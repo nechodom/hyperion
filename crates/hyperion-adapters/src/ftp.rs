@@ -408,6 +408,16 @@ pub async fn missing_conf_directives() -> Vec<&'static str> {
 /// True when the node's vsftpd.conf enables FTPS. Reported, never auto-set:
 /// flipping it on restarts a daemon every hosting shares and locks out any
 /// client that cannot negotiate TLS.
+/// Is vsftpd configured on this node at all?
+///
+/// The firewall asks before opening the FTP ports when it switches to
+/// default-drop: opening 21 and a passive range on a box that does not run FTP
+/// is a hole for nothing, and NOT opening them on a box that does takes every
+/// customer's FTP away the moment the policy flips.
+pub async fn vsftpd_configured() -> bool {
+    tokio::fs::metadata(VSFTPD_CONF).await.is_ok()
+}
+
 pub async fn ftps_enabled() -> bool {
     let conf = tokio::fs::read_to_string(VSFTPD_CONF)
         .await

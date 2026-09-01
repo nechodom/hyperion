@@ -389,6 +389,12 @@ pub trait AgentApi: Send + Sync + 'static {
 
     /// Apply a hardcoded firewall template by id. Returns
     /// `(applied, output, error_first_line)`.
+    async fn hosting_announce_created(&self, sel: HostingSelector) -> Result<bool, RpcError>;
+    async fn hosting_perm_autoheal_set(
+        &self,
+        sel: HostingSelector,
+        enabled: bool,
+    ) -> Result<bool, RpcError>;
     async fn firewall_enable_default_drop(
         &self,
         rollback_after_secs: i64,

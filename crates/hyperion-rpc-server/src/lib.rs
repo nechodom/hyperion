@@ -536,6 +536,16 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(v) => Response::FirewallList(v),
             Err(e) => Response::Error(e),
         },
+        Request::HostingAnnounceCreated { sel } => match api.hosting_announce_created(sel).await {
+            Ok(v) => Response::HostingAnnounceCreated(v),
+            Err(e) => Response::Error(e),
+        },
+        Request::HostingPermAutohealSet { sel, enabled } => {
+            match api.hosting_perm_autoheal_set(sel, enabled).await {
+                Ok(v) => Response::HostingPermAutohealSet(v),
+                Err(e) => Response::Error(e),
+            }
+        }
         Request::FirewallEnableDefaultDrop {
             rollback_after_secs,
         } => match api.firewall_enable_default_drop(rollback_after_secs).await {
@@ -2115,6 +2125,16 @@ mod tests {
         }
         async fn firewall_list(&self) -> Result<hyperion_types::FirewallView, RpcError> {
             Ok(hyperion_types::FirewallView::default())
+        }
+        async fn hosting_announce_created(&self, _: HostingSelector) -> Result<bool, RpcError> {
+            Ok(true)
+        }
+        async fn hosting_perm_autoheal_set(
+            &self,
+            _: HostingSelector,
+            enabled: bool,
+        ) -> Result<bool, RpcError> {
+            Ok(enabled)
         }
         async fn firewall_enable_default_drop(&self, _: i64) -> Result<String, RpcError> {
             Ok(String::new())

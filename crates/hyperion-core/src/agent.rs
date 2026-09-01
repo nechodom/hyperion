@@ -680,6 +680,18 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
     async fn firewall_list(&self) -> Result<hyperion_types::FirewallView, RpcError> {
         self.svc.firewall_list().await
     }
+    async fn hosting_announce_created(&self, sel: HostingSelector) -> Result<bool, RpcError> {
+        self.svc.notify_hosting_created(sel).await
+    }
+
+    async fn hosting_perm_autoheal_set(
+        &self,
+        sel: HostingSelector,
+        enabled: bool,
+    ) -> Result<bool, RpcError> {
+        self.svc.permissions_autoheal_set(sel, enabled).await
+    }
+
     async fn firewall_enable_default_drop(
         &self,
         rollback_after_secs: i64,

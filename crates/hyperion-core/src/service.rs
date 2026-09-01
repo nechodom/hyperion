@@ -10830,6 +10830,173 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         })
     }
 
+    /// What this hosting costs, in words: the plan price from the profile, the
+    /// care packages on top, and a combined total.
+    ///
+    /// Shared by the new-hosting announcement and the care-plan one so the two
+    /// can never disagree about the same site. Prices come from the SNAPSHOTS
+    /// taken at apply/activation time, not from the live definitions — a later
+    /// re-price must not rewrite what the customer agreed to.
+    ///
+    /// Currencies are summed only when they all match. Mixing CZK and EUR into
+    /// one number would be a wrong figure quoted with confidence, so the parts
+    /// are listed and the total is left out.
+    async fn price_picture(&self, id: &HostingId) -> (String, String, String) {
+        let applied = hyperion_state::profiles::get_apply(&self.pool, id)
+            .await
+            .ok()
+            .flatten();
+        let base = applied.as_ref().and_then(|a| {
+            match (a.price_minor, &a.price_currency, &a.price_interval) {
+                (Some(m), Some(c), Some(iv)) => Some((m, c.clone(), iv.clone())),
+                _ => None,
+            }
+        });
+
+        let packages = hyperion_state::packages::list_for_hosting(&self.pool, id)
+            .await
+            .unwrap_or_default();
+        let plan_line = if packages.is_empty() {
+            "• care plan: none".to_string()
+        } else {
+            let names: Vec<String> = packages
+                .iter()
+                .map(
+                    |p| match (p.price_minor, &p.price_currency, &p.price_interval) {
+                        (Some(m), Some(c), Some(iv)) => {
+                            format!("{} ({:.2} {c} {iv})", p.package_name, m as f64 / 100.0)
+                        }
+                        _ => p.package_name.clone(),
+                    },
+                )
+                .collect();
+            format!("• care plan: *{}*", names.join(", "))
+        };
+
+        let base_line = match &base {
+            Some((m, c, iv)) => format!(
+                "• price: *{:.2} {c} ({iv})* — to change it, edit the profile or the price \
+                 in Hyperion, not in the invoice",
+                *m as f64 / 100.0
+            ),
+            None => "• price: *not set* — apply a profile in Hyperion to set one".to_string(),
+        };
+
+        // One currency and one interval, or no total.
+        let mut currency: Option<String> = base.as_ref().map(|(_, c, _)| c.clone());
+        let mut interval: Option<String> = base.as_ref().map(|(_, _, iv)| iv.clone());
+        let mut total: i64 = base.as_ref().map(|(m, _, _)| *m).unwrap_or(0);
+        let mut comparable = base.is_some() || !packages.is_empty();
+        for p in &packages {
+            match (p.price_minor, &p.price_currency, &p.price_interval) {
+                (Some(m), Some(c), Some(iv)) => {
+                    if currency.get_or_insert_with(|| c.clone()) != c
+                        || interval.get_or_insert_with(|| iv.clone()) != iv
+                    {
+                        comparable = false;
+                        break;
+                    }
+                    total += m;
+                }
+                // A package with no price cannot be added up; saying nothing
+                // beats a total that quietly omits it.
+                _ => {
+                    comparable = false;
+                    break;
+                }
+            }
+        }
+        let total_line = match (comparable, currency, interval) {
+            (true, Some(c), Some(iv)) if !packages.is_empty() => {
+                format!("\n• total: *{:.2} {c} ({iv})*", total as f64 / 100.0)
+            }
+            _ => String::new(),
+        };
+        (base_line, plan_line, total_line)
+    }
+
+    /// Announce a newly provisioned hosting on Slack, once.
+    ///
+    /// Deliberately NOT fired from `create()`: the price and the billing clock
+    /// are set by applying a PROFILE, which happens after the hosting exists.
+    /// Announcing at create time would tell the operator "no price set" for
+    /// every site, which is the one thing the message is for. So the create
+    /// paths call this after the profile step, and a hosting_kv marker makes a
+    /// second call a no-op — an operator who re-runs a profile, or an API
+    /// client that retries, must not re-announce the site.
+    ///
+    /// The webhook is the profile's own when it has one, else the cluster
+    /// default — same precedence as the billing reminder, so a plan with its
+    /// own channel keeps everything about that plan together.
+    pub async fn notify_hosting_created(&self, sel: HostingSelector) -> Result<bool, RpcError> {
+        let detail = self.get(sel).await?;
+        const KV_ANNOUNCED: &str = "created_announced";
+        if matches!(
+            hyperion_state::hosting_kv::get(&self.pool, detail.id.as_str(), KV_ANNOUNCED).await,
+            Ok(Some(_))
+        ) {
+            return Ok(false);
+        }
+
+        let applied = hyperion_state::profiles::get_apply(&self.pool, &detail.id)
+            .await
+            .ok()
+            .flatten();
+        // Price, care plan and total, from the same helper the care-plan
+        // message uses — the two must never disagree about one site.
+        let (price_line, plan_line, total_line) = self.price_picture(&detail.id).await;
+        let next_line = match applied.as_ref().and_then(|a| a.next_billing_at) {
+            Some(t) => format!("• next reminder: {}", fmt_notif_time(t)),
+            None => "• next reminder: none scheduled".to_string(),
+        };
+        let node = detail
+            .node_id
+            .as_deref()
+            .filter(|n| !n.is_empty())
+            .unwrap_or("this node");
+        let msg = format!(
+            ":sparkles: *New hosting*\n• address: `{}`\n{price_line}\n{plan_line}{total_line}\n\
+             {next_line}\n• node: {node}",
+            detail.domain
+        );
+
+        // The webhook snapshotted at apply time first — it survives the
+        // profile being deleted or re-pointed, which is the whole reason the
+        // billing sweep reads it that way too. Live lookup only as a fallback.
+        let webhook = match applied.as_ref().and_then(|a| a.slack_webhook.clone()) {
+            Some(w) => Some(w),
+            None => match applied.as_ref().and_then(|a| a.profile_id) {
+                Some(pid) => self
+                    .profile_get(pid)
+                    .await
+                    .ok()
+                    .and_then(|p| p.slack_webhook),
+                None => None,
+            },
+        };
+        self.notify_slack(webhook.as_deref(), &msg).await;
+
+        // Marked only after the send is attempted. notify_slack is
+        // best-effort, so a failed post still marks — re-announcing on the
+        // next retry would be worse than one lost message.
+        let _ = hyperion_state::hosting_kv::set(
+            &self.pool,
+            detail.id.as_str(),
+            KV_ANNOUNCED,
+            &now_secs().to_string(),
+            now_secs(),
+        )
+        .await;
+        self.append_audit(
+            "hosting.created.announced",
+            Some(detail.id.as_str()),
+            &serde_json::json!({ "domain": detail.domain }).to_string(),
+            "ok",
+        )
+        .await;
+        Ok(true)
+    }
+
     pub(crate) async fn notify_slack(&self, specific: Option<&str>, message: &str) {
         let url = specific
             .filter(|s| !s.trim().is_empty())
@@ -10922,18 +11089,29 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     None => None,
                 },
             };
-            let price_str = match (row.price_minor, &row.price_currency, &row.price_interval) {
-                (Some(m), Some(c), Some(iv)) => {
-                    format!("{:.2} {c} ({iv})", m as f64 / 100.0)
-                }
-                _ => "no price set".into(),
-            };
             let due_in_days = row
                 .next_billing_at
                 .map(|t| ((t - now).max(0)) / 86400)
                 .unwrap_or(0);
+            let (price_str, action) =
+                match (row.price_minor, &row.price_currency, &row.price_interval) {
+                    (Some(m), Some(c), Some(iv)) => (
+                        format!("{:.2} {c} ({iv})", m as f64 / 100.0),
+                        format!(
+                            "*Invoice {:.2} {c}* for the next {iv} period.",
+                            m as f64 / 100.0
+                        ),
+                    ),
+                    _ => (
+                        "not set".into(),
+                        "*No price is set on this hosting* — nothing to invoice. Apply a \
+                         profile in Hyperion to set one."
+                            .to_string(),
+                    ),
+                };
             let msg = format!(
-                ":calendar: *Billing reminder*\n• site: `{domain}`\n• price: {price_str}\n• due in {due_in_days} day(s)"
+                ":calendar: *Hosting due*\n• site: `{domain}`\n• price: {price_str}\n\
+                 • due in {due_in_days} day(s)\n{action}"
             );
             self.notify_slack(webhook.as_deref(), &msg).await;
             // Also send email if configured. Use the hosting's
@@ -11003,18 +11181,37 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 .ok()
                 .flatten()
                 .and_then(|a| a.slack_webhook);
-            let price_str = match (row.price_minor, &row.price_currency, &row.price_interval) {
-                (Some(m), Some(c), Some(iv)) => {
-                    format!("{:.2} {c} ({iv})", m as f64 / 100.0)
-                }
-                _ => "no price set".into(),
-            };
             let due_in_days = row
                 .next_billing_at
                 .map(|t| ((t - now).max(0)) / 86400)
                 .unwrap_or(0);
+            // Name the ACTION, not just the date. A reminder that says only
+            // "due in 2 days" is a fact; the operator still has to work out
+            // that it means "raise an invoice for this amount". A recurring
+            // care fee that nobody invoices is revenue quietly lost every
+            // month, which is exactly what this message exists to prevent.
+            let (price_str, action) =
+                match (row.price_minor, &row.price_currency, &row.price_interval) {
+                    (Some(m), Some(c), Some(iv)) => (
+                        format!("{:.2} {c} ({iv})", m as f64 / 100.0),
+                        format!(
+                            "*Invoice {:.2} {c}* for the next {iv} period.",
+                            m as f64 / 100.0
+                        ),
+                    ),
+                    // Said out loud rather than skipped: a care package with
+                    // no price is one nobody is charging for, and the day it
+                    // comes due is when that is worth noticing.
+                    _ => (
+                        "not set".into(),
+                        "*No price is set on this package* — nothing to invoice, and nobody \
+                         is being charged for it. Set one in Hyperion."
+                            .to_string(),
+                    ),
+                };
             let msg = format!(
-                ":package: *Care package reminder*\n• site: `{domain}`\n• package: {label}\n• price: {price_str}\n• due in {due_in_days} day(s)"
+                ":package: *Care package due*\n• site: `{domain}`\n• package: {label}\n\
+                 • price: {price_str}\n• due in {due_in_days} day(s)\n{action}"
             );
             self.notify_slack(webhook.as_deref(), &msg).await;
             let owner = self
@@ -11949,6 +12146,33 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .ok_or(RpcError::Internal {
                 message: "activation vanished after write (concurrent delete?)".into(),
             })?;
+        // Tell Slack the price changed. Only from HERE, the path that opens a
+        // NEW row — the early return above re-asserts a package the hosting
+        // already holds, and announcing that would report a price rise that
+        // did not happen, every time the drift tick re-applied the bundle.
+        //
+        // The message carries the whole picture, not just the package: an
+        // operator reading "care plan added" wants to know what the customer
+        // now pays in total, which is the number that goes on the invoice.
+        let (price_line, plan_line, total_line) = self.price_picture(&detail.id).await;
+        let next_line = match row.next_billing_at {
+            Some(t) => format!("• next reminder: {}", fmt_notif_time(t)),
+            None => "• next reminder: none scheduled".to_string(),
+        };
+        // Same channel the hosting's own billing messages go to: the profile's
+        // webhook snapshotted at apply time, else the cluster default.
+        let webhook = hyperion_state::profiles::get_apply(&self.pool, &detail.id)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|a| a.slack_webhook);
+        let msg = format!(
+            ":package: *Care plan activated*\n• address: `{}`\n{price_line}\n{plan_line}\
+             {total_line}\n{next_line}",
+            detail.domain
+        );
+        self.notify_slack(webhook.as_deref(), &msg).await;
+
         Ok(activation_row_to_wire(row, def.name))
     }
 
@@ -21558,6 +21782,97 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             });
         }
 
+        // 2b. Open what hyperion itself runs, before anything starts dropping.
+        //
+        // Without this, switching to default-drop takes the sites down: the
+        // survival set keeps the operator connected and nothing else. Web is
+        // unconditional — this is a hosting panel. FTP is added only when
+        // vsftpd is actually configured, and then BOTH halves, because the
+        // control port alone gives a connection that hangs on the first
+        // directory listing, which reads as "FTP is broken" rather than "a
+        // port is closed".
+        //
+        // Anything else — mail, a database opened to the outside — stays the
+        // operator's deliberate choice through the templates on the firewall
+        // page, and the message below says so.
+        let mut opened: Vec<String> = vec!["80, 443 (web)".to_string()];
+        let web: Vec<Vec<&str>> = vec![
+            vec![
+                "add",
+                "rule",
+                "inet",
+                "hyperion",
+                "input",
+                "tcp",
+                "dport",
+                "{",
+                "80,",
+                "443",
+                "}",
+                "accept",
+                "comment",
+                "\"hyperion:web\"",
+            ],
+            vec![
+                "add",
+                "rule",
+                "inet",
+                "hyperion",
+                "input",
+                "udp",
+                "dport",
+                "443",
+                "accept",
+                "comment",
+                "\"hyperion:web-quic\"",
+            ],
+        ];
+        for cmd in &web {
+            Self::nft(cmd)
+                .await
+                .map_err(|e| RpcError::Internal { message: e })?;
+        }
+
+        let ftp_port = hyperion_adapters::ftp::read_listen_port().await;
+        if hyperion_adapters::ftp::vsftpd_configured().await {
+            let ftp_port_s = ftp_port.to_string();
+            Self::nft(&[
+                "add",
+                "rule",
+                "inet",
+                "hyperion",
+                "input",
+                "tcp",
+                "dport",
+                &ftp_port_s,
+                "accept",
+                "comment",
+                "\"hyperion:ftp\"",
+            ])
+            .await
+            .map_err(|e| RpcError::Internal { message: e })?;
+            opened.push(format!("{ftp_port} (FTP control)"));
+            if let Some((lo, hi)) = hyperion_adapters::ftp::passive_range().await {
+                let range = format!("{lo}-{hi}");
+                Self::nft(&[
+                    "add",
+                    "rule",
+                    "inet",
+                    "hyperion",
+                    "input",
+                    "tcp",
+                    "dport",
+                    &range,
+                    "accept",
+                    "comment",
+                    "\"hyperion:ftp-passive\"",
+                ])
+                .await
+                .map_err(|e| RpcError::Internal { message: e })?;
+                opened.push(format!("{range} (FTP passive)"));
+            }
+        }
+
         // 3. Flip the policy.
         Self::nft(&[
             "add", "chain", "inet", "hyperion", "input", "{", "type", "filter", "hook", "input",
@@ -21582,9 +21897,12 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         )
         .await;
         Ok(format!(
-            "Default-drop is on. SSH is allowed on {port_list}, along with loopback and \
-             established connections. CONFIRM FROM ANOTHER SESSION that you can still get \
-             in — if you do not confirm, the firewall reverts to accepting everything."
+            "Default-drop is on. Allowed: SSH on {port_list}, loopback, established \
+             connections, and {}. Anything else — mail, a database reachable from \
+             outside — is now DROPPED until you apply its template on this page. \
+             CONFIRM FROM ANOTHER SESSION that you can still get in; without that \
+             confirmation the firewall reverts to accepting everything.",
+            opened.join(", ")
         ))
     }
 

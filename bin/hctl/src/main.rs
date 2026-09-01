@@ -1432,6 +1432,18 @@ fn print_pretty(resp: &Response) {
                 println!("{}", v.raw);
             }
         }
+        Response::HostingAnnounceCreated(sent) => println!(
+            "{}",
+            if *sent {
+                "new-hosting announcement sent"
+            } else {
+                "already announced — nothing sent"
+            }
+        ),
+        Response::HostingPermAutohealSet(on) => println!(
+            "permission self-repair {}",
+            if *on { "enabled" } else { "disabled" }
+        ),
         Response::FirewallDefaultDrop {
             message,
             armed_seconds_left,

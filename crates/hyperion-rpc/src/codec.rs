@@ -395,6 +395,17 @@ pub enum Request {
     /// Arms a deadline: unless `FirewallConfirmDefaultDrop` arrives within
     /// `rollback_after_secs`, the policy goes back to accept — including
     /// after an agent restart, because the deadline is a file.
+    /// Announce a newly provisioned hosting on Slack. Idempotent: a second
+    /// call for the same hosting is a no-op, so a retry or a re-applied
+    /// profile cannot announce the site twice.
+    HostingAnnounceCreated {
+        sel: HostingSelector,
+    },
+    /// Turn the per-hosting permission self-repair on or off. Absent key ⇒ on.
+    HostingPermAutohealSet {
+        sel: HostingSelector,
+        enabled: bool,
+    },
     FirewallEnableDefaultDrop {
         rollback_after_secs: i64,
     },
@@ -1730,6 +1741,10 @@ pub enum Response {
     /// nft command in the template ran successfully + the ruleset
     /// got persisted. `applied=false` ⇒ the operator should read
     /// `error` and decide whether to retry / fix manually.
+    HostingPermAutohealSet(bool),
+    /// True when this call sent the announcement; false when it had already
+    /// been sent.
+    HostingAnnounceCreated(bool),
     /// A default-drop transition, or its status. `message` is operator-facing.
     FirewallDefaultDrop {
         message: String,
