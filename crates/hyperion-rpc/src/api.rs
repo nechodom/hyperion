@@ -389,6 +389,13 @@ pub trait AgentApi: Send + Sync + 'static {
 
     /// Apply a hardcoded firewall template by id. Returns
     /// `(applied, output, error_first_line)`.
+    async fn firewall_enable_default_drop(
+        &self,
+        rollback_after_secs: i64,
+    ) -> Result<String, RpcError>;
+    async fn firewall_confirm_default_drop(&self) -> Result<String, RpcError>;
+    async fn firewall_disable_default_drop(&self) -> Result<String, RpcError>;
+    async fn firewall_arm_remaining(&self) -> Result<Option<i64>, RpcError>;
     async fn firewall_apply_template(
         &self,
         template_id: String,
@@ -943,6 +950,7 @@ pub trait AgentApi: Send + Sync + 'static {
         alert_after_fails: Option<i64>,
         alert_email: Option<String>,
         alert_slack_webhook: Option<String>,
+        clear_slack_webhook: bool,
         alert_webhook_url: Option<String>,
     ) -> Result<(), RpcError>;
     async fn monitor_probe_now(

@@ -559,6 +559,7 @@ async fn main() -> anyhow::Result<()> {
             }
             .sanitized(),
         )
+        .with_permissions_autoheal(cfg.permissions.enabled)
         .with_agent_config_path(cli.config.clone())
         .with_node_state_file(state_file_for_svc)
         .with_git_sha(env!("HYPERION_GIT_SHA"));
@@ -890,6 +891,24 @@ async fn main() -> anyhow::Result<()> {
                 Ok(_) => {}
                 Err(e) => tracing::warn!(error=%e, "startup: FTP autoheal failed"),
             }
+            // The firewall's default-drop rollback runs on its OWN loop, and a
+            // tight one. The deadline is measured in minutes and the operator
+            // is, by construction, possibly locked out while it runs — a
+            // five-minute scheduler tick could hold a closed box shut for five
+            // minutes longer than promised. Checked once immediately too: an
+            // agent that restarted between arming and confirming would
+            // otherwise leave the policy dropping with nobody watching, which
+            // is the exact state the deadline exists to prevent.
+            let fw_svc = tick_svc.clone();
+            tokio::spawn(async move {
+                fw_svc.firewall_rollback_tick().await;
+                let mut fw = tokio::time::interval(std::time::Duration::from_secs(15));
+                loop {
+                    fw.tick().await;
+                    fw_svc.firewall_rollback_tick().await;
+                }
+            });
+
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(5 * 60));
             interval.tick().await; // skip the immediate first tick
             loop {

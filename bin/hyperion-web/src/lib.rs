@@ -514,6 +514,10 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/certs/issue-all", post(handlers::certs::post_issue_all))
         .route("/firewall", get(handlers::firewall::get_firewall))
         .route("/firewall/apply", post(handlers::firewall::post_apply))
+        .route(
+            "/firewall/default-drop",
+            post(handlers::firewall::post_default_drop),
+        )
         .route("/audit", get(handlers::audit::get_audit))
         .route("/settings/backups", get(handlers::backups::get_backups))
         .route(

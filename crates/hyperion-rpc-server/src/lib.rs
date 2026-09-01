@@ -536,6 +536,39 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(v) => Response::FirewallList(v),
             Err(e) => Response::Error(e),
         },
+        Request::FirewallEnableDefaultDrop {
+            rollback_after_secs,
+        } => match api.firewall_enable_default_drop(rollback_after_secs).await {
+            Ok(message) => {
+                let armed_seconds_left = api.firewall_arm_remaining().await.ok().flatten();
+                Response::FirewallDefaultDrop {
+                    message,
+                    armed_seconds_left,
+                }
+            }
+            Err(e) => Response::Error(e),
+        },
+        Request::FirewallConfirmDefaultDrop => match api.firewall_confirm_default_drop().await {
+            Ok(message) => Response::FirewallDefaultDrop {
+                message,
+                armed_seconds_left: None,
+            },
+            Err(e) => Response::Error(e),
+        },
+        Request::FirewallDisableDefaultDrop => match api.firewall_disable_default_drop().await {
+            Ok(message) => Response::FirewallDefaultDrop {
+                message,
+                armed_seconds_left: None,
+            },
+            Err(e) => Response::Error(e),
+        },
+        Request::FirewallArmStatus => match api.firewall_arm_remaining().await {
+            Ok(armed_seconds_left) => Response::FirewallDefaultDrop {
+                message: String::new(),
+                armed_seconds_left,
+            },
+            Err(e) => Response::Error(e),
+        },
         Request::FirewallApplyTemplate { template_id } => {
             match api.firewall_apply_template(template_id).await {
                 Ok((applied, output, error)) => Response::FirewallTemplateApplied {
@@ -1146,6 +1179,7 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             alert_after_fails,
             alert_email,
             alert_slack_webhook,
+            clear_slack_webhook,
             alert_webhook_url,
         } => match api
             .monitor_set(
@@ -1156,6 +1190,7 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
                 alert_after_fails,
                 alert_email,
                 alert_slack_webhook,
+                clear_slack_webhook,
                 alert_webhook_url,
             )
             .await
@@ -2081,6 +2116,18 @@ mod tests {
         async fn firewall_list(&self) -> Result<hyperion_types::FirewallView, RpcError> {
             Ok(hyperion_types::FirewallView::default())
         }
+        async fn firewall_enable_default_drop(&self, _: i64) -> Result<String, RpcError> {
+            Ok(String::new())
+        }
+        async fn firewall_confirm_default_drop(&self) -> Result<String, RpcError> {
+            Ok(String::new())
+        }
+        async fn firewall_disable_default_drop(&self) -> Result<String, RpcError> {
+            Ok(String::new())
+        }
+        async fn firewall_arm_remaining(&self) -> Result<Option<i64>, RpcError> {
+            Ok(None)
+        }
         async fn firewall_apply_template(
             &self,
             _: String,
@@ -2648,6 +2695,7 @@ mod tests {
             _: Option<i64>,
             _: Option<String>,
             _: Option<String>,
+            _: bool,
             _: Option<String>,
         ) -> Result<(), RpcError> {
             Ok(())

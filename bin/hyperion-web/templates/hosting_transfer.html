@@ -10,12 +10,40 @@
   <span>Move or copy</span>
 </nav>
 
-<div class="page-header">
+{#- The same sticky identity strip the hosting page uses, so following
+    "Move / copy" does not drop the operator onto a page with nothing tying it
+    to a hosting. It is a header, NOT the tab strip: every tab there is a bare
+    `#hash` driven by an inline controller over panels that do not exist here,
+    so pasting it would give eleven dead links. One explicit way back instead. -#}
+<div class="page-header sticky" data-hosting-id="{{ detail.id }}">
   <div>
-    <h1>Move or copy {{ detail.domain }}</h1>
-    <div class="subtitle">Every way to relocate or duplicate this hosting, in one
-      place. Choose an option below — each one explains exactly what happens to
+    <h1 style="display:flex;align-items:center;gap:0.7rem;flex-wrap:wrap">
+      {{ detail.domain }}
+      <span class="pill
+        {% if detail.state.as_str() == "active" %}ok
+        {% else if detail.state.as_str() == "suspended" %}warn
+        {% else if detail.state.as_str() == "failed" %}err
+        {% else %}warn pulse{% endif %}">{{ detail.state.as_str() }}</span>
+      {% if let Some(n) = detail.node_id.as_ref() %}
+        <span class="tag" title="Lives on node {{ n }}"
+              style="background:var(--surface-2);border:1px solid var(--border);font-size:0.75rem;font-weight:500;padding:0.25rem 0.55rem">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:0.3rem">
+            <rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/>
+          </svg>
+          on <strong>{{ n }}</strong>
+        </span>
+      {% endif %}
+    </h1>
+    <div class="subtitle">Move or copy — every way to relocate or duplicate this
+      hosting, in one place. Each option below explains exactly what happens to
       the original.</div>
+  </div>
+  <span class="grow"></span>
+  <div class="actions">
+    <a href="/hostings/{{ detail.id.as_str() }}" class="btn ghost">
+      <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+      Back to {{ detail.domain }}
+    </a>
   </div>
 </div>
 

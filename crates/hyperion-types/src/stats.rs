@@ -296,6 +296,15 @@ pub struct FirewallPort {
     /// PostgreSQL, Redis), `"hyperion"` (panel + master RPC),
     /// `"unknown"`. Drives the pill colour in the UI.
     pub category: String,
+    /// True when the rule that opens this port carries hyperion's own
+    /// comment tag — i.e. hyperion put it there, rather than the operator,
+    /// the distro, or another tool.
+    ///
+    /// Without this the page listed every open port with no way to tell which
+    /// ones the panel is responsible for, so "what did hyperion open?" could
+    /// only be answered by reading the raw ruleset.
+    #[serde(default)]
+    pub opened_by_hyperion: bool,
 }
 
 /// Operator-facing view of the agent's effective config — minus

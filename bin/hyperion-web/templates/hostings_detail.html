@@ -400,6 +400,30 @@
 <div hx-get="/hostings/{{ detail.id.as_str() }}/dns-panel"
      hx-trigger="load" hx-swap="outerHTML"></div>
 
+{#- Names this site serves that its certificate does not carry. A STATE, not
+    a flash: adding an alias starts serving that name immediately over a
+    certificate that does not cover it, so the browser refuses it — and until
+    now nothing said so, on any page, ever. Computed from the certificate FILE
+    (see cert_uncovered_names), not from the alias list, which is what made the
+    SSL card cheerfully show an alias as covered. -#}
+{% if !cert_uncovered_names.is_empty() %}
+  <div class="flash error">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+    <div class="flash-body">
+      <strong>The certificate does not cover
+      {% for n in cert_uncovered_names %}<code>{{ n }}</code>{% if !loop.last %}, {% endif %}{% endfor %}.</strong>
+      This site is already answering on
+      {% if cert_uncovered_names.len() == 1 %}that name{% else %}those names{% endif %},
+      so visitors reach it and their browser refuses the certificate
+      (<code>ERR_CERT_COMMON_NAME_INVALID</code>). Issue a new certificate to
+      add {% if cert_uncovered_names.len() == 1 %}it{% else %}them{% endif %} —
+      <a href="#ssl">on the SSL tab</a>. You do not need to delete the current
+      one first; issuing replaces it in place and the site keeps serving
+      throughout.
+    </div>
+  </div>
+{% endif %}
+
 {% if let Some(e) = error %}
   <div class="flash error">
     <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
@@ -1067,13 +1091,19 @@
       <code>{{ detail.domain }}</code> already has a trusted certificate, and it
       renews itself — there is normally nothing to do here. Issuing a new one is
       only useful after changing the domain's aliases, and Let's Encrypt limits
-      how often that can be repeated, so the current certificate has to be
-      removed first.
+      how often that can be repeated.
     </p>
     <p class="muted" style="margin:0 0 1rem;font-size:0.88rem">
-      Deleting it drops <code>{{ detail.domain }}</code> back to a self-signed
-      certificate. The site keeps serving, but browsers show a security warning
-      until a new certificate is issued.
+      {#- This used to say the current certificate "has to be removed first".
+          It does not: issuing writes over the same paths atomically, and the
+          renewal sweep already does exactly that on live certificates. An
+          operator who followed the old advice dropped their site to a
+          self-signed certificate — a browser warning on every visit — for no
+          reason, and for as long as issuance then took. -#}
+      Deleting is <strong>not</strong> a prerequisite: issuing replaces the
+      certificate in place and the site keeps serving a trusted one throughout.
+      Delete only to deliberately fall back to self-signed — visitors then see
+      a browser security warning until a new certificate is issued.
     </p>
     <form method="post" action="/hostings/cert/delete"
           data-confirm-title="Delete this certificate"
@@ -3704,12 +3734,35 @@
              value="{% if let Some(e) = monitor_config.alert_email %}{{ e|e }}{% endif %}">
     </div>
     <div class="field">
-      <label for="m_slack">Slack incoming webhook URL</label>
-      <input id="m_slack" name="alert_slack_webhook" type="url"
-             placeholder="{% if monitor_config.alert_slack_webhook_set %}(set — type new URL to replace, or leave blank to keep){% else %}https://hooks.slack.com/services/…{% endif %}"
-             value="">
+      <label>Slack incoming webhook URL</label>
       {% if monitor_config.alert_slack_webhook_set %}
-        <p class="text-soft small" style="margin:0.2rem 0 0">A webhook is currently configured. Leave blank to keep, type a new URL to replace.</p>
+        {#- No input while one is configured. The webhook is a bearer
+            credential — whoever holds it can post as that app — so it is
+            never rendered back, not even masked. That used to leave an empty
+            box beside the promise "leave blank to keep", while an empty box
+            is exactly what cleared the column: saving this card for any other
+            reason silently destroyed the integration. Replacing it is now
+            remove-then-add, which cannot happen by accident. -#}
+        <div class="row" style="gap:0.5rem;align-items:center;flex-wrap:wrap">
+          <span class="pill ok">connected</span>
+          {#- A submit INSIDE this form, not a form of its own: everything else
+              on the card rides along exactly as the operator sees it, so
+              removing the webhook cannot quietly reset the interval or the
+              e-mail recipients. Native confirm() rather than data-confirm-*,
+              which the shared driver reads off the FORM and would then attach
+              to the ordinary Save button too. -#}
+          <button type="submit" name="remove_slack" value="1" class="btn small danger"
+                  onclick="return confirm('Remove the Slack webhook? Alerts for this site stop going to that channel until you add a new URL.');">
+            Remove
+          </button>
+          <span class="text-soft small">A webhook is configured. It is not shown
+            here and never will be. To point alerts at a different channel,
+            remove this one first and then add the new URL.</span>
+        </div>
+      {% else %}
+        <input id="m_slack" name="alert_slack_webhook" type="url"
+               placeholder="https://hooks.slack.com/services/…"
+               value="">
       {% endif %}
     </div>
     <div class="field">

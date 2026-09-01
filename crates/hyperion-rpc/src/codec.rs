@@ -388,6 +388,22 @@ pub enum Request {
     FirewallApplyTemplate {
         template_id: String,
     },
+    /// Turn hyperion's input chain into a real firewall: `policy drop`, with
+    /// loopback, established/related and every sshd port explicitly allowed
+    /// FIRST and verified in the ruleset before the policy flips.
+    ///
+    /// Arms a deadline: unless `FirewallConfirmDefaultDrop` arrives within
+    /// `rollback_after_secs`, the policy goes back to accept — including
+    /// after an agent restart, because the deadline is a file.
+    FirewallEnableDefaultDrop {
+        rollback_after_secs: i64,
+    },
+    /// The operator got back in. Cancels the pending revert.
+    FirewallConfirmDefaultDrop,
+    /// Put the chain back to accepting everything.
+    FirewallDisableDefaultDrop,
+    /// Seconds left to confirm; `None` when nothing is armed.
+    FirewallArmStatus,
     /// `systemctl restart <name>` on a whitelisted unit. Restarts
     /// hyperion-agent itself are refused (would terminate this RPC
     /// session); operator must SSH for self-restart.
@@ -1176,6 +1192,11 @@ pub enum Request {
         alert_after_fails: Option<i64>,
         alert_email: Option<String>,
         alert_slack_webhook: Option<String>,
+        /// Remove the stored webhook. An empty `alert_slack_webhook` means
+        /// "leave it alone": the secret is never shown to the operator, so a
+        /// blank field cannot mean "delete it".
+        #[serde(default)]
+        clear_slack_webhook: bool,
         alert_webhook_url: Option<String>,
     },
     /// Operator-driven manual probe (the "Test now" button). Always
@@ -1709,6 +1730,12 @@ pub enum Response {
     /// nft command in the template ran successfully + the ruleset
     /// got persisted. `applied=false` ⇒ the operator should read
     /// `error` and decide whether to retry / fix manually.
+    /// A default-drop transition, or its status. `message` is operator-facing.
+    FirewallDefaultDrop {
+        message: String,
+        /// Seconds left to confirm access; `None` when nothing is armed.
+        armed_seconds_left: Option<i64>,
+    },
     FirewallTemplateApplied {
         applied: bool,
         /// Joined stdout from every nft command we ran. Operators

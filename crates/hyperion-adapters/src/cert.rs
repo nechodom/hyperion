@@ -88,6 +88,7 @@ pub fn inspect_pem(cert_pem: &str) -> Result<InspectedCert, CertError> {
         not_after: leaf.validity().not_after.timestamp(),
         issuer: issuer_label(&leaf),
         fingerprint: crate::acme::fingerprint_sha256_der(leaf_der),
+        covered_names: covered_names_of(&leaf),
     })
 }
 
@@ -97,6 +98,16 @@ pub struct InspectedCert {
     pub not_after: i64,
     pub issuer: String,
     pub fingerprint: String,
+    /// The names this certificate ACTUALLY covers — the SAN list, plus the
+    /// common name when it looks like a hostname. Read from the file, so it
+    /// is the only source that can answer "does the cert cover this alias?".
+    ///
+    /// `HostingDetail.cert.sans` used to be filled with the hosting's ALIAS
+    /// list instead, which made every "is it covered?" question answer itself
+    /// yes: adding an alias produced a name the certificate did not carry, the
+    /// browser refused it, and the panel showed the alias sitting happily in
+    /// the certificate's SAN list.
+    pub covered_names: Vec<String>,
 }
 
 /// Validate `cert_pem` + `key_pem` (+ optional `ca_bundle_pem`) for a
@@ -268,26 +279,11 @@ fn looks_like_hostname(s: &str) -> bool {
 /// matches the concrete hostname `host`. Wildcards match exactly one
 /// left-most label — `*.example.com` matches `www.example.com` but not
 /// `example.com` (apex) nor `a.b.example.com` (nested). Case-insensitive.
-pub(crate) fn name_matches(pattern: &str, host: &str) -> bool {
-    // Normalize both sides identically — including a trailing FQDN-root
-    // dot, which a SAN may carry (`example.com.`) but the required name
-    // won't.
-    let pattern = pattern.trim().trim_end_matches('.').to_ascii_lowercase();
-    let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
-    if pattern.is_empty() || host.is_empty() {
-        return false;
-    }
-    match pattern.strip_prefix("*.") {
-        Some(suffix) if !suffix.is_empty() => {
-            // host must be exactly "<single-label>.<suffix>".
-            match host.strip_suffix(suffix).and_then(|p| p.strip_suffix('.')) {
-                Some(label) => !label.is_empty() && !label.contains('.'),
-                None => false,
-            }
-        }
-        _ => pattern == host,
-    }
-}
+/// Re-exported: the rule lives in `hyperion-validate` because the panel needs
+/// it too and must not link this crate. One implementation, because a second
+/// would disagree at exactly the wildcard cases that decide whether a browser
+/// accepts the site.
+pub use hyperion_validate::certname::name_matches;
 
 #[cfg(test)]
 mod tests {
