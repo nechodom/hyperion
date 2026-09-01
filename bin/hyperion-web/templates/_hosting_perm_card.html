@@ -9,6 +9,13 @@
     <h2 style="margin:0;font-size:0.95rem">
       <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
       File permissions
+      {% if autoheal_enabled %}
+        <span class="pill ok" style="font-size:0.6rem;margin-left:0.4rem"
+              title="Problems found here are repaired automatically, every five minutes">self-repairing</span>
+      {% else %}
+        <span class="pill warn" style="font-size:0.6rem;margin-left:0.4rem"
+              title="Problems are reported but not fixed for this site">report only</span>
+      {% endif %}
     </h2>
     {% if error.is_some() %}<span class="pill err">could not check</span>
     {% else if report.worst() == "error" %}<span class="pill err">needs attention</span>
@@ -84,4 +91,29 @@
     {% endif %}
   </div>
   {% endif %}
+  {#- The switch for the check above. It lives here rather than on its own
+      card because a page that lists permission problems while something
+      silently fixes them elsewhere is two halves of one story. Posts to the
+      OWNING node, which is where the five-minute tick reads the key. -#}
+  <div style="border-top:1px solid var(--border-subtle);margin-top:0.7rem;padding-top:0.6rem">
+    <form hx-post="/hostings/perm-autoheal" hx-target="closest .card" hx-swap="outerHTML"
+          style="display:flex;gap:0.6rem;align-items:center;flex-wrap:wrap;margin:0">
+      <input type="hidden" name="_csrf" value="{{ csrf_autoheal }}">
+      <input type="hidden" name="selector" value="{{ selector }}">
+      {% if autoheal_enabled %}
+        <input type="hidden" name="enabled" value="off">
+        <button class="btn ghost" type="submit" style="font-size:0.75rem;padding:0.2rem 0.55rem">Stop repairing this site</button>
+        <span class="text-soft small">Every five minutes hyperion fixes a tree
+          nginx cannot read, a <code>wp-config.php</code> other users can read,
+          and world-readable <code>logs/</code> or <code>tmp/</code>. Turn it off
+          for a site whose modes are deliberately unusual.</span>
+      {% else %}
+        <input type="hidden" name="enabled" value="on">
+        <button class="btn primary" type="submit" style="font-size:0.75rem;padding:0.2rem 0.55rem">Repair automatically</button>
+        <span class="text-soft small">Problems above are reported but not fixed
+          for this site. Node-wide repair is still governed by
+          <code>[permissions] enabled</code> in agent.toml.</span>
+      {% endif %}
+    </form>
+  </div>
 </div>

@@ -201,6 +201,10 @@ pub fn build_router(state: SharedState) -> Router {
             post(handlers::hostings::post_bruteforce_scan),
         )
         .route(
+            "/hostings/perm-autoheal",
+            post(handlers::hostings::post_perm_autoheal),
+        )
+        .route(
             "/hostings/dkim/enable",
             post(handlers::hostings::post_dkim_enable),
         )

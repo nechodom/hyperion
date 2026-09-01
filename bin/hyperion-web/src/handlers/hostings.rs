@@ -1270,6 +1270,23 @@ pub async fn post_create(
                 }
             }
 
+            // Announce the new site on Slack — AFTER the profile step, so the
+            // message carries the price and the billing date rather than
+            // "not set" for every hosting. Idempotent on the node side, so a
+            // retried create cannot announce twice. Best-effort: a Slack
+            // outage must not fail a provision that succeeded.
+            if let Err(e) = crate::dispatcher::dispatch_to_node(
+                &state,
+                target,
+                Request::HostingAnnounceCreated {
+                    sel: HostingSelector::Id(created.id.clone()),
+                },
+            )
+            .await
+            {
+                tracing::warn!(error = %e, "new-hosting Slack announcement failed");
+            }
+
             // Re-fetch detail for nice display. Must go to the SAME
             // node we just provisioned on — otherwise the master
             // would return "no such hosting" because the row lives
@@ -6416,7 +6433,55 @@ struct PermCardTpl {
     selector: String,
     system_user: String,
     csrf_repair: String,
+    /// Is the five-minute self-repair allowed to act on this site?
+    ///
+    /// Reported here rather than on its own card because it is the switch for
+    /// exactly the check displayed beside it — a card that lists permission
+    /// problems while something silently fixes them elsewhere is two halves of
+    /// one story on different pages.
+    autoheal_enabled: bool,
+    csrf_autoheal: String,
     error: Option<String>,
+}
+
+/// POST /hostings/perm-autoheal — turn this site's permission self-repair on
+/// or off, re-rendering the permissions card in place.
+///
+/// The write goes to the OWNING node: that is where the five-minute tick reads
+/// the key, so a master-local write would be a switch wired to nothing.
+pub async fn post_perm_autoheal(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<PermAutohealForm>,
+) -> Result<Response, AppError> {
+    let sel = match require_manage_for_selector(
+        &state,
+        &ctx,
+        &form.selector,
+        Capability::HostingEditConfig,
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
+    let (_, owner) = find_hosting_anywhere(&state, sel.clone()).await?;
+    let enabled = form.enabled.trim() != "off";
+    let _ = crate::dispatcher::dispatch_to_node(
+        &state,
+        owner.as_deref(),
+        Request::HostingPermAutohealSet { sel, enabled },
+    )
+    .await?;
+    // Re-render the whole card so the tile and the check agree.
+    get_perm_panel(State(state), ctx, Path(form.selector)).await
+}
+
+#[derive(serde::Deserialize)]
+pub struct PermAutohealForm {
+    pub selector: String,
+    /// "on" | "off"
+    pub enabled: String,
 }
 
 /// GET /hostings/:selector/perm-panel — diagnose this site's file permissions.
@@ -6425,13 +6490,15 @@ pub async fn get_perm_panel(
     ctx: AuthCtx,
     Path(selector): Path<String>,
 ) -> Result<Response, AppError> {
-    let card = |report, system_user: String, error: Option<String>| {
+    let card = |report, system_user: String, autoheal_enabled: bool, error: Option<String>| {
         Html(
             PermCardTpl {
                 report,
                 selector: selector.clone(),
                 system_user,
                 csrf_repair: csrf_token_for(&state, &ctx, "/hostings/wp/perm-repair"),
+                autoheal_enabled,
+                csrf_autoheal: csrf_token_for(&state, &ctx, "/hostings/perm-autoheal"),
                 error,
             }
             .render()
@@ -6445,13 +6512,21 @@ pub async fn get_perm_panel(
             return Ok(card(
                 Default::default(),
                 String::new(),
+                true,
                 Some(format!("could not read the selector: {e}")),
             ))
         }
     };
     let (detail, owner) = match find_hosting_anywhere(&state, sel.clone()).await {
         Ok(v) => v,
-        Err(e) => return Ok(card(Default::default(), String::new(), Some(e.to_string()))),
+        Err(e) => {
+            return Ok(card(
+                Default::default(),
+                String::new(),
+                true,
+                Some(e.to_string()),
+            ))
+        }
     };
     // A read probe, so HostingView is the right gate — the repair below is
     // what needs manage rights.
@@ -6468,10 +6543,31 @@ pub async fn get_perm_panel(
         return Ok(card(
             Default::default(),
             String::new(),
+            true,
             Some("You do not have access to this hosting.".into()),
         ));
     }
     let user = detail.system_user.clone();
+    // Read from the OWNING node's kv — that is where the tick reads it, so a
+    // master-local read would show a switch wired to nothing. A failed read
+    // renders as ON, which is what the tick itself answers when it cannot read
+    // the key: the tile shows the state the site is actually in.
+    let autoheal_enabled = match crate::dispatcher::dispatch_to_node(
+        &state,
+        owner.as_deref(),
+        Request::HostingKvList {
+            hosting_id: detail.id.as_str().to_string(),
+        },
+    )
+    .await
+    {
+        Ok(RpcResponse::HostingKvList(v)) => v
+            .into_iter()
+            .find(|(k, _)| k == "permissions_autoheal_enabled")
+            .map(|(_, val)| val.trim() != "off")
+            .unwrap_or(true),
+        _ => true,
+    };
     match crate::dispatcher::dispatch_to_node(
         &state,
         owner.as_deref(),
@@ -6479,14 +6575,25 @@ pub async fn get_perm_panel(
     )
     .await
     {
-        Ok(RpcResponse::WpPermCheck(r)) => Ok(card(r, user, None)),
-        Ok(RpcResponse::Error(e)) => Ok(card(Default::default(), user, Some(e.to_string()))),
+        Ok(RpcResponse::WpPermCheck(r)) => Ok(card(r, user, autoheal_enabled, None)),
+        Ok(RpcResponse::Error(e)) => Ok(card(
+            Default::default(),
+            user,
+            autoheal_enabled,
+            Some(e.to_string()),
+        )),
         Ok(_) => Ok(card(
             Default::default(),
             user,
+            autoheal_enabled,
             Some("unexpected response from the node".into()),
         )),
-        Err(e) => Ok(card(Default::default(), user, Some(e.to_string()))),
+        Err(e) => Ok(card(
+            Default::default(),
+            user,
+            autoheal_enabled,
+            Some(e.to_string()),
+        )),
     }
 }
 
