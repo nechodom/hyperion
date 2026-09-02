@@ -1062,13 +1062,41 @@
       <input type="hidden" name="section" value="notifications">
 
       <div class="field">
-        <label for="nt_care">Care report — body
+        <label for="nt_care_subject">Care report — subject and body
           <span class="hint">placeholders:
             <code>{domain}</code> <code>{period_start}</code> <code>{period_end}</code> <code>{days}</code>
             <code>{attacks}</code> <code>{updates}</code> <code>{traffic}</code> <code>{uptime}</code>
             <code>{backups}</code> <code>{integrity}</code>
           </span>
+          {#- The six above each expand to a whole SECTION: heading, figure and
+              an English paragraph explaining it. Right for the built-in
+              letter, wrong for a translated one — every placeholder puts
+              English back in, which is how a Czech report came out as an
+              English block followed by the Czech sentence meant to replace
+              it. The values below carry the measurement and nothing else. -#}
+          <span class="hint" style="display:block;margin-top:0.3rem">
+            values only (use these when writing your own wording):
+            <code>{attacks_count}</code> <code>{updates_count}</code>
+            <code>{traffic_requests}</code> <code>{traffic_sent}</code>
+            <code>{traffic_received}</code> <code>{disk_peak}</code>
+            <code>{uptime_pct}</code> <code>{backups_count}</code>
+            <code>{backups_failed}</code> <code>{backup_last_iso}</code>
+            <code>{days_count}</code> <code>{period_start_iso}</code>
+            <code>{period_end_iso}</code>
+          </span>
+          <span class="hint" style="display:block;margin-top:0.2rem">
+            A value that was never measured prints <code>—</code>, never
+            <code>0</code>: a zero would claim something the report cannot
+            evidence.
+          </span>
         </label>
+        {#- The subject was not editable at all. This letter goes to a paying
+            CUSTOMER, so a translated body arrived under an English subject
+            with no field anywhere to fix it. Empty keeps the built-in one. -#}
+        <input id="nt_care_subject" name="care_report_subject_template" type="text"
+               style="width:100%;font-family:var(--font-mono);font-size:0.85rem;margin-bottom:0.5rem"
+               placeholder="(empty — the built-in English subject is used)"
+               value="{{ config.notifications.care_report_subject_template }}">
         <textarea id="nt_care" name="care_report_body_template" rows="10"
                   style="width:100%;font-family:var(--font-mono);font-size:0.85rem"
                   placeholder="(empty — the built-in letter below is sent)">{{ config.notifications.care_report_body_template }}</textarea>
@@ -1081,12 +1109,24 @@
       </div>
 
       <div class="field" style="margin-top:1.2rem">
-        <label for="nt_expiry">Expiry warning — body
+        <label for="nt_expiry_subject">Expiry warning — subject and body
           <span class="hint">placeholders:
             <code>{domain}</code> <code>{expires_at}</code> <code>{days_left}</code>
             <code>{grace_days}</code> <code>{delete_at}</code> <code>{when}</code>
           </span>
+          {#- Same split as the care report: the four above carry English
+              wording ("5 days", "expires on 1 Jun 2026 — 5 days left"), which
+              a translated letter cannot use. -#}
+          <span class="hint" style="display:block;margin-top:0.3rem">
+            values only: <code>{days_left_count}</code>
+            <code>{grace_days_count}</code> <code>{expires_at_iso}</code>
+            <code>{delete_at_iso}</code>
+          </span>
         </label>
+        <input id="nt_expiry_subject" name="expiry_warning_subject_template" type="text"
+               style="width:100%;font-family:var(--font-mono);font-size:0.85rem;margin-bottom:0.5rem"
+               placeholder="(empty — the built-in English subject is used)"
+               value="{{ config.notifications.expiry_warning_subject_template }}">
         <textarea id="nt_expiry" name="expiry_warning_body_template" rows="8"
                   style="width:100%;font-family:var(--font-mono);font-size:0.85rem"
                   placeholder="(empty — the built-in letter below is sent)">{{ config.notifications.expiry_warning_body_template }}</textarea>
@@ -1182,13 +1222,21 @@
   // either its measured wording or its honest "we were not looking"
   // wording, never a bare figure.
   var careSample = {{ care_preview_json|safe }};
+  {#- Kept in step with the renderer's placeholder list by hand, because this
+      letter's sample is not server-generated the way the care report's is. A
+      placeholder missing here previews as its own name, which reads as "this
+      does not work" for something that does. -#}
   var expirySample = {
     domain: 'example.com',
     expires_at: '1 Sep 2026',
     days_left: '7 days',
     grace_days: '14 days',
     delete_at: '15 Sep 2026',
-    when: 'expires on 1 Sep 2026 — 7 days left'
+    when: 'expires on 1 Sep 2026 — 7 days left',
+    days_left_count: '7',
+    grace_days_count: '14',
+    expires_at_iso: '2026-09-01',
+    delete_at_iso: '2026-09-15'
   };
   function letterPreview(inputId, defaultId, previewId, fields) {
     var el = document.getElementById(inputId);
@@ -1204,7 +1252,7 @@
     letterPreview('nt_care', 'nt_care_default', 'nt_care_preview', careSample);
     letterPreview('nt_expiry', 'nt_expiry_default', 'nt_expiry_preview', expirySample);
   }
-  ['nt_care', 'nt_expiry'].forEach(function (id) {
+  ['nt_care', 'nt_expiry', 'nt_care_subject', 'nt_expiry_subject'].forEach(function (id) {
     var el = document.getElementById(id);
     if (el) el.addEventListener('input', updateLetters);
   });

@@ -4933,12 +4933,16 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     Ok((r, exp, to)) => {
                         let template = self.expiry_warning_template();
                         let letter = letter_origin(&template);
+                        let subject_template =
+                            read_notifications_section(self.agent_config_path.as_deref())
+                                .expiry_warning_subject_template;
                         let (subject, body) = expiry_warning_mail_with(
                             &r.domain,
                             exp,
                             r.grace_days,
                             now_secs(),
                             &template,
+                            &subject_template,
                         );
                         // A relay failure still leaves this an `Ok(())`, so
                         // the row is marked done rather than bounced back to
@@ -13015,7 +13019,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // is what BOTH show — a preview that differs from the mail is worse
         // than no preview.
         let template = self.care_report_template();
-        let (subject, body) = care_report_render_with(&report, &detail.domain, &template);
+        let subject_template = read_notifications_section(self.agent_config_path.as_deref())
+            .care_report_subject_template;
+        let (subject, body) =
+            care_report_render_full(&report, &detail.domain, &template, &subject_template);
         let mail = CareReportMail {
             subject,
             body,
@@ -13101,6 +13108,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // operator's letter says so in its own journal, which is where you
         // look when a customer forwards you wording you don't recognise.
         let body_template = self.care_report_template();
+        let subject_template = read_notifications_section(self.agent_config_path.as_deref())
+            .care_report_subject_template;
         let letter = letter_origin(&body_template);
         let mut sent = 0i64;
         for hosting_id in order {
@@ -13191,7 +13200,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 );
                 continue;
             }
-            let (subject, body) = care_report_render_with(&report, &detail.domain, &body_template);
+            let (subject, body) =
+                care_report_render_full(&report, &detail.domain, &body_template, &subject_template);
             // Fourth guard, on exactly the terms of the three above. The
             // marker is BOTH "already reported" and the next period's start,
             // so consuming it on a message the relay refused does not delay
@@ -24234,6 +24244,99 @@ fn care_report_parts(
         ("uptime", parts[3].clone()),
         ("backups", parts[4].clone()),
         ("integrity", parts[5].clone()),
+        // ── Bare values ────────────────────────────────────────────────
+        //
+        // The six placeholders above each expand to a whole SECTION —
+        // heading, figure and an English paragraph explaining it. That is
+        // right for an operator who keeps the built-in letter and wrong for
+        // everyone else: translate the letter and every placeholder injects
+        // English back into it, so a Czech report came out as an English
+        // block followed by the Czech sentence meant to replace it. The same
+        // went for `{days}`, which carries its own unit word and turned
+        // "{days} dní" into "30 days dní".
+        //
+        // These carry the MEASUREMENT and nothing else, so the wording around
+        // them is entirely the operator's.
+        //
+        // An em dash, never a zero, when something was not measured. The
+        // whole report is built on not claiming a figure it does not have —
+        // "0 attacks blocked" on a site nobody was watching is exactly the
+        // lie the sections go to such lengths to avoid, and a bare-value
+        // placeholder must not reintroduce it.
+        ("days_count", days.to_string()),
+        ("period_start_iso", iso_date(report.period_start)),
+        ("period_end_iso", iso_date(last_day)),
+        ("attacks_count", opt_num(report.attacks_blocked)),
+        ("updates_count", opt_num(report.updates_applied)),
+        (
+            "traffic_requests",
+            report
+                .usage
+                .as_ref()
+                .map(|u| group_int(u.requests))
+                .unwrap_or_else(|| UNMEASURED.to_string()),
+        ),
+        (
+            "traffic_sent",
+            report
+                .usage
+                .as_ref()
+                .map(|u| human_bytes(u.bw_out_bytes))
+                .unwrap_or_else(|| UNMEASURED.to_string()),
+        ),
+        (
+            "traffic_received",
+            report
+                .usage
+                .as_ref()
+                .and_then(|u| u.bw_in_bytes)
+                .map(human_bytes)
+                .unwrap_or_else(|| UNMEASURED.to_string()),
+        ),
+        (
+            "disk_peak",
+            report
+                .usage
+                .as_ref()
+                .map(|u| human_bytes(u.disk_peak_bytes))
+                .unwrap_or_else(|| UNMEASURED.to_string()),
+        ),
+        (
+            "uptime_pct",
+            match report.uptime.as_ref() {
+                // Zero samples IS "not monitored" — dividing by it would
+                // print a confident 100 %.
+                Some(u) if u.samples > 0 => {
+                    format!("{:.2}", (u.successes as f64 / u.samples as f64) * 100.0)
+                }
+                _ => UNMEASURED.to_string(),
+            },
+        ),
+        (
+            "backups_count",
+            report
+                .backups
+                .as_ref()
+                .map(|b| group_int(b.taken))
+                .unwrap_or_else(|| UNMEASURED.to_string()),
+        ),
+        (
+            "backups_failed",
+            report
+                .backups
+                .as_ref()
+                .map(|b| group_int(b.failed))
+                .unwrap_or_else(|| UNMEASURED.to_string()),
+        ),
+        (
+            "backup_last_iso",
+            report
+                .backups
+                .as_ref()
+                .and_then(|b| b.last_success_at)
+                .map(iso_date)
+                .unwrap_or_else(|| UNMEASURED.to_string()),
+        ),
     ];
     (subject, parts, fields)
 }
@@ -24280,6 +24383,28 @@ pub fn care_report_render_with(
     let mut body = render_template(body_template, &pairs);
     body.push_str(&care_omitted_unmeasured_note(report, body_template));
     (subject, body)
+}
+
+/// [`care_report_render_with`], with the subject line editable too.
+///
+/// This letter goes to a paying customer, and until now only its body could be
+/// changed — so an operator who translated it sent Czech prose under an English
+/// subject, with no field anywhere to fix it. The subject takes the same
+/// placeholders as the body; empty keeps the built-in English one, which is
+/// what every existing install has.
+pub fn care_report_render_full(
+    report: &CareReport,
+    domain: &str,
+    body_template: &str,
+    subject_template: &str,
+) -> (String, String) {
+    let (built_in_subject, body) = care_report_render_with(report, domain, body_template);
+    if subject_template.trim().is_empty() {
+        return (built_in_subject, body);
+    }
+    let (_, _, fields) = care_report_parts(report, domain);
+    let pairs: Vec<(&str, &str)> = fields.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    (render_template(subject_template, &pairs), body)
 }
 
 /// The one thing a custom letter must not be allowed to do: quietly drop
@@ -24340,6 +24465,31 @@ fn care_omitted_unmeasured_note(report: &CareReport, body_template: &str) -> Str
 /// Blocked attacks. `None` is the case the database cannot produce on its
 /// own — the caller sets it when the ban scanner was switched off — and it
 /// is exactly why zero must not be printed there.
+/// What a bare-value placeholder prints when the thing was never measured.
+///
+/// Not "0", and not an English phrase. A zero would be a claim the report has
+/// no evidence for — the whole letter is built on refusing that — and a phrase
+/// would put English back into a template somebody translated, which is the
+/// bug these placeholders exist to fix. A dash is a fact in any language: the
+/// operator sees it in the preview and writes their own sentence around it.
+const UNMEASURED: &str = "—";
+
+/// A count, or [`UNMEASURED`] when there is none.
+fn opt_num(v: Option<i64>) -> String {
+    v.map(group_int).unwrap_or_else(|| UNMEASURED.to_string())
+}
+
+/// `YYYY-MM-DD`. Month names are a language; digits are not, so a translated
+/// letter gets a date it can use.
+fn iso_date(ts: i64) -> String {
+    use chrono::TimeZone;
+    chrono::Utc
+        .timestamp_opt(ts, 0)
+        .single()
+        .map(|d| d.format("%Y-%m-%d").to_string())
+        .unwrap_or_else(|| UNMEASURED.to_string())
+}
+
 fn care_section_attacks(blocked: Option<i64>, covered_since: Option<i64>) -> String {
     // Protection started mid-period: the count is real but it is not a
     // period total, and "0" is emphatically not "a quiet month". Both
@@ -27088,16 +27238,18 @@ fn expiry_days_left(expires_at: i64, now: i64) -> i64 {
 /// countdown, mis-plural a single day, or name a delete date other than
 /// the one `reconcile_scheduled_rows` actually queued. Unknown `{tokens}`
 /// are left verbatim rather than dropped — see `render_template`.
+#[allow(clippy::too_many_arguments)]
 fn expiry_warning_mail_with(
     domain: &str,
     expires_at: i64,
     grace_days: i64,
     now: i64,
     body_template: &str,
+    subject_template: &str,
 ) -> (String, String) {
     let days_left = expiry_days_left(expires_at, now);
     let grace = grace_days.max(1);
-    let subject = if days_left == 0 {
+    let built_in_subject = if days_left == 0 {
         format!("[Hyperion] Hosting for {domain} expires today")
     } else {
         format!(
@@ -27117,6 +27269,31 @@ fn expiry_warning_mail_with(
     let exp_date = fmt_mail_date(expires_at);
     let del_date = fmt_mail_date(expires_at + grace * 86_400);
     let grace_str = format!("{grace} {}", plural(grace, "day", "days"));
+    // The subject takes the same placeholders as the body, so an operator who
+    // translated the letter can translate the line the customer sees FIRST.
+    // Empty keeps the built-in English one, which is what every existing
+    // install has.
+    let subject = if subject_template.trim().is_empty() {
+        built_in_subject
+    } else {
+        render_template(
+            subject_template,
+            &[
+                ("domain", domain),
+                ("expires_at", &exp_date),
+                (
+                    "days_left",
+                    &format!("{days_left} {}", plural(days_left, "day", "days")),
+                ),
+                ("grace_days", &grace_str),
+                ("delete_at", &del_date),
+                ("days_left_count", &days_left.to_string()),
+                ("grace_days_count", &grace.to_string()),
+                ("expires_at_iso", &iso_date(expires_at)),
+                ("delete_at_iso", &iso_date(expires_at + grace * 86_400)),
+            ],
+        )
+    };
     if body_template.trim().is_empty() {
         let body = format!(
             "Hello,\n\n\
@@ -27129,6 +27306,16 @@ fn expiry_warning_mail_with(
         return (subject, body);
     }
     let days_left_str = format!("{days_left} {}", plural(days_left, "day", "days"));
+    // Bare values beside the ready-made ones, for the same reason the care
+    // report has them: `{days_left}` carries its own unit word, so a
+    // translated letter writing "{days_left} dní" produced "5 days dní", and
+    // `{when}` is an entire English sentence that lands in the middle of a
+    // Czech paragraph. `{expires_at}` and `{delete_at}` spell the month in
+    // English; the ISO forms are digits, which every language can read.
+    let days_left_count = days_left.to_string();
+    let grace_days_count = grace.to_string();
+    let exp_iso = iso_date(expires_at);
+    let del_iso = iso_date(expires_at + grace * 86_400);
     let body = render_template(
         body_template,
         &[
@@ -27140,6 +27327,10 @@ fn expiry_warning_mail_with(
             ("grace_days", &grace_str),
             ("delete_at", &del_date),
             ("when", &when),
+            ("days_left_count", &days_left_count),
+            ("grace_days_count", &grace_days_count),
+            ("expires_at_iso", &exp_iso),
+            ("delete_at_iso", &del_iso),
         ],
     );
     (subject, body)
@@ -27199,9 +27390,17 @@ fn read_notifications_section(
         // "use the built-in letter", so a missing key, an empty key and an
         // unreadable agent.toml all land on today's wording.
         care_report_body_template: get("care_report_body_template", &def.care_report_body_template),
+        care_report_subject_template: get(
+            "care_report_subject_template",
+            &def.care_report_subject_template,
+        ),
         expiry_warning_body_template: get(
             "expiry_warning_body_template",
             &def.expiry_warning_body_template,
+        ),
+        expiry_warning_subject_template: get(
+            "expiry_warning_subject_template",
+            &def.expiry_warning_subject_template,
         ),
     }
 }
@@ -27489,6 +27688,8 @@ fn parse_agent_section_fields(
             // built-in care report is ~1.2 kB before the operator adds a
             // word. Empty stays empty and means "use the built-in letter".
             ("notifications", "care_report_body_template")
+            | ("notifications", "care_report_subject_template")
+            | ("notifications", "expiry_warning_subject_template")
             | ("notifications", "expiry_warning_body_template") => {
                 if v.len() > 20_000 {
                     return Err(bad("letter too long (max 20000 characters)".into()));
@@ -31348,7 +31549,7 @@ mod tests {
     #[test]
     fn expiry_warning_30d_states_domain_date_days_and_consequences() {
         let (subject, body) =
-            expiry_warning_mail_with("example.cz", EXP_TS, 14, EXP_TS - 30 * 86_400, "");
+            expiry_warning_mail_with("example.cz", EXP_TS, 14, EXP_TS - 30 * 86_400, "", "");
         assert_eq!(
             subject,
             "[Hyperion] Hosting for example.cz expires in 30 days"
@@ -31362,7 +31563,7 @@ mod tests {
     #[test]
     fn expiry_warning_7d_variant() {
         let (subject, body) =
-            expiry_warning_mail_with("example.cz", EXP_TS, 14, EXP_TS - 7 * 86_400, "");
+            expiry_warning_mail_with("example.cz", EXP_TS, 14, EXP_TS - 7 * 86_400, "", "");
         assert_eq!(
             subject,
             "[Hyperion] Hosting for example.cz expires in 7 days"
@@ -31373,7 +31574,7 @@ mod tests {
     #[test]
     fn expiry_warning_1d_variant_is_singular() {
         let (subject, body) =
-            expiry_warning_mail_with("example.cz", EXP_TS, 14, EXP_TS - 86_400, "");
+            expiry_warning_mail_with("example.cz", EXP_TS, 14, EXP_TS - 86_400, "", "");
         assert_eq!(
             subject,
             "[Hyperion] Hosting for example.cz expires in 1 day"
@@ -31383,11 +31584,12 @@ mod tests {
 
     #[test]
     fn expiry_warning_on_the_day_says_today() {
-        let (subject, body) = expiry_warning_mail_with("example.cz", EXP_TS, 14, EXP_TS, "");
+        let (subject, body) = expiry_warning_mail_with("example.cz", EXP_TS, 14, EXP_TS, "", "");
         assert_eq!(subject, "[Hyperion] Hosting for example.cz expires today");
         assert!(body.contains("hosting for example.cz expires today."));
         // A late tick can't produce a negative countdown.
-        let (late, _) = expiry_warning_mail_with("example.cz", EXP_TS, 14, EXP_TS + 3 * 86_400, "");
+        let (late, _) =
+            expiry_warning_mail_with("example.cz", EXP_TS, 14, EXP_TS + 3 * 86_400, "", "");
         assert_eq!(late, "[Hyperion] Hosting for example.cz expires today");
     }
 
@@ -31396,9 +31598,10 @@ mod tests {
         // grace_days = 0 is stored, but reconcile_scheduled_rows queues the
         // delete at grace.max(1) — the letter must name that same date, and
         // say "1 day" rather than "1 days".
-        let (_, body) = expiry_warning_mail_with("example.cz", EXP_TS, 0, EXP_TS - 86_400, "");
+        let (_, body) = expiry_warning_mail_with("example.cz", EXP_TS, 0, EXP_TS - 86_400, "", "");
         assert!(body.contains("after a grace period of 1 day, on 2 Sep 2026"));
-        let (_, body) = expiry_warning_mail_with("example.cz", EXP_TS, 3, EXP_TS - 2 * 86_400, "");
+        let (_, body) =
+            expiry_warning_mail_with("example.cz", EXP_TS, 3, EXP_TS - 2 * 86_400, "", "");
         assert!(body.contains("2 days left."));
         assert!(body.contains("after a grace period of 3 days, on 4 Sep 2026"));
     }
@@ -31812,21 +32015,35 @@ mod tests {
     #[test]
     fn care_letter_unknown_placeholder_is_left_literal() {
         let r = mk_care_report();
-        // `{uptime_pct}` is exactly the placeholder this design refuses to
-        // provide: there is no way to ask for the number behind a section,
-        // so a template cannot turn "not monitored" into "100 %". Asking
-        // for it yields the operator's own text back, visibly wrong in the
-        // preview rather than silently dropped from the mail.
-        let (_, body) =
-            care_report_render_with(&r, "example.cz", "{domain} {uptime_pct} {nope} {unclosed");
+        let (_, body) = care_report_render_with(&r, "example.cz", "{domain} {nope} {unclosed");
         // `starts_with`, not `==`: this letter names no section at all, so
         // the unmeasured-section disclosure is appended after it. That is
         // `a_custom_letter_cannot_drop_an_unmeasured_section`'s business;
-        // what matters here is that the three bad tokens survive verbatim.
+        // what matters here is that the bad tokens survive verbatim.
+        assert!(body.starts_with("example.cz {nope} {unclosed"), "{body}");
+    }
+
+    /// `{uptime_pct}` now exists — a translated letter needs the bare number,
+    /// because the section placeholder that used to be the only option
+    /// carries an English paragraph with it.
+    ///
+    /// What it must NOT do is what this design originally withheld it to
+    /// prevent: let a template print a confident "100 %" for a site nobody
+    /// was checking. Zero samples yields a dash, so the number can only ever
+    /// appear when it was really measured.
+    #[test]
+    fn uptime_pct_cannot_invent_a_figure_for_an_unmonitored_site() {
+        let r = mk_care_report();
         assert!(
-            body.starts_with("example.cz {uptime_pct} {nope} {unclosed"),
-            "{body}"
+            r.uptime.as_ref().map(|u| u.samples).unwrap_or(0) == 0,
+            "this fixture is the unmonitored one"
         );
+        let (_, body) = care_report_render_with(&r, "example.cz", "{uptime_pct}");
+        assert!(
+            body.starts_with('—'),
+            "an unmonitored site must not yield a percentage: {body}"
+        );
+        assert!(!body.contains("100"), "{body}");
     }
 
     #[test]
@@ -31837,15 +32054,101 @@ mod tests {
             (0, EXP_TS - 86_400),
             (14, EXP_TS), // "expires today"
         ] {
-            let (_, builtin) = expiry_warning_mail_with("example.cz", EXP_TS, grace, now, "");
+            let (_, builtin) = expiry_warning_mail_with("example.cz", EXP_TS, grace, now, "", "");
             let (_, templated) = expiry_warning_mail_with(
                 "example.cz",
                 EXP_TS,
                 grace,
                 now,
                 hyperion_types::EXPIRY_WARNING_DEFAULT_BODY_TEMPLATE,
+                "",
             );
             assert_eq!(builtin, templated, "grace={grace} now={now}");
+        }
+    }
+
+    /// The bug this whole split exists for: a translated letter must not have
+    /// English put back into it. `{attacks}` and friends expand to a whole
+    /// SECTION — heading, figure, and an English paragraph — so a Czech
+    /// template using them came out as an English block followed by the Czech
+    /// sentence meant to replace it. The `_count` forms carry the measurement
+    /// and nothing else.
+    #[test]
+    fn value_placeholders_carry_no_english() {
+        let fields: std::collections::BTreeMap<&str, String> =
+            care_report_preview_fields().into_iter().collect();
+        // Digits only. A word here is English leaking into somebody's letter.
+        for key in [
+            "attacks_count",
+            "updates_count",
+            "traffic_requests",
+            "uptime_pct",
+            "backups_count",
+            "backups_failed",
+            "days_count",
+            "period_start_iso",
+            "period_end_iso",
+        ] {
+            let v = fields.get(key).unwrap_or_else(|| panic!("missing {key}"));
+            assert!(
+                !v.chars().any(|c| c.is_ascii_alphabetic()),
+                "{key} = {v:?} contains a word — a value placeholder must be a \
+                 measurement, so a template in any language can put its own \
+                 wording around it"
+            );
+        }
+        // Byte sizes carry a UNIT, and a unit is not a language: "32.9 MiB"
+        // reads the same in Czech. What they must not carry is prose, so the
+        // rule is "a number and a unit symbol", not "no letters at all".
+        for key in ["traffic_sent", "traffic_received", "disk_peak"] {
+            let v = fields.get(key).unwrap_or_else(|| panic!("missing {key}"));
+            let words: Vec<&str> = v.split_whitespace().collect();
+            assert!(
+                words.len() <= 2,
+                "{key} = {v:?} is prose, not a measurement"
+            );
+            if let Some(unit) = words.get(1) {
+                assert!(
+                    matches!(*unit, "B" | "KiB" | "MiB" | "GiB" | "TiB"),
+                    "{key} = {v:?} — {unit:?} is not a byte unit"
+                );
+            }
+        }
+    }
+
+    /// A value that was never measured prints a dash, never a zero. The whole
+    /// letter is built on refusing to state a figure it cannot evidence, and
+    /// "0 attacks blocked" on a site nobody watched is exactly that lie.
+    #[test]
+    fn an_unmeasured_value_is_a_dash_not_a_zero() {
+        let from = 1_780_272_000;
+        let report = CareReport {
+            hosting_id: hyperion_types::HostingId("h".into()),
+            domain: "example.cz".into(),
+            period_start: from,
+            period_end: from + 30 * 86_400,
+            attacks_blocked: None,
+            attacks_covered_since: None,
+            updates_applied: None,
+            usage: None,
+            uptime: None,
+            backups: None,
+            integrity: None,
+        };
+        let (_, _, fields) = care_report_parts(&report, "example.cz");
+        let map: std::collections::BTreeMap<&str, String> = fields.into_iter().collect();
+        for key in [
+            "attacks_count",
+            "updates_count",
+            "traffic_requests",
+            "uptime_pct",
+            "backups_count",
+        ] {
+            assert_eq!(
+                map.get(key).map(String::as_str),
+                Some("—"),
+                "{key} must not invent a figure"
+            );
         }
     }
 
@@ -31858,6 +32161,7 @@ mod tests {
             EXP_TS - 7 * 86_400,
             "Renew {domain} before {expires_at} ({days_left} left).\n\
              Deleted on {delete_at}, after {grace_days}.\n{when}\n{mystery}",
+            "",
         );
         assert_eq!(
             subject,
@@ -31918,9 +32222,23 @@ mod tests {
             "x".repeat(20_001),
         )]);
         assert!(parse_agent_section_fields("notifications", &big).is_err());
-        // A neighbouring field in the same section is still refused.
+        // The subjects are allow-listed too — this letter goes to a paying
+        // customer, and until they were, a translated body arrived under an
+        // English subject with no field anywhere to change it.
+        let subj = std::collections::BTreeMap::from([
+            (
+                "care_report_subject_template".to_string(),
+                "Report údržby — {domain}".to_string(),
+            ),
+            (
+                "expiry_warning_subject_template".to_string(),
+                "Hosting {domain} končí za {days_left_count} dní".to_string(),
+            ),
+        ]);
+        assert!(parse_agent_section_fields("notifications", &subj).is_ok());
+        // A field that is NOT in the section's allow-list is still refused.
         let bogus = std::collections::BTreeMap::from([(
-            "care_report_subject_template".to_string(),
+            "care_report_footer_template".to_string(),
             "nope".to_string(),
         )]);
         assert!(parse_agent_section_fields("notifications", &bogus).is_err());

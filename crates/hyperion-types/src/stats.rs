@@ -372,10 +372,22 @@ pub struct NotificationTemplatesView {
     /// deserializes on a newer master.
     #[serde(default)]
     pub care_report_body_template: String,
+    /// Subject line of the care report. EMPTY ⇒ the built-in English one.
+    ///
+    /// This letter goes to a paying CUSTOMER. Until now only its body was
+    /// editable, so an operator who translated it sent a Czech letter under
+    /// an English subject — and no amount of editing could fix that, because
+    /// the field did not exist.
+    #[serde(default)]
+    pub care_report_subject_template: String,
     /// Body of the hosting-expiry warning letter. EMPTY ⇒ the built-in
     /// default (`EXPIRY_WARNING_DEFAULT_BODY_TEMPLATE`).
     #[serde(default)]
     pub expiry_warning_body_template: String,
+    /// Subject line of the expiry warning. EMPTY ⇒ the built-in English one.
+    /// Same reasoning as `care_report_subject_template`.
+    #[serde(default)]
+    pub expiry_warning_subject_template: String,
 }
 
 impl Default for NotificationTemplatesView {
@@ -386,7 +398,9 @@ impl Default for NotificationTemplatesView {
             email_body_template: "{body}".into(),
             // Empty = "use the built-in letter". See the type docs.
             care_report_body_template: String::new(),
+            care_report_subject_template: String::new(),
             expiry_warning_body_template: String::new(),
+            expiry_warning_subject_template: String::new(),
         }
     }
 }
