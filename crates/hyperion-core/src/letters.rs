@@ -438,6 +438,8 @@ pub static STRINGS: &[LetterString] = &[
              \n\
              {integrity}\n\
              \n\
+             {service}\n\
+             \n\
              --\n\
              You receive this report because {domain} is on a care plan.\n\
              The figures come straight from the server the site runs on; times are UTC.\n\
@@ -462,6 +464,8 @@ pub static STRINGS: &[LetterString] = &[
              {backups}\n\
              \n\
              {integrity}\n\
+             \n\
+             {service}\n\
              \n\
              --\n\
              Tento report dostáváte, protože web {domain} má aktivní plán údržby.\n\
@@ -810,6 +814,89 @@ pub static STRINGS: &[LetterString] = &[
         cs: "\n  Skener malwaru na serveru neběžel, o podezřelém kódu tedy nic\n  \
              netvrdíme.",
     },
+    // ── The monthly service check ───────────────────────────────────────
+    //
+    // The only section that is not a measurement: it reports what a PERSON
+    // did, and every wording below says so. That distinction is the whole
+    // reason it is worded separately from "we measured" — a customer must
+    // not read "we opened your site and clicked through it" as something a
+    // machine verified.
+    LetterString {
+        id: "care.service.unknown",
+        group: "Care report — service check",
+        note: "The checklist could not be read at all. NOT the same as \"nothing was done\".",
+        en: "CHECKS BY HAND: no record\n  \
+             We could not read our own record of the manual checks for this\n  \
+             period, so this letter does not claim they happened.",
+        cs: "RUČNÍ KONTROLY: bez záznamu\n  \
+             Nepodařilo se nám načíst vlastní záznam o ručních kontrolách za\n  \
+             toto období, proto v tomto dopise netvrdíme, že proběhly.",
+    },
+    LetterString {
+        id: "care.service.none",
+        group: "Care report — service check",
+        note: "The record is readable and empty — nothing was ticked in this period.",
+        en: "CHECKS BY HAND: none recorded\n  \
+             Nobody recorded going through the site by hand during this\n  \
+             period. If that is wrong, the record is what is wrong — and we\n  \
+             would rather tell you than quietly leave the line out.",
+        cs: "RUČNÍ KONTROLY: nezaznamenány\n  \
+             Za toto období nikdo nezaznamenal, že by webem prošel ručně.\n  \
+             Pokud to tak nebylo, je špatně ten záznam — a raději vám to\n  \
+             řekneme, než abychom tenhle řádek potichu vynechali.",
+    },
+    LetterString {
+        id: "care.service.all",
+        group: "Care report — service check",
+        note: "Everything on the checklist was done. Token: {done} (the list).",
+        en: "CHECKS BY HAND: all done\n  \
+             Somebody went through the site personally this period: {done}.\n  \
+             These are the parts no automatic check can do for you.",
+        cs: "RUČNÍ KONTROLY: vše hotovo\n  \
+             Někdo za toto období prošel web osobně: {done}.\n  \
+             To jsou věci, které za vás žádná automatická kontrola neudělá.",
+    },
+    LetterString {
+        id: "care.service.partial",
+        group: "Care report — service check",
+        note: "Some items were done and some were not. Tokens: {done} {missing}.",
+        en: "CHECKS BY HAND: partly done\n  \
+             Done this period: {done}.\n  \
+             Not done: {missing}. We list what we missed rather than only what\n  \
+             we managed.",
+        cs: "RUČNÍ KONTROLY: částečně hotovo\n  \
+             Za toto období hotovo: {done}.\n  \
+             Neprovedeno: {missing}. Uvádíme i to, co jsme nestihli, ne jen to,\n  \
+             co se povedlo.",
+    },
+    LetterString {
+        id: "care.service.item.render",
+        group: "Care report — service check",
+        note: "Name of the pages/navigation check inside the lists above.",
+        en: "pages, navigation, links and the gallery",
+        cs: "stránky, navigace, odkazy a galerie",
+    },
+    LetterString {
+        id: "care.service.item.forms",
+        group: "Care report — service check",
+        note: "Name of the form check inside the lists above.",
+        en: "forms, including that the message arrives",
+        cs: "formuláře včetně doručení zprávy",
+    },
+    LetterString {
+        id: "care.service.item.speed",
+        group: "Care report — service check",
+        note: "Name of the speed check inside the lists above.",
+        en: "loading speed and the cache settings",
+        cs: "rychlost načítání a nastavení cache",
+    },
+    LetterString {
+        id: "care.service.item.post_update",
+        group: "Care report — service check",
+        note: "Name of the post-update check inside the lists above.",
+        en: "that the site still works after the updates",
+        cs: "funkčnost webu po aktualizacích",
+    },
     // ── The disclosure a custom letter cannot delete ────────────────────
     //
     // Omitting a MEASURED section is the operator's editorial choice.
@@ -869,6 +956,13 @@ pub static STRINGS: &[LetterString] = &[
         note: "Name of the backups section in the \"not measured\" list.",
         en: "backups",
         cs: "zálohy",
+    },
+    LetterString {
+        id: "care.unmeasured.service",
+        group: "Care report — frame",
+        note: "Name of the manual-check section in the \"not measured\" list.",
+        en: "checks by hand",
+        cs: "ruční kontroly",
     },
     LetterString {
         id: "care.unmeasured.integrity",

@@ -1606,6 +1606,19 @@ pub enum Request {
     PackageDelete {
         id: i64,
     },
+    /// Every site on THIS node that holds a care package, with how much of
+    /// `period`'s monthly service checklist is done.
+    ///
+    /// One call per node instead of two per site: the activations and the
+    /// checklist both live here, so the panel would otherwise fan out a
+    /// `PackageActivations` and a `HostingKvList` for every hosting it
+    /// wanted a badge for.
+    CareOverview {
+        /// `YYYY-MM`. Passed in rather than read from the node's clock so
+        /// every node answers about the SAME month — a cluster spanning a
+        /// month boundary must not report two different periods.
+        period: String,
+    },
     /// The packages a hosting holds. `history = true` also returns
     /// cancelled activations (what was bought, and when it stopped).
     PackageActivations {
@@ -2144,6 +2157,7 @@ pub enum Response {
     PackageUpdate(hyperion_types::ServicePackage),
     PackageDelete,
     PackageActivations(Vec<hyperion_types::HostingPackage>),
+    CareOverview(Vec<hyperion_types::care_check::CareOverviewRow>),
     PackageActivate(hyperion_types::HostingPackage),
     PackageCancel(hyperion_types::HostingPackage),
     /// How many individual features the pass had to put back. 0 = nothing

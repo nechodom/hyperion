@@ -740,6 +740,20 @@ pub fn build_router(state: SharedState) -> Router {
             "/hostings/:selector/packages-panel",
             get(handlers::packages::get_packages_panel),
         )
+        // The monthly service checklist — the part of a care plan a machine
+        // cannot do, and therefore the part that needs a person's tick.
+        // Re-renders the same card, so it lives beside the panel route.
+        .route(
+            "/hostings/packages/service-check",
+            post(handlers::packages::post_service_check),
+        )
+        // Care overview. Lazy because it asks EVERY node — the activations
+        // and the checklist are both co-located with the hosting — and must
+        // not hold the dashboard behind the slowest one.
+        .route(
+            "/dashboard/care-panel",
+            get(handlers::care::get_care_panel),
+        )
         .route("/logout", post(handlers::login::post_logout))
         // Tiny role echo for the nav-hiding shim in base.html.
         // Returns "super_admin" | "admin" | "operator" | "viewer".

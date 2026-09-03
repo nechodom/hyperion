@@ -1605,6 +1605,10 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(_) => Response::PackageDelete,
             Err(e) => Response::Error(e),
         },
+        Request::CareOverview { period } => match api.care_overview(period).await {
+            Ok(v) => Response::CareOverview(v),
+            Err(e) => Response::Error(e),
+        },
         Request::PackageActivations { sel, history } => {
             match api.package_activations(sel, history).await {
                 Ok(v) => Response::PackageActivations(v),
@@ -3077,6 +3081,12 @@ mod tests {
             _: HostingSelector,
             _: bool,
         ) -> Result<Vec<hyperion_types::HostingPackage>, RpcError> {
+            Ok(vec![])
+        }
+        async fn care_overview(
+            &self,
+            _: String,
+        ) -> Result<Vec<hyperion_types::care_check::CareOverviewRow>, RpcError> {
             Ok(vec![])
         }
         async fn package_activate(

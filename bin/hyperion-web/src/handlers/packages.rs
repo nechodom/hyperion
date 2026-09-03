@@ -319,6 +319,35 @@ struct PackagesCardTpl {
     /// Set after an action so the swapped-in card carries its own result.
     flash: Option<String>,
     error: Option<String>,
+    /// `YYYY-MM` the checklist below is filing ticks under, and how to say
+    /// it to a person.
+    check_period: String,
+    check_period_label: String,
+    /// The four monthly service checks, in list order.
+    checks: Vec<ServiceCheckRow>,
+    checks_done: usize,
+    checks_total: usize,
+    /// Last month, and whether it was left unfinished. A checklist nobody
+    /// looks at is the same as no checklist, so the card says out loud when
+    /// a month closed with work outstanding — that is the state a customer
+    /// discovers on your behalf.
+    prev_period_label: String,
+    prev_outstanding: usize,
+    /// Only shown when a package is actually held: an operator who sells no
+    /// care plan is not promising anybody a monthly look.
+    show_checks: bool,
+}
+
+/// One row in the monthly service checklist.
+pub struct ServiceCheckRow {
+    pub id: String,
+    pub label: String,
+    pub detail: String,
+    pub checked: bool,
+    /// Who ticked it and when, already worded. Empty when untouched.
+    pub by: String,
+    pub at: String,
+    pub note: String,
 }
 
 /// The care report as the preview block renders it — the operator reading
@@ -821,8 +850,49 @@ async fn render_card(
     .map(|s| s.trim().to_string())
     .unwrap_or_default();
 
+    // The monthly checklist lives on the owning node beside the feature
+    // toggles, which is also where the customer's report is assembled.
+    let checks = read_service_checks(state, owner.as_deref(), detail.id.as_str()).await;
+    let now = hyperion_types::now_secs();
+    let period = hyperion_types::care_check::period_key(now);
+    let prev = hyperion_types::care_check::previous_period(&period).unwrap_or_default();
+    let check_rows: Vec<ServiceCheckRow> = hyperion_types::care_check::ServiceCheckItem::ALL
+        .into_iter()
+        .map(|item| {
+            let mark = checks.month(&period).and_then(|m| m.get(item.as_str()));
+            ServiceCheckRow {
+                id: item.as_str().to_string(),
+                label: item.label().to_string(),
+                detail: item.detail().to_string(),
+                checked: mark.is_some(),
+                by: mark.map(|m| m.by.clone()).unwrap_or_default(),
+                at: mark
+                    .map(|m| crate::handlers::stats::fmt_ago(&m.at))
+                    .unwrap_or_default(),
+                note: mark.map(|m| m.note.clone()).unwrap_or_default(),
+            }
+        })
+        .collect();
+    let checks_done = check_rows.iter().filter(|r| r.checked).count();
+    // A month with nothing ticked at all is far more likely to be "this site
+    // was never on a plan then" than "we skipped it", so it is not nagged
+    // about; a month someone STARTED and left half-done is the real signal.
+    let prev_outstanding = if checks.month(&prev).is_some() {
+        checks.outstanding(&prev).len()
+    } else {
+        0
+    };
+
     let tpl = PackagesCardTpl {
         report_to,
+        check_period: period.clone(),
+        check_period_label: month_label(&period),
+        checks: check_rows,
+        checks_done,
+        checks_total: hyperion_types::care_check::ServiceCheckItem::ALL.len(),
+        prev_period_label: month_label(&prev),
+        prev_outstanding,
+        show_checks: !held.is_empty(),
         selector,
         csrf_token: super::session_csrf_token(state, ctx),
         held,
@@ -1308,4 +1378,146 @@ mod tests {
         assert!(held.included.is_empty());
         assert_eq!(held.name, "Care package", "never renders as a blank row");
     }
+}
+
+/// Read the monthly service checklist off the owning node.
+///
+/// An unreadable node yields an EMPTY checklist, i.e. "nothing was checked".
+/// The alternative — treating a failed read as "probably fine" — would let a
+/// node being down mark a month done, which is the one direction this record
+/// must never fail in.
+async fn read_service_checks(
+    state: &SharedState,
+    owner: Option<&str>,
+    hosting_id: &str,
+) -> hyperion_types::care_check::CareServiceChecks {
+    let kv: Vec<(String, String)> = match crate::dispatcher::dispatch_to_node(
+        state,
+        owner,
+        Request::HostingKvList {
+            hosting_id: hosting_id.to_string(),
+        },
+    )
+    .await
+    {
+        Ok(RpcResponse::HostingKvList(v)) => v,
+        _ => return Default::default(),
+    };
+    kv.iter()
+        .find(|(k, _)| k == "care_service_checks")
+        .map(|(_, v)| hyperion_types::care_check::CareServiceChecks::parse(v))
+        .unwrap_or_default()
+}
+
+/// `"2026-09"` → `"September 2026"`. A bare `YYYY-MM` beside a checkbox
+/// reads as a version number.
+fn month_label(period: &str) -> String {
+    const MONTHS: [&str; 12] = [
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
+    ];
+    let Some((y, m)) = period.split_once('-') else {
+        return period.to_string();
+    };
+    match m.parse::<usize>() {
+        Ok(n) if (1..=12).contains(&n) => format!("{} {y}", MONTHS[n - 1]),
+        _ => period.to_string(),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct ServiceCheckForm {
+    pub selector: String,
+    pub period: String,
+    pub item: String,
+    /// Absent when the box was unticked — that is how an HTML checkbox
+    /// reports "off", and un-ticking has to work: a mark is a claim that
+    /// somebody looked, and a claim made by mistake must be retractable.
+    #[serde(default)]
+    pub checked: Option<String>,
+    #[serde(default)]
+    pub note: String,
+}
+
+/// POST /hostings/packages/service-check — tick or clear one monthly item.
+///
+/// Gated on manage-level access plus `ProfilesManage`, the same pair the
+/// activate / cancel handlers use: this is a record the customer may later
+/// be shown, so it is not something a read-only session gets to write.
+pub async fn post_service_check(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<ServiceCheckForm>,
+) -> Result<Response, AppError> {
+    let sel = match super::hostings::require_manage_for_selector(
+        &state,
+        &ctx,
+        &form.selector,
+        Capability::ProfilesManage,
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
+    let Some(item) = hyperion_types::care_check::ServiceCheckItem::parse(&form.item) else {
+        return render_card(
+            &state,
+            &ctx,
+            form.selector.clone(),
+            None,
+            Some("unknown checklist item".into()),
+            None,
+        )
+        .await;
+    };
+    let (detail, owner) = super::hostings::find_hosting_anywhere(&state, sel).await?;
+    let mut checks = read_service_checks(&state, owner.as_deref(), detail.id.as_str()).await;
+    // The period comes from the form rather than the clock so the tick lands
+    // in the month the operator was looking at — a submit that crosses
+    // midnight on the 1st must not file itself under the new month.
+    let period = if form.period.trim().is_empty() {
+        hyperion_types::care_check::period_key(hyperion_types::now_secs())
+    } else {
+        form.period.trim().to_string()
+    };
+    let who = ctx.username.clone();
+    checks.set(
+        &period,
+        item,
+        form.checked.is_some(),
+        &who,
+        form.note.trim(),
+        hyperion_types::now_secs(),
+    );
+    let saved = crate::dispatcher::dispatch_to_node(
+        &state,
+        owner.as_deref(),
+        Request::HostingKvSet {
+            hosting_id: detail.id.as_str().to_string(),
+            key: "care_service_checks".into(),
+            value: checks.to_json(),
+        },
+    )
+    .await;
+    let error = match saved {
+        Ok(RpcResponse::HostingKvSet) => None,
+        Ok(RpcResponse::Error(e)) => Some(format!("the owning node refused the change: {e}")),
+        Ok(_) => Some("unexpected response from the owning node".into()),
+        Err(e) => Some(format!("the owning node could not be reached: {e}")),
+    };
+    // Re-render from the node either way, so a refused write shows the
+    // checklist as the node actually holds it rather than as the click
+    // implied.
+    render_card(&state, &ctx, form.selector, None, error, None).await
 }

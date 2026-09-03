@@ -12166,6 +12166,153 @@ impl<A: AdapterPort + 'static> HostingService<A> {
 
     /// The packages a hosting holds. `history = true` includes cancelled
     /// rows (what the customer bought and when it stopped).
+    /// Which monthly service checks an operator ticked inside `[from, to)`.
+    ///
+    /// The checklist is filed per calendar month and a report period is not,
+    /// so a period is mapped onto every month it TOUCHES: a quarterly report
+    /// asks about three months, a weekly one about the one or two its days
+    /// fall in. An item counts as done if it was ticked in any of them —
+    /// the customer is being told the work happened, and a fortnightly
+    /// report that straddles a month boundary must not report the same
+    /// month's work as missing in the half that fell the wrong side.
+    ///
+    /// `None` when the value could not be read at all. That is a different
+    /// statement from "nothing was ticked", and the letter words it as one:
+    /// an unreadable record must never read as a confirmed omission, and an
+    /// omission must never read as work done.
+    async fn care_service_work(
+        &self,
+        hosting_id: &str,
+        from: i64,
+        to: i64,
+    ) -> Option<hyperion_types::package::CareServiceWork> {
+        use hyperion_types::care_check::{period_key, CareServiceChecks, ServiceCheckItem};
+        let raw = hyperion_state::hosting_kv::get(&self.pool, hosting_id, CARE_CHECKS_KV_KEY)
+            .await
+            .ok()?
+            .unwrap_or_default();
+        let checks = CareServiceChecks::parse(&raw);
+        // Every month the half-open window touches, walked a day at a time
+        // from the first day to the last one INSIDE it. A period shorter
+        // than a month yields one or two keys; a quarter yields three or
+        // four. Cheap either way, and it cannot miss a month the way
+        // stepping by 30 days can.
+        let last = (to - 1).max(from);
+        let mut months: Vec<String> = Vec::new();
+        let mut t = from;
+        loop {
+            let k = period_key(t);
+            if !months.contains(&k) {
+                months.push(k);
+            }
+            if t >= last {
+                break;
+            }
+            t = (t + 86_400).min(last);
+        }
+        let mut work = hyperion_types::package::CareServiceWork::default();
+        for item in ServiceCheckItem::ALL {
+            if months.iter().any(|m| checks.is_checked(m, item)) {
+                work.done.push(item.as_str().to_string());
+            } else {
+                work.missing.push(item.as_str().to_string());
+            }
+        }
+        Some(work)
+    }
+
+    /// Care standing for every site on THIS node: what it pays for, and how
+    /// much of `period`'s monthly service checklist has been ticked.
+    ///
+    /// The two halves have to be read together and can only be read here —
+    /// `hosting_packages` rows are co-located with their hosting, and the
+    /// checklist is in this node's `hosting_kv`. The panel fans this out one
+    /// call per node; the alternative was two round-trips per site, on the
+    /// dashboard, on every page load.
+    ///
+    /// A site whose checklist cannot be read is reported with NOTHING ticked
+    /// rather than skipped. Skipping it would quietly shrink the list of
+    /// sites the operator owes a look at, which is the one direction this
+    /// answer must not fail in.
+    pub async fn care_overview(
+        &self,
+        period: String,
+    ) -> Result<Vec<hyperion_types::care_check::CareOverviewRow>, RpcError> {
+        use hyperion_types::care_check::{
+            CareOverviewRow, CareServiceChecks, ServiceCheckItem,
+        };
+        let rows = packages::list_all_active(&self.pool)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("care overview: {e}")))?;
+        if rows.is_empty() {
+            return Ok(Vec::new());
+        }
+        let prev = hyperion_types::care_check::previous_period(&period);
+        // Group the activations by hosting first: a site holding two packages
+        // is ONE row with two names, not two rows the operator has to tick
+        // twice.
+        let mut order: Vec<HostingId> = Vec::new();
+        let mut names: HashMap<String, Vec<String>> = HashMap::new();
+        for r in rows {
+            let key = r.hosting_id.as_str().to_string();
+            if !names.contains_key(&key) {
+                order.push(r.hosting_id.clone());
+            }
+            let entry = names.entry(key).or_default();
+            // The activation SNAPSHOTS the name, so a deleted definition
+            // still says what the customer bought.
+            if !r.package_name.trim().is_empty() && !entry.contains(&r.package_name) {
+                entry.push(r.package_name.clone());
+            }
+        }
+        let mut out = Vec::with_capacity(order.len());
+        for id in order {
+            let domain = match hyperion_state::hostings::get_by_id(&self.pool, &id).await {
+                Ok(Some(h)) => h.domain,
+                // The activation outlived its hosting, or the row is
+                // unreadable. Naming it by id beats dropping it: an
+                // activation with no site is itself worth seeing.
+                _ => id.as_str().to_string(),
+            };
+            let raw = hyperion_state::hosting_kv::get(&self.pool, id.as_str(), CARE_CHECKS_KV_KEY)
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            let checks = CareServiceChecks::parse(&raw);
+            let outstanding: Vec<String> = checks
+                .outstanding(&period)
+                .into_iter()
+                .map(|i| i.label().to_string())
+                .collect();
+            // A month nobody touched at all is far more likely to predate the
+            // plan than to have been skipped, so only a month that was
+            // STARTED and left unfinished is reported as outstanding.
+            let prev_outstanding = match prev.as_deref() {
+                Some(p) if checks.month(p).is_some() => checks.outstanding(p).len(),
+                _ => 0,
+            };
+            out.push(CareOverviewRow {
+                hosting_id: id.as_str().to_string(),
+                domain,
+                packages: names.remove(id.as_str()).unwrap_or_default(),
+                checks_done: checks.done_count(&period),
+                checks_total: ServiceCheckItem::ALL.len(),
+                outstanding,
+                prev_outstanding,
+            });
+        }
+        // Sites needing attention first, then alphabetically — the card is
+        // read top-down as a work list.
+        out.sort_by(|a, b| {
+            b.outstanding
+                .len()
+                .cmp(&a.outstanding.len())
+                .then_with(|| a.domain.cmp(&b.domain))
+        });
+        Ok(out)
+    }
+
     pub async fn package_activations(
         &self,
         sel: HostingSelector,
@@ -12811,6 +12958,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             RpcError::Internal_with(format!("care report ({what}): {e}"))
         };
         let mut report = CareReport::empty(detail.id.clone(), detail.domain.clone(), from, to);
+        report.service_work = self.care_service_work(id, from, to).await;
 
         // The one metric whose unmeasured state the database CANNOT see:
         // with `[fail2ban] enabled = false` — or with this site opted out of
@@ -13398,7 +13546,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             for (hid, domain) in blocked {
                 out.push(DashboardAlert {
                     kind: "care_report_blocked".into(),
-                    severity: "error".into(),
+                    // The site is up and serving. See the rule on `notify_admins`.
+                    severity: "warn".into(),
                     message: format!(
                         "{domain} is paying for a care report that cannot be sent — the site \
                          has no owner e-mail. Set one under Expiration on the site, then the \
@@ -13463,7 +13612,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                         // investigate (DNS broke, port 80 closed, …).
                         out.push(DashboardAlert {
                             kind: "cert_expiring".into(),
-                            severity: "error".into(),
+                            // Still valid, so visitors still see the site.
+                            // `cert_expired` is the red one. See the rule
+                            // on `notify_admins`.
+                            severity: "warn".into(),
                             message: format!(
                                 "{} certificate expires in {} day(s) — renew now.",
                                 detail.domain, days
@@ -13512,7 +13664,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     // Has runs but none successful.
                     out.push(DashboardAlert {
                         kind: "backup_failing".into(),
-                        severity: "error".into(),
+                        // Nothing is broken for a visitor — this is exposure
+                        // to a future problem. See the rule on `notify_admins`.
+                        severity: "warn".into(),
                         message: format!("{} has no successful backups on record.", s.domain),
                         hosting: Some(s.domain.clone()),
                     });
@@ -16818,7 +16972,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             match &outcome {
                 CertRenewOutcome::Failed { error } => {
                     self.notify_admins(
-                        if days_left < 7 { "error" } else { "warn" },
+                        // Red once the certificate is actually EXPIRED —
+                        // that is the moment a visitor sees a warning
+                        // instead of the site. Before that it is urgent,
+                        // not broken. See the rule on `notify_admins`.
+                        if days_left <= 0 { "error" } else { "warn" },
                         "Cert renewal failed",
                         &format!("{domain_str} — {error} ({} day(s) until expiry)", days_left),
                         &format!("/hostings/{}", domain_str),
@@ -16848,7 +17006,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     // token) — nag the operator to re-run DNS-01 before it
                     // expires. Per-domain kind → one bell row per cert.
                     self.notify_admins(
-                        if days_left < 7 { "error" } else { "warn" },
+                        if days_left <= 0 { "error" } else { "warn" },
                         "Wildcard cert needs manual renewal",
                         &format!("{domain_str} — {reason} ({days_left} day(s) until expiry)"),
                         &format!("/hostings/{}", domain_str),
@@ -22781,6 +22939,21 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(n)
     }
 
+    /// What each severity MEANS, so the notification centre can be read at a
+    /// glance instead of parsed. 
+    ///
+    /// * `error` (red) — something is broken RIGHT NOW: the site does not
+    ///   serve, the certificate is expired, malware is on disk, the
+    ///   filesystem is failing. An operator should stop what they are doing.
+    /// * `warn` (orange) — something will break, or a promise is unmet: a
+    ///   certificate expiring next week, backups that have never succeeded, a
+    ///   care report with nowhere to go. Needs doing; nothing is down.
+    /// * `info` — a thing happened that was worth recording.
+    ///
+    /// The line is deliberately "is it broken now", not "how much do I care".
+    /// Everything an operator cares about looks urgent to whoever wrote it,
+    /// which is how a panel ends up all red — and a panel that is all red
+    /// tells you nothing, so the one genuinely-down site does not stand out.
     /// Fan-out helper: emit one notification to every super_admin
     /// and admin user. Operators are skipped by default since
     /// operator-relevant events typically have a hosting_id and a
@@ -24223,7 +24396,7 @@ fn care_report_parts(
     cat: &LetterCatalog,
     report: &CareReport,
     domain: &str,
-) -> (String, [String; 6], Vec<(&'static str, String)>) {
+) -> (String, [String; 7], Vec<(&'static str, String)>) {
     let days = care_days_spanned(report.period_start, report.period_end);
     // The period is half-open, so the last day INSIDE it is `end - 1`.
     let last_day = (report.period_end - 1).max(report.period_start);
@@ -24254,6 +24427,7 @@ fn care_report_parts(
         care_section_uptime(cat, report.uptime.as_ref()),
         care_section_backups(cat, report.backups.as_ref()),
         care_section_integrity(cat, report.integrity.as_ref()),
+        care_section_service(cat, report.service_work.as_ref()),
     ];
     let fields = vec![
         ("domain", domain.to_string()),
@@ -24268,6 +24442,9 @@ fn care_report_parts(
         ("uptime", parts[3].clone()),
         ("backups", parts[4].clone()),
         ("integrity", parts[5].clone()),
+        // What a PERSON did. Not a measurement, and the section says so in
+        // every branch — see `care_section_service`.
+        ("service", parts[6].clone()),
         // ── Bare values ────────────────────────────────────────────────
         //
         // The six placeholders above each expand to a whole SECTION —
@@ -24448,6 +24625,14 @@ fn care_omitted_unmeasured_note(
             report.integrity.is_none(),
             "care.unmeasured.integrity",
         ),
+        // Unreadable, not merely un-ticked: an empty checklist is a fact the
+        // letter states out loud, so only a record we could not read at all
+        // belongs in the "we cannot say" list.
+        (
+            "service",
+            report.service_work.is_none(),
+            "care.unmeasured.service",
+        ),
     ]
     .into_iter()
     .filter(|(placeholder, is_unmeasured, _)| {
@@ -24476,6 +24661,9 @@ fn care_omitted_unmeasured_note(
 /// fact in any language: the operator sees it in the preview and writes their
 /// own sentence around it.
 const UNMEASURED: &str = "—";
+
+/// `hosting_kv` key holding the monthly service checklist JSON.
+pub const CARE_CHECKS_KV_KEY: &str = "care_service_checks";
 
 /// A count, or [`UNMEASURED`] when there is none.
 fn opt_num(cat: &LetterCatalog, v: Option<i64>) -> String {
@@ -24734,6 +24922,39 @@ fn care_section_integrity(cat: &LetterCatalog, integrity: Option<&CareIntegrity>
         out.push_str(cat.get("care.integrity.no_malware_scan"));
     }
     out
+}
+
+/// The monthly service check. The one section that reports what a PERSON
+/// did rather than what was measured, and every wording it can use says so.
+///
+/// Three states that must stay distinct: the record could not be read, the
+/// record is empty, and the record says what happened. Collapsing the first
+/// two would turn "we do not know" into "we did not do it", and collapsing
+/// the last two would turn "we did not do it" into silence.
+fn care_section_service(
+    cat: &LetterCatalog,
+    work: Option<&hyperion_types::package::CareServiceWork>,
+) -> String {
+    let Some(w) = work else {
+        return cat.get("care.service.unknown").to_string();
+    };
+    if w.is_empty() {
+        return cat.get("care.service.none").to_string();
+    }
+    let name = |ids: &[String]| -> String {
+        ids.iter()
+            .map(|id| cat.get(&format!("care.service.item.{id}")).to_string())
+            .collect::<Vec<_>>()
+            .join(cat.get("list_sep"))
+    };
+    let done = name(&w.done);
+    if w.missing.is_empty() {
+        return cat.render("care.service.all", &[("done", &done)]);
+    }
+    cat.render(
+        "care.service.partial",
+        &[("done", &done), ("missing", &name(&w.missing))],
+    )
 }
 
 /// Calendar days the half-open window `[from, to)` touches.
@@ -31772,6 +31993,17 @@ mod tests {
             plugin_issues: 0,
             malware_hits: 0,
         });
+        // A readable checklist with everything ticked — the ordinary case.
+        // `None` here would mean the record could not be READ, which puts
+        // "checks by hand" in the unmeasured disclosure and is a different
+        // fixture from the one these tests want.
+        r.service_work = Some(hyperion_types::package::CareServiceWork {
+            done: hyperion_types::care_check::ServiceCheckItem::ALL
+                .iter()
+                .map(|i| i.as_str().to_string())
+                .collect(),
+            missing: Vec::new(),
+        });
         r
     }
 
@@ -32252,6 +32484,7 @@ mod tests {
             uptime: None,
             backups: None,
             integrity: None,
+            service_work: None,
         };
         let (_, _, fields) = care_report_parts(&en(), &report, "example.cz");
         let map: std::collections::BTreeMap<&str, String> = fields.into_iter().collect();

@@ -1263,6 +1263,19 @@ fn print_pretty(resp: &Response) {
         Response::PackageDelete => {
             println!("✓ package deleted (existing activations keep their price, unenforced)")
         }
+        Response::CareOverview(rows) => {
+            if rows.is_empty() {
+                println!("(no site on this node holds a care package)");
+            }
+            for r in rows {
+                let state = if r.outstanding.is_empty() {
+                    "checked".to_string()
+                } else {
+                    format!("{}/{} — {}", r.checks_done, r.checks_total, r.outstanding.join(", "))
+                };
+                println!("{:<34} {:<24} {state}", r.domain, r.packages.join(","));
+            }
+        }
         Response::PackageActivations(rows) => {
             if rows.is_empty() {
                 println!("(no packages on this hosting)");

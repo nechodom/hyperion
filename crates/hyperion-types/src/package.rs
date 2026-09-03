@@ -845,6 +845,48 @@ pub struct CareReport {
     pub backups: Option<CareBackups>,
     #[serde(default)]
     pub integrity: Option<CareIntegrity>,
+    /// The monthly service checks an OPERATOR ticked inside the period.
+    ///
+    /// Unlike every other field here this is not a measurement — it is a
+    /// person saying they looked, and the letter has to describe it that
+    /// way. It is in the report because it is the part of a care plan the
+    /// customer is paying for and can least see: a backup announces itself
+    /// by existing, but "we opened your site and clicked through it" leaves
+    /// no trace anywhere unless somebody records it.
+    ///
+    /// `None` when the checklist could not be read at all, which is a
+    /// different statement from "nothing was ticked" and is worded as one.
+    #[serde(default)]
+    pub service_work: Option<CareServiceWork>,
+}
+
+/// Which monthly service checks were done inside a report period.
+///
+/// Item ids, not labels: the wording belongs to the letter's language pack,
+/// so a Czech report names them in Czech. Both halves are carried because
+/// the report's whole doctrine is that a gap is stated rather than left to
+/// be inferred from a short list.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CareServiceWork {
+    /// Ticked at least once inside the period.
+    #[serde(default)]
+    pub done: Vec<String>,
+    /// Not ticked in any month the period touches.
+    #[serde(default)]
+    pub missing: Vec<String>,
+}
+
+impl CareServiceWork {
+    pub fn is_complete(&self) -> bool {
+        self.missing.is_empty() && !self.done.is_empty()
+    }
+
+    /// Nothing was ticked at all — which for a site that has only just
+    /// started on a plan is ordinary, and for one that has not is the
+    /// point of printing this section.
+    pub fn is_empty(&self) -> bool {
+        self.done.is_empty()
+    }
 }
 
 impl CareReport {
@@ -871,6 +913,7 @@ impl CareReport {
             uptime: None,
             backups: None,
             integrity: None,
+            service_work: None,
         }
     }
 
@@ -885,6 +928,10 @@ impl CareReport {
             && self.uptime.is_none()
             && self.backups.is_none()
             && self.integrity.is_none()
+        // `service_work` is deliberately NOT part of this. It is a person
+        // saying they looked, not a measurement, and a report carrying only
+        // that would still be a report with nothing measured in it — which
+        // is exactly the state this guard exists to stop going out.
     }
 }
 

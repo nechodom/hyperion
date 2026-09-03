@@ -13,6 +13,7 @@
 )]
 #![forbid(unsafe_code)]
 
+pub mod care_check;
 pub mod cert;
 pub mod db;
 pub mod dkim;

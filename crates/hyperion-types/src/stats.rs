@@ -439,6 +439,8 @@ pub const CARE_REPORT_DEFAULT_BODY_TEMPLATE: &str = "CARE REPORT\n\
      \n\
      {integrity}\n\
      \n\
+     {service}\n\
+     \n\
      --\n\
      You receive this report because {domain} is on a care plan.\n\
      The figures come straight from the server the site runs on; times are UTC.\n\

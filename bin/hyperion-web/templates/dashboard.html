@@ -236,6 +236,11 @@
 </div>
 {% endif %}
 
+{# Care overview. Lazy: it asks every node, because the activations and the
+   monthly checklist both live beside the hosting. Renders nothing at all on
+   an install that sells no care package. #}
+<div hx-get="/dashboard/care-panel" hx-trigger="load" hx-swap="outerHTML"></div>
+
 <div class="dashboard-grid">
 <div class="card hover">
   <div class="spread" style="margin-bottom:1rem">

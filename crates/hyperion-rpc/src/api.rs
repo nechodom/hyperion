@@ -1167,6 +1167,11 @@ pub trait AgentApi: Send + Sync + 'static {
         sel: HostingSelector,
         history: bool,
     ) -> Result<Vec<hyperion_types::HostingPackage>, RpcError>;
+    /// Care standing for every site on this node, for one `YYYY-MM`.
+    async fn care_overview(
+        &self,
+        period: String,
+    ) -> Result<Vec<hyperion_types::care_check::CareOverviewRow>, RpcError>;
     /// Activate a package on a hosting: snapshot the features it forces,
     /// then apply them through their existing setters. Idempotent.
     /// `package` is the definition resolved by the master (see

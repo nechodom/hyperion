@@ -1,0 +1,71 @@
+{# Care overview — lazily swapped into the dashboard via
+   hx-get="/dashboard/care-panel".
+
+   A work list, not a summary. Everything else a care plan sells proves
+   itself; the four monthly items need a person to look, and the only
+   evidence they happened is that somebody said so. Sites with something
+   outstanding sort to the top; a month that closed unfinished is called
+   out even though it can no longer be fixed, because that is exactly the
+   state worth learning from your own panel rather than from a customer.
+
+   Absent entirely when no site is on a plan — an empty card on an install
+   that sells no care is noise. #}
+{% if total > 0 || !unreachable.is_empty() %}
+<div class="card hover" id="care-panel">
+  <h2>
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>
+    Care plans — {{ period_label }}
+    {% if total > 0 %}
+      {% if complete == total %}
+        <span class="pill ok" style="margin-left:0.4rem;font-size:0.65rem">all checked</span>
+      {% else %}
+        <span class="pill warn" style="margin-left:0.4rem;font-size:0.65rem">{{ complete }} of {{ total }} checked</span>
+      {% endif %}
+    {% endif %}
+  </h2>
+
+  {% if !unreachable.is_empty() %}
+  {# "Nothing needs attention" and "we could not ask the node that has the
+     sites" must not look the same. #}
+  <div class="flash warn" style="margin:-0.1rem 0 0.8rem">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+    <div class="flash-body">
+      This list is incomplete — no answer from {{ unreachable|join(", ") }}.
+      Sites there are missing from it, checked or not.
+    </div>
+  </div>
+  {% endif %}
+
+  {% if total == 0 %}
+    <p class="muted" style="margin:0;font-size:0.85rem">No site is on a care package.</p>
+  {% else %}
+  <div style="display:flex;flex-direction:column;gap:0.4rem">
+    {% for r in rows %}
+    <a href="/hostings/{{ r.hosting_id }}" class="row" style="align-items:baseline;gap:0.5rem;flex-wrap:wrap;border:1px solid var(--border);border-radius:var(--radius-xs);padding:0.45rem 0.6rem;background:var(--bg-2);text-decoration:none;color:inherit">
+      <strong style="font-size:0.9rem">{{ r.domain }}</strong>
+      {% if !r.packages.is_empty() %}
+        <span class="text-soft small">{{ r.packages }}</span>
+      {% endif %}
+      <span class="grow"></span>
+      {% if r.complete %}
+        <span class="pill ok" style="font-size:0.6rem">checked</span>
+      {% else %}
+        <span class="pill warn" style="font-size:0.6rem">{{ r.done }}/{{ r.total }}</span>
+      {% endif %}
+      {% if r.prev_outstanding > 0 %}
+        <span class="pill danger" style="font-size:0.6rem" title="Last month closed with work outstanding">last month unfinished</span>
+      {% endif %}
+      {% if !r.complete %}
+        <span class="text-soft small" style="flex-basis:100%">Still to check: {{ r.outstanding }}</span>
+      {% endif %}
+    </a>
+    {% endfor %}
+  </div>
+  <p class="text-soft small" style="margin:0.6rem 0 0;line-height:1.5">
+    These four are the part of a care plan a machine cannot do. A tick records
+    that an operator confirmed they did it — bookkeeping, not a measurement.
+    Untouched is undone.
+  </p>
+  {% endif %}
+</div>
+{% endif %}

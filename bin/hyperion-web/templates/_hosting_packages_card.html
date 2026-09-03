@@ -130,6 +130,88 @@
     </div>
   {% endif %}
 
+
+  {# The monthly service check — the part of a care plan a machine cannot do.
+     Backups, updates and the malware scan prove themselves; whether the
+     gallery still renders, whether the contact form's mail actually
+     ARRIVES, whether the site still feels fast, whether last month's
+     updates broke a layout — those need a person to look, and a plan that
+     promises them without recording that anybody did is selling something
+     nobody delivers.
+
+     Untouched is UNDONE, never "probably fine". That is the whole point:
+     an unlooked-at month has to be visible here before the customer finds
+     it. Shown only when a package is actually held — an operator who sells
+     no care plan is not promising anybody a monthly look. #}
+  {% if show_checks %}
+  <div style="margin-top:0.9rem;padding-top:0.8rem;border-top:1px solid var(--border)">
+    <div style="display:flex;gap:0.5rem;align-items:baseline;flex-wrap:wrap">
+      <strong style="font-size:0.9rem">Monthly check — {{ check_period_label }}</strong>
+      <span class="grow"></span>
+      {% if checks_done == checks_total %}
+        <span class="pill ok" style="font-size:0.6rem">done</span>
+      {% else %}
+        <span class="pill warn" style="font-size:0.6rem">{{ checks_done }} of {{ checks_total }}</span>
+      {% endif %}
+    </div>
+
+    {% if prev_outstanding > 0 %}
+    {# A month that was STARTED and left half-finished. A month with nothing
+       ticked at all is far more likely to be "this site wasn't on a plan
+       then" than "we skipped it", so that one says nothing. #}
+    <div class="flash warn" style="margin:0.5rem 0 0">
+      <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+      <div class="flash-body">
+        {{ prev_period_label }} closed with {{ prev_outstanding }} of
+        {{ checks_total }} still unchecked. That month cannot be completed any
+        more — it is here so it is not the customer who notices.
+      </div>
+    </div>
+    {% endif %}
+
+    <div style="display:flex;flex-direction:column;gap:0.45rem;margin-top:0.6rem">
+      {% for c in checks %}
+      <form hx-post="/hostings/packages/service-check" hx-target="#packages-card" hx-swap="outerHTML"
+            style="border:1px solid var(--border);border-radius:var(--radius-xs);padding:0.5rem 0.6rem;background:var(--bg-2)">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <input type="hidden" name="selector" value="{{ selector }}">
+        <input type="hidden" name="period" value="{{ check_period }}">
+        <input type="hidden" name="item" value="{{ c.id }}">
+        <label style="display:flex;gap:0.5rem;align-items:flex-start;cursor:pointer">
+          <input type="checkbox" name="checked" value="on" style="margin-top:0.2rem"
+                 {% if c.checked %}checked{% endif %}
+                 {% if !can_manage %}disabled{% endif %}
+                 onchange="this.form.requestSubmit()">
+          <span>
+            <span style="font-weight:600;font-size:0.88rem">{{ c.label }}</span>
+            <span class="text-soft small" style="display:block;line-height:1.5">{{ c.detail }}</span>
+            {% if c.checked %}
+              <span class="text-soft small" style="display:block;margin-top:0.2rem">
+                {% if c.by.is_empty() %}Checked {{ c.at }}{% else %}Checked by {{ c.by }} {{ c.at }}{% endif %}{% if !c.note.is_empty() %} — {{ c.note }}{% endif %}
+              </span>
+            {% endif %}
+          </span>
+        </label>
+        {% if can_manage %}
+        <div class="row" style="gap:0.4rem;margin-top:0.4rem">
+          <input type="text" name="note" value="{{ c.note }}" placeholder="note (optional)"
+                 style="flex:1;font-size:0.8rem">
+          <button class="btn small ghost" type="submit">Save note</button>
+        </div>
+        {% endif %}
+      </form>
+      {% endfor %}
+    </div>
+
+    <p class="text-soft small" style="margin:0.6rem 0 0;line-height:1.5">
+      A tick records that an operator confirmed they did this — it is
+      bookkeeping, not a measurement, and it says so wherever it is shown.
+      Un-ticking is allowed: a mark made by mistake has to be retractable or
+      the record stops meaning anything.
+    </p>
+  </div>
+  {% endif %}
+
   {# The care report — the one part of a package the customer actually sees
      ARRIVE. Present only when something this site holds really sells one
      (`sells_report`; a package that pins reports off sells nothing), and
