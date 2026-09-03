@@ -179,14 +179,24 @@ impl CareServiceChecks {
         now: i64,
     ) {
         if checked {
-            self.0.entry(period.to_string()).or_default().insert(
-                item.as_str().to_string(),
-                ServiceCheckMark {
-                    at: now,
-                    by: by.to_string(),
-                    note: note.to_string(),
-                },
-            );
+            let month = self.0.entry(period.to_string()).or_default();
+            match month.get_mut(item.as_str()) {
+                // Already ticked: this is a note edit, not a new claim. The
+                // record of WHO looked and WHEN is the whole value of the
+                // mark, and saving a note must not quietly re-attribute it
+                // to whoever typed the note.
+                Some(existing) => existing.note = note.to_string(),
+                None => {
+                    month.insert(
+                        item.as_str().to_string(),
+                        ServiceCheckMark {
+                            at: now,
+                            by: by.to_string(),
+                            note: note.to_string(),
+                        },
+                    );
+                }
+            }
         } else if let Some(m) = self.0.get_mut(period) {
             m.remove(item.as_str());
             if m.is_empty() {
@@ -266,6 +276,19 @@ mod tests {
         assert!(!c.is_checked("2026-09", ServiceCheckItem::Render));
         // The month emptied out entirely, so it leaves no husk behind.
         assert!(c.month("2026-09").is_none());
+    }
+
+    /// Saving a note on a ticked item keeps who ticked it and when. The
+    /// mark is the record; the note is a remark on it.
+    #[test]
+    fn editing_a_note_does_not_reattribute_the_tick() {
+        let mut c = CareServiceChecks::default();
+        c.set("2026-09", ServiceCheckItem::Forms, true, "kevin", "", 100);
+        c.set("2026-09", ServiceCheckItem::Forms, true, "someone-else", "client confirmed", 999);
+        let m = c.month("2026-09").unwrap().get("forms").unwrap();
+        assert_eq!(m.by, "kevin");
+        assert_eq!(m.at, 100);
+        assert_eq!(m.note, "client confirmed");
     }
 
     #[test]

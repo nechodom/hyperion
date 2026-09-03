@@ -848,26 +848,33 @@ pub static STRINGS: &[LetterString] = &[
     LetterString {
         id: "care.service.all",
         group: "Care report — service check",
-        note: "Everything on the checklist was done. Token: {done} (the list).",
+        note: "Everything on the checklist was done. Token: {done} — a list, one item per line.",
         en: "CHECKS BY HAND: all done\n  \
-             Somebody went through the site personally this period: {done}.\n  \
+             Somebody went through the site personally this period:{done}\n  \
              These are the parts no automatic check can do for you.",
         cs: "RUČNÍ KONTROLY: vše hotovo\n  \
-             Někdo za toto období prošel web osobně: {done}.\n  \
+             Někdo za toto období prošel web osobně:{done}\n  \
              To jsou věci, které za vás žádná automatická kontrola neudělá.",
     },
     LetterString {
         id: "care.service.partial",
         group: "Care report — service check",
-        note: "Some items were done and some were not. Tokens: {done} {missing}.",
+        note: "Some items were done and some were not. Tokens: {done} {missing} — each is a list, one item per line.",
         en: "CHECKS BY HAND: partly done\n  \
-             Done this period: {done}.\n  \
-             Not done: {missing}. We list what we missed rather than only what\n  \
-             we managed.",
+             Done this period:{done}\n  \
+             Not done:{missing}\n  \
+             We list what we missed rather than only what we managed.",
         cs: "RUČNÍ KONTROLY: částečně hotovo\n  \
-             Za toto období hotovo: {done}.\n  \
-             Neprovedeno: {missing}. Uvádíme i to, co jsme nestihli, ne jen to,\n  \
-             co se povedlo.",
+             Za toto období hotovo:{done}\n  \
+             Neprovedeno:{missing}\n  \
+             Uvádíme i to, co jsme nestihli, ne jen to, co se povedlo.",
+    },
+    LetterString {
+        id: "care.service.item_sep",
+        group: "Care report — service check",
+        note: "Put before EACH item in the lists above. The default starts a new indented line; the item names contain commas, so a comma-joined list reads as one run-on sentence.",
+        en: "\n  • ",
+        cs: "\n  • ",
     },
     LetterString {
         id: "care.service.item.render",

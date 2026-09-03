@@ -7849,11 +7849,20 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             // Not a finding. A static site has no `wp_mail()` to fix, and
             // reporting "missing" about it would be a complaint that the
             // site is not WordPress.
+            // Say what was LOOKED FOR, not what was concluded: a WordPress
+            // site whose tree is missing (a failed import, a stub node) must
+            // not be told it "is not WordPress" by a card that never opened
+            // wp-config.php — it checked for one directory.
             push(
                 "wp_mail_plugin",
-                "WordPress mail",
+                "No WordPress tree here",
                 "info",
-                "This site is not WordPress, so there is no WordPress mail to configure.".into(),
+                format!(
+                    "There is no wp-content directory under {}, so there is no WordPress \
+                     mail to configure. A static or proxied site is expected to look like \
+                     this; a WordPress site that does has a missing document tree.",
+                    if root.is_empty() { "the document root" } else { root.as_str() }
+                ),
                 "",
             );
             return Ok(hyperion_types::FtpCheckReport {
@@ -25504,11 +25513,15 @@ fn care_section_service(
     if w.is_empty() {
         return cat.get("care.service.none").to_string();
     }
+    // One item per line, each preceded by the separator. The item names
+    // contain commas ("forms, including that the message arrives"), so a
+    // comma-joined list read as one run-on sentence with the boundaries
+    // between items lost.
     let name = |ids: &[String]| -> String {
+        let sep = cat.get("care.service.item_sep");
         ids.iter()
-            .map(|id| cat.get(&format!("care.service.item.{id}")).to_string())
-            .collect::<Vec<_>>()
-            .join(cat.get("list_sep"))
+            .map(|id| format!("{sep}{}", cat.get(&format!("care.service.item.{id}"))))
+            .collect::<String>()
     };
     let done = name(&w.done);
     if w.missing.is_empty() {

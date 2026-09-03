@@ -1301,18 +1301,6 @@
   </div>
 </div>
 
-{# Snapshots, lazy for the same reason as the checks around it: it reaches
-   the owning node and shells out to restic. #}
-<div id="snapshots-panel"
-     hx-get="/hostings/{{ detail.id.as_str() }}/snapshots-panel"
-     hx-trigger="revealed once"
-     hx-swap="innerHTML">
-  <div class="card" style="margin-bottom:0.9rem">
-    <span class="spinner-inline" style="margin-right:0.4rem"></span>
-    <span class="text-soft small">Reading snapshots…</span>
-  </div>
-</div>
-
 {# WordPress mail, beside the permission check and lazy for the same reason:
    it reads the owning node and runs wp-cli, so it must not be paid for by
    an operator who never opens this tab. #}
@@ -3327,6 +3315,18 @@
 </div><!-- /tab-ftp -->
 
 <div class="tab-panel" id="tab-backups">
+{# Snapshots belong with the other copies of the site, not on the WordPress
+   tab: an operator asking "what do I have to fall back on?" looks here.
+   Lazy because it reaches the owning node and shells out to restic. #}
+<div id="snapshots-panel"
+     hx-get="/hostings/{{ detail.id.as_str() }}/snapshots-panel"
+     hx-trigger="revealed once"
+     hx-swap="innerHTML">
+  <div class="card" style="margin-bottom:0.9rem">
+    <span class="spinner-inline" style="margin-right:0.4rem"></span>
+    <span class="text-soft small">Reading snapshots…</span>
+  </div>
+</div>
 
 {# Live progress for anything running against THIS site, polled in place.
    The action still spawns a background job and still has a /jobs/<id> page
