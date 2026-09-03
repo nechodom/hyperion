@@ -232,6 +232,7 @@ pub async fn build_agent() -> (Arc<dyn AgentApi>, tempfile::TempDir) {
         secrets,
         paths: hyperion_core::HostingPaths::default(),
         permissions_autoheal: true,
+        snapshots_enabled: false,
         remote_backup: None,
         retention: hyperion_core::BackupRetention::default(),
         slack_default_webhook: None,

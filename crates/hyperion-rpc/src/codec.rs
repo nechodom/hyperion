@@ -1393,6 +1393,36 @@ pub enum Request {
     /// node (the vsftpd config, the passwd/shadow entry and the web root
     /// are all node-local — a master-local scan would call every remote
     /// hosting broken).
+    /// Snapshots this site has, newest last. Empty when the node has no
+    /// snapshot engine — which is not an error, it is "none".
+    SnapshotList {
+        sel: HostingSelector,
+    },
+    /// Take one now, tagged `manual`.
+    SnapshotNow {
+        sel: HostingSelector,
+    },
+    /// What changed between two snapshots.
+    SnapshotDiff {
+        sel: HostingSelector,
+        from: String,
+        to: String,
+    },
+    /// Everything we can say about one site's outgoing WordPress mail.
+    /// Read-only; `WpMailRepair` is the acting half.
+    WpMailSelfCheck {
+        sel: HostingSelector,
+    },
+    /// Write the mu-plugin, and — only with evidence that mail is failing —
+    /// take `wp_mail()` back off an SMTP plugin. Re-checks and returns.
+    WpMailRepair {
+        sel: HostingSelector,
+    },
+    /// Per-site switch for the automatic version of the above.
+    WpMailAutofixSet {
+        sel: HostingSelector,
+        enabled: bool,
+    },
     FtpSelfCheck {
         sel: HostingSelector,
     },
@@ -2104,6 +2134,12 @@ pub enum Response {
     },
     FtpDisable,
     FtpSelfCheck(hyperion_types::FtpCheckReport),
+    WpMailSelfCheck(hyperion_types::FtpCheckReport),
+    WpMailRepair(hyperion_types::FtpCheckReport),
+    WpMailAutofixSet(bool),
+    SnapshotList(Vec<hyperion_types::SnapshotSummary>),
+    SnapshotNow(String),
+    SnapshotDiff(hyperion_types::SnapshotDiff),
     FtpAccountList(Vec<hyperion_types::FtpExtraAccount>),
     /// `(login, password)` — the password is shown once, and it is paired
     /// with the login it belongs to because the panel used to show a fresh

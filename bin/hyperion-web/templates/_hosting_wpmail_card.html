@@ -1,0 +1,99 @@
+{# WordPress mail self-check. Lazy-loaded over HTMX from the WordPress tab.
+
+   Failures render INSIDE the card via `error` — HTMX does not swap on a
+   non-2xx response, so an error status would leave the operator watching a
+   spinner. Confirm attributes go on the <form>, never the <button>: the
+   driver reads them off the submit event's target. #}
+<div class="card" style="margin-bottom:0.9rem">
+  <div class="row" style="align-items:center;gap:0.6rem;margin-bottom:0.5rem">
+    <h2 style="margin:0;font-size:0.95rem">
+      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></svg>
+      WordPress mail
+      {% if autofix_enabled %}
+        <span class="pill ok" style="font-size:0.6rem;margin-left:0.4rem"
+              title="Hyperion keeps this configured, every five minutes">self-repairing</span>
+      {% else %}
+        <span class="pill warn" style="font-size:0.6rem;margin-left:0.4rem"
+              title="Problems are reported but not fixed for this site">report only</span>
+      {% endif %}
+    </h2>
+    {% if error.is_some() %}<span class="pill err">could not check</span>
+    {% else if report.worst() == "error" %}<span class="pill err">needs attention</span>
+    {% else if report.worst() == "warn" %}<span class="pill warn">warnings</span>
+    {% else %}<span class="pill ok">all good</span>{% endif %}
+    <span class="grow"></span>
+    <button class="btn ghost small" type="button"
+            hx-get="/hostings/{{ selector }}/wpmail-panel"
+            hx-target="#wpmail-panel" hx-swap="innerHTML"
+            hx-disabled-elt="this">Re-check</button>
+  </div>
+
+  {% if let Some(e) = error %}
+  <p class="text-soft small" style="margin:0">{{ e }}</p>
+  {% else %}
+
+  <table class="table small" style="margin:0 0 0.6rem">
+    <tbody>
+      {% for it in report.items %}
+      <tr id="wpmail-{{ it.id }}">
+        <td style="width:1.6rem;vertical-align:top">
+          {% if it.severity == "ok" %}<span style="color:var(--success)">●</span>
+          {% else if it.severity == "error" %}<span style="color:var(--danger)">●</span>
+          {% else if it.severity == "warn" %}<span style="color:var(--warn)">●</span>
+          {% else %}<span class="text-soft">●</span>{% endif %}
+        </td>
+        <td style="vertical-align:top"><strong>{{ it.label }}</strong></td>
+        <td class="text-soft" style="vertical-align:top;word-break:break-word">{{ it.detail }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <p class="text-soft small" style="margin:0 0 0.6rem;line-height:1.55">
+    Mail leaves this server through its own queue, signed with this domain's
+    DKIM key and sent with this domain's SPF envelope. The one thing that
+    breaks it is a <strong>From address on somebody else's domain</strong> —
+    the recipient accepts nothing and sends no bounce, so the site simply
+    stops being heard from. That is what the pin above prevents.
+  </p>
+
+  {% if report.has_site_repair() %}
+  <div class="row" style="gap:0.5rem;flex-wrap:wrap">
+    <form hx-post="/hostings/wp/mail-repair" hx-target="closest .card" hx-swap="outerHTML"
+          style="margin:0"
+          data-confirm-title="Configure WordPress mail"
+          data-confirm-body="Installs a must-use plugin that keeps the From address on this domain and records any send that fails. If mail has actually been failing and an SMTP plugin is handling it, Hyperion also takes sending back — and tells you it did."
+          data-confirm-confirm-label="Configure">
+      <input type="hidden" name="_csrf" value="{{ csrf_repair }}">
+      <input type="hidden" name="selector" value="{{ selector }}">
+      <button class="btn primary small" type="submit">Configure now</button>
+    </form>
+  </div>
+  {% endif %}
+  {% endif %}
+
+  {#- The switch for the check above, on the same card for the same reason
+      the permission one is: a page that lists problems while something
+      silently fixes them elsewhere is two halves of one story. Posts to the
+      OWNING node, which is where the five-minute tick reads the key. -#}
+  <div style="border-top:1px solid var(--border-subtle);margin-top:0.7rem;padding-top:0.6rem">
+    <form hx-post="/hostings/wp/mail-autofix" hx-target="closest .card" hx-swap="outerHTML"
+          style="display:flex;gap:0.6rem;align-items:center;flex-wrap:wrap;margin:0">
+      <input type="hidden" name="_csrf" value="{{ csrf_autofix }}">
+      <input type="hidden" name="selector" value="{{ selector }}">
+      {% if autofix_enabled %}
+        <input type="hidden" name="enabled" value="off">
+        <button class="btn ghost" type="submit" style="font-size:0.75rem;padding:0.2rem 0.55rem">Stop configuring this site</button>
+        <span class="text-soft small">Hyperion keeps the sender pinned and the
+          failure log running. Whatever is already installed stays exactly as
+          it is — this switch stops future changes, it does not undo past
+          ones.</span>
+      {% else %}
+        <input type="hidden" name="enabled" value="on">
+        <button class="btn primary" type="submit" style="font-size:0.75rem;padding:0.2rem 0.55rem">Configure automatically</button>
+        <span class="text-soft small">Problems above are reported but not fixed
+          for this site.</span>
+      {% endif %}
+    </form>
+  </div>
+</div>

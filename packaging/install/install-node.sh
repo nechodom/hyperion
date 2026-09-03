@@ -257,6 +257,11 @@ apt-get install -y -qq \
    # has no sudo, and its absence surfaces as "io: No such file or
    # directory" — a message that points at the site, not at the box.` \
   sudo \
+  `# restic backs the snapshot engine: a content-addressed, deduplicated
+   # copy taken before anything changes a site, and the only way to answer
+   # "what did last night's update actually change?". Without it the
+   # snapshot code is inert and sites fall back to archive backups.` \
+  restic \
   bind9-dnsutils \
   nginx "${optional_pkgs[@]}"
 

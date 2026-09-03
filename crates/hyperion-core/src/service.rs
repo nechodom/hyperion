@@ -422,6 +422,12 @@ pub struct HostingService<A: AdapterPort + 'static> {
     pub paths: HostingPaths,
     pub remote_backup: Option<RemoteBackupConfig>,
     pub retention: BackupRetention,
+    /// Take a content-addressed snapshot before anything changes a site.
+    ///
+    /// Node-wide, from `[snapshots] enabled`, and ON by default — but it
+    /// does nothing at all unless restic is installed, so an install that
+    /// has never heard of the feature is unaffected.
+    pub snapshots_enabled: bool,
     /// Cluster-wide default Slack webhook for notifications.
     /// Per-profile webhooks override this.
     pub slack_default_webhook: Option<String>,
@@ -1728,6 +1734,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             permissions_autoheal: true,
             remote_backup: None,
             retention: BackupRetention::default(),
+            snapshots_enabled: true,
             slack_default_webhook: None,
             acme_contact_email: "admin@hyperion.invalid".into(),
             email_config: None,
@@ -2282,6 +2289,14 @@ impl<A: AdapterPort + 'static> HostingService<A> {
 
     pub fn with_remote_backup(mut self, cfg: Option<RemoteBackupConfig>) -> Self {
         self.remote_backup = cfg;
+        self
+    }
+
+    /// Node-wide switch for snapshots. Default ON, and a no-op unless
+    /// restic is installed — so this is a way to say "not on this node",
+    /// not a way to turn the feature on.
+    pub fn with_snapshots(mut self, enabled: bool) -> Self {
+        self.snapshots_enabled = enabled;
         self
     }
 
@@ -7727,6 +7742,545 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// repair runs only when it fires, and lands in the audit log both
     /// so the fix is traceable and so a repeating heal — something
     /// re-breaking modes on a schedule — is visible as a pattern.
+    /// Is the WordPress mail self-repair allowed to act on this hosting?
+    ///
+    /// **Default ON** (absent ⇒ enabled), same contract as the permission
+    /// repair: a read error also answers "on", because silently stopping a
+    /// repair is worse than repeating one.
+    pub async fn wp_mail_autofix_enabled(&self, hosting_id: &str) -> bool {
+        match hyperion_state::hosting_kv::get(&self.pool, hosting_id, WP_MAIL_AUTOFIX_KV_KEY).await
+        {
+            Ok(Some(v)) => v.trim() != "off",
+            _ => true,
+        }
+    }
+
+    /// Turn the per-site WordPress mail self-repair on or off.
+    pub async fn wp_mail_autofix_set(
+        &self,
+        sel: HostingSelector,
+        enabled: bool,
+    ) -> Result<bool, RpcError> {
+        let detail = self.get(sel).await?;
+        hyperion_state::hosting_kv::set(
+            &self.pool,
+            detail.id.as_str(),
+            WP_MAIL_AUTOFIX_KV_KEY,
+            if enabled { "on" } else { "off" },
+            now_secs(),
+        )
+        .await
+        .map_err(|e| RpcError::Internal_with(format!("wp mail autofix set: {e}")))?;
+        // Turning it OFF leaves whatever is on disk exactly as it is. The
+        // switch means "stop deciding for me", not "undo what you did" —
+        // removing a working mu-plugin because somebody wanted manual
+        // control would break the site's mail at the moment they asked for
+        // less interference.
+        self.append_audit(
+            "hosting.wp_mail.autofix.set",
+            Some(detail.id.as_str()),
+            &serde_json::json!({ "enabled": enabled }).to_string(),
+            "ok",
+        )
+        .await;
+        Ok(enabled)
+    }
+
+    /// The address this site should send as.
+    ///
+    /// An operator override wins; otherwise `wordpress@<domain>`. Not the
+    /// admin's own mailbox: SPF checks the ENVELOPE, and a real person's
+    /// address at another provider is precisely the sender that fails it.
+    async fn wp_mail_from_address(&self, hosting_id: &str, domain: &str) -> String {
+        match hyperion_state::hosting_kv::get(&self.pool, hosting_id, WP_MAIL_FROM_KV_KEY).await {
+            Ok(Some(v)) if !v.trim().is_empty() => v.trim().to_string(),
+            _ => hyperion_adapters::wpmail::default_from(domain),
+        }
+    }
+
+    /// Has hyperion taken WordPress's mail back off an SMTP plugin?
+    ///
+    /// Off unless it was turned on, and it is only ever turned on after mail
+    /// has actually been failing — a working SMTP plugin is the site owner's
+    /// choice and none of our business.
+    async fn wp_mail_force_local(&self, hosting_id: &str) -> Option<i64> {
+        match hyperion_state::hosting_kv::get(&self.pool, hosting_id, WP_MAIL_FORCE_LOCAL_KV_KEY)
+            .await
+        {
+            Ok(Some(v)) => v.trim().parse::<i64>().ok(),
+            _ => None,
+        }
+    }
+
+    /// Everything we can say about one site's outgoing mail.
+    ///
+    /// Reads only — the repair is [`Self::wp_mail_repair`]. Reported through
+    /// `FtpCheckReport` because that is already this codebase's shape for
+    /// "a list of findings, each with a severity and maybe a fix"; the WP
+    /// permission check reuses it for the same reason.
+    pub async fn wp_mail_self_check(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<hyperion_types::FtpCheckReport, RpcError> {
+        use hyperion_adapters::wpmail;
+        let detail = self.get(sel).await?;
+        let mut items: Vec<hyperion_types::FtpCheckItem> = Vec::new();
+        let mut push = |id: &str, label: &str, severity: &str, detail: String, fix: &str| {
+            items.push(hyperion_types::FtpCheckItem {
+                id: id.into(),
+                label: label.into(),
+                severity: severity.into(),
+                detail,
+                fix: fix.into(),
+            });
+        };
+        let root = detail.root_dir.trim().to_string();
+        let from = self
+            .wp_mail_from_address(detail.id.as_str(), &detail.domain)
+            .await;
+        let forced_at = self.wp_mail_force_local(detail.id.as_str()).await;
+        let log = wpmail::failure_log_path(&root)
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let expected = wpmail::render_mu_plugin(&detail.domain, &from, &log, forced_at.is_some());
+        let state = wpmail::mu_plugin_state(&root, &expected).await;
+
+        if matches!(state, wpmail::MuState::NotWordPress) {
+            // Not a finding. A static site has no `wp_mail()` to fix, and
+            // reporting "missing" about it would be a complaint that the
+            // site is not WordPress.
+            push(
+                "wp_mail_plugin",
+                "WordPress mail",
+                "info",
+                "This site is not WordPress, so there is no WordPress mail to configure.".into(),
+                "",
+            );
+            return Ok(hyperion_types::FtpCheckReport {
+                items,
+                node_id: self.current_node_id(),
+                ..Default::default()
+            });
+        }
+
+        match state {
+            wpmail::MuState::Current => push(
+                "wp_mail_plugin",
+                "Sender is pinned to this domain",
+                "ok",
+                format!("WordPress sends as {from}, which is what this domain's SPF record covers."),
+                "",
+            ),
+            wpmail::MuState::Missing => push(
+                "wp_mail_plugin",
+                "Sender is not pinned",
+                "warn",
+                format!(
+                    "The mu-plugin that keeps the From address on {} is not installed, so \
+                     WordPress and its plugins can send as any address they like. Mail from \
+                     another domain fails SPF at the receiving end and is dropped without a \
+                     bounce.",
+                    detail.domain
+                ),
+                "site_repair",
+            ),
+            wpmail::MuState::Stale => push(
+                "wp_mail_plugin",
+                "Sender pin is out of date",
+                "warn",
+                format!(
+                    "The installed mu-plugin does not match what this site needs now \
+                     (expected sender {from}). Rewriting it is the fix."
+                ),
+                "site_repair",
+            ),
+            wpmail::MuState::NotWordPress => {}
+        }
+
+        // Failures the plugin recorded. This is the only direct evidence
+        // that mail is actually broken — `wp_mail()` returns false and
+        // almost every caller in WordPress ignores it.
+        let lines = wpmail::recent_failures(&root, 20).await;
+        let day = now_secs() - 86_400;
+        let week = now_secs() - 7 * 86_400;
+        let recent = wpmail::failures_since(&lines, day);
+        let weekly = wpmail::failures_since(&lines, week);
+        if weekly == 0 {
+            push(
+                "wp_mail_failures",
+                "No send failures recorded",
+                "ok",
+                if lines.is_empty() {
+                    "Nothing has failed since the record started.".into()
+                } else {
+                    format!(
+                        "Nothing in the last 7 days. Last recorded failure: {}",
+                        lines.last().cloned().unwrap_or_default()
+                    )
+                },
+                "",
+            );
+        } else {
+            push(
+                "wp_mail_failures",
+                "WordPress could not send",
+                if recent > 0 { "error" } else { "warn" },
+                format!(
+                    "{weekly} failed send(s) in the last 7 days ({recent} in the last 24 h). \
+                     Most recent: {}",
+                    lines.last().cloned().unwrap_or_default()
+                ),
+                "site_repair",
+            );
+        }
+
+        // Which plugin, if any, has taken `wp_mail()` over. Listed rather
+        // than judged: one with working credentials is the owner's choice.
+        let active: Vec<String> = match hyperion_adapters::wpcli::plugin_list(
+            detail.system_user.trim(),
+            &root,
+        )
+        .await
+        {
+            Ok((plugins, _)) => plugins
+                .into_iter()
+                .filter(|p| p.status.starts_with("active"))
+                .map(|p| p.slug)
+                .collect(),
+            // wp-cli failing is its own problem and is reported by the other
+            // WordPress cards; here it only means we cannot name the plugin.
+            Err(_) => Vec::new(),
+        };
+        let smtp = wpmail::smtp_plugins_in(&active);
+        if !smtp.is_empty() {
+            push(
+                "wp_mail_smtp_plugin",
+                "An SMTP plugin is handling mail",
+                if weekly > 0 { "warn" } else { "info" },
+                format!(
+                    "{} is active and sends the site's mail itself. {}",
+                    smtp.join(", "),
+                    if weekly > 0 {
+                        "Since sends are failing, its credentials are the first thing to check."
+                    } else {
+                        "It is working, so Hyperion leaves it alone."
+                    }
+                ),
+                if weekly > 0 { "site_repair" } else { "" },
+            );
+        }
+        if let Some(at) = forced_at {
+            push(
+                "wp_mail_force_local",
+                "Hyperion is sending this site's mail",
+                "info",
+                format!(
+                    "Since {}, Hyperion has been overriding the SMTP plugin and sending through \
+                     this server's own mail path, because sends were failing. Fix the plugin's \
+                     credentials and turn this off to hand it back.",
+                    iso_date(&LetterCatalog::default(), at)
+                ),
+                "",
+            );
+        }
+
+        Ok(hyperion_types::FtpCheckReport {
+            items,
+            node_id: self.current_node_id(),
+            ..Default::default()
+        })
+    }
+
+    /// Fix what [`Self::wp_mail_self_check`] found, then re-check.
+    ///
+    /// Two steps, in order of how invasive they are:
+    ///
+    /// 1. Write the mu-plugin. Always safe — it pins the From address and
+    ///    starts recording failures, and changes nothing else.
+    /// 2. Only when mail is ACTUALLY failing and an SMTP plugin is in the
+    ///    way: take `wp_mail()` back. This one overrides a choice the site
+    ///    owner made, so it needs evidence rather than a hunch, and it is
+    ///    announced (`notify_admins`) rather than done quietly.
+    pub async fn wp_mail_repair(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<hyperion_types::FtpCheckReport, RpcError> {
+        let detail = self.get(sel.clone()).await?;
+        self.wp_mail_apply(&detail).await?;
+        self.wp_mail_self_check(sel).await
+    }
+
+    /// The repair itself, against a detail we already hold. Returns whether
+    /// anything was written.
+    async fn wp_mail_apply(&self, detail: &HostingDetail) -> Result<bool, RpcError> {
+        use hyperion_adapters::wpmail;
+        let root = detail.root_dir.trim().to_string();
+        let user = detail.system_user.trim().to_string();
+        if root.is_empty() || user.is_empty() {
+            return Ok(false);
+        }
+        let id = detail.id.as_str();
+        let from = self.wp_mail_from_address(id, &detail.domain).await;
+        let log = wpmail::failure_log_path(&root)
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let mut forced_at = self.wp_mail_force_local(id).await;
+
+        // Has mail been failing, and is something in the way?
+        let lines = wpmail::recent_failures(&root, 20).await;
+        let week = now_secs() - 7 * 86_400;
+        let failing = wpmail::failures_since(&lines, week) > 0;
+        if failing && forced_at.is_none() {
+            let active: Vec<String> = match hyperion_adapters::wpcli::plugin_list(&user, &root).await
+            {
+                Ok((p, _)) => p
+                    .into_iter()
+                    .filter(|p| p.status.starts_with("active"))
+                    .map(|p| p.slug)
+                    .collect(),
+                Err(_) => Vec::new(),
+            };
+            let smtp = wpmail::smtp_plugins_in(&active);
+            if !smtp.is_empty() {
+                let now = now_secs();
+                let _ = hyperion_state::hosting_kv::set(
+                    &self.pool,
+                    id,
+                    WP_MAIL_FORCE_LOCAL_KV_KEY,
+                    &now.to_string(),
+                    now,
+                )
+                .await;
+                forced_at = Some(now);
+                // Announced, not quiet: this overrides a decision somebody
+                // made deliberately, and an operator who does not know it
+                // happened cannot explain it to their customer.
+                self.notify_admins(
+                    "warn",
+                    "Hyperion took over WordPress mail",
+                    &format!(
+                        "{} — sends through {} have been failing, so Hyperion is now sending \
+                         this site's mail through the server's own mail path instead. Fix the \
+                         plugin's credentials and turn the override off on the site's Mail card \
+                         to hand it back.",
+                        detail.domain,
+                        smtp.join(", ")
+                    ),
+                    &format!("/hostings/{}", detail.domain),
+                    "wp_mail_override",
+                )
+                .await;
+            }
+        }
+
+        let contents = wpmail::render_mu_plugin(&detail.domain, &from, &log, forced_at.is_some());
+        match wpmail::mu_plugin_state(&root, &contents).await {
+            wpmail::MuState::Current | wpmail::MuState::NotWordPress => Ok(false),
+            _ => {
+                wpmail::install_mu_plugin(&root, &user, &contents)
+                    .await
+                    .map_err(RpcError::from)?;
+                Ok(true)
+            }
+        }
+    }
+
+    /// Keep every WordPress site's mail configured, and only speak up when
+    /// the repair did not help.
+    ///
+    /// The user-visible contract is "set it up automatically; if it errors,
+    /// try to fix it; notify only after that fails". So: writing the
+    /// mu-plugin is silent, taking mail off a broken SMTP plugin is a
+    /// warning, and mail STILL failing afterwards is an error — that is the
+    /// point at which hyperion has run out of things to try and a person
+    /// has to look.
+    pub async fn wp_mail_tick(&self) -> Result<i64, RpcError> {
+        let mut acted = 0i64;
+        for s in self.list().await? {
+            if s.state != HostingState::Active {
+                continue;
+            }
+            if !self.wp_mail_autofix_enabled(s.id.as_str()).await {
+                continue;
+            }
+            let Ok(detail) = self.get(HostingSelector::Id(s.id.clone())).await else {
+                continue;
+            };
+            if detail.root_dir.trim().is_empty() || detail.system_user.trim().is_empty() {
+                continue;
+            }
+            let before = self.wp_mail_force_local(detail.id.as_str()).await;
+            match self.wp_mail_apply(&detail).await {
+                Ok(true) => {
+                    acted += 1;
+                    tracing::info!(domain = %detail.domain, "wp mail: configuration written");
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    tracing::warn!(domain = %detail.domain, error = %e, "wp mail: repair failed");
+                    self.append_audit(
+                        "hosting.wp_mail.autofix",
+                        Some(detail.id.as_str()),
+                        &serde_json::json!({"error": e.to_string()}).to_string(),
+                        "failed",
+                    )
+                    .await;
+                    continue;
+                }
+            }
+            // The one thing worth waking somebody for: we already took mail
+            // over, and it is STILL failing. Measured from the moment of the
+            // override so the failures that CAUSED it cannot re-trigger this
+            // for ever.
+            if let Some(at) = before {
+                let lines = hyperion_adapters::wpmail::recent_failures(&detail.root_dir, 20).await;
+                // An hour's grace: a queue drains, and a failure logged one
+                // second after the override is not evidence against it.
+                if hyperion_adapters::wpmail::failures_since(&lines, at + 3_600) > 0 {
+                    self.notify_admins(
+                        "error",
+                        "WordPress mail is still failing",
+                        &format!(
+                            "{} — Hyperion already moved this site's mail onto the server's own \
+                             mail path and sends are still failing. Nothing further is automatic: \
+                             see the site's Mail card for the recorded errors.",
+                            detail.domain
+                        ),
+                        &format!("/hostings/{}", detail.domain),
+                        "wp_mail_failing",
+                    )
+                    .await;
+                }
+            }
+        }
+        Ok(acted)
+    }
+
+    /// Take a snapshot of this site before something changes it.
+    ///
+    /// Best-effort by design, and that is a deliberate trade: a site whose
+    /// snapshot could not be taken should still get its security update. The
+    /// snapshot is insurance, and refusing to apply a patch because the
+    /// insurance was unavailable leaves the site exposed for certain in
+    /// order to avoid a risk that is merely possible.
+    ///
+    /// Returns the snapshot's short id when one was taken. `None` covers
+    /// every reason there is no snapshot — restic not installed, the engine
+    /// switched off, the site having no document tree — because the caller
+    /// does the same thing with all of them.
+    pub async fn snapshot_before_change(
+        &self,
+        detail: &HostingDetail,
+        tag: &str,
+    ) -> Option<String> {
+        use hyperion_adapters::restic;
+        if !self.snapshots_enabled {
+            return None;
+        }
+        let root = detail.root_dir.trim();
+        if root.is_empty() {
+            return None;
+        }
+        if !restic::available().await {
+            // Said once per attempt at debug: an operator who has not opted
+            // in should not have their journal filled with it.
+            tracing::debug!("snapshots: restic is not installed on this node");
+            return None;
+        }
+        let repo = match restic::ensure_repo(restic::REPO_BASE, detail.id.as_str()).await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(domain = %detail.domain, error = %e, "snapshots: repository unavailable");
+                return None;
+            }
+        };
+        let paths = vec![root.to_string()];
+        match restic::backup(&repo, &paths, &[tag]).await {
+            Ok(id) => {
+                tracing::info!(domain = %detail.domain, snapshot = %id, tag, "snapshots: taken");
+                // Retention runs straight after the snapshot rather than on
+                // its own timer: this is the only moment we know the
+                // repository just grew, and a prune that never runs is how a
+                // disk fills up quietly.
+                if let Err(e) = restic::forget_prune(
+                    &repo,
+                    self.retention.max_age_days.max(1),
+                    self.retention.keep_latest_n.max(1),
+                )
+                .await
+                {
+                    tracing::warn!(domain = %detail.domain, error = %e, "snapshots: prune failed");
+                }
+                Some(id)
+            }
+            Err(e) => {
+                tracing::warn!(domain = %detail.domain, error = %e, "snapshots: backup failed");
+                None
+            }
+        }
+    }
+
+    /// Snapshots this site has, newest last.
+    pub async fn snapshot_list(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<Vec<hyperion_types::SnapshotSummary>, RpcError> {
+        use hyperion_adapters::restic;
+        let detail = self.get(sel).await?;
+        if !restic::available().await {
+            return Ok(Vec::new());
+        }
+        let repo = restic::Repo::for_hosting(restic::REPO_BASE, detail.id.as_str());
+        // A site that has never been snapshotted has no repository, and that
+        // is not an error — it is the answer "none yet".
+        if !tokio::fs::try_exists(&repo.password_file).await.unwrap_or(false) {
+            return Ok(Vec::new());
+        }
+        let rows = restic::snapshots(&repo)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("snapshot list: {e}")))?;
+        Ok(rows
+            .into_iter()
+            .map(|s| hyperion_types::SnapshotSummary {
+                id: s.id,
+                time: s.time,
+                tags: s.tags,
+            })
+            .collect())
+    }
+
+    /// What changed between two snapshots — the question an operator asks
+    /// every time a site breaks after an update, and the one a `tar.gz`
+    /// cannot answer.
+    pub async fn snapshot_diff(
+        &self,
+        sel: HostingSelector,
+        from: String,
+        to: String,
+    ) -> Result<hyperion_types::SnapshotDiff, RpcError> {
+        use hyperion_adapters::restic;
+        let detail = self.get(sel).await?;
+        // Ids come from a form. Restic ids are hex; anything else is either a
+        // typo or an attempt to smuggle an argument, and both stop here.
+        for id in [&from, &to] {
+            if id.is_empty() || id.len() > 64 || !id.chars().all(|c| c.is_ascii_hexdigit()) {
+                return Err(RpcError::Validation {
+                    message: format!("not a snapshot id: {id:?}"),
+                });
+            }
+        }
+        let repo = restic::Repo::for_hosting(restic::REPO_BASE, detail.id.as_str());
+        let d = restic::diff(&repo, &from, &to)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("snapshot diff: {e}")))?;
+        Ok(hyperion_types::SnapshotDiff {
+            added: d.added as i64,
+            removed: d.removed as i64,
+            modified: d.modified as i64,
+            sample: d.sample,
+        })
+    }
+
     /// Is the permission self-repair allowed to act on this hosting?
     ///
     /// **Default ON** (absent ⇒ enabled). The check has always run; what is
@@ -9204,6 +9758,15 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     .filter(|f| !crate::wp_updates::is_paused(&skips, &f.slug, now))
                     .map(|f| (f.kind.clone(), f.slug.clone()))
                     .collect();
+                // One snapshot before the batch, not one per plugin: the
+                // operator's question is "what did tonight's updates change",
+                // and five snapshots taken seconds apart answer a question
+                // nobody asked while costing five prunes.
+                if !targets.is_empty() {
+                    if let Ok(d) = self.get(HostingSelector::Id(s.id.clone())).await {
+                        let _ = self.snapshot_before_change(&d, "pre-update").await;
+                    }
+                }
                 for (kind, slug) in targets {
                     let state = if kind == "theme" {
                         self.wp_theme_action(
@@ -26240,6 +26803,15 @@ const INTEGRITY_ENABLED_KV_KEY: &str = "integrity_scan_enabled";
 /// for everybody.
 /// Per-hosting switch for the permission self-repair. Absent ⇒ ON.
 const PERM_AUTOHEAL_KV_KEY: &str = "permissions_autoheal_enabled";
+
+/// Per-site switch for the WordPress mail self-repair. Absent ⇒ ON.
+const WP_MAIL_AUTOFIX_KV_KEY: &str = "wp_mail_autofix_enabled";
+/// Unix seconds when hyperion took `wp_mail()` off an SMTP plugin, or absent.
+/// A timestamp rather than a flag because "is it still failing SINCE we
+/// intervened" is the question the tick has to answer.
+const WP_MAIL_FORCE_LOCAL_KV_KEY: &str = "wp_mail_force_local_at";
+/// Operator override for the sender address; absent ⇒ `wordpress@<domain>`.
+const WP_MAIL_FROM_KV_KEY: &str = "wp_mail_from";
 const FAIL2BAN_HTTP_KV_KEY: &str = "http_bruteforce_scan_enabled";
 
 /// Thin pub wrapper so `panel_import` can reuse the exact repair the
@@ -33020,6 +33592,7 @@ mod tests {
             permissions_autoheal: true,
             remote_backup: None,
             retention: BackupRetention::default(),
+            snapshots_enabled: true,
             slack_default_webhook: None,
             acme_contact_email: "test@example.invalid".into(),
             email_config: None,
@@ -33100,6 +33673,7 @@ mod tests {
             permissions_autoheal: true,
             remote_backup: None,
             retention: BackupRetention::default(),
+            snapshots_enabled: true,
             slack_default_webhook: None,
             acme_contact_email: "test@example.invalid".into(),
             email_config: None,
@@ -33147,6 +33721,7 @@ mod tests {
             permissions_autoheal: true,
             remote_backup: None,
             retention: BackupRetention::default(),
+            snapshots_enabled: true,
             slack_default_webhook: None,
             acme_contact_email: "test@example.invalid".into(),
             email_config: None,
@@ -33266,6 +33841,7 @@ mod tests {
             permissions_autoheal: true,
             remote_backup: None,
             retention: BackupRetention::default(),
+            snapshots_enabled: true,
             slack_default_webhook: None,
             acme_contact_email: "test@example.invalid".into(),
             email_config: None,

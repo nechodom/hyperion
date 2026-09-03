@@ -694,6 +694,30 @@ pub fn build_router(state: SharedState) -> Router {
             post(handlers::hostings::post_ftp_account_delete),
         )
         .route(
+            "/hostings/:selector/snapshots-panel",
+            get(handlers::hostings::get_snapshots_panel),
+        )
+        .route(
+            "/hostings/snapshots/now",
+            post(handlers::hostings::post_snapshot_now),
+        )
+        .route(
+            "/hostings/snapshots/diff",
+            post(handlers::hostings::post_snapshot_diff),
+        )
+        .route(
+            "/hostings/:selector/wpmail-panel",
+            get(handlers::hostings::get_wpmail_panel),
+        )
+        .route(
+            "/hostings/wp/mail-repair",
+            post(handlers::hostings::post_wpmail_repair),
+        )
+        .route(
+            "/hostings/wp/mail-autofix",
+            post(handlers::hostings::post_wpmail_autofix),
+        )
+        .route(
             "/hostings/:selector/perm-panel",
             get(handlers::hostings::get_perm_panel),
         )

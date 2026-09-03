@@ -2217,3 +2217,28 @@ impl FtpCheckReport {
         self.items.iter().any(|i| i.fix == "disable_ftps")
     }
 }
+
+/// One snapshot of a site, as the panel lists it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SnapshotSummary {
+    /// Restic's short id — what a diff or a restore is addressed by.
+    pub id: String,
+    /// RFC3339, as restic prints it.
+    pub time: String,
+    /// Why it was taken: `pre-update`, `scheduled`, `manual`.
+    pub tags: Vec<String>,
+}
+
+/// What changed between two snapshots.
+///
+/// The question a `tar.gz` cannot answer, and the one an operator asks every
+/// time a site breaks after an update. `sample` is a handful of paths, not
+/// the whole list: a WordPress core update touches thousands of files and
+/// nobody reads that.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SnapshotDiff {
+    pub added: i64,
+    pub removed: i64,
+    pub modified: i64,
+    pub sample: Vec<String>,
+}

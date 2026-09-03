@@ -27,9 +27,11 @@ pub mod nodejs;
 pub mod phpfpm;
 pub mod postfix;
 pub mod postgres;
+pub mod restic;
 pub mod rollback;
 pub mod ssh;
 pub mod users;
+pub mod wpmail;
 pub mod wpcli;
 
 pub mod files;

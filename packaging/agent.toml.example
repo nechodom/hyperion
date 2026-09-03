@@ -200,6 +200,27 @@ mail_threshold = 8    # postfix/dovecot SASL auth failures
 #   Tolikrát jsme odstřihli adresu, která se opakovaně pokoušela..."""
 # "unit_day" = "den|dny|dní"
 
+# ─── Snapshots before a change ─────────────────────────────────────────────
+#
+# Before Hyperion applies this site's updates, it takes a content-addressed
+# snapshot of the document tree. Restic stores each chunk of content once, so
+# thirty days of a site that barely changes costs a little more than one copy
+# of it — and `restic diff` then answers the question a tar.gz cannot: what
+# did last night's update actually change?
+#
+# Retention comes from [backup_retention] above, so a site keeps the policy
+# it already had rather than silently getting restic's defaults.
+#
+# This does NOTHING unless `restic` is installed. Default on, because the
+# only cost on a node without it is a debug line.
+#
+# The repositories live under /var/lib/hyperion/snapshots/<hosting-id>, one
+# per site, each with its password in a 0600 file BESIDE it — a restore has
+# to be possible from the filesystem alone, by somebody who has lost the
+# panel. Losing that file loses every snapshot in that repository.
+[snapshots]
+enabled = true
+
 # ─── Permission self-repair ────────────────────────────────────────────────
 #
 # Every five minutes hyperion checks each active site for permissions that

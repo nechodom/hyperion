@@ -1263,6 +1263,37 @@ fn print_pretty(resp: &Response) {
         Response::PackageDelete => {
             println!("✓ package deleted (existing activations keep their price, unenforced)")
         }
+        // The three self-check responses share one shape; print them the
+        // same way the FTP check already is.
+        Response::WpMailSelfCheck(r) | Response::WpMailRepair(r) => {
+            for it in &r.items {
+                println!("[{}] {}: {}", it.severity, it.label, it.detail);
+            }
+        }
+        Response::SnapshotList(rows) => {
+            if rows.is_empty() {
+                println!("(no snapshots — the snapshot engine may not be installed)");
+            }
+            for r in rows {
+                println!("{:<10} {:<26} {}", r.id, r.time, r.tags.join(","));
+            }
+        }
+        Response::SnapshotNow(id) => {
+            if id.is_empty() {
+                println!("no snapshot taken (engine unavailable or site has no document tree)");
+            } else {
+                println!("snapshot {id}");
+            }
+        }
+        Response::SnapshotDiff(d) => {
+            println!("+{} -{} M{}", d.added, d.removed, d.modified);
+            for p in &d.sample {
+                println!("  {p}");
+            }
+        }
+        Response::WpMailAutofixSet(on) => {
+            println!("wp mail self-repair: {}", if *on { "on" } else { "off" });
+        }
         Response::CareOverview(rows) => {
             if rows.is_empty() {
                 println!("(no site on this node holds a care package)");

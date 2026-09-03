@@ -752,6 +752,37 @@ pub trait AgentApi: Send + Sync + 'static {
         &self,
         sel: HostingSelector,
     ) -> Result<hyperion_types::FtpCheckReport, RpcError>;
+    /// Snapshots this site has, newest last.
+    async fn snapshot_list(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<Vec<hyperion_types::SnapshotSummary>, RpcError>;
+    /// Take one now. Returns its short id, or empty when the node has no
+    /// snapshot engine.
+    async fn snapshot_now(&self, sel: HostingSelector) -> Result<String, RpcError>;
+    /// What changed between two snapshots.
+    async fn snapshot_diff(
+        &self,
+        sel: HostingSelector,
+        from: String,
+        to: String,
+    ) -> Result<hyperion_types::SnapshotDiff, RpcError>;
+    /// Everything we can say about one site's outgoing WordPress mail.
+    async fn wp_mail_self_check(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<hyperion_types::FtpCheckReport, RpcError>;
+    /// Configure it, repair it, then re-check.
+    async fn wp_mail_repair(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<hyperion_types::FtpCheckReport, RpcError>;
+    /// Per-site switch for the automatic repair. Default ON.
+    async fn wp_mail_autofix_set(
+        &self,
+        sel: HostingSelector,
+        enabled: bool,
+    ) -> Result<bool, RpcError>;
     async fn ftp_repair_site(&self, sel: HostingSelector) -> Result<String, RpcError>;
     async fn ftp_repair_node_config(&self) -> Result<String, RpcError>;
     async fn ftp_set_ftps(&self, enabled: bool, require_tls: bool) -> Result<String, RpcError>;

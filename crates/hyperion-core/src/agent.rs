@@ -1837,6 +1837,53 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
     ) -> Result<Vec<hyperion_types::HostingPackage>, RpcError> {
         self.svc.package_activations(sel, history).await
     }
+    async fn care_overview(
+        &self,
+        period: String,
+    ) -> Result<Vec<hyperion_types::care_check::CareOverviewRow>, RpcError> {
+        self.svc.care_overview(period).await
+    }
+    async fn snapshot_list(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<Vec<hyperion_types::SnapshotSummary>, RpcError> {
+        self.svc.snapshot_list(sel).await
+    }
+    async fn snapshot_now(&self, sel: HostingSelector) -> Result<String, RpcError> {
+        let detail = self.svc.get(sel).await?;
+        Ok(self
+            .svc
+            .snapshot_before_change(&detail, "manual")
+            .await
+            .unwrap_or_default())
+    }
+    async fn snapshot_diff(
+        &self,
+        sel: HostingSelector,
+        from: String,
+        to: String,
+    ) -> Result<hyperion_types::SnapshotDiff, RpcError> {
+        self.svc.snapshot_diff(sel, from, to).await
+    }
+    async fn wp_mail_self_check(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<hyperion_types::FtpCheckReport, RpcError> {
+        self.svc.wp_mail_self_check(sel).await
+    }
+    async fn wp_mail_repair(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<hyperion_types::FtpCheckReport, RpcError> {
+        self.svc.wp_mail_repair(sel).await
+    }
+    async fn wp_mail_autofix_set(
+        &self,
+        sel: HostingSelector,
+        enabled: bool,
+    ) -> Result<bool, RpcError> {
+        self.svc.wp_mail_autofix_set(sel, enabled).await
+    }
     async fn package_activate(
         &self,
         sel: HostingSelector,

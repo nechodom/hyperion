@@ -1434,6 +1434,32 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(m) => Response::FtpAccountDelete(m),
             Err(e) => Response::Error(e),
         },
+        Request::SnapshotList { sel } => match api.snapshot_list(sel).await {
+            Ok(v) => Response::SnapshotList(v),
+            Err(e) => Response::Error(e),
+        },
+        Request::SnapshotNow { sel } => match api.snapshot_now(sel).await {
+            Ok(v) => Response::SnapshotNow(v),
+            Err(e) => Response::Error(e),
+        },
+        Request::SnapshotDiff { sel, from, to } => match api.snapshot_diff(sel, from, to).await {
+            Ok(v) => Response::SnapshotDiff(v),
+            Err(e) => Response::Error(e),
+        },
+        Request::WpMailSelfCheck { sel } => match api.wp_mail_self_check(sel).await {
+            Ok(r) => Response::WpMailSelfCheck(r),
+            Err(e) => Response::Error(e),
+        },
+        Request::WpMailRepair { sel } => match api.wp_mail_repair(sel).await {
+            Ok(r) => Response::WpMailRepair(r),
+            Err(e) => Response::Error(e),
+        },
+        Request::WpMailAutofixSet { sel, enabled } => {
+            match api.wp_mail_autofix_set(sel, enabled).await {
+                Ok(v) => Response::WpMailAutofixSet(v),
+                Err(e) => Response::Error(e),
+            }
+        }
         Request::FtpSelfCheck { sel } => match api.ftp_self_check(sel).await {
             Ok(r) => Response::FtpSelfCheck(r),
             Err(e) => Response::Error(e),
@@ -3088,6 +3114,42 @@ mod tests {
             _: String,
         ) -> Result<Vec<hyperion_types::care_check::CareOverviewRow>, RpcError> {
             Ok(vec![])
+        }
+        async fn snapshot_list(
+            &self,
+            _: HostingSelector,
+        ) -> Result<Vec<hyperion_types::SnapshotSummary>, RpcError> {
+            Ok(vec![])
+        }
+        async fn snapshot_now(&self, _: HostingSelector) -> Result<String, RpcError> {
+            Ok(String::new())
+        }
+        async fn snapshot_diff(
+            &self,
+            _: HostingSelector,
+            _: String,
+            _: String,
+        ) -> Result<hyperion_types::SnapshotDiff, RpcError> {
+            Ok(Default::default())
+        }
+        async fn wp_mail_self_check(
+            &self,
+            _: HostingSelector,
+        ) -> Result<hyperion_types::FtpCheckReport, RpcError> {
+            Ok(Default::default())
+        }
+        async fn wp_mail_repair(
+            &self,
+            _: HostingSelector,
+        ) -> Result<hyperion_types::FtpCheckReport, RpcError> {
+            Ok(Default::default())
+        }
+        async fn wp_mail_autofix_set(
+            &self,
+            _: HostingSelector,
+            _: bool,
+        ) -> Result<bool, RpcError> {
+            Ok(true)
         }
         async fn package_activate(
             &self,
