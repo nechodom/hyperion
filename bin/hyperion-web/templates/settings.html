@@ -1156,6 +1156,77 @@
     <textarea id="nt_care_default" hidden>{{ care_report_default_template }}</textarea>
     <textarea id="nt_expiry_default" hidden>{{ expiry_warning_default_template }}</textarea>
   </div>
+
+  <div class="card">
+    <div class="row" style="align-items:center;gap:0.6rem;margin-bottom:0.4rem">
+      <h2 style="margin:0">
+        <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m5 8 6 6"/><path d="m4 14 6-6 2-3"/><path d="M2 5h12"/><path d="M7 2h1"/><path d="m22 22-5-10-5 10"/><path d="M14 18h6"/></svg>
+        Letter language and wording
+      </h2>
+    </div>
+    <p class="text-soft small" style="margin:0 0 0.9rem;line-height:1.55">
+      The two customer letters are assembled from the sentences below. Pick a
+      language and every one of them changes — including the headings, the
+      month names, the thousands separator and the plural endings. Nothing
+      customer-facing is left in English by picking Čeština.
+      {#- This card exists because the placeholder approach could not finish
+          the job: {attacks} expands to a whole SECTION, so a translated
+          letter got English put straight back into it, and the branch that
+          says "we did not measure this" was unreachable from a template. -#}
+    </p>
+    <form method="post" action="/settings/config" autocomplete="off">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="section" value="letters">
+
+      <div class="field">
+        <label for="lt_lang">Language of the customer letters</label>
+        <select id="lt_lang" name="lang" style="min-width:14rem">
+          <option value="en" {% if letter_lang == "en" %}selected{% endif %}>English</option>
+          <option value="cs" {% if letter_lang == "cs" %}selected{% endif %}>Čeština</option>
+        </select>
+        <span class="hint" style="display:block;margin-top:0.3rem">
+          Applies to the care report and the expiry warning. Operator alerts
+          (Slack, mail to you) are separate and stay as they are.
+        </span>
+      </div>
+
+      <p class="text-soft small" style="margin:1rem 0 0.6rem;line-height:1.55">
+        Every sentence below is optional. Leave a field empty and the chosen
+        language's built-in wording is used — shown in grey inside the field —
+        so an empty form is not &ldquo;no text&rdquo;, it is
+        &ldquo;whatever the pack says&rdquo;. Words in braces are values the
+        server fills in; a brace you spell wrong is left in the letter exactly
+        as typed rather than dropped, so you see it before a customer does.
+      </p>
+
+      {% for g in letter_groups %}
+      <details style="margin:0.4rem 0;border:1px solid var(--border);border-radius:var(--radius-xs)">
+        <summary style="cursor:pointer;padding:0.5rem 0.7rem;font-weight:600">{{ g.name }}</summary>
+        <div style="padding:0.2rem 0.7rem 0.7rem">
+          {% for s in g.strings %}
+          <div class="field" style="margin-bottom:0.7rem">
+            <label style="display:block">
+              <code style="font-size:0.8rem">{{ s.id }}</code>
+              <span class="hint" style="display:block;margin:0.15rem 0 0.3rem">{{ s.note }}</span>
+              {% if s.multiline %}
+              <textarea name="{{ s.id }}" rows="4"
+                        style="width:100%;font-family:var(--font-mono);font-size:0.82rem"
+                        placeholder="{{ s.built_in }}">{{ s.current }}</textarea>
+              {% else %}
+              <input type="text" name="{{ s.id }}"
+                     style="width:100%;font-family:var(--font-mono);font-size:0.82rem"
+                     placeholder="{{ s.built_in }}" value="{{ s.current }}">
+              {% endif %}
+            </label>
+          </div>
+          {% endfor %}
+        </div>
+      </details>
+      {% endfor %}
+
+      <button type="submit" class="btn primary" style="margin-top:0.8rem">Save letter wording</button>
+    </form>
+  </div>
 </div>
 
 <script>

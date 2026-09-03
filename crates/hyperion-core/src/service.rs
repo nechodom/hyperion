@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use hyperion_adapters::integrity;
 use hyperion_adapters::rollback::{Rollback, RollbackStack};
 use hyperion_adapters::AdapterError;
+use crate::letters::{render_template, LetterCatalog, LetterLang};
 use hyperion_rpc::codec::CareReportMail;
 use hyperion_rpc::wire::{
     DbCredentials, DeleteOpts, HostingCreateReq, HostingCreated, HostingSelector,
@@ -4937,6 +4938,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                             read_notifications_section(self.agent_config_path.as_deref())
                                 .expiry_warning_subject_template;
                         let (subject, body) = expiry_warning_mail_with(
+                            &self.letter_catalog(),
                             &r.domain,
                             exp,
                             r.grace_days,
@@ -12990,6 +12992,16 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         read_notifications_section(self.agent_config_path.as_deref()).care_report_body_template
     }
 
+    /// The letter LANGUAGE plus every per-string override, from `[letters]`
+    /// in agent.toml.
+    ///
+    /// Same per-node caveat as the two body templates above: the letter is
+    /// rendered on the node that owns the hosting, so a worker keeps writing
+    /// in the old language until the section reaches it.
+    fn letter_catalog(&self) -> LetterCatalog {
+        read_letters_section(self.agent_config_path.as_deref())
+    }
+
     /// The operator's expiry-warning body template. Same empty-means-default
     /// rule — and the same per-node caveat — as `care_report_template`.
     fn expiry_warning_template(&self) -> String {
@@ -13022,7 +13034,13 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let subject_template = read_notifications_section(self.agent_config_path.as_deref())
             .care_report_subject_template;
         let (subject, body) =
-            care_report_render_full(&report, &detail.domain, &template, &subject_template);
+            care_report_render_full(
+                &self.letter_catalog(),
+                &report,
+                &detail.domain,
+                &template,
+                &subject_template,
+            );
         let mail = CareReportMail {
             subject,
             body,
@@ -13201,7 +13219,13 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 continue;
             }
             let (subject, body) =
-                care_report_render_full(&report, &detail.domain, &body_template, &subject_template);
+                care_report_render_full(
+                    &self.letter_catalog(),
+                    &report,
+                    &detail.domain,
+                    &body_template,
+                    &subject_template,
+                );
             // Fourth guard, on exactly the terms of the three above. The
             // marker is BOTH "already reported" and the next period's start,
             // so consuming it on a message the relay refused does not delay
@@ -24131,32 +24155,16 @@ fn report_cadence_secs(c: ReportCadence) -> Option<i64> {
 /// `domain` is passed separately rather than read off the report so the
 /// renderer can be exercised without building a hosting; at every call
 /// site it is `report.domain`.
-pub fn care_report_render(report: &CareReport, domain: &str) -> (String, String) {
-    // "" = the built-in letter, which is exactly what this function is.
-    care_report_render_with(report, domain, "")
+pub fn care_report_render(
+    cat: &LetterCatalog,
+    report: &CareReport,
+    domain: &str,
+) -> (String, String) {
+    // "" = the built-in letter for `cat`'s language, which is exactly what
+    // this function is.
+    care_report_render_with(cat, report, domain, "")
 }
 
-/// Same letter, with the operator's editable body template applied.
-///
-/// `body_template` empty (or whitespace) ⇒ the built-in default, byte for
-/// byte — an operator who never opens Settings sees no change. A non-empty
-/// template replaces the BODY only; the subject line stays ours, because it
-/// is what makes the mail findable in the customer's inbox and in
-/// `/emails`.
-///
-/// HONESTY: the placeholders a template can use for the six sections are
-/// the SECTION STRINGS produced above — never the raw `Option<i64>` counts
-/// behind them. That is the whole point of the feature. `{uptime}` is
-/// literally "AVAILABILITY: not monitored (uptime checks were not
-/// active)…" when nothing was measured, so no arrangement of the template
-/// can promote an unmeasured section into a number or a clean bill of
-/// health; the worst a bad template can do is leave a section out. If you
-/// are ever tempted to add `{uptime_pct}` or `{attack_count}` here: don't.
-/// That is the lie this design exists to make unrepresentable.
-///
-/// An unknown `{token}` is left VERBATIM in the output by `render_template`
-/// (never a panic, never silently dropped), so an operator's typo shows up
-/// in the preview instead of quietly deleting a paragraph.
 /// The sample a Settings preview shows for each `{placeholder}`, as
 /// `(name, value)` pairs ready to hand to the page.
 ///
@@ -24172,7 +24180,7 @@ pub fn care_report_render(report: &CareReport, domain: &str) -> (String, String)
 /// reads well with a percentage in it can read absurdly with "not
 /// monitored" in the same slot, and finding that out from a customer is
 /// too late.
-pub fn care_report_preview_fields() -> Vec<(&'static str, String)> {
+pub fn care_report_preview_fields(cat: &LetterCatalog) -> Vec<(&'static str, String)> {
     // 1–30 Jun 2026, half-open. Fixed, so the preview never depends on
     // the clock and two operators comparing screens see the same letter.
     let from = 1_780_272_000; // 2026-06-01 00:00 UTC
@@ -24204,7 +24212,7 @@ pub fn care_report_preview_fields() -> Vec<(&'static str, String)> {
         }),
         ..CareReport::empty(HostingId("preview".into()), "example.com".into(), from, to)
     };
-    let (_, _, fields) = care_report_parts(&report, "example.com");
+    let (_, _, fields) = care_report_parts(cat, &report, "example.com");
     fields
 }
 
@@ -24212,31 +24220,47 @@ pub fn care_report_preview_fields() -> Vec<(&'static str, String)> {
 /// Split out so [`care_report_preview_fields`] cannot diverge from what
 /// [`care_report_render_with`] actually sends.
 fn care_report_parts(
+    cat: &LetterCatalog,
     report: &CareReport,
     domain: &str,
 ) -> (String, [String; 6], Vec<(&'static str, String)>) {
     let days = care_days_spanned(report.period_start, report.period_end);
     // The period is half-open, so the last day INSIDE it is `end - 1`.
     let last_day = (report.period_end - 1).max(report.period_start);
-    let from_str = report_date(report.period_start);
-    let to_str = report_date(last_day);
-    let subject = format!("Care report for {domain} ({from_str} – {to_str})");
-    let parts = [
-        care_section_attacks(report.attacks_blocked, report.attacks_covered_since),
-        care_section_updates(report.updates_applied),
-        care_section_usage(report.usage.as_ref()),
-        care_section_uptime(report.uptime.as_ref()),
-        care_section_backups(report.backups.as_ref()),
-        care_section_integrity(report.integrity.as_ref()),
-    ];
+    let from_str = report_date(cat, report.period_start);
+    let to_str = report_date(cat, last_day);
     // Day count carries its own unit word so a template can never render
     // "1 days", and so `{days}` alone reproduces the default's "(30 days)".
+    let days_str = format!("{days} {}", cat.plural("unit_day", days));
+    let days_count = days.to_string();
+    let start_iso = iso_date(cat, report.period_start);
+    let end_iso = iso_date(cat, last_day);
+    let subject = cat.render(
+        "care.subject",
+        &[
+            ("domain", domain),
+            ("period_start", &from_str),
+            ("period_end", &to_str),
+            ("days", &days_str),
+            ("days_count", &days_count),
+            ("period_start_iso", &start_iso),
+            ("period_end_iso", &end_iso),
+        ],
+    );
+    let parts = [
+        care_section_attacks(cat, report.attacks_blocked, report.attacks_covered_since),
+        care_section_updates(cat, report.updates_applied),
+        care_section_usage(cat, report.usage.as_ref()),
+        care_section_uptime(cat, report.uptime.as_ref()),
+        care_section_backups(cat, report.backups.as_ref()),
+        care_section_integrity(cat, report.integrity.as_ref()),
+    ];
     let fields = vec![
         ("domain", domain.to_string()),
         ("period_start", from_str),
         // Inclusive last day of the period, same as the default letter.
         ("period_end", to_str),
-        ("days", format!("{days} {}", plural(days, "day", "days"))),
+        ("days", days_str),
         // Rendered sections, unmeasured wording included. See above.
         ("attacks", parts[0].clone()),
         ("updates", parts[1].clone()),
@@ -24247,41 +24271,38 @@ fn care_report_parts(
         // ── Bare values ────────────────────────────────────────────────
         //
         // The six placeholders above each expand to a whole SECTION —
-        // heading, figure and an English paragraph explaining it. That is
-        // right for an operator who keeps the built-in letter and wrong for
-        // everyone else: translate the letter and every placeholder injects
-        // English back into it, so a Czech report came out as an English
-        // block followed by the Czech sentence meant to replace it. The same
-        // went for `{days}`, which carries its own unit word and turned
-        // "{days} dní" into "30 days dní".
-        //
-        // These carry the MEASUREMENT and nothing else, so the wording around
-        // them is entirely the operator's.
+        // heading, figure and the paragraph explaining it. These carry the
+        // MEASUREMENT and nothing else, so an operator writing their own
+        // sentence around one is not fighting a paragraph they did not
+        // write.
         //
         // An em dash, never a zero, when something was not measured. The
         // whole report is built on not claiming a figure it does not have —
         // "0 attacks blocked" on a site nobody was watching is exactly the
         // lie the sections go to such lengths to avoid, and a bare-value
         // placeholder must not reintroduce it.
-        ("days_count", days.to_string()),
-        ("period_start_iso", iso_date(report.period_start)),
-        ("period_end_iso", iso_date(last_day)),
-        ("attacks_count", opt_num(report.attacks_blocked)),
-        ("updates_count", opt_num(report.updates_applied)),
+        ("days_count", days_count),
+        ("period_start_iso", start_iso),
+        ("period_end_iso", end_iso),
+        ("attacks_count", opt_num(cat, report.attacks_blocked)),
+        ("updates_count", opt_num(cat, report.updates_applied)),
         (
             "traffic_requests",
             report
                 .usage
                 .as_ref()
-                .map(|u| group_int(u.requests))
+                .map(|u| cat.group_int(u.requests))
                 .unwrap_or_else(|| UNMEASURED.to_string()),
         ),
         (
+            // The SAME units the `{traffic}` section quotes. A bare value
+            // in MiB beside a section in MB is two different numbers for
+            // one measurement in one letter.
             "traffic_sent",
             report
                 .usage
                 .as_ref()
-                .map(|u| human_bytes(u.bw_out_bytes))
+                .map(|u| customer_bytes(cat, u.bw_out_bytes))
                 .unwrap_or_else(|| UNMEASURED.to_string()),
         ),
         (
@@ -24290,7 +24311,7 @@ fn care_report_parts(
                 .usage
                 .as_ref()
                 .and_then(|u| u.bw_in_bytes)
-                .map(human_bytes)
+                .map(|n| customer_bytes(cat, n))
                 .unwrap_or_else(|| UNMEASURED.to_string()),
         ),
         (
@@ -24298,7 +24319,7 @@ fn care_report_parts(
             report
                 .usage
                 .as_ref()
-                .map(|u| human_bytes(u.disk_peak_bytes))
+                .map(|u| customer_bytes(cat, u.disk_peak_bytes))
                 .unwrap_or_else(|| UNMEASURED.to_string()),
         ),
         (
@@ -24306,9 +24327,10 @@ fn care_report_parts(
             match report.uptime.as_ref() {
                 // Zero samples IS "not monitored" — dividing by it would
                 // print a confident 100 %.
-                Some(u) if u.samples > 0 => {
-                    format!("{:.2}", (u.successes as f64 / u.samples as f64) * 100.0)
-                }
+                Some(u) if u.samples > 0 => cat.decimal(&format!(
+                    "{:.2}",
+                    (u.successes as f64 / u.samples as f64) * 100.0
+                )),
                 _ => UNMEASURED.to_string(),
             },
         ),
@@ -24317,7 +24339,7 @@ fn care_report_parts(
             report
                 .backups
                 .as_ref()
-                .map(|b| group_int(b.taken))
+                .map(|b| cat.group_int(b.taken))
                 .unwrap_or_else(|| UNMEASURED.to_string()),
         ),
         (
@@ -24325,7 +24347,7 @@ fn care_report_parts(
             report
                 .backups
                 .as_ref()
-                .map(|b| group_int(b.failed))
+                .map(|b| cat.group_int(b.failed))
                 .unwrap_or_else(|| UNMEASURED.to_string()),
         ),
         (
@@ -24334,7 +24356,7 @@ fn care_report_parts(
                 .backups
                 .as_ref()
                 .and_then(|b| b.last_success_at)
-                .map(iso_date)
+                .map(|ts| iso_date(cat, ts))
                 .unwrap_or_else(|| UNMEASURED.to_string()),
         ),
     ];
@@ -24342,46 +24364,25 @@ fn care_report_parts(
 }
 
 pub fn care_report_render_with(
+    cat: &LetterCatalog,
     report: &CareReport,
     domain: &str,
     body_template: &str,
 ) -> (String, String) {
-    let days = care_days_spanned(report.period_start, report.period_end);
-    // The period is half-open, so the last day INSIDE it is `end - 1`.
-    // Printing the exclusive end ("1 Jun – 1 Jul") reads to a customer as
-    // a day they were charged for twice.
-    let last_day = (report.period_end - 1).max(report.period_start);
-    let from_str = report_date(report.period_start);
-    let to_str = report_date(last_day);
-
-    let (subject, parts, fields) = care_report_parts(report, domain);
-
-    if body_template.trim().is_empty() {
-        let sections = parts.join("\n\n");
-        let body = format!(
-            "CARE REPORT\n\
-             Site:    {domain}\n\
-             Period:  {from_str} – {to_str} ({days} {})\n\
-             \n\
-             Here is what happened on your site during this period. We only quote\n\
-             figures we actually measured. Where something was not being measured,\n\
-             we say so — rather than print a zero that would claim something other\n\
-             than \"we were not looking\".\n\
-             \n\
-             {sections}\n\
-             \n\
-             --\n\
-             You receive this report because {domain} is on a care plan.\n\
-             The figures come straight from the server the site runs on; times are UTC.\n\
-             If anything here needs explaining, just reply to this e-mail.\n",
-            plural(days, "day", "days"),
-        );
-        return (subject, body);
-    }
-
+    let (subject, _, fields) = care_report_parts(cat, report, domain);
+    // Empty means "the built-in letter", and the built-in letter is now a
+    // catalogue string like every other word in it — so a Czech install
+    // that has customised nothing still sends a Czech report. The custom
+    // and default paths are one path, which is why the disclosure note
+    // below cannot be reached by only one of them.
+    let template = if body_template.trim().is_empty() {
+        cat.get("care.body").to_string()
+    } else {
+        body_template.to_string()
+    };
     let pairs: Vec<(&str, &str)> = fields.iter().map(|(k, v)| (*k, v.as_str())).collect();
-    let mut body = render_template(body_template, &pairs);
-    body.push_str(&care_omitted_unmeasured_note(report, body_template));
+    let mut body = render_template(&template, &pairs);
+    body.push_str(&care_omitted_unmeasured_note(cat, report, &template));
     (subject, body)
 }
 
@@ -24390,19 +24391,20 @@ pub fn care_report_render_with(
 /// This letter goes to a paying customer, and until now only its body could be
 /// changed — so an operator who translated it sent Czech prose under an English
 /// subject, with no field anywhere to fix it. The subject takes the same
-/// placeholders as the body; empty keeps the built-in English one, which is
-/// what every existing install has.
+/// placeholders as the body; empty keeps the catalogue's, which is the built-in
+/// subject in the letter's own language.
 pub fn care_report_render_full(
+    cat: &LetterCatalog,
     report: &CareReport,
     domain: &str,
     body_template: &str,
     subject_template: &str,
 ) -> (String, String) {
-    let (built_in_subject, body) = care_report_render_with(report, domain, body_template);
+    let (built_in_subject, body) = care_report_render_with(cat, report, domain, body_template);
     if subject_template.trim().is_empty() {
         return (built_in_subject, body);
     }
-    let (_, _, fields) = care_report_parts(report, domain);
+    let (_, _, fields) = care_report_parts(cat, report, domain);
     let pairs: Vec<(&str, &str)> = fields.iter().map(|(k, v)| (*k, v.as_str())).collect();
     (render_template(subject_template, &pairs), body)
 }
@@ -24418,110 +24420,108 @@ pub fn care_report_render_full(
 /// from the built-in letter and deleted the section that read badly.
 /// Availability is the one they delete, and it is the one that matters.
 ///
-/// So the disclosure is re-attached at the end. Terse, not a second copy
-/// of the section — enough that no customer is told a period was watched
-/// when it was not.
-fn care_omitted_unmeasured_note(report: &CareReport, body_template: &str) -> String {
+/// So the disclosure is re-attached at the end — in the letter's own
+/// language, which is the point of the catalogue: a Czech report used to
+/// get this paragraph bolted on in English no matter how thoroughly it had
+/// been translated.
+fn care_omitted_unmeasured_note(
+    cat: &LetterCatalog,
+    report: &CareReport,
+    body_template: &str,
+) -> String {
     let unmeasured: Vec<&str> = [
         (
             "attacks",
             report.attacks_blocked.is_none(),
-            "attacks blocked",
+            "care.unmeasured.attacks",
         ),
         (
             "updates",
             report.updates_applied.is_none(),
-            "updates applied",
+            "care.unmeasured.updates",
         ),
-        ("traffic", report.usage.is_none(), "traffic"),
-        ("uptime", report.uptime.is_none(), "availability"),
-        ("backups", report.backups.is_none(), "backups"),
+        ("traffic", report.usage.is_none(), "care.unmeasured.traffic"),
+        ("uptime", report.uptime.is_none(), "care.unmeasured.uptime"),
+        ("backups", report.backups.is_none(), "care.unmeasured.backups"),
         (
             "integrity",
             report.integrity.is_none(),
-            "file integrity and malware",
+            "care.unmeasured.integrity",
         ),
     ]
     .into_iter()
     .filter(|(placeholder, is_unmeasured, _)| {
         *is_unmeasured && !body_template.contains(&format!("{{{placeholder}}}"))
     })
-    .map(|(_, _, label)| label)
+    .map(|(_, _, id)| cat.get(id))
     .collect();
     if unmeasured.is_empty() {
         return String::new();
     }
-    format!(
-        "\n\nNOT MEASURED THIS PERIOD: {}.\n  \
-         We were not measuring {} during this period, so this letter makes no\n  \
-         claim about {}. This note is added automatically — a report may leave\n  \
-         a figure out, but never a gap in what was watched.",
-        unmeasured.join(", "),
-        plural(unmeasured.len() as i64, "it", "them"),
-        plural(unmeasured.len() as i64, "it", "them"),
+    let n = unmeasured.len() as i64;
+    cat.render(
+        "care.unmeasured.note",
+        &[
+            ("list", &unmeasured.join(cat.get("list_sep"))),
+            ("pronoun", cat.plural("care.unmeasured.pronoun", n)),
+        ],
     )
 }
 
-/// Blocked attacks. `None` is the case the database cannot produce on its
-/// own — the caller sets it when the ban scanner was switched off — and it
-/// is exactly why zero must not be printed there.
 /// What a bare-value placeholder prints when the thing was never measured.
 ///
 /// Not "0", and not an English phrase. A zero would be a claim the report has
 /// no evidence for — the whole letter is built on refusing that — and a phrase
-/// would put English back into a template somebody translated, which is the
-/// bug these placeholders exist to fix. A dash is a fact in any language: the
-/// operator sees it in the preview and writes their own sentence around it.
+/// would put one language's word into a letter written in another. A dash is a
+/// fact in any language: the operator sees it in the preview and writes their
+/// own sentence around it.
 const UNMEASURED: &str = "—";
 
 /// A count, or [`UNMEASURED`] when there is none.
-fn opt_num(v: Option<i64>) -> String {
-    v.map(group_int).unwrap_or_else(|| UNMEASURED.to_string())
+fn opt_num(cat: &LetterCatalog, v: Option<i64>) -> String {
+    v.map(|n| cat.group_int(n))
+        .unwrap_or_else(|| UNMEASURED.to_string())
 }
 
-/// `YYYY-MM-DD`. Month names are a language; digits are not, so a translated
-/// letter gets a date it can use.
-fn iso_date(ts: i64) -> String {
+/// `YYYY-MM-DD`. Month names are a language; digits are not, so a letter in
+/// any language gets a date it can use without translating anything.
+fn iso_date(cat: &LetterCatalog, ts: i64) -> String {
     use chrono::TimeZone;
     chrono::Utc
         .timestamp_opt(ts, 0)
         .single()
         .map(|d| d.format("%Y-%m-%d").to_string())
-        .unwrap_or_else(|| UNMEASURED.to_string())
+        .unwrap_or_else(|| cat.get("date_unknown").to_string())
 }
 
-fn care_section_attacks(blocked: Option<i64>, covered_since: Option<i64>) -> String {
+/// Blocked attacks. `None` is the case the database cannot produce on its
+/// own — the caller sets it when the ban scanner was switched off — and it
+/// is exactly why zero must not be printed there.
+///
+/// Which of the four wordings is used is decided HERE, from the data. The
+/// operator owns every word of all four and none of that decision, so a
+/// translated letter can say "nesledováno" but can never say "0".
+fn care_section_attacks(
+    cat: &LetterCatalog,
+    blocked: Option<i64>,
+    covered_since: Option<i64>,
+) -> String {
     // Protection started mid-period: the count is real but it is not a
     // period total, and "0" is emphatically not "a quiet month". Both
     // wordings below would otherwise assert coverage we cannot evidence.
     if let (Some(n), Some(since)) = (blocked, covered_since) {
-        return format!(
-            "ATTACKS BLOCKED: {} (since {})\n  \
-             Automatic attack protection has been watching this site since\n  \
-             {}, not for the whole period, so this figure covers only that\n  \
-             part of it. We cannot say what reached the site beforehand.",
-            group_int(n),
-            report_date(since),
-            report_date(since),
+        return cat.render(
+            "care.attacks.since",
+            &[
+                ("count", &cat.group_int(n)),
+                ("since", &report_date(cat, since)),
+            ],
         );
     }
     match blocked {
-        None => "ATTACKS BLOCKED: not monitored\n  \
-             Automatic attack protection was not running on this server during\n  \
-             the period. We do not print a zero here — it would mean nobody was\n  \
-             watching."
-            .to_string(),
-        Some(0) => "ATTACKS BLOCKED: 0\n  \
-             Protection ran for the whole period and never had to step in. That\n  \
-             is good news, not a missing figure."
-            .to_string(),
-        Some(n) => format!(
-            "ATTACKS BLOCKED: {}\n  \
-             That is how many times we cut off an address that kept trying to\n  \
-             guess an admin password or otherwise abuse the site. A blocked\n  \
-             address cannot reach the site at all for several hours.",
-            group_int(n)
-        ),
+        None => cat.get("care.attacks.none").to_string(),
+        Some(0) => cat.get("care.attacks.zero").to_string(),
+        Some(n) => cat.render("care.attacks.some", &[("count", &cat.group_int(n))]),
     }
 }
 
@@ -24529,25 +24529,16 @@ fn care_section_attacks(blocked: Option<i64>, covered_since: Option<i64>) -> Str
 /// covers plugins and themes ONLY (WordPress core has no durable record
 /// to count), and an audit log that does not span the period yields
 /// "not determined" rather than a partial total dressed up as a whole one.
-fn care_section_updates(applied: Option<i64>) -> String {
+fn care_section_updates(cat: &LetterCatalog, applied: Option<i64>) -> String {
     match applied {
-        None => "PLUGIN AND THEME UPDATES: not determined\n  \
-             Our operational records do not cover this whole period, so we\n  \
-             cannot give you an exact count. We will not pass an incomplete\n  \
-             number off as a complete one."
-            .to_string(),
-        Some(0) => "PLUGIN AND THEME UPDATES: 0\n  \
-             There was nothing to apply — plugins and themes were up to date\n  \
-             throughout the period."
-            .to_string(),
-        Some(n) => format!(
-            "PLUGIN AND THEME UPDATES: {}\n  \
-             We applied {} {} to the site. We count only the ones that actually\n  \
-             installed. WordPress core updates are not in this figure — we do\n  \
-             not track those separately yet.",
-            group_int(n),
-            group_int(n),
-            plural(n, "update", "updates"),
+        None => cat.get("care.updates.none").to_string(),
+        Some(0) => cat.get("care.updates.zero").to_string(),
+        Some(n) => cat.render(
+            "care.updates.some",
+            &[
+                ("count", &cat.group_int(n)),
+                ("unit", cat.plural("unit_update", n)),
+            ],
         ),
     }
 }
@@ -24555,94 +24546,85 @@ fn care_section_updates(applied: Option<i64>) -> String {
 /// Traffic and footprint. Carries its own coverage caveat: a month with a
 /// four-day sampling gap says so instead of presenting 26 days of traffic
 /// as a month.
-fn care_section_usage(usage: Option<&CareUsage>) -> String {
+fn care_section_usage(cat: &LetterCatalog, usage: Option<&CareUsage>) -> String {
     let Some(u) = usage else {
-        return "TRAFFIC: not measured\n  \
-             Traffic measurement was not running for this site during the\n  \
-             period. \"0 requests\" would claim nobody visited the site, and we\n  \
-             do not know that."
-            .to_string();
+        return cat.get("care.traffic.none").to_string();
     };
-    let mut out = format!(
-        "TRAFFIC: {} {}, {} sent\n  \
-         A request is one load of a page, an image or a file.",
-        group_int(u.requests),
-        plural(u.requests, "request", "requests"),
-        customer_bytes(u.bw_out_bytes),
+    let mut out = cat.render(
+        "care.traffic.head",
+        &[
+            ("requests", &cat.group_int(u.requests)),
+            ("unit", cat.plural("unit_request", u.requests)),
+            ("sent", &customer_bytes(cat, u.bw_out_bytes)),
+        ],
     );
     // Inbound bytes need a log format the stock nginx config doesn't have,
     // so a zero there is ambiguous — and `reports::usage` hands us `None`
     // rather than letting us print "0 B received" for a live site.
     match u.bw_in_bytes {
-        Some(n) => out.push_str(&format!("\n  Data received: {}.", customer_bytes(n))),
-        None => out.push_str(
-            "\n  The server does not record how much data was received, so we do\n  \
-             not quote it.",
-        ),
+        Some(n) => out.push_str(&cat.render(
+            "care.traffic.received",
+            &[("received", &customer_bytes(cat, n))],
+        )),
+        None => out.push_str(cat.get("care.traffic.received_unknown")),
     }
-    out.push_str(&format!(
-        "\n  Peak disk use during the period: {}.",
-        customer_bytes(u.disk_peak_bytes)
+    out.push_str(&cat.render(
+        "care.traffic.disk_peak",
+        &[("disk", &customer_bytes(cat, u.disk_peak_bytes))],
     ));
-    if u.is_complete() {
-        out.push_str(&format!(
-            "\n  These figures cover the whole period ({} of {} {}).",
-            group_int(u.days_counted),
-            group_int(u.days_in_period),
-            plural(u.days_in_period, "day", "days")
-        ));
+    // "was higher" would state a fact about days we just said we did not
+    // measure — the site may have served nothing on them. The partial
+    // wording keeps that a possibility.
+    let id = if u.is_complete() {
+        "care.traffic.complete"
     } else {
-        out.push_str(&format!(
-            // "was higher" would state a fact about days we just said we did
-            // not measure — the site may have served nothing on them. This is
-            // the one sentence that could draw a conclusion from the gap, so
-            // it stays a possibility.
-            "\n  Note: these figures cover only {} of the period's {} {} — the\n  \
-             rest was not measured, so real traffic may have been higher.",
-            group_int(u.days_counted),
-            group_int(u.days_in_period),
-            plural(u.days_in_period, "day", "days")
-        ));
-    }
+        "care.traffic.partial"
+    };
+    out.push_str(&cat.render(
+        id,
+        &[
+            ("counted", &cat.group_int(u.days_counted)),
+            ("total", &cat.group_int(u.days_in_period)),
+            ("unit", cat.plural("unit_day", u.days_in_period)),
+        ],
+    ));
     out
 }
 
 /// Uptime. THE section this whole design exists for: with no samples
 /// there is no percentage to print, and "100 %" for a site nobody
 /// monitored is the exact lie the report must never tell.
-fn care_section_uptime(uptime: Option<&CareUptime>) -> String {
-    const NOT_MONITORED: &str = "AVAILABILITY: not monitored (uptime checks were not active)\n  \
-         We were not checking this site regularly during the period, so we\n  \
-         cannot say whether it stayed reachable. A figure of 100 % would be\n  \
-         invented.";
+fn care_section_uptime(cat: &LetterCatalog, uptime: Option<&CareUptime>) -> String {
     let Some(u) = uptime else {
-        return NOT_MONITORED.to_string();
+        return cat.get("care.uptime.none").to_string();
     };
     // `samples > 0` is guaranteed by the assembler (zero samples arrive as
     // `None` above), so this can only ever be `Some`.
     let Some(ratio) = u.success_ratio_x100() else {
-        return NOT_MONITORED.to_string();
+        return cat.get("care.uptime.none").to_string();
     };
     let failures = u.failures();
+    let pct = pct_x100_str(cat, ratio);
+    let samples = cat.group_int(u.samples);
     let mut out = if failures == 0 {
-        format!(
-            "AVAILABILITY: {} ({} {}, no outage)\n  \
-             We checked the site automatically and it answered every time.",
-            pct_x100_str(ratio),
-            group_int(u.samples),
-            plural(u.samples, "check", "checks"),
+        cat.render(
+            "care.uptime.perfect",
+            &[
+                ("pct", &pct),
+                ("samples", &samples),
+                ("unit", cat.plural("unit_check", u.samples)),
+            ],
         )
     } else {
-        format!(
-            "AVAILABILITY: {} ({} {}, {} of them failed)\n  \
-             The site did not answer on {} {}. One or two failed checks are usually\n  \
-             a brief outage or a restart; if they repeat, we look into it.",
-            pct_x100_str(ratio),
-            group_int(u.samples),
-            plural(u.samples, "check", "checks"),
-            group_int(failures),
-            group_int(failures),
-            plural(failures, "check", "checks"),
+        cat.render(
+            "care.uptime.failures",
+            &[
+                ("pct", &pct),
+                ("samples", &samples),
+                ("unit", cat.plural("unit_check", u.samples)),
+                ("failures", &cat.group_int(failures)),
+                ("failures_unit", cat.plural("unit_check", failures)),
+            ],
         )
     };
     // A percentage computed from a subset of the period is a percentage OF
@@ -24651,13 +24633,14 @@ fn care_section_uptime(uptime: Option<&CareUptime>) -> String {
     // check was recorded. Saying so is the difference between a measured
     // score and a flattering one.
     if !u.is_complete() {
-        out.push_str(&format!(
-            "\n  Note: checks ran on only {} of the period's {} {}, so this\n  \
-             percentage describes those {} — not the whole period.",
-            group_int(u.days_counted),
-            group_int(u.days_in_period),
-            plural(u.days_in_period, "day", "days"),
-            plural(u.days_counted, "day", "days"),
+        out.push_str(&cat.render(
+            "care.uptime.partial",
+            &[
+                ("counted", &cat.group_int(u.days_counted)),
+                ("total", &cat.group_int(u.days_in_period)),
+                ("total_unit", cat.plural("unit_day", u.days_in_period)),
+                ("counted_unit", cat.plural("unit_day", u.days_counted)),
+            ],
         ));
     }
     out
@@ -24666,41 +24649,34 @@ fn care_section_uptime(uptime: Option<&CareUptime>) -> String {
 /// Backups. Three genuinely different states, and the middle one is the
 /// alarming one: a site that DOES take backups and took none this period
 /// must not read the same as a site that never had any.
-fn care_section_backups(backups: Option<&CareBackups>) -> String {
+fn care_section_backups(cat: &LetterCatalog, backups: Option<&CareBackups>) -> String {
     let Some(b) = backups else {
-        return "BACKUPS: not monitored\n  \
-             Not a single backup has ever run for this site — automatic backups\n  \
-             were never switched on for it. \"0 backups\" would look like a\n  \
-             failure; this is the state where backups were never enabled."
-            .to_string();
+        return cat.get("care.backups.none").to_string();
     };
     let mut out = if b.taken == 0 {
-        "BACKUPS: 0 in this period\n  \
-         This site does have backups configured, but none ran during the\n  \
-         period. That needs looking into — please get in touch."
-            .to_string()
+        cat.get("care.backups.zero").to_string()
     } else {
-        let mut s = format!(
-            "BACKUPS: {}\n  \
-             We stored {} complete {} of the site (files and database).",
-            group_int(b.taken),
-            group_int(b.taken),
-            plural(b.taken, "copy", "copies"),
+        let mut s = cat.render(
+            "care.backups.some",
+            &[
+                ("count", &cat.group_int(b.taken)),
+                ("unit", cat.plural("unit_copy", b.taken)),
+            ],
         );
         // Only ever a time INSIDE the period: the report must not reach
         // backwards for a comforting older date.
         if let Some(ts) = b.last_success_at {
-            s.push_str(&format!(
-                "\n  Last successful backup: {}.",
-                report_datetime(ts)
+            s.push_str(&cat.render(
+                "care.backups.last",
+                &[("when", &report_datetime(cat, ts))],
             ));
         }
         s
     };
     if b.failed > 0 {
-        out.push_str(&format!(
-            "\n  Failed attempts: {} (these retry automatically).",
-            group_int(b.failed)
+        out.push_str(&cat.render(
+            "care.backups.failed",
+            &[("count", &cat.group_int(b.failed))],
         ));
     }
     out
@@ -24709,64 +24685,53 @@ fn care_section_backups(backups: Option<&CareBackups>) -> String {
 /// File integrity + malware. "Clean" requires BOTH halves to have run —
 /// zero malware hits from a scanner that was never installed means "not
 /// looked for", and the copy has to say which.
-fn care_section_integrity(integrity: Option<&CareIntegrity>) -> String {
+fn care_section_integrity(cat: &LetterCatalog, integrity: Option<&CareIntegrity>) -> String {
     let Some(i) = integrity else {
-        return "FILE INTEGRITY AND MALWARE: not checked\n  \
-             No file check ran on the site during this period. So we cannot say\n  \
-             it is clean — only that we did not look."
-            .to_string();
+        return cat.get("care.integrity.none").to_string();
     };
-    let when = report_date(i.scanned_at);
+    let when = report_date(cat, i.scanned_at);
     let findings = i.total_findings();
     let mut out = if i.is_clean() {
-        format!(
-            "FILE INTEGRITY AND MALWARE: nothing found\n  \
-             Check on {when}: the WordPress files match what wordpress.org\n  \
-             published, and the malware scan found nothing."
-        )
+        cat.render("care.integrity.clean", &[("when", &when)])
     } else if findings == 0 {
-        format!(
-            "FILE INTEGRITY AND MALWARE: only partly checked\n  \
-             The check on {when} found nothing, but it only ran in part — so we\n  \
-             cannot write \"clean\"."
-        )
+        cat.render("care.integrity.partial", &[("when", &when)])
     } else {
         let mut what: Vec<String> = Vec::new();
         if i.core_issues > 0 {
-            what.push(format!(
-                "modified WordPress core files ({})",
-                group_int(i.core_issues)
+            what.push(cat.render(
+                "care.integrity.what_core",
+                &[("count", &cat.group_int(i.core_issues))],
             ));
         }
         if i.plugin_issues > 0 {
-            what.push(format!(
-                "modified plugin files ({})",
-                group_int(i.plugin_issues)
+            what.push(cat.render(
+                "care.integrity.what_plugin",
+                &[("count", &cat.group_int(i.plugin_issues))],
             ));
         }
         if i.malware_hits > 0 {
-            what.push(format!("suspicious code ({})", group_int(i.malware_hits)));
+            what.push(cat.render(
+                "care.integrity.what_malware",
+                &[("count", &cat.group_int(i.malware_hits))],
+            ));
         }
-        format!(
-            "FILE INTEGRITY AND MALWARE: {} {}\n  \
-             The check on {when} found: {}.\n  \
-             Not every finding means an attack — a hand-edited file looks the\n  \
-             same. If you are unsure about a finding, get in touch.",
-            group_int(findings),
-            plural(findings, "finding", "findings"),
-            what.join(", "),
+        cat.render(
+            "care.integrity.findings",
+            &[
+                ("count", &cat.group_int(findings)),
+                ("unit", cat.plural("unit_finding", findings)),
+                ("when", &when),
+                ("what", &what.join(cat.get("list_sep"))),
+            ],
         )
     };
     // Which half did NOT run is information the customer is owed, in every
     // one of the three branches above.
     if !i.checksums_ran {
-        out.push_str("\n  We could not verify the file checksums, so that part is unknown.");
+        out.push_str(cat.get("care.integrity.no_checksums"));
     }
     if !i.malware_scan_ran {
-        out.push_str(
-            "\n  The malware scanner was not running on the server, so we say\n  \
-             nothing about suspicious code.",
-        );
+        out.push_str(cat.get("care.integrity.no_malware_scan"));
     }
     out
 }
@@ -24783,87 +24748,68 @@ fn care_days_spanned(from: i64, to: i64) -> i64 {
     (to - 1).div_euclid(86_400) - from.div_euclid(86_400) + 1
 }
 
-/// English plural pick: exactly 1 is singular, everything else (including
-/// 0) is plural.
-fn plural(n: i64, one: &'static str, many: &'static str) -> &'static str {
-    if n.abs() == 1 {
-        one
-    } else {
-        many
-    }
-}
-
-/// Thousands-grouped integer: "34,500".
-fn group_int(n: i64) -> String {
-    let digits = n.unsigned_abs().to_string();
-    let mut out = String::with_capacity(digits.len() + digits.len() / 3 + 1);
-    if n < 0 {
-        out.push('-');
-    }
-    for (i, ch) in digits.chars().enumerate() {
-        // Group from the LEFT by counting how many digits remain.
-        if i > 0 && (digits.len() - i) % 3 == 0 {
-            out.push(',');
-        }
-        out.push(ch);
-    }
-    out
-}
-
 /// Bytes for a CUSTOMER: SI steps (kB / MB / GB), because that is what
 /// their connection and their invoice talk about. `human_bytes` (GiB)
 /// stays as it is for the operator dashboard — two audiences, two
 /// conventions, and neither should learn the other's.
-fn customer_bytes(n: i64) -> String {
+fn customer_bytes(cat: &LetterCatalog, n: i64) -> String {
     const STEPS: [(&str, i64); 3] = [("GB", 1_000_000_000), ("MB", 1_000_000), ("kB", 1_000)];
     for (label, scale) in STEPS {
         if n.abs() >= scale {
             let v = n as f64 / scale as f64;
-            return format!("{v:.1} {label}");
+            return cat.decimal(&format!("{v:.1} {label}"));
         }
     }
-    format!("{} B", group_int(n))
+    format!("{} B", cat.group_int(n))
 }
 
-/// "30 Jun 2026". Spelled month, because a purely numeric date reads as a
-/// different day depending on the reader's country.
-fn report_date(ts: i64) -> String {
+/// "30 Jun 2026" — or "30. čvn 2026". Spelled month, because a purely
+/// numeric date reads as a different day depending on the reader's country,
+/// and both the month names and the order they appear in come from the
+/// catalogue.
+fn report_date(cat: &LetterCatalog, ts: i64) -> String {
     use chrono::Datelike;
-    const MONTHS: [&str; 12] = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    ];
     match chrono::DateTime::<chrono::Utc>::from_timestamp(ts, 0) {
         Some(dt) => {
-            let m = MONTHS
+            let months = cat.months();
+            let m = months
                 .get((dt.month() as usize).saturating_sub(1))
-                .copied()
-                .unwrap_or("???");
-            format!("{} {} {}", dt.day(), m, dt.year())
+                .cloned()
+                .unwrap_or_else(|| "???".to_string());
+            cat.render(
+                "date_fmt",
+                &[
+                    ("day", &dt.day().to_string()),
+                    ("month", &m),
+                    ("year", &dt.year().to_string()),
+                ],
+            )
         }
         // Unrepresentable timestamps can't reach a real report; saying so
         // beats printing a wrong date with total confidence.
-        None => "unknown date".to_string(),
+        None => cat.get("date_unknown").to_string(),
     }
 }
 
 /// "30 Jun 2026 03:14 UTC" — the zone is spelled out because the customer
 /// may not be in UTC and an unlabelled clock time would be a small lie.
-fn report_datetime(ts: i64) -> String {
+fn report_datetime(cat: &LetterCatalog, ts: i64) -> String {
     use chrono::Timelike;
     match chrono::DateTime::<chrono::Utc>::from_timestamp(ts, 0) {
-        Some(dt) => format!(
-            "{} {:02}:{:02} UTC",
-            report_date(ts),
-            dt.hour(),
-            dt.minute()
+        Some(dt) => cat.render(
+            "date_time_fmt",
+            &[
+                ("date", &report_date(cat, ts)),
+                ("time", &format!("{:02}:{:02}", dt.hour(), dt.minute())),
+            ],
         ),
-        None => "unknown time".to_string(),
+        None => cat.get("time_unknown").to_string(),
     }
 }
 
-/// Hundredths of a percent → "99.93 %".
-fn pct_x100_str(x: i64) -> String {
-    format!("{}.{:02} %", x / 100, (x % 100).abs())
+/// Hundredths of a percent → "99.93 %", or "99,93 %".
+fn pct_x100_str(cat: &LetterCatalog, x: i64) -> String {
+    cat.decimal(&format!("{}.{:02} %", x / 100, (x % 100).abs()))
 }
 
 fn derive_user_from_summary(s: &HostingSummary) -> Option<String> {
@@ -27156,32 +27102,6 @@ fn is_internal_ip(ip: &std::net::IpAddr) -> bool {
 /// default (`master_accepts_hostings = true`) on parse failure or
 /// missing file/section so an out-of-date agent.toml never breaks
 /// the settings page.
-/// Substitute `{key}` tokens in `tmpl` with the matching value. Single
-/// pass (substituted values are NOT re-scanned, so a value containing
-/// `{time}` won't itself get expanded), UTF-8 safe, and unknown `{tokens}`
-/// are left verbatim so an operator's typo is visible in the output
-/// rather than silently dropped. Backs the editable notification wording.
-fn render_template(tmpl: &str, fields: &[(&str, &str)]) -> String {
-    let mut out = String::with_capacity(tmpl.len() + 32);
-    let mut rest = tmpl;
-    while let Some(open) = rest.find('{') {
-        out.push_str(&rest[..open]);
-        let after = &rest[open + 1..];
-        if let Some(close) = after.find('}') {
-            let key = &after[..close];
-            if let Some((_, val)) = fields.iter().find(|(k, _)| *k == key) {
-                out.push_str(val);
-                rest = &after[close + 1..];
-                continue;
-            }
-        }
-        // Not a closed, known placeholder — emit the literal '{' and move on.
-        out.push('{');
-        rest = after;
-    }
-    out.push_str(rest);
-    out
-}
 
 /// Format a unix timestamp for embedding in a notification template.
 fn fmt_notif_time(secs: i64) -> String {
@@ -27190,13 +27110,6 @@ fn fmt_notif_time(secs: i64) -> String {
         .unwrap_or_default()
 }
 
-/// Date only, spelled month ("1 Sep 2026"): a purely numeric date reads
-/// as a different day depending on the reader's country.
-fn fmt_mail_date(secs: i64) -> String {
-    chrono::DateTime::<chrono::Utc>::from_timestamp(secs, 0)
-        .map(|dt| dt.format("%-d %b %Y").to_string())
-        .unwrap_or_default()
-}
 
 /// Whole days left until `expires_at`, as a CALENDAR difference in UTC —
 /// the same calendar `fmt_mail_date` prints — never negative. Derived from
@@ -27240,6 +27153,7 @@ fn expiry_days_left(expires_at: i64, now: i64) -> i64 {
 /// are left verbatim rather than dropped — see `render_template`.
 #[allow(clippy::too_many_arguments)]
 fn expiry_warning_mail_with(
+    cat: &LetterCatalog,
     domain: &str,
     expires_at: i64,
     grace_days: i64,
@@ -27249,91 +27163,78 @@ fn expiry_warning_mail_with(
 ) -> (String, String) {
     let days_left = expiry_days_left(expires_at, now);
     let grace = grace_days.max(1);
-    let built_in_subject = if days_left == 0 {
-        format!("[Hyperion] Hosting for {domain} expires today")
-    } else {
-        format!(
-            "[Hyperion] Hosting for {domain} expires in {days_left} {}",
-            plural(days_left, "day", "days")
-        )
-    };
+    let days_unit = cat.plural("unit_day", days_left);
+    let grace_unit = cat.plural("unit_day", grace);
+    // Dates in the letter's own calendar words: `report_date` reads the
+    // month names out of the catalogue, so a Czech letter no longer names
+    // the month in English.
+    let exp_date = report_date(cat, expires_at);
+    let del_date = report_date(cat, expires_at + grace * 86_400);
+    let days_left_str = format!("{days_left} {days_unit}");
+    let grace_str = format!("{grace} {grace_unit}");
     let when = if days_left == 0 {
-        "expires today".to_string()
+        cat.get("expiry.when.today").to_string()
     } else {
-        format!(
-            "expires on {} — {days_left} {} left",
-            fmt_mail_date(expires_at),
-            plural(days_left, "day", "days")
-        )
-    };
-    let exp_date = fmt_mail_date(expires_at);
-    let del_date = fmt_mail_date(expires_at + grace * 86_400);
-    let grace_str = format!("{grace} {}", plural(grace, "day", "days"));
-    // The subject takes the same placeholders as the body, so an operator who
-    // translated the letter can translate the line the customer sees FIRST.
-    // Empty keeps the built-in English one, which is what every existing
-    // install has.
-    let subject = if subject_template.trim().is_empty() {
-        built_in_subject
-    } else {
-        render_template(
-            subject_template,
+        cat.render(
+            "expiry.when.days",
             &[
-                ("domain", domain),
-                ("expires_at", &exp_date),
-                (
-                    "days_left",
-                    &format!("{days_left} {}", plural(days_left, "day", "days")),
-                ),
-                ("grace_days", &grace_str),
-                ("delete_at", &del_date),
-                ("days_left_count", &days_left.to_string()),
-                ("grace_days_count", &grace.to_string()),
-                ("expires_at_iso", &iso_date(expires_at)),
-                ("delete_at_iso", &iso_date(expires_at + grace * 86_400)),
+                ("date", &exp_date),
+                ("days", &days_left.to_string()),
+                ("unit", days_unit),
             ],
         )
     };
-    if body_template.trim().is_empty() {
-        let body = format!(
-            "Hello,\n\n\
-             hosting for {domain} {when}.\n\n\
-             If it is not renewed before then:\n\
-             - on {exp_date} the hosting will be suspended and visitors will see an information page instead of the site,\n\
-             - after a grace period of {grace_str}, on {del_date}, the hosting and its data will be deleted.\n\n\
-             To renew, please get in touch.\n\n--\nHyperion\n",
-        );
-        return (subject, body);
-    }
-    let days_left_str = format!("{days_left} {}", plural(days_left, "day", "days"));
+    let days_left_count = days_left.to_string();
+    let grace_days_count = grace.to_string();
+    let exp_iso = iso_date(cat, expires_at);
+    let del_iso = iso_date(cat, expires_at + grace * 86_400);
     // Bare values beside the ready-made ones, for the same reason the care
     // report has them: `{days_left}` carries its own unit word, so a
     // translated letter writing "{days_left} dní" produced "5 days dní", and
-    // `{when}` is an entire English sentence that lands in the middle of a
-    // Czech paragraph. `{expires_at}` and `{delete_at}` spell the month in
-    // English; the ISO forms are digits, which every language can read.
-    let days_left_count = days_left.to_string();
-    let grace_days_count = grace.to_string();
-    let exp_iso = iso_date(expires_at);
-    let del_iso = iso_date(expires_at + grace * 86_400);
-    let body = render_template(
-        body_template,
-        &[
-            ("domain", domain),
-            ("expires_at", &exp_date),
-            ("days_left", &days_left_str),
-            // Already clamped with `.max(1)`, so the letter names the date
-            // the delete is really queued for.
-            ("grace_days", &grace_str),
-            ("delete_at", &del_date),
-            ("when", &when),
-            ("days_left_count", &days_left_count),
-            ("grace_days_count", &grace_days_count),
-            ("expires_at_iso", &exp_iso),
-            ("delete_at_iso", &del_iso),
-        ],
-    );
-    (subject, body)
+    // `{when}` is a whole sentence that lands in the middle of a paragraph.
+    // `{expires_at}` and `{delete_at}` spell the month; the ISO forms are
+    // digits, which every language can read.
+    let fields: Vec<(&str, &str)> = vec![
+        ("domain", domain),
+        ("expires_at", &exp_date),
+        ("days_left", &days_left_str),
+        // Already clamped with `.max(1)`, so the letter names the date the
+        // delete is really queued for.
+        ("grace_days", &grace_str),
+        ("delete_at", &del_date),
+        ("when", &when),
+        ("days_left_count", &days_left_count),
+        ("grace_days_count", &grace_days_count),
+        ("expires_at_iso", &exp_iso),
+        ("delete_at_iso", &del_iso),
+    ];
+    // The subject takes the same placeholders as the body, so an operator who
+    // translated the letter can translate the line the customer sees FIRST.
+    // Empty falls back to the catalogue's, which is already in the letter's
+    // language.
+    let subject = if subject_template.trim().is_empty() {
+        let id = if days_left == 0 {
+            "expiry.subject.today"
+        } else {
+            "expiry.subject.days"
+        };
+        cat.render(
+            id,
+            &[
+                ("domain", domain),
+                ("days", &days_left_count),
+                ("unit", days_unit),
+            ],
+        )
+    } else {
+        render_template(subject_template, &fields)
+    };
+    let template = if body_template.trim().is_empty() {
+        cat.get("expiry.body").to_string()
+    } else {
+        body_template.to_string()
+    };
+    (subject, render_template(&template, &fields))
 }
 
 /// Which of the two possible bodies a customer letter was rendered from,
@@ -27355,6 +27256,59 @@ fn letter_origin(template: &str) -> &'static str {
     } else {
         "operator (this node's agent.toml)"
     }
+}
+
+/// Read the letter language and per-string overrides from `[letters]` in
+/// agent.toml.
+///
+/// A missing file, section or key leaves the built-in English pack, so an
+/// install that has never touched Settings sends exactly the letters it
+/// always did. Unknown ids are DROPPED rather than kept: they can only come
+/// from a hand-edited file or a string this version has removed, and either
+/// way carrying them forward would put wording in a letter that nothing
+/// renders.
+fn read_letters_section(cfg_path: Option<&std::path::Path>) -> LetterCatalog {
+    let Some(path) = cfg_path else {
+        return LetterCatalog::default();
+    };
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return LetterCatalog::default();
+    };
+    letter_catalog_from_toml(&raw)
+}
+
+/// [`read_letters_section`] against an agent.toml already in memory.
+///
+/// The panel has the file open anyway (the Raw TOML tab), and building the
+/// catalogue from that same text is what lets the Settings preview render
+/// through the identical code path the mailer uses. A preview that agrees
+/// with the letter only most of the time is worse than none.
+pub fn letter_catalog_from_toml(raw: &str) -> LetterCatalog {
+    let Ok(doc) = raw.parse::<toml_edit::DocumentMut>() else {
+        return LetterCatalog::default();
+    };
+    let Some(section) = doc.get("letters").and_then(|s| s.as_table_like()) else {
+        return LetterCatalog::default();
+    };
+    let lang = section
+        .get("lang")
+        .and_then(|v| v.as_str())
+        .map(LetterLang::parse)
+        .unwrap_or_default();
+    let mut cat = LetterCatalog::new(lang);
+    for (key, item) in section.iter() {
+        if key == "lang" {
+            continue;
+        }
+        let Some(text) = item.as_str() else { continue };
+        if crate::letters::lookup(key).is_some() {
+            // A <textarea> submits CRLF per the HTML spec; left alone those
+            // would reach a plain-text mail body.
+            cat.overrides
+                .insert(key.to_string(), text.replace("\r\n", "\n"));
+        }
+    }
+    cat
 }
 
 /// Read the operator-editable `[notifications]` message templates from
@@ -27698,6 +27652,29 @@ fn parse_agent_section_fields(
                 // Left alone they would end up in a plain-text mail body and
                 // would stop a saved copy of the default letter from being
                 // byte-identical to the built-in one.
+                crate::config_persist::FieldValue::Str(v.replace("\r\n", "\n"))
+            }
+            // [letters] — the language pack and the per-string overrides.
+            // Every word the two customer letters can say is one of these,
+            // which is what makes "translate the whole thing" a thing an
+            // operator can do rather than a code change.
+            ("letters", "lang") => {
+                // Normalised rather than rejected: an unrecognised language
+                // resolves to English, and a customer's report going out in
+                // the wrong language beats one not going out at all.
+                crate::config_persist::FieldValue::Str(
+                    LetterLang::parse(v).as_str().to_string(),
+                )
+            }
+            // Only ids the catalogue actually has. An unknown one is either
+            // a hand-edited file or a string this version removed, and
+            // storing it would put wording in agent.toml that nothing reads.
+            ("letters", id) if crate::letters::lookup(id).is_some() => {
+                if v.len() > 20_000 {
+                    return Err(bad("letter string too long (max 20000 characters)".into()));
+                }
+                // A <textarea> submits CRLF line endings per the HTML spec.
+                // Left alone they would end up in a plain-text mail body.
                 crate::config_persist::FieldValue::Str(v.replace("\r\n", "\n"))
             }
             // Reject anything else.
@@ -29800,6 +29777,142 @@ impl Rollback for CertRowDelete {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A Czech report must contain no English at all.
+    ///
+    /// This is the test the whole catalogue exists for. Before it, six
+    /// placeholders expanded to English sections, the "not measured"
+    /// disclosure was appended in English no matter what, and the month
+    /// names came out of a Rust array — so a letter an operator had
+    /// carefully translated still reached their customer with English in
+    /// it. The check is deliberately crude (look for words that could only
+    /// come from the English pack) because a subtle check would not have
+    /// caught the bug it is here to prevent.
+    #[test]
+    fn a_czech_letter_carries_no_english() {
+        let cs = LetterCatalog::new(LetterLang::Cs);
+        let from = 1_780_272_000;
+        let to = from + 30 * 86_400;
+        // Every section MEASURED, so every "some" branch renders...
+        let measured = CareReport {
+            attacks_blocked: Some(12),
+            updates_applied: Some(3),
+            usage: Some(CareUsage {
+                bw_in_bytes: Some(2_000_000),
+                bw_out_bytes: 34_500_000,
+                requests: 12_345,
+                disk_peak_bytes: 1_200_000_000,
+                days_counted: 20,
+                days_in_period: 30,
+            }),
+            uptime: Some(CareUptime {
+                samples: 100,
+                successes: 97,
+                days_counted: 20,
+                days_in_period: 30,
+            }),
+            backups: Some(CareBackups {
+                taken: 30,
+                failed: 1,
+                last_success_at: Some(to - 3600),
+            }),
+            integrity: Some(CareIntegrity {
+                scanned_at: to - 3600,
+                checksums_ran: true,
+                malware_scan_ran: false,
+                core_issues: 2,
+                plugin_issues: 1,
+                malware_hits: 1,
+            }),
+            ..CareReport::empty(HostingId("t".into()), "example.cz".into(), from, to)
+        };
+        // ...and once more with everything UNMEASURED, so does every
+        // "not monitored" branch plus the appended disclosure.
+        let unmeasured = CareReport::empty(HostingId("t".into()), "example.cz".into(), from, to);
+        for r in [&measured, &unmeasured] {
+            let (subject, body) = care_report_render_with(&cs, r, "example.cz", "");
+            let whole = format!("{subject}\n{body}");
+            for english in [
+                "CARE REPORT",
+                "Site:",
+                "Period:",
+                "ATTACKS",
+                "UPDATES",
+                "TRAFFIC",
+                "AVAILABILITY",
+                "BACKUPS",
+                "FILE INTEGRITY",
+                "not monitored",
+                "not measured",
+                "NOT MEASURED",
+                "days",
+                "checks",
+                "requests",
+                "copies",
+                "findings",
+                "Jun",
+                "care plan",
+            ] {
+                assert!(
+                    !whole.contains(english),
+                    "Czech letter still contains {english:?}:\n{whole}"
+                );
+            }
+        }
+    }
+
+    /// The disclosure that gets bolted onto a custom letter follows the
+    /// language too — it used to arrive in English on top of Czech prose.
+    #[test]
+    fn the_unmeasured_disclosure_is_translated() {
+        let cs = LetterCatalog::new(LetterLang::Cs);
+        let from = 1_780_272_000;
+        let r = CareReport::empty(HostingId("t".into()), "example.cz".into(), from, from + 86_400);
+        // A letter that mentions no section at all, so all six are omitted.
+        let (_, body) = care_report_render_with(&cs, &r, "example.cz", "Dobrý den. {domain}");
+        assert!(body.starts_with("Dobrý den. example.cz"), "{body}");
+        assert!(body.contains("V TOMTO OBDOBÍ NEMĚŘENO"), "{body}");
+        assert!(body.contains("dostupnost"), "{body}");
+        assert!(!body.contains("NOT MEASURED"), "{body}");
+    }
+
+    /// The Czech pack must not be reachable by accident: an install that
+    /// has never touched Settings sends exactly the letter it always did.
+    #[test]
+    fn the_english_default_letter_is_unchanged() {
+        assert_eq!(
+            en().get("care.body"),
+            hyperion_types::CARE_REPORT_DEFAULT_BODY_TEMPLATE,
+            "the catalogue's English letter drifted from the constant the panel shows"
+        );
+        assert_eq!(
+            en().get("expiry.body"),
+            hyperion_types::EXPIRY_WARNING_DEFAULT_BODY_TEMPLATE,
+            "the catalogue's English expiry letter drifted from the constant the panel shows"
+        );
+    }
+
+    /// Czech numbers and dates, which are as much a translation as the
+    /// words: "34,500" reads as thirty-four and a half to a Czech customer.
+    #[test]
+    fn czech_numbers_and_dates() {
+        let cs = LetterCatalog::new(LetterLang::Cs);
+        let from = 1_780_272_000; // 2026-06-01
+        let r = CareReport {
+            attacks_blocked: Some(12_345),
+            ..CareReport::empty(HostingId("t".into()), "example.cz".into(), from, from + 86_400)
+        };
+        let (_, body) = care_report_render_with(&cs, &r, "example.cz", "{attacks_count} {period_start}");
+        assert!(body.starts_with("12 345 1. čvn 2026"), "{body}");
+    }
+
+    /// The English pack, unmodified — what every install has until an
+    /// operator picks another language, and therefore what these tests
+    /// pin the built-in letters to.
+    fn en() -> LetterCatalog {
+        LetterCatalog::new(LetterLang::En)
+    }
+
     use crate::SecretsStore;
     use hyperion_state::db::open_memory;
     use hyperion_types::{CertInfo, DbProvision};
@@ -30644,8 +30757,8 @@ mod tests {
             assert_eq!(letter_origin(blank), "built-in", "{blank:?}");
             // Same input, same verdict from the renderer: blank ⇒ built-in.
             assert_eq!(
-                care_report_render_with(&r, &r.domain, blank).1,
-                care_report_render_with(&r, &r.domain, "").1,
+                care_report_render_with(&en(), &r, &r.domain, blank).1,
+                care_report_render_with(&en(), &r, &r.domain, "").1,
                 "{blank:?}"
             );
         }
@@ -31549,7 +31662,7 @@ mod tests {
     #[test]
     fn expiry_warning_30d_states_domain_date_days_and_consequences() {
         let (subject, body) =
-            expiry_warning_mail_with("example.cz", EXP_TS, 14, EXP_TS - 30 * 86_400, "", "");
+            expiry_warning_mail_with(&en(), "example.cz", EXP_TS, 14, EXP_TS - 30 * 86_400, "", "");
         assert_eq!(
             subject,
             "[Hyperion] Hosting for example.cz expires in 30 days"
@@ -31563,7 +31676,7 @@ mod tests {
     #[test]
     fn expiry_warning_7d_variant() {
         let (subject, body) =
-            expiry_warning_mail_with("example.cz", EXP_TS, 14, EXP_TS - 7 * 86_400, "", "");
+            expiry_warning_mail_with(&en(), "example.cz", EXP_TS, 14, EXP_TS - 7 * 86_400, "", "");
         assert_eq!(
             subject,
             "[Hyperion] Hosting for example.cz expires in 7 days"
@@ -31574,7 +31687,7 @@ mod tests {
     #[test]
     fn expiry_warning_1d_variant_is_singular() {
         let (subject, body) =
-            expiry_warning_mail_with("example.cz", EXP_TS, 14, EXP_TS - 86_400, "", "");
+            expiry_warning_mail_with(&en(), "example.cz", EXP_TS, 14, EXP_TS - 86_400, "", "");
         assert_eq!(
             subject,
             "[Hyperion] Hosting for example.cz expires in 1 day"
@@ -31584,12 +31697,12 @@ mod tests {
 
     #[test]
     fn expiry_warning_on_the_day_says_today() {
-        let (subject, body) = expiry_warning_mail_with("example.cz", EXP_TS, 14, EXP_TS, "", "");
+        let (subject, body) = expiry_warning_mail_with(&en(), "example.cz", EXP_TS, 14, EXP_TS, "", "");
         assert_eq!(subject, "[Hyperion] Hosting for example.cz expires today");
         assert!(body.contains("hosting for example.cz expires today."));
         // A late tick can't produce a negative countdown.
         let (late, _) =
-            expiry_warning_mail_with("example.cz", EXP_TS, 14, EXP_TS + 3 * 86_400, "", "");
+            expiry_warning_mail_with(&en(), "example.cz", EXP_TS, 14, EXP_TS + 3 * 86_400, "", "");
         assert_eq!(late, "[Hyperion] Hosting for example.cz expires today");
     }
 
@@ -31598,10 +31711,10 @@ mod tests {
         // grace_days = 0 is stored, but reconcile_scheduled_rows queues the
         // delete at grace.max(1) — the letter must name that same date, and
         // say "1 day" rather than "1 days".
-        let (_, body) = expiry_warning_mail_with("example.cz", EXP_TS, 0, EXP_TS - 86_400, "", "");
+        let (_, body) = expiry_warning_mail_with(&en(), "example.cz", EXP_TS, 0, EXP_TS - 86_400, "", "");
         assert!(body.contains("after a grace period of 1 day, on 2 Sep 2026"));
         let (_, body) =
-            expiry_warning_mail_with("example.cz", EXP_TS, 3, EXP_TS - 2 * 86_400, "", "");
+            expiry_warning_mail_with(&en(), "example.cz", EXP_TS, 3, EXP_TS - 2 * 86_400, "", "");
         assert!(body.contains("2 days left."));
         assert!(body.contains("after a grace period of 3 days, on 4 Sep 2026"));
     }
@@ -31665,13 +31778,13 @@ mod tests {
     #[test]
     fn care_letter_empty_template_is_todays_letter() {
         let r = mk_care_report();
-        let (subject, body) = care_report_render(&r, "example.cz");
+        let (subject, body) = care_report_render(&en(), &r, "example.cz");
         // Explicit "" and whitespace-only both mean "built-in letter".
         assert_eq!(
-            care_report_render_with(&r, "example.cz", ""),
+            care_report_render_with(&en(), &r, "example.cz", ""),
             (subject.clone(), body.clone())
         );
-        assert_eq!(care_report_render_with(&r, "example.cz", "  \n\t ").1, body);
+        assert_eq!(care_report_render_with(&en(), &r, "example.cz", "  \n\t ").1, body);
         // …and today's letter is still exactly this.
         assert_eq!(
             subject,
@@ -31704,8 +31817,8 @@ mod tests {
                 CARE_TO,
             )
         }] {
-            let (_, builtin) = care_report_render(&r, &r.domain);
-            let (_, templated) = care_report_render_with(
+            let (_, builtin) = care_report_render(&en(), &r, &r.domain);
+            let (_, templated) = care_report_render_with(&en(), 
                 &r,
                 &r.domain,
                 hyperion_types::CARE_REPORT_DEFAULT_BODY_TEMPLATE,
@@ -31784,7 +31897,7 @@ mod tests {
     #[test]
     fn a_custom_letter_cannot_drop_an_unmeasured_section() {
         let r = mk_care_report(); // uptime is None
-        let (_, body) = care_report_render_with(&r, "example.cz", "{domain}\n{attacks}\n{traffic}");
+        let (_, body) = care_report_render_with(&en(), &r, "example.cz", "{domain}\n{attacks}\n{traffic}");
         assert!(
             !body.contains("AVAILABILITY:"),
             "operator did drop it: {body}"
@@ -31796,13 +31909,13 @@ mod tests {
 
         // Keeping the placeholder is the normal case, and must not produce
         // a second copy of the same disclosure.
-        let (_, kept) = care_report_render_with(&r, "example.cz", "{domain}\n{uptime}");
+        let (_, kept) = care_report_render_with(&en(), &r, "example.cz", "{domain}\n{uptime}");
         assert!(kept.contains("AVAILABILITY: not monitored"));
         assert!(!kept.contains("NOT MEASURED THIS PERIOD"), "{kept}");
 
         // Dropping a MEASURED section stays the operator's call — a
         // shorter letter is still a true one.
-        let (_, short) = care_report_render_with(&r, "example.cz", "{domain}\n{uptime}");
+        let (_, short) = care_report_render_with(&en(), &r, "example.cz", "{domain}\n{uptime}");
         assert!(!short.contains("ATTACKS BLOCKED"), "{short}");
         assert!(!short.contains("NOT MEASURED THIS PERIOD"), "{short}");
     }
@@ -31929,21 +32042,21 @@ mod tests {
         // 15 Jun, inside the 1–30 Jun fixture period.
         let since = CARE_FROM + 14 * 86_400;
 
-        let quiet = care_section_attacks(Some(0), Some(since));
+        let quiet = care_section_attacks(&en(), Some(0), Some(since));
         assert!(quiet.contains("since 15 Jun 2026"), "{quiet}");
         assert!(
             !quiet.contains("Protection ran for the whole period"),
             "a zero from half a period must not claim the period: {quiet}"
         );
 
-        let busy = care_section_attacks(Some(4), Some(since));
+        let busy = care_section_attacks(&en(), Some(4), Some(since));
         assert!(
             busy.contains("ATTACKS BLOCKED: 4 (since 15 Jun 2026)"),
             "{busy}"
         );
 
         // Full coverage keeps the original, unqualified wording.
-        let full = care_section_attacks(Some(0), None);
+        let full = care_section_attacks(&en(), Some(0), None);
         assert!(
             full.contains("Protection ran for the whole period"),
             "{full}"
@@ -31957,7 +32070,7 @@ mod tests {
     /// already drifted.
     #[test]
     fn the_settings_preview_sample_comes_from_the_real_renderer() {
-        let fields = care_report_preview_fields();
+        let fields = care_report_preview_fields(&en());
         let get = |k: &str| {
             fields
                 .iter()
@@ -31966,11 +32079,11 @@ mod tests {
                 .unwrap_or_default()
         };
         // Availability is deliberately the unmeasured one.
-        assert_eq!(get("uptime"), care_section_uptime(None));
+        assert_eq!(get("uptime"), care_section_uptime(&en(), None));
         assert!(get("uptime").contains("AVAILABILITY: not monitored"));
         // And the measured sections are byte-identical to the letter's.
-        assert_eq!(get("attacks"), care_section_attacks(Some(12), None));
-        assert_eq!(get("updates"), care_section_updates(Some(3)));
+        assert_eq!(get("attacks"), care_section_attacks(&en(), Some(12), None));
+        assert_eq!(get("updates"), care_section_updates(&en(), Some(3)));
         // Every placeholder the docs promise has a sample.
         for k in [
             "domain",
@@ -31991,7 +32104,7 @@ mod tests {
     #[test]
     fn care_letter_custom_template_keeps_an_unmeasured_section_honest() {
         let r = mk_care_report(); // uptime is None
-        let (subject, body) = care_report_render_with(
+        let (subject, body) = care_report_render_with(&en(), 
             &r,
             "example.cz",
             "{domain} {period_start}–{period_end} ({days})\n{uptime}\n{attacks}",
@@ -32015,7 +32128,7 @@ mod tests {
     #[test]
     fn care_letter_unknown_placeholder_is_left_literal() {
         let r = mk_care_report();
-        let (_, body) = care_report_render_with(&r, "example.cz", "{domain} {nope} {unclosed");
+        let (_, body) = care_report_render_with(&en(), &r, "example.cz", "{domain} {nope} {unclosed");
         // `starts_with`, not `==`: this letter names no section at all, so
         // the unmeasured-section disclosure is appended after it. That is
         // `a_custom_letter_cannot_drop_an_unmeasured_section`'s business;
@@ -32038,7 +32151,7 @@ mod tests {
             r.uptime.as_ref().map(|u| u.samples).unwrap_or(0) == 0,
             "this fixture is the unmonitored one"
         );
-        let (_, body) = care_report_render_with(&r, "example.cz", "{uptime_pct}");
+        let (_, body) = care_report_render_with(&en(), &r, "example.cz", "{uptime_pct}");
         assert!(
             body.starts_with('—'),
             "an unmonitored site must not yield a percentage: {body}"
@@ -32054,8 +32167,8 @@ mod tests {
             (0, EXP_TS - 86_400),
             (14, EXP_TS), // "expires today"
         ] {
-            let (_, builtin) = expiry_warning_mail_with("example.cz", EXP_TS, grace, now, "", "");
-            let (_, templated) = expiry_warning_mail_with(
+            let (_, builtin) = expiry_warning_mail_with(&en(), "example.cz", EXP_TS, grace, now, "", "");
+            let (_, templated) = expiry_warning_mail_with(&en(), 
                 "example.cz",
                 EXP_TS,
                 grace,
@@ -32076,7 +32189,7 @@ mod tests {
     #[test]
     fn value_placeholders_carry_no_english() {
         let fields: std::collections::BTreeMap<&str, String> =
-            care_report_preview_fields().into_iter().collect();
+            care_report_preview_fields(&en()).into_iter().collect();
         // Digits only. A word here is English leaking into somebody's letter.
         for key in [
             "attacks_count",
@@ -32097,9 +32210,14 @@ mod tests {
                  wording around it"
             );
         }
-        // Byte sizes carry a UNIT, and a unit is not a language: "32.9 MiB"
+        // Byte sizes carry a UNIT, and a unit is not a language: "34.5 MB"
         // reads the same in Czech. What they must not carry is prose, so the
         // rule is "a number and a unit symbol", not "no letters at all".
+        //
+        // SI steps, not binary ones: these are the same figures the
+        // `{traffic}` section quotes, and one measurement printed in MiB in
+        // one placeholder and MB in the paragraph beside it is two different
+        // numbers for one fact in one letter.
         for key in ["traffic_sent", "traffic_received", "disk_peak"] {
             let v = fields.get(key).unwrap_or_else(|| panic!("missing {key}"));
             let words: Vec<&str> = v.split_whitespace().collect();
@@ -32109,7 +32227,7 @@ mod tests {
             );
             if let Some(unit) = words.get(1) {
                 assert!(
-                    matches!(*unit, "B" | "KiB" | "MiB" | "GiB" | "TiB"),
+                    matches!(*unit, "B" | "kB" | "MB" | "GB"),
                     "{key} = {v:?} — {unit:?} is not a byte unit"
                 );
             }
@@ -32135,7 +32253,7 @@ mod tests {
             backups: None,
             integrity: None,
         };
-        let (_, _, fields) = care_report_parts(&report, "example.cz");
+        let (_, _, fields) = care_report_parts(&en(), &report, "example.cz");
         let map: std::collections::BTreeMap<&str, String> = fields.into_iter().collect();
         for key in [
             "attacks_count",
@@ -32154,7 +32272,7 @@ mod tests {
 
     #[test]
     fn expiry_letter_custom_template_substitutes_and_preserves_unknowns() {
-        let (subject, body) = expiry_warning_mail_with(
+        let (subject, body) = expiry_warning_mail_with(&en(), 
             "example.cz",
             EXP_TS,
             14,

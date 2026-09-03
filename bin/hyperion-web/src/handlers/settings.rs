@@ -108,8 +108,16 @@ struct SettingsTpl<'a> {
     /// the same constants a hyperion-core test pins to the built-in
     /// wording — so the editor can never show a "default" the mailer
     /// doesn't actually send.
-    care_report_default_template: &'static str,
-    expiry_warning_default_template: &'static str,
+    /// Language-aware: with `[letters] lang = "cs"` these are the CZECH
+    /// built-ins, so "start from the built-in letter" hands the operator
+    /// the letter their customers are actually receiving rather than an
+    /// English one they would have to translate a second time.
+    care_report_default_template: String,
+    expiry_warning_default_template: String,
+    /// `[letters] lang` as stored — which built-in pack the letters use.
+    letter_lang: String,
+    /// Every translatable string, grouped for the editor.
+    letter_groups: Vec<LetterGroupCard>,
     /// One row per enrolled node: which customer letters that node would
     /// actually send right now. Empty on a single-node install (nothing can
     /// diverge) — see [`letter_node_rows`] for why the card shows this at
@@ -124,6 +132,30 @@ struct SettingsTpl<'a> {
     /// already drifted from the mailer — an operator adjusting wording
     /// around a sentence was editing text nobody receives.
     care_preview_json: String,
+}
+
+/// One card in the letter-wording editor: a group of strings that belong
+/// to the same part of a letter.
+pub struct LetterGroupCard {
+    pub name: String,
+    pub strings: Vec<LetterStringRow>,
+}
+
+/// One translatable string, as the editor needs it.
+///
+/// `built_in` is shown as the field's placeholder rather than its value, so
+/// an untouched string stays EMPTY in the form and therefore empty in
+/// agent.toml. That is what keeps "I have not customised this" different
+/// from "I have pinned this to today's wording": the first follows the
+/// built-in pack when it improves, the second does not.
+pub struct LetterStringRow {
+    pub id: String,
+    pub note: String,
+    pub built_in: String,
+    pub current: String,
+    /// Multi-line strings get a <textarea>, one-liners an <input>. Purely
+    /// a matter of the editor not being painful to use.
+    pub multiline: bool,
 }
 
 /// What one node currently holds for the two CUSTOMER letters, compared
@@ -761,6 +793,13 @@ pub async fn get_settings(
         Ok(s) => mask_secrets_in_toml(s),
         Err(e) => format!("(could not read /etc/hyperion/agent.toml: {e})"),
     };
+    // The letter language + every per-string override, built from the SAME
+    // file the mailer reads. An unreadable agent.toml leaves the English
+    // pack, which is what a fresh install has.
+    let letter_cat = agent_toml
+        .as_deref()
+        .map(hyperion_core::service::letter_catalog_from_toml)
+        .unwrap_or_default();
     let update_current_short = short_sha(&update_status.current_sha);
     let update_latest_short = short_sha(&update_status.latest_sha);
     // Per-test-node wildcard rows: a `*.<base>` cert issued once covers
@@ -927,12 +966,14 @@ pub async fn get_settings(
         api_keys,
         can_manage_api_keys,
         new_api_key: new_api_key.clone(),
-        care_report_default_template: hyperion_types::CARE_REPORT_DEFAULT_BODY_TEMPLATE,
-        expiry_warning_default_template: hyperion_types::EXPIRY_WARNING_DEFAULT_BODY_TEMPLATE,
+        care_report_default_template: letter_cat.get("care.body").to_string(),
+        expiry_warning_default_template: letter_cat.get("expiry.body").to_string(),
+        letter_lang: letter_cat.lang.as_str().to_string(),
+        letter_groups: letter_group_cards(&letter_cat),
         letter_nodes,
         care_preview_json: {
             let map: std::collections::BTreeMap<&str, String> =
-                hyperion_core::service::care_report_preview_fields()
+                hyperion_core::service::care_report_preview_fields(&letter_cat)
                     .into_iter()
                     .collect();
             // A failure here would only mean the preview has no sample, so
@@ -1402,7 +1443,8 @@ pub async fn post_config(
     // `[notifications]` holds the two CUSTOMER letters, and those are read on
     // the node that OWNS each hosting — not here. Keep a copy of the fields
     // so the same text can go to every node once the master's write lands.
-    let notification_fields = (form.section == "notifications").then(|| fields.clone());
+    let notification_fields = matches!(form.section.as_str(), "notifications" | "letters")
+        .then(|| (form.section.clone(), fields.clone()));
     let resp = hyperion_rpc_client::call(
         &state.agent_socket,
         Request::AgentConfigUpdate {
@@ -1463,7 +1505,7 @@ pub async fn post_config(
             // success banner: the operator has just edited what their
             // customers read, and "saved" would be a lie for that node's.
             match notification_fields {
-                Some(f) => match propagate_notifications(&state, f).await {
+                Some((sect, f)) => match propagate_notifications(&state, &sect, f).await {
                     Ok(0) => format!(
                         "/settings?flash=Section+%5B{}%5D+saved+%E2%80%94+hyperion-agent+restarting+%28~5s%29#{}",
                         urlencode(&form.section),
@@ -1535,6 +1577,7 @@ pub async fn post_config(
 /// lists, per node, what went wrong, in words the operator can act on.
 async fn propagate_notifications(
     state: &SharedState,
+    section: &str,
     fields: std::collections::BTreeMap<String, String>,
 ) -> Result<usize, Vec<String>> {
     let nodes: Vec<hyperion_types::NodeSummary> =
@@ -1556,6 +1599,7 @@ async fn propagate_notifications(
     for n in nodes {
         let st = state.clone();
         let f = fields.clone();
+        let sect = section.to_string();
         let node_id = n.node_id.clone();
         let label = if n.label.trim().is_empty() {
             n.node_id.clone()
@@ -1567,7 +1611,7 @@ async fn propagate_notifications(
                 &st,
                 Some(node_id.as_str()),
                 Request::AgentConfigUpdate {
-                    section: "notifications".to_string(),
+                    section: sect.to_string(),
                     fields: f.into(),
                 },
             )
@@ -1619,6 +1663,8 @@ fn section_to_tab(section: &str) -> &'static str {
         // the Notifications tab and write `[notifications]`. Without this
         // the save bounced the operator to Mail mid-edit.
         "notifications" => "notifications",
+        // Every word the customer letters can say — same tab.
+        "letters" => "notifications",
         "backup_remote" | "backup_retention" => "backups",
         // [cluster] fields are now split across two tabs: the Security card
         // (2FA + hardening flags) lives on General, Cluster placement on
@@ -2382,6 +2428,33 @@ pub async fn post_node_wildcard_finish(
     }
 }
 
+/// Group every catalogue string for the editor, in table order.
+///
+/// The operator sees the built-in wording as a PLACEHOLDER and their own as
+/// the value, which is the same empty-means-default contract the two letter
+/// bodies already use — and the reason clearing a field is how you go back.
+fn letter_group_cards(cat: &hyperion_core::letters::LetterCatalog) -> Vec<LetterGroupCard> {
+    hyperion_core::letters::groups()
+        .into_iter()
+        .map(|g| LetterGroupCard {
+            name: g.to_string(),
+            strings: hyperion_core::letters::STRINGS
+                .iter()
+                .filter(|s| s.group == g)
+                .map(|s| {
+                    let built_in = s.built_in(cat.lang);
+                    LetterStringRow {
+                        id: s.id.to_string(),
+                        note: s.note.to_string(),
+                        built_in: built_in.to_string(),
+                        current: cat.overrides.get(s.id).cloned().unwrap_or_default(),
+                        multiline: built_in.contains('\n') || built_in.len() > 60,
+                    }
+                })
+                .collect(),
+        })
+        .collect()
+}
 #[cfg(test)]
 mod tests {
     use super::{letter_verdict, mask_secrets_in_toml, synthesize_unchecked_checkboxes};
