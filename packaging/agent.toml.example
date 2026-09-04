@@ -140,9 +140,9 @@ mail_threshold = 8    # postfix/dovecot SASL auth failures
 #   email_subject_template = "{subject}"   # {subject} {time}
 #   email_body_template    = "{body}"      # {body} {time} {panel} {kind}
 #
-# The last two are whole letters to the CUSTOMER, and default to EMPTY,
-# which means "send the built-in letter". Only the body is editable; the
-# subject stays as Hyperion writes it.
+# The last four are the two whole letters to the CUSTOMER — subject and
+# body each — and default to EMPTY, which means "send the built-in letter"
+# in the language chosen under [letters] below.
 #
 #   care_report_body_template
 #     {domain} {period_start} {period_end} {days}
@@ -150,9 +150,12 @@ mail_threshold = 8    # postfix/dovecot SASL auth failures
 #
 #     The six section placeholders carry the WHOLE rendered section,
 #     already worded — including "not monitored" / "not determined" /
-#     "not checked" when that section could not be measured. There is
-#     deliberately no placeholder for the bare number behind a section, so
-#     no wording can promote something we never measured into a figure.
+#     "not checked" when that section could not be measured. Beside them
+#     are bare values ({attacks_count}, {uptime_pct}, {traffic_sent},
+#     {days_count}, {period_start_iso} …) which carry the measurement and
+#     no wording at all, for a letter written from scratch. A value that
+#     was never measured prints an em dash, never a zero: no wording can
+#     promote something we did not measure into a figure.
 #
 #   expiry_warning_body_template
 #     {domain} {expires_at} {days_left} {grace_days} {delete_at} {when}
@@ -171,6 +174,31 @@ mail_threshold = 8    # postfix/dovecot SASL auth failures
 #
 # {uptime}
 # """
+
+# ─── Customer letter language and wording ──────────────────────────────────
+#
+# Every sentence the two customer letters can say lives here, so a letter can
+# be translated COMPLETELY rather than around the edges. `lang` picks a
+# built-in pack — "en" or "cs" — and that alone changes the headings, the
+# month names, the thousands separator ("34,500" vs "34 500"), the decimal
+# comma and the plural endings (Czech needs three: 1 den / 2 dny / 5 dní).
+#
+# Every other key is one string, keyed by its id, and overrides that pack.
+# Missing or empty means "use the pack's wording", so a file with only
+# `lang` in it is a fully translated letter. Edit them in the panel under
+# Settings -> Notifications -> Letter language and wording, which lists them
+# grouped with the built-in text shown in each field.
+#
+# WHICH wording is used is never yours to change — that is decided from what
+# was actually measured. You can make the letter say "nesledováno" instead of
+# "not monitored"; you cannot make it say a percentage for a site nobody was
+# watching. That is the property the whole report is built on.
+#
+# [letters]
+# lang = "cs"
+# "care.attacks.some" = """ZABLOKOVANÉ ÚTOKY: {count}
+#   Tolikrát jsme odstřihli adresu, která se opakovaně pokoušela..."""
+# "unit_day" = "den|dny|dní"
 
 # ─── Permission self-repair ────────────────────────────────────────────────
 #

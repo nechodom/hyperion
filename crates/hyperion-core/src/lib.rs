@@ -19,6 +19,7 @@
 
 pub mod agent;
 pub mod config_persist;
+pub mod letters;
 pub mod master_rpc;
 pub mod node_rpc;
 pub mod panel_import;
