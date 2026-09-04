@@ -118,8 +118,13 @@ pub async fn get_care_panel(
         }
         rows = kept;
         // A tenant cannot act on another node's outage, and naming nodes to
-        // them leaks the cluster's shape.
-        unreachable.clear();
+        // them leaks the cluster's shape — but the FACT that the list is
+        // incomplete is theirs to know. Clearing it outright turned "we
+        // could not ask the node holding your sites" into "everything is
+        // checked", which is the one direction this card must never fail in.
+        if !unreachable.is_empty() {
+            unreachable = vec!["a server that could not be reached".to_string()];
+        }
     }
 
     // Same order every node's answer already used, re-applied across the

@@ -46,7 +46,14 @@
     <div class="row" style="gap:1.2rem;flex-wrap:wrap;margin:0 0 0.6rem">
       <span class="text-soft small">{{ r.pages_ok() }} of {{ r.pages.len() }} pages answered</span>
       <span class="text-soft small">{{ r.links_checked }} links &amp; images checked</span>
-      <span class="text-soft small">typical {{ r.median_ttfb_ms() }} ms · slowest {{ r.slowest_ttfb_ms() }} ms</span>
+      {#- Timings only when something actually answered. With every page
+          failed the medians are 0, and "typical 0 ms" reads as a blisteringly
+          fast site rather than as one that is down. -#}
+      {% if r.pages_ok() > 0 %}
+        <span class="text-soft small">typical {{ r.median_ttfb_ms() }} ms · slowest {{ r.slowest_ttfb_ms() }} ms</span>
+      {% else %}
+        <span class="text-soft small">no timings — nothing answered</span>
+      {% endif %}
       <span class="text-soft small">found via {{ r.discovery }}</span>
     </div>
 

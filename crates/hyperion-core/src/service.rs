@@ -8111,7 +8111,16 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             if !f.is_ok() || f.body.trim().is_empty() {
                 continue;
             }
-            let locs = sitecheck::sitemap_locs(&f.body);
+            // A sitemap is a list of URLs the SITE supplies, so it is exactly
+            // as trustworthy as a link on a page — which is to say, it goes
+            // through the same same-site test. Without it a tenant lists
+            // `http://169.254.169.254/` in their own sitemap and the crawler
+            // fetches it from inside the node.
+            let same_site = |raw: &str| sitecheck::resolve_url(raw, base, domain);
+            let locs: Vec<String> = sitecheck::sitemap_locs(&f.body)
+                .iter()
+                .filter_map(|u| same_site(u))
+                .collect();
             if locs.is_empty() {
                 continue;
             }
@@ -8124,7 +8133,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 let Ok(cf) = sitecheck::fetch(&child, domain, LOOPBACK, true).await else {
                     continue;
                 };
-                let child_locs = sitecheck::sitemap_locs(&cf.body);
+                let child_locs: Vec<String> = sitecheck::sitemap_locs(&cf.body)
+                    .iter()
+                    .filter_map(|u| same_site(u))
+                    .collect();
                 if cf.is_ok() && !child_locs.is_empty() {
                     return child_locs;
                 }

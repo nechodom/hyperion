@@ -225,11 +225,37 @@ pub async fn mu_plugin_state(root_dir: &str, expected: &str) -> MuState {
     if !tokio::fs::try_exists(&wp_content).await.unwrap_or(false) {
         return MuState::NotWordPress;
     }
-    match tokio::fs::read_to_string(mu_plugin_path(root_dir)).await {
+    // A symlink here reads as `Stale`, which sends the caller to
+    // `install_mu_plugin` — where the link is removed and a real file put in
+    // its place. Reading THROUGH it would compare some unrelated file to our
+    // template and, worse, invite the write that follows.
+    let Ok(path) =
+        resolve_in_site(root_dir, &format!("wp-content/mu-plugins/{MU_PLUGIN_FILE}")).await
+    else {
+        return MuState::Stale;
+    };
+    match tokio::fs::read_to_string(path).await {
         Ok(found) if found == expected => MuState::Current,
         Ok(_) => MuState::Stale,
         Err(_) => MuState::Missing,
     }
+}
+
+/// Resolve a path inside the site, refusing to follow a symlink at ANY
+/// segment.
+///
+/// This is the whole security story of this module. Every path here lives in
+/// a tree the tenant can write, and everything below runs as ROOT. Without
+/// this check a tenant replaces `wp-content/mu-plugins` with a symlink to
+/// `/etc` and gets three things for free: root writing a file there, root
+/// creating directories under it, and — the one that ends the argument —
+/// `chown` following the link and handing them ownership of `/etc`.
+///
+/// `resolve_inside_jail` already refuses a symlink at any segment and pins
+/// the result inside the jail; reusing it means this module cannot drift
+/// from the file manager's rules.
+async fn resolve_in_site(root_dir: &str, rel: &str) -> Result<PathBuf, AdapterError> {
+    crate::files::resolve_inside_jail(Path::new(root_dir), rel).await
 }
 
 /// Write (or rewrite) the plugin, owned by the site user.
@@ -242,24 +268,46 @@ pub async fn install_mu_plugin(
     system_user: &str,
     contents: &str,
 ) -> Result<bool, AdapterError> {
-    let mu_dir = Path::new(root_dir).join("wp-content").join("mu-plugins");
     if !tokio::fs::try_exists(Path::new(root_dir).join("wp-content"))
         .await
         .unwrap_or(false)
     {
         return Ok(false);
     }
+    // Refuses a symlinked `wp-content` or `mu-plugins`; falls back to the
+    // logical path when `mu-plugins` simply does not exist yet, which is the
+    // ordinary case on a site that has never had one.
+    let mu_dir = resolve_in_site(root_dir, "wp-content/mu-plugins").await?;
     tokio::fs::create_dir_all(&mu_dir)
         .await
         .map_err(|e| AdapterError::Other(format!("create {}: {e}", mu_dir.display())))?;
-    let path = mu_dir.join(MU_PLUGIN_FILE);
+    // Clear a symlink sitting on the NAME before resolving, not after: the
+    // resolver refuses a symlinked final segment, so leaving one there would
+    // wedge the feature for that site for ever — a tenant could opt out of
+    // having their sender pinned by planting one link. The name belongs to
+    // this module, and `remove_file` unlinks the link rather than its target,
+    // so clearing it is safe. `mu_dir` is already a resolved real directory
+    // inside the site, so this join cannot escape.
+    let logical = mu_dir.join(MU_PLUGIN_FILE);
+    if let Ok(md) = tokio::fs::symlink_metadata(&logical).await {
+        if md.file_type().is_symlink() {
+            let _ = tokio::fs::remove_file(&logical).await;
+        }
+    }
+    let path =
+        resolve_in_site(root_dir, &format!("wp-content/mu-plugins/{MU_PLUGIN_FILE}")).await?;
     tokio::fs::write(&path, contents)
         .await
         .map_err(|e| AdapterError::Other(format!("write {}: {e}", path.display())))?;
     // PHP runs as the site user and nginx as another, so the tree needs
     // world-read to be served and the file needs to belong to the site so
     // its owner can see (and, if they insist, delete) it.
+    //
+    // `-h` because chown FOLLOWS a symlink by default: without it, a link
+    // planted between the resolve above and this call would hand the target
+    // to the tenant. The paths are already checked; this closes the race.
     let _ = tokio::process::Command::new("/usr/bin/chown")
+        .arg("-h")
         .arg(format!("{system_user}:{system_user}"))
         .arg(&mu_dir)
         .arg(&path)
@@ -279,7 +327,15 @@ pub async fn remove_mu_plugin(root_dir: &str) {
 /// Reads at most the tail of the file: the plugin caps it, but a site that
 /// has been failing for a month should not be able to make this allocate.
 pub async fn recent_failures(root_dir: &str, limit: usize) -> Vec<String> {
-    let Some(path) = failure_log_path(root_dir) else {
+    // The log lives beside the docroot, so the jail is the SITE directory.
+    // Read as root and shown in the panel, so a symlink here is an arbitrary
+    // file-read: point it at /etc/shadow and the Mail card renders the last
+    // twenty lines of it to whoever can open the page.
+    let Some(site_dir) = Path::new(root_dir).parent() else {
+        return Vec::new();
+    };
+    let Ok(path) = crate::files::resolve_inside_jail(site_dir, "logs/wp-mail-failures.log").await
+    else {
         return Vec::new();
     };
     let Ok(raw) = tokio::fs::read_to_string(&path).await else {
@@ -306,7 +362,17 @@ pub fn failures_since(lines: &[String], since: i64) -> usize {
     lines
         .iter()
         .filter(|l| match l.split('\t').next() {
-            Some(ts) => ts.len() >= cutoff.len() && ts[..cutoff.len()] >= cutoff[..],
+            // Two things at once. `ts[..cutoff.len()]` panics when the cut
+            // lands inside a multi-byte character, and this log is written
+            // by a site's own PHP — a UTF-8 error message in the first field
+            // was enough to bring the whole mail tick down for every site on
+            // the node. And a non-ASCII field is not one of OUR timestamps,
+            // so it must not compare as recent either: comparing raw bytes
+            // makes any UTF-8 lead byte sort above every digit, which is how
+            // garbage would have counted as a fresh failure.
+            Some(ts) => {
+                ts.is_ascii() && ts.len() >= cutoff.len() && ts[..cutoff.len()] >= cutoff[..]
+            }
             None => false,
         })
         .count()
@@ -459,5 +525,130 @@ mod iso_tests {
         // Leap day, and one second before midnight.
         assert_eq!(iso_utc(1_709_164_800), "2024-02-29T00:00:00");
         assert_eq!(iso_utc(1_780_271_999), "2026-05-31T23:59:59");
+    }
+}
+
+#[cfg(test)]
+mod symlink_tests {
+    use super::*;
+    use std::os::unix::fs::symlink;
+
+    /// The escape this module's path handling exists to stop.
+    ///
+    /// A tenant owns their document tree. If root follows a symlink they
+    /// planted at `wp-content/mu-plugins`, it writes a file wherever they
+    /// point it — and the `chown` that follows hands them the target. That
+    /// is `/etc` for the asking.
+    #[tokio::test]
+    async fn a_symlinked_mu_plugins_directory_is_refused() {
+        let site = tempfile::tempdir().expect("tmp");
+        let outside = tempfile::tempdir().expect("tmp2");
+        let root = site.path().join("htdocs");
+        std::fs::create_dir_all(root.join("wp-content")).expect("wp-content");
+        symlink(outside.path(), root.join("wp-content").join("mu-plugins")).expect("symlink");
+
+        let err = install_mu_plugin(&root.to_string_lossy(), "victim", "<?php // x")
+            .await
+            .expect_err("must refuse a symlinked mu-plugins");
+        assert!(
+            err.to_string().contains("symlink"),
+            "refused for the wrong reason: {err}"
+        );
+        assert!(
+            !outside.path().join(MU_PLUGIN_FILE).exists(),
+            "root wrote OUTSIDE the site"
+        );
+    }
+
+    /// A symlink on the file NAME is ours to clear: the name belongs to this
+    /// module, so the link is unlinked and a real file written in its place.
+    /// What must never happen is writing THROUGH it.
+    #[tokio::test]
+    async fn a_symlinked_plugin_file_is_replaced_not_followed() {
+        let site = tempfile::tempdir().expect("tmp");
+        let outside = tempfile::tempdir().expect("tmp2");
+        let victim = outside.path().join("victim.conf");
+        std::fs::write(&victim, "original").expect("victim");
+
+        let root = site.path().join("htdocs");
+        let mu = root.join("wp-content").join("mu-plugins");
+        std::fs::create_dir_all(&mu).expect("mu");
+        symlink(&victim, mu.join(MU_PLUGIN_FILE)).expect("symlink");
+
+        install_mu_plugin(&root.to_string_lossy(), "victim", "<?php // ours")
+            .await
+            .expect("install");
+        assert_eq!(
+            std::fs::read_to_string(&victim).expect("read victim"),
+            "original",
+            "root wrote through the symlink"
+        );
+        // And the link was cleared rather than left to wedge the feature —
+        // otherwise a tenant opts out of having their sender pinned by
+        // planting one symlink.
+        assert_eq!(
+            std::fs::read_to_string(mu_plugin_path(&root.to_string_lossy())).expect("read ours"),
+            "<?php // ours"
+        );
+    }
+
+    /// The failure log is read as root and rendered in the panel. A symlink
+    /// there is an arbitrary file read — /etc/shadow into the Mail card.
+    #[tokio::test]
+    async fn a_symlinked_failure_log_is_not_read() {
+        let site = tempfile::tempdir().expect("tmp");
+        let outside = tempfile::tempdir().expect("tmp2");
+        let secret = outside.path().join("secret");
+        std::fs::write(&secret, "root:$6$hash\nsecond line\n").expect("secret");
+
+        let root = site.path().join("htdocs");
+        std::fs::create_dir_all(&root).expect("root");
+        std::fs::create_dir_all(site.path().join("logs")).expect("logs");
+        symlink(
+            &secret,
+            site.path().join("logs").join("wp-mail-failures.log"),
+        )
+        .expect("symlink");
+
+        let lines = recent_failures(&root.to_string_lossy(), 20).await;
+        assert!(
+            lines.is_empty(),
+            "leaked a file through a symlink: {lines:?}"
+        );
+    }
+
+    /// The ordinary case still has to work, or the guard is just an outage.
+    #[tokio::test]
+    async fn a_normal_site_still_gets_its_plugin() {
+        let site = tempfile::tempdir().expect("tmp");
+        let root = site.path().join("htdocs");
+        std::fs::create_dir_all(root.join("wp-content")).expect("wp-content");
+
+        let wrote = install_mu_plugin(&root.to_string_lossy(), "site", "<?php // ours")
+            .await
+            .expect("install");
+        assert!(wrote);
+        assert_eq!(
+            std::fs::read_to_string(mu_plugin_path(&root.to_string_lossy())).expect("read"),
+            "<?php // ours"
+        );
+    }
+}
+
+#[cfg(test)]
+mod utf8_tests {
+    use super::*;
+
+    /// The log is written by the SITE's PHP. A multi-byte character in the
+    /// first field made the old prefix compare slice mid-character and
+    /// panic, which took down the whole mail tick for every site on the node.
+    #[test]
+    fn a_multibyte_first_field_does_not_panic() {
+        let lines = vec![
+            "čččččččččččččččččččč\tto@x\tbroken".to_string(),
+            "2026-06-10T10:00:00+00:00\tto@x\treal".to_string(),
+            "🙂".to_string(),
+        ];
+        assert_eq!(failures_since(&lines, 1_780_617_600), 1);
     }
 }

@@ -188,6 +188,25 @@ fn timeout_for_request(req: &Request) -> u64 {
         // First-time enable apt-installs opendkim + opendkim-tools before it
         // generates the key — well past 30s on a cold apt cache.
         Request::DkimEnable { .. } => 600,
+        // A snapshot walks and hashes the whole document tree, exactly like
+        // the archive backup above, and the first one on a site has nothing
+        // to deduplicate against.
+        Request::SnapshotNow { .. } => 3600,
+        // Pruning rewrites the repository's pack files.
+        // Listing and diffing are cheap, but both read repository metadata
+        // that scales with the number of snapshots kept.
+        Request::SnapshotList { .. } | Request::SnapshotDiff { .. } => 120,
+        // Up to eight pages plus forty links and images, each with its own
+        // 20-second ceiling. 30s was guaranteed to expire on any site with a
+        // slow page, and the timeout was reported to the operator as the
+        // NODE being unreachable rather than the crawl still running.
+        Request::SiteCheckRun { .. } => 900,
+        // A repair writes the mu-plugin and may run wp-cli to enumerate
+        // plugins, which on a cold site is seconds, not milliseconds.
+        Request::WpMailSelfCheck { .. } | Request::WpMailRepair { .. } => 300,
+        // Fans out per hosting on the node: activations plus one kv read
+        // each, so it scales with the estate rather than being constant.
+        Request::CareOverview { .. } => 120,
         _ => 30,
     }
 }
