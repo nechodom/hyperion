@@ -155,6 +155,10 @@ pub struct CreateForm {
     pub price_interval: String,
     #[serde(default)]
     pub slack_webhook: String,
+    /// Operator addresses that also receive alerts for sites on this
+    /// profile, on top of the cluster-wide list. Comma- or newline-separated.
+    #[serde(default)]
+    pub alert_emails: String,
     /// Newline-separated list of WordPress plugins this profile
     /// installs when applied. Each line is a wordpress.org slug
     /// (e.g. `akismet`) or `@asset:<id>` to install from an
@@ -245,6 +249,7 @@ pub async fn post_create(
         } else {
             Some(interval)
         },
+        alert_emails: form.alert_emails.trim().to_string(),
         slack_webhook: if form.slack_webhook.trim().is_empty() {
             None
         } else {
@@ -348,6 +353,7 @@ pub async fn post_clone(
         price_currency: src.price_currency.clone(),
         price_interval: src.price_interval.clone(),
         slack_webhook: src.slack_webhook.clone(),
+        alert_emails: src.alert_emails.clone(),
         wp_plugins: src.wp_plugins.clone(),
         wp_themes: src.wp_themes.clone(),
         default_php_version: src.default_php_version.clone(),
@@ -481,6 +487,7 @@ pub async fn post_update(
         } else {
             Some(interval)
         },
+        alert_emails: form.alert_emails.trim().to_string(),
         slack_webhook: if form.slack_webhook.trim().is_empty() {
             None
         } else {

@@ -7903,6 +7903,61 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             }
         }
 
+        // ── Cache settings, the half of "speed" an operator can fix ─────
+        //
+        // "Check the loading speed and adjust the cache if it needs it" is
+        // on the care list, and a timing number alone does not say what to
+        // adjust. These two do: both are a line of nginx config, and both
+        // are invisible until somebody looks.
+        if home.is_ok() {
+            if home.content_encoding.is_empty() {
+                push(
+                    "warn",
+                    "cache",
+                    &base,
+                    "",
+                    "Pages are sent uncompressed. The browser asked for gzip and the server \
+                     sent none, so every visitor downloads several times more HTML than they \
+                     need to. This is one line of nginx configuration."
+                        .into(),
+                );
+            }
+            // One asset, not all of them: the setting is per-location, so a
+            // second finding about a second file is the same finding twice.
+            let asset = bodies
+                .first()
+                .map(|(page_url, body)| {
+                    sitecheck::extract_links(body, page_url, &domain)
+                        .into_iter()
+                        .find(|(k, _)| matches!(k, LinkKind::Asset | LinkKind::Image))
+                })
+                .unwrap_or(None);
+            if let Some((_, asset_url)) = asset {
+                if let Ok(f) = sitecheck::fetch(&asset_url, &domain, LOOPBACK, false).await {
+                    report.links_checked += 1;
+                    if f.is_ok() && !sitecheck::caches_in_browser(&f.cache_control) {
+                        let how = if f.cache_control.is_empty() {
+                            "no Cache-Control header at all".to_string()
+                        } else {
+                            format!("Cache-Control: {}", f.cache_control)
+                        };
+                        push(
+                            "warn",
+                            "cache",
+                            &asset_url,
+                            &base,
+                            format!(
+                                "Stylesheets, scripts and images are not cached by the browser \
+                                 ({how}), so a returning visitor downloads all of them again on \
+                                 every page. This is the single biggest thing you can change \
+                                 about how fast the site feels on a second visit."
+                            ),
+                        );
+                    }
+                }
+            }
+        }
+
         // ── What those pages point at ───────────────────────────────────
         let mut targets: Vec<(LinkKind, String, String)> = Vec::new();
         let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
@@ -11257,6 +11312,33 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// success message on a card — MUST branch on it: a letter the relay
     /// refused was never received, and saying otherwise is the one failure
     /// nobody downstream can detect.
+    /// Operator alert addresses this hosting's profile adds.
+    ///
+    /// The apply-row SNAPSHOT is read first, exactly as the billing sweep
+    /// reads the snapshotted Slack webhook: it survives the profile being
+    /// deleted, which sets `profile_id` NULL. The live profile is only a
+    /// fallback for rows applied before migration 063 — those have no
+    /// snapshot, and reading the profile is better than alerting nobody.
+    ///
+    /// Empty on any failure. An alert must still reach the cluster-wide
+    /// addresses when this lookup cannot answer.
+    async fn profile_alert_emails(&self, hosting_id: &str) -> Vec<String> {
+        let id = HostingId(hosting_id.to_string());
+        let Ok(Some(row)) = profiles::get_apply(&self.pool, &id).await else {
+            return Vec::new();
+        };
+        if let Some(list) = row.alert_emails.as_deref().filter(|s| !s.trim().is_empty()) {
+            return parse_recipient_list(list);
+        }
+        let Some(pid) = row.profile_id else {
+            return Vec::new();
+        };
+        match profiles::get(&self.pool, pid).await {
+            Ok(Some(p)) => parse_recipient_list(&p.alert_emails),
+            _ => Vec::new(),
+        }
+    }
+
     pub(crate) async fn notify_email(
         &self,
         to: &str,
@@ -11273,15 +11355,20 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // operator alert, and those go to every administrator address on
         // record — one entry was never enough for a team, and an alert nobody
         // happened to be reading is an alert that did not happen.
-        let recipients: Vec<String> = if to.is_empty() {
-            let list = parse_recipient_list(self.email_default_to.as_deref().unwrap_or(""));
-            if list.is_empty() {
-                return false;
-            }
-            list
-        } else {
-            vec![to.to_string()]
+        // An operator alert (empty `to`) also reaches whatever this site's
+        // profile names — see `resolve_recipients`.
+        let from_profile = match hosting_id {
+            Some(id) if to.is_empty() => self.profile_alert_emails(id).await,
+            _ => Vec::new(),
         };
+        let recipients = resolve_recipients(
+            to,
+            self.email_default_to.as_deref().unwrap_or(""),
+            &from_profile,
+        );
+        if recipients.is_empty() {
+            return false;
+        }
         // Apply the operator's editable email wording (defaults "{subject}"
         // / "{body}" are pass-through). Rendered text is what we send AND
         // log, so the email log shows exactly what the recipient received.
@@ -12824,6 +12911,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             p.price_interval.as_deref(),
             next,
             p.slack_webhook.as_deref(),
+            // Snapshotted for the same reason the price and the Slack
+            // webhook are: deleting the profile sets `profile_id` NULL, and
+            // a live lookup would silently stop alerting the people this
+            // site's alerts were going to.
+            Some(p.alert_emails.as_str()),
             now,
         )
         .await
@@ -25011,6 +25103,7 @@ fn profile_input_to_new(input: ProfileInput) -> hyperion_state::profiles::NewPro
         price_currency: input.price_currency,
         price_interval: input.price_interval,
         slack_webhook: input.slack_webhook,
+        alert_emails: input.alert_emails,
         wp_plugins: input.wp_plugins,
         wp_themes: input.wp_themes,
         // Normalise empty strings to None so the DB stores NULL and
@@ -25046,6 +25139,7 @@ fn profile_row_to_wire(r: hyperion_state::profiles::ProfileRow) -> HostingProfil
         price_currency: r.price_currency,
         price_interval: r.price_interval,
         slack_webhook: r.slack_webhook,
+        alert_emails: r.alert_emails,
         wp_plugins: r.wp_plugins,
         wp_themes: r.wp_themes,
         default_php_version: r.default_php_version,
@@ -29190,6 +29284,43 @@ mod chmod_path_tests {
 /// free text, and a stray word between two commas would otherwise fail every
 /// send that shares its batch. Duplicates are dropped too, so the same person
 /// listed twice is not mailed twice.
+/// Who one message actually goes to.
+///
+/// Two different jobs, and conflating them is how a customer ends up on an
+/// operator's alert list:
+///
+/// * A NAMED recipient — a hosting owner, a customer — gets the letter and
+///   nobody else. It may still be a LIST: an owner-e-mail field holding
+///   "a@x.cz, b@x.cz" used to go out as one malformed address and bounce.
+///   Anything the parser cannot make sense of is passed through unchanged
+///   rather than dropped, because an SMTP server rejecting an address the
+///   operator typed beats hyperion quietly sending to nobody.
+/// * An OPERATOR alert — no named recipient — goes to every administrator
+///   address on record: the cluster-wide list PLUS whatever the site's
+///   profile adds. Additive, never a replacement: adding one address to a
+///   profile must not silently stop the operator receiving alerts they were
+///   already getting.
+///
+/// Case-insensitively deduplicated, so an address on both lists is mailed
+/// once.
+fn resolve_recipients(to: &str, cluster: &str, from_profile: &[String]) -> Vec<String> {
+    if !to.trim().is_empty() {
+        let list = parse_recipient_list(to);
+        return if list.is_empty() {
+            vec![to.to_string()]
+        } else {
+            list
+        };
+    }
+    let mut list = parse_recipient_list(cluster);
+    for addr in from_profile {
+        if !list.iter().any(|e| e.eq_ignore_ascii_case(addr)) {
+            list.push(addr.clone());
+        }
+    }
+    list
+}
+
 fn parse_recipient_list(raw: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for part in raw.split([',', ';', '\n', '\r', ' ', '\t']) {
@@ -29209,7 +29340,64 @@ fn parse_recipient_list(raw: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod recipient_list_tests {
-    use super::parse_recipient_list;
+    use super::{parse_recipient_list, resolve_recipients};
+
+    /// The rule the profile alert list exists to follow: it ADDS to the
+    /// cluster-wide addresses. Replacing them would mean adding one address
+    /// to a profile silently stops the operator getting alerts they were
+    /// already receiving.
+    #[test]
+    fn a_profile_list_adds_to_the_cluster_list() {
+        let got = resolve_recipients("", "ops@us.cz", &["it@klient.cz".to_string()]);
+        assert_eq!(got, vec!["ops@us.cz", "it@klient.cz"]);
+    }
+
+    #[test]
+    fn an_address_on_both_lists_is_mailed_once() {
+        let got = resolve_recipients("", "ops@us.cz, shared@x.cz", &["OPS@US.CZ".to_string()]);
+        assert_eq!(got, vec!["ops@us.cz", "shared@x.cz"]);
+    }
+
+    /// A named recipient is the customer. The profile's operator addresses
+    /// must never be added to a letter addressed to them.
+    #[test]
+    fn a_named_recipient_never_gains_the_operator_addresses() {
+        let got = resolve_recipients("zakaznik@x.cz", "ops@us.cz", &["it@klient.cz".to_string()]);
+        assert_eq!(got, vec!["zakaznik@x.cz"]);
+    }
+
+    /// An owner-e-mail field holding two addresses went out as one
+    /// malformed recipient and bounced.
+    #[test]
+    fn a_named_recipient_may_itself_be_a_list() {
+        let got = resolve_recipients("a@x.cz, b@x.cz", "ops@us.cz", &[]);
+        assert_eq!(got, vec!["a@x.cz", "b@x.cz"]);
+    }
+
+    /// Something the parser cannot read is passed on for the SMTP server to
+    /// reject, rather than silently becoming "send to nobody".
+    #[test]
+    fn an_unparseable_named_recipient_is_passed_through() {
+        assert_eq!(
+            resolve_recipients("not-an-address", "ops@us.cz", &[]),
+            vec!["not-an-address"]
+        );
+    }
+
+    /// No named recipient, no cluster list and no profile list = nothing to
+    /// send to, which the caller turns into "did not send".
+    #[test]
+    fn nothing_configured_yields_no_recipients() {
+        assert!(resolve_recipients("", "", &[]).is_empty());
+    }
+
+    /// A profile list alone is enough — an install that never set a
+    /// cluster-wide address still alerts the people a profile names.
+    #[test]
+    fn a_profile_list_alone_is_enough() {
+        let got = resolve_recipients("", "", &["it@klient.cz".to_string()]);
+        assert_eq!(got, vec!["it@klient.cz"]);
+    }
 
     #[test]
     fn one_address_still_works() {

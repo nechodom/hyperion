@@ -44,6 +44,10 @@ pub const USER_AGENT: &str = "Hyperion-SiteCheck/1 (+https://github.com/nechodom
 
 /// Marker curl writes after the body so one request yields both.
 const METRICS_MARK: &str = "\nHYPERION-SITECHECK ";
+/// Header lines follow the metrics line, one per header, because a
+/// `cache-control` value contains spaces and commas and would wreck a
+/// single space-separated report line.
+const HEADER_MARK: &str = "HYPERION-HDR ";
 
 /// Pages fetched in full. A care plan promises "the main pages", not a
 /// crawl of a 10 000-post archive, and every page fetched is a request on
@@ -73,6 +77,13 @@ pub struct Fetched {
     pub ttfb_ms: i64,
     pub total_ms: i64,
     pub bytes: i64,
+    /// `content-encoding` as sent, lowercased. Empty when the server sent
+    /// none — which for HTML means it is shipping every byte uncompressed.
+    pub content_encoding: String,
+    /// `cache-control` as sent. Empty when the server sent none, which for
+    /// a stylesheet or an image means every repeat visitor downloads it
+    /// again.
+    pub cache_control: String,
     /// Body, only for pages we asked to keep it.
     pub body: String,
 }
@@ -103,6 +114,11 @@ fn fetch_config(url: &str, host: &str, resolve_to: &str, keep_body: bool) -> Str
     cfg.push_str("silent\n");
     cfg.push_str("show-error\n");
     cfg.push_str("location\n");
+    // Ask for compression, the way a browser does. Without this the server
+    // never gets the chance to compress, so "is compression on?" cannot be
+    // answered — and `size_download` would be the uncompressed size either
+    // way, which is the page weight a browser has to parse.
+    cfg.push_str("compressed\n");
     cfg.push_str("max-redirs = 5\n");
     cfg.push_str(&format!("max-time = {TIMEOUT_SECS}\n"));
     cfg.push_str(&format!(
@@ -115,9 +131,14 @@ fn fetch_config(url: &str, host: &str, resolve_to: &str, keep_body: bool) -> Str
         // that as a broken link is a false alarm on a working page.
         cfg.push_str("output = \"/dev/null\"\n");
     }
+    // `%header{...}` needs curl 7.84+ (Debian 12 ships 7.88). On anything
+    // older it comes back unexpanded, which `split_metrics` reads as "not
+    // reported" rather than as a header value.
     cfg.push_str(&format!(
-        "write-out = \"{}%{{http_code}} %{{time_starttransfer}} %{{time_total}} %{{size_download}}\"\n",
-        cmd::curl_config_quote(METRICS_MARK)
+        "write-out = \"{}%{{http_code}} %{{time_starttransfer}} %{{time_total}} %{{size_download}}\\n{}content-encoding: %header{{content-encoding}}\\n{}cache-control: %header{{cache-control}}\"\n",
+        cmd::curl_config_quote(METRICS_MARK),
+        HEADER_MARK,
+        HEADER_MARK
     ));
     cfg
 }
@@ -134,6 +155,8 @@ pub fn split_metrics(url: &str, out: &str) -> Fetched {
         ttfb_ms: 0,
         total_ms: 0,
         bytes: 0,
+        content_encoding: String::new(),
+        cache_control: String::new(),
         body: String::new(),
     };
     let Some(at) = out.rfind(METRICS_MARK) else {
@@ -143,7 +166,9 @@ pub fn split_metrics(url: &str, out: &str) -> Fetched {
         return f;
     };
     f.body = out[..at].to_string();
-    let fields: Vec<&str> = out[at + METRICS_MARK.len()..].split_whitespace().collect();
+    let block = &out[at + METRICS_MARK.len()..];
+    let mut lines = block.lines();
+    let fields: Vec<&str> = lines.next().unwrap_or("").split_whitespace().collect();
     if let Some(v) = fields.first() {
         f.status = v.parse().unwrap_or(0);
     }
@@ -156,7 +181,45 @@ pub fn split_metrics(url: &str, out: &str) -> Fetched {
     if let Some(v) = fields.get(3) {
         f.bytes = v.parse().unwrap_or(0);
     }
+    for line in lines {
+        let Some(rest) = line.strip_prefix(HEADER_MARK) else {
+            continue;
+        };
+        let Some((name, value)) = rest.split_once(':') else {
+            continue;
+        };
+        let value = value.trim();
+        // An old curl leaves `%header{...}` unexpanded. That is "not
+        // reported", never a header value — reading it as one would have the
+        // report claim a site sets a Cache-Control of "%header{...}".
+        if value.is_empty() || value.contains("%header{") {
+            continue;
+        }
+        match name.trim().to_ascii_lowercase().as_str() {
+            "content-encoding" => f.content_encoding = value.to_ascii_lowercase(),
+            "cache-control" => f.cache_control = value.to_string(),
+            _ => {}
+        }
+    }
     f
+}
+
+/// Does this `cache-control` let a browser reuse the file without asking?
+///
+/// `no-store` / `no-cache` / `max-age=0` all mean "come back every time",
+/// which for a stylesheet or a logo is a request per visit per visitor. A
+/// missing header entirely is the same answer, so an empty string is false.
+pub fn caches_in_browser(cache_control: &str) -> bool {
+    let cc = cache_control.to_ascii_lowercase();
+    if cc.is_empty() || cc.contains("no-store") || cc.contains("no-cache") {
+        return false;
+    }
+    let Some(at) = cc.find("max-age=") else {
+        return false;
+    };
+    let rest = &cc[at + "max-age=".len()..];
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    digits.parse::<i64>().map(|n| n > 0).unwrap_or(false)
 }
 
 /// curl reports times as seconds with a fraction; a locale that uses a comma
@@ -539,5 +602,72 @@ mod tests {
     #[test]
     fn entities_are_decoded_once() {
         assert_eq!(decode_entities("a&amp;b&#039;c"), "a&b'c");
+    }
+}
+
+#[cfg(test)]
+mod header_tests {
+    use super::*;
+
+    #[test]
+    fn compression_is_requested_the_way_a_browser_does() {
+        let cfg = fetch_config("https://example.cz/", "example.cz", "127.0.0.1", true);
+        assert!(cfg.contains("compressed\n"));
+        assert!(cfg.contains("%header{content-encoding}"));
+        assert!(cfg.contains("%header{cache-control}"));
+    }
+
+    #[test]
+    fn headers_are_read_off_their_own_lines() {
+        let out = format!(
+            "<html>x</html>{METRICS_MARK}200 0.1 0.2 500\n\
+             {HEADER_MARK}content-encoding: GZIP\n\
+             {HEADER_MARK}cache-control: public, max-age=3600"
+        );
+        let f = split_metrics("https://x/", &out);
+        assert_eq!(f.body, "<html>x</html>");
+        assert_eq!(f.status, 200);
+        assert_eq!(f.content_encoding, "gzip");
+        // A value with a comma and a space would have wrecked a single
+        // space-separated report line.
+        assert_eq!(f.cache_control, "public, max-age=3600");
+    }
+
+    /// curl before 7.84 has no `%header{}` and leaves it literal. Reading
+    /// that as a value would make the report claim the site sets a
+    /// Cache-Control of "%header{cache-control}".
+    #[test]
+    fn an_old_curl_reports_nothing_rather_than_the_literal() {
+        let out = format!(
+            "body{METRICS_MARK}200 0.1 0.2 5\n\
+             {HEADER_MARK}content-encoding: %header{{content-encoding}}\n\
+             {HEADER_MARK}cache-control: %header{{cache-control}}"
+        );
+        let f = split_metrics("https://x/", &out);
+        assert_eq!(f.status, 200);
+        assert!(f.content_encoding.is_empty());
+        assert!(f.cache_control.is_empty());
+    }
+
+    #[test]
+    fn a_server_that_sent_no_headers_reports_none() {
+        let out = format!("body{METRICS_MARK}200 0.1 0.2 5");
+        let f = split_metrics("https://x/", &out);
+        assert!(f.content_encoding.is_empty());
+        assert!(f.cache_control.is_empty());
+    }
+
+    #[test]
+    fn browser_caching_needs_a_real_max_age() {
+        assert!(caches_in_browser("public, max-age=31536000, immutable"));
+        assert!(caches_in_browser("max-age=60"));
+        // Every one of these means "ask me again every time".
+        assert!(!caches_in_browser(""));
+        assert!(!caches_in_browser("no-store"));
+        assert!(!caches_in_browser("no-cache"));
+        assert!(!caches_in_browser("public, max-age=0"));
+        assert!(!caches_in_browser("public"));
+        // `no-cache` wins even beside a max-age, which is what it means.
+        assert!(!caches_in_browser("no-cache, max-age=600"));
     }
 }

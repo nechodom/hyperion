@@ -23,6 +23,11 @@ pub struct ProfileRow {
     pub price_currency: Option<String>,
     pub price_interval: Option<String>,
     pub slack_webhook: Option<String>,
+    /// Operator addresses that also get this profile's sites' alerts, on
+    /// top of the cluster-wide `[email] default_to` (migration 063).
+    /// Comma- or newline-separated; empty means "the cluster list only".
+    #[sqlx(default)]
+    pub alert_emails: String,
     /// Newline-separated WordPress plugin list. See profile.rs for
     /// the syntax (slug, @asset:<id>, trailing ! for activate).
     #[sqlx(default)]
@@ -74,6 +79,8 @@ pub struct NewProfile {
     pub price_currency: Option<String>,
     pub price_interval: Option<String>,
     pub slack_webhook: Option<String>,
+    /// See ProfileRow::alert_emails.
+    pub alert_emails: String,
     /// See ProfileRow::wp_plugins / wp_themes for the syntax.
     pub wp_plugins: String,
     pub wp_themes: String,
@@ -102,6 +109,9 @@ pub struct ProfileApplyRow {
     /// (migration 047). billing_sweep reads this first so the channel survives
     /// a profile delete; `None` falls back to the live profile lookup.
     pub slack_webhook: Option<String>,
+    /// Snapshot of the profile's operator alert addresses at apply time
+    /// (migration 063), for the same reason `slack_webhook` is snapshotted.
+    pub alert_emails: Option<String>,
     pub applied_at: i64,
 }
 
@@ -111,11 +121,11 @@ pub async fn insert(pool: &SqlitePool, p: &NewProfile, now: i64) -> Result<i64, 
            (name, description, php_memory_mb, php_max_exec_secs, php_max_children,
             php_max_requests, db_max_connections, disk_hard_mb, bw_monthly_mb,
             expiry_grace_days, expiry_warning_offsets, price_minor, price_currency,
-            price_interval, slack_webhook, wp_plugins, wp_themes,
+            price_interval, slack_webhook, alert_emails, wp_plugins, wp_themes,
             default_php_version, default_db_engine, quota_exceed_action,
             disk_soft_mb, mem_limit_mib, backup_cadence,
             created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            RETURNING id"#,
     )
     .bind(&p.name)
@@ -133,6 +143,7 @@ pub async fn insert(pool: &SqlitePool, p: &NewProfile, now: i64) -> Result<i64, 
     .bind(&p.price_currency)
     .bind(&p.price_interval)
     .bind(&p.slack_webhook)
+    .bind(&p.alert_emails)
     .bind(&p.wp_plugins)
     .bind(&p.wp_themes)
     .bind(&p.default_php_version)
@@ -160,7 +171,7 @@ pub async fn update(
             php_max_children = ?, php_max_requests = ?, db_max_connections = ?,
             disk_hard_mb = ?, bw_monthly_mb = ?, expiry_grace_days = ?,
             expiry_warning_offsets = ?, price_minor = ?, price_currency = ?,
-            price_interval = ?, slack_webhook = ?, wp_plugins = ?, wp_themes = ?,
+            price_interval = ?, slack_webhook = ?, alert_emails = ?, wp_plugins = ?, wp_themes = ?,
             default_php_version = ?, default_db_engine = ?, quota_exceed_action = ?,
             disk_soft_mb = ?, mem_limit_mib = ?, backup_cadence = ?,
             updated_at = ?
@@ -181,6 +192,7 @@ pub async fn update(
     .bind(&p.price_currency)
     .bind(&p.price_interval)
     .bind(&p.slack_webhook)
+    .bind(&p.alert_emails)
     .bind(&p.wp_plugins)
     .bind(&p.wp_themes)
     .bind(&p.default_php_version)
@@ -208,7 +220,7 @@ const SELECT_ALL: &str =
     "SELECT id, name, description, php_memory_mb, php_max_exec_secs, php_max_children,
             php_max_requests, db_max_connections, disk_hard_mb, bw_monthly_mb,
             expiry_grace_days, expiry_warning_offsets, price_minor, price_currency,
-            price_interval, slack_webhook, wp_plugins, wp_themes,
+            price_interval, slack_webhook, alert_emails, wp_plugins, wp_themes,
             default_php_version, default_db_engine, quota_exceed_action,
             disk_soft_mb, mem_limit_mib, backup_cadence,
             created_at, updated_at
@@ -239,13 +251,14 @@ pub async fn upsert_apply(
     price_interval: Option<&str>,
     next_billing_at: Option<i64>,
     slack_webhook: Option<&str>,
+    alert_emails: Option<&str>,
     now: i64,
 ) -> Result<(), StateError> {
     sqlx::query(
         r#"INSERT INTO hosting_profile_apply
             (hosting_id, profile_id, price_minor, price_currency, price_interval,
-             next_billing_at, slack_webhook, applied_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+             next_billing_at, slack_webhook, alert_emails, applied_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(hosting_id) DO UPDATE SET
             profile_id = excluded.profile_id,
             price_minor = excluded.price_minor,
@@ -253,6 +266,7 @@ pub async fn upsert_apply(
             price_interval = excluded.price_interval,
             next_billing_at = excluded.next_billing_at,
             slack_webhook = excluded.slack_webhook,
+            alert_emails = excluded.alert_emails,
             applied_at = excluded.applied_at"#,
     )
     .bind(hosting_id.as_str())
@@ -262,6 +276,7 @@ pub async fn upsert_apply(
     .bind(price_interval)
     .bind(next_billing_at)
     .bind(slack_webhook)
+    .bind(alert_emails)
     .bind(now)
     .execute(pool)
     .await?;
@@ -341,10 +356,11 @@ pub async fn get_apply(
         Option<String>,
         Option<i64>,
         Option<String>,
+        Option<String>,
         i64,
     )> = sqlx::query_as(
         "SELECT hosting_id, profile_id, price_minor, price_currency, price_interval,
-                next_billing_at, slack_webhook, applied_at
+                next_billing_at, slack_webhook, alert_emails, applied_at
          FROM hosting_profile_apply WHERE hosting_id = ?",
     )
     .bind(hosting_id.as_str())
@@ -359,6 +375,7 @@ pub async fn get_apply(
             price_interval,
             next_billing_at,
             slack_webhook,
+            alert_emails,
             applied_at,
         )| ProfileApplyRow {
             hosting_id: HostingId(hosting_id),
@@ -368,6 +385,7 @@ pub async fn get_apply(
             price_interval,
             next_billing_at,
             slack_webhook,
+            alert_emails,
             applied_at,
         },
     ))
@@ -389,10 +407,11 @@ pub async fn due_billings(
         Option<String>,
         Option<i64>,
         Option<String>,
+        Option<String>,
         i64,
     )> = sqlx::query_as(
         "SELECT a.hosting_id, a.profile_id, a.price_minor, a.price_currency, a.price_interval,
-                a.next_billing_at, a.slack_webhook, a.applied_at
+                a.next_billing_at, a.slack_webhook, a.alert_emails, a.applied_at
          FROM hosting_profile_apply a
            JOIN hostings h ON h.id = a.hosting_id
          WHERE a.next_billing_at IS NOT NULL AND a.next_billing_at <= ? AND h.state != 'trashed'
@@ -412,6 +431,7 @@ pub async fn due_billings(
                 price_interval,
                 next_billing_at,
                 slack_webhook,
+                alert_emails,
                 applied_at,
             )| ProfileApplyRow {
                 hosting_id: HostingId(hosting_id),
@@ -421,6 +441,7 @@ pub async fn due_billings(
                 price_interval,
                 next_billing_at,
                 slack_webhook,
+                alert_emails,
                 applied_at,
             },
         )
@@ -451,6 +472,7 @@ mod tests {
             price_currency: Some("CZK".into()),
             price_interval: Some("monthly".into()),
             slack_webhook: None,
+            alert_emails: String::new(),
             wp_plugins: String::new(),
             wp_themes: String::new(),
             default_php_version: None,
@@ -531,5 +553,152 @@ mod tests {
         };
         insert(&pool, &p, 1).await.expect("first");
         assert!(insert(&pool, &p, 2).await.is_err());
+    }
+}
+
+#[cfg(test)]
+mod alert_email_tests {
+    use super::*;
+    use crate::db::open_memory;
+
+    /// `hosting_profile_apply.hosting_id` is a foreign key into `hostings`,
+    /// so an apply row needs a site to hang off.
+    async fn seed_hosting(pool: &SqlitePool, id: &HostingId) {
+        // `hostings.system_user_id` is itself a foreign key, so the site
+        // needs a user before it can exist.
+        sqlx::query(
+            "INSERT INTO system_users (id, name, uid, home_dir, shell, created_at)
+             VALUES (1000, 'test_user', 1000, '/home/test_user', '/usr/sbin/nologin', 100)",
+        )
+        .execute(pool)
+        .await
+        .expect("seed system user");
+        crate::hostings::insert(
+            pool,
+            id,
+            &format!("{}.example.cz", id.as_str()),
+            1000,
+            None,
+            "/home/x/htdocs",
+            100,
+            None,
+        )
+        .await
+        .expect("seed hosting");
+    }
+
+    fn profile_with_alerts(alerts: &str) -> NewProfile {
+        NewProfile {
+            name: "Klient XY".into(),
+            expiry_warning_offsets: "30,7,1".into(),
+            quota_exceed_action: "notify".into(),
+            backup_cadence: "off".into(),
+            alert_emails: alerts.into(),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn alert_addresses_round_trip_through_the_profile() {
+        let pool = open_memory().await.expect("open");
+        let id = insert(
+            &pool,
+            &profile_with_alerts("ops@klient.cz, it@klient.cz"),
+            100,
+        )
+        .await
+        .expect("insert");
+        let got = get(&pool, id).await.expect("get").expect("row");
+        assert_eq!(got.alert_emails, "ops@klient.cz, it@klient.cz");
+    }
+
+    /// A profile that has never named an address must read as empty, not as
+    /// a NULL that panics the row decode — every profile predating migration
+    /// 063 is in that state.
+    #[tokio::test]
+    async fn a_profile_without_addresses_reads_as_empty() {
+        let pool = open_memory().await.expect("open");
+        let id = insert(&pool, &profile_with_alerts(""), 100)
+            .await
+            .expect("insert");
+        assert_eq!(
+            get(&pool, id)
+                .await
+                .expect("get")
+                .expect("row")
+                .alert_emails,
+            ""
+        );
+    }
+
+    /// The snapshot is the whole point: deleting the profile sets
+    /// `profile_id` NULL, and a live lookup would silently stop alerting the
+    /// people this site's alerts were going to. Same guarantee migration 047
+    /// gave the Slack webhook.
+    #[tokio::test]
+    async fn the_apply_snapshot_survives_deleting_the_profile() {
+        let pool = open_memory().await.expect("open");
+        let id = insert(&pool, &profile_with_alerts("ops@klient.cz"), 100)
+            .await
+            .expect("insert");
+        let hosting = HostingId("h1".into());
+        seed_hosting(&pool, &hosting).await;
+        upsert_apply(
+            &pool,
+            &hosting,
+            Some(id),
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("ops@klient.cz"),
+            100,
+        )
+        .await
+        .expect("apply");
+
+        delete(&pool, id).await.expect("delete");
+
+        let row = get_apply(&pool, &hosting)
+            .await
+            .expect("get_apply")
+            .expect("row");
+        assert_eq!(row.profile_id, None, "the FK should have gone NULL");
+        assert_eq!(
+            row.alert_emails.as_deref(),
+            Some("ops@klient.cz"),
+            "the addresses must outlive the profile"
+        );
+    }
+
+    /// Re-applying replaces the snapshot — that is how an edited profile
+    /// reaches sites already on it.
+    #[tokio::test]
+    async fn re_applying_updates_the_snapshot() {
+        let pool = open_memory().await.expect("open");
+        let hosting = HostingId("h1".into());
+        seed_hosting(&pool, &hosting).await;
+        for addrs in ["a@x.cz", "b@x.cz"] {
+            upsert_apply(
+                &pool,
+                &hosting,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(addrs),
+                100,
+            )
+            .await
+            .expect("apply");
+        }
+        let row = get_apply(&pool, &hosting)
+            .await
+            .expect("get_apply")
+            .expect("row");
+        assert_eq!(row.alert_emails.as_deref(), Some("b@x.cz"));
     }
 }

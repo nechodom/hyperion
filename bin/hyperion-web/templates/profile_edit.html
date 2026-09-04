@@ -144,6 +144,24 @@
       <label for="p_slack">Slack incoming webhook URL <span class="hint">overrides the global default for hostings on this profile</span></label>
       <input id="p_slack" name="slack_webhook" type="url" value="{% if let Some(w) = profile.slack_webhook %}{{ w }}{% endif %}" placeholder="https://hooks.slack.com/services/T.../B.../...">
     </div>
+    {#- Same field as the create form. Editing this does NOT reach sites
+        already on the profile: the addresses are snapshotted onto each
+        apply row, so re-apply is what pushes a change out — exactly how
+        the price and the Slack channel already behave. -#}
+    <div class="field">
+      <label for="p_alert_emails">Alert e-mail addresses
+        <span class="hint">operator alerts for sites on this profile also go here — a client's own IT contact, a shared inbox</span>
+      </label>
+      <input id="p_alert_emails" name="alert_emails" type="text"
+             value="{{ profile.alert_emails }}"
+             placeholder="ops@klient.cz, admin@klient.cz">
+      <span class="hint" style="display:block;margin-top:0.3rem">
+        In addition to the cluster-wide addresses in
+        <a href="/settings#notifications">Settings → Notifications</a>, never
+        instead of them. Sites already on this profile keep the addresses
+        they were applied with until you re-apply.
+      </span>
+    </div>
 
     {# Wizard pre-fill — when set, /hostings/new auto-selects
        these runtime values in step 3 the moment the operator
