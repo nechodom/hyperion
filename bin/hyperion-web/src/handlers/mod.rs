@@ -4,6 +4,7 @@ pub mod audit;
 pub mod avatar;
 pub mod backups;
 pub mod bans;
+pub mod care;
 pub mod certs;
 pub mod dashboard;
 pub mod emails;

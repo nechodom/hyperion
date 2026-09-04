@@ -7,9 +7,11 @@ license.workspace = true
 
 [dependencies]
 serde.workspace = true
+# The care checklist is stored as one JSON value in `hosting_kv`, so its
+# (de)serialisation belongs with the type rather than at each call site.
+serde_json.workspace = true
 uuid.workspace = true
 ulid.workspace = true
 chrono.workspace = true
 
 [dev-dependencies]
-serde_json.workspace = true

@@ -13,6 +13,7 @@
 )]
 #![forbid(unsafe_code)]
 
+pub mod care_check;
 pub mod cert;
 pub mod db;
 pub mod dkim;
@@ -26,6 +27,7 @@ pub mod migration;
 pub mod package;
 pub mod php;
 pub mod profile;
+pub mod sitecheck;
 pub mod spf;
 pub mod stats;
 pub mod wp;
@@ -56,6 +58,7 @@ pub use package::{
 };
 pub use php::PhpVersion;
 pub use profile::{HostingProfile, ProfileApply, ProfileInput, WpAssetSummary};
+pub use sitecheck::{SiteCheckFinding, SiteCheckPage, SiteCheckReport};
 pub use spf::SpfCheckResult;
 pub use stats::{decode_mime_header, render_html_shell, CountryTraffic};
 pub use stats::{
@@ -67,8 +70,8 @@ pub use stats::{
     MonitorSamplePoint, MtaDiagnostics, MtaPortProbe, NodeMetricPoint, NodeMetricsHistory,
     NodeStats, NodeSummary, NodeUpdateStatus, NotificationFeed, NotificationTemplatesView,
     NotificationView, ServiceHealth, ServiceInstallStatus, ServicesHealth, SiteEmailLogEntry,
-    SlackConfigView, SmtpAutodetect, TrashEntry, UpdateStatus, Web2faEnrollment, WebHostingAccess,
-    WebLoginResult, WebUserSummary, WebVerify2faResult,
+    SlackConfigView, SmtpAutodetect, SnapshotDiff, SnapshotSummary, TrashEntry, UpdateStatus,
+    Web2faEnrollment, WebHostingAccess, WebLoginResult, WebUserSummary, WebVerify2faResult,
 };
 pub use stats::{CARE_REPORT_DEFAULT_BODY_TEMPLATE, EXPIRY_WARNING_DEFAULT_BODY_TEMPLATE};
 pub use wp::{

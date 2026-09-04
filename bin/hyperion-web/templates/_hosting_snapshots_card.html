@@ -1,0 +1,78 @@
+{# Snapshots. Lazy-loaded over HTMX from the Backups area.
+
+   A snapshot is not another copy of the site — restic stores each chunk of
+   content once, so thirty of them cost a little more than one. What they buy
+   that a tar.gz cannot is the diff: after a site breaks following an update,
+   "what actually changed?" has an answer.
+
+   Failures render INSIDE the card via `error`: HTMX does not swap on a
+   non-2xx response, so an error status leaves a spinner on screen. #}
+<div class="card" style="margin-bottom:0.9rem">
+  <div class="row" style="align-items:center;gap:0.6rem;margin-bottom:0.5rem">
+    <h2 style="margin:0;font-size:0.95rem">
+      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v6"/><path d="m8 6 4-4 4 4"/><rect x="3" y="10" width="18" height="11" rx="2"/><path d="M7 15h10"/></svg>
+      Snapshots
+      {% if !rows.is_empty() %}
+        <span class="pill ok" style="font-size:0.6rem;margin-left:0.4rem">{{ rows.len() }}</span>
+      {% endif %}
+    </h2>
+    <span class="grow"></span>
+    <form hx-post="/hostings/snapshots/now" hx-target="closest .card" hx-swap="outerHTML" style="margin:0">
+      <input type="hidden" name="_csrf" value="{{ csrf_now }}">
+      <input type="hidden" name="selector" value="{{ selector }}">
+      <button class="btn ghost small" type="submit">Snapshot now</button>
+    </form>
+  </div>
+
+  {% if let Some(e) = error %}
+  <div class="flash warn" style="margin:0 0 0.6rem">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+    <div class="flash-body">{{ e }}</div>
+  </div>
+  {% endif %}
+
+  {% if let Some(d) = diff %}
+  <div style="border:1px solid var(--border);border-radius:var(--radius-xs);padding:0.55rem 0.7rem;margin:0 0 0.7rem;background:var(--bg-2)">
+    <div class="row" style="gap:0.6rem;align-items:baseline;flex-wrap:wrap">
+      <strong style="font-size:0.85rem">Changes {{ diff_of }}</strong>
+      <span class="text-soft small">{{ d.added }} added · {{ d.removed }} removed · {{ d.modified }} changed</span>
+    </div>
+    {% if !d.sample.is_empty() %}
+    {#- A handful, not the list: a core update touches thousands of files. -#}
+    <pre style="margin:0.4rem 0 0;font-size:0.75rem;white-space:pre-wrap;word-break:break-all">{% for p in d.sample %}{{ p }}
+{% endfor %}</pre>
+    {% endif %}
+  </div>
+  {% endif %}
+
+  {% if rows.is_empty() %}
+  <p class="text-soft small" style="margin:0">
+    No snapshots yet. One is taken automatically before Hyperion applies this
+    site's updates, so the first will appear with the next batch — provided
+    this node has the snapshot engine installed.
+  </p>
+  {% else %}
+  <table class="table small" style="margin:0">
+    <tbody>
+      {% for r in rows %}
+      <tr>
+        <td style="width:6rem"><code>{{ r.id }}</code></td>
+        <td class="text-soft" style="white-space:nowrap">{{ r.when }}</td>
+        <td class="text-soft">{{ r.tags }}</td>
+        <td style="text-align:right">
+          {% if !r.previous.is_empty() %}
+          <form hx-post="/hostings/snapshots/diff" hx-target="closest .card" hx-swap="outerHTML" style="margin:0;display:inline">
+            <input type="hidden" name="_csrf" value="{{ csrf_diff }}">
+            <input type="hidden" name="selector" value="{{ selector }}">
+            <input type="hidden" name="from" value="{{ r.previous }}">
+            <input type="hidden" name="to" value="{{ r.id }}">
+            <button class="btn ghost" type="submit" style="font-size:0.72rem;padding:0.15rem 0.45rem">What changed</button>
+          </form>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</div>

@@ -1,34 +1,41 @@
-//! Shared test scaffolding: a permissive `AdapterPort` stub + a builder that
-//! assembles a real `HostingService` / `AgentImpl` over an in-memory SQLite DB.
-//! Used by the node-connection integration test so it drives the REAL dispatch
-//! path (AgentImpl → HostingService → SQLite) behind the signed-RPC channel.
+//! A local panel for LOOKING at the UI, not a test.
+//!
+//! Reuses the same stub agent + real router the e2e tests use, but binds a
+//! TCP port and sits there so the pages can be opened in a browser. Stub
+//! adapters mean every action "succeeds" without touching the machine; the
+//! in-memory database starts empty and is gone when this stops.
+//!
+//!     cargo test -p hyperion-web --test devserver -- --ignored --nocapture
+//!
+//! Login: kevin / secret-pw-1. `#[ignore]` so `cargo test` never blocks on it.
+//!
+//! The fixture below is a copy of the one in `web_e2e.rs`; a shared module
+//! would be tidier, but this file is a tool, not a test, and pulling the e2e
+//! harness apart to share it is not worth risking those tests for.
+#![allow(dead_code)]
 
 use async_trait::async_trait;
 use hyperion_adapters::AdapterError;
+use hyperion_auth::SessionSigner;
 use hyperion_core::{AgentImpl, HostingService, SecretsStore};
-use hyperion_rpc::wire::DbCredentials;
 use hyperion_rpc::AgentApi;
 use hyperion_state::db::open_memory;
 use hyperion_types::{CertInfo, DbProvision, HostingDetail, HostingId, PhpVersion};
+use hyperion_web::admin_user::{self, AdminUser};
+use hyperion_web::config::Config;
+use hyperion_web::state::AppState;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
-/// Permissive stub: all calls succeed, db_create returns plausible creds.
-pub struct StubAdapters {
+struct StubAdapters {
     uid_seq: AtomicU32,
 }
-
 impl StubAdapters {
-    pub fn new() -> Self {
+    fn new() -> Self {
         Self {
-            uid_seq: AtomicU32::new(2000),
+            uid_seq: AtomicU32::new(3000),
         }
-    }
-}
-
-impl Default for StubAdapters {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -56,14 +63,14 @@ impl hyperion_core::AdapterPort for StubAdapters {
         &self,
         engine: DbProvision,
         hosting_id: &HostingId,
-        _domain: &str,
-    ) -> Result<DbCredentials, AdapterError> {
+        _: &str,
+    ) -> Result<hyperion_rpc::wire::DbCredentials, AdapterError> {
         let h: String = hosting_id.as_str().chars().take(6).collect();
-        Ok(DbCredentials {
+        Ok(hyperion_rpc::wire::DbCredentials {
             engine,
-            db_name: format!("lm_{}_db", h),
-            db_user: format!("lm_{}_u", h),
-            password: "test-password-not-real".into(),
+            db_name: format!("lm_{h}_db"),
+            db_user: format!("lm_{h}_u"),
+            password: "TEST-PASSWORD-DONT-USE".into(),
         })
     }
     async fn db_drop(&self, _: DbProvision, _: &str, _: &str) -> Result<(), AdapterError> {
@@ -147,6 +154,8 @@ impl hyperion_core::AdapterPort for StubAdapters {
     ) -> Result<(Vec<hyperion_types::WpPlugin>, String), AdapterError> {
         Ok((vec![], "6.5.3".into()))
     }
+    // Note: migration export/import don't go through AdapterPort — they
+    // are higher-level service methods. No stub needed here.
     async fn wp_plugin_action(
         &self,
         _: &str,
@@ -219,11 +228,10 @@ impl hyperion_core::AdapterPort for StubAdapters {
     }
 }
 
-/// Assemble a real `AgentImpl` (HostingService over in-memory SQLite + stub
-/// adapters) as `Arc<dyn AgentApi>`. The `TempDir` must be kept alive by the
-/// caller for the lifetime of the agent (it backs the secrets store).
-pub async fn build_agent() -> (Arc<dyn AgentApi>, tempfile::TempDir) {
-    let dir = tempfile::tempdir().expect("tempdir");
+/// Start a stub hyperion-agent on a temp Unix socket. Returns the socket path
+/// and the temp dir guard (drop it last).
+async fn start_agent() -> (PathBuf, tempfile::TempDir) {
+    let dir = tempfile::tempdir().expect("dir");
     let pool = open_memory().await.expect("memory db");
     let secrets = Arc::new(SecretsStore::new(dir.path().join("secrets")));
     let svc = Arc::new(HostingService::<StubAdapters> {
@@ -255,5 +263,87 @@ pub async fn build_agent() -> (Arc<dyn AgentApi>, tempfile::TempDir) {
         )),
     });
     let agent: Arc<dyn AgentApi> = Arc::new(AgentImpl::new(svc));
-    (agent, dir)
+    let path = dir.path().join("agent.sock");
+    let srv = hyperion_rpc_server::Server::bind(&path, agent)
+        .await
+        .expect("bind");
+    tokio::spawn(srv.run());
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    (path, dir)
+}
+
+fn build_app(agent_socket: PathBuf, admin: AdminUser) -> axum::Router {
+    build_app_with_signer(agent_socket, admin, Arc::new(SessionSigner::new_random())).0
+}
+
+/// Same as [`build_app`] but lets the test keep a handle on the signer
+/// so it can mint tokens that the app will accept as valid signatures.
+/// Returned tuple is `(router, signer)`.
+fn build_app_with_signer(
+    agent_socket: PathBuf,
+    admin: AdminUser,
+    signer: Arc<SessionSigner>,
+) -> (axum::Router, Arc<SessionSigner>) {
+    let cfg = Config::default();
+    let csrf_key: [u8; 32] = {
+        let mut k = [0u8; 32];
+        use rand::RngCore;
+        rand::thread_rng().fill_bytes(&mut k);
+        k
+    };
+    let state = Arc::new(AppState {
+        cfg: Config {
+            web: hyperion_web::config::WebSection {
+                secure_cookies: false, // test over plain HTTP
+                ..cfg.web
+            },
+        },
+        agent_socket,
+        session: signer.clone(),
+        csrf_key: Arc::new(csrf_key),
+        admin_user: Arc::new(admin),
+        ratelimit: Arc::new(hyperion_web::ratelimit::RateLimiter::new()),
+        // Tests don't exercise remote dispatch — leave the signer
+        // unset so any handler that wires it in later gets a clean
+        // "remote disabled" error rather than a stub signature.
+        master_rpc_signer: None,
+        // Empty hostname ⇒ the enforce_panel_hostname middleware is
+        // a no-op, so tests reach handlers regardless of Host header.
+        panel_hostname: Arc::new(tokio::sync::RwLock::new(String::new())),
+        // Fixtures log in as admins without enrolling 2FA — keep the
+        // enforcement gate off so the existing flows render as before.
+        enforce_admin_2fa: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        // "master" = draw everything, matching how these fixtures were
+        // written. Standalone only ever HIDES chrome, so this keeps the
+        // existing assertions honest.
+        deployment_mode: Arc::new(tokio::sync::RwLock::new("master".to_string())),
+        ftp_password_handoff: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        error_handoff: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+    });
+    // The login/2FA + enroll handlers extract `ConnectInfo<SocketAddr>` (real
+    // peer IP for the rate-limit bucket). `.oneshot()` doesn't go through
+    // `into_make_service_with_connect_info`, so inject a mock peer addr the same
+    // way axum's own tests do — otherwise those handlers 500 on extraction.
+    // No MockConnectInfo here: a real listener supplies the peer address.
+    let router = hyperion_web::build_router(state);
+    (router, signer)
+}
+
+#[tokio::test]
+#[ignore]
+async fn devserver() {
+    let admin = admin_user::create("kevin", "secret-pw-1").expect("create");
+    let (sock, _dir) = start_agent().await;
+    let (router, _signer) =
+        build_app_with_signer(sock, admin, Arc::new(SessionSigner::new_random()));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:8190")
+        .await
+        .expect("bind 127.0.0.1:8190");
+    eprintln!("devserver: http://127.0.0.1:8190  (kevin / secret-pw-1)");
+    axum::serve(
+        listener,
+        router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await
+    .expect("serve");
 }

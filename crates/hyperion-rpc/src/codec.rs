@@ -1393,6 +1393,45 @@ pub enum Request {
     /// node (the vsftpd config, the passwd/shadow entry and the web root
     /// are all node-local — a master-local scan would call every remote
     /// hosting broken).
+    /// Walk the site now: fetch the pages its sitemap advertises, then the
+    /// links, images and assets they reference. Stores the result.
+    SiteCheckRun {
+        sel: HostingSelector,
+    },
+    /// The last stored walk, without running one. `None` when none has run.
+    SiteCheckLast {
+        sel: HostingSelector,
+    },
+    /// Snapshots this site has, newest last. Empty when the node has no
+    /// snapshot engine — which is not an error, it is "none".
+    SnapshotList {
+        sel: HostingSelector,
+    },
+    /// Take one now, tagged `manual`.
+    SnapshotNow {
+        sel: HostingSelector,
+    },
+    /// What changed between two snapshots.
+    SnapshotDiff {
+        sel: HostingSelector,
+        from: String,
+        to: String,
+    },
+    /// Everything we can say about one site's outgoing WordPress mail.
+    /// Read-only; `WpMailRepair` is the acting half.
+    WpMailSelfCheck {
+        sel: HostingSelector,
+    },
+    /// Write the mu-plugin, and — only with evidence that mail is failing —
+    /// take `wp_mail()` back off an SMTP plugin. Re-checks and returns.
+    WpMailRepair {
+        sel: HostingSelector,
+    },
+    /// Per-site switch for the automatic version of the above.
+    WpMailAutofixSet {
+        sel: HostingSelector,
+        enabled: bool,
+    },
     FtpSelfCheck {
         sel: HostingSelector,
     },
@@ -1605,6 +1644,19 @@ pub enum Request {
     /// the retire path; callers should warn on `active_count > 0` first.
     PackageDelete {
         id: i64,
+    },
+    /// Every site on THIS node that holds a care package, with how much of
+    /// `period`'s monthly service checklist is done.
+    ///
+    /// One call per node instead of two per site: the activations and the
+    /// checklist both live here, so the panel would otherwise fan out a
+    /// `PackageActivations` and a `HostingKvList` for every hosting it
+    /// wanted a badge for.
+    CareOverview {
+        /// `YYYY-MM`. Passed in rather than read from the node's clock so
+        /// every node answers about the SAME month — a cluster spanning a
+        /// month boundary must not report two different periods.
+        period: String,
     },
     /// The packages a hosting holds. `history = true` also returns
     /// cancelled activations (what was bought, and when it stopped).
@@ -2091,6 +2143,14 @@ pub enum Response {
     },
     FtpDisable,
     FtpSelfCheck(hyperion_types::FtpCheckReport),
+    WpMailSelfCheck(hyperion_types::FtpCheckReport),
+    WpMailRepair(hyperion_types::FtpCheckReport),
+    WpMailAutofixSet(bool),
+    SiteCheck(hyperion_types::SiteCheckReport),
+    SiteCheckLast(Option<hyperion_types::SiteCheckReport>),
+    SnapshotList(Vec<hyperion_types::SnapshotSummary>),
+    SnapshotNow(String),
+    SnapshotDiff(hyperion_types::SnapshotDiff),
     FtpAccountList(Vec<hyperion_types::FtpExtraAccount>),
     /// `(login, password)` — the password is shown once, and it is paired
     /// with the login it belongs to because the panel used to show a fresh
@@ -2144,6 +2204,7 @@ pub enum Response {
     PackageUpdate(hyperion_types::ServicePackage),
     PackageDelete,
     PackageActivations(Vec<hyperion_types::HostingPackage>),
+    CareOverview(Vec<hyperion_types::care_check::CareOverviewRow>),
     PackageActivate(hyperion_types::HostingPackage),
     PackageCancel(hyperion_types::HostingPackage),
     /// How many individual features the pass had to put back. 0 = nothing

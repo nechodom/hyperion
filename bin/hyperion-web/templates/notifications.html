@@ -67,6 +67,17 @@
   <div class="card" style="padding:0">
     <div class="scroll-x">
 <table class="data-table data-table--cards">
+      {# The colours have one meaning, and it is worth stating: a panel where
+         everything is red tells you nothing, because the one site that is
+         actually down no longer stands out. #}
+      <caption class="text-soft small" style="caption-side:top;text-align:left;padding:0 0 0.5rem">
+        <span class="pill err">error</span> something is broken right now —
+        the site does not serve, a certificate has expired, malware is on
+        disk. <span class="pill warn">warn</span> something will break or a
+        promise is unmet — a certificate expiring next week, backups that
+        have never succeeded. <span class="pill ok">info</span> worth
+        recording.
+      </caption>
       <thead>
         <tr>
           <th style="width:5rem">Severity</th>

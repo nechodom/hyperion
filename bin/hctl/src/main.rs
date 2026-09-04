@@ -1263,6 +1263,66 @@ fn print_pretty(resp: &Response) {
         Response::PackageDelete => {
             println!("✓ package deleted (existing activations keep their price, unenforced)")
         }
+        // The three self-check responses share one shape; print them the
+        // same way the FTP check already is.
+        Response::WpMailSelfCheck(r) | Response::WpMailRepair(r) => {
+            for it in &r.items {
+                println!("[{}] {}: {}", it.severity, it.label, it.detail);
+            }
+        }
+        Response::SiteCheck(r) | Response::SiteCheckLast(Some(r)) => {
+            if !r.error.is_empty() {
+                println!("could not check: {}", r.error);
+            }
+            println!(
+                "{} page(s) ok of {}, {} link(s) checked, slowest {} ms",
+                r.pages_ok(),
+                r.pages.len(),
+                r.links_checked,
+                r.slowest_ttfb_ms()
+            );
+            for f in &r.findings {
+                println!("[{}] {} {}: {}", f.severity, f.kind, f.url, f.detail);
+            }
+        }
+        Response::SiteCheckLast(None) => println!("(no page check has run for this site yet)"),
+        Response::SnapshotList(rows) => {
+            if rows.is_empty() {
+                println!("(no snapshots — the snapshot engine may not be installed)");
+            }
+            for r in rows {
+                println!("{:<10} {:<26} {}", r.id, r.time, r.tags.join(","));
+            }
+        }
+        Response::SnapshotNow(id) => {
+            if id.is_empty() {
+                println!("no snapshot taken (engine unavailable or site has no document tree)");
+            } else {
+                println!("snapshot {id}");
+            }
+        }
+        Response::SnapshotDiff(d) => {
+            println!("+{} -{} M{}", d.added, d.removed, d.modified);
+            for p in &d.sample {
+                println!("  {p}");
+            }
+        }
+        Response::WpMailAutofixSet(on) => {
+            println!("wp mail self-repair: {}", if *on { "on" } else { "off" });
+        }
+        Response::CareOverview(rows) => {
+            if rows.is_empty() {
+                println!("(no site on this node holds a care package)");
+            }
+            for r in rows {
+                let state = if r.outstanding.is_empty() {
+                    "checked".to_string()
+                } else {
+                    format!("{}/{} — {}", r.checks_done, r.checks_total, r.outstanding.join(", "))
+                };
+                println!("{:<34} {:<24} {state}", r.domain, r.packages.join(","));
+            }
+        }
         Response::PackageActivations(rows) => {
             if rows.is_empty() {
                 println!("(no packages on this hosting)");

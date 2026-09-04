@@ -885,6 +885,16 @@ if ! command -v sudo >/dev/null 2>&1; then
     || warn "could not install sudo — every WordPress action will fail on this node"
 fi
 
+# restic backs the snapshot engine — a deduplicated copy taken before
+# anything changes a site, and the only thing that can answer "what did last
+# night's update change?". Absent, the snapshot code is inert and sites keep
+# getting archive backups, so this is a heal rather than a hard requirement.
+if ! command -v restic >/dev/null 2>&1; then
+  log "Installing restic — snapshots before updates need it ..."
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq restic \
+    || warn "could not install restic — this node will not take snapshots before updates"
+fi
+
 declare -A NEEDED_PKGS=(
   [nginx.service]="nginx"
   [vsftpd.service]="vsftpd"

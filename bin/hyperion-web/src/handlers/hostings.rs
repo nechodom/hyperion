@@ -11757,3 +11757,595 @@ mod tests {
         assert!(!html.contains(">Clean.<"));
     }
 }
+
+// ============================================================
+// WordPress mail
+// ============================================================
+
+#[derive(Template)]
+#[template(path = "_hosting_wpmail_card.html")]
+struct WpMailCardTpl {
+    report: hyperion_types::FtpCheckReport,
+    selector: String,
+    /// Is the automatic version of this check allowed to act on this site?
+    /// Read from the OWNING node, because that is where the tick reads it —
+    /// a master-local read would show a switch wired to nothing.
+    autofix_enabled: bool,
+    csrf_repair: String,
+    csrf_autofix: String,
+    error: Option<String>,
+}
+
+/// GET /hostings/:selector/wpmail-panel — how this site's WordPress mail is
+/// set up, and whether anything has been failing.
+pub async fn get_wpmail_panel(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Path(selector): Path<String>,
+) -> Result<Response, AppError> {
+    let card = |report, autofix_enabled: bool, error: Option<String>| {
+        Html(
+            WpMailCardTpl {
+                report,
+                selector: selector.clone(),
+                autofix_enabled,
+                csrf_repair: csrf_token_for(&state, &ctx, "/hostings/wp/mail-repair"),
+                csrf_autofix: csrf_token_for(&state, &ctx, "/hostings/wp/mail-autofix"),
+                error,
+            }
+            .render()
+            .unwrap_or_default(),
+        )
+        .into_response()
+    };
+    let sel = match parse_selector(&selector) {
+        Ok(s) => s,
+        Err(e) => {
+            return Ok(card(
+                Default::default(),
+                true,
+                Some(format!("could not read the selector: {e}")),
+            ))
+        }
+    };
+    let (detail, owner) = match find_hosting_anywhere(&state, sel.clone()).await {
+        Ok(v) => v,
+        Err(e) => return Ok(card(Default::default(), true, Some(e.to_string()))),
+    };
+    // A read probe, so HostingView is the right gate; the repair below is
+    // what needs manage rights.
+    if require_hosting_access(
+        &state,
+        &ctx,
+        detail.id.as_str(),
+        false,
+        Capability::HostingView,
+    )
+    .await
+    .is_err()
+    {
+        return Ok(card(
+            Default::default(),
+            true,
+            Some("You do not have access to this hosting.".into()),
+        ));
+    }
+    // Absent or unreadable ⇒ ON, matching what the tick itself answers.
+    let autofix_enabled = match crate::dispatcher::dispatch_to_node(
+        &state,
+        owner.as_deref(),
+        Request::HostingKvList {
+            hosting_id: detail.id.as_str().to_string(),
+        },
+    )
+    .await
+    {
+        Ok(RpcResponse::HostingKvList(v)) => v
+            .into_iter()
+            .find(|(k, _)| k == "wp_mail_autofix_enabled")
+            .map(|(_, val)| val.trim() != "off")
+            .unwrap_or(true),
+        _ => true,
+    };
+    match crate::dispatcher::dispatch_to_node(
+        &state,
+        owner.as_deref(),
+        Request::WpMailSelfCheck { sel },
+    )
+    .await
+    {
+        Ok(RpcResponse::WpMailSelfCheck(r)) => Ok(card(r, autofix_enabled, None)),
+        Ok(RpcResponse::Error(e)) => Ok(card(
+            Default::default(),
+            autofix_enabled,
+            Some(e.to_string()),
+        )),
+        Ok(_) => Ok(card(
+            Default::default(),
+            autofix_enabled,
+            Some("unexpected response from the node".into()),
+        )),
+        Err(e) => Ok(card(
+            Default::default(),
+            autofix_enabled,
+            Some(e.to_string()),
+        )),
+    }
+}
+
+#[derive(serde::Deserialize)]
+pub struct WpMailRepairForm {
+    pub selector: String,
+}
+
+/// POST /hostings/wp/mail-repair — write the configuration now.
+pub async fn post_wpmail_repair(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<WpMailRepairForm>,
+) -> Result<Response, AppError> {
+    let sel = match require_manage_for_selector(
+        &state,
+        &ctx,
+        &form.selector,
+        Capability::HostingEditConfig,
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
+    let (_, owner) = find_hosting_anywhere(&state, sel.clone()).await?;
+    let _ = crate::dispatcher::dispatch_to_node(
+        &state,
+        owner.as_deref(),
+        Request::WpMailRepair { sel },
+    )
+    .await;
+    // Re-render from the node rather than reporting success: a repair the
+    // node refused then shows the state the site is actually in, not the
+    // state the click implied.
+    get_wpmail_panel(State(state), ctx, Path(form.selector)).await
+}
+
+#[derive(serde::Deserialize)]
+pub struct WpMailAutofixForm {
+    pub selector: String,
+    pub enabled: String,
+}
+
+/// POST /hostings/wp/mail-autofix — per-site switch for the automatic repair.
+///
+/// Turning it OFF leaves whatever is already on disk exactly as it is: the
+/// switch means "stop deciding for me", not "undo what you did", and pulling
+/// a working mu-plugin would break the site's mail at the moment somebody
+/// asked for less interference.
+pub async fn post_wpmail_autofix(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<WpMailAutofixForm>,
+) -> Result<Response, AppError> {
+    let sel = match require_manage_for_selector(
+        &state,
+        &ctx,
+        &form.selector,
+        Capability::HostingEditConfig,
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
+    let (_, owner) = find_hosting_anywhere(&state, sel.clone()).await?;
+    let enabled = form.enabled.trim() != "off";
+    let _ = crate::dispatcher::dispatch_to_node(
+        &state,
+        owner.as_deref(),
+        Request::WpMailAutofixSet { sel, enabled },
+    )
+    .await?;
+    // Re-render the whole card so the switch and the findings agree.
+    get_wpmail_panel(State(state), ctx, Path(form.selector)).await
+}
+
+// ============================================================
+// Snapshots
+// ============================================================
+
+#[derive(Template)]
+#[template(path = "_hosting_snapshots_card.html")]
+struct SnapshotsCardTpl {
+    selector: String,
+    /// Newest FIRST here, unlike the RPC: this is a list somebody reads, and
+    /// the interesting snapshot is the most recent one.
+    rows: Vec<SnapshotRow>,
+    csrf_now: String,
+    csrf_diff: String,
+    diff: Option<hyperion_types::SnapshotDiff>,
+    diff_of: String,
+    error: Option<String>,
+}
+
+pub struct SnapshotRow {
+    pub id: String,
+    pub when: String,
+    pub tags: String,
+    /// The snapshot immediately older than this one, so "what changed" is
+    /// one click. Empty on the oldest.
+    pub previous: String,
+}
+
+/// GET /hostings/:selector/snapshots-panel
+pub async fn get_snapshots_panel(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Path(selector): Path<String>,
+) -> Result<Response, AppError> {
+    render_snapshots(&state, &ctx, selector, None, String::new(), None).await
+}
+
+async fn render_snapshots(
+    state: &SharedState,
+    ctx: &AuthCtx,
+    selector: String,
+    diff: Option<hyperion_types::SnapshotDiff>,
+    diff_of: String,
+    error: Option<String>,
+) -> Result<Response, AppError> {
+    let card = |rows: Vec<SnapshotRow>, error: Option<String>| {
+        Html(
+            SnapshotsCardTpl {
+                selector: selector.clone(),
+                rows,
+                csrf_now: csrf_token_for(state, ctx, "/hostings/snapshots/now"),
+                csrf_diff: csrf_token_for(state, ctx, "/hostings/snapshots/diff"),
+                diff: diff.clone(),
+                diff_of: diff_of.clone(),
+                error,
+            }
+            .render()
+            .unwrap_or_default(),
+        )
+        .into_response()
+    };
+    let sel = match parse_selector(&selector) {
+        Ok(s) => s,
+        Err(e) => return Ok(card(Vec::new(), Some(e.to_string()))),
+    };
+    let (detail, owner) = match find_hosting_anywhere(state, sel.clone()).await {
+        Ok(v) => v,
+        Err(e) => return Ok(card(Vec::new(), Some(e.to_string()))),
+    };
+    if require_hosting_access(
+        state,
+        ctx,
+        detail.id.as_str(),
+        false,
+        Capability::HostingView,
+    )
+    .await
+    .is_err()
+    {
+        return Ok(card(
+            Vec::new(),
+            Some("You do not have access to this hosting.".into()),
+        ));
+    }
+    let list = match crate::dispatcher::dispatch_to_node(
+        state,
+        owner.as_deref(),
+        Request::SnapshotList { sel },
+    )
+    .await
+    {
+        Ok(RpcResponse::SnapshotList(v)) => v,
+        Ok(RpcResponse::Error(e)) => return Ok(card(Vec::new(), Some(e.to_string()))),
+        Ok(_) => {
+            return Ok(card(
+                Vec::new(),
+                Some("unexpected response from the node".into()),
+            ))
+        }
+        Err(e) => return Ok(card(Vec::new(), Some(e.to_string()))),
+    };
+    // The node answers with an empty list both when the engine is missing
+    // and when nothing has been snapshotted yet. The card says the second,
+    // which is the honest reading: we cannot tell them apart from here, and
+    // "no snapshots" is true either way.
+    let mut rows: Vec<SnapshotRow> = Vec::with_capacity(list.len());
+    for (i, s) in list.iter().enumerate() {
+        rows.push(SnapshotRow {
+            previous: if i == 0 {
+                String::new()
+            } else {
+                list[i - 1].id.clone()
+            },
+            id: s.id.clone(),
+            when: s.time.clone(),
+            tags: s.tags.join(", "),
+        });
+    }
+    rows.reverse();
+    Ok(card(rows, error))
+}
+
+#[derive(serde::Deserialize)]
+pub struct SnapshotNowForm {
+    pub selector: String,
+}
+
+/// POST /hostings/snapshots/now — take one by hand.
+pub async fn post_snapshot_now(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<SnapshotNowForm>,
+) -> Result<Response, AppError> {
+    let sel = match require_manage_for_selector(
+        &state,
+        &ctx,
+        &form.selector,
+        Capability::HostingEditConfig,
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
+    let (_, owner) = find_hosting_anywhere(&state, sel.clone()).await?;
+    let error = match crate::dispatcher::dispatch_to_node(
+        &state,
+        owner.as_deref(),
+        Request::SnapshotNow { sel },
+    )
+    .await
+    {
+        // An empty id means the node has no engine — reported, because a
+        // button that silently does nothing is worse than one that refuses.
+        Ok(RpcResponse::SnapshotNow(id)) if id.is_empty() => Some(
+            "No snapshot was taken — this node has no snapshot engine installed, or the site \
+             has no document tree."
+                .to_string(),
+        ),
+        Ok(RpcResponse::SnapshotNow(_)) => None,
+        Ok(RpcResponse::Error(e)) => Some(e.to_string()),
+        Ok(_) => Some("unexpected response from the node".into()),
+        Err(e) => Some(e.to_string()),
+    };
+    render_snapshots(&state, &ctx, form.selector, None, String::new(), error).await
+}
+
+#[derive(serde::Deserialize)]
+pub struct SnapshotDiffForm {
+    pub selector: String,
+    pub from: String,
+    pub to: String,
+}
+
+/// POST /hostings/snapshots/diff — what changed between two of them.
+pub async fn post_snapshot_diff(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<SnapshotDiffForm>,
+) -> Result<Response, AppError> {
+    let sel = match parse_selector(&form.selector) {
+        Ok(s) => s,
+        Err(e) => {
+            return render_snapshots(
+                &state,
+                &ctx,
+                form.selector.clone(),
+                None,
+                String::new(),
+                Some(e.to_string()),
+            )
+            .await
+        }
+    };
+    let (detail, owner) = find_hosting_anywhere(&state, sel.clone()).await?;
+    // Reading a diff is reading the site's contents, so it is gated like the
+    // rest of the detail page rather than like a change.
+    if require_hosting_access(
+        &state,
+        &ctx,
+        detail.id.as_str(),
+        false,
+        Capability::HostingView,
+    )
+    .await
+    .is_err()
+    {
+        return render_snapshots(
+            &state,
+            &ctx,
+            form.selector,
+            None,
+            String::new(),
+            Some("You do not have access to this hosting.".into()),
+        )
+        .await;
+    }
+    let label = format!("{} → {}", form.from, form.to);
+    let (diff, error) = match crate::dispatcher::dispatch_to_node(
+        &state,
+        owner.as_deref(),
+        Request::SnapshotDiff {
+            sel,
+            from: form.from.clone(),
+            to: form.to.clone(),
+        },
+    )
+    .await
+    {
+        Ok(RpcResponse::SnapshotDiff(d)) => (Some(d), None),
+        Ok(RpcResponse::Error(e)) => (None, Some(e.to_string())),
+        Ok(_) => (None, Some("unexpected response from the node".into())),
+        Err(e) => (None, Some(e.to_string())),
+    };
+    render_snapshots(&state, &ctx, form.selector, diff, label, error).await
+}
+
+// ============================================================
+// Automated page check
+// ============================================================
+
+#[derive(Template)]
+#[template(path = "_hosting_sitecheck_card.html")]
+struct SiteCheckCardTpl {
+    selector: String,
+    /// `None` until a walk has run. Distinct from a walk that ran and found
+    /// nothing: the card says "not checked yet", never "all good".
+    report: Option<hyperion_types::SiteCheckReport>,
+    checked_ago: String,
+    csrf_run: String,
+    error: Option<String>,
+}
+
+/// GET /hostings/:selector/sitecheck-panel — the LAST walk, from store.
+///
+/// Never runs one: a crawl is up to fifty requests against the customer's
+/// own site, and a page render is not a thing that should cost that. The
+/// button below spawns it as a job.
+pub async fn get_sitecheck_panel(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Path(selector): Path<String>,
+) -> Result<Response, AppError> {
+    let card = |report: Option<hyperion_types::SiteCheckReport>, error: Option<String>| {
+        let checked_ago = report
+            .as_ref()
+            .map(|r| crate::handlers::stats::fmt_ago(&r.checked_at))
+            .unwrap_or_default();
+        Html(
+            SiteCheckCardTpl {
+                selector: selector.clone(),
+                report,
+                checked_ago,
+                csrf_run: csrf_token_for(&state, &ctx, "/hostings/site-check"),
+                error,
+            }
+            .render()
+            .unwrap_or_default(),
+        )
+        .into_response()
+    };
+    let sel = match parse_selector(&selector) {
+        Ok(s) => s,
+        Err(e) => return Ok(card(None, Some(e.to_string()))),
+    };
+    let (detail, owner) = match find_hosting_anywhere(&state, sel.clone()).await {
+        Ok(v) => v,
+        Err(e) => return Ok(card(None, Some(e.to_string()))),
+    };
+    if require_hosting_access(
+        &state,
+        &ctx,
+        detail.id.as_str(),
+        false,
+        Capability::HostingView,
+    )
+    .await
+    .is_err()
+    {
+        return Ok(card(
+            None,
+            Some("You do not have access to this hosting.".into()),
+        ));
+    }
+    match crate::dispatcher::dispatch_to_node(
+        &state,
+        owner.as_deref(),
+        Request::SiteCheckLast { sel },
+    )
+    .await
+    {
+        Ok(RpcResponse::SiteCheckLast(r)) => Ok(card(r, None)),
+        Ok(RpcResponse::Error(e)) => Ok(card(None, Some(e.to_string()))),
+        Ok(_) => Ok(card(None, Some("unexpected response from the node".into()))),
+        Err(e) => Ok(card(None, Some(e.to_string()))),
+    }
+}
+
+#[derive(serde::Deserialize)]
+pub struct SiteCheckForm {
+    pub selector: String,
+}
+
+/// POST /hostings/site-check — walk the site now, as a background job.
+///
+/// A job rather than an inline request: the crawl is up to fifty fetches,
+/// each with a twenty-second ceiling, so a sick site would hold the
+/// connection open for minutes and lose the result when the operator's
+/// browser gave up.
+pub async fn post_site_check(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<SiteCheckForm>,
+) -> Result<Response, AppError> {
+    let sel = match require_manage_for_selector(
+        &state,
+        &ctx,
+        &form.selector,
+        Capability::HostingEditConfig,
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
+    let (_, owner) = find_hosting_anywhere(&state, sel.clone()).await?;
+    let actor_uid = ctx.session.as_ref().map(|s| s.user_id).unwrap_or(0);
+    let actor_label = ctx.username.clone();
+    let job_state = state.clone();
+    let job_id = crate::handlers::jobs::spawn_job(
+        state.clone(),
+        "site_check",
+        Some(&form.selector),
+        "{}",
+        &actor_label,
+        actor_uid,
+        move |reporter| async move {
+            reporter
+                .step("Fetching pages, links and images…", 20, "")
+                .await;
+            let outcome = crate::dispatcher::dispatch_to_node(
+                &job_state,
+                owner.as_deref(),
+                Request::SiteCheckRun { sel },
+            )
+            .await;
+            match outcome {
+                Ok(RpcResponse::SiteCheck(r)) if r.error.is_empty() => {
+                    let summary = format!(
+                        "{} of {} page(s) answered, {} link(s) checked, {} problem(s) found.\n{}",
+                        r.pages_ok(),
+                        r.pages.len(),
+                        r.links_checked,
+                        r.findings.len(),
+                        r.findings
+                            .iter()
+                            .map(|f| format!("[{}] {} — {}", f.severity, f.url, f.detail))
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    );
+                    reporter.step("Done", 100, &summary).await;
+                    reporter.finish(true, None).await;
+                }
+                // The crawl could not START. Reported as a failed job rather
+                // than a clean one with an empty result, which would read as
+                // "nothing wrong with the site".
+                Ok(RpcResponse::SiteCheck(r)) => {
+                    reporter.finish(false, Some(r.error)).await;
+                }
+                Ok(RpcResponse::Error(e)) => reporter.finish(false, Some(e.to_string())).await,
+                Ok(_) => {
+                    reporter
+                        .finish(false, Some("unexpected response from the node".into()))
+                        .await
+                }
+                Err(e) => reporter.finish(false, Some(e.to_string())).await,
+            }
+        },
+    )
+    .await?;
+    Ok(Redirect::to(&format!("/jobs/{job_id}")).into_response())
+}

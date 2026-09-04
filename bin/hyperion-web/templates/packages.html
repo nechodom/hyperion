@@ -148,6 +148,9 @@
                 {% if !v.pkg.features.monitoring.is_leave() %}<span class="pill">monitoring {{ v.pkg.features.monitoring }}</span>{% endif %}
                 {% if !v.pkg.features.hardening.is_leave() %}<span class="pill">WAF {{ v.pkg.features.hardening }}</span>{% endif %}
                 {% if !v.pkg.features.backup_cadence.is_leave() %}<span class="pill">backups {{ v.pkg.features.backup_cadence }}</span>{% endif %}
+                {#- The one feature the customer actually SEES was the one
+                    missing from this list. -#}
+                {% if !v.pkg.features.report_cadence.is_leave() %}<span class="pill">report {{ v.pkg.features.report_cadence }}</span>{% endif %}
               </div>
             {% endif %}
           </td>

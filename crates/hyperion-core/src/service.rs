@@ -422,6 +422,12 @@ pub struct HostingService<A: AdapterPort + 'static> {
     pub paths: HostingPaths,
     pub remote_backup: Option<RemoteBackupConfig>,
     pub retention: BackupRetention,
+    /// Take a content-addressed snapshot before anything changes a site.
+    ///
+    /// Node-wide, from `[snapshots] enabled`, and ON by default — but it
+    /// does nothing at all unless restic is installed, so an install that
+    /// has never heard of the feature is unaffected.
+    pub snapshots_enabled: bool,
     /// Cluster-wide default Slack webhook for notifications.
     /// Per-profile webhooks override this.
     pub slack_default_webhook: Option<String>,
@@ -1728,6 +1734,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             permissions_autoheal: true,
             remote_backup: None,
             retention: BackupRetention::default(),
+            snapshots_enabled: true,
             slack_default_webhook: None,
             acme_contact_email: "admin@hyperion.invalid".into(),
             email_config: None,
@@ -2282,6 +2289,14 @@ impl<A: AdapterPort + 'static> HostingService<A> {
 
     pub fn with_remote_backup(mut self, cfg: Option<RemoteBackupConfig>) -> Self {
         self.remote_backup = cfg;
+        self
+    }
+
+    /// Node-wide switch for snapshots. Default ON, and a no-op unless
+    /// restic is installed — so this is a way to say "not on this node",
+    /// not a way to turn the feature on.
+    pub fn with_snapshots(mut self, enabled: bool) -> Self {
+        self.snapshots_enabled = enabled;
         self
     }
 
@@ -3209,13 +3224,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         )
         .await;
         // Notify admins so the bell catches "this site went to trash".
-        self.notify_admins(
+        self.notify_admins_say(
             "warn",
-            "Hosting moved to trash",
-            &format!(
-                "{} will be GC'd after the trash retention window.",
-                detail.domain
-            ),
+            "ops.trash",
+            &[("domain", &detail.domain)],
             "/trash",
             "hosting.trash",
         )
@@ -7727,6 +7739,1047 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// repair runs only when it fires, and lands in the audit log both
     /// so the fix is traceable and so a repeating heal — something
     /// re-breaking modes on a schedule — is visible as a pattern.
+    /// Walk the site the way a visitor would and report what is broken.
+    ///
+    /// Fetches the pages the site itself advertises (its sitemap, falling
+    /// back to the home page alone), then the links, images and assets those
+    /// pages reference. Everything is pinned to loopback, so what is checked
+    /// is the copy THIS node serves — a site whose DNS still points at the
+    /// old host would otherwise be graded on somebody else's server.
+    ///
+    /// Never an `Err` for anything about the SITE: a site that does not
+    /// answer is the finding, not a failure of the check. `error` on the
+    /// report is reserved for the crawl being unable to start at all, which
+    /// must not render as "nothing wrong".
+    pub async fn site_check(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<hyperion_types::SiteCheckReport, RpcError> {
+        use hyperion_adapters::sitecheck::{self, LinkKind};
+        use hyperion_types::{SiteCheckFinding, SiteCheckPage, SiteCheckReport};
+
+        let detail = self.get(sel).await?;
+        let mut report = SiteCheckReport {
+            checked_at: now_secs(),
+            ..Default::default()
+        };
+        let domain = detail.domain.trim().to_string();
+        if domain.is_empty() {
+            report.error = "this hosting has no domain to fetch".into();
+            return Ok(report);
+        }
+        // A redirect hosting has no pages of its own; crawling it would
+        // report on wherever it points, which is not ours to grade.
+        if detail.kind.trim() == "redirect" {
+            report.error = "a redirect hosting serves no pages of its own".into();
+            return Ok(report);
+        }
+
+        let base = format!("https://{domain}/");
+        let mut push = |severity: &str, kind: &str, url: &str, found_on: &str, detail: String| {
+            report.findings.push(SiteCheckFinding {
+                severity: severity.into(),
+                kind: kind.into(),
+                url: url.into(),
+                found_on: found_on.into(),
+                detail,
+            });
+        };
+
+        // ── The home page ───────────────────────────────────────────────
+        let home = match sitecheck::fetch(&base, &domain, LOOPBACK, true).await {
+            Ok(f) => f,
+            Err(e) => {
+                // curl itself could not run. That is our problem, not the
+                // site's, and saying "the site is down" would be a lie.
+                report.error = format!("could not run the check: {e}");
+                return Ok(report);
+            }
+        };
+        let mut bodies: Vec<(String, String)> = Vec::new();
+        report.pages.push(SiteCheckPage {
+            url: home.url.clone(),
+            status: home.status,
+            ttfb_ms: home.ttfb_ms,
+            total_ms: home.total_ms,
+            bytes: home.bytes,
+        });
+        if home.status == 0 {
+            push(
+                "error",
+                "page",
+                &base,
+                "",
+                "The site did not answer at all on this server.".into(),
+            );
+        } else if !home.is_ok() {
+            push(
+                "error",
+                "page",
+                &base,
+                "",
+                format!("The home page answers HTTP {}.", home.status),
+            );
+        } else {
+            bodies.push((home.url.clone(), home.body.clone()));
+        }
+
+        // ── The pages the site says it has ──────────────────────────────
+        let mut page_urls = self.sitemap_pages(&domain, &base).await;
+        report.discovery = if page_urls.is_empty() {
+            "home page only — no sitemap".into()
+        } else {
+            "sitemap".into()
+        };
+        page_urls.retain(|u| u != &base);
+        page_urls.truncate(sitecheck::MAX_PAGES.saturating_sub(1));
+        for url in page_urls {
+            let Ok(f) = sitecheck::fetch(&url, &domain, LOOPBACK, true).await else {
+                continue;
+            };
+            report.pages.push(SiteCheckPage {
+                url: f.url.clone(),
+                status: f.status,
+                ttfb_ms: f.ttfb_ms,
+                total_ms: f.total_ms,
+                bytes: f.bytes,
+            });
+            if f.is_ok() {
+                bodies.push((f.url.clone(), f.body.clone()));
+            } else if f.status >= 500 || f.status == 0 {
+                // The site's own sitemap says this page exists and it
+                // crashes. That is broken now.
+                push(
+                    "error",
+                    "page",
+                    &f.url,
+                    "",
+                    format!(
+                        "A page the site's own sitemap lists answers HTTP {}.",
+                        f.status
+                    ),
+                );
+            } else {
+                push(
+                    "warn",
+                    "page",
+                    &f.url,
+                    "",
+                    format!(
+                        "A page the site's own sitemap lists answers HTTP {} — published but missing.",
+                        f.status
+                    ),
+                );
+            }
+        }
+
+        // ── Slowness, once, on the worst offender ───────────────────────
+        //
+        // One line rather than one per page: a slow site is slow everywhere,
+        // and eight identical findings bury the broken links underneath.
+        if let Some(worst) = report
+            .pages
+            .iter()
+            .filter(|p| p.is_ok())
+            .max_by_key(|p| p.ttfb_ms)
+        {
+            if worst.ttfb_ms >= sitecheck::SLOW_TTFB_MS {
+                let url = worst.url.clone();
+                let ms = worst.ttfb_ms;
+                push(
+                    "info",
+                    "slow",
+                    &url,
+                    "",
+                    format!(
+                        "Slowest page took {ms} ms to start answering, measured on the server \
+                         itself — so that is PHP and the database, with no network in it. \
+                         Caching is usually what this is about."
+                    ),
+                );
+            }
+        }
+
+        // ── Cache settings, the half of "speed" an operator can fix ─────
+        //
+        // "Check the loading speed and adjust the cache if it needs it" is
+        // on the care list, and a timing number alone does not say what to
+        // adjust. These two do: both are a line of nginx config, and both
+        // are invisible until somebody looks.
+        if home.is_ok() {
+            if home.content_encoding.is_empty() {
+                push(
+                    "warn",
+                    "cache",
+                    &base,
+                    "",
+                    "Pages are sent uncompressed. The browser asked for gzip and the server \
+                     sent none, so every visitor downloads several times more HTML than they \
+                     need to. This is one line of nginx configuration."
+                        .into(),
+                );
+            }
+            // One asset, not all of them: the setting is per-location, so a
+            // second finding about a second file is the same finding twice.
+            let asset = bodies
+                .first()
+                .map(|(page_url, body)| {
+                    sitecheck::extract_links(body, page_url, &domain)
+                        .into_iter()
+                        .find(|(k, _)| matches!(k, LinkKind::Asset | LinkKind::Image))
+                })
+                .unwrap_or(None);
+            if let Some((_, asset_url)) = asset {
+                if let Ok(f) = sitecheck::fetch(&asset_url, &domain, LOOPBACK, false).await {
+                    report.links_checked += 1;
+                    if f.is_ok() && !sitecheck::caches_in_browser(&f.cache_control) {
+                        let how = if f.cache_control.is_empty() {
+                            "no Cache-Control header at all".to_string()
+                        } else {
+                            format!("Cache-Control: {}", f.cache_control)
+                        };
+                        push(
+                            "warn",
+                            "cache",
+                            &asset_url,
+                            &base,
+                            format!(
+                                "Stylesheets, scripts and images are not cached by the browser \
+                                 ({how}), so a returning visitor downloads all of them again on \
+                                 every page. This is the single biggest thing you can change \
+                                 about how fast the site feels on a second visit."
+                            ),
+                        );
+                    }
+                }
+            }
+        }
+
+        // ── What those pages point at ───────────────────────────────────
+        let mut targets: Vec<(LinkKind, String, String)> = Vec::new();
+        let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for (page_url, body) in &bodies {
+            for (kind, url) in sitecheck::extract_links(body, page_url, &domain) {
+                // A link on ten pages is one request, and it is attributed to
+                // the first page it was seen on.
+                if seen.insert(url.clone()) {
+                    targets.push((kind, url, page_url.clone()));
+                }
+            }
+        }
+        // Pages already fetched above are not fetched again.
+        let fetched: std::collections::BTreeSet<String> =
+            report.pages.iter().map(|p| p.url.clone()).collect();
+        targets.retain(|(_, u, _)| !fetched.contains(u));
+        targets.truncate(sitecheck::MAX_LINKS);
+
+        let mut heaviest: Option<(String, i64)> = None;
+        let mut asset_bytes: i64 = 0;
+        for (kind, url, found_on) in targets {
+            let Ok(f) = sitecheck::fetch(&url, &domain, LOOPBACK, false).await else {
+                continue;
+            };
+            report.links_checked += 1;
+            if f.is_ok() {
+                // Images and stylesheets are what a page actually weighs;
+                // a nav link is a different page, not part of this one.
+                if matches!(kind, LinkKind::Image | LinkKind::Asset) {
+                    asset_bytes += f.bytes;
+                    if heaviest.as_ref().map(|(_, b)| f.bytes > *b).unwrap_or(true) {
+                        heaviest = Some((url.clone(), f.bytes));
+                    }
+                }
+                continue;
+            }
+            let what = match kind {
+                LinkKind::Nav => "A link on this site leads nowhere",
+                LinkKind::Image => "An image on this site does not load",
+                LinkKind::Asset => "A stylesheet or script does not load",
+            };
+            let why = match kind {
+                // The one that makes a site "look broken" without anything
+                // being down, and the one nobody reports because the page
+                // still opens.
+                LinkKind::Asset => {
+                    " — this is what makes a site render as unstyled text while still being up."
+                }
+                _ => "",
+            };
+            let status = if f.status == 0 {
+                "no answer".to_string()
+            } else {
+                format!("HTTP {}", f.status)
+            };
+            push(
+                "warn",
+                kind.as_str(),
+                &url,
+                &found_on,
+                format!("{what} ({status}){why}"),
+            );
+        }
+
+        // ── What the page's own HTML does to it ─────────────────────────
+        //
+        // Deliberately NOT called Core Web Vitals. Those are FIELD numbers,
+        // from real visitors on real phones and networks; anything measured
+        // here — one fetch, over loopback, on server hardware — would be a
+        // different measurement wearing the same name, and it would flatter
+        // every site we host. What follows is the CAUSES, which are in the
+        // HTML, are what an operator would change anyway, and can be stated
+        // without inventing a score.
+        if let Some((_, body)) = bodies.first() {
+            let w = sitecheck::page_weight(body);
+            if w.blocking_scripts > 0 {
+                push(
+                    "warn",
+                    "slow",
+                    &base,
+                    "",
+                    format!(
+                        "{} script(s) in the page head have neither `defer` nor `async`, so the \
+                         browser stops building the page until each one has downloaded and run. \
+                         This is the usual reason a site shows nothing for the first second.",
+                        w.blocking_scripts
+                    ),
+                );
+            }
+            if w.unsized_images > 0 {
+                push(
+                    "warn",
+                    "slow",
+                    &base,
+                    "",
+                    format!(
+                        "{} of {} image(s) have no width and height, so the browser reserves no \
+                         space and everything below them jumps as they load. That jumping is \
+                         what Google measures as layout shift, and it is the half of a page's \
+                         speed score that has nothing to do with how fast the server is.",
+                        w.unsized_images, w.images
+                    ),
+                );
+            }
+        }
+        if let Some((url, bytes)) = heaviest {
+            if bytes >= HEAVY_ASSET_BYTES {
+                push(
+                    "warn",
+                    "slow",
+                    &url,
+                    &base,
+                    format!(
+                        "One file on the home page is {}. On a phone that is most of the wait \
+                         before anything appears; a resized copy usually costs nothing visible.",
+                        human_bytes(bytes)
+                    ),
+                );
+            }
+        }
+        if asset_bytes > 0 {
+            let html = report.pages.first().map(|p| p.bytes).unwrap_or(0);
+            push(
+                "info",
+                "slow",
+                &base,
+                "",
+                format!(
+                    "Home page weighs {} in total — {} of HTML plus {} of images, stylesheets \
+                     and scripts, as a browser downloads it.",
+                    human_bytes(html + asset_bytes),
+                    human_bytes(html),
+                    human_bytes(asset_bytes)
+                ),
+            );
+        }
+
+        Ok(report)
+    }
+
+    /// URLs from the site's sitemap, or empty when it has none.
+    ///
+    /// WordPress 5.5+ serves an INDEX at `/wp-sitemap.xml` — a sitemap of
+    /// sitemaps — so one level is followed. Anything unreadable yields an
+    /// empty list and the caller checks the home page alone; a missing
+    /// sitemap is not a finding, plenty of sites do not have one.
+    async fn sitemap_pages(&self, domain: &str, base: &str) -> Vec<String> {
+        use hyperion_adapters::sitecheck;
+        for candidate in ["wp-sitemap.xml", "sitemap.xml", "sitemap_index.xml"] {
+            let url = format!("{base}{candidate}");
+            let Ok(f) = sitecheck::fetch(&url, domain, LOOPBACK, true).await else {
+                continue;
+            };
+            if !f.is_ok() || f.body.trim().is_empty() {
+                continue;
+            }
+            let locs = sitecheck::sitemap_locs(&f.body);
+            if locs.is_empty() {
+                continue;
+            }
+            if !sitecheck::is_sitemap_index(&f.body) {
+                return locs;
+            }
+            // An index: follow the first child, which for WordPress is the
+            // one listing pages rather than an archive of 10 000 posts.
+            for child in locs.into_iter().take(2) {
+                let Ok(cf) = sitecheck::fetch(&child, domain, LOOPBACK, true).await else {
+                    continue;
+                };
+                let child_locs = sitecheck::sitemap_locs(&cf.body);
+                if cf.is_ok() && !child_locs.is_empty() {
+                    return child_locs;
+                }
+            }
+        }
+        Vec::new()
+    }
+
+    /// The last stored site check, or `None` when one has never run.
+    pub async fn site_check_last(
+        &self,
+        hosting_id: &str,
+    ) -> Option<hyperion_types::SiteCheckReport> {
+        let raw = hyperion_state::hosting_kv::get(&self.pool, hosting_id, SITE_CHECK_KV_KEY)
+            .await
+            .ok()??;
+        serde_json::from_str(&raw).ok()
+    }
+
+    /// Run the check and keep the result.
+    pub async fn site_check_run(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<hyperion_types::SiteCheckReport, RpcError> {
+        let detail = self.get(sel.clone()).await?;
+        let report = self.site_check(sel).await?;
+        if let Ok(json) = serde_json::to_string(&report) {
+            let _ = hyperion_state::hosting_kv::set(
+                &self.pool,
+                detail.id.as_str(),
+                SITE_CHECK_KV_KEY,
+                &json,
+                now_secs(),
+            )
+            .await;
+        }
+        Ok(report)
+    }
+
+    /// Walk every care-plan site on this node, once a week.
+    ///
+    /// Only sites that hold a package: this is a thing a care plan promises,
+    /// and crawling every site on the box would put someone else's traffic
+    /// figures up for a service they are not paying for.
+    ///
+    /// Speaks up only for `error` findings — the site not answering, or a
+    /// page its own sitemap advertises crashing. Broken links and missing
+    /// images are real and are left in the panel: waking somebody at 3 a.m.
+    /// for an image is how alerting gets ignored.
+    pub async fn site_check_tick(&self) -> Result<i64, RpcError> {
+        let held = packages::list_all_active(&self.pool)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("site check: read held failed: {e}")))?;
+        if held.is_empty() {
+            return Ok(0);
+        }
+        let mut ids: Vec<HostingId> = Vec::new();
+        for row in held {
+            if !ids.contains(&row.hosting_id) {
+                ids.push(row.hosting_id);
+            }
+        }
+        let now = now_secs();
+        let mut ran = 0i64;
+        for id in ids {
+            // Weekly. The report carries its own timestamp, so the cadence
+            // survives a restart without a second piece of state to keep in
+            // step with it.
+            if let Some(prev) = self.site_check_last(id.as_str()).await {
+                if now - prev.checked_at < SITE_CHECK_INTERVAL_SECS {
+                    continue;
+                }
+            }
+            let Ok(detail) = self.get(HostingSelector::Id(id.clone())).await else {
+                continue;
+            };
+            if detail.state != HostingState::Active {
+                continue;
+            }
+            let report = match self.site_check_run(HostingSelector::Id(id.clone())).await {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(domain = %detail.domain, error = %e, "site check failed");
+                    continue;
+                }
+            };
+            ran += 1;
+            let broken = report.count("error");
+            if broken > 0 {
+                let urls = report
+                    .findings
+                    .iter()
+                    .filter(|f| f.severity == "error")
+                    .map(|f| f.url.as_str())
+                    .take(3)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                self.notify_admins_say(
+                    "error",
+                    "ops.pages_broken",
+                    &[
+                        ("domain", &detail.domain),
+                        ("count", &broken.to_string()),
+                        ("urls", &urls),
+                    ],
+                    &format!("/hostings/{}", detail.domain),
+                    "site_check_broken",
+                )
+                .await;
+            }
+        }
+        Ok(ran)
+    }
+
+    /// Is the WordPress mail self-repair allowed to act on this hosting?
+    ///
+    /// **Default ON** (absent ⇒ enabled), same contract as the permission
+    /// repair: a read error also answers "on", because silently stopping a
+    /// repair is worse than repeating one.
+    pub async fn wp_mail_autofix_enabled(&self, hosting_id: &str) -> bool {
+        match hyperion_state::hosting_kv::get(&self.pool, hosting_id, WP_MAIL_AUTOFIX_KV_KEY).await
+        {
+            Ok(Some(v)) => v.trim() != "off",
+            _ => true,
+        }
+    }
+
+    /// Turn the per-site WordPress mail self-repair on or off.
+    pub async fn wp_mail_autofix_set(
+        &self,
+        sel: HostingSelector,
+        enabled: bool,
+    ) -> Result<bool, RpcError> {
+        let detail = self.get(sel).await?;
+        hyperion_state::hosting_kv::set(
+            &self.pool,
+            detail.id.as_str(),
+            WP_MAIL_AUTOFIX_KV_KEY,
+            if enabled { "on" } else { "off" },
+            now_secs(),
+        )
+        .await
+        .map_err(|e| RpcError::Internal_with(format!("wp mail autofix set: {e}")))?;
+        // Turning it OFF leaves whatever is on disk exactly as it is. The
+        // switch means "stop deciding for me", not "undo what you did" —
+        // removing a working mu-plugin because somebody wanted manual
+        // control would break the site's mail at the moment they asked for
+        // less interference.
+        self.append_audit(
+            "hosting.wp_mail.autofix.set",
+            Some(detail.id.as_str()),
+            &serde_json::json!({ "enabled": enabled }).to_string(),
+            "ok",
+        )
+        .await;
+        Ok(enabled)
+    }
+
+    /// The address this site should send as.
+    ///
+    /// An operator override wins; otherwise `wordpress@<domain>`. Not the
+    /// admin's own mailbox: SPF checks the ENVELOPE, and a real person's
+    /// address at another provider is precisely the sender that fails it.
+    async fn wp_mail_from_address(&self, hosting_id: &str, domain: &str) -> String {
+        match hyperion_state::hosting_kv::get(&self.pool, hosting_id, WP_MAIL_FROM_KV_KEY).await {
+            Ok(Some(v)) if !v.trim().is_empty() => v.trim().to_string(),
+            _ => hyperion_adapters::wpmail::default_from(domain),
+        }
+    }
+
+    /// Has hyperion taken WordPress's mail back off an SMTP plugin?
+    ///
+    /// Off unless it was turned on, and it is only ever turned on after mail
+    /// has actually been failing — a working SMTP plugin is the site owner's
+    /// choice and none of our business.
+    async fn wp_mail_force_local(&self, hosting_id: &str) -> Option<i64> {
+        match hyperion_state::hosting_kv::get(&self.pool, hosting_id, WP_MAIL_FORCE_LOCAL_KV_KEY)
+            .await
+        {
+            Ok(Some(v)) => v.trim().parse::<i64>().ok(),
+            _ => None,
+        }
+    }
+
+    /// Everything we can say about one site's outgoing mail.
+    ///
+    /// Reads only — the repair is [`Self::wp_mail_repair`]. Reported through
+    /// `FtpCheckReport` because that is already this codebase's shape for
+    /// "a list of findings, each with a severity and maybe a fix"; the WP
+    /// permission check reuses it for the same reason.
+    pub async fn wp_mail_self_check(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<hyperion_types::FtpCheckReport, RpcError> {
+        use hyperion_adapters::wpmail;
+        let detail = self.get(sel).await?;
+        let mut items: Vec<hyperion_types::FtpCheckItem> = Vec::new();
+        let mut push = |id: &str, label: &str, severity: &str, detail: String, fix: &str| {
+            items.push(hyperion_types::FtpCheckItem {
+                id: id.into(),
+                label: label.into(),
+                severity: severity.into(),
+                detail,
+                fix: fix.into(),
+            });
+        };
+        let root = detail.root_dir.trim().to_string();
+        let from = self
+            .wp_mail_from_address(detail.id.as_str(), &detail.domain)
+            .await;
+        let forced_at = self.wp_mail_force_local(detail.id.as_str()).await;
+        let log = wpmail::failure_log_path(&root)
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let expected = wpmail::render_mu_plugin(&detail.domain, &from, &log, forced_at.is_some());
+        let state = wpmail::mu_plugin_state(&root, &expected).await;
+
+        if matches!(state, wpmail::MuState::NotWordPress) {
+            // Not a finding. A static site has no `wp_mail()` to fix, and
+            // reporting "missing" about it would be a complaint that the
+            // site is not WordPress.
+            // Say what was LOOKED FOR, not what was concluded: a WordPress
+            // site whose tree is missing (a failed import, a stub node) must
+            // not be told it "is not WordPress" by a card that never opened
+            // wp-config.php — it checked for one directory.
+            push(
+                "wp_mail_plugin",
+                "No WordPress tree here",
+                "info",
+                format!(
+                    "There is no wp-content directory under {}, so there is no WordPress \
+                     mail to configure. A static or proxied site is expected to look like \
+                     this; a WordPress site that does has a missing document tree.",
+                    if root.is_empty() {
+                        "the document root"
+                    } else {
+                        root.as_str()
+                    }
+                ),
+                "",
+            );
+            return Ok(hyperion_types::FtpCheckReport {
+                items,
+                node_id: self.current_node_id(),
+                ..Default::default()
+            });
+        }
+
+        match state {
+            wpmail::MuState::Current => push(
+                "wp_mail_plugin",
+                "Sender is pinned to this domain",
+                "ok",
+                format!(
+                    "WordPress sends as {from}, which is what this domain's SPF record covers."
+                ),
+                "",
+            ),
+            wpmail::MuState::Missing => push(
+                "wp_mail_plugin",
+                "Sender is not pinned",
+                "warn",
+                format!(
+                    "The mu-plugin that keeps the From address on {} is not installed, so \
+                     WordPress and its plugins can send as any address they like. Mail from \
+                     another domain fails SPF at the receiving end and is dropped without a \
+                     bounce.",
+                    detail.domain
+                ),
+                "site_repair",
+            ),
+            wpmail::MuState::Stale => push(
+                "wp_mail_plugin",
+                "Sender pin is out of date",
+                "warn",
+                format!(
+                    "The installed mu-plugin does not match what this site needs now \
+                     (expected sender {from}). Rewriting it is the fix."
+                ),
+                "site_repair",
+            ),
+            wpmail::MuState::NotWordPress => {}
+        }
+
+        // Failures the plugin recorded. This is the only direct evidence
+        // that mail is actually broken — `wp_mail()` returns false and
+        // almost every caller in WordPress ignores it.
+        let lines = wpmail::recent_failures(&root, 20).await;
+        let day = now_secs() - 86_400;
+        let week = now_secs() - 7 * 86_400;
+        let recent = wpmail::failures_since(&lines, day);
+        let weekly = wpmail::failures_since(&lines, week);
+        if weekly == 0 {
+            push(
+                "wp_mail_failures",
+                "No send failures recorded",
+                "ok",
+                if lines.is_empty() {
+                    "Nothing has failed since the record started.".into()
+                } else {
+                    format!(
+                        "Nothing in the last 7 days. Last recorded failure: {}",
+                        lines.last().cloned().unwrap_or_default()
+                    )
+                },
+                "",
+            );
+        } else {
+            push(
+                "wp_mail_failures",
+                "WordPress could not send",
+                if recent > 0 { "error" } else { "warn" },
+                format!(
+                    "{weekly} failed send(s) in the last 7 days ({recent} in the last 24 h). \
+                     Most recent: {}",
+                    lines.last().cloned().unwrap_or_default()
+                ),
+                "site_repair",
+            );
+        }
+
+        // Which plugin, if any, has taken `wp_mail()` over. Listed rather
+        // than judged: one with working credentials is the owner's choice.
+        let active: Vec<String> =
+            match hyperion_adapters::wpcli::plugin_list(detail.system_user.trim(), &root).await {
+                Ok((plugins, _)) => plugins
+                    .into_iter()
+                    .filter(|p| p.status.starts_with("active"))
+                    .map(|p| p.slug)
+                    .collect(),
+                // wp-cli failing is its own problem and is reported by the other
+                // WordPress cards; here it only means we cannot name the plugin.
+                Err(_) => Vec::new(),
+            };
+        let smtp = wpmail::smtp_plugins_in(&active);
+        if !smtp.is_empty() {
+            push(
+                "wp_mail_smtp_plugin",
+                "An SMTP plugin is handling mail",
+                if weekly > 0 { "warn" } else { "info" },
+                format!(
+                    "{} is active and sends the site's mail itself. {}",
+                    smtp.join(", "),
+                    if weekly > 0 {
+                        "Since sends are failing, its credentials are the first thing to check."
+                    } else {
+                        "It is working, so Hyperion leaves it alone."
+                    }
+                ),
+                if weekly > 0 { "site_repair" } else { "" },
+            );
+        }
+        if let Some(at) = forced_at {
+            push(
+                "wp_mail_force_local",
+                "Hyperion is sending this site's mail",
+                "info",
+                format!(
+                    "Since {}, Hyperion has been overriding the SMTP plugin and sending through \
+                     this server's own mail path, because sends were failing. Fix the plugin's \
+                     credentials and turn this off to hand it back.",
+                    iso_date(&LetterCatalog::default(), at)
+                ),
+                "",
+            );
+        }
+
+        Ok(hyperion_types::FtpCheckReport {
+            items,
+            node_id: self.current_node_id(),
+            ..Default::default()
+        })
+    }
+
+    /// Fix what [`Self::wp_mail_self_check`] found, then re-check.
+    ///
+    /// Two steps, in order of how invasive they are:
+    ///
+    /// 1. Write the mu-plugin. Always safe — it pins the From address and
+    ///    starts recording failures, and changes nothing else.
+    /// 2. Only when mail is ACTUALLY failing and an SMTP plugin is in the
+    ///    way: take `wp_mail()` back. This one overrides a choice the site
+    ///    owner made, so it needs evidence rather than a hunch, and it is
+    ///    announced (`notify_admins`) rather than done quietly.
+    pub async fn wp_mail_repair(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<hyperion_types::FtpCheckReport, RpcError> {
+        let detail = self.get(sel.clone()).await?;
+        self.wp_mail_apply(&detail).await?;
+        self.wp_mail_self_check(sel).await
+    }
+
+    /// The repair itself, against a detail we already hold. Returns whether
+    /// anything was written.
+    async fn wp_mail_apply(&self, detail: &HostingDetail) -> Result<bool, RpcError> {
+        use hyperion_adapters::wpmail;
+        let root = detail.root_dir.trim().to_string();
+        let user = detail.system_user.trim().to_string();
+        if root.is_empty() || user.is_empty() {
+            return Ok(false);
+        }
+        let id = detail.id.as_str();
+        let from = self.wp_mail_from_address(id, &detail.domain).await;
+        let log = wpmail::failure_log_path(&root)
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let mut forced_at = self.wp_mail_force_local(id).await;
+
+        // Has mail been failing, and is something in the way?
+        let lines = wpmail::recent_failures(&root, 20).await;
+        let week = now_secs() - 7 * 86_400;
+        let failing = wpmail::failures_since(&lines, week) > 0;
+        if failing && forced_at.is_none() {
+            let active: Vec<String> =
+                match hyperion_adapters::wpcli::plugin_list(&user, &root).await {
+                    Ok((p, _)) => p
+                        .into_iter()
+                        .filter(|p| p.status.starts_with("active"))
+                        .map(|p| p.slug)
+                        .collect(),
+                    Err(_) => Vec::new(),
+                };
+            let smtp = wpmail::smtp_plugins_in(&active);
+            if !smtp.is_empty() {
+                let now = now_secs();
+                let _ = hyperion_state::hosting_kv::set(
+                    &self.pool,
+                    id,
+                    WP_MAIL_FORCE_LOCAL_KV_KEY,
+                    &now.to_string(),
+                    now,
+                )
+                .await;
+                forced_at = Some(now);
+                // Announced, not quiet: this overrides a decision somebody
+                // made deliberately, and an operator who does not know it
+                // happened cannot explain it to their customer.
+                self.notify_admins_say(
+                    "warn",
+                    "ops.mail_override",
+                    &[("domain", &detail.domain), ("plugins", &smtp.join(", "))],
+                    &format!("/hostings/{}", detail.domain),
+                    "wp_mail_override",
+                )
+                .await;
+            }
+        }
+
+        let contents = wpmail::render_mu_plugin(&detail.domain, &from, &log, forced_at.is_some());
+        match wpmail::mu_plugin_state(&root, &contents).await {
+            wpmail::MuState::Current | wpmail::MuState::NotWordPress => Ok(false),
+            _ => {
+                wpmail::install_mu_plugin(&root, &user, &contents)
+                    .await
+                    .map_err(RpcError::from)?;
+                Ok(true)
+            }
+        }
+    }
+
+    /// Keep every WordPress site's mail configured, and only speak up when
+    /// the repair did not help.
+    ///
+    /// The user-visible contract is "set it up automatically; if it errors,
+    /// try to fix it; notify only after that fails". So: writing the
+    /// mu-plugin is silent, taking mail off a broken SMTP plugin is a
+    /// warning, and mail STILL failing afterwards is an error — that is the
+    /// point at which hyperion has run out of things to try and a person
+    /// has to look.
+    pub async fn wp_mail_tick(&self) -> Result<i64, RpcError> {
+        let mut acted = 0i64;
+        for s in self.list().await? {
+            if s.state != HostingState::Active {
+                continue;
+            }
+            if !self.wp_mail_autofix_enabled(s.id.as_str()).await {
+                continue;
+            }
+            let Ok(detail) = self.get(HostingSelector::Id(s.id.clone())).await else {
+                continue;
+            };
+            if detail.root_dir.trim().is_empty() || detail.system_user.trim().is_empty() {
+                continue;
+            }
+            let before = self.wp_mail_force_local(detail.id.as_str()).await;
+            match self.wp_mail_apply(&detail).await {
+                Ok(true) => {
+                    acted += 1;
+                    tracing::info!(domain = %detail.domain, "wp mail: configuration written");
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    tracing::warn!(domain = %detail.domain, error = %e, "wp mail: repair failed");
+                    self.append_audit(
+                        "hosting.wp_mail.autofix",
+                        Some(detail.id.as_str()),
+                        &serde_json::json!({"error": e.to_string()}).to_string(),
+                        "failed",
+                    )
+                    .await;
+                    continue;
+                }
+            }
+            // The one thing worth waking somebody for: we already took mail
+            // over, and it is STILL failing. Measured from the moment of the
+            // override so the failures that CAUSED it cannot re-trigger this
+            // for ever.
+            if let Some(at) = before {
+                let lines = hyperion_adapters::wpmail::recent_failures(&detail.root_dir, 20).await;
+                // An hour's grace: a queue drains, and a failure logged one
+                // second after the override is not evidence against it.
+                if hyperion_adapters::wpmail::failures_since(&lines, at + 3_600) > 0 {
+                    self.notify_admins_say(
+                        "error",
+                        "ops.mail_failing",
+                        &[("domain", &detail.domain)],
+                        &format!("/hostings/{}", detail.domain),
+                        "wp_mail_failing",
+                    )
+                    .await;
+                }
+            }
+        }
+        Ok(acted)
+    }
+
+    /// Take a snapshot of this site before something changes it.
+    ///
+    /// Best-effort by design, and that is a deliberate trade: a site whose
+    /// snapshot could not be taken should still get its security update. The
+    /// snapshot is insurance, and refusing to apply a patch because the
+    /// insurance was unavailable leaves the site exposed for certain in
+    /// order to avoid a risk that is merely possible.
+    ///
+    /// Returns the snapshot's short id when one was taken. `None` covers
+    /// every reason there is no snapshot — restic not installed, the engine
+    /// switched off, the site having no document tree — because the caller
+    /// does the same thing with all of them.
+    pub async fn snapshot_before_change(
+        &self,
+        detail: &HostingDetail,
+        tag: &str,
+    ) -> Option<String> {
+        use hyperion_adapters::restic;
+        if !self.snapshots_enabled {
+            return None;
+        }
+        let root = detail.root_dir.trim();
+        if root.is_empty() {
+            return None;
+        }
+        if !restic::available().await {
+            // Said once per attempt at debug: an operator who has not opted
+            // in should not have their journal filled with it.
+            tracing::debug!("snapshots: restic is not installed on this node");
+            return None;
+        }
+        let repo = match restic::ensure_repo(restic::REPO_BASE, detail.id.as_str()).await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(domain = %detail.domain, error = %e, "snapshots: repository unavailable");
+                return None;
+            }
+        };
+        let paths = vec![root.to_string()];
+        match restic::backup(&repo, &paths, &[tag]).await {
+            Ok(id) => {
+                tracing::info!(domain = %detail.domain, snapshot = %id, tag, "snapshots: taken");
+                // Retention runs straight after the snapshot rather than on
+                // its own timer: this is the only moment we know the
+                // repository just grew, and a prune that never runs is how a
+                // disk fills up quietly.
+                if let Err(e) = restic::forget_prune(
+                    &repo,
+                    self.retention.max_age_days.max(1),
+                    self.retention.keep_latest_n.max(1),
+                )
+                .await
+                {
+                    tracing::warn!(domain = %detail.domain, error = %e, "snapshots: prune failed");
+                }
+                Some(id)
+            }
+            Err(e) => {
+                tracing::warn!(domain = %detail.domain, error = %e, "snapshots: backup failed");
+                None
+            }
+        }
+    }
+
+    /// Snapshots this site has, newest last.
+    pub async fn snapshot_list(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<Vec<hyperion_types::SnapshotSummary>, RpcError> {
+        use hyperion_adapters::restic;
+        let detail = self.get(sel).await?;
+        if !restic::available().await {
+            return Ok(Vec::new());
+        }
+        let repo = restic::Repo::for_hosting(restic::REPO_BASE, detail.id.as_str());
+        // A site that has never been snapshotted has no repository, and that
+        // is not an error — it is the answer "none yet".
+        if !tokio::fs::try_exists(&repo.password_file)
+            .await
+            .unwrap_or(false)
+        {
+            return Ok(Vec::new());
+        }
+        let rows = restic::snapshots(&repo)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("snapshot list: {e}")))?;
+        Ok(rows
+            .into_iter()
+            .map(|s| hyperion_types::SnapshotSummary {
+                id: s.id,
+                time: s.time,
+                tags: s.tags,
+            })
+            .collect())
+    }
+
+    /// What changed between two snapshots — the question an operator asks
+    /// every time a site breaks after an update, and the one a `tar.gz`
+    /// cannot answer.
+    pub async fn snapshot_diff(
+        &self,
+        sel: HostingSelector,
+        from: String,
+        to: String,
+    ) -> Result<hyperion_types::SnapshotDiff, RpcError> {
+        use hyperion_adapters::restic;
+        let detail = self.get(sel).await?;
+        // Ids come from a form. Restic ids are hex; anything else is either a
+        // typo or an attempt to smuggle an argument, and both stop here.
+        for id in [&from, &to] {
+            if id.is_empty() || id.len() > 64 || !id.chars().all(|c| c.is_ascii_hexdigit()) {
+                return Err(RpcError::Validation {
+                    message: format!("not a snapshot id: {id:?}"),
+                });
+            }
+        }
+        let repo = restic::Repo::for_hosting(restic::REPO_BASE, detail.id.as_str());
+        let d = restic::diff(&repo, &from, &to)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("snapshot diff: {e}")))?;
+        Ok(hyperion_types::SnapshotDiff {
+            added: d.added as i64,
+            removed: d.removed as i64,
+            modified: d.modified as i64,
+            sample: d.sample,
+        })
+    }
+
     /// Is the permission self-repair allowed to act on this hosting?
     ///
     /// **Default ON** (absent ⇒ enabled). The check has always run; what is
@@ -9204,6 +10257,15 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     .filter(|f| !crate::wp_updates::is_paused(&skips, &f.slug, now))
                     .map(|f| (f.kind.clone(), f.slug.clone()))
                     .collect();
+                // One snapshot before the batch, not one per plugin: the
+                // operator's question is "what did tonight's updates change",
+                // and five snapshots taken seconds apart answer a question
+                // nobody asked while costing five prunes.
+                if !targets.is_empty() {
+                    if let Ok(d) = self.get(HostingSelector::Id(s.id.clone())).await {
+                        let _ = self.snapshot_before_change(&d, "pre-update").await;
+                    }
+                }
                 for (kind, slug) in targets {
                     let state = if kind == "theme" {
                         self.wp_theme_action(
@@ -9244,15 +10306,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                                 );
                                 skips_dirty = true;
                                 if newly_paused {
-                                    self.notify_admins(
+                                    self.notify_admins_say(
                                         "warn",
-                                        "WordPress auto-update paused",
-                                        &format!(
-                                            "{} — auto-update of plugin '{slug}' keeps failing, so Hyperion paused it. \
-                                             This is almost always a commercial plugin whose update needs a license key. \
-                                             Add the key, then click Resume on the hosting's WordPress panel.",
-                                            s.domain
-                                        ),
+                                        "ops.update_paused",
+                                        &[("domain", &s.domain), ("slug", &slug)],
                                         &format!("/hostings/{}#wordpress", s.domain),
                                         &format!("wp.update.paused:{}:{slug}", s.domain),
                                     )
@@ -9264,6 +10321,85 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 }
                 if skips_dirty {
                     self.set_wp_update_skips(s.id.as_str(), &skips).await;
+                }
+
+                // ── WordPress core ──────────────────────────────────────
+                //
+                // Plugins and themes are only two thirds of "keep it
+                // updated", and core is the third that carries the
+                // security releases every published exploit is written
+                // against. `--minor` is the ceiling: a 6.5.3 → 6.5.5 hop
+                // is what WordPress itself installs unattended, while a
+                // major is where themes break and stays a decision a
+                // person makes while they are around to look at it.
+                //
+                // The snapshot above already covers this: it is taken
+                // before the whole batch, so a core update that goes
+                // wrong is one restore away like everything else.
+                if let Ok(detail) = self.get(HostingSelector::Id(s.id.clone())).await {
+                    let user = detail.system_user.trim().to_string();
+                    let root = detail.root_dir.trim().to_string();
+                    if !user.is_empty() && !root.is_empty() {
+                        // An error reading the answer means "we do not
+                        // know", which must not become "update anyway".
+                        let available = hyperion_adapters::wpcli::core_check_update(&user, &root)
+                            .await
+                            .unwrap_or_default();
+                        if let Some(rel) = available.iter().find(|u| u.is_minor()) {
+                            // A snapshot before core specifically, even
+                            // though the batch already took one: a site
+                            // whose plugins updated cleanly and whose CORE
+                            // then broke wants to go back to the working
+                            // plugins, not to last night.
+                            let _ = self
+                                .snapshot_before_change(&detail, "pre-core-update")
+                                .await;
+                            match hyperion_adapters::wpcli::core_update_minor(&user, &root).await {
+                                Ok(out) => {
+                                    auto_updated += 1;
+                                    tracing::info!(
+                                        domain = %detail.domain,
+                                        version = %rel.version,
+                                        "wp core: minor update applied"
+                                    );
+                                    self.append_audit(
+                                        "wp.core.auto_update",
+                                        Some(detail.id.as_str()),
+                                        &serde_json::json!({
+                                            "version": rel.version,
+                                            "output_tail": out.chars().rev().take(400)
+                                                .collect::<String>().chars().rev()
+                                                .collect::<String>(),
+                                        })
+                                        .to_string(),
+                                        "ok",
+                                    )
+                                    .await;
+                                }
+                                Err(e) => {
+                                    // Worth telling somebody: unlike a
+                                    // commercial plugin needing a licence,
+                                    // a core update that will not apply
+                                    // leaves a known-vulnerable core
+                                    // serving the site.
+                                    tracing::warn!(domain = %detail.domain, error = %e,
+                                        "wp core: minor update failed");
+                                    self.notify_admins_say(
+                                        "warn",
+                                        "ops.core_failed",
+                                        &[
+                                            ("domain", &detail.domain),
+                                            ("version", &rel.version),
+                                            ("error", &e.to_string()),
+                                        ],
+                                        &format!("/hostings/{}#wordpress", detail.domain),
+                                        &format!("wp.core.failed:{}", detail.domain),
+                                    )
+                                    .await;
+                                }
+                            }
+                        }
+                    }
                 }
                 // Re-scan so the stored result reflects what's LEFT
                 // (typically only major updates needing manual review).
@@ -9298,13 +10434,16 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     continue;
                 }
                 new_majors += 1;
-                self.notify_admins(
+                self.notify_admins_say(
                     "warn",
-                    "WordPress major update available",
-                    &format!(
-                        "{} — {} {} {} → {} (major; review before applying)",
-                        s.domain, f.kind, f.name, f.installed_version, f.patched_version
-                    ),
+                    "ops.major_update",
+                    &[
+                        ("domain", &s.domain),
+                        ("kind", &f.kind),
+                        ("name", &f.name),
+                        ("from", &f.installed_version),
+                        ("to", &f.patched_version),
+                    ],
                     &format!("/hostings/{}#wordpress", s.domain),
                     &format!("wp.update.major:{}:{}", s.domain, key),
                 )
@@ -9627,16 +10766,16 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 || !scan.core_modified.is_empty()
                 || !scan.core_unexpected.is_empty()
                 || !scan.plugins_failed.is_empty();
-            self.notify_admins(
+            self.notify_admins_say(
                 if compromised { "error" } else { "warn" },
-                "WordPress integrity check found changes",
-                &format!(
-                    "{} — {} core file(s), {} plugin file(s) and {} malware hit(s) differ from what should be there ({new_keys} new since the last check).",
-                    s.domain,
-                    scan.core_issue_count(),
-                    scan.plugin_issue_count(),
-                    scan.malware.len(),
-                ),
+                "ops.integrity",
+                &[
+                    ("domain", &s.domain),
+                    ("core", &scan.core_issue_count().to_string()),
+                    ("plugins", &scan.plugin_issue_count().to_string()),
+                    ("malware", &scan.malware.len().to_string()),
+                    ("new", &new_keys.to_string()),
+                ],
                 &format!("/hostings/{}#wordpress", s.domain),
                 &format!("wp.integrity:{}", s.domain),
             )
@@ -10241,6 +11380,33 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// success message on a card — MUST branch on it: a letter the relay
     /// refused was never received, and saying otherwise is the one failure
     /// nobody downstream can detect.
+    /// Operator alert addresses this hosting's profile adds.
+    ///
+    /// The apply-row SNAPSHOT is read first, exactly as the billing sweep
+    /// reads the snapshotted Slack webhook: it survives the profile being
+    /// deleted, which sets `profile_id` NULL. The live profile is only a
+    /// fallback for rows applied before migration 063 — those have no
+    /// snapshot, and reading the profile is better than alerting nobody.
+    ///
+    /// Empty on any failure. An alert must still reach the cluster-wide
+    /// addresses when this lookup cannot answer.
+    async fn profile_alert_emails(&self, hosting_id: &str) -> Vec<String> {
+        let id = HostingId(hosting_id.to_string());
+        let Ok(Some(row)) = profiles::get_apply(&self.pool, &id).await else {
+            return Vec::new();
+        };
+        if let Some(list) = row.alert_emails.as_deref().filter(|s| !s.trim().is_empty()) {
+            return parse_recipient_list(list);
+        }
+        let Some(pid) = row.profile_id else {
+            return Vec::new();
+        };
+        match profiles::get(&self.pool, pid).await {
+            Ok(Some(p)) => parse_recipient_list(&p.alert_emails),
+            _ => Vec::new(),
+        }
+    }
+
     pub(crate) async fn notify_email(
         &self,
         to: &str,
@@ -10257,15 +11423,20 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // operator alert, and those go to every administrator address on
         // record — one entry was never enough for a team, and an alert nobody
         // happened to be reading is an alert that did not happen.
-        let recipients: Vec<String> = if to.is_empty() {
-            let list = parse_recipient_list(self.email_default_to.as_deref().unwrap_or(""));
-            if list.is_empty() {
-                return false;
-            }
-            list
-        } else {
-            vec![to.to_string()]
+        // An operator alert (empty `to`) also reaches whatever this site's
+        // profile names — see `resolve_recipients`.
+        let from_profile = match hosting_id {
+            Some(id) if to.is_empty() => self.profile_alert_emails(id).await,
+            _ => Vec::new(),
         };
+        let recipients = resolve_recipients(
+            to,
+            self.email_default_to.as_deref().unwrap_or(""),
+            &from_profile,
+        );
+        if recipients.is_empty() {
+            return false;
+        }
         // Apply the operator's editable email wording (defaults "{subject}"
         // / "{body}" are pass-through). Rendered text is what we send AND
         // log, so the email log shows exactly what the recipient received.
@@ -11033,8 +12204,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let packages = hyperion_state::packages::list_for_hosting(&self.pool, id)
             .await
             .unwrap_or_default();
+        let cat = self.letter_catalog();
         let plan_line = if packages.is_empty() {
-            "• care plan: none".to_string()
+            cat.get("slack.plan_none").to_string()
         } else {
             let names: Vec<String> = packages
                 .iter()
@@ -11047,16 +12219,21 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     },
                 )
                 .collect();
-            format!("• care plan: *{}*", names.join(", "))
+            cat.render("slack.plan_some", &[("names", &names.join(", "))])
         };
 
         let base_line = match &base {
-            Some((m, c, iv)) => format!(
-                "• price: *{:.2} {c} ({iv})* — to change it, edit the profile or the price \
-                 in Hyperion, not in the invoice",
-                *m as f64 / 100.0
+            Some((m, c, iv)) => cat.render(
+                "slack.price_line",
+                &[(
+                    "price",
+                    &format!(
+                        "{} {c} ({iv})",
+                        cat.decimal(&format!("{:.2}", *m as f64 / 100.0))
+                    ),
+                )],
             ),
-            None => "• price: *not set* — apply a profile in Hyperion to set one".to_string(),
+            None => cat.get("slack.price_unset").to_string(),
         };
 
         // One currency and one interval, or no total.
@@ -11084,9 +12261,16 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             }
         }
         let total_line = match (comparable, currency, interval) {
-            (true, Some(c), Some(iv)) if !packages.is_empty() => {
-                format!("\n• total: *{:.2} {c} ({iv})*", total as f64 / 100.0)
-            }
+            (true, Some(c), Some(iv)) if !packages.is_empty() => cat.render(
+                "slack.total",
+                &[(
+                    "total",
+                    &format!(
+                        "{} {c} ({iv})",
+                        cat.decimal(&format!("{:.2}", total as f64 / 100.0))
+                    ),
+                )],
+            ),
             _ => String::new(),
         };
         (base_line, plan_line, total_line)
@@ -11122,19 +12306,27 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // Price, care plan and total, from the same helper the care-plan
         // message uses — the two must never disagree about one site.
         let (price_line, plan_line, total_line) = self.price_picture(&detail.id).await;
+        let cat = self.letter_catalog();
         let next_line = match applied.as_ref().and_then(|a| a.next_billing_at) {
-            Some(t) => format!("• next reminder: {}", fmt_notif_time(t)),
-            None => "• next reminder: none scheduled".to_string(),
+            Some(t) => cat.render("slack.next_reminder", &[("when", &fmt_notif_time(t))]),
+            None => cat.get("slack.next_reminder_none").to_string(),
         };
         let node = detail
             .node_id
             .as_deref()
             .filter(|n| !n.is_empty())
-            .unwrap_or("this node");
-        let msg = format!(
-            ":sparkles: *New hosting*\n• address: `{}`\n{price_line}\n{plan_line}{total_line}\n\
-             {next_line}\n• node: {node}",
-            detail.domain
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| cat.get("slack.node_unknown").to_string());
+        let msg = cat.render(
+            "slack.new_hosting",
+            &[
+                ("domain", &detail.domain),
+                ("price", &price_line),
+                ("plan", &plan_line),
+                ("total", &total_line),
+                ("next", &next_line),
+                ("node", &node),
+            ],
         );
 
         // The webhook snapshotted at apply time first — it survives the
@@ -11270,25 +12462,32 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 .next_billing_at
                 .map(|t| ((t - now).max(0)) / 86400)
                 .unwrap_or(0);
+            let cat = self.letter_catalog();
             let (price_str, action) =
                 match (row.price_minor, &row.price_currency, &row.price_interval) {
-                    (Some(m), Some(c), Some(iv)) => (
-                        format!("{:.2} {c} ({iv})", m as f64 / 100.0),
-                        format!(
-                            "*Invoice {:.2} {c}* for the next {iv} period.",
-                            m as f64 / 100.0
-                        ),
-                    ),
+                    (Some(m), Some(c), Some(iv)) => {
+                        let amount = cat.decimal(&format!("{:.2}", m as f64 / 100.0));
+                        (
+                            format!("{amount} {c} ({iv})"),
+                            cat.render(
+                                "slack.invoice_action",
+                                &[("amount", &format!("{amount} {c}")), ("interval", iv)],
+                            ),
+                        )
+                    }
                     _ => (
-                        "not set".into(),
-                        "*No price is set on this hosting* — nothing to invoice. Apply a \
-                         profile in Hyperion to set one."
-                            .to_string(),
+                        cat.get("slack.price_not_set").to_string(),
+                        cat.get("slack.no_price_hosting").to_string(),
                     ),
                 };
-            let msg = format!(
-                ":calendar: *Hosting due*\n• site: `{domain}`\n• price: {price_str}\n\
-                 • due in {due_in_days} day(s)\n{action}"
+            let msg = cat.render(
+                "slack.hosting_due",
+                &[
+                    ("domain", &domain),
+                    ("price", &price_str),
+                    ("days", &due_in_days.to_string()),
+                    ("action", &action),
+                ],
             );
             self.notify_slack(webhook.as_deref(), &msg).await;
             // Also send email if configured. Use the hosting's
@@ -11367,28 +12566,36 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             // that it means "raise an invoice for this amount". A recurring
             // care fee that nobody invoices is revenue quietly lost every
             // month, which is exactly what this message exists to prevent.
+            let cat = self.letter_catalog();
             let (price_str, action) =
                 match (row.price_minor, &row.price_currency, &row.price_interval) {
-                    (Some(m), Some(c), Some(iv)) => (
-                        format!("{:.2} {c} ({iv})", m as f64 / 100.0),
-                        format!(
-                            "*Invoice {:.2} {c}* for the next {iv} period.",
-                            m as f64 / 100.0
-                        ),
-                    ),
+                    (Some(m), Some(c), Some(iv)) => {
+                        let amount = cat.decimal(&format!("{:.2}", m as f64 / 100.0));
+                        (
+                            format!("{amount} {c} ({iv})"),
+                            cat.render(
+                                "slack.invoice_action",
+                                &[("amount", &format!("{amount} {c}")), ("interval", iv)],
+                            ),
+                        )
+                    }
                     // Said out loud rather than skipped: a care package with
                     // no price is one nobody is charging for, and the day it
                     // comes due is when that is worth noticing.
                     _ => (
-                        "not set".into(),
-                        "*No price is set on this package* — nothing to invoice, and nobody \
-                         is being charged for it. Set one in Hyperion."
-                            .to_string(),
+                        cat.get("slack.price_not_set").to_string(),
+                        cat.get("slack.no_price_package").to_string(),
                     ),
                 };
-            let msg = format!(
-                ":package: *Care package due*\n• site: `{domain}`\n• package: {label}\n\
-                 • price: {price_str}\n• due in {due_in_days} day(s)\n{action}"
+            let msg = cat.render(
+                "slack.package_due",
+                &[
+                    ("domain", &domain),
+                    ("package", &label),
+                    ("price", &price_str),
+                    ("days", &due_in_days.to_string()),
+                    ("action", &action),
+                ],
             );
             self.notify_slack(webhook.as_deref(), &msg).await;
             let owner = self
@@ -11808,6 +13015,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             p.price_interval.as_deref(),
             next,
             p.slack_webhook.as_deref(),
+            // Snapshotted for the same reason the price and the Slack
+            // webhook are: deleting the profile sets `profile_id` NULL, and
+            // a live lookup would silently stop alerting the people this
+            // site's alerts were going to.
+            Some(p.alert_emails.as_str()),
             now,
         )
         .await
@@ -12166,6 +13378,151 @@ impl<A: AdapterPort + 'static> HostingService<A> {
 
     /// The packages a hosting holds. `history = true` includes cancelled
     /// rows (what the customer bought and when it stopped).
+    /// Which monthly service checks an operator ticked inside `[from, to)`.
+    ///
+    /// The checklist is filed per calendar month and a report period is not,
+    /// so a period is mapped onto every month it TOUCHES: a quarterly report
+    /// asks about three months, a weekly one about the one or two its days
+    /// fall in. An item counts as done if it was ticked in any of them —
+    /// the customer is being told the work happened, and a fortnightly
+    /// report that straddles a month boundary must not report the same
+    /// month's work as missing in the half that fell the wrong side.
+    ///
+    /// `None` when the value could not be read at all. That is a different
+    /// statement from "nothing was ticked", and the letter words it as one:
+    /// an unreadable record must never read as a confirmed omission, and an
+    /// omission must never read as work done.
+    async fn care_service_work(
+        &self,
+        hosting_id: &str,
+        from: i64,
+        to: i64,
+    ) -> Option<hyperion_types::package::CareServiceWork> {
+        use hyperion_types::care_check::{period_key, CareServiceChecks, ServiceCheckItem};
+        let raw = hyperion_state::hosting_kv::get(&self.pool, hosting_id, CARE_CHECKS_KV_KEY)
+            .await
+            .ok()?
+            .unwrap_or_default();
+        let checks = CareServiceChecks::parse(&raw);
+        // Every month the half-open window touches, walked a day at a time
+        // from the first day to the last one INSIDE it. A period shorter
+        // than a month yields one or two keys; a quarter yields three or
+        // four. Cheap either way, and it cannot miss a month the way
+        // stepping by 30 days can.
+        let last = (to - 1).max(from);
+        let mut months: Vec<String> = Vec::new();
+        let mut t = from;
+        loop {
+            let k = period_key(t);
+            if !months.contains(&k) {
+                months.push(k);
+            }
+            if t >= last {
+                break;
+            }
+            t = (t + 86_400).min(last);
+        }
+        let mut work = hyperion_types::package::CareServiceWork::default();
+        for item in ServiceCheckItem::ALL {
+            if months.iter().any(|m| checks.is_checked(m, item)) {
+                work.done.push(item.as_str().to_string());
+            } else {
+                work.missing.push(item.as_str().to_string());
+            }
+        }
+        Some(work)
+    }
+
+    /// Care standing for every site on THIS node: what it pays for, and how
+    /// much of `period`'s monthly service checklist has been ticked.
+    ///
+    /// The two halves have to be read together and can only be read here —
+    /// `hosting_packages` rows are co-located with their hosting, and the
+    /// checklist is in this node's `hosting_kv`. The panel fans this out one
+    /// call per node; the alternative was two round-trips per site, on the
+    /// dashboard, on every page load.
+    ///
+    /// A site whose checklist cannot be read is reported with NOTHING ticked
+    /// rather than skipped. Skipping it would quietly shrink the list of
+    /// sites the operator owes a look at, which is the one direction this
+    /// answer must not fail in.
+    pub async fn care_overview(
+        &self,
+        period: String,
+    ) -> Result<Vec<hyperion_types::care_check::CareOverviewRow>, RpcError> {
+        use hyperion_types::care_check::{CareOverviewRow, CareServiceChecks, ServiceCheckItem};
+        let rows = packages::list_all_active(&self.pool)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("care overview: {e}")))?;
+        if rows.is_empty() {
+            return Ok(Vec::new());
+        }
+        let prev = hyperion_types::care_check::previous_period(&period);
+        // Group the activations by hosting first: a site holding two packages
+        // is ONE row with two names, not two rows the operator has to tick
+        // twice.
+        let mut order: Vec<HostingId> = Vec::new();
+        let mut names: HashMap<String, Vec<String>> = HashMap::new();
+        for r in rows {
+            let key = r.hosting_id.as_str().to_string();
+            if !names.contains_key(&key) {
+                order.push(r.hosting_id.clone());
+            }
+            let entry = names.entry(key).or_default();
+            // The activation SNAPSHOTS the name, so a deleted definition
+            // still says what the customer bought.
+            if !r.package_name.trim().is_empty() && !entry.contains(&r.package_name) {
+                entry.push(r.package_name.clone());
+            }
+        }
+        let mut out = Vec::with_capacity(order.len());
+        for id in order {
+            let domain = match hyperion_state::hostings::get_by_id(&self.pool, &id).await {
+                Ok(Some(h)) => h.domain,
+                // The activation outlived its hosting, or the row is
+                // unreadable. Naming it by id beats dropping it: an
+                // activation with no site is itself worth seeing.
+                _ => id.as_str().to_string(),
+            };
+            let raw = hyperion_state::hosting_kv::get(&self.pool, id.as_str(), CARE_CHECKS_KV_KEY)
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            let checks = CareServiceChecks::parse(&raw);
+            let outstanding: Vec<String> = checks
+                .outstanding(&period)
+                .into_iter()
+                .map(|i| i.label().to_string())
+                .collect();
+            // A month nobody touched at all is far more likely to predate the
+            // plan than to have been skipped, so only a month that was
+            // STARTED and left unfinished is reported as outstanding.
+            let prev_outstanding = match prev.as_deref() {
+                Some(p) if checks.month(p).is_some() => checks.outstanding(p).len(),
+                _ => 0,
+            };
+            out.push(CareOverviewRow {
+                hosting_id: id.as_str().to_string(),
+                domain,
+                packages: names.remove(id.as_str()).unwrap_or_default(),
+                checks_done: checks.done_count(&period),
+                checks_total: ServiceCheckItem::ALL.len(),
+                outstanding,
+                prev_outstanding,
+            });
+        }
+        // Sites needing attention first, then alphabetically — the card is
+        // read top-down as a work list.
+        out.sort_by(|a, b| {
+            b.outstanding
+                .len()
+                .cmp(&a.outstanding.len())
+                .then_with(|| a.domain.cmp(&b.domain))
+        });
+        Ok(out)
+    }
+
     pub async fn package_activations(
         &self,
         sel: HostingSelector,
@@ -12332,9 +13689,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // operator reading "care plan added" wants to know what the customer
         // now pays in total, which is the number that goes on the invoice.
         let (price_line, plan_line, total_line) = self.price_picture(&detail.id).await;
+        let cat = self.letter_catalog();
         let next_line = match row.next_billing_at {
-            Some(t) => format!("• next reminder: {}", fmt_notif_time(t)),
-            None => "• next reminder: none scheduled".to_string(),
+            Some(t) => cat.render("slack.next_reminder", &[("when", &fmt_notif_time(t))]),
+            None => cat.get("slack.next_reminder_none").to_string(),
         };
         // Same channel the hosting's own billing messages go to: the profile's
         // webhook snapshotted at apply time, else the cluster default.
@@ -12343,10 +13701,15 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .ok()
             .flatten()
             .and_then(|a| a.slack_webhook);
-        let msg = format!(
-            ":package: *Care plan activated*\n• address: `{}`\n{price_line}\n{plan_line}\
-             {total_line}\n{next_line}",
-            detail.domain
+        let msg = cat.render(
+            "slack.care_activated",
+            &[
+                ("domain", &detail.domain),
+                ("price", &price_line),
+                ("plan", &plan_line),
+                ("total", &total_line),
+                ("next", &next_line),
+            ],
         );
         self.notify_slack(webhook.as_deref(), &msg).await;
 
@@ -12811,6 +14174,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             RpcError::Internal_with(format!("care report ({what}): {e}"))
         };
         let mut report = CareReport::empty(detail.id.clone(), detail.domain.clone(), from, to);
+        report.service_work = self.care_service_work(id, from, to).await;
 
         // The one metric whose unmeasured state the database CANNOT see:
         // with `[fail2ban] enabled = false` — or with this site opted out of
@@ -13396,7 +14760,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             for (hid, domain) in blocked {
                 out.push(DashboardAlert {
                     kind: "care_report_blocked".into(),
-                    severity: "error".into(),
+                    // The site is up and serving. See the rule on `notify_admins`.
+                    severity: "warn".into(),
                     message: format!(
                         "{domain} is paying for a care report that cannot be sent — the site \
                          has no owner e-mail. Set one under Expiration on the site, then the \
@@ -13461,7 +14826,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                         // investigate (DNS broke, port 80 closed, …).
                         out.push(DashboardAlert {
                             kind: "cert_expiring".into(),
-                            severity: "error".into(),
+                            // Still valid, so visitors still see the site.
+                            // `cert_expired` is the red one. See the rule
+                            // on `notify_admins`.
+                            severity: "warn".into(),
                             message: format!(
                                 "{} certificate expires in {} day(s) — renew now.",
                                 detail.domain, days
@@ -13510,7 +14878,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     // Has runs but none successful.
                     out.push(DashboardAlert {
                         kind: "backup_failing".into(),
-                        severity: "error".into(),
+                        // Nothing is broken for a visitor — this is exposure
+                        // to a future problem. See the rule on `notify_admins`.
+                        severity: "warn".into(),
                         message: format!("{} has no successful backups on record.", s.domain),
                         hosting: Some(s.domain.clone()),
                     });
@@ -14934,18 +16304,23 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         cap_mib: i64,
         suspended: bool,
     ) {
-        let what = if suspended {
-            "suspended (over disk quota)"
-        } else {
-            "over its disk quota"
-        };
-        let slack = format!(
-            ":floppy_disk: *Disk quota exceeded*\n• site: `{domain}`\n• usage: {used_mib} MiB / {cap_mib} MiB cap\n• action: {what}"
-        );
-        let subj = format!("[Hyperion] Disk quota exceeded — {domain}");
-        let body = format!(
-            "Hosting:  {domain}\nUsage:    {used_mib} MiB\nDisk cap: {cap_mib} MiB\nAction:   {what}\n\n--\nHyperion\n"
-        );
+        let cat = self.letter_catalog();
+        let what = cat
+            .get(if suspended {
+                "quota.action_suspended"
+            } else {
+                "quota.action_over"
+            })
+            .to_string();
+        let args = [
+            ("domain", domain),
+            ("used", &used_mib.to_string()),
+            ("cap", &cap_mib.to_string()),
+            ("action", what.as_str()),
+        ];
+        let slack = cat.render("quota.over.slack", &args);
+        let subj = cat.render("quota.over.subject", &args);
+        let body = cat.render("quota.over.body", &args);
         self.notify_quota_event(hosting_id, &subj, &slack, &body)
             .await;
     }
@@ -14959,13 +16334,15 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         used_mib: i64,
         cap_mib: i64,
     ) {
-        let slack = format!(
-            ":white_check_mark: *Disk usage back under quota*\n• site: `{domain}`\n• usage: {used_mib} MiB / {cap_mib} MiB cap\n• action: resumed"
-        );
-        let subj = format!("[Hyperion] Disk usage back under quota — {domain}");
-        let body = format!(
-            "Hosting:  {domain}\nUsage:    {used_mib} MiB\nDisk cap: {cap_mib} MiB\nAction:   resumed automatically\n\n--\nHyperion\n"
-        );
+        let cat = self.letter_catalog();
+        let args = [
+            ("domain", domain),
+            ("used", &used_mib.to_string()),
+            ("cap", &cap_mib.to_string()),
+        ];
+        let slack = cat.render("quota.resolved.slack", &args);
+        let subj = cat.render("quota.resolved.subject", &args);
+        let body = cat.render("quota.resolved.body", &args);
         self.notify_quota_event(hosting_id, &subj, &slack, &body)
             .await;
     }
@@ -16815,10 +18192,18 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             let days_left = (cert.not_after - now) / 86400;
             match &outcome {
                 CertRenewOutcome::Failed { error } => {
-                    self.notify_admins(
-                        if days_left < 7 { "error" } else { "warn" },
-                        "Cert renewal failed",
-                        &format!("{domain_str} — {error} ({} day(s) until expiry)", days_left),
+                    self.notify_admins_say(
+                        // Red once the certificate is actually EXPIRED —
+                        // that is the moment a visitor sees a warning
+                        // instead of the site. Before that it is urgent,
+                        // not broken. See the rule on `notify_admins`.
+                        if days_left <= 0 { "error" } else { "warn" },
+                        "ops.cert_failed",
+                        &[
+                            ("domain", &domain_str),
+                            ("error", &error.to_string()),
+                            ("days", &days_left.to_string()),
+                        ],
                         &format!("/hostings/{}", domain_str),
                         &format!("cert.renew_failed:{domain_str}"),
                     )
@@ -16829,13 +18214,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     // already inside the red band. Notify so the
                     // operator knows their automation caught it
                     // before expiry (informational, not a failure).
-                    self.notify_admins(
+                    self.notify_admins_say(
                         "info",
-                        "Cert renewed close to expiry",
-                        &format!(
-                            "{domain_str} — was {} day(s) from expiry, now renewed.",
-                            days_left
-                        ),
+                        "ops.cert_renewed_late",
+                        &[("domain", &domain_str), ("days", &days_left.to_string())],
                         &format!("/hostings/{}", domain_str),
                         &format!("cert.renewed_late:{domain_str}"),
                     )
@@ -16845,10 +18227,14 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     // Wildcard cert we can't auto-renew (no DNS
                     // token) — nag the operator to re-run DNS-01 before it
                     // expires. Per-domain kind → one bell row per cert.
-                    self.notify_admins(
-                        if days_left < 7 { "error" } else { "warn" },
-                        "Wildcard cert needs manual renewal",
-                        &format!("{domain_str} — {reason} ({days_left} day(s) until expiry)"),
+                    self.notify_admins_say(
+                        if days_left <= 0 { "error" } else { "warn" },
+                        "ops.cert_wildcard_manual",
+                        &[
+                            ("domain", &domain_str),
+                            ("reason", &reason.to_string()),
+                            ("days", &days_left.to_string()),
+                        ],
                         &format!("/hostings/{}", domain_str),
                         &format!("cert.wildcard_manual:{domain_str}"),
                     )
@@ -20276,13 +21662,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     image_kind = %gathered.image_kind,
                     "rofs watchdog: rootfs is read-only BY DESIGN on this image — not fixable"
                 );
-                self.notify_admins(
+                self.notify_admins_say(
                     "error",
-                    "Root filesystem is read-only by design",
-                    &format!(
-                        "This node runs a {} image whose root filesystem is immutable.                          Hyperion cannot install packages or write outside its data                          directories here; pick a standard (non-immutable) base image.",
-                        gathered.image_kind
-                    ),
+                    "ops.rofs_by_design",
+                    &[("image", &gathered.image_kind)],
                     "/services",
                     "system.rofs",
                 )
@@ -20297,12 +21680,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 tracing::error!(
                     "rofs watchdog: rootfs is read-only AGAIN after {MAX_ATTEMPTS} repairs —                      standing down. This pattern means failing storage or filesystem                      corruption; check dmesg and SMART before remounting by hand"
                 );
-                self.notify_admins(
+                self.notify_admins_say(
                     "error",
-                    "Root filesystem keeps going read-only",
-                    &format!(
-                        "The rootfs flipped to read-only again after {MAX_ATTEMPTS} automatic                          repairs this boot. The watchdog has stopped remounting: a filesystem                          that keeps doing this usually means failing storage, and remounting                          in a loop can make corruption worse. Check `dmesg` and the disk's                          SMART data, then repair by hand from Services → Read-only rootfs."
-                    ),
+                    "ops.rofs_stood_down",
+                    &[("attempts", &MAX_ATTEMPTS.to_string())],
                     "/services",
                     "system.rofs",
                 )
@@ -20342,12 +21723,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 // forever and never reached the stand-down threshold.
                 let repairs = REPAIRS_THIS_BOOT.fetch_add(1, Ordering::Relaxed) + 1;
                 if repairs == REPAIRS_BEFORE_ALERT {
-                    self.notify_admins(
+                    self.notify_admins_say(
                         "error",
-                        "Root filesystem keeps going read-only",
-                        &format!(
-                            "Hyperion has remounted the rootfs read-write {repairs} times                              since this node booted. Each repair worked, so services are                              running — but a filesystem only does this in response to I/O                              errors, and a repeat means the underlying storage is failing.                              Check `dmesg` and SMART data now; the repairs are buying time,                              not fixing anything."
-                        ),
+                        "ops.rofs_repeats",
+                        &[("repairs", &repairs.to_string())],
                         "/services",
                         "system.rofs",
                     )
@@ -20357,10 +21736,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             }
             Ok(_) => {
                 if alert_due() {
-                    self.notify_admins(
+                    self.notify_admins_say(
                         "error",
-                        "Root filesystem is read-only and the automatic repair failed",
-                        "Hyperion detected a read-only rootfs and tried to remount it                          read-write, but the mount refused. This needs a human: see                          Services → Read-only rootfs for the full diagnostic.",
+                        "ops.rofs_repair_failed",
+                        &[],
                         "/services",
                         "system.rofs",
                     )
@@ -22779,6 +24158,47 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(n)
     }
 
+    /// An operator alert, in the operator's own language.
+    ///
+    /// The title and body come from the catalogue, so the same edit reaches
+    /// the e-mail and the notification-centre row together — they are one
+    /// message and drifting apart would make the panel disagree with the
+    /// mail somebody was reading on their phone.
+    ///
+    /// WHICH alert fires and how severe it is stays decided here. An
+    /// operator owning the wording cannot promote a warning to an error or
+    /// silence one by emptying it: a blank override falls back to the pack,
+    /// exactly as it does for the customer letters.
+    async fn notify_admins_say(
+        &self,
+        severity: &str,
+        id: &str,
+        args: &[(&str, &str)],
+        href: &str,
+        kind: &str,
+    ) {
+        let cat = self.letter_catalog();
+        let title = cat.render(&format!("{id}.title"), args);
+        let body = cat.render(&format!("{id}.body"), args);
+        self.notify_admins(severity, &title, &body, href, kind)
+            .await;
+    }
+
+    /// What each severity MEANS, so the notification centre can be read at a
+    /// glance instead of parsed.
+    ///
+    /// * `error` (red) — something is broken RIGHT NOW: the site does not
+    ///   serve, the certificate is expired, malware is on disk, the
+    ///   filesystem is failing. An operator should stop what they are doing.
+    /// * `warn` (orange) — something will break, or a promise is unmet: a
+    ///   certificate expiring next week, backups that have never succeeded, a
+    ///   care report with nowhere to go. Needs doing; nothing is down.
+    /// * `info` — a thing happened that was worth recording.
+    ///
+    /// The line is deliberately "is it broken now", not "how much do I care".
+    /// Everything an operator cares about looks urgent to whoever wrote it,
+    /// which is how a panel ends up all red — and a panel that is all red
+    /// tells you nothing, so the one genuinely-down site does not stand out.
     /// Fan-out helper: emit one notification to every super_admin
     /// and admin user. Operators are skipped by default since
     /// operator-relevant events typically have a hosting_id and a
@@ -23824,6 +25244,7 @@ fn profile_input_to_new(input: ProfileInput) -> hyperion_state::profiles::NewPro
         price_currency: input.price_currency,
         price_interval: input.price_interval,
         slack_webhook: input.slack_webhook,
+        alert_emails: input.alert_emails,
         wp_plugins: input.wp_plugins,
         wp_themes: input.wp_themes,
         // Normalise empty strings to None so the DB stores NULL and
@@ -23859,6 +25280,7 @@ fn profile_row_to_wire(r: hyperion_state::profiles::ProfileRow) -> HostingProfil
         price_currency: r.price_currency,
         price_interval: r.price_interval,
         slack_webhook: r.slack_webhook,
+        alert_emails: r.alert_emails,
         wp_plugins: r.wp_plugins,
         wp_themes: r.wp_themes,
         default_php_version: r.default_php_version,
@@ -24221,7 +25643,7 @@ fn care_report_parts(
     cat: &LetterCatalog,
     report: &CareReport,
     domain: &str,
-) -> (String, [String; 6], Vec<(&'static str, String)>) {
+) -> (String, [String; 7], Vec<(&'static str, String)>) {
     let days = care_days_spanned(report.period_start, report.period_end);
     // The period is half-open, so the last day INSIDE it is `end - 1`.
     let last_day = (report.period_end - 1).max(report.period_start);
@@ -24252,6 +25674,7 @@ fn care_report_parts(
         care_section_uptime(cat, report.uptime.as_ref()),
         care_section_backups(cat, report.backups.as_ref()),
         care_section_integrity(cat, report.integrity.as_ref()),
+        care_section_service(cat, report.service_work.as_ref()),
     ];
     let fields = vec![
         ("domain", domain.to_string()),
@@ -24266,6 +25689,9 @@ fn care_report_parts(
         ("uptime", parts[3].clone()),
         ("backups", parts[4].clone()),
         ("integrity", parts[5].clone()),
+        // What a PERSON did. Not a measurement, and the section says so in
+        // every branch — see `care_section_service`.
+        ("service", parts[6].clone()),
         // ── Bare values ────────────────────────────────────────────────
         //
         // The six placeholders above each expand to a whole SECTION —
@@ -24450,6 +25876,14 @@ fn care_omitted_unmeasured_note(
             report.integrity.is_none(),
             "care.unmeasured.integrity",
         ),
+        // Unreadable, not merely un-ticked: an empty checklist is a fact the
+        // letter states out loud, so only a record we could not read at all
+        // belongs in the "we cannot say" list.
+        (
+            "service",
+            report.service_work.is_none(),
+            "care.unmeasured.service",
+        ),
     ]
     .into_iter()
     .filter(|(placeholder, is_unmeasured, _)| {
@@ -24478,6 +25912,9 @@ fn care_omitted_unmeasured_note(
 /// fact in any language: the operator sees it in the preview and writes their
 /// own sentence around it.
 const UNMEASURED: &str = "—";
+
+/// `hosting_kv` key holding the monthly service checklist JSON.
+pub const CARE_CHECKS_KV_KEY: &str = "care_service_checks";
 
 /// A count, or [`UNMEASURED`] when there is none.
 fn opt_num(cat: &LetterCatalog, v: Option<i64>) -> String {
@@ -24733,6 +26170,43 @@ fn care_section_integrity(cat: &LetterCatalog, integrity: Option<&CareIntegrity>
         out.push_str(cat.get("care.integrity.no_malware_scan"));
     }
     out
+}
+
+/// The monthly service check. The one section that reports what a PERSON
+/// did rather than what was measured, and every wording it can use says so.
+///
+/// Three states that must stay distinct: the record could not be read, the
+/// record is empty, and the record says what happened. Collapsing the first
+/// two would turn "we do not know" into "we did not do it", and collapsing
+/// the last two would turn "we did not do it" into silence.
+fn care_section_service(
+    cat: &LetterCatalog,
+    work: Option<&hyperion_types::package::CareServiceWork>,
+) -> String {
+    let Some(w) = work else {
+        return cat.get("care.service.unknown").to_string();
+    };
+    if w.is_empty() {
+        return cat.get("care.service.none").to_string();
+    }
+    // One item per line, each preceded by the separator. The item names
+    // contain commas ("forms, including that the message arrives"), so a
+    // comma-joined list read as one run-on sentence with the boundaries
+    // between items lost.
+    let name = |ids: &[String]| -> String {
+        let sep = cat.get("care.service.item_sep");
+        ids.iter()
+            .map(|id| format!("{sep}{}", cat.get(&format!("care.service.item.{id}"))))
+            .collect::<String>()
+    };
+    let done = name(&w.done);
+    if w.missing.is_empty() {
+        return cat.render("care.service.all", &[("done", &done)]);
+    }
+    cat.render(
+        "care.service.partial",
+        &[("done", &done), ("missing", &name(&w.missing))],
+    )
 }
 
 /// Calendar days the half-open window `[from, to)` touches.
@@ -26018,6 +27492,28 @@ const INTEGRITY_ENABLED_KV_KEY: &str = "integrity_scan_enabled";
 /// for everybody.
 /// Per-hosting switch for the permission self-repair. Absent ⇒ ON.
 const PERM_AUTOHEAL_KV_KEY: &str = "permissions_autoheal_enabled";
+
+/// Per-site switch for the WordPress mail self-repair. Absent ⇒ ON.
+const WP_MAIL_AUTOFIX_KV_KEY: &str = "wp_mail_autofix_enabled";
+/// Unix seconds when hyperion took `wp_mail()` off an SMTP plugin, or absent.
+/// A timestamp rather than a flag because "is it still failing SINCE we
+/// intervened" is the question the tick has to answer.
+const WP_MAIL_FORCE_LOCAL_KV_KEY: &str = "wp_mail_force_local_at";
+/// Operator override for the sender address; absent ⇒ `wordpress@<domain>`.
+const WP_MAIL_FROM_KV_KEY: &str = "wp_mail_from";
+/// Last automated page walk, as JSON.
+const SITE_CHECK_KV_KEY: &str = "site_check_last";
+/// How often the automated walk runs per site. Weekly: every request it
+/// makes lands on the customer's own traffic bill, and pages do not rot
+/// faster than that.
+const SITE_CHECK_INTERVAL_SECS: i64 = 7 * 86_400;
+/// Every fetch is pinned here, so the check grades the copy THIS node
+/// serves rather than whatever the site's DNS currently points at.
+const LOOPBACK: &str = "127.0.0.1";
+/// A single file this big on the home page is worth saying out loud. Chosen
+/// as "an unresized camera photo": below it, an image is a judgement call
+/// nobody needs a panel's opinion on.
+const HEAVY_ASSET_BYTES: i64 = 500_000;
 const FAIL2BAN_HTTP_KV_KEY: &str = "http_bruteforce_scan_enabled";
 
 /// Thin pub wrapper so `panel_import` can reuse the exact repair the
@@ -27933,6 +29429,43 @@ mod chmod_path_tests {
 /// free text, and a stray word between two commas would otherwise fail every
 /// send that shares its batch. Duplicates are dropped too, so the same person
 /// listed twice is not mailed twice.
+/// Who one message actually goes to.
+///
+/// Two different jobs, and conflating them is how a customer ends up on an
+/// operator's alert list:
+///
+/// * A NAMED recipient — a hosting owner, a customer — gets the letter and
+///   nobody else. It may still be a LIST: an owner-e-mail field holding
+///   "a@x.cz, b@x.cz" used to go out as one malformed address and bounce.
+///   Anything the parser cannot make sense of is passed through unchanged
+///   rather than dropped, because an SMTP server rejecting an address the
+///   operator typed beats hyperion quietly sending to nobody.
+/// * An OPERATOR alert — no named recipient — goes to every administrator
+///   address on record: the cluster-wide list PLUS whatever the site's
+///   profile adds. Additive, never a replacement: adding one address to a
+///   profile must not silently stop the operator receiving alerts they were
+///   already getting.
+///
+/// Case-insensitively deduplicated, so an address on both lists is mailed
+/// once.
+fn resolve_recipients(to: &str, cluster: &str, from_profile: &[String]) -> Vec<String> {
+    if !to.trim().is_empty() {
+        let list = parse_recipient_list(to);
+        return if list.is_empty() {
+            vec![to.to_string()]
+        } else {
+            list
+        };
+    }
+    let mut list = parse_recipient_list(cluster);
+    for addr in from_profile {
+        if !list.iter().any(|e| e.eq_ignore_ascii_case(addr)) {
+            list.push(addr.clone());
+        }
+    }
+    list
+}
+
 fn parse_recipient_list(raw: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for part in raw.split([',', ';', '\n', '\r', ' ', '\t']) {
@@ -27952,7 +29485,64 @@ fn parse_recipient_list(raw: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod recipient_list_tests {
-    use super::parse_recipient_list;
+    use super::{parse_recipient_list, resolve_recipients};
+
+    /// The rule the profile alert list exists to follow: it ADDS to the
+    /// cluster-wide addresses. Replacing them would mean adding one address
+    /// to a profile silently stops the operator getting alerts they were
+    /// already receiving.
+    #[test]
+    fn a_profile_list_adds_to_the_cluster_list() {
+        let got = resolve_recipients("", "ops@us.cz", &["it@klient.cz".to_string()]);
+        assert_eq!(got, vec!["ops@us.cz", "it@klient.cz"]);
+    }
+
+    #[test]
+    fn an_address_on_both_lists_is_mailed_once() {
+        let got = resolve_recipients("", "ops@us.cz, shared@x.cz", &["OPS@US.CZ".to_string()]);
+        assert_eq!(got, vec!["ops@us.cz", "shared@x.cz"]);
+    }
+
+    /// A named recipient is the customer. The profile's operator addresses
+    /// must never be added to a letter addressed to them.
+    #[test]
+    fn a_named_recipient_never_gains_the_operator_addresses() {
+        let got = resolve_recipients("zakaznik@x.cz", "ops@us.cz", &["it@klient.cz".to_string()]);
+        assert_eq!(got, vec!["zakaznik@x.cz"]);
+    }
+
+    /// An owner-e-mail field holding two addresses went out as one
+    /// malformed recipient and bounced.
+    #[test]
+    fn a_named_recipient_may_itself_be_a_list() {
+        let got = resolve_recipients("a@x.cz, b@x.cz", "ops@us.cz", &[]);
+        assert_eq!(got, vec!["a@x.cz", "b@x.cz"]);
+    }
+
+    /// Something the parser cannot read is passed on for the SMTP server to
+    /// reject, rather than silently becoming "send to nobody".
+    #[test]
+    fn an_unparseable_named_recipient_is_passed_through() {
+        assert_eq!(
+            resolve_recipients("not-an-address", "ops@us.cz", &[]),
+            vec!["not-an-address"]
+        );
+    }
+
+    /// No named recipient, no cluster list and no profile list = nothing to
+    /// send to, which the caller turns into "did not send".
+    #[test]
+    fn nothing_configured_yields_no_recipients() {
+        assert!(resolve_recipients("", "", &[]).is_empty());
+    }
+
+    /// A profile list alone is enough — an install that never set a
+    /// cluster-wide address still alerts the people a profile names.
+    #[test]
+    fn a_profile_list_alone_is_enough() {
+        let got = resolve_recipients("", "", &["it@klient.cz".to_string()]);
+        assert_eq!(got, vec!["it@klient.cz"]);
+    }
 
     #[test]
     fn one_address_still_works() {
@@ -31788,6 +33378,17 @@ mod tests {
             plugin_issues: 0,
             malware_hits: 0,
         });
+        // A readable checklist with everything ticked — the ordinary case.
+        // `None` here would mean the record could not be READ, which puts
+        // "checks by hand" in the unmeasured disclosure and is a different
+        // fixture from the one these tests want.
+        r.service_work = Some(hyperion_types::package::CareServiceWork {
+            done: hyperion_types::care_check::ServiceCheckItem::ALL
+                .iter()
+                .map(|i| i.as_str().to_string())
+                .collect(),
+            missing: Vec::new(),
+        });
         r
     }
 
@@ -32277,6 +33878,7 @@ mod tests {
             uptime: None,
             backups: None,
             integrity: None,
+            service_work: None,
         };
         let (_, _, fields) = care_report_parts(&en(), &report, "example.cz");
         let map: std::collections::BTreeMap<&str, String> = fields.into_iter().collect();
@@ -32813,6 +34415,7 @@ mod tests {
             permissions_autoheal: true,
             remote_backup: None,
             retention: BackupRetention::default(),
+            snapshots_enabled: true,
             slack_default_webhook: None,
             acme_contact_email: "test@example.invalid".into(),
             email_config: None,
@@ -32893,6 +34496,7 @@ mod tests {
             permissions_autoheal: true,
             remote_backup: None,
             retention: BackupRetention::default(),
+            snapshots_enabled: true,
             slack_default_webhook: None,
             acme_contact_email: "test@example.invalid".into(),
             email_config: None,
@@ -32940,6 +34544,7 @@ mod tests {
             permissions_autoheal: true,
             remote_backup: None,
             retention: BackupRetention::default(),
+            snapshots_enabled: true,
             slack_default_webhook: None,
             acme_contact_email: "test@example.invalid".into(),
             email_config: None,
@@ -33059,6 +34664,7 @@ mod tests {
             permissions_autoheal: true,
             remote_backup: None,
             retention: BackupRetention::default(),
+            snapshots_enabled: true,
             slack_default_webhook: None,
             acme_contact_email: "test@example.invalid".into(),
             email_config: None,

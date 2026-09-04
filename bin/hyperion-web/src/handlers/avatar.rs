@@ -81,10 +81,21 @@ async fn serve_avatar(state: &SharedState, user_id: i64) -> Result<Response, App
         hyperion_rpc_client::call(&state.agent_socket, Request::AvatarFilename { user_id }).await?;
     let filename = match resp {
         RpcResponse::AvatarFilename(f) => f,
-        _ => return Ok(StatusCode::NOT_FOUND.into_response()),
+        // The bootstrap admin has no web_users row to look up, so the agent
+        // answers this with an error for the one account every install has
+        // — and that must not read as a broken resource on every page. The
+        // avatar is the wrong place to surface an RPC fault; the initial
+        // renders instead, exactly as for an account with no picture.
+        _ => return Ok(StatusCode::NO_CONTENT.into_response()),
     };
+    // No picture uploaded is the ordinary state for most accounts, and
+    // every page renders <img src="/avatar/me" onerror="this.remove()">.
+    // A 404 there made the browser log "Failed to load resource" on
+    // every single page load, which buried real errors in the console.
+    // 204 still fires the image's error handler (there is no image), so
+    // the fallback initial renders exactly as before — silently.
     let Some(filename) = filename else {
-        return Ok(StatusCode::NOT_FOUND.into_response());
+        return Ok(StatusCode::NO_CONTENT.into_response());
     };
     // Defense in depth — the filename came from our own DB but we
     // still refuse anything with a path separator.

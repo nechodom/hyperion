@@ -1,0 +1,97 @@
+{# Automated page check. Lazy-loaded over HTMX; shows the LAST walk from
+   store and never runs one on render — a crawl is up to fifty requests
+   against the customer's own site.
+
+   The honest framing matters here. This finds the 404 behind a menu item,
+   the image that stopped loading, the stylesheet that went missing. It
+   cannot tell you a layout is broken or a photo is the wrong one, and the
+   monthly checklist keeps its own record precisely because those are
+   different claims. #}
+<div class="card" style="margin-bottom:0.9rem">
+  <div class="row" style="align-items:center;gap:0.6rem;margin-bottom:0.5rem">
+    <h2 style="margin:0;font-size:0.95rem">
+      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+      Pages, links and images
+    </h2>
+    {% if let Some(r) = report %}
+      {% if r.worst() == "unknown" %}<span class="pill warn">could not check</span>
+      {% else if r.worst() == "error" %}<span class="pill err">{{ r.count("error") }} broken</span>
+      {% else if r.worst() == "warn" %}<span class="pill warn">{{ r.count("warn") }} to look at</span>
+      {% else %}<span class="pill ok">nothing broken</span>{% endif %}
+      <span class="text-soft small">checked {{ checked_ago }}</span>
+    {% else %}
+      <span class="pill">not checked yet</span>
+    {% endif %}
+    <span class="grow"></span>
+    <form method="post" action="/hostings/site-check" style="margin:0">
+      <input type="hidden" name="_csrf" value="{{ csrf_run }}">
+      <input type="hidden" name="selector" value="{{ selector }}">
+      <button class="btn ghost small" type="submit">Check now</button>
+    </form>
+  </div>
+
+  {% if let Some(e) = error %}
+  <p class="text-soft small" style="margin:0">{{ e }}</p>
+  {% else if let Some(r) = report %}
+
+    {% if !r.error.is_empty() %}
+    {#- The walk could not START. Not the same as "found nothing", and it
+        must not render the same. -#}
+    <div class="flash warn" style="margin:0 0 0.6rem">
+      <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+      <div class="flash-body">{{ r.error }}</div>
+    </div>
+    {% else %}
+
+    <div class="row" style="gap:1.2rem;flex-wrap:wrap;margin:0 0 0.6rem">
+      <span class="text-soft small">{{ r.pages_ok() }} of {{ r.pages.len() }} pages answered</span>
+      <span class="text-soft small">{{ r.links_checked }} links &amp; images checked</span>
+      <span class="text-soft small">typical {{ r.median_ttfb_ms() }} ms · slowest {{ r.slowest_ttfb_ms() }} ms</span>
+      <span class="text-soft small">found via {{ r.discovery }}</span>
+    </div>
+
+    {% if r.findings.is_empty() %}
+      <p class="text-soft small" style="margin:0 0 0.6rem">
+        Every page answered and every link, image and stylesheet on them
+        loaded.
+      </p>
+    {% else %}
+    <table class="table small" style="margin:0 0 0.6rem">
+      <tbody>
+        {% for f in r.findings %}
+        <tr>
+          <td style="width:1.6rem;vertical-align:top">
+            {% if f.severity == "error" %}<span style="color:var(--danger)">●</span>
+            {% else if f.severity == "warn" %}<span style="color:var(--warn)">●</span>
+            {% else %}<span class="text-soft">●</span>{% endif %}
+          </td>
+          <td style="vertical-align:top;word-break:break-all">
+            <code style="font-size:0.78rem">{{ f.url }}</code>
+            {% if !f.found_on.is_empty() %}
+              <span class="text-soft small" style="display:block">on {{ f.found_on }}</span>
+            {% endif %}
+          </td>
+          <td class="text-soft" style="vertical-align:top">{{ f.detail }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+    {% endif %}
+
+  {% else %}
+    <p class="text-soft small" style="margin:0 0 0.6rem">
+      No walk has run for this site yet. Sites on a care package are walked
+      once a week; anyone can start one now with the button above.
+    </p>
+  {% endif %}
+
+  <p class="text-soft small" style="margin:0;line-height:1.55">
+    Fetched from this server with the site's own hostname pinned to it, so
+    what is graded is the copy <strong>we</strong> serve — not whatever the
+    domain's DNS currently points at. It finds dead links, missing images and
+    stylesheets that fail to load. It cannot tell you a layout is wrong or a
+    photo is the wrong one; that is what the monthly check on the care card
+    is for.
+  </p>
+</div>

@@ -560,6 +560,7 @@ async fn main() -> anyhow::Result<()> {
             .sanitized(),
         )
         .with_permissions_autoheal(cfg.permissions.enabled)
+        .with_snapshots(cfg.snapshots.enabled)
         .with_agent_config_path(cli.config.clone())
         .with_node_state_file(state_file_for_svc)
         .with_git_sha(env!("HYPERION_GIT_SHA"));
@@ -951,6 +952,26 @@ async fn main() -> anyhow::Result<()> {
                 // and ancestor traversal. Never touches the daemon, a
                 // node-wide file, or any password state — see the doc comment
                 // on ftp_autoheal_tick for why those are operator decisions.
+                // Keep every WordPress site's sender pinned to its own
+                // domain, and record the sends that fail. Silent when it
+                // works; only mail that is STILL failing after Hyperion
+                // took it over reaches the notification centre.
+                // Walk each care-plan site once a week: the pages its own
+                // sitemap advertises, plus the links and images on them.
+                // The uptime monitor answers "did it respond"; this answers
+                // "does it work".
+                match tick_svc.site_check_tick().await {
+                    Ok(n) if n > 0 => tracing::info!(sites = n, "site check: walked sites"),
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!(error=%e, "site check tick failed"),
+                }
+                match tick_svc.wp_mail_tick().await {
+                    Ok(n) if n > 0 => {
+                        tracing::info!(configured = n, "wp mail: wrote configuration")
+                    }
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!(error=%e, "wp mail tick failed"),
+                }
                 match tick_svc.ftp_autoheal_tick().await {
                     Ok(n) if n > 0 => {
                         tracing::warn!(healed = n, "ftp autoheal: repaired FTP roots")

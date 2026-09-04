@@ -15,6 +15,24 @@ pub struct Config {
     pub remote_rpc: RemoteRpcSection,
     pub fail2ban: Fail2banSection,
     pub permissions: PermissionsSection,
+    pub snapshots: SnapshotsSection,
+}
+
+/// Content-addressed snapshots taken before anything changes a site.
+///
+/// Defaults to ON, but it does NOTHING unless `restic` is installed — so an
+/// install that has never heard of the feature is unaffected, and turning it
+/// on is a matter of installing one package rather than editing config.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct SnapshotsSection {
+    pub enabled: bool,
+}
+
+impl Default for SnapshotsSection {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
 }
 
 /// The permission self-repair. `enabled = false` makes

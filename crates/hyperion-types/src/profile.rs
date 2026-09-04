@@ -22,6 +22,16 @@ pub struct HostingProfile {
     pub price_currency: Option<String>,
     pub price_interval: Option<String>,
     pub slack_webhook: Option<String>,
+    /// Operator addresses that also receive alerts for sites on this
+    /// profile, ON TOP OF the cluster-wide `[email] default_to`.
+    ///
+    /// Additive rather than a replacement on purpose: adding one address to
+    /// a profile must not silently stop the operator receiving alerts they
+    /// were already getting, and an alert that quietly stopped is worse than
+    /// one too many. Comma- or newline-separated; empty = the cluster list
+    /// alone. `#[serde(default)]` so an older agent still deserialises.
+    #[serde(default)]
+    pub alert_emails: String,
     /// Newline-separated list of WordPress plugins to install when
     /// this profile is applied to a WP-installed hosting. Each line
     /// is either:
@@ -136,6 +146,9 @@ pub struct ProfileInput {
     pub price_minor: Option<i64>,
     pub price_currency: Option<String>,
     pub price_interval: Option<String>,
+    /// See [`HostingProfile::alert_emails`].
+    #[serde(default)]
+    pub alert_emails: String,
     pub slack_webhook: Option<String>,
     #[serde(default)]
     pub wp_plugins: String,
