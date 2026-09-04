@@ -425,6 +425,105 @@ pub fn resolve_url(raw: &str, base_url: &str, host: &str) -> Option<String> {
     }
 }
 
+/// What in a page's own HTML makes it slow or makes it jump about.
+///
+/// # Why this is not "Core Web Vitals"
+///
+/// Core Web Vitals are FIELD measurements: Google's numbers come from real
+/// visitors, on their own phones and their own networks. A number produced
+/// here — one fetch, over loopback, on server hardware with no network in
+/// the way — would be a different measurement wearing the same name, and it
+/// would flatter every site we host. That is the same lie the care report
+/// refuses to tell about uptime, and it is refused here for the same reason.
+///
+/// What IS honest is the causes, because they are in the HTML and they are
+/// what an operator would change anyway:
+///
+/// * a script in `<head>` with neither `defer` nor `async` stops the parser
+///   dead until it has downloaded and run — the usual reason a page is blank
+///   for a second;
+/// * an `<img>` with no width and height reserves no space, so everything
+///   below it jumps when the image arrives. That is Cumulative Layout Shift,
+///   in one sentence.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PageWeight {
+    /// `<script src>` in `<head>` without `defer` or `async`.
+    pub blocking_scripts: usize,
+    /// `<img>` tags missing a width or a height attribute.
+    pub unsized_images: usize,
+    /// `<img>` tags seen at all, so the count above has a denominator.
+    pub images: usize,
+}
+
+/// Analyse one page's HTML.
+pub fn page_weight(html: &str) -> PageWeight {
+    let mut w = PageWeight::default();
+    // Only `<head>` blocks rendering. A script at the end of `<body>` is the
+    // recommended shape and must not be reported as a problem.
+    let head_end = find_ci(html, "</head>").unwrap_or(html.len());
+    let head = &html[..head_end];
+
+    let mut rest = head;
+    while let Some(at) = find_ci(rest, "<script ") {
+        let after = &rest[at + "<script ".len()..];
+        let end = after.find('>').unwrap_or(after.len());
+        let inside = &after[..end];
+        let lower = inside.to_ascii_lowercase();
+        // Only an external script blocks on the network. An inline one is
+        // already downloaded by the time the parser reaches it.
+        if attr_value(inside, "src").is_some()
+            && !has_bare_attr(&lower, "defer")
+            && !has_bare_attr(&lower, "async")
+            // A module is deferred by definition.
+            && attr_value(inside, "type").map(|t| t.to_ascii_lowercase()) != Some("module".into())
+        {
+            w.blocking_scripts += 1;
+        }
+        rest = &after[end.min(after.len())..];
+    }
+
+    let mut rest = html;
+    while let Some(at) = find_ci(rest, "<img ") {
+        let after = &rest[at + "<img ".len()..];
+        let end = after.find('>').unwrap_or(after.len());
+        let inside = &after[..end];
+        w.images += 1;
+        // BOTH are needed: the browser reserves space from the ratio, so one
+        // without the other reserves nothing.
+        let sized = attr_value(inside, "width").is_some_and(|v| !v.trim().is_empty())
+            && attr_value(inside, "height").is_some_and(|v| !v.trim().is_empty());
+        if !sized {
+            w.unsized_images += 1;
+        }
+        rest = &after[end.min(after.len())..];
+    }
+    w
+}
+
+/// Is `name` present as a valueless attribute (`defer`, `async`)?
+///
+/// Whole-word, so `data-async` is not `async` — the same trap `attr_value`
+/// guards against.
+fn has_bare_attr(tag_inside_lower: &str, name: &str) -> bool {
+    let bytes = tag_inside_lower.as_bytes();
+    let mut from = 0usize;
+    while let Some(at) = tag_inside_lower[from..].find(name) {
+        let idx = from + at;
+        let before_ok = idx == 0 || !is_attr_char(bytes[idx - 1]);
+        let after_idx = idx + name.len();
+        let after_ok = after_idx >= bytes.len() || !is_attr_char(bytes[after_idx]);
+        if before_ok && after_ok {
+            return true;
+        }
+        from = idx + name.len();
+    }
+    false
+}
+
+fn is_attr_char(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'-' || b == b'_'
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -669,5 +768,76 @@ mod header_tests {
         assert!(!caches_in_browser("public"));
         // `no-cache` wins even beside a max-age, which is what it means.
         assert!(!caches_in_browser("no-cache, max-age=600"));
+    }
+}
+
+#[cfg(test)]
+mod weight_tests {
+    use super::*;
+
+    #[test]
+    fn a_blocking_script_in_head_is_counted() {
+        let html = r#"<html><head>
+            <script src="/a.js"></script>
+            </head><body></body></html>"#;
+        assert_eq!(page_weight(html).blocking_scripts, 1);
+    }
+
+    /// The recommended shapes must not be reported as problems, or the card
+    /// tells an operator to fix a page that is already right.
+    #[test]
+    fn deferred_async_module_and_inline_scripts_are_fine() {
+        for tag in [
+            r#"<script src="/a.js" defer></script>"#,
+            r#"<script src="/a.js" async></script>"#,
+            r#"<script src="/a.js" type="module"></script>"#,
+            r#"<script>var a = 1;</script>"#,
+        ] {
+            let html = format!("<html><head>{tag}</head></html>");
+            assert_eq!(page_weight(&html).blocking_scripts, 0, "{tag}");
+        }
+    }
+
+    /// `data-async` is not `async`. Reading it as one would silently excuse
+    /// a script that really does block.
+    #[test]
+    fn a_prefixed_attribute_does_not_count_as_defer_or_async() {
+        let html = r#"<html><head><script src="/a.js" data-async="1"></script></head></html>"#;
+        assert_eq!(page_weight(html).blocking_scripts, 1);
+    }
+
+    /// A script at the end of `<body>` is the shape everyone is told to
+    /// use — it does not block rendering and is not a finding.
+    #[test]
+    fn a_script_after_head_does_not_block() {
+        let html = r#"<html><head></head><body><script src="/a.js"></script></body></html>"#;
+        assert_eq!(page_weight(html).blocking_scripts, 0);
+    }
+
+    #[test]
+    fn images_need_both_dimensions_to_reserve_space() {
+        let html = r#"
+            <img src="/a.jpg" width="800" height="600">
+            <img src="/b.jpg" width="800">
+            <img src="/c.jpg">
+        "#;
+        let w = page_weight(html);
+        assert_eq!(w.images, 3);
+        // One with only a width reserves nothing, so it shifts the page too.
+        assert_eq!(w.unsized_images, 2);
+    }
+
+    #[test]
+    fn an_empty_dimension_is_not_a_dimension() {
+        let html = r#"<img src="/a.jpg" width="" height="600">"#;
+        assert_eq!(page_weight(html).unsized_images, 1);
+    }
+
+    #[test]
+    fn a_page_with_no_head_still_parses() {
+        let w = page_weight("<img src=/a.jpg>");
+        assert_eq!(w.images, 1);
+        assert_eq!(w.unsized_images, 1);
+        assert_eq!(w.blocking_scripts, 0);
     }
 }

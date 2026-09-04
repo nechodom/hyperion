@@ -177,8 +177,10 @@ mail_threshold = 8    # postfix/dovecot SASL auth failures
 
 # ─── Customer letter language and wording ──────────────────────────────────
 #
-# Every sentence the two customer letters can say lives here, so a letter can
-# be translated COMPLETELY rather than around the edges. `lang` picks a
+# Every sentence Hyperion writes that LEAVES the building lives here, so it can
+# be translated completely rather than around the edges: the two customer
+# letters, the Slack messages, and the operator alerts that are e-mailed to
+# every administrator address. (The panel itself stays in English.) `lang` picks a
 # built-in pack — "en" or "cs" — and that alone changes the headings, the
 # month names, the thousands separator ("34,500" vs "34 500"), the decimal
 # comma and the plural endings (Czech needs three: 1 den / 2 dny / 5 dní).
@@ -188,6 +190,10 @@ mail_threshold = 8    # postfix/dovecot SASL auth failures
 # `lang` in it is a fully translated letter. Edit them in the panel under
 # Settings -> Notifications -> Letter language and wording, which lists them
 # grouped with the built-in text shown in each field.
+#
+# The operator alerts are worth translating since profiles gained their own
+# alert addresses (migration 063): those can be a client's own IT contact,
+# who did not sign up to read English.
 #
 # WHICH wording is used is never yours to change — that is decided from what
 # was actually measured. You can make the letter say "nesledováno" instead of

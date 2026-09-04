@@ -1185,8 +1185,12 @@
           <option value="cs" {% if letter_lang == "cs" %}selected{% endif %}>Čeština</option>
         </select>
         <span class="hint" style="display:block;margin-top:0.3rem">
-          Applies to the care report and the expiry warning. Operator alerts
-          (Slack, mail to you) are separate and stay as they are.
+          Applies to everything Hyperion writes that leaves the building: the
+          care report and the expiry warning to your customer, and the
+          operator alerts — Slack messages, and the mail that goes to every
+          administrator address. That last one matters since profiles gained
+          their own alert addresses: those can be a client's own IT contact.
+          The panel itself stays in English.
         </span>
       </div>
 

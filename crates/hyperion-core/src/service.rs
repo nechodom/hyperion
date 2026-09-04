@@ -3224,13 +3224,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         )
         .await;
         // Notify admins so the bell catches "this site went to trash".
-        self.notify_admins(
+        self.notify_admins_say(
             "warn",
-            "Hosting moved to trash",
-            &format!(
-                "{} will be GC'd after the trash retention window.",
-                detail.domain
-            ),
+            "ops.trash",
+            &[("domain", &detail.domain)],
             "/trash",
             "hosting.trash",
         )
@@ -7976,12 +7973,22 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         targets.retain(|(_, u, _)| !fetched.contains(u));
         targets.truncate(sitecheck::MAX_LINKS);
 
+        let mut heaviest: Option<(String, i64)> = None;
+        let mut asset_bytes: i64 = 0;
         for (kind, url, found_on) in targets {
             let Ok(f) = sitecheck::fetch(&url, &domain, LOOPBACK, false).await else {
                 continue;
             };
             report.links_checked += 1;
             if f.is_ok() {
+                // Images and stylesheets are what a page actually weighs;
+                // a nav link is a different page, not part of this one.
+                if matches!(kind, LinkKind::Image | LinkKind::Asset) {
+                    asset_bytes += f.bytes;
+                    if heaviest.as_ref().map(|(_, b)| f.bytes > *b).unwrap_or(true) {
+                        heaviest = Some((url.clone(), f.bytes));
+                    }
+                }
                 continue;
             }
             let what = match kind {
@@ -8009,6 +8016,79 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 &url,
                 &found_on,
                 format!("{what} ({status}){why}"),
+            );
+        }
+
+        // ── What the page's own HTML does to it ─────────────────────────
+        //
+        // Deliberately NOT called Core Web Vitals. Those are FIELD numbers,
+        // from real visitors on real phones and networks; anything measured
+        // here — one fetch, over loopback, on server hardware — would be a
+        // different measurement wearing the same name, and it would flatter
+        // every site we host. What follows is the CAUSES, which are in the
+        // HTML, are what an operator would change anyway, and can be stated
+        // without inventing a score.
+        if let Some((_, body)) = bodies.first() {
+            let w = sitecheck::page_weight(body);
+            if w.blocking_scripts > 0 {
+                push(
+                    "warn",
+                    "slow",
+                    &base,
+                    "",
+                    format!(
+                        "{} script(s) in the page head have neither `defer` nor `async`, so the \
+                         browser stops building the page until each one has downloaded and run. \
+                         This is the usual reason a site shows nothing for the first second.",
+                        w.blocking_scripts
+                    ),
+                );
+            }
+            if w.unsized_images > 0 {
+                push(
+                    "warn",
+                    "slow",
+                    &base,
+                    "",
+                    format!(
+                        "{} of {} image(s) have no width and height, so the browser reserves no \
+                         space and everything below them jumps as they load. That jumping is \
+                         what Google measures as layout shift, and it is the half of a page's \
+                         speed score that has nothing to do with how fast the server is.",
+                        w.unsized_images, w.images
+                    ),
+                );
+            }
+        }
+        if let Some((url, bytes)) = heaviest {
+            if bytes >= HEAVY_ASSET_BYTES {
+                push(
+                    "warn",
+                    "slow",
+                    &url,
+                    &base,
+                    format!(
+                        "One file on the home page is {}. On a phone that is most of the wait \
+                         before anything appears; a resized copy usually costs nothing visible.",
+                        human_bytes(bytes)
+                    ),
+                );
+            }
+        }
+        if asset_bytes > 0 {
+            let html = report.pages.first().map(|p| p.bytes).unwrap_or(0);
+            push(
+                "info",
+                "slow",
+                &base,
+                "",
+                format!(
+                    "Home page weighs {} in total — {} of HTML plus {} of images, stylesheets \
+                     and scripts, as a browser downloads it.",
+                    human_bytes(html + asset_bytes),
+                    human_bytes(html),
+                    human_bytes(asset_bytes)
+                ),
             );
         }
 
@@ -8134,21 +8214,22 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             ran += 1;
             let broken = report.count("error");
             if broken > 0 {
-                self.notify_admins(
+                let urls = report
+                    .findings
+                    .iter()
+                    .filter(|f| f.severity == "error")
+                    .map(|f| f.url.as_str())
+                    .take(3)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                self.notify_admins_say(
                     "error",
-                    "Pages on this site are broken",
-                    &format!(
-                        "{} — the automatic page check found {broken} page(s) that do not work: {}",
-                        detail.domain,
-                        report
-                            .findings
-                            .iter()
-                            .filter(|f| f.severity == "error")
-                            .map(|f| f.url.as_str())
-                            .take(3)
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    ),
+                    "ops.pages_broken",
+                    &[
+                        ("domain", &detail.domain),
+                        ("count", &broken.to_string()),
+                        ("urls", &urls),
+                    ],
                     &format!("/hostings/{}", detail.domain),
                     "site_check_broken",
                 )
@@ -8482,17 +8563,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 // Announced, not quiet: this overrides a decision somebody
                 // made deliberately, and an operator who does not know it
                 // happened cannot explain it to their customer.
-                self.notify_admins(
+                self.notify_admins_say(
                     "warn",
-                    "Hyperion took over WordPress mail",
-                    &format!(
-                        "{} — sends through {} have been failing, so Hyperion is now sending \
-                         this site's mail through the server's own mail path instead. Fix the \
-                         plugin's credentials and turn the override off on the site's Mail card \
-                         to hand it back.",
-                        detail.domain,
-                        smtp.join(", ")
-                    ),
+                    "ops.mail_override",
+                    &[("domain", &detail.domain), ("plugins", &smtp.join(", "))],
                     &format!("/hostings/{}", detail.domain),
                     "wp_mail_override",
                 )
@@ -8564,15 +8638,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 // An hour's grace: a queue drains, and a failure logged one
                 // second after the override is not evidence against it.
                 if hyperion_adapters::wpmail::failures_since(&lines, at + 3_600) > 0 {
-                    self.notify_admins(
+                    self.notify_admins_say(
                         "error",
-                        "WordPress mail is still failing",
-                        &format!(
-                            "{} — Hyperion already moved this site's mail onto the server's own \
-                             mail path and sends are still failing. Nothing further is automatic: \
-                             see the site's Mail card for the recorded errors.",
-                            detail.domain
-                        ),
+                        "ops.mail_failing",
+                        &[("domain", &detail.domain)],
                         &format!("/hostings/{}", detail.domain),
                         "wp_mail_failing",
                     )
@@ -10237,15 +10306,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                                 );
                                 skips_dirty = true;
                                 if newly_paused {
-                                    self.notify_admins(
+                                    self.notify_admins_say(
                                         "warn",
-                                        "WordPress auto-update paused",
-                                        &format!(
-                                            "{} — auto-update of plugin '{slug}' keeps failing, so Hyperion paused it. \
-                                             This is almost always a commercial plugin whose update needs a license key. \
-                                             Add the key, then click Resume on the hosting's WordPress panel.",
-                                            s.domain
-                                        ),
+                                        "ops.update_paused",
+                                        &[("domain", &s.domain), ("slug", &slug)],
                                         &format!("/hostings/{}#wordpress", s.domain),
                                         &format!("wp.update.paused:{}:{slug}", s.domain),
                                     )
@@ -10320,13 +10384,14 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                                     // serving the site.
                                     tracing::warn!(domain = %detail.domain, error = %e,
                                         "wp core: minor update failed");
-                                    self.notify_admins(
+                                    self.notify_admins_say(
                                         "warn",
-                                        "WordPress core update failed",
-                                        &format!(
-                                            "{} — the {} security release could not be applied                                              automatically, so the site is still on the older                                              core. A snapshot was taken first, so nothing is                                              lost. Error: {e}",
-                                            detail.domain, rel.version
-                                        ),
+                                        "ops.core_failed",
+                                        &[
+                                            ("domain", &detail.domain),
+                                            ("version", &rel.version),
+                                            ("error", &e.to_string()),
+                                        ],
                                         &format!("/hostings/{}#wordpress", detail.domain),
                                         &format!("wp.core.failed:{}", detail.domain),
                                     )
@@ -10369,13 +10434,16 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     continue;
                 }
                 new_majors += 1;
-                self.notify_admins(
+                self.notify_admins_say(
                     "warn",
-                    "WordPress major update available",
-                    &format!(
-                        "{} — {} {} {} → {} (major; review before applying)",
-                        s.domain, f.kind, f.name, f.installed_version, f.patched_version
-                    ),
+                    "ops.major_update",
+                    &[
+                        ("domain", &s.domain),
+                        ("kind", &f.kind),
+                        ("name", &f.name),
+                        ("from", &f.installed_version),
+                        ("to", &f.patched_version),
+                    ],
                     &format!("/hostings/{}#wordpress", s.domain),
                     &format!("wp.update.major:{}:{}", s.domain, key),
                 )
@@ -10698,16 +10766,16 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 || !scan.core_modified.is_empty()
                 || !scan.core_unexpected.is_empty()
                 || !scan.plugins_failed.is_empty();
-            self.notify_admins(
+            self.notify_admins_say(
                 if compromised { "error" } else { "warn" },
-                "WordPress integrity check found changes",
-                &format!(
-                    "{} — {} core file(s), {} plugin file(s) and {} malware hit(s) differ from what should be there ({new_keys} new since the last check).",
-                    s.domain,
-                    scan.core_issue_count(),
-                    scan.plugin_issue_count(),
-                    scan.malware.len(),
-                ),
+                "ops.integrity",
+                &[
+                    ("domain", &s.domain),
+                    ("core", &scan.core_issue_count().to_string()),
+                    ("plugins", &scan.plugin_issue_count().to_string()),
+                    ("malware", &scan.malware.len().to_string()),
+                    ("new", &new_keys.to_string()),
+                ],
                 &format!("/hostings/{}#wordpress", s.domain),
                 &format!("wp.integrity:{}", s.domain),
             )
@@ -12136,8 +12204,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let packages = hyperion_state::packages::list_for_hosting(&self.pool, id)
             .await
             .unwrap_or_default();
+        let cat = self.letter_catalog();
         let plan_line = if packages.is_empty() {
-            "• care plan: none".to_string()
+            cat.get("slack.plan_none").to_string()
         } else {
             let names: Vec<String> = packages
                 .iter()
@@ -12150,16 +12219,21 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     },
                 )
                 .collect();
-            format!("• care plan: *{}*", names.join(", "))
+            cat.render("slack.plan_some", &[("names", &names.join(", "))])
         };
 
         let base_line = match &base {
-            Some((m, c, iv)) => format!(
-                "• price: *{:.2} {c} ({iv})* — to change it, edit the profile or the price \
-                 in Hyperion, not in the invoice",
-                *m as f64 / 100.0
+            Some((m, c, iv)) => cat.render(
+                "slack.price_line",
+                &[(
+                    "price",
+                    &format!(
+                        "{} {c} ({iv})",
+                        cat.decimal(&format!("{:.2}", *m as f64 / 100.0))
+                    ),
+                )],
             ),
-            None => "• price: *not set* — apply a profile in Hyperion to set one".to_string(),
+            None => cat.get("slack.price_unset").to_string(),
         };
 
         // One currency and one interval, or no total.
@@ -12187,9 +12261,16 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             }
         }
         let total_line = match (comparable, currency, interval) {
-            (true, Some(c), Some(iv)) if !packages.is_empty() => {
-                format!("\n• total: *{:.2} {c} ({iv})*", total as f64 / 100.0)
-            }
+            (true, Some(c), Some(iv)) if !packages.is_empty() => cat.render(
+                "slack.total",
+                &[(
+                    "total",
+                    &format!(
+                        "{} {c} ({iv})",
+                        cat.decimal(&format!("{:.2}", total as f64 / 100.0))
+                    ),
+                )],
+            ),
             _ => String::new(),
         };
         (base_line, plan_line, total_line)
@@ -12225,19 +12306,27 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // Price, care plan and total, from the same helper the care-plan
         // message uses — the two must never disagree about one site.
         let (price_line, plan_line, total_line) = self.price_picture(&detail.id).await;
+        let cat = self.letter_catalog();
         let next_line = match applied.as_ref().and_then(|a| a.next_billing_at) {
-            Some(t) => format!("• next reminder: {}", fmt_notif_time(t)),
-            None => "• next reminder: none scheduled".to_string(),
+            Some(t) => cat.render("slack.next_reminder", &[("when", &fmt_notif_time(t))]),
+            None => cat.get("slack.next_reminder_none").to_string(),
         };
         let node = detail
             .node_id
             .as_deref()
             .filter(|n| !n.is_empty())
-            .unwrap_or("this node");
-        let msg = format!(
-            ":sparkles: *New hosting*\n• address: `{}`\n{price_line}\n{plan_line}{total_line}\n\
-             {next_line}\n• node: {node}",
-            detail.domain
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| cat.get("slack.node_unknown").to_string());
+        let msg = cat.render(
+            "slack.new_hosting",
+            &[
+                ("domain", &detail.domain),
+                ("price", &price_line),
+                ("plan", &plan_line),
+                ("total", &total_line),
+                ("next", &next_line),
+                ("node", &node),
+            ],
         );
 
         // The webhook snapshotted at apply time first — it survives the
@@ -12373,25 +12462,32 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 .next_billing_at
                 .map(|t| ((t - now).max(0)) / 86400)
                 .unwrap_or(0);
+            let cat = self.letter_catalog();
             let (price_str, action) =
                 match (row.price_minor, &row.price_currency, &row.price_interval) {
-                    (Some(m), Some(c), Some(iv)) => (
-                        format!("{:.2} {c} ({iv})", m as f64 / 100.0),
-                        format!(
-                            "*Invoice {:.2} {c}* for the next {iv} period.",
-                            m as f64 / 100.0
-                        ),
-                    ),
+                    (Some(m), Some(c), Some(iv)) => {
+                        let amount = cat.decimal(&format!("{:.2}", m as f64 / 100.0));
+                        (
+                            format!("{amount} {c} ({iv})"),
+                            cat.render(
+                                "slack.invoice_action",
+                                &[("amount", &format!("{amount} {c}")), ("interval", iv)],
+                            ),
+                        )
+                    }
                     _ => (
-                        "not set".into(),
-                        "*No price is set on this hosting* — nothing to invoice. Apply a \
-                         profile in Hyperion to set one."
-                            .to_string(),
+                        cat.get("slack.price_not_set").to_string(),
+                        cat.get("slack.no_price_hosting").to_string(),
                     ),
                 };
-            let msg = format!(
-                ":calendar: *Hosting due*\n• site: `{domain}`\n• price: {price_str}\n\
-                 • due in {due_in_days} day(s)\n{action}"
+            let msg = cat.render(
+                "slack.hosting_due",
+                &[
+                    ("domain", &domain),
+                    ("price", &price_str),
+                    ("days", &due_in_days.to_string()),
+                    ("action", &action),
+                ],
             );
             self.notify_slack(webhook.as_deref(), &msg).await;
             // Also send email if configured. Use the hosting's
@@ -12470,28 +12566,36 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             // that it means "raise an invoice for this amount". A recurring
             // care fee that nobody invoices is revenue quietly lost every
             // month, which is exactly what this message exists to prevent.
+            let cat = self.letter_catalog();
             let (price_str, action) =
                 match (row.price_minor, &row.price_currency, &row.price_interval) {
-                    (Some(m), Some(c), Some(iv)) => (
-                        format!("{:.2} {c} ({iv})", m as f64 / 100.0),
-                        format!(
-                            "*Invoice {:.2} {c}* for the next {iv} period.",
-                            m as f64 / 100.0
-                        ),
-                    ),
+                    (Some(m), Some(c), Some(iv)) => {
+                        let amount = cat.decimal(&format!("{:.2}", m as f64 / 100.0));
+                        (
+                            format!("{amount} {c} ({iv})"),
+                            cat.render(
+                                "slack.invoice_action",
+                                &[("amount", &format!("{amount} {c}")), ("interval", iv)],
+                            ),
+                        )
+                    }
                     // Said out loud rather than skipped: a care package with
                     // no price is one nobody is charging for, and the day it
                     // comes due is when that is worth noticing.
                     _ => (
-                        "not set".into(),
-                        "*No price is set on this package* — nothing to invoice, and nobody \
-                         is being charged for it. Set one in Hyperion."
-                            .to_string(),
+                        cat.get("slack.price_not_set").to_string(),
+                        cat.get("slack.no_price_package").to_string(),
                     ),
                 };
-            let msg = format!(
-                ":package: *Care package due*\n• site: `{domain}`\n• package: {label}\n\
-                 • price: {price_str}\n• due in {due_in_days} day(s)\n{action}"
+            let msg = cat.render(
+                "slack.package_due",
+                &[
+                    ("domain", &domain),
+                    ("package", &label),
+                    ("price", &price_str),
+                    ("days", &due_in_days.to_string()),
+                    ("action", &action),
+                ],
             );
             self.notify_slack(webhook.as_deref(), &msg).await;
             let owner = self
@@ -13585,9 +13689,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // operator reading "care plan added" wants to know what the customer
         // now pays in total, which is the number that goes on the invoice.
         let (price_line, plan_line, total_line) = self.price_picture(&detail.id).await;
+        let cat = self.letter_catalog();
         let next_line = match row.next_billing_at {
-            Some(t) => format!("• next reminder: {}", fmt_notif_time(t)),
-            None => "• next reminder: none scheduled".to_string(),
+            Some(t) => cat.render("slack.next_reminder", &[("when", &fmt_notif_time(t))]),
+            None => cat.get("slack.next_reminder_none").to_string(),
         };
         // Same channel the hosting's own billing messages go to: the profile's
         // webhook snapshotted at apply time, else the cluster default.
@@ -13596,10 +13701,15 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .ok()
             .flatten()
             .and_then(|a| a.slack_webhook);
-        let msg = format!(
-            ":package: *Care plan activated*\n• address: `{}`\n{price_line}\n{plan_line}\
-             {total_line}\n{next_line}",
-            detail.domain
+        let msg = cat.render(
+            "slack.care_activated",
+            &[
+                ("domain", &detail.domain),
+                ("price", &price_line),
+                ("plan", &plan_line),
+                ("total", &total_line),
+                ("next", &next_line),
+            ],
         );
         self.notify_slack(webhook.as_deref(), &msg).await;
 
@@ -16194,18 +16304,23 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         cap_mib: i64,
         suspended: bool,
     ) {
-        let what = if suspended {
-            "suspended (over disk quota)"
-        } else {
-            "over its disk quota"
-        };
-        let slack = format!(
-            ":floppy_disk: *Disk quota exceeded*\n• site: `{domain}`\n• usage: {used_mib} MiB / {cap_mib} MiB cap\n• action: {what}"
-        );
-        let subj = format!("[Hyperion] Disk quota exceeded — {domain}");
-        let body = format!(
-            "Hosting:  {domain}\nUsage:    {used_mib} MiB\nDisk cap: {cap_mib} MiB\nAction:   {what}\n\n--\nHyperion\n"
-        );
+        let cat = self.letter_catalog();
+        let what = cat
+            .get(if suspended {
+                "quota.action_suspended"
+            } else {
+                "quota.action_over"
+            })
+            .to_string();
+        let args = [
+            ("domain", domain),
+            ("used", &used_mib.to_string()),
+            ("cap", &cap_mib.to_string()),
+            ("action", what.as_str()),
+        ];
+        let slack = cat.render("quota.over.slack", &args);
+        let subj = cat.render("quota.over.subject", &args);
+        let body = cat.render("quota.over.body", &args);
         self.notify_quota_event(hosting_id, &subj, &slack, &body)
             .await;
     }
@@ -16219,13 +16334,15 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         used_mib: i64,
         cap_mib: i64,
     ) {
-        let slack = format!(
-            ":white_check_mark: *Disk usage back under quota*\n• site: `{domain}`\n• usage: {used_mib} MiB / {cap_mib} MiB cap\n• action: resumed"
-        );
-        let subj = format!("[Hyperion] Disk usage back under quota — {domain}");
-        let body = format!(
-            "Hosting:  {domain}\nUsage:    {used_mib} MiB\nDisk cap: {cap_mib} MiB\nAction:   resumed automatically\n\n--\nHyperion\n"
-        );
+        let cat = self.letter_catalog();
+        let args = [
+            ("domain", domain),
+            ("used", &used_mib.to_string()),
+            ("cap", &cap_mib.to_string()),
+        ];
+        let slack = cat.render("quota.resolved.slack", &args);
+        let subj = cat.render("quota.resolved.subject", &args);
+        let body = cat.render("quota.resolved.body", &args);
         self.notify_quota_event(hosting_id, &subj, &slack, &body)
             .await;
     }
@@ -18075,14 +18192,18 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             let days_left = (cert.not_after - now) / 86400;
             match &outcome {
                 CertRenewOutcome::Failed { error } => {
-                    self.notify_admins(
+                    self.notify_admins_say(
                         // Red once the certificate is actually EXPIRED —
                         // that is the moment a visitor sees a warning
                         // instead of the site. Before that it is urgent,
                         // not broken. See the rule on `notify_admins`.
                         if days_left <= 0 { "error" } else { "warn" },
-                        "Cert renewal failed",
-                        &format!("{domain_str} — {error} ({} day(s) until expiry)", days_left),
+                        "ops.cert_failed",
+                        &[
+                            ("domain", &domain_str),
+                            ("error", &error.to_string()),
+                            ("days", &days_left.to_string()),
+                        ],
                         &format!("/hostings/{}", domain_str),
                         &format!("cert.renew_failed:{domain_str}"),
                     )
@@ -18093,13 +18214,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     // already inside the red band. Notify so the
                     // operator knows their automation caught it
                     // before expiry (informational, not a failure).
-                    self.notify_admins(
+                    self.notify_admins_say(
                         "info",
-                        "Cert renewed close to expiry",
-                        &format!(
-                            "{domain_str} — was {} day(s) from expiry, now renewed.",
-                            days_left
-                        ),
+                        "ops.cert_renewed_late",
+                        &[("domain", &domain_str), ("days", &days_left.to_string())],
                         &format!("/hostings/{}", domain_str),
                         &format!("cert.renewed_late:{domain_str}"),
                     )
@@ -18109,10 +18227,14 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     // Wildcard cert we can't auto-renew (no DNS
                     // token) — nag the operator to re-run DNS-01 before it
                     // expires. Per-domain kind → one bell row per cert.
-                    self.notify_admins(
+                    self.notify_admins_say(
                         if days_left <= 0 { "error" } else { "warn" },
-                        "Wildcard cert needs manual renewal",
-                        &format!("{domain_str} — {reason} ({days_left} day(s) until expiry)"),
+                        "ops.cert_wildcard_manual",
+                        &[
+                            ("domain", &domain_str),
+                            ("reason", &reason.to_string()),
+                            ("days", &days_left.to_string()),
+                        ],
                         &format!("/hostings/{}", domain_str),
                         &format!("cert.wildcard_manual:{domain_str}"),
                     )
@@ -21540,13 +21662,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     image_kind = %gathered.image_kind,
                     "rofs watchdog: rootfs is read-only BY DESIGN on this image — not fixable"
                 );
-                self.notify_admins(
+                self.notify_admins_say(
                     "error",
-                    "Root filesystem is read-only by design",
-                    &format!(
-                        "This node runs a {} image whose root filesystem is immutable.                          Hyperion cannot install packages or write outside its data                          directories here; pick a standard (non-immutable) base image.",
-                        gathered.image_kind
-                    ),
+                    "ops.rofs_by_design",
+                    &[("image", &gathered.image_kind)],
                     "/services",
                     "system.rofs",
                 )
@@ -21561,12 +21680,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 tracing::error!(
                     "rofs watchdog: rootfs is read-only AGAIN after {MAX_ATTEMPTS} repairs —                      standing down. This pattern means failing storage or filesystem                      corruption; check dmesg and SMART before remounting by hand"
                 );
-                self.notify_admins(
+                self.notify_admins_say(
                     "error",
-                    "Root filesystem keeps going read-only",
-                    &format!(
-                        "The rootfs flipped to read-only again after {MAX_ATTEMPTS} automatic                          repairs this boot. The watchdog has stopped remounting: a filesystem                          that keeps doing this usually means failing storage, and remounting                          in a loop can make corruption worse. Check `dmesg` and the disk's                          SMART data, then repair by hand from Services → Read-only rootfs."
-                    ),
+                    "ops.rofs_stood_down",
+                    &[("attempts", &MAX_ATTEMPTS.to_string())],
                     "/services",
                     "system.rofs",
                 )
@@ -21606,12 +21723,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 // forever and never reached the stand-down threshold.
                 let repairs = REPAIRS_THIS_BOOT.fetch_add(1, Ordering::Relaxed) + 1;
                 if repairs == REPAIRS_BEFORE_ALERT {
-                    self.notify_admins(
+                    self.notify_admins_say(
                         "error",
-                        "Root filesystem keeps going read-only",
-                        &format!(
-                            "Hyperion has remounted the rootfs read-write {repairs} times                              since this node booted. Each repair worked, so services are                              running — but a filesystem only does this in response to I/O                              errors, and a repeat means the underlying storage is failing.                              Check `dmesg` and SMART data now; the repairs are buying time,                              not fixing anything."
-                        ),
+                        "ops.rofs_repeats",
+                        &[("repairs", &repairs.to_string())],
                         "/services",
                         "system.rofs",
                     )
@@ -21621,10 +21736,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             }
             Ok(_) => {
                 if alert_due() {
-                    self.notify_admins(
+                    self.notify_admins_say(
                         "error",
-                        "Root filesystem is read-only and the automatic repair failed",
-                        "Hyperion detected a read-only rootfs and tried to remount it                          read-write, but the mount refused. This needs a human: see                          Services → Read-only rootfs for the full diagnostic.",
+                        "ops.rofs_repair_failed",
+                        &[],
                         "/services",
                         "system.rofs",
                     )
@@ -24041,6 +24156,32 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .await
             .map_err(|e| RpcError::Internal_with(format!("notifications mark_all_read: {e}")))?;
         Ok(n)
+    }
+
+    /// An operator alert, in the operator's own language.
+    ///
+    /// The title and body come from the catalogue, so the same edit reaches
+    /// the e-mail and the notification-centre row together — they are one
+    /// message and drifting apart would make the panel disagree with the
+    /// mail somebody was reading on their phone.
+    ///
+    /// WHICH alert fires and how severe it is stays decided here. An
+    /// operator owning the wording cannot promote a warning to an error or
+    /// silence one by emptying it: a blank override falls back to the pack,
+    /// exactly as it does for the customer letters.
+    async fn notify_admins_say(
+        &self,
+        severity: &str,
+        id: &str,
+        args: &[(&str, &str)],
+        href: &str,
+        kind: &str,
+    ) {
+        let cat = self.letter_catalog();
+        let title = cat.render(&format!("{id}.title"), args);
+        let body = cat.render(&format!("{id}.body"), args);
+        self.notify_admins(severity, &title, &body, href, kind)
+            .await;
     }
 
     /// What each severity MEANS, so the notification centre can be read at a
@@ -27369,6 +27510,10 @@ const SITE_CHECK_INTERVAL_SECS: i64 = 7 * 86_400;
 /// Every fetch is pinned here, so the check grades the copy THIS node
 /// serves rather than whatever the site's DNS currently points at.
 const LOOPBACK: &str = "127.0.0.1";
+/// A single file this big on the home page is worth saying out loud. Chosen
+/// as "an unresized camera photo": below it, an image is a judgement call
+/// nobody needs a panel's opinion on.
+const HEAVY_ASSET_BYTES: i64 = 500_000;
 const FAIL2BAN_HTTP_KV_KEY: &str = "http_bruteforce_scan_enabled";
 
 /// Thin pub wrapper so `panel_import` can reuse the exact repair the

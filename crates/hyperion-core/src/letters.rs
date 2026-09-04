@@ -978,6 +978,440 @@ pub static STRINGS: &[LetterString] = &[
         en: "file integrity and malware",
         cs: "integrita souborů a malware",
     },
+    // ── Operator alerts ─────────────────────────────────────────────────
+    //
+    // These leave hyperion: they are e-mailed to every administrator
+    // address, and since profiles gained their own alert list that can
+    // include a client's own IT contact. The notification centre shows the
+    // same text, so the panel row and the mail cannot drift apart.
+    //
+    // Same rule as the customer letters: an operator owns every word, and
+    // owns none of the decision about WHICH alert fires or how severe it is.
+    LetterString {
+        id: "ops.trash.title",
+        group: "Operator alerts — hostings",
+        note: "A site was moved to the trash.",
+        en: "Hosting moved to trash",
+        cs: "Hosting přesunut do koše",
+    },
+    LetterString {
+        id: "ops.trash.body",
+        group: "Operator alerts — hostings",
+        note: "Token: {domain}.",
+        en: "{domain} will be deleted for good after the trash retention window.",
+        cs: "{domain} bude po uplynutí lhůty koše nenávratně smazán.",
+    },
+    LetterString {
+        id: "ops.pages_broken.title",
+        group: "Operator alerts — hostings",
+        note: "The weekly page walk found pages that do not work.",
+        en: "Pages on this site are broken",
+        cs: "Na tomto webu nefungují stránky",
+    },
+    LetterString {
+        id: "ops.pages_broken.body",
+        group: "Operator alerts — hostings",
+        note: "Tokens: {domain} {count} {urls}.",
+        en: "{domain} — the automatic page check found {count} page(s) that do not work: {urls}",
+        cs: "{domain} — automatická kontrola stránek našla {count} nefunkčních stránek: {urls}",
+    },
+    LetterString {
+        id: "ops.mail_override.title",
+        group: "Operator alerts — WordPress",
+        note: "Hyperion took mail off a failing SMTP plugin.",
+        en: "Hyperion took over WordPress mail",
+        cs: "Hyperion převzal odesílání pošty WordPressu",
+    },
+    LetterString {
+        id: "ops.mail_override.body",
+        group: "Operator alerts — WordPress",
+        note: "Tokens: {domain} {plugins}.",
+        en: "{domain} — sends through {plugins} have been failing, so Hyperion is now sending \
+             this site's mail through the server's own mail path instead. Fix the plugin's \
+             credentials and turn the override off on the site's Mail card to hand it back.",
+        cs: "{domain} — odesílání přes {plugins} opakovaně selhávalo, takže poštu tohoto webu \
+             nyní posílá Hyperion vlastní cestou serveru. Opravte přihlašovací údaje pluginu a \
+             na kartě Mail u webu převzetí vypněte, tím se vrátí zpět.",
+    },
+    LetterString {
+        id: "ops.mail_failing.title",
+        group: "Operator alerts — WordPress",
+        note: "Mail is still failing after Hyperion took it over — nothing further is automatic.",
+        en: "WordPress mail is still failing",
+        cs: "Pošta WordPressu stále selhává",
+    },
+    LetterString {
+        id: "ops.mail_failing.body",
+        group: "Operator alerts — WordPress",
+        note: "Token: {domain}.",
+        en: "{domain} — Hyperion already moved this site's mail onto the server's own mail path \
+             and sends are still failing. Nothing further is automatic: see the site's Mail card \
+             for the recorded errors.",
+        cs: "{domain} — Hyperion už poštu tohoto webu přesunul na vlastní cestu serveru a \
+             odesílání stále selhává. Dál už automaticky nic nezmůže: zaznamenané chyby najdete \
+             na kartě Mail u webu.",
+    },
+    LetterString {
+        id: "ops.update_paused.title",
+        group: "Operator alerts — WordPress",
+        note: "A plugin's auto-update kept failing and was paused.",
+        en: "WordPress auto-update paused",
+        cs: "Automatická aktualizace WordPressu pozastavena",
+    },
+    LetterString {
+        id: "ops.update_paused.body",
+        group: "Operator alerts — WordPress",
+        note: "Tokens: {domain} {slug}.",
+        en: "{domain} — auto-update of plugin '{slug}' keeps failing, so Hyperion paused it. \
+             This is almost always a commercial plugin whose update needs a license key. Add \
+             the key, then click Resume on the hosting's WordPress panel.",
+        cs: "{domain} — automatická aktualizace pluginu „{slug}\" opakovaně selhává, proto ji \
+             Hyperion pozastavil. Skoro vždy jde o placený plugin, jehož aktualizace vyžaduje \
+             licenční klíč. Doplňte klíč a na kartě WordPress u webu klikněte na Resume.",
+    },
+    LetterString {
+        id: "ops.core_failed.title",
+        group: "Operator alerts — WordPress",
+        note: "A minor core release could not be applied — the site stays on a known-vulnerable core.",
+        en: "WordPress core update failed",
+        cs: "Aktualizace jádra WordPressu selhala",
+    },
+    LetterString {
+        id: "ops.core_failed.body",
+        group: "Operator alerts — WordPress",
+        note: "Tokens: {domain} {version} {error}.",
+        en: "{domain} — the {version} security release could not be applied automatically, so \
+             the site is still on the older core. A snapshot was taken first, so nothing is \
+             lost. Error: {error}",
+        cs: "{domain} — bezpečnostní vydání {version} se nepodařilo nasadit automaticky, web \
+             tedy stále běží na starším jádře. Předtím byl pořízen snapshot, takže se nic \
+             neztratilo. Chyba: {error}",
+    },
+    LetterString {
+        id: "ops.major_update.title",
+        group: "Operator alerts — WordPress",
+        note: "A major update is available and is deliberately not applied unattended.",
+        en: "WordPress major update available",
+        cs: "K dispozici je velká aktualizace WordPressu",
+    },
+    LetterString {
+        id: "ops.major_update.body",
+        group: "Operator alerts — WordPress",
+        note: "Tokens: {domain} {kind} {name} {from} {to}.",
+        en: "{domain} — {kind} {name} {from} → {to} (major; review before applying)",
+        cs: "{domain} — {kind} {name} {from} → {to} (velká verze; před nasazením prověřte)",
+    },
+    LetterString {
+        id: "ops.integrity.title",
+        group: "Operator alerts — WordPress",
+        note: "The file check found files that differ from what should be there.",
+        en: "WordPress integrity check found changes",
+        cs: "Kontrola integrity WordPressu našla změny",
+    },
+    LetterString {
+        id: "ops.integrity.body",
+        group: "Operator alerts — WordPress",
+        note: "Tokens: {domain} {core} {plugins} {malware} {new}.",
+        en: "{domain} — {core} core file(s), {plugins} plugin file(s) and {malware} malware \
+             hit(s) differ from what should be there ({new} new since the last check).",
+        cs: "{domain} — {core} souborů jádra, {plugins} souborů pluginů a {malware} nálezů \
+             malwaru se liší od toho, co tam má být ({new} nových od poslední kontroly).",
+    },
+    LetterString {
+        id: "ops.cert_failed.title",
+        group: "Operator alerts — certificates",
+        note: "Renewal failed. Red only once the certificate has actually expired.",
+        en: "Cert renewal failed",
+        cs: "Obnova certifikátu selhala",
+    },
+    LetterString {
+        id: "ops.cert_failed.body",
+        group: "Operator alerts — certificates",
+        note: "Tokens: {domain} {error} {days}.",
+        en: "{domain} — {error} ({days} day(s) until expiry)",
+        cs: "{domain} — {error} (do vypršení zbývá dnů: {days})",
+    },
+    LetterString {
+        id: "ops.cert_renewed_late.title",
+        group: "Operator alerts — certificates",
+        note: "Renewal worked, but only just — worth knowing the margin was thin.",
+        en: "Cert renewed close to expiry",
+        cs: "Certifikát obnoven těsně před vypršením",
+    },
+    LetterString {
+        id: "ops.cert_renewed_late.body",
+        group: "Operator alerts — certificates",
+        note: "Tokens: {domain} {days}.",
+        en: "{domain} — was {days} day(s) from expiry, now renewed.",
+        cs: "{domain} — do vypršení zbývalo dnů: {days}, nyní je obnoven.",
+    },
+    LetterString {
+        id: "ops.cert_wildcard_manual.title",
+        group: "Operator alerts — certificates",
+        note: "A wildcard cert cannot be renewed unattended (DNS-01 needs a token).",
+        en: "Wildcard cert needs manual renewal",
+        cs: "Wildcard certifikát je potřeba obnovit ručně",
+    },
+    LetterString {
+        id: "ops.cert_wildcard_manual.body",
+        group: "Operator alerts — certificates",
+        note: "Tokens: {domain} {reason} {days}.",
+        en: "{domain} — {reason} ({days} day(s) until expiry)",
+        cs: "{domain} — {reason} (do vypršení zbývá dnů: {days})",
+    },
+    LetterString {
+        id: "ops.rofs_by_design.title",
+        group: "Operator alerts — this server",
+        note: "The node runs an immutable image; hyperion cannot manage packages on it.",
+        en: "Root filesystem is read-only by design",
+        cs: "Kořenový systém souborů je záměrně jen pro čtení",
+    },
+    LetterString {
+        id: "ops.rofs_by_design.body",
+        group: "Operator alerts — this server",
+        note: "Token: {image}.",
+        en: "This node runs a {image} image whose root filesystem is immutable. Hyperion cannot \
+             install packages or write outside its data directories here; pick a standard \
+             (non-immutable) base image.",
+        cs: "Tento node běží na image {image}, jehož kořenový systém souborů je neměnný. \
+             Hyperion zde nemůže instalovat balíčky ani zapisovat mimo své datové adresáře; \
+             zvolte běžný (neneměnný) základní image.",
+    },
+    LetterString {
+        id: "ops.rofs_stood_down.title",
+        group: "Operator alerts — this server",
+        note: "The watchdog stopped remounting — repeating it can make corruption worse.",
+        en: "Root filesystem keeps going read-only",
+        cs: "Kořenový systém souborů se opakovaně přepíná jen pro čtení",
+    },
+    LetterString {
+        id: "ops.rofs_stood_down.body",
+        group: "Operator alerts — this server",
+        note: "Token: {attempts}.",
+        en: "The rootfs flipped to read-only again after {attempts} automatic repairs this boot. \
+             The watchdog has stopped remounting: a filesystem that keeps doing this usually \
+             means failing storage, and remounting in a loop can make corruption worse. Check \
+             `dmesg` and the disk's SMART data, then repair by hand from Services → Read-only \
+             rootfs.",
+        cs: "Kořenový systém souborů se po {attempts} automatických opravách od startu znovu \
+             přepnul jen pro čtení. Watchdog přestal připojovat znovu: systém souborů, který to \
+             dělá opakovaně, obvykle znamená selhávající úložiště, a opakované připojování může \
+             poškození ještě zhoršit. Zkontrolujte `dmesg` a SMART data disku, pak opravte ručně \
+             přes Services → Read-only rootfs.",
+    },
+    LetterString {
+        id: "ops.rofs_repeats.title",
+        group: "Operator alerts — this server",
+        note: "Repairs are working, but a filesystem only does this in response to I/O errors.",
+        en: "Root filesystem keeps going read-only",
+        cs: "Kořenový systém souborů se opakovaně přepíná jen pro čtení",
+    },
+    LetterString {
+        id: "ops.rofs_repeats.body",
+        group: "Operator alerts — this server",
+        note: "Token: {repairs}.",
+        en: "Hyperion has remounted the rootfs read-write {repairs} times since this node booted. \
+             Each repair worked, so services are running — but a filesystem only does this in \
+             response to I/O errors, and a repeat means the underlying storage is failing. Check \
+             `dmesg` and SMART data now; the repairs are buying time, not fixing anything.",
+        cs: "Hyperion od startu tohoto nodu připojil kořenový systém souborů pro zápis \
+             {repairs}×. Každá oprava zabrala, služby tedy běží — ale systém souborů tohle dělá \
+             jen jako reakci na I/O chyby a opakování znamená, že úložiště selhává. Zkontrolujte \
+             hned `dmesg` a SMART data; opravy jen kupují čas, nic neřeší.",
+    },
+    LetterString {
+        id: "ops.rofs_repair_failed.title",
+        group: "Operator alerts — this server",
+        note: "The remount itself was refused. Needs a person.",
+        en: "Root filesystem is read-only and the automatic repair failed",
+        cs: "Kořenový systém souborů je jen pro čtení a automatická oprava selhala",
+    },
+    LetterString {
+        id: "ops.rofs_repair_failed.body",
+        group: "Operator alerts — this server",
+        note: "No tokens.",
+        en: "Hyperion detected a read-only rootfs and tried to remount it read-write, but the \
+             mount refused. This needs a human: see Services → Read-only rootfs for the full \
+             diagnostic.",
+        cs: "Hyperion zjistil kořenový systém souborů jen pro čtení a pokusil se ho připojit pro \
+             zápis, ale připojení bylo odmítnuto. Tohle vyžaduje člověka: úplnou diagnostiku \
+             najdete v Services → Read-only rootfs.",
+    },
+    // ── Slack, and the quota letters that go with it ────────────────────
+    //
+    // Composed from fragments rather than written as whole messages,
+    // because the price line and the plan line have to read identically in
+    // the new-hosting announcement, the care-plan announcement and the
+    // billing reminder — three messages about one site that must never
+    // disagree about what it costs.
+    LetterString {
+        id: "slack.new_hosting",
+        group: "Slack",
+        note: "Announced once, after the profile is applied. Tokens: {domain} {price} {plan} {total} {next} {node}.",
+        en: ":sparkles: *New hosting*\n• address: `{domain}`\n{price}\n{plan}{total}\n{next}\n• node: {node}",
+        cs: ":sparkles: *Nový hosting*\n• adresa: `{domain}`\n{price}\n{plan}{total}\n{next}\n• node: {node}",
+    },
+    LetterString {
+        id: "slack.care_activated",
+        group: "Slack",
+        note: "A care plan was activated on a site. Tokens: {domain} {price} {plan} {total} {next}.",
+        en: ":package: *Care plan activated*\n• address: `{domain}`\n{price}\n{plan}{total}\n{next}",
+        cs: ":package: *Aktivován plán údržby*\n• adresa: `{domain}`\n{price}\n{plan}{total}\n{next}",
+    },
+    LetterString {
+        id: "slack.hosting_due",
+        group: "Slack",
+        note: "Billing reminder for the hosting itself. Tokens: {domain} {price} {days} {action}.",
+        en: ":calendar: *Hosting due*\n• site: `{domain}`\n• price: {price}\n• due in {days} day(s)\n{action}",
+        cs: ":calendar: *Blíží se platba za hosting*\n• web: `{domain}`\n• cena: {price}\n• zbývá dnů: {days}\n{action}",
+    },
+    LetterString {
+        id: "slack.package_due",
+        group: "Slack",
+        note: "Billing reminder for a care package. Tokens: {domain} {package} {price} {days} {action}.",
+        en: ":package: *Care package due*\n• site: `{domain}`\n• package: {package}\n• price: {price}\n• due in {days} day(s)\n{action}",
+        cs: ":package: *Blíží se platba za plán údržby*\n• web: `{domain}`\n• balíček: {package}\n• cena: {price}\n• zbývá dnů: {days}\n{action}",
+    },
+    LetterString {
+        id: "slack.price_line",
+        group: "Slack",
+        note: "The site's own price. Token: {price}. The pointer to Hyperion is the point of the line — a price edited on the invoice instead is the one that drifts.",
+        en: "• price: *{price}* — to change it, edit the profile or the price in Hyperion, not in the invoice",
+        cs: "• cena: *{price}* — pokud ji chcete změnit, upravte profil nebo cenu v Hyperionu, ne na faktuře",
+    },
+    LetterString {
+        id: "slack.price_unset",
+        group: "Slack",
+        note: "The site has no price at all.",
+        en: "• price: *not set* — apply a profile in Hyperion to set one",
+        cs: "• cena: *nenastavena* — nastavíte ji použitím profilu v Hyperionu",
+    },
+    LetterString {
+        id: "slack.plan_none",
+        group: "Slack",
+        note: "The site is on no care plan.",
+        en: "• care plan: none",
+        cs: "• plán údržby: žádný",
+    },
+    LetterString {
+        id: "slack.plan_some",
+        group: "Slack",
+        note: "Token: {names} — the plans held, with their own prices.",
+        en: "• care plan: *{names}*",
+        cs: "• plán údržby: *{names}*",
+    },
+    LetterString {
+        id: "slack.total",
+        group: "Slack",
+        note: "Hosting plus plans. Token: {total}. Absent entirely when the prices cannot be added up — a total that quietly omits an unpriced plan is worse than none.",
+        en: "\n• total: *{total}*",
+        cs: "\n• celkem: *{total}*",
+    },
+    LetterString {
+        id: "slack.next_reminder",
+        group: "Slack",
+        note: "Token: {when}.",
+        en: "• next reminder: {when}",
+        cs: "• další připomenutí: {when}",
+    },
+    LetterString {
+        id: "slack.next_reminder_none",
+        group: "Slack",
+        note: "No billing clock is running for this site.",
+        en: "• next reminder: none scheduled",
+        cs: "• další připomenutí: žádné naplánované",
+    },
+    LetterString {
+        id: "slack.node_unknown",
+        group: "Slack",
+        note: "Stands in for the node name on a single-server install.",
+        en: "this node",
+        cs: "tento server",
+    },
+    LetterString {
+        id: "slack.invoice_action",
+        group: "Slack",
+        note: "What to DO about the reminder. Tokens: {amount} {interval}. \"Due in 2 days\" is a fact; this is the instruction.",
+        en: "*Invoice {amount}* for the next {interval} period.",
+        cs: "*Vyfakturovat {amount}* na další období ({interval}).",
+    },
+    LetterString {
+        id: "slack.no_price_hosting",
+        group: "Slack",
+        note: "A reminder fired for a site with no price — there is nothing to invoice.",
+        en: "*No price is set on this hosting* — nothing to invoice. Apply a profile in Hyperion to set one.",
+        cs: "*U tohoto hostingu není nastavena cena* — není co fakturovat. Nastavíte ji použitím profilu v Hyperionu.",
+    },
+    LetterString {
+        id: "slack.no_price_package",
+        group: "Slack",
+        note: "Same, for a care package — and nobody is being charged for it.",
+        en: "*No price is set on this package* — nothing to invoice, and nobody is being charged for it. Set one in Hyperion.",
+        cs: "*U tohoto balíčku není nastavena cena* — není co fakturovat a nikomu se nic neúčtuje. Nastavte ji v Hyperionu.",
+    },
+    LetterString {
+        id: "slack.price_not_set",
+        group: "Slack",
+        note: "Stands in for a price in a reminder that has none.",
+        en: "not set",
+        cs: "nenastavena",
+    },
+    LetterString {
+        id: "quota.over.slack",
+        group: "Disk quota",
+        note: "Tokens: {domain} {used} {cap} {action}.",
+        en: ":floppy_disk: *Disk quota exceeded*\n• site: `{domain}`\n• usage: {used} MiB / {cap} MiB cap\n• action: {action}",
+        cs: ":floppy_disk: *Překročena disková kvóta*\n• web: `{domain}`\n• využito: {used} MiB z {cap} MiB\n• akce: {action}",
+    },
+    LetterString {
+        id: "quota.over.subject",
+        group: "Disk quota",
+        note: "Token: {domain}.",
+        en: "[Hyperion] Disk quota exceeded — {domain}",
+        cs: "[Hyperion] Překročena disková kvóta — {domain}",
+    },
+    LetterString {
+        id: "quota.over.body",
+        group: "Disk quota",
+        note: "Tokens: {domain} {used} {cap} {action}.",
+        en: "Hosting:  {domain}\nUsage:    {used} MiB\nDisk cap: {cap} MiB\nAction:   {action}\n\n--\nHyperion\n",
+        cs: "Hosting:  {domain}\nVyužito:  {used} MiB\nKvóta:    {cap} MiB\nAkce:     {action}\n\n--\nHyperion\n",
+    },
+    LetterString {
+        id: "quota.action_suspended",
+        group: "Disk quota",
+        note: "Fills {action} when the site was suspended for it.",
+        en: "suspended (over disk quota)",
+        cs: "pozastaveno (překročena disková kvóta)",
+    },
+    LetterString {
+        id: "quota.action_over",
+        group: "Disk quota",
+        note: "Fills {action} when the site is over the cap but still serving.",
+        en: "over its disk quota",
+        cs: "překračuje diskovou kvótu",
+    },
+    LetterString {
+        id: "quota.resolved.slack",
+        group: "Disk quota",
+        note: "Tokens: {domain} {used} {cap}.",
+        en: ":white_check_mark: *Disk usage back under quota*\n• site: `{domain}`\n• usage: {used} MiB / {cap} MiB cap\n• action: resumed",
+        cs: ":white_check_mark: *Využití disku je zpět pod kvótou*\n• web: `{domain}`\n• využito: {used} MiB z {cap} MiB\n• akce: obnoveno",
+    },
+    LetterString {
+        id: "quota.resolved.subject",
+        group: "Disk quota",
+        note: "Token: {domain}.",
+        en: "[Hyperion] Disk usage back under quota — {domain}",
+        cs: "[Hyperion] Využití disku je zpět pod kvótou — {domain}",
+    },
+    LetterString {
+        id: "quota.resolved.body",
+        group: "Disk quota",
+        note: "Tokens: {domain} {used} {cap}.",
+        en: "Hosting:  {domain}\nUsage:    {used} MiB\nDisk cap: {cap} MiB\nAction:   resumed automatically\n\n--\nHyperion\n",
+        cs: "Hosting:  {domain}\nVyužito:  {used} MiB\nKvóta:    {cap} MiB\nAkce:     obnoveno automaticky\n\n--\nHyperion\n",
+    },
     // ── Expiry warning ─────────────────────────────────────────────────
     LetterString {
         id: "expiry.subject.today",
