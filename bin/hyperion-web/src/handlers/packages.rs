@@ -852,7 +852,11 @@ async fn render_card(
 
     // The monthly checklist lives on the owning node beside the feature
     // toggles, which is also where the customer's report is assembled.
-    let checks = read_service_checks(state, owner.as_deref(), detail.id.as_str()).await;
+    // For DISPLAY, an unreadable record shows as nothing ticked: untouched
+    // is undone, and a read we could not make is not evidence of work.
+    let checks = read_service_checks(state, owner.as_deref(), detail.id.as_str())
+        .await
+        .unwrap_or_default();
     let now = hyperion_types::now_secs();
     let period = hyperion_types::care_check::period_key(now);
     let prev = hyperion_types::care_check::previous_period(&period).unwrap_or_default();
@@ -1390,7 +1394,7 @@ async fn read_service_checks(
     state: &SharedState,
     owner: Option<&str>,
     hosting_id: &str,
-) -> hyperion_types::care_check::CareServiceChecks {
+) -> Option<hyperion_types::care_check::CareServiceChecks> {
     let kv: Vec<(String, String)> = match crate::dispatcher::dispatch_to_node(
         state,
         owner,
@@ -1401,12 +1405,19 @@ async fn read_service_checks(
     .await
     {
         Ok(RpcResponse::HostingKvList(v)) => v,
-        _ => return Default::default(),
+        // `None` means "could not read", which is NOT an empty checklist.
+        // Collapsing the two was a way to lose a month's work: a failed read
+        // followed by one tick wrote the empty value back over everything
+        // that was there. Display sites still collapse it to empty — that is
+        // the "untouched is undone" direction — but the WRITE path refuses.
+        _ => return None,
     };
-    kv.iter()
-        .find(|(k, _)| k == "care_service_checks")
-        .map(|(_, v)| hyperion_types::care_check::CareServiceChecks::parse(v))
-        .unwrap_or_default()
+    Some(
+        kv.iter()
+            .find(|(k, _)| k == "care_service_checks")
+            .map(|(_, v)| hyperion_types::care_check::CareServiceChecks::parse(v))
+            .unwrap_or_default(),
+    )
 }
 
 /// `"2026-09"` → `"September 2026"`. A bare `YYYY-MM` beside a checkbox
@@ -1482,7 +1493,27 @@ pub async fn post_service_check(
         .await;
     };
     let (detail, owner) = super::hostings::find_hosting_anywhere(&state, sel).await?;
-    let mut checks = read_service_checks(&state, owner.as_deref(), detail.id.as_str()).await;
+    // Read-modify-write over one JSON blob, so a read we could not make must
+    // NOT become a write: it would put an empty checklist over the whole
+    // month's record. Refusing costs one click; the alternative silently
+    // destroys the thing this feature exists to keep.
+    let Some(mut checks) = read_service_checks(&state, owner.as_deref(), detail.id.as_str()).await
+    else {
+        return render_card(
+            &state,
+            &ctx,
+            form.selector.clone(),
+            None,
+            Some(
+                "The owning node did not answer, so this tick was not saved — writing now would \
+                 have overwritten the month's record with an empty one. Try again once the node \
+                 is reachable."
+                    .into(),
+            ),
+            None,
+        )
+        .await;
+    };
     // The period comes from the form rather than the clock so the tick lands
     // in the month the operator was looking at — a submit that crosses
     // midnight on the 1st must not file itself under the new month.

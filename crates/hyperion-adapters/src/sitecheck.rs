@@ -61,6 +61,16 @@ pub const MAX_LINKS: usize = 40;
 /// short enough that a hung site does not stall the whole tick.
 const TIMEOUT_SECS: u32 = 20;
 
+/// Bytes we are willing to pull down for one URL.
+///
+/// A timeout alone is not a limit: twenty seconds of loopback is gigabytes,
+/// and the body is buffered in the agent's memory. A tenant serving an
+/// endless stream from their own site would OOM the node that hosts them —
+/// they do not even have to mean it, a runaway export script does the same.
+/// Eight megabytes is far past any real page; beyond it the fetch is cut
+/// short, which costs a truncated link list rather than a wrong verdict.
+const MAX_BYTES: u64 = 8 * 1024 * 1024;
+
 /// A page served slower than this is worth mentioning. Not a failure —
 /// measured from inside the same machine, so it is the server's own
 /// thinking time with no network in it, which is the part an operator can
@@ -84,13 +94,27 @@ pub struct Fetched {
     /// a stylesheet or an image means every repeat visitor downloads it
     /// again.
     pub cache_control: String,
+    /// `location` as sent, when this was a redirect. Curl does NOT follow it
+    /// — the caller does, after putting the target through the same-site
+    /// test, because `--resolve` pins only the site's own hostname.
+    pub location: String,
     /// Body, only for pages we asked to keep it.
     pub body: String,
 }
 
 impl Fetched {
+    /// Answered with something a visitor can use.
+    ///
+    /// A 3xx is NOT "ok" now that curl no longer follows redirects: treating
+    /// one as a working page would report a site that only ever redirects as
+    /// healthy without a single page having been read.
     pub fn is_ok(&self) -> bool {
-        (200..400).contains(&self.status)
+        (200..300).contains(&self.status)
+    }
+
+    /// A redirect with somewhere to go.
+    pub fn is_redirect(&self) -> bool {
+        (300..400).contains(&self.status) && !self.location.trim().is_empty()
     }
 }
 
@@ -113,14 +137,24 @@ fn fetch_config(url: &str, host: &str, resolve_to: &str, keep_body: bool) -> Str
     cfg.push_str("insecure\n");
     cfg.push_str("silent\n");
     cfg.push_str("show-error\n");
-    cfg.push_str("location\n");
+    // Redirects are NOT followed by curl. `--resolve` pins only the site's
+    // own hostname, so a redirect to another host leaves the pin behind and
+    // curl reaches the real internet — or the node's own network. A site
+    // that redirects (http to https, bare to www) is ordinary, so the hop is
+    // followed by the CALLER, which re-runs the same-site test on the target
+    // the way it does for every other URL.
+    cfg.push_str("max-redirs = 0\n");
+    // Belt and braces: even a Location we somehow followed could not be a
+    // file:// or gopher:// URL.
+    cfg.push_str("proto = \"=http,https\"\n");
+    cfg.push_str("proto-redir = \"=http,https\"\n");
     // Ask for compression, the way a browser does. Without this the server
     // never gets the chance to compress, so "is compression on?" cannot be
     // answered — and `size_download` would be the uncompressed size either
     // way, which is the page weight a browser has to parse.
     cfg.push_str("compressed\n");
-    cfg.push_str("max-redirs = 5\n");
     cfg.push_str(&format!("max-time = {TIMEOUT_SECS}\n"));
+    cfg.push_str(&format!("max-filesize = {MAX_BYTES}\n"));
     cfg.push_str(&format!(
         "user-agent = \"{}\"\n",
         cmd::curl_config_quote(USER_AGENT)
@@ -135,8 +169,11 @@ fn fetch_config(url: &str, host: &str, resolve_to: &str, keep_body: bool) -> Str
     // older it comes back unexpanded, which `split_metrics` reads as "not
     // reported" rather than as a header value.
     cfg.push_str(&format!(
-        "write-out = \"{}%{{http_code}} %{{time_starttransfer}} %{{time_total}} %{{size_download}}\\n{}content-encoding: %header{{content-encoding}}\\n{}cache-control: %header{{cache-control}}\"\n",
+        // ONE write-out: curl honours only the last one it is given, so a
+        // second line would silently drop the first's fields.
+        "write-out = \"{}%{{http_code}} %{{time_starttransfer}} %{{time_total}} %{{size_download}}\\n{}content-encoding: %header{{content-encoding}}\\n{}cache-control: %header{{cache-control}}\\n{}location: %header{{location}}\"\n",
         cmd::curl_config_quote(METRICS_MARK),
+        HEADER_MARK,
         HEADER_MARK,
         HEADER_MARK
     ));
@@ -157,6 +194,7 @@ pub fn split_metrics(url: &str, out: &str) -> Fetched {
         bytes: 0,
         content_encoding: String::new(),
         cache_control: String::new(),
+        location: String::new(),
         body: String::new(),
     };
     let Some(at) = out.rfind(METRICS_MARK) else {
@@ -198,6 +236,7 @@ pub fn split_metrics(url: &str, out: &str) -> Fetched {
         match name.trim().to_ascii_lowercase().as_str() {
             "content-encoding" => f.content_encoding = value.to_ascii_lowercase(),
             "cache-control" => f.cache_control = value.to_string(),
+            "location" => f.location = value.to_string(),
             _ => {}
         }
     }
@@ -231,18 +270,58 @@ fn secs_to_ms(v: &str) -> i64 {
         .unwrap_or(0)
 }
 
-/// Fetch one URL through this node's own nginx.
+/// Redirect hops followed. Enough for the ordinary http→https→www chain,
+/// short enough that a redirect loop is not a denial of service.
+const MAX_HOPS: usize = 3;
+
+/// Fetch one URL through this node's own nginx, following redirects ONLY
+/// while they stay on the site.
+///
+/// The hop is taken here rather than by curl because `--resolve` pins the
+/// site's hostname and nothing else: a `Location:` pointing at
+/// `169.254.169.254` would leave the pin behind and let a tenant use the
+/// crawler to reach the node's own network. Every hop goes back through
+/// `resolve_url`, the same test every link on a page has to pass.
 pub async fn fetch(
     url: &str,
     host: &str,
     resolve_to: &str,
     keep_body: bool,
 ) -> Result<Fetched, AdapterError> {
-    let cfg = fetch_config(url, host, resolve_to, keep_body);
-    // Non-zero exit is an ANSWER here (a timeout, a refused connection), not
-    // a transport bug: the report says which page failed and why.
-    let (stdout, _stderr, _code) = cmd::curl_with_config_capture(&cfg).await?;
-    Ok(split_metrics(url, &stdout))
+    let mut current = url.to_string();
+    let mut last: Option<Fetched> = None;
+    for _ in 0..=MAX_HOPS {
+        let cfg = fetch_config(&current, host, resolve_to, keep_body);
+        // Non-zero exit is an ANSWER here (a timeout, a refused connection),
+        // not a transport bug: the report says which page failed and why.
+        let (stdout, _stderr, _code) = cmd::curl_with_config_capture(&cfg).await?;
+        let f = split_metrics(&current, &stdout);
+        if !f.is_redirect() {
+            return Ok(f);
+        }
+        let Some(next) = resolve_url(&f.location, &current, host) else {
+            // Off-site, or a scheme we will not follow. Reported as the
+            // redirect it is rather than chased.
+            return Ok(f);
+        };
+        if next == current {
+            return Ok(f);
+        }
+        current = next;
+        last = Some(f);
+    }
+    // Ran out of hops: report the last redirect rather than pretending.
+    Ok(last.unwrap_or_else(|| Fetched {
+        url: url.to_string(),
+        status: 0,
+        ttfb_ms: 0,
+        total_ms: 0,
+        bytes: 0,
+        content_encoding: String::new(),
+        cache_control: String::new(),
+        location: String::new(),
+        body: String::new(),
+    }))
 }
 
 /// URLs out of a sitemap, in document order.
@@ -316,6 +395,7 @@ impl LinkKind {
 pub fn extract_links(html: &str, base_url: &str, host: &str) -> Vec<(LinkKind, String)> {
     let mut out: Vec<(LinkKind, String)> = Vec::new();
     let mut seen: BTreeSet<String> = BTreeSet::new();
+    let scan = Scanner::new(html);
     for (tag, attr, kind) in [
         ("<a ", "href", LinkKind::Nav),
         ("<img ", "src", LinkKind::Image),
@@ -323,11 +403,14 @@ pub fn extract_links(html: &str, base_url: &str, host: &str) -> Vec<(LinkKind, S
         ("<link ", "href", LinkKind::Asset),
         ("<script ", "src", LinkKind::Asset),
     ] {
-        let mut rest = html;
-        while let Some(at) = find_ci(rest, tag) {
-            let after = &rest[at + tag.len()..];
-            let end = after.find('>').unwrap_or(after.len());
-            let inside = &after[..end];
+        for at in scan.offsets_of(tag) {
+            // A page with a million links is a page we stop reading. The
+            // caller caps how many are FETCHED; this caps how many are held
+            // in memory to decide that.
+            if out.len() >= MAX_LINKS_PER_PAGE {
+                return out;
+            }
+            let inside = scan.tag_interior(at, tag.len());
             if let Some(raw) = attr_value(inside, attr) {
                 if let Some(abs) = resolve_url(&decode_entities(&raw), base_url, host) {
                     if seen.insert(abs.clone()) {
@@ -335,16 +418,72 @@ pub fn extract_links(html: &str, base_url: &str, host: &str) -> Vec<(LinkKind, S
                     }
                 }
             }
-            rest = &after[end.min(after.len())..];
         }
     }
     out
 }
 
+/// Links held in memory from ONE page while deciding what to fetch.
+///
+/// Generous — a real page has tens — and there only so that a page with a
+/// hundred thousand anchors cannot make the agent allocate for all of them.
+pub const MAX_LINKS_PER_PAGE: usize = 500;
+
 /// Case-insensitive `find` for ASCII needles (every tag name here is ASCII).
+///
+/// `to_ascii_lowercase` only maps A-Z, so it preserves byte length even for
+/// multi-byte UTF-8 — the returned offset is therefore valid in `haystack`
+/// too. Every caller relies on that.
+///
+/// Allocates. Callers that scan a page tag by tag must NOT call this in a
+/// loop over a shrinking slice: that is one copy of the remaining page per
+/// tag found, which on a page with thousands of links is gigabytes of
+/// churn. Use [`Scanner`] for those.
 fn find_ci(haystack: &str, needle: &str) -> Option<usize> {
     let h = haystack.to_ascii_lowercase();
     h.find(needle)
+}
+
+/// One lowercase copy of a page, scanned repeatedly.
+///
+/// Exists because the obvious loop — lowercase the rest of the page, find
+/// the next tag, repeat — is quadratic in the page size, and the page is
+/// supplied by the site being checked. A large page is not hostile input
+/// and still made the crawler burn CPU proportional to length times tag
+/// count.
+struct Scanner<'a> {
+    original: &'a str,
+    lower: String,
+}
+
+impl<'a> Scanner<'a> {
+    fn new(html: &'a str) -> Self {
+        Self {
+            original: html,
+            lower: html.to_ascii_lowercase(),
+        }
+    }
+
+    /// Byte offsets, in document order, where `needle` (already lowercase)
+    /// starts. Offsets index BOTH strings — see `find_ci`.
+    fn offsets_of(&self, needle: &str) -> Vec<usize> {
+        let mut out = Vec::new();
+        let mut from = 0usize;
+        while let Some(at) = self.lower[from..].find(needle) {
+            let idx = from + at;
+            out.push(idx);
+            from = idx + needle.len();
+        }
+        out
+    }
+
+    /// The text between `<tag ` and the next `>`, as it appears in the
+    /// ORIGINAL (attribute values are case-sensitive).
+    fn tag_interior(&self, tag_start: usize, tag_len: usize) -> &'a str {
+        let after = &self.original[tag_start + tag_len..];
+        let end = after.find('>').unwrap_or(after.len());
+        &after[..end]
+    }
 }
 
 /// `attr="value"` / `attr='value'` out of a tag's interior.
@@ -409,19 +548,57 @@ pub fn resolve_url(raw: &str, base_url: &str, host: &str) -> Option<String> {
     };
     // Strip the fragment: two links differing only after '#' are one request.
     let abs = abs.split('#').next().unwrap_or(&abs).to_string();
-    // Same site only.
+    // Same site only — and the authority has to be parsed properly to know
+    // that. `split(':').next()` on `example.cz:80@169.254.169.254` yields
+    // "example.cz", which passed this test while curl went to the metadata
+    // service: the part before an `@` is USERINFO, not the host.
     let after_scheme = abs.split("://").nth(1)?;
-    let abs_host = after_scheme
-        .split('/')
-        .next()?
-        .split(':')
-        .next()?
-        .to_ascii_lowercase();
+    let authority = after_scheme.split(['/', '?', '#']).next()?;
+    // A link on a site never legitimately carries credentials, and every
+    // parser disagrees about them. Refused outright rather than parsed.
+    if authority.contains('@') {
+        return None;
+    }
+    let (host_part, port) = split_host_port(authority)?;
+    // Only the two ports the fetch pins with `--resolve`. Any other port
+    // would leave the pin behind and reach whatever is listening there —
+    // which on a hosting node is every tenant's FPM socket and the agent
+    // itself.
+    if !matches!(port, None | Some(80) | Some(443)) {
+        return None;
+    }
+    let abs_host = host_part.to_ascii_lowercase();
     let want = host.to_ascii_lowercase();
     if abs_host == want || abs_host == format!("www.{want}") || want == format!("www.{abs_host}") {
         Some(abs)
     } else {
         None
+    }
+}
+
+/// Split an authority into host and optional port, honouring the `[::1]`
+/// form so a bracketed IPv6 address is not chopped at its own colons.
+fn split_host_port(authority: &str) -> Option<(&str, Option<u16>)> {
+    if authority.is_empty() {
+        return None;
+    }
+    if let Some(rest) = authority.strip_prefix('[') {
+        let end = rest.find(']')?;
+        let host = &rest[..end];
+        let after = &rest[end + 1..];
+        let port = match after.strip_prefix(':') {
+            Some(p) if !p.is_empty() => Some(p.parse().ok()?),
+            Some(_) => return None,
+            None if after.is_empty() => None,
+            None => return None,
+        };
+        return Some((host, port));
+    }
+    match authority.split_once(':') {
+        Some((h, p)) if !p.is_empty() => Some((h, Some(p.parse().ok()?))),
+        // A trailing colon with no port is malformed.
+        Some(_) => None,
+        None => Some((authority, None)),
     }
 }
 
@@ -463,11 +640,9 @@ pub fn page_weight(html: &str) -> PageWeight {
     let head_end = find_ci(html, "</head>").unwrap_or(html.len());
     let head = &html[..head_end];
 
-    let mut rest = head;
-    while let Some(at) = find_ci(rest, "<script ") {
-        let after = &rest[at + "<script ".len()..];
-        let end = after.find('>').unwrap_or(after.len());
-        let inside = &after[..end];
+    let head_scan = Scanner::new(head);
+    for at in head_scan.offsets_of("<script ") {
+        let inside = head_scan.tag_interior(at, "<script ".len());
         let lower = inside.to_ascii_lowercase();
         // Only an external script blocks on the network. An inline one is
         // already downloaded by the time the parser reaches it.
@@ -479,14 +654,11 @@ pub fn page_weight(html: &str) -> PageWeight {
         {
             w.blocking_scripts += 1;
         }
-        rest = &after[end.min(after.len())..];
     }
 
-    let mut rest = html;
-    while let Some(at) = find_ci(rest, "<img ") {
-        let after = &rest[at + "<img ".len()..];
-        let end = after.find('>').unwrap_or(after.len());
-        let inside = &after[..end];
+    let body_scan = Scanner::new(html);
+    for at in body_scan.offsets_of("<img ") {
+        let inside = body_scan.tag_interior(at, "<img ".len());
         w.images += 1;
         // BOTH are needed: the browser reserves space from the ratio, so one
         // without the other reserves nothing.
@@ -495,7 +667,6 @@ pub fn page_weight(html: &str) -> PageWeight {
         if !sized {
             w.unsized_images += 1;
         }
-        rest = &after[end.min(after.len())..];
     }
     w
 }
@@ -839,5 +1010,126 @@ mod weight_tests {
         assert_eq!(w.images, 1);
         assert_eq!(w.unsized_images, 1);
         assert_eq!(w.blocking_scripts, 0);
+    }
+}
+
+#[cfg(test)]
+mod ssrf_tests {
+    use super::*;
+
+    /// The one that got through review. `split(':').next()` on
+    /// `example.cz:80@169.254.169.254` yields "example.cz" — userinfo read
+    /// as the host — so the URL passed the same-site test while curl went to
+    /// the cloud metadata service, which `--resolve` does not pin.
+    #[test]
+    fn userinfo_cannot_impersonate_the_host() {
+        for raw in [
+            "https://example.cz:80@169.254.169.254/latest/meta-data/",
+            "https://example.cz@169.254.169.254/",
+            "https://example.cz:443@127.0.0.1:9443/",
+            "http://user:pass@example.cz/",
+        ] {
+            assert_eq!(
+                resolve_url(raw, "https://example.cz/", "example.cz"),
+                None,
+                "{raw} must not pass the same-site test"
+            );
+        }
+    }
+
+    /// `--resolve` pins ports 80 and 443 and nothing else, so any other port
+    /// leaves the pin behind. On a hosting node that reaches every tenant's
+    /// FPM socket and the agent's own RPC.
+    #[test]
+    fn only_the_pinned_ports_are_followed() {
+        assert!(resolve_url(
+            "https://example.cz:443/a",
+            "https://example.cz/",
+            "example.cz"
+        )
+        .is_some());
+        assert!(resolve_url(
+            "http://example.cz:80/a",
+            "https://example.cz/",
+            "example.cz"
+        )
+        .is_some());
+        assert!(resolve_url("https://example.cz/a", "https://example.cz/", "example.cz").is_some());
+        for bad in [
+            "https://example.cz:9443/a",
+            "http://example.cz:8080/a",
+            "https://example.cz:22/",
+        ] {
+            assert_eq!(
+                resolve_url(bad, "https://example.cz/", "example.cz"),
+                None,
+                "{bad} is not a pinned port"
+            );
+        }
+    }
+
+    #[test]
+    fn a_bracketed_ipv6_authority_is_parsed_not_chopped() {
+        assert_eq!(split_host_port("[::1]"), Some(("::1", None)));
+        assert_eq!(split_host_port("[::1]:443"), Some(("::1", Some(443))));
+        assert_eq!(
+            split_host_port("example.cz:8080"),
+            Some(("example.cz", Some(8080)))
+        );
+        assert_eq!(split_host_port("example.cz"), Some(("example.cz", None)));
+        // Malformed authorities are refused rather than guessed at.
+        assert_eq!(split_host_port("example.cz:"), None);
+        assert_eq!(split_host_port(""), None);
+    }
+
+    /// curl must not chase a Location itself: it would leave the pin behind.
+    /// The hop is taken by `fetch`, which re-runs the same-site test.
+    #[test]
+    fn curl_is_told_not_to_follow_redirects_or_odd_schemes() {
+        let cfg = fetch_config("https://example.cz/", "example.cz", "127.0.0.1", true);
+        assert!(cfg.contains("max-redirs = 0"));
+        assert!(
+            !cfg.contains("\nlocation\n"),
+            "curl would follow the redirect itself"
+        );
+        assert!(cfg.contains("proto = \"=http,https\""));
+        assert!(cfg.contains("proto-redir = \"=http,https\""));
+        // One write-out only — curl honours the last and silently drops the rest.
+        assert_eq!(cfg.matches("write-out").count(), 1);
+        assert!(cfg.contains("%header{location}"));
+    }
+
+    /// A 3xx is not a working page now that we do not follow them blindly;
+    /// reporting one as ok would grade a site that only redirects as healthy.
+    #[test]
+    fn a_redirect_is_not_a_working_page() {
+        let f = split_metrics(
+            "https://example.cz/",
+            &format!("{METRICS_MARK}301 0.1 0.2 0\n{HEADER_MARK}location: https://example.cz/new"),
+        );
+        assert!(!f.is_ok());
+        assert!(f.is_redirect());
+        assert_eq!(f.location, "https://example.cz/new");
+    }
+
+    /// A redirect the crawler will not chase must still not read as ok.
+    #[test]
+    fn an_offsite_redirect_target_is_refused_by_the_same_test() {
+        assert_eq!(
+            resolve_url(
+                "https://169.254.169.254/",
+                "https://example.cz/",
+                "example.cz"
+            ),
+            None
+        );
+        assert_eq!(
+            resolve_url(
+                "http://localhost:9443/",
+                "https://example.cz/",
+                "example.cz"
+            ),
+            None
+        );
     }
 }

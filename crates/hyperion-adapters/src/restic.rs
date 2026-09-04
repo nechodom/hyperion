@@ -97,12 +97,28 @@ pub async fn available() -> bool {
 /// snapshot already in the repository.
 pub async fn ensure_repo(base: &str, hosting_id: &str) -> Result<Repo, AdapterError> {
     let repo = Repo::for_hosting(base, hosting_id);
+    // The BASE directory is created by whichever repo is made first, and
+    // `create_dir_all` uses the umask — on a default 022 that is 0755, so
+    // every tenant on the node can list which sites have snapshots. Tighten
+    // it too, not just the leaf.
+    if let Some(base_dir) = repo.path.parent() {
+        tokio::fs::create_dir_all(base_dir)
+            .await
+            .map_err(|e| AdapterError::Other(format!("create {}: {e}", base_dir.display())))?;
+        set_mode(base_dir, 0o700)
+            .await
+            .map_err(|e| AdapterError::Other(format!("chmod {}: {e}", base_dir.display())))?;
+    }
     tokio::fs::create_dir_all(&repo.path)
         .await
         .map_err(|e| AdapterError::Other(format!("create {}: {e}", repo.path.display())))?;
     // 0700: the repository holds a copy of the site, including wp-config.php
-    // and therefore the database password.
-    let _ = set_mode(&repo.path, 0o700).await;
+    // and therefore the database password. A HARD error, not best-effort —
+    // publishing every tenant's database credentials at 0755 because one
+    // chmod quietly failed is not a degraded mode worth having.
+    set_mode(&repo.path, 0o700)
+        .await
+        .map_err(|e| AdapterError::Other(format!("chmod {}: {e}", repo.path.display())))?;
 
     if !tokio::fs::try_exists(&repo.password_file)
         .await

@@ -956,15 +956,6 @@ async fn main() -> anyhow::Result<()> {
                 // domain, and record the sends that fail. Silent when it
                 // works; only mail that is STILL failing after Hyperion
                 // took it over reaches the notification centre.
-                // Walk each care-plan site once a week: the pages its own
-                // sitemap advertises, plus the links and images on them.
-                // The uptime monitor answers "did it respond"; this answers
-                // "does it work".
-                match tick_svc.site_check_tick().await {
-                    Ok(n) if n > 0 => tracing::info!(sites = n, "site check: walked sites"),
-                    Ok(_) => {}
-                    Err(e) => tracing::warn!(error=%e, "site check tick failed"),
-                }
                 match tick_svc.wp_mail_tick().await {
                     Ok(n) if n > 0 => {
                         tracing::info!(configured = n, "wp mail: wrote configuration")
@@ -1016,6 +1007,35 @@ async fn main() -> anyhow::Result<()> {
                     Ok(0) => tracing::debug!("monitor tick: nothing due"),
                     Ok(n) => tracing::info!(sampled = n, "monitor tick"),
                     Err(e) => tracing::warn!(error=%e, "monitor tick failed"),
+                }
+                interval.tick().await;
+            }
+        });
+    }
+    // The weekly page walk. On its OWN task, not in the five-minute loop:
+    // one pass fetches up to eight pages plus forty links PER SITE, each
+    // with a 20-second ceiling, so on a node with a few dozen care-plan
+    // sites a bad week could hold the shared loop for longer than its own
+    // period — and everything behind it (fail2ban bans, quota enforcement,
+    // permission repair) would stop running while it waited on somebody
+    // else's slow site.
+    //
+    // Hourly outer cadence; the per-site weekly interval is enforced inside
+    // the tick from each report's own timestamp, so this only decides how
+    // promptly a site that has become due is picked up.
+    {
+        let site_svc = svc.clone();
+        tokio::spawn(async move {
+            // Well clear of boot: the first pass would otherwise compete
+            // with provisioning and the initial stats sample.
+            tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
+            interval.tick().await; // immediate-first-tick consumption
+            loop {
+                match site_svc.site_check_tick().await {
+                    Ok(n) if n > 0 => tracing::info!(sites = n, "site check: walked sites"),
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!(error=%e, "site check tick failed"),
                 }
                 interval.tick().await;
             }
