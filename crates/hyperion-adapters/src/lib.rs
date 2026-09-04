@@ -32,8 +32,8 @@ pub mod rollback;
 pub mod sitecheck;
 pub mod ssh;
 pub mod users;
-pub mod wpmail;
 pub mod wpcli;
+pub mod wpmail;
 
 pub mod files;
 

@@ -162,7 +162,10 @@ pub fn split_metrics(url: &str, out: &str) -> Fetched {
 /// curl reports times as seconds with a fraction; a locale that uses a comma
 /// is handled because the value is ours to parse, not the operator's.
 fn secs_to_ms(v: &str) -> i64 {
-    v.replace(',', ".").parse::<f64>().map(|s| (s * 1000.0).round() as i64).unwrap_or(0)
+    v.replace(',', ".")
+        .parse::<f64>()
+        .map(|s| (s * 1000.0).round() as i64)
+        .unwrap_or(0)
 }
 
 /// Fetch one URL through this node's own nginx.
@@ -335,7 +338,10 @@ pub fn resolve_url(raw: &str, base_url: &str, host: &str) -> Option<String> {
         format!("https://{host}{raw}")
     } else {
         // Relative to the current directory of `base_url`.
-        let dir = base_url.rfind('/').map(|i| &base_url[..i + 1]).unwrap_or(base_url);
+        let dir = base_url
+            .rfind('/')
+            .map(|i| &base_url[..i + 1])
+            .unwrap_or(base_url);
         format!("{dir}{raw}")
     };
     // Strip the fragment: two links differing only after '#' are one request.
@@ -406,7 +412,12 @@ mod tests {
     /// directives of its own — `output = "/etc/cron.d/x"` as root.
     #[test]
     fn a_quote_in_a_url_cannot_inject_curl_directives() {
-        let cfg = fetch_config("https://x/\"\noutput = \"/etc/passwd", "x", "127.0.0.1", true);
+        let cfg = fetch_config(
+            "https://x/\"\noutput = \"/etc/passwd",
+            "x",
+            "127.0.0.1",
+            true,
+        );
         assert!(!cfg.contains("\noutput = \"/etc/passwd"));
         assert!(cfg.contains("\\\"\\noutput"));
     }
@@ -485,8 +496,18 @@ mod tests {
 
     #[test]
     fn www_and_bare_are_the_same_site() {
-        assert!(resolve_url("https://www.example.cz/a", "https://example.cz/", "example.cz").is_some());
-        assert!(resolve_url("https://example.cz/a", "https://www.example.cz/", "www.example.cz").is_some());
+        assert!(resolve_url(
+            "https://www.example.cz/a",
+            "https://example.cz/",
+            "example.cz"
+        )
+        .is_some());
+        assert!(resolve_url(
+            "https://example.cz/a",
+            "https://www.example.cz/",
+            "www.example.cz"
+        )
+        .is_some());
     }
 
     #[test]
@@ -505,8 +526,14 @@ mod tests {
         assert_eq!(attr_value(r#"data-href="/x""#, "href"), None);
         assert_eq!(attr_value(r#"srcset="/x 2x""#, "src"), None);
         assert_eq!(attr_value(r#"href="/x""#, "href").as_deref(), Some("/x"));
-        assert_eq!(attr_value(r#"class="a" href='/y'"#, "href").as_deref(), Some("/y"));
-        assert_eq!(attr_value(r#"href=/z rel=next"#, "href").as_deref(), Some("/z"));
+        assert_eq!(
+            attr_value(r#"class="a" href='/y'"#, "href").as_deref(),
+            Some("/y")
+        );
+        assert_eq!(
+            attr_value(r#"href=/z rel=next"#, "href").as_deref(),
+            Some("/z")
+        );
     }
 
     #[test]

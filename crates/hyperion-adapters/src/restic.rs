@@ -84,7 +84,9 @@ impl Repo {
 /// `false` here into "this site cannot use the snapshot engine", not into a
 /// failed backup.
 pub async fn available() -> bool {
-    cmd::run("/usr/bin/env", &["restic", "version"]).await.is_ok()
+    cmd::run("/usr/bin/env", &["restic", "version"])
+        .await
+        .is_ok()
 }
 
 /// Create the repository if it is not there yet, generating a password the
@@ -102,7 +104,10 @@ pub async fn ensure_repo(base: &str, hosting_id: &str) -> Result<Repo, AdapterEr
     // and therefore the database password.
     let _ = set_mode(&repo.path, 0o700).await;
 
-    if !tokio::fs::try_exists(&repo.password_file).await.unwrap_or(false) {
+    if !tokio::fs::try_exists(&repo.password_file)
+        .await
+        .unwrap_or(false)
+    {
         let secret = generate_password()?;
         write_secret(&repo.password_file, &secret).await?;
     }
@@ -137,11 +142,7 @@ pub struct Snapshot {
 ///
 /// Returns the new snapshot's short id. `--tag` values are ours, never a
 /// customer's input.
-pub async fn backup(
-    repo: &Repo,
-    paths: &[String],
-    tags: &[&str],
-) -> Result<String, AdapterError> {
+pub async fn backup(repo: &Repo, paths: &[String], tags: &[&str]) -> Result<String, AdapterError> {
     let mut args = repo.base_args();
     args.push("backup".into());
     args.push("--json".into());
@@ -172,11 +173,7 @@ pub async fn snapshots(repo: &Repo) -> Result<Vec<Snapshot>, AdapterError> {
 /// retention it already had rather than silently getting restic's defaults.
 /// Both are floors, not ceilings: restic keeps a snapshot matching EITHER
 /// rule, which is what stops a quiet fortnight deleting the only copy.
-pub async fn forget_prune(
-    repo: &Repo,
-    keep_days: i64,
-    keep_last: i64,
-) -> Result<(), AdapterError> {
+pub async fn forget_prune(repo: &Repo, keep_days: i64, keep_last: i64) -> Result<(), AdapterError> {
     let mut args = repo.base_args();
     args.push("forget".into());
     args.push("--prune".into());
@@ -421,7 +418,9 @@ mod tests {
         // /proc/<pid>/cmdline is world-readable and every tenant is a local
         // user. A password among these would be readable by all of them.
         assert!(
-            !args.iter().any(|a| a.len() == 64 && a.chars().all(|c| c.is_ascii_hexdigit())),
+            !args
+                .iter()
+                .any(|a| a.len() == 64 && a.chars().all(|c| c.is_ascii_hexdigit())),
             "a secret-looking value is on the argv: {args:?}"
         );
     }
@@ -484,9 +483,6 @@ mod tests {
     async fn pruning_with_no_retention_rule_is_refused() {
         let repo = Repo::for_hosting("/nonexistent", "h");
         let err = forget_prune(&repo, 0, 0).await.expect_err("must refuse");
-        assert!(
-            err.to_string().contains("delete every snapshot"),
-            "{err}"
-        );
+        assert!(err.to_string().contains("delete every snapshot"), "{err}");
     }
 }

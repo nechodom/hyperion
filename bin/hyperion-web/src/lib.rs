@@ -782,10 +782,7 @@ pub fn build_router(state: SharedState) -> Router {
         // Care overview. Lazy because it asks EVERY node — the activations
         // and the checklist are both co-located with the hosting — and must
         // not hold the dashboard behind the slowest one.
-        .route(
-            "/dashboard/care-panel",
-            get(handlers::care::get_care_panel),
-        )
+        .route("/dashboard/care-panel", get(handlers::care::get_care_panel))
         .route("/logout", post(handlers::login::post_logout))
         // Tiny role echo for the nav-hiding shim in base.html.
         // Returns "super_admin" | "admin" | "operator" | "viewer".

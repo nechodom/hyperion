@@ -264,7 +264,14 @@ mod tests {
     #[test]
     fn ticking_and_untucking_round_trips() {
         let mut c = CareServiceChecks::default();
-        c.set("2026-09", ServiceCheckItem::Render, true, "kevin", "ok", 100);
+        c.set(
+            "2026-09",
+            ServiceCheckItem::Render,
+            true,
+            "kevin",
+            "ok",
+            100,
+        );
         assert!(c.is_checked("2026-09", ServiceCheckItem::Render));
         assert_eq!(c.done_count("2026-09"), 1);
         assert_eq!(c.outstanding("2026-09").len(), 3);
@@ -284,7 +291,14 @@ mod tests {
     fn editing_a_note_does_not_reattribute_the_tick() {
         let mut c = CareServiceChecks::default();
         c.set("2026-09", ServiceCheckItem::Forms, true, "kevin", "", 100);
-        c.set("2026-09", ServiceCheckItem::Forms, true, "someone-else", "client confirmed", 999);
+        c.set(
+            "2026-09",
+            ServiceCheckItem::Forms,
+            true,
+            "someone-else",
+            "client confirmed",
+            999,
+        );
         let m = c.month("2026-09").unwrap().get("forms").unwrap();
         assert_eq!(m.by, "kevin");
         assert_eq!(m.at, 100);

@@ -11855,13 +11855,21 @@ pub async fn get_wpmail_panel(
     .await
     {
         Ok(RpcResponse::WpMailSelfCheck(r)) => Ok(card(r, autofix_enabled, None)),
-        Ok(RpcResponse::Error(e)) => Ok(card(Default::default(), autofix_enabled, Some(e.to_string()))),
+        Ok(RpcResponse::Error(e)) => Ok(card(
+            Default::default(),
+            autofix_enabled,
+            Some(e.to_string()),
+        )),
         Ok(_) => Ok(card(
             Default::default(),
             autofix_enabled,
             Some("unexpected response from the node".into()),
         )),
-        Err(e) => Ok(card(Default::default(), autofix_enabled, Some(e.to_string()))),
+        Err(e) => Ok(card(
+            Default::default(),
+            autofix_enabled,
+            Some(e.to_string()),
+        )),
     }
 }
 
@@ -12238,7 +12246,10 @@ pub async fn get_sitecheck_panel(
     .await
     .is_err()
     {
-        return Ok(card(None, Some("You do not have access to this hosting.".into())));
+        return Ok(card(
+            None,
+            Some("You do not have access to this hosting.".into()),
+        ));
     }
     match crate::dispatcher::dispatch_to_node(
         &state,

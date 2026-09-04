@@ -329,13 +329,13 @@ fn build_app_with_signer(
     (router, signer)
 }
 
-
 #[tokio::test]
 #[ignore]
 async fn devserver() {
     let admin = admin_user::create("kevin", "secret-pw-1").expect("create");
     let (sock, _dir) = start_agent().await;
-    let (router, _signer) = build_app_with_signer(sock, admin, Arc::new(SessionSigner::new_random()));
+    let (router, _signer) =
+        build_app_with_signer(sock, admin, Arc::new(SessionSigner::new_random()));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:8190")
         .await
         .expect("bind 127.0.0.1:8190");

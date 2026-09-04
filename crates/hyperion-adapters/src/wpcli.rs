@@ -606,10 +606,7 @@ pub fn parse_core_updates(stdout: &str) -> Vec<CoreUpdate> {
 }
 
 /// Core releases available for this site.
-pub async fn core_check_update(
-    user: &str,
-    htdocs: &str,
-) -> Result<Vec<CoreUpdate>, AdapterError> {
+pub async fn core_check_update(user: &str, htdocs: &str) -> Result<Vec<CoreUpdate>, AdapterError> {
     ensure_wp_cli_present().await?;
     let args: [&str; 3] = ["core", "check-update", "--format=json"];
     let argv = build_argv(user, htdocs, &args);

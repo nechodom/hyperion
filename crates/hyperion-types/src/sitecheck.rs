@@ -92,7 +92,12 @@ impl SiteCheckReport {
     /// Middle page's TTFB. Reported beside the slowest because one heavy
     /// archive page should not be read as "the site is slow".
     pub fn median_ttfb_ms(&self) -> i64 {
-        let mut v: Vec<i64> = self.pages.iter().filter(|p| p.is_ok()).map(|p| p.ttfb_ms).collect();
+        let mut v: Vec<i64> = self
+            .pages
+            .iter()
+            .filter(|p| p.is_ok())
+            .map(|p| p.ttfb_ms)
+            .collect();
         if v.is_empty() {
             return 0;
         }
@@ -113,7 +118,10 @@ impl SiteCheckReport {
 
     /// Count of findings at `severity`.
     pub fn count(&self, severity: &str) -> usize {
-        self.findings.iter().filter(|f| f.severity == severity).count()
+        self.findings
+            .iter()
+            .filter(|f| f.severity == severity)
+            .count()
     }
 }
 

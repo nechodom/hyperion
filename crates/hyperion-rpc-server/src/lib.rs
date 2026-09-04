@@ -3164,11 +3164,7 @@ mod tests {
         ) -> Result<hyperion_types::FtpCheckReport, RpcError> {
             Ok(Default::default())
         }
-        async fn wp_mail_autofix_set(
-            &self,
-            _: HostingSelector,
-            _: bool,
-        ) -> Result<bool, RpcError> {
+        async fn wp_mail_autofix_set(&self, _: HostingSelector, _: bool) -> Result<bool, RpcError> {
             Ok(true)
         }
         async fn package_activate(

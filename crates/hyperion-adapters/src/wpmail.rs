@@ -206,7 +206,10 @@ pub fn render_mu_plugin(domain: &str, from: &str, log_path: &str, force_local: b
         .replace("{{DOMAIN}}", &php_single_quoted(domain))
         .replace("{{FROM}}", &php_single_quoted(from))
         .replace("{{LOG}}", &php_single_quoted(log_path))
-        .replace("{{FORCE_LOCAL}}", if force_local { "true" } else { "false" })
+        .replace(
+            "{{FORCE_LOCAL}}",
+            if force_local { "true" } else { "false" },
+        )
 }
 
 /// Escape for a PHP single-quoted string: only `\` and `'` are special
@@ -402,7 +405,10 @@ mod tests {
     #[test]
     fn a_quote_cannot_escape_the_php_string() {
         let php = render_mu_plugin("ev'il\\.cz", "a@b", "/l", false);
-        assert!(php.contains("define('HYPERION_MAIL_DOMAIN', 'ev\\'il\\\\.cz');"), "{php}");
+        assert!(
+            php.contains("define('HYPERION_MAIL_DOMAIN', 'ev\\'il\\\\.cz');"),
+            "{php}"
+        );
     }
 
     #[test]

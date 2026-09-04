@@ -8222,7 +8222,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     "There is no wp-content directory under {}, so there is no WordPress \
                      mail to configure. A static or proxied site is expected to look like \
                      this; a WordPress site that does has a missing document tree.",
-                    if root.is_empty() { "the document root" } else { root.as_str() }
+                    if root.is_empty() {
+                        "the document root"
+                    } else {
+                        root.as_str()
+                    }
                 ),
                 "",
             );
@@ -8238,7 +8242,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 "wp_mail_plugin",
                 "Sender is pinned to this domain",
                 "ok",
-                format!("WordPress sends as {from}, which is what this domain's SPF record covers."),
+                format!(
+                    "WordPress sends as {from}, which is what this domain's SPF record covers."
+                ),
                 "",
             ),
             wpmail::MuState::Missing => push(
@@ -8306,21 +8312,17 @@ impl<A: AdapterPort + 'static> HostingService<A> {
 
         // Which plugin, if any, has taken `wp_mail()` over. Listed rather
         // than judged: one with working credentials is the owner's choice.
-        let active: Vec<String> = match hyperion_adapters::wpcli::plugin_list(
-            detail.system_user.trim(),
-            &root,
-        )
-        .await
-        {
-            Ok((plugins, _)) => plugins
-                .into_iter()
-                .filter(|p| p.status.starts_with("active"))
-                .map(|p| p.slug)
-                .collect(),
-            // wp-cli failing is its own problem and is reported by the other
-            // WordPress cards; here it only means we cannot name the plugin.
-            Err(_) => Vec::new(),
-        };
+        let active: Vec<String> =
+            match hyperion_adapters::wpcli::plugin_list(detail.system_user.trim(), &root).await {
+                Ok((plugins, _)) => plugins
+                    .into_iter()
+                    .filter(|p| p.status.starts_with("active"))
+                    .map(|p| p.slug)
+                    .collect(),
+                // wp-cli failing is its own problem and is reported by the other
+                // WordPress cards; here it only means we cannot name the plugin.
+                Err(_) => Vec::new(),
+            };
         let smtp = wpmail::smtp_plugins_in(&active);
         if !smtp.is_empty() {
             push(
@@ -8401,15 +8403,15 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let week = now_secs() - 7 * 86_400;
         let failing = wpmail::failures_since(&lines, week) > 0;
         if failing && forced_at.is_none() {
-            let active: Vec<String> = match hyperion_adapters::wpcli::plugin_list(&user, &root).await
-            {
-                Ok((p, _)) => p
-                    .into_iter()
-                    .filter(|p| p.status.starts_with("active"))
-                    .map(|p| p.slug)
-                    .collect(),
-                Err(_) => Vec::new(),
-            };
+            let active: Vec<String> =
+                match hyperion_adapters::wpcli::plugin_list(&user, &root).await {
+                    Ok((p, _)) => p
+                        .into_iter()
+                        .filter(|p| p.status.starts_with("active"))
+                        .map(|p| p.slug)
+                        .collect(),
+                    Err(_) => Vec::new(),
+                };
             let smtp = wpmail::smtp_plugins_in(&active);
             if !smtp.is_empty() {
                 let now = now_secs();
@@ -8603,7 +8605,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let repo = restic::Repo::for_hosting(restic::REPO_BASE, detail.id.as_str());
         // A site that has never been snapshotted has no repository, and that
         // is not an error — it is the answer "none yet".
-        if !tokio::fs::try_exists(&repo.password_file).await.unwrap_or(false) {
+        if !tokio::fs::try_exists(&repo.password_file)
+            .await
+            .unwrap_or(false)
+        {
             return Ok(Vec::new());
         }
         let rows = restic::snapshots(&repo)
@@ -10218,10 +10223,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     if !user.is_empty() && !root.is_empty() {
                         // An error reading the answer means "we do not
                         // know", which must not become "update anyway".
-                        let available =
-                            hyperion_adapters::wpcli::core_check_update(&user, &root)
-                                .await
-                                .unwrap_or_default();
+                        let available = hyperion_adapters::wpcli::core_check_update(&user, &root)
+                            .await
+                            .unwrap_or_default();
                         if let Some(rel) = available.iter().find(|u| u.is_minor()) {
                             // A snapshot before core specifically, even
                             // though the batch already took one: a site
@@ -13250,9 +13254,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         &self,
         period: String,
     ) -> Result<Vec<hyperion_types::care_check::CareOverviewRow>, RpcError> {
-        use hyperion_types::care_check::{
-            CareOverviewRow, CareServiceChecks, ServiceCheckItem,
-        };
+        use hyperion_types::care_check::{CareOverviewRow, CareServiceChecks, ServiceCheckItem};
         let rows = packages::list_all_active(&self.pool)
             .await
             .map_err(|e| RpcError::Internal_with(format!("care overview: {e}")))?;
@@ -23950,7 +23952,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     }
 
     /// What each severity MEANS, so the notification centre can be read at a
-    /// glance instead of parsed. 
+    /// glance instead of parsed.
     ///
     /// * `error` (red) — something is broken RIGHT NOW: the site does not
     ///   serve, the certificate is expired, malware is on disk, the
