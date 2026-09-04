@@ -694,6 +694,14 @@ pub fn build_router(state: SharedState) -> Router {
             post(handlers::hostings::post_ftp_account_delete),
         )
         .route(
+            "/hostings/:selector/sitecheck-panel",
+            get(handlers::hostings::get_sitecheck_panel),
+        )
+        .route(
+            "/hostings/site-check",
+            post(handlers::hostings::post_site_check),
+        )
+        .route(
             "/hostings/:selector/snapshots-panel",
             get(handlers::hostings::get_snapshots_panel),
         )

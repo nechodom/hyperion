@@ -558,6 +558,86 @@ pub async fn install_item(
     Ok(())
 }
 
+/// A core release wp-cli says is available.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoreUpdate {
+    pub version: String,
+    /// wp-cli's own classification: `minor` for a security/point release,
+    /// `major` for the ones that move the number before the dot.
+    pub update_type: String,
+}
+
+impl CoreUpdate {
+    /// Safe to apply unattended.
+    ///
+    /// wp-cli calls a 6.5.3 → 6.5.5 hop `minor`, which is the security
+    /// release WordPress itself auto-installs by default. A `major` is where
+    /// themes and plugins break, and it stays a decision a person makes
+    /// while they are around to look at the result.
+    pub fn is_minor(&self) -> bool {
+        self.update_type.eq_ignore_ascii_case("minor")
+    }
+}
+
+/// What `wp core check-update --format=json` offers, newest first.
+///
+/// An empty list is the ordinary answer for an up-to-date site. Anything
+/// unparseable yields an empty list too: the failure direction that skips an
+/// update is safe, and the one that invents a release to install is not.
+pub fn parse_core_updates(stdout: &str) -> Vec<CoreUpdate> {
+    #[derive(serde::Deserialize)]
+    struct Raw {
+        #[serde(default)]
+        version: String,
+        #[serde(default)]
+        update_type: String,
+    }
+    let rows: Vec<Raw> = match parse_wp_json(stdout, "wp core check-update") {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    rows.into_iter()
+        .filter(|r| !r.version.trim().is_empty())
+        .map(|r| CoreUpdate {
+            version: r.version.trim().to_string(),
+            update_type: r.update_type.trim().to_string(),
+        })
+        .collect()
+}
+
+/// Core releases available for this site.
+pub async fn core_check_update(
+    user: &str,
+    htdocs: &str,
+) -> Result<Vec<CoreUpdate>, AdapterError> {
+    ensure_wp_cli_present().await?;
+    let args: [&str; 3] = ["core", "check-update", "--format=json"];
+    let argv = build_argv(user, htdocs, &args);
+    // A site with no update prints an empty table and can exit non-zero on
+    // some wp-cli builds; an error here means "we do not know", which the
+    // caller treats as "do not update".
+    let stdout = cmd::run("/usr/bin/sudo", &argv_as_refs(&argv)).await?;
+    Ok(parse_core_updates(&stdout))
+}
+
+/// Apply the latest MINOR core release, then bring the database with it.
+///
+/// `--minor` is wp-cli's own ceiling, so this cannot walk a site onto the
+/// next major even if one is out. `core update-db` is not optional: a core
+/// upgrade that skips it leaves the site serving from a schema the new code
+/// does not expect, which is the "white screen after the update" every
+/// support queue knows.
+pub async fn core_update_minor(user: &str, htdocs: &str) -> Result<String, AdapterError> {
+    ensure_wp_cli_present().await?;
+    let args: [&str; 3] = ["core", "update", "--minor"];
+    let argv = build_argv(user, htdocs, &args);
+    let out = cmd::run("/usr/bin/sudo", &argv_as_refs(&argv)).await?;
+    let db_args: [&str; 2] = ["core", "update-db"];
+    let db_argv = build_argv(user, htdocs, &db_args);
+    let db_out = cmd::run("/usr/bin/sudo", &argv_as_refs(&db_argv)).await?;
+    Ok(format!("{}\n{}", out.trim(), db_out.trim()))
+}
+
 /// List installed WP plugins via `wp plugin list --format=json` and
 /// `wp core version`. Both calls run under `system_user` against
 /// `htdocs`. Returns the parsed plugin table + wp version string.
@@ -1915,5 +1995,42 @@ mod tests {
         assert_eq!(got(r#"{"v":42}"#), Some("42".to_string()));
         assert_eq!(got(r#"{"v":null}"#), None);
         assert_eq!(got(r#"{}"#), None); // missing key
+    }
+}
+
+#[cfg(test)]
+mod core_update_tests {
+    use super::*;
+
+    #[test]
+    fn an_up_to_date_site_offers_nothing() {
+        assert!(parse_core_updates("[]").is_empty());
+    }
+
+    /// wp-cli prints PHP notices to stdout before its JSON, and an
+    /// unparseable answer must skip the update rather than invent one.
+    #[test]
+    fn noise_and_garbage_yield_no_update() {
+        assert!(parse_core_updates("").is_empty());
+        assert!(parse_core_updates("PHP Warning: something\n").is_empty());
+        assert!(parse_core_updates("not json at all").is_empty());
+    }
+
+    #[test]
+    fn a_minor_release_is_recognised_and_a_major_is_not() {
+        let out = r#"[{"version":"6.5.5","update_type":"minor","package_url":"x"}]"#;
+        let v = parse_core_updates(out);
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].version, "6.5.5");
+        assert!(v[0].is_minor());
+
+        let major = parse_core_updates(r#"[{"version":"6.6","update_type":"major"}]"#);
+        assert!(!major[0].is_minor(), "a major must never apply unattended");
+    }
+
+    /// A row with no version is not a release, however wp-cli got there.
+    #[test]
+    fn a_versionless_row_is_dropped() {
+        assert!(parse_core_updates(r#"[{"update_type":"minor"}]"#).is_empty());
     }
 }

@@ -1434,6 +1434,14 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(m) => Response::FtpAccountDelete(m),
             Err(e) => Response::Error(e),
         },
+        Request::SiteCheckRun { sel } => match api.site_check_run(sel).await {
+            Ok(v) => Response::SiteCheck(v),
+            Err(e) => Response::Error(e),
+        },
+        Request::SiteCheckLast { sel } => match api.site_check_last(sel).await {
+            Ok(v) => Response::SiteCheckLast(v),
+            Err(e) => Response::Error(e),
+        },
         Request::SnapshotList { sel } => match api.snapshot_list(sel).await {
             Ok(v) => Response::SnapshotList(v),
             Err(e) => Response::Error(e),
@@ -3114,6 +3122,18 @@ mod tests {
             _: String,
         ) -> Result<Vec<hyperion_types::care_check::CareOverviewRow>, RpcError> {
             Ok(vec![])
+        }
+        async fn site_check_run(
+            &self,
+            _: HostingSelector,
+        ) -> Result<hyperion_types::SiteCheckReport, RpcError> {
+            Ok(Default::default())
+        }
+        async fn site_check_last(
+            &self,
+            _: HostingSelector,
+        ) -> Result<Option<hyperion_types::SiteCheckReport>, RpcError> {
+            Ok(None)
         }
         async fn snapshot_list(
             &self,

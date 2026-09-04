@@ -7742,6 +7742,367 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// repair runs only when it fires, and lands in the audit log both
     /// so the fix is traceable and so a repeating heal — something
     /// re-breaking modes on a schedule — is visible as a pattern.
+    /// Walk the site the way a visitor would and report what is broken.
+    ///
+    /// Fetches the pages the site itself advertises (its sitemap, falling
+    /// back to the home page alone), then the links, images and assets those
+    /// pages reference. Everything is pinned to loopback, so what is checked
+    /// is the copy THIS node serves — a site whose DNS still points at the
+    /// old host would otherwise be graded on somebody else's server.
+    ///
+    /// Never an `Err` for anything about the SITE: a site that does not
+    /// answer is the finding, not a failure of the check. `error` on the
+    /// report is reserved for the crawl being unable to start at all, which
+    /// must not render as "nothing wrong".
+    pub async fn site_check(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<hyperion_types::SiteCheckReport, RpcError> {
+        use hyperion_adapters::sitecheck::{self, LinkKind};
+        use hyperion_types::{SiteCheckFinding, SiteCheckPage, SiteCheckReport};
+
+        let detail = self.get(sel).await?;
+        let mut report = SiteCheckReport {
+            checked_at: now_secs(),
+            ..Default::default()
+        };
+        let domain = detail.domain.trim().to_string();
+        if domain.is_empty() {
+            report.error = "this hosting has no domain to fetch".into();
+            return Ok(report);
+        }
+        // A redirect hosting has no pages of its own; crawling it would
+        // report on wherever it points, which is not ours to grade.
+        if detail.kind.trim() == "redirect" {
+            report.error = "a redirect hosting serves no pages of its own".into();
+            return Ok(report);
+        }
+
+        let base = format!("https://{domain}/");
+        let mut push = |severity: &str, kind: &str, url: &str, found_on: &str, detail: String| {
+            report.findings.push(SiteCheckFinding {
+                severity: severity.into(),
+                kind: kind.into(),
+                url: url.into(),
+                found_on: found_on.into(),
+                detail,
+            });
+        };
+
+        // ── The home page ───────────────────────────────────────────────
+        let home = match sitecheck::fetch(&base, &domain, LOOPBACK, true).await {
+            Ok(f) => f,
+            Err(e) => {
+                // curl itself could not run. That is our problem, not the
+                // site's, and saying "the site is down" would be a lie.
+                report.error = format!("could not run the check: {e}");
+                return Ok(report);
+            }
+        };
+        let mut bodies: Vec<(String, String)> = Vec::new();
+        report.pages.push(SiteCheckPage {
+            url: home.url.clone(),
+            status: home.status,
+            ttfb_ms: home.ttfb_ms,
+            total_ms: home.total_ms,
+            bytes: home.bytes,
+        });
+        if home.status == 0 {
+            push(
+                "error",
+                "page",
+                &base,
+                "",
+                "The site did not answer at all on this server.".into(),
+            );
+        } else if !home.is_ok() {
+            push(
+                "error",
+                "page",
+                &base,
+                "",
+                format!("The home page answers HTTP {}.", home.status),
+            );
+        } else {
+            bodies.push((home.url.clone(), home.body.clone()));
+        }
+
+        // ── The pages the site says it has ──────────────────────────────
+        let mut page_urls = self.sitemap_pages(&domain, &base).await;
+        report.discovery = if page_urls.is_empty() {
+            "home page only — no sitemap".into()
+        } else {
+            "sitemap".into()
+        };
+        page_urls.retain(|u| u != &base);
+        page_urls.truncate(sitecheck::MAX_PAGES.saturating_sub(1));
+        for url in page_urls {
+            let Ok(f) = sitecheck::fetch(&url, &domain, LOOPBACK, true).await else {
+                continue;
+            };
+            report.pages.push(SiteCheckPage {
+                url: f.url.clone(),
+                status: f.status,
+                ttfb_ms: f.ttfb_ms,
+                total_ms: f.total_ms,
+                bytes: f.bytes,
+            });
+            if f.is_ok() {
+                bodies.push((f.url.clone(), f.body.clone()));
+            } else if f.status >= 500 || f.status == 0 {
+                // The site's own sitemap says this page exists and it
+                // crashes. That is broken now.
+                push(
+                    "error",
+                    "page",
+                    &f.url,
+                    "",
+                    format!(
+                        "A page the site's own sitemap lists answers HTTP {}.",
+                        f.status
+                    ),
+                );
+            } else {
+                push(
+                    "warn",
+                    "page",
+                    &f.url,
+                    "",
+                    format!(
+                        "A page the site's own sitemap lists answers HTTP {} — published but missing.",
+                        f.status
+                    ),
+                );
+            }
+        }
+
+        // ── Slowness, once, on the worst offender ───────────────────────
+        //
+        // One line rather than one per page: a slow site is slow everywhere,
+        // and eight identical findings bury the broken links underneath.
+        if let Some(worst) = report
+            .pages
+            .iter()
+            .filter(|p| p.is_ok())
+            .max_by_key(|p| p.ttfb_ms)
+        {
+            if worst.ttfb_ms >= sitecheck::SLOW_TTFB_MS {
+                let url = worst.url.clone();
+                let ms = worst.ttfb_ms;
+                push(
+                    "info",
+                    "slow",
+                    &url,
+                    "",
+                    format!(
+                        "Slowest page took {ms} ms to start answering, measured on the server \
+                         itself — so that is PHP and the database, with no network in it. \
+                         Caching is usually what this is about."
+                    ),
+                );
+            }
+        }
+
+        // ── What those pages point at ───────────────────────────────────
+        let mut targets: Vec<(LinkKind, String, String)> = Vec::new();
+        let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for (page_url, body) in &bodies {
+            for (kind, url) in sitecheck::extract_links(body, page_url, &domain) {
+                // A link on ten pages is one request, and it is attributed to
+                // the first page it was seen on.
+                if seen.insert(url.clone()) {
+                    targets.push((kind, url, page_url.clone()));
+                }
+            }
+        }
+        // Pages already fetched above are not fetched again.
+        let fetched: std::collections::BTreeSet<String> =
+            report.pages.iter().map(|p| p.url.clone()).collect();
+        targets.retain(|(_, u, _)| !fetched.contains(u));
+        targets.truncate(sitecheck::MAX_LINKS);
+
+        for (kind, url, found_on) in targets {
+            let Ok(f) = sitecheck::fetch(&url, &domain, LOOPBACK, false).await else {
+                continue;
+            };
+            report.links_checked += 1;
+            if f.is_ok() {
+                continue;
+            }
+            let what = match kind {
+                LinkKind::Nav => "A link on this site leads nowhere",
+                LinkKind::Image => "An image on this site does not load",
+                LinkKind::Asset => "A stylesheet or script does not load",
+            };
+            let why = match kind {
+                // The one that makes a site "look broken" without anything
+                // being down, and the one nobody reports because the page
+                // still opens.
+                LinkKind::Asset => {
+                    " — this is what makes a site render as unstyled text while still being up."
+                }
+                _ => "",
+            };
+            let status = if f.status == 0 {
+                "no answer".to_string()
+            } else {
+                format!("HTTP {}", f.status)
+            };
+            push(
+                "warn",
+                kind.as_str(),
+                &url,
+                &found_on,
+                format!("{what} ({status}){why}"),
+            );
+        }
+
+        Ok(report)
+    }
+
+    /// URLs from the site's sitemap, or empty when it has none.
+    ///
+    /// WordPress 5.5+ serves an INDEX at `/wp-sitemap.xml` — a sitemap of
+    /// sitemaps — so one level is followed. Anything unreadable yields an
+    /// empty list and the caller checks the home page alone; a missing
+    /// sitemap is not a finding, plenty of sites do not have one.
+    async fn sitemap_pages(&self, domain: &str, base: &str) -> Vec<String> {
+        use hyperion_adapters::sitecheck;
+        for candidate in ["wp-sitemap.xml", "sitemap.xml", "sitemap_index.xml"] {
+            let url = format!("{base}{candidate}");
+            let Ok(f) = sitecheck::fetch(&url, domain, LOOPBACK, true).await else {
+                continue;
+            };
+            if !f.is_ok() || f.body.trim().is_empty() {
+                continue;
+            }
+            let locs = sitecheck::sitemap_locs(&f.body);
+            if locs.is_empty() {
+                continue;
+            }
+            if !sitecheck::is_sitemap_index(&f.body) {
+                return locs;
+            }
+            // An index: follow the first child, which for WordPress is the
+            // one listing pages rather than an archive of 10 000 posts.
+            for child in locs.into_iter().take(2) {
+                let Ok(cf) = sitecheck::fetch(&child, domain, LOOPBACK, true).await else {
+                    continue;
+                };
+                let child_locs = sitecheck::sitemap_locs(&cf.body);
+                if cf.is_ok() && !child_locs.is_empty() {
+                    return child_locs;
+                }
+            }
+        }
+        Vec::new()
+    }
+
+    /// The last stored site check, or `None` when one has never run.
+    pub async fn site_check_last(
+        &self,
+        hosting_id: &str,
+    ) -> Option<hyperion_types::SiteCheckReport> {
+        let raw = hyperion_state::hosting_kv::get(&self.pool, hosting_id, SITE_CHECK_KV_KEY)
+            .await
+            .ok()??;
+        serde_json::from_str(&raw).ok()
+    }
+
+    /// Run the check and keep the result.
+    pub async fn site_check_run(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<hyperion_types::SiteCheckReport, RpcError> {
+        let detail = self.get(sel.clone()).await?;
+        let report = self.site_check(sel).await?;
+        if let Ok(json) = serde_json::to_string(&report) {
+            let _ = hyperion_state::hosting_kv::set(
+                &self.pool,
+                detail.id.as_str(),
+                SITE_CHECK_KV_KEY,
+                &json,
+                now_secs(),
+            )
+            .await;
+        }
+        Ok(report)
+    }
+
+    /// Walk every care-plan site on this node, once a week.
+    ///
+    /// Only sites that hold a package: this is a thing a care plan promises,
+    /// and crawling every site on the box would put someone else's traffic
+    /// figures up for a service they are not paying for.
+    ///
+    /// Speaks up only for `error` findings — the site not answering, or a
+    /// page its own sitemap advertises crashing. Broken links and missing
+    /// images are real and are left in the panel: waking somebody at 3 a.m.
+    /// for an image is how alerting gets ignored.
+    pub async fn site_check_tick(&self) -> Result<i64, RpcError> {
+        let held = packages::list_all_active(&self.pool)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("site check: read held failed: {e}")))?;
+        if held.is_empty() {
+            return Ok(0);
+        }
+        let mut ids: Vec<HostingId> = Vec::new();
+        for row in held {
+            if !ids.contains(&row.hosting_id) {
+                ids.push(row.hosting_id);
+            }
+        }
+        let now = now_secs();
+        let mut ran = 0i64;
+        for id in ids {
+            // Weekly. The report carries its own timestamp, so the cadence
+            // survives a restart without a second piece of state to keep in
+            // step with it.
+            if let Some(prev) = self.site_check_last(id.as_str()).await {
+                if now - prev.checked_at < SITE_CHECK_INTERVAL_SECS {
+                    continue;
+                }
+            }
+            let Ok(detail) = self.get(HostingSelector::Id(id.clone())).await else {
+                continue;
+            };
+            if detail.state != HostingState::Active {
+                continue;
+            }
+            let report = match self.site_check_run(HostingSelector::Id(id.clone())).await {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(domain = %detail.domain, error = %e, "site check failed");
+                    continue;
+                }
+            };
+            ran += 1;
+            let broken = report.count("error");
+            if broken > 0 {
+                self.notify_admins(
+                    "error",
+                    "Pages on this site are broken",
+                    &format!(
+                        "{} — the automatic page check found {broken} page(s) that do not work: {}",
+                        detail.domain,
+                        report
+                            .findings
+                            .iter()
+                            .filter(|f| f.severity == "error")
+                            .map(|f| f.url.as_str())
+                            .take(3)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                    &format!("/hostings/{}", detail.domain),
+                    "site_check_broken",
+                )
+                .await;
+            }
+        }
+        Ok(ran)
+    }
+
     /// Is the WordPress mail self-repair allowed to act on this hosting?
     ///
     /// **Default ON** (absent ⇒ enabled), same contract as the permission
@@ -9836,6 +10197,85 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 }
                 if skips_dirty {
                     self.set_wp_update_skips(s.id.as_str(), &skips).await;
+                }
+
+                // ── WordPress core ──────────────────────────────────────
+                //
+                // Plugins and themes are only two thirds of "keep it
+                // updated", and core is the third that carries the
+                // security releases every published exploit is written
+                // against. `--minor` is the ceiling: a 6.5.3 → 6.5.5 hop
+                // is what WordPress itself installs unattended, while a
+                // major is where themes break and stays a decision a
+                // person makes while they are around to look at it.
+                //
+                // The snapshot above already covers this: it is taken
+                // before the whole batch, so a core update that goes
+                // wrong is one restore away like everything else.
+                if let Ok(detail) = self.get(HostingSelector::Id(s.id.clone())).await {
+                    let user = detail.system_user.trim().to_string();
+                    let root = detail.root_dir.trim().to_string();
+                    if !user.is_empty() && !root.is_empty() {
+                        // An error reading the answer means "we do not
+                        // know", which must not become "update anyway".
+                        let available =
+                            hyperion_adapters::wpcli::core_check_update(&user, &root)
+                                .await
+                                .unwrap_or_default();
+                        if let Some(rel) = available.iter().find(|u| u.is_minor()) {
+                            // A snapshot before core specifically, even
+                            // though the batch already took one: a site
+                            // whose plugins updated cleanly and whose CORE
+                            // then broke wants to go back to the working
+                            // plugins, not to last night.
+                            let _ = self
+                                .snapshot_before_change(&detail, "pre-core-update")
+                                .await;
+                            match hyperion_adapters::wpcli::core_update_minor(&user, &root).await {
+                                Ok(out) => {
+                                    auto_updated += 1;
+                                    tracing::info!(
+                                        domain = %detail.domain,
+                                        version = %rel.version,
+                                        "wp core: minor update applied"
+                                    );
+                                    self.append_audit(
+                                        "wp.core.auto_update",
+                                        Some(detail.id.as_str()),
+                                        &serde_json::json!({
+                                            "version": rel.version,
+                                            "output_tail": out.chars().rev().take(400)
+                                                .collect::<String>().chars().rev()
+                                                .collect::<String>(),
+                                        })
+                                        .to_string(),
+                                        "ok",
+                                    )
+                                    .await;
+                                }
+                                Err(e) => {
+                                    // Worth telling somebody: unlike a
+                                    // commercial plugin needing a licence,
+                                    // a core update that will not apply
+                                    // leaves a known-vulnerable core
+                                    // serving the site.
+                                    tracing::warn!(domain = %detail.domain, error = %e,
+                                        "wp core: minor update failed");
+                                    self.notify_admins(
+                                        "warn",
+                                        "WordPress core update failed",
+                                        &format!(
+                                            "{} — the {} security release could not be applied                                              automatically, so the site is still on the older                                              core. A snapshot was taken first, so nothing is                                              lost. Error: {e}",
+                                            detail.domain, rel.version
+                                        ),
+                                        &format!("/hostings/{}#wordpress", detail.domain),
+                                        &format!("wp.core.failed:{}", detail.domain),
+                                    )
+                                    .await;
+                                }
+                            }
+                        }
+                    }
                 }
                 // Re-scan so the stored result reflects what's LEFT
                 // (typically only major updates needing manual review).
@@ -26825,6 +27265,15 @@ const WP_MAIL_AUTOFIX_KV_KEY: &str = "wp_mail_autofix_enabled";
 const WP_MAIL_FORCE_LOCAL_KV_KEY: &str = "wp_mail_force_local_at";
 /// Operator override for the sender address; absent ⇒ `wordpress@<domain>`.
 const WP_MAIL_FROM_KV_KEY: &str = "wp_mail_from";
+/// Last automated page walk, as JSON.
+const SITE_CHECK_KV_KEY: &str = "site_check_last";
+/// How often the automated walk runs per site. Weekly: every request it
+/// makes lands on the customer's own traffic bill, and pages do not rot
+/// faster than that.
+const SITE_CHECK_INTERVAL_SECS: i64 = 7 * 86_400;
+/// Every fetch is pinned here, so the check grades the copy THIS node
+/// serves rather than whatever the site's DNS currently points at.
+const LOOPBACK: &str = "127.0.0.1";
 const FAIL2BAN_HTTP_KV_KEY: &str = "http_bruteforce_scan_enabled";
 
 /// Thin pub wrapper so `panel_import` can reuse the exact repair the

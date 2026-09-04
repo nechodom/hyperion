@@ -27,6 +27,7 @@ pub mod migration;
 pub mod package;
 pub mod php;
 pub mod profile;
+pub mod sitecheck;
 pub mod spf;
 pub mod stats;
 pub mod wp;
@@ -57,6 +58,7 @@ pub use package::{
 };
 pub use php::PhpVersion;
 pub use profile::{HostingProfile, ProfileApply, ProfileInput, WpAssetSummary};
+pub use sitecheck::{SiteCheckFinding, SiteCheckPage, SiteCheckReport};
 pub use spf::SpfCheckResult;
 pub use stats::{decode_mime_header, render_html_shell, CountryTraffic};
 pub use stats::{

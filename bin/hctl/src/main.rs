@@ -1270,6 +1270,22 @@ fn print_pretty(resp: &Response) {
                 println!("[{}] {}: {}", it.severity, it.label, it.detail);
             }
         }
+        Response::SiteCheck(r) | Response::SiteCheckLast(Some(r)) => {
+            if !r.error.is_empty() {
+                println!("could not check: {}", r.error);
+            }
+            println!(
+                "{} page(s) ok of {}, {} link(s) checked, slowest {} ms",
+                r.pages_ok(),
+                r.pages.len(),
+                r.links_checked,
+                r.slowest_ttfb_ms()
+            );
+            for f in &r.findings {
+                println!("[{}] {} {}: {}", f.severity, f.kind, f.url, f.detail);
+            }
+        }
+        Response::SiteCheckLast(None) => println!("(no page check has run for this site yet)"),
         Response::SnapshotList(rows) => {
             if rows.is_empty() {
                 println!("(no snapshots — the snapshot engine may not be installed)");

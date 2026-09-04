@@ -752,6 +752,16 @@ pub trait AgentApi: Send + Sync + 'static {
         &self,
         sel: HostingSelector,
     ) -> Result<hyperion_types::FtpCheckReport, RpcError>;
+    /// Walk the site now and store the result.
+    async fn site_check_run(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<hyperion_types::SiteCheckReport, RpcError>;
+    /// The last stored walk, without running one.
+    async fn site_check_last(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<Option<hyperion_types::SiteCheckReport>, RpcError>;
     /// Snapshots this site has, newest last.
     async fn snapshot_list(
         &self,

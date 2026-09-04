@@ -681,6 +681,24 @@
 </div>
 {% endif %}
 
+{# What a visitor would actually meet: the pages the site advertises, and
+   the links, images and stylesheets on them.
+
+   On OVERVIEW rather than the WordPress tab, because it is not a WordPress
+   thing — a static site's menu links rot the same way — and because the
+   Health card above answers "did it respond" while this answers "does it
+   work", which is the question an operator actually came to the page with.
+   Lazy: it reads the owning node. #}
+<div id="sitecheck-panel"
+     hx-get="/hostings/{{ detail.id.as_str() }}/sitecheck-panel"
+     hx-trigger="revealed once"
+     hx-swap="innerHTML">
+  <div class="card" style="margin-bottom:0.9rem">
+    <span class="spinner-inline" style="margin-right:0.4rem"></span>
+    <span class="text-soft small">Reading the last page check…</span>
+  </div>
+</div>
+
 {# Security at a glance — the controls are spread across tabs (WAF on
    Settings, bans on Settings, updates on WordPress); this card is the
    single entry point. Status comes from the hosting's own vhost options;

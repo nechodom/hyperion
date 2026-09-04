@@ -1393,6 +1393,15 @@ pub enum Request {
     /// node (the vsftpd config, the passwd/shadow entry and the web root
     /// are all node-local — a master-local scan would call every remote
     /// hosting broken).
+    /// Walk the site now: fetch the pages its sitemap advertises, then the
+    /// links, images and assets they reference. Stores the result.
+    SiteCheckRun {
+        sel: HostingSelector,
+    },
+    /// The last stored walk, without running one. `None` when none has run.
+    SiteCheckLast {
+        sel: HostingSelector,
+    },
     /// Snapshots this site has, newest last. Empty when the node has no
     /// snapshot engine — which is not an error, it is "none".
     SnapshotList {
@@ -2137,6 +2146,8 @@ pub enum Response {
     WpMailSelfCheck(hyperion_types::FtpCheckReport),
     WpMailRepair(hyperion_types::FtpCheckReport),
     WpMailAutofixSet(bool),
+    SiteCheck(hyperion_types::SiteCheckReport),
+    SiteCheckLast(Option<hyperion_types::SiteCheckReport>),
     SnapshotList(Vec<hyperion_types::SnapshotSummary>),
     SnapshotNow(String),
     SnapshotDiff(hyperion_types::SnapshotDiff),

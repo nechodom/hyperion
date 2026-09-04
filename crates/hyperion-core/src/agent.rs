@@ -1843,6 +1843,19 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
     ) -> Result<Vec<hyperion_types::care_check::CareOverviewRow>, RpcError> {
         self.svc.care_overview(period).await
     }
+    async fn site_check_run(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<hyperion_types::SiteCheckReport, RpcError> {
+        self.svc.site_check_run(sel).await
+    }
+    async fn site_check_last(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<Option<hyperion_types::SiteCheckReport>, RpcError> {
+        let detail = self.svc.get(sel).await?;
+        Ok(self.svc.site_check_last(detail.id.as_str()).await)
+    }
     async fn snapshot_list(
         &self,
         sel: HostingSelector,
