@@ -1085,7 +1085,12 @@ mod tests {
                 "{} needs two English forms",
                 s.id
             );
-            assert_eq!(s.cs.split('|').count(), 3, "{} needs three Czech forms", s.id);
+            assert_eq!(
+                s.cs.split('|').count(),
+                3,
+                "{} needs three Czech forms",
+                s.id
+            );
         }
     }
 
@@ -1113,8 +1118,7 @@ mod tests {
     #[test]
     fn missing_plural_form_falls_back_to_the_last() {
         let mut c = LetterCatalog::new(LetterLang::Cs);
-        c.overrides
-            .insert("unit_day".into(), "den|dnů".into());
+        c.overrides.insert("unit_day".into(), "den|dnů".into());
         assert_eq!(c.plural("unit_day", 1), "den");
         assert_eq!(c.plural("unit_day", 2), "dnů");
         assert_eq!(c.plural("unit_day", 9), "dnů");
@@ -1123,8 +1127,10 @@ mod tests {
     #[test]
     fn overrides_win_but_blank_ones_do_not() {
         let mut c = LetterCatalog::new(LetterLang::Cs);
-        c.overrides.insert("care.unmeasured.traffic".into(), "provoz".into());
-        c.overrides.insert("care.unmeasured.backups".into(), "   ".into());
+        c.overrides
+            .insert("care.unmeasured.traffic".into(), "provoz".into());
+        c.overrides
+            .insert("care.unmeasured.backups".into(), "   ".into());
         assert_eq!(c.get("care.unmeasured.traffic"), "provoz");
         // Blank means "no override" — clearing the field in Settings is how
         // an operator goes back to the built-in wording.
@@ -1148,7 +1154,8 @@ mod tests {
     #[test]
     fn months_fall_back_when_an_override_is_short() {
         let mut c = LetterCatalog::new(LetterLang::Cs);
-        c.overrides.insert("date_months".into(), "leden,únor".into());
+        c.overrides
+            .insert("date_months".into(), "leden,únor".into());
         assert_eq!(c.months().len(), 12);
         assert_eq!(c.months()[0], "led");
     }

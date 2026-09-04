@@ -1,10 +1,10 @@
 //! `HostingService` — the orchestrator. Single-node, no transport.
 
+use crate::letters::{render_template, LetterCatalog, LetterLang};
 use async_trait::async_trait;
 use hyperion_adapters::integrity;
 use hyperion_adapters::rollback::{Rollback, RollbackStack};
 use hyperion_adapters::AdapterError;
-use crate::letters::{render_template, LetterCatalog, LetterLang};
 use hyperion_rpc::codec::CareReportMail;
 use hyperion_rpc::wire::{
     DbCredentials, DeleteOpts, HostingCreateReq, HostingCreated, HostingSelector,
@@ -14193,14 +14193,13 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let template = self.care_report_template();
         let subject_template = read_notifications_section(self.agent_config_path.as_deref())
             .care_report_subject_template;
-        let (subject, body) =
-            care_report_render_full(
-                &self.letter_catalog(),
-                &report,
-                &detail.domain,
-                &template,
-                &subject_template,
-            );
+        let (subject, body) = care_report_render_full(
+            &self.letter_catalog(),
+            &report,
+            &detail.domain,
+            &template,
+            &subject_template,
+        );
         let mail = CareReportMail {
             subject,
             body,
@@ -14378,14 +14377,13 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 );
                 continue;
             }
-            let (subject, body) =
-                care_report_render_full(
-                    &self.letter_catalog(),
-                    &report,
-                    &detail.domain,
-                    &body_template,
-                    &subject_template,
-                );
+            let (subject, body) = care_report_render_full(
+                &self.letter_catalog(),
+                &report,
+                &detail.domain,
+                &body_template,
+                &subject_template,
+            );
             // Fourth guard, on exactly the terms of the three above. The
             // marker is BOTH "already reported" and the next period's start,
             // so consuming it on a message the relay refused does not delay
@@ -25631,7 +25629,11 @@ fn care_omitted_unmeasured_note(
         ),
         ("traffic", report.usage.is_none(), "care.unmeasured.traffic"),
         ("uptime", report.uptime.is_none(), "care.unmeasured.uptime"),
-        ("backups", report.backups.is_none(), "care.unmeasured.backups"),
+        (
+            "backups",
+            report.backups.is_none(),
+            "care.unmeasured.backups",
+        ),
         (
             "integrity",
             report.integrity.is_none(),
@@ -25866,10 +25868,7 @@ fn care_section_backups(cat: &LetterCatalog, backups: Option<&CareBackups>) -> S
         // Only ever a time INSIDE the period: the report must not reach
         // backwards for a comforting older date.
         if let Some(ts) = b.last_success_at {
-            s.push_str(&cat.render(
-                "care.backups.last",
-                &[("when", &report_datetime(cat, ts))],
-            ));
+            s.push_str(&cat.render("care.backups.last", &[("when", &report_datetime(cat, ts))]));
         }
         s
     };
@@ -28365,7 +28364,6 @@ fn fmt_notif_time(secs: i64) -> String {
         .unwrap_or_default()
 }
 
-
 /// Whole days left until `expires_at`, as a CALENDAR difference in UTC —
 /// the same calendar `fmt_mail_date` prints — never negative. Derived from
 /// the clock rather than from the warning's own 30/7/1 offset: a tick that
@@ -28917,9 +28915,7 @@ fn parse_agent_section_fields(
                 // Normalised rather than rejected: an unrecognised language
                 // resolves to English, and a customer's report going out in
                 // the wrong language beats one not going out at all.
-                crate::config_persist::FieldValue::Str(
-                    LetterLang::parse(v).as_str().to_string(),
-                )
+                crate::config_persist::FieldValue::Str(LetterLang::parse(v).as_str().to_string())
             }
             // Only ids the catalogue actually has. An unknown one is either
             // a hand-edited file or a string this version removed, and
@@ -31122,7 +31118,12 @@ mod tests {
     fn the_unmeasured_disclosure_is_translated() {
         let cs = LetterCatalog::new(LetterLang::Cs);
         let from = 1_780_272_000;
-        let r = CareReport::empty(HostingId("t".into()), "example.cz".into(), from, from + 86_400);
+        let r = CareReport::empty(
+            HostingId("t".into()),
+            "example.cz".into(),
+            from,
+            from + 86_400,
+        );
         // A letter that mentions no section at all, so all six are omitted.
         let (_, body) = care_report_render_with(&cs, &r, "example.cz", "Dobrý den. {domain}");
         assert!(body.starts_with("Dobrý den. example.cz"), "{body}");
@@ -31155,9 +31156,15 @@ mod tests {
         let from = 1_780_272_000; // 2026-06-01
         let r = CareReport {
             attacks_blocked: Some(12_345),
-            ..CareReport::empty(HostingId("t".into()), "example.cz".into(), from, from + 86_400)
+            ..CareReport::empty(
+                HostingId("t".into()),
+                "example.cz".into(),
+                from,
+                from + 86_400,
+            )
         };
-        let (_, body) = care_report_render_with(&cs, &r, "example.cz", "{attacks_count} {period_start}");
+        let (_, body) =
+            care_report_render_with(&cs, &r, "example.cz", "{attacks_count} {period_start}");
         assert!(body.starts_with("12 345 1. čvn 2026"), "{body}");
     }
 
@@ -32916,8 +32923,15 @@ mod tests {
 
     #[test]
     fn expiry_warning_30d_states_domain_date_days_and_consequences() {
-        let (subject, body) =
-            expiry_warning_mail_with(&en(), "example.cz", EXP_TS, 14, EXP_TS - 30 * 86_400, "", "");
+        let (subject, body) = expiry_warning_mail_with(
+            &en(),
+            "example.cz",
+            EXP_TS,
+            14,
+            EXP_TS - 30 * 86_400,
+            "",
+            "",
+        );
         assert_eq!(
             subject,
             "[Hyperion] Hosting for example.cz expires in 30 days"
@@ -32952,7 +32966,8 @@ mod tests {
 
     #[test]
     fn expiry_warning_on_the_day_says_today() {
-        let (subject, body) = expiry_warning_mail_with(&en(), "example.cz", EXP_TS, 14, EXP_TS, "", "");
+        let (subject, body) =
+            expiry_warning_mail_with(&en(), "example.cz", EXP_TS, 14, EXP_TS, "", "");
         assert_eq!(subject, "[Hyperion] Hosting for example.cz expires today");
         assert!(body.contains("hosting for example.cz expires today."));
         // A late tick can't produce a negative countdown.
@@ -32966,7 +32981,8 @@ mod tests {
         // grace_days = 0 is stored, but reconcile_scheduled_rows queues the
         // delete at grace.max(1) — the letter must name that same date, and
         // say "1 day" rather than "1 days".
-        let (_, body) = expiry_warning_mail_with(&en(), "example.cz", EXP_TS, 0, EXP_TS - 86_400, "", "");
+        let (_, body) =
+            expiry_warning_mail_with(&en(), "example.cz", EXP_TS, 0, EXP_TS - 86_400, "", "");
         assert!(body.contains("after a grace period of 1 day, on 2 Sep 2026"));
         let (_, body) =
             expiry_warning_mail_with(&en(), "example.cz", EXP_TS, 3, EXP_TS - 2 * 86_400, "", "");
@@ -33050,7 +33066,10 @@ mod tests {
             care_report_render_with(&en(), &r, "example.cz", ""),
             (subject.clone(), body.clone())
         );
-        assert_eq!(care_report_render_with(&en(), &r, "example.cz", "  \n\t ").1, body);
+        assert_eq!(
+            care_report_render_with(&en(), &r, "example.cz", "  \n\t ").1,
+            body
+        );
         // …and today's letter is still exactly this.
         assert_eq!(
             subject,
@@ -33084,7 +33103,8 @@ mod tests {
             )
         }] {
             let (_, builtin) = care_report_render(&en(), &r, &r.domain);
-            let (_, templated) = care_report_render_with(&en(), 
+            let (_, templated) = care_report_render_with(
+                &en(),
                 &r,
                 &r.domain,
                 hyperion_types::CARE_REPORT_DEFAULT_BODY_TEMPLATE,
@@ -33163,7 +33183,8 @@ mod tests {
     #[test]
     fn a_custom_letter_cannot_drop_an_unmeasured_section() {
         let r = mk_care_report(); // uptime is None
-        let (_, body) = care_report_render_with(&en(), &r, "example.cz", "{domain}\n{attacks}\n{traffic}");
+        let (_, body) =
+            care_report_render_with(&en(), &r, "example.cz", "{domain}\n{attacks}\n{traffic}");
         assert!(
             !body.contains("AVAILABILITY:"),
             "operator did drop it: {body}"
@@ -33370,7 +33391,8 @@ mod tests {
     #[test]
     fn care_letter_custom_template_keeps_an_unmeasured_section_honest() {
         let r = mk_care_report(); // uptime is None
-        let (subject, body) = care_report_render_with(&en(), 
+        let (subject, body) = care_report_render_with(
+            &en(),
             &r,
             "example.cz",
             "{domain} {period_start}–{period_end} ({days})\n{uptime}\n{attacks}",
@@ -33394,7 +33416,8 @@ mod tests {
     #[test]
     fn care_letter_unknown_placeholder_is_left_literal() {
         let r = mk_care_report();
-        let (_, body) = care_report_render_with(&en(), &r, "example.cz", "{domain} {nope} {unclosed");
+        let (_, body) =
+            care_report_render_with(&en(), &r, "example.cz", "{domain} {nope} {unclosed");
         // `starts_with`, not `==`: this letter names no section at all, so
         // the unmeasured-section disclosure is appended after it. That is
         // `a_custom_letter_cannot_drop_an_unmeasured_section`'s business;
@@ -33433,8 +33456,10 @@ mod tests {
             (0, EXP_TS - 86_400),
             (14, EXP_TS), // "expires today"
         ] {
-            let (_, builtin) = expiry_warning_mail_with(&en(), "example.cz", EXP_TS, grace, now, "", "");
-            let (_, templated) = expiry_warning_mail_with(&en(), 
+            let (_, builtin) =
+                expiry_warning_mail_with(&en(), "example.cz", EXP_TS, grace, now, "", "");
+            let (_, templated) = expiry_warning_mail_with(
+                &en(),
                 "example.cz",
                 EXP_TS,
                 grace,
@@ -33539,7 +33564,8 @@ mod tests {
 
     #[test]
     fn expiry_letter_custom_template_substitutes_and_preserves_unknowns() {
-        let (subject, body) = expiry_warning_mail_with(&en(), 
+        let (subject, body) = expiry_warning_mail_with(
+            &en(),
             "example.cz",
             EXP_TS,
             14,
