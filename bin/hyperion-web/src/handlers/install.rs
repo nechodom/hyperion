@@ -573,8 +573,16 @@ pub async fn get_update_node_status(
         Some(node_id)
     };
     let resp = crate::dispatcher::dispatch_to_node(&state, target, Request::NodeUpdateStatus).await;
+    // Whether the every-3s poller on that node's card should keep running.
+    // This is one RPC per node card, and the /install page lists every node
+    // — an idle cluster was still N requests every three seconds, for ever.
+    // An RPC error keeps polling, so a node restarting mid-update recovers.
+    let mut still_running = true;
     let body = match resp {
-        Ok(RpcResponse::NodeUpdateStatus(s)) => render_update_status(&s),
+        Ok(RpcResponse::NodeUpdateStatus(s)) => {
+            still_running = s.started_at != 0 && s.state == "running";
+            render_update_status(&s)
+        }
         Ok(RpcResponse::Error(e)) => format!(
             "<div class=\"text-soft small\">status RPC error: {}</div>",
             html_escape(&e.to_string())
@@ -585,12 +593,15 @@ pub async fn get_update_node_status(
             html_escape(&e.to_string())
         ),
     };
-    (
-        axum::http::StatusCode::OK,
-        [("content-type", "text/html; charset=utf-8")],
-        body,
-    )
-        .into_response()
+    // 286 tells htmx to swap the body and then retire the poll. "Start
+    // update" is a plain form POST that re-renders /install, so the next
+    // update gets a fresh poller.
+    let status = if still_running {
+        axum::http::StatusCode::OK
+    } else {
+        axum::http::StatusCode::from_u16(286).unwrap_or(axum::http::StatusCode::OK)
+    };
+    (status, [("content-type", "text/html; charset=utf-8")], body).into_response()
 }
 
 /// Format a NodeUpdateStatus as a small HTML fragment for the

@@ -423,23 +423,42 @@ pre code {
     display: contents;
   }
   .sidebar .brand { padding: 0; }
+  /* The top bar is the scroller (`.sidebar`, above). These sections must
+     NOT be scrollers too, and must not shrink: as flex items they default
+     to flex-shrink:1, and their own `overflow-x:auto` let them shrink below
+     min-content — so at 375px each section collapsed to about ten pixels
+     and the links became unreadable slivers of chopped text rather than
+     the sidebar scrolling sideways as intended. */
   .sidebar .nav-section {
     flex-direction: row;
     padding: 0;
-    overflow-x: auto;
+    overflow: visible;
+    flex: 0 0 auto;
   }
   .sidebar .nav-label { display: none; }
   .sidebar a.nav-link {
     padding: 0.4rem 0.7rem;
     font-size: 0.85rem;
+    flex: 0 0 auto;
+    white-space: nowrap;
   }
   .sidebar a.nav-link.active::before { display: none; }
   .sidebar a.nav-link .nav-icon { display: none; }
+  /* Sticky, not `margin-left:auto`: once the bar scrolls for real, an
+     auto margin parks the account controls at the END of the scroll
+     content, so signing out means scrolling past every nav link first.
+     Sticky keeps them against the right edge with the links passing
+     underneath — hence the background, which the transparent original
+     did not need. */
   .sidebar-footer {
     margin-top: 0;
     margin-left: auto;
-    padding: 0;
+    padding: 0 0 0 0.5rem;
     border-top: 0;
+    position: sticky;
+    right: 0;
+    flex: 0 0 auto;
+    background: var(--bg-2);
   }
   .sidebar .user-pill { padding: 0.3rem 0.5rem; }
   .sidebar .user-role { display: none; }
@@ -546,6 +565,18 @@ pre code {
   stroke-width: 2;
 }
 .card .muted { color: var(--text-dim); }
+
+/* Prose lists. Without this the browser's own 40px indent applies, which is
+   nearly twice the gutter everything else in a card uses — one list sat that
+   far in while its neighbours (which all carried an inline padding-left) did
+   not. Zero-specificity `:where()`, so the list widgets that reset themselves
+   by class (.activity-feed, .cmdk-list, .bell-list, .features) still win. */
+:where(.card, .panel, .prose, form) ul,
+:where(.card, .panel, .prose, form) ol {
+  padding-left: 1.2rem;
+  margin: 0.4rem 0;
+}
+:where(.card, .panel, .prose, form) li { margin: 0.15rem 0; }
 
 .card.danger {
   border-color: color-mix(in oklab, var(--danger) 30%, var(--border));

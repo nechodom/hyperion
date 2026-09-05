@@ -232,7 +232,14 @@ pub async fn chown_in_jail(
 ) -> Result<(), AdapterError> {
     let abs = resolve_inside_jail(jail, rel_path).await?;
     let spec = format!("{owner}:{owner}");
-    crate::cmd::run("/usr/bin/chown", &[&spec, abs.to_string_lossy().as_ref()]).await?;
+    // `-h` even though the resolver already refused a symlinked path: the
+    // check and the chown are two syscalls apart, and the directory between
+    // them belongs to the tenant.
+    crate::cmd::run(
+        "/usr/bin/chown",
+        &["-h", &spec, abs.to_string_lossy().as_ref()],
+    )
+    .await?;
     Ok(())
 }
 

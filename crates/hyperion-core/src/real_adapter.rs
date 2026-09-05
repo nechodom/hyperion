@@ -238,24 +238,61 @@ async fn ensure_preview_shim(root_dir: &str, system_user: &str, preview_active: 
     if !tokio::fs::try_exists(&wp_content).await.unwrap_or(false) {
         return;
     }
-    let mu_dir = wp_content.join("mu-plugins");
-    let shim = mu_dir.join("hyperion-preview.php");
+    // `remove_file` unlinks a symlink rather than its target, so clearing
+    // the shim needs no resolution.
+    let shim_logical = wp_content.join("mu-plugins").join("hyperion-preview.php");
     if !preview_active {
         // No preview for this site anymore — remove a shim we may have
         // dropped before, so it can't linger.
-        let _ = tokio::fs::remove_file(&shim).await;
+        let _ = tokio::fs::remove_file(&shim_logical).await;
         return;
     }
+    // Everything below runs as ROOT in a tree the TENANT owns. Resolving
+    // `mu-plugins` by name let a symlink there be followed by create_dir_all
+    // (which dereferences), by the write, and by a chown with no `-h` —
+    // which hands the tenant whatever they pointed at. `resolve_inside_jail`
+    // refuses a symlink at any segment and pins the result inside the site.
+    let Ok(mu_dir) = hyperion_adapters::files::resolve_inside_jail(
+        std::path::Path::new(root_dir),
+        "wp-content/mu-plugins",
+    )
+    .await
+    else {
+        tracing::warn!(
+            root_dir,
+            "preview shim: refusing a symlinked mu-plugins path"
+        );
+        return;
+    };
     if tokio::fs::create_dir_all(&mu_dir).await.is_err() {
         return;
     }
+    // The NAME is ours to manage, so a symlink sitting on it is cleared
+    // rather than refused — otherwise a tenant disables the preview shim
+    // permanently by planting one link.
+    let logical = mu_dir.join("hyperion-preview.php");
+    if let Ok(md) = tokio::fs::symlink_metadata(&logical).await {
+        if md.file_type().is_symlink() {
+            let _ = tokio::fs::remove_file(&logical).await;
+        }
+    }
+    let Ok(shim) = hyperion_adapters::files::resolve_inside_jail(
+        std::path::Path::new(root_dir),
+        "wp-content/mu-plugins/hyperion-preview.php",
+    )
+    .await
+    else {
+        return;
+    };
     if tokio::fs::write(&shim, PREVIEW_SHIM_PHP).await.is_err() {
         return;
     }
     // The site runs as its own user; a root-owned mu-plugin is readable by
     // PHP-FPM anyway, but chown keeps the tree uniform (and lets the site
-    // owner delete it over FTP).
+    // owner delete it over FTP). `-h` because chown dereferences by default,
+    // which is the whole escalation this function used to allow.
     let _ = tokio::process::Command::new("/usr/bin/chown")
+        .arg("-h")
         .arg(format!("{system_user}:{system_user}"))
         .arg(&mu_dir)
         .arg(&shim)
@@ -361,17 +398,27 @@ impl AdapterPort for RealAdapter {
         // what happens when the directory is empty + autoindex is off).
         // Operator/client replaces it with real content.
         let index_path = std::path::Path::new(htdocs).join("index.html");
-        if !index_path.exists() {
+        // `exists()` DEREFERENCES: a tenant symlinking index.html at a file
+        // that does not exist yet made this report "absent", and root then
+        // created the target and chowned it to them. `symlink_metadata` sees
+        // the link itself, so a link — dangling or not — counts as present
+        // and nothing is written.
+        let absent = tokio::fs::symlink_metadata(&index_path).await.is_err();
+        if absent {
             let body = HOSTING_PLACEHOLDER_HTML;
             if let Err(e) = tokio::fs::write(&index_path, body).await {
                 tracing::warn!(error=%e, "could not write placeholder index.html");
             } else {
                 let mut chown = tokio::process::Command::new("/usr/bin/chown");
                 chown
+                    .arg("-h")
                     .arg(format!("{}:{}", owner_uid, owner_uid))
                     .arg(&index_path);
                 best_effort_cmd(chown, "chown placeholder index.html").await;
                 let mut chmod = tokio::process::Command::new("/usr/bin/chmod");
+                // chmod has no `-h` on Linux and follows symlinks; the write
+                // above only happens when nothing was there, so the path is
+                // a regular file we just created.
                 chmod.arg("0644").arg(&index_path);
                 best_effort_cmd(chmod, "chmod 0644 placeholder index.html").await;
             }
@@ -2273,5 +2320,45 @@ mod tests {
             derive_system_user_from_log_path(std::path::Path::new("/home/a:b/x.cz/logs")),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod preview_shim_symlink_tests {
+    use super::*;
+    use std::os::unix::fs::symlink;
+
+    /// Same escape the mail plugin had: root resolving a tenant-owned path
+    /// by name, then writing and chowning through whatever is there.
+    #[tokio::test]
+    async fn a_symlinked_mu_plugins_directory_is_not_written_through() {
+        let site = tempfile::tempdir().expect("tmp");
+        let outside = tempfile::tempdir().expect("tmp2");
+        let root = site.path().join("htdocs");
+        std::fs::create_dir_all(root.join("wp-content")).expect("wp-content");
+        symlink(outside.path(), root.join("wp-content").join("mu-plugins")).expect("symlink");
+
+        ensure_preview_shim(&root.to_string_lossy(), "victim", true).await;
+
+        assert!(
+            !outside.path().join("hyperion-preview.php").exists(),
+            "root wrote outside the site through a symlink"
+        );
+    }
+
+    /// And the ordinary case still installs, or the guard is just an outage.
+    #[tokio::test]
+    async fn a_normal_site_still_gets_the_shim() {
+        let site = tempfile::tempdir().expect("tmp");
+        let root = site.path().join("htdocs");
+        std::fs::create_dir_all(root.join("wp-content")).expect("wp-content");
+
+        ensure_preview_shim(&root.to_string_lossy(), "site", true).await;
+
+        let shim = root
+            .join("wp-content")
+            .join("mu-plugins")
+            .join("hyperion-preview.php");
+        assert!(shim.exists(), "the shim was not installed");
     }
 }

@@ -63,7 +63,8 @@
         loaded.
       </p>
     {% else %}
-    <table class="table small" style="margin:0 0 0.6rem">
+    <div class="table-wrap" style="margin:0 0 0.6rem">
+    <table class="table small" style="margin:0">
       <tbody>
         {% for f in r.findings %}
         <tr>
@@ -83,6 +84,7 @@
         {% endfor %}
       </tbody>
     </table>
+    </div>
     {% endif %}
     {% endif %}
 
