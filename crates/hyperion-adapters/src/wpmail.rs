@@ -322,10 +322,75 @@ pub async fn remove_mu_plugin(root_dir: &str) {
     let _ = tokio::fs::remove_file(mu_plugin_path(root_dir)).await;
 }
 
+/// What the failure log could tell us.
+///
+/// Three states, kept apart because collapsing them is how "we could not
+/// read the record" became "nothing has failed" — a green Mail card for a
+/// site whose log we never opened.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FailureLog {
+    /// Read, and these are the last lines (possibly none).
+    Read(Vec<String>),
+    /// No log file yet. Ordinary: nothing has failed since the plugin was
+    /// installed, or it has only just been installed.
+    Absent,
+    /// A log exists but could not be read — a symlink we refuse to follow,
+    /// or a permission problem. NOT evidence that mail is fine.
+    Unreadable,
+}
+
+impl FailureLog {
+    /// The lines, or none. For callers that only count.
+    pub fn lines(&self) -> &[String] {
+        match self {
+            FailureLog::Read(v) => v,
+            _ => &[],
+        }
+    }
+
+    /// True only when we actually looked and the log is there.
+    pub fn is_read(&self) -> bool {
+        matches!(self, FailureLog::Read(_))
+    }
+}
+
+/// [`recent_failures`], keeping the three states apart.
+pub async fn read_failure_log(root_dir: &str, limit: usize) -> FailureLog {
+    let Some(site_dir) = Path::new(root_dir).parent() else {
+        return FailureLog::Unreadable;
+    };
+    let Ok(path) = crate::files::resolve_inside_jail(site_dir, "logs/wp-mail-failures.log").await
+    else {
+        // Refused — a symlink, or something outside the site. That is a
+        // finding, not an absence.
+        return FailureLog::Unreadable;
+    };
+    match tokio::fs::read_to_string(&path).await {
+        Ok(raw) => {
+            let lines: Vec<&str> = raw.lines().filter(|l| !l.trim().is_empty()).collect();
+            FailureLog::Read(
+                lines
+                    .iter()
+                    .rev()
+                    .take(limit)
+                    .rev()
+                    .map(|s| s.to_string())
+                    .collect(),
+            )
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => FailureLog::Absent,
+        Err(_) => FailureLog::Unreadable,
+    }
+}
+
 /// The last few recorded failures, newest last, for the card to quote.
 ///
 /// Reads at most the tail of the file: the plugin caps it, but a site that
 /// has been failing for a month should not be able to make this allocate.
+///
+/// Answers with an empty vec for all three of "no failures", "no log" and
+/// "could not read it" — [`read_failure_log`] is the one to reach for when
+/// that difference matters, which on a card it usually does.
 pub async fn recent_failures(root_dir: &str, limit: usize) -> Vec<String> {
     // The log lives beside the docroot, so the jail is the SITE directory.
     // Read as root and shown in the panel, so a symlink here is an arbitrary
@@ -650,5 +715,41 @@ mod utf8_tests {
             "🙂".to_string(),
         ];
         assert_eq!(failures_since(&lines, 1_780_617_600), 1);
+    }
+}
+
+#[cfg(test)]
+mod failure_log_tests {
+    use super::*;
+    use std::os::unix::fs::symlink;
+
+    /// The three states have to stay apart. Collapsing "could not read" into
+    /// "nothing failed" is a green Mail card for a site whose log was never
+    /// opened.
+    #[tokio::test]
+    async fn absent_read_and_unreadable_are_three_answers() {
+        let site = tempfile::tempdir().expect("tmp");
+        let root = site.path().join("htdocs");
+        std::fs::create_dir_all(&root).expect("root");
+        std::fs::create_dir_all(site.path().join("logs")).expect("logs");
+        let root_s = root.to_string_lossy().to_string();
+
+        // No file yet — ordinary.
+        assert_eq!(read_failure_log(&root_s, 20).await, FailureLog::Absent);
+
+        // A real log reads.
+        let log = site.path().join("logs").join("wp-mail-failures.log");
+        std::fs::write(&log, "2026-06-10T10:00:00+00:00\tto@x\tboom\n").expect("write");
+        let got = read_failure_log(&root_s, 20).await;
+        assert!(got.is_read());
+        assert_eq!(got.lines().len(), 1);
+
+        // A symlink is refused, and that is NOT "nothing failed".
+        std::fs::remove_file(&log).expect("rm");
+        symlink(site.path().join("elsewhere"), &log).expect("symlink");
+        let got = read_failure_log(&root_s, 20).await;
+        assert_eq!(got, FailureLog::Unreadable);
+        assert!(!got.is_read());
+        assert!(got.lines().is_empty());
     }
 }

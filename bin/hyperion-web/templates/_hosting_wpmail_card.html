@@ -32,7 +32,8 @@
   <p class="text-soft small" style="margin:0">{{ e }}</p>
   {% else %}
 
-  <table class="table small" style="margin:0 0 0.6rem">
+  <div class="table-wrap" style="margin:0 0 0.6rem">
+  <table class="table small" style="margin:0">
     <tbody>
       {% for it in report.items %}
       <tr id="wpmail-{{ it.id }}">
@@ -48,6 +49,7 @@
       {% endfor %}
     </tbody>
   </table>
+  </div>
 
   <p class="text-soft small" style="margin:0 0 0.6rem;line-height:1.55">
     Mail leaves this server through its own queue, signed with this domain's

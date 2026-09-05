@@ -1520,9 +1520,9 @@ function isShortcutContext(ev) {
   async function poll() {
     try {
       const r = await fetch('/api/jobs-active', { credentials: 'same-origin', headers: { accept: 'application/json' } });
-      if (!r.ok) return;
+      if (!r.ok) return false;
       const jobs = await r.json();
-      if (!Array.isArray(jobs) || !jobs.length) { box.hidden = true; box.replaceChildren(); return; }
+      if (!Array.isArray(jobs) || !jobs.length) { box.hidden = true; box.replaceChildren(); return false; }
       box.hidden = false;
       const frag = document.createDocumentFragment();
       const head = el('div', 'font-size:.7rem;letter-spacing:.04em;text-transform:uppercase;opacity:.7;padding:0 2px');
@@ -1543,10 +1543,35 @@ function isShortcutContext(ev) {
         frag.appendChild(a);
       });
       box.replaceChildren(frag);
+      return true;
     } catch (_) { /* swallow */ }
+    return false;
   }
-  poll();
-  setInterval(poll, 3000);
+  // Adaptive cadence. This ran every three seconds on EVERY page, whether
+  // or not anything was running — a browser left open was twenty requests a
+  // minute, for ever, to say "still nothing". Three seconds is right while
+  // a job is in flight and the bar is moving; when idle, half a minute is
+  // plenty for a job started elsewhere to show up. A hidden tab does not
+  // poll at all, and checks once as soon as it comes back.
+  const BUSY_MS = 3000;
+  const IDLE_MS = 30000;
+  let timer = null;
+  function schedule(ms) {
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(run, ms);
+  }
+  async function run() {
+    if (document.hidden) {
+      schedule(IDLE_MS);
+      return;
+    }
+    const busy = await poll();
+    schedule(busy ? BUSY_MS : IDLE_MS);
+  }
+  document.addEventListener('visibilitychange', function () {
+    if (!document.hidden) schedule(0);
+  });
+  schedule(0);
 })();
 </script>
 <script>
@@ -1576,6 +1601,11 @@ function isShortcutContext(ev) {
       // `force` (bfcache restore) bypasses the click cooldown but still
       // respects hidden + focus so we never clobber what the user is doing.
       if (document.hidden) return;
+      // Not on screen — a region inside a tab panel nobody has opened. This
+      // refetches the WHOLE page to swap one region, so it was a full render
+      // of the hosting detail every fifteen seconds for an operator sitting
+      // on a different tab. `offsetParent` is null for `display:none`.
+      if (!node.offsetParent && node.style.position !== 'fixed') return;
       if (!force && Date.now() - lastClick < 4000) return;
       if (inputFocused(node)) return;
       try {
@@ -1620,6 +1650,52 @@ function isShortcutContext(ev) {
   window.addEventListener('pageshow', (e) => {
     if (e.persisted) ticks.forEach((t) => t(true));
   });
+})();
+</script>
+<script>
+// Visibility-gated htmx polling. An element marked
+// `data-poll-visible data-poll-ms="30000"` with `hx-trigger="poll-tick"` is
+// asked to refresh on that cadence, but ONLY while it is actually on screen.
+//
+// htmx's own `every 30s` cannot do this. Its polling loop fires on a timer
+// with no visibility test at all, and a `display:none` element polls exactly
+// as hard as a visible one — the per-hosting jobs panel lives on the Backups
+// tab and was reaching the owning node every thirty seconds for an operator
+// sitting on Overview. htmx does support a `[expr]` trigger filter, which
+// would gate it, but that filter is compiled with `Function()`; our CSP
+// grants no 'unsafe-eval', so the compile throws, htmx catches it, drops the
+// filter and polls anyway. Failing open is the worst case: the gate looks
+// present in the markup and does nothing.
+//
+// So the cadence lives here, next to the rules it has to share:
+// nothing ticks in a hidden browser tab, and nothing ticks for a panel whose
+// UI tab is closed. Opening the tab resumes on the next beat — no catch-up
+// burst, because the panel re-renders from scratch anyway.
+(function () {
+  // One timer for the page, not one per element: the elements are swapped
+  // out by htmx on every refresh (hx-swap="outerHTML"), so a per-element
+  // interval would keep firing against a detached node while the fresh one
+  // armed a second timer. Re-querying each beat sidesteps that entirely.
+  const BEAT_MS = 1000;
+  const last = new Map();
+  setInterval(function () {
+    if (document.hidden) return;
+    const now = Date.now();
+    document.querySelectorAll('[data-poll-visible][id]').forEach(function (node) {
+      // `offsetParent` is null for display:none — the closed-tab case.
+      if (!node.offsetParent) return;
+      const ms = parseInt(node.getAttribute('data-poll-ms'), 10) || 30000;
+      const key = node.id;
+      const prev = last.get(key);
+      if (prev && now - prev < ms) return;
+      last.set(key, now);
+      // First sighting: record the time and wait a full period rather than
+      // firing at once. The panel was rendered with the page, so its content
+      // is already current; an immediate hit would just duplicate that.
+      if (!prev) return;
+      if (window.htmx) window.htmx.trigger(node, 'poll-tick');
+    });
+  }, BEAT_MS);
 })();
 </script>
 </body>

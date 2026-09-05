@@ -42,7 +42,9 @@
   <div style="display:flex;flex-direction:column;gap:0.4rem">
     {% for r in rows %}
     <a href="/hostings/{{ r.hosting_id }}" class="row" style="align-items:baseline;gap:0.5rem;flex-wrap:wrap;border:1px solid var(--border);border-radius:var(--radius-xs);padding:0.45rem 0.6rem;background:var(--bg-2);text-decoration:none;color:inherit">
-      <strong style="font-size:0.9rem">{{ r.domain }}</strong>
+      {#- `min-width:0` so a long domain can shrink and wrap rather than
+          forcing the row wider than the card on a phone. -#}
+      <strong style="font-size:0.9rem;min-width:0;word-break:break-word">{{ r.domain }}</strong>
       {% if !r.packages.is_empty() %}
         <span class="text-soft small">{{ r.packages }}</span>
       {% endif %}

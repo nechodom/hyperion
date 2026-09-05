@@ -23,22 +23,24 @@
   <p class="text-soft small" style="margin:0">{{ e }}</p>
   {% else %}
 
-  <table class="table small" style="margin:0 0 0.6rem">
-    <tbody>
-      {% for it in report.items %}
-      <tr>
-        <td style="width:1.6rem;vertical-align:top">
-          {% if it.severity == "ok" %}<span style="color:var(--success)">●</span>
-          {% else if it.severity == "error" %}<span style="color:var(--danger)">●</span>
-          {% else if it.severity == "warn" %}<span style="color:var(--warn)">●</span>
-          {% else %}<span class="text-soft">●</span>{% endif %}
-        </td>
-        <td style="vertical-align:top"><strong>{{ it.label }}</strong></td>
-        <td class="text-soft" style="vertical-align:top">{{ it.detail }}</td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
+  <div class="scroll-x">
+    <table class="table small" style="margin:0 0 0.6rem">
+      <tbody>
+        {% for it in report.items %}
+        <tr>
+          <td style="width:1.6rem;vertical-align:top">
+            {% if it.severity == "ok" %}<span style="color:var(--success)">●</span>
+            {% else if it.severity == "error" %}<span style="color:var(--danger)">●</span>
+            {% else if it.severity == "warn" %}<span style="color:var(--warn)">●</span>
+            {% else %}<span class="text-soft">●</span>{% endif %}
+          </td>
+          <td style="vertical-align:top"><strong>{{ it.label }}</strong></td>
+          <td class="text-soft" style="vertical-align:top">{{ it.detail }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
 
   <p class="text-soft small" style="margin:0 0 0.6rem">
     Checked on <strong>{{ target_node }}</strong> · connect to port

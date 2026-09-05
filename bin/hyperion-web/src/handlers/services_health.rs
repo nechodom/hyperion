@@ -243,8 +243,18 @@ pub async fn get_service_install_status(
     };
     let resp =
         crate::dispatcher::dispatch_to_node(&state, target, Request::ServiceInstallStatus).await;
+    // Whether the every-2s poller on the page should keep running. An
+    // install that has finished — or a node where none ever started — is not
+    // going to change on its own, and this poll is an RPC to that node: left
+    // running it was a request every two seconds, for ever, to every operator
+    // with the Services page open. An RPC error keeps polling on purpose, so
+    // a node that is briefly unreachable mid-install resumes by itself.
+    let mut still_running = true;
     let body = match resp {
-        Ok(RpcResponse::ServiceInstallStatus(s)) => render_install_status(&s),
+        Ok(RpcResponse::ServiceInstallStatus(s)) => {
+            still_running = s.started_at != 0 && s.state == "running";
+            render_install_status(&s)
+        }
         Ok(RpcResponse::Error(e)) => format!(
             "<div class=\"text-soft small\">status RPC error: {}</div>",
             escape(&e.to_string())
@@ -255,8 +265,17 @@ pub async fn get_service_install_status(
             escape(&e.to_string())
         ),
     };
+    // 286 is htmx's "stop polling": the body is still swapped, so the card
+    // shows its final state, but the every-2s trigger is retired. Clicking
+    // Install is a plain form POST that re-renders the whole page, so a new
+    // install gets a fresh poller.
+    let status = if still_running {
+        axum::http::StatusCode::OK
+    } else {
+        axum::http::StatusCode::from_u16(286).unwrap_or(axum::http::StatusCode::OK)
+    };
     (
-        axum::http::StatusCode::OK,
+        status,
         [
             ("content-type", "text/html; charset=utf-8"),
             ("cache-control", "no-store"),

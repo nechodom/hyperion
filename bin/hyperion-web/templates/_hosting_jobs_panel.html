@@ -11,7 +11,8 @@
    on a quiet page. #}
 {% if !jobs.is_empty() %}
 <div id="hosting-jobs" hx-get="/hostings/{{ selector }}/jobs-panel"
-     hx-trigger="every 2s" hx-swap="outerHTML">
+     hx-trigger="poll-tick" hx-swap="outerHTML"
+     data-poll-visible data-poll-ms="2000">
   {% for j in jobs %}
   <div class="card" style="margin-bottom:0.75rem;border-color:var(--primary)">
     <div class="spread" style="align-items:center;gap:0.75rem">
@@ -33,8 +34,22 @@
   {% endfor %}
 </div>
 {% else %}
-{# Keep polling even with nothing to show, so a job started from ANOTHER
-   tab (or by the scheduler) appears here on its own. Empty div, no card. #}
+{# Keep watching even with nothing to show, so a job started from ANOTHER
+   tab (or by the scheduler) appears here on its own. Empty div, no card.
+
+   Every 30s, not every 5. This poll reaches the OWNING NODE, and it ran for
+   as long as the page was open — a browser left open overnight was thousands
+   of RPCs asking whether anything had started. A job appearing within half a
+   minute is fine; the two-second cadence above is for a job actually running,
+   where the progress bar is the point.
+
+   `data-poll-visible` rather than htmx's own `every 30s`: this panel lives on
+   the Backups tab, and htmx polls a `display:none` element just as eagerly as
+   a visible one. Its `[expr]` trigger filter would gate it, but that is
+   compiled with `Function()` and our CSP has no `unsafe-eval` — htmx swallows
+   the failure and polls anyway. The tick in base.html checks the element is
+   actually on screen, so a closed tab costs nothing and opening it resumes. #}
 <div id="hosting-jobs" hx-get="/hostings/{{ selector }}/jobs-panel"
-     hx-trigger="every 5s" hx-swap="outerHTML"></div>
+     hx-trigger="poll-tick" hx-swap="outerHTML"
+     data-poll-visible data-poll-ms="30000"></div>
 {% endif %}

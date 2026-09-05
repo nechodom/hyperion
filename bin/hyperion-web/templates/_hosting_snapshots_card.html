@@ -52,11 +52,12 @@
     this node has the snapshot engine installed.
   </p>
   {% else %}
+  <div class="table-wrap" style="margin:0">
   <table class="table small" style="margin:0">
     <tbody>
       {% for r in rows %}
       <tr>
-        <td style="width:6rem"><code>{{ r.id }}</code></td>
+        <td><code>{{ r.id }}</code></td>
         <td class="text-soft" style="white-space:nowrap">{{ r.when }}</td>
         <td class="text-soft">{{ r.tags }}</td>
         <td style="text-align:right">
@@ -74,5 +75,6 @@
       {% endfor %}
     </tbody>
   </table>
+  </div>
   {% endif %}
 </div>

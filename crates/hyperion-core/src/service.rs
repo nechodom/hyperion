@@ -8424,12 +8424,27 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // Failures the plugin recorded. This is the only direct evidence
         // that mail is actually broken — `wp_mail()` returns false and
         // almost every caller in WordPress ignores it.
-        let lines = wpmail::recent_failures(&root, 20).await;
+        let log = wpmail::read_failure_log(&root, 20).await;
+        let lines: Vec<String> = log.lines().to_vec();
         let day = now_secs() - 86_400;
         let week = now_secs() - 7 * 86_400;
         let recent = wpmail::failures_since(&lines, day);
         let weekly = wpmail::failures_since(&lines, week);
-        if weekly == 0 {
+        if matches!(log, wpmail::FailureLog::Unreadable) {
+            // "We could not read the record" is not "nothing has failed".
+            // Rendering the second for the first is how a site whose log we
+            // never opened showed a green card.
+            push(
+                "wp_mail_failures",
+                "Send failures could not be read",
+                "warn",
+                "The file this site's failed sends are recorded in could not be read — it may \
+                 have been replaced with a link, which we do not follow. Nothing here says mail \
+                 is working; it says we cannot tell."
+                    .into(),
+                "site_repair",
+            );
+        } else if weekly == 0 {
             push(
                 "wp_mail_failures",
                 "No send failures recorded",
@@ -8547,9 +8562,12 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let mut forced_at = self.wp_mail_force_local(id).await;
 
         // Has mail been failing, and is something in the way?
-        let lines = wpmail::recent_failures(&root, 20).await;
-        let week = now_secs() - 7 * 86_400;
-        let failing = wpmail::failures_since(&lines, week) > 0;
+        // `log` above is the log's PATH, which goes into the plugin; this is
+        // its CONTENT.
+        let failures = wpmail::read_failure_log(&root, 20).await;
+        // Unreadable is not "failing": taking mail off a working SMTP plugin
+        // because we could not open a log file would be acting on nothing.
+        let failing = wpmail::failures_since(failures.lines(), now_secs() - 7 * 86_400) > 0;
         if failing && forced_at.is_none() {
             let active: Vec<String> =
                 match hyperion_adapters::wpcli::plugin_list(&user, &root).await {
@@ -8647,9 +8665,15 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             // for ever.
             if let Some(at) = before {
                 let lines = hyperion_adapters::wpmail::recent_failures(&detail.root_dir, 20).await;
-                // An hour's grace: a queue drains, and a failure logged one
-                // second after the override is not evidence against it.
-                if hyperion_adapters::wpmail::failures_since(&lines, at + 3_600) > 0 {
+                // A SLIDING day, floored by the override plus an hour's
+                // grace. An absolute cutoff was wrong in both directions: a
+                // single failure the day after the override re-alerted for
+                // ever, and a site that started failing months later was
+                // compared against a cutoff so old that every line counted.
+                // The floor keeps the failures that CAUSED the override from
+                // being read as evidence against it.
+                let since = (now_secs() - 86_400).max(at + 3_600);
+                if hyperion_adapters::wpmail::failures_since(&lines, since) > 0 {
                     self.notify_admins_say(
                         "error",
                         "ops.mail_failing",

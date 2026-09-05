@@ -681,6 +681,13 @@
 </div>
 {% endif %}
 
+{#- `intersect once`, never `revealed once`: htmx's `revealed` asks
+    getBoundingClientRect, and a `display:none` element answers all zeros —
+    which its "is it on screen" test reads as YES. Every panel marked
+    `revealed` therefore loaded immediately, on every tab, and opening one
+    site fired fifteen requests at the owning node for tabs nobody looked
+    at. `intersect` uses IntersectionObserver, which correctly never fires
+    for a hidden element and fires the moment its tab is shown. -#}
 {# What a visitor would actually meet: the pages the site advertises, and
    the links, images and stylesheets on them.
 
@@ -691,7 +698,7 @@
    Lazy: it reads the owning node. #}
 <div id="sitecheck-panel"
      hx-get="/hostings/{{ detail.id.as_str() }}/sitecheck-panel"
-     hx-trigger="revealed once"
+     hx-trigger="intersect once"
      hx-swap="innerHTML">
   <div class="card" style="margin-bottom:0.9rem">
     <span class="spinner-inline" style="margin-right:0.4rem"></span>
@@ -1293,7 +1300,7 @@
    on this tab is secondary. Lazy — the probe + possible wp-cli run must
    not hold up the page. #}
 <div hx-get="/hostings/{{ detail.id.as_str() }}/health-panel"
-     hx-trigger="load" hx-swap="outerHTML">
+     hx-trigger="intersect once" hx-swap="outerHTML">
   <div class="card hover" id="fatal-card">
     <h2>
       <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
@@ -1305,13 +1312,13 @@
   </div>
 </div>
 
-{# Permissions check, below site health. `revealed once` rather than `load`:
+{# Permissions check, below site health. `intersect once` rather than `load`:
    the health card above already pays a load-triggered probe, and a second
    one would double the work on every detail render whether or not the
    operator ever opens this tab. #}
 <div id="perm-panel"
      hx-get="/hostings/{{ detail.id.as_str() }}/perm-panel"
-     hx-trigger="revealed once"
+     hx-trigger="intersect once"
      hx-swap="innerHTML">
   <div class="card" style="margin-bottom:0.9rem">
     <span class="spinner-inline" style="margin-right:0.4rem"></span>
@@ -1324,7 +1331,7 @@
    an operator who never opens this tab. #}
 <div id="wpmail-panel"
      hx-get="/hostings/{{ detail.id.as_str() }}/wpmail-panel"
-     hx-trigger="revealed once"
+     hx-trigger="intersect once"
      hx-swap="innerHTML">
   <div class="card" style="margin-bottom:0.9rem">
     <span class="spinner-inline" style="margin-right:0.4rem"></span>
@@ -1439,7 +1446,7 @@
 {# WordPress updates ("defender") — lazily loaded so the page render
    isn't blocked on a wp-cli plugin/theme enumeration. #}
 <div hx-get="/hostings/{{ detail.id.as_str() }}/vuln-panel"
-     hx-trigger="load"
+     hx-trigger="intersect once"
      hx-swap="outerHTML"
      style="margin-top:1rem">
   <div class="card">
@@ -1455,7 +1462,7 @@
    changed?". Lazy for the same reason, only more so — it hashes every
    core and plugin file against wordpress.org before it renders. #}
 <div hx-get="/hostings/{{ detail.id.as_str() }}/integrity-panel"
-     hx-trigger="load"
+     hx-trigger="intersect once"
      hx-swap="outerHTML"
      style="margin-top:1rem">
   <div class="card">
@@ -2417,7 +2424,7 @@
 {# Banned IPs — lazily loaded so the page render isn't blocked on an
    nftables/state ban lookup on the owning node. #}
 <div id="bans" hx-get="/hostings/{{ detail.id.as_str() }}/bans-panel"
-     hx-trigger="load"
+     hx-trigger="intersect once"
      hx-swap="outerHTML"
      style="margin-top:1rem">
   <div class="card">
@@ -2898,7 +2905,7 @@
   </select>
 </div>
 <div hx-get="/hostings/{{ detail.id.as_str() }}/traffic-panel?hours=24"
-     hx-trigger="load" hx-swap="outerHTML">
+     hx-trigger="intersect once" hx-swap="outerHTML">
   <div class="card hover" id="traffic-card">
     <h2>
       <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
@@ -2913,10 +2920,10 @@
 
 <div class="tab-panel" id="tab-ftp">
 {# Lazy: the probe reads files on the OWNING node, so it must not block the
-   page. `revealed` rather than `load` — the panel is one of many tabs. #}
+   page. `intersect` rather than `load` — the panel is one of many tabs. #}
 <div id="ftp-panel"
      hx-get="/hostings/{{ detail.id.as_str() }}/ftp-panel"
-     hx-trigger="revealed once"
+     hx-trigger="intersect once"
      hx-swap="innerHTML">
   <div class="card" style="margin-bottom:0.9rem">
     <span class="spinner-inline" style="margin-right:0.4rem"></span>
@@ -3094,47 +3101,49 @@
   </p>
 
   {% if !ftp_extra.is_empty() %}
-  <table class="table small" style="margin:0 0 0.9rem">
-    <thead>
-      <tr><th>Login</th><th>Lands in</th><th>Note</th><th>Password</th><th class="right">Actions</th></tr>
-    </thead>
-    <tbody>
-      {% for a in ftp_extra %}
-      <tr>
-        <td><code>{{ a.login }}</code></td>
-        <td class="text-soft"><code>{{ a.local_root }}</code></td>
-        <td class="text-soft">{{ a.label }}</td>
-        <td>
-          {% if a.password_state == "set" %}<span class="pill ok">set</span>
-          {% else %}<span class="pill warn">{{ a.password_state }}</span>{% endif %}
-        </td>
-        <td class="right">
-          <div class="row-actions">
-            <form method="post" action="/hostings/ftp/account/reset" style="display:inline"
-                  data-confirm-title="New password for {{ a.login }}"
-                  data-confirm-body="A new password is generated and shown once. The old one stops working immediately — anything using it (a deploy script, a colleague's client) will start failing."
-                  data-confirm-confirm-label="Generate">
-              <input type="hidden" name="_csrf" value="{{ csrf_ftp_account_reset }}">
-              <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
-              <input type="hidden" name="id" value="{{ a.id }}">
-              <button class="btn small" type="submit">New password</button>
-            </form>
-            <form method="post" action="/hostings/ftp/account/delete" style="display:inline"
-                  data-confirm-title="Delete the login {{ a.login }}"
-                  data-confirm-variant="danger"
-                  data-confirm-body="The Linux account is removed and this login stops working. The site's files are not touched — this deletes a way in, not any content."
-                  data-confirm-confirm-label="Delete login">
-              <input type="hidden" name="_csrf" value="{{ csrf_ftp_account_delete }}">
-              <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
-              <input type="hidden" name="id" value="{{ a.id }}">
-              <button class="btn small danger" type="submit">Delete</button>
-            </form>
-          </div>
-        </td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
+  <div class="scroll-x">
+    <table class="table small" style="margin:0 0 0.9rem">
+      <thead>
+        <tr><th>Login</th><th>Lands in</th><th>Note</th><th>Password</th><th class="right">Actions</th></tr>
+      </thead>
+      <tbody>
+        {% for a in ftp_extra %}
+        <tr>
+          <td><code>{{ a.login }}</code></td>
+          <td class="text-soft"><code>{{ a.local_root }}</code></td>
+          <td class="text-soft">{{ a.label }}</td>
+          <td>
+            {% if a.password_state == "set" %}<span class="pill ok">set</span>
+            {% else %}<span class="pill warn">{{ a.password_state }}</span>{% endif %}
+          </td>
+          <td class="right">
+            <div class="row-actions">
+              <form method="post" action="/hostings/ftp/account/reset" style="display:inline"
+                    data-confirm-title="New password for {{ a.login }}"
+                    data-confirm-body="A new password is generated and shown once. The old one stops working immediately — anything using it (a deploy script, a colleague's client) will start failing."
+                    data-confirm-confirm-label="Generate">
+                <input type="hidden" name="_csrf" value="{{ csrf_ftp_account_reset }}">
+                <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
+                <input type="hidden" name="id" value="{{ a.id }}">
+                <button class="btn small" type="submit">New password</button>
+              </form>
+              <form method="post" action="/hostings/ftp/account/delete" style="display:inline"
+                    data-confirm-title="Delete the login {{ a.login }}"
+                    data-confirm-variant="danger"
+                    data-confirm-body="The Linux account is removed and this login stops working. The site's files are not touched — this deletes a way in, not any content."
+                    data-confirm-confirm-label="Delete login">
+                <input type="hidden" name="_csrf" value="{{ csrf_ftp_account_delete }}">
+                <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
+                <input type="hidden" name="id" value="{{ a.id }}">
+                <button class="btn small danger" type="submit">Delete</button>
+              </form>
+            </div>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
   {% endif %}
 
   <form method="post" action="/hostings/ftp/account" class="row"
@@ -3319,7 +3328,7 @@
 {# SFTP (SSH keys) — lazily loaded so the page render isn't blocked on
    an SSH group + authorized_keys probe on the owning node. #}
 <div hx-get="/hostings/{{ detail.id.as_str() }}/sftp-panel"
-     hx-trigger="load"
+     hx-trigger="intersect once"
      hx-swap="outerHTML"
      style="margin-top:1rem">
   <div class="card">
@@ -3338,7 +3347,7 @@
    Lazy because it reaches the owning node and shells out to restic. #}
 <div id="snapshots-panel"
      hx-get="/hostings/{{ detail.id.as_str() }}/snapshots-panel"
-     hx-trigger="revealed once"
+     hx-trigger="intersect once"
      hx-swap="innerHTML">
   <div class="card" style="margin-bottom:0.9rem">
     <span class="spinner-inline" style="margin-right:0.4rem"></span>
@@ -3349,9 +3358,16 @@
 {# Live progress for anything running against THIS site, polled in place.
    The action still spawns a background job and still has a /jobs/<id> page
    — that is what makes it survive a disconnect — but you no longer have to
-   leave this tab to find out how it is going. #}
+   leave this tab to find out how it is going.
+
+   No `every` here. htmx's polling has no visibility test, so `every 2s` on a
+   placeholder inside a closed tab hit the owning node every two seconds
+   whether or not anyone opened Backups — the `intersect once` beside it was
+   doing nothing to stop that. The cadence lives in the swapped-in panel
+   instead (`data-poll-visible` in _hosting_jobs_panel.html), which only ticks
+   while it is on screen. #}
 <div id="hosting-jobs" hx-get="/hostings/{{ detail.id.as_str() }}/jobs-panel"
-     hx-trigger="load, every 2s" hx-swap="outerHTML"></div>
+     hx-trigger="intersect once" hx-swap="outerHTML"></div>
 
 <p class="text-soft small" style="margin:0 0 0.6rem" data-role-min="admin">Backups land on local disk; off-site targets (S3 + age) are configured cluster-wide in <a href="/settings/backups">Settings → Backup targets</a>, and each site picks one of them below.</p>
 
@@ -3934,7 +3950,7 @@
    node). The skeleton below is replaced by _hosting_spf_card.html;
    on check failure the response is empty and the skeleton vanishes. #}
 <div hx-get="/hostings/{{ detail.id.as_str() }}/spf-panel"
-     hx-trigger="load" hx-swap="outerHTML">
+     hx-trigger="intersect once" hx-swap="outerHTML">
   <div class="card hover">
     <h2>
       <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
@@ -3950,7 +3966,7 @@
 {# DKIM card — lazily loaded (status + key read on the owning node). The
    skeleton is replaced by _hosting_dkim_card.html. #}
 <div hx-get="/hostings/{{ detail.id.as_str() }}/dkim-panel"
-     hx-trigger="load" hx-swap="outerHTML">
+     hx-trigger="intersect once" hx-swap="outerHTML">
   <div class="card hover">
     <h2>
       <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
