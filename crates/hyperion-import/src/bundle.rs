@@ -15,7 +15,10 @@
 use crate::adapter::shell_quote;
 use crate::error::ImportError;
 use crate::ir::{ImportIR, IrDatabase, IrDbEngine};
+use crate::proc::{capture, wait_status};
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::time::{Duration, Instant};
 use tokio::process::Command;
 
 /// Manifest filename inside the bundle.
@@ -118,6 +121,70 @@ fn hex_lower(bytes: &[u8]) -> String {
     s
 }
 
+// ---------------------------------------------------------------------------
+// Wall-clock budgets
+//
+// Every command spawned from this module runs under one. A `mysqldump
+// --single-transaction` taken against a busy live site can block on a metadata
+// lock and never return; with thirty sites selected, one of them wedging is an
+// ordinary outcome, not an exotic one. Unbudgeted that stopped the whole export
+// forever — and because the run is DETACHED there is no terminal to notice, so
+// `--status` kept rendering the same "packing" line and the operator's only
+// recourse was to find the pid and kill it by hand.
+//
+// These figures are POLICY, not measurements: none is derived from an observed
+// run, and none should be read as one. Each is set far above any duration this
+// path is expected to need, because being wrong is not symmetric — too generous
+// only delays a run that was already stuck, too tight DROPS a site's data.
+// ---------------------------------------------------------------------------
+
+/// One small read that either answers at once or is stuck: `df`, and
+/// CloudPanel's sqlite credential lookup.
+pub const PROBE_BUDGET: Duration = Duration::from_secs(60);
+
+/// `du -sb` over a docroot — a metadata walk over a tree that can hold millions
+/// of inodes with a cold cache, so far wider than a probe.
+pub const MEASURE_BUDGET: Duration = Duration::from_secs(15 * 60);
+
+/// The budget for one DATABASE, shared by every method tried for it. Per-method
+/// budgets would let a single wedged database cost this three times over on
+/// CloudPanel (stored creds → clpctl → socket), which is the same invisible
+/// stall wearing a different hat.
+pub const DUMP_BUDGET: Duration = Duration::from_secs(6 * 3600);
+
+/// Floor under every size-scaled budget: a small docroot on a loaded box is
+/// slow, not stuck.
+pub const PACK_BUDGET_FLOOR: Duration = Duration::from_secs(10 * 60);
+
+/// The throughput a size-scaled budget assumes. Deliberately far below what any
+/// real disk sustains — it is a floor a healthy run must never cross, not an
+/// estimate of how fast `tar` is.
+pub const PACK_MIN_BYTES_PER_SEC: u64 = 1024 * 1024;
+
+/// Ceiling on every budget, and the budget used when a size could not be
+/// measured.
+pub const MAX_STEP_BUDGET: Duration = Duration::from_secs(24 * 3600);
+
+/// Budget for one `tar` pass over `bytes` of input.
+///
+/// `None` means `du` could not weigh the tree, and that must never SHORTEN the
+/// budget: "unmeasurable" is not evidence of "small", so a missing measurement
+/// buys the ceiling rather than the floor. Everything about this path fails
+/// open — the cost of a budget that is too generous is a delay, the cost of one
+/// that is too tight is a site that arrives without its files.
+pub fn pack_budget(bytes: Option<u64>) -> Duration {
+    let Some(bytes) = bytes else {
+        return MAX_STEP_BUDGET;
+    };
+    let scaled = Duration::from_secs(bytes / PACK_MIN_BYTES_PER_SEC);
+    (PACK_BUDGET_FLOOR + scaled).min(MAX_STEP_BUDGET)
+}
+
+/// What is left of a budget that ends at `deadline`; zero once it is spent.
+fn remaining(deadline: Instant) -> Duration {
+    deadline.saturating_duration_since(Instant::now())
+}
+
 /// Run a shell command with its stdout going STRAIGHT to `dest`.
 ///
 /// The point is that the bytes never exist in this process's memory. The dump
@@ -126,22 +193,37 @@ fn hex_lower(bytes: &[u8]) -> String {
 /// that the run is detached, the OOM killer would take it with no terminal event
 /// in the journal, leaving a status frozen mid-phase.
 ///
-/// `.status()` and NOT `.output()`: `output()` installs its own pipes and
-/// silently overrides a `File` stdout, which this repo has been bitten by before.
-async fn sh_to_file(cmd: &str, dest: &Path) -> Result<u64, ImportError> {
+/// NOT `.output()`: it installs its own pipes and silently overrides a `File`
+/// stdout, which this repo has been bitten by before.
+///
+/// Every failure path — including the budget expiring — deletes `dest`. A killed
+/// dump leaves a file that is perfectly well-formed SQL up to the cut, and
+/// packing that would put a silently half-restored database into the bundle.
+async fn sh_to_file(
+    cmd: &str,
+    dest: &Path,
+    budget: Duration,
+    what: &str,
+) -> Result<u64, ImportError> {
     let file = std::fs::File::create(dest)?;
-    let status = Command::new("sh")
-        .arg("-c")
-        .arg(cmd)
-        .stdout(std::process::Stdio::from(file))
-        .stderr(std::process::Stdio::piped())
-        .status()
-        .await?;
+    let mut c = Command::new("sh");
+    c.arg("-c").arg(cmd).stdout(Stdio::from(file));
+    let (status, stderr) = match wait_status(c, budget, what).await {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = tokio::fs::remove_file(dest).await;
+            return Err(e);
+        }
+    };
     if !status.success() {
         let _ = tokio::fs::remove_file(dest).await;
         return Err(ImportError::Command {
             cmd: cmd.chars().take(80).collect(),
-            msg: format!("exited with {status}"),
+            msg: if stderr.is_empty() {
+                format!("exited with {status}")
+            } else {
+                format!("exited with {status}: {stderr}")
+            },
         });
     }
     Ok(tokio::fs::metadata(dest)
@@ -218,10 +300,12 @@ pub async fn read_manifest(dir: &Path) -> Option<ImportIR> {
 /// Free bytes on the filesystem holding `path`. `None` when `df` cannot say —
 /// and a caller must then skip the check rather than refuse work on a guess.
 pub async fn avail_bytes(path: &Path) -> Option<u64> {
-    let out = tokio::process::Command::new("/bin/df")
-        .args(["-P", "-B1", "--"])
-        .arg(path)
-        .output()
+    let mut cmd = Command::new("/bin/df");
+    cmd.args(["-P", "-B1", "--"]).arg(path);
+    // A `df` that hangs (an unresponsive network mount under the temp dir) must
+    // not become the export's stall. Timing out lands here as `None`, which is
+    // already the "cannot say" answer every caller handles.
+    let out = capture(cmd, PROBE_BUDGET, "measuring free space")
         .await
         .ok()?;
     if !out.status.success() {
@@ -232,13 +316,15 @@ pub async fn avail_bytes(path: &Path) -> Option<u64> {
 }
 
 /// Apparent size of a directory tree in bytes, via `du -sb`.
+///
+/// `None` on a timeout as well as on a failure — and that is the fail-open
+/// answer everywhere it is used: no denominator for the progress line, and the
+/// most generous budget for the `tar` that follows.
 async fn dir_bytes(path: &Path) -> Option<u64> {
-    let out = tokio::process::Command::new("/usr/bin/du")
-        .args(["-sb", "--"])
-        .arg(path)
-        .output()
-        .await
-        .ok()?;
+    let mut cmd = Command::new("/usr/bin/du");
+    cmd.args(["-sb", "--"]).arg(path);
+    let what = format!("measuring {}", path.display());
+    let out = capture(cmd, MEASURE_BUDGET, &what).await.ok()?;
     if !out.status.success() {
         return None;
     }
@@ -417,11 +503,17 @@ async fn build_inner(
     for (idx, h) in ir.hostings.iter().enumerate() {
         let site = stage.join("sites").join(site_dir(&h.domain));
         tokio::fs::create_dir_all(site.join("db")).await?;
+        // Weighed BEFORE the tar rather than after it, because the figure now
+        // serves twice: it is this site's share of the progress denominator and
+        // it sets the tar's wall-clock budget. Same one `du` per site as before.
+        let docroot_bytes = dir_bytes(Path::new(&h.docroot)).await;
         if Path::new(&h.docroot).is_dir() {
             let tgz = site.join("docroot.tar.gz");
             if let Err(e) = run(
                 "tar",
                 &["czf", &tgz.display().to_string(), "-C", &h.docroot, "."],
+                pack_budget(docroot_bytes),
+                &format!("packing {}", h.domain),
             )
             .await
             {
@@ -457,7 +549,7 @@ async fn build_inner(
             }
         }
         let done = idx as u64 + 1;
-        input_done = input_done.saturating_add(dir_bytes(Path::new(&h.docroot)).await.unwrap_or(0));
+        input_done = input_done.saturating_add(docroot_bytes.unwrap_or(0));
         note(crate::progress::Event::Site {
             t: now(),
             done,
@@ -490,28 +582,37 @@ async fn build_inner(
     tokio::fs::write(stage.join(MANIFEST), manifest).await?;
 
     if to_stdout {
-        // Legacy path, byte-for-byte as before: stream the packed bundle to our
-        // stdout (inherited by `.status()`).
-        let status = Command::new("tar")
-            .arg("cf")
-            .arg("-")
-            .arg("-C")
-            .arg(stage)
-            .arg(".")
-            .status()
-            .await?;
+        // Legacy path: stream the packed bundle to our stdout, which the child
+        // inherits (`wait_status` configures stdin and stderr, never stdout).
+        //
+        // Only the ceiling applies here. This tar's pace is set by whoever is
+        // reading the other end of the pipe — an upload over the operator's
+        // link — and a size-scaled budget would be measuring a network we never
+        // measured, so it could kill a slow but perfectly healthy transfer.
+        let mut cmd = Command::new("tar");
+        cmd.arg("cf").arg("-").arg("-C").arg(stage).arg(".");
+        let (status, stderr) = wait_status(cmd, MAX_STEP_BUDGET, "streaming the bundle").await?;
         // The status check comes BEFORE any cleanup now. It used to run after
         // `remove_dir_all`, so a failed stream destroyed the staged tree before
         // reporting the failure — and every retry re-dumped every database.
         if !status.success() {
             return Err(ImportError::Command {
                 cmd: "tar cf - (stream)".into(),
-                msg: format!("tar exited with {status}"),
+                // tar's own stderr is now captured rather than inherited, so it
+                // has to be carried into the error or the reason is lost.
+                msg: if stderr.is_empty() {
+                    format!("tar exited with {status}")
+                } else {
+                    format!("tar exited with {status}: {stderr}")
+                },
             });
         }
         return Ok(());
     }
 
+    // The staged tree is exactly what this tar reads, so `du` on it is a
+    // measurement rather than an estimate — and `None` buys the ceiling.
+    let stage_bytes = dir_bytes(stage).await;
     run(
         "tar",
         &[
@@ -521,6 +622,8 @@ async fn build_inner(
             &stage.display().to_string(),
             ".",
         ],
+        pack_budget(stage_bytes),
+        "packing the bundle",
     )
     .await?;
 
@@ -538,6 +641,12 @@ async fn build_inner(
 /// Dump one DB to `dest`, matching the format the restore helpers expect
 /// (mariadb/mysql → plain SQL; postgres → custom `-Fc`).
 async fn dump_db(db: &IrDatabase, dest: &Path, source_kind: &str) -> Result<(), ImportError> {
+    // ONE budget for this database, spent by whichever methods are tried for it.
+    // A dump blocked on a metadata lock is the failure this whole budget exists
+    // for, and it must cost the export [`DUMP_BUDGET`] once — not once per
+    // fallback method.
+    let deadline = Instant::now() + DUMP_BUDGET;
+    let what = format!("dumping database {}", db.name);
     match db.engine {
         IrDbEngine::Postgres => {
             // Streamed to the file, never through a Vec: a large database must
@@ -545,6 +654,8 @@ async fn dump_db(db: &IrDatabase, dest: &Path, source_kind: &str) -> Result<(), 
             let n = sh_to_file(
                 &format!("sudo -u postgres pg_dump -Fc -- {}", shell_quote(&db.name)),
                 dest,
+                remaining(deadline),
+                &what,
             )
             .await?;
             if n == 0 {
@@ -556,7 +667,7 @@ async fn dump_db(db: &IrDatabase, dest: &Path, source_kind: &str) -> Result<(), 
             }
             Ok(())
         }
-        _ => dump_mariadb(&db.name, dest, source_kind).await,
+        _ => dump_mariadb(&db.name, dest, source_kind, deadline).await,
     }
 }
 
@@ -571,11 +682,17 @@ async fn dump_db(db: &IrDatabase, dest: &Path, source_kind: &str) -> Result<(), 
 ///   2. `clpctl db:export` — the panel's native exporter, which handles auth and
 ///      any password encryption itself; its (often gzipped) output is inflated;
 ///   3. a plain `mysqldump` (works where root has unix_socket auth or ~/.my.cnf).
-async fn dump_mariadb(name: &str, dest: &Path, source_kind: &str) -> Result<(), ImportError> {
+async fn dump_mariadb(
+    name: &str,
+    dest: &Path,
+    source_kind: &str,
+    deadline: Instant,
+) -> Result<(), ImportError> {
     let mut errors: Vec<String> = Vec::new();
+    let what = format!("dumping database {name}");
 
     if source_kind == "cloudpanel" {
-        match cloudpanel_creds_dump(name, dest).await {
+        match cloudpanel_creds_dump(name, dest, deadline).await {
             Ok(Some(n)) if n > 0 => return Ok(()),
             // Record WHY each method produced nothing, so the per-site skip
             // message names every path that was tried (diagnosability across
@@ -584,7 +701,7 @@ async fn dump_mariadb(name: &str, dest: &Path, source_kind: &str) -> Result<(), 
             Ok(None) => errors.push("stored-creds: no DB server recorded in CloudPanel".into()),
             Err(e) => errors.push(format!("stored-creds: {e}")),
         }
-        match clpctl_export(name, dest).await {
+        match clpctl_export(name, dest, deadline).await {
             Ok(true) => return Ok(()),
             Ok(false) => errors.push("clpctl db:export: empty output".into()),
             Err(e) => errors.push(format!("clpctl: {e}")),
@@ -600,6 +717,8 @@ async fn dump_mariadb(name: &str, dest: &Path, source_kind: &str) -> Result<(), 
             shell_quote(name)
         ),
         dest,
+        remaining(deadline),
+        &what,
     )
     .await
     {
@@ -621,7 +740,11 @@ const CLOUDPANEL_DB_SQ3: &str = "/home/clp/htdocs/app/data/db.sq3";
 /// `mysqldump` with them via a 0600 defaults-file (so the password never appears
 /// in argv / `ps`). `Ok(None)` if the panel records no DB server (nothing to do
 /// → let the caller fall through to `clpctl`).
-async fn cloudpanel_creds_dump(name: &str, dest: &Path) -> Result<Option<u64>, ImportError> {
+async fn cloudpanel_creds_dump(
+    name: &str,
+    dest: &Path,
+    deadline: Instant,
+) -> Result<Option<u64>, ImportError> {
     let sql = "SELECT host,user_name,password,port FROM database_server \
                ORDER BY is_default DESC, id ASC LIMIT 1;";
     let q = format!(
@@ -629,7 +752,14 @@ async fn cloudpanel_creds_dump(name: &str, dest: &Path) -> Result<Option<u64>, I
         shell_quote(CLOUDPANEL_DB_SQ3),
         shell_quote(sql)
     );
-    let raw = sh_capture(&q).await?;
+    // A probe budget, not the database's: this is one small read of a local
+    // sqlite file, and the dump itself still gets what is left of the deadline.
+    let raw = sh_capture(
+        &q,
+        remaining(deadline).min(PROBE_BUDGET),
+        "reading CloudPanel's stored database credentials",
+    )
+    .await?;
     let text = String::from_utf8_lossy(&raw);
     let text = text.trim();
     if text.is_empty() || text == "[]" {
@@ -677,6 +807,8 @@ async fn cloudpanel_creds_dump(name: &str, dest: &Path) -> Result<Option<u64>, I
             shell_quote(name)
         ),
         dest,
+        remaining(deadline),
+        &format!("dumping database {name}"),
     )
     .await;
     let _ = tokio::fs::remove_dir_all(&dir).await;
@@ -697,13 +829,13 @@ async fn cloudpanel_creds_dump(name: &str, dest: &Path) -> Result<Option<u64>, I
 /// Note: CloudPanel v1 used `db:backup` rather than `db:export`; v2 (CE 6.x,
 /// what we target) uses `db:export`. On a v1 box this errors → the DB is
 /// skipped-and-reported, never silently corrupted.
-async fn clpctl_export(name: &str, dest: &Path) -> Result<bool, ImportError> {
+async fn clpctl_export(name: &str, dest: &Path, deadline: Instant) -> Result<bool, ImportError> {
     // SECURITY (sec-findings #5): the DB dump (tenant data) lands here. Use a
     // 0700 private dir with a randomized name rather than a predictable
     // `/tmp/hyperion-clpexp-<pid>-<db>` path other local users could read/race.
     let dir = secure_private_dir("hyperion-clpexp").await?;
     let want = dir.join(format!("{}.sql.gz", site_dir(name)));
-    let result = clpctl_export_inner(name, &dir, &want, dest).await;
+    let result = clpctl_export_inner(name, &dir, &want, dest, deadline).await;
     let _ = tokio::fs::remove_dir_all(&dir).await;
     result
 }
@@ -713,13 +845,20 @@ async fn clpctl_export_inner(
     dir: &Path,
     want: &Path,
     dest: &Path,
+    deadline: Instant,
 ) -> Result<bool, ImportError> {
-    let out = Command::new("clpctl")
-        .arg("db:export")
+    let mut cmd = Command::new("clpctl");
+    cmd.arg("db:export")
         .arg(format!("--databaseName={name}"))
-        .arg(format!("--file={}", want.display()))
-        .output()
-        .await?;
+        .arg(format!("--file={}", want.display()));
+    // clpctl runs a mysqldump of its own, so it can wedge in exactly the same
+    // way — on what is left of this database's budget.
+    let out = capture(
+        cmd,
+        remaining(deadline),
+        &format!("dumping database {name}"),
+    )
+    .await?;
     if !out.status.success() {
         return Err(ImportError::Command {
             cmd: format!("clpctl db:export {name}"),
@@ -744,10 +883,13 @@ async fn clpctl_export_inner(
     // gzip magic is 1f 8b. Decompress ONLY when it's really gzip; a failure here
     // is a genuine error (surfaced) — we never fall back to writing raw bytes.
     let plain = if raw.len() >= 2 && raw[0] == 0x1f && raw[1] == 0x8b {
-        sh_capture(&format!(
-            "gzip -dc {}",
-            shell_quote(&file.display().to_string())
-        ))
+        // Sized to the file actually on disk — a real measurement — and still
+        // capped by what is left of this database's budget.
+        sh_capture(
+            &format!("gzip -dc {}", shell_quote(&file.display().to_string())),
+            pack_budget(Some(raw.len() as u64)).min(remaining(deadline)),
+            &format!("decompressing the {name} export"),
+        )
         .await?
     } else {
         raw
@@ -810,9 +952,12 @@ fn looks_like_sql(bytes: &[u8]) -> bool {
     PREFIXES.iter().any(|p| head_up.starts_with(p))
 }
 
-/// Run `sh -c <cmd>`, returning stdout on success or an error carrying stderr.
-async fn sh_capture(cmd: &str) -> Result<Vec<u8>, ImportError> {
-    let out = Command::new("sh").arg("-c").arg(cmd).output().await?;
+/// Run `sh -c <cmd>` under `budget`, returning stdout on success or an error
+/// carrying stderr.
+async fn sh_capture(cmd: &str, budget: Duration, what: &str) -> Result<Vec<u8>, ImportError> {
+    let mut c = Command::new("sh");
+    c.arg("-c").arg(cmd);
+    let out = capture(c, budget, what).await?;
     if !out.status.success() {
         return Err(ImportError::Command {
             cmd: cmd.to_string(),
@@ -822,8 +967,10 @@ async fn sh_capture(cmd: &str) -> Result<Vec<u8>, ImportError> {
     Ok(out.stdout)
 }
 
-async fn run(bin: &str, args: &[&str]) -> Result<(), ImportError> {
-    let out = Command::new(bin).args(args).output().await?;
+async fn run(bin: &str, args: &[&str], budget: Duration, what: &str) -> Result<(), ImportError> {
+    let mut cmd = Command::new(bin);
+    cmd.args(args);
+    let out = capture(cmd, budget, what).await?;
     if !out.status.success() {
         return Err(ImportError::Command {
             cmd: format!("{bin} {}", args.join(" ")),
@@ -836,7 +983,9 @@ async fn run(bin: &str, args: &[&str]) -> Result<(), ImportError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        assert_no_site_dir_collision, human, looks_like_sql, preflight_space, run, seal, site_dir,
+        assert_no_site_dir_collision, dump_mariadb, human, looks_like_sql, pack_budget,
+        preflight_space, run, seal, sh_to_file, shell_quote, site_dir, Duration, ImportError,
+        Instant, MAX_STEP_BUDGET, PACK_BUDGET_FLOOR,
     };
     use crate::ir::ImportIR;
 
@@ -945,6 +1094,8 @@ mod tests {
                 &src.display().to_string(),
                 ".",
             ],
+            MAX_STEP_BUDGET,
+            "packing the fixture",
         )
         .await
         .expect("tar");
@@ -1031,5 +1182,158 @@ mod tests {
     fn site_dir_collapses_unsafe_chars() {
         assert_eq!(site_dir("a.example.com"), "a.example.com");
         assert_eq!(site_dir("a/b c:d"), "a_b_c_d");
+    }
+
+    /// The failure every budget in this module exists for: a command that never
+    /// returns. Modelled with a sleep, and with a BACKGROUNDED grandchild so the
+    /// test also pins down that the kill takes the whole process GROUP — killing
+    /// the direct child is not enough for `sudo -u postgres pg_dump`, which is a
+    /// real path here.
+    #[tokio::test]
+    async fn a_command_that_never_returns_is_killed_at_its_budget() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let late = dir.path().join("late");
+        let dest = dir.path().join("wp_x.dump");
+        let cmd = format!(
+            "( sleep 3; : > {} ) & wait",
+            shell_quote(&late.display().to_string())
+        );
+
+        let t0 = std::time::Instant::now();
+        let err = sh_to_file(&cmd, &dest, Duration::from_secs(1), "dumping database wp_x")
+            .await
+            .expect_err("a wedged dump must not be waited on forever");
+        let waited = t0.elapsed();
+
+        assert!(
+            waited < Duration::from_secs(3),
+            "gave up only after {waited:?} — the budget is not being enforced"
+        );
+        assert!(
+            matches!(err, ImportError::Timeout { .. }),
+            "a timeout is not a diagnosis and must not be reported as a plain \
+             command failure: {err}"
+        );
+        let why = err.to_string();
+        assert!(why.contains("dumping database wp_x"), "{why}");
+        assert!(
+            why.contains("1s"),
+            "the message must name the budget: {why}"
+        );
+
+        // Whatever the killed command wrote is a partial artefact: packing it
+        // would put a half-restored database in the bundle.
+        assert!(
+            !dest.exists(),
+            "a timed-out dump must take its partial file with it"
+        );
+
+        // And nothing may still be running: wait past the sleep and check the
+        // backgrounded grandchild never got to write.
+        tokio::time::sleep(Duration::from_secs(4)).await;
+        assert!(
+            !late.exists(),
+            "the process group outlived its budget — killing the direct child \
+             leaves `sudo`-style grandchildren behind"
+        );
+    }
+
+    /// A `tar` budget is only as good as the measurement under it, and the
+    /// missing measurement must buy the MOST generous budget, never the floor.
+    #[test]
+    fn the_pack_budget_scales_with_what_was_measured_and_fails_open() {
+        assert_eq!(
+            pack_budget(None),
+            MAX_STEP_BUDGET,
+            "'we could not weigh it' is not evidence that it is small"
+        );
+        // A tiny tree still gets the floor: small is not the same as fast on a
+        // box that is already loaded.
+        assert_eq!(pack_budget(Some(0)), PACK_BUDGET_FLOOR);
+        assert_eq!(pack_budget(Some(1024)), PACK_BUDGET_FLOOR);
+        // 6 GiB at the assumed floor rate of 1 MiB/s buys 6144 s on top of it.
+        let six_gib = 6 * 1024 * 1024 * 1024u64;
+        assert_eq!(
+            pack_budget(Some(six_gib)),
+            PACK_BUDGET_FLOOR + Duration::from_secs(6144)
+        );
+        assert_eq!(pack_budget(Some(u64::MAX)), MAX_STEP_BUDGET);
+    }
+
+    /// CloudPanel tries three methods for one database. Per-method budgets would
+    /// let a single wedged database cost three times the budget, so the deadline
+    /// is per DATABASE and every later method inherits what is left of it.
+    #[tokio::test]
+    async fn a_wedged_database_cannot_spend_its_budget_once_per_fallback() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let dest = dir.path().join("wp_x.dump");
+        // A deadline that is already in the past, without doing arithmetic on a
+        // monotonic clock that may be close to zero.
+        let deadline = Instant::now();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let t0 = std::time::Instant::now();
+        let err = dump_mariadb("wp_x", &dest, "cloudpanel", deadline)
+            .await
+            .expect_err("a spent budget cannot produce a dump");
+        assert!(
+            t0.elapsed() < Duration::from_secs(2),
+            "nothing may be spawned once the budget is gone"
+        );
+
+        let why = err.to_string();
+        for method in ["stored-creds", "clpctl", "mysqldump (socket)"] {
+            assert!(
+                why.contains(method),
+                "every method that was skipped has to be named, or the skip \
+                 reason is undiagnosable: {why}"
+            );
+        }
+        assert!(
+            why.contains("already spent"),
+            "say WHY nothing was tried: {why}"
+        );
+    }
+
+    /// A killed step must not vanish. The loop is failure-tolerant, so the only
+    /// thing that carries a timeout to the operator is the journal: it has to
+    /// reach `hyperion-export --status` (and from there the panel's Transfers
+    /// row) as a Skip, with the reason still attached.
+    #[tokio::test]
+    async fn a_timed_out_step_reaches_the_journal_as_a_readable_skip() {
+        use crate::progress::{append, read, render_status, Event};
+
+        let dir = tempfile::tempdir().expect("tmp");
+        let dest = dir.path().join("wp_x.dump");
+        let err = sh_to_file(
+            "sleep 30",
+            &dest,
+            Duration::from_secs(1),
+            "dumping database wp_x",
+        )
+        .await
+        .expect_err("must time out");
+
+        // Exactly what `build_inner` records for a failed database.
+        let j = dir.path().join("journal.ndjson");
+        append(
+            &j,
+            &Event::Skip {
+                t: 100,
+                what: "example.cz (db wp_x)".into(),
+                why: err.to_string(),
+            },
+        )
+        .expect("append");
+
+        let st = read(&j).expect("read");
+        assert_eq!(st.skipped.len(), 1);
+        let out = render_status(&st, 100, false);
+        assert!(out.contains("could NOT be exported"), "{out}");
+        assert!(out.contains("example.cz (db wp_x)"), "{out}");
+        assert!(
+            out.contains("dumping database wp_x") && out.contains("killed"),
+            "the reason must survive into the status an operator reads:\n{out}"
+        );
     }
 }

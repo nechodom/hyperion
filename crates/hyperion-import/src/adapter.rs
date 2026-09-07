@@ -83,6 +83,14 @@ pub enum Runner {
     Ssh(SshTarget),
 }
 
+/// Wall-clock budget for one adapter read ([`Runner::sh`] and everything built
+/// on it: `cat`, `ls -1`, `test -e`, `sqlite3 -readonly`, `clpctl --version`).
+///
+/// Policy, not a measurement — set far above what any of these needs, because
+/// the cost of being wrong is not symmetric: too generous only delays a run
+/// that was already stuck, too tight fails a detection that would have worked.
+pub const READ_BUDGET: std::time::Duration = std::time::Duration::from_secs(120);
+
 impl Runner {
     pub fn for_location(loc: &Location) -> Self {
         match loc {
@@ -93,24 +101,33 @@ impl Runner {
 
     /// Run a `/bin/sh -c` command (locally or on the remote box) and return its
     /// stdout. Non-zero exit → `Err`.
+    ///
+    /// Budgeted like everything else this crate spawns. These are all small
+    /// reads of panel configuration — no payload ever moves through here — so a
+    /// command still running after [`READ_BUDGET`] is stuck, not slow. It
+    /// matters most over SSH: `ConnectTimeout` only covers reaching the box, and
+    /// a session that dies afterwards leaves `ssh` waiting on a socket nobody
+    /// will ever close.
     pub async fn sh(&self, command: &str) -> Result<String, ImportError> {
-        let out = match self {
+        let cmd = match self {
             Runner::Local => {
-                tokio::process::Command::new("sh")
-                    .arg("-c")
-                    .arg(command)
-                    .output()
-                    .await?
+                let mut c = tokio::process::Command::new("sh");
+                c.arg("-c").arg(command);
+                c
             }
             Runner::Ssh(t) => {
-                tokio::process::Command::new("ssh")
-                    .args(t.ssh_opts())
+                let mut c = tokio::process::Command::new("ssh");
+                c.args(t.ssh_opts())
                     .arg(format!("{}@{}", t.user, t.host))
-                    .arg(command)
-                    .output()
-                    .await?
+                    .arg(command);
+                c
             }
         };
+        let what = format!(
+            "reading `{}` from the source panel",
+            command.chars().take(60).collect::<String>()
+        );
+        let out = crate::proc::capture(cmd, READ_BUDGET, &what).await?;
         if !out.status.success() {
             return Err(ImportError::Command {
                 cmd: command.to_string(),

@@ -19,6 +19,7 @@ pub mod hestia;
 pub mod ir;
 pub mod panel;
 pub mod planner;
+pub(crate) mod proc;
 pub mod progress;
 
 pub use adapter::{Location, SourceAdapter, SourceKind, SourcePanelInfo, SshTarget};
