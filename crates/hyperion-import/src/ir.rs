@@ -66,6 +66,30 @@ pub struct IrHosting {
     pub tls: Option<IrCert>,
     /// `authorized_keys` lines for the site user.
     pub ssh_keys: Vec<String>,
+    /// Apparent size of the docroot on the SOURCE box (`du -sb`), in bytes —
+    /// i.e. what this site will occupy again, UNCOMPRESSED, once its
+    /// `docroot.tar.gz` is inflated into the target hosting tree.
+    ///
+    /// This travels in the bundle because the import side has no other way to
+    /// know it: the compressed tarball is all it can see, and a 13 GB bundle
+    /// routinely inflates to 30 GB+. Without it the target node's only space
+    /// check was "can I receive the bundle", which approved a transfer that
+    /// then ran the disk out mid-import, hours later, after some sites had
+    /// already been created.
+    ///
+    /// `0` means NOT MEASURED (an unreadable docroot, or a bundle packed by an
+    /// older exporter — hence `serde(default)`). Callers must treat `0` as "no
+    /// figure" and skip the check rather than refuse work on a guess; `du -sb`
+    /// never reports 0 for a directory that exists.
+    #[serde(default)]
+    pub docroot_bytes: u64,
+    /// Σ of this site's database dumps as packed into the bundle, in bytes.
+    /// Measured at pack time (the dumps do not exist before that), so it is
+    /// `0` on a plan/scan and on bundles from an older exporter.
+    ///
+    /// Same convention as [`IrHosting::docroot_bytes`]: `0` = no figure.
+    #[serde(default)]
+    pub db_bytes: u64,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

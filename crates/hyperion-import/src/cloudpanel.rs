@@ -154,6 +154,10 @@ impl SourceAdapter for CloudPanelAdapter {
                 crons: Vec::new(),
                 tls: None,
                 ssh_keys,
+                // A scan must stay cheap; the sizes are measured by the
+                // packing pass and stamped into the bundle's manifest.
+                docroot_bytes: 0,
+                db_bytes: 0,
             });
         }
 
