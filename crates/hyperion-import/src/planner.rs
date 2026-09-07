@@ -141,6 +141,7 @@ mod tests {
             },
             hostings,
             unsupported: vec![],
+            skipped: Vec::new(),
         }
     }
 

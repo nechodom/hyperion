@@ -1530,9 +1530,9 @@ dependencies = [
 name = "hyperion-export"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "clap",
  "hyperion-import",
+ "serde_json",
  "tokio",
 ]
 
@@ -1544,6 +1544,7 @@ dependencies = [
  "rand 0.8.6",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
@@ -1685,6 +1686,7 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
+ "sha2",
  "subtle",
  "tempfile",
  "thiserror 1.0.69",

@@ -17,13 +17,24 @@
 {% if let Some(m) = flash_error %}<div class="flash error"><div class="flash-body">{{ m }}</div></div>{% endif %}
 
 {% if let Some(m) = minted %}
+{% if let Some(w) = stale_vhost %}
+{# The fix for the 2 GiB upload cliff ships in a template the AGENT re-renders
+   at boot. That only happens once a panel hostname and a certificate exist, so
+   an operator can upgrade and still be running the old vhost — and would then
+   hit the identical failure on a panel whose UI promises otherwise. #}
+<div class="card" style="margin-bottom:1rem;border-color:var(--warn)">
+  <h3 style="margin-top:0">Large imports will still fail on this box</h3>
+  <p class="text-soft" style="margin:0">{{ w }}</p>
+</div>
+{% endif %}
 <div class="card" style="margin-bottom:1rem;border-color:var(--accent)">
   <h3>Run on your {{ m.kind }} server, as root</h3>
-  <p class="text-soft">Token valid for 2 hours, single use. Everything runs server-to-server — your laptop is never in the middle. Needs <code>sudo</code>/root on the source (to read the panel DB).</p>
+  <p class="text-soft">Token valid for 4 hours, and extended automatically while an upload is running. Everything runs server-to-server — your laptop is never in the middle. Needs <code>sudo</code>/root on the source (to read the panel DB).</p>
   <pre class="code-block" style="white-space:pre-wrap;word-break:break-all;user-select:all"><code>{{ m.one_liner }}</code></pre>
   <button class="btn small" type="button"
           onclick="navigator.clipboard.writeText(this.previousElementSibling.innerText.trim());this.textContent='Copied ✓';">Copy command</button>
-  <p class="text-soft" style="margin-top:.6rem">It scans the server, reports the sites here, then <strong>waits</strong>. Below under <em>Transfers</em> a <strong>Choose sites</strong> button appears — tick the ones you want and click Import. The script then exports just those and streams them back. You can close this page; it keeps running.</p>
+  <p class="text-soft" style="margin-top:.6rem">It scans the server, reports the sites here, then <strong>waits</strong>. Below under <em>Transfers</em> a <strong>Choose sites</strong> button appears — tick the ones you want and click Import. The script then exports just those and uploads them back. You can close this page; it keeps running.</p>
+  <p class="text-soft" style="margin-top:.6rem"><strong>The export runs in the background on the source server</strong>, so closing your SSH session does not cancel it — and if the connection drops mid-upload, it continues from where it stopped rather than starting over. Under 3&nbsp;GB of site files you also get a live progress bar in your terminal; above that it just detaches. Either way you can check on it at any time by running <code>sudo /var/lib/hyperion-export/status</code> on the source server.</p>
 </div>
 {% endif %}
 
@@ -50,7 +61,12 @@
   <h3>Transfers</h3>
   {# Single source of truth = the /import/wizard/transfers fragment (transfers_html),
      polled so the "Choose sites" button appears as soon as the source reports. #}
-  <div hx-get="/import/wizard/transfers" hx-trigger="load, every 3s" hx-swap="innerHTML">
+  {# `data-poll-visible` rather than htmx's own `every 3s`: htmx polls a hidden
+     element just as eagerly as a visible one, and this page is often left open
+     in a background browser tab for the length of a multi-hour transfer. The
+     tick in base.html skips a hidden tab. #}
+  <div hx-get="/import/wizard/transfers" hx-trigger="load, poll-tick" hx-swap="innerHTML"
+       id="import-transfers" data-poll-visible data-poll-ms="3000">
     <p class="text-soft">Loading…</p>
   </div>
 </div>

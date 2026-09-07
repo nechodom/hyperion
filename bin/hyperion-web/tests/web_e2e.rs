@@ -2506,3 +2506,468 @@ async fn stats_page_lists_sites_and_honours_sort() {
         "active column header should be marked"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Resumable import upload, driven over the real router.
+//
+// The offset reconciliation between `begin`, `chunk` and `commit` is the most
+// dangerous code in the import path: get it wrong and bytes are concatenated in
+// the wrong order, producing a bundle that is the right LENGTH and passes
+// `tar tf` while containing garbage. State-layer unit tests cannot see that —
+// only assembling a real body through real HTTP and comparing it byte-for-byte
+// against the original proves resume does not corrupt.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Give one upload test exclusive use of a private receive directory.
+///
+/// Two things force this. `HYPERION_MIGRATION_DIR` is process-wide, and every
+/// test here starts a fresh agent with an in-memory database, so the first token
+/// each mints has id 1 — meaning they would all reconcile offsets against the
+/// same `bundle-1.tar.part`. Holding the guard for the body of the test makes
+/// each run alone against its own directory.
+///
+/// Returned guard must be held, not dropped: `let _g = …`, never `let _ = …`.
+async fn exclusive_migration_dir() -> (tempfile::TempDir, tokio::sync::MutexGuard<'static, ()>) {
+    // A tokio mutex, not a std one: the guard is deliberately held across the
+    // whole test body, which awaits throughout.
+    static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let guard = LOCK.lock().await;
+    let dir = tempfile::tempdir().expect("migration tmpdir");
+    std::env::set_var("HYPERION_MIGRATION_DIR", dir.path());
+    (dir, guard)
+}
+
+/// Mint an import token straight through the agent, the way the authenticated
+/// wizard would, and hand back the plaintext.
+async fn mint_import_token(sock: &std::path::Path) -> String {
+    let resp = hyperion_rpc_client::call(
+        sock,
+        hyperion_rpc::codec::Request::ImportToken(hyperion_types::ImportTokenOp::Mint {
+            target_node: "local".into(),
+            source_kind: "cloudpanel".into(),
+            created_by: "kevin".into(),
+            ttl_secs: 3600,
+        }),
+    )
+    .await
+    .expect("mint rpc");
+    match resp {
+        hyperion_rpc::codec::Response::ImportToken(hyperion_types::ImportTokenResult::Minted {
+            token,
+            ..
+        }) => token,
+        other => panic!("unexpected mint reply: {other:?}"),
+    }
+}
+
+fn upload_req(path: &str, token: &str, method: Method, body: Vec<u8>) -> Request<Body> {
+    Request::builder()
+        .method(method)
+        .uri(path)
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::from(body))
+        .unwrap()
+}
+
+async fn body_text(resp: axum::response::Response) -> String {
+    String::from_utf8_lossy(&resp.into_body().collect().await.unwrap().to_bytes()).to_string()
+}
+
+fn field(body: &str, key: &str) -> Option<String> {
+    body.lines()
+        .find_map(|l| l.strip_prefix(&format!("{key} ")))
+        .map(|v| v.trim().to_string())
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(bytes);
+    h.finalize().iter().fold(String::new(), |mut s, b| {
+        use std::fmt::Write;
+        let _ = write!(s, "{b:02x}");
+        s
+    })
+}
+
+/// The assertion that matters: a transfer interrupted mid-flight and resumed
+/// must reassemble to EXACTLY the original bytes.
+#[tokio::test]
+async fn an_interrupted_upload_resumes_without_corrupting_the_bundle() {
+    let (_dir, _guard) = exclusive_migration_dir().await;
+    let admin = admin_user::create("kevin", "pw").expect("admin");
+    let (sock, _dir) = start_agent().await;
+    let token = mint_import_token(&sock).await;
+    let app = build_app(sock, admin);
+
+    // A body with position-dependent content, so a misplaced chunk cannot pass
+    // unnoticed the way a run of identical bytes would.
+    let payload: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
+    let sha = sha256_hex(&payload);
+
+    let begin = app
+        .clone()
+        .oneshot(upload_req(
+            "/import/upload/begin",
+            &token,
+            Method::POST,
+            format!("bytes {}\nsha256 {sha}\n", payload.len()).into_bytes(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(begin.status(), StatusCode::OK);
+    let body = body_text(begin).await;
+    assert_eq!(field(&body, "offset").as_deref(), Some("0"));
+
+    // First chunk lands.
+    let cut = 120_000usize;
+    let mut req = upload_req(
+        "/import/upload/chunk",
+        &token,
+        Method::PUT,
+        payload[..cut].to_vec(),
+    );
+    req.headers_mut()
+        .insert("x-hyperion-offset", "0".parse().unwrap());
+    let r = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    assert_eq!(
+        field(&body_text(r).await, "offset").as_deref(),
+        Some(cut.to_string().as_str())
+    );
+
+    // …the connection drops. The runner comes back and calls `begin` again,
+    // which is the whole reason it is idempotent.
+    let again = app
+        .clone()
+        .oneshot(upload_req(
+            "/import/upload/begin",
+            &token,
+            Method::POST,
+            format!("bytes {}\nsha256 {sha}\n", payload.len()).into_bytes(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        again.status(),
+        StatusCode::OK,
+        "a resumed upload must be re-admitted, not 403'd"
+    );
+    let resume_off: usize = field(&body_text(again).await, "offset")
+        .expect("offset")
+        .parse()
+        .unwrap();
+    assert_eq!(resume_off, cut, "the server must report where it really is");
+
+    // The rest.
+    let mut req = upload_req(
+        "/import/upload/chunk",
+        &token,
+        Method::PUT,
+        payload[resume_off..].to_vec(),
+    );
+    req.headers_mut()
+        .insert("x-hyperion-offset", resume_off.to_string().parse().unwrap());
+    let r = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+
+    // The bundle is not a tar, so commit refuses at the tar check — but only
+    // AFTER the digest matched, which is what this test is about. Assert on the
+    // message so a future refactor cannot quietly reorder those two checks.
+    let commit = app
+        .clone()
+        .oneshot(upload_req(
+            "/import/upload/commit",
+            &token,
+            Method::POST,
+            format!("bytes {}\nsha256 {sha}\n", payload.len()).into_bytes(),
+        ))
+        .await
+        .unwrap();
+    let ctext = body_text(commit).await;
+    assert!(
+        ctext.contains("arrived intact") && ctext.contains("not a"),
+        "the digest must have matched over the reassembled bytes; got:\n{ctext}"
+    );
+}
+
+/// A chunk offered at the wrong offset must be REFUSED and must write nothing —
+/// otherwise a stale runner splices bytes into the middle of the file.
+#[tokio::test]
+async fn a_chunk_at_the_wrong_offset_is_refused_with_the_real_offset() {
+    let (_dir, _guard) = exclusive_migration_dir().await;
+    let admin = admin_user::create("kevin", "pw").expect("admin");
+    let (sock, _dir) = start_agent().await;
+    let token = mint_import_token(&sock).await;
+    let app = build_app(sock, admin);
+
+    let payload = vec![7u8; 50_000];
+    let sha = sha256_hex(&payload);
+    app.clone()
+        .oneshot(upload_req(
+            "/import/upload/begin",
+            &token,
+            Method::POST,
+            format!("bytes {}\nsha256 {sha}\n", payload.len()).into_bytes(),
+        ))
+        .await
+        .unwrap();
+
+    let mut req = upload_req(
+        "/import/upload/chunk",
+        &token,
+        Method::PUT,
+        payload[..10_000].to_vec(),
+    );
+    req.headers_mut()
+        .insert("x-hyperion-offset", "0".parse().unwrap());
+    app.clone().oneshot(req).await.unwrap();
+
+    // A stale runner believes it is at 0 and tries to send from there again.
+    let mut req = upload_req(
+        "/import/upload/chunk",
+        &token,
+        Method::PUT,
+        payload[..10_000].to_vec(),
+    );
+    req.headers_mut()
+        .insert("x-hyperion-offset", "0".parse().unwrap());
+    let r = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(r.status(), StatusCode::CONFLICT);
+    let text = body_text(r).await;
+    assert_eq!(
+        field(&text, "offset").as_deref(),
+        Some("10000"),
+        "the 409 must carry the authoritative offset so the client can seek"
+    );
+}
+
+/// A bundle whose digest does not match must never reach the import job, and the
+/// partial must be discarded rather than left to be resumed into for ever.
+#[tokio::test]
+async fn a_corrupted_bundle_is_refused_at_commit() {
+    let (_dir, _guard) = exclusive_migration_dir().await;
+    let admin = admin_user::create("kevin", "pw").expect("admin");
+    let (sock, _dir) = start_agent().await;
+    let token = mint_import_token(&sock).await;
+    let app = build_app(sock, admin);
+
+    let payload = vec![3u8; 20_000];
+    let lie = sha256_hex(b"a completely different bundle");
+    app.clone()
+        .oneshot(upload_req(
+            "/import/upload/begin",
+            &token,
+            Method::POST,
+            format!("bytes {}\nsha256 {lie}\n", payload.len()).into_bytes(),
+        ))
+        .await
+        .unwrap();
+    let mut req = upload_req("/import/upload/chunk", &token, Method::PUT, payload.clone());
+    req.headers_mut()
+        .insert("x-hyperion-offset", "0".parse().unwrap());
+    app.clone().oneshot(req).await.unwrap();
+
+    let commit = app
+        .clone()
+        .oneshot(upload_req(
+            "/import/upload/commit",
+            &token,
+            Method::POST,
+            format!("bytes {}\nsha256 {lie}\n", payload.len()).into_bytes(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(commit.status(), StatusCode::CONFLICT);
+    let text = body_text(commit).await;
+    assert!(text.contains("corrupted"), "{text}");
+    assert_eq!(
+        field(&text, "offset").as_deref(),
+        Some("0"),
+        "the partial must be discarded so the retry starts clean"
+    );
+}
+
+/// The upload routes must refuse an unauthenticated caller — they are public,
+/// and the bearer token is the only thing standing in front of them.
+#[tokio::test]
+async fn the_upload_routes_require_a_bearer_token() {
+    let admin = admin_user::create("kevin", "pw").expect("admin");
+    let (sock, _dir) = start_agent().await;
+    let app = build_app(sock, admin);
+
+    for (path, method) in [
+        ("/import/upload/begin", Method::POST),
+        ("/import/upload/chunk", Method::PUT),
+        ("/import/upload/commit", Method::POST),
+        ("/import/upload/status", Method::GET),
+        ("/import/progress", Method::POST),
+    ] {
+        let r = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method.clone())
+                    .uri(path)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            r.status(),
+            StatusCode::UNAUTHORIZED,
+            "{path} answered without a token"
+        );
+    }
+}
+
+/// The generated bootstrap must be valid bash. It is assembled from a prelude
+/// plus an asset, runs as ROOT on somebody else's production server, and CI has
+/// no other check on it.
+#[tokio::test]
+async fn the_generated_bootstrap_is_syntactically_valid_bash() {
+    use std::io::Write;
+    let admin = admin_user::create("kevin", "pw").expect("admin");
+    let (sock, _dir) = start_agent().await;
+    let token = mint_import_token(&sock).await;
+    let app = build_app(sock, admin);
+
+    let r = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/import/agent/{token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let script = body_text(r).await;
+
+    // The three interpolated values must have landed.
+    assert!(
+        script.contains(&format!("T='{token}'")),
+        "token prelude missing"
+    );
+    assert!(script.contains("K='cloudpanel'"), "kind prelude missing");
+
+    // The credential must never be in a URL: this loop runs once per chunk and
+    // every URL lands in the panel's nginx access log.
+    for line in script.lines() {
+        if line.contains("http") && line.contains(&token) {
+            panic!("the token appears in a URL, which the access log will keep:\n{line}");
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("boot.sh");
+    let mut f = std::fs::File::create(&p).unwrap();
+    f.write_all(script.as_bytes()).unwrap();
+    drop(f);
+
+    let out = std::process::Command::new("bash")
+        .arg("-n")
+        .arg(&p)
+        .output()
+        .expect("bash -n");
+    assert!(
+        out.status.success(),
+        "the generated bootstrap is not valid bash:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// The happy path, and then the retry an operator's flaky link produces: a
+/// commit whose 200 was lost, sent again.
+///
+/// It must NOT re-import, and it must not answer "cancelled" — which is what a
+/// status filter that hid completed transfers used to make it say.
+#[tokio::test]
+async fn a_repeated_commit_returns_the_same_job_and_does_not_reimport() {
+    let (_dir, _guard) = exclusive_migration_dir().await;
+    let admin = admin_user::create("kevin", "pw").expect("admin");
+    let (sock, _agentdir) = start_agent().await;
+    let token = mint_import_token(&sock).await;
+    let app = build_app(sock, admin);
+
+    // A real tar, so commit gets past the archive check and actually spawns a
+    // job — the state this test is about.
+    let src = tempfile::tempdir().unwrap();
+    std::fs::write(src.path().join("manifest.json"), b"{}").unwrap();
+    let tar_path = src.path().join("b.tar");
+    let ok = std::process::Command::new("tar")
+        .arg("cf")
+        .arg(&tar_path)
+        .arg("-C")
+        .arg(src.path())
+        .arg("manifest.json")
+        .status()
+        .expect("tar")
+        .success();
+    assert!(ok, "could not build a fixture tar");
+    let payload = std::fs::read(&tar_path).unwrap();
+    let sha = sha256_hex(&payload);
+
+    app.clone()
+        .oneshot(upload_req(
+            "/import/upload/begin",
+            &token,
+            Method::POST,
+            format!("bytes {}\nsha256 {sha}\n", payload.len()).into_bytes(),
+        ))
+        .await
+        .unwrap();
+    let mut req = upload_req("/import/upload/chunk", &token, Method::PUT, payload.clone());
+    req.headers_mut()
+        .insert("x-hyperion-offset", "0".parse().unwrap());
+    let r = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+
+    let commit_body = format!("bytes {}\nsha256 {sha}\n", payload.len()).into_bytes();
+    let first = app
+        .clone()
+        .oneshot(upload_req(
+            "/import/upload/commit",
+            &token,
+            Method::POST,
+            commit_body.clone(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+    let first_text = body_text(first).await;
+    let job = field(&first_text, "job").expect("a job id");
+    assert!(!job.is_empty());
+
+    // …the reply never reached the source, so it sends it again.
+    let second = app
+        .clone()
+        .oneshot(upload_req(
+            "/import/upload/commit",
+            &token,
+            Method::POST,
+            commit_body,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        second.status(),
+        StatusCode::OK,
+        "a repeated commit must not read as cancelled"
+    );
+    assert_eq!(
+        field(&body_text(second).await, "job").as_deref(),
+        Some(job.as_str()),
+        "the SAME job must come back — a second import would duplicate every site"
+    );
+
+    // And a stale runner must not be able to append to a committed transfer.
+    let mut req = upload_req("/import/upload/chunk", &token, Method::PUT, vec![0u8; 16]);
+    req.headers_mut().insert(
+        "x-hyperion-offset",
+        payload.len().to_string().parse().unwrap(),
+    );
+    let late = app.oneshot(req).await.unwrap();
+    assert_eq!(late.status(), StatusCode::GONE);
+}

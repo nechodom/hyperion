@@ -19,6 +19,7 @@ pub mod hestia;
 pub mod ir;
 pub mod panel;
 pub mod planner;
+pub mod progress;
 
 pub use adapter::{Location, SourceAdapter, SourceKind, SourcePanelInfo, SshTarget};
 pub use cloudpanel::CloudPanelAdapter;

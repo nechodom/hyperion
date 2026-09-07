@@ -436,13 +436,45 @@ pub(crate) async fn run_panel_import_job(
         .step(&format!("Importing {source} from {where_}…"), 10, "")
         .await;
 
-    match crate::dispatcher::dispatch_to_node(
+    // The import RPC is one coarse call: the node unpacks the bundle, then per
+    // site inflates a docroot, creates a user and loads a database, and only
+    // then replies. For the bundles this change finally makes deliverable —
+    // thirty sites, tens of gigabytes — that is hours of silence, and
+    // `jobs::reap_stale` fails any `running` job that has not ticked. So the
+    // job would be declared dead exactly when it was working hardest.
+    //
+    // This heartbeat exists to prevent that, and it is careful to claim NOTHING
+    // it cannot see: the percentage creeps toward a ceiling well short of done
+    // and the label says plainly that no per-site progress is available. It is
+    // aborted the moment the real result lands.
+    let beat = {
+        let reporter = reporter.clone();
+        tokio::spawn(async move {
+            let mut pct: i64 = 10;
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(120)).await;
+                pct = (pct + 5).min(85);
+                reporter
+                    .step(
+                        "Still importing — the node reports once every site is done, so \
+                         there is no per-site progress to show. Large bundles take a while.",
+                        pct,
+                        "",
+                    )
+                    .await;
+            }
+        })
+    };
+
+    let dispatched = crate::dispatcher::dispatch_to_node(
         &state,
         node.as_deref(),
         Request::HostingImportPanel { req },
     )
-    .await
-    {
+    .await;
+    beat.abort();
+
+    match dispatched {
         Ok(RpcResponse::HostingImportPanel(res)) => {
             let mut log = String::new();
             for c in &res.created {

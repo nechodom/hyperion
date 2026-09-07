@@ -198,6 +198,8 @@ impl SourceAdapter for HestiaAdapter {
             },
             hostings,
             unsupported,
+            // Filled in by the exporter as it packs; empty at extraction time.
+            skipped: Vec::new(),
         })
     }
 }

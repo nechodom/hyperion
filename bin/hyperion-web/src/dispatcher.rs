@@ -171,8 +171,15 @@ fn timeout_for_request(req: &Request) -> u64 {
         Request::BackupRestore { .. }
         | Request::BackupRestoreAsNew { .. }
         | Request::HostingImport { .. }
-        | Request::HostingImportFromUrl { .. }
-        | Request::HostingImportPanel { .. } => 3600,
+        | Request::HostingImportFromUrl { .. } => 3600,
+        // A self-service panel import is the longest single RPC in the system:
+        // unpack one bundle, then per site inflate a docroot, create a user and
+        // load a database, and only then reply. Thirty sites and tens of
+        // gigabytes — which resumable uploads finally make deliverable — do not
+        // fit in an hour on ordinary hardware, and losing this timeout is
+        // misreported as "node unreachable" while the node is still importing,
+        // over a half-created cluster the operator is then tempted to retry.
+        Request::HostingImportPanel { .. } => 6 * 3600,
         // Creating the archive scales with the SITE, exactly like restoring
         // one — a 12 GB tree is minutes of tar + gzip before the dump even
         // starts. 600s was a coin flip on a large site, and losing it was

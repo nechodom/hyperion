@@ -297,7 +297,15 @@ async fn maybe_wait(c: &Conn, v: &Value, wait: bool) -> Result<()> {
             loop {
                 let job = send_value(c, Method::GET, &format!("/api/v1/jobs/{id}"), None).await?;
                 let state = job.get("state").and_then(|s| s.as_str()).unwrap_or("");
-                let progress = job.get("progress").and_then(|p| p.as_i64()).unwrap_or(0);
+                // `progress_pct` — JobView serialises it under that name with no
+                // serde rename, so reading "progress" printed 0% for the whole
+                // life of every job. Most visible on the panel import, which
+                // this release makes long enough that an operator would sit and
+                // watch it not move.
+                let progress = job
+                    .get("progress_pct")
+                    .and_then(|p| p.as_i64())
+                    .unwrap_or(0);
                 eprintln!("  {state} {progress}%");
                 if state != "running" {
                     return print_and_status(job);

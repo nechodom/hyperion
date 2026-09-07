@@ -14,6 +14,25 @@ pub struct ImportIR {
     /// Things the source manages but Hyperion can't import yet — surfaced to the
     /// operator in the report rather than silently dropped (the "honesty rule").
     pub unsupported: Vec<IrUnsupported>,
+    /// Artefacts the exporter tried to pack and could not — one entry per
+    /// skipped docroot or database, written into the bundle's own manifest.
+    ///
+    /// This is what lets the IMPORT side tell "the exporter deliberately left
+    /// this out" apart from "the bundle arrived truncated". Without it a missing
+    /// `docroot.tar.gz` is ambiguous, and the import resolved that ambiguity by
+    /// creating an EMPTY site and reporting success.
+    #[serde(default)]
+    pub skipped: Vec<IrSkipped>,
+}
+
+/// One artefact the exporter could not pack, and why.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct IrSkipped {
+    /// The hosting this belongs to.
+    pub domain: String,
+    /// `"docroot"` or `"db:<name>"`.
+    pub what: String,
+    pub why: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]

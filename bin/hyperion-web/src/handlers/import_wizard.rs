@@ -30,7 +30,16 @@ use std::path::PathBuf;
 // run/scan startup, so a deliberating operator can't outlive the token mid-wait
 // (which would read as a false "cancelled" and 403 a late ingest).
 const TOKEN_TTL_SECS: i64 = 4 * 60 * 60;
-const MIGRATION_DIR: &str = "/var/lib/hyperion/migration";
+const MIGRATION_DIR_DEFAULT: &str = "/var/lib/hyperion/migration";
+
+/// Where received bundles land.
+///
+/// Overridable via `HYPERION_MIGRATION_DIR` for two reasons: the tests must not
+/// write to a real system path, and an operator whose `/var` is too small for a
+/// 40 GB bundle needs somewhere to put it that is not a recompile away.
+fn migration_dir() -> String {
+    std::env::var("HYPERION_MIGRATION_DIR").unwrap_or_else(|_| MIGRATION_DIR_DEFAULT.to_string())
+}
 const MIN_FREE_BYTES: i64 = 2 * 1024 * 1024 * 1024; // 2 GiB floor before accepting
 
 /// One in-flight transfer row for the wizard table.
@@ -39,13 +48,25 @@ pub struct TransferRow {
     pub source_kind: String,
     pub status: String,
     pub received: String,
+    /// Raw byte count behind `received` — the formatted string is for display
+    /// only and must never be parsed back to compute a percentage.
+    pub received_bytes: i64,
     pub job_id: Option<String>,
     pub created_by: String,
     /// Interactive stage derived from manifest/selection presence:
-    /// "awaiting_report" | "awaiting_selection" | "selected" | "active".
+    /// "awaiting_report" | "awaiting_selection" | "selected" | "packing" |
+    /// "active".
     pub stage: String,
     /// How many sites the source reported (for the "Choose sites (N)" link).
     pub site_count: usize,
+    /// Total the source declared, 0 = unknown. A percentage without this is a
+    /// number with no denominator, so the renderer must not print one.
+    pub expected_bytes: i64,
+    /// Measured bytes/second, 0 = not enough evidence to state one. Zero renders
+    /// as nothing at all — never as "0 B/s", which would read as a stall.
+    pub rate_bytes_per_sec: i64,
+    /// What the source last said while PACKING. Empty until it reports.
+    pub packing_note: String,
 }
 
 /// Shown once after minting: the single interactive command to paste on the
@@ -67,6 +88,40 @@ struct ImportWizardTpl<'a> {
     minted: Option<MintedView>,
     flash: Option<String>,
     flash_error: Option<String>,
+    /// Set when the panel's own nginx vhost predates the upload rules, so a
+    /// bundle over 2 GiB would still be refused mid-stream. Rendered as a
+    /// warning card rather than left for the operator to discover as
+    /// `curl: (55) Send failure: Broken pipe` on somebody else's server.
+    stale_vhost: Option<String>,
+}
+
+/// Does the live panel vhost carry the `/import/` upload rules?
+///
+/// Read from disk rather than assumed, because the fix ships in a template and
+/// an operator can be running a vhost rendered by an older version: the agent
+/// re-asserts it at boot, but only when `[cluster] panel_hostname` is set AND
+/// the certificate exists. Silence there is exactly the case where the operator
+/// upgrades, re-runs the one-liner, and hits the identical 413 — with a panel
+/// whose UI now promises resumable background uploads.
+async fn stale_panel_vhost() -> Option<String> {
+    const VHOST: &str = "/etc/nginx/sites-enabled/hyperion-panel.conf";
+    let text = match tokio::fs::read_to_string(VHOST).await {
+        Ok(t) => t,
+        // No managed vhost at all. Either this panel is reached directly on
+        // :8443 (in which case nginx is not in the path and there is nothing to
+        // warn about) or it is behind something we did not write. Say nothing
+        // rather than cry wolf.
+        Err(_) => return None,
+    };
+    if text.contains("location /import/") && text.contains("proxy_request_buffering off") {
+        return None;
+    }
+    Some(format!(
+        "The nginx vhost at {VHOST} predates this version and still caps every \
+         upload at 2 GiB. An import larger than that will fail mid-transfer with \
+         a broken pipe on the source server. Run update.sh on this box (or \
+         restart the Hyperion agent) to re-render it."
+    ))
 }
 
 #[derive(Deserialize)]
@@ -137,8 +192,13 @@ async fn list_transfers(state: &SharedState) -> Vec<TransferRow> {
                 let has_selection = !i.selection_json.trim().is_empty();
                 // Stage drives the wizard row: the source is in one of these
                 // phases while status is still "pending" (pre-ingest).
+                // What the source reports while it packs — the phase that used
+                // to be dead air, and is usually the longest part of a run.
+                let packing_note = summarise_source_progress(&i.source_progress_json);
                 let stage = if i.job_id.is_some() || i.status != "pending" {
                     "active"
+                } else if has_selection && !packing_note.is_empty() && i.received_bytes == 0 {
+                    "packing"
                 } else if has_selection {
                     "selected"
                 } else if has_manifest {
@@ -152,10 +212,14 @@ async fn list_transfers(state: &SharedState) -> Vec<TransferRow> {
                     source_kind: i.source_kind,
                     status: i.status,
                     received: human_bytes(i.received_bytes),
+                    received_bytes: i.received_bytes,
                     job_id: i.job_id,
                     created_by: i.created_by,
                     stage,
                     site_count,
+                    expected_bytes: i.expected_bytes,
+                    rate_bytes_per_sec: i.rate_bytes_per_sec,
+                    packing_note,
                 }
             })
             .collect(),
@@ -492,6 +556,7 @@ async fn render(
         minted,
         flash: flash.filter(|s| !s.is_empty()),
         flash_error: flash_error.filter(|s| !s.is_empty()),
+        stale_vhost: stale_panel_vhost().await,
     };
     Ok(Html(tpl.render()?).into_response())
 }
@@ -516,98 +581,27 @@ pub async fn get_agent_script(
     // Values are SINGLE-quoted: token is hex, kind is a fixed enum, base is
     // charset-stripped in base_url — none can contain a single quote, so this
     // cannot be broken out of (defense-in-depth atop base_url sanitization).
+    // The runner lives in `assets/import-runner.sh`, not in a format! string.
+    //
+    // It grew from a one-line pipeline into a few hundred lines with an offset
+    // loop, a back-off ladder, flock and setsid handling — and a `format!` raw
+    // string requires every `{` and `}` in that to be doubled. A slip in the
+    // doubling compiles cleanly and ships a syntactically invalid script whose
+    // first reader is an operator running it as root on a customer's production
+    // server. As a real file it is checked by `bash -n` in CI, and the three
+    // values it needs arrive as a small generated prelude instead.
+    //
+    // Those values are single-quoted: the token is hex, the kind is a fixed
+    // enum, and `base` is charset-stripped in `base_url`, so none can contain
+    // the `'` that would end the quoting.
+    const RUNNER: &str = include_str!("../../assets/import-runner.sh");
     let script = format!(
-        r#"#!/bin/bash
-# Hyperion self-service import — runs on the SOURCE panel box (as root).
-# It reports your sites to Hyperion, waits for you to pick them in the panel,
-# then exports only those and streams them back. Nothing touches your machine.
-#
-# pipefail is set UP HERE, not just before the export: without it a failing
-# producer in any pipeline is masked by a succeeding consumer, and the script
-# marches on with empty data.
-set -euo pipefail
-T='{token}'
-B='{base}'
-K='{kind}'
-
-# Cleanup via trap, not by hand. `set -e` aborts on the first failing command,
-# so every hand-written `rm` further down is unreachable on exactly the paths
-# that need it — a network blip or a bad binary would leave the temporary
-# files in /tmp forever.
-TMP=""; LIST=""
-cleanup() {{ [ -n "$TMP" ] && rm -f "$TMP"; [ -n "$LIST" ] && rm -f "$LIST"; }}
-trap cleanup EXIT
-TMP="$(mktemp)"; LIST="$(mktemp)"
-
-echo "[hyperion] downloading exporter from $B …" >&2
-ARCH="$(uname -m)"
-curl -fsSL "$B/import/agent-bin/$T?arch=$ARCH" -o "$TMP"
-
-# Verify what arrived is actually an executable for THIS machine before
-# running it. A zero-byte or truncated download, or a binary built for another
-# architecture, otherwise fails with the kernel's bare "cannot execute binary
-# file: Exec format error" — which says nothing about what went wrong or where
-# to look.
-if [ ! -s "$TMP" ]; then
-  echo "[hyperion] the exporter downloaded as an EMPTY file." >&2
-  echo "[hyperion] On the Hyperion box: ls -l /usr/local/bin/hyperion-export" >&2
-  echo "[hyperion] and re-run update.sh if it is missing or 0 bytes." >&2
-  exit 1
-fi
-if command -v file >/dev/null 2>&1; then
-  DESC="$(file -b "$TMP" 2>/dev/null || true)"
-  case "$DESC" in
-    *ELF*) : ;;
-    *) echo "[hyperion] what downloaded is not a Linux executable: $DESC" >&2
-       echo "[hyperion] The first bytes were: $(head -c 120 "$TMP" | tr -d '\0')" >&2
-       exit 1 ;;
-  esac
-  # Architecture mismatch is the other cause of "Exec format error": Hyperion
-  # serves the binary it has, and that is built for the Hyperion box.
-  THIS_ARCH="$(uname -m)"
-  case "$THIS_ARCH:$DESC" in
-    x86_64:*x86-64*|aarch64:*aarch64*|armv7*:*ARM*|i?86:*Intel\ 80386*) : ;;
-    *) echo "[hyperion] the exporter is for a different CPU than this machine." >&2
-       echo "[hyperion] this box: $THIS_ARCH — binary: $DESC" >&2
-       echo "[hyperion] Hyperion builds x86_64 and aarch64 exporters. Run" >&2
-       echo "[hyperion] update.sh on the Hyperion box so it has both, then" >&2
-       echo "[hyperion] re-run this command." >&2
-       exit 1 ;;
-  esac
-fi
-chmod +x "$TMP"
-
-echo "[hyperion] scanning $K and reporting the sites to Hyperion …" >&2
-"$TMP" --kind "$K" --list --json > "$LIST"
-curl -fsS -X POST -H 'Content-Type: application/json' --data-binary @"$LIST" "$B/import/manifest/$T" >/dev/null
-echo "[hyperion] reported. Open Hyperion -> Import, tick the sites you want, click Import. Waiting…" >&2
-
-SEL=""
-# Brace expansion, not $(seq …): no subshell, no external binary. And a named
-# loop variable — `_` is a Bash special that holds the previous command's last
-# argument, so writing to it clobbers something the shell owns.
-for _i in {{1..2640}}; do
-  R="$(curl -fsS "$B/import/selection/$T" || true)"
-  case "$R" in
-    pending|"") sleep 5 ;;
-    cancelled) echo "[hyperion] cancelled (or token expired) in the panel." >&2; exit 0 ;;
-    # A selection is a comma-separated list of domains. Matching that shape
-    # rather than accepting anything non-empty: a proxy's HTML error page also
-    # arrives with HTTP 200, and the old catch-all would have passed it
-    # straight to --only.
-    *[!a-zA-Z0-9.,_-]*) echo "[hyperion] unexpected reply from Hyperion — not a site list:" >&2
-                        echo "$R" | head -c 200 >&2; echo >&2; exit 1 ;;
-    *) SEL="$R"; break ;;
-  esac
-done
-if [ -z "$SEL" ]; then echo "[hyperion] timed out waiting for a selection." >&2; exit 1; fi
-
-echo "[hyperion] exporting the selected sites and streaming to Hyperion …" >&2
-# The panel always sends an explicit comma-separated list of the chosen SOURCE
-# domains (never a wildcard), so the source exports exactly those.
-"$TMP" --kind "$K" --only "$SEL" --out - | curl -fsS --max-time 86400 -X POST -T - "$B/import/ingest/$T"
-echo "[hyperion] done — watch progress in Hyperion -> Import." >&2
-"#
+        "#!/bin/bash\n\
+         # Hyperion self-service import — generated for one token, valid once.\n\
+         T='{token}'\n\
+         B='{base}'\n\
+         K='{kind}'\n\
+         {RUNNER}"
     );
     Ok((
         [(
@@ -617,6 +611,536 @@ echo "[hyperion] done — watch progress in Hyperion -> Import." >&2
         script,
     )
         .into_response())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Resumable chunked upload
+//
+// The original path was one `curl -T -` streaming a whole panel's worth of
+// docroots and database dumps through a single HTTP request, and its token was
+// consumed by the request STARTING. So any interruption — a dropped SSH
+// session, a proxy's body limit, a network blip four hours in — lost the
+// transfer permanently: the bundle had to be re-packed AND the token was spent.
+//
+// These five routes replace that with an offset protocol whose one invariant is
+// that THE SERVER IS AUTHORITATIVE ABOUT THE OFFSET. The client never decides
+// where its bytes go; it asks, appends where told, and is corrected with a 409
+// whenever it disagrees. That single rule is what makes a resume safe across a
+// reconnect, a panel restart, or a partial write.
+//
+// Replies are `key value` lines, matching the existing `/import/selection`
+// protocol, so the bash runner parses them with `sed` rather than needing a
+// JSON tool on a stranger's server.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Largest chunk the panel will accept. nginx no longer caps `/import/`, so this
+/// IS the ceiling — and being the ceiling in the application means an oversized
+/// body gets a sentence back instead of a closed socket.
+const MAX_CHUNK_BYTES: u64 = 128 * 1024 * 1024;
+
+/// Chunk size the panel asks the source to use.
+const PREFERRED_CHUNK_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Headroom demanded on top of the declared bundle size before accepting it.
+const RECEIVE_HEADROOM_BYTES: u64 = 1024 * 1024 * 1024;
+
+/// Pull the token out of `Authorization: Bearer …`.
+///
+/// The token is NOT in the path for these routes, unlike the bootstrap fetch.
+/// The upload loop makes one request per chunk — hundreds for a large bundle —
+/// and a URL lands in the panel's nginx access log every time. That log is
+/// world-readable on many installs and is routinely shipped to aggregation, so
+/// putting a live credential in it hundreds of times is the same mistake as
+/// putting one on argv, which this project already refuses to do.
+fn bearer(headers: &HeaderMap) -> Option<String> {
+    let raw = headers
+        .get(axum::http::header::AUTHORIZATION)?
+        .to_str()
+        .ok()?;
+    let t = raw.strip_prefix("Bearer ")?.trim();
+    // The token is hex; refuse anything else rather than passing operator-shaped
+    // junk into a hash lookup.
+    if t.is_empty() || t.len() > 128 || !t.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(t.to_string())
+}
+
+fn text(code: StatusCode, body: String) -> Response {
+    (
+        code,
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; charset=utf-8",
+        )],
+        body,
+    )
+        .into_response()
+}
+
+/// Parse a `key value` body into a small map. Bounded by the route's 8 KiB body
+/// limit, so no size guard is needed here.
+fn kv(body: &str) -> std::collections::HashMap<&str, &str> {
+    body.lines()
+        .filter_map(|l| l.split_once(' '))
+        .map(|(k, v)| (k.trim(), v.trim()))
+        .collect()
+}
+
+fn part_path(id: i64) -> String {
+    format!("{}/bundle-{id}.tar.part", migration_dir())
+}
+
+fn final_path(id: i64) -> String {
+    format!("{}/bundle-{id}.tar", migration_dir())
+}
+
+async fn part_len(id: i64) -> u64 {
+    tokio::fs::metadata(part_path(id))
+        .await
+        .map(|m| m.len())
+        .unwrap_or(0)
+}
+
+/// Make sure the migration directory exists and is 0700.
+///
+/// The bundle holds plaintext database dumps and wp-config secrets; a site's
+/// PHP-FPM uid must not be able to traverse in.
+async fn ensure_migration_dir() {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = tokio::fs::create_dir_all(migration_dir()).await;
+    let _ =
+        tokio::fs::set_permissions(migration_dir(), std::fs::Permissions::from_mode(0o700)).await;
+}
+
+/// `POST /import/upload/begin` — admit an attempt and say where to continue.
+///
+/// Idempotent by design: calling it again after a dropped connection is exactly
+/// how a resume starts, and the reply carries the offset the panel already
+/// holds. That is why it uses `ClaimUpload` rather than the single-use
+/// `Resolve { consume: true }`, which refuses the second call for ever.
+pub async fn post_upload_begin(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    body: String,
+) -> Result<Response, AppError> {
+    let Some(token) = bearer(&headers) else {
+        return Ok(text(StatusCode::UNAUTHORIZED, "no bearer token\n".into()));
+    };
+    let f = kv(&body);
+    let expected: u64 = f.get("bytes").and_then(|v| v.parse().ok()).unwrap_or(0);
+    let sha = f.get("sha256").copied().unwrap_or("");
+    // A bundle with no declared digest is refused outright. There is no fallback
+    // to `tar tf`: a tar truncated at a 512-byte boundary and zero-padded — what
+    // a crash or a short write leaves — reads as a clean end-of-archive, so
+    // `tar tf` exits 0 having silently dropped every member past the cut, and
+    // the import then creates those sites EMPTY and reports success.
+    if expected == 0 || sha.len() != 64 || !sha.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Ok(text(
+            StatusCode::BAD_REQUEST,
+            "begin needs `bytes <n>` and `sha256 <64 hex>`\n".into(),
+        ));
+    }
+
+    let claimed = match token_rpc(
+        &state,
+        ImportTokenOp::ClaimUpload {
+            token: token.clone(),
+            expected_bytes: expected as i64,
+            bundle_sha256: sha.to_string(),
+        },
+    )
+    .await?
+    {
+        ImportTokenResult::Resolved(Some(i)) => i,
+        _ => {
+            return Ok(text(
+                StatusCode::FORBIDDEN,
+                "this import token is expired, cancelled, or its bundle already \
+                 arrived and is being imported\n"
+                    .into(),
+            ))
+        }
+    };
+
+    ensure_migration_dir().await;
+
+    // A real preflight, against the size actually being sent. The old blind
+    // 2 GiB floor accepted a 40 GB bundle onto a disk with 3 GB free and
+    // discovered the problem hours later, mid-write.
+    if let Some(avail) = avail_bytes(&migration_dir()).await {
+        let need = expected.saturating_add(RECEIVE_HEADROOM_BYTES);
+        if (avail as u64) < need {
+            // Deliberately NOT marked failed. Freeing disk and re-running the
+            // one-liner is the obvious fix, and a token burnt here would force
+            // the operator back through mint + scan + selection for a problem
+            // they just solved.
+            return Ok(text(
+                StatusCode::INSUFFICIENT_STORAGE,
+                format!(
+                    "not enough free disk on the target node: {} free, {} needed \
+                     (the {} bundle plus 1 GB of headroom for the import itself)\n",
+                    hyperion_import::progress::human_bytes(avail as u64),
+                    hyperion_import::progress::human_bytes(need),
+                    hyperion_import::progress::human_bytes(expected),
+                ),
+            ));
+        }
+    }
+
+    // A different bundle than the one this token was carrying. Re-packing is a
+    // normal event — the run directory was cleaned, the box rebooted before
+    // staging finished, a site was fixed and the export re-run — so the partial
+    // is discarded and the transfer restarts, rather than the token being
+    // bricked with a mismatch error the operator cannot act on.
+    let mut offset = part_len(claimed.id).await;
+    let previous_sha = claimed.bundle_sha256.clone();
+    if offset > 0 && !previous_sha.is_empty() && previous_sha != sha {
+        let _ = tokio::fs::remove_file(part_path(claimed.id)).await;
+        offset = 0;
+    }
+    // Never claim to hold more than was declared: a stale .part longer than the
+    // new bundle would make the client skip past the end.
+    if offset > expected {
+        let _ = tokio::fs::remove_file(part_path(claimed.id)).await;
+        offset = 0;
+    }
+
+    Ok(text(
+        StatusCode::OK,
+        format!("offset {offset}\nchunk {PREFERRED_CHUNK_BYTES}\nstate receiving\n"),
+    ))
+}
+
+/// `PUT /import/upload/chunk` — append one chunk at the offset the server holds.
+pub async fn put_upload_chunk(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    body: axum::body::Body,
+) -> Result<Response, AppError> {
+    let Some(token) = bearer(&headers) else {
+        return Ok(text(StatusCode::UNAUTHORIZED, "no bearer token\n".into()));
+    };
+    // Refuse an oversized chunk from the DECLARED length, before reading a byte.
+    // Discovering the overflow mid-stream is precisely the failure that produced
+    // `curl (55)` and a SIGPIPE'd tar with no usable error.
+    if let Some(len) = headers
+        .get(axum::http::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok())
+    {
+        if len > MAX_CHUNK_BYTES {
+            return Ok(text(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                format!("chunk of {len} bytes exceeds the {MAX_CHUNK_BYTES} byte limit\n"),
+            ));
+        }
+    }
+    let Some(info) = resolve(&state, &token, false).await? else {
+        // `get_fetchable` admits pending/receiving only, so a cancelled or
+        // completed transfer lands here. 410 is the runner's stop signal.
+        return Ok(text(StatusCode::GONE, "state cancelled\n".into()));
+    };
+    if info.status == "importing" {
+        // The precondition stated here rather than left to the query filter:
+        // once commit has handed the bundle to a job, no further byte may be
+        // appended to it, whatever a stale runner believes.
+        return Ok(text(
+            StatusCode::GONE,
+            "state importing\nthis bundle already arrived and is being imported\n".into(),
+        ));
+    }
+    let want: u64 = headers
+        .get("x-hyperion-offset")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(u64::MAX);
+
+    ensure_migration_dir().await;
+    let path = part_path(info.id);
+    let have = part_len(info.id).await;
+    if want != have {
+        // The sole resume negotiation. No write happens; the client seeks.
+        return Ok(text(
+            StatusCode::CONFLICT,
+            format!("offset {have}\nstate receiving\n"),
+        ));
+    }
+
+    use http_body_util::BodyExt;
+    use tokio::io::AsyncWriteExt;
+    let mut file = {
+        let mut o = tokio::fs::OpenOptions::new();
+        // 0600 from creation, never the default 0644 — it is world-readable
+        // while it streams otherwise, and this file is every selected site's
+        // database in plaintext.
+        o.create(true).append(true).mode(0o600);
+        match o.open(&path).await {
+            Ok(f) => f,
+            Err(e) => return Err(AppError::Internal(format!("open bundle part: {e}"))),
+        }
+    };
+
+    // Any failure mid-chunk rolls the file back to the last acknowledged offset,
+    // so a partial chunk is never counted and the client can retry exactly that
+    // chunk. Without this a torn write would leave the file at an offset the
+    // client does not know about, and the resume would splice bytes into the
+    // middle of a member.
+    let rollback = |e: String| async move {
+        if let Ok(f) = tokio::fs::OpenOptions::new().write(true).open(&path).await {
+            let _ = f.set_len(have).await;
+        }
+        e
+    };
+
+    let mut body = body;
+    let mut written: u64 = 0;
+    loop {
+        match body.frame().await {
+            Some(Ok(frame)) => {
+                let Ok(data) = frame.into_data() else {
+                    continue;
+                };
+                // Content-Length was checked before the body was read, but a
+                // chunked request declares none — so the running total is
+                // capped here too.
+                if written + data.len() as u64 > MAX_CHUNK_BYTES {
+                    let msg = rollback("chunk exceeded the size limit mid-stream".into()).await;
+                    return Ok(text(StatusCode::PAYLOAD_TOO_LARGE, format!("{msg}\n")));
+                }
+                if let Err(e) = file.write_all(&data).await {
+                    let msg = rollback(format!("write failed (disk full?): {e}")).await;
+                    return Ok(text(
+                        StatusCode::INSUFFICIENT_STORAGE,
+                        format!("{msg}\noffset {have}\n"),
+                    ));
+                }
+                written += data.len() as u64;
+            }
+            Some(Err(e)) => {
+                let msg = rollback(format!("upload error: {e}")).await;
+                return Ok(text(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("{msg}\noffset {have}\n"),
+                ));
+            }
+            None => break,
+        }
+    }
+    if let Err(e) = file.flush().await {
+        let msg = rollback(format!("flush failed: {e}")).await;
+        return Ok(text(
+            StatusCode::INSUFFICIENT_STORAGE,
+            format!("{msg}\noffset {have}\n"),
+        ));
+    }
+    drop(file);
+
+    let now_off = have + written;
+    let _ = token_rpc(
+        &state,
+        ImportTokenOp::RecordUpload {
+            id: info.id,
+            received_bytes: now_off as i64,
+        },
+    )
+    .await;
+    Ok(text(
+        StatusCode::OK,
+        format!("offset {now_off}\nstate receiving\n"),
+    ))
+}
+
+/// `POST /import/upload/commit` — verify and hand the bundle to the import job.
+pub async fn post_upload_commit(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    body: String,
+) -> Result<Response, AppError> {
+    let Some(token) = bearer(&headers) else {
+        return Ok(text(StatusCode::UNAUTHORIZED, "no bearer token\n".into()));
+    };
+    let Some(info) = resolve(&state, &token, false).await? else {
+        return Ok(text(StatusCode::GONE, "state cancelled\n".into()));
+    };
+    // Already committed. Retrying a commit whose 200 was lost is normal, and
+    // answering "cancelled" for it would be both wrong and alarming; answering
+    // with the existing job is right, and re-importing the same bundle would be
+    // the actual harm.
+    if info.status == "importing" {
+        if let Some(job) = info.job_id.as_deref() {
+            return Ok(text(
+                StatusCode::OK,
+                format!(
+                    "state importing\njob {job}\nreceived {}\n",
+                    info.received_bytes
+                ),
+            ));
+        }
+    }
+    let f = kv(&body);
+    let declared: u64 = f.get("bytes").and_then(|v| v.parse().ok()).unwrap_or(0);
+    let sha = f.get("sha256").copied().unwrap_or("").to_lowercase();
+
+    let part = part_path(info.id);
+    let have = part_len(info.id).await;
+    if have != declared || declared == 0 {
+        return Ok(text(
+            StatusCode::CONFLICT,
+            format!(
+                "the panel holds {have} bytes but the source declared {declared}\n\
+                 offset {have}\nstate receiving\n"
+            ),
+        ));
+    }
+
+    // The real integrity check. `tar tf` is not one — see post_upload_begin.
+    let actual = match hyperion_import::bundle::seal(std::path::Path::new(&part)).await {
+        Ok((_, digest)) => digest,
+        Err(e) => return Err(AppError::Internal(format!("hash bundle: {e}"))),
+    };
+    if actual != sha {
+        // Exactly one full re-upload is granted: a corrupt resume must not be
+        // able to loop for ever, and must never reach the import job.
+        let _ = tokio::fs::remove_file(&part).await;
+        update(&state, info.id, None, None, Some(0)).await;
+        return Ok(text(
+            StatusCode::CONFLICT,
+            format!(
+                "the bundle arrived corrupted — the source promised sha256 {sha} but \
+                 {} arrived. The partial has been discarded; the upload will restart \
+                 from zero.\noffset 0\nstate receiving\n",
+                &actual[..16]
+            ),
+        ));
+    }
+
+    let final_p = final_path(info.id);
+    if let Err(e) = tokio::fs::rename(&part, &final_p).await {
+        return Err(AppError::Internal(format!("finalise bundle: {e}")));
+    }
+
+    // `tar tf` stays as a SECONDARY check: the digest proves the bytes are the
+    // ones the source sealed, but not that the source sealed a valid archive.
+    let tar_ok = tokio::process::Command::new("tar")
+        .arg("tf")
+        .arg(&final_p)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !tar_ok {
+        let head = tokio::fs::read(&final_p).await.unwrap_or_default();
+        let preview: String = String::from_utf8_lossy(&head[..head.len().min(160)])
+            .chars()
+            .map(|c| if c.is_control() { '·' } else { c })
+            .collect();
+        let _ = tokio::fs::remove_file(&final_p).await;
+        update(&state, info.id, Some("failed"), None, Some(have as i64)).await;
+        return Ok(text(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "the {have} bytes arrived intact (the digest matched) but they are not a \
+                 tar archive — the exporter produced something else. First bytes: \
+                 {preview:?}\n"
+            ),
+        ));
+    }
+
+    let site_overrides: Vec<hyperion_import::SiteImportOverride> =
+        serde_json::from_str(&info.selection_json).unwrap_or_default();
+    let req = hyperion_import::ImportPanelReq {
+        source_kind: info.source_kind.clone(),
+        mode: "archive".into(),
+        ssh: None,
+        archive_path: Some(final_p),
+        site_overrides,
+    };
+    let node = if info.target_node.is_empty() || info.target_node == "local" {
+        None
+    } else {
+        Some(info.target_node.clone())
+    };
+    let label = format!("{} (self-service bundle)", info.source_kind);
+    let job_state = state.clone();
+    let job_id = crate::handlers::jobs::spawn_job(
+        state.clone(),
+        "panel_import",
+        Some(&label),
+        "{}",
+        &info.created_by,
+        0,
+        move |reporter| async move {
+            crate::handlers::import_panel::run_panel_import_job(reporter, job_state, node, req)
+                .await;
+        },
+    )
+    .await?;
+    update(
+        &state,
+        info.id,
+        Some("importing"),
+        Some(&job_id),
+        Some(have as i64),
+    )
+    .await;
+
+    Ok(text(
+        StatusCode::OK,
+        format!("state importing\njob {job_id}\nreceived {have}\n"),
+    ))
+}
+
+/// `GET /import/upload/status` — what the panel believes, for the source to
+/// compare against.
+pub async fn get_upload_status(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(token) = bearer(&headers) else {
+        return Ok(text(StatusCode::UNAUTHORIZED, "no bearer token\n".into()));
+    };
+    let Some(info) = resolve(&state, &token, false).await? else {
+        return Ok(text(StatusCode::OK, "state cancelled\n".into()));
+    };
+    Ok(text(
+        StatusCode::OK,
+        format!(
+            "state {}\noffset {}\nexpected {}\njob {}\n",
+            info.status,
+            part_len(info.id).await,
+            info.expected_bytes,
+            info.job_id.as_deref().unwrap_or("-"),
+        ),
+    ))
+}
+
+/// `POST /import/progress` — what the source is doing while it PACKS.
+///
+/// Before this the panel showed dead air for the longest phase of a run, so an
+/// operator watching the Transfers table could not tell a working export from a
+/// dead one.
+pub async fn post_source_progress(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    body: String,
+) -> Result<Response, AppError> {
+    let Some(token) = bearer(&headers) else {
+        return Ok(text(StatusCode::UNAUTHORIZED, "no bearer token\n".into()));
+    };
+    // Stored verbatim and rendered as text, never evaluated. The 8 KiB route
+    // limit bounds it.
+    let _ = token_rpc(
+        &state,
+        ImportTokenOp::SetSourceProgress {
+            token,
+            progress_json: body,
+        },
+    )
+    .await?;
+    Ok(text(StatusCode::OK, "ok\n".into()))
 }
 
 /// `POST /import/manifest/:token` (public, token-gated, NOT consumed) — the
@@ -757,6 +1281,14 @@ pub async fn get_agent_bin(
 
 /// `POST /import/ingest/:token` — receive the streamed bundle (token consumed
 /// atomically) → write to disk → spawn the archive import job.
+/// LEGACY single-shot ingest, kept for a transfer already in flight when the
+/// panel was upgraded — its source is running the old bootstrap and knows
+/// nothing about chunks. New transfers never reach it.
+///
+/// It has no digest, so its only structural check is `tar tf`, which exits 0 on
+/// a zero-padded truncation. The CONSEQUENCE of that is closed elsewhere:
+/// `panel_import` now refuses a bundle whose manifest does not account for a
+/// missing docroot, instead of creating the site empty and reporting success.
 pub async fn post_ingest(
     State(state): State<SharedState>,
     Path(token): Path<String>,
@@ -771,16 +1303,16 @@ pub async fn post_ingest(
             .into_response());
     };
 
-    let _ = tokio::fs::create_dir_all(MIGRATION_DIR).await;
+    let _ = tokio::fs::create_dir_all(migration_dir()).await;
     // SECURITY (sec-findings #6): the bundle holds plaintext DB dumps +
     // wp-config secrets. Lock the dir to 0700 so other local users (e.g. a site
     // PHP-FPM uid) can't traverse in and read bundle-*.tar.
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ =
-            tokio::fs::set_permissions(MIGRATION_DIR, std::fs::Permissions::from_mode(0o700)).await;
+        let _ = tokio::fs::set_permissions(migration_dir(), std::fs::Permissions::from_mode(0o700))
+            .await;
     }
-    if let Some(avail) = avail_bytes(MIGRATION_DIR).await {
+    if let Some(avail) = avail_bytes(&migration_dir()).await {
         if avail < MIN_FREE_BYTES {
             update(&state, info.id, Some("failed"), None, None).await;
             return Ok((
@@ -791,7 +1323,7 @@ pub async fn post_ingest(
         }
     }
 
-    let path = format!("{MIGRATION_DIR}/bundle-{}.tar", info.id);
+    let path = format!("{}/bundle-{}.tar", migration_dir(), info.id);
     // SECURITY (sec-findings #6): create the bundle 0600 at creation (before any
     // bytes), not the default 0644 — otherwise it's world-readable while it
     // streams and forever after.
@@ -1040,12 +1572,66 @@ fn esc(s: &str) -> String {
     askama_escape::escape(s, askama_escape::Html).to_string()
 }
 
+/// One line for the Progress column.
+///
+/// Every figure here is measured. A percentage needs `expected_bytes` and is
+/// omitted without it; a rate and an ETA need two samples far enough apart,
+/// which the state layer already decided by returning 0 — so 0 renders as
+/// nothing at all, never as "0 B/s", which would read as a stall.
+fn progress_cell(r: &TransferRow) -> String {
+    if r.expected_bytes <= 0 {
+        // Total unknown: say how much has landed and stop there.
+        return esc(&r.received);
+    }
+    let pct = (r.received_bytes.min(r.expected_bytes) * 100) / r.expected_bytes;
+    let rate = if r.rate_bytes_per_sec > 0 {
+        let left = (r.expected_bytes - r.received_bytes).max(0);
+        let eta = left / r.rate_bytes_per_sec;
+        format!(
+            " · {}/s · ~{} left",
+            human_bytes(r.rate_bytes_per_sec),
+            hyperion_import::progress::human_secs(eta)
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        "<div style=\"min-width:11rem\"><div class=\"progress-bar\" style=\"margin-bottom:.25rem\">\
+         <div class=\"progress-bar-fill\" style=\"width:{pct}%\"></div></div>\
+         <span class=\"text-soft small\">{} of {} ({pct}%){}</span></div>",
+        esc(&r.received),
+        esc(&human_bytes(r.expected_bytes)),
+        esc(&rate),
+    )
+}
+
+/// Reduce the source's packing report to one sentence for the table.
+///
+/// The body is whatever the source POSTed, so it is parsed defensively and
+/// rendered as escaped text — never trusted, never evaluated.
+fn summarise_source_progress(json: &str) -> String {
+    if json.trim().is_empty() {
+        return String::new();
+    }
+    let f: std::collections::HashMap<&str, &str> = json
+        .lines()
+        .filter_map(|l| l.split_once(' '))
+        .map(|(k, v)| (k.trim(), v.trim()))
+        .collect();
+    let done = f.get("sites_done").copied().unwrap_or("?");
+    let total = f.get("sites_total").copied().unwrap_or("?");
+    match f.get("input_done").and_then(|v| v.parse::<i64>().ok()) {
+        Some(b) => format!("packing site {done} of {total} — {} so far", human_bytes(b)),
+        None => format!("packing site {done} of {total}"),
+    }
+}
+
 fn transfers_html(rows: &[TransferRow], csrf: &str) -> String {
     if rows.is_empty() {
         return "<p class=\"text-soft\">No transfers in flight. Generate a command above and run it on your source server.</p>".to_string();
     }
     let mut h = String::from(
-        "<div class=\"table-wrap\"><table class=\"table\"><thead><tr><th>Source</th><th>By</th><th>Stage</th><th>Received</th><th></th></tr></thead><tbody>",
+        "<div class=\"table-wrap\"><table class=\"table\"><thead><tr><th>Source</th><th>By</th><th>Stage</th><th>Progress</th><th></th></tr></thead><tbody>",
     );
     for r in rows {
         // Stage label + the primary action cell.
@@ -1065,6 +1651,10 @@ fn transfers_html(rows: &[TransferRow], csrf: &str) -> String {
                 "reported 0 sites".to_string(),
                 "<span class=\"text-soft\">nothing to import on the source</span>".to_string(),
             ),
+            "packing" => (
+                "packing on the source".to_string(),
+                format!("<span class=\"text-soft\">{}</span>", esc(&r.packing_note)),
+            ),
             "selected" => (
                 "selected".to_string(),
                 "<span class=\"text-soft\">waiting for the source to export…</span>".to_string(),
@@ -1077,8 +1667,11 @@ fn transfers_html(rows: &[TransferRow], csrf: &str) -> String {
                 },
             ),
         };
-        // Cancel stays available until the import job has actually started.
-        let cancel = if r.job_id.is_none() && r.stage != "active" {
+        // Cancel stays available until the import job has actually started —
+        // including WHILE a bundle is being received. It used to disappear the
+        // moment the stage went "active", which is exactly when a transfer the
+        // operator no longer wants is costing the most disk and bandwidth.
+        let cancel = if r.job_id.is_none() {
             format!(
                 "<form method=\"post\" action=\"/import/cancel\" style=\"display:inline;margin-left:.4rem\">\
                  <input type=\"hidden\" name=\"_csrf\" value=\"{}\">\
@@ -1095,7 +1688,7 @@ fn transfers_html(rows: &[TransferRow], csrf: &str) -> String {
             esc(&r.source_kind),
             esc(&r.created_by),
             stage,
-            esc(&r.received),
+            progress_cell(r),
             action,
             cancel,
         ));
