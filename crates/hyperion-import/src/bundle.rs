@@ -84,6 +84,55 @@ pub async fn measure_payload(ir: &ImportIR) -> Option<u64> {
     Some(payload)
 }
 
+/// Headroom demanded on top of every measured import figure: 1 GiB for the
+/// target's own scratch (nginx/php-fpm config, the DB load, the job log) and
+/// for the ordinary drift between `du -sb` and what a filesystem actually
+/// charges for the same tree.
+pub const IMPORT_HEADROOM_BYTES: u64 = 1024 * 1024 * 1024;
+
+/// What an import will WRITE beyond the bundle itself: every site's docroot
+/// inflated into its hosting tree, plus the per-site copy of each database dump
+/// that the restore step makes.
+///
+/// `None` when any site in the manifest carries no measured docroot size — an
+/// older bundle, or a docroot `du` could not read. There is then no denominator
+/// and the caller must skip its check rather than refuse on a partial sum,
+/// which would be a guess pretending to be a measurement.
+pub fn inflate_bytes(ir: &ImportIR) -> Option<u64> {
+    if ir.hostings.is_empty() {
+        return None;
+    }
+    let mut total: u64 = 0;
+    for h in &ir.hostings {
+        if h.docroot_bytes == 0 {
+            // Not "this site is empty": `du -sb` never says 0 for a directory
+            // that exists, so 0 is exactly the "never measured" marker.
+            return None;
+        }
+        total = total
+            .saturating_add(h.docroot_bytes)
+            .saturating_add(h.db_bytes);
+    }
+    Some(total)
+}
+
+/// Free bytes a node needs before importing a `bundle_len`-byte bundle whose
+/// manifest inflates to `inflate` bytes.
+///
+/// `bundle_copies` is the whole reason this is a function rather than a sum
+/// written twice:
+///   * **2** before the transfer — the arriving `.tar` lands on the disk AND is
+///     then unpacked into a staging tree of its own size beside it;
+///   * **1** once the `.tar` is already on disk, because `df` has by then
+///     already stopped counting those bytes as free. Demanding them twice there
+///     would refuse an import that fits.
+pub fn import_needed_bytes(bundle_len: u64, inflate: u64, bundle_copies: u64) -> u64 {
+    bundle_len
+        .saturating_mul(bundle_copies)
+        .saturating_add(inflate)
+        .saturating_add(IMPORT_HEADROOM_BYTES)
+}
+
 /// Size + hex sha256 of a finished bundle, read in one streaming pass.
 ///
 /// This digest is the bundle's only real integrity check. `tar tf` is not one:
@@ -413,8 +462,14 @@ async fn build_inner(
     // import side can tell a deliberate omission from a truncated upload.
     let mut skipped: Vec<crate::ir::IrSkipped> = Vec::new();
     let mut input_done: u64 = 0;
+    // Per-site (docroot_bytes, db_bytes), stamped into the manifest below. These
+    // are the UNCOMPRESSED figures — the only ones that say what the import will
+    // actually have to write — and this loop is already measuring the docroot
+    // for the progress denominator, so recording it costs nothing extra.
+    let mut measured: Vec<(u64, u64)> = Vec::with_capacity(ir.hostings.len());
 
     for (idx, h) in ir.hostings.iter().enumerate() {
+        let mut db_bytes: u64 = 0;
         let site = stage.join("sites").join(site_dir(&h.domain));
         tokio::fs::create_dir_all(site.join("db")).await?;
         if Path::new(&h.docroot).is_dir() {
@@ -441,7 +496,19 @@ async fn build_inner(
         }
         for db in &h.databases {
             let dest = site.join("db").join(format!("{}.dump", db.name));
-            if let Err(e) = dump_db(db, &dest, &ir.source.kind).await {
+            let dumped = dump_db(db, &dest, &ir.source.kind).await;
+            if dumped.is_ok() {
+                // Measured, not estimated: the dump now exists. The import
+                // copies it out of the staging tree before loading it, so this
+                // is space the target really has to find.
+                db_bytes = db_bytes.saturating_add(
+                    tokio::fs::metadata(&dest)
+                        .await
+                        .map(|m| m.len())
+                        .unwrap_or(0),
+                );
+            }
+            if let Err(e) = dumped {
                 let _ = tokio::fs::remove_file(&dest).await;
                 eprintln!("  ⚠ {}: database '{}' skipped — {e}", h.domain, db.name);
                 skipped.push(crate::ir::IrSkipped {
@@ -457,7 +524,9 @@ async fn build_inner(
             }
         }
         let done = idx as u64 + 1;
-        input_done = input_done.saturating_add(dir_bytes(Path::new(&h.docroot)).await.unwrap_or(0));
+        let docroot_bytes = dir_bytes(Path::new(&h.docroot)).await.unwrap_or(0);
+        measured.push((docroot_bytes, db_bytes));
+        input_done = input_done.saturating_add(docroot_bytes);
         note(crate::progress::Event::Site {
             t: now(),
             done,
@@ -482,6 +551,14 @@ async fn build_inner(
     // side reads it to distinguish "left out on purpose" from "truncated".
     let mut manifest_ir = ir.clone();
     manifest_ir.skipped = skipped;
+    // Carry the uncompressed sizes across with the bundle. The import side sees
+    // only a compressed tarball, so without these it cannot tell a 13 GB bundle
+    // that inflates to 15 GB from one that inflates to 44 GB — and it was
+    // approving both against a check that only covered receiving the bundle.
+    for (h, (doc, db)) in manifest_ir.hostings.iter_mut().zip(measured) {
+        h.docroot_bytes = doc;
+        h.db_bytes = db;
+    }
     let manifest =
         serde_json::to_string_pretty(&manifest_ir).map_err(|e| ImportError::Command {
             cmd: "serialize manifest".into(),
@@ -854,6 +931,8 @@ mod tests {
             crons: vec![],
             tls: None,
             ssh_keys: vec![],
+            docroot_bytes: 0,
+            db_bytes: 0,
         }
     }
 
@@ -886,6 +965,123 @@ mod tests {
         ir.hostings
             .push(hosting_with_docroot(&doc.display().to_string()));
         assert!(preflight_space(&ir, &stage, true).await.is_ok());
+    }
+
+    /// The inflate figure has exactly the same rule as the export preflight:
+    /// anything it cannot measure yields no figure at all, so the checks built
+    /// on it skip rather than refuse. A partial sum would be a guess wearing a
+    /// measurement's clothes — and it would refuse imports that fit.
+    #[test]
+    fn inflate_bytes_is_none_whenever_any_site_is_unmeasured() {
+        use crate::bundle::inflate_bytes;
+
+        // Nothing to weigh.
+        assert_eq!(inflate_bytes(&ImportIR::default()), None);
+
+        // One site measured, one not (an older bundle, or a docroot `du`
+        // could not read) ⇒ no denominator.
+        let mut ir = ImportIR::default();
+        let mut a = hosting_with_docroot("/srv/a");
+        a.docroot_bytes = 10_000;
+        let b = hosting_with_docroot("/srv/b"); // docroot_bytes stays 0
+        ir.hostings.push(a);
+        ir.hostings.push(b);
+        assert_eq!(inflate_bytes(&ir), None);
+
+        // Every site measured ⇒ docroots + dumps.
+        let mut ir = ImportIR::default();
+        let mut a = hosting_with_docroot("/srv/a");
+        a.docroot_bytes = 10_000;
+        a.db_bytes = 2_000;
+        let mut b = hosting_with_docroot("/srv/b");
+        b.domain = "second.cz".into();
+        b.docroot_bytes = 5_000;
+        ir.hostings.push(a);
+        ir.hostings.push(b);
+        assert_eq!(inflate_bytes(&ir), Some(17_000));
+    }
+
+    /// The bundle is counted twice before it has landed (it arrives, then is
+    /// unpacked beside itself) and once afterwards, when `df` has already
+    /// stopped counting its bytes as free. Getting that backwards either lets
+    /// a doomed transfer start or refuses an import that fits.
+    #[test]
+    fn import_needed_counts_the_bundle_once_it_is_on_disk() {
+        use crate::bundle::{import_needed_bytes, IMPORT_HEADROOM_BYTES};
+        let gb = 1024 * 1024 * 1024u64;
+
+        // Before the transfer: 13 GB bundle + 13 GB staging + 31 GB inflate.
+        assert_eq!(
+            import_needed_bytes(13 * gb, 31 * gb, 2),
+            57 * gb + IMPORT_HEADROOM_BYTES
+        );
+        // Already on disk: the bundle's own bytes are gone from `avail`.
+        assert_eq!(
+            import_needed_bytes(13 * gb, 31 * gb, 1),
+            44 * gb + IMPORT_HEADROOM_BYTES
+        );
+        // An unmeasured inflate degrades to the old bundle-plus-headroom check
+        // rather than to a refusal.
+        assert_eq!(
+            import_needed_bytes(13 * gb, 0, 2),
+            26 * gb + IMPORT_HEADROOM_BYTES
+        );
+        // Saturating, not wrapping: a bogus manifest must not produce a tiny
+        // requirement that waves a doomed import through.
+        assert_eq!(import_needed_bytes(u64::MAX, u64::MAX, 2), u64::MAX);
+    }
+
+    /// A packed bundle must carry the uncompressed sizes: they are the whole
+    /// input to the target node's space check, and the target cannot derive
+    /// them from a compressed tarball.
+    #[tokio::test]
+    async fn packing_records_the_uncompressed_docroot_size() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let doc = tmp.path().join("docroot");
+        std::fs::create_dir_all(&doc).expect("mkdir");
+        std::fs::write(doc.join("big.txt"), vec![b'a'; 200_000]).expect("write");
+
+        let mut ir = ImportIR::default();
+        ir.hostings
+            .push(hosting_with_docroot(&doc.display().to_string()));
+        let out = tmp.path().join("bundle.tar");
+        crate::bundle::build(&ir, &out).await.expect("build");
+
+        // Read the manifest back the way the import side does.
+        let unpacked = tmp.path().join("unpacked");
+        std::fs::create_dir_all(&unpacked).expect("mkdir");
+        assert!(std::process::Command::new("tar")
+            .args(["xf", &out.display().to_string(), "-C"])
+            .arg(&unpacked)
+            .status()
+            .expect("tar")
+            .success());
+        let back = crate::bundle::read_manifest(&unpacked)
+            .await
+            .expect("manifest");
+        let recorded = back.hostings[0].docroot_bytes;
+
+        // `dir_bytes` shells out to `du -sb`, which is GNU-only — the target
+        // platform, and CI. Where it is missing the figure is legitimately
+        // absent, and the contract to assert is the fail-open one: `0` in the
+        // manifest, `None` out of `inflate_bytes`, so no check can refuse on it.
+        if recorded == 0 {
+            assert_eq!(crate::bundle::inflate_bytes(&back), None);
+            return;
+        }
+
+        assert!(
+            recorded >= 200_000,
+            "docroot_bytes should hold the UNCOMPRESSED size, got {recorded}"
+        );
+        // And the compressed bundle really is smaller than what it inflates to
+        // — which is the entire reason the figure has to travel with it.
+        let packed = std::fs::metadata(&out).expect("stat").len();
+        assert!(
+            packed < recorded,
+            "expected the bundle ({packed}) to be smaller than its inflate ({recorded})"
+        );
+        assert_eq!(crate::bundle::inflate_bytes(&back), Some(recorded));
     }
 
     #[test]

@@ -32,7 +32,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// Dry-run: detect + extract the source panel and classify every site as
     /// Create / Skip / Conflict / Unsupported. Side-effect-free.
     pub async fn import_panel_plan(&self, req: ImportPanelReq) -> Result<ImportPlan, RpcError> {
-        let (loc, key_file) = build_location(&req).await?;
+        let (loc, key_file) = build_location(&req, &self.paths.home_root).await?;
         let out = self.plan_at(&req, &loc).await;
         cleanup_key(key_file).await;
         out
@@ -44,7 +44,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         &self,
         req: ImportPanelReq,
     ) -> Result<ImportPanelResult, RpcError> {
-        let (loc, key_file) = build_location(&req).await?;
+        let (loc, key_file) = build_location(&req, &self.paths.home_root).await?;
         let out = self.apply_at(&req, &loc).await;
         cleanup_key(key_file).await;
         out
@@ -117,7 +117,21 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let plan = self.plan_at(req, loc).await?;
         let mut created = Vec::new();
         let mut skipped = Vec::new();
+        // Set once the disk fills. Every remaining site is then recorded as not
+        // attempted instead of being created: past this point create() still
+        // succeeds (a hosting row, a user, a few KB of config) while the docroot
+        // it exists for cannot be written, so carrying on manufactures empty
+        // sites that look imported. One clear stop leaves the operator with a
+        // list of what to re-run after freeing space.
+        let mut out_of_space: Option<String> = None;
         for item in &plan.items {
+            if let Some(why) = &out_of_space {
+                skipped.push(SkippedHosting {
+                    domain: item.domain.clone(),
+                    reason: format!("not attempted — the disk filled up earlier: {why}"),
+                });
+                continue;
+            }
             // Operator override for this site (keyed by source domain), if any.
             let ov = req
                 .site_overrides
@@ -138,10 +152,16 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                         databases: item.hosting.databases.len(),
                         notes,
                     }),
-                    Err(e) => skipped.push(SkippedHosting {
-                        domain: final_domain,
-                        reason: format!("failed: {e}"),
-                    }),
+                    Err(e) => {
+                        let reason = e.to_string();
+                        if looks_like_out_of_space(&reason) {
+                            out_of_space = Some(reason.clone());
+                        }
+                        skipped.push(SkippedHosting {
+                            domain: final_domain,
+                            reason: format!("failed: {reason}"),
+                        });
+                    }
                 },
                 _ => skipped.push(SkippedHosting {
                     domain: item.domain.clone(),
@@ -149,11 +169,21 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 }),
             }
         }
-        let message = format!(
-            "imported {} site(s), skipped {}",
-            created.len(),
-            skipped.len()
-        );
+        let message = if out_of_space.is_some() {
+            format!(
+                "ran out of disk: imported {} site(s), then stopped with {} not imported. \
+                 Free up space and re-run the import — the sites already imported are \
+                 detected and skipped.",
+                created.len(),
+                skipped.len()
+            )
+        } else {
+            format!(
+                "imported {} site(s), skipped {}",
+                created.len(),
+                skipped.len()
+            )
+        };
         Ok(ImportPanelResult {
             created,
             skipped,
@@ -428,7 +458,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
 
 /// Resolve the request into a [`Location`]. For `remote`, writes the supplied
 /// private key to a 0600 file (returned so the caller deletes it after the run).
-async fn build_location(req: &ImportPanelReq) -> Result<(Location, Option<PathBuf>), RpcError> {
+async fn build_location(
+    req: &ImportPanelReq,
+    home_root: &str,
+) -> Result<(Location, Option<PathBuf>), RpcError> {
     match req.mode.as_str() {
         "inplace" => Ok((Location::InPlace, None)),
         "remote" => {
@@ -493,6 +526,16 @@ async fn build_location(req: &ImportPanelReq) -> Result<(Location, Option<PathBu
                     message: format!("bundle not found on node: {src}"),
                 });
             }
+            // Before anything is unpacked: will the unpack, and the import it
+            // feeds, actually fit? The `/import/upload/begin` preflight covers
+            // the same ground, but a bundle can reach a node by other routes
+            // (an operator-supplied archive, a re-run against a disk that has
+            // filled since), and running out here is the expensive failure —
+            // it lands mid-loop with some sites created and populated, some
+            // created empty, and the bundle already deleted by the job's own
+            // cleanup.
+            bundle_fits_or_refuse(Path::new(src), home_root).await?;
+
             let dir = PathBuf::from(format!(
                 "/var/lib/hyperion/migration/bundle-{}",
                 unique_token()
@@ -538,6 +581,140 @@ async fn build_location(req: &ImportPanelReq) -> Result<(Location, Option<PathBu
             message: format!("unsupported import mode '{other}' (inplace | remote | archive)"),
         }),
     }
+}
+
+/// Does this failure mean the filesystem is full?
+///
+/// Matched on the message rather than a typed error because the ENOSPC crosses
+/// three crate boundaries on its way here — `std::io::Error` inside the tar
+/// sandbox, into `AdapterError`, into a `String` reason on `RpcError` — and
+/// every one of those is a `Display` conversion. The forms below are what
+/// `std::io::Error` prints for `errno 28` on Linux, plus the wording
+/// `cp`/`rsync`/`tar` use when the failure comes from a subprocess instead.
+///
+/// A false negative just restores today's behaviour (keep going); a false
+/// positive stops a batch early with an accurate list of what was not
+/// attempted. Neither loses data.
+fn looks_like_out_of_space(msg: &str) -> bool {
+    let m = msg.to_ascii_lowercase();
+    m.contains("no space left on device")
+        || m.contains("os error 28")
+        || m.contains("write error: no space")
+        || m.contains("disk quota exceeded")
+}
+
+/// Refuse an import whose unpack + inflate cannot fit on this node's disk.
+///
+/// Three costs, only one of which was ever checked:
+///   1. the `bundle.tar` itself — already on disk here, so `df` has already
+///      stopped counting it as free;
+///   2. the staging tree it is unpacked into, the same size again, under
+///      `/var/lib/hyperion/migration`;
+///   3. every site's `docroot.tar.gz` inflated into its real hosting tree under
+///      `home_root`, plus the copy the restore makes of each database dump.
+///      Compressed site files routinely double or triple on the way out, so
+///      this is the largest of the three and was invisible to a check that
+///      weighed the bundle alone.
+///
+/// (2) and (3) land on the same filesystem on a default install and on separate
+/// ones where `/home` has its own volume, so the device ids decide: one summed
+/// check when they match, two independent ones when they do not. Summing across
+/// two filesystems would refuse imports that fit; checking a shared filesystem
+/// twice in halves would pass an import that does not.
+///
+/// Note (2) is counted ONCE, not twice: the bundle is already written when this
+/// runs, so demanding its bytes a second time would refuse imports that fit.
+/// The `/import/upload/begin` check counts two copies because there the bundle
+/// has not landed yet.
+///
+/// Fail-open throughout, per the export preflight's rule: no `df`, no readable
+/// manifest, or a manifest from an exporter that recorded no sizes all mean
+/// there is no figure — and a guess must never be the reason a legitimate
+/// import is refused.
+async fn bundle_fits_or_refuse(bundle: &Path, home_root: &str) -> Result<(), RpcError> {
+    let Some(bundle_len) = tokio::fs::metadata(bundle).await.ok().map(|m| m.len()) else {
+        return Ok(());
+    };
+    let stage = bundle.parent().unwrap_or(Path::new("/"));
+    let homes = Path::new(home_root);
+
+    // Read the manifest straight out of the tar — reading it after extraction
+    // would be reading it after the space is already spent. 8 MiB is far past
+    // any real manifest (a 40-site IR is tens of KB) and caps a hostile one.
+    let bundle_path = bundle.to_path_buf();
+    let raw = tokio::task::spawn_blocking(move || {
+        hyperion_adapters::backup::read_tar_member(
+            &bundle_path,
+            hyperion_import::bundle::MANIFEST,
+            8 * 1024 * 1024,
+        )
+    })
+    .await
+    .ok()
+    .flatten();
+    let inflate = raw
+        .as_deref()
+        .and_then(|b| serde_json::from_slice::<hyperion_import::ImportIR>(b).ok())
+        .and_then(|ir| hyperion_import::bundle::inflate_bytes(&ir))
+        .unwrap_or(0);
+
+    // Unknown device ids mean we cannot tell whether these two costs share a
+    // filesystem, and the only answer that cannot wrongly refuse work is to
+    // weigh the unpack alone.
+    let shared = same_filesystem(stage, homes).unwrap_or(false);
+    let inflate_on_stage = if shared { inflate } else { 0 };
+
+    check_fits(stage, bundle_len, inflate_on_stage, "unpack this bundle").await?;
+    if !shared && inflate > 0 {
+        check_fits(homes, 0, inflate, "unpack this bundle").await?;
+    }
+    Ok(())
+}
+
+/// Do `bundle_len` bytes of unpack plus `inflate` bytes of site files fit under
+/// `probe`? `Ok(())` whenever `df` cannot say — see [`bundle_fits_or_refuse`].
+async fn check_fits(
+    probe: &Path,
+    bundle_len: u64,
+    inflate: u64,
+    what: &str,
+) -> Result<(), RpcError> {
+    let Some(avail) = hyperion_import::bundle::avail_bytes(probe).await else {
+        return Ok(());
+    };
+    let needed = hyperion_import::bundle::import_needed_bytes(bundle_len, inflate, 1);
+    if avail >= needed {
+        return Ok(());
+    }
+    let human = hyperion_import::progress::human_bytes;
+    let parts = match (bundle_len > 0, inflate > 0) {
+        (true, true) => format!(
+            "{} to {what}, then {} of site files and database dumps",
+            human(bundle_len),
+            human(inflate)
+        ),
+        (true, false) => format!("{} to {what}", human(bundle_len)),
+        _ => format!("{} of site files and database dumps", human(inflate)),
+    };
+    Err(RpcError::Validation {
+        message: format!(
+            "not enough free disk on {}: {} free, {} needed ({parts}, plus 1 GB of \
+             headroom). Free up space and start the import again — nothing has been \
+             created yet.",
+            probe.display(),
+            human(avail),
+            human(needed),
+        ),
+    })
+}
+
+/// Are these two paths on the same filesystem? `None` when either cannot be
+/// stat'ed, which callers must read as "cannot tell", never as "no".
+fn same_filesystem(a: &Path, b: &Path) -> Option<bool> {
+    use std::os::unix::fs::MetadataExt;
+    let da = std::fs::metadata(a).ok()?.dev();
+    let db = std::fs::metadata(b).ok()?.dev();
+    Some(da == db)
 }
 
 /// Remove the per-run ephemeral artifact: the 0600 ssh key file (remote mode)
@@ -816,4 +993,47 @@ async fn rewrite_wp_config(root_dir: &str, db_name: &str, db_user: &str, db_pass
         })
         .collect();
     let _ = tokio::fs::write(&path, rewritten.join("\n")).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::looks_like_out_of_space;
+
+    /// The whole point of stopping the batch is that ENOSPC arrives here as a
+    /// STRING, three `Display` conversions away from the `io::Error` that
+    /// produced it. These are the exact forms it takes on the way through.
+    #[test]
+    fn out_of_space_is_recognised_however_it_arrives() {
+        // std::io::Error for errno 28, as ProvisioningFailed renders it.
+        assert!(looks_like_out_of_space(
+            "import_copy_files: No space left on device (os error 28)"
+        ));
+        // The same error surfaced only as its raw code.
+        assert!(looks_like_out_of_space("unpack failed: os error 28"));
+        // From a subprocess (`cp`, `rsync`, `tar`) rather than from Rust.
+        assert!(looks_like_out_of_space(
+            "tar: ./wp-content/uploads/a.jpg: Cannot write: No space left on device"
+        ));
+        assert!(looks_like_out_of_space("gzip: write error: no space"));
+        // A filesystem quota is the same wall for the operator: more room, or
+        // fewer sites. Continuing would create the rest empty either way.
+        assert!(looks_like_out_of_space("write: Disk quota exceeded"));
+    }
+
+    /// A false positive here abandons sites that would have imported fine, so
+    /// ordinary per-site failures must not trip it — least of all the ones
+    /// whose text merely mentions space or disks.
+    #[test]
+    fn ordinary_failures_do_not_stop_the_batch() {
+        assert!(!looks_like_out_of_space(
+            "import_copy_files: the bundle contains no docroot for this site"
+        ));
+        assert!(!looks_like_out_of_space(
+            "target domain 'não válido': invalid domain"
+        ));
+        assert!(!looks_like_out_of_space("os error 2"));
+        assert!(!looks_like_out_of_space(
+            "database dump 'shop_disk_space' missing from bundle"
+        ));
+    }
 }

@@ -641,9 +641,6 @@ const MAX_CHUNK_BYTES: u64 = 128 * 1024 * 1024;
 /// Chunk size the panel asks the source to use.
 const PREFERRED_CHUNK_BYTES: u64 = 64 * 1024 * 1024;
 
-/// Headroom demanded on top of the declared bundle size before accepting it.
-const RECEIVE_HEADROOM_BYTES: u64 = 1024 * 1024 * 1024;
-
 /// Pull the token out of `Authorization: Bearer …`.
 ///
 /// The token is NOT in the path for these routes, unlike the bootstrap fetch.
@@ -730,6 +727,14 @@ pub async fn post_upload_begin(
     let f = kv(&body);
     let expected: u64 = f.get("bytes").and_then(|v| v.parse().ok()).unwrap_or(0);
     let sha = f.get("sha256").copied().unwrap_or("");
+    // Optional: the measured UNCOMPRESSED size of the selected docroots. Absent
+    // (an older runner, or a source where `du` could not read every docroot)
+    // means the inflate figure is unknown, and an unknown figure must not be
+    // the reason a transfer is refused — the check below is simply skipped.
+    let inflate: u64 = f
+        .get("inflate")
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(0);
     // A bundle with no declared digest is refused outright. There is no fallback
     // to `tar tf`: a tar truncated at a 512-byte boundary and zero-padded — what
     // a crash or a short write leaves — reads as a clean end-of-archive, so
@@ -768,21 +773,38 @@ pub async fn post_upload_begin(
     // A real preflight, against the size actually being sent. The old blind
     // 2 GiB floor accepted a 40 GB bundle onto a disk with 3 GB free and
     // discovered the problem hours later, mid-write.
+    //
+    // And RECEIVING the bundle was never the whole cost. The bundle is unpacked
+    // into a staging tree of its own size beside it, and each site's compressed
+    // `docroot.tar.gz` is then inflated into the real hosting tree — so a 13 GB
+    // bundle of 30 sites needs ~57 GB, not 14. Checking only the first of those
+    // three is what let a multi-hour upload the operator watched succeed die
+    // mid-import, with some sites created and populated and some created empty.
     if let Some(avail) = avail_bytes(&migration_dir()).await {
-        let need = expected.saturating_add(RECEIVE_HEADROOM_BYTES);
+        // 2 copies: the arriving `.tar`, plus the staging tree it is unpacked
+        // into. `inflate` is 0 when the source could not measure it, and then
+        // this is exactly the old bundle-plus-headroom check.
+        let need = hyperion_import::bundle::import_needed_bytes(expected, inflate, 2);
         if (avail as u64) < need {
             // Deliberately NOT marked failed. Freeing disk and re-running the
             // one-liner is the obvious fix, and a token burnt here would force
             // the operator back through mint + scan + selection for a problem
             // they just solved.
+            let human = hyperion_import::progress::human_bytes;
             return Ok(text(
                 StatusCode::INSUFFICIENT_STORAGE,
                 format!(
                     "not enough free disk on the target node: {} free, {} needed \
-                     (the {} bundle plus 1 GB of headroom for the import itself)\n",
-                    hyperion_import::progress::human_bytes(avail as u64),
-                    hyperion_import::progress::human_bytes(need),
-                    hyperion_import::progress::human_bytes(expected),
+                     (the {} bundle, counted twice because it is unpacked into a \
+                     staging tree beside itself{}, plus 1 GB of headroom)\n",
+                    human(avail as u64),
+                    human(need),
+                    human(expected),
+                    if inflate > 0 {
+                        format!(", plus {} of site files once unpacked", human(inflate))
+                    } else {
+                        String::new()
+                    },
                 ),
             ));
         }
@@ -1699,7 +1721,32 @@ fn transfers_html(rows: &[TransferRow], csrf: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{manifest_domain_set, selection_reply, wire_safe_domain};
+    use super::{kv, manifest_domain_set, selection_reply, wire_safe_domain};
+
+    /// `inflate` is what turns the begin-time check from "can I receive this"
+    /// into "can I import this". It is optional on the wire (an older runner
+    /// sends none, and a source that could not measure every docroot omits it),
+    /// and anything unparseable has to read as "no figure" — 0 — so the check
+    /// degrades to the old bundle-plus-headroom one instead of refusing a
+    /// transfer on a guess.
+    #[test]
+    fn begin_reads_an_optional_inflate_figure() {
+        let parse = |body: &str| {
+            kv(body)
+                .get("inflate")
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(0)
+        };
+        assert_eq!(
+            parse("bytes 100\nsha256 abc\ninflate 33285996544\n"),
+            33_285_996_544
+        );
+        // Absent, empty, and junk all mean the same thing: no figure.
+        assert_eq!(parse("bytes 100\nsha256 abc\n"), 0);
+        assert_eq!(parse("bytes 100\ninflate \n"), 0);
+        assert_eq!(parse("bytes 100\ninflate unknown\n"), 0);
+        assert_eq!(parse("bytes 100\ninflate -1\n"), 0);
+    }
 
     #[test]
     fn wire_safe_domain_accepts_real_domains_rejects_meta() {
