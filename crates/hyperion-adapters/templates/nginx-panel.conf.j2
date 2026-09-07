@@ -8,7 +8,7 @@
    ACME challenge location is kept on port 80 so renewals work.
    HTTPS redirects everything else to the panel.
 #}
-{# The proxy leg, shared by `location /` and `location /import/` so the two
+{# The proxy leg, shared by every proxying location so they
    can never drift. Askama macros expand at render time, so both locations get
    byte-identical directives — which matters because a divergence here is
    invisible until an upload dies at 2 GiB. #}
@@ -127,8 +127,27 @@ server {
 
        `client_body_timeout` is the gap between body packets, not the total
        duration; nginx's 60s default is fine for a LAN and marginal for a slow
-       link mid-chunk, so it is raised while staying finite. #}
-    location /import/ {
+       link mid-chunk, so it is raised while staying finite.
+
+       NO TRAILING SLASH on the prefix, and that is not cosmetic. nginx
+       documents that a prefix location ending in `/` and handled by
+       `proxy_pass` answers a request for the same URI WITHOUT the slash with an
+       automatic 301 to the slashed form. A first attempt at this used
+       `location /import/`, which made nginx redirect `/import` — the import
+       page itself — to `/import/`, a path axum does not route, so the operator
+       got a 404 on a page that had worked for months. `^~` matches the same
+       upload paths, suppresses regex locations, and triggers none of that.
+       The single-path `/import/progress` gets an exact `=` match for the same
+       reason. Both are scoped to the machine endpoints only, so nothing an
+       operator's browser visits passes through these rules at all. #}
+    location ^~ /import/upload {
+        client_max_body_size 0;
+        proxy_request_buffering off;
+        client_body_timeout 300s;
+{% call panel_proxy() %}
+    }
+
+    location = /import/progress {
         client_max_body_size 0;
         proxy_request_buffering off;
         client_body_timeout 300s;
