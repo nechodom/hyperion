@@ -51,6 +51,11 @@ once_cell = "1"
 hex = "0.4"
 rand = "0.8"
 sha2 = "0.10"
+# Safe wrappers for the handful of syscalls that have no std equivalent —
+# today `killpg`, which the export path needs to stop a wedged `mysqldump`
+# together with everything it forked. Already in the tree transitively; taking
+# it directly keeps `unsafe` out of our own crates.
+rustix = { version = "1", features = ["process"] }
 toml = "0.8"
 toml_edit = "0.22"
 argon2 = "0.5"

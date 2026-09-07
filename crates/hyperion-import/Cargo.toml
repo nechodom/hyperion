@@ -17,6 +17,9 @@ rand.workspace = true
 # Bundle integrity. `tar tf` exits 0 on a zero-padded truncation and silently
 # drops whole sites, so the digest is the only real check — see bundle::seal.
 sha2.workspace = true
+# `killpg`: a timed-out dump has to be stopped along with whatever it forked,
+# and there is no `kill` BINARY on a minimal Debian — see `proc::kill_group`.
+rustix.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

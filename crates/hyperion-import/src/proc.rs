@@ -59,22 +59,25 @@ fn prime(cmd: &mut Command) {
 /// never receives, so the dump would keep running, still holding its
 /// transaction and still writing into a file we have already deleted.
 ///
-/// Shelling out to `kill` keeps this crate free of `unsafe`/libc for one
-/// syscall. It is belt to `kill_on_drop`'s braces: the direct child is already
-/// dead by the time this runs (and un-reaped, so it still holds the group id),
-/// and if `kill` is missing this simply adds nothing.
-async fn kill_group(pid: Option<u32>) {
-    let Some(pid) = pid else { return };
-    let mut cmd = Command::new("kill");
-    cmd.arg("-KILL")
-        .arg(format!("-{pid}"))
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .kill_on_drop(true);
-    // Budgeted like everything else here — not via [`capture`], which would call
-    // back into this function. Dropping the future on expiry kills it.
-    let _ = tokio::time::timeout(Duration::from_secs(10), cmd.status()).await;
+/// `killpg` as a SYSCALL, deliberately, after shelling out to `kill` shipped and
+/// failed: there is no `kill` binary on a minimal Debian — it is a shell
+/// builtin, and `procps` is not installed — so the spawn returned ENOENT and the
+/// group survived on exactly the Linux boxes this runs on. It looked fine on
+/// macOS, which does have `/bin/kill`. A syscall has no PATH to depend on, no
+/// argument dialect to get wrong, and no second process to spawn while we are
+/// busy killing one.
+///
+/// It is belt to `kill_on_drop`'s braces: our own child is already dead by the
+/// time this runs, and un-reaped, so it still holds the group id.
+fn kill_group(pid: Option<u32>) {
+    let Some(raw) = pid.and_then(|p| i32::try_from(p).ok()) else {
+        return;
+    };
+    let Some(pid) = rustix::process::Pid::from_raw(raw) else {
+        return;
+    };
+    // ESRCH is the ordinary case (everything already exited) — nothing to say.
+    let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
 }
 
 /// Spawn `cmd` under `budget` and collect its output, or kill it — and
@@ -98,7 +101,7 @@ pub(crate) async fn capture(
     match tokio::time::timeout(budget, child.wait_with_output()).await {
         Ok(out) => Ok(out?),
         Err(_) => {
-            kill_group(pid).await;
+            kill_group(pid);
             Err(timed_out(what, budget, &shown_cmd))
         }
     }
@@ -141,7 +144,7 @@ pub(crate) async fn wait_status(
         Err(_) => {
             // The group first, while our own child is still un-reaped and
             // therefore still holds the group id; then reap it.
-            kill_group(pid).await;
+            kill_group(pid);
             let _ = child.kill().await;
             Err(timed_out(what, budget, &shown_cmd))
         }
