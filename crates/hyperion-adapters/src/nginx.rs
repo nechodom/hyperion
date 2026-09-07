@@ -1335,9 +1335,9 @@ mod tests {
         .expect("render_panel");
 
         let import_block = out
-            .split_once("location /import/ {")
+            .split_once("location ^~ /import/upload {")
             .map(|(_, rest)| rest.split_once("\n    }").map(|(b, _)| b).unwrap_or(rest))
-            .expect("panel vhost has no `location /import/` — the 2 GiB cliff is back");
+            .expect("panel vhost has no upload location — the 2 GiB cliff is back");
 
         assert!(
             import_block.contains("client_max_body_size 0;"),
@@ -1362,18 +1362,73 @@ mod tests {
             "the server-level cap for the rest of the panel disappeared:\n{out}"
         );
 
-        // The proxy leg is shared by both locations through an askama macro.
-        // If the macro stopped expanding, one location would silently have no
-        // upstream at all — so assert it landed in both.
+        // The proxy leg is shared through an askama macro. If it stopped
+        // expanding, a location would silently have no upstream at all — so
+        // assert it landed in every one that needs it: `/`, the upload prefix
+        // and the progress endpoint.
         assert_eq!(
             out.matches("proxy_pass https://127.0.0.1:8443;").count(),
-            2,
-            "expected the proxy body in exactly `location /` and `location /import/`:\n{out}"
+            3,
+            "the macro did not expand into every proxying location:\n{out}"
         );
         assert_eq!(
             out.matches("proxy_ssl_verify off;").count(),
-            2,
-            "the two locations drifted — they must share one macro:\n{out}"
+            3,
+            "the locations drifted — they must share one macro:\n{out}"
+        );
+    }
+
+    /// The regression that took the import page down in production.
+    ///
+    /// nginx documents that a prefix location which ends in `/` AND is handled
+    /// by `proxy_pass` answers a request for the same URI *without* the slash
+    /// with an automatic 301 to the slashed form. `location /import/` therefore
+    /// redirected `/import` — the import page itself — to `/import/`, which
+    /// axum does not route, so a page that had worked for months started
+    /// returning 404 the moment this vhost was deployed.
+    ///
+    /// The rule is general, so the test is general: no proxying prefix location
+    /// may end in a slash. `location /` is the one exception — the URI it would
+    /// redirect is the empty string, which cannot be requested.
+    #[test]
+    fn no_proxying_location_ends_in_a_slash() {
+        let out = render_panel(&PanelVhostInput {
+            domain: "panel.example.cz",
+            cert_path: "/etc/hyperion/certs/panel.example.cz/fullchain.pem",
+            key_path: "/etc/hyperion/certs/panel.example.cz/privkey.pem",
+            acme_challenge_root: "/var/lib/hyperion/acme-challenges",
+        })
+        .expect("render_panel");
+
+        // Walk each `location <spec> {` and keep the ones whose body proxies.
+        let mut offenders = Vec::new();
+        for (i, _) in out.match_indices("location ") {
+            let rest = &out[i..];
+            let Some((header, body)) = rest.split_once('{') else {
+                continue;
+            };
+            let spec = header.trim_start_matches("location ").trim();
+            let body = body.split_once("\n    }").map(|(b, _)| b).unwrap_or(body);
+            if !body.contains("proxy_pass") {
+                continue;
+            }
+            // `location /` is the catch-all root and is exempt: the URI nginx
+            // would redirect is the empty string.
+            if spec == "/" {
+                continue;
+            }
+            // An exact match (`=`) never performs the redirect.
+            if spec.starts_with('=') {
+                continue;
+            }
+            if spec.ends_with('/') {
+                offenders.push(spec.to_string());
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "these proxying locations end in a slash, so nginx will 301 the \
+             unslashed URI into a path the app does not route: {offenders:?}\n\n{out}"
         );
     }
 
