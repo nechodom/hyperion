@@ -275,12 +275,20 @@ jrn "{\"k\":\"bundle\",\"t\":$(now),\"bytes\":$SIZE,\"sha256\":\"$SHA\"}"
 # --- upload -------------------------------------------------------------------
 # `begin` is idempotent and is how a resume starts: it answers with the offset
 # the server already holds.
+#
+# `inflate` is the measured, UNCOMPRESSED size of the selected docroots (from
+# the --estimate pass above). The panel needs it because the bundle it is about
+# to receive is compressed: 13 GB on the wire is routinely 30 GB+ on disk once
+# each site is unpacked into its hosting tree. It is sent only when it was
+# actually measured — an omitted figure makes the panel skip that check rather
+# than refuse a transfer on a guess.
 begin() {
   curl -sS -o "$RESP" -w '%{http_code}' \
     -H "Authorization: Bearer $TOKEN" -H 'Content-Type: text/plain' \
     --data-binary "bytes $SIZE
 sha256 $SHA
-" "$B/import/upload/begin"
+${INPUT_BYTES:+inflate $INPUT_BYTES
+}" "$B/import/upload/begin"
 }
 CODE="$(begin)" || fail "could not reach Hyperion to start the upload"
 [ "$CODE" = "200" ] || fail "Hyperion refused the upload ($CODE): $(head -c 400 "$RESP")"
@@ -360,6 +368,7 @@ K='$K'
 SEL='$SEL'
 SITES=$SITES
 INPUT_JSON=$INPUT_JSON
+INPUT_BYTES='$INPUT_BYTES'
 CHUNK_BYTES=$CHUNK_BYTES
 ENVEOF
 chmod 600 "$RUN/env"

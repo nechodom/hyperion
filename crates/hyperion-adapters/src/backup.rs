@@ -279,6 +279,45 @@ pub fn extract_tar_sandboxed(archive: &Path, target_root: &Path) -> Result<u64, 
     Ok(archive_len)
 }
 
+/// Read one small member out of a plain tar WITHOUT unpacking the archive.
+///
+/// The panel import needs the bundle's `manifest.json` *before* it commits the
+/// disk that unpacking costs, because the sizes recorded in that manifest are
+/// what say whether the unpack can fit at all. Reading it back after extraction
+/// would be reading it after the damage.
+///
+/// Safe against a hostile bundle by construction: nothing is written to disk
+/// (so no path traversal is even expressible here), the member is matched by
+/// exact name against both `name` and `./name` — the form `tar cf -C dir .`
+/// produces — and it is truncated at `max_bytes`, so a manifest inflated to
+/// gigabytes cannot become an allocation of its own size.
+///
+/// `None` for any failure at all: not a tar, member absent, unreadable. The
+/// caller must treat that as "no information", never as "empty".
+pub fn read_tar_member(archive: &Path, name: &str, max_bytes: u64) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let file = std::fs::File::open(archive).ok()?;
+    let mut ar = tar::Archive::new(file);
+    for entry in ar.entries().ok()? {
+        let mut entry = entry.ok()?;
+        let matches = entry
+            .path()
+            .ok()
+            .map(|p| {
+                let p = p.to_string_lossy();
+                p == name || p.strip_prefix("./") == Some(name)
+            })
+            .unwrap_or(false);
+        if !matches {
+            continue;
+        }
+        let mut buf = Vec::new();
+        entry.by_ref().take(max_bytes).read_to_end(&mut buf).ok()?;
+        return Some(buf);
+    }
+    None
+}
+
 /// Core sandboxed tar extractor. Reads tar entries from `reader` (already
 /// decompressed if needed) and unpacks them under `target_root`, applying the
 /// full per-member containment validation. Returns the number of members
@@ -781,6 +820,40 @@ mod tests {
             }
         }
         b.finish().expect("finish tar");
+    }
+
+    /// The import reads the bundle's manifest BEFORE unpacking, to decide
+    /// whether the unpack can fit. So the reader has to find the member under
+    /// the `./` prefix `tar cf -C dir .` writes, and has to answer `None` —
+    /// never an empty body — for anything it cannot produce, because the
+    /// caller reads `None` as "no figure, skip the check".
+    #[test]
+    fn read_tar_member_finds_the_manifest_and_says_none_otherwise() {
+        let d = tempfile::tempdir().expect("dir");
+        let tar = d.path().join("bundle.tar");
+        build_plain_tar(
+            &tar,
+            &[
+                ("./manifest.json", "file", r#"{"hostings":[]}"#),
+                (
+                    "./sites/a.cz/docroot.tar.gz",
+                    "file",
+                    "not really a tarball",
+                ),
+            ],
+        );
+
+        let got = read_tar_member(&tar, "manifest.json", 8 * 1024 * 1024).expect("manifest");
+        assert_eq!(String::from_utf8_lossy(&got), r#"{"hostings":[]}"#);
+
+        // Absent member, and a path that is not a tar at all.
+        assert!(read_tar_member(&tar, "nope.json", 4096).is_none());
+        let bogus = d.path().join("missing.tar");
+        assert!(read_tar_member(&bogus, "manifest.json", 4096).is_none());
+
+        // The cap truncates rather than allocating whatever the archive claims.
+        let capped = read_tar_member(&tar, "manifest.json", 4).expect("capped");
+        assert_eq!(capped.len(), 4);
     }
 
     #[test]

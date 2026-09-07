@@ -129,6 +129,8 @@ mod tests {
             crons: vec![],
             tls: None,
             ssh_keys: vec![],
+            docroot_bytes: 0,
+            db_bytes: 0,
         }
     }
 

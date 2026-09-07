@@ -146,6 +146,10 @@ impl SourceAdapter for HestiaAdapter {
                     crons: Vec::new(),
                     tls: None,
                     ssh_keys: Vec::new(),
+                    // A scan must stay cheap; the sizes are measured by the
+                    // packing pass and stamped into the bundle's manifest.
+                    docroot_bytes: 0,
+                    db_bytes: 0,
                 });
             }
 
