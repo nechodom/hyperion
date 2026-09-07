@@ -554,6 +554,25 @@ async fn cleanup_key(artifact: Option<PathBuf>) {
 
 /// Copy the source docroot's contents into `dest` — local `cp -a` for in-place,
 /// `rsync -e ssh` for remote.
+
+/// Did the exporter record this domain's docroot as one it could not pack?
+///
+/// The bundle's own `manifest.json` carries the skip list, so this asks the
+/// bundle rather than trusting the absence of a file. That distinction is the
+/// whole point: "the exporter left it out and said so" and "the bundle was
+/// truncated" look identical on disk, and resolving that ambiguity toward the
+/// first one silently produced empty sites with a green job.
+async fn docroot_was_skipped(dir: &std::path::Path, domain: &str) -> bool {
+    let Some(ir) = hyperion_import::bundle::read_manifest(dir).await else {
+        // No readable manifest at all — that is not a bundle we should be
+        // trusting to omit things on purpose.
+        return false;
+    };
+    ir.skipped
+        .iter()
+        .any(|s| s.domain == domain && s.what == "docroot")
+}
+
 async fn fetch_files(
     loc: &Location,
     domain: &str,
@@ -571,7 +590,8 @@ async fn fetch_files(
             .await
         }
         Location::Archive(dir) => {
-            // Unpack this site's bundled docroot tarball (absent = empty site).
+            // Unpack this site's bundled docroot tarball. Absent is only
+            // acceptable when the manifest says the exporter skipped it.
             let tgz = dir
                 .join("sites")
                 .join(hyperion_import::bundle::site_dir(domain))
@@ -588,8 +608,23 @@ async fn fetch_files(
                 .await
                 .map_err(|e| format!("docroot unpack task join: {e}"))?;
                 unpacked.map(|_| ()).map_err(|e| e.to_string())
-            } else {
+            } else if docroot_was_skipped(dir, domain).await {
+                // The exporter said, in the bundle's own manifest, that it could
+                // not pack this docroot. An empty site is then the honest
+                // outcome — the operator was told at export time.
                 Ok(())
+            } else {
+                // Absent AND not recorded as skipped means the bundle is not
+                // what it claims to be. Creating the site EMPTY and reporting
+                // success is how a truncated upload turned into "30 sites
+                // imported, several of them blank, green job" — the digest check
+                // on upload closes that at the front door, and this closes it
+                // here for a bundle that arrived by any other route.
+                Err(format!(
+                    "{domain}: the bundle contains no docroot for this site and its \
+                     manifest does not record one as skipped — the bundle is \
+                     incomplete. Refusing to create an empty site."
+                ))
             }
         }
         _ => {

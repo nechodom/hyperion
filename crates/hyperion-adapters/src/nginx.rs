@@ -1317,6 +1317,66 @@ mod tests {
         assert!(out.contains("alias /var/lib/hyperion/acme-challenges/;"));
     }
 
+    /// The self-service import upload needs its own body rules, and their
+    /// ABSENCE is what broke a real import: the server-level
+    /// `client_max_body_size 2g` made nginx answer 413 and close the connection
+    /// mid-body, which reached the operator as `curl: (55) Send failure: Broken
+    /// pipe` and `tar exited with signal: 13 (SIGPIPE)` — naming neither nginx
+    /// nor a size. Nothing else in the tree would notice if these directives
+    /// were dropped again, so this test is the guard.
+    #[test]
+    fn panel_vhost_lets_the_import_upload_through_unbuffered() {
+        let out = render_panel(&PanelVhostInput {
+            domain: "panel.example.cz",
+            cert_path: "/etc/hyperion/certs/panel.example.cz/fullchain.pem",
+            key_path: "/etc/hyperion/certs/panel.example.cz/privkey.pem",
+            acme_challenge_root: "/var/lib/hyperion/acme-challenges",
+        })
+        .expect("render_panel");
+
+        let import_block = out
+            .split_once("location /import/ {")
+            .map(|(_, rest)| rest.split_once("\n    }").map(|(b, _)| b).unwrap_or(rest))
+            .expect("panel vhost has no `location /import/` — the 2 GiB cliff is back");
+
+        assert!(
+            import_block.contains("client_max_body_size 0;"),
+            "the import location must lift the server-level 2g cap; \
+             hyperion-web's DefaultBodyLimit is the real ceiling:\n{import_block}"
+        );
+        assert!(
+            import_block.contains("proxy_request_buffering off;"),
+            "without this nginx spools the whole bundle to /var/lib/nginx/body \
+             before hyperion-web sees a byte, so Received stays 0:\n{import_block}"
+        );
+        assert!(
+            import_block.contains("client_body_timeout"),
+            "nginx's 60s default is marginal for a slow link mid-chunk:\n{import_block}"
+        );
+
+        // `location /` must NOT inherit the lifted cap — everything else on the
+        // panel (plugin upload, restore upload) is still bounded by the 2 GiB
+        // server-level value, and a browser form has no business exceeding it.
+        assert!(
+            out.contains("client_max_body_size 2g;"),
+            "the server-level cap for the rest of the panel disappeared:\n{out}"
+        );
+
+        // The proxy leg is shared by both locations through an askama macro.
+        // If the macro stopped expanding, one location would silently have no
+        // upstream at all — so assert it landed in both.
+        assert_eq!(
+            out.matches("proxy_pass https://127.0.0.1:8443;").count(),
+            2,
+            "expected the proxy body in exactly `location /` and `location /import/`:\n{out}"
+        );
+        assert_eq!(
+            out.matches("proxy_ssl_verify off;").count(),
+            2,
+            "the two locations drifted — they must share one macro:\n{out}"
+        );
+    }
+
     #[test]
     fn rendered_vhosts_use_debian12_compatible_http2() {
         let aliases: Vec<String> = vec![];

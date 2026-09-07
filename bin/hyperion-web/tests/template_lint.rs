@@ -305,6 +305,10 @@ fn every_page_is_reachable_from_the_nav() {
         "/import/agent-bin",
         "/import/select",
         "/import/selection",
+        // Machine endpoints the source box's runner drives over HTTP; there is
+        // no page behind them and nothing in the panel should link to one.
+        "/import/upload",
+        "/import/progress",
         "/import/wizard",
         "/install/update-node-status",
         "/services/install-status",

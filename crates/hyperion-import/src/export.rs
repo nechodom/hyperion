@@ -25,49 +25,97 @@ pub async fn run(
     list: bool,
     json: bool,
 ) -> Result<usize, ImportError> {
+    run_with_journal(kind, out, only, list, json, None).await
+}
+
+/// What the bootstrap needs to know BEFORE it commits to anything: how big this
+/// export is, whether the box has room, and therefore whether the operator gets
+/// a live progress bar or a detached run they check on later.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Estimate {
+    pub sites: usize,
+    /// Σ `du -sb` of the selected docroots. `None` when any one of them could
+    /// not be measured — the caller must then show no percentage and no ETA
+    /// rather than substituting a guess.
+    pub input_bytes: Option<u64>,
+    pub free_bytes: Option<u64>,
+    /// `"foreground"` (progress bar in the terminal) or `"background"`.
+    ///
+    /// This decides only what is DISPLAYED. The run is detached either way, so
+    /// an SSH drop can never cancel an export — which is what the operator
+    /// actually asked for, and what a literal reading of "small = foreground"
+    /// would have failed to deliver for a 2.9 GB site.
+    pub mode: &'static str,
+}
+
+/// Measure a would-be export without packing anything.
+pub async fn estimate(kind: Option<&str>, only: Option<&str>) -> Result<Estimate, ImportError> {
+    let (_info, ir) = detect_and_extract(kind, only).await?;
+    let input_bytes = crate::bundle::measure_payload(&ir).await;
+    let free_bytes = crate::bundle::avail_bytes(std::env::temp_dir().as_path()).await;
+    // An unmeasurable payload is treated as large: detached is strictly the more
+    // robust path, so uncertainty must not resolve toward the fragile one.
+    let mode = match input_bytes {
+        Some(b) if b < crate::progress::FOREGROUND_MAX_BYTES => "foreground",
+        _ => "background",
+    };
+    Ok(Estimate {
+        sites: ir.hostings.len(),
+        input_bytes,
+        free_bytes,
+        mode,
+    })
+}
+
+/// Detect the panel once and extract its IR, applying `--only`.
+///
+/// One `detect()` call, not two: it used to be called again after the probe
+/// loop, and on CloudPanel each call shells out to `clpctl --version`.
+async fn detect_and_extract(
+    kind: Option<&str>,
+    only: Option<&str>,
+) -> Result<(crate::adapter::SourcePanelInfo, crate::ir::ImportIR), ImportError> {
+    let loc = Location::InPlace;
+    let (adapter, info) = resolve_adapter(kind, &loc).await?;
+    let mut ir = adapter.extract(&loc).await?;
+    apply_only(&mut ir, only)?;
+    Ok((info, ir))
+}
+
+fn apply_only(ir: &mut crate::ir::ImportIR, only: Option<&str>) -> Result<(), ImportError> {
+    let Some(d) = only else { return Ok(()) };
+    let want: Vec<&str> = d
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    ir.hostings
+        .retain(|h| want.iter().any(|w| w.eq_ignore_ascii_case(&h.domain)));
+    if ir.hostings.is_empty() {
+        return Err(ImportError::Parse {
+            what: "--only".into(),
+            msg: format!("no matching site for '{d}' in the source panel"),
+        });
+    }
+    Ok(())
+}
+
+/// See [`run`]. `journal`, when given, receives one event per packed site and
+/// per skipped artefact so a detached run can be asked where it is.
+pub async fn run_with_journal(
+    kind: Option<&str>,
+    out: &Path,
+    only: Option<&str>,
+    list: bool,
+    json: bool,
+    journal: Option<&Path>,
+) -> Result<usize, ImportError> {
     let loc = Location::InPlace;
 
-    let adapter = match kind {
-        Some(k) => adapter_for(k).ok_or_else(|| {
-            ImportError::UnsupportedMode(format!(
-                "unknown panel kind '{k}' (cloudpanel | hestiacp)"
-            ))
-        })?,
-        None => {
-            // Auto-detect: probe each known panel in-place.
-            let mut found = None;
-            for k in ["cloudpanel", "hestiacp"] {
-                if let Some(a) = adapter_for(k) {
-                    if a.detect(&loc).await.is_some() {
-                        found = Some(a);
-                        break;
-                    }
-                }
-            }
-            found.ok_or(ImportError::NotDetected)?
-        }
-    };
-
-    let info = adapter.detect(&loc).await.ok_or(ImportError::NotDetected)?;
+    let (_adapter, info) = resolve_adapter(kind, &loc).await?;
     eprintln!("• detected {} {}", info.kind.as_str(), info.version);
 
-    let mut ir = adapter.extract(&loc).await?;
-    if let Some(d) = only {
-        let want: Vec<&str> = d
-            .split(',')
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .collect();
-        ir.hostings
-            .retain(|h| want.iter().any(|w| w.eq_ignore_ascii_case(&h.domain)));
-        if ir.hostings.is_empty() {
-            return Err(ImportError::Parse {
-                what: "--only".into(),
-                msg: format!("no matching site for '{d}' in the source panel"),
-            });
-        }
-    }
-
+    let (_info2, ir) = detect_and_extract(kind, only).await?;
     let n = ir.hostings.len();
 
     if list {
@@ -83,8 +131,42 @@ pub async fn run(
     }
 
     eprintln!("• packing {n} site(s) (docroots + DB dumps) …");
-    crate::bundle::build(&ir, out).await?;
+    crate::bundle::build_with_journal(&ir, out, journal).await?;
     Ok(n)
+}
+
+async fn resolve_adapter(
+    kind: Option<&str>,
+    loc: &Location,
+) -> Result<
+    (
+        Box<dyn crate::adapter::SourceAdapter>,
+        crate::adapter::SourcePanelInfo,
+    ),
+    ImportError,
+> {
+    let adapter = match kind {
+        Some(k) => adapter_for(k).ok_or_else(|| {
+            ImportError::UnsupportedMode(format!(
+                "unknown panel kind '{k}' (cloudpanel | hestiacp)"
+            ))
+        })?,
+        None => {
+            // Auto-detect: probe each known panel in-place.
+            let mut found = None;
+            for k in ["cloudpanel", "hestiacp"] {
+                if let Some(a) = adapter_for(k) {
+                    if a.detect(loc).await.is_some() {
+                        found = Some(a);
+                        break;
+                    }
+                }
+            }
+            found.ok_or(ImportError::NotDetected)?
+        }
+    };
+    let info = adapter.detect(loc).await.ok_or(ImportError::NotDetected)?;
+    Ok((adapter, info))
 }
 
 /// Emit the would-be-exported sites as a JSON array to STDOUT — the contract the

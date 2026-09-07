@@ -177,6 +177,8 @@ impl SourceAdapter for CloudPanelAdapter {
                         .into(),
                 },
             ],
+            // Filled in by the exporter as it packs; empty at extraction time.
+            skipped: Vec::new(),
         })
     }
 }

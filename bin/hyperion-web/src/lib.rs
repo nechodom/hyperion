@@ -945,6 +945,41 @@ pub fn build_router(state: SharedState) -> Router {
             post(handlers::import_wizard::post_ingest)
                 .layer(axum::extract::DefaultBodyLimit::disable()),
         )
+        // Resumable chunked upload. The token is in `Authorization: Bearer`, NOT
+        // in the path, because this loop runs once per chunk — hundreds of times
+        // for a large bundle — and every URL lands in the panel's nginx access
+        // log. A live credential written to that log hundreds of times is the
+        // same mistake as putting one on argv.
+        //
+        // nginx no longer caps `/import/` (see nginx-panel.conf.j2), so these
+        // limits are the real ceiling — which is the point: the application can
+        // answer an oversized body with a sentence, where nginx could only close
+        // the socket, and a closed socket is what reached the operator as
+        // "curl: (55) Send failure: Broken pipe".
+        .route(
+            "/import/upload/begin",
+            post(handlers::import_wizard::post_upload_begin)
+                .layer(axum::extract::DefaultBodyLimit::max(8 * 1024)),
+        )
+        .route(
+            "/import/upload/chunk",
+            axum::routing::put(handlers::import_wizard::put_upload_chunk)
+                .layer(axum::extract::DefaultBodyLimit::max(128 * 1024 * 1024)),
+        )
+        .route(
+            "/import/upload/commit",
+            post(handlers::import_wizard::post_upload_commit)
+                .layer(axum::extract::DefaultBodyLimit::max(8 * 1024)),
+        )
+        .route(
+            "/import/upload/status",
+            get(handlers::import_wizard::get_upload_status),
+        )
+        .route(
+            "/import/progress",
+            post(handlers::import_wizard::post_source_progress)
+                .layer(axum::extract::DefaultBodyLimit::max(8 * 1024)),
+        )
         // Unmatched URLs get the themed 404 page (axum's default is a bare empty
         // body). Still flows through the layers below (security headers etc.).
         .fallback(crate::error::not_found_fallback)

@@ -4723,6 +4723,22 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// processed (success + failed). Designed to be called both manually
     /// and from a tokio interval task in hyperion-agent.
     pub async fn scheduler_tick(&self) -> Result<i64, RpcError> {
+        // 0. Sweep spent and expired import tokens.
+        //
+        // `import_tokens::cleanup` existed with no caller at all, so every
+        // finished, failed, cancelled and expired transfer row accumulated for
+        // the life of the install. Best-effort: a failure here must not stop the
+        // expiry sweep the rest of this function does. The cutoff keeps a day of
+        // finished rows so the wizard can still show what happened recently.
+        {
+            let cutoff = now_secs() - 24 * 60 * 60;
+            match hyperion_state::import_tokens::cleanup(&self.pool, cutoff).await {
+                Ok(n) if n > 0 => tracing::debug!(rows = n, "swept old import tokens"),
+                Ok(_) => {}
+                Err(e) => tracing::warn!(error=%e, "import token sweep failed"),
+            }
+        }
+
         // 1. Make sure every hosting with an expires_at has its scheduled rows.
         self.reconcile_scheduled_rows()
             .await
@@ -19310,6 +19326,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         use hyperion_types::{ImportTokenInfo, ImportTokenOp, ImportTokenResult};
 
         fn to_info(r: toks::ImportTokenRow) -> ImportTokenInfo {
+            // Computed here, not in the UI: the evidence rule for "is there
+            // enough data to state a rate" must have exactly one implementation,
+            // and 0 means "render no rate", never "stalled".
+            let rate_bytes_per_sec = toks::rate_bytes_per_sec(&r).unwrap_or(0);
             ImportTokenInfo {
                 id: r.id,
                 target_node: r.target_node,
@@ -19322,6 +19342,12 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 created_at: r.created_at,
                 manifest_json: r.manifest_json.unwrap_or_default(),
                 selection_json: r.selection_json.unwrap_or_default(),
+                expected_bytes: r.expected_bytes,
+                bundle_sha256: r.bundle_sha256.unwrap_or_default(),
+                received_at: r.received_at,
+                rate_bytes_per_sec,
+                source_progress_json: r.source_progress_json.unwrap_or_default(),
+                source_progress_at: r.source_progress_at,
             }
         }
         let map = |what: &'static str| {
@@ -19396,6 +19422,39 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                         .await
                         .map_err(map("bytes"))?;
                 }
+                Ok(ImportTokenResult::Ack)
+            }
+            ImportTokenOp::ClaimUpload {
+                token,
+                expected_bytes,
+                bundle_sha256,
+            } => {
+                let hash = hex::encode(blake3::hash(token.as_bytes()).as_bytes());
+                let row = toks::claim_upload(
+                    &self.pool,
+                    &hash,
+                    expected_bytes,
+                    &bundle_sha256,
+                    now_secs(),
+                )
+                .await
+                .map_err(map("claim_upload"))?;
+                Ok(ImportTokenResult::Resolved(row.map(to_info)))
+            }
+            ImportTokenOp::RecordUpload { id, received_bytes } => {
+                toks::record_upload(&self.pool, id, received_bytes, now_secs())
+                    .await
+                    .map_err(map("record_upload"))?;
+                Ok(ImportTokenResult::Ack)
+            }
+            ImportTokenOp::SetSourceProgress {
+                token,
+                progress_json,
+            } => {
+                let hash = hex::encode(blake3::hash(token.as_bytes()).as_bytes());
+                toks::set_source_progress(&self.pool, &hash, &progress_json, now_secs())
+                    .await
+                    .map_err(map("set_source_progress"))?;
                 Ok(ImportTokenResult::Ack)
             }
             ImportTokenOp::List => {

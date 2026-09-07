@@ -428,6 +428,14 @@ install -m 0755 target/release/hctl           /usr/bin/hctl
 # gets reported from every new install.
 install -d -m 0755 /usr/local/bin
 install -m 0755 packaging/install/hyperion-wrapper.sh /usr/local/bin/hyperion
+# The self-service import exporter. A fresh master used to ship WITHOUT it, so
+# /import/agent-bin answered 404 until someone happened to run update.sh — the
+# import wizard was simply broken on a new box. This is the host-glibc build;
+# update.sh replaces it with the static-musl per-arch binaries, which are what
+# an older source server actually needs.
+if [ -x target/release/hyperion-export ]; then
+  install -m 0755 target/release/hyperion-export /usr/local/bin/hyperion-export
+fi
 
 
 #-------- 6. Users + directories ------------------------------------------

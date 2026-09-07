@@ -36,6 +36,120 @@ pub fn site_dir(domain: &str) -> String {
         .collect()
 }
 
+/// Refuse an export in which two domains would share one bundle directory.
+///
+/// [`site_dir`] collapses every character outside `[A-Za-z0-9.-]` to `_`, so
+/// `a b.cz` and `a-b.cz` … and, more realistically, an IDN and its transcription
+/// can land on the same name. The staging loop writes
+/// `sites/<site_dir>/docroot.tar.gz` unconditionally, so the second site would
+/// OVERWRITE the first while `manifest.json` still listed both — the import then
+/// creates site A populated with site B's files, with no error anywhere and a
+/// green job. That is silent cross-site data corruption, and its likelihood
+/// scales with how many sites are selected at once.
+///
+/// Refusing is deliberate. Disambiguating with a hash suffix would need the
+/// import side to learn the same mapping, and a rename that only one side knows
+/// is a worse failure than a clear stop. The operator can import the two in
+/// separate batches.
+fn assert_no_site_dir_collision(ir: &ImportIR) -> Result<(), ImportError> {
+    let mut seen: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for h in &ir.hostings {
+        let dir = site_dir(&h.domain);
+        if let Some(first) = seen.insert(dir.clone(), h.domain.clone()) {
+            return Err(ImportError::Command {
+                cmd: "plan bundle layout".into(),
+                msg: format!(
+                    "{first:?} and {:?} would both be packed as sites/{dir}/, so one \
+                     would silently overwrite the other. Export them in separate \
+                     batches (pick one, import it, then pick the other).",
+                    h.domain
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Σ of the selected docroots, or `None` when any one of them could not be
+/// measured.
+///
+/// `None` is load-bearing: it means "there is no denominator", and every caller
+/// must then decline to show a percentage or an ETA rather than substituting a
+/// guess. Split out of `preflight_space`, which computed this and threw it away.
+pub async fn measure_payload(ir: &ImportIR) -> Option<u64> {
+    let mut payload: u64 = 0;
+    for h in &ir.hostings {
+        payload = payload.saturating_add(dir_bytes(Path::new(&h.docroot)).await?);
+    }
+    Some(payload)
+}
+
+/// Size + hex sha256 of a finished bundle, read in one streaming pass.
+///
+/// This digest is the bundle's only real integrity check. `tar tf` is not one:
+/// a tar truncated at a 512-byte block boundary and padded with zeros — exactly
+/// what a crash or a short write leaves behind — reads as a clean end-of-archive
+/// marker, so `tar tf` exits 0 while silently omitting every member past the
+/// cut. Verified: a 6-member archive cut at a block boundary lists 5 and exits 0.
+pub async fn seal(path: &Path) -> Result<(u64, String), ImportError> {
+    use sha2::{Digest, Sha256};
+    use tokio::io::AsyncReadExt;
+    let mut f = tokio::fs::File::open(path).await?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 1024 * 1024];
+    let mut total: u64 = 0;
+    loop {
+        let n = f.read(&mut buf).await?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+        total += n as u64;
+    }
+    Ok((total, hex_lower(&hasher.finalize())))
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        use std::fmt::Write;
+        let _ = write!(s, "{b:02x}");
+    }
+    s
+}
+
+/// Run a shell command with its stdout going STRAIGHT to `dest`.
+///
+/// The point is that the bytes never exist in this process's memory. The dump
+/// helpers used to `.output()` into a `Vec<u8>` and then write it, so a 4 GB
+/// database was a 4 GB allocation on somebody else's production server — and now
+/// that the run is detached, the OOM killer would take it with no terminal event
+/// in the journal, leaving a status frozen mid-phase.
+///
+/// `.status()` and NOT `.output()`: `output()` installs its own pipes and
+/// silently overrides a `File` stdout, which this repo has been bitten by before.
+async fn sh_to_file(cmd: &str, dest: &Path) -> Result<u64, ImportError> {
+    let file = std::fs::File::create(dest)?;
+    let status = Command::new("sh")
+        .arg("-c")
+        .arg(cmd)
+        .stdout(std::process::Stdio::from(file))
+        .stderr(std::process::Stdio::piped())
+        .status()
+        .await?;
+    if !status.success() {
+        let _ = tokio::fs::remove_file(dest).await;
+        return Err(ImportError::Command {
+            cmd: cmd.chars().take(80).collect(),
+            msg: format!("exited with {status}"),
+        });
+    }
+    Ok(tokio::fs::metadata(dest)
+        .await
+        .map(|m| m.len())
+        .unwrap_or(0))
+}
+
 /// Create a private, mode-0700 working directory under the system temp dir with
 /// a randomized (non-pid-derived) name.
 ///
@@ -101,7 +215,9 @@ pub async fn read_manifest(dir: &Path) -> Option<ImportIR> {
 /// Bytes free on the filesystem holding `path`, via `df -P -B1`.
 /// `None` on any exec/parse failure — an unknown figure must not block
 /// an export that would have worked.
-async fn avail_bytes(path: &Path) -> Option<u64> {
+/// Free bytes on the filesystem holding `path`. `None` when `df` cannot say —
+/// and a caller must then skip the check rather than refuse work on a guess.
+pub async fn avail_bytes(path: &Path) -> Option<u64> {
     let out = tokio::process::Command::new("/bin/df")
         .args(["-P", "-B1", "--"])
         .arg(path)
@@ -228,32 +344,77 @@ async fn preflight_space(
 /// everything into `out`. Shells out to `tar`/`mysqldump`/`pg_dump` (present on
 /// any panel box) so there are no extra crate deps.
 pub async fn build(ir: &ImportIR, out: &Path) -> Result<(), ImportError> {
-    // `--out -` streams the final tar straight to stdout (piped into curl on the
-    // source by the self-service bootstrap — no bundle file lands on disk).
-    let to_stdout = out.as_os_str() == "-";
-    let stage = if to_stdout {
-        std::env::temp_dir().join(format!("hyperion-export-stage-{}", std::process::id()))
-    } else {
-        out.with_extension("bundle-stage")
-    };
-    // Before anything is written: fail with one clear sentence rather
-    // than half-way through `tar`, with a stage dir left behind.
-    // Streaming to stdout never materialises the second archive.
-    preflight_space(ir, &stage, !to_stdout).await?;
-    let _ = tokio::fs::remove_dir_all(&stage).await;
-    tokio::fs::create_dir_all(&stage).await?;
+    build_with_journal(ir, out, None).await
+}
 
-    let manifest = serde_json::to_string_pretty(ir).map_err(|e| ImportError::Command {
-        cmd: "serialize manifest".into(),
-        msg: e.to_string(),
-    })?;
-    tokio::fs::write(stage.join(MANIFEST), manifest).await?;
+/// Build a portable bundle from an extracted IR. Runs on the SOURCE box (as
+/// root/sudo): tars each docroot, dumps each DB, writes the manifest, then packs
+/// everything into `out`. Shells out to `tar`/`mysqldump`/`pg_dump` (present on
+/// any panel box) so there are no extra crate deps.
+///
+/// When `journal` is given, one event is appended per finished site and one per
+/// skipped artefact, so a DETACHED run can be asked where it is from another
+/// shell. That is the only reason this takes the argument: nothing here reads
+/// the journal back.
+///
+/// `out == "-"` keeps the original streaming behaviour for the legacy bootstrap
+/// script; every other path builds a real file, because an offset into a
+/// regenerated stream is meaningless (tar member order is readdir order and a
+/// re-taken dump differs byte-for-byte from the last one) while an offset into a
+/// finished file is exactly what resume needs.
+pub async fn build_with_journal(
+    ir: &ImportIR,
+    out: &Path,
+    journal: Option<&Path>,
+) -> Result<(), ImportError> {
+    // Before anything is written: two domains that would collapse onto one
+    // bundle directory must stop the run, not overwrite each other.
+    assert_no_site_dir_collision(ir)?;
+
+    let to_stdout = out.as_os_str() == "-";
+    // A randomized 0700 directory, not `$TMPDIR/hyperion-export-stage-<pid>`.
+    // This tree holds every selected site's docroot AND plaintext database
+    // dumps, on a box whose tenants are local users; a pid-predictable name
+    // created at the default umask in world-writable temp is both readable and
+    // pre-plantable. The same file already uses this helper for the MariaDB
+    // defaults-file, for the same reason.
+    let stage = secure_private_dir("hyperion-export-stage").await?;
+    // From here on every early return must take the stage tree with it — it is
+    // the secrets, not just scratch space.
+    let result = build_inner(ir, out, journal, &stage, to_stdout).await;
+    let _ = tokio::fs::remove_dir_all(&stage).await;
+    result
+}
+
+async fn build_inner(
+    ir: &ImportIR,
+    out: &Path,
+    journal: Option<&Path>,
+    stage: &Path,
+    to_stdout: bool,
+) -> Result<(), ImportError> {
+    preflight_space(ir, stage, !to_stdout).await?;
+
+    let now = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0)
+    };
+    let note = |ev: crate::progress::Event| {
+        if let Some(j) = journal {
+            let _ = crate::progress::append(j, &ev);
+        }
+    };
 
     // A single unreadable docroot or DB must not sink a 40-site migration:
-    // record the failure, drop the partial artefact, and keep going. The import
-    // side skips any site whose docroot/DB dump is absent from the bundle.
-    let mut failures: Vec<String> = Vec::new();
-    for h in &ir.hostings {
+    // record the failure, drop the partial artefact, and keep going. What is
+    // NEW is that the record travels INSIDE the bundle (ir.skipped), so the
+    // import side can tell a deliberate omission from a truncated upload.
+    let mut skipped: Vec<crate::ir::IrSkipped> = Vec::new();
+    let mut input_done: u64 = 0;
+
+    for (idx, h) in ir.hostings.iter().enumerate() {
         let site = stage.join("sites").join(site_dir(&h.domain));
         tokio::fs::create_dir_all(site.join("db")).await?;
         if Path::new(&h.docroot).is_dir() {
@@ -266,7 +427,16 @@ pub async fn build(ir: &ImportIR, out: &Path) -> Result<(), ImportError> {
             {
                 let _ = tokio::fs::remove_file(&tgz).await;
                 eprintln!("  ⚠ {}: docroot skipped — {e}", h.domain);
-                failures.push(format!("{} (docroot)", h.domain));
+                skipped.push(crate::ir::IrSkipped {
+                    domain: h.domain.clone(),
+                    what: "docroot".into(),
+                    why: e.to_string(),
+                });
+                note(crate::progress::Event::Skip {
+                    t: now(),
+                    what: format!("{} (docroot)", h.domain),
+                    why: e.to_string(),
+                });
             }
         }
         for db in &h.databases {
@@ -274,29 +444,65 @@ pub async fn build(ir: &ImportIR, out: &Path) -> Result<(), ImportError> {
             if let Err(e) = dump_db(db, &dest, &ir.source.kind).await {
                 let _ = tokio::fs::remove_file(&dest).await;
                 eprintln!("  ⚠ {}: database '{}' skipped — {e}", h.domain, db.name);
-                failures.push(format!("{} (db {})", h.domain, db.name));
+                skipped.push(crate::ir::IrSkipped {
+                    domain: h.domain.clone(),
+                    what: format!("db:{}", db.name),
+                    why: e.to_string(),
+                });
+                note(crate::progress::Event::Skip {
+                    t: now(),
+                    what: format!("{} (db {})", h.domain, db.name),
+                    why: e.to_string(),
+                });
             }
         }
+        let done = idx as u64 + 1;
+        input_done = input_done.saturating_add(dir_bytes(Path::new(&h.docroot)).await.unwrap_or(0));
+        note(crate::progress::Event::Site {
+            t: now(),
+            done,
+            name: h.domain.clone(),
+            input_done,
+        });
     }
-    if !failures.is_empty() {
+
+    if !skipped.is_empty() {
         eprintln!(
             "⚠ {} item(s) could not be exported and were skipped: {}",
-            failures.len(),
-            failures.join(", ")
+            skipped.len(),
+            skipped
+                .iter()
+                .map(|s| format!("{} ({})", s.domain, s.what))
+                .collect::<Vec<_>>()
+                .join(", ")
         );
     }
 
+    // The manifest is written LAST so it can carry the skip list. The import
+    // side reads it to distinguish "left out on purpose" from "truncated".
+    let mut manifest_ir = ir.clone();
+    manifest_ir.skipped = skipped;
+    let manifest =
+        serde_json::to_string_pretty(&manifest_ir).map_err(|e| ImportError::Command {
+            cmd: "serialize manifest".into(),
+            msg: e.to_string(),
+        })?;
+    tokio::fs::write(stage.join(MANIFEST), manifest).await?;
+
     if to_stdout {
-        // Stream the packed bundle to our stdout (inherited by .status()).
+        // Legacy path, byte-for-byte as before: stream the packed bundle to our
+        // stdout (inherited by `.status()`).
         let status = Command::new("tar")
             .arg("cf")
             .arg("-")
             .arg("-C")
-            .arg(&stage)
+            .arg(stage)
             .arg(".")
             .status()
             .await?;
-        let _ = tokio::fs::remove_dir_all(&stage).await;
+        // The status check comes BEFORE any cleanup now. It used to run after
+        // `remove_dir_all`, so a failed stream destroyed the staged tree before
+        // reporting the failure — and every retry re-dumped every database.
         if !status.success() {
             return Err(ImportError::Command {
                 cmd: "tar cf - (stream)".into(),
@@ -317,7 +523,15 @@ pub async fn build(ir: &ImportIR, out: &Path) -> Result<(), ImportError> {
         ],
     )
     .await?;
-    let _ = tokio::fs::remove_dir_all(&stage).await;
+
+    // Seal it: the exact size and digest of what will be uploaded. Both travel
+    // to the panel, which refuses a bundle whose digest does not match.
+    let (bytes, sha256) = seal(out).await?;
+    note(crate::progress::Event::Bundle {
+        t: now(),
+        bytes,
+        sha256,
+    });
     Ok(())
 }
 
@@ -326,12 +540,20 @@ pub async fn build(ir: &ImportIR, out: &Path) -> Result<(), ImportError> {
 async fn dump_db(db: &IrDatabase, dest: &Path, source_kind: &str) -> Result<(), ImportError> {
     match db.engine {
         IrDbEngine::Postgres => {
-            let bytes = sh_capture(&format!(
-                "sudo -u postgres pg_dump -Fc -- {}",
-                shell_quote(&db.name)
-            ))
+            // Streamed to the file, never through a Vec: a large database must
+            // not become an allocation of its own size on the source box.
+            let n = sh_to_file(
+                &format!("sudo -u postgres pg_dump -Fc -- {}", shell_quote(&db.name)),
+                dest,
+            )
             .await?;
-            tokio::fs::write(dest, &bytes).await?;
+            if n == 0 {
+                let _ = tokio::fs::remove_file(dest).await;
+                return Err(ImportError::Command {
+                    cmd: format!("pg_dump {}", db.name),
+                    msg: "produced an empty dump".into(),
+                });
+            }
             Ok(())
         }
         _ => dump_mariadb(&db.name, dest, source_kind).await,
@@ -353,11 +575,8 @@ async fn dump_mariadb(name: &str, dest: &Path, source_kind: &str) -> Result<(), 
     let mut errors: Vec<String> = Vec::new();
 
     if source_kind == "cloudpanel" {
-        match cloudpanel_creds_dump(name).await {
-            Ok(Some(bytes)) if !bytes.is_empty() => {
-                tokio::fs::write(dest, &bytes).await?;
-                return Ok(());
-            }
+        match cloudpanel_creds_dump(name, dest).await {
+            Ok(Some(n)) if n > 0 => return Ok(()),
             // Record WHY each method produced nothing, so the per-site skip
             // message names every path that was tried (diagnosability across
             // dozens of sites).
@@ -373,16 +592,18 @@ async fn dump_mariadb(name: &str, dest: &Path, source_kind: &str) -> Result<(), 
     }
 
     // Plain socket mysqldump — root via unix_socket plugin or ~/.my.cnf.
-    match sh_capture(&format!(
-        "mysqldump --single-transaction --routines --triggers --events -- {}",
-        shell_quote(name)
-    ))
+    // Streamed straight to `dest`; a multi-gigabyte dump held in memory is how
+    // a detached export gets OOM-killed with nothing in its journal.
+    match sh_to_file(
+        &format!(
+            "mysqldump --single-transaction --routines --triggers --events -- {}",
+            shell_quote(name)
+        ),
+        dest,
+    )
     .await
     {
-        Ok(bytes) if !bytes.is_empty() => {
-            tokio::fs::write(dest, &bytes).await?;
-            return Ok(());
-        }
+        Ok(n) if n > 0 => return Ok(()),
         Ok(_) => errors.push("mysqldump (socket): empty output".into()),
         Err(e) => errors.push(format!("mysqldump (socket): {e}")),
     }
@@ -400,7 +621,7 @@ const CLOUDPANEL_DB_SQ3: &str = "/home/clp/htdocs/app/data/db.sq3";
 /// `mysqldump` with them via a 0600 defaults-file (so the password never appears
 /// in argv / `ps`). `Ok(None)` if the panel records no DB server (nothing to do
 /// → let the caller fall through to `clpctl`).
-async fn cloudpanel_creds_dump(name: &str) -> Result<Option<Vec<u8>>, ImportError> {
+async fn cloudpanel_creds_dump(name: &str, dest: &Path) -> Result<Option<u64>, ImportError> {
     let sql = "SELECT host,user_name,password,port FROM database_server \
                ORDER BY is_default DESC, id ASC LIMIT 1;";
     let q = format!(
@@ -447,10 +668,16 @@ async fn cloudpanel_creds_dump(name: &str) -> Result<Option<Vec<u8>>, ImportErro
     )
     .await?;
     let cnf_q = shell_quote(&cnf.display().to_string());
-    let res = sh_capture(&format!(
-        "mysqldump --defaults-extra-file={cnf_q} --single-transaction --routines --triggers --events -- {}",
-        shell_quote(name)
-    ))
+    // Streamed to `dest` rather than captured: this is the primary CloudPanel
+    // dump path, so it is the one most likely to meet a multi-gigabyte database.
+    let res = sh_to_file(
+        &format!(
+            "mysqldump --defaults-extra-file={cnf_q} --single-transaction --routines \
+             --triggers --events -- {}",
+            shell_quote(name)
+        ),
+        dest,
+    )
     .await;
     let _ = tokio::fs::remove_dir_all(&dir).await;
     Ok(Some(res?))
@@ -608,7 +835,10 @@ async fn run(bin: &str, args: &[&str]) -> Result<(), ImportError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{human, looks_like_sql, preflight_space, site_dir};
+    use super::{
+        assert_no_site_dir_collision, human, looks_like_sql, preflight_space, run, seal, site_dir,
+    };
+    use crate::ir::ImportIR;
 
     fn hosting_with_docroot(docroot: &str) -> crate::ir::IrHosting {
         crate::ir::IrHosting {
@@ -687,6 +917,114 @@ mod tests {
         assert!(!looks_like_sql(b"")); // empty
         assert!(!looks_like_sql(&[0u8, 1, 2, 3, 4, 5])); // raw bytes
         assert!(!looks_like_sql(b"\x89PNG\r\n\x1a\n")); // a PNG, not SQL
+    }
+
+    /// The finding this whole digest path exists for.
+    ///
+    /// A tar cut at a 512-byte block boundary and padded with zeros — what a
+    /// crash, a short write or ext4's delayed-allocation zero-fill leaves —
+    /// presents those zeros as the archive's end-of-archive marker. `tar tf`
+    /// therefore exits 0 having silently dropped every member past the cut, and
+    /// an import driven by that check creates the missing sites EMPTY and
+    /// reports success. The digest is the only thing that notices.
+    #[tokio::test]
+    async fn a_zero_padded_truncation_changes_the_digest() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(&src).expect("src");
+        for i in 0..6 {
+            std::fs::write(src.join(format!("site{i}.txt")), format!("content {i}\n")).expect("w");
+        }
+        let full = dir.path().join("full.tar");
+        run(
+            "tar",
+            &[
+                "cf",
+                &full.display().to_string(),
+                "-C",
+                &src.display().to_string(),
+                ".",
+            ],
+        )
+        .await
+        .expect("tar");
+
+        let (full_len, full_sha) = seal(&full).await.expect("seal full");
+        assert!(full_len > 0);
+
+        // Cut at a block boundary, then zero-pad back to a plausible length.
+        let bytes = std::fs::read(&full).expect("read");
+        let cut = (bytes.len() * 6 / 10) / 512 * 512;
+        let mut truncated = bytes[..cut].to_vec();
+        truncated.resize(bytes.len(), 0);
+        let trunc = dir.path().join("trunc.tar");
+        std::fs::write(&trunc, &truncated).expect("write trunc");
+
+        let (trunc_len, trunc_sha) = seal(&trunc).await.expect("seal trunc");
+        assert_eq!(
+            trunc_len, full_len,
+            "the zero padding makes the SIZE match — which is why a length check \
+             alone cannot catch this"
+        );
+        assert_ne!(
+            trunc_sha, full_sha,
+            "the digest must distinguish a zero-padded truncation from the real bundle"
+        );
+
+        // And the thing that made this dangerous: `tar tf` is happy with it.
+        let tar_ok = tokio::process::Command::new("tar")
+            .arg("tf")
+            .arg(&trunc)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await
+            .map(|s| s.success())
+            .unwrap_or(false);
+        assert!(
+            tar_ok,
+            "if tar ever starts rejecting this, the comment on `seal` should be \
+             revisited — but do NOT drop the digest, the guarantee is different"
+        );
+    }
+
+    /// Two domains that collapse to one bundle directory must stop the export,
+    /// not overwrite each other.
+    #[test]
+    fn colliding_site_dirs_are_refused_not_silently_merged() {
+        let mut ir = ImportIR {
+            hostings: vec![
+                hosting_with_docroot("/tmp/a"),
+                hosting_with_docroot("/tmp/b"),
+            ],
+            ..Default::default()
+        };
+        // Both collapse to `a_b.cz`.
+        ir.hostings[0].domain = "a b.cz".into();
+        ir.hostings[1].domain = "a+b.cz".into();
+        assert_eq!(
+            site_dir(&ir.hostings[0].domain),
+            site_dir(&ir.hostings[1].domain)
+        );
+
+        let err = assert_no_site_dir_collision(&ir).expect_err("must refuse");
+        let msg = err.to_string();
+        assert!(msg.contains("a b.cz"), "name both domains: {msg}");
+        assert!(msg.contains("a+b.cz"), "name both domains: {msg}");
+    }
+
+    #[test]
+    fn distinct_site_dirs_are_allowed() {
+        let mut ir = ImportIR {
+            hostings: vec![
+                hosting_with_docroot("/tmp/a"),
+                hosting_with_docroot("/tmp/b"),
+            ],
+            ..Default::default()
+        };
+        ir.hostings[0].domain = "one.cz".into();
+        ir.hostings[1].domain = "two.cz".into();
+        assert!(assert_no_site_dir_collision(&ir).is_ok());
     }
 
     #[test]
