@@ -60,3 +60,29 @@ jobs:
 
       - name: Build (release — mirrors the rolling release)
         run: cargo build --workspace --release
+
+      # The self-service exporter is the ONE binary CI was not covering, and it
+      # is the one that runs on somebody else's server. It is built for
+      # x86_64-unknown-linux-musl so it is static and works on any Linux
+      # regardless of glibc age — a target with real differences from the host
+      # build above, and until now it was compiled for the first time inside
+      # release.yml, which only runs on a `v*` tag. So a dependency that does not
+      # support musl would be discovered at release time, with the tag already
+      # pushed and no binaries to ship.
+      #
+      # This is not hypothetical: `rustix` arrived as a dependency of
+      # hyperion-import (for the process-group kill in the export deadlines) and
+      # nothing here would have exercised it under musl.
+      - name: Build the static musl exporter
+        run: |
+          rustup target add x86_64-unknown-linux-musl
+          cargo build --release --target x86_64-unknown-linux-musl -p hyperion-export
+          file target/x86_64-unknown-linux-musl/release/hyperion-export
+
+      # The bootstrap the operator pipes to `sudo bash` on their source server is
+      # assembled from a prelude plus this asset. A syntax error in it compiles
+      # perfectly well and is first discovered by root on a production box.
+      # `web_e2e` already pipes the RENDERED script through `bash -n`; this
+      # checks the asset on its own so a break is attributed to the right file.
+      - name: Syntax-check the import runner
+        run: bash -n bin/hyperion-web/assets/import-runner.sh
