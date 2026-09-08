@@ -438,15 +438,28 @@ chmod 600 "$RUN/env"
 #
 # It IS cleared when the token changes, because then the bundle beside it
 # belongs to a different transfer and must not be resumed into.
+# CREATE the journal before reading it, and swallow the read's status.
+#
+# The previous order read it first, and on a box where no export had ever run
+# `sed` exited non-zero on the missing file. Under this script's `set -euo
+# pipefail` that status propagates out of the command substitution and out of
+# the assignment, so the script died SILENTLY right here — after the measuring
+# line and before "export started in the background". The operator saw a
+# terminal that simply stopped, and the panel went on saying "waiting for the
+# source to export…" because the worker had never been spawned.
+#
+# `bash -n` cannot see this: the line is syntactically perfect. That is why CI
+# now runs shellcheck as well.
+[ -e "$JOURNAL" ] || : > "$JOURNAL"
+chmod 600 "$JOURNAL"
+
 FP_NOW="$(printf '%s' "$T" | sha256sum 2>/dev/null | cut -c1-8 || true)"
-FP_WAS="$(sed -n 's/.*"k":"start".*"token_fp":"\([0-9a-f]*\)".*/\1/p' "$JOURNAL" 2>/dev/null | tail -1)"
+FP_WAS="$(sed -n 's/.*"k":"start".*"token_fp":"\([0-9a-f]*\)".*/\1/p' "$JOURNAL" | tail -1 || true)"
 if [ -n "$FP_WAS" ] && [ "$FP_WAS" != "$FP_NOW" ]; then
   say "this is a different transfer than the one in $RUN — starting clean."
   rm -f "$BUNDLE" "$CHUNK"
   : > "$JOURNAL"
 fi
-[ -e "$JOURNAL" ] || : > "$JOURNAL"
-chmod 600 "$JOURNAL"
 
 if command -v setsid >/dev/null 2>&1; then
   setsid nohup "$RUN/worker.sh" "$RUN/env" >>"$RUN/worker.log" 2>&1 &

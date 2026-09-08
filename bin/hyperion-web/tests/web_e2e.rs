@@ -3013,3 +3013,136 @@ async fn a_repeated_commit_returns_the_same_job_and_does_not_reimport() {
     let late = app.oneshot(req).await.unwrap();
     assert_eq!(late.status(), StatusCode::GONE);
 }
+
+/// Run the generated bootstrap far enough to reach the point where it detaches
+/// the worker, against stubbed external commands.
+///
+/// `bash -n` cannot catch what this catches. A shell script can be
+/// syntactically perfect and still die on its first line of real work — which
+/// is exactly what happened in v0.58.0: under `set -euo pipefail`, `sed` on a
+/// journal that does not exist yet exited non-zero, that status propagated out
+/// of the command substitution and out of the assignment, and the script
+/// stopped SILENTLY between "measuring the selected sites" and "export started
+/// in the background". The operator's terminal simply ended, the worker was
+/// never spawned, and the panel went on saying "waiting for the source to
+/// export…" for a transfer that had already died. It cost a real 31 GB
+/// migration attempt.
+///
+/// The stubs are deliberately dumb: they exist to let the script REACH its own
+/// logic, not to simulate a panel. Anything that aborts before the detach —
+/// an unset variable, a `set -e` trip, a missing file, a bad redirect — fails
+/// this test with the script's own output attached.
+#[tokio::test]
+async fn the_bootstrap_reaches_the_detach_against_stubs() {
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+
+    let admin = admin_user::create("kevin", "pw").expect("admin");
+    let (sock, _agentdir) = start_agent().await;
+    let token = mint_import_token(&sock).await;
+    let app = build_app(sock, admin);
+
+    let r = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/import/agent/{token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let script = body_text(r).await;
+
+    let tmp = tempfile::tempdir().unwrap();
+    // Canonicalise: `guard_dir` refuses a symlinked ancestor of the run
+    // directory, and on macOS a temp dir sits under `/var`, which IS a symlink.
+    // (That refusal is correct — root is about to write plaintext database
+    // dumps there — so the test gives it a real path rather than weakening it.)
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let bin = root.join("stubbin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let run_dir = root.join("exportdir");
+
+    // Stubs. `curl` answers each step the setup phase makes: the exporter
+    // download writes a file, the manifest POST is ignored, and the selection
+    // poll returns one domain so the script stops waiting.
+    let stub = |name: &str, body: &str| {
+        let p = bin.join(name);
+        let mut f = std::fs::File::create(&p).unwrap();
+        writeln!(f, "#!/bin/bash\n{body}").unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    stub(
+        "curl",
+        r#"out=""; while [ $# -gt 0 ]; do case "$1" in -o) shift; out="$1";; -K) shift;; esac; shift; done
+if [ -n "$out" ]; then
+  # The "exporter" the runner downloads. It has to be genuinely executable:
+  # the runner probes `--help` for --estimate before it will proceed.
+  { echo '#!/bin/bash'
+    echo 'case " $* " in'
+    echo '  *" --help "*) echo "--estimate --journal --status --watch";;'
+    echo '  *" --estimate "*) echo "{\"sites\":1,\"input_bytes\":1024,\"free_bytes\":999999999,\"mode\":\"foreground\"}";;'
+    echo 'esac'
+    echo 'exit 0'
+  } > "$out"
+  chmod +x "$out"
+fi
+printf 'example.cz\n'
+exit 0"#,
+    );
+    // Pin the architecture on both sides so the test reads the same on an
+    // arm64 laptop and an x86_64 runner. The script cross-checks `uname -m`
+    // against `file`'s wording, and the two spell it differently on purpose
+    // ("x86_64" vs "x86-64") — which is exactly what the real guard matches.
+    stub("uname", r#"echo x86_64"#);
+    stub("file", r#"echo 'ELF 64-bit LSB executable, x86-64'"#);
+    // The exporter: --help must advertise --estimate, --estimate must print the
+    // JSON the runner seds, and --watch must return promptly.
+
+    // Everything the script shells out to that must simply succeed.
+    for name in ["setsid", "nohup", "flock", "sha256sum"] {
+        stub(name, "exit 0");
+    }
+    // guard_dir insists every ancestor of the run dir is root-owned and not
+    // group/world-writable. A temp dir is neither, so `stat` is stubbed to the
+    // shape a correctly-provisioned box has. The guard's own logic is covered
+    // by its unit tests; what is under test here is that the script RUNS.
+    stub(
+        "stat",
+        r#"case "$1" in -c) case "$2" in %u) echo 0;; %a) echo 755;; esac;; esac"#,
+    );
+
+    // The exporter is fetched to a temp file and copied to $RUN/hyperion-export,
+    // then invoked by that path — so put the stub where the copy lands.
+    std::fs::create_dir_all(run_dir.join("run")).unwrap();
+
+    let script_path = root.join("boot.sh");
+    std::fs::write(&script_path, &script).unwrap();
+
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let out = std::process::Command::new("bash")
+        .arg(&script_path)
+        .env("PATH", path)
+        .env("HYPERION_EXPORT_DIR", &run_dir)
+        .output()
+        .expect("run the bootstrap");
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    // The measuring line proves it got past the selection poll; the detach line
+    // is the one that was never reached in v0.58.0.
+    assert!(
+        stderr.contains("measuring the selected sites"),
+        "the script did not reach the measuring step.\n--- stderr ---\n{stderr}\n--- stdout ---\n{stdout}"
+    );
+    assert!(
+        stderr.contains("export started in the background"),
+        "the script died before detaching the worker — the failure that cost a real \
+         migration, and that `bash -n` cannot see.\n--- stderr ---\n{stderr}\n--- stdout ---\n{stdout}"
+    );
+}
