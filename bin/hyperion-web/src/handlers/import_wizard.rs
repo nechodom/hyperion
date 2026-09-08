@@ -344,6 +344,13 @@ struct SiteRow {
     owner: String,
     php: String,
     dbs: usize,
+    /// Docroot size, already formatted, or "unknown" when the source could not
+    /// measure it. Formatted here rather than in the template because an
+    /// unmeasured site must read as unknown, never as "0 B".
+    size: String,
+    /// Raw bytes for the running total the page keeps as boxes are ticked.
+    /// 0 means "not measured" and the total then declines to be a figure.
+    size_bytes: u64,
 }
 
 /// A profile choice for the per-site dropdown on the import checklist.
@@ -397,6 +404,10 @@ pub async fn get_select(
         php: String,
         #[serde(default)]
         dbs: Vec<String>,
+        /// Absent from a manifest reported by an exporter older than this
+        /// panel, and absent per-site when `du` could not read that docroot.
+        #[serde(default)]
+        bytes: Option<u64>,
     }
     let sites: Vec<SiteRow> = serde_json::from_str::<Vec<ManifestSite>>(&info.manifest_json)
         .unwrap_or_default()
@@ -406,11 +417,25 @@ pub async fn get_select(
             owner: s.owner,
             php: s.php,
             dbs: s.dbs.len(),
+            size: match s.bytes {
+                Some(b) => hyperion_import::progress::human_bytes(b),
+                None => "unknown".into(),
+            },
+            size_bytes: s.bytes.unwrap_or(0),
         })
         .collect();
     if sites.is_empty() {
         return Ok(Redirect::to("/import?flash_error=no+sites+reported+yet").into_response());
     }
+    // Largest first. Choosing which sites to take in this batch is a question
+    // about size before it is a question about anything else, and the sites
+    // that decide whether a batch fits are the big ones.
+    let mut sites = sites;
+    sites.sort_by(|a, b| {
+        b.size_bytes
+            .cmp(&a.size_bytes)
+            .then(a.domain.cmp(&b.domain))
+    });
     // Profiles for the per-site dropdown (best-effort; empty = no profile column).
     let profiles: Vec<ProfileOpt> =
         match hyperion_rpc_client::call(&state.agent_socket, Request::ProfileList).await {

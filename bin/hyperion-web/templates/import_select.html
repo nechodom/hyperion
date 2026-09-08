@@ -24,24 +24,35 @@
              onclick="var ck=this.checked;this.closest('form').querySelectorAll('.hyp-site').forEach(function(c){c.checked=ck;});">
       <strong>Select all</strong>
     </label>
+    {# Sites can be imported in several batches, and on a source box with a
+       small disk they HAVE to be: the export stages a copy and then packs it
+       into an archive beside itself, so packing needs roughly twice the site
+       files plus room for the database dumps. An operator who picks blind
+       finds that out when the export refuses — so the figure is here, next to
+       the boxes they are ticking. #}
+    <p class="text-soft small" id="hyp-selected-total" style="margin:.4rem 0 0"></p>
     <div class="table-wrap">
       <table class="table">
         <thead>
           <tr>
             <th></th>
             <th>Source site</th>
+            <th style="text-align:right">Size</th>
             <th>Import as</th>
             {% if !profiles.is_empty() %}<th>Profile</th><th>Bill from</th>{% endif %}
           </tr>
         </thead>
         <tbody>
         {% for s in sites %}
-          <tr class="hyp-row" data-source="{{ s.domain }}">
+          <tr class="hyp-row" data-source="{{ s.domain }}" data-bytes="{{ s.size_bytes }}">
             <td><input type="checkbox" class="hyp-site" checked></td>
             <td>
               <strong>{{ s.domain }}</strong>
               <div class="text-soft small">{{ s.owner }} · PHP {{ s.php }} · {{ s.dbs }} DB{% if s.dbs != 1 %}s{% endif %}</div>
             </td>
+            {# Site files only — the database dumps are not measurable until
+               they are taken, and the export budgets ~20% on top for them. #}
+            <td class="numeric" style="text-align:right;white-space:nowrap">{{ s.size }}</td>
             <td>
               <input type="text" class="hyp-target" value="{{ s.domain }}" autocomplete="off"
                      spellcheck="false" style="min-width:14rem">
@@ -76,6 +87,56 @@
 </div>
 
 <script>
+// Running total of what is ticked, so the operator sees the number that decides
+// whether the export will fit BEFORE they submit — not after the source refuses.
+//
+// A site the source could not measure carries 0, and one of those makes the
+// total a floor rather than a figure: it says "at least", because quietly
+// counting an unmeasured site as nothing is how a selection that cannot fit
+// looks like one that can.
+(function () {
+  var out = document.getElementById('hyp-selected-total');
+  if (!out) return;
+  function human(b) {
+    var u = [['TB', 1e12], ['GB', 1e9], ['MB', 1e6], ['kB', 1e3]];
+    for (var i = 0; i < u.length; i++) {
+      if (b >= u[i][1]) {
+        var v = b / u[i][1];
+        return (v >= 100 ? v.toFixed(0) : v.toFixed(1)) + ' ' + u[i][0];
+      }
+    }
+    return b + ' B';
+  }
+  function render() {
+    var rows = document.querySelectorAll('.hyp-row');
+    var n = 0, bytes = 0, unknown = 0;
+    rows.forEach(function (row) {
+      var cb = row.querySelector('.hyp-site');
+      if (!cb || !cb.checked) return;
+      n++;
+      var b = parseInt(row.getAttribute('data-bytes'), 10) || 0;
+      if (b > 0) { bytes += b; } else { unknown++; }
+    });
+    if (n === 0) { out.textContent = 'Nothing selected.'; return; }
+    var size = (unknown > 0 ? 'at least ' : '') + human(bytes);
+    var tail = unknown > 0
+      ? ' (' + unknown + ' site(s) could not be measured on the source)'
+      : '';
+    // Packing stages a copy and then archives it beside itself, and budgets
+    // ~20% for database dumps — the same arithmetic the exporter applies.
+    var need = human(Math.round(bytes * 1.2 * 2) + 512 * 1024 * 1024);
+    out.textContent = n + ' site(s) selected · ' + size + ' of site files' + tail +
+      ' · the source server needs about ' + need + ' free to pack this batch.';
+  }
+  document.addEventListener('change', function (e) {
+    if (e.target && e.target.classList && e.target.classList.contains('hyp-site')) render();
+  });
+  document.addEventListener('click', function (e) {
+    if (e.target && e.target.type === 'checkbox') setTimeout(render, 0);
+  });
+  render();
+})();
+
 function hypBuildImportConfig(form) {
   var rows = form.querySelectorAll('.hyp-row');
   var out = [];

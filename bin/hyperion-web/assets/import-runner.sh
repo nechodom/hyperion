@@ -191,12 +191,47 @@ say "hundreds of thousands of files can take a minute) …"
 EST="$("$BIN" --kind "$K" --only "$SEL" --estimate)" || die "could not measure the selection."
 # Plain shell parsing of two known integer fields — no jq on a stranger's box.
 INPUT_BYTES="$(printf '%s' "$EST" | sed -n 's/.*"input_bytes":\([0-9]*\).*/\1/p')"
+FREE_BYTES="$(printf '%s' "$EST" | sed -n 's/.*"free_bytes":\([0-9]*\).*/\1/p')"
+NEED_BYTES="$(printf '%s' "$EST" | sed -n 's/.*"needed_bytes":\([0-9]*\).*/\1/p')"
+FITS="$(printf '%s' "$EST" | sed -n 's/.*"fits":\([a-z]*\).*/\1/p')"
 MODE="$(printf '%s' "$EST" | sed -n 's/.*"mode":"\([a-z]*\)".*/\1/p')"
 [ -n "$MODE" ] || MODE=background
+
+gb() { awk "BEGIN{printf \"%.1f GB\", $1/1000000000}"; }
+
 if [ -n "$INPUT_BYTES" ]; then
-  say "selected sites hold $INPUT_BYTES bytes of files."
+  say "selected sites hold $(gb "$INPUT_BYTES") of files."
 else
   say "could not measure every site — running detached, which is the safe choice."
+fi
+
+# REFUSE HERE, not an hour into a detached run.
+#
+# The packer has always had this check, but it runs after the worker has been
+# spawned: the operator got an exit code, a status line saying "not enough free
+# disk", and a log file to go read — long after they had walked away. The same
+# arithmetic is available before anything is written, so it is applied while
+# they are still watching and can act on it.
+if [ "$FITS" = "false" ] && [ -n "$NEED_BYTES" ] && [ -n "$FREE_BYTES" ]; then
+  say ""
+  say "NOT ENOUGH DISK on this server to pack that selection."
+  say "  free:   $(gb "$FREE_BYTES")"
+  say "  needed: $(gb "$NEED_BYTES")  (the site files, ~20% for database dumps,"
+  say "          counted twice because the staged tree is packed into an archive"
+  say "          beside itself, plus 512 MB of headroom)"
+  say ""
+  say "Nothing has been packed and nothing was changed. Either:"
+  say "  • pick fewer sites in Hyperion and re-run this command — the site list"
+  say "    there shows each site's size, largest first, so you can take the"
+  say "    biggest ones in their own batch; or"
+  say "  • free up space; or"
+  say "  • point the export at a bigger filesystem and re-run:"
+  say "      HYPERION_EXPORT_DIR=/path/with/room TMPDIR=/path/with/room \\"
+  say "        curl -fsSL \"$B/import/agent/\$T\" | sudo -E bash"
+  say ""
+  say "Sites can be imported in several batches — each one is independent, and"
+  say "Hyperion skips a site it has already imported."
+  exit 1
 fi
 
 # --- 4. write the credential where it is not on argv -------------------------

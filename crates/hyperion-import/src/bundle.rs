@@ -79,6 +79,19 @@ fn assert_no_site_dir_collision(ir: &ImportIR) -> Result<(), ImportError> {
 /// `None` is load-bearing: it means "there is no denominator", and every caller
 /// must then decline to show a percentage or an ETA rather than substituting a
 /// guess. Split out of `preflight_space`, which computed this and threw it away.
+/// Per-site docroot sizes, in the order the sites appear.
+///
+/// `None` for a site whose docroot could not be measured — the caller must show
+/// "unknown" for it and refuse to total the selection, rather than quietly
+/// treating it as zero.
+pub async fn measure_each(ir: &ImportIR) -> Vec<Option<u64>> {
+    let mut out = Vec::with_capacity(ir.hostings.len());
+    for h in &ir.hostings {
+        out.push(dir_bytes(Path::new(&h.docroot)).await);
+    }
+    out
+}
+
 pub async fn measure_payload(ir: &ImportIR) -> Option<u64> {
     let mut payload: u64 = 0;
     for h in &ir.hostings {
@@ -449,6 +462,29 @@ fn human(bytes: u64) -> String {
 /// Deliberately conservative in the SAFE direction: an unmeasurable
 /// docroot or an unreadable `df` skips the check entirely rather than
 /// blocking a legitimate export.
+/// Bytes needed on the staging filesystem to pack `payload` bytes of site files.
+///
+/// The ONE formula. It used to live only inside `preflight_space`, which runs
+/// after the exporter has already started — so the operator learned their disk
+/// was too small an hour into a detached run, from an exit code, with the
+/// numbers in a log file. `estimate` now applies the same arithmetic before
+/// anything is packed, and the two cannot drift because there is only one.
+///
+/// `copies` is 2 when the staged tree and the finished archive share a
+/// filesystem (the tree is packed into an archive beside itself) and 1 when the
+/// archive lands elsewhere.
+pub fn pack_needed_bytes(payload: u64, copies: u64) -> u64 {
+    // Database dumps are not measurable before they are taken. Allow a flat
+    // 20 % of the file payload plus 512 MB of headroom, so the estimate errs
+    // toward letting a borderline export proceed rather than blocking one that
+    // would have fit.
+    let dumps = payload / 5;
+    payload
+        .saturating_add(dumps)
+        .saturating_mul(copies)
+        .saturating_add(512 * 1024 * 1024)
+}
+
 async fn preflight_space(
     ir: &ImportIR,
     stage: &Path,
@@ -494,18 +530,13 @@ async fn preflight_space(
     // When the archive lands on its OWN filesystem the stage carries one copy
     // and the archive carries the other, so neither is charged twice.
     let copies = if needs_archive && !separate { 2 } else { 1 };
-    let needed = payload
-        .saturating_add(dumps)
-        .saturating_mul(copies)
-        .saturating_add(512 * 1024 * 1024);
+    let needed = pack_needed_bytes(payload, copies);
 
     // The archive's own filesystem, checked separately when it is one.
     if separate && needs_archive {
         if let Some(o) = out_probe.as_deref() {
             if let Some(out_avail) = avail_bytes(o).await {
-                let out_needed = payload
-                    .saturating_add(dumps)
-                    .saturating_add(512 * 1024 * 1024);
+                let out_needed = pack_needed_bytes(payload, 1);
                 if out_avail < out_needed {
                     return Err(ImportError::Command {
                         cmd: format!("preflight: free space on {}", o.display()),
