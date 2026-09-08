@@ -181,7 +181,11 @@ async fn run_status(cli: &Cli) -> i32 {
             print!("\x1b[2J\x1b[H{text}");
             use std::io::Write;
             let _ = std::io::stdout().flush();
-            if st.outcome.is_some() || !alive {
+            // `st.pid.is_none()` means the worker has not written its `start`
+            // line yet, which is the ordinary case for the first second or two
+            // — not a dead run. Exiting there told the operator their export had
+            // died at the very moment it was starting.
+            if st.outcome.is_some() || (!alive && st.pid.is_some()) {
                 return terminal_code(&st);
             }
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;

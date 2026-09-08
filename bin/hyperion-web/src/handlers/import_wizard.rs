@@ -32,6 +32,9 @@ use std::path::PathBuf;
 const TOKEN_TTL_SECS: i64 = 4 * 60 * 60;
 const MIGRATION_DIR_DEFAULT: &str = "/var/lib/hyperion/migration";
 
+/// The panel's own nginx vhost, as the agent writes it.
+const PANEL_VHOST: &str = "/etc/nginx/sites-enabled/hyperion-panel.conf";
+
 /// Where received bundles land.
 ///
 /// Overridable via `HYPERION_MIGRATION_DIR` for two reasons: the tests must not
@@ -104,8 +107,7 @@ struct ImportWizardTpl<'a> {
 /// upgrades, re-runs the one-liner, and hits the identical 413 — with a panel
 /// whose UI now promises resumable background uploads.
 async fn stale_panel_vhost() -> Option<String> {
-    const VHOST: &str = "/etc/nginx/sites-enabled/hyperion-panel.conf";
-    let text = match tokio::fs::read_to_string(VHOST).await {
+    let text = match tokio::fs::read_to_string(PANEL_VHOST).await {
         Ok(t) => t,
         // No managed vhost at all. Either this panel is reached directly on
         // :8443 (in which case nginx is not in the path and there is nothing to
@@ -113,15 +115,47 @@ async fn stale_panel_vhost() -> Option<String> {
         // rather than cry wolf.
         Err(_) => return None,
     };
-    if text.contains("location /import/") && text.contains("proxy_request_buffering off") {
-        return None;
+    diagnose_panel_vhost(&text)
+}
+
+/// Split out from the file read so it can be tested against real rendered
+/// vhosts rather than only against a live filesystem.
+///
+/// It looks for the two shapes that actually hurt, and it must be updated
+/// whenever `nginx-panel.conf.j2` changes what it emits. The first version of
+/// this check went stale exactly that way: it treated the presence of
+/// `location /import/` as the sign of a GOOD vhost, and when that location was
+/// renamed the test inverted — a correctly updated box was told it was stale,
+/// while a box carrying the broken location was told it was fine. The
+/// `vhost_diagnosis_matches_what_the_template_actually_renders` test pins it to
+/// the real renderer so it cannot drift again.
+fn diagnose_panel_vhost(text: &str) -> Option<String> {
+    // The regression from v0.56.0. nginx 301s the unslashed URI for a
+    // proxy_pass prefix location ending in `/`, so `location /import/` sends
+    // `/import` — the import page itself — to `/import/`, which axum does not
+    // route. The operator sees a 404 on a page that worked yesterday, and
+    // nothing in the panel explains it.
+    if text.contains("location /import/") {
+        return Some(format!(
+            "The nginx vhost at {PANEL_VHOST} carries a `location /import/` \
+             block. nginx answers `/import` with a 301 to `/import/` for a \
+             location written that way, and that path is not routed — so the \
+             Import page itself returns 404. Run update.sh on this box (or \
+             restart the Hyperion agent) to re-render the vhost."
+        ));
     }
-    Some(format!(
-        "The nginx vhost at {VHOST} predates this version and still caps every \
-         upload at 2 GiB. An import larger than that will fail mid-transfer with \
-         a broken pipe on the source server. Run update.sh on this box (or \
-         restart the Hyperion agent) to re-render it."
-    ))
+    // The upload rules are missing entirely: an older vhost, from before
+    // resumable uploads existed.
+    if !text.contains("/import/upload") || !text.contains("proxy_request_buffering off") {
+        return Some(format!(
+            "The nginx vhost at {PANEL_VHOST} predates this version and still \
+             caps every upload at 2 GiB. An import larger than that will fail \
+             mid-transfer with a broken pipe on the source server. Run \
+             update.sh on this box (or restart the Hyperion agent) to \
+             re-render it."
+        ));
+    }
+    None
 }
 
 #[derive(Deserialize)]
@@ -747,6 +781,19 @@ pub async fn post_upload_begin(
         ));
     }
 
+    // What this token was carrying BEFORE this call, read while it is still
+    // readable. `claim_upload` writes the incoming digest and then re-SELECTs,
+    // so the row it returns always echoes back the sha just sent — which made
+    // the stale-partial check below compare a value with itself and never fire.
+    // A resume after a re-pack would then be told to continue at the previous
+    // bundle's offset, splicing the tail of one archive onto the head of
+    // another; only the commit digest would notice, after the whole remainder
+    // had been uploaded.
+    let previous_sha = resolve(&state, &token, false)
+        .await?
+        .map(|i| i.bundle_sha256)
+        .unwrap_or_default();
+
     let claimed = match token_rpc(
         &state,
         ImportTokenOp::ClaimUpload {
@@ -768,7 +815,23 @@ pub async fn post_upload_begin(
         }
     };
 
+    // A different bundle than the one this token was carrying. Re-packing is a
+    // normal event — the run directory was cleaned, the box rebooted before
+    // staging finished, a site was fixed and the export re-run — so the partial
+    // is discarded and the transfer restarts, rather than the token being
+    // bricked with a mismatch error the operator cannot act on.
     ensure_migration_dir().await;
+    let mut offset = part_len(claimed.id).await;
+    if offset > 0 && !previous_sha.is_empty() && previous_sha != sha {
+        let _ = tokio::fs::remove_file(part_path(claimed.id)).await;
+        offset = 0;
+    }
+    // Never claim to hold more than was declared: a stale .part longer than the
+    // new bundle would make the client skip past the end.
+    if offset > expected {
+        let _ = tokio::fs::remove_file(part_path(claimed.id)).await;
+        offset = 0;
+    }
 
     // A real preflight, against the size actually being sent. The old blind
     // 2 GiB floor accepted a 40 GB bundle onto a disk with 3 GB free and
@@ -784,7 +847,13 @@ pub async fn post_upload_begin(
         // 2 copies: the arriving `.tar`, plus the staging tree it is unpacked
         // into. `inflate` is 0 when the source could not measure it, and then
         // this is exactly the old bundle-plus-headroom check.
-        let need = hyperion_import::bundle::import_needed_bytes(expected, inflate, 2);
+        // Charge only what is still to ARRIVE. A resume already has `offset`
+        // bytes on this disk — `df` has stopped counting them as free — so
+        // demanding the whole bundle again refused a transfer that was 90 %
+        // done for space it was already using, and refused it permanently:
+        // every retry made the same demand.
+        let need = hyperion_import::bundle::import_needed_bytes(expected, inflate, 2)
+            .saturating_sub(offset);
         if (avail as u64) < need {
             // Deliberately NOT marked failed. Freeing disk and re-running the
             // one-liner is the obvious fix, and a token burnt here would force
@@ -808,24 +877,6 @@ pub async fn post_upload_begin(
                 ),
             ));
         }
-    }
-
-    // A different bundle than the one this token was carrying. Re-packing is a
-    // normal event — the run directory was cleaned, the box rebooted before
-    // staging finished, a site was fixed and the export re-run — so the partial
-    // is discarded and the transfer restarts, rather than the token being
-    // bricked with a mismatch error the operator cannot act on.
-    let mut offset = part_len(claimed.id).await;
-    let previous_sha = claimed.bundle_sha256.clone();
-    if offset > 0 && !previous_sha.is_empty() && previous_sha != sha {
-        let _ = tokio::fs::remove_file(part_path(claimed.id)).await;
-        offset = 0;
-    }
-    // Never claim to hold more than was declared: a stale .part longer than the
-    // new bundle would make the client skip past the end.
-    if offset > expected {
-        let _ = tokio::fs::remove_file(part_path(claimed.id)).await;
-        offset = 0;
     }
 
     Ok(text(
@@ -1201,7 +1252,28 @@ pub async fn get_selection(
     State(state): State<SharedState>,
     Path(token): Path<String>,
 ) -> Result<Response, AppError> {
-    let Some(info) = resolve(&state, &token, false).await? else {
+    selection_for(&state, &token).await
+}
+
+/// `GET /import/selection` — the same reply, with the token in a header.
+///
+/// The runner polls this up to 2640 times while it waits for the operator to
+/// pick sites. With the token in the path that was 2640 lines of the panel's
+/// nginx access log carrying a live credential — the same reason the chunk loop
+/// never put it there. The path form stays for a source that started before
+/// this shipped.
+pub async fn get_selection_bearer(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(token) = bearer(&headers) else {
+        return Ok(text(StatusCode::UNAUTHORIZED, "no bearer token\n".into()));
+    };
+    selection_for(&state, &token).await
+}
+
+async fn selection_for(state: &SharedState, token: &str) -> Result<Response, AppError> {
+    let Some(info) = resolve(state, token, false).await? else {
         // Unknown / expired / cancelled → tell the source to stop.
         return Ok((StatusCode::OK, "cancelled\n").into_response());
     };
@@ -1642,9 +1714,19 @@ fn summarise_source_progress(json: &str) -> String {
         .collect();
     let done = f.get("sites_done").copied().unwrap_or("?");
     let total = f.get("sites_total").copied().unwrap_or("?");
+    // A skip is the one thing in this report the operator must not miss: it
+    // means a site is going to arrive incomplete, and until now it reached them
+    // nowhere at all — not during the export, not in the import result.
+    let skipped = match f.get("skipped").and_then(|v| v.parse::<i64>().ok()) {
+        Some(n) if n > 0 => format!(" · {n} item(s) could not be exported"),
+        _ => String::new(),
+    };
     match f.get("input_done").and_then(|v| v.parse::<i64>().ok()) {
-        Some(b) => format!("packing site {done} of {total} — {} so far", human_bytes(b)),
-        None => format!("packing site {done} of {total}"),
+        Some(b) => format!(
+            "packing site {done} of {total} — {} so far{skipped}",
+            human_bytes(b)
+        ),
+        None => format!("packing site {done} of {total}{skipped}"),
     }
 }
 
@@ -1680,6 +1762,12 @@ fn transfers_html(rows: &[TransferRow], csrf: &str) -> String {
             "selected" => (
                 "selected".to_string(),
                 "<span class=\"text-soft\">waiting for the source to export…</span>".to_string(),
+            ),
+            _ if r.status == "failed" => (
+                "<span class=\"pill err\">failed</span>".to_string(),
+                "<span class=\"text-soft\">this transfer did not finish — start a new \
+                 one from the command above</span>"
+                    .to_string(),
             ),
             _ => (
                 esc(&r.status),
@@ -1721,6 +1809,55 @@ fn transfers_html(rows: &[TransferRow], csrf: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// The diagnosis must be pinned to what the template ACTUALLY renders, not
+    /// to a string someone remembered.
+    ///
+    /// The first version of this check treated `location /import/` as the sign
+    /// of a healthy vhost. #137 renamed that location — because it was 301-ing
+    /// `/import` into a 404 — and the check silently inverted: a correctly
+    /// updated box was told it was stale, and a box carrying the broken
+    /// location was told it was fine. Rendering the real template here means
+    /// the next rename fails this test instead of the operator's diagnosis.
+    #[test]
+    fn vhost_diagnosis_matches_what_the_template_actually_renders() {
+        let current =
+            hyperion_adapters::nginx::render_panel(&hyperion_adapters::nginx::PanelVhostInput {
+                domain: "panel.example.cz",
+                cert_path: "/c/fullchain.pem",
+                key_path: "/c/privkey.pem",
+                acme_challenge_root: "/var/lib/hyperion/acme-challenges",
+            })
+            .expect("render_panel");
+
+        assert_eq!(
+            super::diagnose_panel_vhost(&current),
+            None,
+            "the vhost this version renders must not be reported as stale"
+        );
+    }
+
+    /// The shape that took the Import page down, and the one that caps uploads.
+    #[test]
+    fn a_broken_or_ancient_vhost_is_named_precisely() {
+        // v0.56.0's vhost: it HAS the upload rules, so a naive "are the rules
+        // present" check calls it healthy — while `/import` 404s.
+        let broken = "location /import/ {\n  proxy_request_buffering off;\n  proxy_pass x;\n}";
+        let msg = super::diagnose_panel_vhost(broken).expect("must warn");
+        assert!(
+            msg.contains("404"),
+            "name the symptom the operator is seeing: {msg}"
+        );
+        assert!(msg.contains("update.sh"), "name the remedy: {msg}");
+
+        // Pre-resumable-upload vhost: no upload rules at all.
+        let ancient = "location / {\n  proxy_pass x;\n}";
+        let msg = super::diagnose_panel_vhost(ancient).expect("must warn");
+        assert!(
+            msg.contains("2 GiB"),
+            "name the limit that will bite: {msg}"
+        );
+    }
+
     use super::{kv, manifest_domain_set, selection_reply, wire_safe_domain};
 
     /// `inflate` is what turns the begin-time check from "can I receive this"

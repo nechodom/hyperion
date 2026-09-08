@@ -307,6 +307,25 @@ pub fn render_status(st: &RunState, now: i64, alive: bool) -> String {
             out.push_str("  Re-run the same one-liner — packing is not repeated and\n");
             out.push_str("  the upload continues from where it stopped.\n");
         }
+        // No `start` recorded yet. The runner detaches the worker and attaches
+        // the viewer within a few shell builtins, so the first read routinely
+        // lands before the worker has written its first line — and "no pid" is
+        // not "the pid is gone".
+        // Nothing has been recorded at all. The runner detaches the worker and
+        // attaches the viewer within a few shell builtins, so the first read
+        // routinely lands before the worker has written its first line — and
+        // "nothing yet" is not "the pid is gone". Narrow on purpose: any
+        // recorded progress means the run is past this state, whatever the
+        // journal says about a pid.
+        None if st.pid.is_none()
+            && st.samples.is_empty()
+            && st.sites_done == 0
+            && st.bundle_bytes.is_none() =>
+        {
+            out.push_str("Starting the export…\n");
+            out.push_str("  The worker has not reported yet. If this does not change\n");
+            out.push_str("  within a minute, check the log beside the journal.\n");
+        }
         None if !alive => {
             // The one case a naive reader gets wrong: the last line looks like
             // progress, but nothing is running.
@@ -525,6 +544,18 @@ mod tests {
         assert!(
             !out.contains('%'),
             "a percentage needs a denominator:\n{out}"
+        );
+    }
+
+    /// The first read of a just-created journal must not read as a death.
+    #[test]
+    fn a_run_that_has_not_reported_yet_is_not_called_dead() {
+        let st = RunState::default();
+        let out = render_status(&st, 0, false);
+        assert!(out.contains("Starting"), "{out}");
+        assert!(
+            !out.contains("NOT running"),
+            "no pid recorded is not the same as a pid that is gone:\n{out}"
         );
     }
 

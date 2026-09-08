@@ -940,6 +940,13 @@ pub fn build_router(state: SharedState) -> Router {
             "/import/selection/:token",
             get(handlers::import_wizard::get_selection),
         )
+        // Same reply, token in `Authorization: Bearer`. The runner polls this
+        // hundreds of times; a token in the path would be a live credential in
+        // as many nginx access-log lines.
+        .route(
+            "/import/selection",
+            get(handlers::import_wizard::get_selection_bearer),
+        )
         .route(
             "/import/ingest/:token",
             post(handlers::import_wizard::post_ingest)

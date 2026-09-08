@@ -10,6 +10,10 @@
 //! crate stays a pure, dependency-light extraction+planning layer with no path
 //! back to core (avoids a core ↔ import dependency cycle and keeps it trivially
 //! unit-testable).
+// The one crate here that was missing this, which only became load-bearing
+// when it took `rustix` as a direct dependency for the process-group kill.
+#![forbid(unsafe_code)]
+
 pub mod adapter;
 pub mod bundle;
 pub mod cloudpanel;

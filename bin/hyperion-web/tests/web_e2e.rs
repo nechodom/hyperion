@@ -2852,13 +2852,55 @@ async fn the_generated_bootstrap_is_syntactically_valid_bash() {
     );
     assert!(script.contains("K='cloudpanel'"), "kind prelude missing");
 
-    // The credential must never be in a URL: this loop runs once per chunk and
-    // every URL lands in the panel's nginx access log.
+    // The credential must never be in a URL: these loops run hundreds of times
+    // per transfer and every URL lands in the panel's nginx access log.
+    //
+    // Asserting on the literal token was vacuous — the script interpolates it
+    // once, as `T='<token>'`, and every later use is the VARIABLE `$T`. The
+    // check could never fail however many URLs carried the credential. Assert on
+    // the shape instead: no line that mentions a URL may also splice `$T` into
+    // it. The prelude line that defines T is the one exception.
+    // ONE-SHOT bootstrap fetches are exempt, and only these. The operator pastes
+    // `curl <panel>/import/agent/<token> | sudo bash` themselves, so that token
+    // is already in their shell history and in one access-log line; fetching the
+    // exporter the same way adds nothing that is not already there. What must
+    // never happen is a LOOP putting it there hundreds of times — the selection
+    // poll (up to 2640 requests) and the chunk upload (one per 64 MiB).
+    //
+    // Listing the exceptions by content rather than loosening the rule means a
+    // new URL use of the token fails this test rather than slipping in beside
+    // them.
+    const ONE_SHOT: &[&str] = &["/import/agent-bin/", "/import/manifest/"];
     for line in script.lines() {
-        if line.contains("http") && line.contains(&token) {
-            panic!("the token appears in a URL, which the access log will keep:\n{line}");
+        let l = line.trim();
+        if l.starts_with("T=") || l.starts_with('#') {
+            continue;
         }
+        let exempt = ONE_SHOT.iter().any(|p| l.contains(p));
+        let mentions_url = l.contains("http") || l.contains("url =") || l.contains("$B/");
+        let splices_token = l.contains("/$T") || l.contains("$T?") || l.contains("${T}");
+        assert!(
+            exempt || !(mentions_url && splices_token),
+            "the token is spliced into a URL, which the access log will keep:\n{line}"
+        );
+        // The literal value must appear nowhere but the prelude, exempt or not.
+        assert!(
+            !l.contains(&token),
+            "the token's literal value escaped the prelude:\n{line}"
+        );
     }
+
+    // And the two loops that run many times per transfer must authenticate by
+    // header, from a 0600 config — never on argv, where /proc/<pid>/cmdline
+    // hands the token to every local user on a shared panel box.
+    assert!(
+        script.contains("-K \"$SELCFG\""),
+        "the selection poll must read its URL and credential from a config file"
+    );
+    assert!(
+        !script.contains("-H \"Authorization: Bearer $TOKEN\""),
+        "the token must not reach curl's argv"
+    );
 
     let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("boot.sh");

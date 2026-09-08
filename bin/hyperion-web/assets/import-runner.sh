@@ -27,6 +27,8 @@ JOURNAL="$RUN/journal.ndjson"
 BUNDLE="$RUN/bundle.tar"
 CHUNK="$RUN/chunk.bin"
 CURLCFG="$RUN/upload.curl"
+AUTHCFG="$RUN/auth.curl"
+SELCFG="$RUN/selection.curl"
 RESP="$RUN/response.txt"
 STATUS_CMD="sudo $RUN_DIR/status"
 # 64 MiB. Halved on a 413 so a proxy stricter than Hyperion's own nginx can
@@ -63,8 +65,15 @@ guard_dir() {
       owner=$(stat -c %u "$cur" 2>/dev/null || echo 0)
       perms=$(stat -c %a "$cur" 2>/dev/null || echo 700)
       [ "$owner" = "0" ] || die "$cur is not owned by root (uid $owner). Refusing."
-      case "$perms" in
-        *[2367])  die "$cur is group- or world-writable ($perms). Refusing." ;;
+      # `stat -c %a` may print three digits or four (a set-uid/sticky bit adds
+      # one), so normalise to the last three before looking at owner/group/other.
+      # The first version tested `*[2367]` with no trailing `*`, which anchors on
+      # the LAST character — it caught 777 and 707 but waved 770 and 775
+      # through, and a group-writable ancestor is just as good a foothold as a
+      # world-writable one.
+      perms="${perms: -3}"
+      case "${perms#?}" in
+        *[2367]*) die "$cur is group- or world-writable ($perms). Refusing." ;;
       esac
     fi
   done
@@ -146,11 +155,21 @@ say "scanning $K and reporting the sites to Hyperion …"
 "$BIN" --kind "$K" --list --json > "$LIST"
 curl -fsS -X POST -H 'Content-Type: application/json' --data-binary @"$LIST" \
   "$B/import/manifest/$T" >/dev/null
+# The selection poll runs up to 2640 times, and the token was in its URL every
+# time — 2640 lines of the panel's nginx access log carrying a live credential.
+# Same reasoning as the chunk loop: URL and header live in a 0600 config.
+umask 077
+cat > "$SELCFG" <<SELEOF
+url = "$B/import/selection"
+header = "Authorization: Bearer $T"
+SELEOF
+chmod 600 "$SELCFG"
+
 say "reported. Open Hyperion -> Import, tick the sites you want, click Import. Waiting…"
 
 SEL=""
 for _i in {1..2640}; do
-  R="$(curl -fsS "$B/import/selection/$T" || true)"
+  R="$(curl -fsS -K "$SELCFG" || true)"
   case "$R" in
     pending|"") sleep 5 ;;
     cancelled) say "cancelled (or token expired) in the panel."; exit 0 ;;
@@ -191,8 +210,17 @@ url = "$B/import/upload/chunk"
 header = "Authorization: Bearer $T"
 header = "Content-Type: application/octet-stream"
 CURLEOF
+# The same credential, without a url, for the requests that need their own.
+# /proc/<pid>/cmdline is world-readable and the tenants on a panel box are local
+# users, so `-H "Authorization: Bearer $T"` on the command line hands the token
+# to anyone running `ps` for as long as curl lives. The chunk loop already
+# avoided that through $CURLCFG; begin, commit and the packing heartbeat did not.
+cat > "$AUTHCFG" <<AUTHEOF
+header = "Authorization: Bearer $T"
+header = "Content-Type: text/plain"
+AUTHEOF
 printf '%s' "$T" > "$RUN/token"
-chmod 600 "$CURLCFG" "$RUN/token"
+chmod 600 "$CURLCFG" "$AUTHCFG" "$RUN/token"
 
 # The status helper the operator runs later. It needs no arguments and no memory
 # of what was typed an hour ago.
@@ -216,7 +244,11 @@ json_str() { printf '"%s"' "$(printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g; s/
 # Whatever kills this process, the journal must end with a terminal event —
 # otherwise `--status` shows a live-looking phase for a run that is gone. The
 # pid check in the status renderer is the backstop; this is the good path.
-trap 'jrn "{\"k\":\"fail\",\"t\":$(now),\"why\":\"the export was interrupted\"}"' HUP TERM INT
+# Recording the outcome and stopping are one act. Without the `exit` the trap
+# wrote a terminal `fail` and let the run continue, so `--status` reported a
+# failure for an export that was still going — and `progress::read` takes the
+# last outcome it sees.
+trap 'jrn "{\"k\":\"fail\",\"t\":$(now),\"why\":\"the export was interrupted\"}"; exit 1' HUP TERM INT
 
 TOKEN="$(cat "$RUN/token")"
 # Cosmetic only — it proves a journal belongs to the token being resumed.
@@ -239,12 +271,13 @@ if [ ! -s "$BUNDLE" ] || ! grep -q '"k":"bundle"' "$JOURNAL" 2>/dev/null; then
       sleep 15
       SD=$(grep -o '"k":"site"[^}]*' "$JOURNAL" 2>/dev/null | tail -1 | sed -n 's/.*"done":\([0-9]*\).*/\1/p')
       ID=$(grep -o '"k":"site"[^}]*' "$JOURNAL" 2>/dev/null | tail -1 | sed -n 's/.*"input_done":\([0-9]*\).*/\1/p')
-      curl -sS -o /dev/null -H "Authorization: Bearer $TOKEN" \
-        -H 'Content-Type: text/plain' \
+      SK=$(grep -c '"k":"skip"' "$JOURNAL" 2>/dev/null || echo 0)
+      curl -sS -o /dev/null -K "$AUTHCFG" \
         --data-binary "phase packing
 sites_total $SITES
 sites_done ${SD:-0}
 input_done ${ID:-0}
+skipped ${SK:-0}
 " "$B/import/progress" || true
     done
   ) &
@@ -283,8 +316,7 @@ jrn "{\"k\":\"bundle\",\"t\":$(now),\"bytes\":$SIZE,\"sha256\":\"$SHA\"}"
 # actually measured — an omitted figure makes the panel skip that check rather
 # than refuse a transfer on a guess.
 begin() {
-  curl -sS -o "$RESP" -w '%{http_code}' \
-    -H "Authorization: Bearer $TOKEN" -H 'Content-Type: text/plain' \
+  curl -sS -o "$RESP" -w '%{http_code}' -K "$AUTHCFG" \
     --data-binary "bytes $SIZE
 sha256 $SHA
 ${INPUT_BYTES:+inflate $INPUT_BYTES
@@ -295,61 +327,81 @@ CODE="$(begin)" || fail "could not reach Hyperion to start the upload"
 OFF="$(sed -n 's/^offset \([0-9]*\)$/\1/p' "$RESP")"
 [ -n "$OFF" ] || OFF=0
 
-BACKOFF=2
-while [ "$OFF" -lt "$SIZE" ]; do
-  dd if="$BUNDLE" of="$CHUNK" bs=1048576 iflag=skip_bytes,count_bytes \
-     skip="$OFF" count="$CHUNK_BYTES" status=none 2>/dev/null || \
-     fail "could not read the bundle at offset $OFF"
-  # `-T` on a REGULAR FILE, never `-T -`: that gives a real Content-Length, so
-  # nginx and axum can refuse an oversized chunk before a single byte flows.
-  # Streaming from a pipe is what turned the original 2 GiB refusal into a
-  # broken pipe and a SIGPIPE'd tar with no usable error.
-  # No `-f`: the server's body carries the diagnosis, and -f throws it away.
-  CODE="$(curl -sS -o "$RESP" -w '%{http_code}' -K "$CURLCFG" \
-          -H "X-Hyperion-Offset: $OFF" -T "$CHUNK" --max-time 900 || echo 000)"
-  case "$CODE" in
-    200)
-      OFF="$(sed -n 's/^offset \([0-9]*\)$/\1/p' "$RESP")"
-      [ -n "$OFF" ] || fail "Hyperion accepted a chunk without saying where it got to"
-      jrn "{\"k\":\"upload\",\"t\":$(now),\"off\":$OFF}"
-      BACKOFF=2
-      ;;
-    409)
-      # The server is always authoritative about the offset. This is the whole
-      # resume negotiation: seek to where it actually is and continue.
-      OFF="$(sed -n 's/^offset \([0-9]*\)$/\1/p' "$RESP")"
-      [ -n "$OFF" ] || fail "offset conflict with no offset in the reply"
-      jrn "{\"k\":\"retry\",\"t\":$(now),\"why\":\"resynced to offset $OFF\",\"wait\":0}"
-      ;;
-    410) fail "the transfer was cancelled in the Hyperion panel" ;;
-    413)
-      if [ "$CHUNK_BYTES" -gt 8388608 ]; then
-        CHUNK_BYTES=$((CHUNK_BYTES / 2))
-        jrn "{\"k\":\"retry\",\"t\":$(now),\"why\":\"chunk too large, trying $CHUNK_BYTES\",\"wait\":0}"
-      else
-        fail "something between this box and Hyperion refuses even 8 MiB uploads"
-      fi
-      ;;
-    408|429|500|502|503|504|000)
-      jrn "{\"k\":\"retry\",\"t\":$(now),\"why\":\"HTTP $CODE\",\"wait\":$BACKOFF}"
-      sleep "$BACKOFF"
-      [ "$BACKOFF" -lt 120 ] && BACKOFF=$((BACKOFF * 3))
-      ;;
-    *) fail "Hyperion refused the upload ($CODE): $(head -c 400 "$RESP")" ;;
-  esac
-done
+upload_from() {
+    OFF="$1"
+    BACKOFF=2
+    while [ "$OFF" -lt "$SIZE" ]; do
+    dd if="$BUNDLE" of="$CHUNK" bs=1048576 iflag=skip_bytes,count_bytes \
+       skip="$OFF" count="$CHUNK_BYTES" status=none 2>/dev/null || \
+       fail "could not read the bundle at offset $OFF"
+    # `-T` on a REGULAR FILE, never `-T -`: that gives a real Content-Length, so
+    # nginx and axum can refuse an oversized chunk before a single byte flows.
+    # Streaming from a pipe is what turned the original 2 GiB refusal into a
+    # broken pipe and a SIGPIPE'd tar with no usable error.
+    # No `-f`: the server's body carries the diagnosis, and -f throws it away.
+    CODE="$(curl -sS -o "$RESP" -w '%{http_code}' -K "$CURLCFG" \
+            -H "X-Hyperion-Offset: $OFF" -T "$CHUNK" --max-time 900 || true)"
+    case "$CODE" in
+      200)
+        OFF="$(sed -n 's/^offset \([0-9]*\)$/\1/p' "$RESP")"
+        [ -n "$OFF" ] || fail "Hyperion accepted a chunk without saying where it got to"
+        jrn "{\"k\":\"upload\",\"t\":$(now),\"off\":$OFF}"
+        BACKOFF=2
+        ;;
+      409)
+        # The server is always authoritative about the offset. This is the whole
+        # resume negotiation: seek to where it actually is and continue.
+        OFF="$(sed -n 's/^offset \([0-9]*\)$/\1/p' "$RESP")"
+        [ -n "$OFF" ] || fail "offset conflict with no offset in the reply"
+        jrn "{\"k\":\"retry\",\"t\":$(now),\"why\":\"resynced to offset $OFF\",\"wait\":0}"
+        ;;
+      410) fail "the transfer was cancelled in the Hyperion panel" ;;
+      413)
+        if [ "$CHUNK_BYTES" -gt 8388608 ]; then
+          CHUNK_BYTES=$((CHUNK_BYTES / 2))
+          jrn "{\"k\":\"retry\",\"t\":$(now),\"why\":\"chunk too large, trying $CHUNK_BYTES\",\"wait\":0}"
+        else
+          fail "something between this box and Hyperion refuses even 8 MiB uploads"
+        fi
+        ;;
+      408|429|500|502|503|504|000)
+        jrn "{\"k\":\"retry\",\"t\":$(now),\"why\":\"HTTP $CODE\",\"wait\":$BACKOFF}"
+        sleep "$BACKOFF"
+        [ "$BACKOFF" -lt 120 ] && BACKOFF=$((BACKOFF * 3))
+        ;;
+      *) fail "Hyperion refused the upload ($CODE): $(head -c 400 "$RESP")" ;;
+    esac
+  done
+}
 
-CODE="$(curl -sS -o "$RESP" -w '%{http_code}' \
-        -H "Authorization: Bearer $TOKEN" -H 'Content-Type: text/plain' \
-        --data-binary "bytes $SIZE
+upload_from "$OFF"
+
+commit() {
+  curl -sS -o "$RESP" -w '%{http_code}' -K "$AUTHCFG" \
+    --data-binary "bytes $SIZE
 sha256 $SHA
-" "$B/import/upload/commit" || echo 000)"
+" "$B/import/upload/commit" || true
+}
+CODE="$(commit)"
+if [ "$CODE" = "409" ]; then
+  # The panel holds a different number of bytes than we sent, or the digest did
+  # not match and it discarded the partial. Both replies carry the offset to
+  # continue from, and the panel's own message says the upload will restart —
+  # so honour that instead of failing, which left the operator with a packed
+  # bundle and a transfer that would never finish. Exactly one retry: a second
+  # mismatch is corruption that repeating cannot fix.
+  OFF="$(sed -n 's/^offset \([0-9]*\)$/\1/p' "$RESP")"
+  [ -n "$OFF" ] || fail "Hyperion rejected the bundle without saying where to resume"
+  jrn "{\"k\":\"retry\",\"t\":$(now),\"why\":\"commit disagreed, re-uploading from $OFF\",\"wait\":0}"
+  upload_from "$OFF"
+  CODE="$(commit)"
+fi
 [ "$CODE" = "200" ] || fail "Hyperion rejected the finished bundle ($CODE): $(head -c 400 "$RESP")"
 JOB="$(sed -n 's/^job \(.*\)$/\1/p' "$RESP")"
 jrn "{\"k\":\"done\",\"t\":$(now),\"job\":$(json_str "$JOB")}"
 # The bundle is on the other side now; it is the largest thing on this disk and
 # it holds every selected site's database in plaintext.
-rm -f "$BUNDLE" "$CHUNK" "$RUN/token" "$CURLCFG"
+rm -f "$BUNDLE" "$CHUNK" "$RUN/token" "$CURLCFG" "$AUTHCFG"
 WORKEREOF
 chmod 700 "$RUN/worker.sh"
 
@@ -361,6 +413,7 @@ JOURNAL='$JOURNAL'
 BUNDLE='$BUNDLE'
 CHUNK='$CHUNK'
 CURLCFG='$CURLCFG'
+AUTHCFG='$AUTHCFG'
 RESP='$RESP'
 BIN='$BIN'
 B='$B'
@@ -373,7 +426,26 @@ CHUNK_BYTES=$CHUNK_BYTES
 ENVEOF
 chmod 600 "$RUN/env"
 
-: > "$JOURNAL"
+# The journal is APPENDED to, never truncated.
+#
+# Truncating it here undid the whole resume: the worker's only test for "is a
+# bundle already packed" is `grep -q '"k":"bundle"' "$JOURNAL"`, so a blanked
+# journal made every re-run re-dump every database — the expensive half — while
+# `--status` went on telling the operator "packing is not repeated". Several
+# attempts in one file is the case `progress::read` was written for: each
+# `start` event resets the fold, dropping the previous attempt's outcome and
+# samples.
+#
+# It IS cleared when the token changes, because then the bundle beside it
+# belongs to a different transfer and must not be resumed into.
+FP_NOW="$(printf '%s' "$T" | sha256sum 2>/dev/null | cut -c1-8 || true)"
+FP_WAS="$(sed -n 's/.*"k":"start".*"token_fp":"\([0-9a-f]*\)".*/\1/p' "$JOURNAL" 2>/dev/null | tail -1)"
+if [ -n "$FP_WAS" ] && [ "$FP_WAS" != "$FP_NOW" ]; then
+  say "this is a different transfer than the one in $RUN — starting clean."
+  rm -f "$BUNDLE" "$CHUNK"
+  : > "$JOURNAL"
+fi
+[ -e "$JOURNAL" ] || : > "$JOURNAL"
 chmod 600 "$JOURNAL"
 
 if command -v setsid >/dev/null 2>&1; then

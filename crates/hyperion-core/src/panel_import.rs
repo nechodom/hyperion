@@ -359,28 +359,47 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 let _ = tokio::fs::create_dir_all(parent).await;
             }
             let dump_path = Path::new(&dump);
-            fetch_db(loc, &h.domain, srcdb, dump_path)
-                .await
-                .map_err(|reason| RpcError::ProvisioningFailed {
-                    stage: "import_db_dump".into(),
-                    reason,
-                })?;
-            match srcdb.engine {
-                IrDbEngine::Postgres => {
-                    hyperion_adapters::backup::restore_postgres_dump(&newdb.db_name, dump_path)
-                        .await
-                        .map_err(|e| RpcError::ProvisioningFailed {
-                            stage: "import_db_restore".into(),
-                            reason: e.to_string(),
-                        })?;
+            // A database the exporter recorded as skipped is not a failure —
+            // the site is created and populated without it, and the omission is
+            // reported rather than silently absorbed. Anything else IS a
+            // failure, including a dump missing with no manifest entry.
+            let skipped_db = match fetch_db(loc, &h.domain, srcdb, dump_path).await {
+                Ok(()) => false,
+                Err(reason) if reason == SKIPPED_MARKER => {
+                    notes.push(format!(
+                        "database '{}' was not exported (the source could not dump it) — \
+                         the site was created without it",
+                        srcdb.name
+                    ));
+                    true
                 }
-                _ => {
-                    hyperion_adapters::backup::restore_mariadb_dump(&newdb.db_name, dump_path)
-                        .await
-                        .map_err(|e| RpcError::ProvisioningFailed {
-                            stage: "import_db_restore".into(),
-                            reason: e.to_string(),
-                        })?;
+                Err(reason) => {
+                    return Err(RpcError::ProvisioningFailed {
+                        stage: "import_db_dump".into(),
+                        reason,
+                    })
+                }
+            };
+            if skipped_db {
+                // Nothing to restore. Fall through to the rest of the site.
+            } else {
+                match srcdb.engine {
+                    IrDbEngine::Postgres => {
+                        hyperion_adapters::backup::restore_postgres_dump(&newdb.db_name, dump_path)
+                            .await
+                            .map_err(|e| RpcError::ProvisioningFailed {
+                                stage: "import_db_restore".into(),
+                                reason: e.to_string(),
+                            })?;
+                    }
+                    _ => {
+                        hyperion_adapters::backup::restore_mariadb_dump(&newdb.db_name, dump_path)
+                            .await
+                            .map_err(|e| RpcError::ProvisioningFailed {
+                                stage: "import_db_restore".into(),
+                                reason: e.to_string(),
+                            })?;
+                    }
                 }
             }
             let _ = tokio::fs::remove_file(&dump).await;
@@ -740,6 +759,23 @@ async fn cleanup_key(artifact: Option<PathBuf>) {
 /// truncated" look identical on disk, and resolving that ambiguity toward the
 /// first one silently produced empty sites with a green job.
 async fn docroot_was_skipped(dir: &std::path::Path, domain: &str) -> bool {
+    artefact_was_skipped(dir, domain, "docroot").await
+}
+
+/// Sentinel reason meaning "the exporter deliberately left this out".
+///
+/// Carried as an `Err` so the per-site loop's existing plumbing routes it, but
+/// recognised by the caller and turned into a note rather than a failure.
+pub(crate) const SKIPPED_MARKER: &str = "__hyperion_artefact_skipped__";
+
+/// Did the exporter record this artefact as one it could not pack?
+///
+/// `what` is `"docroot"` or `"db:<name>"`, matching what `bundle::build` pushes
+/// into `ImportIR::skipped`. Asking the BUNDLE rather than trusting the absence
+/// of a file is the whole point: "the exporter left it out and said so" and "the
+/// bundle was truncated" look identical on disk, and resolving that ambiguity
+/// toward the first silently produced empty sites under a green job.
+async fn artefact_was_skipped(dir: &std::path::Path, domain: &str, what: &str) -> bool {
     let Some(ir) = hyperion_import::bundle::read_manifest(dir).await else {
         // No readable manifest at all — that is not a bundle we should be
         // trusting to omit things on purpose.
@@ -747,7 +783,7 @@ async fn docroot_was_skipped(dir: &std::path::Path, domain: &str) -> bool {
     };
     ir.skipped
         .iter()
-        .any(|s| s.domain == domain && s.what == "docroot")
+        .any(|s| s.domain == domain && s.what == what)
 }
 
 async fn fetch_files(
@@ -835,9 +871,23 @@ async fn fetch_db(
                     .await
                     .map(|_| ())
                     .map_err(|e| format!("copy bundle dump: {e}"))
+            } else if artefact_was_skipped(dir, domain, &format!("db:{}", srcdb.name)).await {
+                // The exporter said, in the bundle's own manifest, that it could
+                // not dump this database — a permission failure, or #139's
+                // deadline killing a `mysqldump` wedged on a metadata lock. The
+                // operator was told at export time and is told again in the job
+                // log; failing the whole site here would turn a partial export
+                // into no export at all.
+                //
+                // Symmetry with the docroot path matters: that one has consulted
+                // the manifest since the digest work landed, and this one did
+                // not, so a legitimately skipped database hard-failed a site the
+                // exporter had deliberately packed without it.
+                Err(SKIPPED_MARKER.to_string())
             } else {
                 Err(format!(
-                    "database dump '{}' missing from bundle",
+                    "database dump '{}' missing from bundle — and the manifest does \
+                     not record it as skipped, so the bundle is incomplete",
                     srcdb.name
                 ))
             }

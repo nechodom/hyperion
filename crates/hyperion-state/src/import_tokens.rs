@@ -270,6 +270,21 @@ pub async fn set_source_progress(
     .execute(pool)
     .await?
     .rows_affected();
+    // A heartbeat IS evidence of progress, so it earns the same expiry slide an
+    // uploaded chunk does. Without this only `record_upload` ever extended the
+    // token, and packing 30 sites routinely outlasts the 4h mint TTL — so the
+    // transfer's row silently vanished from the panel mid-export and the first
+    // chunk was met with a 403 for a run that was working perfectly.
+    if n > 0 {
+        if let Some(id) =
+            sqlx::query_scalar::<_, i64>("SELECT id FROM import_tokens WHERE token_hash = ?")
+                .bind(token_hash)
+                .fetch_optional(pool)
+                .await?
+        {
+            touch_expiry(pool, id, now).await?;
+        }
+    }
     Ok(n > 0)
 }
 
@@ -371,15 +386,25 @@ pub async fn cancel(pool: &SqlitePool, id: i64) -> Result<(), StateError> {
     Ok(())
 }
 
-/// Active tokens (pending/receiving/importing, unexpired) — for the wizard's
-/// "in-flight transfers" list.
+/// How long a failed transfer stays visible in the wizard.
+pub const FAILED_VISIBLE_SECS: i64 = 24 * 60 * 60;
+
+/// Tokens the wizard should show: everything in flight, plus recent failures.
+///
+/// Failures used to be excluded, so a transfer that died — a bundle that
+/// arrived corrupted, a `tar` the panel could not spawn — simply VANISHED from
+/// the table. The operator was left with a row that had been there a moment ago
+/// and no statement of what happened, which is the one thing a transfer list
+/// exists to prevent: "absent" and "lost" must never look the same.
 pub async fn list_active(pool: &SqlitePool, now: i64) -> Result<Vec<ImportTokenRow>, StateError> {
     let rows = sqlx::query_as::<_, ImportTokenRow>(&format!(
         "SELECT {COLS} FROM import_tokens \
-         WHERE status IN ('pending', 'receiving', 'importing') AND expires_at > ? \
+         WHERE (status IN ('pending', 'receiving', 'importing') AND expires_at > ?) \
+            OR (status = 'failed' AND created_at > ?) \
          ORDER BY created_at DESC",
     ))
     .bind(now)
+    .bind(now - FAILED_VISIBLE_SECS)
     .fetch_all(pool)
     .await?;
     Ok(rows)
@@ -388,9 +413,16 @@ pub async fn list_active(pool: &SqlitePool, now: i64) -> Result<Vec<ImportTokenR
 /// Best-effort GC of expired/finished rows older than `cutoff`.
 pub async fn cleanup(pool: &SqlitePool, cutoff: i64) -> Result<u64, StateError> {
     let n = sqlx::query(
+        // A failed row is kept as long as the wizard still shows it; sweeping
+        // it immediately is what made a failure indistinguishable from a
+        // transfer that never existed.
         "DELETE FROM import_tokens \
-         WHERE expires_at < ? OR status IN ('done', 'failed', 'cancelled')",
+         WHERE expires_at < ? \
+            OR (status IN ('done', 'cancelled') AND created_at < ?) \
+            OR (status = 'failed' AND created_at < ?)",
     )
+    .bind(cutoff)
+    .bind(cutoff)
     .bind(cutoff)
     .execute(pool)
     .await?
@@ -600,6 +632,71 @@ mod tests {
             source_progress_at: 0,
         };
         assert_eq!(rate_bytes_per_sec(&row), None);
+    }
+
+    /// A transfer that failed must stay visible, with its own row, for a day.
+    ///
+    /// It used to be excluded from `list_active`, so a died transfer simply
+    /// VANISHED from the wizard — the operator saw a row a moment ago and then
+    /// nothing, with no statement of what happened. "Absent" and "lost" must
+    /// never look the same.
+    #[tokio::test]
+    async fn a_failed_transfer_stays_visible_and_is_swept_later() {
+        let pool = mem().await;
+        let now = 10_000;
+        let id = create(&pool, "f1", "local", "cloudpanel", "admin", now, now + 3600)
+            .await
+            .unwrap();
+        set_status(&pool, id, "failed").await.unwrap();
+
+        let rows = list_active(&pool, now + 60).await.unwrap();
+        assert_eq!(rows.len(), 1, "a failed transfer must still be listed");
+        assert_eq!(rows[0].status, "failed");
+
+        // Past the visibility window it drops out of the list…
+        let rows = list_active(&pool, now + FAILED_VISIBLE_SECS + 60)
+            .await
+            .unwrap();
+        assert!(rows.is_empty(), "a day-old failure should stop being shown");
+
+        // …and only then is it swept.
+        assert_eq!(
+            cleanup(&pool, now - 1).await.unwrap(),
+            0,
+            "a fresh failure must not be deleted while the wizard still shows it"
+        );
+        assert_eq!(cleanup(&pool, now + 1).await.unwrap(), 1);
+    }
+
+    /// A packing heartbeat is evidence of progress and must extend the token —
+    /// packing 30 sites routinely outlasts the 4h mint TTL, and without this the
+    /// row expired mid-export and the first chunk met a 403.
+    #[tokio::test]
+    async fn a_packing_heartbeat_extends_the_token() {
+        let pool = mem().await;
+        let created = 1_000;
+        create(
+            &pool,
+            "h9",
+            "local",
+            "cloudpanel",
+            "admin",
+            created,
+            created + 600,
+        )
+        .await
+        .unwrap();
+        let at = created + 500;
+        assert!(set_source_progress(&pool, "h9", "phase packing\n", at)
+            .await
+            .unwrap());
+        let row = get_fetchable(&pool, "h9", at).await.unwrap().unwrap();
+        assert_eq!(
+            row.expires_at,
+            at + EXPIRY_SLIDE_SECS,
+            "the heartbeat should buy the same two hours a chunk does"
+        );
+        assert_eq!(row.source_progress_json.as_deref(), Some("phase packing\n"));
     }
 
     #[tokio::test]
