@@ -101,12 +101,32 @@ pub const IMPORT_HEADROOM_BYTES: u64 = 1024 * 1024 * 1024;
 /// older bundle, or a docroot `du` could not read. There is then no denominator
 /// and the caller must skip its check rather than refuse on a partial sum,
 /// which would be a guess pretending to be a measurement.
+/// Was this site's docroot recorded as skipped?
+///
+/// A skipped docroot is not IN the bundle, so charging its measured size to the
+/// import's disk check demands room for files that will never be written — and
+/// on a tight disk that refuses an import which would have fitted.
+fn docroot_skipped(ir: &ImportIR, domain: &str) -> bool {
+    ir.skipped
+        .iter()
+        .any(|s| s.domain == domain && s.what == "docroot")
+}
+
 pub fn inflate_bytes(ir: &ImportIR) -> Option<u64> {
     if ir.hostings.is_empty() {
         return None;
     }
     let mut total: u64 = 0;
     for h in &ir.hostings {
+        // A docroot the exporter skipped is not in the bundle, so its measured
+        // size is not a cost the import will pay. Charging it demanded room for
+        // files that will never be written, which on a tight disk refuses an
+        // import that would have fitted. The site's databases are still counted
+        // — a skipped docroot says nothing about them.
+        if docroot_skipped(ir, &h.domain) {
+            total = total.saturating_add(h.db_bytes);
+            continue;
+        }
         if h.docroot_bytes == 0 {
             // Not "this site is empty": `du -sb` never says 0 for a directory
             // that exists, so 0 is exactly the "never measured" marker.
@@ -346,6 +366,19 @@ pub async fn read_manifest(dir: &Path) -> Option<ImportIR> {
 /// Bytes free on the filesystem holding `path`, via `df -P -B1`.
 /// `None` on any exec/parse failure — an unknown figure must not block
 /// an export that would have worked.
+/// Do two paths sit on the same filesystem?
+///
+/// `None` from either `stat` means "cannot tell", and the caller must then treat
+/// them as the SAME filesystem — the conservative reading, because it charges
+/// both costs to one budget rather than splitting a budget that is really one.
+async fn same_filesystem(a: &Path, b: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let (Ok(ma), Ok(mb)) = (tokio::fs::metadata(a).await, tokio::fs::metadata(b).await) else {
+        return true;
+    };
+    ma.dev() == mb.dev()
+}
+
 /// Free bytes on the filesystem holding `path`. `None` when `df` cannot say —
 /// and a caller must then skip the check rather than refuse work on a guess.
 pub async fn avail_bytes(path: &Path) -> Option<u64> {
@@ -419,12 +452,27 @@ fn human(bytes: u64) -> String {
 async fn preflight_space(
     ir: &ImportIR,
     stage: &Path,
+    out: Option<&Path>,
     needs_archive: bool,
 ) -> Result<(), ImportError> {
     // `stage` does not exist yet; ask about its parent, which does.
     let probe = stage.parent().unwrap_or(Path::new("/"));
     let Some(avail) = avail_bytes(probe).await else {
         return Ok(());
+    };
+    // The staged tree and the finished archive do not necessarily share a
+    // filesystem, and on the path that matters they never do: the runner packs
+    // into /var/lib/hyperion-export while the stage lives under TMPDIR. Probing
+    // only the stage meant a box with a roomy /tmp and a full /var passed the
+    // check and then died mid-`tar` — which for a large site is hours in.
+    //
+    // Two filesystems get two independent checks; one gets a single summed one.
+    // Summing across two would refuse an export that fits, and halving a shared
+    // one would pass an export that does not.
+    let out_probe = out.and_then(|o| o.parent()).map(|p| p.to_path_buf());
+    let separate = match &out_probe {
+        Some(o) => !same_filesystem(probe, o).await,
+        None => false,
     };
     let mut payload: u64 = 0;
     for h in &ir.hostings {
@@ -443,11 +491,39 @@ async fn preflight_space(
     // the check errs toward letting a borderline export proceed rather
     // than blocking one that would have fit.
     let dumps = payload / 5;
-    let copies = if needs_archive { 2 } else { 1 };
+    // When the archive lands on its OWN filesystem the stage carries one copy
+    // and the archive carries the other, so neither is charged twice.
+    let copies = if needs_archive && !separate { 2 } else { 1 };
     let needed = payload
         .saturating_add(dumps)
         .saturating_mul(copies)
         .saturating_add(512 * 1024 * 1024);
+
+    // The archive's own filesystem, checked separately when it is one.
+    if separate && needs_archive {
+        if let Some(o) = out_probe.as_deref() {
+            if let Some(out_avail) = avail_bytes(o).await {
+                let out_needed = payload
+                    .saturating_add(dumps)
+                    .saturating_add(512 * 1024 * 1024);
+                if out_avail < out_needed {
+                    return Err(ImportError::Command {
+                        cmd: format!("preflight: free space on {}", o.display()),
+                        msg: format!(
+                            "not enough room to write the bundle: {} free on {}, about \
+                             {} needed. Free up space there, or point \
+                             HYPERION_EXPORT_DIR at a filesystem that has room and \
+                             re-run.",
+                            human(out_avail),
+                            o.display(),
+                            human(out_needed),
+                        ),
+                    });
+                }
+            }
+        }
+    }
+
     if avail >= needed {
         return Ok(());
     }
@@ -528,7 +604,13 @@ async fn build_inner(
     stage: &Path,
     to_stdout: bool,
 ) -> Result<(), ImportError> {
-    preflight_space(ir, stage, !to_stdout).await?;
+    preflight_space(
+        ir,
+        stage,
+        if to_stdout { None } else { Some(out) },
+        !to_stdout,
+    )
+    .await?;
 
     let now = || {
         std::time::SystemTime::now()
@@ -562,6 +644,27 @@ async fn build_inner(
         // serves twice: it is this site's share of the progress denominator and
         // it sets the tar's wall-clock budget. Same one `du` per site as before.
         let docroot_bytes = dir_bytes(Path::new(&h.docroot)).await;
+        if !Path::new(&h.docroot).is_dir() {
+            // Not a directory: a path the panel recorded but that no longer
+            // exists, a dangling mount, a typo in the source panel's database.
+            // Recording it is what makes it survivable — the import refuses an
+            // absent docroot that the manifest does NOT account for, so without
+            // this entry the site could never be imported at all, and the
+            // operator would be told the bundle was "incomplete" with no way to
+            // find out which site or why.
+            let why = format!("{} is not a directory on the source box", h.docroot);
+            eprintln!("  ⚠ {}: docroot skipped — {why}", h.domain);
+            skipped.push(crate::ir::IrSkipped {
+                domain: h.domain.clone(),
+                what: "docroot".into(),
+                why: why.clone(),
+            });
+            note(crate::progress::Event::Skip {
+                t: now(),
+                what: format!("{} (docroot)", h.domain),
+                why,
+            });
+        }
         if Path::new(&h.docroot).is_dir() {
             let tgz = site.join("docroot.tar.gz");
             if let Err(e) = run(
@@ -1101,14 +1204,14 @@ mod tests {
 
         // No hostings ⇒ nothing to weigh.
         let empty = ImportIR::default();
-        assert!(preflight_space(&empty, &stage, true).await.is_ok());
+        assert!(preflight_space(&empty, &stage, None, true).await.is_ok());
 
         // A docroot that does not exist ⇒ `du` fails ⇒ the estimate is a
         // guess ⇒ pass rather than block.
         let mut ir = ImportIR::default();
         ir.hostings
             .push(hosting_with_docroot("/definitely/not/here"));
-        assert!(preflight_space(&ir, &stage, true).await.is_ok());
+        assert!(preflight_space(&ir, &stage, None, true).await.is_ok());
 
         // A real, tiny docroot on a normal filesystem must also pass —
         // the everyday case; a false refusal here blocks every export.
@@ -1118,7 +1221,7 @@ mod tests {
         let mut ir = ImportIR::default();
         ir.hostings
             .push(hosting_with_docroot(&doc.display().to_string()));
-        assert!(preflight_space(&ir, &stage, true).await.is_ok());
+        assert!(preflight_space(&ir, &stage, None, true).await.is_ok());
     }
 
     /// The inflate figure has exactly the same rule as the export preflight:
