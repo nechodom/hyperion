@@ -3946,6 +3946,17 @@
   <a href="/settings#mail">Settings → Mail</a>.
 </p>
 
+{# Which language this customer's letters are written in. Lazy like its
+   neighbours: resolving it means asking the OWNING node for both the site's
+   own setting and its package snapshot. #}
+<div hx-get="/hostings/{{ detail.id.as_str() }}/letter-lang-panel"
+     hx-trigger="intersect once" hx-swap="outerHTML">
+  <div class="card hover">
+    <h2>Language of this customer's letters</h2>
+    <p class="muted" style="margin:0;font-size:0.85rem"><span class="spinner-inline"></span> asking the owning node…</p>
+  </div>
+</div>
+
 {# SPF card — loads lazily (dig TXT + public-IP probe on the owning
    node). The skeleton below is replaced by _hosting_spf_card.html;
    on check failure the response is empty and the skeleton vanishes. #}

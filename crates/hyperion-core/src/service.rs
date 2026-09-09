@@ -4966,7 +4966,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                             read_notifications_section(self.agent_config_path.as_deref())
                                 .expiry_warning_subject_template;
                         let (subject, body) = expiry_warning_mail_with(
-                            &self.letter_catalog(),
+                            // The CUSTOMER's last notice before suspension —
+                            // it follows the site's language, not the cluster's.
+                            &self.letter_catalog_for(&r.id).await,
                             &r.domain,
                             exp,
                             r.grace_days,
@@ -13684,6 +13686,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             &packages::NewActivation {
                 hosting_id: detail.id.clone(),
                 package_id,
+                // Snapshotted with the rest: the letter is rendered on the
+                // node that owns this hosting, where `service_packages` is
+                // empty, so reading the definition there would silently fall
+                // back to the cluster language on every worker.
+                letters_lang: def.letters_lang.clone(),
                 // Snapshot the name, price AND bundle: a later re-price,
                 // re-scope or delete of the definition must not rewrite what
                 // this customer agreed to. The bundle snapshot is also what
@@ -14414,6 +14421,60 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// Same per-node caveat as the two body templates above: the letter is
     /// rendered on the node that owns the hosting, so a worker keeps writing
     /// in the old language until the section reaches it.
+    /// `hosting_kv` key holding a site's own letter language.
+    pub const LETTER_LANG_KV_KEY: &'static str = "letters.lang";
+
+    /// The catalogue to write THIS SITE's customer letters in.
+    ///
+    /// Resolution order, most specific first:
+    ///   1. the site's own setting  (`hosting_kv`, `letters.lang`)
+    ///   2. its care package's default (snapshotted onto the activation)
+    ///   3. the cluster's `[letters] lang`
+    ///
+    /// Only the LANGUAGE is per-site. The operator's per-string overrides come
+    /// from the cluster catalogue either way: those are the operator's wording,
+    /// and a sentence they rewrote should read the same for every customer who
+    /// gets that language.
+    ///
+    /// This is for letters the CUSTOMER reads. Operator alerts — Slack, the
+    /// mail to every admin address — deliberately keep using
+    /// [`Self::letter_catalog`]: one inbox holding messages in whichever
+    /// language each site happens to be set to is worse than one language
+    /// throughout.
+    async fn letter_catalog_for(&self, hosting_id: &HostingId) -> LetterCatalog {
+        let mut cat = self.letter_catalog();
+        // The site's own setting wins outright.
+        if let Ok(Some(v)) = hyperion_state::hosting_kv::get(
+            &self.pool,
+            hosting_id.as_str(),
+            Self::LETTER_LANG_KV_KEY,
+        )
+        .await
+        {
+            let v = v.trim();
+            if !v.is_empty() {
+                cat.lang = LetterLang::parse(v);
+                return cat;
+            }
+        }
+        // Otherwise the package's default, read from the ACTIVATION's snapshot
+        // rather than the definition — definitions are master-only and this
+        // runs on the node that owns the hosting.
+        if let Ok(rows) = hyperion_state::packages::list_for_hosting(&self.pool, hosting_id).await {
+            // Oldest active activation with an opinion. A site on two packages
+            // is unusual; taking the first one that states a language is
+            // deterministic, which is what matters.
+            if let Some(l) = rows
+                .iter()
+                .map(|r| r.letters_lang.trim())
+                .find(|l| !l.is_empty())
+            {
+                cat.lang = LetterLang::parse(l);
+            }
+        }
+        cat
+    }
+
     fn letter_catalog(&self) -> LetterCatalog {
         read_letters_section(self.agent_config_path.as_deref())
     }
@@ -14450,7 +14511,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let subject_template = read_notifications_section(self.agent_config_path.as_deref())
             .care_report_subject_template;
         let (subject, body) = care_report_render_full(
-            &self.letter_catalog(),
+            &self.letter_catalog_for(&detail.id).await,
             &report,
             &detail.domain,
             &template,
@@ -14634,7 +14695,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 continue;
             }
             let (subject, body) = care_report_render_full(
-                &self.letter_catalog(),
+                &self.letter_catalog_for(&detail.id).await,
                 &report,
                 &detail.domain,
                 &body_template,
@@ -16356,7 +16417,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         cap_mib: i64,
         suspended: bool,
     ) {
-        let cat = self.letter_catalog();
+        // The CUSTOMER reads this one, so it follows the site's language.
+        let cat = self
+            .letter_catalog_for(&HostingId(hosting_id.to_string()))
+            .await;
         let what = cat
             .get(if suspended {
                 "quota.action_suspended"
@@ -16386,7 +16450,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         used_mib: i64,
         cap_mib: i64,
     ) {
-        let cat = self.letter_catalog();
+        // The CUSTOMER reads this one, so it follows the site's language.
+        let cat = self
+            .letter_catalog_for(&HostingId(hosting_id.to_string()))
+            .await;
         let args = [
             ("domain", domain),
             ("used", &used_mib.to_string()),
@@ -25570,6 +25637,7 @@ fn package_input_to_new(input: PackageInput) -> hyperion_state::packages::NewPac
         price_currency: input.price_currency,
         price_interval: input.price_interval,
         features: input.features,
+        letters_lang: input.letters_lang,
     }
 }
 
@@ -25586,6 +25654,7 @@ fn package_row_to_wire(r: hyperion_state::packages::PackageRow) -> ServicePackag
         price_minor: r.price_minor,
         price_currency: r.price_currency,
         price_interval: r.price_interval,
+        letters_lang: r.letters_lang,
         features,
         // Filled in by package_list / package_get; 0 from the bare conversion.
         active_count: 0,
@@ -25605,6 +25674,7 @@ fn activation_row_to_wire(
         hosting_id: r.hosting_id,
         package_id: r.package_id,
         package_name,
+        letters_lang: r.letters_lang,
         price_minor: r.price_minor,
         price_currency: r.price_currency,
         price_interval: r.price_interval,
@@ -31457,6 +31527,7 @@ impl Rollback for CertRowDelete {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
 
     /// A Czech report must contain no English at all.
@@ -32338,6 +32409,7 @@ mod tests {
                 },
                 next_billing_at: None,
                 prior_state_json: None,
+                letters_lang: String::new(),
             },
             now_secs() - 40 * 86_400,
         )
@@ -36474,6 +36546,82 @@ mod tests {
             ..care_input("X", PackageFeatures::default())
         };
         assert!(validate_package(nameless).is_err());
+    }
+
+    /// The language resolves site → package → cluster, and each step is only
+    /// consulted when the one above it says nothing.
+    ///
+    /// The order IS the feature: an operator who sets one site to Czech must not
+    /// have that undone by the package default, and a package default must not
+    /// be undone by the cluster setting.
+    #[tokio::test]
+    async fn the_site_language_beats_the_package_which_beats_the_cluster() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), package_mocks());
+        let detail = hosting_for_packages(&s, "lang-order.cz").await;
+
+        // Nothing set anywhere: the cluster pack, which is English with no
+        // agent.toml behind this service.
+        assert_eq!(
+            s.letter_catalog_for(&detail.id).await.lang,
+            LetterLang::En,
+            "with no opinion anywhere the cluster setting decides"
+        );
+
+        // A package default alone.
+        hyperion_state::packages::activate(
+            &pool,
+            &hyperion_state::packages::NewActivation {
+                hosting_id: detail.id.clone(),
+                package_id: 1,
+                package_name: "Péče".into(),
+                price_minor: None,
+                price_currency: None,
+                price_interval: None,
+                features: PackageFeatures::default(),
+                next_billing_at: None,
+                prior_state_json: None,
+                letters_lang: "cs".into(),
+            },
+            0,
+        )
+        .await
+        .expect("activate");
+        assert_eq!(
+            s.letter_catalog_for(&detail.id).await.lang,
+            LetterLang::Cs,
+            "the package default must apply when the site says nothing"
+        );
+
+        // The site's own setting overrides the package.
+        s.hosting_kv_set(
+            detail.id.as_str().to_string(),
+            HostingService::<MockAdapterPort>::LETTER_LANG_KV_KEY.to_string(),
+            "en".into(),
+        )
+        .await
+        .expect("kv set");
+        assert_eq!(
+            s.letter_catalog_for(&detail.id).await.lang,
+            LetterLang::En,
+            "the site's own setting must beat its package"
+        );
+
+        // An empty site setting is NOT an opinion — it falls through again.
+        // Anything else would make "clear this" mean "force the cluster
+        // default", which is a different act with no way to ask for it.
+        s.hosting_kv_set(
+            detail.id.as_str().to_string(),
+            HostingService::<MockAdapterPort>::LETTER_LANG_KV_KEY.to_string(),
+            String::new(),
+        )
+        .await
+        .expect("kv clear");
+        assert_eq!(
+            s.letter_catalog_for(&detail.id).await.lang,
+            LetterLang::Cs,
+            "clearing the site setting falls back to the package, not the cluster"
+        );
     }
 
     #[tokio::test]

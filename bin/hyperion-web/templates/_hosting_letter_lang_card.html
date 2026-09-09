@@ -1,0 +1,32 @@
+{# Which language THIS site's customer letters are written in.
+   Shows the RESOLVED answer and where it came from, because "Czech" alone
+   does not tell the operator whether they set that or inherited it — and the
+   difference decides whether editing the package would change it. #}
+<div class="card hover" id="letter-lang-card">
+  <h2>
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m5 8 6 6"/><path d="m4 14 6-6 2-3"/><path d="M2 5h12"/><path d="M7 2h1"/><path d="m22 22-5-10-5 10"/><path d="M14 18h6"/></svg>
+    Language of this customer's letters
+  </h2>
+  <p class="text-soft small" style="margin:0 0 0.7rem;line-height:1.55">
+    Right now: <strong>{{ effective_label }}</strong> — {{ source_note }}.
+    This covers the care report, the expiry warning and the disk-quota letters.
+    Alerts to <em>you</em> are unaffected; those stay in one language, set in
+    <a href="/settings#notifications">Settings → Notifications</a>.
+  </p>
+  <form method="post" action="/hostings/letter-language" class="row" style="gap:0.5rem;align-items:flex-end;flex-wrap:wrap">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    <input type="hidden" name="selector" value="{{ selector }}">
+    <div class="field" style="margin:0">
+      <label for="ll_lang">This site's language</label>
+      <select id="ll_lang" name="lang" style="min-width:16rem">
+        <option value=""{% if chosen == "" %} selected{% endif %}>Follow the care package, or the panel setting</option>
+        <option value="en"{% if chosen == "en" %} selected{% endif %}>English</option>
+        <option value="cs"{% if chosen == "cs" %} selected{% endif %}>Čeština</option>
+      </select>
+    </div>
+    <button class="btn small primary" type="submit">Save</button>
+  </form>
+  {% if let Some(e) = error %}
+  <p class="text-soft small" style="margin:0.6rem 0 0">{{ e }}</p>
+  {% endif %}
+</div>

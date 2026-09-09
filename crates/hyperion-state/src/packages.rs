@@ -40,6 +40,10 @@ pub struct PackageRow {
     pub feat_hardening: String,
     pub feat_backup_cadence: String,
     pub feat_report_cadence: String,
+    /// Default letter language for this package's customers. Empty = no
+    /// opinion. Column order matters: this sits before the timestamps, matching
+    /// SELECT_PACKAGES and the migration.
+    pub letters_lang: String,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -77,6 +81,9 @@ pub struct NewPackage {
     pub price_currency: Option<String>,
     pub price_interval: Option<String>,
     pub features: PackageFeatures,
+    /// Default language for this package's customers' letters. Empty = no
+    /// opinion, so the site's own setting or the cluster default decides.
+    pub letters_lang: String,
 }
 
 impl Default for NewPackage {
@@ -93,6 +100,9 @@ impl Default for NewPackage {
             price_currency: None,
             price_interval: None,
             features: PackageFeatures::default(),
+            // No opinion by default: a package that says nothing about language
+            // must not quietly override the cluster setting.
+            letters_lang: String::new(),
         }
     }
 }
@@ -126,6 +136,15 @@ pub struct HostingPackageRow {
     /// Serialised `PackagePriorState` — what the forced features were set
     /// to before this activation touched them. See migration 057.
     pub prior_state_json: Option<String>,
+    /// Language for the CUSTOMER letters of this site, snapshotted from the
+    /// definition at activation. Empty = no opinion, so the site's own setting
+    /// or the cluster default decides.
+    ///
+    /// Snapshotted rather than looked up, like the name and price above: this
+    /// row is read on the node that OWNS the hosting, where `service_packages`
+    /// is empty. Resolving through `package_id` would give the right language
+    /// on the master and the cluster default on every worker.
+    pub letters_lang: String,
 }
 
 /// Values for [`activate`]. A struct rather than nine positional arguments:
@@ -145,6 +164,8 @@ pub struct NewActivation {
     pub features: PackageFeatures,
     pub next_billing_at: Option<i64>,
     pub prior_state_json: Option<String>,
+    /// Copied from the definition at activation. See [`HostingPackageRow`].
+    pub letters_lang: String,
 }
 
 // ---------------------------------------------------------------- definitions
@@ -152,7 +173,8 @@ pub struct NewActivation {
 const SELECT_PACKAGES: &str =
     "SELECT id, name, slug, description, enabled, price_minor, price_currency,
             price_interval, feat_wp_auto_update, feat_integrity_scan, feat_monitoring,
-            feat_hardening, feat_backup_cadence, feat_report_cadence, created_at, updated_at
+            feat_hardening, feat_backup_cadence, feat_report_cadence, letters_lang,
+            created_at, updated_at
      FROM service_packages";
 
 /// Create a definition. A duplicate `name` or `slug` surfaces as a
@@ -162,11 +184,11 @@ pub async fn insert(pool: &SqlitePool, p: &NewPackage, now: i64) -> Result<i64, 
         r#"INSERT INTO service_packages
            (name, slug, description, enabled, price_minor, price_currency, price_interval,
             feat_wp_auto_update, feat_integrity_scan, feat_monitoring, feat_hardening,
-            feat_backup_cadence, feat_report_cadence, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            feat_backup_cadence, feat_report_cadence, letters_lang, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            RETURNING id"#,
     )
-    // 15 columns, 15 placeholders, 15 binds — in column order.
+    // 16 columns, 16 placeholders, 16 binds — in column order.
     .bind(&p.name)
     .bind(&p.slug)
     .bind(&p.description)
@@ -180,6 +202,7 @@ pub async fn insert(pool: &SqlitePool, p: &NewPackage, now: i64) -> Result<i64, 
     .bind(p.features.hardening.as_str())
     .bind(p.features.backup_cadence.as_str())
     .bind(p.features.report_cadence.as_str())
+    .bind(&p.letters_lang)
     .bind(now)
     .bind(now)
     .fetch_one(pool)
@@ -204,10 +227,10 @@ pub async fn update(
             price_minor = ?, price_currency = ?, price_interval = ?,
             feat_wp_auto_update = ?, feat_integrity_scan = ?, feat_monitoring = ?,
             feat_hardening = ?, feat_backup_cadence = ?, feat_report_cadence = ?,
-            updated_at = ?
+            letters_lang = ?, updated_at = ?
            WHERE id = ?"#,
     )
-    // 14 SET placeholders + the WHERE id — the trailing `.bind(id)` is what
+    // 15 SET placeholders + the WHERE id — the trailing `.bind(id)` is what
     // keeps this from becoming `WHERE id = NULL` (a silent zero-row update).
     .bind(&p.name)
     .bind(&p.slug)
@@ -222,6 +245,7 @@ pub async fn update(
     .bind(p.features.hardening.as_str())
     .bind(p.features.backup_cadence.as_str())
     .bind(p.features.report_cadence.as_str())
+    .bind(&p.letters_lang)
     .bind(now)
     .bind(id)
     .execute(pool)
@@ -306,7 +330,8 @@ const SELECT_ACTIVATIONS: &str =
             a.price_currency, a.price_interval, a.next_billing_at, a.state,
             a.activated_at, a.cancelled_at, a.prior_state_json,
             a.feat_wp_auto_update, a.feat_integrity_scan, a.feat_monitoring,
-            a.feat_hardening, a.feat_backup_cadence, a.feat_report_cadence
+            a.feat_hardening, a.feat_backup_cadence, a.feat_report_cadence,
+            a.letters_lang
      FROM hosting_packages a";
 
 /// Raw activation row. A `FromRow` struct rather than a tuple: sqlx only
@@ -332,6 +357,7 @@ struct ActivationRowRaw {
     feat_hardening: String,
     feat_backup_cadence: String,
     feat_report_cadence: String,
+    letters_lang: String,
 }
 
 fn map_activation(r: ActivationRowRaw) -> HostingPackageRow {
@@ -343,6 +369,7 @@ fn map_activation(r: ActivationRowRaw) -> HostingPackageRow {
         price_minor: r.price_minor,
         price_currency: r.price_currency,
         price_interval: r.price_interval,
+        letters_lang: r.letters_lang,
         features: PackageFeatures {
             wp_auto_update: FeatureToggle::from_stored(&r.feat_wp_auto_update),
             integrity_scan: FeatureToggle::from_stored(&r.feat_integrity_scan),
@@ -373,11 +400,12 @@ pub async fn activate(pool: &SqlitePool, a: &NewActivation, now: i64) -> Result<
            (hosting_id, package_id, package_name, price_minor, price_currency,
             price_interval, next_billing_at, state, activated_at, cancelled_at,
             prior_state_json, feat_wp_auto_update, feat_integrity_scan,
-            feat_monitoring, feat_hardening, feat_backup_cadence, feat_report_cadence)
-           VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, NULL, ?, ?, ?, ?, ?, ?, ?)
+            feat_monitoring, feat_hardening, feat_backup_cadence, feat_report_cadence,
+            letters_lang)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)
            RETURNING id"#,
     )
-    // 15 placeholders (state / cancelled_at are literals), 15 binds.
+    // 16 placeholders (state / cancelled_at are literals), 16 binds.
     .bind(a.hosting_id.as_str())
     .bind(a.package_id)
     .bind(&a.package_name)
@@ -393,6 +421,7 @@ pub async fn activate(pool: &SqlitePool, a: &NewActivation, now: i64) -> Result<
     .bind(a.features.hardening.as_str())
     .bind(a.features.backup_cadence.as_str())
     .bind(a.features.report_cadence.as_str())
+    .bind(&a.letters_lang)
     .fetch_one(pool)
     .await?;
     Ok(row.0)
@@ -622,6 +651,7 @@ mod tests {
                 price_minor: Some(19_000),
                 price_currency: Some("Kč".into()),
                 price_interval: Some("yearly".into()),
+                letters_lang: "cs".into(),
                 features: PackageFeatures {
                     wp_auto_update: FeatureToggle::Off,
                     hardening: FeatureToggle::On,
@@ -675,6 +705,10 @@ mod tests {
             price_minor: Some(price_minor),
             price_currency: Some("Kč".into()),
             price_interval: Some("monthly".into()),
+            // Non-empty on purpose, like the bundle below: this is the LAST
+            // bind of the activation INSERT, so a dropped bind would leave it
+            // empty and a test that activated with "" could not tell.
+            letters_lang: "cs".into(),
             // A non-default bundle on purpose: the snapshot is what the drift
             // tick enforces, so a test that activated with an all-`leave`
             // bundle would pass even if the snapshot were dropped entirely.

@@ -201,6 +201,12 @@ pub fn build_router(state: SharedState) -> Router {
             post(handlers::hostings::post_bruteforce_scan),
         )
         .route(
+            // Per-site letter language. Written on the OWNING node, because
+            // that is where the customer's letters are rendered.
+            "/hostings/letter-language",
+            post(handlers::hostings::post_letter_language),
+        )
+        .route(
             "/hostings/perm-autoheal",
             post(handlers::hostings::post_perm_autoheal),
         )
@@ -760,6 +766,11 @@ pub fn build_router(state: SharedState) -> Router {
         .route(
             "/hostings/:selector/traffic-panel",
             get(handlers::hostings::get_traffic_panel),
+        )
+        .route(
+            // Resolved letter language for one site, read from the OWNING node.
+            "/hostings/:selector/letter-lang-panel",
+            get(handlers::hostings::get_letter_lang_panel),
         )
         .route(
             "/hostings/:selector/spf-panel",
