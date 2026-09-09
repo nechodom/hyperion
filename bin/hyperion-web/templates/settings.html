@@ -1195,6 +1195,19 @@
       </div>
 
       <p class="text-soft small" style="margin:1rem 0 0.6rem;line-height:1.55">
+        Going through all of them one field at a time is painful, so
+        <strong>Download all wording</strong> gives you every sentence in one
+        file with its current text — the built-in wording where you have not
+        changed it — and <strong>Replace all wording</strong> takes that file
+        back. A sentence you leave exactly as it came is not stored as your
+        own, so later improvements to it still reach you.
+      </p>
+      <div class="row" style="gap:0.5rem;flex-wrap:wrap;margin:0 0 0.9rem">
+        <a class="btn small" href="/settings/letters.toml" download>Download all wording</a>
+        <button class="btn small ghost" type="button" id="lt-prefill">Fill the fields below with the built-in wording</button>
+      </div>
+
+      <p class="text-soft small" style="margin:1rem 0 0.6rem;line-height:1.55">
         Every sentence below is optional. Leave a field empty and the chosen
         language's built-in wording is used — shown in grey inside the field —
         so an empty form is not &ldquo;no text&rdquo;, it is
@@ -1230,6 +1243,35 @@
 
       <button type="submit" class="btn primary" style="margin-top:0.8rem">Save letter wording</button>
     </form>
+
+    {# Paste-back. Separate form because it REPLACES wording wholesale, which is
+       a different act from editing one sentence and should not share a submit
+       button with it. #}
+    <details style="margin-top:1.2rem;border:1px solid var(--border);border-radius:var(--radius-xs)">
+      <summary style="cursor:pointer;padding:0.5rem 0.7rem;font-weight:600">Replace all wording from a file</summary>
+      <div style="padding:0.2rem 0.7rem 0.7rem">
+        <p class="text-soft small" style="margin:0 0 0.6rem;line-height:1.55">
+          Paste an edited <code>hyperion-letters.toml</code>. Sentences the file
+          does not mention are left alone, so a handful of lines is a valid
+          paste. An id this version does not know is named back to you rather
+          than dropped silently.
+          Ids that contain a dot work written either way —
+          <code>"care.subject"</code> or <code>care.subject</code>. The download
+          quotes them because that is what TOML strictly means; a snippet typed
+          without the quotes is understood the same.
+        </p>
+        <form method="post" action="/settings/letters/import" autocomplete="off"
+              data-confirm-title="Replace the letter wording"
+              data-confirm-body="Every sentence in the pasted file replaces what is stored now. Sentences the file does not mention keep their current wording."
+              data-confirm-confirm-label="Replace wording">
+          <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+          <textarea name="toml" rows="10" required
+                    style="width:100%;font-family:var(--font-mono);font-size:0.82rem"
+                    placeholder="[letters]&#10;lang = &quot;cs&quot;&#10;&quot;care.subject&quot; = &quot;…&quot;"></textarea>
+          <button type="submit" class="btn primary small" style="margin-top:0.5rem">Replace wording</button>
+        </form>
+      </div>
+    </details>
   </div>
 </div>
 
@@ -1338,6 +1380,25 @@
       if (target && src) { target.value = src.value; updateLetters(); }
     });
   });
+  // Copy every built-in placeholder into its field, so the operator can EDIT
+  // the sentence instead of retyping it from what they can see but not select.
+  // It only fills fields that are still empty — pressing it must never wipe
+  // wording someone has already written.
+  var prefill = document.getElementById('lt-prefill');
+  if (prefill) {
+    prefill.addEventListener('click', function () {
+      var n = 0;
+      document.querySelectorAll('[placeholder]').forEach(function (el) {
+        if (!el.name || el.value !== '' || !el.closest('form')) return;
+        var f = el.closest('form');
+        var sec = f.querySelector('input[name="section"]');
+        if (!sec || sec.value !== 'letters') return;
+        el.value = el.getAttribute('placeholder');
+        n++;
+      });
+      prefill.textContent = n + ' field(s) filled in — edit them, then Save letter wording';
+    });
+  }
   document.querySelectorAll('[data-clear]').forEach(function (btn) {
     btn.addEventListener('click', function () {
       var target = document.getElementById(btn.getAttribute('data-clear'));

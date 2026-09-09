@@ -323,6 +323,18 @@ pub fn build_router(state: SharedState) -> Router {
             "/settings/api-keys/revoke",
             post(handlers::settings::post_api_key_revoke),
         )
+        // Bulk letter wording. The export is a plain TOML download — the same
+        // shape the overrides are stored in, so it doubles as a backup and can
+        // be pasted into agent.toml directly. The per-string editor beside it
+        // stays for changing one sentence.
+        .route(
+            "/settings/letters.toml",
+            get(handlers::settings::get_letters_export),
+        )
+        .route(
+            "/settings/letters/import",
+            post(handlers::settings::post_letters_import),
+        )
         .route("/settings/config", post(handlers::settings::post_config))
         .route(
             "/settings/node-wildcard/begin",

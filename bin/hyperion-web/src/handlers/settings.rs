@@ -1393,6 +1393,35 @@ pub async fn post_config(
             fields.remove(*k);
         }
     }
+    // A letter sentence submitted EXACTLY as the pack writes it is not an
+    // override, and storing it would fork that sentence: every later
+    // improvement to the built-in wording would stop reaching this install,
+    // with nothing in the UI to say so.
+    //
+    // This is not hypothetical. "Fill the fields with the built-in wording"
+    // exists so an operator can EDIT a sentence instead of retyping something
+    // they can see but not select — and it puts all 125 built-ins into the
+    // form. Pressing it and saving, which is the obvious thing to do, would
+    // otherwise fork the entire catalogue in one click. Retyping a sentence
+    // character-for-character does the same, more slowly.
+    if form.section == "letters" {
+        let cat = current_letter_catalogue().await;
+        for (id, value) in fields.iter_mut() {
+            if id == "lang" || value.is_empty() {
+                continue;
+            }
+            if let Some(s) = hyperion_core::letters::lookup(id) {
+                if value.as_str() == s.built_in(cat.lang) {
+                    // CLEARED, not dropped. Typing the pack's own wording means
+                    // "I want what the pack says" — which is the same act as
+                    // emptying the field, and must remove an override that is
+                    // already there. Dropping the field instead would leave the
+                    // old override in place, the exact opposite.
+                    value.clear();
+                }
+            }
+        }
+    }
     // Unchecked checkboxes don't show up in the form at all — but our
     // service knows the field is required. Synthesise the missing
     // booleans as "false" so unchecking persists. ONLY for checkboxes
@@ -2433,6 +2462,372 @@ pub async fn post_node_wildcard_finish(
 /// The operator sees the built-in wording as a PLACEHOLDER and their own as
 /// the value, which is the same empty-means-default contract the two letter
 /// bodies already use — and the reason clearing a field is how you go back.
+
+/// The letter language + overrides exactly as the mailer reads them.
+///
+/// Read from the same file rather than passed around, because the export and
+/// the import are separate requests and a stale copy would let an operator
+/// export one thing and import against another.
+async fn current_letter_catalogue() -> hyperion_core::letters::LetterCatalog {
+    tokio::fs::read_to_string("/etc/hyperion/agent.toml")
+        .await
+        .ok()
+        .as_deref()
+        .map(hyperion_core::service::letter_catalog_from_toml)
+        .unwrap_or_default()
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Bulk export / import of the letter wording
+//
+// The per-string editor is fine for changing one sentence and miserable for
+// going through all of them: the built-in text is the field's PLACEHOLDER, not
+// its value, so an operator who wants to reword something has to retype it from
+// scratch — they cannot select it, cannot copy it, and cannot see two sentences
+// side by side to keep the tone consistent.
+//
+// So: one file out, one file in. The format is the same `[letters]` TOML the
+// overrides are already STORED in, which means the export doubles as a backup
+// and can be pasted straight into agent.toml by anyone who prefers that.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Collect every string leaf of a TOML table as a DOTTED id.
+///
+/// 111 of the 125 ids contain a dot, and in TOML a bare `care.subject = "x"` is
+/// a nested table rather than a key of that name. An operator hand-editing the
+/// file will write it both ways — the download quotes them, a snippet typed
+/// from memory usually does not — and a paste that is silently discarded is the
+/// worst outcome available: the flash says it worked and the next letter goes
+/// out with the old wording. So both spellings are accepted and mean the same
+/// thing, which is what the operator meant either way.
+fn flatten_toml_strings(t: &dyn toml_edit::TableLike, prefix: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for (k, v) in t.iter() {
+        let id = if prefix.is_empty() {
+            k.to_string()
+        } else {
+            format!("{prefix}.{k}")
+        };
+        if let Some(text) = v.as_str() {
+            out.push((id, text.to_string()));
+        } else if let Some(sub) = v.as_table_like() {
+            out.extend(flatten_toml_strings(sub, &id));
+        }
+    }
+    out
+}
+
+/// Render an id as a TOML key.
+///
+/// Most ids contain a dot (`care.subject`), and a bare dotted key in TOML means
+/// a NESTED TABLE, not a key of that name — `care.subject = "x"` parses as
+/// `care = { subject = "x" }`, so the import would find no such string and
+/// silently keep the old wording. The agent's own writer quotes these because
+/// `toml_edit` does it automatically; this export builds the text by hand and
+/// has to do it itself.
+fn toml_key(id: &str) -> String {
+    if !id.is_empty()
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        id.to_string()
+    } else {
+        format!("\"{}\"", id.replace('\\', "\\\\").replace('"', "\\\""))
+    }
+}
+
+/// Escape a string as a TOML basic string, or emit a multi-line literal.
+///
+/// Letter bodies contain newlines and `{placeholders}`; both have to survive a
+/// round trip unchanged, because a mangled placeholder reaches a customer.
+fn toml_value(s: &str) -> String {
+    if s.contains('\n') {
+        // Multi-line basic string. `"""` inside the text would end it early,
+        // and a trailing quote would glue onto the terminator — neither
+        // appears in the pack today, but the export must not depend on that.
+        let body = s.replace('\\', "\\\\").replace("\"\"\"", "\\\"\\\"\\\"");
+        let body = if body.ends_with('"') {
+            format!("{}\\\"", &body[..body.len() - 1])
+        } else {
+            body
+        };
+        format!("\"\"\"\n{body}\"\"\"")
+    } else {
+        let esc = s
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\t', "\\t")
+            .replace('\r', "\\r");
+        format!("\"{esc}\"")
+    }
+}
+
+/// `GET /settings/letters.toml` — every sentence, with its current text.
+///
+/// The value written for each id is what the letter says TODAY: the operator's
+/// override where one exists, otherwise the built-in wording for the chosen
+/// language. That is the whole point — the file is something to edit, not a
+/// list of blanks to fill in.
+pub async fn get_letters_export(
+    // Not read: the catalogue comes from agent.toml directly, so the export and
+    // the import cannot disagree about what is stored. Kept so the handler
+    // keeps the shape every other one here has.
+    State(_state): State<SharedState>,
+    ctx: AuthCtx,
+) -> Result<Response, AppError> {
+    // The same gate every other write to agent.toml uses. `post_config` is
+    // super_admin, and this reads and replaces the very same section — a
+    // lower bar here would be a way around it.
+    if !ctx.is_super_admin() {
+        return Ok((axum::http::StatusCode::FORBIDDEN, "super admin only\n").into_response());
+    }
+    let cat = current_letter_catalogue().await;
+    let lang = match cat.lang {
+        hyperion_core::letters::LetterLang::Cs => "cs",
+        _ => "en",
+    };
+
+    let mut out = String::new();
+    out.push_str(&format!(
+        "# Hyperion letter wording — every sentence Hyperion writes that leaves\n\
+         # the building: the customer's care report and expiry warning, the\n\
+         # operator alerts, the Slack messages and the disk-quota letters.\n\
+         #\n\
+         # Language pack in use: {lang}\n\
+         #\n\
+         # Edit the values, then paste the whole file back into Settings →\n\
+         # Notifications → \"Letter language and wording\" → Replace all wording.\n\
+         # A value left EXACTLY as the built-in wording is not stored as an\n\
+         # override, so future improvements to that sentence still reach you;\n\
+         # change one character and it becomes yours and stops tracking.\n\
+         #\n\
+         # Words in {{braces}} are values the server fills in. Keep them spelled\n\
+         # exactly as they are — a brace you mistype is left in the letter\n\
+         # verbatim rather than dropped, so a customer would see it.\n\
+         \n[letters]\nlang = \"{lang}\"\n"
+    ));
+
+    for g in hyperion_core::letters::groups() {
+        out.push_str(&format!("\n# ── {g} ──\n"));
+        for s in hyperion_core::letters::STRINGS
+            .iter()
+            .filter(|s| s.group == g)
+        {
+            // An empty override is not an override: `LetterCatalog::get`
+            // falls back to the pack for one, and so must this. Reading the map
+            // directly exported a BLANK for every string once the per-string
+            // form had been saved with its fields empty — which is what saving
+            // it without touching anything does.
+            let own = cat.overrides.get(s.id).filter(|v| !v.trim().is_empty());
+            let effective = own
+                .cloned()
+                .unwrap_or_else(|| s.built_in(cat.lang).to_string());
+            let overridden = own.is_some();
+            out.push_str(&format!(
+                "\n# {}{}\n{} = {}\n",
+                s.note,
+                if overridden { "  [your wording]" } else { "" },
+                toml_key(s.id),
+                toml_value(&effective)
+            ));
+        }
+    }
+
+    Ok((
+        axum::http::StatusCode::OK,
+        [
+            (
+                axum::http::header::CONTENT_TYPE,
+                "text/plain; charset=utf-8",
+            ),
+            (
+                axum::http::header::CONTENT_DISPOSITION,
+                "attachment; filename=\"hyperion-letters.toml\"",
+            ),
+        ],
+        out,
+    )
+        .into_response())
+}
+
+#[derive(Deserialize)]
+pub struct LettersImportForm {
+    #[serde(default)]
+    pub _csrf: String,
+    pub toml: String,
+}
+
+/// `POST /settings/letters/import` — replace the wording from a pasted file.
+///
+/// Everything the file does not mention is left alone; an id it mentions with
+/// the built-in wording has its override REMOVED rather than stored, so the
+/// operator's file stays a diff against the pack instead of forking it.
+pub async fn post_letters_import(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<LettersImportForm>,
+) -> Result<Response, AppError> {
+    if !ctx.is_super_admin() {
+        return Ok(Redirect::to("/settings?flash_error=super+admin+required").into_response());
+    }
+    let doc: toml_edit::DocumentMut = match form.toml.parse() {
+        Ok(d) => d,
+        Err(e) => {
+            return Ok(Redirect::to(&format!(
+                "/settings?flash_error={}#notifications",
+                urlencode(&format!("that is not valid TOML: {e}"))
+            ))
+            .into_response())
+        }
+    };
+    // Accept the file with or without its `[letters]` header, because an
+    // operator who edits only a handful of lines will paste only those.
+    let root = doc
+        .get("letters")
+        .and_then(|t| t.as_table_like())
+        .map(|t| flatten_toml_strings(t, ""))
+        .unwrap_or_else(|| flatten_toml_strings(doc.as_table(), ""));
+    let table = root;
+
+    let cat = current_letter_catalogue().await;
+
+    // Which pack the operator was editing AGAINST decides what counts as
+    // "unchanged", and the file says so. Reading the stored language instead
+    // would compare Czech text to English built-ins the moment someone
+    // translates by exporting, switching `lang`, and pasting back — every one
+    // of the 125 sentences would differ, so every one would be stored as an
+    // override, and the whole catalogue would silently stop tracking the pack.
+    // Whatever the rest of the product accepts. `LetterLang::parse` trims,
+    // lowercases and takes cs/cz/cesky/česky — so demanding the exact bytes
+    // "en" or "cs" here would drop a `lang = "CS"` line silently, and dropping
+    // it also flips the fork guard below to compare against one pack instead of
+    // two. Anything unrecognised parses as English, which is the same fallback
+    // the mailer applies, so there is nothing to reject.
+    let mut lang: Option<String> = None;
+    for (id, value) in &table {
+        if id == "lang" && !value.trim().is_empty() {
+            lang = Some(match hyperion_core::letters::LetterLang::parse(value) {
+                hyperion_core::letters::LetterLang::Cs => "cs".to_string(),
+                _ => "en".to_string(),
+            });
+        }
+    }
+    // "Unchanged" is judged against BOTH packs, not one.
+    //
+    // Against the stored pack only: export in English, set lang = "cs", paste —
+    // every Czech sentence differs from its English built-in, so all 125 become
+    // overrides and the catalogue silently stops tracking the pack for ever.
+    //
+    // Against the file's pack only: the same operator who switches lang but has
+    // not translated anything yet pastes 125 ENGLISH values against the Czech
+    // pack — same fork, and worse, the overrides then win, so the language
+    // switch they just asked for does nothing.
+    //
+    // Either pack's own wording means "I did not change this sentence", which
+    // is the question actually being asked.
+    let file_lang = lang
+        .as_deref()
+        .map(hyperion_core::letters::LetterLang::parse);
+    let packs: Vec<hyperion_core::letters::LetterLang> = match file_lang {
+        Some(l) if l != cat.lang => vec![l, cat.lang],
+        _ => vec![cat.lang],
+    };
+
+    let mut fields: std::collections::BTreeMap<String, String> = Default::default();
+    let mut unknown: Vec<String> = Vec::new();
+    let mut kept = 0usize;
+
+    for (id, value) in table {
+        if id == "lang" {
+            continue;
+        }
+        let Some(s) = hyperion_core::letters::STRINGS.iter().find(|s| s.id == id) else {
+            // An id this build does not have. Named rather than dropped: it is
+            // usually a typo or a file from a newer version, and silently
+            // ignoring it would leave the operator believing they had changed
+            // something they had not.
+            unknown.push(id);
+            continue;
+        };
+        // Identical to the pack? Then it is NOT an override. Storing it would
+        // fork that sentence: every later improvement to the built-in wording
+        // would stop reaching this install, invisibly.
+        if packs.iter().any(|&l| value == s.built_in(l)) {
+            fields.insert(id, String::new());
+        } else {
+            fields.insert(id, value);
+            kept += 1;
+        }
+    }
+
+    if let Some(l) = lang {
+        fields.insert("lang".into(), l);
+    }
+    if fields.is_empty() {
+        return Ok(Redirect::to(
+            "/settings?flash_error=that+file+contained+no+letter+strings#notifications",
+        )
+        .into_response());
+    }
+
+    let resp = hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::AgentConfigUpdate {
+            section: "letters".into(),
+            fields: fields.clone().into(),
+        },
+    )
+    .await
+    .map_err(AppError::from)?;
+    if let RpcResponse::Error(e) = resp {
+        return Ok(Redirect::to(&format!(
+            "/settings?flash_error={}#notifications",
+            urlencode(&e.to_string())
+        ))
+        .into_response());
+    }
+    // The letters are rendered on the node that OWNS each hosting, so the
+    // master's copy is not enough — the same propagation the per-string form
+    // already does.
+    // Letters render on the node that OWNS each hosting, so the master's write
+    // is not the job finished. A failure here used to be discarded while the
+    // flash still said success — the operator would believe their customers
+    // were getting the new wording when half the cluster was not sending it.
+    let propagation = propagate_notifications(&state, "letters", fields.clone()).await;
+
+    let mut msg = format!("{kept} sentence(s) now use your wording");
+    match &propagation {
+        Ok(0) => {}
+        Ok(n) => msg.push_str(&format!("; pushed to {n} other node(s)")),
+        Err(problems) => {
+            msg.push_str(&format!(
+                "; but {} node(s) did NOT get it and are still sending the old \
+                 wording: {}",
+                problems.len(),
+                problems.join("; ")
+            ));
+        }
+    }
+    if !unknown.is_empty() {
+        msg.push_str(&format!(
+            "; {} id(s) were not recognised and were ignored: {}",
+            unknown.len(),
+            unknown
+                .iter()
+                .take(5)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    Ok(Redirect::to(&format!(
+        "/settings?flash={}#notifications",
+        urlencode(&msg)
+    ))
+    .into_response())
+}
+
 fn letter_group_cards(cat: &hyperion_core::letters::LetterCatalog) -> Vec<LetterGroupCard> {
     hyperion_core::letters::groups()
         .into_iter()
@@ -2457,8 +2852,232 @@ fn letter_group_cards(cat: &hyperion_core::letters::LetterCatalog) -> Vec<Letter
 }
 #[cfg(test)]
 mod tests {
-    use super::{letter_verdict, mask_secrets_in_toml, synthesize_unchecked_checkboxes};
+    use super::{
+        flatten_toml_strings, letter_verdict, mask_secrets_in_toml,
+        synthesize_unchecked_checkboxes, toml_key, toml_value,
+    };
     use std::collections::BTreeMap;
+
+    /// Every sentence in the pack must survive a trip out to TOML and back.
+    ///
+    /// The bodies carry newlines, quotes and `{placeholders}`, and a mangled
+    /// placeholder reaches a CUSTOMER — so this walks the real catalogue rather
+    /// than a handful of samples.
+    #[test]
+    fn every_string_survives_the_export_round_trip() {
+        for lang in [
+            hyperion_core::letters::LetterLang::En,
+            hyperion_core::letters::LetterLang::Cs,
+        ] {
+            let mut doc = String::from("[letters]\n");
+            for s in hyperion_core::letters::STRINGS.iter() {
+                doc.push_str(&format!(
+                    "{} = {}\n",
+                    toml_key(s.id),
+                    toml_value(s.built_in(lang))
+                ));
+            }
+            let parsed: toml_edit::DocumentMut = doc
+                .parse()
+                .unwrap_or_else(|e| panic!("export is not valid TOML for {lang:?}: {e}\n{doc}"));
+            let table = parsed
+                .get("letters")
+                .and_then(|t| t.as_table_like())
+                .expect("[letters] table");
+            for s in hyperion_core::letters::STRINGS.iter() {
+                let got = table
+                    .get(s.id)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_else(|| panic!("{} missing after round trip", s.id));
+                assert_eq!(
+                    got,
+                    s.built_in(lang),
+                    "{} changed on the way through TOML ({lang:?})",
+                    s.id
+                );
+            }
+        }
+    }
+
+    /// A value that is byte-identical to the pack must NOT become an override.
+    ///
+    /// Storing it would fork that sentence silently: every later improvement to
+    /// the built-in wording would stop reaching the install, and nothing in the
+    /// UI would say so. The import writes an empty string for those, which is
+    /// how this codebase spells "remove the override".
+    #[test]
+    fn unchanged_wording_is_not_stored_as_an_override() {
+        let s = hyperion_core::letters::STRINGS
+            .first()
+            .expect("the catalogue is not empty");
+        let lang = hyperion_core::letters::LetterLang::En;
+        let built_in = s.built_in(lang);
+
+        // What post_letters_import decides, in the same shape.
+        let decide = |value: &str| -> String {
+            if value == built_in {
+                String::new()
+            } else {
+                value.to_string()
+            }
+        };
+        assert_eq!(
+            decide(built_in),
+            "",
+            "identical wording must clear, not store"
+        );
+        assert_eq!(
+            decide(&format!("{built_in} ")),
+            format!("{built_in} "),
+            "one changed character makes it the operator's"
+        );
+    }
+
+    /// Switching language in the file must not fork the whole catalogue.
+    ///
+    /// The operator's route to a translation is: export, change `lang`, replace
+    /// the values, paste back. If "unchanged" is judged against the language
+    /// STORED rather than the one the file declares, every Czech sentence
+    /// differs from its English built-in — so all 125 become overrides at once
+    /// and the install silently stops tracking the pack for ever.
+    #[test]
+    fn a_language_switch_is_judged_against_the_file_not_the_stored_pack() {
+        use hyperion_core::letters::LetterLang;
+        let s = hyperion_core::letters::STRINGS
+            .iter()
+            .find(|s| s.built_in(LetterLang::En) != s.built_in(LetterLang::Cs))
+            .expect("some string differs between the packs");
+
+        // The rule post_letters_import applies: unchanged against EITHER pack.
+        let packs = [LetterLang::Cs, LetterLang::En];
+        let is_override = |value: &str| !packs.iter().any(|&l| value == s.built_in(l));
+
+        // Stored English, file says Czech, values are the Czech built-ins:
+        // a translation. Nothing is the operator's own.
+        assert!(
+            !is_override(s.built_in(LetterLang::Cs)),
+            "the Czech pack's own wording must not be stored as the operator's"
+        );
+        // Same switch, but the values are still English because they have not
+        // been translated yet. Also nothing of the operator's — and crucially
+        // no override, so the language switch they asked for actually takes.
+        assert!(
+            !is_override(s.built_in(LetterLang::En)),
+            "storing these would make the language switch a no-op"
+        );
+        // A genuine edit is still theirs.
+        assert!(is_override(&format!("{} x", s.built_in(LetterLang::Cs))));
+    }
+
+    /// Pressing "fill the fields with the built-in wording" and then Save must
+    /// not fork all 125 sentences.
+    ///
+    /// The button exists so an operator can EDIT a sentence rather than retype
+    /// something they can see but not select — so it puts every built-in into
+    /// the form. Saving that, which is the obvious next click, would store all
+    /// of them as overrides and the install would silently stop tracking the
+    /// pack for ever. The save path clears anything identical to the pack, so
+    /// the button is safe and so is retyping a sentence by hand.
+    #[test]
+    fn saving_the_built_in_wording_clears_rather_than_forks() {
+        use hyperion_core::letters::LetterLang;
+        let lang = LetterLang::En;
+        // The rule post_config applies to a `letters` submission.
+        let decide = |id: &str, value: &str| -> Option<String> {
+            if id == "lang" || value.is_empty() {
+                return Some(value.to_string());
+            }
+            match hyperion_core::letters::lookup(id) {
+                Some(s) if value == s.built_in(lang) => Some(String::new()),
+                _ => Some(value.to_string()),
+            }
+        };
+        for s in hyperion_core::letters::STRINGS.iter() {
+            assert_eq!(
+                decide(s.id, s.built_in(lang)).as_deref(),
+                Some(""),
+                "{} would have been stored as the operator's own wording",
+                s.id
+            );
+        }
+        // A real edit still lands.
+        let s = hyperion_core::letters::STRINGS.first().expect("non-empty");
+        let edited = format!("{} (edited)", s.built_in(lang));
+        assert_eq!(decide(s.id, &edited).as_deref(), Some(edited.as_str()));
+    }
+
+    /// An empty override is not an override, and the export must say so.
+    ///
+    /// `LetterCatalog::get` already falls back to the pack for one. Reading the
+    /// map directly exported a BLANK for every sentence once the per-string
+    /// form had been saved with its fields empty — which is what saving it
+    /// without touching anything does.
+    #[test]
+    fn an_empty_override_exports_as_the_pack_wording() {
+        use hyperion_core::letters::{LetterCatalog, LetterLang};
+        let s = hyperion_core::letters::STRINGS.first().expect("non-empty");
+        let mut cat = LetterCatalog::new(LetterLang::En);
+        cat.overrides.insert(s.id.to_string(), String::new());
+
+        // The rule get_letters_export applies.
+        let own = cat.overrides.get(s.id).filter(|v| !v.trim().is_empty());
+        assert!(
+            own.is_none(),
+            "a blank must not read as the operator's wording"
+        );
+        let effective = own
+            .cloned()
+            .unwrap_or_else(|| s.built_in(cat.lang).to_string());
+        assert_eq!(effective, s.built_in(LetterLang::En));
+    }
+
+    /// Both spellings of a dotted id must mean the same thing.
+    ///
+    /// The download quotes them, because in TOML a bare `care.subject = "x"` is
+    /// a nested TABLE, not a key of that name. A snippet typed from memory
+    /// usually does not — and a paste that is silently discarded is the worst
+    /// outcome available: the flash says it worked and the next letter goes out
+    /// with the old wording.
+    #[test]
+    fn a_dotted_id_is_accepted_quoted_or_not() {
+        let quoted: toml_edit::DocumentMut = "[letters]\n\"care.subject\" = \"hi\"\n"
+            .parse()
+            .expect("valid");
+        let bare: toml_edit::DocumentMut =
+            "[letters]\ncare.subject = \"hi\"\n".parse().expect("valid");
+
+        let read = |d: &toml_edit::DocumentMut| {
+            flatten_toml_strings(d.get("letters").unwrap().as_table_like().unwrap(), "")
+        };
+        assert_eq!(read(&quoted), vec![("care.subject".into(), "hi".into())]);
+        assert_eq!(
+            read(&bare),
+            vec![("care.subject".into(), "hi".into())],
+            "an unquoted dotted key must not be silently dropped"
+        );
+
+        // Three segments, which the catalogue has (care.unmeasured.note).
+        let deep: toml_edit::DocumentMut = "[letters]\ncare.unmeasured.note = \"x\"\n"
+            .parse()
+            .expect("valid");
+        assert_eq!(
+            read(&deep),
+            vec![("care.unmeasured.note".into(), "x".into())]
+        );
+    }
+
+    /// A multi-line body must not be able to end its own TOML string early.
+    #[test]
+    fn a_body_containing_triple_quotes_still_round_trips() {
+        let nasty = "line one\nshe said \"\"\"hello\"\"\" and left\nline three\n";
+        let doc = format!("[letters]\nx = {}\n", toml_value(nasty));
+        let parsed: toml_edit::DocumentMut = doc.parse().expect("valid TOML");
+        assert_eq!(
+            parsed["letters"]["x"].as_str().expect("string"),
+            nasty,
+            "escaping lost the text"
+        );
+    }
 
     /// The badge may read "in step" only when BOTH customer letters match.
     /// Half a match is still a node sending wording the operator never wrote,
