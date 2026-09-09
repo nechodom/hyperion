@@ -52,6 +52,8 @@ struct PackagesTpl<'a> {
     css_version: &'static str,
     htmx_version: &'static str,
     packages: Vec<PackageView>,
+    /// The four built-ins as textarea lines, for the "new package" form.
+    builtin_check_text: String,
     csrf_token: String,
     flash: Option<String>,
     error: Option<String>,
@@ -63,6 +65,14 @@ struct PackagesTpl<'a> {
 struct PackageView {
     pkg: ServicePackage,
     price_major: String,
+    /// The plan's checklist as the textarea shows it. Resolved, not raw: a
+    /// plan storing "" promises the built-in four, and the form has to say so
+    /// in words rather than as an empty box the operator reads as "none".
+    check_text: String,
+    /// How many items that resolves to — the row badge. Derived here rather
+    /// than counted in the template, which cannot tell an empty definition
+    /// (the built-in four) from a plan that lists four of its own.
+    check_count: usize,
 }
 
 #[derive(Deserialize, Default)]
@@ -91,6 +101,10 @@ pub async fn get_packages(
         .into_iter()
         .map(|pkg| PackageView {
             price_major: price_major(pkg.price_minor),
+            check_count: hyperion_types::care_check::parse_check_items(&pkg.check_items).len(),
+            check_text: check_items_to_text(&hyperion_types::care_check::parse_check_items(
+                &pkg.check_items,
+            )),
             pkg,
         })
         .collect();
@@ -101,6 +115,7 @@ pub async fn get_packages(
         css_version: super::css_version(),
         htmx_version: super::htmx_version(),
         packages,
+        builtin_check_text: check_items_to_text(&hyperion_types::care_check::builtin_check_items()),
         csrf_token: super::session_csrf_token(&state, &ctx),
         flash: q.flash,
         error: q.error,
@@ -167,6 +182,134 @@ pub struct PackageForm {
     /// so an older cached form cannot silently reset a customer's language.
     #[serde(default)]
     pub letters_lang: Option<String>,
+    /// The monthly checklist, one item per line as `Name | note`.
+    ///
+    /// A textarea rather than a row of inputs with add/remove buttons, for
+    /// one reason that outranks the prettier control: `application/x-www-form-
+    /// urlencoded` has no ordered repeated-field decoding in serde, so a row
+    /// UI would need index-numbered names and a hand-written body parser —
+    /// two new ways for the list a customer is billed against to come back in
+    /// the wrong order. Lines are ordered by construction.
+    ///
+    /// `Option` for the same reason as the cadence and the language above:
+    /// absent must mean "leave what is stored", never "clear it", or an older
+    /// cached form would silently reset a plan's checklist to the built-in
+    /// four the next time somebody fixes a typo in the name.
+    #[serde(default)]
+    pub check_items_text: Option<String>,
+}
+
+/// Render a plan's checklist for the textarea: one item per line.
+///
+/// The note after `|` is optional and omitted when empty, so a plain list
+/// reads as a plain list rather than as a column of trailing pipes.
+pub fn check_items_to_text(items: &[hyperion_types::care_check::CheckItemDef]) -> String {
+    items
+        .iter()
+        .map(|i| {
+            if i.detail.trim().is_empty() {
+                i.label.clone()
+            } else {
+                format!("{} | {}", i.label, i.detail)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Parse the textarea back into definitions, keeping ids stable.
+///
+/// The id is what a tick is stored under, so it must survive an edit of the
+/// list. It is matched back by LABEL against `current`: re-ordering the list,
+/// adding an item or deleting one leaves every other item's id alone. Re-
+/// wording an item does start a new one — months already ticked keep the
+/// wording they were ticked against (the frozen list on the site), so nothing
+/// in the record changes, but from the next tick it is a different item, and
+/// the form says so.
+///
+/// CRLF is stripped first. A textarea posts `\r\n` and the pack file the
+/// operator may have pasted from does not; the same mismatch silently forked
+/// every multi-line letter override once already.
+pub fn parse_check_items_text(
+    text: &str,
+    current: &[hyperion_types::care_check::CheckItemDef],
+) -> Vec<hyperion_types::care_check::CheckItemDef> {
+    use hyperion_types::care_check::CheckItemDef;
+    let mut out: Vec<CheckItemDef> = Vec::new();
+    for line in text.replace("\r\n", "\n").replace('\r', "\n").lines() {
+        let line = line.trim();
+        // `#` opens a comment line so the hint text in the box can be left in
+        // place, the way the letters pack file works.
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let (label, detail) = match line.split_once('|') {
+            Some((l, d)) => (l.trim(), d.trim()),
+            None => (line, ""),
+        };
+        if label.is_empty() {
+            continue;
+        }
+        // Keep the id an existing item already has. Case-insensitive so
+        // fixing capitalisation is not a rename.
+        let id = current
+            .iter()
+            .find(|c| c.label.trim().eq_ignore_ascii_case(label))
+            .map(|c| c.id.clone())
+            .unwrap_or_else(|| slug_id(label));
+        // A collision would let one tick satisfy two items. The core rejects
+        // it outright; here the duplicate line is simply dropped, because the
+        // operator listing the same check twice means one check.
+        if id.is_empty() || out.iter().any(|k| k.id == id) {
+            continue;
+        }
+        out.push(CheckItemDef {
+            id,
+            label: label.to_string(),
+            detail: detail.to_string(),
+        });
+    }
+    out
+}
+
+/// `a-z0-9-` from a label, Czech diacritics folded.
+///
+/// Mirrors the package slug rule rather than importing it: `hyperion-core` is
+/// not a dependency of the web binary, and the agent re-derives the id anyway
+/// — this only has to agree with it.
+fn slug_id(input: &str) -> String {
+    let mut out = String::new();
+    let mut last_dash = true;
+    for ch in input.trim().to_lowercase().chars() {
+        let mapped = match ch {
+            'á' | 'à' | 'â' | 'ä' | 'ą' | 'å' => 'a',
+            'č' | 'ć' | 'ç' => 'c',
+            'ď' => 'd',
+            'é' | 'ě' | 'è' | 'ê' | 'ë' | 'ę' => 'e',
+            'í' | 'ì' | 'î' | 'ï' => 'i',
+            'ľ' | 'ł' => 'l',
+            'ň' | 'ń' => 'n',
+            'ó' | 'ò' | 'ô' | 'ö' | 'ő' => 'o',
+            'ř' => 'r',
+            'š' | 'ś' => 's',
+            'ť' => 't',
+            'ú' | 'ů' | 'ù' | 'û' | 'ü' | 'ű' => 'u',
+            'ý' | 'ÿ' => 'y',
+            'ž' | 'ź' | 'ż' => 'z',
+            c => c,
+        };
+        if mapped.is_ascii_alphanumeric() {
+            out.push(mapped);
+            last_dash = false;
+        } else if !last_dash {
+            out.push('-');
+            last_dash = true;
+        }
+    }
+    while out.ends_with('-') {
+        out.pop();
+    }
+    out
 }
 
 impl PackageForm {
@@ -177,6 +320,7 @@ impl PackageForm {
         self,
         current: Option<ReportCadence>,
         current_lang: Option<&str>,
+        current_items: Option<&str>,
     ) -> Result<PackageInput, AppError> {
         let price_minor = parse_price_major(&self.price_major)?;
         let currency = self.price_currency.trim().to_string();
@@ -195,6 +339,23 @@ impl PackageForm {
             Some("") => String::new(),
             Some(_) | None => current_lang.unwrap_or("").to_string(),
         };
+        // Absent field = leave what is stored, as above. A field that IS
+        // present and empty does mean "clear it" — which the core reads back
+        // as the built-in four, never as a plan that promises nothing.
+        let check_items = match self.check_items_text.as_deref() {
+            Some(text) => {
+                let current = hyperion_types::care_check::parse_check_items(
+                    current_items.unwrap_or_default(),
+                );
+                let items = parse_check_items_text(text, &current);
+                if items.is_empty() {
+                    String::new()
+                } else {
+                    hyperion_types::care_check::check_items_to_json(&items)
+                }
+            }
+            None => current_items.unwrap_or_default().to_string(),
+        };
         Ok(PackageInput {
             name: self.name.trim().to_string(),
             slug: self.slug.trim().to_string(),
@@ -204,6 +365,7 @@ impl PackageForm {
             price_currency: (!currency.is_empty()).then_some(currency),
             price_interval: (!interval.is_empty()).then_some(interval),
             letters_lang,
+            check_items,
             features: PackageFeatures {
                 wp_auto_update: FeatureToggle::from_stored(&self.feat_wp_auto_update),
                 integrity_scan: FeatureToggle::from_stored(&self.feat_integrity_scan),
@@ -224,7 +386,7 @@ pub async fn post_create(
     if !ctx.can(Capability::ProfilesManage) {
         return Err(AppError::Forbidden);
     }
-    let input = form.into_input(None, None)?;
+    let input = form.into_input(None, None, None)?;
     match hyperion_rpc_client::call(&state.agent_socket, Request::PackageCreate(input)).await? {
         RpcResponse::PackageCreate(p) => Ok(redirect_flash(&format!(
             "Package \"{}\" created. Activate it on a hosting from that site's detail page.",
@@ -248,13 +410,17 @@ pub async fn post_update(
     // incoming form might not post back — see
     // `PackageForm::feat_report_cadence` for why absent must not mean
     // "leave".
-    let (current, current_lang) =
+    let (current, current_lang, current_items) =
         match hyperion_rpc_client::call(&state.agent_socket, Request::PackageGet { id }).await? {
-            RpcResponse::PackageGet(p) => (Some(p.features.report_cadence), p.letters_lang),
+            RpcResponse::PackageGet(p) => (
+                Some(p.features.report_cadence),
+                p.letters_lang,
+                p.check_items,
+            ),
             RpcResponse::Error(e) => return Ok(redirect_error(&e.to_string())),
             _ => return Err(AppError::Internal("unexpected response".into())),
         };
-    let input = form.into_input(current, Some(&current_lang))?;
+    let input = form.into_input(current, Some(&current_lang), Some(&current_items))?;
     match hyperion_rpc_client::call(&state.agent_socket, Request::PackageUpdate { id, input })
         .await?
     {
@@ -354,6 +520,10 @@ struct PackagesCardTpl {
     /// discovers on your behalf.
     prev_period_label: String,
     prev_outstanding: usize,
+    /// LAST month's denominator, which is not this month's: a plan edited
+    /// since then changed the list, and "3 of 5 still unchecked" against a
+    /// four-item month is a sentence about a month that never existed.
+    prev_total: usize,
     /// Only shown when a package is actually held: an operator who sells no
     /// care plan is not promising anybody a monthly look.
     show_checks: bool,
@@ -881,14 +1051,23 @@ async fn render_card(
     let now = hyperion_types::now_secs();
     let period = hyperion_types::care_check::period_key(now);
     let prev = hyperion_types::care_check::previous_period(&period).unwrap_or_default();
-    let check_rows: Vec<ServiceCheckRow> = hyperion_types::care_check::ServiceCheckItem::ALL
+    // What THIS site is asked, from the packages it holds — read off the
+    // activation snapshots that came back with the card, not from the
+    // definitions: the snapshot is what the owning node ticks against, and
+    // showing the operator a different list from the one their tick lands in
+    // is the seam this whole feature could fail at.
+    let live_items = resolve_site_check_items(&activations);
+    // A month already ticked keeps the list it was ticked against, so editing
+    // a plan mid-month never rescores what somebody already signed off.
+    let check_rows: Vec<ServiceCheckRow> = checks
+        .items_now(&period, &live_items)
         .into_iter()
         .map(|item| {
-            let mark = checks.month(&period).and_then(|m| m.get(item.as_str()));
+            let mark = checks.month(&period).and_then(|m| m.get(&item.id));
             ServiceCheckRow {
-                id: item.as_str().to_string(),
-                label: item.label().to_string(),
-                detail: item.detail().to_string(),
+                id: item.id,
+                label: item.label,
+                detail: item.detail,
                 checked: mark.is_some(),
                 by: mark.map(|m| m.by.clone()).unwrap_or_default(),
                 at: mark
@@ -899,13 +1078,17 @@ async fn render_card(
         })
         .collect();
     let checks_done = check_rows.iter().filter(|r| r.checked).count();
+    let check_rows_total = check_rows.len();
     // A month with nothing ticked at all is far more likely to be "this site
     // was never on a plan then" than "we skipped it", so it is not nagged
     // about; a month someone STARTED and left half-done is the real signal.
-    let prev_outstanding = if checks.month(&prev).is_some() {
-        checks.outstanding(&prev).len()
+    let (prev_outstanding, prev_total) = if checks.month(&prev).is_some() {
+        (
+            checks.outstanding_defs(&prev).len(),
+            checks.items_for(&prev).len(),
+        )
     } else {
-        0
+        (0, 0)
     };
 
     let tpl = PackagesCardTpl {
@@ -913,10 +1096,11 @@ async fn render_card(
         check_period: period.clone(),
         check_period_label: month_label(&period),
         checks: check_rows,
+        checks_total: check_rows_total,
         checks_done,
-        checks_total: hyperion_types::care_check::ServiceCheckItem::ALL.len(),
         prev_period_label: month_label(&prev),
         prev_outstanding,
+        prev_total,
         show_checks: !held.is_empty(),
         selector,
         csrf_token: super::session_csrf_token(state, ctx),
@@ -929,6 +1113,47 @@ async fn render_card(
         error,
     };
     Ok(Html(tpl.render()?).into_response())
+}
+
+/// The site's ACTIVE activations, from the node that owns it.
+///
+/// `None` when the node did not answer — which a caller must not read as
+/// "this site holds nothing": on this card that is the difference between a
+/// silent collapse and rendering a cancelled entitlement.
+async fn fetch_activations(
+    state: &SharedState,
+    sel: HostingSelector,
+    owner: Option<&str>,
+) -> Option<Vec<HostingPackage>> {
+    match crate::dispatcher::dispatch_to_node(
+        state,
+        owner,
+        Request::PackageActivations {
+            sel,
+            history: false,
+        },
+    )
+    .await
+    {
+        Ok(RpcResponse::PackageActivations(v)) => Some(v),
+        _ => None,
+    }
+}
+
+/// The checklist a site is on, from the packages it HOLDS.
+///
+/// Union across activations, deduped by id, built-in four when none of them
+/// says anything. Only ACTIVE activations count: a cancelled plan is not a
+/// promise, and its items must stop being asked for the month after it ends.
+pub fn resolve_site_check_items(
+    activations: &[HostingPackage],
+) -> Vec<hyperion_types::care_check::CheckItemDef> {
+    let snapshots: Vec<&str> = activations
+        .iter()
+        .filter(|a| a.state == hyperion_types::package::PackageState::Active)
+        .map(|a| a.check_items.as_str())
+        .collect();
+    hyperion_types::care_check::resolve_check_items(&snapshots)
 }
 
 fn build_held(
@@ -1342,6 +1567,88 @@ mod tests {
         assert_eq!(lines[1].live_label, "currently weekly");
     }
 
+    /// The create form is pre-filled with the built-ins. Saved untouched,
+    /// that has to come back as the BUILT-INS — same ids, so
+    /// `validate_check_items` collapses it to "" — and not as four look-alike
+    /// custom items whose ids nothing in 24 months of history matches.
+    #[test]
+    fn the_prefilled_builtin_list_round_trips_to_the_builtin_ids() {
+        use hyperion_types::care_check::{builtin_check_items, parse_check_items};
+        let text = check_items_to_text(&builtin_check_items());
+        // `current` on the create path is `parse_check_items("")`, i.e. the
+        // built-ins — which is what makes the label match find their ids.
+        let back = parse_check_items_text(&text, &parse_check_items(""));
+        assert_eq!(back, builtin_check_items());
+        // Including the one id with an underscore, which the package slug
+        // rule would have rewritten to `post-update`.
+        assert!(back.iter().any(|i| i.id == "post_update"));
+    }
+
+    /// Re-ordering, adding and deleting must leave every surviving item's id
+    /// alone — the id is what 24 months of ticks are filed under.
+    #[test]
+    fn editing_the_list_keeps_the_ids_of_the_items_that_stay() {
+        use hyperion_types::care_check::CheckItemDef;
+        let current = vec![
+            CheckItemDef {
+                id: "post_update".into(),
+                label: "Still working after updates".into(),
+                detail: String::new(),
+            },
+            CheckItemDef {
+                id: "gdpr-review".into(),
+                label: "GDPR review".into(),
+                detail: "Cookie banner".into(),
+            },
+        ];
+        // Re-ordered, one deleted, one added, one note edited, and one
+        // capitalisation fixed.
+        let text = "gdpr review | Cookie banner and the DPA\nStock feed | Ran the importer by hand";
+        let back = parse_check_items_text(text, &current);
+        assert_eq!(
+            back.iter().map(|i| i.id.as_str()).collect::<Vec<_>>(),
+            vec!["gdpr-review", "stock-feed"],
+            "a kept item keeps its id; a new one is slugged from its name"
+        );
+        assert_eq!(back[0].detail, "Cookie banner and the DPA");
+    }
+
+    /// A textarea posts CRLF; nothing else in the panel does. The same
+    /// mismatch silently forked every multi-line letter override once.
+    #[test]
+    fn crlf_and_blank_lines_and_comments_are_not_items() {
+        let back = parse_check_items_text(
+            "Render\r\n\r\n# a note to self\r\nForms | and their delivery\r\n   \r\n",
+            &[],
+        );
+        assert_eq!(
+            back.iter().map(|i| i.label.as_str()).collect::<Vec<_>>(),
+            vec!["Render", "Forms"]
+        );
+        assert_eq!(back[1].detail, "and their delivery");
+    }
+
+    /// Two lines naming the same check are one check, not a pair that can
+    /// disagree about whether it was done.
+    #[test]
+    fn a_repeated_line_is_one_item() {
+        let back = parse_check_items_text("GDPR review\nGDPR  review | again", &[]);
+        assert_eq!(back.len(), 1);
+    }
+
+    #[test]
+    fn a_name_with_no_letters_is_not_an_item() {
+        // Would otherwise slug to "", and an empty id is a mark filed under
+        // nothing.
+        assert!(parse_check_items_text("---\n|||\n   ", &[]).is_empty());
+    }
+
+    #[test]
+    fn czech_names_slug_without_diacritics() {
+        let back = parse_check_items_text("Kontrola záloh a obnovy", &[]);
+        assert_eq!(back[0].id, "kontrola-zaloh-a-obnovy");
+    }
+
     #[test]
     fn unreadable_node_never_renders_a_tick() {
         let f = PackageFeatures {
@@ -1381,6 +1688,82 @@ mod tests {
         assert_eq!(price_major(None), "");
     }
 
+    /// Saving the Edit form untouched must not change the plan's checklist.
+    ///
+    /// The class of bug this guards is the one that has landed twice: a form
+    /// round-trip that looks lossless and is not, so fixing a typo in the
+    /// package name quietly rewrites something the customer is billed
+    /// against. Both directions matter — a plan on the built-ins must stay on
+    /// the built-ins (stored as ""), and a custom plan must come back
+    /// byte-identical.
+    #[test]
+    fn saving_the_edit_form_untouched_changes_nothing() {
+        use hyperion_types::care_check::{check_items_to_json, parse_check_items, CheckItemDef};
+        let form = |text: Option<String>| PackageForm {
+            name: "Péče Plus".into(),
+            slug: String::new(),
+            description: String::new(),
+            enabled: Some("1".into()),
+            price_major: String::new(),
+            price_currency: String::new(),
+            price_interval: String::new(),
+            feat_wp_auto_update: "leave".into(),
+            feat_integrity_scan: "leave".into(),
+            feat_monitoring: "leave".into(),
+            feat_hardening: "leave".into(),
+            feat_backup_cadence: "leave".into(),
+            feat_report_cadence: Some("leave".into()),
+            letters_lang: Some(String::new()),
+            check_items_text: text,
+        };
+
+        // A plan on the built-ins: the textarea shows them, and saving them
+        // back has to resolve to the built-in IDS so the agent collapses it
+        // to "" — not to four look-alikes with slugged-from-label ids.
+        let stored = "";
+        let shown = check_items_to_text(&parse_check_items(stored));
+        let out = form(Some(shown))
+            .into_input(None, None, Some(stored))
+            .expect("input");
+        assert_eq!(
+            parse_check_items(&out.check_items),
+            hyperion_types::care_check::builtin_check_items()
+        );
+
+        // A custom plan comes back byte-identical.
+        let custom = check_items_to_json(&[
+            CheckItemDef {
+                id: "gdpr-review".into(),
+                label: "GDPR revize".into(),
+                detail: "Cookie lišta a DPA".into(),
+            },
+            CheckItemDef {
+                id: "stock-feed".into(),
+                label: "Import skladu".into(),
+                detail: String::new(),
+            },
+        ]);
+        let shown = check_items_to_text(&parse_check_items(&custom));
+        let out = form(Some(shown))
+            .into_input(None, None, Some(&custom))
+            .expect("input");
+        assert_eq!(out.check_items, custom);
+
+        // A form that does not carry the field at all leaves the stored list
+        // alone. Absent must never mean "clear it".
+        let out = form(None)
+            .into_input(None, None, Some(&custom))
+            .expect("input");
+        assert_eq!(out.check_items, custom);
+
+        // A form that carries it EMPTY does mean "clear it" — which the agent
+        // reads back as the built-in four, never as a plan promising nothing.
+        let out = form(Some(String::new()))
+            .into_input(None, None, Some(&custom))
+            .expect("input");
+        assert_eq!(out.check_items, "");
+    }
+
     #[test]
     fn an_orphaned_activation_still_shows_its_price() {
         let a = HostingPackage {
@@ -1389,6 +1772,7 @@ mod tests {
             package_id: None,
             package_name: String::new(),
             letters_lang: String::new(),
+            check_items: String::new(),
             price_minor: Some(49_000),
             price_currency: Some("Kč".into()),
             price_interval: Some("monthly".into()),
@@ -1503,18 +1887,32 @@ pub async fn post_service_check(
         Ok(s) => s,
         Err(r) => return Ok(r),
     };
-    let Some(item) = hyperion_types::care_check::ServiceCheckItem::parse(&form.item) else {
+    let (detail, owner) = super::hostings::find_hosting_anywhere(&state, sel.clone()).await?;
+    // The list this site is actually on, resolved exactly the way the card
+    // renders it. A tick is checked against it: an id the site is not asked
+    // for would sit in the record for months, counted by nothing and shown by
+    // nothing, and would surface only in a customer's report.
+    //
+    // A node that cannot be asked what the site holds must therefore not be
+    // told a tick at all. Guessing the built-in four here would file the
+    // operator's work under a checklist their customer never bought.
+    let Some(activations) = fetch_activations(&state, sel, owner.as_deref()).await else {
         return render_card(
             &state,
             &ctx,
             form.selector.clone(),
             None,
-            Some("unknown checklist item".into()),
+            Some(
+                "The owning node did not answer with this site's care plans, so the tick was not \
+                 saved — there is no way to tell which checklist it belongs to. Try again once \
+                 the node is reachable."
+                    .into(),
+            ),
             None,
         )
         .await;
     };
-    let (detail, owner) = super::hostings::find_hosting_anywhere(&state, sel).await?;
+    let live = resolve_site_check_items(&activations);
     // Read-modify-write over one JSON blob, so a read we could not make must
     // NOT become a write: it would put an empty checklist over the whole
     // month's record. Refusing costs one click; the alternative silently
@@ -1544,10 +1942,33 @@ pub async fn post_service_check(
     } else {
         form.period.trim().to_string()
     };
+    // Freeze the month against the list as it stands NOW, before the first
+    // tick lands in it. From here the plan can be edited freely: this month
+    // keeps its denominator and its wording, and the change applies from the
+    // next one. Once-only, so a second tick this month does not re-freeze.
+    checks.freeze_items(&period, &live);
+    // Scored against the frozen list, which for a month already under way is
+    // what the operator was looking at — not what the plan says today.
+    let allowed = checks.items_now(&period, &live);
+    let item_id = form.item.trim();
+    if !allowed.iter().any(|i| i.id == item_id) {
+        return render_card(
+            &state,
+            &ctx,
+            form.selector.clone(),
+            None,
+            Some(format!(
+                "\"{item_id}\" is not on this site's checklist for {period} — the care plan may \
+                 have been edited since this page was loaded. Reload and try again."
+            )),
+            None,
+        )
+        .await;
+    }
     let who = ctx.username.clone();
-    checks.set(
+    checks.set_id(
         &period,
-        item,
+        item_id,
         form.checked.is_some(),
         &who,
         form.note.trim(),

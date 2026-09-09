@@ -139,6 +139,12 @@
      promises them without recording that anybody did is selling something
      nobody delivers.
 
+     WHICH items appear here comes from the care plan the site holds, not
+     from this page: a site on two plans is asked for the union, and a site
+     whose plans say nothing gets the built-in four. A month somebody has
+     already started is scored against the list it was ticked against, so
+     editing a plan never rewrites a month that is already signed off.
+
      Untouched is UNDONE, never "probably fine". That is the whole point:
      an unlooked-at month has to be visible here before the customer finds
      it. Shown only when a package is actually held — an operator who sells
@@ -163,7 +169,7 @@
       <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
       <div class="flash-body">
         {{ prev_period_label }} closed with {{ prev_outstanding }} of
-        {{ checks_total }} still unchecked. That month cannot be completed any
+        {{ prev_total }} still unchecked. That month cannot be completed any
         more — it is here so it is not the customer who notices.
       </div>
     </div>
@@ -184,7 +190,9 @@
                  onchange="this.form.requestSubmit()">
           <span>
             <span style="font-weight:600;font-size:0.88rem">{{ c.label }}</span>
+            {%- if !c.detail.is_empty() %}
             <span class="text-soft small" style="display:block;line-height:1.5">{{ c.detail }}</span>
+            {%- endif %}
             {% if c.checked %}
               <span class="text-soft small" style="display:block;margin-top:0.2rem">
                 {% if c.by.is_empty() %}Checked {{ c.at }}{% else %}Checked by {{ c.by }} {{ c.at }}{% endif %}{% if !c.note.is_empty() %} — {{ c.note }}{% endif %}
@@ -208,6 +216,11 @@
       bookkeeping, not a measurement, and it says so wherever it is shown.
       Un-ticking is allowed: a mark made by mistake has to be retractable or
       the record stops meaning anything.
+      {%- if can_manage %}
+      What is on this list comes from the care plan — edit it under
+      <a href="/packages">Care packages</a>. A month already ticked keeps the
+      list it was ticked against.
+      {%- endif %}
     </p>
   </div>
   {% endif %}

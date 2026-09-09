@@ -1,18 +1,31 @@
 //! The monthly service check: the part of a care plan a machine cannot do.
 //!
 //! Most of what a care plan sells, hyperion does by itself and can prove —
-//! backups ran, updates applied, malware scan came back clean. Four items on
-//! the list are not like that. Whether the gallery still renders, whether the
-//! contact form's mail actually arrives, whether the site still feels fast,
-//! whether last week's plugin update broke a layout: those need a person to
-//! look, and a plan that promises them without recording that anybody did is
-//! selling something nobody delivers.
+//! backups ran, updates applied, malware scan came back clean. Some items are
+//! not like that. Whether the gallery still renders, whether the contact
+//! form's mail actually arrives, whether the site still feels fast, whether
+//! last week's plugin update broke a layout: those need a person to look, and
+//! a plan that promises them without recording that anybody did is selling
+//! something nobody delivers.
 //!
 //! So each site carries a per-month checklist. It is bookkeeping, not
 //! measurement, and it says so: a tick means "an operator confirmed they did
 //! this", nothing more. Untouched is UNDONE — never "probably fine" — because
 //! the whole point is to make an unlooked-at month visible before the customer
 //! finds it.
+//!
+//! WHICH items are on the list belongs to the CARE PACKAGE, not to the site.
+//! Four are built in and are what every plan gets by default; an operator
+//! whose plan promises something else — a GDPR review, a stock feed, an
+//! uptime report the customer signed for — edits the plan's list, and every
+//! site on that plan is asked the same question. That is the point: a list
+//! per SITE would give every site its own private definition of "checked",
+//! and "is this month done?" would stop having an answer across the estate,
+//! which is the one question the dashboard exists to answer.
+//!
+//! A month, once ticked, keeps the list it was ticked against — see
+//! [`CareServiceChecks::applied`]. Editing a plan changes what gets asked
+//! next month; it never rescores a month somebody already signed off.
 //!
 //! Stored as one JSON value in `hosting_kv` under `care_service_checks`, on
 //! the node that owns the hosting, which is also where the customer's report
@@ -21,12 +34,12 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-/// One thing a person has to look at every month.
+/// The four items the product has always shipped.
 ///
-/// Deliberately a closed set. An operator inventing their own items per site
-/// gives every site a different definition of "checked", and then "is this
-/// month done?" has no answer across the estate — which is the one question
-/// the dashboard has to answer.
+/// A closed set, and it stays closed: these are the ones the customer letter
+/// has translated wording for, and the ones a plan gets when it says nothing.
+/// An operator's own items are [`CheckItemDef`]s on the care package — they
+/// carry their own label because no letter pack can know it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ServiceCheckItem {
@@ -106,17 +119,136 @@ pub struct ServiceCheckMark {
     pub note: String,
 }
 
+/// One item on a care plan's monthly checklist.
+///
+/// The built-in four are the default; a plan may replace them wholesale. The id
+/// is what a tick is stored under and is therefore permanent for that plan: it
+/// appears in 24 months of history, so renaming the LABEL is free and changing
+/// the id would orphan every mark that used it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckItemDef {
+    pub id: String,
+    pub label: String,
+    #[serde(default)]
+    pub detail: String,
+}
+
+/// Parse a plan's stored `check_items`, falling back to the built-in four.
+///
+/// Empty, absent or unparseable all mean "the built-in list" — the same answer
+/// every package gave before this existed, and the one that cannot silently
+/// reduce what an operator promised a customer.
+pub fn parse_check_items(raw: &str) -> Vec<CheckItemDef> {
+    let kept = parse_check_items_raw(raw);
+    if kept.is_empty() {
+        return builtin_check_items();
+    }
+    kept
+}
+
+/// Parse without the fallback — an empty result means "this plan says
+/// nothing", which is what [`resolve_check_items`] needs to tell apart from
+/// "this plan asks for the built-in four".
+pub fn parse_check_items_raw(raw: &str) -> Vec<CheckItemDef> {
+    let parsed: Vec<CheckItemDef> = serde_json::from_str(raw.trim()).unwrap_or_default();
+    parsed
+        .into_iter()
+        .filter(|i| !i.id.trim().is_empty() && !i.label.trim().is_empty())
+        .collect()
+}
+
+/// The checklist for a SITE, from the `check_items` of every package it holds.
+///
+/// A site can hold two packages, so the answer is their union in the order
+/// given, first definition of an id winning. Nothing from any of them means
+/// the built-in four: a site on a plan is never asked for an empty list, or
+/// "0 of 0 checked" would read as a finished month on the dashboard.
+pub fn resolve_check_items(snapshots: &[&str]) -> Vec<CheckItemDef> {
+    let mut out: Vec<CheckItemDef> = Vec::new();
+    for raw in snapshots {
+        for item in parse_check_items_raw(raw) {
+            if !out.iter().any(|k| k.id == item.id) {
+                out.push(item);
+            }
+        }
+    }
+    if out.is_empty() {
+        return builtin_check_items();
+    }
+    out
+}
+
+/// Turn a list of definitions back into the stored JSON.
+pub fn check_items_to_json(items: &[CheckItemDef]) -> String {
+    serde_json::to_string(items).unwrap_or_default()
+}
+
+/// The four the product has always shipped, as definitions.
+pub fn builtin_check_items() -> Vec<CheckItemDef> {
+    ServiceCheckItem::ALL
+        .into_iter()
+        .map(|i| CheckItemDef {
+            id: i.as_str().to_string(),
+            label: i.label().to_string(),
+            detail: i.detail().to_string(),
+        })
+        .collect()
+}
+
 /// Everything ticked in one month, keyed by item id.
 pub type ServiceCheckMonth = BTreeMap<String, ServiceCheckMark>;
 
-/// The whole history, keyed by `YYYY-MM`.
+/// The whole history, keyed by `YYYY-MM`, plus which items each month was
+/// measured against.
 ///
-/// `#[serde(transparent)]` so the stored JSON is just the map — a shape that
-/// stays readable in the database and survives a future field being added
-/// beside it.
+/// It WAS `#[serde(transparent)]` over the bare map. That shape could not carry
+/// the frozen item list, and changing it is why `parse` handles both — a
+/// silent `unwrap_or_default` on the old shape would have deleted 24 months of
+/// record from every site on upgrade.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct CareServiceChecks(pub BTreeMap<String, ServiceCheckMonth>);
+pub struct CareServiceChecks {
+    /// The marks themselves, `YYYY-MM` → id → who/when/note. Byte-identical to
+    /// what every version since v0.54 wrote.
+    pub periods: BTreeMap<String, ServiceCheckMonth>,
+    /// WHICH items applied in each period, frozen the first time that period
+    /// is ticked.
+    ///
+    /// Without this, removing an item from a care plan would rewrite history:
+    /// a March that read "3 of 4" would silently become "3 of 3" — a record
+    /// nobody re-checked, changed after the fact, and the exact thing a
+    /// dispute with a customer turns on. A period with no entry here predates
+    /// the feature and means the built-in four.
+    ///
+    /// Whole definitions, not ids: the LABEL is the operator's own wording and
+    /// lives on the care package, which may be edited or deleted long before
+    /// this month is read back. Storing ids alone would leave a customer's
+    /// year-old report naming an item `gdpr-2025` because the only place that
+    /// knew what it was called has since changed its mind.
+    #[serde(default)]
+    pub applied: BTreeMap<String, Vec<CheckItemDef>>,
+}
+
+/// What the stored JSON may look like on disk.
+///
+/// `parse` used to be `from_str(raw).unwrap_or_default()`, which is right for
+/// corruption — "nothing has been checked" is the failure that shows up as work
+/// outstanding — and catastrophic for a SHAPE CHANGE: every site's 24 months
+/// would vanish silently on upgrade. So the legacy shape is a case, not an
+/// accident.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum StoredChecks {
+    Current(CareServiceChecksRepr),
+    /// v0.54 through v0.61: a bare `YYYY-MM` → marks object.
+    Legacy(BTreeMap<String, ServiceCheckMonth>),
+}
+
+#[derive(Deserialize)]
+struct CareServiceChecksRepr {
+    periods: BTreeMap<String, ServiceCheckMonth>,
+    #[serde(default)]
+    applied: BTreeMap<String, Vec<CheckItemDef>>,
+}
 
 /// How many months of history to keep.
 ///
@@ -131,7 +263,19 @@ impl CareServiceChecks {
     /// one that shows up on the dashboard as work outstanding, not the one
     /// that quietly marks a month done.
     pub fn parse(raw: &str) -> Self {
-        serde_json::from_str(raw).unwrap_or_default()
+        match serde_json::from_str::<StoredChecks>(raw) {
+            Ok(StoredChecks::Current(r)) => Self {
+                periods: r.periods,
+                applied: r.applied,
+            },
+            // A blob written before the item list was frozen. Its periods all
+            // mean the built-in four, which `items_for` supplies.
+            Ok(StoredChecks::Legacy(periods)) => Self {
+                periods,
+                applied: BTreeMap::new(),
+            },
+            Err(_) => Self::default(),
+        }
     }
 
     pub fn to_json(&self) -> String {
@@ -139,7 +283,7 @@ impl CareServiceChecks {
     }
 
     pub fn month(&self, period: &str) -> Option<&ServiceCheckMonth> {
-        self.0.get(period)
+        self.periods.get(period)
     }
 
     pub fn is_checked(&self, period: &str, item: ServiceCheckItem) -> bool {
@@ -148,20 +292,126 @@ impl CareServiceChecks {
             .unwrap_or(false)
     }
 
-    /// Items still outstanding for `period`, in list order.
-    pub fn outstanding(&self, period: &str) -> Vec<ServiceCheckItem> {
-        ServiceCheckItem::ALL
+    /// The items that applied in `period`.
+    ///
+    /// The FROZEN list where one was recorded, the built-in four otherwise —
+    /// which is what every period written before v0.62 means. This is the only
+    /// place that decides what a month was scored against, so a plan edited
+    /// today cannot change what March said.
+    ///
+    /// Note what it does NOT take: the plan's CURRENT list. A caller that
+    /// wants "what should this site be asked THIS month" wants
+    /// [`Self::items_now`], which falls back to the live list for a month
+    /// nobody has ticked yet.
+    pub fn items_for(&self, period: &str) -> Vec<CheckItemDef> {
+        match self.applied.get(period) {
+            Some(items) if !items.is_empty() => items.clone(),
+            _ => builtin_check_items(),
+        }
+    }
+
+    /// What `period` is scored against right now: the frozen list once the
+    /// month has been ticked, otherwise `live` — the site's current plan.
+    ///
+    /// The two cases are the whole design. Before the first tick a month is
+    /// still a question, so a plan edited today changes it. After the first
+    /// tick it is a record, and nothing edits a record.
+    pub fn items_now(&self, period: &str, live: &[CheckItemDef]) -> Vec<CheckItemDef> {
+        match self.applied.get(period) {
+            Some(items) if !items.is_empty() => items.clone(),
+            _ if !live.is_empty() => live.to_vec(),
+            _ => builtin_check_items(),
+        }
+    }
+
+    /// Freeze the item list for `period`, once.
+    ///
+    /// Called the first time a month is ticked. Deliberately does NOT
+    /// overwrite: the list is what applied when the work was done, and a plan
+    /// edited mid-month must not retroactively add an item nobody was asked to
+    /// do — or remove one they already ticked.
+    pub fn freeze_items(&mut self, period: &str, items: &[CheckItemDef]) {
+        if items.is_empty() {
+            return;
+        }
+        self.applied
+            .entry(period.to_string())
+            .or_insert_with(|| items.to_vec());
+    }
+
+    /// Ids still outstanding for `period`, in list order.
+    pub fn outstanding_ids(&self, period: &str) -> Vec<String> {
+        self.outstanding_defs(period)
             .into_iter()
-            .filter(|i| !self.is_checked(period, *i))
+            .map(|i| i.id)
+            .collect()
+    }
+
+    /// Items still outstanding for `period`, in list order.
+    pub fn outstanding_defs(&self, period: &str) -> Vec<CheckItemDef> {
+        let checked = self.month(period);
+        self.items_for(period)
+            .into_iter()
+            .filter(|i| !checked.map(|m| m.contains_key(&i.id)).unwrap_or(false))
+            .collect()
+    }
+
+    /// Items still outstanding for `period`, scored against `live` while the
+    /// month is still open. See [`Self::items_now`].
+    pub fn outstanding_now(&self, period: &str, live: &[CheckItemDef]) -> Vec<CheckItemDef> {
+        let checked = self.month(period);
+        self.items_now(period, live)
+            .into_iter()
+            .filter(|i| !checked.map(|m| m.contains_key(&i.id)).unwrap_or(false))
             .collect()
     }
 
     pub fn is_complete(&self, period: &str) -> bool {
-        self.outstanding(period).is_empty()
+        self.outstanding_ids(period).is_empty()
     }
 
     pub fn done_count(&self, period: &str) -> usize {
-        ServiceCheckItem::ALL.len() - self.outstanding(period).len()
+        self.items_for(period).len() - self.outstanding_ids(period).len()
+    }
+
+    /// How many items the period was measured against — its denominator.
+    pub fn total_count(&self, period: &str) -> usize {
+        self.items_for(period).len()
+    }
+
+    /// Record (or clear) a mark by raw id, so a custom item works exactly like
+    /// a built-in one.
+    pub fn set_id(
+        &mut self,
+        period: &str,
+        id: &str,
+        checked: bool,
+        by: &str,
+        note: &str,
+        now: i64,
+    ) {
+        if checked {
+            let month = self.periods.entry(period.to_string()).or_default();
+            match month.get_mut(id) {
+                Some(existing) => existing.note = note.to_string(),
+                None => {
+                    month.insert(
+                        id.to_string(),
+                        ServiceCheckMark {
+                            at: now,
+                            by: by.to_string(),
+                            note: note.to_string(),
+                        },
+                    );
+                }
+            }
+        } else if let Some(m) = self.periods.get_mut(period) {
+            m.remove(id);
+            if m.is_empty() {
+                self.periods.remove(period);
+            }
+        }
+        self.trim();
     }
 
     /// Record (or clear) one item, then trim the history.
@@ -179,7 +429,7 @@ impl CareServiceChecks {
         now: i64,
     ) {
         if checked {
-            let month = self.0.entry(period.to_string()).or_default();
+            let month = self.periods.entry(period.to_string()).or_default();
             match month.get_mut(item.as_str()) {
                 // Already ticked: this is a note edit, not a new claim. The
                 // record of WHO looked and WHEN is the whole value of the
@@ -197,10 +447,10 @@ impl CareServiceChecks {
                     );
                 }
             }
-        } else if let Some(m) = self.0.get_mut(period) {
+        } else if let Some(m) = self.periods.get_mut(period) {
             m.remove(item.as_str());
             if m.is_empty() {
-                self.0.remove(period);
+                self.periods.remove(period);
             }
         }
         self.trim();
@@ -210,11 +460,22 @@ impl CareServiceChecks {
     /// `YYYY-MM` keys chronologically, which is the one thing that makes
     /// this a two-line operation rather than a date-parsing exercise.
     fn trim(&mut self) {
-        while self.0.len() > KEEP_MONTHS {
-            let Some(oldest) = self.0.keys().next().cloned() else {
+        while self.periods.len() > KEEP_MONTHS {
+            let Some(oldest) = self.periods.keys().next().cloned() else {
                 break;
             };
-            self.0.remove(&oldest);
+            self.periods.remove(&oldest);
+            self.applied.remove(&oldest);
+        }
+        // `applied` gets its own bound. Un-ticking a month's last item drops
+        // the period but deliberately KEEPS its frozen list, so that a re-tick
+        // lands on the same denominator — which means `applied` can outlive
+        // `periods` and would otherwise grow without a ceiling.
+        while self.applied.len() > KEEP_MONTHS {
+            let Some(oldest) = self.applied.keys().next().cloned() else {
+                break;
+            };
+            self.applied.remove(&oldest);
         }
     }
 }
@@ -249,6 +510,201 @@ pub fn previous_period(period: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    /// A blob written by any version since v0.54 must survive the shape change.
+    ///
+    /// `parse` was `from_str(raw).unwrap_or_default()` — right for corruption,
+    /// catastrophic for a shape change: every site's 24 months would have
+    /// vanished on upgrade, silently, with the dashboard simply showing more
+    /// work outstanding. Nobody would have noticed until a customer asked about
+    /// a month they were billed for.
+    #[test]
+    fn a_pre_v062_blob_keeps_every_month() {
+        let legacy = r#"{
+            "2026-03": {"render": {"at": 100, "by": "kevin", "note": "ok"},
+                        "forms":  {"at": 101, "by": "kevin", "note": ""}},
+            "2026-04": {"speed":  {"at": 200, "by": "kevin", "note": ""}}
+        }"#;
+        let c = CareServiceChecks::parse(legacy);
+        assert_eq!(c.periods.len(), 2, "both months must survive: {c:?}");
+        assert!(c.is_checked("2026-03", ServiceCheckItem::Render));
+        assert!(c.is_checked("2026-04", ServiceCheckItem::Speed));
+
+        // No frozen list on an old period ⇒ the built-in four, which is what
+        // those months were actually measured against.
+        assert_eq!(c.total_count("2026-03"), 4);
+        assert_eq!(c.done_count("2026-03"), 2);
+        assert_eq!(c.done_count("2026-04"), 1);
+
+        // And it round-trips into the new shape without losing anything.
+        let again = CareServiceChecks::parse(&c.to_json());
+        assert_eq!(again, c, "a save after an upgrade must not drop history");
+    }
+
+    /// Build a list of definitions from ids, for tests that only care about
+    /// which items applied.
+    fn defs(ids: &[&str]) -> Vec<CheckItemDef> {
+        ids.iter()
+            .map(|id| CheckItemDef {
+                id: (*id).to_string(),
+                label: id.to_uppercase(),
+                detail: String::new(),
+            })
+            .collect()
+    }
+
+    /// Removing an item from a care plan must not rewrite a month nobody
+    /// re-checked.
+    #[test]
+    fn a_frozen_month_keeps_its_denominator_when_the_plan_changes() {
+        let mut c = CareServiceChecks::default();
+        let march = defs(&["render", "forms", "speed", "post_update"]);
+        c.freeze_items("2026-03", &march);
+        c.set_id("2026-03", "render", true, "kevin", "", 1);
+        c.set_id("2026-03", "forms", true, "kevin", "", 2);
+        c.set_id("2026-03", "speed", true, "kevin", "", 3);
+        assert_eq!((c.done_count("2026-03"), c.total_count("2026-03")), (3, 4));
+
+        // The operator now trims the plan to two items and adds a custom one.
+        let april = defs(&["render", "forms", "backup_drill"]);
+        c.freeze_items("2026-04", &april);
+        assert_eq!(
+            (c.done_count("2026-03"), c.total_count("2026-03")),
+            (3, 4),
+            "March must still read 3 of 4"
+        );
+        assert_eq!(c.total_count("2026-04"), 3);
+
+        // Freezing is once-only: a plan edited mid-month cannot retroactively
+        // add work nobody was asked to do.
+        c.freeze_items("2026-04", &march);
+        assert_eq!(
+            c.total_count("2026-04"),
+            3,
+            "the list is frozen, not latest"
+        );
+    }
+
+    /// A month still open follows the plan; a month already ticked does not.
+    #[test]
+    fn a_plan_edit_reaches_next_month_and_not_last_month() {
+        let mut c = CareServiceChecks::default();
+        let old_plan = defs(&["render", "forms"]);
+        c.freeze_items("2026-03", &old_plan);
+        c.set_id("2026-03", "render", true, "kevin", "", 1);
+
+        let new_plan = defs(&["render", "forms", "gdpr"]);
+        assert_eq!(
+            c.items_now("2026-03", &new_plan).len(),
+            2,
+            "a month already ticked keeps its own list"
+        );
+        assert_eq!(
+            c.items_now("2026-04", &new_plan).len(),
+            3,
+            "a month nobody has touched follows the plan as it stands"
+        );
+        // And a site on no plan at all still gets asked something: "0 of 0"
+        // renders as a finished month.
+        assert_eq!(c.items_now("2026-04", &[]).len(), 4);
+    }
+
+    /// The frozen list carries the WORDING, so a rename cannot rewrite what a
+    /// customer was told last month.
+    #[test]
+    fn a_frozen_month_keeps_the_wording_it_was_ticked_with() {
+        let mut c = CareServiceChecks::default();
+        c.freeze_items(
+            "2026-03",
+            &[CheckItemDef {
+                id: "gdpr".into(),
+                label: "GDPR review".into(),
+                detail: "Checked the cookie banner".into(),
+            }],
+        );
+        c.set_id("2026-03", "gdpr", true, "kevin", "", 1);
+        // The plan is reworded — a different label, and the operator may well
+        // have deleted the package outright by the time this is read back.
+        let items = c.items_for("2026-03");
+        assert_eq!(items[0].label, "GDPR review");
+        assert_eq!(items[0].detail, "Checked the cookie banner");
+        // Including across a save/load, which is where storing bare ids would
+        // have lost it.
+        let round = CareServiceChecks::parse(&c.to_json());
+        assert_eq!(round.items_for("2026-03")[0].label, "GDPR review");
+    }
+
+    /// Two plans on one site are asked as one list, without asking twice for
+    /// the item they share.
+    #[test]
+    fn two_plans_on_one_site_make_one_list() {
+        let a = check_items_to_json(&defs(&["render", "forms"]));
+        let b = check_items_to_json(&defs(&["forms", "gdpr"]));
+        let ids: Vec<String> = resolve_check_items(&[&a, &b])
+            .into_iter()
+            .map(|i| i.id)
+            .collect();
+        assert_eq!(ids, vec!["render", "forms", "gdpr"]);
+
+        // Nothing from either plan means the built-ins, never an empty list.
+        assert_eq!(resolve_check_items(&["", ""]).len(), 4);
+        assert_eq!(resolve_check_items(&[]).len(), 4);
+        // Including when the stored value is garbage: an unreadable plan must
+        // not silently reduce what it promised.
+        assert_eq!(resolve_check_items(&["{oops", "null"]).len(), 4);
+    }
+
+    /// `applied` outlives `periods` by design, so it needs its own ceiling.
+    #[test]
+    fn the_frozen_lists_do_not_grow_without_bound() {
+        let mut c = CareServiceChecks::default();
+        let items = defs(&["render"]);
+        for y in 2000..2010 {
+            for m in 1..=12 {
+                let p = format!("{y}-{m:02}");
+                c.freeze_items(&p, &items);
+                c.set_id(&p, "render", true, "kevin", "", 1);
+                // Un-tick, which drops the period but keeps the frozen list.
+                c.set_id(&p, "render", false, "kevin", "", 2);
+            }
+        }
+        assert!(
+            c.applied.len() <= KEEP_MONTHS,
+            "120 months of frozen lists survived the trim: {}",
+            c.applied.len()
+        );
+    }
+
+    /// A custom id ticks and unticks exactly like a built-in one.
+    #[test]
+    fn a_custom_item_behaves_like_a_built_in_one() {
+        let mut c = CareServiceChecks::default();
+        let items = defs(&["render", "backup_drill"]);
+        c.freeze_items("2026-05", &items);
+        assert_eq!(
+            c.outstanding_ids("2026-05"),
+            vec!["render".to_string(), "backup_drill".to_string()]
+        );
+
+        c.set_id(
+            "2026-05",
+            "backup_drill",
+            true,
+            "kevin",
+            "restored to staging",
+            9,
+        );
+        assert_eq!(c.outstanding_ids("2026-05"), vec!["render".to_string()]);
+        assert!(!c.is_complete("2026-05"));
+
+        c.set_id("2026-05", "render", true, "kevin", "", 10);
+        assert!(c.is_complete("2026-05"));
+
+        // Un-ticking stays destructive and possible — a claim made by mistake
+        // has to be retractable or the record stops meaning anything.
+        c.set_id("2026-05", "backup_drill", false, "kevin", "", 11);
+        assert_eq!(c.done_count("2026-05"), 1);
+    }
+
     use super::*;
 
     #[test]
@@ -274,7 +730,7 @@ mod tests {
         );
         assert!(c.is_checked("2026-09", ServiceCheckItem::Render));
         assert_eq!(c.done_count("2026-09"), 1);
-        assert_eq!(c.outstanding("2026-09").len(), 3);
+        assert_eq!(c.outstanding_ids("2026-09").len(), 3);
 
         let round = CareServiceChecks::parse(&c.to_json());
         assert_eq!(round, c);
@@ -332,9 +788,9 @@ mod tests {
                 );
             }
         }
-        assert_eq!(c.0.len(), KEEP_MONTHS);
-        assert_eq!(c.0.keys().next().unwrap(), "2024-01");
-        assert_eq!(c.0.keys().next_back().unwrap(), "2025-12");
+        assert_eq!(c.periods.len(), KEEP_MONTHS);
+        assert_eq!(c.periods.keys().next().unwrap(), "2024-01");
+        assert_eq!(c.periods.keys().next_back().unwrap(), "2025-12");
     }
 
     #[test]

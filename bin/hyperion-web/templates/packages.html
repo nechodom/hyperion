@@ -9,7 +9,7 @@
    touches what it explicitly forces, which is what lets a site hold a
    Backup package and a Monitoring package at the same time without each
    switching the other's feature off. #}
-{% macro feature_bundle(id_prefix, wp, integrity, monitoring, hardening, backup, report, lang) %}
+{% macro feature_bundle(id_prefix, wp, integrity, monitoring, hardening, backup, report, lang, checks) %}
 <div class="field-row">
   <div class="field">
     <label for="{{ id_prefix }}_wp">Automatic WordPress updates</label>
@@ -78,6 +78,28 @@
     <option value="cs"{% if lang == "cs" %} selected{% endif %}>Čeština</option>
   </select>
 </div>
+{# The monthly checklist this plan promises. Everything above is enforced by
+   the machine; this is the part only a person can do, so the only evidence it
+   happened is that somebody said so — which makes WHAT was promised worth
+   writing down per plan rather than assuming. #}
+<div class="field">
+  <label for="{{ id_prefix }}_checks">Monthly checks by hand <span class="hint">one per line, <code>name | what you actually did</code> — the note after the bar is optional</span></label>
+  <textarea id="{{ id_prefix }}_checks" name="check_items_text" rows="6" spellcheck="false" style="font-family:var(--mono);font-size:0.78rem;line-height:1.6">{{ checks }}</textarea>
+  <div class="text-soft small" style="margin-top:0.35rem;line-height:1.55">
+    Every site on this plan gets asked exactly these, every month, on its own
+    page. Leave the box empty to fall back to the four built-in checks.
+    <br>
+    Editing the list changes what gets asked from the next tick onwards. A
+    month somebody has already started keeps the list — and the wording — it
+    was ticked against, so nothing you change here rescores a month that is
+    already signed off. Rewording an item starts a new item for that reason:
+    the old one keeps the months it was ticked in.
+    <br>
+    Your own items appear in the customer's care report exactly as written
+    here — only the four built-in ones are translated — so write them in the
+    language selected above.
+  </div>
+</div>
 {% endmacro %}
 
 {% block main %}
@@ -86,10 +108,11 @@
     <h1>Care packages</h1>
     <div class="subtitle">
       What you sell on top of the hosting itself — managed updates, scanning,
-      monitoring, backups, hardening. A package records that a customer
-      <em>paid</em> for those, switches them on, and keeps them on: anything
-      switched off by hand comes back on the next enforcement pass. Activate one
-      from a hosting's detail page.
+      monitoring, backups, hardening, and the monthly checks you do by hand. A
+      package records that a customer <em>paid</em> for those, switches on the
+      ones a machine can switch on, and keeps them on: anything switched off by
+      hand comes back on the next enforcement pass. Activate one from a
+      hosting's detail page.
     </div>
   </div>
 </div>
@@ -151,6 +174,11 @@
           <td>
             {# Only forced features are listed. A package that says nothing
                about monitoring must not look like it sells monitoring. #}
+            {#- The monthly checks stand outside the tri-state bundle: they are
+                not something the machine switches on, they are what a person
+                promises to do. Shown as a count on every row, including the
+                ones that changed it, because "4 checks" and "7 checks" are
+                two different products. -#}
             {% if v.pkg.features.forced_count() == 0 %}
               <span class="pill warn" title="This package forces nothing — it sells no capability">sells nothing</span>
             {% else %}
@@ -165,6 +193,9 @@
                 {% if !v.pkg.features.report_cadence.is_leave() %}<span class="pill">report {{ v.pkg.features.report_cadence }}</span>{% endif %}
               </div>
             {% endif %}
+            <div style="margin-top:0.25rem">
+              <span class="pill" title="Checks an operator confirms by hand every month{% if v.pkg.check_items.is_empty() %} — the built-in list{% else %}, set on this plan{% endif %}">{{ v.check_count }} monthly check{% if v.check_count != 1 %}s{% endif %}{% if !v.pkg.check_items.is_empty() %} · custom{% endif %}</span>
+            </div>
           </td>
           <td>{{ v.pkg.pretty_price() }}</td>
           <td>
@@ -253,7 +284,8 @@
                                        v.pkg.features.hardening.as_str(),
                                        v.pkg.features.backup_cadence.as_str(),
                                        v.pkg.features.report_cadence.as_str(),
-                                       v.pkg.letters_lang.as_str()) %}
+                                       v.pkg.letters_lang.as_str(),
+                                       v.check_text.as_str()) %}
                 <label class="field" style="display:flex;align-items:center;gap:0.5rem;margin-top:0.8rem">
                   <input type="checkbox" name="enabled" value="1"{% if v.pkg.enabled %} checked{% endif %} style="margin:0">
                   <span>Offered — show it in the activate picker. Untick to retire it without touching the {{ v.pkg.active_count }} site{% if v.pkg.active_count != 1 %}s{% endif %} already on it.</span>
@@ -328,7 +360,11 @@
       without fighting — and a customer who switched something on themselves keeps it
       when the package is cancelled.
     </p>
-    {% call feature_bundle("n", "leave", "leave", "leave", "leave", "leave", "leave", "") %}
+    {# The new form starts from the four built-ins, spelled out rather than
+       implied: an operator has to see what they are selling before they can
+       decide it is wrong. Saved unedited, it collapses back to "the
+       built-ins" rather than storing a copy. #}
+    {% call feature_bundle("n", "leave", "leave", "leave", "leave", "leave", "leave", "", builtin_check_text.as_str()) %}
 
     <label class="field" style="display:flex;align-items:center;gap:0.5rem;margin-top:0.8rem">
       <input type="checkbox" name="enabled" value="1" checked style="margin:0">
