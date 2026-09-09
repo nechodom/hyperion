@@ -78,6 +78,17 @@ jobs:
           # x86_64 binary meant those imports died on "Exec format error".
           # hyperion-export is pure Rust with no C dependencies, so a linker is
           # all the cross-build needs.
+          # Drop the runner's THIRD-PARTY apt sources before updating.
+          #
+          # GitHub's image ships Google Chrome's repository, and `apt-get update`
+          # fails the whole step when ANY configured source is unhappy. On
+          # 2026-09-09 that repo served a stale Packages.gz — "Hash Sum
+          # mismatch" — and took a release build down with it, minutes after
+          # every binary including the musl exporter had already compiled
+          # cleanly. We need one cross-compiler from Ubuntu's own archive; a
+          # release must not be hostage to a browser vendor's CDN.
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.list \
+                     /etc/apt/sources.list.d/microsoft-prod.list
           sudo apt-get update -qq
           sudo apt-get install -y -qq gcc-aarch64-linux-gnu
           rustup target add aarch64-unknown-linux-musl
