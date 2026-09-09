@@ -237,6 +237,7 @@ async fn letter_node_rows(
         };
         let care = master.care_report_body_template.clone();
         let expiry = master.expiry_warning_body_template.clone();
+        let letters = master.letters_fingerprint.clone();
         set.spawn(async move {
             let probe = tokio::time::timeout(
                 std::time::Duration::from_secs(LETTER_PROBE_TIMEOUT_SECS),
@@ -253,11 +254,41 @@ async fn letter_node_rows(
                     // strings themselves. Both sides read "" as "send the
                     // built-in letter", so two empties are genuinely the
                     // same letter, not two unknowns.
+                    // The two BODIES plus the `[letters]` fingerprint. The
+                    // badge used to compare only the bodies and then claim the
+                    // node "sends the same letters" — a statement about the
+                    // whole letter made from two of its fields, so a node on a
+                    // different LANGUAGE, or missing every sentence the
+                    // operator rewrote, read as agreement.
+                    //
+                    // An empty fingerprint means the node did not say (an agent
+                    // older than this field), which must read as unknown rather
+                    // than as agreement.
+                    let theirs = v.notifications.letters_fingerprint.as_str();
+                    let letters_same = if theirs.is_empty() || letters.is_empty() {
+                        None
+                    } else {
+                        Some(theirs == letters)
+                    };
                     let (s, note) = letter_verdict(
                         v.notifications.care_report_body_template == care,
                         v.notifications.expiry_warning_body_template == expiry,
                     );
-                    (s, note.to_string())
+                    match letters_same {
+                        Some(false) => (
+                            "differs",
+                            "sends its letters in a DIFFERENT language or with different \
+                             wording — its sites' owners do not get what the box above says"
+                                .to_string(),
+                        ),
+                        None if s == "same" => (
+                            "unknown",
+                            "sends the same two letter bodies, but is too old to say which \
+                             language and wording it uses, so letter parity is unknown"
+                                .to_string(),
+                        ),
+                        _ => (s, note.to_string()),
+                    }
                 }
                 Ok(Ok(RpcResponse::Error(e))) => (
                     "unknown",
@@ -1409,6 +1440,19 @@ pub async fn post_config(
         for (id, value) in fields.iter_mut() {
             if id == "lang" || value.is_empty() {
                 continue;
+            }
+            // NORMALISE FIRST. A <textarea> submits CRLF per the HTML spec and
+            // the pack holds LF, so the comparison below was ALWAYS false for
+            // the 46 multi-line sentences — the fork guard never fired for any
+            // of them, and "Fill the fields with the built-in wording" followed
+            // by Save (the obvious next click) forked all 46 in one press. The
+            // exact failure this guard exists to prevent.
+            //
+            // Storing LF is right regardless: `letter_catalog_from_toml`
+            // already strips CRLF when reading, and a CRLF that survived would
+            // reach a plain-text mail body.
+            if value.contains('\r') {
+                *value = value.replace("\r\n", "\n").replace('\r', "\n");
             }
             if let Some(s) = hyperion_core::letters::lookup(id) {
                 if value.as_str() == s.built_in(cat.lang) {
@@ -2702,16 +2746,42 @@ pub async fn post_letters_import(
     // lowercases and takes cs/cz/cesky/česky — so demanding the exact bytes
     // "en" or "cs" here would drop a `lang = "CS"` line silently, and dropping
     // it also flips the fork guard below to compare against one pack instead of
-    // two. Anything unrecognised parses as English, which is the same fallback
-    // the mailer applies, so there is nothing to reject.
+    // two. `LetterLang::parse` is the right accepter for the ALIASES an operator
+    // may reasonably type ("CS", "cz", "česky") — but it answers English for
+    // anything it does not know, which is the correct fallback for a config file
+    // already on disk and the WRONG answer for a file being imported: `lang =
+    // "sk"` is a plausible mistake, and coercing it would switch every letter to
+    // English without saying so. So the value is checked against the aliases
+    // first and named back when it is none of them.
     let mut lang: Option<String> = None;
+    let mut bad_lang: Option<String> = None;
     for (id, value) in &table {
-        if id == "lang" && !value.trim().is_empty() {
-            lang = Some(match hyperion_core::letters::LetterLang::parse(value) {
-                hyperion_core::letters::LetterLang::Cs => "cs".to_string(),
-                _ => "en".to_string(),
-            });
+        if id != "lang" || value.trim().is_empty() {
+            continue;
         }
+        let v = value.trim().to_lowercase();
+        let known = matches!(
+            v.as_str(),
+            "en" | "eng" | "english" | "cs" | "cz" | "cesky" | "česky"
+        );
+        if !known {
+            bad_lang = Some(value.trim().to_string());
+            continue;
+        }
+        lang = Some(match hyperion_core::letters::LetterLang::parse(value) {
+            hyperion_core::letters::LetterLang::Cs => "cs".to_string(),
+            _ => "en".to_string(),
+        });
+    }
+    if let Some(bad) = bad_lang {
+        return Ok(Redirect::to(&format!(
+            "/settings?flash_error={}#notifications",
+            urlencode(&format!(
+                "lang = \"{bad}\" is not a language this version has — the packs are \
+                 English (en) and Czech (cs). Nothing was changed."
+            ))
+        ))
+        .into_response());
     }
     // "Unchanged" is judged against BOTH packs, not one.
     //
@@ -2753,6 +2823,13 @@ pub async fn post_letters_import(
         // Identical to the pack? Then it is NOT an override. Storing it would
         // fork that sentence: every later improvement to the built-in wording
         // would stop reaching this install, invisibly.
+        // Same normalisation as the save path: a file edited on Windows, or
+        // pasted through a textarea, carries CRLF that the pack does not.
+        let value = if value.contains('\r') {
+            value.replace("\r\n", "\n").replace('\r', "\n")
+        } else {
+            value
+        };
         if packs.iter().any(|&l| value == s.built_in(l)) {
             fields.insert(id, String::new());
         } else {
@@ -2765,9 +2842,29 @@ pub async fn post_letters_import(
         fields.insert("lang".into(), l);
     }
     if fields.is_empty() {
-        return Ok(Redirect::to(
-            "/settings?flash_error=that+file+contained+no+letter+strings#notifications",
-        )
+        // Name what was NOT recognised rather than calling the file empty. An
+        // operator whose ids are all mistyped — a stale file, a hand-edited
+        // key — would otherwise be told their work contained nothing, which is
+        // the "absent vs lost" confusion this project refuses everywhere else.
+        let msg = if unknown.is_empty() {
+            "that file contained no letter strings".to_string()
+        } else {
+            format!(
+                "none of the {} id(s) in that file are known to this version, so \
+                 nothing was changed: {}",
+                unknown.len(),
+                unknown
+                    .iter()
+                    .take(5)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
+        return Ok(Redirect::to(&format!(
+            "/settings?flash_error={}#notifications",
+            urlencode(&msg)
+        ))
         .into_response());
     }
 
@@ -2857,6 +2954,87 @@ mod tests {
         synthesize_unchecked_checkboxes, toml_key, toml_value,
     };
     use std::collections::BTreeMap;
+
+    /// The fork guard must survive a `<textarea>`.
+    ///
+    /// A textarea submits CRLF per the HTML spec and the pack holds LF, so the
+    /// guard's `value == built_in` was ALWAYS false for the 46 multi-line
+    /// sentences — it never fired for any of them. "Fill the fields with the
+    /// built-in wording" followed by Save, the obvious next click, therefore
+    /// forked all 46 in one press: exactly the failure the guard exists to
+    /// prevent, shipped in the same release as the button that triggers it.
+    #[test]
+    fn a_textareas_crlf_does_not_defeat_the_fork_guard() {
+        // The normalisation the save and import paths apply before comparing.
+        let normalise = |v: &str| {
+            if v.contains('\r') {
+                v.replace("\r\n", "\n").replace('\r', "\n")
+            } else {
+                v.to_string()
+            }
+        };
+        let lang = hyperion_core::letters::LetterLang::En;
+        let mut multiline = 0;
+        for s in hyperion_core::letters::STRINGS.iter() {
+            let built_in = s.built_in(lang);
+            if !built_in.contains('\n') {
+                continue;
+            }
+            multiline += 1;
+            // What the browser actually posts back for an untouched field.
+            let posted = built_in.replace('\n', "\r\n");
+            assert_ne!(
+                posted, built_in,
+                "the fixture is wrong if these are already equal"
+            );
+            assert_eq!(
+                normalise(&posted),
+                built_in,
+                "{} would be stored as an override after a round trip through the form",
+                s.id
+            );
+        }
+        assert!(
+            multiline >= 20,
+            "expected the pack to hold many multi-line bodies, found {multiline}"
+        );
+    }
+
+    /// `LetterLang::parse` answers English for anything it does not know, which
+    /// is the right fallback for a config file already on disk and the WRONG
+    /// answer for a file being imported.
+    ///
+    /// `lang = "sk"` is a plausible mistake. Coercing it would switch every
+    /// customer letter to English and say nothing — so the accepter here is the
+    /// alias LIST, and the parse is only used to fold a known alias onto its
+    /// pack.
+    #[test]
+    fn an_unknown_language_is_named_not_coerced_to_english() {
+        // What the import accepts, in the same shape.
+        let accepts = |v: &str| {
+            let v = v.trim().to_lowercase();
+            matches!(
+                v.as_str(),
+                "en" | "eng" | "english" | "cs" | "cz" | "cesky" | "česky"
+            )
+        };
+        for good in ["en", "EN", " cs ", "cz", "Česky", "english"] {
+            assert!(accepts(good), "{good:?} is a language an operator may type");
+        }
+        for bad in ["sk", "de", "pl", "c", "czech-ish", "42"] {
+            assert!(
+                !accepts(bad),
+                "{bad:?} must be named back, not silently become English"
+            );
+            // And the thing that made this necessary: parse() maps them all to
+            // English, so it cannot be the accepter.
+            assert_eq!(
+                hyperion_core::letters::LetterLang::parse(bad),
+                hyperion_core::letters::LetterLang::En,
+                "parse() coerces {bad:?} — which is exactly why it is not the gate"
+            );
+        }
+    }
 
     /// Every sentence in the pack must survive a trip out to TOML and back.
     ///
@@ -3076,6 +3254,47 @@ mod tests {
             parsed["letters"]["x"].as_str().expect("string"),
             nasty,
             "escaping lost the text"
+        );
+    }
+
+    /// An older node that cannot report its `[letters]` must read as UNKNOWN,
+    /// never as agreement.
+    ///
+    /// The badge compared only the two body templates and then claimed the node
+    /// "sends the same letters as this master" — a statement about the whole
+    /// letter made from two of its fields. A node on a different LANGUAGE, or
+    /// missing every sentence the operator had rewritten, satisfied it.
+    #[test]
+    fn letter_parity_is_unknown_when_a_node_cannot_report_its_wording() {
+        // The decision the node loop makes, in the same shape.
+        let verdict = |bodies_match: bool, ours: &str, theirs: &str| -> &'static str {
+            let letters_same = if theirs.is_empty() || ours.is_empty() {
+                None
+            } else {
+                Some(theirs == ours)
+            };
+            let base = if bodies_match { "same" } else { "differs" };
+            match letters_same {
+                Some(false) => "differs",
+                None if base == "same" => "unknown",
+                _ => base,
+            }
+        };
+        assert_eq!(verdict(true, "abc", "abc"), "same", "everything agrees");
+        assert_eq!(
+            verdict(true, "abc", "xyz"),
+            "differs",
+            "same bodies but different wording or language is NOT the same letter"
+        );
+        assert_eq!(
+            verdict(true, "abc", ""),
+            "unknown",
+            "a node too old to say must not be reported as agreeing"
+        );
+        assert_eq!(
+            verdict(false, "abc", "abc"),
+            "differs",
+            "a body mismatch still wins"
         );
     }
 

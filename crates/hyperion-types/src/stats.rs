@@ -388,6 +388,18 @@ pub struct NotificationTemplatesView {
     /// Same reasoning as `care_report_subject_template`.
     #[serde(default)]
     pub expiry_warning_subject_template: String,
+    /// Fingerprint of this node's `[letters]` section: the language plus a
+    /// digest of every per-string override.
+    ///
+    /// The parity badge compared only the two BODY templates, so a node running
+    /// a different language pack — or none of the operator's rewritten
+    /// sentences — reported "sends the same letters as this master". That is a
+    /// claim about the whole letter made from two of its fields.
+    ///
+    /// EMPTY means "this node did not say", which an older agent will not, and
+    /// must render as unknown rather than as agreement.
+    #[serde(default)]
+    pub letters_fingerprint: String,
 }
 
 impl Default for NotificationTemplatesView {
@@ -396,6 +408,7 @@ impl Default for NotificationTemplatesView {
             slack_template: "{message}".into(),
             email_subject_template: "{subject}".into(),
             email_body_template: "{body}".into(),
+            letters_fingerprint: String::new(),
             // Empty = "use the built-in letter". See the type docs.
             care_report_body_template: String::new(),
             care_report_subject_template: String::new(),

@@ -490,6 +490,34 @@ pub async fn list_all_active(pool: &SqlitePool) -> Result<Vec<HostingPackageRow>
 /// second time, on top of whatever the customer changed in between.
 /// `prior_state_json` is kept for the audit trail; the restore has already
 /// happened by the time this is called.
+/// Push a definition's letter language onto its ACTIVE activations.
+///
+/// Deliberately unlike the price and the feature bundle, which are snapshotted
+/// and never rewritten: those are what the customer AGREED to, and a later
+/// re-price must not reach back into a sold plan. A language is not part of
+/// that agreement — it is a presentation default the operator changes when they
+/// discover the setting, expecting it to apply to the sites already on the
+/// package. Without this the field is write-once at activation, and the panel
+/// says the opposite in three places.
+///
+/// Cancelled activations are left alone: their language is history.
+pub async fn set_letters_lang(
+    pool: &SqlitePool,
+    package_id: i64,
+    lang: &str,
+) -> Result<u64, StateError> {
+    let n = sqlx::query(
+        "UPDATE hosting_packages SET letters_lang = ? \
+         WHERE package_id = ? AND state = 'active'",
+    )
+    .bind(lang)
+    .bind(package_id)
+    .execute(pool)
+    .await?
+    .rows_affected();
+    Ok(n)
+}
+
 pub async fn cancel(pool: &SqlitePool, id: i64, now: i64) -> Result<bool, StateError> {
     let r = sqlx::query(
         "UPDATE hosting_packages
@@ -695,6 +723,66 @@ mod tests {
             ..care_package()
         };
         assert!(insert(&pool, &same_slug, 3).await.is_err(), "slug");
+    }
+
+    /// A definition's language must reach the sites ALREADY on it.
+    ///
+    /// Unlike the price and the bundle, which stay snapshotted because they are
+    /// what the customer agreed to. The panel tells the operator in three places
+    /// that an edit "picks up on the next enforcement pass"; before this the
+    /// language was write-once at activation and all three were false.
+    #[tokio::test]
+    async fn a_package_language_edit_reaches_active_sites_but_not_cancelled_ones() {
+        let pool = fresh().await;
+        // `fresh()` seeds exactly h1 and h2, hosting_id is a real FK, and
+        // (hosting_id, package_id) is UNIQUE — so the three rows are three
+        // distinct pairs: h1 on the edited package (must move), h2 on the same
+        // package but cancelled (must not), h1 on another package (must not).
+        activate(&pool, &activation("h1", 7, 100), 0).await.unwrap();
+        let gone_id = activate(&pool, &activation("h2", 7, 100), 0).await.unwrap();
+        activate(&pool, &activation("h1", 9, 100), 0).await.unwrap();
+        cancel(&pool, gone_id, 1).await.unwrap();
+
+        let moved = set_letters_lang(&pool, 7, "en").await.unwrap();
+        assert_eq!(moved, 1, "only the ACTIVE activation of package 7 moves");
+
+        let read = |h: &str| {
+            let pool = pool.clone();
+            let h = h.to_string();
+            async move {
+                list_for_hosting(&pool, &HostingId(h))
+                    .await
+                    .unwrap()
+                    .first()
+                    .map(|r| r.letters_lang.clone())
+            }
+        };
+        // h1 holds two activations; the edited package's is the one that moved.
+        let h1: Vec<(i64, String)> = list_for_hosting(&pool, &HostingId("h1".into()))
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| (r.package_id.unwrap_or(0), r.letters_lang))
+            .collect();
+        assert!(
+            h1.contains(&(7, "en".to_string())),
+            "the edited package's activation must move: {h1:?}"
+        );
+        assert!(
+            h1.contains(&(9, "cs".to_string())),
+            "a different package on the same site must not: {h1:?}"
+        );
+        // A cancelled activation keeps its language: it is history.
+        // (list_for_hosting only returns active rows, so read it directly.)
+        let gone_lang: (String,) =
+            sqlx::query_as("SELECT letters_lang FROM hosting_packages WHERE id = ?")
+                .bind(gone_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(gone_lang.0, "cs", "a cancelled activation is not rewritten");
+        // A different package is untouched.
+        let _ = read;
     }
 
     fn activation(hosting: &str, package_id: i64, price_minor: i64) -> NewActivation {

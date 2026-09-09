@@ -1722,6 +1722,27 @@ impl Default for HostingPaths {
     }
 }
 
+/// Drop the operator's per-string overrides when this site reads a DIFFERENT
+/// language than the one they were written in.
+///
+/// The overrides are one flat list with no language on them, because until
+/// v0.61 there was only ever one language in play. Now a site can read Czech
+/// while the cluster is English, and a sentence the operator rewrote was
+/// written in the CLUSTER's language — so applying it to the other pack
+/// produces a letter that is Czech in the places the operator touched and
+/// English everywhere else. Half a translation is worse than none: the customer
+/// cannot tell it is a bug, only that their hosting company writes badly.
+///
+/// So an override travels with the language it was authored in, and a site
+/// reading the other one gets the pack, whole. The operator is told this in
+/// Settings; the alternative — keying every override by language — is a real
+/// feature and not something to fake here.
+fn drop_foreign_overrides(cat: &mut LetterCatalog, authored_in: LetterLang) {
+    if cat.lang != authored_in {
+        cat.overrides.clear();
+    }
+}
+
 impl<A: AdapterPort + 'static> HostingService<A> {
     pub fn new(pool: SqlitePool, adapters: Arc<A>, secrets: Arc<crate::SecretsStore>) -> Self {
         Self {
@@ -13387,14 +13408,32 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // 404 before writing, so editing a deleted package doesn't report ok.
         self.package_get(id).await?;
         let validated = validate_package(input)?;
-        packages::update(&self.pool, id, &package_input_to_new(validated), now_secs())
+        let new = package_input_to_new(validated);
+        let lang = new.letters_lang.clone();
+        packages::update(&self.pool, id, &new, now_secs())
             .await
             .map_err(|e| RpcError::Internal_with(format!("package update: {e}")))?;
+        // Push the LANGUAGE onto the sites already on this package.
+        //
+        // Deliberately unlike the price and the bundle, which stay snapshotted:
+        // those are what the customer agreed to. A language is a presentation
+        // default the operator changes when they find the setting, expecting it
+        // to apply to the forty sites already sold — and the panel says exactly
+        // that in three places ("Sites already holding this package pick the
+        // change up on the next enforcement pass"). Without this the field was
+        // write-once at activation and all three statements were false.
+        let moved = packages::set_letters_lang(&self.pool, id, &lang)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("package language: {e}")))?;
         let out = self.package_get(id).await?;
         self.append_audit(
             "package.update",
             None,
-            &serde_json::json!({"id": id, "name": out.name, "slug": out.slug}).to_string(),
+            &serde_json::json!({
+                "id": id, "name": out.name, "slug": out.slug,
+                "letters_lang": lang, "activations_relanguaged": moved,
+            })
+            .to_string(),
             "ok",
         )
         .await;
@@ -14443,6 +14482,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// throughout.
     async fn letter_catalog_for(&self, hosting_id: &HostingId) -> LetterCatalog {
         let mut cat = self.letter_catalog();
+        let cluster_lang = cat.lang;
         // The site's own setting wins outright.
         if let Ok(Some(v)) = hyperion_state::hosting_kv::get(
             &self.pool,
@@ -14454,6 +14494,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             let v = v.trim();
             if !v.is_empty() {
                 cat.lang = LetterLang::parse(v);
+                drop_foreign_overrides(&mut cat, cluster_lang);
                 return cat;
             }
         }
@@ -14472,6 +14513,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 cat.lang = LetterLang::parse(l);
             }
         }
+        drop_foreign_overrides(&mut cat, cluster_lang);
         cat
     }
 
@@ -16421,22 +16463,41 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let cat = self
             .letter_catalog_for(&HostingId(hosting_id.to_string()))
             .await;
-        let what = cat
-            .get(if suspended {
-                "quota.action_suspended"
-            } else {
-                "quota.action_over"
-            })
-            .to_string();
-        let args = [
+        // TWO catalogues on purpose. The subject and body reach the CUSTOMER, so
+        // they follow the site's language; the Slack line reaches the OPERATOR's
+        // shared channel, so it stays on the cluster language. Rendering both
+        // from one catalogue is what made a Czech site post Czech alerts into an
+        // English operator channel — the split this release states, broken by
+        // the release that stated it.
+        //
+        // `action` is a SENTENCE FRAGMENT, so it has to be taken from each
+        // catalogue separately; sharing one `args` would splice the customer's
+        // language into the operator's line, which is the same bug one level in.
+        let ops = self.letter_catalog();
+        let key = if suspended {
+            "quota.action_suspended"
+        } else {
+            "quota.action_over"
+        };
+        let used = used_mib.to_string();
+        let cap = cap_mib.to_string();
+        let what_cust = cat.get(key).to_string();
+        let what_ops = ops.get(key).to_string();
+        let args_cust = [
             ("domain", domain),
-            ("used", &used_mib.to_string()),
-            ("cap", &cap_mib.to_string()),
-            ("action", what.as_str()),
+            ("used", used.as_str()),
+            ("cap", cap.as_str()),
+            ("action", what_cust.as_str()),
         ];
-        let slack = cat.render("quota.over.slack", &args);
-        let subj = cat.render("quota.over.subject", &args);
-        let body = cat.render("quota.over.body", &args);
+        let args_ops = [
+            ("domain", domain),
+            ("used", used.as_str()),
+            ("cap", cap.as_str()),
+            ("action", what_ops.as_str()),
+        ];
+        let slack = ops.render("quota.over.slack", &args_ops);
+        let subj = cat.render("quota.over.subject", &args_cust);
+        let body = cat.render("quota.over.body", &args_cust);
         self.notify_quota_event(hosting_id, &subj, &slack, &body)
             .await;
     }
@@ -16459,7 +16520,14 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             ("used", &used_mib.to_string()),
             ("cap", &cap_mib.to_string()),
         ];
-        let slack = cat.render("quota.resolved.slack", &args);
+        // TWO catalogues on purpose. The subject and body reach the CUSTOMER, so
+        // they follow the site's language; the Slack line reaches the OPERATOR's
+        // shared channel, so it stays on the cluster language. Rendering both
+        // from one catalogue is what made a Czech site post Czech alerts into an
+        // English operator channel — the split this release states, broken by
+        // the release that stated it.
+        let ops = self.letter_catalog();
+        let slack = ops.render("quota.resolved.slack", &args);
         let subj = cat.render("quota.resolved.subject", &args);
         let body = cat.render("quota.resolved.body", &args);
         self.notify_quota_event(hosting_id, &subj, &slack, &body)
@@ -28995,7 +29063,30 @@ fn read_notifications_section(
             .unwrap_or(fallback)
             .to_string()
     };
+    // Fingerprint of `[letters]`: the language, then every override id and its
+    // text, in sorted order. Read from the SAME parsed document so it describes
+    // the file this node will actually render from.
+    //
+    // A digest rather than the section itself: the parity badge only needs to
+    // know whether two nodes agree, and shipping ~125 sentences per node to
+    // answer that would be a payload for a yes/no.
+    let letters_fingerprint = {
+        let cat = letter_catalog_from_toml(&raw);
+        let mut h = blake3::Hasher::new();
+        h.update(match cat.lang {
+            crate::letters::LetterLang::Cs => b"cs",
+            _ => b"en",
+        });
+        for (id, text) in &cat.overrides {
+            h.update(b"\x00");
+            h.update(id.as_bytes());
+            h.update(b"\x01");
+            h.update(text.as_bytes());
+        }
+        h.finalize().to_hex().to_string()
+    };
     hyperion_types::NotificationTemplatesView {
+        letters_fingerprint,
         slack_template: get("slack_template", &def.slack_template),
         email_subject_template: get("email_subject_template", &def.email_subject_template),
         email_body_template: get("email_body_template", &def.email_body_template),
@@ -36546,6 +36637,43 @@ mod tests {
             ..care_input("X", PackageFeatures::default())
         };
         assert!(validate_package(nameless).is_err());
+    }
+
+    /// A site reading a different language than the cluster gets the PACK,
+    /// whole — not the operator's Czech sentences dropped into an English
+    /// letter.
+    ///
+    /// The overrides are one flat list with no language on them. Applying them
+    /// across a language boundary produces a letter that is Czech where the
+    /// operator touched it and English everywhere else, and the customer cannot
+    /// tell that is a bug — only that their hosting company writes badly.
+    #[tokio::test]
+    async fn overrides_do_not_cross_a_language_boundary() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), package_mocks());
+        let detail = hosting_for_packages(&s, "mixed.cz").await;
+
+        // The operator has rewritten a sentence. Their cluster is English here,
+        // so that wording is English wording.
+        // Same language as the cluster: the override applies.
+        let same = s.letter_catalog_for(&detail.id).await;
+        assert_eq!(same.lang, LetterLang::En);
+
+        // Now the site is set to Czech. The operator's English sentence must
+        // NOT be spliced into the Czech letter.
+        s.hosting_kv_set(
+            detail.id.as_str().to_string(),
+            HostingService::<MockAdapterPort>::LETTER_LANG_KV_KEY.to_string(),
+            "cs".into(),
+        )
+        .await
+        .expect("kv");
+        let other = s.letter_catalog_for(&detail.id).await;
+        assert_eq!(other.lang, LetterLang::Cs, "the site reads Czech");
+        assert!(
+            other.overrides.is_empty(),
+            "an override authored under the English pack must not reach a Czech letter"
+        );
     }
 
     /// The language resolves site → package → cluster, and each step is only
