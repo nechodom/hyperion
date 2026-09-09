@@ -44,6 +44,9 @@ pub struct PackageRow {
     /// opinion. Column order matters: this sits before the timestamps, matching
     /// SELECT_PACKAGES and the migration.
     pub letters_lang: String,
+    /// The monthly checklist, as a JSON array of {id,label,detail}. Empty = the
+    /// built-in four.
+    pub check_items: String,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -84,6 +87,8 @@ pub struct NewPackage {
     /// Default language for this package's customers' letters. Empty = no
     /// opinion, so the site's own setting or the cluster default decides.
     pub letters_lang: String,
+    /// The monthly checklist. Empty = the built-in four.
+    pub check_items: String,
 }
 
 impl Default for NewPackage {
@@ -103,6 +108,9 @@ impl Default for NewPackage {
             // No opinion by default: a package that says nothing about language
             // must not quietly override the cluster setting.
             letters_lang: String::new(),
+            // Empty = the built-in four, which is what every package meant
+            // before the list was editable.
+            check_items: String::new(),
         }
     }
 }
@@ -145,6 +153,8 @@ pub struct HostingPackageRow {
     /// is empty. Resolving through `package_id` would give the right language
     /// on the master and the cluster default on every worker.
     pub letters_lang: String,
+    /// The monthly checklist as it stood at activation, same reasoning.
+    pub check_items: String,
 }
 
 /// Values for [`activate`]. A struct rather than nine positional arguments:
@@ -166,6 +176,8 @@ pub struct NewActivation {
     pub prior_state_json: Option<String>,
     /// Copied from the definition at activation. See [`HostingPackageRow`].
     pub letters_lang: String,
+    /// Copied from the definition at activation. See [`HostingPackageRow`].
+    pub check_items: String,
 }
 
 // ---------------------------------------------------------------- definitions
@@ -174,7 +186,7 @@ const SELECT_PACKAGES: &str =
     "SELECT id, name, slug, description, enabled, price_minor, price_currency,
             price_interval, feat_wp_auto_update, feat_integrity_scan, feat_monitoring,
             feat_hardening, feat_backup_cadence, feat_report_cadence, letters_lang,
-            created_at, updated_at
+            check_items, created_at, updated_at
      FROM service_packages";
 
 /// Create a definition. A duplicate `name` or `slug` surfaces as a
@@ -184,8 +196,9 @@ pub async fn insert(pool: &SqlitePool, p: &NewPackage, now: i64) -> Result<i64, 
         r#"INSERT INTO service_packages
            (name, slug, description, enabled, price_minor, price_currency, price_interval,
             feat_wp_auto_update, feat_integrity_scan, feat_monitoring, feat_hardening,
-            feat_backup_cadence, feat_report_cadence, letters_lang, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            feat_backup_cadence, feat_report_cadence, letters_lang, check_items,
+            created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            RETURNING id"#,
     )
     // 16 columns, 16 placeholders, 16 binds — in column order.
@@ -203,6 +216,7 @@ pub async fn insert(pool: &SqlitePool, p: &NewPackage, now: i64) -> Result<i64, 
     .bind(p.features.backup_cadence.as_str())
     .bind(p.features.report_cadence.as_str())
     .bind(&p.letters_lang)
+    .bind(&p.check_items)
     .bind(now)
     .bind(now)
     .fetch_one(pool)
@@ -227,7 +241,7 @@ pub async fn update(
             price_minor = ?, price_currency = ?, price_interval = ?,
             feat_wp_auto_update = ?, feat_integrity_scan = ?, feat_monitoring = ?,
             feat_hardening = ?, feat_backup_cadence = ?, feat_report_cadence = ?,
-            letters_lang = ?, updated_at = ?
+            letters_lang = ?, check_items = ?, updated_at = ?
            WHERE id = ?"#,
     )
     // 15 SET placeholders + the WHERE id — the trailing `.bind(id)` is what
@@ -246,6 +260,7 @@ pub async fn update(
     .bind(p.features.backup_cadence.as_str())
     .bind(p.features.report_cadence.as_str())
     .bind(&p.letters_lang)
+    .bind(&p.check_items)
     .bind(now)
     .bind(id)
     .execute(pool)
@@ -331,7 +346,7 @@ const SELECT_ACTIVATIONS: &str =
             a.activated_at, a.cancelled_at, a.prior_state_json,
             a.feat_wp_auto_update, a.feat_integrity_scan, a.feat_monitoring,
             a.feat_hardening, a.feat_backup_cadence, a.feat_report_cadence,
-            a.letters_lang
+            a.letters_lang, a.check_items
      FROM hosting_packages a";
 
 /// Raw activation row. A `FromRow` struct rather than a tuple: sqlx only
@@ -358,6 +373,7 @@ struct ActivationRowRaw {
     feat_backup_cadence: String,
     feat_report_cadence: String,
     letters_lang: String,
+    check_items: String,
 }
 
 fn map_activation(r: ActivationRowRaw) -> HostingPackageRow {
@@ -370,6 +386,7 @@ fn map_activation(r: ActivationRowRaw) -> HostingPackageRow {
         price_currency: r.price_currency,
         price_interval: r.price_interval,
         letters_lang: r.letters_lang,
+        check_items: r.check_items,
         features: PackageFeatures {
             wp_auto_update: FeatureToggle::from_stored(&r.feat_wp_auto_update),
             integrity_scan: FeatureToggle::from_stored(&r.feat_integrity_scan),
@@ -401,8 +418,8 @@ pub async fn activate(pool: &SqlitePool, a: &NewActivation, now: i64) -> Result<
             price_interval, next_billing_at, state, activated_at, cancelled_at,
             prior_state_json, feat_wp_auto_update, feat_integrity_scan,
             feat_monitoring, feat_hardening, feat_backup_cadence, feat_report_cadence,
-            letters_lang)
-           VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)
+            letters_lang, check_items)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            RETURNING id"#,
     )
     // 16 placeholders (state / cancelled_at are literals), 16 binds.
@@ -422,6 +439,7 @@ pub async fn activate(pool: &SqlitePool, a: &NewActivation, now: i64) -> Result<
     .bind(a.features.backup_cadence.as_str())
     .bind(a.features.report_cadence.as_str())
     .bind(&a.letters_lang)
+    .bind(&a.check_items)
     .fetch_one(pool)
     .await?;
     Ok(row.0)
@@ -511,6 +529,36 @@ pub async fn set_letters_lang(
          WHERE package_id = ? AND state = 'active'",
     )
     .bind(lang)
+    .bind(package_id)
+    .execute(pool)
+    .await?
+    .rows_affected();
+    Ok(n)
+}
+
+/// Push a definition's monthly checklist onto its ACTIVE activations.
+///
+/// Same reasoning as [`set_letters_lang`], and the same limit: the checklist is
+/// what the operator promises to LOOK AT from now on, not a price the customer
+/// agreed to, so editing the plan has to reach the sites already on it —
+/// otherwise a plan edited today keeps checking yesterday's list forever and
+/// the package page is lying.
+///
+/// It does NOT rewrite history: months already ticked keep their own frozen
+/// list (see `CareServiceChecks::applied`), so a March scored out of four stays
+/// out of four after the fifth item is added in April.
+///
+/// Cancelled activations are left alone: their checklist is history.
+pub async fn set_check_items(
+    pool: &SqlitePool,
+    package_id: i64,
+    items: &str,
+) -> Result<u64, StateError> {
+    let n = sqlx::query(
+        "UPDATE hosting_packages SET check_items = ? \
+         WHERE package_id = ? AND state = 'active'",
+    )
+    .bind(items)
     .bind(package_id)
     .execute(pool)
     .await?
@@ -680,6 +728,7 @@ mod tests {
                 price_currency: Some("Kč".into()),
                 price_interval: Some("yearly".into()),
                 letters_lang: "cs".into(),
+                check_items: r#"[{"id":"gdpr","label":"GDPR"}]"#.into(),
                 features: PackageFeatures {
                     wp_auto_update: FeatureToggle::Off,
                     hardening: FeatureToggle::On,
@@ -704,6 +753,11 @@ mod tests {
         assert_eq!(f.wp_auto_update, FeatureToggle::Off);
         assert_eq!(f.hardening, FeatureToggle::On);
         assert_eq!(f.backup_cadence, BackupCadence::Weekly);
+        assert_eq!(
+            row.check_items, r#"[{"id":"gdpr","label":"GDPR"}]"#,
+            "a custom checklist must survive an edit, or the plan silently \
+             reverts to the built-in four"
+        );
         // The last SET column before `updated_at` — if its bind were
         // missing, `updated_at` would absorb the id and the whole UPDATE
         // would silently address no row at all.
@@ -793,10 +847,14 @@ mod tests {
             price_minor: Some(price_minor),
             price_currency: Some("Kč".into()),
             price_interval: Some("monthly".into()),
-            // Non-empty on purpose, like the bundle below: this is the LAST
-            // bind of the activation INSERT, so a dropped bind would leave it
-            // empty and a test that activated with "" could not tell.
+            // Non-empty on purpose, like the bundle below: a dropped bind
+            // would leave it empty and a test that activated with "" could not
+            // tell.
             letters_lang: "cs".into(),
+            // Non-empty for the same reason, and this one is now the LAST bind
+            // of the activation INSERT — the position a misalignment lands on
+            // first.
+            check_items: r#"[{"id":"gdpr","label":"GDPR"}]"#.into(),
             // A non-default bundle on purpose: the snapshot is what the drift
             // tick enforces, so a test that activated with an all-`leave`
             // bundle would pass even if the snapshot were dropped entirely.

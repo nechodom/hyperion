@@ -540,6 +540,12 @@ pub struct ServicePackage {
     /// payload without the field still deserialises.
     #[serde(default)]
     pub letters_lang: String,
+    /// The monthly checklist this plan promises, as a JSON array of
+    /// `{id,label,detail}`. Empty = the built-in four, which is what every
+    /// package meant before the list was editable. `#[serde(default)]` so an
+    /// older agent that doesn't send it still deserialises.
+    #[serde(default)]
+    pub check_items: String,
     #[serde(default)]
     pub features: PackageFeatures,
     /// How many hostings currently hold this package (active activations).
@@ -582,6 +588,10 @@ pub struct PackageInput {
     /// deserialises rather than failing the whole request.
     #[serde(default)]
     pub letters_lang: String,
+    /// The monthly checklist for this plan, as a JSON array of
+    /// `{id,label,detail}`. Empty = the built-in four.
+    #[serde(default)]
+    pub check_items: String,
     #[serde(default)]
     pub features: PackageFeatures,
 }
@@ -603,6 +613,9 @@ impl Default for PackageInput {
             // No opinion: a package that says nothing about language must not
             // quietly override the cluster setting.
             letters_lang: String::new(),
+            // Empty = the built-in four. Same reasoning: a plan that says
+            // nothing must not silently shrink what it promises.
+            check_items: String::new(),
         }
     }
 }
@@ -625,6 +638,11 @@ pub struct HostingPackage {
     /// that owns the hosting, where the definitions table is empty.
     #[serde(default)]
     pub letters_lang: String,
+    /// Monthly checklist snapshotted from the definition at activation, same
+    /// reasoning as the language above: the checklist is rendered and ticked
+    /// on the OWNING node, which has no `service_packages` rows to resolve.
+    #[serde(default)]
+    pub check_items: String,
     /// Price the customer agreed to, snapshotted at activation — a later
     /// re-price or delete of the definition never rewrites it.
     pub price_minor: Option<i64>,
@@ -893,6 +911,16 @@ pub struct CareServiceWork {
     /// Not ticked in any month the period touches.
     #[serde(default)]
     pub missing: Vec<String>,
+    /// Operator wording for the ids above that the letter pack cannot name.
+    ///
+    /// The built-in four are translated by the pack, so a Czech report names
+    /// them in Czech. An item the operator added has no translation anywhere —
+    /// only the label they typed — and without carrying it here the letter
+    /// would print the lookup key (`care.service.item.gdpr`) at a paying
+    /// customer. Absent for a built-in id, and `#[serde(default)]` so a report
+    /// from an older node still deserialises.
+    #[serde(default)]
+    pub labels: std::collections::BTreeMap<String, String>,
 }
 
 impl CareServiceWork {
@@ -1206,6 +1234,7 @@ mod tests {
             price_currency: Some("Kč".into()),
             price_interval: Some("monthly".into()),
             letters_lang: String::new(),
+            check_items: String::new(),
             features: PackageFeatures::default(),
             active_count: 0,
             created_at: 0,
@@ -1232,6 +1261,7 @@ mod tests {
             package_id: Some(3),
             package_name: "Péče Plus".into(),
             letters_lang: "cs".into(),
+            check_items: r#"[{"id":"render","label":"Vzhled"}]"#.into(),
             price_minor: Some(49_000),
             price_currency: Some("Kč".into()),
             price_interval: Some("monthly".into()),

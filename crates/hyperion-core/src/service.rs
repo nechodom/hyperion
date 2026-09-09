@@ -13425,6 +13425,13 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let moved = packages::set_letters_lang(&self.pool, id, &lang)
             .await
             .map_err(|e| RpcError::Internal_with(format!("package language: {e}")))?;
+        // And the CHECKLIST, for the same reason: it is what the operator
+        // promises to look at from here on, not a term the customer bought.
+        // Months already ticked keep their own frozen list, so this changes
+        // what is checked next month without rescoring the record.
+        let relisted = packages::set_check_items(&self.pool, id, &new.check_items)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("package checklist: {e}")))?;
         let out = self.package_get(id).await?;
         self.append_audit(
             "package.update",
@@ -13432,6 +13439,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             &serde_json::json!({
                 "id": id, "name": out.name, "slug": out.slug,
                 "letters_lang": lang, "activations_relanguaged": moved,
+                "activations_relisted": relisted,
             })
             .to_string(),
             "ok",
@@ -13485,13 +13493,36 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// statement from "nothing was ticked", and the letter words it as one:
     /// an unreadable record must never read as a confirmed omission, and an
     /// omission must never read as work done.
+    /// The monthly checklist this site is on, from the packages it HOLDS.
+    ///
+    /// Read from the activation snapshots, never from `service_packages`: the
+    /// definitions table only exists on the master, and every caller of this
+    /// runs on the node that owns the hosting. Resolving through `package_id`
+    /// would give the operator's real list on a single-node install and the
+    /// built-in four on every worker — the same trap the letter language fell
+    /// into.
+    ///
+    /// A site holding two packages is asked for the union. An unreadable
+    /// activation list yields the built-in four rather than an empty one,
+    /// because "0 of 0" renders as a finished month.
+    pub(crate) async fn care_check_items(
+        &self,
+        hosting_id: &HostingId,
+    ) -> Vec<hyperion_types::care_check::CheckItemDef> {
+        let rows = packages::list_for_hosting(&self.pool, hosting_id)
+            .await
+            .unwrap_or_default();
+        let snapshots: Vec<&str> = rows.iter().map(|r| r.check_items.as_str()).collect();
+        hyperion_types::care_check::resolve_check_items(&snapshots)
+    }
+
     async fn care_service_work(
         &self,
         hosting_id: &str,
         from: i64,
         to: i64,
     ) -> Option<hyperion_types::package::CareServiceWork> {
-        use hyperion_types::care_check::{period_key, CareServiceChecks, ServiceCheckItem};
+        use hyperion_types::care_check::{period_key, CareServiceChecks};
         let raw = hyperion_state::hosting_kv::get(&self.pool, hosting_id, CARE_CHECKS_KV_KEY)
             .await
             .ok()?
@@ -13515,12 +13546,38 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             }
             t = (t + 86_400).min(last);
         }
+        // What the customer was owed across this window is the UNION of what
+        // each month it touches was scored against — a frozen list for a month
+        // already ticked, the site's current plan for one still open. A
+        // quarterly report whose plan gained an item in month two has to name
+        // that item, and must not retro-charge months one and three with it
+        // beyond what their own record says.
+        let live = self
+            .care_check_items(&HostingId(hosting_id.to_string()))
+            .await;
+        let mut items: Vec<hyperion_types::care_check::CheckItemDef> = Vec::new();
+        for m in &months {
+            for def in checks.items_now(m, &live) {
+                if !items.iter().any(|k| k.id == def.id) {
+                    items.push(def);
+                }
+            }
+        }
         let mut work = hyperion_types::package::CareServiceWork::default();
-        for item in ServiceCheckItem::ALL {
-            if months.iter().any(|m| checks.is_checked(m, item)) {
-                work.done.push(item.as_str().to_string());
+        for item in items {
+            let done = months
+                .iter()
+                .any(|m| checks.month(m).is_some_and(|mm| mm.contains_key(&item.id)));
+            if done {
+                work.done.push(item.id.clone());
             } else {
-                work.missing.push(item.as_str().to_string());
+                work.missing.push(item.id.clone());
+            }
+            // Only what the letter pack cannot name. Carrying a label for a
+            // built-in id would let an operator's edit of the package silently
+            // override the translated wording in a customer's letter.
+            if hyperion_types::care_check::ServiceCheckItem::parse(&item.id).is_none() {
+                work.labels.insert(item.id, item.label);
             }
         }
         Some(work)
@@ -13543,7 +13600,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         &self,
         period: String,
     ) -> Result<Vec<hyperion_types::care_check::CareOverviewRow>, RpcError> {
-        use hyperion_types::care_check::{CareOverviewRow, CareServiceChecks, ServiceCheckItem};
+        use hyperion_types::care_check::{CareOverviewRow, CareServiceChecks};
         let rows = packages::list_all_active(&self.pool)
             .await
             .map_err(|e| RpcError::Internal_with(format!("care overview: {e}")))?;
@@ -13556,17 +13613,22 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // twice.
         let mut order: Vec<HostingId> = Vec::new();
         let mut names: HashMap<String, Vec<String>> = HashMap::new();
+        // The checklist snapshots, grouped the same way. Taken from the rows
+        // already in hand rather than re-queried per site: this runs on the
+        // dashboard, on every load, for every site on the node.
+        let mut lists: HashMap<String, Vec<String>> = HashMap::new();
         for r in rows {
             let key = r.hosting_id.as_str().to_string();
             if !names.contains_key(&key) {
                 order.push(r.hosting_id.clone());
             }
-            let entry = names.entry(key).or_default();
+            let entry = names.entry(key.clone()).or_default();
             // The activation SNAPSHOTS the name, so a deleted definition
             // still says what the customer bought.
             if !r.package_name.trim().is_empty() && !entry.contains(&r.package_name) {
                 entry.push(r.package_name.clone());
             }
+            lists.entry(key).or_default().push(r.check_items.clone());
         }
         let mut out = Vec::with_capacity(order.len());
         for id in order {
@@ -13583,24 +13645,32 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 .flatten()
                 .unwrap_or_default();
             let checks = CareServiceChecks::parse(&raw);
+            // The site's own list, not the built-in four: two sites on two
+            // plans are asked different questions and the dashboard has to
+            // say so, including in the denominator.
+            let raw_lists = lists.remove(id.as_str()).unwrap_or_default();
+            let live = hyperion_types::care_check::resolve_check_items(
+                &raw_lists.iter().map(String::as_str).collect::<Vec<_>>(),
+            );
+            let total = checks.items_now(&period, &live).len();
             let outstanding: Vec<String> = checks
-                .outstanding(&period)
+                .outstanding_now(&period, &live)
                 .into_iter()
-                .map(|i| i.label().to_string())
+                .map(|i| i.label)
                 .collect();
             // A month nobody touched at all is far more likely to predate the
             // plan than to have been skipped, so only a month that was
             // STARTED and left unfinished is reported as outstanding.
             let prev_outstanding = match prev.as_deref() {
-                Some(p) if checks.month(p).is_some() => checks.outstanding(p).len(),
+                Some(p) if checks.month(p).is_some() => checks.outstanding_defs(p).len(),
                 _ => 0,
             };
             out.push(CareOverviewRow {
                 hosting_id: id.as_str().to_string(),
                 domain,
                 packages: names.remove(id.as_str()).unwrap_or_default(),
-                checks_done: checks.done_count(&period),
-                checks_total: ServiceCheckItem::ALL.len(),
+                checks_done: total.saturating_sub(outstanding.len()),
+                checks_total: total,
                 outstanding,
                 prev_outstanding,
             });
@@ -13730,6 +13800,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 // empty, so reading the definition there would silently fall
                 // back to the cluster language on every worker.
                 letters_lang: def.letters_lang.clone(),
+                // Snapshotted for the same reason: the monthly checklist is
+                // rendered and ticked on the owning node too.
+                check_items: def.check_items.clone(),
                 // Snapshot the name, price AND bundle: a later re-price,
                 // re-scope or delete of the definition must not rewrite what
                 // this customer agreed to. The bundle snapshot is also what
@@ -25593,37 +25666,8 @@ fn toggle_of(prior: Option<bool>) -> FeatureToggle {
 /// yields "" — the caller turns that into "set a slug yourself" rather
 /// than inventing a handle nobody can guess.
 fn slugify(input: &str) -> String {
-    const FOLD: &[(char, char)] = &[
-        ('á', 'a'),
-        ('ä', 'a'),
-        ('č', 'c'),
-        ('ď', 'd'),
-        ('é', 'e'),
-        ('ě', 'e'),
-        ('í', 'i'),
-        ('ĺ', 'l'),
-        ('ľ', 'l'),
-        ('ň', 'n'),
-        ('ó', 'o'),
-        ('ô', 'o'),
-        ('ö', 'o'),
-        ('ŕ', 'r'),
-        ('ř', 'r'),
-        ('š', 's'),
-        ('ť', 't'),
-        ('ú', 'u'),
-        ('ů', 'u'),
-        ('ü', 'u'),
-        ('ý', 'y'),
-        ('ž', 'z'),
-    ];
     let mut out = String::with_capacity(input.len());
-    for ch in input.to_lowercase().chars() {
-        let c = FOLD
-            .iter()
-            .find(|(from, _)| *from == ch)
-            .map(|(_, to)| *to)
-            .unwrap_or(ch);
+    for c in slug_fold(input).chars() {
         if c.is_ascii_alphanumeric() {
             out.push(c);
         } else if !out.is_empty() && !out.ends_with('-') {
@@ -25692,7 +25736,148 @@ fn validate_package(mut p: PackageInput) -> Result<PackageInput, RpcError> {
             });
         }
     }
+    // A language the letter pack does not know resolves to English silently,
+    // so an unknown one is rejected here rather than stored. The web form
+    // already gates this; `hctl` and `/api/v1` post the same struct.
+    p.letters_lang = p.letters_lang.trim().to_lowercase();
+    if !matches!(p.letters_lang.as_str(), "" | "en" | "cs") {
+        return Err(RpcError::Validation {
+            message: "letters language must be en | cs, or empty for no opinion".into(),
+        });
+    }
+    p.check_items = validate_check_items(&p.check_items)?;
     Ok(p)
+}
+
+/// How many items one plan may promise, and how long each may be.
+///
+/// A ceiling exists because this string is SNAPSHOTTED onto every activation
+/// and frozen into up to 24 months of every site's record: a pasted document
+/// in this field is not a cosmetic problem, it is multiplied by the estate.
+const MAX_CHECK_ITEMS: usize = 30;
+const MAX_CHECK_LABEL: usize = 120;
+const MAX_CHECK_DETAIL: usize = 300;
+
+/// Normalise one checklist item id.
+///
+/// NOT `slugify`: that maps `_` to `-`, and `post_update` is a built-in id
+/// with marks filed under it on every site that has ever ticked it. Running
+/// the package slug rule over these would rename it to `post-update` the
+/// first time anybody edited a plan, orphaning that history everywhere at
+/// once. Underscores are therefore kept; everything else follows the same
+/// fold-and-hyphenate rule so the web layer's derived ids pass through
+/// unchanged.
+fn check_item_id(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for ch in slug_fold(raw).chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            out.push(ch);
+        } else if !out.is_empty() && !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    out.trim_matches('-').to_string()
+}
+
+/// Lowercase and fold the diacritics `slugify` folds, without touching
+/// anything else. Shared so the two rules cannot drift apart on which
+/// letters they know.
+fn slug_fold(input: &str) -> String {
+    const FOLD: &[(char, char)] = &[
+        ('á', 'a'),
+        ('ä', 'a'),
+        ('č', 'c'),
+        ('ď', 'd'),
+        ('é', 'e'),
+        ('ě', 'e'),
+        ('í', 'i'),
+        ('ĺ', 'l'),
+        ('ľ', 'l'),
+        ('ň', 'n'),
+        ('ó', 'o'),
+        ('ô', 'o'),
+        ('ö', 'o'),
+        ('ŕ', 'r'),
+        ('ř', 'r'),
+        ('š', 's'),
+        ('ť', 't'),
+        ('ú', 'u'),
+        ('ů', 'u'),
+        ('ü', 'u'),
+        ('ý', 'y'),
+        ('ž', 'z'),
+    ];
+    input
+        .to_lowercase()
+        .chars()
+        .map(|ch| {
+            FOLD.iter()
+                .find(|(from, _)| *from == ch)
+                .map(|(_, to)| *to)
+                .unwrap_or(ch)
+        })
+        .collect()
+}
+
+/// Normalise a plan's checklist into the exact JSON that gets stored.
+///
+/// Returns the EMPTY string for a list that is absent, unreadable or exactly
+/// the built-in four. That collapse is deliberate: "" is what every package
+/// held before this existed and is what the resolver reads as "the built-in
+/// four", so a plan nobody edited keeps saying it in one way rather than two.
+fn validate_check_items(raw: &str) -> Result<String, RpcError> {
+    use hyperion_types::care_check::{
+        builtin_check_items, check_items_to_json, parse_check_items_raw, CheckItemDef,
+    };
+    let parsed = parse_check_items_raw(raw);
+    if parsed.is_empty() {
+        // Covers both "the caller sent nothing" and "the caller sent
+        // something we could not read". Neither may shrink what the plan
+        // promises, and both mean the built-in four.
+        return Ok(String::new());
+    }
+    if parsed.len() > MAX_CHECK_ITEMS {
+        return Err(RpcError::Validation {
+            message: format!("a care plan may list at most {MAX_CHECK_ITEMS} monthly checks"),
+        });
+    }
+    let mut out: Vec<CheckItemDef> = Vec::with_capacity(parsed.len());
+    for item in parsed {
+        let id = check_item_id(&item.id);
+        if id.is_empty() {
+            return Err(RpcError::Validation {
+                message: format!("checklist item \"{}\" has no usable id", item.label.trim()),
+            });
+        }
+        // Ids key the marks. Two items sharing one would make a single tick
+        // satisfy both, which is the one failure this list must not have.
+        if out.iter().any(|k: &CheckItemDef| k.id == id) {
+            return Err(RpcError::Validation {
+                message: format!("two checklist items share the id \"{id}\""),
+            });
+        }
+        let label = item.label.trim();
+        if label.chars().count() > MAX_CHECK_LABEL {
+            return Err(RpcError::Validation {
+                message: format!("checklist item name max {MAX_CHECK_LABEL} chars"),
+            });
+        }
+        let detail = item.detail.trim();
+        if detail.chars().count() > MAX_CHECK_DETAIL {
+            return Err(RpcError::Validation {
+                message: format!("checklist item note max {MAX_CHECK_DETAIL} chars"),
+            });
+        }
+        out.push(CheckItemDef {
+            id,
+            label: label.to_string(),
+            detail: detail.to_string(),
+        });
+    }
+    if out == builtin_check_items() {
+        return Ok(String::new());
+    }
+    Ok(check_items_to_json(&out))
 }
 
 fn package_input_to_new(input: PackageInput) -> hyperion_state::packages::NewPackage {
@@ -25706,6 +25891,7 @@ fn package_input_to_new(input: PackageInput) -> hyperion_state::packages::NewPac
         price_interval: input.price_interval,
         features: input.features,
         letters_lang: input.letters_lang,
+        check_items: input.check_items,
     }
 }
 
@@ -25723,6 +25909,7 @@ fn package_row_to_wire(r: hyperion_state::packages::PackageRow) -> ServicePackag
         price_currency: r.price_currency,
         price_interval: r.price_interval,
         letters_lang: r.letters_lang,
+        check_items: r.check_items,
         features,
         // Filled in by package_list / package_get; 0 from the bare conversion.
         active_count: 0,
@@ -25743,6 +25930,7 @@ fn activation_row_to_wire(
         package_id: r.package_id,
         package_name,
         letters_lang: r.letters_lang,
+        check_items: r.check_items,
         price_minor: r.price_minor,
         price_currency: r.price_currency,
         price_interval: r.price_interval,
@@ -26429,7 +26617,7 @@ fn care_section_service(
     let name = |ids: &[String]| -> String {
         let sep = cat.get("care.service.item_sep");
         ids.iter()
-            .map(|id| format!("{sep}{}", cat.get(&format!("care.service.item.{id}"))))
+            .map(|id| format!("{sep}{}", service_item_name(cat, id, &w.labels)))
             .collect::<String>()
     };
     let done = name(&w.done);
@@ -26440,6 +26628,30 @@ fn care_section_service(
         "care.service.partial",
         &[("done", &done), ("missing", &name(&w.missing))],
     )
+}
+
+/// What to CALL one checklist item in a customer's letter.
+///
+/// A built-in id is named by the letter pack, so a Czech report says it in
+/// Czech. An item the operator added exists only as the label they typed —
+/// there is no translation of "GDPR review" for the pack to find — so the
+/// label travels with the report. Falling back to the bare id is the last
+/// resort and is still better than the alternative this function exists to
+/// prevent: `cat.get` on an unknown key returns the KEY, which would print
+/// `care.service.item.gdpr` into a letter a customer reads.
+fn service_item_name(
+    cat: &LetterCatalog,
+    id: &str,
+    labels: &std::collections::BTreeMap<String, String>,
+) -> String {
+    if hyperion_types::care_check::ServiceCheckItem::parse(id).is_some() {
+        return cat.get(&format!("care.service.item.{id}")).to_string();
+    }
+    labels
+        .get(id)
+        .filter(|l| !l.trim().is_empty())
+        .cloned()
+        .unwrap_or_else(|| id.to_string())
 }
 
 /// Calendar days the half-open window `[from, to)` touches.
@@ -32491,6 +32703,7 @@ mod tests {
                 hosting_id: detail.id.clone(),
                 package_id: 1,
                 package_name: "Péče".into(),
+                check_items: String::new(),
                 price_minor: None,
                 price_currency: None,
                 price_interval: None,
@@ -33646,6 +33859,7 @@ mod tests {
                 .map(|i| i.as_str().to_string())
                 .collect(),
             missing: Vec::new(),
+            labels: Default::default(),
         });
         r
     }
@@ -36614,6 +36828,91 @@ mod tests {
     }
 
     #[test]
+    fn a_plans_checklist_is_normalised_and_bounded() {
+        use hyperion_types::care_check::{
+            builtin_check_items, check_items_to_json, parse_check_items, CheckItemDef,
+        };
+        let def = |id: &str, label: &str| CheckItemDef {
+            id: id.into(),
+            label: label.into(),
+            detail: String::new(),
+        };
+
+        // Absent, unreadable and "exactly the built-ins" all collapse to "",
+        // which is the one value the resolver reads as the built-in four.
+        // Two spellings of the same promise is how a plan starts saying
+        // different things on different pages.
+        for raw in ["", "  ", "{oops", "null", "[]"] {
+            assert_eq!(validate_check_items(raw).unwrap(), "", "{raw:?}");
+        }
+        assert_eq!(
+            validate_check_items(&check_items_to_json(&builtin_check_items())).unwrap(),
+            ""
+        );
+
+        // `post_update` must survive verbatim: `slugify` would rewrite it to
+        // `post-update` and orphan every mark ever filed under it.
+        let kept = validate_check_items(&check_items_to_json(&[
+            def("post_update", "Still working after updates"),
+            def("GDPR Review", "GDPR revize"),
+        ]))
+        .unwrap();
+        let ids: Vec<String> = parse_check_items(&kept).into_iter().map(|i| i.id).collect();
+        assert_eq!(ids, vec!["post_update", "gdpr-review"]);
+
+        // Two items sharing an id would let one tick satisfy both.
+        assert!(validate_check_items(&check_items_to_json(&[
+            def("gdpr", "GDPR review"),
+            def("GDPR", "GDPR audit"),
+        ]))
+        .is_err());
+
+        // Bounds: this string is snapshotted onto every activation and frozen
+        // into 24 months of every site's record.
+        let many: Vec<CheckItemDef> = (0..MAX_CHECK_ITEMS + 1)
+            .map(|n| def(&format!("i{n}"), &format!("Check {n}")))
+            .collect();
+        assert!(validate_check_items(&check_items_to_json(&many)).is_err());
+        let long = "x".repeat(MAX_CHECK_LABEL + 1);
+        assert!(validate_check_items(&check_items_to_json(&[def("x", &long)])).is_err());
+    }
+
+    /// An operator's own item has no translation anywhere, so the letter has
+    /// to carry the label. Printing the lookup key at a paying customer is
+    /// the failure this guards.
+    #[test]
+    fn a_custom_check_is_named_in_the_letter_not_keyed() {
+        use std::collections::BTreeMap;
+        let cat = crate::letters::LetterCatalog::new(crate::letters::LetterLang::Cs);
+        let mut labels = BTreeMap::new();
+        labels.insert("gdpr-review".to_string(), "GDPR revize".to_string());
+        let work = hyperion_types::package::CareServiceWork {
+            done: vec!["render".into(), "gdpr-review".into()],
+            missing: vec!["forms".into()],
+            labels,
+        };
+        let out = care_section_service(&cat, Some(&work));
+        assert!(out.contains("GDPR revize"), "{out}");
+        assert!(
+            !out.contains("care.service.item"),
+            "a catalogue key reached a customer letter: {out}"
+        );
+        // The built-ins still come from the pack, so a Czech letter names them
+        // in Czech — an operator's edit of a plan must not override that.
+        assert!(!out.contains("Pages and navigation"), "{out}");
+
+        // An id with no label at all falls back to the id, never to the key.
+        let bare = hyperion_types::package::CareServiceWork {
+            done: vec!["stock-feed".into()],
+            missing: Vec::new(),
+            labels: BTreeMap::new(),
+        };
+        let out = care_section_service(&cat, Some(&bare));
+        assert!(out.contains("stock-feed"), "{out}");
+        assert!(!out.contains("care.service.item"), "{out}");
+    }
+
+    #[test]
     fn validate_package_derives_slug_and_bounds_pricing() {
         let p =
             validate_package(care_input("Péče Plus", PackageFeatures::default())).expect("valid");
@@ -36703,6 +37002,7 @@ mod tests {
                 hosting_id: detail.id.clone(),
                 package_id: 1,
                 package_name: "Péče".into(),
+                check_items: String::new(),
                 price_minor: None,
                 price_currency: None,
                 price_interval: None,
@@ -36750,6 +37050,88 @@ mod tests {
             LetterLang::Cs,
             "clearing the site setting falls back to the package, not the cluster"
         );
+    }
+
+    /// The seam this feature lives or dies on: a plan's checklist has to
+    /// reach the SITE — through the activation snapshot, on the node that
+    /// owns it — and an edit has to reach the sites already sold.
+    #[tokio::test]
+    async fn a_plans_checklist_reaches_its_sites_and_survives_an_edit() {
+        use hyperion_types::care_check::{check_items_to_json, CheckItemDef};
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), package_mocks());
+        let detail = hosting_for_packages(&s, "checklist.cz").await;
+        let def = |id: &str, label: &str| CheckItemDef {
+            id: id.into(),
+            label: label.into(),
+            detail: String::new(),
+        };
+
+        // A plan promising three checks, one of them the operator's own.
+        let mut input = care_input("Péče Plus", PackageFeatures::default());
+        input.check_items =
+            check_items_to_json(&[def("render", "Vzhled"), def("gdpr-review", "GDPR revize")]);
+        let pkg = s.package_create(input.clone()).await.expect("create");
+        assert_eq!(
+            hyperion_types::care_check::parse_check_items(&pkg.check_items).len(),
+            2
+        );
+
+        // Nothing held yet, so the site is asked the built-in four rather
+        // than nothing — "0 of 0" would render as a finished month.
+        assert_eq!(s.care_check_items(&detail.id).await.len(), 4);
+
+        s.package_activate(HostingSelector::Id(detail.id.clone()), pkg.id, None)
+            .await
+            .expect("activate");
+        let ids: Vec<String> = s
+            .care_check_items(&detail.id)
+            .await
+            .into_iter()
+            .map(|i| i.id)
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["render", "gdpr-review"],
+            "the site must be asked what its plan promises, off the snapshot"
+        );
+
+        // The operator edits the plan. Sites already on it have to follow —
+        // otherwise the plan page and the site page say different things,
+        // for ever, and only one of them is what gets ticked.
+        input.check_items = check_items_to_json(&[
+            def("render", "Vzhled"),
+            def("gdpr-review", "GDPR revize"),
+            def("stock-feed", "Kontrola importu"),
+        ]);
+        s.package_update(pkg.id, input.clone())
+            .await
+            .expect("update");
+        assert_eq!(
+            s.care_check_items(&detail.id).await.len(),
+            3,
+            "an edit must reach the sites already sold"
+        );
+
+        // The dashboard counts against that list, not against four.
+        let period = hyperion_types::care_check::period_key(now_secs());
+        let rows = s.care_overview(period.clone()).await.expect("overview");
+        let row = rows
+            .iter()
+            .find(|r| r.hosting_id == detail.id.as_str())
+            .expect("row");
+        assert_eq!((row.checks_done, row.checks_total), (0, 3));
+        assert!(
+            row.outstanding.contains(&"Kontrola importu".to_string()),
+            "the operator's own wording, not an id: {:?}",
+            row.outstanding
+        );
+
+        // And clearing the plan's list falls back to the built-ins rather
+        // than promising nothing.
+        input.check_items = String::new();
+        s.package_update(pkg.id, input).await.expect("clear");
+        assert_eq!(s.care_check_items(&detail.id).await.len(), 4);
     }
 
     #[tokio::test]
