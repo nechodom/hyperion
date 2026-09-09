@@ -7693,12 +7693,40 @@ pub async fn get_letter_lang_panel(
     )
     .await
     {
-        Ok(RpcResponse::HostingKvList(v)) => v
-            .into_iter()
-            .find(|(k, _)| k == "letters.lang")
-            .map(|(_, val)| val.trim().to_string())
-            .unwrap_or_default(),
-        _ => String::new(),
+        // `Some("")` = the node answered and holds no setting.
+        // `None`      = the node did not answer.
+        //
+        // Collapsing the two into "" made the card state "inherited — no care
+        // package on this site states a language" about a node it never
+        // reached: a positive claim about state that was not read, which is the
+        // one thing this project refuses everywhere else.
+        Ok(RpcResponse::HostingKvList(v)) => Some(
+            v.into_iter()
+                .find(|(k, _)| k == "letters.lang")
+                .map(|(_, val)| val.trim().to_string())
+                .unwrap_or_default(),
+        ),
+        _ => None,
+    };
+    let Some(chosen) = chosen else {
+        return Ok(Html(
+            LetterLangCardTpl {
+                selector,
+                csrf_token,
+                chosen: String::new(),
+                effective_label: "unknown".into(),
+                source_note: "the node that owns this site did not answer, so what \
+                              language it writes in could not be read"
+                    .into(),
+                error: Some(
+                    "Saving below still works — it writes to the owning node — but \
+                     the current value shown is not from that node."
+                        .into(),
+                ),
+            }
+            .render()?,
+        )
+        .into_response());
     };
     let label = |l: &str| match l {
         "cs" => "Čeština",
@@ -7725,12 +7753,29 @@ pub async fn get_letter_lang_panel(
         )
         .await
         {
-            Ok(RpcResponse::PackageActivations(v)) => v
-                .into_iter()
-                .map(|p| p.letters_lang.trim().to_string())
-                .find(|l| !l.is_empty())
-                .unwrap_or_default(),
-            _ => String::new(),
+            Ok(RpcResponse::PackageActivations(v)) => Some(
+                v.into_iter()
+                    .map(|p| p.letters_lang.trim().to_string())
+                    .find(|l| !l.is_empty())
+                    .unwrap_or_default(),
+            ),
+            _ => None,
+        };
+        let Some(pkg) = pkg else {
+            return Ok(Html(
+                LetterLangCardTpl {
+                    selector,
+                    csrf_token,
+                    chosen,
+                    effective_label: "unknown".into(),
+                    source_note: "this site has no language of its own, and its care \
+                                  packages could not be read from the owning node"
+                        .into(),
+                    error: None,
+                }
+                .render()?,
+            )
+            .into_response());
         };
         let pkg = pkg.as_str();
         if pkg.is_empty() {

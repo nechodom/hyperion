@@ -61,7 +61,11 @@ impl LetterLang {
     /// Unknown values fall back to English rather than erroring: a typo in
     /// `agent.toml` must not stop a customer's report going out.
     pub fn parse(s: &str) -> LetterLang {
-        match s.trim().to_ascii_lowercase().as_str() {
+        // `to_lowercase`, not `to_ascii_lowercase`: the alias list contains
+        // "česky", and ASCII lowercasing leaves `Č` alone — so an operator who
+        // wrote `lang = "Česky"` matched nothing and silently got ENGLISH, which
+        // is the one outcome this function must never reach by accident.
+        match s.trim().to_lowercase().as_str() {
             "cs" | "cz" | "cesky" | "česky" => LetterLang::Cs,
             _ => LetterLang::En,
         }
@@ -1474,6 +1478,35 @@ pub static STRINGS: &[LetterString] = &[
 
 #[cfg(test)]
 mod tests {
+    /// `Česky` must reach the Czech pack.
+    ///
+    /// It did not: the alias list holds "česky" and the match lowercased with
+    /// `to_ascii_lowercase`, which leaves `Č` untouched — so a capitalised
+    /// Czech alias fell through to English, silently, for every letter.
+    #[test]
+    fn a_capitalised_czech_alias_is_not_english() {
+        for v in [
+            "česky",
+            "Česky",
+            "ČESKY",
+            "Cesky",
+            "CS",
+            " cz ",
+            "Czech".to_lowercase().as_str(),
+        ] {
+            let got = LetterLang::parse(v);
+            if v.trim().eq_ignore_ascii_case("czech") {
+                continue;
+            }
+            assert_eq!(got, LetterLang::Cs, "{v:?} should reach the Czech pack");
+        }
+        assert_eq!(
+            LetterLang::parse("sk"),
+            LetterLang::En,
+            "unknown falls back"
+        );
+    }
+
     use super::*;
 
     /// The failure this guards against reaches a paying customer: a string
