@@ -534,6 +534,12 @@ pub struct ServicePackage {
     pub price_minor: Option<i64>,
     pub price_currency: Option<String>,
     pub price_interval: Option<String>,
+    /// Default language for the CUSTOMER letters of every site on this
+    /// package. Empty = no opinion, so the site's own setting or the cluster
+    /// default decides. `#[serde(default)]` so an older client or a saved
+    /// payload without the field still deserialises.
+    #[serde(default)]
+    pub letters_lang: String,
     #[serde(default)]
     pub features: PackageFeatures,
     /// How many hostings currently hold this package (active activations).
@@ -571,6 +577,11 @@ pub struct PackageInput {
     pub price_minor: Option<i64>,
     pub price_currency: Option<String>,
     pub price_interval: Option<String>,
+    /// Default language for this package's customers' letters. Empty = no
+    /// opinion. `#[serde(default)]` so a client that predates the field still
+    /// deserialises rather than failing the whole request.
+    #[serde(default)]
+    pub letters_lang: String,
     #[serde(default)]
     pub features: PackageFeatures,
 }
@@ -589,6 +600,9 @@ impl Default for PackageInput {
             price_currency: None,
             price_interval: None,
             features: PackageFeatures::default(),
+            // No opinion: a package that says nothing about language must not
+            // quietly override the cluster setting.
+            letters_lang: String::new(),
         }
     }
 }
@@ -606,6 +620,11 @@ pub struct HostingPackage {
     /// agent still deserialises.
     #[serde(default)]
     pub package_name: String,
+    /// Letter language snapshotted from the definition at activation. Empty =
+    /// no opinion. Snapshotted, not looked up: this row is read on the node
+    /// that owns the hosting, where the definitions table is empty.
+    #[serde(default)]
+    pub letters_lang: String,
     /// Price the customer agreed to, snapshotted at activation — a later
     /// re-price or delete of the definition never rewrites it.
     pub price_minor: Option<i64>,
@@ -1186,6 +1205,7 @@ mod tests {
             price_minor: Some(49_000),
             price_currency: Some("Kč".into()),
             price_interval: Some("monthly".into()),
+            letters_lang: String::new(),
             features: PackageFeatures::default(),
             active_count: 0,
             created_at: 0,
@@ -1211,6 +1231,7 @@ mod tests {
             hosting_id: HostingId("h1".into()),
             package_id: Some(3),
             package_name: "Péče Plus".into(),
+            letters_lang: "cs".into(),
             price_minor: Some(49_000),
             price_currency: Some("Kč".into()),
             price_interval: Some("monthly".into()),

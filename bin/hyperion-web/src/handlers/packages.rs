@@ -161,19 +161,39 @@ pub struct PackageForm {
     /// in the package name.
     #[serde(default)]
     pub feat_report_cadence: Option<String>,
+    /// Default language for the CUSTOMER letters of every site on this
+    /// package. Empty = no opinion. `Option` for the same reason as the
+    /// cadence above: absent must mean "leave what is stored", not "clear it",
+    /// so an older cached form cannot silently reset a customer's language.
+    #[serde(default)]
+    pub letters_lang: Option<String>,
 }
 
 impl PackageForm {
     /// `current` is the cadence already stored on the definition, for an
     /// edit; `None` on create (where "not in the form" really does mean
     /// "no opinion").
-    fn into_input(self, current: Option<ReportCadence>) -> Result<PackageInput, AppError> {
+    fn into_input(
+        self,
+        current: Option<ReportCadence>,
+        current_lang: Option<&str>,
+    ) -> Result<PackageInput, AppError> {
         let price_minor = parse_price_major(&self.price_major)?;
         let currency = self.price_currency.trim().to_string();
         let interval = self.price_interval.trim().to_string();
         let report_cadence = match self.feat_report_cadence.as_deref() {
             Some(v) => ReportCadence::from_stored(v),
             None => current.unwrap_or_default(),
+        };
+        // Absent field = leave what is stored. Only "en", "cs" and empty are
+        // accepted; anything else is treated as no opinion rather than written
+        // through, because a stored language the pack does not know would
+        // resolve to English silently.
+        let letters_lang = match self.letters_lang.as_deref().map(str::trim) {
+            Some("en") => "en".to_string(),
+            Some("cs") => "cs".to_string(),
+            Some("") => String::new(),
+            Some(_) | None => current_lang.unwrap_or("").to_string(),
         };
         Ok(PackageInput {
             name: self.name.trim().to_string(),
@@ -183,6 +203,7 @@ impl PackageForm {
             price_minor,
             price_currency: (!currency.is_empty()).then_some(currency),
             price_interval: (!interval.is_empty()).then_some(interval),
+            letters_lang,
             features: PackageFeatures {
                 wp_auto_update: FeatureToggle::from_stored(&self.feat_wp_auto_update),
                 integrity_scan: FeatureToggle::from_stored(&self.feat_integrity_scan),
@@ -203,7 +224,7 @@ pub async fn post_create(
     if !ctx.can(Capability::ProfilesManage) {
         return Err(AppError::Forbidden);
     }
-    let input = form.into_input(None)?;
+    let input = form.into_input(None, None)?;
     match hyperion_rpc_client::call(&state.agent_socket, Request::PackageCreate(input)).await? {
         RpcResponse::PackageCreate(p) => Ok(redirect_flash(&format!(
             "Package \"{}\" created. Activate it on a hosting from that site's detail page.",
@@ -227,13 +248,13 @@ pub async fn post_update(
     // incoming form might not post back — see
     // `PackageForm::feat_report_cadence` for why absent must not mean
     // "leave".
-    let current =
+    let (current, current_lang) =
         match hyperion_rpc_client::call(&state.agent_socket, Request::PackageGet { id }).await? {
-            RpcResponse::PackageGet(p) => Some(p.features.report_cadence),
+            RpcResponse::PackageGet(p) => (Some(p.features.report_cadence), p.letters_lang),
             RpcResponse::Error(e) => return Ok(redirect_error(&e.to_string())),
             _ => return Err(AppError::Internal("unexpected response".into())),
         };
-    let input = form.into_input(current)?;
+    let input = form.into_input(current, Some(&current_lang))?;
     match hyperion_rpc_client::call(&state.agent_socket, Request::PackageUpdate { id, input })
         .await?
     {
@@ -1367,6 +1388,7 @@ mod tests {
             hosting_id: hyperion_types::HostingId("h1".into()),
             package_id: None,
             package_name: String::new(),
+            letters_lang: String::new(),
             price_minor: Some(49_000),
             price_currency: Some("Kč".into()),
             price_interval: Some("monthly".into()),

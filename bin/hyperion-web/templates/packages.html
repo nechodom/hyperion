@@ -9,7 +9,7 @@
    touches what it explicitly forces, which is what lets a site hold a
    Backup package and a Monitoring package at the same time without each
    switching the other's feature off. #}
-{% macro feature_bundle(id_prefix, wp, integrity, monitoring, hardening, backup, report) %}
+{% macro feature_bundle(id_prefix, wp, integrity, monitoring, hardening, backup, report, lang) %}
 <div class="field-row">
   <div class="field">
     <label for="{{ id_prefix }}_wp">Automatic WordPress updates</label>
@@ -64,6 +64,18 @@
     <option value="weekly"{% if report == "weekly" %} selected{% endif %}>Weekly</option>
     <option value="quarterly"{% if report == "quarterly" %} selected{% endif %}>Quarterly</option>
     <option value="off"{% if report == "off" %} selected{% endif %}>Off — send no report</option>
+  </select>
+</div>
+{# The language every letter to THIS package's customers is written in. It is
+   a DEFAULT: a site with its own setting keeps that, and a package that says
+   nothing leaves the cluster setting alone. Operator alerts are unaffected —
+   they go to one inbox and stay in one language. #}
+<div class="field">
+  <label for="{{ id_prefix }}_lang">Letters to these customers <span class="hint">a site with its own language setting keeps it; this is what the rest get</span></label>
+  <select id="{{ id_prefix }}_lang" name="letters_lang">
+    <option value=""{% if lang == "" %} selected{% endif %}>Leave alone — use the panel-wide language</option>
+    <option value="en"{% if lang == "en" %} selected{% endif %}>English</option>
+    <option value="cs"{% if lang == "cs" %} selected{% endif %}>Čeština</option>
   </select>
 </div>
 {% endmacro %}
@@ -240,7 +252,8 @@
                                        v.pkg.features.monitoring.as_str(),
                                        v.pkg.features.hardening.as_str(),
                                        v.pkg.features.backup_cadence.as_str(),
-                                       v.pkg.features.report_cadence.as_str()) %}
+                                       v.pkg.features.report_cadence.as_str(),
+                                       v.pkg.letters_lang.as_str()) %}
                 <label class="field" style="display:flex;align-items:center;gap:0.5rem;margin-top:0.8rem">
                   <input type="checkbox" name="enabled" value="1"{% if v.pkg.enabled %} checked{% endif %} style="margin:0">
                   <span>Offered — show it in the activate picker. Untick to retire it without touching the {{ v.pkg.active_count }} site{% if v.pkg.active_count != 1 %}s{% endif %} already on it.</span>
@@ -315,7 +328,7 @@
       without fighting — and a customer who switched something on themselves keeps it
       when the package is cancelled.
     </p>
-    {% call feature_bundle("n", "leave", "leave", "leave", "leave", "leave", "leave") %}
+    {% call feature_bundle("n", "leave", "leave", "leave", "leave", "leave", "leave", "") %}
 
     <label class="field" style="display:flex;align-items:center;gap:0.5rem;margin-top:0.8rem">
       <input type="checkbox" name="enabled" value="1" checked style="margin:0">
