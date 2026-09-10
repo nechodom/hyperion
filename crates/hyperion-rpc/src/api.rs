@@ -1202,6 +1202,18 @@ pub trait AgentApi: Send + Sync + 'static {
     /// Delete a definition. Activations survive with `package_id` NULLed —
     /// they keep the price the customer agreed to, and stop being enforced.
     async fn package_delete(&self, id: i64) -> Result<(), RpcError>;
+    /// Push a definition's live fields onto the activations THIS node owns.
+    ///
+    /// Called on every node by the master after a package edit, because
+    /// `hosting_packages` is co-located with its hosting: the master's own
+    /// UPDATE reaches only the sites it owns. Returns how many ACTIVE
+    /// activations moved.
+    async fn package_relist(
+        &self,
+        package_id: i64,
+        letters_lang: String,
+        check_items: String,
+    ) -> Result<(u64, u64), RpcError>;
     /// Activations a hosting holds; `history` also returns cancelled ones.
     async fn package_activations(
         &self,

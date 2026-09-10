@@ -1830,6 +1830,16 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
     async fn package_delete(&self, id: i64) -> Result<(), RpcError> {
         self.svc.package_delete(id).await
     }
+    async fn package_relist(
+        &self,
+        package_id: i64,
+        letters_lang: String,
+        check_items: String,
+    ) -> Result<(u64, u64), RpcError> {
+        self.svc
+            .package_relist(package_id, &letters_lang, &check_items)
+            .await
+    }
     async fn package_activations(
         &self,
         sel: HostingSelector,

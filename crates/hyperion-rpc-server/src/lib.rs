@@ -1639,6 +1639,20 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(_) => Response::PackageDelete,
             Err(e) => Response::Error(e),
         },
+        Request::PackageRelist {
+            package_id,
+            letters_lang,
+            check_items,
+        } => match api
+            .package_relist(package_id, letters_lang, check_items)
+            .await
+        {
+            Ok((relanguaged, relisted)) => Response::PackageRelist {
+                relanguaged,
+                relisted,
+            },
+            Err(e) => Response::Error(e),
+        },
         Request::CareOverview { period } => match api.care_overview(period).await {
             Ok(v) => Response::CareOverview(v),
             Err(e) => Response::Error(e),
@@ -3109,6 +3123,14 @@ mod tests {
         }
         async fn package_delete(&self, _: i64) -> Result<(), RpcError> {
             Ok(())
+        }
+        async fn package_relist(
+            &self,
+            _: i64,
+            _: String,
+            _: String,
+        ) -> Result<(u64, u64), RpcError> {
+            Ok((0, 0))
         }
         async fn package_activations(
             &self,

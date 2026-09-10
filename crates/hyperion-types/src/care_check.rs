@@ -166,7 +166,12 @@ pub fn parse_check_items_raw(raw: &str) -> Vec<CheckItemDef> {
 pub fn resolve_check_items(snapshots: &[&str]) -> Vec<CheckItemDef> {
     let mut out: Vec<CheckItemDef> = Vec::new();
     for raw in snapshots {
-        for item in parse_check_items_raw(raw) {
+        // `parse_check_items`, WITH the fallback, deliberately: a plan storing
+        // "" promises the built-in four, and it goes on promising them when
+        // the site also holds a plan that lists its own. Unioning the RAW
+        // parse instead would let one custom plan silently cancel every check
+        // the other plan sells.
+        for item in parse_check_items(raw) {
             if !out.iter().any(|k| k.id == item.id) {
                 out.push(item);
             }
@@ -278,7 +283,20 @@ impl CareServiceChecks {
         }
     }
 
+    /// Serialise for storage.
+    ///
+    /// While nothing has been frozen, this writes the PRE-v0.62 shape — the
+    /// bare `YYYY-MM` map — and not because it is tidier. A cluster upgrades
+    /// one node at a time, and this blob is written by the master into the kv
+    /// of the node that owns the site. A v0.61.1 node parses the new shape
+    /// with `unwrap_or_default()`, i.e. as "nothing was ever checked", and
+    /// then tells the customer so. Emitting the old shape until there is
+    /// genuinely something new to say means an install that never edits a
+    /// checklist never writes a blob its other nodes cannot read.
     pub fn to_json(&self) -> String {
+        if self.applied.is_empty() {
+            return serde_json::to_string(&self.periods).unwrap_or_else(|_| "{}".to_string());
+        }
         serde_json::to_string(self).unwrap_or_else(|_| "{}".to_string())
     }
 
@@ -319,6 +337,16 @@ impl CareServiceChecks {
     pub fn items_now(&self, period: &str, live: &[CheckItemDef]) -> Vec<CheckItemDef> {
         match self.applied.get(period) {
             Some(items) if !items.is_empty() => items.clone(),
+            // MARKS but no frozen list: a month ticked before v0.62, when the
+            // list was the built-in four and nothing recorded that. It is a
+            // record, not an open question, so the plan as it stands today
+            // must not rescore it — the same answer `items_for` gives.
+            //
+            // Without this arm the first operator to edit a plan after the
+            // upgrade rewrites up to 24 months of every site's history: the
+            // customer's letter reports four checks that were done, and
+            // recorded, as not performed.
+            _ if self.periods.contains_key(period) => builtin_check_items(),
             _ if !live.is_empty() => live.to_vec(),
             _ => builtin_check_items(),
         }
@@ -332,6 +360,22 @@ impl CareServiceChecks {
     /// do — or remove one they already ticked.
     pub fn freeze_items(&mut self, period: &str, items: &[CheckItemDef]) {
         if items.is_empty() {
+            return;
+        }
+        // Freezing the built-in four is already what NO entry means for a
+        // month that has marks — `items_for` and `items_now` both answer
+        // `builtin_check_items()` for it — so writing it down changes no
+        // answer this type can give.
+        //
+        // Not writing it is what keeps `to_json` on the pre-v0.62 shape for
+        // every install that has not customised a checklist. A cluster
+        // upgrades one node at a time and this blob is written BY THE MASTER
+        // into the owning node's kv; a v0.61.1 node reads an unknown shape as
+        // "nothing was ever checked" and tells the customer so. Without this,
+        // the very first ordinary tick after the upgrade would write the new
+        // shape on a site nobody has customised, and the compatibility this
+        // was built for would never apply to anyone.
+        if items == builtin_check_items() {
             return;
         }
         self.applied
@@ -377,6 +421,44 @@ impl CareServiceChecks {
     /// How many items the period was measured against — its denominator.
     pub fn total_count(&self, period: &str) -> usize {
         self.items_for(period).len()
+    }
+
+    /// Record (or retract) one item, freezing the month if and only if this
+    /// submit is a CLAIM of work.
+    ///
+    /// The single entry point for a tick, and the freeze decision lives here
+    /// rather than in the handler on purpose. The same form also saves a note
+    /// and retracts a mistake, and both post the whole row; a caller that
+    /// froze first would pin the checklist of a month nobody has checked,
+    /// putting it beyond the reach of any later plan edit. Leaving that choice
+    /// to each call site is how it went wrong once already.
+    ///
+    /// `live` is the site's CURRENT plan. It is used only when the month has
+    /// nothing frozen yet — see [`Self::items_now`].
+    pub fn record(
+        &mut self,
+        period: &str,
+        id: &str,
+        checked: bool,
+        by: &str,
+        note: &str,
+        now: i64,
+        live: &[CheckItemDef],
+    ) {
+        if checked {
+            // `items_now`, NOT `live`. For a month carrying marks but nothing
+            // frozen — every month ticked under v0.54..v0.61 — what the month
+            // is scored against is the built-in four, and that is what the
+            // card just showed the operator and what their click validated
+            // against. Freezing the raw plan here would pin today's list onto
+            // a month somebody already signed off, which is the exact
+            // rescoring `items_now` exists to prevent: the marks stay in the
+            // blob, but nothing counts or renders them ever again, and the
+            // customer's letter says nobody looked.
+            let frozen = self.items_now(period, live);
+            self.freeze_items(period, &frozen);
+        }
+        self.set_id(period, id, checked, by, note, now);
     }
 
     /// Record (or clear) a mark by raw id, so a custom item works exactly like
@@ -471,11 +553,22 @@ impl CareServiceChecks {
         // the period but deliberately KEEPS its frozen list, so that a re-tick
         // lands on the same denominator — which means `applied` can outlive
         // `periods` and would otherwise grow without a ceiling.
+        //
+        // Only ORPHANS are eligible. Taking the oldest key outright would
+        // strip the frozen list off a month whose marks are still stored, and
+        // that month would silently rescore against the built-in four — the
+        // exact rewriting-of-history this map exists to prevent. `periods` is
+        // already capped, so dropping orphans alone keeps this bounded.
         while self.applied.len() > KEEP_MONTHS {
-            let Some(oldest) = self.applied.keys().next().cloned() else {
+            let Some(orphan) = self
+                .applied
+                .keys()
+                .find(|k| !self.periods.contains_key(*k))
+                .cloned()
+            else {
                 break;
             };
-            self.applied.remove(&oldest);
+            self.applied.remove(&orphan);
         }
     }
 }
@@ -672,6 +765,242 @@ mod tests {
             "120 months of frozen lists survived the trim: {}",
             c.applied.len()
         );
+    }
+
+    /// The upgrade case, and the one the whole feature turns on.
+    ///
+    /// Every site carries months ticked under v0.54..v0.61, when the list was
+    /// the built-in four and nothing recorded that. Those months must not be
+    /// rescored against whatever the plan says today.
+    #[test]
+    fn a_month_ticked_before_v062_is_not_rescored_by_a_later_plan_edit() {
+        // Exactly what a v0.61 install has on disk: the bare month map.
+        let legacy = r#"{"2026-09":{
+            "render":{"at":1,"by":"kevin","note":""},
+            "forms":{"at":2,"by":"kevin","note":""},
+            "speed":{"at":3,"by":"kevin","note":""},
+            "post_update":{"at":4,"by":"kevin","note":""}}}"#;
+        let c = CareServiceChecks::parse(legacy);
+        assert!(c.applied.is_empty(), "a legacy blob freezes nothing");
+
+        // The operator upgrades and does the obvious first thing: replaces the
+        // list with their own items.
+        let live = defs(&["gdpr", "stock-feed", "uptime"]);
+        let scored = c.items_now("2026-09", &live);
+        assert_eq!(
+            scored.iter().map(|i| i.id.as_str()).collect::<Vec<_>>(),
+            vec!["render", "forms", "speed", "post_update"],
+            "September was ticked against the built-in four and stays scored against them"
+        );
+        assert!(
+            c.outstanding_now("2026-09", &live).is_empty(),
+            "all four were done; the customer must not be told otherwise"
+        );
+        assert_eq!(c.done_count("2026-09"), 4);
+
+        // A month with NO marks is still an open question and follows the plan.
+        assert_eq!(c.items_now("2026-10", &live).len(), 3);
+    }
+
+    /// An unedited plan does not stop promising the built-in four just because
+    /// the site also holds a plan that lists its own.
+    #[test]
+    fn an_unedited_plan_keeps_promising_the_builtins_alongside_a_custom_one() {
+        let custom = check_items_to_json(&defs(&["gdpr"]));
+        let ids: Vec<String> = resolve_check_items(&["", &custom])
+            .into_iter()
+            .map(|i| i.id)
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["render", "forms", "speed", "post_update", "gdpr"],
+            "the unedited plan sells four checks and the custom one sells a fifth"
+        );
+    }
+
+    /// Trimming `applied` must never strip the frozen list off a month whose
+    /// marks are still stored — that month would silently rescore.
+    #[test]
+    fn trim_never_unfreezes_a_month_that_still_has_marks() {
+        let mut c = CareServiceChecks::default();
+        let five = defs(&["a", "b", "c", "d", "e"]);
+        // Fill every kept month with a five-item frozen list...
+        for y in 2025..2027 {
+            for m in 1..=12 {
+                let p = format!("{y}-{m:02}");
+                c.freeze_items(&p, &five);
+                c.set_id(&p, "a", true, "kevin", "", 1);
+            }
+        }
+        // ...then add orphans: months frozen and then emptied by an untick.
+        for m in 1..=6 {
+            let p = format!("2024-{m:02}");
+            c.freeze_items(&p, &five);
+            c.set_id(&p, "a", true, "kevin", "", 1);
+            c.set_id(&p, "a", false, "kevin", "", 2);
+        }
+        for p in c.periods.keys().cloned().collect::<Vec<_>>() {
+            assert_eq!(
+                c.total_count(&p),
+                5,
+                "{p} still has marks, so it must still have its frozen list"
+            );
+        }
+        assert!(c.applied.len() <= KEEP_MONTHS * 2, "still bounded");
+    }
+
+    /// A cluster upgrades one node at a time, and this blob is written by the
+    /// master into the OWNING node's kv. Until something is actually frozen,
+    /// keep writing the shape a v0.61 node can still read.
+    #[test]
+    fn nothing_frozen_still_writes_the_old_shape() {
+        let mut c = CareServiceChecks::default();
+        c.set_id("2026-09", "render", true, "kevin", "ok", 100);
+        let json = c.to_json();
+        assert!(
+            json.starts_with(r#"{"2026-09":"#),
+            "an install that has not edited a checklist must not write a blob              its other nodes cannot read: {json}"
+        );
+        assert_eq!(CareServiceChecks::parse(&json), c, "and it round-trips");
+
+        // Once a month IS frozen there is something new to say, and the new
+        // shape is the only one that can carry it.
+        c.freeze_items("2026-09", &defs(&["render", "gdpr"]));
+        let json = c.to_json();
+        assert!(json.contains(r#""applied""#), "{json}");
+        assert_eq!(CareServiceChecks::parse(&json), c);
+    }
+
+    /// A month is a record from the moment somebody claims work, and not
+    /// before. Saving a note on an unticked row, or retracting a mistake, must
+    /// leave the month open to a later plan edit.
+    #[test]
+    fn only_a_claim_of_work_freezes_the_month() {
+        let old_plan = defs(&["render", "forms"]);
+        let new_plan = defs(&["render", "forms", "gdpr"]);
+
+        // A note typed into the box of a row nobody ticked.
+        let mut c = CareServiceChecks::default();
+        c.record(
+            "2026-03",
+            "render",
+            false,
+            "kevin",
+            "asked client",
+            1,
+            &old_plan,
+        );
+        assert!(
+            c.applied.is_empty(),
+            "nothing was claimed, so nothing is frozen"
+        );
+        assert_eq!(
+            c.items_now("2026-03", &new_plan).len(),
+            3,
+            "the month is still open and follows the plan"
+        );
+
+        // Retracting a tick leaves the month frozen — work WAS claimed once,
+        // and the denominator a re-tick lands on has to be the same one.
+        let mut c = CareServiceChecks::default();
+        c.record("2026-03", "render", true, "kevin", "", 1, &old_plan);
+        c.record("2026-03", "render", false, "kevin", "", 2, &old_plan);
+        assert_eq!(
+            c.items_now("2026-03", &new_plan).len(),
+            2,
+            "a month that was ticked keeps its list even after the tick is pulled"
+        );
+
+        // And a real tick freezes against the plan as it stood, once.
+        let mut c = CareServiceChecks::default();
+        c.record("2026-03", "render", true, "kevin", "", 1, &old_plan);
+        c.record("2026-03", "forms", true, "kevin", "", 2, &new_plan);
+        assert_eq!(
+            c.total_count("2026-03"),
+            2,
+            "frozen once, at the first claim"
+        );
+    }
+
+    /// The regression round 2 found in round 1's own fix.
+    ///
+    /// Ticking a pre-v0.62 month must freeze what the card SCORED it against
+    /// — the built-in four — not the plan as it stands today. Getting this
+    /// wrong put the rescoring back one call deeper than where it was fixed,
+    /// and made the operator's own click the thing that erased the month.
+    #[test]
+    fn ticking_a_legacy_month_freezes_what_it_was_scored_against() {
+        let legacy = r#"{"2026-09":{
+            "render":{"at":1,"by":"kevin","note":""},
+            "forms":{"at":2,"by":"kevin","note":""}}}"#;
+        let mut c = CareServiceChecks::parse(legacy);
+        // The operator has since replaced the plan's list wholesale.
+        let live = defs(&["gdpr-review", "stock-feed"]);
+
+        // The card shows the built-in four, 2 of 4, and the operator ticks the
+        // third — an id that only exists in the built-in list.
+        assert_eq!(c.items_now("2026-09", &live).len(), 4);
+        c.record("2026-09", "speed", true, "kevin", "", 10, &live);
+
+        assert_eq!(
+            (c.done_count("2026-09"), c.total_count("2026-09")),
+            (3, 4),
+            "the month the operator was looking at must stay the month they ticked"
+        );
+        assert!(
+            c.is_checked("2026-09", ServiceCheckItem::Render),
+            "and the marks already recorded must still COUNT, not merely survive"
+        );
+        assert_eq!(
+            c.outstanding_ids("2026-09"),
+            vec!["post_update".to_string()]
+        );
+
+        // October, which nobody has touched, still follows the new plan.
+        assert_eq!(
+            c.items_now("2026-10", &live)
+                .into_iter()
+                .map(|i| i.id)
+                .collect::<Vec<_>>(),
+            vec!["gdpr-review", "stock-feed"]
+        );
+    }
+
+    /// The compatibility guard has to survive ordinary use, or it protects
+    /// nobody: an install that never customises a checklist must never write
+    /// a blob its un-upgraded nodes cannot read.
+    #[test]
+    fn an_install_that_never_customises_never_writes_the_new_shape() {
+        let mut c = CareServiceChecks::default();
+        let builtins = builtin_check_items();
+        // A full year of ordinary ticking on the built-in list.
+        for m in 1..=12 {
+            let p = format!("2026-{m:02}");
+            for item in &builtins {
+                c.record(&p, &item.id, true, "kevin", "", 1, &builtins);
+            }
+        }
+        assert!(
+            c.applied.is_empty(),
+            "the built-in four are what silence means"
+        );
+        let json = c.to_json();
+        assert!(
+            !json.contains(r#""applied""#) && !json.contains(r#""periods""#),
+            "a v0.61 node has to be able to read this: {json}"
+        );
+        // And every month still reads back as complete, against four.
+        for m in 1..=12 {
+            let p = format!("2026-{m:02}");
+            assert!(c.is_complete(&p), "{p}");
+            assert_eq!(c.total_count(&p), 4);
+        }
+        assert_eq!(CareServiceChecks::parse(&json), c);
+
+        // The moment a plan genuinely differs, the new shape is the only one
+        // that can carry it, and that is when it starts being written.
+        c.record("2027-01", "gdpr", true, "kevin", "", 2, &defs(&["gdpr"]));
+        assert!(c.to_json().contains(r#""applied""#));
     }
 
     /// A custom id ticks and unticks exactly like a built-in one.

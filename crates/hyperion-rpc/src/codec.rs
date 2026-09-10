@@ -1645,6 +1645,27 @@ pub enum Request {
     PackageDelete {
         id: i64,
     },
+    /// Push a definition's live fields onto the activations THIS node owns.
+    ///
+    /// Definitions are master-only, but `hosting_packages` is co-located with
+    /// its hosting, so a master editing a package can only reach its own
+    /// sites. Everything a package sells is either snapshotted (price, name,
+    /// bundle — what the customer agreed to) or re-asserted by the node's own
+    /// enforcement tick reading that snapshot. These two are neither: they are
+    /// presentation defaults the operator expects to apply to the sites
+    /// already sold, and nothing on a worker ever re-derives them. Without
+    /// this call they are write-once at activation on every node but the
+    /// master, and the panel's "sites already holding this package pick the
+    /// change up" is false for most of the estate.
+    ///
+    /// Carries the VALUES rather than the id so the node needs no lookup into
+    /// a table it does not have. Idempotent; cancelled activations are left
+    /// alone, their settings being history.
+    PackageRelist {
+        package_id: i64,
+        letters_lang: String,
+        check_items: String,
+    },
     /// Every site on THIS node that holds a care package, with how much of
     /// `period`'s monthly service checklist is done.
     ///
@@ -2203,6 +2224,11 @@ pub enum Response {
     PackageCreate(hyperion_types::ServicePackage),
     PackageUpdate(hyperion_types::ServicePackage),
     PackageDelete,
+    /// How many ACTIVE activations on that node the push actually moved.
+    PackageRelist {
+        relanguaged: u64,
+        relisted: u64,
+    },
     PackageActivations(Vec<hyperion_types::HostingPackage>),
     CareOverview(Vec<hyperion_types::care_check::CareOverviewRow>),
     PackageActivate(hyperion_types::HostingPackage),

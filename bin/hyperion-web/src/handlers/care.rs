@@ -162,7 +162,7 @@ pub async fn get_care_panel(
     Ok(Html(tpl.render()?).into_response())
 }
 
-fn node_label(n: &hyperion_types::NodeSummary) -> String {
+pub(crate) fn node_label(n: &hyperion_types::NodeSummary) -> String {
     if n.label.trim().is_empty() {
         n.node_id.clone()
     } else {
