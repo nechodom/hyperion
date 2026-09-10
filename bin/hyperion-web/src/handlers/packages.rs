@@ -427,10 +427,29 @@ pub async fn post_update(
         // Edits reach every ACTIVE activation on the next enforcement pass
         // — that liveness is the point of a package, and the operator
         // should not be surprised by it.
-        RpcResponse::PackageUpdate(p) => Ok(redirect_flash(&format!(
-            "Package \"{}\" updated. Sites already holding it pick the change up on the next enforcement pass.",
-            p.name
-        ))),
+        RpcResponse::PackageUpdate(p) => {
+            // The master's own UPDATE reached only the sites the master owns.
+            // Every other activation lives in its own node's database, so the
+            // edit has to be carried there explicitly — and a node that does
+            // not answer keeps selling the old checklist and the old letter
+            // language with nothing on screen to say so, which is the one
+            // outcome this must not produce silently.
+            let missed = relist_on_every_node(&state, p.id, &p.letters_lang, &p.check_items).await;
+            if missed.is_empty() {
+                Ok(redirect_flash(&format!(
+                    "Package \"{}\" updated. Sites already holding it pick the change up on the next enforcement pass.",
+                    p.name
+                )))
+            } else {
+                Ok(redirect_error(&format!(
+                    "Package \"{}\" was saved, but {} did not answer, so sites there still hold the \
+                     previous checklist and letter language. Re-save this package once {} reachable.",
+                    p.name,
+                    missed.join(", "),
+                    if missed.len() == 1 { "it is" } else { "they are" },
+                )))
+            }
+        }
         RpcResponse::Error(e) => Ok(redirect_error(&e.to_string())),
         _ => Err(AppError::Internal("unexpected response".into())),
     }
@@ -1113,6 +1132,62 @@ async fn render_card(
         error,
     };
     Ok(Html(tpl.render()?).into_response())
+}
+
+/// Carry a package edit to the activations on every OTHER node.
+///
+/// `hosting_packages` rows are co-located with their hosting, so the UPDATE
+/// the agent just ran covers the sites this server owns and no others. The
+/// price, the name and the feature bundle are snapshotted on purpose and stay
+/// put; the letter language and the monthly checklist are not — they are what
+/// the operator expects to change under the sites already sold, and nothing on
+/// a worker ever re-derives them from the definition.
+///
+/// Returns the nodes that could not be told, by label. An empty vector means
+/// every node applied it. Callers MUST surface a non-empty result: a node that
+/// missed the edit goes on checking last month's list for ever, and the only
+/// place that would ever show up is a customer's report.
+async fn relist_on_every_node(
+    state: &SharedState,
+    package_id: i64,
+    letters_lang: &str,
+    check_items: &str,
+) -> Vec<String> {
+    let nodes: Vec<hyperion_types::NodeSummary> =
+        match hyperion_rpc_client::call(&state.agent_socket, Request::NodesList).await {
+            // A standalone install answers with an EMPTY list, not an error, so
+            // an error here is not "there are no nodes" — it is "nobody could
+            // say". Reporting that as a clean save is the same failure this
+            // whole function exists to fix, one level up: the operator would
+            // be told the edit landed everywhere when it may have landed
+            // nowhere but here.
+            Ok(RpcResponse::NodesList(v)) => v,
+            _ => return vec!["this server (could not list its nodes)".to_string()],
+        };
+    if nodes.is_empty() {
+        return Vec::new();
+    }
+    let req = Request::PackageRelist {
+        package_id,
+        letters_lang: letters_lang.to_string(),
+        check_items: check_items.to_string(),
+    };
+    let (answered, failed) = crate::dispatcher::fan_out_reporting(state, nodes, req).await;
+    let mut missed: Vec<String> = Vec::new();
+    for (node, resp) in answered {
+        match resp {
+            RpcResponse::PackageRelist { .. } => {}
+            // An agent too old to know the request answers with an error, and
+            // that node's sites are exactly as stale as an unreachable one's.
+            _ => missed.push(super::care::node_label(&node)),
+        }
+    }
+    for (node, _) in failed {
+        missed.push(super::care::node_label(&node));
+    }
+    missed.sort();
+    missed.dedup();
+    missed
 }
 
 /// The site's ACTIVE activations, from the node that owns it.
@@ -1942,11 +2017,6 @@ pub async fn post_service_check(
     } else {
         form.period.trim().to_string()
     };
-    // Freeze the month against the list as it stands NOW, before the first
-    // tick lands in it. From here the plan can be edited freely: this month
-    // keeps its denominator and its wording, and the change applies from the
-    // next one. Once-only, so a second tick this month does not re-freeze.
-    checks.freeze_items(&period, &live);
     // Scored against the frozen list, which for a month already under way is
     // what the operator was looking at — not what the plan says today.
     let allowed = checks.items_now(&period, &live);
@@ -1965,14 +2035,18 @@ pub async fn post_service_check(
         )
         .await;
     }
+    // `record`, not `freeze_items` + `set_id`: the decision about WHEN a month
+    // becomes a frozen record belongs to the type, because this same form also
+    // saves a note and retracts a mistake. See `CareServiceChecks::record`.
     let who = ctx.username.clone();
-    checks.set_id(
+    checks.record(
         &period,
         item_id,
         form.checked.is_some(),
         &who,
         form.note.trim(),
         hyperion_types::now_secs(),
+        &live,
     );
     let saved = crate::dispatcher::dispatch_to_node(
         &state,

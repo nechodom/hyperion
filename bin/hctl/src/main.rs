@@ -1263,6 +1263,19 @@ fn print_pretty(resp: &Response) {
         Response::PackageDelete => {
             println!("✓ package deleted (existing activations keep their price, unenforced)")
         }
+        // Say ZERO out loud rather than printing a bare tick. The master fans
+        // this out to every node, and most of them own no site on the package
+        // — but "0 sites moved" is also exactly what a node whose activations
+        // reference a different package_id reports, and the two must not look
+        // the same to whoever is debugging a plan edit that did not land.
+        Response::PackageRelist {
+            relanguaged,
+            relisted,
+        } => {
+            println!(
+                "✓ {relisted} activation(s) relisted, {relanguaged} relanguaged on this node"
+            )
+        }
         // The three self-check responses share one shape; print them the
         // same way the FTP check already is.
         Response::WpMailSelfCheck(r) | Response::WpMailRepair(r) => {

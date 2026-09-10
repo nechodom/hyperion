@@ -127,6 +127,21 @@
 # cross-node moves and copies are blocked. Same-node operations, backups,
 # provisioning and every other RPC keep working normally. Plan migrations
 # outside the rollout window, or finish the rollout first.
+#
+# KNOWN EXCEPTION — editing a CARE PACKAGE during the rollout window (v0.62.0+).
+# Two things a package edit changes are not snapshotted: the monthly checklist
+# and the customer-letter language. The master pushes both to every node, and a
+# node still running the old build does not know the request. The panel names
+# the nodes that missed it and asks you to re-save the package once they answer
+# — that message is the whole guard, so do not dismiss it. Sites on a node that
+# missed the edit keep checking the previous list until you re-save.
+#
+# Also: CUSTOMISING a checklist during the window changes the on-disk shape of
+# that site's check record, and an un-upgraded node reads the new shape as
+# "nothing was ever checked" — which is what its customer report would then
+# say. An install that leaves the built-in four alone never writes the new
+# shape, so ordinary ticking through the window is safe. Wait until every node
+# is up to date before editing a plan's checklist for the first time.
 #==========================================================================
 
 set -euo pipefail

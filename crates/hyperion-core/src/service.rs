@@ -13422,6 +13422,13 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // that in three places ("Sites already holding this package pick the
         // change up on the next enforcement pass"). Without this the field was
         // write-once at activation and all three statements were false.
+        //
+        // THIS NODE ONLY. `hosting_packages` is co-located with its hosting,
+        // so on a master these two lines reach the master's own sites and
+        // nothing else. The caller fans [`Self::package_relist`] out to every
+        // node — and has to tell the operator about any node that did not
+        // answer, because those sites keep the old settings with nothing on
+        // screen to say so.
         let moved = packages::set_letters_lang(&self.pool, id, &lang)
             .await
             .map_err(|e| RpcError::Internal_with(format!("package language: {e}")))?;
@@ -13446,6 +13453,47 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         )
         .await;
         Ok(out)
+    }
+
+    /// Apply a definition's live fields to the activations THIS node owns.
+    ///
+    /// The other half of [`Self::package_update`]. That one runs on the
+    /// master, whose `hosting_packages` holds only the sites the master owns;
+    /// every other site's activation row lives in its own node's database and
+    /// is unreachable from there. The panel calls this on every node after an
+    /// edit.
+    ///
+    /// Takes the VALUES, not the id: `service_packages` is master-only, so a
+    /// worker asked to look the definition up would find nothing and quietly
+    /// do nothing — the exact failure this exists to fix.
+    pub async fn package_relist(
+        &self,
+        package_id: i64,
+        letters_lang: &str,
+        check_items: &str,
+    ) -> Result<(u64, u64), RpcError> {
+        let relanguaged = packages::set_letters_lang(&self.pool, package_id, letters_lang)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("package relist language: {e}")))?;
+        let relisted = packages::set_check_items(&self.pool, package_id, check_items)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("package relist checklist: {e}")))?;
+        if relanguaged > 0 || relisted > 0 {
+            self.append_audit(
+                "package.relist",
+                None,
+                &serde_json::json!({
+                    "package_id": package_id,
+                    "letters_lang": letters_lang,
+                    "activations_relanguaged": relanguaged,
+                    "activations_relisted": relisted,
+                })
+                .to_string(),
+                "ok",
+            )
+            .await;
+        }
+        Ok((relanguaged, relisted))
     }
 
     /// Delete a definition. Existing activations SURVIVE with `package_id`
@@ -37132,6 +37180,87 @@ mod tests {
         input.check_items = String::new();
         s.package_update(pkg.id, input).await.expect("clear");
         assert_eq!(s.care_check_items(&detail.id).await.len(), 4);
+    }
+
+    /// The half of a package edit that does not happen on the master.
+    ///
+    /// `hosting_packages` is co-located with its hosting, so the UPDATE inside
+    /// `package_update` reaches the master's own sites and nothing else. A
+    /// worker's copy is moved by this call and by nothing else — no tick
+    /// re-derives it, because the enforcement pass reads the SNAPSHOT.
+    #[tokio::test]
+    async fn package_relist_moves_the_activations_this_node_owns() {
+        use hyperion_types::care_check::{check_items_to_json, CheckItemDef};
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), package_mocks());
+        let detail = hosting_for_packages(&s, "worker-owned.cz").await;
+
+        // Stand in for what a worker's database looks like: an activation
+        // written when the site was sold, with NO definition behind it —
+        // `service_packages` is empty on a worker, which is the whole reason
+        // the values have to travel with the request.
+        hyperion_state::packages::activate(
+            &pool,
+            &hyperion_state::packages::NewActivation {
+                hosting_id: detail.id.clone(),
+                package_id: 42,
+                package_name: "Péče Plus".into(),
+                letters_lang: "en".into(),
+                check_items: String::new(),
+                price_minor: None,
+                price_currency: None,
+                price_interval: None,
+                features: PackageFeatures::default(),
+                next_billing_at: None,
+                prior_state_json: None,
+            },
+            0,
+        )
+        .await
+        .expect("activate");
+
+        // Before: the site is on the built-in four and English.
+        assert_eq!(s.care_check_items(&detail.id).await.len(), 4);
+        assert_eq!(s.letter_catalog_for(&detail.id).await.lang, LetterLang::En);
+
+        let items = check_items_to_json(&[
+            CheckItemDef {
+                id: "gdpr-review".into(),
+                label: "GDPR revize".into(),
+                detail: String::new(),
+            },
+            CheckItemDef {
+                id: "stock-feed".into(),
+                label: "Import skladu".into(),
+                detail: String::new(),
+            },
+        ]);
+        let (relanguaged, relisted) = s.package_relist(42, "cs", &items).await.expect("relist");
+        assert_eq!((relanguaged, relisted), (1, 1));
+
+        let ids: Vec<String> = s
+            .care_check_items(&detail.id)
+            .await
+            .into_iter()
+            .map(|i| i.id)
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["gdpr-review", "stock-feed"],
+            "the edit has to reach a site whose definition lives on another box"
+        );
+        assert_eq!(
+            s.letter_catalog_for(&detail.id).await.lang,
+            LetterLang::Cs,
+            "and so does the letter language, broken the same way since v0.61.0"
+        );
+
+        // A package this node holds nothing for is a no-op, not an error: the
+        // master fans this out to every node, most of which own no site on it.
+        assert_eq!(
+            s.package_relist(999, "cs", &items).await.expect("noop"),
+            (0, 0)
+        );
     }
 
     #[tokio::test]
