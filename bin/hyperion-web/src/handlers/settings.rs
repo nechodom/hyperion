@@ -1738,7 +1738,10 @@ fn section_to_tab(section: &str) -> &'static str {
         "notifications" => "notifications",
         // Every word the customer letters can say — same tab.
         "letters" => "notifications",
-        "backup_remote" | "backup_retention" => "backups",
+        // Which engine the install uses. It governs both, so it sits at the
+        // top of the tab that shows both — and unlike the cluster.* fields it
+        // needs no `_return_tab` override, because this IS its tab.
+        "backup_remote" | "backup_retention" | "protection" => "backups",
         // [cluster] fields are now split across two tabs: the Security card
         // (2FA + hardening flags) lives on General, Cluster placement on
         // Cluster. General is the default; the placement form carries a

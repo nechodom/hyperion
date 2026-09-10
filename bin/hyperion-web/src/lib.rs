@@ -732,6 +732,10 @@ pub fn build_router(state: SharedState) -> Router {
             post(handlers::hostings::post_snapshot_diff),
         )
         .route(
+            "/hostings/snapshots/restore",
+            post(handlers::hostings::post_snapshot_restore),
+        )
+        .route(
             "/hostings/:selector/wpmail-panel",
             get(handlers::hostings::get_wpmail_panel),
         )

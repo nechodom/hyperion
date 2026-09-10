@@ -1417,6 +1417,59 @@
 <div class="tab-panel" id="tab-backups">
   <p class="text-soft small" style="margin:0 0 0.9rem;line-height:1.55">Cluster-wide backup targets and how many copies are kept. Each site chooses its own schedule and target on its Backups tab.</p>
 
+  {# Which engine this install uses. First card on the tab because it decides
+     what the rest of the tab even means — and because the two are not
+     substitutes, which is the thing operators get wrong. #}
+  <div class="card">
+    <div class="row" style="align-items:center;gap:0.6rem;margin-bottom:0.5rem">
+      <h2 style="margin:0">
+        <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v6"/><path d="m8 6 4-4 4 4"/><rect x="3" y="10" width="18" height="11" rx="2"/><path d="M7 15h10"/></svg>
+        What this panel keeps
+      </h2>
+    </div>
+    <p class="text-soft small" style="margin:0 0 0.8rem;line-height:1.6">
+      <strong>Backup archives</strong> are a tar of the site plus a database
+      dump, kept on a schedule and pushed off-site. They answer
+      <em>“the server is gone.”</em> They are also what a care package sells to
+      a customer.
+      <br>
+      <strong>Snapshots</strong> are taken automatically before Hyperion
+      changes anything, store shared content once so thirty of them cost little
+      more than one, and can say what an update changed. They answer <em>“last
+      night's update broke the site.”</em> They never leave the node.
+    </p>
+    <form method="post" action="/settings/config" autocomplete="off">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="section" value="protection">
+      <div class="field" style="max-width:34rem">
+        <label for="prot_mode">Keep</label>
+        <select id="prot_mode" name="mode">
+          <option value="both"{% if config.cluster.protection_mode == "both" %} selected{% endif %}>Both — archives for disaster recovery, snapshots for undo</option>
+          <option value="backups"{% if config.cluster.protection_mode == "backups" %} selected{% endif %}>Backup archives only — no snapshots are taken</option>
+          <option value="snapshots"{% if config.cluster.protection_mode == "snapshots" %} selected{% endif %}>Snapshots only — no scheduled archives, and no off-site copy</option>
+        </select>
+      </div>
+      {% if config.cluster.protection_mode == "snapshots" %}
+      <div class="flash warn" style="margin:0.2rem 0 0.8rem">
+        <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+        <div class="flash-body">
+          Snapshots stay on the node that holds the site. In this mode nothing
+          is copied off-site, so losing a node loses those sites. Sites whose
+          care package sells backups keep getting them regardless — a plan is a
+          record that somebody paid, and this setting does not cancel it.
+        </div>
+      </div>
+      {% endif %}
+      <p class="text-soft small" style="margin:0 0 0.8rem;line-height:1.55">
+        Switching a engine off stops new copies; it never deletes what is
+        already kept. Backups taken internally to undo a move, a copy or a
+        staging push keep running in every mode — those are how those features
+        roll themselves back, not something being sold.
+      </p>
+      <button class="btn primary" type="submit">Save</button>
+    </form>
+  </div>
+
   {# Two off-site destination types: the FTP/FTPS/SFTP single-target push
      (below) is the path that runs TODAY; the S3 multi-target page is the
      config layer for the upcoming scheduler. Frame them as complementary,

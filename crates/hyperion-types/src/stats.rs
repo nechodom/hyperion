@@ -479,6 +479,14 @@ pub const EXPIRY_WARNING_DEFAULT_BODY_TEMPLATE: &str = "Hello,\n\
      --\n\
      Hyperion\n";
 
+/// `"both"` — see [`ClusterConfigView::protection_mode`]. A free function
+/// rather than a literal because `#[serde(default = "...")]` needs a path, and
+/// having one source for it is what keeps the serde default and the `Default`
+/// impl from drifting apart.
+fn default_protection_mode() -> String {
+    "both".to_string()
+}
+
 fn default_cluster_mode() -> String {
     "master".to_string()
 }
@@ -565,6 +573,27 @@ pub struct ClusterConfigView {
     #[serde(default)]
     pub audit_retention_days: i64,
 
+    /// Which of the two copy-of-the-site engines this install USES:
+    /// `"backups"`, `"snapshots"` or `"both"`.
+    ///
+    /// They are not substitutes and the panel says so. An archive backup is
+    /// files plus a database dump, pushed off-site, scheduled, and SOLD to
+    /// customers on a care plan. A snapshot is a deduplicated local copy taken
+    /// automatically before anything risky, cheap enough to keep thirty of,
+    /// and it never leaves the node. An operator running both pays for both
+    /// and reads two sets of cards; this is how they say which one they mean.
+    ///
+    /// What it does NOT do is override a sold promise. A site whose care
+    /// package forces backups keeps getting them in `"snapshots"` mode, and
+    /// the panel says why — a plan is a record that a customer paid, and a
+    /// display preference does not get to cancel it.
+    ///
+    /// Absent / unrecognised resolves to `"both"`: byte-identical to the
+    /// behaviour before this key existed. A corrupt agent.toml must not be
+    /// able to switch an engine OFF, because that direction loses data.
+    #[serde(default = "default_protection_mode")]
+    pub protection_mode: String,
+
     /// When true, admin+ users who log in without 2FA enrolled are
     /// corralled to the enrolment card before they can use the panel.
     /// Defaults to on. Operators can turn it off from /settings (e.g.
@@ -607,6 +636,10 @@ impl Default for ClusterConfigView {
             // Master, so a read failure never hides the cluster surface
             // from an operator who has real workers.
             mode: default_cluster_mode(),
+            // BOTH, always: the failure direction of this key is an engine
+            // silently switched off, and a default of anything else would
+            // make a corrupt config do exactly that.
+            protection_mode: default_protection_mode(),
             // Permissive default = old behaviour. Operators
             // opt in to "control plane only" via the toggle.
             master_accepts_hostings: true,
@@ -2238,8 +2271,54 @@ pub struct SnapshotSummary {
     pub id: String,
     /// RFC3339, as restic prints it.
     pub time: String,
-    /// Why it was taken: `pre-update`, `scheduled`, `manual`.
+    /// Why it was taken: `pre-update`, `scheduled`, `manual`. Also carries
+    /// [`SNAPSHOT_TAG_WITH_DB`] when there is a database dump in it.
     pub tags: Vec<String>,
+}
+
+/// Tag marking a snapshot that holds a database dump as well as files.
+///
+/// Lives here rather than beside the restic adapter because the PANEL is what
+/// has to read it — to decide whether to offer the database at all — and the
+/// web binary deliberately does not link `hyperion-adapters`.
+pub const SNAPSHOT_TAG_WITH_DB: &str = "with-db";
+
+impl SnapshotSummary {
+    /// Is there a database in this snapshot?
+    ///
+    /// False for every snapshot taken before snapshots included one, and for
+    /// any whose dump failed. The distinction is load-bearing: offering to
+    /// restore a database that is not there fails at the very end of a
+    /// restore, after the files have already been replaced.
+    pub fn has_database(&self) -> bool {
+        self.tags.iter().any(|t| t == SNAPSHOT_TAG_WITH_DB)
+    }
+}
+
+/// What a snapshot restore actually did.
+///
+/// Every field is here because the operator has to be able to tell the
+/// difference between things that look alike afterwards: files put back
+/// versus left alone, a database restored versus a snapshot that never held
+/// one, and — most of all — whether the state that was just overwritten was
+/// itself kept. A restore reported as a bare "done" is not something anyone
+/// can act on when it turns out to have been the wrong snapshot.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SnapshotRestoreOutcome {
+    /// The snapshot that was put back.
+    pub snapshot: String,
+    pub files_restored: bool,
+    pub db_restored: bool,
+    /// The snapshot taken of the state this restore replaced. EMPTY when one
+    /// could not be taken — which is not the same as "there was nothing to
+    /// keep", and the panel says so.
+    #[serde(default)]
+    pub safety_snapshot: String,
+    /// Where the previous document root was moved to. Empty when the files
+    /// were left alone. It is NOT deleted: the operator may have restored the
+    /// wrong snapshot, and this is the only way back.
+    #[serde(default)]
+    pub previous_site_kept_at: String,
 }
 
 /// What changed between two snapshots.

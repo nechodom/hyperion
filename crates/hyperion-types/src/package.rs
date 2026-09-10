@@ -113,6 +113,16 @@ pub enum BackupCadence {
 }
 
 impl BackupCadence {
+    /// Does this package say nothing about backups, or say "off"?
+    ///
+    /// The question "is this customer OWED backups?" — which is not the same
+    /// as "is the toggle non-default". `Leave` means the package has no
+    /// opinion and `Off` means it actively sells their absence; neither is a
+    /// promise the panel has to keep.
+    pub fn is_leave_or_off(self) -> bool {
+        matches!(self, Self::Leave | Self::Off)
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Leave => "leave",

@@ -12217,6 +12217,11 @@ struct SnapshotsCardTpl {
     rows: Vec<SnapshotRow>,
     csrf_now: String,
     csrf_diff: String,
+    csrf_restore: String,
+    /// Whether THIS session may replace the site. Server-side: the handler
+    /// re-checks the same capability, because hiding a button is not a
+    /// permission check.
+    can_restore: bool,
     diff: Option<hyperion_types::SnapshotDiff>,
     diff_of: String,
     error: Option<String>,
@@ -12229,6 +12234,11 @@ pub struct SnapshotRow {
     /// The snapshot immediately older than this one, so "what changed" is
     /// one click. Empty on the oldest.
     pub previous: String,
+    /// Does this snapshot carry a database dump? Read off the tag, because
+    /// restic's list gives tags but not a file list. False for every snapshot
+    /// taken before snapshots included one — and the card offers files-only
+    /// there rather than a checkbox that would fail at the end of a restore.
+    pub has_db: bool,
 }
 
 /// GET /hostings/:selector/snapshots-panel
@@ -12248,6 +12258,12 @@ async fn render_snapshots(
     diff_of: String,
     error: Option<String>,
 ) -> Result<Response, AppError> {
+    // Evaluated once, before the closure borrows it: the same capability the
+    // POST handler enforces, so a rendered button always matches an action
+    // that will be allowed.
+    let can_restore = require_manage_for_selector(state, ctx, &selector, Capability::BackupRestore)
+        .await
+        .is_ok();
     let card = |rows: Vec<SnapshotRow>, error: Option<String>| {
         Html(
             SnapshotsCardTpl {
@@ -12255,6 +12271,8 @@ async fn render_snapshots(
                 rows,
                 csrf_now: csrf_token_for(state, ctx, "/hostings/snapshots/now"),
                 csrf_diff: csrf_token_for(state, ctx, "/hostings/snapshots/diff"),
+                csrf_restore: csrf_token_for(state, ctx, "/hostings/snapshots/restore"),
+                can_restore,
                 diff: diff.clone(),
                 diff_of: diff_of.clone(),
                 error,
@@ -12316,6 +12334,7 @@ async fn render_snapshots(
             } else {
                 list[i - 1].id.clone()
             },
+            has_db: s.has_database(),
             id: s.id.clone(),
             when: s.time.clone(),
             tags: s.tags.join(", "),
@@ -12375,6 +12394,171 @@ pub struct SnapshotDiffForm {
     pub selector: String,
     pub from: String,
     pub to: String,
+}
+
+#[derive(serde::Deserialize)]
+pub struct SnapshotRestoreForm {
+    pub selector: String,
+    pub snapshot: String,
+    /// Unchecked boxes are not posted at all, so absence means "not this
+    /// half" — which is why both are `Option` rather than `bool`.
+    #[serde(default)]
+    pub files: Option<String>,
+    #[serde(default)]
+    pub database: Option<String>,
+}
+
+/// POST /hostings/snapshots/restore — put a snapshot back.
+///
+/// Gated on `BackupRestore`, not on the `HostingEditConfig` that guards
+/// taking a snapshot: this replaces the site. It is the same act as restoring
+/// an archive and it answers to the same capability, so a role built to let
+/// somebody restore backups can restore snapshots too, and one built to let
+/// them take snapshots cannot silently also let them destroy the site.
+pub async fn post_snapshot_restore(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<SnapshotRestoreForm>,
+) -> Result<Response, AppError> {
+    let sel =
+        match require_manage_for_selector(&state, &ctx, &form.selector, Capability::BackupRestore)
+            .await
+        {
+            Ok(s) => s,
+            Err(r) => return Ok(r),
+        };
+    // Neither half selected is a no-op, and a no-op reported as a running
+    // restore is worse than an error: the operator walks away believing the
+    // site was put back.
+    let mode = match (form.files.is_some(), form.database.is_some()) {
+        (true, true) => hyperion_types::BackupRestoreMode::FilesAndDb,
+        (true, false) => hyperion_types::BackupRestoreMode::FilesOnly,
+        (false, true) => hyperion_types::BackupRestoreMode::DbOnly,
+        (false, false) => {
+            return render_snapshots(
+                &state,
+                &ctx,
+                form.selector.clone(),
+                None,
+                String::new(),
+                Some(
+                    "Nothing was selected to restore — tick the files, the database, or both."
+                        .into(),
+                ),
+            )
+            .await
+        }
+    };
+    // Everything slow happens on the OWNING node, so resolve it here while we
+    // still have a request to fail in.
+    let node: Option<String> = find_hosting_anywhere(&state, sel.clone())
+        .await
+        .ok()
+        .and_then(|(_d, n)| n);
+    let snapshot = form.snapshot.trim().to_string();
+
+    let actor_uid = ctx.session.as_ref().map(|s| s.user_id).unwrap_or(0);
+    let actor_label = ctx.username.clone();
+    let job_state = state.clone();
+    let job_id = crate::handlers::jobs::spawn_job(
+        state.clone(),
+        "snapshot-restore",
+        Some(&form.selector),
+        "{}",
+        &actor_label,
+        actor_uid,
+        move |reporter| async move {
+            run_snapshot_restore_job(reporter, job_state, node, sel, snapshot, mode).await;
+        },
+    )
+    .await?;
+    Ok(Redirect::to(&format!("/jobs/{}", job_id)).into_response())
+}
+
+/// Background worker: put a snapshot back on the owning node.
+async fn run_snapshot_restore_job(
+    reporter: crate::handlers::jobs::JobReporter,
+    state: SharedState,
+    node: Option<String>,
+    sel: HostingSelector,
+    snapshot: String,
+    mode: hyperion_types::BackupRestoreMode,
+) {
+    reporter
+        .step(
+            "Restoring snapshot — the current site is kept beside it…",
+            10,
+            &format!(
+                "snapshot: {snapshot}
+restoring: {}
+",
+                mode.as_str()
+            ),
+        )
+        .await;
+    match crate::dispatcher::dispatch_to_node(
+        &state,
+        node.as_deref(),
+        Request::SnapshotRestore {
+            sel,
+            snapshot,
+            mode,
+        },
+    )
+    .await
+    {
+        Ok(RpcResponse::SnapshotRestore(out)) => {
+            // Every line here is a distinction the operator has to be able to
+            // make afterwards. A bare "done" is not something anybody can act
+            // on when it turns out to have been the wrong snapshot.
+            let mut log = String::new();
+            log.push_str(if out.files_restored {
+                "✓ files restored
+"
+            } else {
+                "· files left alone
+"
+            });
+            log.push_str(if out.db_restored {
+                "✓ database restored
+"
+            } else {
+                "· database left alone
+"
+            });
+            if out.safety_snapshot.is_empty() {
+                log.push_str(
+                    "! no snapshot of the replaced state could be taken — there is no \
+                     one-click way back
+",
+                );
+            } else {
+                log.push_str(&format!(
+                    "✓ the state this replaced was kept as snapshot {}
+",
+                    out.safety_snapshot
+                ));
+            }
+            if !out.previous_site_kept_at.is_empty() {
+                log.push_str(&format!(
+                    "· the previous files are still on the node at {}
+  (delete them once the \
+                     site is confirmed working — nothing cleans them up)
+",
+                    out.previous_site_kept_at
+                ));
+            }
+            reporter.step("Restore complete.", 100, &log).await;
+            reporter.finish(true, None).await;
+        }
+        Ok(RpcResponse::Error(e)) => reporter.finish(false, Some(e.to_string())).await,
+        Ok(_) => {
+            reporter
+                .finish(false, Some("unexpected agent response".into()))
+                .await
+        }
+        Err(e) => reporter.finish(false, Some(e.to_string())).await,
+    }
 }
 
 /// POST /hostings/snapshots/diff — what changed between two of them.

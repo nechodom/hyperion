@@ -777,6 +777,14 @@ pub trait AgentApi: Send + Sync + 'static {
         from: String,
         to: String,
     ) -> Result<hyperion_types::SnapshotDiff, RpcError>;
+    /// Put a snapshot back. Destructive: the current document root is moved
+    /// aside, not merged over. See `HostingService::snapshot_restore`.
+    async fn snapshot_restore(
+        &self,
+        sel: HostingSelector,
+        snapshot: String,
+        mode: hyperion_types::BackupRestoreMode,
+    ) -> Result<hyperion_types::SnapshotRestoreOutcome, RpcError>;
     /// Everything we can say about one site's outgoing WordPress mail.
     async fn wp_mail_self_check(
         &self,

@@ -60,7 +60,39 @@
         <td><code>{{ r.id }}</code></td>
         <td class="text-soft" style="white-space:nowrap">{{ r.when }}</td>
         <td class="text-soft">{{ r.tags }}</td>
-        <td style="text-align:right">
+        <td style="text-align:right;white-space:nowrap">
+          {#- Restore. The confirm lives on the FORM: the dialog driver reads
+              the submit event's target, so the same attributes on a <button>
+              are dead markup and the site would be replaced with no prompt at
+              all. The body says what actually happens, including the part
+              operators get wrong — this REPLACES the tree rather than merging
+              onto it, which is the only behaviour that can clean a hacked
+              site, and the current files are kept rather than deleted. -#}
+          {% if can_restore %}
+          <form method="post" action="/hostings/snapshots/restore" style="margin:0;display:inline"
+                data-confirm-title="Restore snapshot {{ r.id }}"
+                data-confirm-body="This replaces the site with its contents from {{ r.when }}. The files that are there now are moved aside on the node, not deleted, and a snapshot of them is taken first — so this can be undone, but not with one click. Anything added since {{ r.when }} will be gone from the live site.{% if !r.has_db %} This snapshot holds no database, so only files can be put back.{% endif %}"
+                data-confirm-confirm-label="Replace the site">
+            <input type="hidden" name="_csrf" value="{{ csrf_restore }}">
+            <input type="hidden" name="selector" value="{{ selector }}">
+            <input type="hidden" name="snapshot" value="{{ r.id }}">
+            {#- Both pre-ticked: a snapshot is one point in time and half of it
+                is a broken WordPress. Unticking is for the operator who knows
+                they only broke one half. -#}
+            <label class="text-soft" style="font-size:0.7rem;margin-right:0.3rem">
+              <input type="checkbox" name="files" value="1" checked> files
+            </label>
+            {% if r.has_db %}
+            <label class="text-soft" style="font-size:0.7rem;margin-right:0.4rem">
+              <input type="checkbox" name="database" value="1" checked> database
+            </label>
+            {% else %}
+            <span class="text-soft" style="font-size:0.7rem;margin-right:0.4rem"
+                  title="Taken before snapshots included a database, or its dump failed">no database</span>
+            {% endif %}
+            <button class="btn ghost" type="submit" style="font-size:0.72rem;padding:0.15rem 0.45rem">Restore</button>
+          </form>
+          {% endif %}
           {% if !r.previous.is_empty() %}
           <form hx-post="/hostings/snapshots/diff" hx-target="closest .card" hx-swap="outerHTML" style="margin:0;display:inline">
             <input type="hidden" name="_csrf" value="{{ csrf_diff }}">
@@ -76,5 +108,15 @@
     </tbody>
   </table>
   </div>
+  <p class="text-soft small" style="margin:0.6rem 0 0;line-height:1.5">
+    Restoring replaces the site with the snapshot rather than copying the
+    snapshot over it — so it can clean up a site that had files added to it.
+    The current files are moved aside on the node and kept; nothing deletes
+    them for you.
+    <br>
+    Snapshots live on this node only. They are the fast way back from a bad
+    update, not a copy that survives losing the server — that is what a backup
+    archive and its off-site copy are for.
+  </p>
   {% endif %}
 </div>

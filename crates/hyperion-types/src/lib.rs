@@ -49,7 +49,8 @@ pub use jobs::{
 pub use limits::next_anniversary;
 pub use limits::{
     BackupRestoreMode, BackupRunWire, ExpiringHosting, HostingExpiry, HostingLimits,
-    HostingUsageBucket, IpBanWire, NodeInviteMint, NodeInviteSummary, OverBwPolicy, SuspendReason,
+    HostingUsageBucket, IpBanWire, NodeInviteMint, NodeInviteSummary, OverBwPolicy, ProtectionMode,
+    SuspendReason,
 };
 pub use migration::{HostingImportResult, HostingMigrationBundle, HostingMigrationManifest};
 pub use package::{
@@ -70,8 +71,9 @@ pub use stats::{
     MonitorSamplePoint, MtaDiagnostics, MtaPortProbe, NodeMetricPoint, NodeMetricsHistory,
     NodeStats, NodeSummary, NodeUpdateStatus, NotificationFeed, NotificationTemplatesView,
     NotificationView, ServiceHealth, ServiceInstallStatus, ServicesHealth, SiteEmailLogEntry,
-    SlackConfigView, SmtpAutodetect, SnapshotDiff, SnapshotSummary, TrashEntry, UpdateStatus,
-    Web2faEnrollment, WebHostingAccess, WebLoginResult, WebUserSummary, WebVerify2faResult,
+    SlackConfigView, SmtpAutodetect, SnapshotDiff, SnapshotRestoreOutcome, SnapshotSummary,
+    TrashEntry, UpdateStatus, Web2faEnrollment, WebHostingAccess, WebLoginResult, WebUserSummary,
+    WebVerify2faResult, SNAPSHOT_TAG_WITH_DB,
 };
 pub use stats::{CARE_REPORT_DEFAULT_BODY_TEMPLATE, EXPIRY_WARNING_DEFAULT_BODY_TEMPLATE};
 pub use wp::{

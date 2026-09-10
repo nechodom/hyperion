@@ -428,6 +428,8 @@ pub struct HostingService<A: AdapterPort + 'static> {
     /// does nothing at all unless restic is installed, so an install that
     /// has never heard of the feature is unaffected.
     pub snapshots_enabled: bool,
+    /// Which engine this node uses. See [`hyperion_types::ProtectionMode`].
+    pub protection_mode: hyperion_types::ProtectionMode,
     /// Cluster-wide default Slack webhook for notifications.
     /// Per-profile webhooks override this.
     pub slack_default_webhook: Option<String>,
@@ -1756,6 +1758,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             remote_backup: None,
             retention: BackupRetention::default(),
             snapshots_enabled: true,
+            protection_mode: hyperion_types::ProtectionMode::Both,
             slack_default_webhook: None,
             acme_contact_email: "admin@hyperion.invalid".into(),
             email_config: None,
@@ -2318,6 +2321,13 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// not a way to turn the feature on.
     pub fn with_snapshots(mut self, enabled: bool) -> Self {
         self.snapshots_enabled = enabled;
+        self
+    }
+
+    /// Which engine this node uses. Anything unrecognised is `both` — see
+    /// [`hyperion_types::ProtectionMode::parse`] for why that direction.
+    pub fn with_protection_mode(mut self, mode: &str) -> Self {
+        self.protection_mode = hyperion_types::ProtectionMode::parse(mode);
         self
     }
 
@@ -8745,7 +8755,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         tag: &str,
     ) -> Option<String> {
         use hyperion_adapters::restic;
-        if !self.snapshots_enabled {
+        if !self.snapshots_enabled || !self.protection_mode.takes_snapshots() {
             return None;
         }
         let root = detail.root_dir.trim();
@@ -8765,8 +8775,73 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 return None;
             }
         };
-        let paths = vec![root.to_string()];
-        match restic::backup(&repo, &paths, &[tag]).await {
+        // The DATABASE, staged beside the repositories so it goes into the
+        // same snapshot as the files.
+        //
+        // Without this a snapshot is half a site. Restoring files alone onto a
+        // WordPress database that has moved on gives a site that is broken in
+        // a way nobody asked for — and this is the copy the panel offers to
+        // roll back to after an update, which is exactly when the two are most
+        // likely to have diverged.
+        //
+        // Best-effort, like everything else here: a site whose dump failed
+        // still gets its files snapshotted and still gets its security update.
+        // What must NOT happen is a snapshot that silently claims to hold a
+        // database it does not, so the tag records which kind this is and
+        // `snapshot_list` reports it.
+        let mut paths = vec![root.to_string()];
+        let mut has_db = false;
+        // A token unique to THIS run, so two overlapping snapshots of the same
+        // site cannot write the same dump file.
+        let run_token = blake3::hash(format!("{}-{}", detail.id.as_str(), now_secs()).as_bytes())
+            .to_hex()[..16]
+            .to_string();
+        let mut staged_dump: Option<std::path::PathBuf> = None;
+        if let Some(db) = detail.database.as_ref() {
+            match restic::ensure_db_stage(detail.id.as_str(), &run_token).await {
+                Ok(dump_path) => {
+                    let dumped = match db.engine {
+                        hyperion_types::DbProvision::MariaDB => {
+                            hyperion_adapters::backup::dump_mariadb(&db.db_name, &dump_path).await
+                        }
+                        hyperion_types::DbProvision::Postgres => {
+                            hyperion_adapters::backup::dump_postgres(&db.db_name, &dump_path).await
+                        }
+                    };
+                    match dumped {
+                        Ok(_) => {
+                            paths.push(dump_path.display().to_string());
+                            staged_dump = Some(dump_path);
+                            has_db = true;
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                domain = %detail.domain, error = %e,
+                                "snapshots: database dump failed, snapshotting files only"
+                            );
+                            restic::clear_db_stage(&dump_path).await;
+                        }
+                    }
+                }
+                Err(e) => tracing::warn!(
+                    domain = %detail.domain, error = %e,
+                    "snapshots: could not stage a database dump, snapshotting files only"
+                ),
+            }
+        }
+        // A second tag, so a restore can tell from the snapshot LIST whether
+        // there is a database in it without fetching the file list first.
+        let mut tags: Vec<&str> = vec![tag];
+        if has_db {
+            tags.push(restic::TAG_WITH_DB);
+        }
+        let result = restic::backup(&repo, &paths, &tags).await;
+        // Before anything else can fail: the dump is a plaintext copy of the
+        // customer's database and must not outlive the call that made it.
+        if let Some(p) = staged_dump.as_deref() {
+            restic::clear_db_stage(p).await;
+        }
+        match result {
             Ok(id) => {
                 tracing::info!(domain = %detail.domain, snapshot = %id, tag, "snapshots: taken");
                 // Retention runs straight after the snapshot rather than on
@@ -8821,6 +8896,448 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 tags: s.tags,
             })
             .collect())
+    }
+
+    /// The safety snapshot a restore takes, WITHOUT the retention prune.
+    ///
+    /// `snapshot_before_change` prunes immediately after taking one, which is
+    /// right everywhere else — it is the only moment we know the repository
+    /// grew. During a restore it is not: adding one more snapshot can push the
+    /// oldest past `keep_last`, and the one that falls off could be the one
+    /// being restored. Retention resumes with the next ordinary snapshot.
+    async fn snapshot_for_restore(&self, detail: &HostingDetail) -> Option<String> {
+        use hyperion_adapters::restic;
+        if !self.snapshots_enabled || !restic::available().await {
+            return None;
+        }
+        let root = detail.root_dir.trim();
+        if root.is_empty() {
+            return None;
+        }
+        let repo = restic::ensure_repo(restic::REPO_BASE, detail.id.as_str())
+            .await
+            .ok()?;
+        restic::backup_no_prune(&repo, &[root.to_string()], &["pre-restore"])
+            .await
+            .ok()
+            .filter(|id| !id.is_empty())
+    }
+
+    /// Move the restored database dump out of the tenant's tree.
+    ///
+    /// Returns the root-owned path it now lives at, or `None` when the
+    /// snapshot carried no dump. The staging tree is inside a directory the
+    /// site's own user owns, so a dump left there is one they can read and —
+    /// far worse — one they can REPLACE before it is fed to the database
+    /// superuser. Located by scanning rather than by a predicted filename,
+    /// because the name carries a per-run token.
+    async fn lift_restored_dump(
+        &self,
+        staging: &std::path::Path,
+        hosting_id: &str,
+        token: &str,
+    ) -> Result<Option<std::path::PathBuf>, String> {
+        use hyperion_adapters::restic;
+        let from_dir = join_absolute(
+            staging,
+            &restic::db_stage_dir(hosting_id).display().to_string(),
+        );
+        let Some(src) = find_restored_dump(&from_dir).await else {
+            return Ok(None);
+        };
+        let dst = restic::ensure_db_stage(hosting_id, &format!("restore-{token}"))
+            .await
+            .map_err(|e| e.to_string())?;
+        // A copy, not a rename: /var/lib and /home are routinely separate
+        // filesystems and a cross-device rename simply fails.
+        tokio::fs::copy(&src, &dst)
+            .await
+            .map_err(|e| format!("copy dump: {e}"))?;
+        Ok(Some(dst))
+    }
+
+    /// A root-owned directory to park the tree a restore replaced.
+    ///
+    /// On the same filesystem as the site so the move is a rename, and OUTSIDE
+    /// the site directory so the permission repair never walks it and the
+    /// tenant's disk quota never counts it.
+    async fn quarantine_dir(
+        &self,
+        detail: &HostingDetail,
+        stamp: i64,
+    ) -> Result<std::path::PathBuf, String> {
+        let base = std::path::Path::new(&self.paths.home_root).join(".hyperion-replaced");
+        tokio::fs::create_dir_all(&base)
+            .await
+            .map_err(|e| format!("create {}: {e}", base.display()))?;
+        set_dir_mode(&base, 0o700).await?;
+        Ok(base.join(format!("{}-{stamp}", detail.id.as_str())))
+    }
+
+    /// Put a snapshot back.
+    ///
+    /// # Why this REPLACES the tree instead of restoring over it
+    ///
+    /// `restic restore` writes the snapshot's files into the target and leaves
+    /// everything else alone, so restoring a pre-compromise snapshot over a
+    /// hacked site keeps every dropped backdoor — and the panel would report
+    /// success. That is not a restore; it is a state the site was never in.
+    /// So the snapshot is restored into a staging directory, the live tree is
+    /// moved ASIDE (not deleted — a restore is itself destructive and the
+    /// operator may have picked the wrong one), and the restored tree is moved
+    /// into its place.
+    ///
+    /// Staging lives INSIDE the site directory, because the swap is two
+    /// renames and a rename cannot cross a filesystem: `/var/lib` and `/home`
+    /// are routinely separate mounts. That means creating a directory in a
+    /// tree the tenant owns, so it is created with `create_dir` and an
+    /// unpredictable name — `create_dir` fails outright if the path already
+    /// exists, symlink included, which is exactly the pre-planted-symlink
+    /// attack it has to refuse.
+    ///
+    /// # Ownership
+    ///
+    /// restic restores the uid/gid recorded in the snapshot. A site whose uid
+    /// has changed since — a rebuild, an import, a move between nodes — would
+    /// come back owned by a user that no longer maps to it: PHP could not
+    /// write, and the site would 403. The tree is therefore re-owned
+    /// afterwards, the same way the archive restore does it.
+    pub async fn snapshot_restore(
+        &self,
+        sel: HostingSelector,
+        snapshot: String,
+        mode: hyperion_types::BackupRestoreMode,
+    ) -> Result<hyperion_types::SnapshotRestoreOutcome, RpcError> {
+        use hyperion_adapters::restic;
+        let detail = self.get(sel).await?;
+
+        // Ids come from a form. Restic ids are hex; anything else is a typo or
+        // an attempt to smuggle an argument (`latest`, `--target`) into a
+        // command line, and both stop here.
+        if snapshot.is_empty()
+            || snapshot.len() > 64
+            || !snapshot.chars().all(|c| c.is_ascii_hexdigit())
+        {
+            return Err(RpcError::Validation {
+                message: format!("not a snapshot id: {snapshot:?}"),
+            });
+        }
+        if !restic::available().await {
+            return Err(RpcError::Validation {
+                message: "restic is not installed on the node that owns this site".into(),
+            });
+        }
+        let repo = restic::Repo::for_hosting(restic::REPO_BASE, detail.id.as_str());
+        if !tokio::fs::try_exists(&repo.password_file)
+            .await
+            .unwrap_or(false)
+        {
+            return Err(RpcError::Validation {
+                message: "this site has no snapshot repository".into(),
+            });
+        }
+        let root = detail.root_dir.trim().to_string();
+        if root.is_empty() {
+            return Err(RpcError::Validation {
+                message: "this site has no document root".into(),
+            });
+        }
+        let site_dir = std::path::Path::new(&root)
+            .parent()
+            .ok_or_else(|| RpcError::Validation {
+                message: format!("document root {root} has no parent directory"),
+            })?
+            .to_path_buf();
+
+        // Does this snapshot HOLD a database, if one was asked for?
+        //
+        // Asked here, before a single byte moves. The first version of this
+        // checked after the swap, which meant the ordinary restore of any
+        // snapshot taken before dumps existed replaced the site and THEN
+        // reported failure — the operator ends up with a half-restored site
+        // and an error message that reads like nothing happened.
+        if mode.restores_db() && detail.database.is_some() {
+            let listed = restic::snapshots(&repo).await.unwrap_or_default();
+            let known = listed
+                .iter()
+                .find(|s| s.id.starts_with(&snapshot) || snapshot.starts_with(&s.id));
+            match known {
+                Some(s) if !s.tags.iter().any(|t| t == restic::TAG_WITH_DB) => {
+                    return Err(RpcError::Validation {
+                        message: format!(
+                            "snapshot {snapshot} holds no database — it was taken before \
+                             snapshots included one, or its dump failed. Restore the files \
+                             only, or use a backup archive."
+                        ),
+                    })
+                }
+                // Not in the list at all: let restic be the judge rather than
+                // refusing on our own hand-rolled parse of its output.
+                _ => {}
+            }
+        }
+
+        // A restore is destructive, so the state being replaced gets its own
+        // snapshot first. Best-effort by design — refusing to restore because
+        // the safety snapshot failed would block the operator at the exact
+        // moment they are trying to fix a broken site — but it is REPORTED,
+        // so "we kept a copy" and "we could not" never look the same.
+        //
+        // Deliberately NOT the pruning variant: taking one more snapshot can
+        // push the oldest past `keep_last`, and the one it deletes could be
+        // the one being restored. Retention resumes with the next ordinary
+        // snapshot.
+        let safety = self.snapshot_for_restore(&detail).await;
+
+        // Disk: the swap holds the restored tree AND the old one at once.
+        // Unknown stays unknown — a missing measurement must not silently
+        // become a pass, but neither may it block a restore on a filesystem
+        // `df` could not read.
+        let need = dir_size_bytes(std::path::Path::new(&root)).await;
+        if let (Some(need), Some(avail)) = (need, fs_avail_bytes(&site_dir).await) {
+            // The restored tree is roughly the size of the current one, and
+            // the old one stays beside it until the operator deletes it.
+            let want = need.saturating_add(need / 4);
+            if avail < want {
+                return Err(RpcError::Validation {
+                    message: format!(
+                        "not enough free space to restore safely: {} available, about {} needed \
+                         to hold the restored site beside the current one",
+                        human_bytes(avail as i64),
+                        human_bytes(want as i64),
+                    ),
+                });
+            }
+        }
+
+        // Staging, created inside the site dir so the swap is two renames.
+        // `create_dir`, never `create_dir_all`: it fails if the path exists at
+        // all — including as a symlink the site's own user planted first,
+        // which is the whole reason the name is unguessable.
+        let stamp = now_secs();
+        let staging = site_dir.join(format!(
+            ".hyperion-restore-{stamp}-{}",
+            &blake3::hash(format!("{}{}", detail.id.as_str(), stamp).as_bytes()).to_hex()[..12]
+        ));
+        tokio::fs::create_dir(&staging).await.map_err(|e| {
+            RpcError::Internal_with(format!("restore staging {}: {e}", staging.display()))
+        })?;
+        // 0700 and root-owned. `create_dir` uses the umask, which on a default
+        // 022 is 0755 — and this directory is about to hold a plaintext copy
+        // of the customer's database inside a tree every other tenant can
+        // reach. An unguessable name is not a substitute for a mode: a 0755
+        // parent is listable.
+        if let Err(e) = set_dir_mode(&staging, 0o700).await {
+            let _ = tokio::fs::remove_dir_all(&staging).await;
+            return Err(RpcError::Internal_with(format!(
+                "restore staging {}: {e}",
+                staging.display()
+            )));
+        }
+        // Called on every exit path, and callable more than once: staging is
+        // removed BEFORE the permission repair on the success path, and again
+        // on each failure path. A once-only closure silently made the second
+        // call a compile error and the first a lie.
+        let cleanup = || {
+            let dir = staging.clone();
+            async move {
+                let _ = tokio::fs::remove_dir_all(&dir).await;
+            }
+        };
+
+        let restored = restic::restore(&repo, &snapshot, &staging.display().to_string()).await;
+        if let Err(e) = restored {
+            cleanup().await;
+            return Err(RpcError::ProvisioningFailed {
+                stage: "restic_restore".into(),
+                reason: e.to_string(),
+            });
+        }
+
+        // restic reproduces ABSOLUTE paths under the target, so the files are
+        // at <staging><root> and the dump at <staging><stage path>.
+        let restored_root = join_absolute(&staging, &root);
+
+        // Get the dump OUT of the tenant's tree before anything else happens.
+        //
+        // site_dir belongs to the site's own unix user, so while the dump sits
+        // under it they can rename the staging directory and put their own
+        // file at that path. Importing it later would run their SQL as the
+        // database superuser. Copying it to a root-owned directory no tenant
+        // can reach removes the whole class: after this, the path being
+        // imported is one nobody but root has ever been able to write.
+        let mut secure_dump: Option<std::path::PathBuf> = None;
+        if mode.restores_db() && detail.database.is_some() {
+            match self
+                .lift_restored_dump(&staging, detail.id.as_str(), &stamp.to_string())
+                .await
+            {
+                Ok(Some(p)) => secure_dump = Some(p),
+                Ok(None) => {
+                    cleanup().await;
+                    return Err(RpcError::Validation {
+                        message: format!(
+                            "snapshot {snapshot} holds no database dump — restore the files \
+                             only, or use a backup archive."
+                        ),
+                    });
+                }
+                Err(e) => {
+                    cleanup().await;
+                    return Err(RpcError::Internal_with(format!("restore dump: {e}")));
+                }
+            }
+        }
+
+        let mut kept_aside: Option<String> = None;
+        if mode.restores_files() {
+            if !tokio::fs::try_exists(&restored_root).await.unwrap_or(false) {
+                cleanup().await;
+                return Err(RpcError::Validation {
+                    message: format!(
+                        "snapshot {snapshot} does not contain {root} — it may belong to a site \
+                         whose document root has since moved"
+                    ),
+                });
+            }
+            // The replaced tree goes OUTSIDE site_dir, into a root-owned
+            // quarantine on the same filesystem.
+            //
+            // Leaving it beside the new one looked tidier and was wrong twice
+            // over: `repair_tree_permissions` walks the whole site dir, so it
+            // would publish the old wp-config.php to every local user at 0644
+            // and keep it that way for ever; and the tree stays owned by the
+            // site user, so it counts against the disk quota and can trip the
+            // overage suspend on a site that has just been repaired.
+            let aside = match self.quarantine_dir(&detail, stamp).await {
+                Ok(p) => p,
+                Err(e) => {
+                    cleanup().await;
+                    return Err(RpcError::Internal_with(format!("restore quarantine: {e}")));
+                }
+            };
+            // A site whose document root is gone is exactly the site somebody
+            // is trying to restore. Nothing to move aside is not an error.
+            let had_root = tokio::fs::try_exists(&root).await.unwrap_or(false);
+            if had_root {
+                if let Err(e) = tokio::fs::rename(&root, &aside).await {
+                    cleanup().await;
+                    return Err(RpcError::ProvisioningFailed {
+                        stage: "restore_swap".into(),
+                        reason: format!("could not move the current site aside: {e}"),
+                    });
+                }
+            }
+            if let Err(e) = tokio::fs::rename(&restored_root, &root).await {
+                // Put it back. Leaving a site with NO document root because
+                // the second rename failed is far worse than a failed restore.
+                if had_root {
+                    let _ = tokio::fs::rename(&aside, &root).await;
+                }
+                cleanup().await;
+                return Err(RpcError::ProvisioningFailed {
+                    stage: "restore_swap".into(),
+                    reason: format!("could not move the restored site into place: {e}"),
+                });
+            }
+            kept_aside = had_root.then(|| aside.display().to_string());
+            // Staging goes BEFORE the permission repair, not after.
+            //
+            // The repair walks the whole site directory with chown -R and
+            // find -exec chmod, so anything still sitting in staging would be
+            // handed to the tenant at 0644 — which for a restored database
+            // dump means every other local user can read the customer's data,
+            // and the copy this code is about to import would be one the
+            // tenant could have rewritten.
+            cleanup().await;
+            // restic restored the snapshot's uid/gid. Re-own before anything
+            // tries to serve the site.
+            if let Err(e) = repair_tree_permissions(&detail.system_user, &site_dir).await {
+                tracing::warn!(domain = %detail.domain, error = %e,
+                    "snapshot restore: ownership repair failed");
+            }
+        }
+
+        let mut db_restored = false;
+        if let (Some(db), Some(dump)) = (detail.database.as_ref(), secure_dump.as_deref()) {
+            let imported = match db.engine {
+                hyperion_types::DbProvision::MariaDB => {
+                    hyperion_adapters::backup::restore_mariadb_dump(&db.db_name, dump).await
+                }
+                hyperion_types::DbProvision::Postgres => {
+                    hyperion_adapters::backup::restore_postgres_dump(&db.db_name, dump).await
+                }
+            };
+            restic::clear_db_stage(dump).await;
+            match imported {
+                Ok(_) => db_restored = true,
+                Err(e) => {
+                    // The files are already swapped. Put them back, so a
+                    // failed restore leaves the site as it was rather than
+                    // half-way between two states — new files against an old
+                    // schema is a broken site nobody asked for, and the error
+                    // message would read as though nothing had happened.
+                    let mut rolled_back = false;
+                    if let Some(aside) = kept_aside.as_deref() {
+                        let _ = tokio::fs::remove_dir_all(&root).await;
+                        rolled_back = tokio::fs::rename(aside, &root).await.is_ok();
+                        if rolled_back {
+                            let _ = repair_tree_permissions(&detail.system_user, &site_dir).await;
+                        }
+                    }
+                    self.append_audit(
+                        "hosting.snapshot_restore",
+                        Some(detail.id.as_str()),
+                        &serde_json::json!({
+                            "snapshot": snapshot,
+                            "mode": mode.as_str(),
+                            "db_error": e.to_string(),
+                            "files_rolled_back": rolled_back,
+                            "previous_site_kept_at": kept_aside,
+                        })
+                        .to_string(),
+                        "error",
+                    )
+                    .await;
+                    return Err(RpcError::ProvisioningFailed {
+                        stage: "db_import".into(),
+                        reason: if rolled_back {
+                            format!("{e} — the files were put back as they were")
+                        } else {
+                            format!(
+                                "{e} — WARNING: the files were already replaced and could not \
+                                 be put back. The previous ones are at {}",
+                                kept_aside.clone().unwrap_or_else(|| "(nowhere)".into())
+                            )
+                        },
+                    });
+                }
+            }
+        }
+
+        cleanup().await;
+        self.append_audit(
+            "hosting.snapshot_restore",
+            Some(detail.id.as_str()),
+            &serde_json::json!({
+                "snapshot": snapshot,
+                "mode": mode.as_str(),
+                "files_restored": mode.restores_files(),
+                "db_restored": db_restored,
+                "safety_snapshot": safety,
+                "previous_site_kept_at": kept_aside,
+            })
+            .to_string(),
+            "ok",
+        )
+        .await;
+        Ok(hyperion_types::SnapshotRestoreOutcome {
+            snapshot,
+            files_restored: mode.restores_files(),
+            db_restored,
+            safety_snapshot: safety.unwrap_or_default(),
+            previous_site_kept_at: kept_aside.unwrap_or_default(),
+        })
     }
 
     /// What changed between two snapshots — the question an operator asks
@@ -12786,6 +13303,26 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             let Some(cadence_secs) = backup_cadence_secs(&cadence) else {
                 continue; // off / unknown
             };
+            // In snapshots-only mode this sweep stops — EXCEPT where a care
+            // package sells backups to this site.
+            //
+            // A package is a record that a customer paid for something, and a
+            // display preference does not get to cancel it. The alternative
+            // was to let the mode win and quietly stop delivering a service
+            // that is still being billed, with the care report going on
+            // saying backups are included. So the promise wins, the site
+            // keeps its backups, and the panel explains why it is still
+            // taking them in a mode that says it should not be.
+            if !self.protection_mode.schedules_backups() {
+                if !self.backups_are_sold_to(&h.id).await {
+                    continue;
+                }
+                tracing::debug!(
+                    domain = %h.domain,
+                    "scheduled backups: snapshots-only mode, but a care package sells backups \
+                     to this site — keeping them"
+                );
+            }
             let last_run =
                 hyperion_state::hosting_kv::get(&self.pool, h.id.as_str(), BACKUP_KV_LAST_RUN)
                     .await
@@ -13453,6 +13990,30 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         )
         .await;
         Ok(out)
+    }
+
+    /// Does an ACTIVE care package on this site sell it backups?
+    ///
+    /// Read from the activation SNAPSHOT, not from the definition: this runs
+    /// on the node that owns the hosting, where `service_packages` is empty.
+    /// The same trap the letter language and the checklist both fell into.
+    ///
+    /// An unreadable activation list answers TRUE — "keep taking backups" is
+    /// the only safe direction for a question about whether a customer is
+    /// owed them.
+    async fn backups_are_sold_to(&self, id: &HostingId) -> bool {
+        match packages::list_for_hosting(&self.pool, id).await {
+            Ok(rows) => rows
+                .iter()
+                .any(|r| !r.features.backup_cadence.is_leave_or_off()),
+            Err(e) => {
+                tracing::warn!(
+                    hosting = %id.as_str(), error = %e,
+                    "scheduled backups: could not read care packages — keeping backups on"
+                );
+                true
+            }
+        }
     }
 
     /// Apply a definition's live fields to the activations THIS node owns.
@@ -29437,6 +29998,19 @@ pub(crate) fn read_cluster_section(
         _ => "master",
     }
     .to_string();
+    // Absent / unrecognised = "both", i.e. today's behaviour. `parse` owns
+    // that rule; spelling it again here is how the two would drift.
+    // From its OWN section, not from `[cluster]`: every node parses this one,
+    // and `[cluster]` is master-only. Surfaced on this view anyway because it
+    // is what the settings page renders, and one view beats two round trips.
+    let protection_mode = hyperion_types::ProtectionMode::parse(
+        doc.get("protection")
+            .and_then(|s| s.get("mode"))
+            .and_then(|v| v.as_str())
+            .unwrap_or(""),
+    )
+    .as_str()
+    .to_string();
     let test_node_ids = section
         .and_then(|s| s.get("test_node_ids"))
         .and_then(|v| v.as_str())
@@ -29488,6 +30062,7 @@ pub(crate) fn read_cluster_section(
         .unwrap_or(false);
     hyperion_types::ClusterConfigView {
         mode,
+        protection_mode,
         master_accepts_hostings: accept,
         test_node_ids,
         test_domain_template,
@@ -29575,6 +30150,22 @@ fn parse_agent_section_fields(
                 other => {
                     return Err(bad(format!(
                         "cluster mode must be \"standalone\" or \"master\", got {other:?}"
+                    )))
+                }
+            },
+            // An explicit match with a REJECTING arm, deliberately unlike the
+            // free-text cluster keys below. A typo saved as a mode would be
+            // read back as "both" by `parse`, so the operator would see an
+            // engine they thought they had switched off still running, with
+            // nothing anywhere to explain it.
+            ("protection", "mode") => match v.trim() {
+                m @ ("backups" | "snapshots" | "both") => {
+                    crate::config_persist::FieldValue::Str(m.to_string())
+                }
+                other => {
+                    return Err(bad(format!(
+                        "protection mode must be \"backups\", \"snapshots\" or \"both\", \
+                         got {other:?}"
                     )))
                 }
             },
@@ -31055,6 +31646,52 @@ fn load_email_section(path: &std::path::Path) -> EmailTomlView {
 /// Installs on demand via apt — assumes root (the caller already checked).
 /// Returns a clear, actionable message on failure instead of letting the
 /// downstream commands fail with a bare "No such file or directory".
+/// `<target>` + `<absolute path>`, the way `restic restore --target` lays it
+/// out: restoring `/home/u/site/htdocs` into `/tmp/x` yields
+/// `/tmp/x/home/u/site/htdocs`.
+///
+/// `Path::join` with an absolute argument REPLACES the base rather than
+/// appending to it, which would silently point every restore at the live tree.
+/// The one `.sql` file restic put in the restored staging directory.
+///
+/// REGULAR FILES ONLY, and that is the whole point of the function. This
+/// directory sits inside a tree the site's own unix user owns, and whatever
+/// comes back from here is handed to the database superuser. A symlink left
+/// there is a redirect to a file of the tenant's choosing, and following it
+/// would execute their SQL as root.
+///
+/// `symlink_metadata`, never `metadata`: the latter follows the link and
+/// reports on the TARGET, so a symlink pointing at a real file passes an
+/// `is_file()` check while still being a symlink.
+async fn find_restored_dump(dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    let mut rd = tokio::fs::read_dir(dir).await.ok()?;
+    while let Ok(Some(e)) = rd.next_entry().await {
+        let is_regular = tokio::fs::symlink_metadata(e.path())
+            .await
+            .map(|m| m.file_type().is_file())
+            .unwrap_or(false);
+        if is_regular && e.path().extension().is_some_and(|x| x == "sql") {
+            return Some(e.path());
+        }
+    }
+    None
+}
+
+/// `chmod` a directory, as a hard error.
+///
+/// Every caller here is protecting a plaintext copy of a customer's data on a
+/// box full of other tenants, so a failed chmod is a refusal, never a warning.
+async fn set_dir_mode(path: &std::path::Path, mode: u32) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+        .await
+        .map_err(|e| format!("chmod {:o} {}: {e}", mode, path.display()))
+}
+
+fn join_absolute(target: &std::path::Path, absolute: &str) -> std::path::PathBuf {
+    target.join(absolute.trim_start_matches('/'))
+}
+
 /// Available bytes on the filesystem that holds `path`, via `df -P -B1`.
 /// `None` on any exec/parse failure — the caller treats unknown as "don't
 /// block the backup".
@@ -34936,6 +35573,7 @@ mod tests {
             remote_backup: None,
             retention: BackupRetention::default(),
             snapshots_enabled: true,
+            protection_mode: hyperion_types::ProtectionMode::Both,
             slack_default_webhook: None,
             acme_contact_email: "test@example.invalid".into(),
             email_config: None,
@@ -35017,6 +35655,7 @@ mod tests {
             remote_backup: None,
             retention: BackupRetention::default(),
             snapshots_enabled: true,
+            protection_mode: hyperion_types::ProtectionMode::Both,
             slack_default_webhook: None,
             acme_contact_email: "test@example.invalid".into(),
             email_config: None,
@@ -35065,6 +35704,7 @@ mod tests {
             remote_backup: None,
             retention: BackupRetention::default(),
             snapshots_enabled: true,
+            protection_mode: hyperion_types::ProtectionMode::Both,
             slack_default_webhook: None,
             acme_contact_email: "test@example.invalid".into(),
             email_config: None,
@@ -35185,6 +35825,7 @@ mod tests {
             remote_backup: None,
             retention: BackupRetention::default(),
             snapshots_enabled: true,
+            protection_mode: hyperion_types::ProtectionMode::Both,
             slack_default_webhook: None,
             acme_contact_email: "test@example.invalid".into(),
             email_config: None,
@@ -37261,6 +37902,73 @@ mod tests {
             s.package_relist(999, "cs", &items).await.expect("noop"),
             (0, 0)
         );
+    }
+
+    /// `join_absolute` is what tells a restore where restic put things.
+    ///
+    /// `Path::join` with an ABSOLUTE argument throws the base away and returns
+    /// the argument. Used naively here that would point every restore at the
+    /// live tree instead of the staging copy — the swap would move the site
+    /// onto itself and the "restored" dump being imported would be the one
+    /// still sitting in the real staging directory.
+    #[test]
+    fn join_absolute_puts_the_path_under_the_target_instead_of_replacing_it() {
+        let target = std::path::Path::new("/home/u/example.cz/.hyperion-restore-1");
+        assert_eq!(
+            join_absolute(target, "/home/u/example.cz/htdocs"),
+            std::path::PathBuf::from(
+                "/home/u/example.cz/.hyperion-restore-1/home/u/example.cz/htdocs"
+            )
+        );
+        // The dump lives at a completely different absolute path and has to
+        // land under the same target.
+        assert_eq!(
+            join_absolute(target, "/var/lib/hyperion/snapshot-db-staging/h1"),
+            std::path::PathBuf::from(
+                "/home/u/example.cz/.hyperion-restore-1/var/lib/hyperion/snapshot-db-staging/h1"
+            )
+        );
+        // And the naive version would have done this, which is the bug. The
+        // lint fires on exactly the mistake being demonstrated, which is why
+        // it is allowed HERE and nowhere else.
+        #[allow(clippy::join_absolute_paths)]
+        let naive = target.join("/home/u/example.cz/htdocs");
+        assert_eq!(
+            naive,
+            std::path::PathBuf::from("/home/u/example.cz/htdocs"),
+            "Path::join with an absolute argument throws the base away"
+        );
+    }
+
+    /// Whatever this returns is executed as the database superuser, and it is
+    /// read out of a directory the site's own unix user can write to.
+    #[tokio::test]
+    async fn a_planted_symlink_is_never_taken_for_the_restored_dump() {
+        let dir = std::env::temp_dir().join(format!("hyp-dump-{}", now_secs()));
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        tokio::fs::create_dir_all(&dir).await.expect("mkdir");
+
+        // Nothing there yet.
+        assert!(find_restored_dump(&dir).await.is_none());
+
+        // A symlink the tenant could have planted, pointing at a file that
+        // really exists — so a `metadata().is_file()` check would follow it
+        // and pass.
+        let elsewhere = dir.join("attacker.sql.real");
+        tokio::fs::write(&elsewhere, b"DROP DATABASE hyperion;")
+            .await
+            .expect("write");
+        std::os::unix::fs::symlink(&elsewhere, dir.join("aaa.sql")).expect("symlink");
+        assert!(
+            find_restored_dump(&dir).await.is_none(),
+            "a symlink must never be handed to the database superuser"
+        );
+
+        // A real dump is found.
+        let real = dir.join("zzz.sql");
+        tokio::fs::write(&real, b"-- dump").await.expect("write");
+        assert_eq!(find_restored_dump(&dir).await, Some(real));
+        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
     #[tokio::test]
