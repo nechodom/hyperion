@@ -732,6 +732,11 @@ pub fn build_router(state: SharedState) -> Router {
             post(handlers::hostings::post_snapshot_diff),
         )
         .route(
+            "/hostings/:selector/signup-panel",
+            get(handlers::hostings::get_signup_panel),
+        )
+        .route("/hostings/signups", post(handlers::hostings::post_signups))
+        .route(
             "/hostings/snapshots/restore",
             post(handlers::hostings::post_snapshot_restore),
         )

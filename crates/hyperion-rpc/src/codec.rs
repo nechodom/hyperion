@@ -1428,6 +1428,15 @@ pub enum Request {
         snapshot: String,
         mode: hyperion_types::BackupRestoreMode,
     },
+    /// Does this WordPress site take public sign-ups, and as what role?
+    WpRegistrationGet {
+        sel: HostingSelector,
+    },
+    /// Open or close public sign-ups. Answers with the state read BACK.
+    WpRegistrationSet {
+        sel: HostingSelector,
+        open: bool,
+    },
     /// Everything we can say about one site's outgoing WordPress mail.
     /// Read-only; `WpMailRepair` is the acting half.
     WpMailSelfCheck {
@@ -2184,6 +2193,7 @@ pub enum Response {
     SnapshotNow(String),
     SnapshotDiff(hyperion_types::SnapshotDiff),
     SnapshotRestore(hyperion_types::SnapshotRestoreOutcome),
+    WpRegistration(hyperion_types::WpRegistrationView),
     FtpAccountList(Vec<hyperion_types::FtpExtraAccount>),
     /// `(login, password)` — the password is shown once, and it is paired
     /// with the login it belongs to because the panel used to show a fresh

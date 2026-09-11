@@ -320,6 +320,60 @@ static URL_RX: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(
 });
 
 /// Validate a plugin slug. Used at the boundary before `wp` argv build.
+/// What a site's open-registration setting is, as WordPress holds it.
+///
+/// `users_can_register` is the door spam bots walk through, and the role a
+/// new account gets decides whether an unwanted signup is an annoyance or an
+/// incident. They are read together because reading one without the other
+/// answers the wrong question: registration being ON is normal for a shop or
+/// a member area, and only alarming when the default role is not
+/// `subscriber`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WpRegistration {
+    pub open: bool,
+    /// `subscriber` on a sane install. Anything above it means a stranger can
+    /// give themselves standing on the site by filling in a form.
+    pub default_role: String,
+}
+
+impl WpRegistration {
+    /// Is this the combination that hands a stranger real standing?
+    ///
+    /// `subscriber` and `customer` (WooCommerce) can read and buy, which is
+    /// what open registration is FOR. Anything else can write.
+    pub fn grants_privilege(&self) -> bool {
+        self.open
+            && !matches!(
+                self.default_role.trim().to_ascii_lowercase().as_str(),
+                "subscriber" | "customer" | ""
+            )
+    }
+}
+
+/// Read whether a site accepts public sign-ups, and what they become.
+pub async fn registration_get(user: &str, htdocs: &str) -> Result<WpRegistration, AdapterError> {
+    // `get` on an option WordPress has never written exits non-zero rather
+    // than printing an empty line, and for `users_can_register` that means
+    // "closed" — the WordPress default. Treating the error as unknown would
+    // put every untouched site into the panel's warning list.
+    let open = match run(user, htdocs, &["option", "get", "users_can_register"]).await {
+        Ok(v) => v.trim() == "1",
+        Err(_) => false,
+    };
+    let default_role = run(user, htdocs, &["option", "get", "default_role"])
+        .await
+        .map(|v| v.trim().to_string())
+        .unwrap_or_default();
+    Ok(WpRegistration { open, default_role })
+}
+
+/// Open or close public sign-ups.
+pub async fn registration_set(user: &str, htdocs: &str, open: bool) -> Result<(), AdapterError> {
+    let v = if open { "1" } else { "0" };
+    run(user, htdocs, &["option", "update", "users_can_register", v]).await?;
+    Ok(())
+}
+
 pub fn validate_plugin_slug(s: &str) -> Result<(), AdapterError> {
     if !SLUG_RX.is_match(s) {
         return Err(AdapterError::Other(format!(

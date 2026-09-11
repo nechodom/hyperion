@@ -1,0 +1,86 @@
+{# Public WordPress registration — the actual door.
+
+   This card exists because of a real incident: a site took six spam sign-ups
+   a minute and the operator's first thought was that fail2ban had broken.
+   It had not. fail2ban counts repeated FAILURES from one address; a
+   registration flood is many addresses making one SUCCESSFUL request each,
+   so there is nothing for it to count and nothing for it to ban. The only
+   thing that stops it is WordPress not creating the account.
+
+   Lazily swapped in over HTMX, because answering it costs a wp-cli call on
+   the owning node. #}
+<div class="card" style="margin-bottom:0.9rem">
+  <div class="row" style="align-items:center;gap:0.6rem;margin-bottom:0.4rem">
+    <h2 style="margin:0;font-size:0.95rem">
+      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><line x1="19" y1="8" x2="19" y2="14"/><line x1="22" y1="11" x2="16" y2="11"/></svg>
+      Public sign-ups
+    </h2>
+    <span class="grow"></span>
+    {% if unknown %}
+      <span class="pill" title="The owning node could not be asked">unknown</span>
+    {% else if reg.open %}
+      <span class="pill warn">open</span>
+    {% else %}
+      <span class="pill ok">closed</span>
+    {% endif %}
+  </div>
+
+  {% if let Some(e) = error %}
+  <div class="flash warn" style="margin:0 0 0.6rem">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+    <div class="flash-body">{{ e }}</div>
+  </div>
+  {% endif %}
+
+  {% if unknown %}
+    <p class="text-soft small" style="margin:0">
+      Could not read this site's registration setting — the node may be
+      unreachable, or this may not be a WordPress install. Nothing was
+      changed.
+    </p>
+  {% else %}
+
+    {% if reg.grants_privilege() %}
+    {# Not spam. Somebody who fills in a form lands in a role that can write. #}
+    <div class="flash error" style="margin:0 0 0.7rem">
+      <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+      <div class="flash-body">
+        Anyone who signs up gets the <strong>{{ reg.default_role }}</strong>
+        role, which can do more than read. That is not spam — treat it as a
+        compromise: close registration, then check the user list for accounts
+        nobody created on purpose.
+      </div>
+    </div>
+    {% endif %}
+
+    <p class="text-soft small" style="margin:0 0 0.7rem;line-height:1.55">
+      {% if reg.open %}
+        This site creates an account for anyone who asks. New accounts get the
+        <code>{{ reg.default_role }}</code> role.
+        <strong>If the site has no member area, shop or customer zone, this
+        should be closed</strong> — it is the door registration spam walks
+        through, and no firewall rule or ban closes it.
+      {% else %}
+        This site does not create accounts for strangers. Nothing to do.
+      {% endif %}
+    </p>
+
+    {% if can_manage %}
+    <form method="post" action="/hostings/signups" style="margin:0"
+          data-confirm-title="{% if reg.open %}Close public sign-ups{% else %}Open public sign-ups{% endif %}"
+          data-confirm-body="{% if reg.open %}New visitors will no longer be able to create an account on {{ domain }}. Existing accounts are untouched — this only stops new ones. If the site has a shop or a member area that people sign up to, leave it open and use the sign-up rate limit instead.{% else %}Anyone will be able to create an account on {{ domain }}, and new accounts will get the {{ reg.default_role }} role. Only do this if the site genuinely needs a member area — open registration is what registration spam uses, and it cannot be stopped by banning addresses.{% endif %}"
+          data-confirm-confirm-label="{% if reg.open %}Close sign-ups{% else %}Open sign-ups{% endif %}">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="selector" value="{{ selector }}">
+      <input type="hidden" name="open" value="{% if reg.open %}0{% else %}1{% endif %}">
+      <button class="btn {% if reg.open %}primary{% else %}ghost{% endif %}" type="submit">
+        {% if reg.open %}Close public sign-ups{% else %}Open public sign-ups{% endif %}
+      </button>
+    </form>
+    <p class="text-soft small" style="margin:0.5rem 0 0;line-height:1.5">
+      Changes WordPress's own <code>users_can_register</code> setting on the
+      site, the same as the tick-box in Settings → General.
+    </p>
+    {% endif %}
+  {% endif %}
+</div>

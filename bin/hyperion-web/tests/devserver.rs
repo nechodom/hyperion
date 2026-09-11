@@ -179,6 +179,16 @@ impl hyperion_core::AdapterPort for StubAdapters {
     ) -> Result<(), AdapterError> {
         Ok(())
     }
+    async fn wp_registration_get(
+        &self,
+        _: &str,
+        _: &str,
+    ) -> Result<hyperion_types::WpRegistrationView, AdapterError> {
+        Ok(Default::default())
+    }
+    async fn wp_registration_set(&self, _: &str, _: &str, _: bool) -> Result<(), AdapterError> {
+        Ok(())
+    }
     async fn wp_theme_list(
         &self,
         _: &str,

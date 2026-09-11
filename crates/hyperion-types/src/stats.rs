@@ -2276,6 +2276,34 @@ pub struct SnapshotSummary {
     pub tags: Vec<String>,
 }
 
+/// Whether a WordPress site takes public sign-ups, and what they become.
+///
+/// Both halves travel together because either alone answers the wrong
+/// question. Open registration is normal for a shop or a member area; it is
+/// only alarming when the role a stranger lands in can write.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WpRegistrationView {
+    pub open: bool,
+    /// `subscriber` on a sane install.
+    #[serde(default)]
+    pub default_role: String,
+}
+
+impl WpRegistrationView {
+    /// Does this hand a stranger real standing on the site?
+    ///
+    /// `subscriber` and `customer` can read and buy, which is what open
+    /// registration is FOR. Anything else can write, and that is not spam any
+    /// more — it is an incident.
+    pub fn grants_privilege(&self) -> bool {
+        self.open
+            && !matches!(
+                self.default_role.trim().to_ascii_lowercase().as_str(),
+                "subscriber" | "customer" | ""
+            )
+    }
+}
+
 /// Tag marking a snapshot that holds a database dump as well as files.
 ///
 /// Lives here rather than beside the restic adapter because the PANEL is what

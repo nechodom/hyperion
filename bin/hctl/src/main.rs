@@ -1260,6 +1260,25 @@ fn print_pretty(resp: &Response) {
             println!("  hardening:       {}", p.features.hardening);
             println!("  backup_cadence:  {}", p.features.backup_cadence);
         }
+        Response::WpRegistration(r) => {
+            println!(
+                "public sign-ups: {}",
+                if r.open { "OPEN" } else { "closed" }
+            );
+            if !r.default_role.is_empty() {
+                println!("new accounts get: {}", r.default_role);
+            }
+            // Said loudly, because this is the difference between an annoyance
+            // and an incident: a stranger filling in a form and landing in a
+            // role that can write is not spam.
+            if r.grants_privilege() {
+                println!(
+                    "  WARNING: open registration hands every stranger the \"{}\" role, \
+                     which can do more than read",
+                    r.default_role
+                );
+            }
+        }
         Response::SnapshotRestore(r) => {
             // Every line is a distinction the operator has to be able to make
             // afterwards, so none of them is folded into a bare tick.

@@ -1,0 +1,14 @@
+-- Per-site sign-up rate limiting.
+--
+-- WordPress registration spam is a botnet: one or two requests per address,
+-- every one of them SUCCEEDING. fail2ban cannot see it — it counts repeated
+-- failures from a single address, and there are neither — and neither can a
+-- per-IP rate limit. What is visible is the SITE suddenly taking hundreds of
+-- sign-ups, so the limit this column enables is keyed on the site.
+--
+-- Default 0. It is a blunt instrument that turns away genuine sign-ups during
+-- a flood, which is the right trade only while one is happening; and the
+-- setting that actually closes the door is WordPress's own
+-- `users_can_register`, which the panel now reads and can switch on the same
+-- card.
+ALTER TABLE hostings ADD COLUMN signup_limit_enabled INTEGER NOT NULL DEFAULT 0;
