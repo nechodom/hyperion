@@ -210,6 +210,14 @@ fn timeout_for_request(req: &Request) -> u64 {
         // unreachable, and the operator would retry a destructive operation
         // that was already half-done.
         Request::SnapshotRestore { .. } => 3600,
+        // Transfers over somebody else's FTP server, sized by the site. On
+        // the default 30s the node would keep working while the master
+        // reported it unreachable, and the operator would retry a restore
+        // that was already running.
+        Request::BackupOffsiteRestore { .. } | Request::BackupOffsiteBackfill { .. } => 3600,
+        // A directory listing is cheap, but it is still a round trip to a
+        // remote host that may be slow to answer.
+        Request::BackupOffsiteList { .. } => 120,
         // Up to eight pages plus forty links and images, each with its own
         // 20-second ceiling. 30s was guaranteed to expire on any site with a
         // slow page, and the timeout was reported to the operator as the

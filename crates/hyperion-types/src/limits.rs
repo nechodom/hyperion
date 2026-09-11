@@ -206,6 +206,38 @@ pub struct BackupRunWire {
     pub db_dump_path: Option<String>,
     pub bytes_total: i64,
     pub error_message: Option<String>,
+    /// Digest of the archive, algorithm-prefixed (`blake3:…`). Empty on a run
+    /// taken before backups were hashed — which is NOT the same as a run that
+    /// failed a check, and the page keeps them apart.
+    #[serde(default)]
+    pub sha256_hex: String,
+    /// Where the off-site copy is. Empty = none is known to exist.
+    #[serde(default)]
+    pub remote_blob_key: String,
+    /// Empty (never pushed) / `ok` (the upload returned success) / `verified`
+    /// (the bytes were listed back at the right size) / `failed`.
+    ///
+    /// `ok` and `verified` are deliberately different words. Collapsing them
+    /// is how "the backup is off-site" becomes a claim nobody checked.
+    #[serde(default)]
+    pub remote_state: String,
+    #[serde(default)]
+    pub remote_error: String,
+}
+
+impl BackupRunWire {
+    /// Wording for the off-site column, and the pill class to draw it with.
+    pub fn offsite_label(&self) -> (&'static str, &'static str) {
+        match self.remote_state.as_str() {
+            "verified" => ("off-site ✓", "pill ok"),
+            "ok" => ("uploaded", "pill"),
+            "failed" => ("off-site FAILED", "pill danger"),
+            // Nothing recorded. On a run older than the feature this means
+            // "we do not know", and saying "no" would be a claim we cannot
+            // support.
+            _ => ("—", "pill"),
+        }
+    }
 }
 
 /// What a `BackupRestore` should put back. Lets the operator restore
@@ -299,6 +331,28 @@ impl ProtectionMode {
     pub fn takes_snapshots(self) -> bool {
         matches!(self, Self::Snapshots | Self::Both)
     }
+}
+
+/// One file sitting on the off-site store.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OffsiteFile {
+    pub name: String,
+    pub bytes: i64,
+}
+
+/// What a backfill actually did.
+///
+/// Four numbers rather than one, because they call for different actions.
+/// `missing_locally` is the one that matters most and would otherwise hide
+/// inside `failed`: those backups were pruned off local disk before they were
+/// ever copied anywhere, so they are simply gone, and no retry brings them
+/// back.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OffsiteBackfillResult {
+    pub considered: i64,
+    pub pushed: i64,
+    pub failed: i64,
+    pub missing_locally: i64,
 }
 
 /// One IP ban as shown in the UI / returned over the wire.

@@ -5238,10 +5238,33 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 )
                 .await
                 .map_err(|e| RpcError::Internal_with(format!("mark_ok: {e}")))?;
+                // Hash it. Until now the entire integrity assurance for a
+                // backup was "the file is not zero bytes" — while the
+                // MIGRATION path in this same file hashes and verifies on the
+                // other side. A backup nothing can check is a backup nobody
+                // can trust, and `tar tf` does not count: a zero-padded
+                // truncation exits 0.
+                //
+                // Stored with its algorithm in front, because
+                // `compute_sha256` computes BLAKE3 and a bare hex string in a
+                // column called `sha256_hex` is a lie a future reader would
+                // act on.
+                let digest = match compute_sha256(&archive_path).await {
+                    Ok(h) => format!("blake3:{h}"),
+                    Err(e) => {
+                        tracing::warn!(domain=%detail.domain, error=%e,
+                            "backup: could not hash the archive");
+                        String::new()
+                    }
+                };
+                if !digest.is_empty() {
+                    let _ = hyperion_state::backups::set_sha256(&self.pool, run_id, &digest).await;
+                }
                 self.append_audit(
                     "hosting.backup",
                     Some(detail.id.as_str()),
-                    &serde_json::json!({"target":"local","bytes":total}).to_string(),
+                    &serde_json::json!({"target":"local","bytes":total,"digest":digest})
+                        .to_string(),
                     "ok",
                 )
                 .await;
@@ -5275,6 +5298,57 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                         (Ok(_), Some(Err(e))) => (false, format!("archive ok, dump failed: {e}")),
                         (Err(e), _) => (false, format!("archive push failed: {e}")),
                     };
+                    // Written to the RUN, not only to the audit log. The
+                    // audit log is cluster-wide, admin-only and reached from
+                    // another page; the question "is this backup off-site?"
+                    // is asked while looking at the backup.
+                    let blob_key = archive_result.as_deref().unwrap_or("").to_string();
+                    let state = if ok { "ok" } else { "failed" };
+                    let _ = hyperion_state::backups::set_remote(
+                        &self.pool,
+                        run_id,
+                        &blob_key,
+                        state,
+                        if ok { "" } else { &note },
+                    )
+                    .await;
+                    // And then LOOK. A zero exit from curl says the transfer
+                    // returned success, not that the bytes are on the far
+                    // side — and those are different claims, so they get
+                    // different words: `ok` versus `verified`.
+                    if ok {
+                        match hyperion_adapters::backup::verify_remote(&archive_path, &upload).await
+                        {
+                            Ok(Some(true)) => {
+                                let _ = hyperion_state::backups::set_remote(
+                                    &self.pool, run_id, &blob_key, "verified", "",
+                                )
+                                .await;
+                            }
+                            Ok(Some(false)) => {
+                                let _ = hyperion_state::backups::set_remote(
+                                    &self.pool,
+                                    run_id,
+                                    &blob_key,
+                                    "failed",
+                                    "uploaded, but the remote copy is missing or the wrong size",
+                                )
+                                .await;
+                                tracing::warn!(domain=%detail.domain,
+                                    "remote backup: upload reported success but the file is not \
+                                     there at the right size");
+                            }
+                            // Could not LOOK is not the same as failed, and
+                            // there are two ways not to look: the server gave
+                            // no readable size, or we could not reach it. The
+                            // row stays `ok` in both — exactly as strong a
+                            // claim as the evidence supports.
+                            Ok(None) => tracing::debug!(domain=%detail.domain,
+                                "remote backup: the server gave no size to check against"),
+                            Err(e) => tracing::warn!(domain=%detail.domain, error=%e,
+                                "remote backup: could not verify the uploaded copy"),
+                        }
+                    }
                     self.append_audit(
                         "hosting.backup.remote",
                         Some(detail.id.as_str()),
@@ -9036,6 +9110,298 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             ),
         )
         .await;
+    }
+
+    /// The FTP destination for one site, or `None` when none is configured.
+    fn remote_upload_for(
+        &self,
+        detail: &HostingDetail,
+    ) -> Option<(hyperion_adapters::backup::RemoteUpload<'_>, String)> {
+        let remote = self.remote_backup.as_ref()?;
+        let dir = format!(
+            "{}/{}",
+            remote.base_path.trim_end_matches('/'),
+            detail.system_user
+        );
+        Some((
+            hyperion_adapters::backup::RemoteUpload {
+                scheme: &remote.scheme,
+                host: &remote.host,
+                port: remote.port,
+                user: &remote.user,
+                password: &remote.password,
+                remote_dir: "",
+            },
+            dir,
+        ))
+    }
+
+    /// What this site actually has on the off-site store.
+    ///
+    /// Read from the REMOTE, not from our own rows. The rows say what we tried
+    /// to upload; this says what is there — and after a node is lost, the rows
+    /// are gone and this is the only answer left.
+    pub async fn backup_offsite_list(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<Vec<hyperion_types::OffsiteFile>, RpcError> {
+        let detail = self.get(sel).await?;
+        let Some((mut up, dir)) = self.remote_upload_for(&detail) else {
+            return Err(RpcError::Validation {
+                message: "no off-site backup target is configured on this node".into(),
+            });
+        };
+        up.remote_dir = &dir;
+        let files = hyperion_adapters::backup::list_remote(&up)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("off-site list: {e}")))?;
+        Ok(files
+            .into_iter()
+            .map(|f| hyperion_types::OffsiteFile {
+                name: f.name,
+                bytes: f.bytes as i64,
+            })
+            .collect())
+    }
+
+    /// Push local backups that have never reached the off-site store.
+    ///
+    /// The backfill. Until the columns this reads were written, the panel had
+    /// no idea which backups were already off-site, so switching a target on
+    /// protected only what happened NEXT — every archive already on disk
+    /// stayed there, and nothing said so.
+    ///
+    /// Oldest first: the oldest is the one closest to being pruned off local
+    /// disk, so it is the one with the least time left to be saved.
+    pub async fn backup_offsite_backfill(
+        &self,
+        limit: i64,
+    ) -> Result<hyperion_types::OffsiteBackfillResult, RpcError> {
+        let mut out = hyperion_types::OffsiteBackfillResult::default();
+        if self.remote_backup.is_none() {
+            return Err(RpcError::Validation {
+                message: "no off-site backup target is configured on this node".into(),
+            });
+        }
+        let runs = hyperion_state::backups::list_needing_offsite(&self.pool, limit.clamp(1, 500))
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("backfill list: {e}")))?;
+        out.considered = runs.len() as i64;
+        for run in runs {
+            let Some(archive) = run.archive_path.clone() else {
+                continue;
+            };
+            // The row can outlive the file: retention prunes the archive and
+            // leaves the row. That is not a failure to report as one — there
+            // is simply nothing left to send.
+            if !tokio::fs::try_exists(&archive).await.unwrap_or(false) {
+                let _ = hyperion_state::backups::set_remote(
+                    &self.pool,
+                    run.id,
+                    "",
+                    "failed",
+                    "the local archive is gone — pruned before it was ever copied off-site",
+                )
+                .await;
+                out.missing_locally += 1;
+                continue;
+            }
+            let Ok(detail) = self.get(HostingSelector::Id(run.hosting_id.clone())).await else {
+                out.failed += 1;
+                continue;
+            };
+            let Some((mut up, dir)) = self.remote_upload_for(&detail) else {
+                break;
+            };
+            up.remote_dir = &dir;
+            let path = std::path::PathBuf::from(&archive);
+            match hyperion_adapters::backup::upload_remote(&path, &up).await {
+                Ok(url) => {
+                    // The DUMP first, and its failure is not thrown away. It
+                    // is a sibling file and just as much part of the backup —
+                    // a restore without it is half a site — so a run whose
+                    // dump did not make it must not be recorded as safely
+                    // off-site, which is what discarding this result did.
+                    let mut dump_note = String::new();
+                    if let Some(dump) = run.db_dump_path.as_deref() {
+                        let dp = std::path::PathBuf::from(dump);
+                        if tokio::fs::try_exists(&dp).await.unwrap_or(false) {
+                            if let Err(e) = hyperion_adapters::backup::upload_remote(&dp, &up).await
+                            {
+                                dump_note = format!("archive pushed, database dump failed: {e}");
+                            }
+                        }
+                    }
+                    if !dump_note.is_empty() {
+                        let _ = hyperion_state::backups::set_remote(
+                            &self.pool, run.id, &url, "failed", &dump_note,
+                        )
+                        .await;
+                        out.failed += 1;
+                        continue;
+                    }
+                    // The same three answers as a fresh backup, kept apart.
+                    // `Some(false)` means we LOOKED and it is not there;
+                    // recording that as "uploaded" reports a copy that
+                    // positively does not exist.
+                    let (state, note) =
+                        match hyperion_adapters::backup::verify_remote(&path, &up).await {
+                            Ok(Some(true)) => ("verified", String::new()),
+                            Ok(Some(false)) => (
+                                "failed",
+                                "uploaded, but the remote copy is missing or the wrong size"
+                                    .to_string(),
+                            ),
+                            Ok(None) | Err(_) => ("ok", String::new()),
+                        };
+                    let _ =
+                        hyperion_state::backups::set_remote(&self.pool, run.id, &url, state, &note)
+                            .await;
+                    if state == "failed" {
+                        out.failed += 1;
+                    } else {
+                        out.pushed += 1;
+                    }
+                }
+                Err(e) => {
+                    let _ = hyperion_state::backups::set_remote(
+                        &self.pool,
+                        run.id,
+                        "",
+                        "failed",
+                        &e.to_string(),
+                    )
+                    .await;
+                    out.failed += 1;
+                }
+            }
+        }
+        self.append_audit(
+            "backup.offsite_backfill",
+            None,
+            &serde_json::json!({
+                "considered": out.considered,
+                "pushed": out.pushed,
+                "failed": out.failed,
+                "missing_locally": out.missing_locally,
+            })
+            .to_string(),
+            "ok",
+        )
+        .await;
+        Ok(out)
+    }
+
+    /// Fetch a backup back off the remote store and restore it.
+    ///
+    /// The half that did not exist. An off-site copy that cannot be read back
+    /// is not a backup, and until now nothing in this codebase could read one.
+    ///
+    /// The download lands under the incoming directory the upload restore path
+    /// already whitelists, so the archive goes through exactly the same
+    /// extractor — sandboxed, symlink-refusing, permission-repairing — as one
+    /// the operator uploaded by hand. Nothing about "it came from the remote"
+    /// gets it a shortcut.
+    pub async fn backup_offsite_restore(
+        &self,
+        sel: HostingSelector,
+        filename: String,
+        mode: hyperion_types::BackupRestoreMode,
+    ) -> Result<String, RpcError> {
+        let detail = self.get(sel.clone()).await?;
+        let Some((mut up, dir)) = self.remote_upload_for(&detail) else {
+            return Err(RpcError::Validation {
+                message: "no off-site backup target is configured on this node".into(),
+            });
+        };
+        up.remote_dir = &dir;
+        // Under the per-hosting incoming directory, which `backup_restore`
+        // already allows and which keeps one site's fetched archive out of
+        // another's.
+        let dest_dir =
+            std::path::PathBuf::from("/var/lib/hyperion/backups/incoming").join(detail.id.as_str());
+        let dest = dest_dir.join(&filename);
+        // Room for the archive, the dump beside it and the extraction to come.
+        // A remote serving an endless stream must not be able to fill the node
+        // and take every site on it down; unknown free space falls back to a
+        // fixed ceiling rather than to none.
+        let budget = fs_avail_bytes(&dest_dir)
+            .await
+            .map(|free| free.saturating_sub(free / 5))
+            .unwrap_or(64 * 1024 * 1024 * 1024);
+        let bytes = hyperion_adapters::backup::download_remote(&filename, &dest, &up, budget)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("off-site download: {e}")))?;
+
+        // The DATABASE.
+        //
+        // `backup_restore` finds the dump as a SIBLING of the archive — same
+        // directory, same stem, `.sql` — so fetching only the tar meant the
+        // file was never there, the restore quietly did files only, and the
+        // panel reported "files and database restored". A restore that says it
+        // put the database back and did not is worse than one that refuses,
+        // because the operator stops looking.
+        let mut db_fetched = false;
+        if mode.restores_db() {
+            let dump_name = format!(
+                "{}.sql",
+                filename
+                    .strip_suffix(".tar.gz")
+                    .or_else(|| filename.strip_suffix(".tgz"))
+                    .unwrap_or(&filename)
+            );
+            match hyperion_adapters::backup::download_remote(
+                &dump_name,
+                &dest_dir.join(&dump_name),
+                &up,
+                budget,
+            )
+            .await
+            {
+                Ok(n) => {
+                    db_fetched = true;
+                    tracing::info!(domain=%detail.domain, file=%dump_name, bytes=n,
+                        "off-site restore: database dump fetched");
+                }
+                Err(e) => {
+                    // Refuse rather than silently degrade to files-only.
+                    let _ = tokio::fs::remove_file(&dest).await;
+                    return Err(RpcError::Validation {
+                        message: format!(
+                            "the off-site copy of {filename} has no database dump beside it \
+                             ({dump_name}): {e}. Restore the files only, or pick a backup whose \
+                             dump is on the remote too."
+                        ),
+                    });
+                }
+            }
+        }
+        tracing::info!(domain=%detail.domain, file=%filename, bytes,
+            "off-site restore: archive fetched");
+        // The restore runs FIRST; the audit row records what happened rather
+        // than what was intended. Writing "ok" before the work is a claim
+        // about the future.
+        let restored = self
+            .backup_restore(sel, dest.display().to_string(), mode)
+            .await;
+        self.append_audit(
+            "hosting.backup.offsite_restore",
+            Some(detail.id.as_str()),
+            &serde_json::json!({
+                "file": filename,
+                "bytes": bytes,
+                "mode": mode.as_str(),
+                "database_fetched": db_fetched,
+            })
+            .to_string(),
+            if restored.is_ok() { "ok" } else { "failed" },
+        )
+        .await;
+        restored?;
+        Ok(format!(
+            "restored {filename} ({bytes} bytes){} from the off-site copy",
+            if db_fetched { " and its database" } else { "" }
+        ))
     }
 
     /// The safety snapshot a restore takes, WITHOUT the retention prune.
@@ -21658,22 +22024,25 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 .map(|s| !s.is_empty())
                 .unwrap_or(false),
         };
-        let backup_remote_view = match &self.remote_backup {
-            Some(r) => hyperion_types::BackupRemoteConfigView {
-                enabled: true,
-                scheme: r.scheme.clone(),
-                host: r.host.clone(),
-                port: r.port,
-                user: r.user.clone(),
-                password_set: !r.password.is_empty(),
-                base_path: r.base_path.clone(),
-            },
-            None => hyperion_types::BackupRemoteConfigView::default(),
-        };
-        let backup_retention_view = hyperion_types::BackupRetentionConfigView {
-            max_age_days: self.retention.max_age_days,
-            keep_latest_n: self.retention.keep_latest_n,
-        };
+        // Read from agent.toml, NOT from `self.remote_backup`.
+        //
+        // Those fields are set once at agent boot and never mutated, and the
+        // web layer schedules the agent restart three seconds AFTER it sends
+        // the redirect — so the page an operator lands on after saving is
+        // guaranteed to be pre-restart. Built from memory, the form came back
+        // showing the OLD host, the OLD user and the OLD "pushing / local
+        // only" pill, and the save looked like it had not happened. It had.
+        //
+        // Worse: `None => default()` blanked every field when the checkbox was
+        // unticked, even though agent.toml still held the host and path — so
+        // disabling the push looked like the configuration had been erased.
+        // "Off" and "gone" are not the same state.
+        //
+        // The `[protection]` card on this same tab already reads straight off
+        // agent.toml, which is why that one reflects a save immediately.
+        let backup_remote_view = read_backup_remote_section(self.agent_config_path.as_deref());
+        let backup_retention_view =
+            read_backup_retention_section(self.agent_config_path.as_deref());
         let acme_view = hyperion_types::AcmeConfigView {
             contact_email: self.acme_contact_email.clone(),
             directory_url: String::new(), // not stored here
@@ -30159,6 +30528,77 @@ fn read_scan_niceness(cfg_path: Option<&std::path::Path>) -> i32 {
     }
 }
 
+/// The `[backup_remote]` section as it is ON DISK.
+///
+/// See the call site for why this must not come from the running agent's
+/// memory. Missing section or unreadable file yields the defaults, which is
+/// the same answer as "nothing configured" — the fail-safe direction here,
+/// because the alternative is showing an operator a destination that is not
+/// really set.
+pub(crate) fn read_backup_remote_section(
+    cfg_path: Option<&std::path::Path>,
+) -> hyperion_types::BackupRemoteConfigView {
+    let mut v = hyperion_types::BackupRemoteConfigView::default();
+    let Some(doc) = read_agent_doc(cfg_path) else {
+        return v;
+    };
+    let Some(sec) = doc.get("backup_remote") else {
+        return v;
+    };
+    let s = |k: &str| {
+        sec.get(k)
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
+    v.enabled = sec
+        .get("enabled")
+        .and_then(|x| x.as_bool())
+        .unwrap_or(false);
+    v.scheme = s("scheme");
+    v.host = s("host");
+    v.port = sec
+        .get("port")
+        .and_then(|x| x.as_integer())
+        .unwrap_or(0)
+        .clamp(0, 65535) as u16;
+    v.user = s("user");
+    // The password itself never leaves the node. Only whether one is set.
+    v.password_set = !s("password").is_empty();
+    v.base_path = s("base_path");
+    v
+}
+
+/// The `[backup_retention]` section as it is ON DISK. Same reasoning.
+pub(crate) fn read_backup_retention_section(
+    cfg_path: Option<&std::path::Path>,
+) -> hyperion_types::BackupRetentionConfigView {
+    let d = hyperion_types::BackupRetentionConfigView::default();
+    let Some(doc) = read_agent_doc(cfg_path) else {
+        return d;
+    };
+    let Some(sec) = doc.get("backup_retention") else {
+        return d;
+    };
+    hyperion_types::BackupRetentionConfigView {
+        max_age_days: sec
+            .get("max_age_days")
+            .and_then(|x| x.as_integer())
+            .unwrap_or(d.max_age_days),
+        keep_latest_n: sec
+            .get("keep_latest_n")
+            .and_then(|x| x.as_integer())
+            .unwrap_or(d.keep_latest_n),
+    }
+}
+
+/// Parse agent.toml once, for the readers above.
+fn read_agent_doc(cfg_path: Option<&std::path::Path>) -> Option<toml_edit::DocumentMut> {
+    let path = cfg_path?;
+    let raw = std::fs::read_to_string(path).ok()?;
+    raw.parse::<toml_edit::DocumentMut>().ok()
+}
+
 pub(crate) fn read_cluster_section(
     cfg_path: Option<&std::path::Path>,
 ) -> hyperion_types::ClusterConfigView {
@@ -30514,6 +30954,10 @@ fn row_to_summary(u: hyperion_state::web_users::WebUserRow) -> hyperion_types::W
 
 fn run_to_wire(r: hyperion_state::backups::BackupRun) -> hyperion_types::BackupRunWire {
     hyperion_types::BackupRunWire {
+        sha256_hex: r.sha256_hex,
+        remote_blob_key: r.remote_blob_key,
+        remote_state: r.remote_state,
+        remote_error: r.remote_error,
         id: r.id,
         hosting_id: r.hosting_id,
         target: r.target,

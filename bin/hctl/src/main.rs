@@ -1260,6 +1260,29 @@ fn print_pretty(resp: &Response) {
             println!("  hardening:       {}", p.features.hardening);
             println!("  backup_cadence:  {}", p.features.backup_cadence);
         }
+        Response::BackupOffsiteList(files) => {
+            if files.is_empty() {
+                println!("nothing on the off-site store for this site");
+            }
+            for f in files {
+                println!("{:>14}  {}", f.bytes, f.name);
+            }
+        }
+        Response::BackupOffsiteBackfill(r) => {
+            println!("considered: {}", r.considered);
+            println!("pushed:     {}", r.pushed);
+            println!("failed:     {}", r.failed);
+            // Said separately from `failed`, because no retry fixes it: those
+            // archives were pruned off local disk before anything copied them
+            // anywhere, so they are gone.
+            if r.missing_locally > 0 {
+                println!(
+                    "GONE:       {} backup(s) had no local archive left to send",
+                    r.missing_locally
+                );
+            }
+        }
+        Response::BackupOffsiteRestore(msg) => println!("✓ {msg}"),
         Response::WpRegistration(r) => {
             println!(
                 "public sign-ups: {}",

@@ -1470,6 +1470,34 @@
     </form>
   </div>
 
+  {# The backfill. Switching a target on only ever protected what happened
+     NEXT — every archive already on disk stayed there, and nothing said so. #}
+  <div class="card">
+    <div class="row" style="align-items:center;gap:0.6rem;margin-bottom:0.5rem">
+      <h2 style="margin:0">
+        <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+        Copy existing backups off-site
+      </h2>
+    </div>
+    <p class="text-soft small" style="margin:0 0 0.8rem;line-height:1.55">
+      Off-site copies are made as each backup runs, so anything already on
+      local disk when you configured the target was never sent. This walks the
+      backups that have no off-site copy recorded — <strong>oldest first</strong>,
+      because the oldest is closest to being pruned off local disk — and
+      uploads them.
+      <br>
+      Backups whose archive has already been pruned are reported separately
+      and counted as gone: nothing can retry those.
+    </p>
+    <form method="post" action="/settings/backups/backfill"
+          data-confirm-title="Copy existing backups off-site"
+          data-confirm-body="Uploads backups that have no off-site copy to the configured FTP target, oldest first. This transfers real data and can take a long time and a lot of bandwidth. It never deletes anything."
+          data-confirm-confirm-label="Start copying">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <button class="btn primary" type="submit">Copy existing backups off-site</button>
+    </form>
+  </div>
+
   {# Two off-site destination types: the FTP/FTPS/SFTP single-target push
      (below) is the path that runs TODAY; the S3 multi-target page is the
      config layer for the upcoming scheduler. Frame them as complementary,

@@ -3379,6 +3379,19 @@
 {# Snapshots belong with the other copies of the site, not on the WordPress
    tab: an operator asking "what do I have to fall back on?" looks here.
    Lazy because it reaches the owning node and shells out to restic. #}
+{# What is on the off-site store. Above the local runs table on purpose: the
+   question "what do I still have if this box is gone?" is the one an operator
+   asks in the moment that matters, and the local list cannot answer it. #}
+<div id="offsite-panel"
+     hx-get="/hostings/{{ detail.id.as_str() }}/offsite-panel"
+     hx-trigger="intersect once"
+     hx-swap="innerHTML">
+  <div class="card" style="margin-bottom:0.9rem">
+    <span class="spinner-inline" style="margin-right:0.4rem"></span>
+    <span class="text-soft small">Asking the off-site store what it has…</span>
+  </div>
+</div>
+
 <div id="snapshots-panel"
      hx-get="/hostings/{{ detail.id.as_str() }}/snapshots-panel"
      hx-trigger="intersect once"
@@ -3472,6 +3485,7 @@
       <table>
         <thead><tr>
           <th>Started</th><th>Target</th><th>State</th>
+          <th>Off-site</th>
           <th class="right">Size</th><th>Archive</th><th class="right">Actions</th>
         </tr></thead>
         <tbody>
@@ -3483,6 +3497,23 @@
               {% if b.state == "ok" %}<span class="pill ok">{{ b.state }}</span>
               {% else if b.state == "failed" %}<span class="pill err">{{ b.state }}</span>
               {% else %}<span class="pill warn pulse">{{ b.state }}</span>{% endif %}
+            </td>
+            {#- What is known about the copy that is NOT on this box. Until
+                this column existed, nothing on the page said anything about
+                it: the outcome was written only to the cluster-wide audit
+                log, behind a capability most operators do not browse with.
+
+                "uploaded" and "off-site ✓" are different words on purpose —
+                one means the transfer returned success, the other means the
+                file was listed back at the right size. An em dash means we
+                have no record, which on a backup older than this feature is
+                the honest answer and not "no". -#}
+            <td>
+              <span class="{{ b.offsite_label().1 }}" style="font-size:0.6rem"
+                    title="{% if !b.remote_error.is_empty() %}{{ b.remote_error }}{% else if !b.remote_blob_key.is_empty() %}{{ b.remote_blob_key }}{% else %}No off-site copy is recorded for this backup{% endif %}">{{ b.offsite_label().0 }}</span>
+              {%- if !b.sha256_hex.is_empty() %}
+              <span class="text-soft" style="font-size:0.6rem;display:block" title="{{ b.sha256_hex }}">hashed</span>
+              {%- endif %}
             </td>
             <td class="right muted numeric">{{ crate::handlers::stats::fmt_bytes(b.bytes_total) }}</td>
             <td>

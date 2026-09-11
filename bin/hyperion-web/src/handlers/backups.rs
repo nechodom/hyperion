@@ -31,11 +31,28 @@ struct BackupsTpl<'a> {
     htmx_version: &'static str,
     targets: Vec<hyperion_types::BackupTargetView>,
     csrf_token: String,
+    /// Every write on this page redirects back with `?flash=` — and until
+    /// this field existed, the template had nowhere to put it, so the
+    /// message was built, url-encoded, carried through a redirect and then
+    /// silently dropped. A save that works and says nothing is
+    /// indistinguishable from one that failed.
+    flash: Option<String>,
+    flash_error: Option<String>,
+}
+
+/// The `?flash=` / `?flash_error=` this page redirects back to itself with.
+#[derive(Deserialize, Default)]
+pub struct BackupsQuery {
+    #[serde(default)]
+    pub flash: Option<String>,
+    #[serde(default)]
+    pub flash_error: Option<String>,
 }
 
 pub async fn get_backups(
     State(state): State<SharedState>,
     ctx: AuthCtx,
+    axum::extract::Query(q): axum::extract::Query<BackupsQuery>,
 ) -> Result<Response, AppError> {
     if !ctx.can(Capability::BackupTargets) {
         return Ok(Redirect::to("/?flash_error=admin+role+required").into_response());
@@ -53,6 +70,8 @@ pub async fn get_backups(
         htmx_version: super::htmx_version(),
         targets,
         csrf_token: super::session_csrf_token(&state, &ctx),
+        flash: q.flash,
+        flash_error: q.flash_error,
     };
     Ok(Html(tpl.render()?).into_response())
 }
@@ -140,12 +159,19 @@ pub async fn post_upsert(
         },
     )
     .await?;
-    let flash = match resp {
-        RpcResponse::BackupTargetUpserted { id } => format!("Saved target #{id}"),
-        RpcResponse::Error(e) => format!("Save failed: {e}"),
-        _ => "Save: unexpected response".into(),
+    // Success and failure go to DIFFERENT parameters. While nothing rendered
+    // either of them this looked harmless; the moment the page started
+    // showing the flash, "Save failed: …" would have arrived in the green
+    // success banner with a tick beside it.
+    let (key, msg) = match resp {
+        RpcResponse::BackupTargetUpserted { id } => ("flash", format!("Saved target #{id}")),
+        RpcResponse::Error(e) => ("flash_error", format!("Save failed: {e}")),
+        _ => (
+            "flash_error",
+            "Save: unexpected response from the agent".into(),
+        ),
     };
-    Ok(Redirect::to(&format!("/settings/backups?flash={}", urlencode(&flash))).into_response())
+    Ok(Redirect::to(&format!("/settings/backups?{key}={}", urlencode(&msg))).into_response())
 }
 
 pub async fn post_delete(
