@@ -203,6 +203,13 @@ fn timeout_for_request(req: &Request) -> u64 {
         // Listing and diffing are cheap, but both read repository metadata
         // that scales with the number of snapshots kept.
         Request::SnapshotList { .. } | Request::SnapshotDiff { .. } => 120,
+        // A restore reads the whole snapshot out of the repository, swaps the
+        // tree and may import a database — the same order of work as taking
+        // one, on a repository read with `--no-cache`. On the default 30s the
+        // restore would keep running on the node while the master reported it
+        // unreachable, and the operator would retry a destructive operation
+        // that was already half-done.
+        Request::SnapshotRestore { .. } => 3600,
         // Up to eight pages plus forty links and images, each with its own
         // 20-second ceiling. 30s was guaranteed to expire on any site with a
         // slow page, and the timeout was reported to the operator as the

@@ -1417,6 +1417,17 @@ pub enum Request {
         from: String,
         to: String,
     },
+    /// Put a snapshot back: restore into staging, then SWAP the document root
+    /// so the result is the site as it was, not the snapshot merged onto
+    /// whatever is there now. The replaced tree is kept beside it.
+    ///
+    /// Destructive, and slow in proportion to the site. Callers run it as a
+    /// background job.
+    SnapshotRestore {
+        sel: HostingSelector,
+        snapshot: String,
+        mode: hyperion_types::BackupRestoreMode,
+    },
     /// Everything we can say about one site's outgoing WordPress mail.
     /// Read-only; `WpMailRepair` is the acting half.
     WpMailSelfCheck {
@@ -2172,6 +2183,7 @@ pub enum Response {
     SnapshotList(Vec<hyperion_types::SnapshotSummary>),
     SnapshotNow(String),
     SnapshotDiff(hyperion_types::SnapshotDiff),
+    SnapshotRestore(hyperion_types::SnapshotRestoreOutcome),
     FtpAccountList(Vec<hyperion_types::FtpExtraAccount>),
     /// `(login, password)` — the password is shown once, and it is paired
     /// with the login it belongs to because the panel used to show a fresh

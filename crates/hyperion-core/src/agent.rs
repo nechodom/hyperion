@@ -1888,6 +1888,14 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
     ) -> Result<hyperion_types::SnapshotDiff, RpcError> {
         self.svc.snapshot_diff(sel, from, to).await
     }
+    async fn snapshot_restore(
+        &self,
+        sel: HostingSelector,
+        snapshot: String,
+        mode: hyperion_types::BackupRestoreMode,
+    ) -> Result<hyperion_types::SnapshotRestoreOutcome, RpcError> {
+        self.svc.snapshot_restore(sel, snapshot, mode).await
+    }
     async fn wp_mail_self_check(
         &self,
         sel: HostingSelector,

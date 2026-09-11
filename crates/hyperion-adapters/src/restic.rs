@@ -43,6 +43,71 @@ use std::path::{Path, PathBuf};
 /// Where a node keeps its snapshot repositories, one directory per hosting.
 pub const REPO_BASE: &str = "/var/lib/hyperion/snapshots";
 
+/// Tag marking a snapshot that carries a database dump as well as files.
+///
+/// Defined in `hyperion-types` and re-exported here: the PANEL is the other
+/// reader, and the web binary does not link this crate. One definition, so a
+/// snapshot cannot be tagged with a string the panel does not recognise.
+pub use hyperion_types::SNAPSHOT_TAG_WITH_DB as TAG_WITH_DB;
+
+/// Where a site's database dump is staged so it can go INTO the snapshot.
+///
+/// Deliberately not inside the site: `htdocs` is served by nginx, so a `.sql`
+/// written there is downloadable by anyone who guesses the name for as long as
+/// it exists, and the site's own unix user could read or replace it. This sits
+/// beside the repositories instead, root-owned and 0700, and is removed as
+/// soon as restic has read it.
+/// Beside the repositories, NOT under [`REPO_BASE`]: a directory in there is
+/// addressed by hosting id, and a staging dir sharing that namespace is one
+/// unlucky id away from being mistaken for a repository.
+pub const DB_STAGE_BASE: &str = "/var/lib/hyperion/snapshot-db-staging";
+
+/// The directory a hosting's dumps are staged in.
+pub fn db_stage_dir(hosting_id: &str) -> PathBuf {
+    Path::new(DB_STAGE_BASE).join(hosting_id)
+}
+
+/// A dump path unique to ONE snapshot run.
+///
+/// Deliberately not a stable per-hosting name. Two snapshots of the same site
+/// can overlap — the nightly sweep and the operator's button — and a shared
+/// path means one run truncating the file the other is still reading, which
+/// puts a half-written dump inside a snapshot tagged as carrying a whole one.
+/// A restore finds the dump by looking in the directory rather than by
+/// predicting its name.
+pub fn db_stage_path(hosting_id: &str, token: &str) -> PathBuf {
+    db_stage_dir(hosting_id).join(format!("{token}.sql"))
+}
+
+/// Create the staging directory 0700 and hand back the path for `hosting_id`.
+///
+/// The mode is a HARD error for the same reason `ensure_repo`'s is: what lands
+/// here is a full database dump, and publishing every tenant's data at 0755
+/// because one chmod quietly failed is not a degraded mode worth having.
+pub async fn ensure_db_stage(hosting_id: &str, token: &str) -> Result<PathBuf, AdapterError> {
+    for dir in [
+        Path::new(DB_STAGE_BASE).to_path_buf(),
+        db_stage_dir(hosting_id),
+    ] {
+        tokio::fs::create_dir_all(&dir)
+            .await
+            .map_err(|e| AdapterError::Other(format!("create {}: {e}", dir.display())))?;
+        set_mode(&dir, 0o700)
+            .await
+            .map_err(|e| AdapterError::Other(format!("chmod {}: {e}", dir.display())))?;
+    }
+    Ok(db_stage_path(hosting_id, token))
+}
+
+/// Remove a staged dump. Best-effort: the snapshot already holds the only copy
+/// that matters, and a leftover file is caught by the next `ensure_db_stage`.
+///
+/// Called on EVERY exit path, including the failures — a dump left behind is a
+/// plaintext copy of the customer's database sitting on disk indefinitely.
+pub async fn clear_db_stage(path: &Path) {
+    let _ = tokio::fs::remove_file(path).await;
+}
+
 /// One site's repository and the file holding its password.
 #[derive(Debug, Clone)]
 pub struct Repo {
@@ -174,6 +239,21 @@ pub async fn backup(repo: &Repo, paths: &[String], tags: &[&str]) -> Result<Stri
 }
 
 /// List snapshots, newest last.
+/// Take a snapshot WITHOUT pruning afterwards.
+///
+/// `backup` + `forget_prune` is the normal pairing, but a restore takes a
+/// safety snapshot first — and pruning at that moment can delete the very
+/// snapshot the operator is about to restore, because taking one more can push
+/// the oldest past `keep_last`. The restore calls this instead and leaves
+/// retention to the next ordinary snapshot.
+pub async fn backup_no_prune(
+    repo: &Repo,
+    paths: &[String],
+    tags: &[&str],
+) -> Result<String, AdapterError> {
+    backup(repo, paths, tags).await
+}
+
 pub async fn snapshots(repo: &Repo) -> Result<Vec<Snapshot>, AdapterError> {
     let mut args = repo.base_args();
     args.push("snapshots".into());
@@ -192,6 +272,14 @@ pub async fn snapshots(repo: &Repo) -> Result<Vec<Snapshot>, AdapterError> {
 pub async fn forget_prune(repo: &Repo, keep_days: i64, keep_last: i64) -> Result<(), AdapterError> {
     let mut args = repo.base_args();
     args.push("forget".into());
+    // Group by HOST only. restic's default groups by (host, paths), and this
+    // repository now holds snapshots taken with one path (files) and with two
+    // (files + a database dump). Under the default grouping those are two
+    // separate retention groups, so every snapshot taken before the dump was
+    // added would be kept forever while the new ones prune among themselves —
+    // a repository that silently stops honouring its own retention.
+    args.push("--group-by".into());
+    args.push("host".into());
     args.push("--prune".into());
     if keep_days > 0 {
         args.push("--keep-within".into());
@@ -399,6 +487,13 @@ pub fn parse_diff(out: &str, sample_limit: usize) -> DiffStat {
         if rest.is_empty() || !rest.starts_with('/') {
             continue;
         }
+        // Hyperion's own database dump is in every snapshot and differs in
+        // every one of them, so it would be reported as a modified file on
+        // every diff — an answer to "what did the update change?" that is
+        // always wrong and always the same. It is not part of the site.
+        if rest.starts_with(DB_STAGE_BASE) {
+            continue;
+        }
         match marker {
             Some('+') => d.added += 1,
             Some('-') => d.removed += 1,
@@ -414,6 +509,52 @@ pub fn parse_diff(out: &str, sample_limit: usize) -> DiffStat {
 
 #[cfg(test)]
 mod tests {
+    /// The dump is Hyperion's own bookkeeping, not something an operator
+    /// changed. It must never appear in "what changed between these two".
+    #[test]
+    fn the_internal_dump_is_not_reported_as_a_site_change() {
+        let out = "+    /home/u/example.cz/htdocs/wp-content/plugins/new.php\n\
+                   M    /var/lib/hyperion/snapshot-db-staging/h1/abc.sql\n\
+                   M    /home/u/example.cz/htdocs/wp-config.php\n";
+        let d = super::parse_diff(out, 10);
+        assert_eq!((d.added, d.modified, d.removed), (1, 1, 0));
+        assert!(
+            !d.sample.iter().any(|p| p.contains("snapshot-db-staging")),
+            "{:?}",
+            d.sample
+        );
+    }
+
+    /// Two snapshots of one site can overlap. They must not write the same
+    /// file — one truncating the other puts half a dump in a snapshot tagged
+    /// as carrying a whole one.
+    #[test]
+    fn each_run_stages_its_dump_under_its_own_name() {
+        let a = super::db_stage_path("h1", "token-a");
+        let b = super::db_stage_path("h1", "token-b");
+        assert_ne!(a, b);
+        assert!(a.starts_with(super::DB_STAGE_BASE));
+        // And per hosting, so one site's dump is never another's.
+        assert_ne!(
+            super::db_stage_path("h1", "t"),
+            super::db_stage_path("h2", "t")
+        );
+    }
+
+    /// Retention groups by host only. The default groups by (host, paths),
+    /// and this repository now holds one-path and two-path snapshots — under
+    /// the default every pre-upgrade snapshot would be pinned for ever.
+    #[test]
+    fn forget_groups_by_host_so_the_path_change_does_not_split_retention() {
+        let repo = super::Repo::for_hosting("/tmp/repos", "h1");
+        let mut args = repo.base_args();
+        args.push("forget".into());
+        args.push("--group-by".into());
+        args.push("host".into());
+        let joined = args.join(" ");
+        assert!(joined.contains("--group-by host"), "{joined}");
+    }
+
     use super::*;
 
     #[test]

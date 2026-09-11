@@ -16,6 +16,34 @@ pub struct Config {
     pub fail2ban: Fail2banSection,
     pub permissions: PermissionsSection,
     pub snapshots: SnapshotsSection,
+    pub protection: ProtectionSection,
+}
+
+/// Which copy-of-the-site engine this node uses: `backups`, `snapshots` or
+/// `both`.
+///
+/// Per-node and parsed here rather than read out of `[cluster]`, because the
+/// code that acts on it — the scheduled backup sweep and the pre-change
+/// snapshot — runs on the node that OWNS each site, and `[cluster]` is a
+/// master-only section the workers never see. The panel edits the master's
+/// copy and propagates it; a node that missed the propagation keeps its own
+/// value and the panel says which.
+///
+/// Defaults to `both`, which is what every install did before this key
+/// existed. Every other value switches an engine OFF, so an absent or
+/// unreadable value must never resolve to one of them.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct ProtectionSection {
+    pub mode: String,
+}
+
+impl Default for ProtectionSection {
+    fn default() -> Self {
+        Self {
+            mode: "both".to_string(),
+        }
+    }
 }
 
 /// Content-addressed snapshots taken before anything changes a site.

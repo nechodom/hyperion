@@ -241,6 +241,66 @@ impl BackupRestoreMode {
     }
 }
 
+/// Which copy-of-the-site engine an install uses.
+///
+/// The two are not substitutes, and the difference is what the operator is
+/// choosing between. A BACKUP is files plus a database dump, pushed off-site,
+/// scheduled, and sellable on a care plan — it answers "the node is gone". A
+/// SNAPSHOT is a deduplicated local copy taken automatically before anything
+/// risky — it answers "last night's update broke the site", cheaply and
+/// thirty times over, but it never leaves the node.
+///
+/// [`Self::Both`] is the default and the only value a corrupt or absent
+/// config can produce: every other value switches an engine OFF, and that is
+/// the direction in which this setting loses data.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ProtectionMode {
+    /// Archive backups only. Snapshots are not taken and their cards are
+    /// hidden; existing repositories are left alone, not deleted.
+    Backups,
+    /// Snapshots only. Scheduled archive backups stop for sites that are not
+    /// on a care plan selling them — see the note on the variant below.
+    Snapshots,
+    #[default]
+    Both,
+}
+
+impl ProtectionMode {
+    /// Anything unrecognised is [`Self::Both`]. See the type doc: the failure
+    /// direction has to be "keep making copies", never "stop".
+    pub fn parse(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "backups" => Self::Backups,
+            "snapshots" => Self::Snapshots,
+            _ => Self::Both,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Backups => "backups",
+            Self::Snapshots => "snapshots",
+            Self::Both => "both",
+        }
+    }
+
+    /// Does this install take SCHEDULED archive backups?
+    ///
+    /// Note what this does not govern: `backup_run` is also called internally
+    /// as rollback material by hosting export, staging create and staging
+    /// push. Those are not a product the operator switched off — they are how
+    /// those features undo themselves — and they keep running in every mode.
+    pub fn schedules_backups(self) -> bool {
+        matches!(self, Self::Backups | Self::Both)
+    }
+
+    /// Does this install take snapshots before it changes a site?
+    pub fn takes_snapshots(self) -> bool {
+        matches!(self, Self::Snapshots | Self::Both)
+    }
+}
+
 /// One IP ban as shown in the UI / returned over the wire.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct IpBanWire {

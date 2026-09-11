@@ -1260,6 +1260,27 @@ fn print_pretty(resp: &Response) {
             println!("  hardening:       {}", p.features.hardening);
             println!("  backup_cadence:  {}", p.features.backup_cadence);
         }
+        Response::SnapshotRestore(r) => {
+            // Every line is a distinction the operator has to be able to make
+            // afterwards, so none of them is folded into a bare tick.
+            println!("✓ restored snapshot {}", r.snapshot);
+            println!(
+                "  files:    {}",
+                if r.files_restored { "restored" } else { "left alone" }
+            );
+            println!(
+                "  database: {}",
+                if r.db_restored { "restored" } else { "left alone" }
+            );
+            if r.safety_snapshot.is_empty() {
+                println!("  WARNING:  no snapshot of the replaced state could be taken");
+            } else {
+                println!("  replaced state kept as snapshot {}", r.safety_snapshot);
+            }
+            if !r.previous_site_kept_at.is_empty() {
+                println!("  previous files kept at {}", r.previous_site_kept_at);
+            }
+        }
         Response::PackageDelete => {
             println!("✓ package deleted (existing activations keep their price, unenforced)")
         }
