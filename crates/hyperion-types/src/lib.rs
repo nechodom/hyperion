@@ -73,7 +73,7 @@ pub use stats::{
     NotificationView, ServiceHealth, ServiceInstallStatus, ServicesHealth, SiteEmailLogEntry,
     SlackConfigView, SmtpAutodetect, SnapshotDiff, SnapshotRestoreOutcome, SnapshotSummary,
     TrashEntry, UpdateStatus, Web2faEnrollment, WebHostingAccess, WebLoginResult, WebUserSummary,
-    WebVerify2faResult, SNAPSHOT_TAG_WITH_DB,
+    WebVerify2faResult, WpRegistrationView, SNAPSHOT_TAG_WITH_DB,
 };
 pub use stats::{CARE_REPORT_DEFAULT_BODY_TEMPLATE, EXPIRY_WARNING_DEFAULT_BODY_TEMPLATE};
 pub use wp::{

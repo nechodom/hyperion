@@ -270,6 +270,21 @@ pub trait AdapterPort: Send + Sync {
         activate: bool,
     ) -> Result<(), AdapterError>;
 
+    /// Read whether a site accepts public sign-ups, and what role they get.
+    async fn wp_registration_get(
+        &self,
+        system_user: &str,
+        htdocs: &str,
+    ) -> Result<hyperion_types::WpRegistrationView, AdapterError>;
+
+    /// Open or close public sign-ups.
+    async fn wp_registration_set(
+        &self,
+        system_user: &str,
+        htdocs: &str,
+        open: bool,
+    ) -> Result<(), AdapterError>;
+
     /// `wp theme list --format=json` — parallel to wp_plugin_list.
     /// Returns the theme table + the core version string.
     async fn wp_theme_list(
@@ -8898,6 +8913,131 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .collect())
     }
 
+    /// Does this site take public sign-ups, and what do they become?
+    pub async fn wp_registration_get(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<hyperion_types::WpRegistrationView, RpcError> {
+        let detail = self.get(sel).await?;
+        self.adapters
+            .wp_registration_get(&detail.system_user, &detail.root_dir)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("registration read: {e}")))
+    }
+
+    /// Open or close public sign-ups.
+    ///
+    /// The one control on this card that actually closes the door. A rate
+    /// limit narrows it and a ban counts the ones already through; this stops
+    /// WordPress creating the account at all.
+    pub async fn wp_registration_set(
+        &self,
+        sel: HostingSelector,
+        open: bool,
+    ) -> Result<hyperion_types::WpRegistrationView, RpcError> {
+        let detail = self.get(sel).await?;
+        self.adapters
+            .wp_registration_set(&detail.system_user, &detail.root_dir, open)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("registration write: {e}")))?;
+        self.append_audit(
+            "hosting.wp_registration",
+            Some(detail.id.as_str()),
+            &serde_json::json!({ "open": open }).to_string(),
+            "ok",
+        )
+        .await;
+        // Read it BACK rather than reporting what was asked for. wp-cli can
+        // exit 0 on a site whose database is unreachable, and a card that
+        // says "closed" over a site still taking sign-ups is worse than one
+        // that says nothing.
+        self.wp_registration_get(HostingSelector::Id(detail.id))
+            .await
+    }
+
+    /// Sign-ups per scan window past which a site is not being used, it is
+    /// being farmed.
+    ///
+    /// Any honest WordPress site takes single digits an hour. This sits where
+    /// a real site will not reach it and a bot passes it in under a minute.
+    const SIGNUP_FLOOD_THRESHOLD: u32 = 30;
+
+    /// `hosting_kv` stamp of the last sign-up flood we spoke up about, so a
+    /// flood that runs for a day is one message and not one per tick.
+    const SIGNUP_FLOOD_KV_KEY: &'static str = "signup_flood_warned_at";
+
+    /// Notice a registration flood and tell somebody.
+    ///
+    /// No ban, deliberately. Every request here returned 200 — the accounts
+    /// exist — so blocking the addresses afterwards neither undoes them nor
+    /// stops the next batch from somewhere else. What helps is the operator
+    /// knowing within the hour, and knowing that the fix is WordPress's own
+    /// registration switch rather than a firewall rule.
+    async fn warn_on_signup_flood(
+        &self,
+        s: &hyperion_types::HostingSummary,
+        access: &std::path::Path,
+        since: i64,
+    ) {
+        let Ok(body) = tokio::fs::read_to_string(access).await else {
+            // Unreadable is not calm. It produces no message rather than a
+            // reassuring one, and the brute-force coverage stamp above
+            // already records what was and was not read.
+            return;
+        };
+        let (count, ips) = count_registrations(&body, since);
+        if count < Self::SIGNUP_FLOOD_THRESHOLD {
+            return;
+        }
+        // One message per day per site. A flood lasting hours must not turn
+        // into hourly alerts — an operator who mutes the channel to stop the
+        // noise is worse off than one who was never told.
+        let now = now_secs();
+        let last =
+            hyperion_state::hosting_kv::get(&self.pool, s.id.as_str(), Self::SIGNUP_FLOOD_KV_KEY)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|v| v.parse::<i64>().ok())
+                .unwrap_or(0);
+        if now - last < 86_400 {
+            return;
+        }
+        let _ = hyperion_state::hosting_kv::set(
+            &self.pool,
+            s.id.as_str(),
+            Self::SIGNUP_FLOOD_KV_KEY,
+            &now.to_string(),
+            now,
+        )
+        .await;
+
+        // The two numbers together are the diagnosis, and the advice differs.
+        // Many addresses means a botnet, and the operator's first instinct —
+        // ban the address — is the wrong move and costs the hour that matters.
+        let shape = if ips > 10 {
+            format!(
+                "from {ips} different addresses. Banning them one at a time will not help:                  each one signs up once and every request succeeds, so there is no repeated                  failure for the ban sweep to count"
+            )
+        } else {
+            format!("from {ips} address(es)")
+        };
+        tracing::warn!(
+            domain = %s.domain, registrations = count, addresses = ips,
+            "sign-up flood: WordPress registrations far above normal"
+        );
+        self.notify_slack(
+            None,
+            &format!(
+                "{}: {} WordPress sign-ups in the last scan window, {}.
+
+                 If the site does not need public registration, switch it off on its                  Security card — that closes the door. If it does, the same card can                  rate-limit sign-ups, and the registration form needs a CAPTCHA.",
+                s.domain, count, shape
+            ),
+        )
+        .await;
+    }
+
     /// The safety snapshot a restore takes, WITHOUT the retention prune.
     ///
     /// `snapshot_before_change` prunes immediately after taking one, which is
@@ -10214,6 +10354,17 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 continue;
             }
             self.note_bruteforce_coverage(s.id.as_str(), since).await;
+            // A sign-up flood, counted on the SAME read as the brute force.
+            //
+            // The scan below counts repeated requests from one address and
+            // bans it. A registration flood is the opposite shape — many
+            // addresses, one or two requests each, every one of them
+            // SUCCEEDING — so there is no repetition to count and no failure
+            // to count it on, and no ban that would help. It gets noticed
+            // here instead, and said out loud, because otherwise the first an
+            // operator hears of it is a mail queue full of "you have a new
+            // account".
+            self.warn_on_signup_flood(s, &access, since).await;
             for ip in scan_access_log_for_bruteforce(&access, since, cfg.http_threshold).await {
                 intents.push(BanIntent {
                     ip,
@@ -29094,6 +29245,48 @@ async fn scan_access_log_for_bruteforce(
         .filter(|(_, c)| *c >= threshold)
         .map(|(ip, _)| ip)
         .collect()
+}
+
+/// Successful WordPress sign-ups in an access log, counted across ALL callers.
+///
+/// The one thing the brute-force sweep beside this cannot do. That one counts
+/// repeated `POST /wp-login.php` from a SINGLE address and bans it past a
+/// threshold, which is right for a brute force and blind to what actually
+/// fills a mail queue: a botnet registering once or twice per address, every
+/// request returning 200. There is no repetition to count and no failure to
+/// count it on.
+///
+/// So this counts the ACT, not the actor. A site taking more sign-ups a minute
+/// than any honest site takes is the signal, whoever is making them.
+///
+/// Returns `(registrations, distinct_ips)`. Both matter: fifty sign-ups from
+/// two addresses is a broken script, fifty from forty-eight addresses is a
+/// botnet, and the operator's next move differs.
+fn count_registrations(log: &str, since: i64) -> (u32, usize) {
+    let mut total = 0u32;
+    let mut ips: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for line in log.lines() {
+        let Some((ip, ts, _)) = parse_access_line(line) else {
+            continue;
+        };
+        if ts < since {
+            continue;
+        }
+        let Some(q1) = line.find('"') else { continue };
+        let Some(q2_rel) = line[q1 + 1..].find('"') else {
+            continue;
+        };
+        let req = &line[q1 + 1..q1 + 1 + q2_rel];
+        // Both shapes WordPress offers: the query-string form on wp-login.php
+        // and the multisite sign-up page.
+        let is_signup = req.starts_with("POST ")
+            && (req.contains("action=register") || req.contains("/wp-signup.php"));
+        if is_signup {
+            total += 1;
+            ips.insert(ip.to_string());
+        }
+    }
+    (total, ips.len())
 }
 
 /// One nginx combined-format line → (client ip, unix ts, bytes sent).

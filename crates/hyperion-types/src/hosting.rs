@@ -208,6 +208,22 @@ pub struct VhostOptions {
     /// user-agents. Lighter than ModSecurity to avoid false positives.
     #[serde(default)]
     pub waf_enabled: bool,
+
+    /// Rate-limit WordPress sign-ups for this site.
+    ///
+    /// Keyed on the SITE, not on the caller, and that is the point: a
+    /// registration flood comes from a botnet at one or two requests per
+    /// address, so no per-IP limit — and no fail2ban rule, which counts
+    /// repeated failures from one address — can see it. What it sees is a
+    /// site suddenly taking hundreds of successful sign-ups.
+    ///
+    /// Off by default. It is a blunt instrument: during a flood it turns away
+    /// genuine sign-ups too, which is the right trade while a flood is
+    /// happening and the wrong one the rest of the time. The setting that
+    /// actually closes the door is WordPress's own `users_can_register`, on
+    /// the same card.
+    #[serde(default)]
+    pub signup_limit_enabled: bool,
     /// Comma/newline-separated IPs or CIDRs allowed to reach
     /// /wp-admin and /wp-login.php (migration 036). Empty = open.
     /// admin-ajax.php is never gated so front-end AJAX keeps working.

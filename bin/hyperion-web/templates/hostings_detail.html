@@ -1316,6 +1316,20 @@
    the health card above already pays a load-triggered probe, and a second
    one would double the work on every detail render whether or not the
    operator ever opens this tab. #}
+{# Public sign-ups. Next to the permission panel rather than buried in the
+   nginx settings form, because it is the one control on this page that
+   closes the door registration spam comes through — and because the thing
+   an operator reaches for first (a ban, a firewall rule) cannot close it. #}
+<div id="signup-panel"
+     hx-get="/hostings/{{ detail.id.as_str() }}/signup-panel"
+     hx-trigger="intersect once"
+     hx-swap="innerHTML">
+  <div class="card" style="margin-bottom:0.9rem">
+    <span class="spinner-inline" style="margin-right:0.4rem"></span>
+    <span class="text-soft small">Reading registration setting…</span>
+  </div>
+</div>
+
 <div id="perm-panel"
      hx-get="/hostings/{{ detail.id.as_str() }}/perm-panel"
      hx-trigger="intersect once"
@@ -2313,6 +2327,26 @@
       <code>xmlrpc.php</code>, dumps and backups; block PHP execution under
       <code>wp-content/uploads</code> and <code>cache</code>; and <code>403</code>
       obvious probe query-strings and scanner user-agents.
+    </p>
+    <h3 class="section-title">Security · WordPress sign-ups</h3>
+    <label class="field-checkbox">
+      <input type="checkbox" name="signup_limit_enabled" value="on"
+             {% if detail.vhost_options.signup_limit_enabled %}checked{% endif %}>
+      Rate-limit public sign-ups on this site
+    </label>
+    <p class="muted small">
+      A limit for the <strong>site</strong>, not for the caller — which is the
+      only kind that helps here. Registration spam is a botnet signing up once
+      or twice per address, and <em>every request succeeds</em>: there is no
+      repeated failure for the brute-force ban sweep to count, so it never
+      fires. This caps sign-ups at a handful a minute and returns
+      <code>429</code> past that.
+      <br>
+      It is blunt on purpose: during a flood it turns away genuine sign-ups
+      too. That is the right trade while a flood is happening and the wrong one
+      the rest of the time — so if the site does not need public registration
+      at all, switch it off below instead. That closes the door rather than
+      narrowing it.
     </p>
     <h3 class="section-title">Bots</h3>
     <p class="muted small" style="margin:-0.3rem 0 0.6rem">

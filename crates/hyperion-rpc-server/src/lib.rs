@@ -1462,6 +1462,16 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(v) => Response::SnapshotRestore(v),
             Err(e) => Response::Error(e),
         },
+        Request::WpRegistrationGet { sel } => match api.wp_registration_get(sel).await {
+            Ok(v) => Response::WpRegistration(v),
+            Err(e) => Response::Error(e),
+        },
+        Request::WpRegistrationSet { sel, open } => {
+            match api.wp_registration_set(sel, open).await {
+                Ok(v) => Response::WpRegistration(v),
+                Err(e) => Response::Error(e),
+            }
+        }
         Request::WpMailSelfCheck { sel } => match api.wp_mail_self_check(sel).await {
             Ok(r) => Response::WpMailSelfCheck(r),
             Err(e) => Response::Error(e),
@@ -3139,6 +3149,19 @@ mod tests {
             _: String,
         ) -> Result<(u64, u64), RpcError> {
             Ok((0, 0))
+        }
+        async fn wp_registration_get(
+            &self,
+            _: HostingSelector,
+        ) -> Result<hyperion_types::WpRegistrationView, RpcError> {
+            Ok(Default::default())
+        }
+        async fn wp_registration_set(
+            &self,
+            _: HostingSelector,
+            _: bool,
+        ) -> Result<hyperion_types::WpRegistrationView, RpcError> {
+            Ok(Default::default())
         }
         async fn snapshot_restore(
             &self,

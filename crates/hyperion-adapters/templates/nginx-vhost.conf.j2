@@ -155,6 +155,20 @@
         autoindex off;
     }
 
+    {%- if signup_limit_enabled %}
+    # ─── Sign-up flood limit (operator-enabled, Security card) ───
+    # Keyed on $server_name via the map in conf.d/hyperion-ratelimit.conf,
+    # so despite sitting at server level it counts ONLY registrations —
+    # every other request maps to an empty key, which nginx does not count.
+    #
+    # Deliberately a limit for the SITE, not for the caller: the thing this
+    # exists to stop is a botnet registering from hundreds of addresses, and
+    # a per-IP limit cannot see that. Real sign-ups are rare enough that a
+    # few a minute is generous; a flood gets 429 and goes in the access log,
+    # where the panel's sweep can find it.
+    limit_req zone=hyperion_signup burst=5 nodelay;
+    {%- endif %}
+
     {%- if waf_enabled %}
     # WAF-lite: deny direct access to sensitive files + dumps. These
     # are regex locations, so they're declared before `location ~ \.php$`

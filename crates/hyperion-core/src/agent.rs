@@ -1888,6 +1888,19 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
     ) -> Result<hyperion_types::SnapshotDiff, RpcError> {
         self.svc.snapshot_diff(sel, from, to).await
     }
+    async fn wp_registration_get(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<hyperion_types::WpRegistrationView, RpcError> {
+        self.svc.wp_registration_get(sel).await
+    }
+    async fn wp_registration_set(
+        &self,
+        sel: HostingSelector,
+        open: bool,
+    ) -> Result<hyperion_types::WpRegistrationView, RpcError> {
+        self.svc.wp_registration_set(sel, open).await
+    }
     async fn snapshot_restore(
         &self,
         sel: HostingSelector,

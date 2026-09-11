@@ -1220,6 +1220,27 @@ impl AdapterPort for RealAdapter {
         hyperion_adapters::wpcli::install_item(system_user, htdocs, kind, source, activate).await
     }
 
+    async fn wp_registration_get(
+        &self,
+        system_user: &str,
+        htdocs: &str,
+    ) -> Result<hyperion_types::WpRegistrationView, AdapterError> {
+        let r = hyperion_adapters::wpcli::registration_get(system_user, htdocs).await?;
+        Ok(hyperion_types::WpRegistrationView {
+            open: r.open,
+            default_role: r.default_role,
+        })
+    }
+
+    async fn wp_registration_set(
+        &self,
+        system_user: &str,
+        htdocs: &str,
+        open: bool,
+    ) -> Result<(), AdapterError> {
+        hyperion_adapters::wpcli::registration_set(system_user, htdocs, open).await
+    }
+
     async fn wp_theme_list(
         &self,
         system_user: &str,

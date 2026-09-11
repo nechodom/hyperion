@@ -234,6 +234,7 @@ struct VhostTpl<'a> {
     fastcgi_cache_enabled: bool,
     fastcgi_cache_ttl: i64,
     waf_enabled: bool,
+    signup_limit_enabled: bool,
     /// Validated IP/CIDR entries allowed to reach /wp-admin. Empty =
     /// allowlist disabled (every entry has already been checked to
     /// parse as an IpAddr or addr/prefix, so they're safe to inline).
@@ -777,6 +778,7 @@ pub fn render(input: &VhostInput<'_>) -> Result<String, AdapterError> {
         },
         fastcgi_cache_ttl: input.options.fastcgi_cache_ttl,
         waf_enabled: input.options.waf_enabled,
+        signup_limit_enabled: input.options.signup_limit_enabled,
         wp_admin_allow: parse_admin_allowlist(&input.options.wp_admin_allowlist),
         // The preview block needs ALL THREE of name/cert/key — a
         // half-supplied set (name but no cert) would render an nginx
@@ -820,6 +822,16 @@ impl Paths {
 /// level — can't be in a server{} block). When the operator turns
 /// the cache off, that file is removed.
 pub async fn write_vhost(paths: &Paths, input: &VhostInput<'_>) -> Result<(), AdapterError> {
+    // The zones the vhost may be about to reference. `limit_req_zone` is an
+    // http-level directive, so it cannot live in the server block — and a
+    // vhost naming a zone that does not exist is not a warning, it is
+    // "nginx: [emerg] unknown limit_req_zone" and a REFUSED RELOAD that takes
+    // every site on the node with it. Written before the vhost, and
+    // unconditionally, so the file is already there whichever way the toggle
+    // moves.
+    if input.options.signup_limit_enabled {
+        ensure_ratelimit_conf(DEFAULT_LOGIN_RPM, DEFAULT_SIGNUP_RPM).await?;
+    }
     let body = render(input)?;
     let vhost = paths.vhost_file(input.domain);
     let backup = backup_existing(&vhost).await?;
@@ -905,6 +917,99 @@ fn render_cache_zone(hosting_id: &str) -> String {
          \x20\x20\x20\x20use_temp_path=off;\n",
         id = hosting_id
     )
+}
+
+/// `/etc/nginx/conf.d/hyperion-ratelimit.conf` — node-wide, one file.
+///
+/// `limit_req_zone` and `map` are http-level directives, so they cannot live
+/// in a server block, and the zones are shared memory: one per node rather
+/// than one per site.
+pub const RATELIMIT_CONF: &str = "/etc/nginx/conf.d/hyperion-ratelimit.conf";
+
+/// Logins per minute, per caller. Generous: a human mistyping a password a
+/// few times must not be locked out, and the ban sweep already handles the
+/// address that keeps trying.
+pub const DEFAULT_LOGIN_RPM: u32 = 20;
+
+/// Sign-ups per minute, for the SITE. No honest WordPress site takes more;
+/// a botnet passes it in seconds.
+pub const DEFAULT_SIGNUP_RPM: u32 = 10;
+
+/// The rate-limit zones, and the honest reasoning for each.
+///
+/// # Why there are two, keyed differently
+///
+/// The per-IP zone is the obvious one and it is the weaker one. It stops a
+/// single host hammering `wp-login.php`, which is the classic brute force —
+/// but the thing that fills a mail queue with sign-up confirmations is a
+/// BOTNET, one or two requests per address, and no per-IP limit can see that.
+///
+/// The second zone is keyed on `$server_name`, so it is a limit for the SITE
+/// rather than for the caller. That is the one that stops a distributed
+/// sign-up flood, and it is deliberately blunt: during a flood, turning the
+/// tap down is better than letting every bot through, and no honest site
+/// takes more than a handful of genuine registrations a minute.
+///
+/// # Why the `map`
+///
+/// A WordPress registration is `POST /wp-login.php?action=register` — the same
+/// PATH as a login, differing only in the query string, which `location`
+/// cannot match on. The map sets an EMPTY key for everything that is not a
+/// sign-up, and nginx does not count a request whose key is empty. So the
+/// zone can sit at server level and still only ever see registrations.
+fn render_ratelimit_conf(per_ip_rpm: u32, per_site_rpm: u32) -> String {
+    // A raw string, not a `format!` with line continuations: this is an nginx
+    // config, and the escaping needed to build it out of a Rust string literal
+    // is exactly how a `\\.` turns into a `\.` nobody notices until a regex
+    // silently stops matching.
+    const TEMPLATE: &str = r#"# Auto-managed by Hyperion. Do not edit — toggle per site on the
+# hosting's Security card.
+#
+# An empty key is NOT counted by nginx, which is how the sign-up zone below
+# sees only sign-ups while living at server level: a WordPress registration
+# differs from a login by its query string, and `location` cannot match on
+# that.
+map $request_uri $hyperion_signup_key {
+    default             "";
+    ~*action=register   $server_name;
+    ~*/wp-signup\.php   $server_name;
+}
+
+# Per CALLER. Stops one host hammering the login form.
+limit_req_zone $binary_remote_addr zone=hyperion_login:10m rate=__PER_IP__r/m;
+
+# Per SITE. The one that stops a distributed sign-up flood, which no per-IP
+# limit can see.
+limit_req_zone $hyperion_signup_key zone=hyperion_signup:10m rate=__PER_SITE__r/m;
+
+# 429, not 503: a rate limit is the client being told to slow down, and a 503
+# reads as the site being broken — to monitoring too.
+limit_req_status 429;
+"#;
+    TEMPLATE
+        .replace("__PER_IP__", &per_ip_rpm.to_string())
+        .replace("__PER_SITE__", &per_site_rpm.to_string())
+}
+
+/// Write (or refresh) the node-wide rate-limit zones.
+///
+/// Idempotent on CONTENT: rewriting an identical file would still bump its
+/// mtime and invite a needless reload, and a reload is the one moment an
+/// nginx config change can take a site down.
+pub async fn ensure_ratelimit_conf(
+    per_ip_rpm: u32,
+    per_site_rpm: u32,
+) -> Result<bool, AdapterError> {
+    let want = render_ratelimit_conf(per_ip_rpm.max(1), per_site_rpm.max(1));
+    if let Ok(existing) = tokio::fs::read_to_string(RATELIMIT_CONF).await {
+        if existing == want {
+            return Ok(false);
+        }
+    }
+    tokio::fs::write(RATELIMIT_CONF, want.as_bytes())
+        .await
+        .map_err(|e| AdapterError::Other(format!("write {RATELIMIT_CONF}: {e}")))?;
+    Ok(true)
 }
 
 /// `/etc/nginx/.htpasswd-<id>` — written when basic auth is on.
@@ -1271,6 +1376,33 @@ async fn ensure_symlink(target: &Path, link: &Path) -> Result<(), AdapterError> 
 
 #[cfg(test)]
 mod tests {
+
+    /// The regex reaches nginx with ONE backslash. A Rust string literal that
+    /// loses it turns `\.` into `.`, which still matches — just also matching
+    /// `wp-signupXphp` and anything else — and nothing fails loudly.
+    #[test]
+    fn the_signup_map_regex_survives_the_rust_literal() {
+        let c = super::render_ratelimit_conf(20, 10);
+        assert!(c.contains(r"~*/wp-signup\.php"), "{c}");
+        assert!(!c.contains(r"wp-signup\\.php"), "double-escaped: {c}");
+    }
+
+    /// An empty key is what makes a server-level zone count only sign-ups.
+    /// Lose the `default ""` line and the zone starts rate-limiting the whole
+    /// site at the sign-up rate.
+    #[test]
+    fn everything_that_is_not_a_signup_gets_an_empty_key() {
+        let c = super::render_ratelimit_conf(20, 10);
+        assert!(c.contains(r#"default             "";"#), "{c}");
+    }
+
+    #[test]
+    fn the_rates_are_substituted_and_never_zero() {
+        let c = super::render_ratelimit_conf(20, 10);
+        assert!(c.contains("rate=20r/m"), "{c}");
+        assert!(c.contains("rate=10r/m"), "{c}");
+        assert!(!c.contains("__PER"), "a placeholder survived: {c}");
+    }
     use super::*;
 
     /// Regression: the standalone `http2 on;` directive only exists
@@ -2219,6 +2351,7 @@ mod tests {
         let aliases: Vec<String> = vec![];
         let opts = hyperion_types::VhostOptions {
             waf_enabled: true,
+            signup_limit_enabled: false,
             wp_admin_allowlist: "203.0.113.5, 198.51.100.0/24".into(),
             ..Default::default()
         };

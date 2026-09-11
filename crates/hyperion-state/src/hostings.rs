@@ -328,6 +328,7 @@ struct RawHostingVhost {
     redirect_code: i64,
     redirect_preserve_path: i64,
     waf_enabled: i64,
+    signup_limit_enabled: i64,
     wp_admin_allowlist: String,
     blocked_bots: String,
     blocked_countries: String,
@@ -345,7 +346,7 @@ const QUERY_DOMAIN: &str =
 const QUERY_VHOST_BY_ID: &str =
     "SELECT basic_auth_enabled, basic_auth_user, basic_auth_hash, force_https, hsts_max_age, \
             custom_nginx_snippet, maintenance_mode, fastcgi_cache_enabled, fastcgi_cache_ttl, \
-            redirect_url, redirect_code, redirect_preserve_path, waf_enabled, wp_admin_allowlist, \
+            redirect_url, redirect_code, redirect_preserve_path, waf_enabled, signup_limit_enabled, wp_admin_allowlist, \
              blocked_bots,
             blocked_countries, blocked_countries, \
             canonical_host \
@@ -413,6 +414,7 @@ async fn fetch_one<'a>(
             redirect_code,
             redirect_preserve_path,
             waf_enabled,
+            signup_limit_enabled,
             wp_admin_allowlist,
             blocked_bots,
             blocked_countries,
@@ -431,6 +433,7 @@ async fn fetch_one<'a>(
             redirect_code,
             redirect_preserve_path: redirect_preserve_path != 0,
             waf_enabled: waf_enabled != 0,
+            signup_limit_enabled: signup_limit_enabled != 0,
             wp_admin_allowlist,
             blocked_bots,
             blocked_countries,
@@ -518,7 +521,7 @@ pub async fn set_vhost_options(
                 force_https=?, hsts_max_age=?, custom_nginx_snippet=?, \
                 maintenance_mode=?, fastcgi_cache_enabled=?, fastcgi_cache_ttl=?, \
                 redirect_url=?, redirect_code=?, redirect_preserve_path=?, \
-                waf_enabled=?, wp_admin_allowlist=?, blocked_bots=?, blocked_countries=?, canonical_host=?, updated_at=? \
+                waf_enabled=?, signup_limit_enabled=?, wp_admin_allowlist=?, blocked_bots=?, blocked_countries=?, canonical_host=?, updated_at=? \
              WHERE id = ?",
         )
         .bind(opts.basic_auth_enabled as i64)
@@ -534,6 +537,11 @@ pub async fn set_vhost_options(
         .bind(opts.redirect_code)
         .bind(opts.redirect_preserve_path as i64)
         .bind(opts.waf_enabled as i64)
+        // Immediately after waf_enabled in BOTH statements, matching the SQL
+        // above. The trap this codebase has hit: a bind in the wrong position
+        // shifts every later placeholder, so the statement still runs and
+        // silently writes the wrong columns.
+        .bind(opts.signup_limit_enabled as i64)
         .bind(&opts.wp_admin_allowlist)
         .bind(&opts.blocked_bots)
         .bind(&opts.blocked_countries)
@@ -552,7 +560,7 @@ pub async fn set_vhost_options(
                 force_https=?, hsts_max_age=?, custom_nginx_snippet=?, \
                 maintenance_mode=?, fastcgi_cache_enabled=?, fastcgi_cache_ttl=?, \
                 redirect_url=?, redirect_code=?, redirect_preserve_path=?, \
-                waf_enabled=?, wp_admin_allowlist=?, blocked_bots=?, blocked_countries=?, canonical_host=?, updated_at=? \
+                waf_enabled=?, signup_limit_enabled=?, wp_admin_allowlist=?, blocked_bots=?, blocked_countries=?, canonical_host=?, updated_at=? \
              WHERE id = ?",
         )
         .bind(opts.basic_auth_enabled as i64)
@@ -567,6 +575,11 @@ pub async fn set_vhost_options(
         .bind(opts.redirect_code)
         .bind(opts.redirect_preserve_path as i64)
         .bind(opts.waf_enabled as i64)
+        // Immediately after waf_enabled in BOTH statements, matching the SQL
+        // above. The trap this codebase has hit: a bind in the wrong position
+        // shifts every later placeholder, so the statement still runs and
+        // silently writes the wrong columns.
+        .bind(opts.signup_limit_enabled as i64)
         .bind(&opts.wp_admin_allowlist)
         .bind(&opts.blocked_bots)
         .bind(&opts.blocked_countries)

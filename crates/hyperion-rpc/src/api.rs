@@ -777,6 +777,17 @@ pub trait AgentApi: Send + Sync + 'static {
         from: String,
         to: String,
     ) -> Result<hyperion_types::SnapshotDiff, RpcError>;
+    /// Does this WordPress site take public sign-ups, and as what role?
+    async fn wp_registration_get(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<hyperion_types::WpRegistrationView, RpcError>;
+    /// Open or close public sign-ups. Answers with the state read BACK.
+    async fn wp_registration_set(
+        &self,
+        sel: HostingSelector,
+        open: bool,
+    ) -> Result<hyperion_types::WpRegistrationView, RpcError>;
     /// Put a snapshot back. Destructive: the current document root is moved
     /// aside, not merged over. See `HostingService::snapshot_restore`.
     async fn snapshot_restore(
