@@ -543,6 +543,10 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/audit", get(handlers::audit::get_audit))
         .route("/settings/backups", get(handlers::backups::get_backups))
         .route(
+            "/settings/backups/backfill",
+            post(handlers::settings::post_offsite_backfill),
+        )
+        .route(
             "/settings/backups/upsert",
             post(handlers::backups::post_upsert),
         )
@@ -736,6 +740,14 @@ pub fn build_router(state: SharedState) -> Router {
             get(handlers::hostings::get_signup_panel),
         )
         .route("/hostings/signups", post(handlers::hostings::post_signups))
+        .route(
+            "/hostings/:selector/offsite-panel",
+            get(handlers::hostings::get_offsite_panel),
+        )
+        .route(
+            "/hostings/offsite-restore",
+            post(handlers::hostings::post_offsite_restore),
+        )
         .route(
             "/hostings/snapshots/restore",
             post(handlers::hostings::post_snapshot_restore),

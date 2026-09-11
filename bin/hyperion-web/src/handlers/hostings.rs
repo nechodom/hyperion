@@ -12211,6 +12211,186 @@ pub async fn post_wpmail_autofix(
 // ============================================================
 
 #[derive(Template)]
+#[template(path = "_hosting_offsite_card.html")]
+struct OffsiteCardTpl {
+    selector: String,
+    detail_domain: String,
+    files: Vec<hyperion_types::OffsiteFile>,
+    /// Is there an off-site target at all? Distinct from "the listing was
+    /// empty": no target is a thing to go and fix, an empty listing on a
+    /// configured target is a thing to worry about.
+    configured: bool,
+    can_restore: bool,
+    csrf_token: String,
+    error: Option<String>,
+}
+
+/// GET /hostings/:selector/offsite-panel
+pub async fn get_offsite_panel(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Path(selector): Path<String>,
+) -> Result<Response, AppError> {
+    render_offsite(&state, &ctx, selector, None).await
+}
+
+async fn render_offsite(
+    state: &SharedState,
+    ctx: &AuthCtx,
+    selector: String,
+    error: Option<String>,
+) -> Result<Response, AppError> {
+    let can_restore = require_manage_for_selector(state, ctx, &selector, Capability::BackupRestore)
+        .await
+        .is_ok();
+    let card = |files: Vec<hyperion_types::OffsiteFile>,
+                configured: bool,
+                detail_domain: String,
+                error: Option<String>| {
+        Html(
+            OffsiteCardTpl {
+                selector: selector.clone(),
+                detail_domain,
+                files,
+                configured,
+                can_restore,
+                csrf_token: csrf_token_for(state, ctx, "/hostings/offsite-restore"),
+                error,
+            }
+            .render()
+            .unwrap_or_default(),
+        )
+        .into_response()
+    };
+    let sel = match parse_selector(&selector) {
+        Ok(s) => s,
+        Err(e) => return Ok(card(Vec::new(), false, String::new(), Some(e.to_string()))),
+    };
+    let (detail, owner) = match find_hosting_anywhere(state, sel.clone()).await {
+        Ok(v) => v,
+        Err(e) => return Ok(card(Vec::new(), false, String::new(), Some(e.to_string()))),
+    };
+    if require_hosting_access(
+        state,
+        ctx,
+        detail.id.as_str(),
+        false,
+        Capability::HostingView,
+    )
+    .await
+    .is_err()
+    {
+        return Ok(card(
+            Vec::new(),
+            false,
+            detail.domain,
+            Some("You do not have access to this hosting.".into()),
+        ));
+    }
+    match crate::dispatcher::dispatch_to_node(
+        state,
+        owner.as_deref(),
+        Request::BackupOffsiteList { sel },
+    )
+    .await
+    {
+        Ok(RpcResponse::BackupOffsiteList(files)) => Ok(card(files, true, detail.domain, error)),
+        // A validation error here is "no target configured", which is a
+        // distinct state the card renders as advice rather than as a fault.
+        Ok(RpcResponse::Error(e)) => {
+            let msg = e.to_string();
+            let no_target = msg.contains("no off-site backup target");
+            Ok(card(
+                Vec::new(),
+                !no_target,
+                detail.domain,
+                if no_target { error } else { Some(msg) },
+            ))
+        }
+        Ok(_) => Ok(card(Vec::new(), true, detail.domain, error)),
+        Err(e) => Ok(card(Vec::new(), true, detail.domain, Some(e.to_string()))),
+    }
+}
+
+#[derive(serde::Deserialize)]
+pub struct OffsiteRestoreForm {
+    pub selector: String,
+    pub filename: String,
+}
+
+/// POST /hostings/offsite-restore — fetch a backup back and restore it.
+pub async fn post_offsite_restore(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<OffsiteRestoreForm>,
+) -> Result<Response, AppError> {
+    let sel =
+        match require_manage_for_selector(&state, &ctx, &form.selector, Capability::BackupRestore)
+            .await
+        {
+            Ok(s) => s,
+            Err(r) => return Ok(r),
+        };
+    let node: Option<String> = find_hosting_anywhere(&state, sel.clone())
+        .await
+        .ok()
+        .and_then(|(_d, n)| n);
+    let filename = form.filename.trim().to_string();
+    let actor_uid = ctx.session.as_ref().map(|s| s.user_id).unwrap_or(0);
+    let actor_label = ctx.username.clone();
+    let job_state = state.clone();
+    // A download over somebody else's FTP plus a full restore. Nowhere near a
+    // request's lifetime, and a dropped browser must not abort it half-way.
+    let job_id = crate::handlers::jobs::spawn_job(
+        state.clone(),
+        "offsite-restore",
+        Some(&form.selector),
+        "{}",
+        &actor_label,
+        actor_uid,
+        move |reporter| async move {
+            reporter
+                .step(
+                    "Fetching the archive from the off-site store…",
+                    10,
+                    &format!(
+                        "file: {filename}
+"
+                    ),
+                )
+                .await;
+            match crate::dispatcher::dispatch_to_node(
+                &job_state,
+                node.as_deref(),
+                Request::BackupOffsiteRestore {
+                    sel,
+                    filename,
+                    mode: hyperion_types::BackupRestoreMode::FilesAndDb,
+                },
+            )
+            .await
+            {
+                Ok(RpcResponse::BackupOffsiteRestore(msg)) => {
+                    reporter
+                        .step("Restore complete.", 100, &format!("✓ {msg}"))
+                        .await;
+                    reporter.finish(true, None).await;
+                }
+                Ok(RpcResponse::Error(e)) => reporter.finish(false, Some(e.to_string())).await,
+                Ok(_) => {
+                    reporter
+                        .finish(false, Some("unexpected agent response".into()))
+                        .await
+                }
+                Err(e) => reporter.finish(false, Some(e.to_string())).await,
+            }
+        },
+    )
+    .await?;
+    Ok(Redirect::to(&format!("/jobs/{}", job_id)).into_response())
+}
+
+#[derive(Template)]
 #[template(path = "_hosting_signup_card.html")]
 struct SignupCardTpl {
     selector: String,

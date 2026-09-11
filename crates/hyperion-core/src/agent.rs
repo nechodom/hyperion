@@ -1888,6 +1888,26 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
     ) -> Result<hyperion_types::SnapshotDiff, RpcError> {
         self.svc.snapshot_diff(sel, from, to).await
     }
+    async fn backup_offsite_list(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<Vec<hyperion_types::OffsiteFile>, RpcError> {
+        self.svc.backup_offsite_list(sel).await
+    }
+    async fn backup_offsite_backfill(
+        &self,
+        limit: i64,
+    ) -> Result<hyperion_types::OffsiteBackfillResult, RpcError> {
+        self.svc.backup_offsite_backfill(limit).await
+    }
+    async fn backup_offsite_restore(
+        &self,
+        sel: HostingSelector,
+        filename: String,
+        mode: hyperion_types::BackupRestoreMode,
+    ) -> Result<String, RpcError> {
+        self.svc.backup_offsite_restore(sel, filename, mode).await
+    }
     async fn wp_registration_get(
         &self,
         sel: HostingSelector,

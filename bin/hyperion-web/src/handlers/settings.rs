@@ -1580,8 +1580,8 @@ pub async fn post_config(
             match notification_fields {
                 Some((sect, f)) => match propagate_notifications(&state, &sect, f).await {
                     Ok(0) => format!(
-                        "/settings?flash=Section+%5B{}%5D+saved+%E2%80%94+hyperion-agent+restarting+%28~5s%29#{}",
-                        urlencode(&form.section),
+                        "/settings?flash={}+saved+%E2%80%94+hyperion-agent+restarting+%28~5s%29#{}",
+                        urlencode(section_label(&form.section)),
                         tab
                     ),
                     Ok(n) => format!(
@@ -1599,15 +1599,19 @@ pub async fn post_config(
                              Sites owned by those nodes keep sending the PREVIOUS letter \
                              until a save reaches them — the per-node list in the \
                              Customer letters card shows which is which.",
-                            if failed.len() == 1 { "one node" } else { "some nodes" },
+                            if failed.len() == 1 {
+                                "one node"
+                            } else {
+                                "some nodes"
+                            },
                             failed.join("; ")
                         )),
                         tab
                     ),
                 },
                 None => format!(
-                    "/settings?flash=Section+%5B{}%5D+saved+%E2%80%94+hyperion-agent+restarting+%28~5s%29#{}",
-                    urlencode(&form.section),
+                    "/settings?flash={}+saved+%E2%80%94+hyperion-agent+restarting+%28~5s%29#{}",
+                    urlencode(section_label(&form.section)),
                     tab
                 ),
             }
@@ -1727,6 +1731,129 @@ async fn propagate_notifications(
 /// Forms can override this entirely via a hidden `_return_tab` field
 /// — that's how the Retention tab (which writes `cluster.*` fields
 /// but lives on its own tab) keeps the operator in place after save.
+/// Operator-facing name for a config section.
+///
+/// The redirect used to say "Section [backup_remote] saved", which is the name
+/// of a TOML table — it tells somebody who already knows the file what
+/// happened, and tells everybody else nothing. The message is the only
+/// confirmation a save has, so it should name the thing that was saved.
+fn section_label(section: &str) -> &'static str {
+    match section {
+        "backup_remote" => "Off-site backup target",
+        "backup_retention" => "Backup retention",
+        "protection" => "What this panel keeps",
+        "cluster" => "Cluster settings",
+        "notifications" => "Notification wording",
+        "letters" => "Customer letter wording",
+        "fail2ban" => "Brute-force thresholds",
+        "update" => "Automatic updates",
+        "acme" => "TLS / ACME",
+        "slack" => "Slack",
+        _ => "Settings",
+    }
+}
+
+/// How many backups one click copies.
+///
+/// A ceiling rather than "all of them": this is real bandwidth over somebody
+/// else's FTP account, and an unbounded sweep on a large estate runs for hours
+/// with no way to stop it. The job log says when it stopped short, because a
+/// truncated sweep reporting "finished" leaves the rest uncopied silently.
+const BACKFILL_BATCH: i64 = 200;
+
+/// POST /settings/backups/backfill — send local backups that never left.
+pub async fn post_offsite_backfill(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+) -> Result<Response, AppError> {
+    // BackupRun is NOT enough. Every Customer role holds it, and this action
+    // is not scoped to a hosting: it walks every successful backup on the
+    // node, for every tenant, uploads them over the operator's own off-site
+    // account and writes state onto rows the caller has no grant on. One
+    // tenant could burn the operator's remote quota and stamp "failed" on
+    // everybody else's backups.
+    //
+    // `BackupTargets` is what the sibling page already uses for "may decide
+    // where backups go", and neither Operator nor Customer holds it.
+    // `scope_all` on top, because an estate-wide action needs estate-wide
+    // scope by definition.
+    if !ctx.can(Capability::BackupTargets) || !ctx.scope_all() {
+        return Ok(Redirect::to(
+            "/settings?flash_error=Copying+backups+off-site+needs+the+backup-targets+capability#backups",
+        )
+        .into_response());
+    }
+    // Real transfers, sized by the estate — a job, never a request.
+    let actor_uid = ctx.session.as_ref().map(|s| s.user_id).unwrap_or(0);
+    let actor_label = ctx.username.clone();
+    let job_state = state.clone();
+    let job_id = crate::handlers::jobs::spawn_job(
+        state.clone(),
+        "offsite-backfill",
+        None,
+        "{}",
+        &actor_label,
+        actor_uid,
+        move |reporter| async move {
+            reporter
+                .step("Looking for backups with no off-site copy…", 5, "")
+                .await;
+            match hyperion_rpc_client::call(
+                &job_state.agent_socket,
+                Request::BackupOffsiteBackfill {
+                    limit: BACKFILL_BATCH,
+                },
+            )
+            .await
+            {
+                Ok(RpcResponse::BackupOffsiteBackfill(r)) => {
+                    let mut log = format!(
+                        "considered: {}\npushed:     {}\nfailed:     {}\n",
+                        r.considered, r.pushed, r.failed
+                    );
+                    // Separated from `failed` because no retry fixes it: the
+                    // archive was pruned off local disk before anything copied
+                    // it anywhere. Those backups are simply gone, and saying
+                    // so is the point.
+                    if r.missing_locally > 0 {
+                        log.push_str(&format!(
+                            "GONE:       {} backup(s) had no local archive left to send — \
+                             they were pruned before ever being copied off-site\n",
+                            r.missing_locally
+                        ));
+                    }
+                    // This ran against the LOCAL agent, so it covered the
+                    // backups on this node only. On a multi-node install the
+                    // workers' rows live on the workers, and a summary that
+                    // did not say so reads as "the estate is off-site now"
+                    // when most of it is not.
+                    log.push_str(
+                        "\nThis covered the backups stored on THIS node. Sites owned by other \
+                         nodes keep their backup rows there.\n",
+                    );
+                    if r.considered >= BACKFILL_BATCH {
+                        log.push_str(
+                            "There are more waiting than one run copies — run it again to \
+                             continue.\n",
+                        );
+                    }
+                    reporter.step("Finished.", 100, &log).await;
+                    reporter.finish(r.failed == 0, None).await;
+                }
+                Ok(RpcResponse::Error(e)) => reporter.finish(false, Some(e.to_string())).await,
+                Ok(_) => {
+                    reporter
+                        .finish(false, Some("unexpected agent response".into()))
+                        .await
+                }
+                Err(e) => reporter.finish(false, Some(e.to_string())).await,
+            }
+        },
+    )
+    .await?;
+    Ok(Redirect::to(&format!("/jobs/{}", job_id)).into_response())
+}
+
 fn section_to_tab(section: &str) -> &'static str {
     match section {
         "email" => "mail",

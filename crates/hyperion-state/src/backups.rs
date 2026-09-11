@@ -16,7 +16,80 @@ pub struct BackupRun {
     pub db_dump_path: Option<String>,
     pub bytes_total: i64,
     pub error_message: Option<String>,
+    /// SHA-256 of the archive, hex.
+    ///
+    /// Migration 031 created this column and nothing ever wrote it, so until
+    /// now the entire integrity assurance for a backup was that the file was
+    /// not zero bytes. Empty means a run from before it was recorded — NOT a
+    /// run that failed its check, and the panel has to keep those apart.
+    pub sha256_hex: String,
+    /// Where the off-site copy went, as a human-readable location — an
+    /// `ftp://host/dir/file` or an `s3://bucket/key`. Empty = no off-site copy
+    /// is known to exist.
+    pub remote_blob_key: String,
+    /// What we know about that copy: empty (never pushed), `pending`,
+    /// `ok`, `failed`, or `verified` — the last meaning the bytes were read
+    /// back and their size matched. `ok` and `verified` are deliberately
+    /// different words: one is "the upload returned success", the other is
+    /// "we looked".
+    pub remote_state: String,
+    /// Why the off-site copy is not there, when it is not. Empty on success.
+    pub remote_error: String,
 }
+
+/// The row as SQLite hands it back, mapped BY NAME.
+///
+/// Hand-written tuple destructuring is what this replaced, and it is the exact
+/// shape of the bug this codebase has hit before: adding a column meant
+/// editing a tuple type and a destructuring pattern in three places, and
+/// getting one of them out of order does not fail — it silently puts the
+/// archive path in the dump column.
+#[derive(sqlx::FromRow)]
+struct BackupRunRow {
+    id: i64,
+    hosting_id: String,
+    target: String,
+    started_at: i64,
+    finished_at: Option<i64>,
+    state: String,
+    #[sqlx(default)]
+    sha256_hex: Option<String>,
+    #[sqlx(default)]
+    remote_blob_key: Option<String>,
+    #[sqlx(default)]
+    remote_state: Option<String>,
+    #[sqlx(default)]
+    remote_error: Option<String>,
+    archive_path: Option<String>,
+    db_dump_path: Option<String>,
+    bytes_total: i64,
+    error_message: Option<String>,
+}
+
+impl From<BackupRunRow> for BackupRun {
+    fn from(r: BackupRunRow) -> Self {
+        BackupRun {
+            id: r.id,
+            hosting_id: HostingId(r.hosting_id),
+            target: r.target,
+            started_at: r.started_at,
+            finished_at: r.finished_at,
+            state: r.state,
+            sha256_hex: r.sha256_hex.unwrap_or_default(),
+            remote_blob_key: r.remote_blob_key.unwrap_or_default(),
+            remote_state: r.remote_state.unwrap_or_default(),
+            remote_error: r.remote_error.unwrap_or_default(),
+            archive_path: r.archive_path,
+            db_dump_path: r.db_dump_path,
+            bytes_total: r.bytes_total,
+            error_message: r.error_message,
+        }
+    }
+}
+
+const SELECT_COLS: &str = "id, hosting_id, target, started_at, finished_at, state, \
+     sha256_hex, remote_blob_key, remote_state, remote_error, archive_path, \
+     db_dump_path, bytes_total, error_message";
 
 pub async fn start(
     pool: &SqlitePool,
@@ -84,105 +157,88 @@ pub async fn list_for(
     hosting_id: &HostingId,
     limit: i64,
 ) -> Result<Vec<BackupRun>, StateError> {
-    let rows: Vec<(
-        i64,
-        String,
-        String,
-        i64,
-        Option<i64>,
-        String,
-        Option<String>,
-        Option<String>,
-        i64,
-        Option<String>,
-    )> = sqlx::query_as(
-        "SELECT id, hosting_id, target, started_at, finished_at, state,
-                archive_path, db_dump_path, bytes_total, error_message
-         FROM backup_runs WHERE hosting_id = ?
-         ORDER BY started_at DESC LIMIT ?",
-    )
+    let rows = sqlx::query_as::<_, BackupRunRow>(&format!(
+        "SELECT {SELECT_COLS} FROM backup_runs WHERE hosting_id = ? \
+         ORDER BY started_at DESC LIMIT ?"
+    ))
     .bind(hosting_id.as_str())
     .bind(limit)
     .fetch_all(pool)
     .await?;
-    Ok(rows
-        .into_iter()
-        .map(
-            |(
-                id,
-                hosting_id,
-                target,
-                started_at,
-                finished_at,
-                state,
-                archive_path,
-                db_dump_path,
-                bytes_total,
-                error_message,
-            )| BackupRun {
-                id,
-                hosting_id: HostingId(hosting_id),
-                target,
-                started_at,
-                finished_at,
-                state,
-                archive_path,
-                db_dump_path,
-                bytes_total,
-                error_message,
-            },
-        )
-        .collect())
+    Ok(rows.into_iter().map(Into::into).collect())
 }
 
-/// Delete a backup_run row by id.
-/// Single backup run by id. Used by `backup_delete` to find the
-/// archive path on disk before deleting it.
 pub async fn get_by_id(pool: &SqlitePool, id: i64) -> Result<Option<BackupRun>, StateError> {
-    let row: Option<(
-        i64,
-        String,
-        String,
-        i64,
-        Option<i64>,
-        String,
-        Option<String>,
-        Option<String>,
-        i64,
-        Option<String>,
-    )> = sqlx::query_as(
-        "SELECT id, hosting_id, target, started_at, finished_at, state, archive_path,
-                db_dump_path, bytes_total, error_message
-         FROM backup_runs WHERE id = ?",
-    )
+    let row = sqlx::query_as::<_, BackupRunRow>(&format!(
+        "SELECT {SELECT_COLS} FROM backup_runs WHERE id = ?"
+    ))
     .bind(id)
     .fetch_optional(pool)
     .await?;
-    Ok(row.map(
-        |(
-            id,
-            hosting_id,
-            target,
-            started_at,
-            finished_at,
-            state,
-            archive_path,
-            db_dump_path,
-            bytes_total,
-            error_message,
-        )| BackupRun {
-            id,
-            hosting_id: HostingId(hosting_id),
-            target,
-            started_at,
-            finished_at,
-            state,
-            archive_path,
-            db_dump_path,
-            bytes_total,
-            error_message,
-        },
+    Ok(row.map(Into::into))
+}
+
+/// Record the archive's digest, computed once when it is written.
+///
+/// Separate from `mark_ok` because hashing a multi-gigabyte archive is not
+/// free and the caller decides when to pay for it — but a run without a digest
+/// is a run nothing can ever verify, so the caller that skips it is choosing
+/// that.
+pub async fn set_sha256(pool: &SqlitePool, id: i64, hex: &str) -> Result<(), StateError> {
+    sqlx::query("UPDATE backup_runs SET sha256_hex = ? WHERE id = ?")
+        .bind(hex)
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Record what happened to the off-site copy.
+///
+/// The columns this writes have existed since migration 031 and were dead, so
+/// nothing in the panel could answer "is this backup anywhere but here?" — and
+/// a backfill had nothing to diff against.
+pub async fn set_remote(
+    pool: &SqlitePool,
+    id: i64,
+    blob_key: &str,
+    state: &str,
+    error: &str,
+) -> Result<(), StateError> {
+    sqlx::query(
+        "UPDATE backup_runs SET remote_blob_key = ?, remote_state = ?, remote_error = ? \
+         WHERE id = ?",
+    )
+    .bind(blob_key)
+    .bind(state)
+    .bind(error)
+    .bind(id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Successful local backups with no off-site copy, oldest first.
+///
+/// What a backfill works from. `state='ok'` because pushing the archive of a
+/// failed run would copy a file that may be truncated; oldest first because
+/// the oldest is the one closest to being pruned off local disk.
+pub async fn list_needing_offsite(
+    pool: &SqlitePool,
+    limit: i64,
+) -> Result<Vec<BackupRun>, StateError> {
+    let rows = sqlx::query_as::<_, BackupRunRow>(&format!(
+        "SELECT {SELECT_COLS} FROM backup_runs \
+          WHERE state = 'ok' \
+            AND archive_path IS NOT NULL \
+            AND (remote_state IS NULL OR remote_state NOT IN ('ok', 'verified')) \
+          ORDER BY started_at ASC \
+          LIMIT ?"
     ))
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(Into::into).collect())
 }
 
 pub async fn delete_by_id(pool: &SqlitePool, id: i64) -> Result<(), StateError> {
@@ -194,53 +250,13 @@ pub async fn delete_by_id(pool: &SqlitePool, id: i64) -> Result<(), StateError> 
 }
 
 pub async fn list_all(pool: &SqlitePool, limit: i64) -> Result<Vec<BackupRun>, StateError> {
-    let rows: Vec<(
-        i64,
-        String,
-        String,
-        i64,
-        Option<i64>,
-        String,
-        Option<String>,
-        Option<String>,
-        i64,
-        Option<String>,
-    )> = sqlx::query_as(
-        "SELECT id, hosting_id, target, started_at, finished_at, state,
-                archive_path, db_dump_path, bytes_total, error_message
-         FROM backup_runs ORDER BY started_at DESC LIMIT ?",
-    )
+    let rows = sqlx::query_as::<_, BackupRunRow>(&format!(
+        "SELECT {SELECT_COLS} FROM backup_runs ORDER BY started_at DESC LIMIT ?"
+    ))
     .bind(limit)
     .fetch_all(pool)
     .await?;
-    Ok(rows
-        .into_iter()
-        .map(
-            |(
-                id,
-                hosting_id,
-                target,
-                started_at,
-                finished_at,
-                state,
-                archive_path,
-                db_dump_path,
-                bytes_total,
-                error_message,
-            )| BackupRun {
-                id,
-                hosting_id: HostingId(hosting_id),
-                target,
-                started_at,
-                finished_at,
-                state,
-                archive_path,
-                db_dump_path,
-                bytes_total,
-                error_message,
-            },
-        )
-        .collect())
+    Ok(rows.into_iter().map(Into::into).collect())
 }
 
 #[cfg(test)]

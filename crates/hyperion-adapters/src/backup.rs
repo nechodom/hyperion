@@ -500,6 +500,266 @@ pub async fn upload_remote(file: &Path, upload: &RemoteUpload<'_>) -> Result<Str
     Ok(url)
 }
 
+/// Is the file really on the remote, at the right size?
+///
+/// A zero exit from the upload means the transfer returned success. It does
+/// not mean the bytes are on the far side: a full disk, a quota, a proxy that
+/// buffered and dropped, an FTP server that accepted and discarded — all of
+/// those can produce a clean upload and no file. The only way to know is to
+/// look, so this asks the server for the size and compares it.
+///
+/// Three answers, and they must stay three. `Ok(Some(true))` is "we looked and
+/// it is there at the right size". `Ok(Some(false))` is "we looked and it is
+/// not". `Ok(None)` and `Err` are both "we could not look" — the server did
+/// not answer with a size we can read, or we could not reach it at all — and
+/// neither may be recorded as failure, because the upload may well be fine.
+pub async fn verify_remote(
+    file: &Path,
+    upload: &RemoteUpload<'_>,
+) -> Result<Option<bool>, AdapterError> {
+    let want = tokio::fs::metadata(file)
+        .await
+        .map_err(|e| AdapterError::Other(format!("stat {}: {e}", file.display())))?
+        .len();
+    let scheme = match upload.scheme {
+        "ftp" | "ftps" | "sftp" => upload.scheme,
+        other => {
+            return Err(AdapterError::Other(format!(
+                "unsupported remote scheme: {other}"
+            )))
+        }
+    };
+    let filename = file
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| AdapterError::Other("file has no name".into()))?;
+    let dir = format!("/{}", upload.remote_dir.trim_matches('/'));
+    let url = format!(
+        "{scheme}://{host}:{port}{dir}/{filename}",
+        host = upload.host,
+        port = upload.port,
+    );
+    // `head` over FTP asks for SIZE rather than transferring anything, and
+    // `write-out` hands back just the number so nothing has to parse a
+    // protocol-specific listing format.
+    let config = format!(
+        concat!(
+            "user = \"{user}:{password}\"\n",
+            "url = \"{url}\"\n",
+            "head\n",
+            "fail\n",
+            "silent\n",
+            "show-error\n",
+            "max-time = 60\n",
+            "write-out = \"%{{size_download}} %{{size_upload}} %{{filename_effective}}\"\n",
+        ),
+        user = cmd::curl_config_quote(upload.user),
+        password = cmd::curl_config_quote(upload.password),
+        url = cmd::curl_config_quote(&url),
+    );
+    // curl reports an FTP SIZE response in `Content-Length`, which it exposes
+    // through the header block rather than through size_download on a HEAD.
+    // Parse whichever of the two carries a number.
+    let out = cmd::curl_with_config(&config).await?;
+    // THREE answers, not two. `None` is "the server answered but not with a
+    // size we could read" — plenty of FTP servers do that — and folding it
+    // into `false` told the operator a perfectly good backup was missing.
+    // The doc comment above already promised three states; the code returned
+    // two.
+    Ok(parse_remote_size(&out).map(|seen| seen == want))
+}
+
+/// Pull a byte count out of curl's HEAD output for an FTP URL.
+///
+/// Servers differ: some answer a real `Content-Length`, some only emit the
+/// raw `213 <size>` of the SIZE command. Both shapes are read, and anything
+/// unrecognised yields `None` — which the caller treats as "could not look",
+/// never as "not there".
+pub fn parse_remote_size(out: &str) -> Option<u64> {
+    for line in out.lines() {
+        let l = line.trim();
+        if let Some(rest) = l.strip_prefix("Content-Length:") {
+            if let Ok(n) = rest.trim().parse::<u64>() {
+                return Some(n);
+            }
+        }
+        // `213 1234` — the FTP SIZE reply.
+        if let Some(rest) = l.strip_prefix("213 ") {
+            if let Ok(n) = rest.trim().parse::<u64>() {
+                return Some(n);
+            }
+        }
+    }
+    None
+}
+
+/// One file on the remote store.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteEntry {
+    pub name: String,
+    pub bytes: u64,
+}
+
+/// What is actually on the remote for this site.
+///
+/// The half that never existed. Until this, everything the panel knew about
+/// the off-site copy came from the moment of upload — so a file deleted,
+/// truncated or never written by the far side was invisible, and an operator
+/// whose node was gone had no way to find out what they still had.
+pub async fn list_remote(upload: &RemoteUpload<'_>) -> Result<Vec<RemoteEntry>, AdapterError> {
+    let scheme = match upload.scheme {
+        "ftp" | "ftps" | "sftp" => upload.scheme,
+        other => {
+            return Err(AdapterError::Other(format!(
+                "unsupported remote scheme: {other}"
+            )))
+        }
+    };
+    let dir = format!("/{}", upload.remote_dir.trim_matches('/'));
+    // The trailing slash is what makes curl LIST a directory rather than
+    // retrieve a file of that name.
+    let url = format!(
+        "{scheme}://{host}:{port}{dir}/",
+        host = upload.host,
+        port = upload.port,
+    );
+    let config = format!(
+        concat!(
+            "user = \"{user}:{password}\"\n",
+            "url = \"{url}\"\n",
+            "fail\n",
+            "silent\n",
+            "show-error\n",
+            "max-time = 120\n",
+        ),
+        user = cmd::curl_config_quote(upload.user),
+        password = cmd::curl_config_quote(upload.password),
+        url = cmd::curl_config_quote(&url),
+    );
+    Ok(parse_ftp_listing(&cmd::curl_with_config(&config).await?))
+}
+
+/// Parse the `LIST` output curl returns for an FTP directory.
+///
+/// Unix-style `ls -l`, which is what essentially every FTP server emits:
+/// `-rw-r--r-- 1 user group 12345 Jan  1 00:00 name.tar.gz`. Anything that
+/// does not look like that is skipped rather than guessed at — a wrong size
+/// here would make `verify` call a good backup broken.
+pub fn parse_ftp_listing(out: &str) -> Vec<RemoteEntry> {
+    let mut v = Vec::new();
+    for line in out.lines() {
+        let f: Vec<&str> = line.split_whitespace().collect();
+        // Directories and symlinks are not backups.
+        if f.len() < 9 || !line.starts_with('-') {
+            continue;
+        }
+        let Ok(bytes) = f[4].parse::<u64>() else {
+            continue;
+        };
+        // The name is everything from field 8 on, so a filename containing
+        // spaces survives.
+        let name = f[8..].join(" ");
+        if name.is_empty() || name == "." || name == ".." {
+            continue;
+        }
+        v.push(RemoteEntry { name, bytes });
+    }
+    v
+}
+
+/// Fetch one file off the remote into `dest`.
+///
+/// `dest` is chosen by the caller and must be somewhere the restore is allowed
+/// to read from — this function does not decide that, and deliberately does
+/// not take the file name from the remote listing without the caller having
+/// validated it, because a remote server is not a trusted source of paths.
+pub async fn download_remote(
+    filename: &str,
+    dest: &Path,
+    upload: &RemoteUpload<'_>,
+    max_bytes: u64,
+) -> Result<u64, AdapterError> {
+    // A name from a listing is attacker-influenced if the remote store is,
+    // and it is interpolated into a URL — so curl will PERCENT-DECODE it
+    // before asking for a path. Rejecting a literal `/` was not enough:
+    // `%2f` and `%2e%2e%2f` sail through a substring check and arrive at the
+    // server as `../`, which walks out of this site's directory and into
+    // another tenant's.
+    //
+    // So the rule is an allow-list, not a deny-list. A backup file name is
+    // ASCII letters, digits, dot, dash and underscore — anything else,
+    // including a percent sign, is refused rather than reasoned about.
+    let plain = !filename.is_empty()
+        && filename.len() <= 255
+        && filename
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+        && !filename.contains("..")
+        && !filename.starts_with('.')
+        && !filename.starts_with('-');
+    if !plain {
+        return Err(AdapterError::Other(format!(
+            "refusing a remote file name that is not a plain backup file name: {filename:?}"
+        )));
+    }
+    let scheme = match upload.scheme {
+        "ftp" | "ftps" | "sftp" => upload.scheme,
+        other => {
+            return Err(AdapterError::Other(format!(
+                "unsupported remote scheme: {other}"
+            )))
+        }
+    };
+    if let Some(parent) = dest.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| AdapterError::Other(format!("create {}: {e}", parent.display())))?;
+    }
+    let dir = format!("/{}", upload.remote_dir.trim_matches('/'));
+    let url = format!(
+        "{scheme}://{host}:{port}{dir}/{filename}",
+        host = upload.host,
+        port = upload.port,
+    );
+    let local = dest
+        .to_str()
+        .ok_or_else(|| AdapterError::Other("destination path not utf8".into()))?;
+    let config = format!(
+        concat!(
+            "user = \"{user}:{password}\"\n",
+            "url = \"{url}\"\n",
+            "output = \"{local}\"\n",
+            "fail\n",
+            "silent\n",
+            "show-error\n",
+            // A restore of a large site is not a 300-second job.
+            "max-time = 3600\n",
+            // A remote that serves an endless stream would otherwise fill the
+            // node's disk and take every site on it down. curl aborts past
+            // this, and the caller's own free-space check decides the number.
+            "max-filesize = {cap}\n",
+        ),
+        cap = max_bytes,
+        user = cmd::curl_config_quote(upload.user),
+        password = cmd::curl_config_quote(upload.password),
+        url = cmd::curl_config_quote(&url),
+        local = cmd::curl_config_quote(local),
+    );
+    cmd::curl_with_config(&config).await?;
+    let n = tokio::fs::metadata(dest)
+        .await
+        .map_err(|e| AdapterError::Other(format!("stat {}: {e}", dest.display())))?
+        .len();
+    if n == 0 {
+        // curl can exit 0 having written nothing at all.
+        let _ = tokio::fs::remove_file(dest).await;
+        return Err(AdapterError::Other(
+            "the remote file downloaded as zero bytes".into(),
+        ));
+    }
+    Ok(n)
+}
+
 // ── S3-compatible off-site upload (Wasabi / B2 / Minio / AWS) ────────────────
 
 const AWS_BIN: &str = "/usr/bin/aws";
@@ -795,6 +1055,109 @@ pub fn engine_str(engine: DbProvision) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+
+    /// A wrong size here would make a good backup look broken, so anything
+    /// not recognised must yield None rather than a guess.
+    #[test]
+    fn remote_size_is_read_from_either_shape_or_not_at_all() {
+        assert_eq!(
+            super::parse_remote_size("Content-Length: 4096\r\n"),
+            Some(4096)
+        );
+        assert_eq!(super::parse_remote_size("213 12345\r\n"), Some(12345));
+        // Not a number, not a size line, empty: all "could not look".
+        assert_eq!(super::parse_remote_size("Content-Length: big"), None);
+        assert_eq!(super::parse_remote_size("550 Not Found"), None);
+        assert_eq!(super::parse_remote_size(""), None);
+    }
+
+    #[test]
+    fn ftp_listing_takes_files_and_skips_everything_else() {
+        let out = "drwxr-xr-x 2 u g 4096 Jan  1 00:00 subdir\n\
+                   -rw-r--r-- 1 u g 12345 Jan  1 00:00 site-1700000000.tar.gz\n\
+                   lrwxrwxrwx 1 u g 7 Jan  1 00:00 link -> target\n\
+                   -rw-r--r-- 1 u g 42 Jan  1 00:00 name with spaces.sql\n\
+                   garbage\n";
+        let v = super::parse_ftp_listing(out);
+        assert_eq!(v.len(), 2, "{v:?}");
+        assert_eq!(v[0].name, "site-1700000000.tar.gz");
+        assert_eq!(v[0].bytes, 12345);
+        // A filename with spaces survives, because the name is everything
+        // from the ninth field on.
+        assert_eq!(v[1].name, "name with spaces.sql");
+    }
+
+    /// A remote store is not a trusted source of paths. A listing entry that
+    /// escapes its directory must never become a write target.
+    /// The allow-list, stated as the property it protects: whatever survives
+    /// the check must still be a plain file name AFTER a percent-decode,
+    /// because curl decodes the URL before asking the server for a path.
+    #[test]
+    fn an_accepted_name_cannot_decode_into_a_path() {
+        fn accepted(name: &str) -> bool {
+            !name.is_empty()
+                && name.len() <= 255
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+                && !name.contains("..")
+                && !name.starts_with('.')
+                && !name.starts_with('-')
+        }
+        // The shapes that defeated the old substring check.
+        for escape in ["%2f", "%2F", "%2e%2e%2f", "..%2f", "%00", "/", "\\", ".."] {
+            let name = format!("site{escape}x.tar.gz");
+            assert!(!accepted(&name), "would have accepted {name:?}");
+        }
+        // An ordinary backup name still works, or the feature is useless.
+        assert!(accepted("example.cz-1700000000.tar.gz"));
+        assert!(accepted("example_cz-1700000000.sql"));
+    }
+
+    #[test]
+    fn verify_keeps_could_not_look_apart_from_not_there() {
+        // The server answered, but not with a size anyone can read. That is
+        // not evidence the file is missing, and folding it into `false` told
+        // the operator a good backup had failed.
+        assert_eq!(super::parse_remote_size("550 Permission denied"), None);
+        assert_eq!(super::parse_remote_size("Content-Length: 10"), Some(10));
+    }
+
+    #[tokio::test]
+    async fn a_remote_file_name_that_is_a_path_is_refused() {
+        let up = super::RemoteUpload {
+            scheme: "ftp",
+            host: "example.invalid",
+            port: 21,
+            user: "u",
+            password: "p",
+            remote_dir: "/backups",
+        };
+        let dest = std::path::Path::new("/tmp/hyperion-test-never-written");
+        // curl percent-DECODES the URL before asking the server for a path,
+        // so a substring check for '/' never saw `%2f`. These are the names
+        // that walked out of one tenant's directory and into another's.
+        for bad in [
+            "../../etc/passwd",
+            "/etc/passwd",
+            "a/b",
+            "..",
+            "",
+            "%2f%2e%2e%2fother",
+            "%2e%2e%2fsite.tar.gz",
+            "..%2fsite.tar.gz",
+            "a%00b",
+            "-oflag",
+            ".hidden",
+            "name with spaces.tar.gz",
+        ] {
+            assert!(
+                super::download_remote(bad, dest, &up, 1024).await.is_err(),
+                "accepted {bad:?}"
+            );
+        }
+        assert!(!dest.exists(), "a refused name still wrote something");
+    }
     use super::*;
 
     /// Build a plain `.tar` at `path` from `(name, kind, body_or_linktarget)`

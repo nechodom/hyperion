@@ -1,0 +1,94 @@
+{# What is on the OFF-SITE store for this site.
+
+   Read from the remote server, not from our own rows: the rows say what was
+   uploaded, this says what is actually there. After losing the node, the rows
+   are gone and this is the only answer left — which is the whole reason an
+   off-site copy exists.
+
+   Lazily loaded, because it is a round trip to somebody else's FTP server. #}
+<div class="card" style="margin-bottom:0.9rem">
+  <div class="row" style="align-items:center;gap:0.6rem;margin-bottom:0.4rem">
+    <h2 style="margin:0;font-size:0.95rem">
+      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+      Off-site copies
+    </h2>
+    <span class="grow"></span>
+    {% if !configured %}
+      <span class="pill warn">no target</span>
+    {% else if files.is_empty() %}
+      <span class="pill warn">nothing there</span>
+    {% else %}
+      <span class="pill ok">{{ files.len() }}</span>
+    {% endif %}
+  </div>
+
+  {% if let Some(e) = error %}
+  <div class="flash warn" style="margin:0 0 0.6rem">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+    <div class="flash-body">{{ e }}</div>
+  </div>
+  {% endif %}
+
+  {% if !configured %}
+    <p class="text-soft small" style="margin:0;line-height:1.55">
+      This node has no <strong>FTP/FTPS/SFTP</strong> off-site target, so this
+      card has nothing to list — <a href="/settings#backups">set one up</a>.
+      <br>
+      S3 targets are configured separately at
+      <a href="/settings/backups">Backup targets</a> and are
+      <strong>not</strong> shown here: they are uploaded encrypted, and the key
+      to read them back is deliberately kept off this server, so the panel
+      cannot list or restore them. If S3 is your only copy, make sure you still
+      have that key.
+    </p>
+  {% else if files.is_empty() %}
+    <p class="text-soft small" style="margin:0;line-height:1.55">
+      The remote directory for this site is empty or could not be listed.
+      Backups taken before a target was configured are <strong>not</strong>
+      copied retroactively — use <em>Copy existing backups off-site</em> on
+      the <a href="/settings#backups">Backups settings</a> page to send the
+      ones already on disk.
+    </p>
+  {% else %}
+    <div class="table-wrap" style="margin:0">
+      <table class="table small" style="margin:0">
+        <thead><tr><th>File</th><th class="right">Size</th><th class="right">Restore</th></tr></thead>
+        <tbody>
+        {% for f in files %}
+          <tr>
+            <td><code style="font-size:0.74rem">{{ f.name }}</code></td>
+            <td class="right muted numeric">{{ crate::handlers::stats::fmt_bytes(f.bytes) }}</td>
+            <td class="right">
+              {% if can_restore %}
+              {#- The confirm goes on the FORM: the dialog driver reads the
+                  submit event's target, so these attributes on the button
+                  would be dead markup and the site would be overwritten with
+                  no prompt. -#}
+              <form method="post" action="/hostings/offsite-restore" style="margin:0;display:inline"
+                    data-confirm-title="Restore {{ detail_domain }} from the off-site copy"
+                    data-confirm-body="Downloads {{ f.name }} from the remote server and restores it over {{ detail_domain }}. Files and database are overwritten with the contents of that archive; anything changed since is lost. The download alone can take a long time on a large site."
+                    data-confirm-confirm-label="Download and restore"
+                    data-confirm-variant="danger">
+                <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+                <input type="hidden" name="selector" value="{{ selector }}">
+                <input type="hidden" name="filename" value="{{ f.name }}">
+                <button class="btn ghost" type="submit" style="font-size:0.72rem;padding:0.15rem 0.45rem">Restore</button>
+              </form>
+              {% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <p class="text-soft small" style="margin:0.6rem 0 0;line-height:1.5">
+      Listed from the remote server itself, so this is what it says it has —
+      not what we believe we uploaded. A restore fetches the archive and its
+      database dump back and puts them through the same checks as a file you
+      upload by hand.
+      <br>
+      This is the FTP target only. S3 copies are encrypted with a key that is
+      not on this server, so they cannot be listed or restored from here.
+    </p>
+  {% endif %}
+</div>

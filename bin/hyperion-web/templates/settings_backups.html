@@ -17,6 +17,22 @@
   </div>
 </div>
 
+{# Said where the operator is looking. Every write on this page comes back
+   through a redirect carrying `?flash=`, and for a long time nothing
+   rendered it — the save worked and looked exactly like a save that had
+   not. #}
+{% if let Some(m) = flash %}
+  <div class="flash success" style="margin-bottom:1rem">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+    <div class="flash-body">{{ m }}</div>
+  </div>
+{% endif %}
+{% if let Some(e) = flash_error %}
+  <div class="flash error" style="margin-bottom:1rem">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+    <div class="flash-body">{{ e }}</div>
+  </div>
+{% endif %}
 <div class="flash info" style="margin-bottom:1rem">
   <div class="flash-body">
     <strong>How it runs.</strong> Whenever a hosting backup completes (manually, from the

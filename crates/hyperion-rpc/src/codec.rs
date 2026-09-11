@@ -1428,6 +1428,21 @@ pub enum Request {
         snapshot: String,
         mode: hyperion_types::BackupRestoreMode,
     },
+    /// What this site actually has on the off-site store, read from the
+    /// REMOTE rather than from our own rows.
+    BackupOffsiteList {
+        sel: HostingSelector,
+    },
+    /// Push local backups that never reached the off-site store.
+    BackupOffsiteBackfill {
+        limit: i64,
+    },
+    /// Fetch one backup back off the remote store and restore it.
+    BackupOffsiteRestore {
+        sel: HostingSelector,
+        filename: String,
+        mode: hyperion_types::BackupRestoreMode,
+    },
     /// Does this WordPress site take public sign-ups, and as what role?
     WpRegistrationGet {
         sel: HostingSelector,
@@ -2194,6 +2209,9 @@ pub enum Response {
     SnapshotDiff(hyperion_types::SnapshotDiff),
     SnapshotRestore(hyperion_types::SnapshotRestoreOutcome),
     WpRegistration(hyperion_types::WpRegistrationView),
+    BackupOffsiteList(Vec<hyperion_types::OffsiteFile>),
+    BackupOffsiteBackfill(hyperion_types::OffsiteBackfillResult),
+    BackupOffsiteRestore(String),
     FtpAccountList(Vec<hyperion_types::FtpExtraAccount>),
     /// `(login, password)` — the password is shown once, and it is paired
     /// with the login it belongs to because the panel used to show a fresh

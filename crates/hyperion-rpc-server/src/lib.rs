@@ -1462,6 +1462,24 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(v) => Response::SnapshotRestore(v),
             Err(e) => Response::Error(e),
         },
+        Request::BackupOffsiteList { sel } => match api.backup_offsite_list(sel).await {
+            Ok(v) => Response::BackupOffsiteList(v),
+            Err(e) => Response::Error(e),
+        },
+        Request::BackupOffsiteBackfill { limit } => {
+            match api.backup_offsite_backfill(limit).await {
+                Ok(v) => Response::BackupOffsiteBackfill(v),
+                Err(e) => Response::Error(e),
+            }
+        }
+        Request::BackupOffsiteRestore {
+            sel,
+            filename,
+            mode,
+        } => match api.backup_offsite_restore(sel, filename, mode).await {
+            Ok(v) => Response::BackupOffsiteRestore(v),
+            Err(e) => Response::Error(e),
+        },
         Request::WpRegistrationGet { sel } => match api.wp_registration_get(sel).await {
             Ok(v) => Response::WpRegistration(v),
             Err(e) => Response::Error(e),
@@ -3149,6 +3167,26 @@ mod tests {
             _: String,
         ) -> Result<(u64, u64), RpcError> {
             Ok((0, 0))
+        }
+        async fn backup_offsite_list(
+            &self,
+            _: HostingSelector,
+        ) -> Result<Vec<hyperion_types::OffsiteFile>, RpcError> {
+            Ok(Vec::new())
+        }
+        async fn backup_offsite_backfill(
+            &self,
+            _: i64,
+        ) -> Result<hyperion_types::OffsiteBackfillResult, RpcError> {
+            Ok(Default::default())
+        }
+        async fn backup_offsite_restore(
+            &self,
+            _: HostingSelector,
+            _: String,
+            _: hyperion_types::BackupRestoreMode,
+        ) -> Result<String, RpcError> {
+            Ok(String::new())
         }
         async fn wp_registration_get(
             &self,

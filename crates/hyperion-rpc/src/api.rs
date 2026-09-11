@@ -777,6 +777,23 @@ pub trait AgentApi: Send + Sync + 'static {
         from: String,
         to: String,
     ) -> Result<hyperion_types::SnapshotDiff, RpcError>;
+    /// What this site has on the off-site store, read from the remote.
+    async fn backup_offsite_list(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<Vec<hyperion_types::OffsiteFile>, RpcError>;
+    /// Push local backups that never reached the off-site store.
+    async fn backup_offsite_backfill(
+        &self,
+        limit: i64,
+    ) -> Result<hyperion_types::OffsiteBackfillResult, RpcError>;
+    /// Fetch one backup back off the remote and restore it.
+    async fn backup_offsite_restore(
+        &self,
+        sel: HostingSelector,
+        filename: String,
+        mode: hyperion_types::BackupRestoreMode,
+    ) -> Result<String, RpcError>;
     /// Does this WordPress site take public sign-ups, and as what role?
     async fn wp_registration_get(
         &self,
