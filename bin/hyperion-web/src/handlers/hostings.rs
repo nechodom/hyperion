@@ -12220,6 +12220,14 @@ struct OffsiteCardTpl {
     /// empty": no target is a thing to go and fix, an empty listing on a
     /// configured target is a thing to worry about.
     configured: bool,
+    /// Does the per-site directory exist on the remote?
+    ///
+    /// The third state, and the one production hit first: the folder is made
+    /// by the first UPLOAD, so a site whose backups all predate the target
+    /// has no directory — and curl answers that with exit 9, which the card
+    /// used to surface as "internal error: off-site list". It is an ordinary
+    /// state with an obvious fix.
+    directory_exists: bool,
     can_restore: bool,
     csrf_token: String,
     error: Option<String>,
@@ -12245,6 +12253,7 @@ async fn render_offsite(
         .is_ok();
     let card = |files: Vec<hyperion_types::OffsiteFile>,
                 configured: bool,
+                directory_exists: bool,
                 detail_domain: String,
                 error: Option<String>| {
         Html(
@@ -12253,6 +12262,7 @@ async fn render_offsite(
                 detail_domain,
                 files,
                 configured,
+                directory_exists,
                 can_restore,
                 csrf_token: csrf_token_for(state, ctx, "/hostings/offsite-restore"),
                 error,
@@ -12264,11 +12274,27 @@ async fn render_offsite(
     };
     let sel = match parse_selector(&selector) {
         Ok(s) => s,
-        Err(e) => return Ok(card(Vec::new(), false, String::new(), Some(e.to_string()))),
+        Err(e) => {
+            return Ok(card(
+                Vec::new(),
+                false,
+                false,
+                String::new(),
+                Some(e.to_string()),
+            ))
+        }
     };
     let (detail, owner) = match find_hosting_anywhere(state, sel.clone()).await {
         Ok(v) => v,
-        Err(e) => return Ok(card(Vec::new(), false, String::new(), Some(e.to_string()))),
+        Err(e) => {
+            return Ok(card(
+                Vec::new(),
+                false,
+                false,
+                String::new(),
+                Some(e.to_string()),
+            ))
+        }
     };
     if require_hosting_access(
         state,
@@ -12283,6 +12309,7 @@ async fn render_offsite(
         return Ok(card(
             Vec::new(),
             false,
+            false,
             detail.domain,
             Some("You do not have access to this hosting.".into()),
         ));
@@ -12294,7 +12321,13 @@ async fn render_offsite(
     )
     .await
     {
-        Ok(RpcResponse::BackupOffsiteList(files)) => Ok(card(files, true, detail.domain, error)),
+        Ok(RpcResponse::BackupOffsiteList(listing)) => Ok(card(
+            listing.files,
+            true,
+            listing.directory_exists,
+            detail.domain,
+            error,
+        )),
         // A validation error here is "no target configured", which is a
         // distinct state the card renders as advice rather than as a fault.
         Ok(RpcResponse::Error(e)) => {
@@ -12303,12 +12336,19 @@ async fn render_offsite(
             Ok(card(
                 Vec::new(),
                 !no_target,
+                false,
                 detail.domain,
                 if no_target { error } else { Some(msg) },
             ))
         }
-        Ok(_) => Ok(card(Vec::new(), true, detail.domain, error)),
-        Err(e) => Ok(card(Vec::new(), true, detail.domain, Some(e.to_string()))),
+        Ok(_) => Ok(card(Vec::new(), true, false, detail.domain, error)),
+        Err(e) => Ok(card(
+            Vec::new(),
+            true,
+            false,
+            detail.domain,
+            Some(e.to_string()),
+        )),
     }
 }
 

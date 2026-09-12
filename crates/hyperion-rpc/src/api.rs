@@ -781,7 +781,7 @@ pub trait AgentApi: Send + Sync + 'static {
     async fn backup_offsite_list(
         &self,
         sel: HostingSelector,
-    ) -> Result<Vec<hyperion_types::OffsiteFile>, RpcError>;
+    ) -> Result<hyperion_types::OffsiteListing, RpcError>;
     /// Push local backups that never reached the off-site store.
     async fn backup_offsite_backfill(
         &self,

@@ -1260,11 +1260,18 @@ fn print_pretty(resp: &Response) {
             println!("  hardening:       {}", p.features.hardening);
             println!("  backup_cadence:  {}", p.features.backup_cadence);
         }
-        Response::BackupOffsiteList(files) => {
-            if files.is_empty() {
-                println!("nothing on the off-site store for this site");
+        Response::BackupOffsiteList(listing) => {
+            // Three states, three different things to do about them.
+            if !listing.directory_exists {
+                println!(
+                    "no directory on the off-site store for this site — nothing has ever been \
+                     pushed for it (the folder is created by the first upload). Use the \
+                     \"Copy existing backups off-site\" button in Settings."
+                );
+            } else if listing.files.is_empty() {
+                println!("the off-site directory exists but is EMPTY");
             }
-            for f in files {
+            for f in &listing.files {
                 println!("{:>14}  {}", f.bytes, f.name);
             }
         }

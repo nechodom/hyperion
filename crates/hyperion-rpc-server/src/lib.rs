@@ -3171,8 +3171,8 @@ mod tests {
         async fn backup_offsite_list(
             &self,
             _: HostingSelector,
-        ) -> Result<Vec<hyperion_types::OffsiteFile>, RpcError> {
-            Ok(Vec::new())
+        ) -> Result<hyperion_types::OffsiteListing, RpcError> {
+            Ok(Default::default())
         }
         async fn backup_offsite_backfill(
             &self,

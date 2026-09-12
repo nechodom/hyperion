@@ -340,6 +340,20 @@ pub struct OffsiteFile {
     pub bytes: i64,
 }
 
+/// The answer to "what is on the off-site store for this site".
+///
+/// Three states, because they call for three different reactions. No
+/// DIRECTORY means nothing has ever been pushed for this site — the folder is
+/// created by the first upload — and the fix is the backfill. An EMPTY
+/// directory means something made the folder and the files are not in it,
+/// which is worth worrying about. Files means files.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OffsiteListing {
+    /// False when the remote has no directory for this site at all.
+    pub directory_exists: bool,
+    pub files: Vec<OffsiteFile>,
+}
+
 /// What a backfill actually did.
 ///
 /// Four numbers rather than one, because they call for different actions.
