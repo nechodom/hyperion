@@ -600,13 +600,16 @@ pub struct RemoteEntry {
     pub bytes: u64,
 }
 
-/// What is actually on the remote for this site.
+/// What is on the remote for this site, or `None` when the directory is not
+/// there at all.
 ///
 /// The half that never existed. Until this, everything the panel knew about
 /// the off-site copy came from the moment of upload — so a file deleted,
 /// truncated or never written by the far side was invisible, and an operator
 /// whose node was gone had no way to find out what they still had.
-pub async fn list_remote(upload: &RemoteUpload<'_>) -> Result<Vec<RemoteEntry>, AdapterError> {
+pub async fn list_remote(
+    upload: &RemoteUpload<'_>,
+) -> Result<Option<Vec<RemoteEntry>>, AdapterError> {
     let scheme = match upload.scheme {
         "ftp" | "ftps" | "sftp" => upload.scheme,
         other => {
@@ -636,7 +639,27 @@ pub async fn list_remote(upload: &RemoteUpload<'_>) -> Result<Vec<RemoteEntry>, 
         password = cmd::curl_config_quote(upload.password),
         url = cmd::curl_config_quote(&url),
     );
-    Ok(parse_ftp_listing(&cmd::curl_with_config(&config).await?))
+    // Capture the exit code rather than treating every non-zero as a fault.
+    //
+    // curl 9 is "could not change to that directory", and for a LIST that
+    // almost always means the directory is not there yet: the per-site folder
+    // is created by `ftp-create-dirs` on the first UPLOAD, so a site whose
+    // backups all predate the target being configured has nothing there and
+    // no folder either. That is a state to explain, not an internal error —
+    // reported as one it sent the operator hunting a fault that did not exist.
+    //
+    // `None` = no directory. `Some(vec![])` = the directory exists and is
+    // empty, which is a different and more worrying answer.
+    let (stdout, stderr, code) = cmd::curl_with_config_capture(&config).await?;
+    match code {
+        0 => Ok(Some(parse_ftp_listing(&stdout))),
+        9 => Ok(None),
+        _ => Err(AdapterError::Command {
+            cmd: "curl --config - (options withheld)".to_string(),
+            code,
+            stderr_tail: stderr,
+        }),
+    }
 }
 
 /// Parse the `LIST` output curl returns for an FTP directory.
@@ -1069,6 +1092,19 @@ mod tests {
         assert_eq!(super::parse_remote_size("Content-Length: big"), None);
         assert_eq!(super::parse_remote_size("550 Not Found"), None);
         assert_eq!(super::parse_remote_size(""), None);
+    }
+
+    /// An empty listing and a missing directory are different answers, and
+    /// the parser must not blur them: `list_remote` decides "missing" from
+    /// curl's exit 9, and hands the parser only output curl actually got.
+    /// A parser that invented entries — or a caller that read a parse of
+    /// nothing as "the folder is there and empty" — would tell an operator
+    /// their backups had been deleted when none were ever sent.
+    #[test]
+    fn an_empty_listing_parses_to_no_entries_and_nothing_else() {
+        assert!(super::parse_ftp_listing("").is_empty());
+        // Some servers answer a bare status line for an empty directory.
+        assert!(super::parse_ftp_listing("total 0\n").is_empty());
     }
 
     #[test]

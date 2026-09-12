@@ -1891,7 +1891,7 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
     async fn backup_offsite_list(
         &self,
         sel: HostingSelector,
-    ) -> Result<Vec<hyperion_types::OffsiteFile>, RpcError> {
+    ) -> Result<hyperion_types::OffsiteListing, RpcError> {
         self.svc.backup_offsite_list(sel).await
     }
     async fn backup_offsite_backfill(

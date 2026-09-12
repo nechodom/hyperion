@@ -9144,7 +9144,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     pub async fn backup_offsite_list(
         &self,
         sel: HostingSelector,
-    ) -> Result<Vec<hyperion_types::OffsiteFile>, RpcError> {
+    ) -> Result<hyperion_types::OffsiteListing, RpcError> {
         let detail = self.get(sel).await?;
         let Some((mut up, dir)) = self.remote_upload_for(&detail) else {
             return Err(RpcError::Validation {
@@ -9152,16 +9152,26 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             });
         };
         up.remote_dir = &dir;
-        let files = hyperion_adapters::backup::list_remote(&up)
+        let listed = hyperion_adapters::backup::list_remote(&up)
             .await
             .map_err(|e| RpcError::Internal_with(format!("off-site list: {e}")))?;
-        Ok(files
-            .into_iter()
-            .map(|f| hyperion_types::OffsiteFile {
-                name: f.name,
-                bytes: f.bytes as i64,
-            })
-            .collect())
+        // `None` = the remote has no directory for this site. The folder is
+        // created by the first upload, so this is what a site whose backups
+        // all predate the target looks like — an ordinary state with an
+        // obvious fix, not a fault.
+        let Some(files) = listed else {
+            return Ok(hyperion_types::OffsiteListing::default());
+        };
+        Ok(hyperion_types::OffsiteListing {
+            directory_exists: true,
+            files: files
+                .into_iter()
+                .map(|f| hyperion_types::OffsiteFile {
+                    name: f.name,
+                    bytes: f.bytes as i64,
+                })
+                .collect(),
+        })
     }
 
     /// Push local backups that have never reached the off-site store.

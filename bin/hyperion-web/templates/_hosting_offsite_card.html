@@ -15,8 +15,10 @@
     <span class="grow"></span>
     {% if !configured %}
       <span class="pill warn">no target</span>
+    {% else if !directory_exists %}
+      <span class="pill warn">never pushed</span>
     {% else if files.is_empty() %}
-      <span class="pill warn">nothing there</span>
+      <span class="pill danger">empty</span>
     {% else %}
       <span class="pill ok">{{ files.len() }}</span>
     {% endif %}
@@ -41,13 +43,29 @@
       cannot list or restore them. If S3 is your only copy, make sure you still
       have that key.
     </p>
-  {% else if files.is_empty() %}
+  {% else if !directory_exists %}
+    {#- The server has no folder for this site. It is created by the first
+        UPLOAD, so this is exactly what a site looks like when every backup it
+        has predates the target being configured. An ordinary state with an
+        obvious fix — and for a while the card reported it as an internal
+        error, which sent the operator hunting a fault that was not there. -#}
     <p class="text-soft small" style="margin:0;line-height:1.55">
-      The remote directory for this site is empty or could not be listed.
-      Backups taken before a target was configured are <strong>not</strong>
-      copied retroactively — use <em>Copy existing backups off-site</em> on
-      the <a href="/settings#backups">Backups settings</a> page to send the
-      ones already on disk.
+      Nothing has ever been copied off-site for this site — the remote has no
+      folder for it yet, and one is created by the first upload.
+      <br>
+      Backups taken before the target was configured are <strong>not</strong>
+      sent retroactively. Use <em>Copy existing backups off-site</em> on the
+      <a href="/settings#backups">Backups settings</a> page to send the ones
+      already on disk, or wait for this site's next scheduled backup.
+    </p>
+  {% else if files.is_empty() %}
+    {#- Worse than "never pushed": something made the folder and the files are
+        not in it. A remote prune, a failed transfer, or somebody tidying up. -#}
+    <p class="text-soft small" style="margin:0;line-height:1.55">
+      The remote folder for this site <strong>exists but is empty</strong>.
+      Something has pushed here before, so the files have been removed since —
+      by a retention rule on the remote, or by hand. Worth looking at before
+      relying on this copy.
     </p>
   {% else %}
     <div class="table-wrap" style="margin:0">

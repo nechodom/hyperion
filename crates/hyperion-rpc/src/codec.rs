@@ -2209,7 +2209,7 @@ pub enum Response {
     SnapshotDiff(hyperion_types::SnapshotDiff),
     SnapshotRestore(hyperion_types::SnapshotRestoreOutcome),
     WpRegistration(hyperion_types::WpRegistrationView),
-    BackupOffsiteList(Vec<hyperion_types::OffsiteFile>),
+    BackupOffsiteList(hyperion_types::OffsiteListing),
     BackupOffsiteBackfill(hyperion_types::OffsiteBackfillResult),
     BackupOffsiteRestore(String),
     FtpAccountList(Vec<hyperion_types::FtpExtraAccount>),
