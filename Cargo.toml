@@ -34,6 +34,13 @@ sqlx = { version = "0.8", default-features = false, features = [
     "runtime-tokio", "sqlite", "macros", "migrate"
 ] }
 chrono = { version = "0.4", default-features = false, features = ["serde", "clock"] }
+# Real IANA zones, not a fixed offset. The operator and their customers are in
+# Europe/Prague, which is CET for half the year and CEST for the other half —
+# a stored "+02:00" would put every timestamp in a customer's letter an hour
+# out from late October to late March, and be right again without anyone
+# touching it. Storage and comparison stay UTC throughout; this is only ever
+# applied at the moment a time is DISPLAYED.
+chrono-tz = { version = "0.10", default-features = false, features = ["std"] }
 uuid = { version = "1", features = ["v7", "serde"] }
 ulid = { version = "1", features = ["serde"] }
 tracing = "0.1"
