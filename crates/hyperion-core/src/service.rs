@@ -35982,7 +35982,6 @@ mod tests {
         assert!(!ip4_matches("1.2.3.4/abc", ip));
     }
 
-    #[test]
     /// The bug that made every SPF check in the panel report "no SPF TXT
     /// record at the apex", for every domain, for as long as the function
     /// existed: `dig_records` dropped any line containing a space.
@@ -36033,6 +36032,7 @@ mod tests {
         }
     }
 
+    #[test]
     fn stitch_dig_txt_single_segment() {
         assert_eq!(
             stitch_dig_txt("\"v=spf1 ip4:1.2.3.4 ~all\""),
