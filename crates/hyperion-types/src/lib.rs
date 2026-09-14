@@ -14,8 +14,8 @@
 #![forbid(unsafe_code)]
 
 pub mod care_check;
-pub mod clock;
 pub mod cert;
+pub mod clock;
 pub mod db;
 pub mod dkim;
 pub mod dns;
