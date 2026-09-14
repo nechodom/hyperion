@@ -13016,9 +13016,17 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     "matches".into(),
                     format!("{} authorizes any sender", mechanism),
                 ),
+                // NOT a finding. We could not work out this node's public
+                // address — the outbound probe was blocked, or the service
+                // was down — so we never got as far as comparing anything.
+                // Reported as `differs` it read as "your SPF record is
+                // wrong", which is a claim about the operator's DNS made
+                // from a measurement that never happened.
                 SpfMatch::NoIp => (
-                    "differs".into(),
-                    "couldn't determine our public IPv4 — cannot verify SPF coverage".into(),
+                    "unknown".into(),
+                    "could not check: this node's public IPv4 could not be determined, so the \
+                     record could not be compared against anything"
+                        .into(),
                 ),
                 SpfMatch::None => (
                     "differs".into(),
@@ -28173,10 +28181,39 @@ async fn dig_records(domain: &str, kind: &str) -> Result<Vec<String>, std::io::E
         return Ok(vec![]);
     }
     let body = String::from_utf8_lossy(&out.stdout);
+    // Filtering depends on the RECORD TYPE, and getting that wrong is how
+    // every SPF check in the panel reported "no SPF TXT record at the apex"
+    // for every domain, for as long as this function has existed.
+    //
+    // The old rule was a single `!l.contains(' ')`, meant to drop the
+    // hostname lines `dig +short A` emits for a CNAME chain so a caller
+    // comparing against an IP does not see one. For A and AAAA that is
+    // right. For everything else it is a disaster:
+    //
+    //   TXT  "v=spf1 include:_spf.example.com ~all"   — spaces everywhere
+    //   MX   "10 mail.example.com."                   — priority, space, host
+    //
+    // Both were silently dropped, so TXT always came back empty and SPF was
+    // always "missing". The fix is to say what each type actually wants
+    // rather than to guess from punctuation: A and AAAA keep only lines that
+    // parse as an address of that family; everything else keeps every
+    // non-empty line, because for those types `+short` prints one rdata per
+    // line and all of it is the answer.
+    let keep_only_addresses = matches!(kind, "A" | "AAAA");
     Ok(body
         .lines()
         .map(|l| l.trim())
-        .filter(|l| !l.is_empty() && !l.contains(' '))
+        .filter(|l| !l.is_empty())
+        .filter(|l| {
+            if !keep_only_addresses {
+                return true;
+            }
+            match l.parse::<std::net::IpAddr>() {
+                Ok(std::net::IpAddr::V4(_)) => kind == "A",
+                Ok(std::net::IpAddr::V6(_)) => kind == "AAAA",
+                Err(_) => false,
+            }
+        })
         .map(String::from)
         .collect())
 }
@@ -35946,6 +35983,56 @@ mod tests {
     }
 
     #[test]
+    /// The bug that made every SPF check in the panel report "no SPF TXT
+    /// record at the apex", for every domain, for as long as the function
+    /// existed: `dig_records` dropped any line containing a space.
+    ///
+    /// This tests the FILTER, which is the part that was wrong — running
+    /// `dig` needs a network and a nameserver, and neither belongs in a unit
+    /// test. The rule under test is "what does each record type keep".
+    #[test]
+    fn dig_keeps_records_that_contain_spaces_except_for_addresses() {
+        // The exact shape of the answers that were being thrown away.
+        let txt = r#""v=spf1 include:_spf.google.com ~all""#;
+        let mx = "10 mail.example.cz.";
+        assert!(keeps("TXT", txt), "an SPF record is mostly spaces");
+        assert!(keeps("MX", mx), "an MX answer is priority, space, host");
+        assert!(keeps("NS", "ns1.example.cz."));
+
+        // A and AAAA still drop what they were meant to drop: the hostname
+        // lines dig emits for a CNAME chain, which a caller comparing
+        // against an IP must not see.
+        assert!(keeps("A", "192.0.2.10"));
+        assert!(!keeps("A", "alias.example.cz."));
+        assert!(
+            !keeps("A", "2001:db8::1"),
+            "an AAAA answer is not an A answer"
+        );
+        assert!(keeps("AAAA", "2001:db8::1"));
+        assert!(!keeps("AAAA", "192.0.2.10"));
+        // Blank lines are never an answer.
+        assert!(!keeps("TXT", "   "));
+    }
+
+    /// Mirrors the filter in `dig_records`. Kept beside the test rather than
+    /// exported, because the point is to pin the RULE — if the real one
+    /// changes shape, this test should be read again rather than silently
+    /// keep passing.
+    fn keeps(kind: &str, line: &str) -> bool {
+        let l = line.trim();
+        if l.is_empty() {
+            return false;
+        }
+        if !matches!(kind, "A" | "AAAA") {
+            return true;
+        }
+        match l.parse::<std::net::IpAddr>() {
+            Ok(std::net::IpAddr::V4(_)) => kind == "A",
+            Ok(std::net::IpAddr::V6(_)) => kind == "AAAA",
+            Err(_) => false,
+        }
+    }
+
     fn stitch_dig_txt_single_segment() {
         assert_eq!(
             stitch_dig_txt("\"v=spf1 ip4:1.2.3.4 ~all\""),
