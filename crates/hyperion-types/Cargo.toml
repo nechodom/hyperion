@@ -13,5 +13,6 @@ serde_json.workspace = true
 uuid.workspace = true
 ulid.workspace = true
 chrono.workspace = true
+chrono-tz.workspace = true
 
 [dev-dependencies]
