@@ -1754,9 +1754,29 @@ impl Default for HostingPaths {
 /// reading the other one gets the pack, whole. The operator is told this in
 /// Settings; the alternative — keying every override by language — is a real
 /// feature and not something to fake here.
-fn drop_foreign_overrides(cat: &mut LetterCatalog, authored_in: LetterLang) {
-    if cat.lang != authored_in {
-        cat.overrides.clear();
+/// Withhold the operator's rewritten sentences from a letter in a different
+/// language from the one they were written in.
+///
+/// The protection is real — an English sentence dropped into a Czech letter
+/// reads as broken — but it may only act on a FACT. It used to act on a
+/// guess: the overrides were taken to be in the cluster's `lang`, which
+/// defaults to English, so on an install that never changed that default
+/// every Czech site silently lost every sentence the operator had rewritten.
+/// The preview went on showing the built-in letter whatever they saved.
+///
+/// So now: only when the operator has DECLARED the language their wording is
+/// in, and it differs from the letter's, is anything withheld. Undeclared
+/// means apply. Of the two ways this can be wrong, an English sentence
+/// appearing in a Czech letter is visible and fixed in one setting; the
+/// operator's own words disappearing without a trace is neither.
+///
+/// `_cluster_lang` is kept in the signature because every caller still has it
+/// to hand; it is no longer evidence of anything.
+fn drop_foreign_overrides(cat: &mut LetterCatalog, _cluster_lang: LetterLang) {
+    if let Some(written_in) = cat.overrides_lang {
+        if cat.lang != written_in {
+            cat.overrides.clear();
+        }
     }
 }
 
@@ -30453,8 +30473,17 @@ pub fn letter_catalog_from_toml(raw: &str) -> LetterCatalog {
         .map(LetterLang::parse)
         .unwrap_or_default();
     let mut cat = LetterCatalog::new(lang);
+    // Only an explicit declaration counts. Absent, empty or unrecognised all
+    // leave it `None`, which `drop_foreign_overrides` reads as "unknown — do
+    // not guess, and do not throw anything away".
+    cat.overrides_lang = section
+        .get("overrides_lang")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| matches!(v.to_ascii_lowercase().as_str(), "en" | "cs"))
+        .map(LetterLang::parse);
     for (key, item) in section.iter() {
-        if key == "lang" {
+        if key == "lang" || key == "overrides_lang" {
             continue;
         }
         let Some(text) = item.as_str() else { continue };
@@ -30945,6 +30974,22 @@ fn parse_agent_section_fields(
                 // the wrong language beats one not going out at all.
                 crate::config_persist::FieldValue::Str(LetterLang::parse(v).as_str().to_string())
             }
+            // Which language the operator's rewritten sentences are in.
+            //
+            // An explicit match with an EMPTY arm, unlike `lang` above which
+            // normalises. Empty is a real answer here and the default — "I
+            // have not said" — and it must be storable so an operator can take
+            // a declaration back. A typo must not silently become "en": that
+            // would withhold every sentence from every Czech site, which is
+            // the exact failure this key was added to end.
+            ("letters", "overrides_lang") => match v.trim() {
+                l @ ("" | "en" | "cs") => crate::config_persist::FieldValue::Str(l.to_string()),
+                other => {
+                    return Err(bad(format!(
+                        "letter wording language must be \"en\", \"cs\" or empty, got {other:?}"
+                    )))
+                }
+            },
             // Only ids the catalogue actually has. An unknown one is either
             // a hand-edited file or a string this version removed, and
             // storing it would put wording in agent.toml that nothing reads.
@@ -34111,6 +34156,140 @@ mod tests {
     /// that has not received it yet. That is the divergence; what must never
     /// happen is it being untraceable. Every render records which body it
     /// used, and this pins both halves of that.
+    /// THE ACTUAL REPRODUCTION of the operator's report.
+    ///
+    /// They edited "the whole report template with placeholders" — which is
+    /// `care.body`, a sentence in the Customer-letters editor, not the
+    /// `[notifications]` body template the test below covers. The cluster
+    /// letter language was left at its default (English); the site follows its
+    /// care package, which is set to Czech. The preview never changed.
+    #[tokio::test]
+    async fn an_edited_letter_reaches_a_site_whose_package_is_in_another_language() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let toml = tmp.path().join("agent.toml");
+        // Default cluster language (no `lang` key = English), one override:
+        // the whole letter, rewritten by the operator.
+        std::fs::write(
+            &toml,
+            "[letters]\n\"care.body\" = \"VLASTNI DOPIS pro {domain}\"\n".as_bytes(),
+        )
+        .expect("write agent.toml");
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), package_mocks()).with_agent_config_path(toml);
+        let detail = hosting_for_packages(&s, "cesky.cz").await;
+        // The site follows its care package, which writes in Czech.
+        hyperion_state::packages::activate(
+            &pool,
+            &hyperion_state::packages::NewActivation {
+                hosting_id: detail.id.clone(),
+                package_id: 1,
+                package_name: "Péče".into(),
+                letters_lang: "cs".into(),
+                check_items: String::new(),
+                price_minor: None,
+                price_currency: None,
+                price_interval: None,
+                features: PackageFeatures::default(),
+                next_billing_at: None,
+                prior_state_json: None,
+            },
+            0,
+        )
+        .await
+        .expect("activate");
+
+        let cat = s.letter_catalog_for(&detail.id).await;
+        assert_eq!(cat.lang, LetterLang::Cs, "the site writes in Czech");
+        assert!(
+            cat.get("care.body").contains("VLASTNI DOPIS"),
+            "the operator's rewritten letter must reach this site, got: {:?}",
+            cat.get("care.body")
+        );
+    }
+
+    /// The protection still holds where it rests on a FACT: an operator who
+    /// has declared their wording is English must not see it appear in a
+    /// Czech letter. Undeclared applies; declared-and-different withholds.
+    #[test]
+    fn declared_foreign_wording_is_withheld_but_undeclared_wording_is_not() {
+        let parse = |toml: &str| letter_catalog_from_toml(toml);
+
+        // Undeclared: nothing is thrown away, whatever the letter's language.
+        let mut undeclared = parse("[letters]\n\"care.body\" = \"X\"\n");
+        undeclared.lang = LetterLang::Cs;
+        drop_foreign_overrides(&mut undeclared, LetterLang::En);
+        assert_eq!(undeclared.get("care.body"), "X", "undeclared must apply");
+
+        // Declared English, rendered in Czech: withheld.
+        let mut foreign = parse("[letters]\noverrides_lang = \"en\"\n\"care.body\" = \"X\"\n");
+        foreign.lang = LetterLang::Cs;
+        drop_foreign_overrides(&mut foreign, LetterLang::En);
+        assert_ne!(
+            foreign.get("care.body"),
+            "X",
+            "declared-and-different withholds"
+        );
+
+        // Declared Czech, rendered in Czech: applied.
+        let mut same = parse("[letters]\noverrides_lang = \"cs\"\n\"care.body\" = \"X\"\n");
+        same.lang = LetterLang::Cs;
+        drop_foreign_overrides(&mut same, LetterLang::En);
+        assert_eq!(same.get("care.body"), "X");
+
+        // The declaration is not itself mistaken for a sentence override.
+        assert!(!parse("[letters]\noverrides_lang = \"cs\"\n")
+            .overrides
+            .contains_key("overrides_lang"));
+    }
+
+    /// REPRODUCTION of an operator report: "I edited the report template but
+    /// the hosting's preview did not change."
+    ///
+    /// The existing test above writes agent.toml by hand. An operator does not
+    /// — they save the Settings form, which goes through `agent_config_update`
+    /// with exactly what a browser posts: a multi-line textarea, CRLF line
+    /// endings and all. This walks that path end to end, then previews.
+    #[tokio::test]
+    async fn a_template_saved_through_the_settings_form_reaches_the_preview() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let toml = tmp.path().join("agent.toml");
+        // A realistic agent.toml that already has other sections in it.
+        std::fs::write(&toml, b"[notifications]\nslack_template = \"{message}\"\n")
+            .expect("write agent.toml");
+
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), happy_mocks()).with_agent_config_path(toml.clone());
+        s.create(req("pece.cz")).await.expect("create");
+        let detail = s
+            .get(HostingSelector::Domain(
+                Domain::parse("pece.cz").expect("parse"),
+            ))
+            .await
+            .expect("get");
+
+        // Exactly what a <textarea> posts.
+        let template = "Dobry den,\r\n\r\nreport pro {domain}.\r\n{uptime}\r\n";
+        let mut fields = std::collections::BTreeMap::new();
+        fields.insert(
+            "care_report_body_template".to_string(),
+            template.to_string(),
+        );
+        s.agent_config_update("notifications".to_string(), fields)
+            .await
+            .expect("save through the settings path");
+
+        let written = std::fs::read_to_string(&toml).expect("read back");
+        let mail = s
+            .care_report_preview(HostingSelector::Id(detail.id.clone()))
+            .await
+            .expect("preview");
+        assert!(
+            mail.body.contains("report pro pece.cz."),
+            "the saved template must reach the preview.\n--- agent.toml ---\n{written}\n--- body ---\n{}",
+            mail.body
+        );
+    }
+
     #[tokio::test]
     async fn a_care_report_records_which_letter_it_was_rendered_from() {
         let tmp = tempfile::tempdir().expect("tmp");

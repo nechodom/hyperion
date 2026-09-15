@@ -116,6 +116,10 @@ struct SettingsTpl<'a> {
     expiry_warning_default_template: String,
     /// `[letters] lang` as stored — which built-in pack the letters use.
     letter_lang: String,
+    /// The language the operator's rewritten sentences are declared to be in:
+    /// "", "en" or "cs". Empty means undeclared, which applies them to every
+    /// letter.
+    letter_overrides_lang: String,
     /// Every translatable string, grouped for the editor.
     letter_groups: Vec<LetterGroupCard>,
     /// One row per enrolled node: which customer letters that node would
@@ -1000,6 +1004,10 @@ pub async fn get_settings(
         care_report_default_template: letter_cat.get("care.body").to_string(),
         expiry_warning_default_template: letter_cat.get("expiry.body").to_string(),
         letter_lang: letter_cat.lang.as_str().to_string(),
+        letter_overrides_lang: letter_cat
+            .overrides_lang
+            .map(|l| l.as_str().to_string())
+            .unwrap_or_default(),
         letter_groups: letter_group_cards(&letter_cat),
         letter_nodes,
         care_preview_json: {

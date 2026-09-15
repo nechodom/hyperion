@@ -1194,6 +1194,33 @@
         </span>
       </div>
 
+      {#- Which language the sentences below are WRITTEN in. A separate question
+          from the one above: that picks the default letter language, and a
+          site or its care package can override it. This one says what the
+          operator's own wording is, so it is never applied to a letter in
+          another language — and, just as importantly, never withheld from one
+          in the same language.
+
+          It used to be inferred from the setting above. That default is
+          English, so an operator who wrote Czech and let their care packages
+          pick Czech had every rewritten sentence silently dropped: the site's
+          preview kept showing the built-in letter whatever they saved. -#}
+      <div class="field">
+        <label for="lt_overrides_lang">Your wording below is written in</label>
+        <select id="lt_overrides_lang" name="overrides_lang" style="min-width:14rem">
+          <option value="" {% if letter_overrides_lang == "" %}selected{% endif %}>Not specified — use it for every letter</option>
+          <option value="cs" {% if letter_overrides_lang == "cs" %}selected{% endif %}>Čeština — only in Czech letters</option>
+          <option value="en" {% if letter_overrides_lang == "en" %}selected{% endif %}>English — only in English letters</option>
+        </select>
+        <span class="hint" style="display:block;margin-top:0.3rem">
+          Only matters when your sites write in more than one language. Pick
+          the language you typed the text below in, and it will be used for
+          letters in that language only — a Czech sentence will not appear in
+          an English letter. Left unspecified, your wording is used for every
+          letter, whatever its language.
+        </span>
+      </div>
+
       <p class="text-soft small" style="margin:1rem 0 0.6rem;line-height:1.55">
         Going through all of them one field at a time is painful, so
         <strong>Download all wording</strong> gives you every sentence in one

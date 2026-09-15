@@ -148,6 +148,17 @@ pub struct LetterCatalog {
     /// stored (the settings write path rejects the rest), so an override
     /// left behind by a removed string is inert rather than a panic.
     pub overrides: BTreeMap<String, String>,
+    /// The language the overrides above were WRITTEN in, when the operator has
+    /// said so (`[letters] overrides_lang`).
+    ///
+    /// `None` means nobody declared it — every install before this field — and
+    /// it is deliberately NOT inferred. It used to be: the overrides were
+    /// assumed to be in the cluster's `lang`, which defaults to English. A
+    /// Czech operator who never touched that default, whose sites write Czech
+    /// through their care package, had every sentence they rewrote silently
+    /// thrown away — the preview kept showing the built-in Czech letter no
+    /// matter what they saved, and nothing on screen said why.
+    pub overrides_lang: Option<LetterLang>,
 }
 
 impl LetterCatalog {
@@ -155,6 +166,7 @@ impl LetterCatalog {
         Self {
             lang,
             overrides: BTreeMap::new(),
+            overrides_lang: None,
         }
     }
 
