@@ -1035,7 +1035,7 @@ fn fmt_action_label_inner(s: &str) -> String {
 /// vulnerability scan"; "web.login.2fa_ok" → "Web login 2FA succeeded".
 fn humanize_kind(kind: &str) -> String {
     let words: Vec<&str> = kind
-        .split(['.', '_'])
+        .split(['.', '_', '-'])
         .filter(|w| !w.is_empty())
         .map(|w| match w {
             "wp" => "WordPress",

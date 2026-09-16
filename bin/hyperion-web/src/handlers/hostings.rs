@@ -3364,7 +3364,10 @@ pub async fn post_set_notes(
         &headers,
         true,
         "Notes & tags saved.",
-        format!("/hostings/{sel_url}?flash_saved=notes#overview"),
+        format!(
+            "/hostings/{sel_url}?flash={}#overview",
+            urlencoding("Notes & tags saved.")
+        ),
     ))
 }
 
@@ -3524,7 +3527,10 @@ pub async fn post_set_php_ini(
         &headers,
         true,
         "PHP settings saved (.user.ini; applies within ~5 min).",
-        format!("/hostings/{sel_url}?flash_saved=php#settings"),
+        format!(
+            "/hostings/{sel_url}?flash={}#settings",
+            urlencoding("PHP settings saved (.user.ini; applies within ~5 min).")
+        ),
     ))
 }
 
@@ -4279,8 +4285,9 @@ pub async fn post_set_limits(
             true,
             "PHP-FPM & DB limits saved.",
             format!(
-                "/hostings/{}?flash_saved=limits#limits",
-                urlencoding(&form.selector)
+                "/hostings/{}?flash={}#limits",
+                urlencoding(&form.selector),
+                urlencoding("PHP-FPM & DB limits saved.")
             ),
         )),
         RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),
@@ -7999,7 +8006,7 @@ pub async fn post_repair_permissions(
     )
     .await;
     let (key, msg) = match resp {
-        Ok(RpcResponse::HostingRepairPermissions(m)) => ("flash_saved", m),
+        Ok(RpcResponse::HostingRepairPermissions(m)) => ("flash", m),
         Ok(RpcResponse::Error(e)) => ("flash_error", e.to_string()),
         Ok(_) => ("flash_error", "unexpected response from node".to_string()),
         Err(e) => ("flash_error", e.to_string()),
@@ -8131,8 +8138,9 @@ pub async fn post_wp_auto_update(
     )
     .await;
     Ok(Redirect::to(&format!(
-        "/hostings/{}?flash_saved=auto-update#wordpress",
-        sel_url
+        "/hostings/{}?flash={}#wordpress",
+        sel_url,
+        urlencoding("Automatic updates setting saved.")
     ))
     .into_response())
 }
@@ -8290,7 +8298,10 @@ pub async fn post_set_backup_cadence(
         "monthly" => "monthly",
         _ => "off",
     };
-    let _ = crate::dispatcher::dispatch_to_node(
+    // The result is read: a schedule that did not reach the owning node must
+    // not come back as "saved" — nobody would find out until a backup was
+    // needed and was not there.
+    let saved = crate::dispatcher::dispatch_to_node(
         &state,
         target.as_deref(),
         Request::HostingKvSet {
@@ -8300,9 +8311,28 @@ pub async fn post_set_backup_cadence(
         },
     )
     .await;
+    let (key, msg) = match saved {
+        Ok(RpcResponse::HostingKvSet) => (
+            "flash",
+            match value {
+                "off" => "Automatic backups switched off — only when you click.".to_string(),
+                v => format!("Automatic backups saved: {v}."),
+            },
+        ),
+        Ok(RpcResponse::Error(e)) => (
+            "flash_error",
+            format!("The schedule was not saved — the owning node refused it: {e}"),
+        ),
+        Ok(_) => ("flash_error", "The schedule was not saved — unexpected response.".into()),
+        Err(e) => (
+            "flash_error",
+            format!("The schedule was not saved — the owning node could not be reached: {e}"),
+        ),
+    };
     Ok(Redirect::to(&format!(
-        "/hostings/{}?flash_saved=backup-cadence#backups",
-        sel_url
+        "/hostings/{}?{key}={}#backups",
+        sel_url,
+        urlencoding(&msg)
     ))
     .into_response())
 }
@@ -8383,21 +8413,26 @@ pub async fn post_set_backup_target(
     .await;
     match saved {
         Ok(RpcResponse::HostingKvSet) => Ok(Redirect::to(&format!(
-            "/hostings/{}?flash_saved=backup-target#backups",
-            sel_url
+            "/hostings/{}?flash={}#backups",
+            sel_url,
+            urlencoding("Off-site destination saved.")
         ))
         .into_response()),
         Ok(RpcResponse::Error(e)) => Ok(Redirect::to(&format!(
-            "/hostings/{}?backup_target_error={}#backups",
+            "/hostings/{}?flash_error={}#backups",
             sel_url,
-            urlencoding(&format!("the owning node refused the change: {e}"))
+            urlencoding(&format!(
+                "The off-site destination was not saved — the owning node refused it: {e}"
+            ))
         ))
         .into_response()),
         Ok(_) => Err(AppError::Internal("unexpected response".into())),
         Err(e) => Ok(Redirect::to(&format!(
-            "/hostings/{}?backup_target_error={}#backups",
+            "/hostings/{}?flash_error={}#backups",
             sel_url,
-            urlencoding(&format!("the owning node could not be reached: {e}"))
+            urlencoding(&format!(
+                "The off-site destination was not saved — the owning node could not be reached: {e}"
+            ))
         ))
         .into_response()),
     }
@@ -11438,12 +11473,31 @@ pub async fn post_restore(
     //
     // The backup archive + the hosting tree live on the owning node —
     // dispatch there (archive_path is the worker's local path).
-    let node: Option<String> = find_hosting_anywhere(&state, sel.clone())
-        .await
-        .ok()
-        .and_then(|(_d, n)| n);
+    let (_, node) = find_hosting_anywhere(&state, sel.clone()).await?;
     let archive_path = form.archive_path.trim().to_string();
     let mode = parse_restore_mode(&form.mode);
+    // Below admin, only this site's OWN archives. The node checks that the
+    // path sits under a backup root — but that root holds every tenant's
+    // archives, and `BackupRestore` is a capability customers have: a guessed
+    // `<domain>-<unix time>.tar.gz` of somebody else's site would import their
+    // files and database into this one. The rows of this site are the list of
+    // what it may restore; the free-text path is an admin tool.
+    if !ctx.is_admin_or_higher() {
+        let own = fetch_backup_list(&state, node.as_deref(), sel.clone(), 1000)
+            .await
+            .unwrap_or_default();
+        if !own
+            .iter()
+            .any(|b| b.archive_path.as_deref() == Some(archive_path.as_str()))
+        {
+            return Ok(Redirect::to(&format!(
+                "/hostings/{}?flash_error={}#backups",
+                urlencoding(&form.selector),
+                urlencoding("That archive is not one of this site's backups.")
+            ))
+            .into_response());
+        }
+    }
 
     let actor_uid = ctx.session.as_ref().map(|s| s.user_id).unwrap_or(0);
     let actor_label = ctx.username.clone();
@@ -11646,6 +11700,15 @@ pub async fn post_restore_as_new(
         Err(r) => return Ok(r),
     };
     let sel_url = urlencoding(&form.selector);
+    // A free-text server path, like the custom-path restore: an admin tool.
+    if !ctx.is_admin_or_higher() {
+        return Ok(Redirect::to(&format!(
+            "/hostings/{}?flash_error={}#backups",
+            sel_url,
+            urlencoding("Restoring into a new domain from a server path needs an admin.")
+        ))
+        .into_response());
+    }
     let new_domain = form.new_domain.trim().to_string();
     if new_domain.is_empty() {
         return Ok(Redirect::to(&format!(
@@ -12215,7 +12278,14 @@ pub async fn post_wpmail_autofix(
 struct OffsiteCardTpl {
     selector: String,
     detail_domain: String,
-    files: Vec<hyperion_types::OffsiteFile>,
+    /// One row per ARCHIVE, newest first. Each backup is two files on the
+    /// remote — the tar and its `.sql` dump — and listing both gave the dump a
+    /// Restore button of its own that could only fail.
+    rows: Vec<OffsiteRow>,
+    /// Does the site have a database at all? A site without one restores
+    /// files only; offering "files and database" there was a guaranteed
+    /// refusal.
+    site_has_db: bool,
     /// Is there an off-site target at all? Distinct from "the listing was
     /// empty": no target is a thing to go and fix, an empty listing on a
     /// configured target is a thing to worry about.
@@ -12229,8 +12299,63 @@ struct OffsiteCardTpl {
     /// state with an obvious fix.
     directory_exists: bool,
     can_restore: bool,
-    csrf_token: String,
+    csrf_offsite_restore: String,
     error: Option<String>,
+}
+
+pub struct OffsiteRow {
+    pub name: String,
+    pub bytes: i64,
+    /// Size of the database dump beside it, when there is one.
+    pub dump_bytes: Option<i64>,
+    /// "3 d ago", from the unix time in the archive name. Empty for a file
+    /// named some other way.
+    pub when: String,
+    pub when_exact: String,
+    taken_at: i64,
+}
+
+/// Pair archives with their dumps and sort newest first.
+fn offsite_rows(files: &[hyperion_types::OffsiteFile]) -> Vec<OffsiteRow> {
+    let mut rows: Vec<OffsiteRow> = files
+        .iter()
+        .filter(|f| !f.name.ends_with(".sql"))
+        .map(|f| {
+            let stem = f
+                .name
+                .strip_suffix(".tar.gz")
+                .or_else(|| f.name.strip_suffix(".tgz"))
+                .unwrap_or(&f.name);
+            let dump_bytes = files
+                .iter()
+                .find(|d| d.name == format!("{stem}.sql"))
+                .map(|d| d.bytes);
+            // `<domain>-<unix seconds>.tar.gz`, as backup_run names them.
+            let taken_at = stem
+                .rsplit('-')
+                .next()
+                .and_then(|t| t.parse::<i64>().ok())
+                .filter(|t| *t > 1_000_000_000)
+                .unwrap_or(0);
+            OffsiteRow {
+                name: f.name.clone(),
+                bytes: f.bytes,
+                dump_bytes,
+                when: if taken_at > 0 {
+                    crate::handlers::stats::fmt_ago(&taken_at)
+                } else {
+                    String::new()
+                },
+                when_exact: chrono::DateTime::from_timestamp(taken_at, 0)
+                    .filter(|_| taken_at > 0)
+                    .map(|t| t.format("%Y-%m-%d %H:%M UTC").to_string())
+                    .unwrap_or_default(),
+                taken_at,
+            }
+        })
+        .collect();
+    rows.sort_by(|a, b| b.taken_at.cmp(&a.taken_at).then(b.name.cmp(&a.name)));
+    rows
 }
 
 /// GET /hostings/:selector/offsite-panel
@@ -12255,16 +12380,18 @@ async fn render_offsite(
                 configured: bool,
                 directory_exists: bool,
                 detail_domain: String,
+                site_has_db: bool,
                 error: Option<String>| {
         Html(
             OffsiteCardTpl {
                 selector: selector.clone(),
                 detail_domain,
-                files,
+                rows: offsite_rows(&files),
+                site_has_db,
                 configured,
                 directory_exists,
                 can_restore,
-                csrf_token: csrf_token_for(state, ctx, "/hostings/offsite-restore"),
+                csrf_offsite_restore: csrf_token_for(state, ctx, "/hostings/offsite-restore"),
                 error,
             }
             .render()
@@ -12280,6 +12407,7 @@ async fn render_offsite(
                 false,
                 false,
                 String::new(),
+                false,
                 Some(e.to_string()),
             ))
         }
@@ -12292,6 +12420,7 @@ async fn render_offsite(
                 false,
                 false,
                 String::new(),
+                false,
                 Some(e.to_string()),
             ))
         }
@@ -12311,9 +12440,11 @@ async fn render_offsite(
             false,
             false,
             detail.domain,
+            false,
             Some("You do not have access to this hosting.".into()),
         ));
     }
+    let site_has_db = detail.database.is_some();
     match crate::dispatcher::dispatch_to_node(
         state,
         owner.as_deref(),
@@ -12326,6 +12457,7 @@ async fn render_offsite(
             true,
             listing.directory_exists,
             detail.domain,
+            site_has_db,
             error,
         )),
         // A validation error here is "no target configured", which is a
@@ -12338,15 +12470,17 @@ async fn render_offsite(
                 !no_target,
                 false,
                 detail.domain,
+                site_has_db,
                 if no_target { error } else { Some(msg) },
             ))
         }
-        Ok(_) => Ok(card(Vec::new(), true, false, detail.domain, error)),
+        Ok(_) => Ok(card(Vec::new(), true, false, detail.domain, site_has_db, error)),
         Err(e) => Ok(card(
             Vec::new(),
             true,
             false,
             detail.domain,
+            site_has_db,
             Some(e.to_string()),
         )),
     }
@@ -12356,6 +12490,9 @@ async fn render_offsite(
 pub struct OffsiteRestoreForm {
     pub selector: String,
     pub filename: String,
+    /// "files_and_db" (default) | "files_only" | "db_only".
+    #[serde(default)]
+    pub mode: String,
 }
 
 /// POST /hostings/offsite-restore — fetch a backup back and restore it.
@@ -12376,6 +12513,7 @@ pub async fn post_offsite_restore(
         .ok()
         .and_then(|(_d, n)| n);
     let filename = form.filename.trim().to_string();
+    let mode = parse_restore_mode(form.mode.trim());
     let actor_uid = ctx.session.as_ref().map(|s| s.user_id).unwrap_or(0);
     let actor_label = ctx.username.clone();
     let job_state = state.clone();
@@ -12405,7 +12543,7 @@ pub async fn post_offsite_restore(
                 Request::BackupOffsiteRestore {
                     sel,
                     filename,
-                    mode: hyperion_types::BackupRestoreMode::FilesAndDb,
+                    mode,
                 },
             )
             .await
@@ -12601,16 +12739,26 @@ pub async fn post_signups(
 #[template(path = "_hosting_snapshots_card.html")]
 struct SnapshotsCardTpl {
     selector: String,
+    domain: String,
     /// Newest FIRST here, unlike the RPC: this is a list somebody reads, and
     /// the interesting snapshot is the most recent one.
     rows: Vec<SnapshotRow>,
-    csrf_now: String,
-    csrf_diff: String,
-    csrf_restore: String,
+    csrf_snapshot_now: String,
+    csrf_snapshot_diff: String,
+    csrf_snapshot_restore: String,
+    csrf_snapshot_delete: String,
     /// Whether THIS session may replace the site. Server-side: the handler
     /// re-checks the same capability, because hiding a button is not a
     /// permission check.
     can_restore: bool,
+    /// Whether THIS session may take or delete snapshots (`BackupRun`, the
+    /// same capability as taking and deleting archives).
+    can_manage: bool,
+    /// `ready`, `not_installed`, `disabled`, `mode_off`, or empty when the
+    /// node could not be asked.
+    engine: String,
+    retention: String,
+    repo_size: String,
     diff: Option<hyperion_types::SnapshotDiff>,
     diff_of: String,
     error: Option<String>,
@@ -12618,8 +12766,12 @@ struct SnapshotsCardTpl {
 
 pub struct SnapshotRow {
     pub id: String,
+    /// "3 h ago".
     pub when: String,
-    pub tags: String,
+    /// "2026-09-16 21:41 UTC", for the tooltip and the confirm dialogs.
+    pub when_exact: String,
+    /// Why it was taken, in words.
+    pub reason: String,
     /// The snapshot immediately older than this one, so "what changed" is
     /// one click. Empty on the oldest.
     pub previous: String,
@@ -12628,6 +12780,24 @@ pub struct SnapshotRow {
     /// taken before snapshots included one — and the card offers files-only
     /// there rather than a checkbox that would fail at the end of a restore.
     pub has_db: bool,
+    /// Will retention delete it at the next sweep? Shown, so a snapshot does
+    /// not vanish from under somebody who was about to restore it.
+    pub expiring: bool,
+}
+
+/// The tag a snapshot was taken with, as a sentence fragment.
+fn snapshot_reason(tags: &[String]) -> String {
+    let why = tags
+        .iter()
+        .find_map(|t| match t.as_str() {
+            "pre-update" => Some("before automatic updates"),
+            "pre-core-update" => Some("before a WordPress core update"),
+            "pre-restore" => Some("before a restore"),
+            "manual" => Some("taken by hand"),
+            _ => None,
+        })
+        .unwrap_or("snapshot");
+    why.to_string()
 }
 
 /// GET /hostings/:selector/snapshots-panel
@@ -12647,21 +12817,38 @@ async fn render_snapshots(
     diff_of: String,
     error: Option<String>,
 ) -> Result<Response, AppError> {
-    // Evaluated once, before the closure borrows it: the same capability the
-    // POST handler enforces, so a rendered button always matches an action
+    // Evaluated once, before the closure borrows them: the same capabilities
+    // the POST handlers enforce, so a rendered button always matches an action
     // that will be allowed.
     let can_restore = require_manage_for_selector(state, ctx, &selector, Capability::BackupRestore)
         .await
         .is_ok();
-    let card = |rows: Vec<SnapshotRow>, error: Option<String>| {
+    let can_manage = require_manage_for_selector(state, ctx, &selector, Capability::BackupRun)
+        .await
+        .is_ok();
+    let card = |rows: Vec<SnapshotRow>,
+                domain: String,
+                overview: Option<&hyperion_types::SnapshotOverview>,
+                error: Option<String>| {
         Html(
             SnapshotsCardTpl {
                 selector: selector.clone(),
+                domain,
                 rows,
-                csrf_now: csrf_token_for(state, ctx, "/hostings/snapshots/now"),
-                csrf_diff: csrf_token_for(state, ctx, "/hostings/snapshots/diff"),
-                csrf_restore: csrf_token_for(state, ctx, "/hostings/snapshots/restore"),
+                csrf_snapshot_now: csrf_token_for(state, ctx, "/hostings/snapshots/now"),
+                csrf_snapshot_diff: csrf_token_for(state, ctx, "/hostings/snapshots/diff"),
+                csrf_snapshot_restore: csrf_token_for(state, ctx, "/hostings/snapshots/restore"),
+                csrf_snapshot_delete: csrf_token_for(state, ctx, "/hostings/snapshots/delete"),
                 can_restore,
+                can_manage,
+                engine: overview.map(|o| o.engine.clone()).unwrap_or_default(),
+                retention: overview
+                    .map(|o| o.retention.describe())
+                    .unwrap_or_default(),
+                repo_size: overview
+                    .filter(|o| o.repo_bytes > 0)
+                    .map(|o| crate::handlers::stats::fmt_bytes(&(o.repo_bytes as i64)))
+                    .unwrap_or_default(),
                 diff: diff.clone(),
                 diff_of: diff_of.clone(),
                 error,
@@ -12673,11 +12860,11 @@ async fn render_snapshots(
     };
     let sel = match parse_selector(&selector) {
         Ok(s) => s,
-        Err(e) => return Ok(card(Vec::new(), Some(e.to_string()))),
+        Err(e) => return Ok(card(Vec::new(), String::new(), None, Some(e.to_string()))),
     };
     let (detail, owner) = match find_hosting_anywhere(state, sel.clone()).await {
         Ok(v) => v,
-        Err(e) => return Ok(card(Vec::new(), Some(e.to_string()))),
+        Err(e) => return Ok(card(Vec::new(), String::new(), None, Some(e.to_string()))),
     };
     if require_hosting_access(
         state,
@@ -12691,32 +12878,53 @@ async fn render_snapshots(
     {
         return Ok(card(
             Vec::new(),
+            detail.domain.clone(),
+            None,
             Some("You do not have access to this hosting.".into()),
         ));
     }
-    let list = match crate::dispatcher::dispatch_to_node(
+    let overview = match crate::dispatcher::dispatch_to_node(
         state,
         owner.as_deref(),
-        Request::SnapshotList { sel },
+        Request::SnapshotOverview { sel },
     )
     .await
     {
-        Ok(RpcResponse::SnapshotList(v)) => v,
-        Ok(RpcResponse::Error(e)) => return Ok(card(Vec::new(), Some(e.to_string()))),
+        Ok(RpcResponse::SnapshotOverview(o)) => o,
+        Ok(RpcResponse::Error(e)) => {
+            return Ok(card(Vec::new(), detail.domain.clone(), None, Some(e.to_string())))
+        }
         Ok(_) => {
             return Ok(card(
                 Vec::new(),
+                detail.domain.clone(),
+                None,
                 Some("unexpected response from the node".into()),
             ))
         }
-        Err(e) => return Ok(card(Vec::new(), Some(e.to_string()))),
+        Err(e) => {
+            return Ok(card(
+                Vec::new(),
+                detail.domain.clone(),
+                None,
+                Some(format!(
+                    "Could not ask the node that owns this site about its snapshots ({e}). A node \
+                     running an older Hyperion cannot answer this yet."
+                )),
+            ))
+        }
     };
-    // The node answers with an empty list both when the engine is missing
-    // and when nothing has been snapshotted yet. The card says the second,
-    // which is the honest reading: we cannot tell them apart from here, and
-    // "no snapshots" is true either way.
+    let now = hyperion_types::now_secs();
+    let expiring: std::collections::HashSet<String> = overview
+        .retention
+        .expired(&overview.snapshots, now)
+        .into_iter()
+        .map(|s| s.id.clone())
+        .collect();
+    let list = &overview.snapshots;
     let mut rows: Vec<SnapshotRow> = Vec::with_capacity(list.len());
     for (i, s) in list.iter().enumerate() {
+        let taken = s.taken_at();
         rows.push(SnapshotRow {
             previous: if i == 0 {
                 String::new()
@@ -12725,12 +12933,19 @@ async fn render_snapshots(
             },
             has_db: s.has_database(),
             id: s.id.clone(),
-            when: s.time.clone(),
-            tags: s.tags.join(", "),
+            when: taken
+                .map(|t| crate::handlers::stats::fmt_ago(&t))
+                .unwrap_or_else(|| s.time.clone()),
+            when_exact: taken
+                .and_then(|t| chrono::DateTime::from_timestamp(t, 0))
+                .map(|t| t.format("%Y-%m-%d %H:%M UTC").to_string())
+                .unwrap_or_else(|| s.time.clone()),
+            reason: snapshot_reason(&s.tags),
+            expiring: expiring.contains(&s.id),
         });
     }
     rows.reverse();
-    Ok(card(rows, error))
+    Ok(card(rows, detail.domain.clone(), Some(&overview), error))
 }
 
 #[derive(serde::Deserialize)]
@@ -12739,43 +12954,181 @@ pub struct SnapshotNowForm {
 }
 
 /// POST /hostings/snapshots/now — take one by hand.
+///
+/// A background job, like "Back up now": the first snapshot of a large site
+/// walks the whole tree and dumps the database, and a request that times out
+/// half-way through left the operator clicking again into a second restic
+/// run on the same repository.
 pub async fn post_snapshot_now(
     State(state): State<SharedState>,
     ctx: AuthCtx,
     Form(form): Form<SnapshotNowForm>,
 ) -> Result<Response, AppError> {
-    let sel = match require_manage_for_selector(
-        &state,
-        &ctx,
-        &form.selector,
-        Capability::HostingEditConfig,
-    )
-    .await
-    {
-        Ok(s) => s,
-        Err(r) => return Ok(r),
-    };
+    let sel =
+        match require_manage_for_selector(&state, &ctx, &form.selector, Capability::BackupRun)
+            .await
+        {
+            Ok(s) => s,
+            Err(r) => return Ok(r),
+        };
     let (_, owner) = find_hosting_anywhere(&state, sel.clone()).await?;
-    let error = match crate::dispatcher::dispatch_to_node(
-        &state,
-        owner.as_deref(),
-        Request::SnapshotNow { sel },
+    let actor_uid = ctx.session.as_ref().map(|s| s.user_id).unwrap_or(0);
+    let job_state = state.clone();
+    let job_id = crate::handlers::jobs::spawn_job(
+        state.clone(),
+        "snapshot_now",
+        Some(&form.selector),
+        "{}",
+        &ctx.username,
+        actor_uid,
+        move |reporter| async move {
+            reporter
+                .step("Taking a snapshot of the files and the database…", 10, "")
+                .await;
+            match crate::dispatcher::dispatch_to_node(
+                &job_state,
+                owner.as_deref(),
+                Request::SnapshotNow { sel },
+            )
+            .await
+            {
+                // An empty id means nothing was taken — reported as a failure
+                // with the reasons, because a job that says "done" and made
+                // nothing is worse than one that refuses.
+                Ok(RpcResponse::SnapshotNow(id)) if id.is_empty() => {
+                    reporter
+                        .finish(
+                            false,
+                            Some(
+                                "No snapshot was taken. Either restic is not installed on the \
+                                 node that owns this site, snapshots are switched off there \
+                                 (Settings → Backups → What this panel keeps), or the site has \
+                                 no document tree. The agent log on that node says which."
+                                    .into(),
+                            ),
+                        )
+                        .await
+                }
+                Ok(RpcResponse::SnapshotNow(id)) => {
+                    reporter
+                        .step("Snapshot taken.", 100, &format!("✓ snapshot {id}\n"))
+                        .await;
+                    reporter.finish(true, None).await;
+                }
+                Ok(RpcResponse::Error(e)) => reporter.finish(false, Some(e.to_string())).await,
+                Ok(_) => {
+                    reporter
+                        .finish(false, Some("unexpected agent response".into()))
+                        .await
+                }
+                Err(e) => reporter.finish(false, Some(e.to_string())).await,
+            }
+        },
     )
-    .await
-    {
-        // An empty id means the node has no engine — reported, because a
-        // button that silently does nothing is worse than one that refuses.
-        Ok(RpcResponse::SnapshotNow(id)) if id.is_empty() => Some(
-            "No snapshot was taken — this node has no snapshot engine installed, or the site \
-             has no document tree."
-                .to_string(),
-        ),
-        Ok(RpcResponse::SnapshotNow(_)) => None,
-        Ok(RpcResponse::Error(e)) => Some(e.to_string()),
-        Ok(_) => Some("unexpected response from the node".into()),
-        Err(e) => Some(e.to_string()),
-    };
-    render_snapshots(&state, &ctx, form.selector, None, String::new(), error).await
+    .await?;
+    Ok(Redirect::to(&format!("/jobs/{}", job_id)).into_response())
+}
+
+#[derive(serde::Deserialize)]
+pub struct SnapshotDeleteForm {
+    pub selector: String,
+    /// One snapshot id, or empty with `all`.
+    #[serde(default)]
+    pub snapshot: String,
+    /// "1" to delete every snapshot of the site.
+    #[serde(default)]
+    pub all: String,
+}
+
+/// POST /hostings/snapshots/delete — delete one snapshot, or all of them.
+///
+/// Gated on `BackupRun`, the capability that deletes archives. A job, because
+/// the delete prunes the repository to actually free the space, and pruning
+/// rewrites pack files.
+pub async fn post_snapshot_delete(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<SnapshotDeleteForm>,
+) -> Result<Response, AppError> {
+    let sel =
+        match require_manage_for_selector(&state, &ctx, &form.selector, Capability::BackupRun)
+            .await
+        {
+            Ok(s) => s,
+            Err(r) => return Ok(r),
+        };
+    let all = matches!(form.all.as_str(), "1" | "true" | "on");
+    let snapshot = form.snapshot.trim().to_string();
+    if !all && snapshot.is_empty() {
+        return render_snapshots(
+            &state,
+            &ctx,
+            form.selector.clone(),
+            None,
+            String::new(),
+            Some("No snapshot was selected.".into()),
+        )
+        .await;
+    }
+    // Resolved with `?`: a lookup that fails must not quietly send the delete
+    // to the master instead of the node that owns the site.
+    let (_, owner) = find_hosting_anywhere(&state, sel.clone()).await?;
+    let actor_uid = ctx.session.as_ref().map(|s| s.user_id).unwrap_or(0);
+    let job_state = state.clone();
+    let job_id = crate::handlers::jobs::spawn_job(
+        state.clone(),
+        "snapshot_delete",
+        Some(&form.selector),
+        "{}",
+        &ctx.username,
+        actor_uid,
+        move |reporter| async move {
+            let what = if all {
+                "every snapshot of this site".to_string()
+            } else {
+                format!("snapshot {snapshot}")
+            };
+            reporter
+                .step(
+                    &format!("Deleting {what} and freeing the space it used…"),
+                    10,
+                    "",
+                )
+                .await;
+            let snapshots = if all { Vec::new() } else { vec![snapshot] };
+            match crate::dispatcher::dispatch_to_node(
+                &job_state,
+                owner.as_deref(),
+                Request::SnapshotDelete {
+                    sel,
+                    snapshots,
+                    all,
+                },
+            )
+            .await
+            {
+                Ok(RpcResponse::SnapshotDeleted(n)) => {
+                    reporter
+                        .step(
+                            "Deleted.",
+                            100,
+                            &format!("✓ {n} snapshot(s) deleted, and the repository pruned\n"),
+                        )
+                        .await;
+                    reporter.finish(true, None).await;
+                }
+                Ok(RpcResponse::Error(e)) => reporter.finish(false, Some(e.to_string())).await,
+                Ok(_) => {
+                    reporter
+                        .finish(false, Some("unexpected agent response".into()))
+                        .await
+                }
+                Err(e) => reporter.finish(false, Some(e.to_string())).await,
+            }
+        },
+    )
+    .await?;
+    Ok(Redirect::to(&format!("/jobs/{}", job_id)).into_response())
 }
 
 #[derive(serde::Deserialize)]

@@ -744,6 +744,10 @@ pub fn build_router(state: SharedState) -> Router {
             post(handlers::hostings::post_snapshot_diff),
         )
         .route(
+            "/hostings/snapshots/delete",
+            post(handlers::hostings::post_snapshot_delete),
+        )
+        .route(
             "/hostings/:selector/signup-panel",
             get(handlers::hostings::get_signup_panel),
         )
