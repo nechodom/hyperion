@@ -508,6 +508,13 @@ pub trait AgentApi: Send + Sync + 'static {
     ) -> Result<i64, RpcError>;
     /// Read the state of the most-recent / in-progress update job.
     async fn node_update_status(&self) -> Result<hyperion_types::NodeUpdateStatus, RpcError>;
+    /// The last recorded OS update check. Runs nothing.
+    async fn os_updates_status(&self) -> Result<hyperion_types::OsUpdateStatus, RpcError>;
+    /// Run an OS update check now; `refresh` runs `apt-get update` first.
+    async fn os_updates_check(
+        &self,
+        refresh: bool,
+    ) -> Result<hyperion_types::OsUpdateStatus, RpcError>;
     /// Update one section of `/etc/hyperion/agent.toml`.
     async fn agent_config_update(
         &self,

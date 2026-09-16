@@ -218,6 +218,10 @@ fn timeout_for_request(req: &Request) -> u64 {
         // A directory listing is cheap, but it is still a round trip to a
         // remote host that may be slow to answer.
         Request::BackupOffsiteList { .. } => 120,
+        // `apt-get update` waits on every configured mirror, and one slow
+        // mirror is enough to blow a 30-second budget. Reported as "node
+        // unreachable" it would send the operator looking at the wrong thing.
+        Request::OsUpdatesCheck { .. } => 600,
         // Up to eight pages plus forty links and images, each with its own
         // 20-second ceiling. 30s was guaranteed to expire on any site with a
         // slow page, and the timeout was reported to the operator as the

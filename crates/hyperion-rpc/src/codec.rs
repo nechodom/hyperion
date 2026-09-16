@@ -567,6 +567,14 @@ pub enum Request {
     /// Read the last N kB of the in-progress / most-recent update
     /// log. Empty when no update has ever run on this node.
     NodeUpdateStatus,
+    /// What the OS on this node has waiting and whether it needs a reboot, as
+    /// of the last check. Cheap: reads the recorded result, runs nothing.
+    OsUpdatesStatus,
+    /// Run a check now. `refresh` runs `apt-get update` first, which talks to
+    /// the mirrors and can take a while.
+    OsUpdatesCheck {
+        refresh: bool,
+    },
     /// Update one section of agent.toml. Validated server-side per
     /// section + field. Operator must `systemctl restart hyperion-agent`
     /// to load the new values (UI tells them).
@@ -1928,6 +1936,7 @@ pub enum Response {
     },
     /// Current update job state + the last ~8 kB of stdout/stderr.
     NodeUpdateStatus(hyperion_types::NodeUpdateStatus),
+    OsUpdates(hyperion_types::OsUpdateStatus),
     AgentConfigUpdate,
     EmailConfigSet,
     EmailLogoSet,

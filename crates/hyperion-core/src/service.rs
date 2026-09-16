@@ -1221,6 +1221,21 @@ async fn run_update_script(
     let mut last_code: i32 = 0;
 
     if do_apt {
+        // Not at the same time as an update CHECK: both run `apt-get update`,
+        // and whichever comes second fails on apt's lock — here that would fail
+        // the operator's upgrade over a background refresh. Held through the
+        // upgrade too, so a check never reads the list half-way through it.
+        let _no_check_meanwhile = match OS_UPDATES_RUNNING.try_lock() {
+            Ok(guard) => guard,
+            Err(_) => {
+                append_line(
+                    &slot,
+                    "waiting for a package-index check to finish before starting",
+                )
+                .await;
+                OS_UPDATES_RUNNING.lock().await
+            }
+        };
         let upd = run_one(&slot, "apt-update", "/usr/bin/apt-get", &["update", "-qq"]).await;
         if upd == 0 {
             last_code = run_one(
@@ -9083,6 +9098,170 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .await
     }
 
+    /// `node_kv` key holding the last OS update check, as JSON.
+    ///
+    /// Persisted rather than cached in memory, because the agent restarts on
+    /// every hyperion update and a cold cache would render as "never checked"
+    /// on exactly the page an operator opens right after updating.
+    const OS_UPDATES_KV: &'static str = "os_updates.last";
+
+    /// `node_kv` key: when security updates were first seen pending.
+    ///
+    /// Its own key, so it survives a check that fails part-way: the age of an
+    /// unapplied security update must not reset because one refresh timed out.
+    const OS_SECURITY_SINCE_KV: &'static str = "os_updates.security_since";
+
+    /// Check what the operating system has waiting.
+    ///
+    /// `refresh` runs `apt-get update` first — the slow, network half. The
+    /// scheduled tick refreshes; the panel's "check now" button can too. When a
+    /// refresh FAILS, the pending list is still read from the old index and
+    /// returned, but `index_refreshed_at` keeps its previous value and `error`
+    /// says what happened. What must never come out of this is "0 pending"
+    /// standing in for "we could not reach the mirrors".
+    pub async fn os_updates_check(
+        &self,
+        refresh: bool,
+    ) -> Result<hyperion_types::OsUpdateStatus, RpcError> {
+        use hyperion_adapters::os_updates;
+        let _one_at_a_time = OS_UPDATES_RUNNING.lock().await;
+        let now = now_secs();
+        let mut status = self.os_updates_stored().await.unwrap_or_default();
+
+        // A check that does not refresh keeps the last refresh's verdict: it
+        // learned nothing new about the mirrors.
+        if refresh {
+            match os_updates::refresh_index().await {
+                Ok(()) => {
+                    status.index_refreshed_at = now;
+                    status.refresh_error.clear();
+                }
+                Err(e) => {
+                    status.refresh_error = format!(
+                        "could not refresh the package index ({e}) — any pending list shown is \
+                         from the last index that did download, and may be out of date"
+                    );
+                }
+            }
+        }
+        status.error = status.refresh_error.clone();
+
+        let mut list_read = false;
+        match os_updates::list_pending().await {
+            Ok(pkgs) => {
+                list_read = true;
+                status.pending = pkgs
+                    .iter()
+                    .map(|p| hyperion_types::OsPendingPackage {
+                        name: p.name.clone(),
+                        installed: p.installed.clone(),
+                        candidate: p.candidate.clone(),
+                        security: p.is_security(),
+                    })
+                    .collect();
+                status.security_count = pkgs.iter().filter(|p| p.is_security()).count() as i64;
+                status.checked_at = now;
+            }
+            Err(e) => {
+                // Could not READ the list at all. Keep the previous one rather
+                // than blanking it — an empty list here would read as "nothing
+                // to install" — and say so.
+                let msg = format!("could not read pending updates: {e}");
+                status.error = if status.error.is_empty() {
+                    msg
+                } else {
+                    format!("{}; {msg}", status.error)
+                };
+            }
+        }
+
+        let (reboot, reboot_pkgs) = os_updates::reboot_required().await;
+        status.reboot_required = reboot;
+        status.reboot_packages = reboot_pkgs;
+
+        // The age of pending SECURITY updates. Stamped on the first check that
+        // sees any, cleared on the first that sees none — and only on a check
+        // that actually READ the list, so a failed read cannot reset the clock.
+        if list_read {
+            if status.security_count > 0 {
+                let since = hyperion_state::node_kv::get(&self.pool, Self::OS_SECURITY_SINCE_KV)
+                    .await
+                    .ok()
+                    .flatten()
+                    .and_then(|v| v.parse::<i64>().ok());
+                match since {
+                    Some(t) => status.security_pending_since = t,
+                    None => {
+                        status.security_pending_since = now;
+                        let _ = hyperion_state::node_kv::set(
+                            &self.pool,
+                            Self::OS_SECURITY_SINCE_KV,
+                            &now.to_string(),
+                            now,
+                        )
+                        .await;
+                    }
+                }
+            } else {
+                status.security_pending_since = 0;
+                let _ =
+                    hyperion_state::node_kv::delete(&self.pool, Self::OS_SECURITY_SINCE_KV).await;
+            }
+        }
+
+        if let Ok(json) = serde_json::to_string(&status) {
+            let _ = hyperion_state::node_kv::set(&self.pool, Self::OS_UPDATES_KV, &json, now).await;
+        }
+        Ok(status)
+    }
+
+    /// The last recorded OS update check, brought up to date cheaply.
+    ///
+    /// Meant for page loads, so it never refreshes the package index. It does
+    /// re-read the pending list when dpkg has changed since the stored check (a
+    /// second or two of `apt list`, no network), and it always re-reads the
+    /// reboot marker. On a machine without dpkg it answers with what is stored,
+    /// and a node never checked comes back with `checked_at` 0, which the panel
+    /// renders as "not checked yet" — never as "up to date".
+    pub async fn os_updates_status(&self) -> Result<hyperion_types::OsUpdateStatus, RpcError> {
+        use hyperion_adapters::os_updates;
+        let mut status = self.os_updates_stored().await?;
+        // Re-read the list (no index refresh — that is the slow, network half)
+        // when it cannot be trusted as stored: never read at all, or read
+        // before packages last changed. Without this, the card went on saying
+        // "40 updates, 6 security" for up to six hours after they had been
+        // installed, from this panel or from a shell.
+        //
+        // Not while a check is already running, though: that one may be an
+        // index refresh taking minutes, and a page load must not queue behind
+        // it and time out. It answers with what is stored, and the running
+        // check stores a fresh answer when it finishes.
+        let busy = OS_UPDATES_RUNNING.try_lock().is_err();
+        if !busy {
+            if let Some(changed) = os_updates::dpkg_changed_at().await {
+                if !status.was_checked() || changed > status.checked_at {
+                    return self.os_updates_check(false).await;
+                }
+            }
+        }
+        // The reboot marker is a file read, so it is always live: a reboot
+        // clears it, and the stored answer would not know.
+        let (reboot, reboot_pkgs) = os_updates::reboot_required().await;
+        status.reboot_required = reboot;
+        status.reboot_packages = reboot_pkgs;
+        Ok(status)
+    }
+
+    /// The last check exactly as persisted, with nothing re-read.
+    async fn os_updates_stored(&self) -> Result<hyperion_types::OsUpdateStatus, RpcError> {
+        let raw = hyperion_state::node_kv::get(&self.pool, Self::OS_UPDATES_KV)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("os updates read: {e}")))?;
+        Ok(raw
+            .and_then(|r| serde_json::from_str(&r).ok())
+            .unwrap_or_default())
+    }
+
     /// Sign-ups per scan window past which a site is not being used, it is
     /// being farmed.
     ///
@@ -16401,6 +16580,20 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     });
                 }
             }
+        }
+
+        // Operating-system updates on THIS node. The stored check only — the
+        // dashboard must not wait on apt — with the live dpkg timestamp passed
+        // in, so a list that installs have since overtaken is not quoted.
+        if let Ok(os) = self.os_updates_stored().await {
+            let (reboot, reboot_pkgs) = hyperion_adapters::os_updates::reboot_required().await;
+            let os = hyperion_types::OsUpdateStatus {
+                reboot_required: reboot,
+                reboot_packages: reboot_pkgs,
+                ..os
+            };
+            let dpkg_changed = hyperion_adapters::os_updates::dpkg_changed_at().await;
+            out.extend(os_update_alerts(&os, now, dpkg_changed));
         }
 
         // Severity sort: error first, then warn, then info.
@@ -29221,6 +29414,102 @@ const INTEGRITY_KV_KEY: &str = "integrity_scan";
 /// site that is not coming back.
 const TRASH_NOTICE: &str = "Hosting is in trash";
 
+/// Held for the duration of an OS update check.
+///
+/// One check at a time: the six-hourly tick and a "check now" click can land
+/// together, and two `apt-get update`s fight over apt's lock — the loser would
+/// report a refresh failure that is not a real one.
+static OS_UPDATES_RUNNING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// How long security updates may wait before the dashboard says so.
+///
+/// Not zero: unattended-upgrades and a weekly maintenance window both leave
+/// updates pending for a day or two as a matter of course, and an alert that is
+/// always on is one nobody reads.
+const OS_SECURITY_GRACE_SECS: i64 = 3 * 86_400;
+
+/// How old a package index may get before the update count stops meaning much.
+const OS_INDEX_STALE_SECS: i64 = 3 * 86_400;
+
+/// Dashboard alerts for this node's operating-system updates.
+///
+/// Pure, so the thresholds are testable: `dpkg_changed_at` is the live dpkg
+/// database timestamp. When packages changed after the stored check, the stored
+/// count is not repeated — it may be describing updates already installed.
+fn os_update_alerts(
+    os: &hyperion_types::OsUpdateStatus,
+    now: i64,
+    dpkg_changed_at: Option<i64>,
+) -> Vec<DashboardAlert> {
+    let mut out = Vec::new();
+    let list_current = os.was_checked() && dpkg_changed_at.map_or(true, |t| t <= os.checked_at);
+    if list_current
+        && os.security_count > 0
+        && os.security_pending_since > 0
+        && now - os.security_pending_since >= OS_SECURITY_GRACE_SECS
+    {
+        let days = (now - os.security_pending_since) / 86_400;
+        out.push(DashboardAlert {
+            kind: "os_security_updates".into(),
+            // Exposed, not broken: the server is up and serving.
+            severity: "warn".into(),
+            message: format!(
+                "This server has {} security update{} waiting, first seen {days} day{} ago. \
+                 Review and install them under Nodes → This server.",
+                os.security_count,
+                if os.security_count == 1 { "" } else { "s" },
+                if days == 1 { "" } else { "s" },
+            ),
+            hosting: None,
+        });
+    }
+    if os.reboot_required {
+        let why = if os.reboot_packages.is_empty() {
+            String::new()
+        } else {
+            let mut names: Vec<&str> = os
+                .reboot_packages
+                .iter()
+                .take(3)
+                .map(String::as_str)
+                .collect();
+            if os.reboot_packages.len() > 3 {
+                names.push("…");
+            }
+            format!(" ({})", names.join(", "))
+        };
+        out.push(DashboardAlert {
+            kind: "os_reboot_required".into(),
+            severity: "warn".into(),
+            message: format!(
+                "This server needs a reboot to finish applying updates{why}. Until it \
+                 restarts it keeps running the old versions."
+            ),
+            hosting: None,
+        });
+    }
+    // Only once an index refresh has ever succeeded: before that there is no
+    // age to report, and the Nodes page already says "never refreshed".
+    if os.index_refreshed_at > 0 && now - os.index_refreshed_at >= OS_INDEX_STALE_SECS {
+        let days = (now - os.index_refreshed_at) / 86_400;
+        let error = if os.error.is_empty() {
+            String::new()
+        } else {
+            format!(" Last error: {}", os.error)
+        };
+        out.push(DashboardAlert {
+            kind: "os_index_stale".into(),
+            severity: "warn".into(),
+            message: format!(
+                "The package index on this server has not refreshed for {days} days, so its \
+                 update count may be out of date.{error}"
+            ),
+            hosting: None,
+        });
+    }
+    out
+}
+
 /// `hosting_kv` key gating the daily integrity sweep for ONE hosting —
 /// the per-site switch a care package sells (and enforces).
 ///
@@ -38683,6 +38972,79 @@ mod tests {
             .await
             .expect_err("wp-cli must not run for a trashed site");
         assert!(matches!(err, RpcError::Conflict { .. }), "{err:?}");
+    }
+
+    fn os_status(security: i64, since: i64, checked_at: i64) -> hyperion_types::OsUpdateStatus {
+        hyperion_types::OsUpdateStatus {
+            checked_at,
+            index_refreshed_at: checked_at,
+            security_count: security,
+            security_pending_since: since,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn os_security_alert_waits_out_the_grace_period() {
+        let now = 10 * 86_400;
+        let kinds = |os: &hyperion_types::OsUpdateStatus, dpkg: Option<i64>| -> Vec<String> {
+            os_update_alerts(os, now, dpkg)
+                .into_iter()
+                .map(|a| a.kind)
+                .collect()
+        };
+        // Two days pending: normal for unattended-upgrades, no alert.
+        assert!(kinds(&os_status(4, now - 2 * 86_400, now - 60), None).is_empty());
+        // Three days: say so.
+        assert_eq!(
+            kinds(&os_status(4, now - 3 * 86_400, now - 60), None),
+            vec!["os_security_updates"]
+        );
+        // Packages changed after the stored check: the count may be describing
+        // updates already installed, so it is not repeated.
+        assert!(kinds(&os_status(4, now - 5 * 86_400, now - 600), Some(now - 60)).is_empty());
+        // Never checked is not "no updates" and not "updates" either.
+        assert!(kinds(&os_status(0, 0, 0), None).is_empty());
+    }
+
+    #[test]
+    fn os_reboot_and_stale_index_alerts() {
+        let now = 10 * 86_400;
+        let os = hyperion_types::OsUpdateStatus {
+            checked_at: now - 60,
+            index_refreshed_at: now - 4 * 86_400,
+            reboot_required: true,
+            reboot_packages: vec![
+                "a".into(),
+                "b".into(),
+                "c".into(),
+                "linux-image-amd64".into(),
+            ],
+            error: "could not refresh the package index (exit 100)".into(),
+            ..Default::default()
+        };
+        let alerts = os_update_alerts(&os, now, None);
+        let reboot = alerts
+            .iter()
+            .find(|a| a.kind == "os_reboot_required")
+            .expect("reboot alert");
+        assert!(
+            reboot.message.contains("(a, b, c, …)"),
+            "{}",
+            reboot.message
+        );
+        let stale = alerts
+            .iter()
+            .find(|a| a.kind == "os_index_stale")
+            .expect("stale alert");
+        assert!(stale.message.contains("4 days"), "{}", stale.message);
+        assert!(stale.message.contains("exit 100"), "{}", stale.message);
+        // An index that has never refreshed has no age to report.
+        let fresh_install = hyperion_types::OsUpdateStatus {
+            checked_at: now - 60,
+            ..Default::default()
+        };
+        assert!(os_update_alerts(&fresh_install, now, None).is_empty());
     }
 
     /// A hosting plus the detail every package test needs.

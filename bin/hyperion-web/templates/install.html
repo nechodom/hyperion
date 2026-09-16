@@ -208,6 +208,47 @@
 })();
 </script>
 
+{# The master is not an enrolled node, so it has no card below — but it is
+   a Debian machine with its own packages, and usually the one everything
+   else depends on. `node_id=local` is the dispatcher's name for it. #}
+<div class="card" id="node-local">
+  <h2>
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="8" rx="2"/><rect x="2" y="13" width="20" height="8" rx="2"/><line x1="6" y1="7" x2="6.01" y2="7"/><line x1="6" y1="17" x2="6.01" y2="17"/></svg>
+    This server
+  </h2>
+  <p class="text-soft small" style="margin:0 0 0.8rem">
+    The master running this panel. Hyperion refreshes its package index every 6 hours and never installs anything on its own.
+  </p>
+  <div class="text-soft small" style="font-weight:600;margin-bottom:0.3rem">Operating system updates</div>
+  <div id="os-upd-local"
+       hx-get="/install/os-updates-panel?node_id=local"
+       hx-trigger="intersect once"
+       hx-swap="innerHTML">
+    <span class="text-soft small">Loading…</span>
+  </div>
+  <details style="margin-top:0.8rem">
+    <summary class="text-soft small" style="cursor:pointer">Install system updates on this server…</summary>
+    <form method="post" action="/install/update-node"
+          data-confirm-title="Install system updates on this server"
+          data-confirm-body="apt-get dist-upgrade will run on the master — the machine serving this panel. Services it upgrades (nginx, PHP, MariaDB) restart as part of the upgrade, so sites and the panel may be briefly unavailable. Hyperion itself is not updated by this. A kernel or library update will ask for a reboot afterwards; that is left to you."
+          data-confirm-confirm-label="Install updates"
+          data-confirm-variant="primary"
+          style="margin-top:0.6rem">
+      <input type="hidden" name="_csrf" value="{{ csrf_update }}">
+      <input type="hidden" name="node_id" value="local">
+      <input type="hidden" name="do_apt" value="on">
+      <button type="submit" class="btn small primary">Install system updates</button>
+    </form>
+    <div id="upd-status-local"
+         hx-get="/install/update-node-status?node_id=local"
+         hx-trigger="load, every 3s"
+         hx-swap="innerHTML"
+         style="margin-top:0.7rem">
+      <span class="text-soft small">Loading status…</span>
+    </div>
+  </details>
+</div>
+
 <div class="card">
   <h2>
     <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>
@@ -328,6 +369,19 @@
           <div><dt>Last seen</dt><dd class="muted" title="{{ n.last_seen_at }}">{{ crate::handlers::stats::fmt_ago(n.last_seen_at) }}</dd></div>
           <div><dt>Remote RPC</dt><dd id="rpc-status-{{ n.node_id }}"><span class="text-soft small">Click Test to check</span></dd></div>
         </dl>
+
+        {# ─── Operating-system updates ─── lazy: the node may spend a second
+           or two re-reading apt's list, and one slow node must not hold up
+           the page. `intersect once`, not `revealed` — see base.html. #}
+        <div class="node-card__os" style="margin:0.2rem 0 0.8rem">
+          <div class="text-soft small" style="font-weight:600;margin-bottom:0.3rem">Operating system updates</div>
+          <div id="os-upd-{{ n.node_id }}"
+               hx-get="/install/os-updates-panel?node_id={{ n.node_id }}"
+               hx-trigger="intersect once"
+               hx-swap="innerHTML">
+            <span class="text-soft small">Loading…</span>
+          </div>
+        </div>
 
         {# ─── Primary actions row (always visible) ─── #}
         <div class="node-card__actions">

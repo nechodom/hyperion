@@ -1225,6 +1225,37 @@ async fn main() -> anyhow::Result<()> {
             }
         });
     }
+    // Operating-system updates — every 6 hours, refresh the apt index and
+    // record what is waiting (and whether a reboot is owed) in node_kv, so the
+    // Nodes page can say how far behind this machine is without running apt
+    // on a page load. Read-only: it never installs anything.
+    //
+    // Runs on every node, because every node has its own packages. The first
+    // check comes 11 minutes after start — clear of the wp-cli sweeps — so a
+    // freshly updated agent has a real answer within the hour instead of
+    // "never checked" for six.
+    {
+        let ou = svc.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(660)).await;
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(6 * 3600));
+            loop {
+                interval.tick().await;
+                match ou.os_updates_check(true).await {
+                    Ok(s) if !s.error.is_empty() => {
+                        tracing::warn!(error = %s.error, "os updates check: incomplete")
+                    }
+                    Ok(s) => tracing::debug!(
+                        pending = s.pending.len(),
+                        security = s.security_count,
+                        reboot = s.reboot_required,
+                        "os updates check"
+                    ),
+                    Err(e) => tracing::warn!(error=%e, "os updates check failed"),
+                }
+            }
+        });
+    }
     // One-shot enrollment with the master, if configured and not yet done.
     let state_file = cfg
         .enrollment

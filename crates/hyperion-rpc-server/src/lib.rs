@@ -723,6 +723,14 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(s) => Response::NodeUpdateStatus(s),
             Err(e) => Response::Error(e),
         },
+        Request::OsUpdatesStatus => match api.os_updates_status().await {
+            Ok(s) => Response::OsUpdates(s),
+            Err(e) => Response::Error(e),
+        },
+        Request::OsUpdatesCheck { refresh } => match api.os_updates_check(refresh).await {
+            Ok(s) => Response::OsUpdates(s),
+            Err(e) => Response::Error(e),
+        },
         Request::AgentConfigUpdate { section, fields } => {
             match api.agent_config_update(section, fields.into_inner()).await {
                 Ok(()) => Response::AgentConfigUpdate,
@@ -2250,6 +2258,15 @@ mod tests {
         }
         async fn node_update_status(&self) -> Result<hyperion_types::NodeUpdateStatus, RpcError> {
             Ok(hyperion_types::NodeUpdateStatus::default())
+        }
+        async fn os_updates_status(&self) -> Result<hyperion_types::OsUpdateStatus, RpcError> {
+            Ok(Default::default())
+        }
+        async fn os_updates_check(
+            &self,
+            _: bool,
+        ) -> Result<hyperion_types::OsUpdateStatus, RpcError> {
+            Ok(Default::default())
         }
         async fn service_install_status(
             &self,

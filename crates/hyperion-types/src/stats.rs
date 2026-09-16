@@ -1800,6 +1800,63 @@ pub struct MonitorOverviewItem {
     pub node_id: String,
 }
 
+/// One package the OS would upgrade.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OsPendingPackage {
+    pub name: String,
+    pub installed: String,
+    pub candidate: String,
+    pub security: bool,
+}
+
+/// What the operating system on a node has waiting, and whether it needs a
+/// reboot.
+///
+/// Every figure here is only as fresh as `index_refreshed_at`, and the panel
+/// has to say so. "0 pending" off an index nobody refreshed in a month is not
+/// "this server is up to date"; it is "we have not looked".
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OsUpdateStatus {
+    /// When the pending list below was READ. 0 = never.
+    #[serde(default)]
+    pub checked_at: i64,
+    /// When `apt-get update` last SUCCEEDED — the age of the index the list
+    /// was read from. 0 = never. A refresh that failed does not move this, and
+    /// that is the whole reason it is a separate field from `checked_at`.
+    #[serde(default)]
+    pub index_refreshed_at: i64,
+    #[serde(default)]
+    pub pending: Vec<OsPendingPackage>,
+    #[serde(default)]
+    pub security_count: i64,
+    #[serde(default)]
+    pub reboot_required: bool,
+    /// What asked for the reboot, when the marker says. Empty with
+    /// `reboot_required` set is still a reboot — just an unexplained one.
+    #[serde(default)]
+    pub reboot_packages: Vec<String>,
+    /// When security updates were FIRST seen pending, persisted across agent
+    /// restarts. 0 = none pending. The dashboard ages the alert from this.
+    #[serde(default)]
+    pub security_pending_since: i64,
+    /// Why the last check did not complete, if it did not. A failed refresh is
+    /// reported here and NOT folded into an empty pending list.
+    #[serde(default)]
+    pub error: String,
+    /// The refresh half of `error`, kept on its own so a later check that does
+    /// not refresh (a page load after packages changed) cannot erase the only
+    /// explanation for an index that keeps getting older.
+    #[serde(default)]
+    pub refresh_error: String,
+}
+
+impl OsUpdateStatus {
+    /// Has this node ever actually been checked?
+    pub fn was_checked(&self) -> bool {
+        self.checked_at > 0
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct NodeUpdateStatus {
     /// Unix seconds when the job started. 0 → no job has ever run.
