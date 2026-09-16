@@ -72,6 +72,33 @@ pub async fn upsert(
     Ok(())
 }
 
+/// Cancel a hosting's pending actions that fell due at or before `now`, and
+/// say which they were.
+///
+/// For a restore from the trash: an operator bringing a site back has made a
+/// decision about it, and an expiry warning dated weeks ago, a suspension or a
+/// deletion replayed on top of that decision would undo it. Actions still in
+/// the future are left alone.
+pub async fn cancel_overdue_for_hosting(
+    pool: &SqlitePool,
+    hosting_id: &HostingId,
+    now: i64,
+) -> Result<Vec<ScheduledKind>, StateError> {
+    let rows: Vec<(String,)> = sqlx::query_as(
+        "UPDATE scheduled_actions SET state = 'canceled' \
+         WHERE hosting_id = ? AND state = 'pending' AND due_at <= ? \
+         RETURNING action",
+    )
+    .bind(hosting_id.as_str())
+    .bind(now)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|(a,)| ScheduledKind::parse(&a))
+        .collect())
+}
+
 pub async fn cancel_for_hosting(
     pool: &SqlitePool,
     hosting_id: &HostingId,
@@ -86,6 +113,20 @@ pub async fn cancel_for_hosting(
     Ok(())
 }
 
+/// Pending actions whose time has come — for hostings that are not in the
+/// trash.
+///
+/// A trashed hosting's actions stay `pending` rather than being run. Run, they
+/// mailed the customer "your hosting expires in 7 days" about a site already
+/// thrown away, and the suspend and delete arms failed against a trashed site
+/// three times each.
+///
+/// Held is not the end of it: whatever fell due while the site sat in the trash
+/// must not fire the moment it comes out. A replayed `DeleteExpired` put a
+/// just-restored site straight back in the trash — or, with the trash switched
+/// off in the meantime, hard-deleted it. `restore_from_trash` therefore cancels
+/// those with [`cancel_overdue_for_hosting`]; what is still in the future stays
+/// armed.
 pub async fn pending_due(
     pool: &SqlitePool,
     now: i64,
@@ -106,6 +147,7 @@ pub async fn pending_due(
                 last_error, created_at
          FROM scheduled_actions
          WHERE state = 'pending' AND due_at <= ?
+           AND hosting_id NOT IN (SELECT id FROM hostings WHERE state = 'trashed')
          ORDER BY due_at LIMIT ?",
     )
     .bind(now)
@@ -372,6 +414,60 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert!(rows.iter().any(|r| r.action == ScheduledKind::Notify30d));
         assert!(rows.iter().any(|r| r.action == ScheduledKind::Notify7d));
+    }
+
+    #[tokio::test]
+    async fn pending_due_holds_a_trashed_hostings_actions() {
+        let pool = open_memory().await.expect("open");
+        let id = fixture(&pool).await;
+        upsert(&pool, &id, ScheduledKind::Notify7d, 50, 1)
+            .await
+            .expect("queue");
+        hostings::mark_trashed(&pool, &id, 60).await.expect("trash");
+        assert!(
+            pending_due(&pool, 300, 10).await.expect("query").is_empty(),
+            "nothing may run for a site in the trash"
+        );
+        hostings::unmark_trashed(&pool, &id, 70)
+            .await
+            .expect("restore");
+        assert_eq!(
+            pending_due(&pool, 300, 10).await.expect("query").len(),
+            1,
+            "the held action is still there once the site is restored"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_overdue_leaves_future_actions_armed() {
+        let pool = open_memory().await.expect("open");
+        let id = fixture(&pool).await;
+        upsert(&pool, &id, ScheduledKind::Notify7d, 50, 1)
+            .await
+            .expect("past notice");
+        upsert(&pool, &id, ScheduledKind::DeleteExpired, 100, 1)
+            .await
+            .expect("past delete");
+        upsert(&pool, &id, ScheduledKind::SuspendExpired, 900, 1)
+            .await
+            .expect("future suspend");
+        let mut dropped = cancel_overdue_for_hosting(&pool, &id, 300)
+            .await
+            .expect("cancel");
+        dropped.sort_by_key(|k| k.as_str());
+        assert_eq!(
+            dropped,
+            vec![ScheduledKind::DeleteExpired, ScheduledKind::Notify7d]
+        );
+        let due_later = pending_due(&pool, 1000, 10).await.expect("query");
+        assert_eq!(due_later.len(), 1, "{due_later:?}");
+        assert_eq!(due_later[0].action, ScheduledKind::SuspendExpired);
+        // Reconciliation re-upserts the same (hosting, action, due) rows on
+        // every tick. The cancelled ones must stay cancelled.
+        upsert(&pool, &id, ScheduledKind::DeleteExpired, 100, 2)
+            .await
+            .expect("reconcile");
+        assert_eq!(pending_due(&pool, 1000, 10).await.expect("query").len(), 1);
     }
 
     #[tokio::test]

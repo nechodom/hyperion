@@ -2019,6 +2019,22 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// Only the reason TEXT comes from the database; everything else is the
     /// detail the caller already has. The operator's existing suspension
     /// notice is preserved rather than reworded by an unrelated action.
+    /// The text a suspended or trashed site's vhost shows visitors.
+    ///
+    /// Trash writes no suspension row, so reading one for a trashed site found
+    /// nothing — the generic "temporarily unavailable" page — or, for a site
+    /// suspended before it was trashed, that old reason (an unpaid invoice, say).
+    async fn suspended_notice(&self, id: &HostingId, state: HostingState) -> Option<String> {
+        if state == HostingState::Trashed {
+            return Some(TRASH_NOTICE.to_string());
+        }
+        hyperion_state::limits::get_suspension(&self.pool, id)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| s.reason_message)
+    }
+
     pub(crate) async fn write_vhost_for_state(
         &self,
         detail: &HostingDetail,
@@ -2027,11 +2043,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             detail.state,
             HostingState::Suspended | HostingState::Trashed
         ) {
-            let reason = hyperion_state::limits::get_suspension(&self.pool, &detail.id)
-                .await
-                .ok()
-                .flatten()
-                .and_then(|s| s.reason_message);
+            let reason = self.suspended_notice(&detail.id, detail.state).await;
             return self
                 .adapters
                 .nginx_apply_suspended(&detail.domain, detail.aliases.clone(), reason)
@@ -3260,7 +3272,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .nginx_apply_suspended(
                 &detail.domain,
                 detail.aliases.clone(),
-                Some("Hosting is in trash".into()),
+                Some(TRASH_NOTICE.into()),
             )
             .await
         {
@@ -3326,13 +3338,35 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 .await;
         }
         let _ = self.adapters.nginx_write_vhost(&detail).await;
-        hostings::unmark_trashed(&self.pool, &detail.id, now_secs())
+        // Before un-trashing, while the scheduler is still holding them: cancel
+        // the expiry actions that fell due during the stay. See
+        // `scheduler::pending_due` — replayed, a `DeleteExpired` put the site
+        // straight back in the trash within five minutes of this restore, or
+        // hard-deleted it with the trash switched off.
+        let now = now_secs();
+        let dropped =
+            hyperion_state::scheduler::cancel_overdue_for_hosting(&self.pool, &detail.id, now)
+                .await
+                .map_err(|e| RpcError::Internal_with(format!("expiry actions: {e}")))?;
+        let dropped: Vec<&str> = dropped.iter().map(|k| k.as_str()).collect();
+        if !dropped.is_empty() {
+            tracing::warn!(
+                domain = %detail.domain, actions = ?dropped,
+                "restored from trash: expiry actions that fell due meanwhile were cancelled — \
+                 set a new expiry if the site should still expire"
+            );
+        }
+        hostings::unmark_trashed(&self.pool, &detail.id, now)
             .await
             .map_err(|e| RpcError::Internal_with(format!("unmark: {e}")))?;
         self.append_audit(
             "hosting.trash.restore",
             Some(detail.id.as_str()),
-            &serde_json::json!({"domain": detail.domain}).to_string(),
+            &serde_json::json!({
+                "domain": detail.domain,
+                "expiry_actions_cancelled": dropped,
+            })
+            .to_string(),
             "ok",
         )
         .await;
@@ -11627,11 +11661,23 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             // operator knows they have simply was not there, with no way to
             // tell whether that was good news or a broken sweep. The page
             // sorts by severity anyway, so clean sites settle at the bottom.
-            let domain = summaries
+            //
+            // A hosting that does not resolve is TRASHED or gone — `list()`
+            // is `WHERE state != 'trashed'` — and its stored scan outlives it
+            // in `hosting_kv` so that un-trashing restores the history.
+            //
+            // It must not become a row. `unwrap_or_default()` here put a
+            // nameless line on the cluster dashboard with a node, a count and
+            // a timestamp but no site: nothing an operator can click, act on,
+            // or match to anything they own. And the finding is not actionable
+            // either way, because a trashed site is deliberately not running.
+            let Some(domain) = summaries
                 .iter()
                 .find(|s| s.id.as_str() == hid)
                 .map(|s| s.domain.clone())
-                .unwrap_or_default();
+            else {
+                continue;
+            };
             out.push(hyperion_types::HostingVulnSummary {
                 hosting_id: hid,
                 domain,
@@ -11941,11 +11987,15 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             let Ok(st) = serde_json::from_str::<StoredIntegrityScan>(&json) else {
                 continue;
             };
-            let domain = summaries
+            // Same as `vuln_findings_list`: a hosting that does not resolve is
+            // trashed or gone, and a nameless row is not information.
+            let Some(domain) = summaries
                 .iter()
                 .find(|s| s.id.as_str() == hid)
                 .map(|s| s.domain.clone())
-                .unwrap_or_default();
+            else {
+                continue;
+            };
             out.push(hyperion_types::HostingIntegritySummary {
                 hosting_id: hid,
                 domain,
@@ -16150,6 +16200,12 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             hyperion_state::hosting_kv::list_by_key(&self.pool, CARE_REPORT_BLOCKED_KEY).await
         {
             for (hid, domain) in blocked {
+                // The marker outlives a trip to the trash (only the purge
+                // removes it), and nothing is owed to a site that is not
+                // running — `summaries` is the non-trashed list.
+                if !summaries.iter().any(|s| s.id.as_str() == hid) {
+                    continue;
+                }
                 out.push(DashboardAlert {
                     kind: "care_report_blocked".into(),
                     // The site is up and serving. See the rule on `notify_admins`.
@@ -16404,9 +16460,20 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let rows = hyperion_state::certificates::list_all(&self.pool)
             .await
             .map_err(|e| RpcError::Internal_with(format!("cert_overview list: {e}")))?;
+        // A trashed site's certificate is still on disk (and still renewed,
+        // so a restore comes back with a valid one), but it is not a site the
+        // operator runs. Rows with no hosting at all — the panel's own
+        // certificate — are kept.
+        let trashed: std::collections::HashSet<String> = hostings::list_trashed(&self.pool)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("cert_overview trashed: {e}")))?
+            .into_iter()
+            .map(|h| h.domain)
+            .collect();
         let now = now_secs();
         Ok(rows
             .into_iter()
+            .filter(|r| !trashed.contains(&r.domain))
             .map(|r| {
                 let days_left = (r.not_after - now) / 86400;
                 let band = if r.not_after <= now {
@@ -17569,6 +17636,14 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 Ok(d) => d,
                 Err(_) => continue,
             };
+            // A trashed site is out of this entirely. It is not `Suspended`, so
+            // it fell through to the decision as if it were live: notify mode
+            // mailed the owner about the disk of a site they had thrown away,
+            // and suspend mode had `suspend()` refuse it and logged "will
+            // retry" every five minutes until the purge.
+            if detail.state == HostingState::Trashed {
+                continue;
+            }
             // Kernel-authoritative usage (whole-user, matches the setquota
             // scope). None ⇒ quotas aren't active/readable ⇒ skip rather than
             // act on an unreliable du estimate or a probe glitch.
@@ -19509,12 +19584,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                                 // is already showing, so a renewal does not
                                 // silently reword the operator's suspension
                                 // notice.
-                                let reason =
-                                    hyperion_state::limits::get_suspension(&self.pool, &row.id)
-                                        .await
-                                        .ok()
-                                        .flatten()
-                                        .and_then(|s| s.reason_message);
+                                let reason = self.suspended_notice(&row.id, row.state).await;
                                 let aliases = hostings::aliases(&self.pool, &row.id)
                                     .await
                                     .unwrap_or_default();
@@ -19614,7 +19684,17 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             // goes red on the dashboard. Same per-cert kind for the
             // bell to render distinct rows.
             let days_left = (cert.not_after - now) / 86400;
+            // A trashed site's certificate is still renewed, so a restore does
+            // not come back serving an expired one — but nobody is to be paged
+            // about it. The usual reason a site is in the trash is that its
+            // customer left and pointed DNS elsewhere, so HTTP-01 fails every
+            // day, and this was a fresh bell entry every day until the purge,
+            // for a site the certificates page no longer lists.
+            let trashed = hosting_row
+                .as_ref()
+                .is_some_and(|r| r.state == HostingState::Trashed);
             match &outcome {
+                _ if trashed => {}
                 CertRenewOutcome::Failed { error } => {
                     self.notify_admins_say(
                         // Red once the certificate is actually EXPIRED —
@@ -19827,9 +19907,16 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // smooth but ~24x inflated — this is the second half of that fix.)
         let (total_bw_out, total_requests) =
             match hyperion_state::limits::usage_rollup_all(&self.pool, 24).await {
-                Ok(rows) => rows.iter().fold((0i64, 0i64), |(b, r), row| {
-                    (b + row.bw_out_bytes, r + row.php_requests)
-                }),
+                // Only sites still on the node's list. A trashed site stops
+                // being sampled, so its last 24 buckets FREEZE — and a rollup
+                // that takes "the last 24, however old" added that frozen day
+                // of traffic to the node's totals on every tick until purge.
+                Ok(rows) => rows
+                    .iter()
+                    .filter(|row| summaries.iter().any(|s| s.id == row.hosting_id))
+                    .fold((0i64, 0i64), |(b, r), row| {
+                        (b + row.bw_out_bytes, r + row.php_requests)
+                    }),
                 // Rollup failing must not sink the whole sample — fall
                 // back to the hour-to-date sums, which are at least real
                 // traffic, and let the next tick correct the shape.
@@ -24339,6 +24426,13 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         activate: bool,
     ) -> Result<(String, String), RpcError> {
         let detail = self.get(sel).await?;
+        // wp-cli runs the site's own PHP as the site's user. A trashed site has
+        // no FPM pool, a locked login and a locked database, on purpose.
+        if detail.state == HostingState::Trashed {
+            return Err(RpcError::Conflict {
+                message: format!("{} is in the trash — restore it first", detail.domain),
+            });
+        }
         let row = hyperion_state::wp_assets::get_by_id(&self.pool, asset_id)
             .await
             .map_err(|e| RpcError::Internal_with(format!("wp_asset lookup: {e}")))?
@@ -24512,6 +24606,14 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         for t in &targets {
             let activate = force_activate.unwrap_or(t.activate);
             let sel = HostingSelector::Id(hyperion_types::HostingId(t.hosting_id.clone()));
+            // Skipped, not failed: a site in the trash is not broken, and
+            // `wp_install_from_asset` refuses it anyway.
+            if matches!(
+                self.get(sel.clone()).await.map(|d| d.state),
+                Ok(HostingState::Trashed)
+            ) {
+                continue;
+            }
             // Re-run the same install path. Reusing wp_install_from_asset
             // means it also updates record_install (bumps last_at) for free.
             match self.wp_install_from_asset(sel, asset_id, activate).await {
@@ -29109,6 +29211,15 @@ struct StoredVulnScan {
 /// `hosting_kv` key holding the last integrity scan, sibling to
 /// `vuln_scan`.
 const INTEGRITY_KV_KEY: &str = "integrity_scan";
+
+/// The notice a trashed site's suspended vhost shows.
+///
+/// A constant because two places render it: `trash_hosting`, and the
+/// certificate renewal that re-applies the suspended vhost to reload nginx.
+/// `trash_hosting` writes no suspension row, so the renewal used to find no
+/// reason on file and put the generic "temporarily unavailable" text on a
+/// site that is not coming back.
+const TRASH_NOTICE: &str = "Hosting is in trash";
 
 /// `hosting_kv` key gating the daily integrity sweep for ONE hosting —
 /// the per-site switch a care package sells (and enforces).
@@ -38399,6 +38510,179 @@ mod tests {
             .expect("monitor read")
             .expect("monitor row")
             .enabled
+    }
+
+    /// A trashed site keeps its stored scan — un-trashing restores the
+    /// history — but must not appear on the cluster dashboards.
+    ///
+    /// It used to: `list()` is `WHERE state != 'trashed'`, the lookup fell
+    /// back to an empty domain, and the row was pushed anyway. The operator
+    /// got a line with a node, a count and a timestamp and no site name:
+    /// nothing to click and nothing to act on, for a site that is deliberately
+    /// not running.
+    #[tokio::test]
+    async fn a_trashed_site_leaves_no_nameless_row_on_the_cluster_lists() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), package_mocks());
+        let site = hosting_for_packages(&s, "kos.cz").await;
+
+        // A stored scan of each kind, as the nightly sweep leaves behind.
+        let vuln = serde_json::to_string(&StoredVulnScan {
+            scanned_at: 1,
+            result: hyperion_types::WpVulnScanResult::default(),
+        })
+        .expect("encode vuln");
+        let integrity = serde_json::to_string(&StoredIntegrityScan {
+            scanned_at: 1,
+            clamav_at: 0,
+            result: hyperion_types::WpIntegrityScanResult::default(),
+        })
+        .expect("encode integrity");
+        for (key, json) in [("vuln_scan", vuln), (INTEGRITY_KV_KEY, integrity)] {
+            hyperion_state::hosting_kv::set(&pool, site.id.as_str(), key, &json, now_secs())
+                .await
+                .expect("store scan");
+        }
+        assert_eq!(
+            s.vuln_findings_list().await.expect("vulns").len(),
+            1,
+            "a live site with a stored scan is listed"
+        );
+        assert_eq!(
+            s.integrity_findings_list().await.expect("integrity").len(),
+            1,
+            "a live site with a stored integrity scan is listed"
+        );
+
+        hyperion_state::hostings::mark_trashed(&pool, &site.id, now_secs())
+            .await
+            .expect("trash");
+
+        let vulns = s.vuln_findings_list().await.expect("vulns");
+        assert!(
+            vulns.is_empty(),
+            "a trashed site must leave no row at all, let alone a nameless one: {vulns:?}"
+        );
+        let integrity = s.integrity_findings_list().await.expect("integrity");
+        assert!(
+            integrity.is_empty(),
+            "same rule on the integrity list: {integrity:?}"
+        );
+
+        // The record itself survives, so un-trashing brings the history back.
+        assert!(
+            hyperion_state::hosting_kv::get(&pool, site.id.as_str(), "vuln_scan")
+                .await
+                .expect("kv read")
+                .is_some(),
+            "the stored scan must not be deleted, only hidden"
+        );
+    }
+
+    /// A restore must not be undone by the expiry actions that fell due while
+    /// the site was in the trash.
+    #[tokio::test]
+    async fn restore_from_trash_does_not_replay_what_fell_due_meanwhile() {
+        use hyperion_state::scheduler::{self, ScheduledKind};
+        let pool = open_memory().await.expect("open");
+        let mut mocks = package_mocks();
+        mocks.expect_linux_unlock_login().returning(|_| Ok(()));
+        mocks.expect_db_unlock().returning(|_, _| Ok(()));
+        let s = svc(pool.clone(), mocks);
+        let site = hosting_for_packages(&s, "kos.cz").await;
+        let now = now_secs();
+        scheduler::upsert(
+            &pool,
+            &site.id,
+            ScheduledKind::DeleteExpired,
+            now - 86_400,
+            1,
+        )
+        .await
+        .expect("overdue delete");
+        scheduler::upsert(&pool, &site.id, ScheduledKind::Notify7d, now + 86_400, 1)
+            .await
+            .expect("future notice");
+        hyperion_state::hostings::mark_trashed(&pool, &site.id, now - 2 * 86_400)
+            .await
+            .expect("trash");
+
+        s.restore_from_trash(HostingSelector::Id(site.id.clone()))
+            .await
+            .expect("restore");
+
+        assert!(
+            scheduler::pending_due(&pool, now + 60, 10)
+                .await
+                .expect("due")
+                .is_empty(),
+            "the delete that fell due in the trash must not run on the restored site"
+        );
+        let later = scheduler::pending_due(&pool, now + 2 * 86_400, 10)
+            .await
+            .expect("later");
+        assert_eq!(later.len(), 1, "a future warning stays armed: {later:?}");
+        assert_eq!(later[0].action, ScheduledKind::Notify7d);
+    }
+
+    /// The rest of the node's views of a trashed site: the dashboard, the
+    /// certificate overview, and the WordPress asset library.
+    #[tokio::test]
+    async fn a_trashed_site_raises_no_alert_lists_no_cert_and_runs_no_wp_cli() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), package_mocks());
+        let site = hosting_for_packages(&s, "kos.cz").await;
+        hyperion_state::hosting_kv::set(
+            &pool,
+            site.id.as_str(),
+            CARE_REPORT_BLOCKED_KEY,
+            "kos.cz",
+            now_secs(),
+        )
+        .await
+        .expect("marker");
+        hyperion_state::certificates::upsert(
+            &pool,
+            "kos.cz",
+            1,
+            now_secs() + 60 * 86_400,
+            "/c",
+            "/k",
+            "Let's Encrypt",
+        )
+        .await
+        .expect("cert");
+        let blocked =
+            |alerts: &[DashboardAlert]| alerts.iter().any(|a| a.kind == "care_report_blocked");
+        assert!(blocked(&s.dashboard_alerts().await.expect("alerts")));
+        assert!(s
+            .cert_overview()
+            .await
+            .expect("certs")
+            .iter()
+            .any(|c| c.domain == "kos.cz"));
+
+        hyperion_state::hostings::mark_trashed(&pool, &site.id, now_secs())
+            .await
+            .expect("trash");
+
+        assert!(
+            !blocked(&s.dashboard_alerts().await.expect("alerts")),
+            "nothing is owed to a site in the trash"
+        );
+        assert!(
+            !s.cert_overview()
+                .await
+                .expect("certs")
+                .iter()
+                .any(|c| c.domain == "kos.cz"),
+            "a trashed site's certificate is not one the operator runs"
+        );
+        let err = s
+            .wp_install_from_asset(HostingSelector::Id(site.id.clone()), 1, false)
+            .await
+            .expect_err("wp-cli must not run for a trashed site");
+        assert!(matches!(err, RpcError::Conflict { .. }), "{err:?}");
     }
 
     /// A hosting plus the detail every package test needs.
