@@ -663,6 +663,14 @@ pub fn build_router(state: SharedState) -> Router {
             "/install/update-node-status",
             get(handlers::install::get_update_node_status),
         )
+        .route(
+            "/install/os-updates-panel",
+            get(handlers::install::get_os_updates),
+        )
+        .route(
+            "/install/os-updates-check",
+            post(handlers::install::post_os_updates_check),
+        )
         .route("/hostings/:selector", get(handlers::hostings::get_detail))
         // Lazy HTMX fragments for the detail page — both shell out
         // to dig/curl on the agent and would otherwise gate the

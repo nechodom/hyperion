@@ -642,6 +642,206 @@ fn render_update_status(s: &hyperion_types::NodeUpdateStatus) -> String {
     out
 }
 
+/// GET /install/os-updates-panel?node_id=… — a node's operating-system update
+/// status as an HTML fragment. Lazy-loaded per card: the answer may involve a
+/// couple of seconds of `apt list` on the node when packages changed since its
+/// last check, and the page must not wait on every node doing that.
+pub async fn get_os_updates(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    axum::extract::Query(q): axum::extract::Query<UpdateNodeStatusQuery>,
+) -> Response {
+    os_updates_fragment(&state, &ctx, &q.node_id, Request::OsUpdatesStatus).await
+}
+
+/// POST /install/os-updates-check — refresh the node's package index and
+/// re-read what is pending. Read-only on the node: nothing is installed.
+///
+/// Inline rather than a background job. It is `apt-get update` — seconds, a
+/// minute on a slow mirror — and the result is persisted on the node, so a
+/// dropped connection loses nothing: the next page load shows it.
+pub async fn post_os_updates_check(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<TestNodeForm>,
+) -> Response {
+    os_updates_fragment(
+        &state,
+        &ctx,
+        &form.node_id,
+        Request::OsUpdatesCheck { refresh: true },
+    )
+    .await
+}
+
+async fn os_updates_fragment(
+    state: &SharedState,
+    ctx: &AuthCtx,
+    node_id: &str,
+    req: Request,
+) -> Response {
+    let html = |status: axum::http::StatusCode, body: String| {
+        (status, [("content-type", "text/html; charset=utf-8")], body).into_response()
+    };
+    if !ctx.is_super_admin() {
+        return html(
+            axum::http::StatusCode::FORBIDDEN,
+            "<span class=\"pill err\">admin only</span>".into(),
+        );
+    }
+    let node_id = match node_id.trim() {
+        "" => "local",
+        id => id,
+    };
+    if !node_id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    {
+        return html(
+            axum::http::StatusCode::BAD_REQUEST,
+            "<span class=\"pill err\">invalid node id</span>".into(),
+        );
+    }
+    let target = (node_id != "local").then_some(node_id);
+    let body = match crate::dispatcher::dispatch_to_node(state, target, req).await {
+        Ok(RpcResponse::OsUpdates(s)) => {
+            render_os_updates(node_id, &s, &super::session_csrf_token(state, ctx))
+        }
+        Ok(RpcResponse::Error(e)) => format!(
+            "<span class=\"text-soft small\">Could not read update status: {}</span>",
+            html_escape(&e.to_string())
+        ),
+        Ok(_) => "<span class=\"text-soft small\">unexpected response</span>".to_string(),
+        // An agent older than this panel cannot decode the request and answers
+        // HTTP 400, which curl reports as exit 22. That is not a connectivity
+        // problem, and the Test button on the same card would say so — show
+        // the actual reason instead of "unreachable".
+        Err(crate::dispatcher::DispatchError::Remote(
+            hyperion_rpc_client::RemoteClientError::HttpError {
+                code: Some(22),
+                stderr,
+            },
+        )) if stderr.contains("400") => "<span class=\"text-soft small\">This node runs an older \
+             Hyperion that does not report operating-system updates yet. Update Hyperion on it \
+             to see them.</span>"
+            .to_string(),
+        Err(e) => format!(
+            "<span class=\"text-soft small\">unreachable: {}</span>",
+            html_escape(&e.to_string())
+        ),
+    };
+    html(axum::http::StatusCode::OK, body)
+}
+
+/// Render a node's OS update status.
+///
+/// The rule it keeps: a count is only as good as the index it was read from,
+/// so "no updates" is never shown without how old that index is, and a node
+/// never checked says so instead of looking up to date.
+fn render_os_updates(node_id: &str, s: &hyperion_types::OsUpdateStatus, csrf: &str) -> String {
+    use crate::handlers::stats::fmt_ago;
+    let id = html_escape(node_id);
+    let mut pills = String::new();
+    if !s.was_checked() {
+        pills.push_str("<span class=\"pill\">not checked yet</span>");
+    } else if s.pending.is_empty() {
+        pills.push_str("<span class=\"pill ok\">no updates pending</span>");
+    } else {
+        let n = s.pending.len();
+        pills.push_str(&format!(
+            "<span class=\"pill warn\">{n} update{} pending</span>",
+            if n == 1 { "" } else { "s" }
+        ));
+        if s.security_count > 0 {
+            pills.push_str(&format!(
+                " <span class=\"pill err\" title=\"From the distribution's security suite\">{} security</span>",
+                s.security_count
+            ));
+        }
+    }
+    if s.reboot_required {
+        let title = if s.reboot_packages.is_empty() {
+            "The system marked a reboot as required".to_string()
+        } else {
+            format!("Requested by: {}", s.reboot_packages.join(", "))
+        };
+        pills.push_str(&format!(
+            " <span class=\"pill warn\" title=\"{}\">reboot required</span>",
+            html_escape(&title)
+        ));
+    }
+    let index_age = if s.index_refreshed_at > 0 {
+        format!("package index refreshed {}", fmt_ago(&s.index_refreshed_at))
+    } else {
+        "package index never refreshed by Hyperion".to_string()
+    };
+    let checked = if s.was_checked() {
+        format!(" · checked {}", fmt_ago(&s.checked_at))
+    } else {
+        String::new()
+    };
+    let mut out = format!(
+        "<div style=\"display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap\">\
+            {pills}\
+            <span class=\"text-soft small\">{index_age}{checked}</span>\
+            <form hx-post=\"/install/os-updates-check\" hx-target=\"#os-upd-{id}\" \
+                  hx-swap=\"innerHTML\" hx-disabled-elt=\"find button\" \
+                  hx-indicator=\"#os-upd-spin-{id}\" style=\"display:contents\">\
+              <input type=\"hidden\" name=\"_csrf\" value=\"{csrf}\">\
+              <input type=\"hidden\" name=\"node_id\" value=\"{id}\">\
+              <button type=\"submit\" class=\"btn small ghost\" \
+                      title=\"Runs apt-get update on the node and re-reads the list. Installs nothing.\">Check now</button>\
+            </form>\
+            <span id=\"os-upd-spin-{id}\" class=\"htmx-indicator text-soft small\">refreshing the package index…</span>\
+         </div>",
+        csrf = html_escape(csrf),
+    );
+    if !s.error.is_empty() {
+        out.push_str(&format!(
+            "<p class=\"small\" style=\"margin:0.4rem 0 0;color:var(--warn)\">{}</p>",
+            html_escape(&s.error)
+        ));
+    }
+    if !s.pending.is_empty() {
+        // Security first, then by name — the ones that matter at the top.
+        let mut pkgs: Vec<&hyperion_types::OsPendingPackage> = s.pending.iter().collect();
+        pkgs.sort_by(|a, b| b.security.cmp(&a.security).then(a.name.cmp(&b.name)));
+        out.push_str(&format!(
+            "<details style=\"margin-top:0.5rem\"><summary class=\"text-soft small\" style=\"cursor:pointer\">\
+             Show {} package{}</summary>\
+             <div style=\"max-height:16rem;overflow:auto;margin-top:0.4rem\"><table class=\"table small\">\
+             <thead><tr><th>Package</th><th>Installed</th><th>Available</th><th></th></tr></thead><tbody>",
+            pkgs.len(),
+            if pkgs.len() == 1 { "" } else { "s" }
+        ));
+        for p in pkgs {
+            out.push_str(&format!(
+                "<tr><td><code>{}</code></td><td class=\"muted\">{}</td><td>{}</td><td>{}</td></tr>",
+                html_escape(&p.name),
+                html_escape(&p.installed),
+                html_escape(&p.candidate),
+                if p.security {
+                    "<span class=\"pill err\">security</span>"
+                } else {
+                    ""
+                }
+            ));
+        }
+        out.push_str("</tbody></table></div></details>");
+        // The master has no node card: its install form sits under this panel.
+        out.push_str(if node_id == "local" {
+            "<p class=\"text-soft small\" style=\"margin:0.4rem 0 0\">\
+             To install them, open <strong>Install system updates on this server</strong> below. \
+             Services on this server may restart briefly while it runs.</p>"
+        } else {
+            "<p class=\"text-soft small\" style=\"margin:0.4rem 0 0\">\
+             To install them, use <strong>Update</strong> with <strong>System packages</strong> ticked. \
+             Services on the node may restart briefly while it runs.</p>"
+        });
+    }
+    out
+}
+
 fn urlencode(s: &str) -> String {
     s.bytes()
         .map(|b| match b {
@@ -900,5 +1100,71 @@ async fn fetch_cluster_test_node_ids(state: &SharedState) -> String {
     match hyperion_rpc_client::call(&state.agent_socket, Request::AgentConfigView).await {
         Ok(RpcResponse::AgentConfigView(c)) => c.cluster.test_node_ids,
         _ => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hyperion_types::{OsPendingPackage, OsUpdateStatus};
+
+    fn pkg(name: &str, security: bool) -> OsPendingPackage {
+        OsPendingPackage {
+            name: name.into(),
+            installed: "1.0".into(),
+            candidate: "1.1".into(),
+            security,
+        }
+    }
+
+    #[test]
+    fn a_node_never_checked_is_not_shown_as_up_to_date() {
+        let html = render_os_updates("s4", &OsUpdateStatus::default(), "tok");
+        assert!(html.contains("not checked yet"), "{html}");
+        assert!(!html.contains("no updates pending"), "{html}");
+        assert!(html.contains("never refreshed"), "{html}");
+    }
+
+    #[test]
+    fn pending_updates_render_escaped_with_security_first() {
+        let status = OsUpdateStatus {
+            checked_at: 1,
+            index_refreshed_at: 1,
+            pending: vec![
+                pkg("zlib1g", false),
+                pkg("<script>x", false),
+                pkg("openssl", true),
+            ],
+            security_count: 1,
+            reboot_required: true,
+            reboot_packages: vec!["kernel 6.1.0-26-amd64 (running 6.1.0-25-amd64)".into()],
+            ..Default::default()
+        };
+        let html = render_os_updates("worker-1.example", &status, "tok\"x");
+        assert!(html.contains("3 updates pending"), "{html}");
+        assert!(html.contains("1 security"), "{html}");
+        assert!(html.contains("reboot required"), "{html}");
+        assert!(
+            !html.contains("<script>x"),
+            "package names are escaped: {html}"
+        );
+        assert!(html.contains("&lt;script&gt;x"), "{html}");
+        assert!(
+            !html.contains("tok\"x"),
+            "the token is escaped in its attribute"
+        );
+        let openssl = html.find("<code>openssl</code>").expect("openssl row");
+        let zlib = html.find("<code>zlib1g</code>").expect("zlib row");
+        assert!(openssl < zlib, "security updates are listed first");
+        assert!(
+            html.contains("use <strong>Update</strong>"),
+            "a node points at its Update pane"
+        );
+
+        let master = render_os_updates("local", &status, "tok");
+        assert!(
+            master.contains("Install system updates on this server"),
+            "the master has no Update pane, so it points at its own form: {master}"
+        );
     }
 }

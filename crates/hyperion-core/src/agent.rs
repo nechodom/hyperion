@@ -845,6 +845,15 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
     async fn node_update_status(&self) -> Result<hyperion_types::NodeUpdateStatus, RpcError> {
         self.svc.node_update_status().await
     }
+    async fn os_updates_status(&self) -> Result<hyperion_types::OsUpdateStatus, RpcError> {
+        self.svc.os_updates_status().await
+    }
+    async fn os_updates_check(
+        &self,
+        refresh: bool,
+    ) -> Result<hyperion_types::OsUpdateStatus, RpcError> {
+        self.svc.os_updates_check(refresh).await
+    }
     async fn agent_config_update(
         &self,
         section: String,

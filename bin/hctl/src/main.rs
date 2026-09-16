@@ -1290,6 +1290,40 @@ fn print_pretty(resp: &Response) {
             }
         }
         Response::BackupOffsiteRestore(msg) => println!("✓ {msg}"),
+        Response::OsUpdates(s) => {
+            if !s.was_checked() {
+                println!("OS updates: never checked on this node");
+            } else {
+                println!(
+                    "OS updates: {} pending, {} of them security",
+                    s.pending.len(),
+                    s.security_count
+                );
+                // The age of the index is the age of the answer. Without it
+                // "0 pending" reads as "up to date" when it may mean "nobody
+                // has refreshed the package list in a month".
+                println!("  package index last refreshed: unix:{}", s.index_refreshed_at);
+                for p in &s.pending {
+                    println!(
+                        "  {}{} {} -> {}",
+                        if p.security { "[security] " } else { "" },
+                        p.name,
+                        p.installed,
+                        p.candidate
+                    );
+                }
+            }
+            if s.reboot_required {
+                println!("REBOOT REQUIRED{}", if s.reboot_packages.is_empty() {
+                    String::new()
+                } else {
+                    format!(" (for: {})", s.reboot_packages.join(", "))
+                });
+            }
+            if !s.error.is_empty() {
+                println!("! {}", s.error);
+            }
+        }
         Response::WpRegistration(r) => {
             println!(
                 "public sign-ups: {}",
