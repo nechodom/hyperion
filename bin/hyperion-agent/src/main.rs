@@ -883,6 +883,17 @@ async fn main() -> anyhow::Result<()> {
                 Ok(_) => {}
                 Err(e) => tracing::warn!(error=%e, "startup: Redis ACL re-assert failed"),
             }
+            // Disable the logins of sites that are suspended or in the trash.
+            // Versions before this locked only the site user's password, which
+            // left extra FTP logins and SFTP keys working on an offline site.
+            match tick_svc.offline_logins_lock_on_boot().await {
+                Ok(n) if n > 0 => tracing::info!(
+                    sites = n,
+                    "startup: disabled every login of offline sites locked by an older version"
+                ),
+                Ok(_) => {}
+                Err(e) => tracing::warn!(error=%e, "startup: offline login lock failed"),
+            }
             // Repoint any stale vsftpd local_root ONCE at startup, before the
             // loop. The loop skips its first tick, so without this an FTP
             // population broken by a bug the deploy just fixed would stay
@@ -969,6 +980,16 @@ async fn main() -> anyhow::Result<()> {
                     }
                     Ok(_) => {}
                     Err(e) => tracing::warn!(error=%e, "ftp autoheal tick failed"),
+                }
+                // Finish any unlock of a returned site's logins that did not
+                // complete — without this a login whose restore failed once
+                // stayed disabled on a live site with nothing to retry it.
+                match tick_svc.offline_logins_reconcile().await {
+                    Ok(n) if n > 0 => {
+                        tracing::warn!(accounts = n, "re-enabled logins of sites back online")
+                    }
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!(error=%e, "login reconcile tick failed"),
                 }
             }
         });

@@ -124,6 +124,12 @@ impl hyperion_core::AdapterPort for StubAdapters {
     async fn linux_unlock_login(&self, _: &str) -> Result<(), AdapterError> {
         Ok(())
     }
+    async fn linux_login_expiry(&self, _: &str) -> Result<Option<String>, AdapterError> {
+        Ok(Some(String::new()))
+    }
+    async fn linux_set_login_expiry(&self, _: &str, _: &str) -> Result<(), AdapterError> {
+        Ok(())
+    }
     async fn kill_user_procs(&self, _: &str) -> Result<(), AdapterError> {
         Ok(())
     }
