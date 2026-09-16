@@ -37990,6 +37990,19 @@ mod tests {
         );
         let o = s.snapshot_overview(sel.clone()).await.expect("overview");
         assert!(o.snapshots.is_empty());
+        // A retry of "delete all" on an empty repository prunes on its own
+        // (the recovery path after a prune that failed) and succeeds.
+        assert_eq!(
+            s.snapshot_delete(sel.clone(), vec![], true)
+                .await
+                .expect("delete all again"),
+            0
+        );
+        // An id that was never there is refused before restic runs.
+        assert!(s
+            .snapshot_delete(sel.clone(), vec!["latest".into()], false)
+            .await
+            .is_err());
         let _ = std::fs::remove_dir_all(&repo.path);
     }
 
