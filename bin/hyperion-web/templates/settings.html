@@ -1608,9 +1608,9 @@
       Backup retention
     </h2>
     <p class="text-soft small" style="margin:0.3rem 0 0.6rem">
-      This governs <strong>backup archives</strong>. Snapshots have their own rule below. Trash and
-      audit-log retention live on the <a href="/settings#retention">Data retention tab</a>.
-      Saved on every node.
+      This governs <strong>backup archives</strong> — and snapshots too, until the Snapshot retention
+      card below has been saved once. Trash and audit-log retention live on the
+      <a href="/settings#retention">Data retention tab</a>. Saved on every node.
     </p>
     <form method="post" action="/settings/config" autocomplete="off">
       <input type="hidden" name="_csrf" value="{{ csrf_token }}">
@@ -1645,7 +1645,7 @@
     </h2>
     <p class="text-soft small" style="margin:0.3rem 0 0.6rem">
       Currently: snapshots are <strong>{{ config.snapshot_retention.describe() }}</strong>.
-      Saved on every node.
+      Until this card is saved, snapshots follow the archive rule above. Saved on every node.
     </p>
     <form method="post" action="/settings/config" autocomplete="off">
       <input type="hidden" name="_csrf" value="{{ csrf_token }}">

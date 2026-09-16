@@ -3383,7 +3383,7 @@
    the node is gone). The summary card on top says how this site is set up and
    carries the one action most visits are for; the rarer restore paths are
    folded away at the bottom. #}
-<div class="card">
+<div class="card" style="margin-bottom:0.9rem">
   <div class="row" style="align-items:center;gap:0.6rem;margin-bottom:0.5rem;flex-wrap:wrap">
     <h2 style="margin:0">
       <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
@@ -3401,8 +3401,8 @@
   </div>
   <p class="text-soft small" style="margin:0 0 0.7rem;line-height:1.6">
     This site has three kinds of copy, listed below in this order.
-    <strong>Archives</strong> hold the whole site and its database as one file on this site's node,
-    made on a schedule or when you click <em>Back up now</em>.
+    <strong>Archives</strong> are a <code>.tar.gz</code> of the site's files with a database dump
+    beside it, kept on this site's node and made on a schedule or when you click <em>Back up now</em>.
     <strong>Snapshots</strong> are taken before automatic updates or by hand; they stay on the node,
     can show what changed, and restoring one replaces the site.
     <strong>Off-site copies</strong> are the archives on the remote server — what is left if the node
@@ -3410,7 +3410,8 @@
   </p>
   <div class="row" style="gap:1.2rem;flex-wrap:wrap;font-size:0.85rem;margin-bottom:0.2rem">
     <span><span class="text-soft">Automatic backups:</span>
-      <strong>{% if backup_cadence == "daily" %}daily{% else if backup_cadence == "weekly" %}weekly{% else if backup_cadence == "monthly" %}monthly{% else %}off — only when you click{% endif %}</strong></span>
+      <strong>{% if backup_cadence == "daily" %}daily{% else if backup_cadence == "weekly" %}weekly{% else if backup_cadence == "monthly" %}monthly{% else %}off — only when you click{% endif %}</strong>
+      {% if backups_paused_by_mode && backup_cadence != "off" %}<span class="pill warn" style="font-size:0.6rem;margin-left:0.3rem" title="Settings → Backups is set to keep snapshots only. Scheduled archives run only for sites whose care package sells backups.">paused — snapshots-only mode</span>{% endif %}</span>
     {% if !backup_target_options.is_empty() %}
     <span><span class="text-soft">Off-site copy:</span>
       <strong>{% if backup_target.is_empty() %}{{ backup_target_default_label }}{% else %}{{ backup_target }}{% endif %}</strong></span>
@@ -3489,9 +3490,10 @@
     Archives
   </h2>
   <p class="text-soft small" style="margin:0 0 0.6rem">
-    Kept in <code>/var/lib/hyperion/backups/local/{{ detail.system_user }}/</code> on this site's node.
-    Restoring an archive writes its files <strong>over</strong> the site (files added since stay)
-    and replaces the database.
+    Kept in <code>/var/lib/hyperion/backups/local/{{ detail.system_user }}/</code> on this site's node,
+    each as the site's files (<code>.tar.gz</code>) plus a database dump (<code>.sql</code>). Restoring
+    writes the files <strong>over</strong> the site (files added since stay) and replaces the database.
+    <em>Download</em> gets the files archive only.
   </p>
   {# Live region: a running backup flips to ok, and a backup started from the
      job progress page shows up on return — no F5. Driver in base.html. The
@@ -3626,8 +3628,10 @@
   <div class="card-section" style="margin-top:0.8rem">
     <h3 style="font-size:0.9rem;margin:0 0 0.5rem">From a .tar.gz upload</h3>
     <p class="muted" style="margin:0 0 0.8rem;font-size:0.85rem">
-      Upload a previously taken archive (max 2 GiB). It is saved to
-      <code>/var/lib/hyperion/backups/incoming/</code>, then restored.
+      Upload a previously taken files archive (max 2 GiB). It is saved to
+      <code>/var/lib/hyperion/backups/incoming/</code>, then restored. This restores
+      <strong>files only</strong> — the database dump is a separate file and is not part of the
+      upload.
     </p>
     {# CSRF token rides in the action URL because multipart bodies
        aren't parsed by the middleware (it would buffer the whole
@@ -3635,7 +3639,7 @@
     <form method="post" action="/hostings/restore-upload?_csrf={{ csrf_token }}"
           enctype="multipart/form-data"
           data-confirm-title="Restore from uploaded archive"
-          data-confirm-body="The files and database of {{ detail.domain }} are overwritten with the uploaded archive."
+          data-confirm-body="The files of {{ detail.domain }} are overwritten with the ones in the uploaded archive. The database is not touched."
           data-confirm-confirm-label="Restore"
           data-confirm-variant="danger">
       <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
@@ -3652,11 +3656,12 @@
   <div class="card-section" data-role-min="admin">
     <h3 style="font-size:0.9rem;margin:0 0 0.5rem">From an archive already on the server</h3>
     <p class="muted" style="margin:0 0 0.8rem;font-size:0.85rem">
-      The full path of an archive under one of the backup roots on this site's node.
+      The full path of an archive under one of the backup roots on this site's node. Its database
+      is restored too when a dump with the same name (<code>.sql</code>) sits beside it.
     </p>
     <form method="post" action="/hostings/restore"
           data-confirm-title="Restore from archive"
-          data-confirm-body="The files and database of {{ detail.domain }} are overwritten."
+          data-confirm-body="The files of {{ detail.domain }} are overwritten with the ones in that archive, and its database too if a matching .sql dump sits beside it."
           data-confirm-confirm-label="Restore"
           data-confirm-variant="danger">
       <input type="hidden" name="_csrf" value="{{ csrf_restore }}">

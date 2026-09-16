@@ -9849,9 +9849,47 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             t
         };
         if targets.is_empty() {
+            // Nothing left to forget — which is also what a retry sees after a
+            // delete that forgot everything and then failed while pruning. So
+            // prune on its own, or that space is never freed.
+            if all {
+                restic::prune(&repo)
+                    .await
+                    .map_err(|e| RpcError::Internal_with(format!("snapshot prune: {e}")))?;
+            }
             return Ok(0);
         }
-        forget_with_unlock(&repo, &targets).await?;
+        if let Err(e) = forget_with_unlock(&repo, &targets).await {
+            // restic forgets first and prunes second. If the prune is what
+            // failed, the snapshots ARE gone: record that, and say the space
+            // was not freed, rather than report a delete that did not happen.
+            let still_there = snapshot_summaries(&repo).await.unwrap_or_default();
+            let removed: Vec<&String> = targets
+                .iter()
+                .filter(|t| !still_there.iter().any(|s| &s.id == *t))
+                .collect();
+            if removed.is_empty() {
+                return Err(e);
+            }
+            self.append_audit(
+                "hosting.snapshot.delete",
+                Some(detail.id.as_str()),
+                &serde_json::json!({
+                    "domain": detail.domain,
+                    "all": all,
+                    "snapshots": removed,
+                    "space_reclaimed": false,
+                })
+                .to_string(),
+                "warn",
+            )
+            .await;
+            return Err(RpcError::Internal_with(format!(
+                "{} snapshot(s) were deleted, but freeing the space they used failed ({e}). \
+                 Delete all again to retry the cleanup; the daily retention sweep also retries it.",
+                removed.len()
+            )));
+        }
         let remaining = snapshot_summaries(&repo).await?;
         let survivors: Vec<&str> = remaining
             .iter()

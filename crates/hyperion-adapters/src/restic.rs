@@ -298,6 +298,19 @@ pub async fn forget_ids(repo: &Repo, ids: &[String]) -> Result<(), AdapterError>
     Ok(())
 }
 
+/// Reclaim the space of data no snapshot references any more.
+///
+/// Normally part of [`forget_ids`]. On its own for the case where that call
+/// forgot the snapshots and then failed while pruning (a full disk, a killed
+/// process): the snapshots are gone, so no later forget of those ids will ever
+/// run a prune for them.
+pub async fn prune(repo: &Repo) -> Result<(), AdapterError> {
+    let mut args = repo.base_args();
+    args.push("prune".into());
+    cmd::run("/usr/bin/env", &as_env_args("restic", &args)).await?;
+    Ok(())
+}
+
 /// Is this a restic snapshot id (short or full)?
 pub fn is_snapshot_id(id: &str) -> bool {
     (8..=64).contains(&id.len()) && id.chars().all(|c| c.is_ascii_hexdigit())

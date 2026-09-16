@@ -38,11 +38,17 @@
     whenever you click <em>Snapshot now</em>. It holds the files and the database, lives on this
     site's node only, and restoring one <strong>replaces</strong> the site with it.
     {% if !retention.is_empty() %}
-    Snapshots are <strong>{{ retention }}</strong>
-    <span class="nowrap">(<a href="/settings#backups" data-role-min="super_admin">change</a>)</span>.
+    Snapshots are <strong>{{ retention }}</strong>{% if can_settings %}
+    (<a href="/settings#backups">change</a>){% endif %}.
     {% endif %}
   </p>
 
+  {% if protection_mode == "snapshots" %}
+  <p class="text-soft small" style="margin:0 0 0.6rem">
+    This node keeps <strong>snapshots only</strong>: scheduled archives are paused (except where a care
+    package sells backups), so snapshots are this site's main way back.
+  </p>
+  {% endif %}
   {% if engine == "not_installed" %}
   <div class="flash warn" style="margin:0 0 0.6rem">
     <div class="flash-body">The node that holds this site has no snapshot engine (<code>restic</code> is not installed), so no new snapshots can be taken there.</div>
@@ -53,7 +59,7 @@
   </div>
   {% else if engine == "mode_off" %}
   <div class="flash info" style="margin:0 0 0.6rem">
-    <div class="flash-body">This node keeps <strong>backup archives only</strong>, so no new snapshots are taken. Existing ones below can still be restored or deleted. <a href="/settings#backups" data-role-min="super_admin">Settings → Backups</a></div>
+    <div class="flash-body">This node keeps <strong>backup archives only</strong>, so no new snapshots are taken. Existing ones below can still be restored or deleted.{% if can_settings %} <a href="/settings#backups">Settings → Backups</a>{% endif %}</div>
   </div>
   {% endif %}
 

@@ -147,6 +147,10 @@ struct DetailTpl<'a> {
     /// Non-empty when the pin above resolves to nothing — the site is NOT
     /// going off-site and the card has to say so.
     backup_target_warning: String,
+    /// The panel keeps snapshots only, so the schedule above is not making
+    /// archives (unless a care package sells backups to the site). The mode
+    /// is saved on every node, so the master's copy speaks for the owner.
+    backups_paused_by_mode: bool,
     csrf_expiry_set: String,
     csrf_expiry_clear: String,
     csrf_dns_check: String,
@@ -1338,6 +1342,7 @@ pub async fn post_create(
                 backup_target_options: vec![],
                 backup_target_default_label: String::new(),
                 backup_target_warning: String::new(),
+                backups_paused_by_mode: false,
                 csrf_expiry_set: csrf_token_for(&state, &ctx, "/hostings/expiry/set"),
                 csrf_expiry_clear: csrf_token_for(&state, &ctx, "/hostings/expiry/clear"),
                 csrf_dns_check: csrf_token_for(&state, &ctx, "/hostings/dns-check"),
@@ -2339,6 +2344,7 @@ pub async fn get_detail(
         backup_target_options,
         backup_target_default_label,
         backup_target_warning,
+        backups_paused_by_mode: fetch_cluster_config(&state).await.protection_mode == "snapshots",
         csrf_profile_apply: csrf_token_for(&state, &ctx, "/profiles/apply"),
         profile_apply,
         applied_profile_name,
@@ -8127,7 +8133,7 @@ pub async fn post_wp_auto_update(
         }
     };
     let value = if form.enabled == "on" { "on" } else { "off" };
-    let _ = crate::dispatcher::dispatch_to_node(
+    let saved = crate::dispatcher::dispatch_to_node(
         &state,
         target.as_deref(),
         Request::HostingKvSet {
@@ -8137,10 +8143,36 @@ pub async fn post_wp_auto_update(
         },
     )
     .await;
+    // Security updates hang on this switch: a write that did not land must not
+    // come back as "saved".
+    let (key, msg) = match saved {
+        Ok(RpcResponse::HostingKvSet) => (
+            "flash",
+            if value == "on" {
+                "Automatic updates switched on.".to_string()
+            } else {
+                "Automatic updates switched off.".to_string()
+            },
+        ),
+        Ok(RpcResponse::Error(e)) => (
+            "flash_error",
+            format!("Automatic updates were not changed — the owning node refused it: {e}"),
+        ),
+        Ok(_) => (
+            "flash_error",
+            "Automatic updates were not changed — unexpected response.".to_string(),
+        ),
+        Err(e) => (
+            "flash_error",
+            format!(
+                "Automatic updates were not changed — the owning node could not be reached: {e}"
+            ),
+        ),
+    };
     Ok(Redirect::to(&format!(
-        "/hostings/{}?flash={}#wordpress",
+        "/hostings/{}?{key}={}#wordpress",
         sel_url,
-        urlencoding("Automatic updates setting saved.")
+        urlencoding(&msg)
     ))
     .into_response())
 }
@@ -12524,6 +12556,16 @@ pub async fn post_offsite_restore(
         .and_then(|(_d, n)| n);
     let filename = form.filename.trim().to_string();
     let mode = parse_restore_mode(form.mode.trim());
+    // Not offered: an off-site restore fetches the whole archive before it
+    // looks at the mode, so "database only" downloaded gigabytes to use none.
+    if mode == hyperion_types::BackupRestoreMode::DbOnly {
+        return Ok(Redirect::to(&format!(
+            "/hostings/{}?flash_error={}#backups",
+            urlencoding(&form.selector),
+            urlencoding("A database-only restore from the off-site copy is not supported.")
+        ))
+        .into_response());
+    }
     let actor_uid = ctx.session.as_ref().map(|s| s.user_id).unwrap_or(0);
     let actor_label = ctx.username.clone();
     let job_state = state.clone();
@@ -12764,9 +12806,15 @@ struct SnapshotsCardTpl {
     /// Whether THIS session may take or delete snapshots (`BackupRun`, the
     /// same capability as taking and deleting archives).
     can_manage: bool,
+    /// Whether THIS session may open Settings. Decided here: the card is
+    /// swapped in by htmx, after the page's role shim has already run, so a
+    /// `data-role-min` inside it hides nothing.
+    can_settings: bool,
     /// `ready`, `not_installed`, `disabled`, `mode_off`, or empty when the
     /// node could not be asked.
     engine: String,
+    /// The owning node's `[protection] mode`.
+    protection_mode: String,
     retention: String,
     repo_size: String,
     diff: Option<hyperion_types::SnapshotDiff>,
@@ -12851,6 +12899,10 @@ async fn render_snapshots(
                 csrf_snapshot_delete: csrf_token_for(state, ctx, "/hostings/snapshots/delete"),
                 can_restore,
                 can_manage,
+                can_settings: ctx.can(Capability::SettingsManage),
+                protection_mode: overview
+                    .map(|o| o.protection_mode.clone())
+                    .unwrap_or_default(),
                 engine: overview.map(|o| o.engine.clone()).unwrap_or_default(),
                 retention: overview.map(|o| o.retention.describe()).unwrap_or_default(),
                 repo_size: overview
@@ -13119,13 +13171,12 @@ pub async fn post_snapshot_delete(
             .await
             {
                 Ok(RpcResponse::SnapshotDeleted(n)) => {
-                    reporter
-                        .step(
-                            "Deleted.",
-                            100,
-                            &format!("✓ {n} snapshot(s) deleted, and the repository pruned\n"),
-                        )
-                        .await;
+                    let log = if n == 0 {
+                        "· nothing was left to delete; leftover space was reclaimed\n".to_string()
+                    } else {
+                        format!("✓ {n} snapshot(s) deleted, and the space they used freed\n")
+                    };
+                    reporter.step("Deleted.", 100, &log).await;
                     reporter.finish(true, None).await;
                 }
                 Ok(RpcResponse::Error(e)) => reporter.finish(false, Some(e.to_string())).await,
