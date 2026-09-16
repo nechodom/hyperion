@@ -237,10 +237,22 @@ pub async fn reboot_required() -> (bool, Vec<String>) {
 }
 
 /// Why the running kernel is not the one the machine would boot, if it is not.
+///
+/// Two ways that happens. A newer kernel package with a new name
+/// (`6.1.0-26-amd64` after `6.1.0-25-amd64`). Or the SAME name rebuilt: Debian
+/// has shipped security fixes that replace `linux-image-6.1.0-23-amd64` 6.1.98-1
+/// with 6.1.99-1 in place, and a name comparison sees nothing. For that, the
+/// package version the running kernel was built from — Debian writes it into
+/// the UTS version, `... Debian 6.1.98-1 (2024-07-02)` — is compared with the
+/// version of that package installed now.
 async fn kernel_reboot_reason() -> Option<String> {
     let running = tokio::fs::read_to_string("/proc/sys/kernel/osrelease")
         .await
         .ok()?;
+    let running = running.trim();
+    if let Some(reason) = same_name_kernel_rebuilt(running).await {
+        return Some(reason);
+    }
     let mut installed = Vec::new();
     let mut dir = tokio::fs::read_dir("/boot").await.ok()?;
     while let Ok(Some(entry)) = dir.next_entry().await {
@@ -252,8 +264,36 @@ async fn kernel_reboot_reason() -> Option<String> {
             installed.push(v.to_string());
         }
     }
-    newer_kernel_installed(running.trim(), &installed)
-        .map(|newest| format!("kernel {newest} (running {})", running.trim()))
+    newer_kernel_installed(running, &installed)
+        .map(|newest| format!("kernel {newest} (running {running})"))
+}
+
+async fn same_name_kernel_rebuilt(release: &str) -> Option<String> {
+    let uts = tokio::fs::read_to_string("/proc/sys/kernel/version")
+        .await
+        .ok()?;
+    let built_from = debian_kernel_build_version(&uts)?;
+    let package = format!("linux-image-{release}");
+    let (installed, _) = apt(
+        "/usr/bin/dpkg-query",
+        &["--show", "--showformat=${Version}", &package],
+    )
+    .await
+    .ok()?;
+    let installed = installed.trim();
+    (!installed.is_empty() && installed != built_from)
+        .then(|| format!("{package} {installed} (running {built_from})"))
+}
+
+/// The Debian package version in a kernel's UTS version string, e.g.
+/// `6.1.98-1` from `#1 SMP PREEMPT_DYNAMIC Debian 6.1.98-1 (2024-07-02)`.
+/// `None` for a kernel Debian did not build.
+fn debian_kernel_build_version(uts: &str) -> Option<&str> {
+    let mut words = uts.split_whitespace();
+    words.find(|w| *w == "Debian")?;
+    words
+        .next()
+        .filter(|v| v.chars().next().is_some_and(|c| c.is_ascii_digit()))
 }
 
 /// The newest installed kernel version, when it is newer than `running`.
@@ -405,6 +445,25 @@ W: Some index files failed to download. They have been ignored, or old ones used
         )
         .is_none());
         assert!(fetch_failure("").is_none());
+    }
+
+    #[test]
+    fn the_debian_build_version_is_read_from_the_uts_version() {
+        assert_eq!(
+            debian_kernel_build_version("#1 SMP PREEMPT_DYNAMIC Debian 6.1.99-1 (2024-07-15)\n"),
+            Some("6.1.99-1")
+        );
+        assert_eq!(
+            debian_kernel_build_version("#1 SMP PREEMPT_DYNAMIC Debian 6.12.9-1 (2025-01-11)"),
+            Some("6.12.9-1")
+        );
+        // Ubuntu, a custom build, or nothing after the word: no claim.
+        assert_eq!(
+            debian_kernel_build_version("#49-Ubuntu SMP PREEMPT_DYNAMIC"),
+            None
+        );
+        assert_eq!(debian_kernel_build_version("#1 SMP Debian"), None);
+        assert_eq!(debian_kernel_build_version(""), None);
     }
 
     #[test]

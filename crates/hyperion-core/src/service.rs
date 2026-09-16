@@ -9098,19 +9098,6 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .await
     }
 
-    /// `node_kv` key holding the last OS update check, as JSON.
-    ///
-    /// Persisted rather than cached in memory, because the agent restarts on
-    /// every hyperion update and a cold cache would render as "never checked"
-    /// on exactly the page an operator opens right after updating.
-    const OS_UPDATES_KV: &'static str = "os_updates.last";
-
-    /// `node_kv` key: when security updates were first seen pending.
-    ///
-    /// Its own key, so it survives a check that fails part-way: the age of an
-    /// unapplied security update must not reset because one refresh timed out.
-    const OS_SECURITY_SINCE_KV: &'static str = "os_updates.security_since";
-
     /// Check what the operating system has waiting.
     ///
     /// `refresh` runs `apt-get update` first — the slow, network half. The
@@ -9123,96 +9110,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         &self,
         refresh: bool,
     ) -> Result<hyperion_types::OsUpdateStatus, RpcError> {
-        use hyperion_adapters::os_updates;
-        let _one_at_a_time = OS_UPDATES_RUNNING.lock().await;
-        let now = now_secs();
-        let mut status = self.os_updates_stored().await.unwrap_or_default();
-
-        // A check that does not refresh keeps the last refresh's verdict: it
-        // learned nothing new about the mirrors.
-        if refresh {
-            match os_updates::refresh_index().await {
-                Ok(()) => {
-                    status.index_refreshed_at = now;
-                    status.refresh_error.clear();
-                }
-                Err(e) => {
-                    status.refresh_error = format!(
-                        "could not refresh the package index ({e}) — any pending list shown is \
-                         from the last index that did download, and may be out of date"
-                    );
-                }
-            }
-        }
-        status.error = status.refresh_error.clone();
-
-        let mut list_read = false;
-        match os_updates::list_pending().await {
-            Ok(pkgs) => {
-                list_read = true;
-                status.pending = pkgs
-                    .iter()
-                    .map(|p| hyperion_types::OsPendingPackage {
-                        name: p.name.clone(),
-                        installed: p.installed.clone(),
-                        candidate: p.candidate.clone(),
-                        security: p.is_security(),
-                    })
-                    .collect();
-                status.security_count = pkgs.iter().filter(|p| p.is_security()).count() as i64;
-                status.checked_at = now;
-            }
-            Err(e) => {
-                // Could not READ the list at all. Keep the previous one rather
-                // than blanking it — an empty list here would read as "nothing
-                // to install" — and say so.
-                let msg = format!("could not read pending updates: {e}");
-                status.error = if status.error.is_empty() {
-                    msg
-                } else {
-                    format!("{}; {msg}", status.error)
-                };
-            }
-        }
-
-        let (reboot, reboot_pkgs) = os_updates::reboot_required().await;
-        status.reboot_required = reboot;
-        status.reboot_packages = reboot_pkgs;
-
-        // The age of pending SECURITY updates. Stamped on the first check that
-        // sees any, cleared on the first that sees none — and only on a check
-        // that actually READ the list, so a failed read cannot reset the clock.
-        if list_read {
-            if status.security_count > 0 {
-                let since = hyperion_state::node_kv::get(&self.pool, Self::OS_SECURITY_SINCE_KV)
-                    .await
-                    .ok()
-                    .flatten()
-                    .and_then(|v| v.parse::<i64>().ok());
-                match since {
-                    Some(t) => status.security_pending_since = t,
-                    None => {
-                        status.security_pending_since = now;
-                        let _ = hyperion_state::node_kv::set(
-                            &self.pool,
-                            Self::OS_SECURITY_SINCE_KV,
-                            &now.to_string(),
-                            now,
-                        )
-                        .await;
-                    }
-                }
-            } else {
-                status.security_pending_since = 0;
-                let _ =
-                    hyperion_state::node_kv::delete(&self.pool, Self::OS_SECURITY_SINCE_KV).await;
-            }
-        }
-
-        if let Ok(json) = serde_json::to_string(&status) {
-            let _ = hyperion_state::node_kv::set(&self.pool, Self::OS_UPDATES_KV, &json, now).await;
-        }
-        Ok(status)
+        os_updates_check_in(&self.pool, refresh).await
     }
 
     /// The last recorded OS update check, brought up to date cheaply.
@@ -9254,12 +9152,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
 
     /// The last check exactly as persisted, with nothing re-read.
     async fn os_updates_stored(&self) -> Result<hyperion_types::OsUpdateStatus, RpcError> {
-        let raw = hyperion_state::node_kv::get(&self.pool, Self::OS_UPDATES_KV)
-            .await
-            .map_err(|e| RpcError::Internal_with(format!("os updates read: {e}")))?;
-        Ok(raw
-            .and_then(|r| serde_json::from_str(&r).ok())
-            .unwrap_or_default())
+        os_updates_stored_in(&self.pool).await
     }
 
     /// Sign-ups per scan window past which a site is not being used, it is
@@ -24910,8 +24803,20 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // Spawn the work. We deliberately don't await — the caller
         // gets the start time back and polls status.
         let slot = self.node_update.clone();
+        let pool = self.pool.clone();
         tokio::spawn(async move {
             run_update_script(slot, do_apt, do_hyperion, safe).await;
+            // The job just refreshed the index and installed packages, so the
+            // stored check is out of date in both halves — including a refresh
+            // error from before the operator fixed the mirrors, which would
+            // otherwise keep saying so for up to six hours. Re-check properly
+            // (with the strict refresh) rather than trust the job's own
+            // `apt-get update`, which exits 0 on a mirror it could not reach.
+            if do_apt {
+                if let Err(e) = os_updates_check_in(&pool, true).await {
+                    tracing::warn!(error = %e, "os updates re-check after node update failed");
+                }
+            }
         });
         self.append_audit(
             "node.update.start",
@@ -29413,6 +29318,128 @@ const INTEGRITY_KV_KEY: &str = "integrity_scan";
 /// reason on file and put the generic "temporarily unavailable" text on a
 /// site that is not coming back.
 const TRASH_NOTICE: &str = "Hosting is in trash";
+
+/// `node_kv` key holding the last OS update check, as JSON.
+///
+/// Persisted rather than cached in memory, because the agent restarts on
+/// every hyperion update and a cold cache would render as "never checked"
+/// on exactly the page an operator opens right after updating.
+const OS_UPDATES_KV: &str = "os_updates.last";
+
+/// `node_kv` key: when security updates were first seen pending.
+///
+/// Its own key, so it survives a check that fails part-way: the age of an
+/// unapplied security update must not reset because one refresh timed out.
+const OS_SECURITY_SINCE_KV: &str = "os_updates.security_since";
+
+/// The last OS update check exactly as persisted, with nothing re-read.
+async fn os_updates_stored_in(
+    pool: &sqlx::SqlitePool,
+) -> Result<hyperion_types::OsUpdateStatus, RpcError> {
+    let raw = hyperion_state::node_kv::get(pool, OS_UPDATES_KV)
+        .await
+        .map_err(|e| RpcError::Internal_with(format!("os updates read: {e}")))?;
+    Ok(raw
+        .and_then(|r| serde_json::from_str(&r).ok())
+        .unwrap_or_default())
+}
+
+/// [`HostingService::os_updates_check`], for callers holding only the pool
+/// (the node update job runs in a detached task).
+async fn os_updates_check_in(
+    pool: &sqlx::SqlitePool,
+    refresh: bool,
+) -> Result<hyperion_types::OsUpdateStatus, RpcError> {
+    use hyperion_adapters::os_updates;
+    let _one_at_a_time = OS_UPDATES_RUNNING.lock().await;
+    let now = now_secs();
+    let mut status = os_updates_stored_in(pool).await.unwrap_or_default();
+
+    // A check that does not refresh keeps the last refresh's verdict: it
+    // learned nothing new about the mirrors.
+    if refresh {
+        match os_updates::refresh_index().await {
+            Ok(()) => {
+                status.index_refreshed_at = now;
+                status.refresh_error.clear();
+            }
+            Err(e) => {
+                status.refresh_error = format!(
+                    "could not refresh the package index ({e}) — any pending list shown is \
+                     from the last index that did download, and may be out of date"
+                );
+            }
+        }
+    }
+    status.error = status.refresh_error.clone();
+
+    let mut list_read = false;
+    match os_updates::list_pending().await {
+        Ok(pkgs) => {
+            list_read = true;
+            status.pending = pkgs
+                .iter()
+                .map(|p| hyperion_types::OsPendingPackage {
+                    name: p.name.clone(),
+                    installed: p.installed.clone(),
+                    candidate: p.candidate.clone(),
+                    security: p.is_security(),
+                })
+                .collect();
+            status.security_count = pkgs.iter().filter(|p| p.is_security()).count() as i64;
+            status.checked_at = now;
+        }
+        Err(e) => {
+            // Could not READ the list at all. Keep the previous one rather
+            // than blanking it — an empty list here would read as "nothing
+            // to install" — and say so.
+            let msg = format!("could not read pending updates: {e}");
+            status.error = if status.error.is_empty() {
+                msg
+            } else {
+                format!("{}; {msg}", status.error)
+            };
+        }
+    }
+
+    let (reboot, reboot_pkgs) = os_updates::reboot_required().await;
+    status.reboot_required = reboot;
+    status.reboot_packages = reboot_pkgs;
+
+    // The age of pending SECURITY updates. Stamped on the first check that
+    // sees any, cleared on the first that sees none — and only on a check
+    // that actually READ the list, so a failed read cannot reset the clock.
+    if list_read {
+        if status.security_count > 0 {
+            let since = hyperion_state::node_kv::get(pool, OS_SECURITY_SINCE_KV)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|v| v.parse::<i64>().ok());
+            match since {
+                Some(t) => status.security_pending_since = t,
+                None => {
+                    status.security_pending_since = now;
+                    let _ = hyperion_state::node_kv::set(
+                        pool,
+                        OS_SECURITY_SINCE_KV,
+                        &now.to_string(),
+                        now,
+                    )
+                    .await;
+                }
+            }
+        } else {
+            status.security_pending_since = 0;
+            let _ = hyperion_state::node_kv::delete(pool, OS_SECURITY_SINCE_KV).await;
+        }
+    }
+
+    if let Ok(json) = serde_json::to_string(&status) {
+        let _ = hyperion_state::node_kv::set(pool, OS_UPDATES_KV, &json, now).await;
+    }
+    Ok(status)
+}
 
 /// Held for the duration of an OS update check.
 ///
