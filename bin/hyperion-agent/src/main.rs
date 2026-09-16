@@ -1246,6 +1246,28 @@ async fn main() -> anyhow::Result<()> {
             }
         });
     }
+    // Snapshot retention — daily. Deletes snapshots older than `[snapshots]
+    // keep_days` (keeping the newest `keep_last`) on every site that has a
+    // repository. Retention also runs after each new snapshot, but a site
+    // with nothing to update takes none, and without this sweep its old
+    // snapshots were never deleted at all.
+    {
+        let sr = svc.clone();
+        tokio::spawn(async move {
+            // 13 minutes in: clear of the wp-cli sweeps and the OS update
+            // check, which is also where restic spends its disk time.
+            tokio::time::sleep(std::time::Duration::from_secs(780)).await;
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(24 * 3600));
+            loop {
+                interval.tick().await;
+                match sr.snapshot_retention_tick().await {
+                    Ok(n) if n > 0 => tracing::info!(deleted = n, "snapshot retention sweep"),
+                    Ok(_) => tracing::debug!("snapshot retention sweep: nothing old enough"),
+                    Err(e) => tracing::warn!(error=%e, "snapshot retention sweep failed"),
+                }
+            }
+        });
+    }
     // Operating-system updates — every 6 hours, refresh the apt index and
     // record what is waiting (and whether a reboot is owed) in node_kv, so the
     // Nodes page can say how far behind this machine is without running apt

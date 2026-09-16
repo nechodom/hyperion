@@ -4114,6 +4114,26 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         )
         .await;
         let _ = hyperion_adapters::dkim::purge_keys(&detail.domain).await;
+        // The snapshot repository: every snapshot of the site, its database
+        // dumps and the password beside them. Kept for ever before this, long
+        // after the customer was gone. The path is the hosting's ULID under a
+        // root-owned directory, never a name a tenant controls.
+        {
+            let repo = hyperion_adapters::restic::Repo::for_hosting(
+                hyperion_adapters::restic::REPO_BASE,
+                detail.id.as_str(),
+            );
+            let site_lock = snapshot_lock(&detail.id);
+            let _no_snapshot_meanwhile = site_lock.lock().await;
+            match tokio::fs::remove_dir_all(&repo.path).await {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => tracing::error!(
+                    error = %e, domain = %detail.domain,
+                    "purge: could not remove the site's snapshot repository"
+                ),
+            }
+        }
         // Drop generic per-hosting KV (notes/tags/etc.) so a future
         // hosting reusing this ULID doesn't inherit stale metadata.
         let _ = hyperion_state::hosting_kv::delete_all(&self.pool, detail.id.as_str()).await;
@@ -6256,13 +6276,35 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let rows = hyperion_state::backups::list_for(&self.pool, hosting_id, 1000)
             .await
             .map_err(|e| RpcError::Internal_with(format!("list_for: {e}")))?;
-        let cutoff = now_secs() - self.retention.max_age_days.max(1) * 24 * 3600;
+        // Read now, not at boot: the panel saves the rule on every node, and a
+        // worker applying the one it started with would ignore that save until
+        // something restarted it.
+        let retention = match self.agent_config_path.as_deref() {
+            Some(path) => {
+                let v = read_backup_retention_section(Some(path));
+                BackupRetention {
+                    max_age_days: v.max_age_days,
+                    keep_latest_n: v.keep_latest_n,
+                }
+            }
+            None => self.retention.clone(),
+        };
+        let cutoff = now_secs() - retention.max_age_days.max(1) * 24 * 3600;
+        let keep = retention.keep_latest_n.max(1) as usize;
         let mut pruned = 0u64;
-        // Newest-first; skip the first keep_latest_n.
-        for r in rows
-            .into_iter()
-            .skip(self.retention.keep_latest_n.max(1) as usize)
-        {
+        let mut good_kept = 0usize;
+        // Newest first. The newest N GOOD backups are kept however old. Failed
+        // and running rows used to count towards N, so a run of failures pushed
+        // the last good archives past the floor and they were deleted — the
+        // moment they mattered most.
+        for r in rows {
+            if r.state == "running" {
+                continue;
+            }
+            if r.state == "ok" && good_kept < keep {
+                good_kept += 1;
+                continue;
+            }
             if r.started_at >= cutoff {
                 continue;
             }
@@ -9513,7 +9555,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         tag: &str,
     ) -> Option<String> {
         use hyperion_adapters::restic;
-        if !self.snapshots_enabled || !self.protection_mode.takes_snapshots() {
+        if !self.snapshots_enabled || !self.protection_mode_now().takes_snapshots() {
             return None;
         }
         let root = detail.root_dir.trim();
@@ -9526,6 +9568,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             tracing::debug!("snapshots: restic is not installed on this node");
             return None;
         }
+        // One restic operation per site at a time: a snapshot, a restore, a
+        // delete and the retention sweep all need the repository, and restic's
+        // own lock makes the loser fail rather than wait.
+        let site_lock = snapshot_lock(&detail.id);
+        let _one_at_a_time = site_lock.lock().await;
         let repo = match restic::ensure_repo(restic::REPO_BASE, detail.id.as_str()).await {
             Ok(r) => r,
             Err(e) => {
@@ -9602,18 +9649,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         match result {
             Ok(id) => {
                 tracing::info!(domain = %detail.domain, snapshot = %id, tag, "snapshots: taken");
-                // Retention runs straight after the snapshot rather than on
-                // its own timer: this is the only moment we know the
-                // repository just grew, and a prune that never runs is how a
-                // disk fills up quietly.
-                if let Err(e) = restic::forget_prune(
-                    &repo,
-                    self.retention.max_age_days.max(1),
-                    self.retention.keep_latest_n.max(1),
-                )
-                .await
-                {
-                    tracing::warn!(domain = %detail.domain, error = %e, "snapshots: prune failed");
+                // Retention straight after the snapshot as well as on the daily
+                // sweep: this is the moment the repository just grew.
+                if let Err(e) = self.apply_snapshot_retention_held(&repo, detail).await {
+                    tracing::warn!(domain = %detail.domain, error = %e, "snapshots: retention failed");
                 }
                 Some(id)
             }
@@ -9654,6 +9693,224 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 tags: s.tags,
             })
             .collect())
+    }
+
+    /// The node's `[protection] mode`, read from agent.toml NOW.
+    ///
+    /// Read live rather than once at boot: the setting was saved from the
+    /// panel, pushed to every node, and never read by the running service —
+    /// the switch from #150 did nothing until this. A node without a config
+    /// path (tests) keeps what it was built with.
+    fn protection_mode_now(&self) -> hyperion_types::ProtectionMode {
+        match self.agent_config_path.as_deref() {
+            Some(path) => {
+                hyperion_types::ProtectionMode::parse(&read_cluster_section(Some(path)).protection_mode)
+            }
+            None => self.protection_mode,
+        }
+    }
+
+    /// How long this node keeps snapshots, read from agent.toml now.
+    fn snapshot_retention_now(&self) -> hyperion_types::SnapshotRetention {
+        match self.agent_config_path.as_deref() {
+            Some(path) => read_snapshot_retention(Some(path)),
+            None => hyperion_types::SnapshotRetention::default(),
+        }
+    }
+
+    /// Apply the retention rule to one repository. The caller holds the
+    /// site's snapshot lock. Returns how many snapshots it deleted.
+    async fn apply_snapshot_retention_held(
+        &self,
+        repo: &hyperion_adapters::restic::Repo,
+        detail: &HostingDetail,
+    ) -> Result<usize, RpcError> {
+        let rule = self.snapshot_retention_now();
+        if rule.keep_days == 0 {
+            return Ok(0);
+        }
+        let listed = snapshot_summaries(repo).await?;
+        let expired: Vec<String> = rule
+            .expired(&listed, now_secs())
+            .into_iter()
+            .map(|s| s.id.clone())
+            .collect();
+        if expired.is_empty() {
+            return Ok(0);
+        }
+        forget_with_unlock(repo, &expired).await?;
+        tracing::info!(
+            domain = %detail.domain, deleted = expired.len(),
+            keep_days = rule.keep_days, keep_last = rule.keep_last,
+            "snapshots: retention deleted old snapshots"
+        );
+        Ok(expired.len())
+    }
+
+    /// Everything the Snapshots section needs, from this (the owning) node.
+    pub async fn snapshot_overview(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<hyperion_types::SnapshotOverview, RpcError> {
+        use hyperion_adapters::restic;
+        let detail = self.get(sel).await?;
+        let mode = self.protection_mode_now();
+        let installed = restic::available().await;
+        let engine = if !installed {
+            "not_installed"
+        } else if !self.snapshots_enabled {
+            "disabled"
+        } else if !mode.takes_snapshots() {
+            "mode_off"
+        } else {
+            "ready"
+        };
+        let repo = restic::Repo::for_hosting(restic::REPO_BASE, detail.id.as_str());
+        let has_repo = tokio::fs::try_exists(&repo.password_file)
+            .await
+            .unwrap_or(false);
+        let (snapshots, repo_bytes) = if installed && has_repo {
+            (
+                snapshot_summaries(&repo).await?,
+                restic::repo_size(&repo).await,
+            )
+        } else {
+            (Vec::new(), 0)
+        };
+        Ok(hyperion_types::SnapshotOverview {
+            snapshots,
+            engine: engine.to_string(),
+            protection_mode: mode.as_str().to_string(),
+            retention: self.snapshot_retention_now(),
+            repo_bytes,
+        })
+    }
+
+    /// Delete snapshots of one site: the listed ids, or every one of them.
+    ///
+    /// Checked afterwards, not trusted: restic exits 0 for an id it does not
+    /// recognise, so "deleted" is only reported once a fresh listing no longer
+    /// has them. Returns how many were deleted.
+    pub async fn snapshot_delete(
+        &self,
+        sel: HostingSelector,
+        ids: Vec<String>,
+        all: bool,
+    ) -> Result<u32, RpcError> {
+        use hyperion_adapters::restic;
+        let detail = self.get(sel).await?;
+        if !all && ids.is_empty() {
+            return Err(RpcError::Validation {
+                message: "no snapshot was selected".into(),
+            });
+        }
+        for id in &ids {
+            if !restic::is_snapshot_id(id) {
+                return Err(RpcError::Validation {
+                    message: format!("not a snapshot id: {id:?}"),
+                });
+            }
+        }
+        if !restic::available().await {
+            return Err(RpcError::Validation {
+                message: "restic is not installed on the node that owns this site".into(),
+            });
+        }
+        let repo = restic::Repo::for_hosting(restic::REPO_BASE, detail.id.as_str());
+        if !tokio::fs::try_exists(&repo.password_file)
+            .await
+            .unwrap_or(false)
+        {
+            return Err(RpcError::NotFound {
+                kind: "snapshot".into(),
+                id: detail.domain.clone(),
+            });
+        }
+        let site_lock = snapshot_lock(&detail.id);
+        let _one_at_a_time = site_lock.lock().await;
+        let listed = snapshot_summaries(&repo).await?;
+        let targets: Vec<String> = if all {
+            listed.iter().map(|s| s.id.clone()).collect()
+        } else {
+            let mut t = Vec::new();
+            for id in &ids {
+                // Matched against the listing, so a stale page asking for a
+                // snapshot that is already gone gets told so.
+                match listed.iter().find(|s| &s.id == id) {
+                    Some(s) => t.push(s.id.clone()),
+                    None => {
+                        return Err(RpcError::NotFound {
+                            kind: "snapshot".into(),
+                            id: id.clone(),
+                        })
+                    }
+                }
+            }
+            t
+        };
+        if targets.is_empty() {
+            return Ok(0);
+        }
+        forget_with_unlock(&repo, &targets).await?;
+        let remaining = snapshot_summaries(&repo).await?;
+        let survivors: Vec<&str> = remaining
+            .iter()
+            .filter(|s| targets.contains(&s.id))
+            .map(|s| s.id.as_str())
+            .collect();
+        if !survivors.is_empty() {
+            return Err(RpcError::Internal_with(format!(
+                "restic reported success, but these snapshots are still there: {}",
+                survivors.join(", ")
+            )));
+        }
+        self.append_audit(
+            "hosting.snapshot.delete",
+            Some(detail.id.as_str()),
+            &serde_json::json!({
+                "domain": detail.domain,
+                "all": all,
+                "snapshots": targets,
+            })
+            .to_string(),
+            "ok",
+        )
+        .await;
+        Ok(targets.len() as u32)
+    }
+
+    /// Apply snapshot retention to every site on this node that has a
+    /// repository. Daily, from the agent: without it a site that takes no new
+    /// snapshots (no pending updates) never has an old one deleted. Returns
+    /// how many snapshots it deleted.
+    pub async fn snapshot_retention_tick(&self) -> Result<usize, RpcError> {
+        use hyperion_adapters::restic;
+        if self.snapshot_retention_now().keep_days == 0 || !restic::available().await {
+            return Ok(0);
+        }
+        let mut deleted = 0usize;
+        for h in self.list().await? {
+            let repo = restic::Repo::for_hosting(restic::REPO_BASE, h.id.as_str());
+            if !tokio::fs::try_exists(&repo.password_file)
+                .await
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            let Ok(detail) = self.get(HostingSelector::Id(h.id.clone())).await else {
+                continue;
+            };
+            let site_lock = snapshot_lock(&detail.id);
+            let _one_at_a_time = site_lock.lock().await;
+            match self.apply_snapshot_retention_held(&repo, &detail).await {
+                Ok(n) => deleted += n,
+                Err(e) => tracing::warn!(
+                    domain = %detail.domain, error = %e,
+                    "snapshots: retention sweep failed for this site"
+                ),
+            }
+        }
+        Ok(deleted)
     }
 
     /// Does this site take public sign-ups, and what do they become?
@@ -10252,6 +10509,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     ) -> Result<hyperion_types::SnapshotRestoreOutcome, RpcError> {
         use hyperion_adapters::restic;
         let detail = self.get(sel).await?;
+        // Held for the whole restore, safety snapshot included: the daily
+        // retention sweep must not delete the snapshot being put back.
+        let site_lock = snapshot_lock(&detail.id);
+        let _one_at_a_time = site_lock.lock().await;
 
         // Ids come from a form. Restic ids are hex; anything else is a typo or
         // an attempt to smuggle an argument (`latest`, `--target`) into a
@@ -14590,7 +14851,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             // saying backups are included. So the promise wins, the site
             // keeps its backups, and the panel explains why it is still
             // taking them in a mode that says it should not be.
-            if !self.protection_mode.schedules_backups() {
+            if !self.protection_mode_now().schedules_backups() {
                 if !self.backups_are_sold_to(&h.id).await {
                     continue;
                 }
@@ -22876,6 +23137,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             backup_retention: backup_retention_view,
             cluster: cluster_view,
             notifications: read_notifications_section(self.agent_config_path.as_deref()),
+            snapshot_retention: read_snapshot_retention(self.agent_config_path.as_deref()),
         })
     }
 
@@ -29910,6 +30172,82 @@ struct StoredVulnScan {
 /// `vuln_scan`.
 const INTEGRITY_KV_KEY: &str = "integrity_scan";
 
+/// The per-site lock around restic operations.
+fn snapshot_lock(id: &HostingId) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+    static LOCKS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>,
+    > = std::sync::OnceLock::new();
+    let map = LOCKS.get_or_init(Default::default);
+    let mut guard = map.lock().unwrap_or_else(|p| p.into_inner());
+    guard.entry(id.as_str().to_string()).or_default().clone()
+}
+
+/// A repository's snapshots as the panel types them, newest last.
+async fn snapshot_summaries(
+    repo: &hyperion_adapters::restic::Repo,
+) -> Result<Vec<hyperion_types::SnapshotSummary>, RpcError> {
+    hyperion_adapters::restic::snapshots(repo)
+        .await
+        .map(|rows| {
+            rows.into_iter()
+                .map(|s| hyperion_types::SnapshotSummary {
+                    id: s.id,
+                    time: s.time,
+                    tags: s.tags,
+                })
+                .collect()
+        })
+        .map_err(|e| RpcError::Internal_with(format!("snapshot list: {e}")))
+}
+
+/// `forget --prune`, clearing a stale lock and trying once more if a killed
+/// restic left one behind.
+async fn forget_with_unlock(
+    repo: &hyperion_adapters::restic::Repo,
+    ids: &[String],
+) -> Result<(), RpcError> {
+    use hyperion_adapters::restic;
+    match restic::forget_ids(repo, ids).await {
+        Ok(()) => Ok(()),
+        Err(e) if restic::is_lock_error(&e) => {
+            restic::unlock_stale(repo)
+                .await
+                .map_err(|e| RpcError::Internal_with(format!("snapshot unlock: {e}")))?;
+            restic::forget_ids(repo, ids)
+                .await
+                .map_err(|e| RpcError::Internal_with(format!("snapshot delete: {e}")))
+        }
+        Err(e) => Err(RpcError::Internal_with(format!("snapshot delete: {e}"))),
+    }
+}
+
+/// `[snapshots] keep_days` / `keep_last` as they are on disk. Absent keys fall
+/// back to `[backup_retention]`, which is what snapshots followed before they
+/// had their own rule — so an upgrade changes nothing until the operator
+/// sets one.
+pub(crate) fn read_snapshot_retention(
+    cfg_path: Option<&std::path::Path>,
+) -> hyperion_types::SnapshotRetention {
+    let archives = read_backup_retention_section(cfg_path);
+    let fallback = hyperion_types::SnapshotRetention {
+        keep_days: archives.max_age_days.clamp(0, 36_500) as u32,
+        keep_last: archives.keep_latest_n.clamp(0, 1_000) as u32,
+    };
+    let Some(doc) = read_agent_doc(cfg_path) else {
+        return fallback;
+    };
+    let sec = doc.get("snapshots");
+    let int = |key: &str| {
+        sec.and_then(|s| s.get(key))
+            .and_then(|v| v.as_integer())
+            .map(|v| v.clamp(0, 36_500) as u32)
+    };
+    hyperion_types::SnapshotRetention {
+        keep_days: int("keep_days").unwrap_or(fallback.keep_days),
+        keep_last: int("keep_last").unwrap_or(fallback.keep_last),
+    }
+}
+
 /// The notice a trashed site's suspended vhost shows.
 ///
 /// A constant because two places render it: `trash_hosting`, and the
@@ -31888,9 +32226,36 @@ fn parse_agent_section_fields(
             | ("backup_remote", "password")
             | ("backup_remote", "base_path") => crate::config_persist::FieldValue::Str(v.clone()),
             ("backup_remote", "port") => crate::config_persist::FieldValue::Int(parse_int(v)?),
-            // [backup_retention]
-            ("backup_retention", "max_age_days") | ("backup_retention", "keep_latest_n") => {
-                crate::config_persist::FieldValue::Int(parse_int(v)?)
+            // [backup_retention] — the same floors the agent applies at boot,
+            // enforced where the value is typed rather than silently later.
+            ("backup_retention", "max_age_days") => {
+                let n = parse_int(v)?;
+                if !(1..=3650).contains(&n) {
+                    return Err(bad(format!("max_age_days must be 1..=3650, got {n}")));
+                }
+                crate::config_persist::FieldValue::Int(n)
+            }
+            ("backup_retention", "keep_latest_n") => {
+                let n = parse_int(v)?;
+                if !(1..=1000).contains(&n) {
+                    return Err(bad(format!("keep_latest_n must be 1..=1000, got {n}")));
+                }
+                crate::config_persist::FieldValue::Int(n)
+            }
+            // [snapshots] retention. keep_days = 0 means "never by age".
+            ("snapshots", "keep_days") => {
+                let n = parse_int(v)?;
+                if !(0..=3650).contains(&n) {
+                    return Err(bad(format!("snapshot keep_days must be 0..=3650, got {n}")));
+                }
+                crate::config_persist::FieldValue::Int(n)
+            }
+            ("snapshots", "keep_last") => {
+                let n = parse_int(v)?;
+                if !(0..=1000).contains(&n) {
+                    return Err(bad(format!("snapshot keep_last must be 0..=1000, got {n}")));
+                }
+                crate::config_persist::FieldValue::Int(n)
             }
             // [cluster] — master web UI placement preferences
             ("cluster", "master_accepts_hostings")

@@ -1461,9 +1461,10 @@
       a customer.
       <br>
       <strong>Snapshots</strong> are taken automatically before Hyperion
-      changes anything, store shared content once so thirty of them cost little
-      more than one, and can say what an update changed. They answer <em>“last
-      night's update broke the site.”</em> They never leave the node.
+      applies a site's automatic updates, and by hand from a site's Backups tab.
+      They store shared content once so thirty of them cost little more than
+      one, and can say what an update changed. They answer <em>“last night's
+      update broke the site.”</em> They never leave the node.
     </p>
     <form method="post" action="/settings/config" autocomplete="off">
       <input type="hidden" name="_csrf" value="{{ csrf_token }}">
@@ -1488,7 +1489,7 @@
       </div>
       {% endif %}
       <p class="text-soft small" style="margin:0 0 0.8rem;line-height:1.55">
-        Switching a engine off stops new copies; it never deletes what is
+        Switching an engine off stops new copies; it never deletes what is
         already kept. Backups taken internally to undo a move, a copy or a
         staging push keep running in every mode — those are how those features
         roll themselves back, not something being sold.
@@ -1607,8 +1608,9 @@
       Backup retention
     </h2>
     <p class="text-soft small" style="margin:0.3rem 0 0.6rem">
-      This governs <strong>backup archives</strong> only. Trash and audit-log retention live on the
-      <a href="/settings#retention">Data retention tab</a>.
+      This governs <strong>backup archives</strong>. Snapshots have their own rule below. Trash and
+      audit-log retention live on the <a href="/settings#retention">Data retention tab</a>.
+      Saved on every node.
     </p>
     <form method="post" action="/settings/config" autocomplete="off">
       <input type="hidden" name="_csrf" value="{{ csrf_token }}">
@@ -1629,6 +1631,43 @@
         After every new backup completes, backups older than <strong>max age</strong> are pruned — but at least <strong>keep latest N</strong> per hosting are always retained. So a hosting nobody has touched for months still keeps its last few backups for when you need them.
       </p>
       <button type="submit" class="btn primary">Save retention policy</button>
+    </form>
+  </div>
+
+  {# Snapshot retention. Its own card because the operator's question is its
+     own: "can old snapshots be deleted after N days?" — and the answer used to
+     be hidden inside the archive rule, measured from the newest snapshot, and
+     applied only when a new one was taken. #}
+  <div class="card" style="margin-top:1rem">
+    <h2>
+      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v6"/><path d="m8 6 4-4 4 4"/><rect x="3" y="10" width="18" height="11" rx="2"/><path d="M7 15h10"/></svg>
+      Snapshot retention
+    </h2>
+    <p class="text-soft small" style="margin:0.3rem 0 0.6rem">
+      Currently: snapshots are <strong>{{ config.snapshot_retention.describe() }}</strong>.
+      Saved on every node.
+    </p>
+    <form method="post" action="/settings/config" autocomplete="off">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="section" value="snapshots">
+      <div class="field-row">
+        <div class="field" style="flex:1">
+          <label for="snap_keep_days">Delete snapshots older than (days) <span class="hint">0 = never by age</span></label>
+          <input id="snap_keep_days" name="keep_days" type="number" min="0" max="3650"
+                 value="{{ config.snapshot_retention.keep_days }}">
+        </div>
+        <div class="field" style="flex:1">
+          <label for="snap_keep_last">Always keep the newest <span class="hint">per site, however old</span></label>
+          <input id="snap_keep_last" name="keep_last" type="number" min="0" max="1000"
+                 value="{{ config.snapshot_retention.keep_last }}">
+        </div>
+      </div>
+      <p class="text-soft small" style="margin:0.4rem 0 0.8rem">
+        Age is counted from today. Old snapshots are deleted once a day on every node, and
+        straight after each new snapshot; deleting also frees the disk space they used. Individual
+        snapshots can be deleted by hand on each site's Backups tab.
+      </p>
+      <button type="submit" class="btn primary">Save snapshot retention</button>
     </form>
   </div>
 </div>

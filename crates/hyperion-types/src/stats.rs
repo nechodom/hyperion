@@ -340,6 +340,10 @@ pub struct AgentConfigView {
     /// is unchanged until the operator edits a template.
     #[serde(default)]
     pub notifications: NotificationTemplatesView,
+    /// `[snapshots] keep_days` / `keep_last`, falling back to
+    /// `[backup_retention]` where unset.
+    #[serde(default)]
+    pub snapshot_retention: SnapshotRetention,
 }
 
 /// Editable templates for outbound notification wording. Each is a string
@@ -2378,6 +2382,101 @@ impl SnapshotSummary {
     pub fn has_database(&self) -> bool {
         self.tags.iter().any(|t| t == SNAPSHOT_TAG_WITH_DB)
     }
+
+    /// When it was taken, in unix seconds. `None` when restic's timestamp does
+    /// not parse — and such a snapshot is never treated as old enough to
+    /// delete.
+    pub fn taken_at(&self) -> Option<i64> {
+        chrono::DateTime::parse_from_rfc3339(self.time.trim())
+            .ok()
+            .map(|t| t.timestamp())
+    }
+}
+
+/// How long a site's snapshots are kept: `[snapshots] keep_days` and
+/// `keep_last` in agent.toml.
+///
+/// Measured from NOW, not the way restic's own `--keep-within` measures it
+/// (from the newest snapshot). With restic's rule a site that stopped taking
+/// snapshots kept its old ones forever, because the newest is always within
+/// N days of itself — which is not what "delete snapshots after 14 days" means
+/// to anybody.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SnapshotRetention {
+    /// Delete snapshots older than this many days. 0 = never by age.
+    #[serde(default)]
+    pub keep_days: u32,
+    /// Always keep this many of the newest, however old. A site that has had
+    /// no update for a month still has something to go back to.
+    #[serde(default)]
+    pub keep_last: u32,
+}
+
+impl Default for SnapshotRetention {
+    fn default() -> Self {
+        Self {
+            keep_days: 30,
+            keep_last: 3,
+        }
+    }
+}
+
+impl SnapshotRetention {
+    /// The snapshots this rule deletes at `now` (unix seconds).
+    pub fn expired<'a>(
+        &self,
+        snapshots: &'a [SnapshotSummary],
+        now: i64,
+    ) -> Vec<&'a SnapshotSummary> {
+        if self.keep_days == 0 {
+            return Vec::new();
+        }
+        let cutoff = now - i64::from(self.keep_days) * 86_400;
+        let mut newest_first: Vec<&SnapshotSummary> = snapshots.iter().collect();
+        // Unparseable times sort as the newest, so they fill the kept slots
+        // rather than being the first to go.
+        newest_first.sort_by_key(|s| std::cmp::Reverse(s.taken_at().unwrap_or(i64::MAX)));
+        newest_first
+            .into_iter()
+            .skip(self.keep_last as usize)
+            .filter(|s| s.taken_at().is_some_and(|t| t <= cutoff))
+            .collect()
+    }
+
+    /// One sentence for the panel.
+    pub fn describe(&self) -> String {
+        let last = match self.keep_last {
+            0 => String::new(),
+            1 => " (the newest one is always kept)".to_string(),
+            n => format!(" (the newest {n} are always kept)"),
+        };
+        match self.keep_days {
+            0 => "kept until deleted by hand".to_string(),
+            1 => format!("deleted after 1 day{last}"),
+            d => format!("deleted after {d} days{last}"),
+        }
+    }
+}
+
+/// Everything the Snapshots section of a site needs, from the owning node.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SnapshotOverview {
+    /// Newest last, as restic lists them.
+    #[serde(default)]
+    pub snapshots: Vec<SnapshotSummary>,
+    /// `ready`, `not_installed` (no restic on the node), `disabled`
+    /// (`[snapshots] enabled = false`) or `mode_off` (the node keeps archives
+    /// only). Existing snapshots are listed whatever this says.
+    #[serde(default)]
+    pub engine: String,
+    /// The node's `[protection] mode`: `backups`, `snapshots` or `both`.
+    #[serde(default)]
+    pub protection_mode: String,
+    #[serde(default)]
+    pub retention: SnapshotRetention,
+    /// Size of the site's repository on disk. 0 when there is none.
+    #[serde(default)]
+    pub repo_bytes: u64,
 }
 
 /// What a snapshot restore actually did.
@@ -2418,4 +2517,107 @@ pub struct SnapshotDiff {
     pub removed: i64,
     pub modified: i64,
     pub sample: Vec<String>,
+}
+
+#[cfg(test)]
+mod snapshot_retention_tests {
+    use super::*;
+
+    const DAY: i64 = 86_400;
+
+    fn snap(id: &str, days_ago: i64, now: i64) -> SnapshotSummary {
+        let t = chrono::DateTime::from_timestamp(now - days_ago * DAY, 0).expect("time");
+        SnapshotSummary {
+            id: id.into(),
+            time: t.to_rfc3339(),
+            tags: vec![],
+        }
+    }
+
+    fn ids(v: Vec<&SnapshotSummary>) -> Vec<String> {
+        let mut out: Vec<String> = v.into_iter().map(|s| s.id.clone()).collect();
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn age_is_measured_from_now_not_from_the_newest_snapshot() {
+        let now = 1_800_000_000;
+        // A site that stopped taking snapshots a month ago: restic's
+        // --keep-within would keep all of these, because each is within 14 days
+        // of the newest.
+        let snaps = vec![snap("a", 40, now), snap("b", 35, now), snap("c", 31, now)];
+        let rule = SnapshotRetention {
+            keep_days: 14,
+            keep_last: 0,
+        };
+        assert_eq!(ids(rule.expired(&snaps, now)), vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn the_newest_are_kept_however_old() {
+        let now = 1_800_000_000;
+        let snaps = vec![
+            snap("old", 60, now),
+            snap("mid", 20, now),
+            snap("new", 16, now),
+            snap("today", 0, now),
+        ];
+        let rule = SnapshotRetention {
+            keep_days: 14,
+            keep_last: 2,
+        };
+        // "today" and "new" are the two newest; "mid" and "old" are past 14 days.
+        assert_eq!(ids(rule.expired(&snaps, now)), vec!["mid", "old"]);
+    }
+
+    #[test]
+    fn zero_days_never_deletes_and_bad_times_are_never_old() {
+        let now = 1_800_000_000;
+        let mut snaps = vec![snap("old", 400, now)];
+        let never = SnapshotRetention {
+            keep_days: 0,
+            keep_last: 0,
+        };
+        assert!(never.expired(&snaps, now).is_empty());
+        snaps.push(SnapshotSummary {
+            id: "garbled".into(),
+            time: "not a time".into(),
+            tags: vec![],
+        });
+        let rule = SnapshotRetention {
+            keep_days: 1,
+            keep_last: 0,
+        };
+        assert_eq!(ids(rule.expired(&snaps, now)), vec!["old"]);
+    }
+
+    #[test]
+    fn restic_timestamps_parse() {
+        let s = SnapshotSummary {
+            id: "x".into(),
+            time: "2026-09-16T21:41:48.442341243Z".into(),
+            tags: vec![],
+        };
+        assert!(s.taken_at().is_some());
+        let s = SnapshotSummary {
+            time: "2026-09-16T23:41:48.442341243+02:00".into(),
+            ..s
+        };
+        assert!(s.taken_at().is_some());
+    }
+
+    #[test]
+    fn the_rule_reads_as_a_sentence() {
+        let r = SnapshotRetention {
+            keep_days: 14,
+            keep_last: 3,
+        };
+        assert_eq!(r.describe(), "deleted after 14 days (the newest 3 are always kept)");
+        let r = SnapshotRetention {
+            keep_days: 0,
+            keep_last: 3,
+        };
+        assert_eq!(r.describe(), "kept until deleted by hand");
+    }
 }

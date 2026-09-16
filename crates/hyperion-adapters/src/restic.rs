@@ -238,14 +238,13 @@ pub async fn backup(repo: &Repo, paths: &[String], tags: &[&str]) -> Result<Stri
     Ok(snapshot_id_from_json(&out).unwrap_or_default())
 }
 
-/// List snapshots, newest last.
-/// Take a snapshot WITHOUT pruning afterwards.
+/// Take a snapshot WITHOUT applying retention afterwards.
 ///
-/// `backup` + `forget_prune` is the normal pairing, but a restore takes a
-/// safety snapshot first — and pruning at that moment can delete the very
-/// snapshot the operator is about to restore, because taking one more can push
-/// the oldest past `keep_last`. The restore calls this instead and leaves
-/// retention to the next ordinary snapshot.
+/// A snapshot is normally followed by retention, but a restore takes a safety
+/// snapshot first — and applying retention at that moment can delete the very
+/// snapshot the operator is about to restore, because one more can push the
+/// oldest past `keep_last`. The restore calls this instead and leaves
+/// retention to the next ordinary snapshot or the daily sweep.
 pub async fn backup_no_prune(
     repo: &Repo,
     paths: &[String],
@@ -254,6 +253,7 @@ pub async fn backup_no_prune(
     backup(repo, paths, tags).await
 }
 
+/// List snapshots, newest last.
 pub async fn snapshots(repo: &Repo) -> Result<Vec<Snapshot>, AdapterError> {
     let mut args = repo.base_args();
     args.push("snapshots".into());
@@ -262,43 +262,65 @@ pub async fn snapshots(repo: &Repo) -> Result<Vec<Snapshot>, AdapterError> {
     Ok(parse_snapshots(&out))
 }
 
-/// Apply retention, then reclaim the space.
+/// Delete the named snapshots and reclaim the space they held.
 ///
-/// `keep_days` and `keep_last` map straight onto the operator's existing
-/// `[backup_retention]` settings, so a site switching engines keeps the
-/// retention it already had rather than silently getting restic's defaults.
-/// Both are floors, not ceilings: restic keeps a snapshot matching EITHER
-/// rule, which is what stops a quiet fortnight deleting the only copy.
-pub async fn forget_prune(repo: &Repo, keep_days: i64, keep_last: i64) -> Result<(), AdapterError> {
+/// `forget` alone only unlinks: the data stays in the pack files until a
+/// `prune` rewrites them, so deleting without pruning frees nothing and the
+/// operator watches the disk not move. They are one operation here for that
+/// reason.
+///
+/// Explicit ids, never a policy. Which snapshots are old is decided by the
+/// caller from the times restic reports (see
+/// `hyperion_types::SnapshotRetention`), because restic's `--keep-within`
+/// measures from the newest snapshot rather than from now. And "delete all"
+/// is the full list of ids, not `--keep-last 0 --unsafe-allow-remove-all`:
+/// that flag does not exist in the restic Debian 12 ships (0.14) and is
+/// refused without a host or tag filter by the one Debian 13 ships (0.18).
+///
+/// restic exits 0 for an id it does not know ("Ignoring …"), so success here
+/// does not prove anything was deleted. Callers list again to check.
+pub async fn forget_ids(repo: &Repo, ids: &[String]) -> Result<(), AdapterError> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    // Hex only. These reach a command line, and `--keep-last` or `latest`
+    // smuggled in as an "id" would change what the command does.
+    for id in ids {
+        if !is_snapshot_id(id) {
+            return Err(AdapterError::Other(format!("not a snapshot id: {id:?}")));
+        }
+    }
     let mut args = repo.base_args();
     args.push("forget".into());
-    // Group by HOST only. restic's default groups by (host, paths), and this
-    // repository now holds snapshots taken with one path (files) and with two
-    // (files + a database dump). Under the default grouping those are two
-    // separate retention groups, so every snapshot taken before the dump was
-    // added would be kept forever while the new ones prune among themselves —
-    // a repository that silently stops honouring its own retention.
-    args.push("--group-by".into());
-    args.push("host".into());
     args.push("--prune".into());
-    if keep_days > 0 {
-        args.push("--keep-within".into());
-        args.push(format!("{keep_days}d"));
-    }
-    if keep_last > 0 {
-        args.push("--keep-last".into());
-        args.push(keep_last.to_string());
-    }
-    // Neither rule set would delete everything. Refuse instead: an empty
-    // retention policy is a misconfiguration, and "delete every backup" is
-    // not a reasonable reading of it.
-    if keep_days <= 0 && keep_last <= 0 {
-        return Err(AdapterError::Other(
-            "refusing to prune with no retention rule — that would delete every snapshot".into(),
-        ));
-    }
+    args.extend(ids.iter().cloned());
     cmd::run("/usr/bin/env", &as_env_args("restic", &args)).await?;
     Ok(())
+}
+
+/// Is this a restic snapshot id (short or full)?
+pub fn is_snapshot_id(id: &str) -> bool {
+    (8..=64).contains(&id.len()) && id.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// Remove STALE locks from the repository.
+///
+/// A restic process killed mid-run (the agent restarting after a settings
+/// save does exactly that) leaves its lock behind, and every later operation
+/// on the repository fails with "repository is already locked". Plain
+/// `unlock` only removes locks whose process is gone; a lock held by a live
+/// restic is left alone.
+pub async fn unlock_stale(repo: &Repo) -> Result<(), AdapterError> {
+    let mut args = repo.base_args();
+    args.push("unlock".into());
+    cmd::run("/usr/bin/env", &as_env_args("restic", &args)).await?;
+    Ok(())
+}
+
+/// Did a restic call fail only because the repository was locked?
+pub fn is_lock_error(e: &AdapterError) -> bool {
+    let text = e.to_string();
+    text.contains("repository is already locked") || text.contains("unable to create lock")
 }
 
 /// What changed between two snapshots.
@@ -541,20 +563,6 @@ mod tests {
         );
     }
 
-    /// Retention groups by host only. The default groups by (host, paths),
-    /// and this repository now holds one-path and two-path snapshots — under
-    /// the default every pre-upgrade snapshot would be pinned for ever.
-    #[test]
-    fn forget_groups_by_host_so_the_path_change_does_not_split_retention() {
-        let repo = super::Repo::for_hosting("/tmp/repos", "h1");
-        let mut args = repo.base_args();
-        args.push("forget".into());
-        args.push("--group-by".into());
-        args.push("host".into());
-        let joined = args.join(" ");
-        assert!(joined.contains("--group-by host"), "{joined}");
-    }
-
     use super::*;
 
     #[test]
@@ -635,11 +643,130 @@ mod tests {
         assert_eq!(d, DiffStat::default());
     }
 
-    /// The one prune that must never run.
     #[tokio::test]
-    async fn pruning_with_no_retention_rule_is_refused() {
+    async fn only_snapshot_ids_reach_the_command_line() {
         let repo = Repo::for_hosting("/nonexistent", "h");
-        let err = forget_prune(&repo, 0, 0).await.expect_err("must refuse");
-        assert!(err.to_string().contains("delete every snapshot"), "{err}");
+        for bad in ["latest", "--keep-last", "abc", "0123456g", ""] {
+            let err = forget_ids(&repo, &[bad.to_string()])
+                .await
+                .expect_err("must refuse");
+            assert!(err.to_string().contains("not a snapshot id"), "{bad}: {err}");
+        }
+        assert!(is_snapshot_id("3b37bfc4"));
+        assert!(is_snapshot_id(
+            "3b37bfc4a71e3843ecdcf488125e531dbcd669b9a7ef79510d767d9f776064d0"
+        ));
+        // Nothing to delete is not an error, and runs nothing.
+        forget_ids(&repo, &[]).await.expect("empty is a no-op");
+    }
+
+    #[test]
+    fn a_lock_error_is_recognised() {
+        let e = AdapterError::Command {
+            cmd: "restic forget".into(),
+            code: 1,
+            stderr_tail: "unable to create lock in backend: repository is already locked by PID 7"
+                .into(),
+        };
+        assert!(is_lock_error(&e));
+        assert!(!is_lock_error(&AdapterError::Other("wrong password".into())));
+    }
+}
+
+/// Against a real restic binary. Run inside a Linux box that has restic:
+/// `HYPERION_RESTIC_IT=1 cargo test -p hyperion-adapters restic::real -- --ignored`
+#[cfg(test)]
+mod real {
+    use super::*;
+
+    fn enabled() -> bool {
+        std::env::var("HYPERION_RESTIC_IT").is_ok()
+    }
+
+    async fn repo_with_snapshots(n: usize) -> (tempfile::TempDir, Repo, std::path::PathBuf) {
+        let base = tempfile::tempdir().expect("tmp");
+        let site = base.path().join("site");
+        std::fs::create_dir_all(&site).expect("site dir");
+        let repo = ensure_repo(base.path().to_str().expect("utf8"), "h1")
+            .await
+            .expect("init");
+        for i in 0..n {
+            std::fs::write(site.join(format!("f{i}")), format!("content {i}")).expect("write");
+            backup(&repo, &[site.display().to_string()], &["manual"])
+                .await
+                .expect("backup");
+        }
+        (base, repo, site)
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn deleting_by_short_id_removes_exactly_those_snapshots() {
+        if !enabled() {
+            return;
+        }
+        let (_base, repo, _site) = repo_with_snapshots(3).await;
+        let before = snapshots(&repo).await.expect("list");
+        assert_eq!(before.len(), 3);
+        forget_ids(&repo, &[before[0].id.clone()]).await.expect("forget");
+        let after = snapshots(&repo).await.expect("list");
+        assert_eq!(after.len(), 2);
+        assert!(!after.iter().any(|s| s.id == before[0].id));
+        // An id that is not there: restic says "Ignoring" and exits 0.
+        forget_ids(&repo, &["deadbeef".to_string()])
+            .await
+            .expect("unknown id is not an error to restic");
+        assert_eq!(snapshots(&repo).await.expect("list").len(), 2);
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn deleting_every_listed_id_empties_the_repository_and_frees_space() {
+        if !enabled() {
+            return;
+        }
+        let (_base, repo, _site) = repo_with_snapshots(3).await;
+        let full = repo_size(&repo).await;
+        let ids: Vec<String> = snapshots(&repo)
+            .await
+            .expect("list")
+            .into_iter()
+            .map(|s| s.id)
+            .collect();
+        forget_ids(&repo, &ids).await.expect("forget all");
+        assert!(snapshots(&repo).await.expect("list").is_empty());
+        assert!(
+            repo_size(&repo).await < full,
+            "prune must reclaim the data, not only unlink it"
+        );
+        // Empty repository still works for the next snapshot.
+        unlock_stale(&repo).await.expect("unlock on a clean repo");
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn listed_times_feed_the_retention_rule() {
+        if !enabled() {
+            return;
+        }
+        let (_base, repo, _site) = repo_with_snapshots(2).await;
+        let listed: Vec<hyperion_types::SnapshotSummary> = snapshots(&repo)
+            .await
+            .expect("list")
+            .into_iter()
+            .map(|s| hyperion_types::SnapshotSummary {
+                id: s.id,
+                time: s.time,
+                tags: s.tags,
+            })
+            .collect();
+        assert!(listed.iter().all(|s| s.taken_at().is_some()), "{listed:?}");
+        let now = listed[1].taken_at().expect("time");
+        let rule = hyperion_types::SnapshotRetention {
+            keep_days: 1,
+            keep_last: 0,
+        };
+        assert!(rule.expired(&listed, now).is_empty(), "nothing is a day old");
+        assert_eq!(rule.expired(&listed, now + 2 * 86_400).len(), 2);
     }
 }

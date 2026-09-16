@@ -1524,8 +1524,17 @@ pub async fn post_config(
     // `[notifications]` holds the two CUSTOMER letters, and those are read on
     // the node that OWNS each hosting — not here. Keep a copy of the fields
     // so the same text can go to every node once the master's write lands.
-    let notification_fields = matches!(form.section.as_str(), "notifications" | "letters")
-        .then(|| (form.section.clone(), fields.clone()));
+    //
+    // The backup engine choice and both retention rules are the same kind of
+    // setting: they are ACTED ON by the node that owns each site (the
+    // scheduled backup sweep, the pre-change snapshot, the retention sweeps),
+    // so a value saved only on the master governed only the master's sites.
+    let notification_fields = matches!(
+        form.section.as_str(),
+        "notifications" | "letters" | "protection" | "snapshots" | "backup_retention"
+    )
+    .then(|| (form.section.clone(), fields.clone()));
+    let is_letters = matches!(form.section.as_str(), "notifications" | "letters");
     let resp = hyperion_rpc_client::call(
         &state.agent_socket,
         Request::AgentConfigUpdate {
@@ -1592,11 +1601,34 @@ pub async fn post_config(
                         urlencode(section_label(&form.section)),
                         tab
                     ),
-                    Ok(n) => format!(
+                    Ok(n) if is_letters => format!(
                         "/settings?flash={}#{}",
                         urlencode(&format!(
                             "Saved, and the same wording is now on {n} other node(s). \
                              hyperion-agent is restarting here (~5s)."
+                        )),
+                        tab
+                    ),
+                    Ok(n) => format!(
+                        "/settings?flash={}#{}",
+                        urlencode(&format!(
+                            "{} saved here and on {n} other node(s).",
+                            section_label(&form.section)
+                        )),
+                        tab
+                    ),
+                    Err(failed) if !is_letters => format!(
+                        "/settings?flash_error={}#{}",
+                        urlencode(&format!(
+                            "Saved on this master, but {} did not take it: {}. \
+                             Sites on those nodes keep the PREVIOUS setting until a save \
+                             reaches them.",
+                            if failed.len() == 1 {
+                                "one node"
+                            } else {
+                                "some nodes"
+                            },
+                            failed.join("; ")
                         )),
                         tab
                     ),
@@ -1750,6 +1782,7 @@ fn section_label(section: &str) -> &'static str {
         "backup_remote" => "Off-site backup target",
         "backup_retention" => "Backup retention",
         "protection" => "What this panel keeps",
+        "snapshots" => "Snapshot retention",
         "cluster" => "Cluster settings",
         "notifications" => "Notification wording",
         "letters" => "Customer letter wording",
@@ -1876,7 +1909,7 @@ fn section_to_tab(section: &str) -> &'static str {
         // Which engine the install uses. It governs both, so it sits at the
         // top of the tab that shows both — and unlike the cluster.* fields it
         // needs no `_return_tab` override, because this IS its tab.
-        "backup_remote" | "backup_retention" | "protection" => "backups",
+        "backup_remote" | "backup_retention" | "protection" | "snapshots" => "backups",
         // [cluster] fields are now split across two tabs: the Security card
         // (2FA + hardening flags) lives on General, Cluster placement on
         // Cluster. General is the default; the placement form carries a

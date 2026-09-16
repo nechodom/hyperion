@@ -1454,6 +1454,18 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(v) => Response::SnapshotList(v),
             Err(e) => Response::Error(e),
         },
+        Request::SnapshotOverview { sel } => match api.snapshot_overview(sel).await {
+            Ok(v) => Response::SnapshotOverview(v),
+            Err(e) => Response::Error(e),
+        },
+        Request::SnapshotDelete {
+            sel,
+            snapshots,
+            all,
+        } => match api.snapshot_delete(sel, snapshots, all).await {
+            Ok(v) => Response::SnapshotDeleted(v),
+            Err(e) => Response::Error(e),
+        },
         Request::SnapshotNow { sel } => match api.snapshot_now(sel).await {
             Ok(v) => Response::SnapshotNow(v),
             Err(e) => Response::Error(e),
@@ -3261,6 +3273,20 @@ mod tests {
         }
         async fn snapshot_now(&self, _: HostingSelector) -> Result<String, RpcError> {
             Ok(String::new())
+        }
+        async fn snapshot_overview(
+            &self,
+            _: HostingSelector,
+        ) -> Result<hyperion_types::SnapshotOverview, RpcError> {
+            Ok(Default::default())
+        }
+        async fn snapshot_delete(
+            &self,
+            _: HostingSelector,
+            _: Vec<String>,
+            _: bool,
+        ) -> Result<u32, RpcError> {
+            Ok(0)
         }
         async fn snapshot_diff(
             &self,
