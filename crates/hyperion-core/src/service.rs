@@ -216,8 +216,18 @@ pub trait AdapterPort: Send + Sync {
     async fn db_unlock(&self, engine: DbProvision, db_user: &str) -> Result<(), AdapterError>;
 
     /// `usermod -L` / `-U` and shell swap to /usr/sbin/nologin.
+    ///
+    /// Only for lifting a suspension recorded before logins were disabled by
+    /// account expiry — see `apply_login_policy`. New locks never use it.
     async fn linux_lock_login(&self, name: &str) -> Result<(), AdapterError>;
     async fn linux_unlock_login(&self, name: &str) -> Result<(), AdapterError>;
+
+    /// A login's account-expiry field as shadow stores it (`""` = never).
+    /// `Ok(None)` when the account does not exist.
+    async fn linux_login_expiry(&self, login: &str) -> Result<Option<String>, AdapterError>;
+    /// Set a login's account-expiry field (`"1"` disables every login; a value
+    /// from `linux_login_expiry` puts it back). A missing account is success.
+    async fn linux_set_login_expiry(&self, login: &str, expiry: &str) -> Result<(), AdapterError>;
 
     /// `pkill -KILL -u <name>` to kill any process owned by the suspended user.
     async fn kill_user_procs(&self, name: &str) -> Result<(), AdapterError>;
@@ -2400,6 +2410,24 @@ impl<A: AdapterPort + 'static> HostingService<A> {
 
     /// Provision a hosting end-to-end with LIFO rollback on partial failure.
     pub async fn create(&self, req: HostingCreateReq) -> Result<HostingCreated, RpcError> {
+        let user = req
+            .system_user
+            .clone()
+            .or_else(|| SystemUserName::derive_from_domain(req.domain.as_str()).ok());
+        let result = self.create_provision(req).await;
+        // A create on an existing system user re-enables it once its row is in
+        // (a new online site needs the account). If the create then failed and
+        // rolled its row back, the account's other sites may all be offline
+        // again: decide it again now rather than at the next reconcile.
+        if result.is_err() {
+            if let Some(user) = user {
+                self.apply_system_user_policy(user.as_str()).await;
+            }
+        }
+        result
+    }
+
+    async fn create_provision(&self, req: HostingCreateReq) -> Result<HostingCreated, RpcError> {
         // 1. Validate (parse already did most). Derive system user if absent.
         let system_user = match req.system_user.clone() {
             Some(u) => u,
@@ -2710,6 +2738,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             pool: self.pool.clone(),
             id: hosting_id_for_rollback,
         }));
+        // A new site on an existing system user whose other hostings are all
+        // offline: that account was disabled, and this site needs it.
+        if user_pre_existed {
+            self.apply_system_user_policy(system_user.as_str()).await;
+        }
 
         // 4b. aliases
         for alias in &req.aliases {
@@ -3220,6 +3253,33 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         );
         let _ = self.adapters.remove_hosting_tree(&hosting_root).await;
 
+        // Extra FTP logins are real passwd entries that share the site's uid;
+        // the ftp_accounts rows cascade away with the hosting, so remove the
+        // accounts here or nothing ever will. (hard_delete_internal does the
+        // same.)
+        if let Ok(logins) =
+            hyperion_state::ftp_accounts::logins_for_hosting(&self.pool, &detail.id).await
+        {
+            for login in logins {
+                if let Err(e) = hyperion_adapters::ftp::delete_extra_login(&login).await {
+                    tracing::error!(
+                        error = %e, login = %login,
+                        "delete: could not remove an extra FTP login — it will outlive the hosting"
+                    );
+                }
+            }
+        }
+        // State is `deleting` by now, so the site counts as neither online
+        // nor offline: its extra logins stay shut on the way out, and its
+        // system user is decided by whatever hostings remain on it.
+        {
+            let _serial = LOGIN_LOCKS.lock().await;
+            let legacy = matches!(
+                detail.state,
+                HostingState::Suspended | HostingState::Trashed
+            ) && matches!(self.login_lock_record(&detail.id).await, Ok(None));
+            self.apply_login_policy_held(&detail.id, Some(legacy)).await;
+        }
         if !opts.keep_user {
             // delete user only if no other hostings reference them
             let (others,): (i64,) =
@@ -3266,6 +3326,491 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(())
     }
 
+    // ─────────────────── Logins of a site that is offline ───────────────────
+    //
+    // While a site is suspended or in the trash nobody may log in to it. It
+    // used to be `usermod -L` on the site's system user alone, which left two
+    // ways in: extra FTP logins are accounts of their own and were never
+    // touched, and with `UsePAM yes` OpenSSH lets an SFTP key in to an
+    // account whose password is locked. A customer whose site was suspended
+    // or thrown away could still write into the tree — including PHP that
+    // would run the moment the site came back.
+    //
+    // Logins are now disabled by account EXPIRY (see
+    // `hyperion_adapters::users::set_login_expiry`): every PAM service
+    // refuses it, root's `sudo -u` still works, and the password field — an
+    // operator's `*` or `!` — is not touched, so nothing can flip it.
+    //
+    // Two kinds of account, two rules:
+    //
+    // * A site's extra FTP logins belong to it alone. They are disabled while
+    //   the site is offline, with each one's previous expiry recorded in the
+    //   site's `hosting_kv` BEFORE it is changed.
+    // * The system user can be shared by several hostings. Its state is not
+    //   remembered per site but DERIVED every time from all of them: disabled
+    //   exactly when none is online and at least one is offline. Its previous
+    //   expiry is recorded once, node-wide.
+    //
+    // Every transition writes the site's state FIRST and then applies this,
+    // under one node-wide mutex, re-reading the state inside it — so the
+    // last application always sees the final state, whatever raced. A
+    // five-minute reconcile repeats it for anything a failure left behind.
+
+    /// Bring a hosting's logins, and its system user, in line with its state.
+    ///
+    /// `legacy` says what a missing record means: `Some(true)` only where the
+    /// caller has established, under [`LOGIN_LOCKS`], that the site was offline
+    /// with no record — taken offline by a version that ran just `usermod -L`
+    /// on the system user, which then needs a `usermod -U` on the way back.
+    /// `None` infers exactly that from the state read here. Every site this
+    /// code takes offline gets its record in the same critical section as its
+    /// state, so a missing record on an offline site is never a race.
+    async fn apply_login_policy(&self, id: &HostingId, legacy: Option<bool>) {
+        let _serial = LOGIN_LOCKS.lock().await;
+        self.apply_login_policy_held(id, legacy).await;
+    }
+
+    /// Returns how many accounts it re-enabled.
+    async fn apply_login_policy_held(&self, id: &HostingId, legacy: Option<bool>) -> usize {
+        // A record that cannot be read is not "no record": acting on it would
+        // record our own "1" as the value to restore. Change nothing.
+        let Ok(record) = self.login_lock_record(id).await else {
+            return 0;
+        };
+        let detail = match self.get(HostingSelector::Id(id.clone())).await {
+            Ok(d) => d,
+            Err(RpcError::NotFound { .. }) => {
+                // The row is gone. Its extra logins belong to no site any
+                // more: an account that survived the teardown stays shut, and
+                // the record has nothing left to track.
+                if record.is_some() {
+                    let _ =
+                        hyperion_state::hosting_kv::delete(&self.pool, id.as_str(), LOGIN_LOCK_KV)
+                            .await;
+                }
+                return 0;
+            }
+            Err(e) => {
+                tracing::error!(
+                    error = %e, hosting = %id.as_str(),
+                    "could not read a hosting to apply its login policy — unchanged"
+                );
+                return 0;
+            }
+        };
+        let mut enabled = 0;
+        let offline = matches!(
+            detail.state,
+            HostingState::Suspended | HostingState::Trashed
+        );
+        // Once the boot pass has recorded every site an older version took
+        // offline, a missing record never means an old-style lock again, so no
+        // race can make this run `usermod -U` on an operator's own `!`.
+        let legacy =
+            legacy.unwrap_or(offline && record.is_none()) && !self.login_policy_migrated().await;
+        if offline {
+            let mut record = record.unwrap_or(LoginLock {
+                legacy_password_lock: legacy,
+                ..LoginLock::default()
+            });
+            let logins = hyperion_state::ftp_accounts::logins_for_hosting(&self.pool, id)
+                .await
+                .unwrap_or_default();
+            for login in &logins {
+                // Recorded already: the real value is in the record, and the
+                // account itself now reads our "1".
+                if record.prior_expiry.contains_key(login) {
+                    continue;
+                }
+                match self.adapters.linux_login_expiry(login).await {
+                    Ok(Some(prior)) => {
+                        record.prior_expiry.insert(login.clone(), prior);
+                    }
+                    Ok(None) => {}
+                    Err(e) => tracing::error!(
+                        error = %e, domain = %detail.domain, login = %login,
+                        "could not read a login's account expiry — it is NOT disabled"
+                    ),
+                }
+            }
+            // The record goes down before any account changes, so there is
+            // always an exact way back. No record, no lock.
+            if self.save_login_lock_record(id, &record).await {
+                for login in logins
+                    .iter()
+                    .filter(|l| record.prior_expiry.contains_key(*l))
+                {
+                    if let Err(e) = self.adapters.linux_set_login_expiry(login, "1").await {
+                        tracing::error!(
+                            error = %e, domain = %detail.domain, login = %login,
+                            "could not disable a login of an offline site"
+                        );
+                    }
+                }
+            } else {
+                tracing::error!(
+                    domain = %detail.domain,
+                    "could not record the logins' expiry — extra logins left enabled"
+                );
+            }
+        } else {
+            // Online again, or being deleted.
+            match record {
+                Some(mut record) => {
+                    if detail.state == HostingState::Deleting {
+                        // The site's extra logins go with it; one that
+                        // survives the teardown must not come back open.
+                        record.prior_expiry.clear();
+                    } else {
+                        let before = record.prior_expiry.len();
+                        record = self.restore_extra_logins(id, &detail.domain, record).await;
+                        enabled += before - record.prior_expiry.len();
+                    }
+                    if record.legacy_password_lock
+                        && self
+                            .adapters
+                            .linux_unlock_login(&detail.system_user)
+                            .await
+                            .is_ok()
+                    {
+                        record.legacy_password_lock = false;
+                        enabled += 1;
+                    }
+                    self.store_or_clear_login_record(id, &record).await;
+                }
+                None if legacy => {
+                    let unlocked = self
+                        .adapters
+                        .linux_unlock_login(&detail.system_user)
+                        .await
+                        .is_ok();
+                    enabled += usize::from(unlocked);
+                }
+                None => {}
+            }
+        }
+        enabled
+            + self
+                .apply_system_user_policy_held(&detail.system_user)
+                .await
+    }
+
+    /// Mark a hosting that is going offline right now as managed by this code:
+    /// an empty record, written in the same critical section as its state, so
+    /// no racing resume can mistake it for an older version's lock.
+    async fn mark_login_policy_managed_held(&self, id: &HostingId) {
+        if let Ok(None) = self.login_lock_record(id).await {
+            self.save_login_lock_record(id, &LoginLock::default()).await;
+        }
+    }
+
+    /// Put back every extra login in `record`; what fails stays in it.
+    async fn restore_extra_logins(
+        &self,
+        id: &HostingId,
+        domain: &str,
+        mut record: LoginLock,
+    ) -> LoginLock {
+        let recorded: Vec<(String, String)> = record
+            .prior_expiry
+            .iter()
+            .map(|(l, p)| (l.clone(), p.clone()))
+            .collect();
+        for (login, prior) in recorded {
+            match self.adapters.linux_set_login_expiry(&login, &prior).await {
+                Ok(()) => {
+                    record.prior_expiry.remove(&login);
+                }
+                Err(e) => tracing::error!(
+                    error = %e, hosting = %id.as_str(), domain = %domain, login = %login,
+                    "could not re-enable a login — it stays disabled, and the agent retries \
+                     every five minutes"
+                ),
+            }
+        }
+        record
+    }
+
+    /// Disable or re-enable a system user from the state of EVERY hosting on
+    /// it: disabled exactly when none is online and at least one is suspended
+    /// or in the trash. A hosting being deleted counts as neither. Returns 1
+    /// when it re-enabled the account.
+    async fn apply_system_user_policy_held(&self, user: &str) -> usize {
+        let user = user.trim();
+        if user.is_empty() {
+            return 0;
+        }
+        let Ok((online, offline)) = sqlx::query_as::<_, (i64, i64)>(
+            "SELECT \
+               COALESCE(SUM(h.state NOT IN ('suspended', 'trashed', 'deleting')), 0), \
+               COALESCE(SUM(h.state IN ('suspended', 'trashed')), 0) \
+             FROM hostings h JOIN system_users u ON u.id = h.system_user_id \
+             WHERE u.name = ?",
+        )
+        .bind(user)
+        .fetch_one(&self.pool)
+        .await
+        else {
+            // Unknown: change nothing either way.
+            return 0;
+        };
+        let want_disabled = online == 0 && offline > 0;
+        let Ok(mut users) = self.system_user_lock_records().await else {
+            return 0;
+        };
+        match (want_disabled, users.get(user).cloned()) {
+            (true, None) => {
+                match self.adapters.linux_login_expiry(user).await {
+                    Ok(Some(prior)) => {
+                        users.insert(user.to_string(), prior);
+                        if !self.save_system_user_lock_records(&users).await {
+                            tracing::error!(
+                                login = %user,
+                                "could not record a system user's expiry — left enabled"
+                            );
+                            return 0;
+                        }
+                    }
+                    Ok(None) => return 0,
+                    Err(e) => {
+                        tracing::error!(
+                            error = %e, login = %user,
+                            "could not read a system user's account expiry — it is NOT disabled"
+                        );
+                        return 0;
+                    }
+                }
+                if let Err(e) = self.adapters.linux_set_login_expiry(user, "1").await {
+                    tracing::error!(error = %e, login = %user, "could not disable a system user");
+                }
+                0
+            }
+            (true, Some(_)) => {
+                if let Err(e) = self.adapters.linux_set_login_expiry(user, "1").await {
+                    tracing::error!(error = %e, login = %user, "could not disable a system user");
+                }
+                0
+            }
+            (false, Some(prior)) => {
+                match self.adapters.linux_set_login_expiry(user, &prior).await {
+                    Ok(()) => {
+                        users.remove(user);
+                        self.save_system_user_lock_records(&users).await;
+                        1
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            error = %e, login = %user,
+                            "could not re-enable a system user — the agent retries every five minutes"
+                        );
+                        0
+                    }
+                }
+            }
+            (false, None) => 0,
+        }
+    }
+
+    /// Re-apply the policy to a system user after a hosting was added to it.
+    async fn apply_system_user_policy(&self, user: &str) {
+        let _serial = LOGIN_LOCKS.lock().await;
+        self.apply_system_user_policy_held(user).await;
+    }
+
+    /// Disable the logins of every site that is suspended or in the trash, once
+    /// at agent start, then reconcile the rest. Sites taken offline by an older
+    /// version had only the system user's password locked; their extra FTP
+    /// logins and SFTP keys work until this runs. Returns how many offline
+    /// sites it found without a record (taken offline by an older version).
+    pub async fn offline_logins_lock_on_boot(&self) -> Result<i64, RpcError> {
+        let mut migrated = 0i64;
+        let mut complete = true;
+        for id in self.offline_hosting_ids().await? {
+            let _serial = LOGIN_LOCKS.lock().await;
+            // Decided here, under the lock, from a fresh read: the RPC server
+            // is already answering, and a site resumed since the list was
+            // taken is online and has nothing to migrate.
+            let Ok(detail) = self.get(HostingSelector::Id(id.clone())).await else {
+                complete = false;
+                continue;
+            };
+            let offline = matches!(
+                detail.state,
+                HostingState::Suspended | HostingState::Trashed
+            );
+            let legacy = match self.login_lock_record(&id).await {
+                Ok(record) => offline && record.is_none() && !self.login_policy_migrated().await,
+                Err(()) => {
+                    complete = false;
+                    continue;
+                }
+            };
+            self.apply_login_policy_held(&id, Some(legacy)).await;
+            if offline && !matches!(self.login_lock_record(&id).await, Ok(Some(_))) {
+                // Not recorded after all (a failed write): try again next start.
+                complete = false;
+            }
+            if !legacy {
+                continue;
+            }
+            migrated += 1;
+            // A session opened since (an sshfs mount, a long-running cron job)
+            // outlives a new expiry, so end it the way suspend and trash do —
+            // but only if the account is now disabled, i.e. it runs no site
+            // that is online, whose PHP workers those would be.
+            let disabled = self
+                .system_user_lock_records()
+                .await
+                .is_ok_and(|users| users.contains_key(detail.system_user.trim()));
+            if disabled {
+                let _ = self.adapters.kill_user_procs(&detail.system_user).await;
+            }
+        }
+        if complete && !self.login_policy_migrated().await {
+            let _ =
+                hyperion_state::node_kv::set(&self.pool, LOGIN_POLICY_MIGRATED_KV, "1", now_secs())
+                    .await;
+        }
+        let _ = self.offline_logins_reconcile().await;
+        Ok(migrated)
+    }
+
+    /// Repair whatever a failure or a race left behind: re-apply the policy to
+    /// every hosting that is offline or still has a login record (online ones
+    /// get their logins back, offline ones are re-asserted, deleted ones
+    /// release theirs) and to every system user on record. Runs at start and
+    /// every five minutes. Returns how many accounts it re-enabled.
+    pub async fn offline_logins_reconcile(&self) -> Result<i64, RpcError> {
+        let mut ids: std::collections::BTreeSet<String> =
+            hyperion_state::hosting_kv::list_by_key(&self.pool, LOGIN_LOCK_KV)
+                .await
+                .map_err(|e| RpcError::Internal_with(format!("login locks: {e}")))?
+                .into_iter()
+                .map(|(hid, _)| hid)
+                .collect();
+        ids.extend(
+            self.offline_hosting_ids()
+                .await?
+                .into_iter()
+                .map(|h| h.as_str().to_string()),
+        );
+        let mut enabled = 0usize;
+        for hid in ids {
+            let _serial = LOGIN_LOCKS.lock().await;
+            enabled += self.apply_login_policy_held(&HostingId(hid), None).await;
+        }
+        let users: Vec<String> = self
+            .system_user_lock_records()
+            .await
+            .map(|u| u.into_keys().collect())
+            .unwrap_or_default();
+        for user in users {
+            let _serial = LOGIN_LOCKS.lock().await;
+            enabled += self.apply_system_user_policy_held(&user).await;
+        }
+        Ok(enabled as i64)
+    }
+
+    /// Has the boot pass recorded every site an older version took offline?
+    /// An unreadable flag counts as yes: the harm of skipping a legacy
+    /// `usermod -U` (a password lock stays) is smaller than stripping an
+    /// operator's own `!`.
+    async fn login_policy_migrated(&self) -> bool {
+        !matches!(
+            hyperion_state::node_kv::get(&self.pool, LOGIN_POLICY_MIGRATED_KV).await,
+            Ok(None)
+        )
+    }
+
+    /// Every hosting on this node that is suspended or in the trash.
+    async fn offline_hosting_ids(&self) -> Result<Vec<HostingId>, RpcError> {
+        let mut ids: Vec<HostingId> = self
+            .list()
+            .await?
+            .into_iter()
+            .filter(|h| h.state == HostingState::Suspended)
+            .map(|h| h.id)
+            .collect();
+        ids.extend(
+            hostings::list_trashed(&self.pool)
+                .await
+                .map_err(|e| RpcError::Internal_with(format!("list trashed: {e}")))?
+                .into_iter()
+                .map(|h| h.id),
+        );
+        Ok(ids)
+    }
+
+    /// `Ok(None)` only when there really is no record. A failed read or an
+    /// unparseable value is an error, so no caller mistakes it for "never
+    /// locked".
+    async fn login_lock_record(&self, id: &HostingId) -> Result<Option<LoginLock>, ()> {
+        match hyperion_state::hosting_kv::get(&self.pool, id.as_str(), LOGIN_LOCK_KV).await {
+            Ok(None) => Ok(None),
+            Ok(Some(raw)) => serde_json::from_str(&raw).map(Some).map_err(|e| {
+                tracing::error!(error = %e, hosting = %id.as_str(), "unreadable login record");
+            }),
+            Err(e) => {
+                tracing::error!(error = %e, hosting = %id.as_str(), "could not read login record");
+                Err(())
+            }
+        }
+    }
+
+    async fn save_login_lock_record(&self, id: &HostingId, record: &LoginLock) -> bool {
+        let Ok(json) = serde_json::to_string(record) else {
+            return false;
+        };
+        hyperion_state::hosting_kv::set(&self.pool, id.as_str(), LOGIN_LOCK_KV, &json, now_secs())
+            .await
+            .is_ok()
+    }
+
+    /// Keep a record that still holds something to undo; drop an empty one.
+    async fn store_or_clear_login_record(&self, id: &HostingId, record: &LoginLock) {
+        if record.prior_expiry.is_empty() && !record.legacy_password_lock {
+            let _ =
+                hyperion_state::hosting_kv::delete(&self.pool, id.as_str(), LOGIN_LOCK_KV).await;
+        } else {
+            self.save_login_lock_record(id, record).await;
+        }
+    }
+
+    /// System user → its account expiry before it was disabled. An error, not
+    /// an empty map, when it cannot be read: saving over it would lose every
+    /// other user's value.
+    async fn system_user_lock_records(
+        &self,
+    ) -> Result<std::collections::BTreeMap<String, String>, ()> {
+        match hyperion_state::node_kv::get(&self.pool, SYSTEM_USER_LOCK_KV).await {
+            Ok(None) => Ok(Default::default()),
+            Ok(Some(raw)) => serde_json::from_str(&raw).map_err(|e| {
+                tracing::error!(error = %e, "unreadable system user lock records");
+            }),
+            Err(e) => {
+                tracing::error!(error = %e, "could not read system user lock records");
+                Err(())
+            }
+        }
+    }
+
+    async fn save_system_user_lock_records(
+        &self,
+        users: &std::collections::BTreeMap<String, String>,
+    ) -> bool {
+        if users.is_empty() {
+            return hyperion_state::node_kv::delete(&self.pool, SYSTEM_USER_LOCK_KV)
+                .await
+                .is_ok();
+        }
+        let Ok(json) = serde_json::to_string(users) else {
+            return false;
+        };
+        hyperion_state::node_kv::set(&self.pool, SYSTEM_USER_LOCK_KV, &json, now_secs())
+            .await
+            .is_ok()
+    }
+
     // ────────────────────────── Trash / recycle bin ──────────────────────────
 
     /// Move a hosting to the trash. Same side-effects as suspend
@@ -3302,12 +3847,20 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         if let Some(db) = detail.database.as_ref() {
             let _ = self.adapters.db_lock(db.engine, &db.db_user).await;
         }
-        let _ = self.adapters.linux_lock_login(&detail.system_user).await;
+        {
+            // State and login policy in one critical section, so a reconcile
+            // or a racing transition never sees one without the other.
+            let _serial = LOGIN_LOCKS.lock().await;
+            // A site suspended by an older version has no record yet and only
+            // a password lock to undo later.
+            let legacy = detail.state == HostingState::Suspended
+                && matches!(self.login_lock_record(&detail.id).await, Ok(None));
+            hostings::mark_trashed(&self.pool, &detail.id, now_secs())
+                .await
+                .map_err(|e| RpcError::Internal_with(format!("mark trashed: {e}")))?;
+            self.apply_login_policy_held(&detail.id, Some(legacy)).await;
+        }
         let _ = self.adapters.kill_user_procs(&detail.system_user).await;
-
-        hostings::mark_trashed(&self.pool, &detail.id, now_secs())
-            .await
-            .map_err(|e| RpcError::Internal_with(format!("mark trashed: {e}")))?;
 
         self.append_audit(
             "hosting.trash",
@@ -3342,7 +3895,6 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 ),
             });
         }
-        let _ = self.adapters.linux_unlock_login(&detail.system_user).await;
         if let Some(db) = detail.database.as_ref() {
             let _ = self.adapters.db_unlock(db.engine, &db.db_user).await;
         }
@@ -3371,9 +3923,21 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                  set a new expiry if the site should still expire"
             );
         }
-        hostings::unmark_trashed(&self.pool, &detail.id, now)
-            .await
-            .map_err(|e| RpcError::Internal_with(format!("unmark: {e}")))?;
+        {
+            let _serial = LOGIN_LOCKS.lock().await;
+            // Legacy only if it is STILL in the trash with no record: a
+            // restore that already ran cleared the record on its way out.
+            let still_trashed = self
+                .get(HostingSelector::Id(detail.id.clone()))
+                .await
+                .is_ok_and(|d| d.state == HostingState::Trashed);
+            let legacy =
+                still_trashed && matches!(self.login_lock_record(&detail.id).await, Ok(None));
+            hostings::unmark_trashed(&self.pool, &detail.id, now)
+                .await
+                .map_err(|e| RpcError::Internal_with(format!("unmark: {e}")))?;
+            self.apply_login_policy_held(&detail.id, Some(legacy)).await;
+        }
         self.append_audit(
             "hosting.trash.restore",
             Some(detail.id.as_str()),
@@ -3495,6 +4059,17 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             self.paths.home_root, detail.system_user, detail.domain
         );
         let _ = self.adapters.remove_hosting_tree(&hosting_root).await;
+        // State is `deleting` by now, so the site counts as neither online
+        // nor offline: its extra logins stay shut on the way out, and its
+        // system user is decided by whatever hostings remain on it.
+        {
+            let _serial = LOGIN_LOCKS.lock().await;
+            let legacy = matches!(
+                detail.state,
+                HostingState::Suspended | HostingState::Trashed
+            ) && matches!(self.login_lock_record(&detail.id).await, Ok(None));
+            self.apply_login_policy_held(&detail.id, Some(legacy)).await;
+        }
         if !opts.keep_user {
             let (others,): (i64,) =
                 sqlx::query_as("SELECT count(*) FROM hostings WHERE system_user_id = (SELECT id FROM system_users WHERE name = ?) AND id != ?")
@@ -3901,6 +4476,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 )
                 .await;
             }
+            // Idempotent, and it lets a suspend retried after a part-way
+            // failure finish disabling the logins. A site suspended by an
+            // older version has no record, and is recorded as such.
+            self.apply_login_policy(&detail.id, None).await;
             return Ok(());
         }
         if detail.state == HostingState::Deleting {
@@ -3918,9 +4497,16 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 message: "hosting is in trash — restore it first".into(),
             });
         }
-        hostings::set_state(&self.pool, &detail.id, HostingState::Suspended, now_secs())
-            .await
-            .map_err(|e| RpcError::Internal_with(format!("set suspended: {e}")))?;
+        {
+            // The state and the record that says this code manages the site's
+            // logins go down together: a resume racing the slower effects
+            // below must not take the site for one an older version locked.
+            let _serial = LOGIN_LOCKS.lock().await;
+            hostings::set_state(&self.pool, &detail.id, HostingState::Suspended, now_secs())
+                .await
+                .map_err(|e| RpcError::Internal_with(format!("set suspended: {e}")))?;
+            self.mark_login_policy_managed_held(&detail.id).await;
+        }
         let susp = hyperion_state::limits::SuspensionRow {
             hosting_id: detail.id.clone(),
             suspended_at: now_secs(),
@@ -3956,7 +4542,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         if let Some(db) = detail.database.as_ref() {
             let _ = self.adapters.db_lock(db.engine, &db.db_user).await;
         }
-        let _ = self.adapters.linux_lock_login(&detail.system_user).await;
+        // The state and its record were written at the top.
+        self.apply_login_policy(&detail.id, Some(false)).await;
         let _ = self.adapters.kill_user_procs(&detail.system_user).await;
 
         self.append_audit(
@@ -3976,7 +4563,6 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             return Ok(());
         }
         // Re-apply effects in resume order.
-        let _ = self.adapters.linux_unlock_login(&detail.system_user).await;
         if let Some(db) = detail.database.as_ref() {
             let _ = self.adapters.db_unlock(db.engine, &db.db_user).await;
         }
@@ -4002,9 +4588,21 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             }
         }
         let _ = self.adapters.nginx_write_vhost(&detail).await;
-        hostings::set_state(&self.pool, &detail.id, HostingState::Active, now_secs())
-            .await
-            .map_err(|e| RpcError::Internal_with(format!("set active: {e}")))?;
+        {
+            let _serial = LOGIN_LOCKS.lock().await;
+            // Legacy only if it is STILL suspended with no record: a second,
+            // concurrent resume finds the site already active.
+            let still_suspended = self
+                .get(HostingSelector::Id(detail.id.clone()))
+                .await
+                .is_ok_and(|d| d.state == HostingState::Suspended);
+            let legacy =
+                still_suspended && matches!(self.login_lock_record(&detail.id).await, Ok(None));
+            hostings::set_state(&self.pool, &detail.id, HostingState::Active, now_secs())
+                .await
+                .map_err(|e| RpcError::Internal_with(format!("set active: {e}")))?;
+            self.apply_login_policy_held(&detail.id, Some(legacy)).await;
+        }
         hyperion_state::limits::delete_suspension(&self.pool, &detail.id)
             .await
             .map_err(|e| RpcError::Internal_with(format!("delete suspension: {e}")))?;
@@ -6221,7 +6819,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 "locked" if detail.state != HostingState::Active => {
                     format!("locked because the hosting is {}", detail.state.as_str())
                 }
-                "locked" => "the account is locked (usermod -L)".into(),
+                "locked" => "the account is locked — a `!` in its password field, or an \
+                             account expiry in the past"
+                    .into(),
                 "star" => "FTP is switched off for this site".into(),
                 "empty" => "the password field is EMPTY — a pre-0.37 disable left it \
                             that way, which some PAM stacks accept as a valid login. \
@@ -29537,6 +30137,38 @@ fn os_update_alerts(
     out
 }
 
+/// `hosting_kv` key: a site's extra FTP logins disabled while it is suspended
+/// or in the trash, and what to put back. Present exactly while they are.
+const LOGIN_LOCK_KV: &str = "logins_locked";
+
+/// `node_kv` key: system users disabled because every hosting on them is
+/// offline, each with its account expiry from before (JSON map).
+const SYSTEM_USER_LOCK_KV: &str = "logins_locked.system_users";
+
+/// `node_kv` key, present once a boot pass has recorded every site that an
+/// older version took offline. From then on a missing record is never a
+/// password lock to undo.
+const LOGIN_POLICY_MIGRATED_KV: &str = "logins_locked.migrated";
+
+/// One application of the login policy at a time, node-wide. Records are
+/// read, changed and written back, hostings can share a system user, and the
+/// boot pass and the five-minute reconcile run beside RPC-driven suspends and
+/// resumes.
+static LOGIN_LOCKS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// See `HostingService::apply_login_policy`.
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+struct LoginLock {
+    /// Extra FTP login → its account-expiry field before it was disabled
+    /// (`""` = never).
+    #[serde(default)]
+    prior_expiry: std::collections::BTreeMap<String, String>,
+    /// The system user's password was locked with `usermod -L` by a version
+    /// from before this record existed, and needs `usermod -U` on the way out.
+    #[serde(default)]
+    legacy_password_lock: bool,
+}
+
 /// `hosting_kv` key gating the daily integrity sweep for ONE hosting —
 /// the per-site switch a care package sells (and enforces).
 ///
@@ -37224,6 +37856,10 @@ mod tests {
         a.expect_nginx_write_vhost().returning(|_| Ok(()));
         a.expect_redis_is_available().returning(|| true);
         // Purge teardown:
+        // A trashed row with no login record is one an older version trashed
+        // (password lock only), and the purge gives the user its password
+        // back in case the account outlives the hosting.
+        a.expect_linux_unlock_login().returning(|_| Ok(()));
         a.expect_nginx_delete_vhost().returning(|_, _| Ok(()));
         a.expect_acme_delete().returning(|_| Ok(()));
         a.expect_db_drop().returning(|_, _, _| Ok(()));
@@ -37263,6 +37899,9 @@ mod tests {
         a.expect_fpm_delete().returning(|_, _| Ok(()));
         a.expect_db_lock().returning(|_, _| Ok(()));
         a.expect_linux_lock_login().returning(|_| Ok(()));
+        a.expect_linux_login_expiry()
+            .returning(|_| Ok(Some(String::new())));
+        a.expect_linux_set_login_expiry().returning(|_, _| Ok(()));
         a.expect_kill_user_procs().returning(|_| Ok(()));
         a
     }
@@ -37279,12 +37918,610 @@ mod tests {
         a.expect_fpm_delete().returning(|_, _| Ok(()));
         a.expect_db_lock().returning(|_, _| Ok(()));
         a.expect_linux_lock_login().returning(|_| Ok(()));
+        a.expect_linux_login_expiry()
+            .returning(|_| Ok(Some(String::new())));
+        a.expect_linux_set_login_expiry().returning(|_, _| Ok(()));
         a.expect_kill_user_procs().returning(|_| Ok(()));
         a.expect_linux_unlock_login().returning(|_| Ok(()));
         a.expect_db_unlock().returning(|_, _| Ok(()));
         a.expect_apply_php_limits()
             .returning(|_, _, _, _, _, _, _| Ok(()));
         a
+    }
+
+    /// A stand-in for the shadow file's account-expiry column: every read and
+    /// write the service makes goes through this map, so a test can check
+    /// what an account ends up with, not just which calls were made.
+    type FakeShadow = std::sync::Arc<std::sync::Mutex<std::collections::BTreeMap<String, String>>>;
+
+    fn with_fake_shadow(mut a: MockAdapterPort, shadow: &FakeShadow) -> MockAdapterPort {
+        let read = shadow.clone();
+        a.expect_linux_login_expiry()
+            .returning(move |login| Ok(read.lock().expect("lock").get(login).cloned()));
+        let write = shadow.clone();
+        a.expect_linux_set_login_expiry()
+            .returning(move |login, value| {
+                if let Some(v) = write.lock().expect("lock").get_mut(login) {
+                    *v = value.to_string();
+                }
+                Ok(())
+            });
+        a
+    }
+
+    /// Mocks for create + suspend + resume + trash + restore, with no
+    /// expectation on the logins themselves (the test adds the fake shadow).
+    fn offline_cycle_mocks() -> MockAdapterPort {
+        let mut a = MockAdapterPort::new();
+        a.expect_ensure_user().returning(|_, _| Ok(1042));
+        a.expect_ensure_dirs().returning(|_, _, _, _| Ok(()));
+        a.expect_fpm_ensure().returning(|_, _, _| Ok(()));
+        a.expect_db_create().returning(|_, _, _| Ok(db_creds()));
+        a.expect_acme_issue().returning(|d, _| Ok(cert_for(d)));
+        a.expect_nginx_write_vhost().returning(|_| Ok(()));
+        a.expect_redis_is_available().returning(|| true);
+        a.expect_nginx_apply_suspended().returning(|_, _, _| Ok(()));
+        a.expect_fpm_delete().returning(|_, _| Ok(()));
+        a.expect_db_lock().returning(|_, _| Ok(()));
+        a.expect_db_unlock().returning(|_, _| Ok(()));
+        a.expect_kill_user_procs().returning(|_| Ok(()));
+        a.expect_apply_php_limits()
+            .returning(|_, _, _, _, _, _, _| Ok(()));
+        a
+    }
+
+    async fn site_with_extra_login(
+        s: &HostingService<MockAdapterPort>,
+        pool: &sqlx::SqlitePool,
+        shadow: &FakeShadow,
+    ) -> HostingDetail {
+        s.create(req("kos.cz")).await.expect("create");
+        let detail = s
+            .get(HostingSelector::Domain(
+                Domain::parse("kos.cz").expect("parse"),
+            ))
+            .await
+            .expect("get");
+        hyperion_state::ftp_accounts::insert(
+            pool,
+            &detail.id,
+            "web.kos.cz",
+            &detail.root_dir,
+            "",
+            "kevin",
+            now_secs(),
+        )
+        .await
+        .expect("extra login");
+        let mut sh = shadow.lock().expect("lock");
+        sh.insert(detail.system_user.clone(), String::new());
+        // An expiry the operator set on this login themselves.
+        sh.insert("web.kos.cz".into(), "20500".into());
+        drop(sh);
+        detail
+    }
+
+    #[tokio::test]
+    async fn suspend_disables_every_login_and_resume_puts_back_exactly_what_was_there() {
+        let pool = open_memory().await.expect("open");
+        let shadow = FakeShadow::default();
+        let mut mocks = with_fake_shadow(offline_cycle_mocks(), &shadow);
+        // Expiry, not the password: `usermod -U` would unlock a login that was
+        // locked for some other reason.
+        mocks.expect_linux_lock_login().times(0);
+        mocks.expect_linux_unlock_login().times(0);
+        let s = svc(pool.clone(), mocks);
+        let site = site_with_extra_login(&s, &pool, &shadow).await;
+        let sel = HostingSelector::Id(site.id.clone());
+
+        s.suspend(
+            sel.clone(),
+            hyperion_types::SuspendReason::Manual { message: None },
+        )
+        .await
+        .expect("suspend");
+        {
+            let sh = shadow.lock().expect("lock");
+            assert_eq!(sh[&site.system_user], "1", "the site user is disabled");
+            assert_eq!(sh["web.kos.cz"], "1", "and so is the extra FTP login");
+        }
+
+        s.resume(sel).await.expect("resume");
+        {
+            let sh = shadow.lock().expect("lock");
+            assert_eq!(sh[&site.system_user], "", "never expired, as before");
+            assert_eq!(
+                sh["web.kos.cz"], "20500",
+                "the operator's own expiry survives"
+            );
+        }
+        assert!(
+            hyperion_state::hosting_kv::get(&pool, site.id.as_str(), LOGIN_LOCK_KV)
+                .await
+                .expect("kv")
+                .is_none(),
+            "nothing left to undo, so no record"
+        );
+    }
+
+    #[tokio::test]
+    async fn trashing_a_suspended_site_keeps_the_real_expiry_to_restore() {
+        let pool = open_memory().await.expect("open");
+        let shadow = FakeShadow::default();
+        let mut mocks = with_fake_shadow(offline_cycle_mocks(), &shadow);
+        mocks.expect_linux_unlock_login().times(0);
+        let s = svc(pool.clone(), mocks);
+        let site = site_with_extra_login(&s, &pool, &shadow).await;
+        let sel = HostingSelector::Id(site.id.clone());
+
+        s.suspend(
+            sel.clone(),
+            hyperion_types::SuspendReason::Manual { message: None },
+        )
+        .await
+        .expect("suspend");
+        let suspended = s.get(sel.clone()).await.expect("get");
+        // A second lock reads "1" from every account. It must not become the
+        // value to restore.
+        s.trash_hosting(suspended).await.expect("trash");
+        s.restore_from_trash(sel).await.expect("restore");
+
+        let sh = shadow.lock().expect("lock");
+        assert_eq!(sh[&site.system_user], "");
+        assert_eq!(sh["web.kos.cz"], "20500");
+    }
+
+    #[tokio::test]
+    async fn a_site_suspended_by_an_older_version_is_unlocked_the_old_way() {
+        let pool = open_memory().await.expect("open");
+        let shadow = FakeShadow::default();
+        let mut mocks = with_fake_shadow(offline_cycle_mocks(), &shadow);
+        mocks
+            .expect_linux_unlock_login()
+            .times(1)
+            .returning(|_| Ok(()));
+        let s = svc(pool.clone(), mocks);
+        let site = site_with_extra_login(&s, &pool, &shadow).await;
+        // What an older version left: state Suspended, password locked with
+        // `usermod -L`, no record.
+        hostings::set_state(&pool, &site.id, HostingState::Suspended, now_secs())
+            .await
+            .expect("legacy suspend");
+
+        // The agent starts: the extra login is closed now, not at resume.
+        assert_eq!(s.offline_logins_lock_on_boot().await.expect("boot"), 1);
+        assert_eq!(shadow.lock().expect("lock")["web.kos.cz"], "1");
+
+        s.resume(HostingSelector::Id(site.id.clone()))
+            .await
+            .expect("resume");
+        let sh = shadow.lock().expect("lock");
+        assert_eq!(sh["web.kos.cz"], "20500");
+        assert_eq!(sh[&site.system_user], "");
+    }
+
+    /// A site an older version suspended, suspended AGAIN before the boot pass
+    /// got to it: the record written then must still say "password-locked by
+    /// an older version", or the resume would leave that lock in place.
+    #[tokio::test]
+    async fn re_suspending_an_old_style_suspension_keeps_its_password_lock_to_undo() {
+        let pool = open_memory().await.expect("open");
+        let shadow = FakeShadow::default();
+        let mut mocks = with_fake_shadow(offline_cycle_mocks(), &shadow);
+        mocks
+            .expect_linux_unlock_login()
+            .times(1)
+            .returning(|_| Ok(()));
+        let s = svc(pool.clone(), mocks);
+        let site = site_with_extra_login(&s, &pool, &shadow).await;
+        hostings::set_state(&pool, &site.id, HostingState::Suspended, now_secs())
+            .await
+            .expect("old-style suspension");
+        let sel = HostingSelector::Id(site.id.clone());
+        s.suspend(
+            sel.clone(),
+            hyperion_types::SuspendReason::Manual { message: None },
+        )
+        .await
+        .expect("suspend again");
+        assert_eq!(shadow.lock().expect("lock")["web.kos.cz"], "1");
+        s.resume(sel).await.expect("resume");
+        assert_eq!(shadow.lock().expect("lock")["web.kos.cz"], "20500");
+    }
+
+    /// A suspend this code performs is never mistaken for an old-style one,
+    /// even by a reconcile that runs before its logins are disabled.
+    #[tokio::test]
+    async fn a_reconcile_mid_suspend_does_not_invent_an_old_style_lock() {
+        let pool = open_memory().await.expect("open");
+        let shadow = FakeShadow::default();
+        let mut mocks = with_fake_shadow(offline_cycle_mocks(), &shadow);
+        mocks.expect_linux_unlock_login().times(0);
+        let s = svc(pool.clone(), mocks);
+        let site = site_with_extra_login(&s, &pool, &shadow).await;
+        s.suspend(
+            HostingSelector::Id(site.id.clone()),
+            hyperion_types::SuspendReason::Manual { message: None },
+        )
+        .await
+        .expect("suspend");
+        s.offline_logins_reconcile().await.expect("reconcile");
+        s.offline_logins_lock_on_boot().await.expect("boot");
+        s.resume(HostingSelector::Id(site.id.clone()))
+            .await
+            .expect("resume");
+        assert_eq!(shadow.lock().expect("lock")["web.kos.cz"], "20500");
+    }
+
+    #[tokio::test]
+    async fn a_login_that_could_not_be_reenabled_stays_on_record_for_the_next_try() {
+        let pool = open_memory().await.expect("open");
+        let shadow = FakeShadow::default();
+        let mut mocks = offline_cycle_mocks();
+        let read = shadow.clone();
+        mocks
+            .expect_linux_login_expiry()
+            .returning(move |login| Ok(read.lock().expect("lock").get(login).cloned()));
+        let write = shadow.clone();
+        let failing = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let still_failing = failing.clone();
+        mocks
+            .expect_linux_set_login_expiry()
+            .returning(move |login, value| {
+                if login == "web.kos.cz"
+                    && value != "1"
+                    && still_failing.load(std::sync::atomic::Ordering::SeqCst)
+                {
+                    return Err(AdapterError::Other(
+                        "usermod: cannot lock /etc/shadow".into(),
+                    ));
+                }
+                if let Some(v) = write.lock().expect("lock").get_mut(login) {
+                    *v = value.to_string();
+                }
+                Ok(())
+            });
+        let s = svc(pool.clone(), mocks);
+        let site = site_with_extra_login(&s, &pool, &shadow).await;
+        let sel = HostingSelector::Id(site.id.clone());
+        s.suspend(
+            sel.clone(),
+            hyperion_types::SuspendReason::Manual { message: None },
+        )
+        .await
+        .expect("suspend");
+        s.resume(sel).await.expect("resume");
+
+        let raw = hyperion_state::hosting_kv::get(&pool, site.id.as_str(), LOGIN_LOCK_KV)
+            .await
+            .expect("kv")
+            .expect("record kept");
+        let record: LoginLock = serde_json::from_str(&raw).expect("json");
+        assert_eq!(
+            record.prior_expiry.get("web.kos.cz").map(String::as_str),
+            Some("20500"),
+            "the failed login keeps its real value for the retry"
+        );
+        assert!(!record.prior_expiry.contains_key(&site.system_user));
+
+        // The site is Active, so resume() would return at once. The reconcile
+        // is what gets the login back once the cause is gone.
+        failing.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(s.offline_logins_reconcile().await.expect("reconcile"), 1);
+        assert_eq!(shadow.lock().expect("lock")["web.kos.cz"], "20500");
+        assert!(
+            hyperion_state::hosting_kv::get(&pool, site.id.as_str(), LOGIN_LOCK_KV)
+                .await
+                .expect("kv")
+                .is_none()
+        );
+    }
+
+    /// Hostings can share a system user. The account is disabled only once
+    /// every hosting on it is offline, comes back with the first one to
+    /// return, and ends with its real expiry whatever the order — never with
+    /// the "1" the second lock would have read.
+    #[tokio::test]
+    async fn sites_sharing_a_system_user_get_it_back_in_either_order() {
+        for a_returns_first in [true, false] {
+            let pool = open_memory().await.expect("open");
+            let shadow = FakeShadow::default();
+            let s = svc(
+                pool.clone(),
+                with_fake_shadow(offline_cycle_mocks(), &shadow),
+            );
+            let a = site_with_extra_login(&s, &pool, &shadow).await;
+            let suid = hyperion_state::system_users::get_by_name(&pool, &a.system_user)
+                .await
+                .expect("user row")
+                .expect("present")
+                .id;
+            let b_id = HostingId::new_v7();
+            hostings::insert(&pool, &b_id, "druhy.cz", suid, None, "/r", now_secs(), None)
+                .await
+                .expect("second hosting on the same user");
+            let (sel_a, sel_b) = (
+                HostingSelector::Id(a.id.clone()),
+                HostingSelector::Id(b_id.clone()),
+            );
+            let manual = || hyperion_types::SuspendReason::Manual { message: None };
+            s.suspend(sel_a.clone(), manual()).await.expect("suspend a");
+            s.suspend(sel_b.clone(), manual()).await.expect("suspend b");
+
+            let (first, second) = if a_returns_first {
+                (sel_a, sel_b)
+            } else {
+                (sel_b, sel_a)
+            };
+            assert_eq!(
+                shadow.lock().expect("lock")[&a.system_user],
+                "1",
+                "disabled once both are offline"
+            );
+            s.resume(first).await.expect("first resume");
+            assert_eq!(
+                shadow.lock().expect("lock")[&a.system_user],
+                "",
+                "back for the site that is online again (a first: {a_returns_first})"
+            );
+            s.resume(second).await.expect("second resume");
+            let sh = shadow.lock().expect("lock");
+            assert_eq!(
+                sh[&a.system_user], "",
+                "the real value is back once both are (a first: {a_returns_first})"
+            );
+            assert_eq!(sh["web.kos.cz"], "20500");
+        }
+    }
+
+    /// Suspending one of two sites on the same system user must not take the
+    /// account away from the one that is still online.
+    #[tokio::test]
+    async fn suspending_one_site_leaves_a_shared_user_working_for_the_live_one() {
+        let pool = open_memory().await.expect("open");
+        let shadow = FakeShadow::default();
+        let s = svc(
+            pool.clone(),
+            with_fake_shadow(offline_cycle_mocks(), &shadow),
+        );
+        let a = site_with_extra_login(&s, &pool, &shadow).await;
+        let suid = hyperion_state::system_users::get_by_name(&pool, &a.system_user)
+            .await
+            .expect("user row")
+            .expect("present")
+            .id;
+        hostings::insert(
+            &pool,
+            &HostingId::new_v7(),
+            "zivy.cz",
+            suid,
+            None,
+            "/r",
+            now_secs(),
+            None,
+        )
+        .await
+        .expect("live sibling");
+        s.suspend(
+            HostingSelector::Id(a.id.clone()),
+            hyperion_types::SuspendReason::Manual { message: None },
+        )
+        .await
+        .expect("suspend");
+        let sh = shadow.lock().expect("lock");
+        assert_eq!(sh[&a.system_user], "", "the live site keeps its account");
+        assert_eq!(
+            sh["web.kos.cz"], "1",
+            "the suspended site's own login is closed"
+        );
+    }
+
+    /// A second hosting on `a`'s system user, straight into the table.
+    async fn sibling_on_same_user(
+        pool: &sqlx::SqlitePool,
+        a: &HostingDetail,
+        domain: &str,
+    ) -> HostingId {
+        let suid = hyperion_state::system_users::get_by_name(pool, &a.system_user)
+            .await
+            .expect("user row")
+            .expect("present")
+            .id;
+        let id = HostingId::new_v7();
+        hostings::insert(pool, &id, domain, suid, None, "/r", now_secs(), None)
+            .await
+            .expect("sibling");
+        id
+    }
+
+    /// The review's case: after one of two sharing sites is back online, an
+    /// agent restart (boot pass) and trashing the other one must not take the
+    /// account away from the site that is online.
+    #[tokio::test]
+    async fn a_restart_or_a_trash_never_disables_a_user_a_live_site_needs() {
+        let pool = open_memory().await.expect("open");
+        let shadow = FakeShadow::default();
+        let s = svc(
+            pool.clone(),
+            with_fake_shadow(offline_cycle_mocks(), &shadow),
+        );
+        let a = site_with_extra_login(&s, &pool, &shadow).await;
+        let b = sibling_on_same_user(&pool, &a, "druhy.cz").await;
+        let manual = || hyperion_types::SuspendReason::Manual { message: None };
+        s.suspend(HostingSelector::Id(a.id.clone()), manual())
+            .await
+            .expect("suspend a");
+        s.suspend(HostingSelector::Id(b.clone()), manual())
+            .await
+            .expect("suspend b");
+        assert_eq!(shadow.lock().expect("lock")[&a.system_user], "1");
+        s.resume(HostingSelector::Id(a.id.clone()))
+            .await
+            .expect("resume a");
+        assert_eq!(shadow.lock().expect("lock")[&a.system_user], "");
+
+        s.offline_logins_lock_on_boot().await.expect("boot");
+        assert_eq!(
+            shadow.lock().expect("lock")[&a.system_user],
+            "",
+            "after a restart"
+        );
+        let b_detail = s.get(HostingSelector::Id(b.clone())).await.expect("get b");
+        s.trash_hosting(b_detail).await.expect("trash b");
+        assert_eq!(
+            shadow.lock().expect("lock")[&a.system_user],
+            "",
+            "after trashing b"
+        );
+        s.offline_logins_reconcile().await.expect("reconcile");
+        assert_eq!(
+            shadow.lock().expect("lock")[&a.system_user],
+            "",
+            "after a reconcile"
+        );
+    }
+
+    /// Deleting one of two offline sites on a user must not reopen the user
+    /// for the one still offline; it opens when that one returns.
+    #[tokio::test]
+    async fn deleting_one_offline_site_keeps_the_other_offline_sites_user_closed() {
+        let pool = open_memory().await.expect("open");
+        let shadow = FakeShadow::default();
+        let mut mocks = with_fake_shadow(offline_cycle_mocks(), &shadow);
+        mocks.expect_nginx_delete_vhost().returning(|_, _| Ok(()));
+        mocks.expect_acme_delete().returning(|_| Ok(()));
+        mocks.expect_db_drop().returning(|_, _, _| Ok(()));
+        mocks.expect_remove_hosting_tree().returning(|_| Ok(()));
+        mocks.expect_delete_user().times(0);
+        let s = svc(pool.clone(), mocks);
+        let a = site_with_extra_login(&s, &pool, &shadow).await;
+        let b = sibling_on_same_user(&pool, &a, "druhy.cz").await;
+        let manual = || hyperion_types::SuspendReason::Manual { message: None };
+        s.suspend(HostingSelector::Id(a.id.clone()), manual())
+            .await
+            .expect("suspend a");
+        s.suspend(HostingSelector::Id(b.clone()), manual())
+            .await
+            .expect("suspend b");
+
+        s.delete(
+            HostingSelector::Id(b),
+            hyperion_rpc::wire::DeleteOpts::default(),
+        )
+        .await
+        .expect("delete b");
+        assert_eq!(
+            shadow.lock().expect("lock")[&a.system_user],
+            "1",
+            "a is still suspended"
+        );
+        s.resume(HostingSelector::Id(a.id.clone()))
+            .await
+            .expect("resume a");
+        assert_eq!(shadow.lock().expect("lock")[&a.system_user], "");
+    }
+
+    /// A new site on an account whose other sites are all offline gets it back.
+    #[tokio::test]
+    async fn a_new_site_on_a_disabled_user_re_enables_it() {
+        let pool = open_memory().await.expect("open");
+        let shadow = FakeShadow::default();
+        let s = svc(
+            pool.clone(),
+            with_fake_shadow(offline_cycle_mocks(), &shadow),
+        );
+        let a = site_with_extra_login(&s, &pool, &shadow).await;
+        s.suspend(
+            HostingSelector::Id(a.id.clone()),
+            hyperion_types::SuspendReason::Manual { message: None },
+        )
+        .await
+        .expect("suspend");
+        assert_eq!(shadow.lock().expect("lock")[&a.system_user], "1");
+        sibling_on_same_user(&pool, &a, "novy.cz").await;
+        s.apply_system_user_policy(&a.system_user).await;
+        let sh = shadow.lock().expect("lock");
+        assert_eq!(sh[&a.system_user], "", "the new site needs the account");
+        assert_eq!(
+            sh["web.kos.cz"], "1",
+            "the suspended site's own login stays closed"
+        );
+    }
+
+    /// A hard delete that keeps the system user must give its logins back:
+    /// the record goes with the row and nothing else clears the expiry.
+    #[tokio::test]
+    async fn deleting_a_suspended_site_but_keeping_its_user_re_enables_the_user() {
+        let pool = open_memory().await.expect("open");
+        let shadow = FakeShadow::default();
+        let mut mocks = with_fake_shadow(offline_cycle_mocks(), &shadow);
+        mocks.expect_nginx_delete_vhost().returning(|_, _| Ok(()));
+        mocks.expect_acme_delete().returning(|_| Ok(()));
+        mocks.expect_db_drop().returning(|_, _, _| Ok(()));
+        mocks.expect_remove_hosting_tree().returning(|_| Ok(()));
+        mocks.expect_delete_user().times(0);
+        let s = svc(pool.clone(), mocks);
+        let site = site_with_extra_login(&s, &pool, &shadow).await;
+        let sel = HostingSelector::Id(site.id.clone());
+        s.suspend(
+            sel.clone(),
+            hyperion_types::SuspendReason::Manual { message: None },
+        )
+        .await
+        .expect("suspend");
+        s.delete(
+            sel,
+            hyperion_rpc::wire::DeleteOpts {
+                keep_user: true,
+                keep_database: false,
+            },
+        )
+        .await
+        .expect("delete");
+        let sh = shadow.lock().expect("lock");
+        assert_eq!(sh[&site.system_user], "", "the kept user works again");
+        assert_eq!(
+            sh["web.kos.cz"], "1",
+            "a login of the deleted site that outlived the teardown stays shut"
+        );
+    }
+
+    /// After the boot pass has migrated this node, a missing record is never
+    /// read as an older version's password lock — whatever raced to clear it.
+    #[tokio::test]
+    async fn once_migrated_a_missing_record_never_unlocks_a_password() {
+        let pool = open_memory().await.expect("open");
+        let shadow = FakeShadow::default();
+        let mut mocks = with_fake_shadow(offline_cycle_mocks(), &shadow);
+        mocks.expect_linux_unlock_login().times(0);
+        mocks.expect_nginx_delete_vhost().returning(|_, _| Ok(()));
+        mocks.expect_acme_delete().returning(|_| Ok(()));
+        mocks.expect_db_drop().returning(|_, _, _| Ok(()));
+        mocks.expect_remove_hosting_tree().returning(|_| Ok(()));
+        let s = svc(pool.clone(), mocks);
+        let site = site_with_extra_login(&s, &pool, &shadow).await;
+        s.offline_logins_lock_on_boot()
+            .await
+            .expect("boot (nothing offline)");
+        s.suspend(
+            HostingSelector::Id(site.id.clone()),
+            hyperion_types::SuspendReason::Manual { message: None },
+        )
+        .await
+        .expect("suspend");
+        // What a reconcile running during the teardown leaves: no record.
+        hyperion_state::hosting_kv::delete(&pool, site.id.as_str(), LOGIN_LOCK_KV)
+            .await
+            .expect("clear record");
+        s.delete(
+            HostingSelector::Id(site.id.clone()),
+            hyperion_rpc::wire::DeleteOpts {
+                keep_user: true,
+                keep_database: false,
+            },
+        )
+        .await
+        .expect("delete");
     }
 
     #[tokio::test]
@@ -37704,6 +38941,9 @@ mod tests {
         a.expect_fpm_delete().returning(|_, _| Ok(()));
         a.expect_db_lock().returning(|_, _| Ok(()));
         a.expect_linux_lock_login().returning(|_| Ok(()));
+        a.expect_linux_login_expiry()
+            .returning(|_| Ok(Some(String::new())));
+        a.expect_linux_set_login_expiry().returning(|_, _| Ok(()));
         a.expect_kill_user_procs().returning(|_| Ok(()));
         let s = svc(pool.clone(), a);
         s.create(req("paused2.cz")).await.expect("create");

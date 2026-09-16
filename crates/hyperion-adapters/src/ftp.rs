@@ -364,35 +364,52 @@ pub async fn read_user_web_root(user: &str) -> Result<Option<String>, AdapterErr
 
 /// Classify `user`'s shadow password field WITHOUT copying the hash out.
 ///
-/// Returns `hash` (a usable password — FTP can log in), `locked` (`!`-prefixed,
-/// which is what suspension does), `star` (`*` — deliberately disabled),
-/// `empty` (the state the old `passwd -d` left behind), or `no_user`.
+/// Returns `hash` (a usable password — FTP can log in), `locked` (a
+/// `!`-prefixed hash, or an EXPIRED account, which is how suspension and the
+/// trash disable logins), `star` (`*` — deliberately disabled), `empty` (the
+/// state the old `passwd -d` left behind), or `no_user`.
 /// Never returns the hash itself: the caller renders this into a web page.
 pub async fn password_state(user: &str) -> String {
     let raw = match tokio::fs::read_to_string("/etc/shadow").await {
         Ok(r) => r,
         Err(_) => return "no_user".into(),
     };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
     for line in raw.lines() {
-        let mut it = line.splitn(3, ':');
-        let (Some(u), Some(hash)) = (it.next(), it.next()) else {
+        let fields: Vec<&str> = line.split(':').collect();
+        let (Some(u), Some(hash)) = (fields.first(), fields.get(1)) else {
             continue;
         };
-        if u != user {
+        if *u != user {
             continue;
         }
-        return if hash.is_empty() {
-            "empty"
-        } else if hash.starts_with('!') {
-            "locked"
-        } else if hash.starts_with('*') {
-            "star"
-        } else {
-            "hash"
-        }
-        .into();
+        let expired = crate::users::expiry_field_is_past(fields.get(7).unwrap_or(&""), now);
+        return shadow_login_state(hash, expired, ["hash", "locked", "star", "empty"]).into();
     }
     "no_user".into()
+}
+
+/// One shadow entry as a login state, in the caller's vocabulary
+/// (`[usable, locked, disabled, empty]`) — the two readers name them
+/// differently and both are rendered by existing pages.
+///
+/// An expired account reads as locked whatever its hash: no PAM service will
+/// let it in. A `*` stays "disabled" even then, because that is the operator's
+/// own setting and the more useful thing to show.
+fn shadow_login_state<'a>(hash: &str, expired: bool, names: [&'a str; 4]) -> &'a str {
+    let [usable, locked, disabled, empty] = names;
+    if hash.starts_with('*') {
+        disabled
+    } else if expired || hash.starts_with('!') {
+        locked
+    } else if hash.is_empty() {
+        empty
+    } else {
+        usable
+    }
 }
 
 /// The login shell recorded for `user` in passwd, and whether it appears in
@@ -1209,10 +1226,14 @@ pub async fn account_password_states() -> Result<Vec<(String, String)>, AdapterE
         .map_err(|e| {
             AdapterError::Other(format!("read /etc/shadow: {e} (agent must run as root)"))
         })?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
     let mut out = Vec::new();
     for line in raw.lines() {
-        let mut it = line.splitn(3, ':');
-        let (Some(user), Some(hash)) = (it.next(), it.next()) else {
+        let fields: Vec<&str> = line.split(':').collect();
+        let (Some(user), Some(hash)) = (fields.first(), fields.get(1)) else {
             continue;
         };
         if user.is_empty() {
@@ -1220,15 +1241,8 @@ pub async fn account_password_states() -> Result<Vec<(String, String)>, AdapterE
         }
         // Never carries the hash itself out of this function — the caller
         // renders this into a web page.
-        let state = if hash.is_empty() {
-            "empty"
-        } else if hash.starts_with('!') {
-            "locked"
-        } else if hash.starts_with('*') {
-            "off"
-        } else {
-            "set"
-        };
+        let expired = crate::users::expiry_field_is_past(fields.get(7).unwrap_or(&""), now);
+        let state = shadow_login_state(hash, expired, ["set", "locked", "off", "empty"]);
         out.push((user.to_string(), state.to_string()));
     }
     Ok(out)
@@ -1504,6 +1518,17 @@ pub async fn probe_login(user: &str, password: &str) -> Result<bool, AdapterErro
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_expired_account_reads_as_locked_but_a_disabled_one_stays_disabled() {
+        let names = ["hash", "locked", "star", "empty"];
+        assert_eq!(super::shadow_login_state("$y$abc", false, names), "hash");
+        assert_eq!(super::shadow_login_state("$y$abc", true, names), "locked");
+        assert_eq!(super::shadow_login_state("!$y$abc", false, names), "locked");
+        assert_eq!(super::shadow_login_state("*", true, names), "star");
+        assert_eq!(super::shadow_login_state("", false, names), "empty");
+        assert_eq!(super::shadow_login_state("", true, names), "locked");
+    }
+
     /// Pure-function sanity: ensure the error string we match against
     /// stays in lockstep with systemd's actual phrasing. If systemd ever
     /// changes the message we want to surface that loudly here.

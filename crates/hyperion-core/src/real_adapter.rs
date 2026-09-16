@@ -1162,6 +1162,14 @@ impl AdapterPort for RealAdapter {
         hyperion_adapters::users::unlock_login(&n).await
     }
 
+    async fn linux_login_expiry(&self, login: &str) -> Result<Option<String>, AdapterError> {
+        hyperion_adapters::users::login_expiry(login).await
+    }
+
+    async fn linux_set_login_expiry(&self, login: &str, expiry: &str) -> Result<(), AdapterError> {
+        hyperion_adapters::users::set_login_expiry(login, expiry).await
+    }
+
     async fn kill_user_procs(&self, name: &str) -> Result<(), AdapterError> {
         let n = SystemUserName::parse(name)?;
         hyperion_adapters::users::kill_user_procs(&n).await

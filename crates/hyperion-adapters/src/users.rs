@@ -92,6 +92,81 @@ pub async fn unlock_login(name: &SystemUserName) -> Result<(), AdapterError> {
     Ok(())
 }
 
+/// The account-expiry field (shadow field 8) of `login`, verbatim: days since
+/// the epoch, or empty for "never expires". `Ok(None)` when there is no such
+/// account.
+///
+/// Read so it can be put back exactly. Suspension and the trash disable a
+/// site's logins by expiring them (see [`set_login_expiry`]), and an operator
+/// may have set an expiry of their own that a resume must not erase.
+pub async fn login_expiry(login: &str) -> Result<Option<String>, AdapterError> {
+    hyperion_validate::validate_login_name(login)
+        .map_err(|e| AdapterError::Other(e.to_string()))?;
+    let raw = tokio::fs::read_to_string("/etc/shadow")
+        .await
+        .map_err(|e| AdapterError::Other(format!("read /etc/shadow: {e}")))?;
+    Ok(shadow_expiry_field(&raw, login).map(str::to_string))
+}
+
+/// Field 8 of `login`'s line in a shadow file, if the line exists.
+fn shadow_expiry_field<'a>(shadow: &'a str, login: &str) -> Option<&'a str> {
+    shadow.lines().find_map(|line| {
+        let fields: Vec<&str> = line.split(':').collect();
+        (fields.first() == Some(&login)).then(|| fields.get(7).copied().unwrap_or(""))
+    })
+}
+
+/// Set `login`'s account expiry: `"1"` to disable every login, or a value
+/// read earlier with [`login_expiry`] to put it back. A missing account is
+/// success — an extra FTP login may have been deleted in the meantime.
+///
+/// Why expiry, and not `usermod -L`:
+///
+/// * `-L` only prefixes the password hash. OpenSSH skips its own
+///   locked-account check when `UsePAM yes` (Debian's default), so a site's
+///   SFTP key kept working on a suspended site. An expired account is refused
+///   by PAM's account stage, which sshd, vsftpd, `su` and cron all run.
+/// * `-U` strips a `!` whoever put it there, so resuming a site unlocked a
+///   login that had been locked for some other reason. Expiry leaves the
+///   password field alone.
+/// * root's `sudo -u <user>` and `runuser` do not run the account stage for
+///   the target, so wp-cli and the other maintenance Hyperion runs as the
+///   site user keep working on a suspended site.
+///
+/// All three verified against Debian 12 (OpenSSH 9.2, vsftpd 3.0.3, sudo 1.9).
+pub async fn set_login_expiry(login: &str, expiry: &str) -> Result<(), AdapterError> {
+    hyperion_validate::validate_login_name(login)
+        .map_err(|e| AdapterError::Other(e.to_string()))?;
+    // Only what shadow itself stores: empty, or a (possibly negative) day count.
+    let well_formed = expiry.is_empty()
+        || expiry
+            .strip_prefix('-')
+            .unwrap_or(expiry)
+            .bytes()
+            .all(|b| b.is_ascii_digit());
+    if !well_formed || expiry == "-" {
+        return Err(AdapterError::Other(format!(
+            "refusing account expiry {expiry:?} for {login}: not a shadow day count"
+        )));
+    }
+    if lookup_raw(login).await?.is_none() {
+        return Ok(());
+    }
+    cmd::run("/usr/sbin/usermod", &["-e", expiry, "--", login]).await?;
+    Ok(())
+}
+
+/// Is a shadow expiry field in the past (or today) — is the account expired?
+pub fn expiry_field_is_past(field: &str, now_secs: i64) -> bool {
+    match field.trim().parse::<i64>() {
+        // Exactly pam_unix's rule (`sp_expire >= 0 && curdays >= sp_expire`),
+        // because PAM is what refuses the login: 0 is expired, -1 and empty
+        // are never.
+        Ok(days) if days >= 0 => days * 86_400 <= now_secs,
+        _ => false,
+    }
+}
+
 /// `pkill -KILL -u <name>`. Best-effort: not-found / no-procs return Ok.
 pub async fn kill_user_procs(name: &SystemUserName) -> Result<(), AdapterError> {
     match cmd::run("/usr/bin/pkill", &["-KILL", "-u", name.as_str()]).await {
@@ -190,6 +265,40 @@ pub async fn lookup(name: &SystemUserName) -> Result<Option<UserInfo>, AdapterEr
 mod tests {
     use super::*;
     use hyperion_validate::SystemUserName;
+
+    #[test]
+    fn shadow_expiry_field_is_read_per_login() {
+        let shadow = "root:*:19000:0:99999:7:::\n\
+                      kos_cz:$y$abc:19000:0:99999:7:::\n\
+                      ftp.kos.cz:!$y$def:19000:0:99999:7::1:\n\
+                      short:x:1";
+        assert_eq!(shadow_expiry_field(shadow, "kos_cz"), Some(""));
+        assert_eq!(shadow_expiry_field(shadow, "ftp.kos.cz"), Some("1"));
+        assert_eq!(
+            shadow_expiry_field(shadow, "short"),
+            Some(""),
+            "a short line is 'never'"
+        );
+        assert_eq!(
+            shadow_expiry_field(shadow, "kos"),
+            None,
+            "a prefix is not a match"
+        );
+    }
+
+    #[test]
+    fn expiry_in_the_past_disables_the_account() {
+        let now = 20_000 * 86_400;
+        assert!(expiry_field_is_past("1", now));
+        assert!(expiry_field_is_past("20000", now));
+        assert!(!expiry_field_is_past("20001", now));
+        assert!(!expiry_field_is_past("", now));
+        assert!(!expiry_field_is_past("-1", now));
+        assert!(
+            expiry_field_is_past("0", now),
+            "pam_unix treats 0 as expired"
+        );
+    }
 
     fn spec(name: &str) -> UserSpec {
         UserSpec::new_with_default_shell(
