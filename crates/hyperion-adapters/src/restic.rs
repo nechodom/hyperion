@@ -650,7 +650,10 @@ mod tests {
             let err = forget_ids(&repo, &[bad.to_string()])
                 .await
                 .expect_err("must refuse");
-            assert!(err.to_string().contains("not a snapshot id"), "{bad}: {err}");
+            assert!(
+                err.to_string().contains("not a snapshot id"),
+                "{bad}: {err}"
+            );
         }
         assert!(is_snapshot_id("3b37bfc4"));
         assert!(is_snapshot_id(
@@ -669,7 +672,9 @@ mod tests {
                 .into(),
         };
         assert!(is_lock_error(&e));
-        assert!(!is_lock_error(&AdapterError::Other("wrong password".into())));
+        assert!(!is_lock_error(&AdapterError::Other(
+            "wrong password".into()
+        )));
     }
 }
 
@@ -708,7 +713,9 @@ mod real {
         let (_base, repo, _site) = repo_with_snapshots(3).await;
         let before = snapshots(&repo).await.expect("list");
         assert_eq!(before.len(), 3);
-        forget_ids(&repo, &[before[0].id.clone()]).await.expect("forget");
+        forget_ids(&repo, &[before[0].id.clone()])
+            .await
+            .expect("forget");
         let after = snapshots(&repo).await.expect("list");
         assert_eq!(after.len(), 2);
         assert!(!after.iter().any(|s| s.id == before[0].id));
@@ -766,7 +773,10 @@ mod real {
             keep_days: 1,
             keep_last: 0,
         };
-        assert!(rule.expired(&listed, now).is_empty(), "nothing is a day old");
+        assert!(
+            rule.expired(&listed, now).is_empty(),
+            "nothing is a day old"
+        );
         assert_eq!(rule.expired(&listed, now + 2 * 86_400).len(), 2);
     }
 }

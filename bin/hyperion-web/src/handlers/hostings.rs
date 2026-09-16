@@ -8323,7 +8323,10 @@ pub async fn post_set_backup_cadence(
             "flash_error",
             format!("The schedule was not saved — the owning node refused it: {e}"),
         ),
-        Ok(_) => ("flash_error", "The schedule was not saved — unexpected response.".into()),
+        Ok(_) => (
+            "flash_error",
+            "The schedule was not saved — unexpected response.".into(),
+        ),
         Err(e) => (
             "flash_error",
             format!("The schedule was not saved — the owning node could not be reached: {e}"),
@@ -12474,7 +12477,14 @@ async fn render_offsite(
                 if no_target { error } else { Some(msg) },
             ))
         }
-        Ok(_) => Ok(card(Vec::new(), true, false, detail.domain, site_has_db, error)),
+        Ok(_) => Ok(card(
+            Vec::new(),
+            true,
+            false,
+            detail.domain,
+            site_has_db,
+            error,
+        )),
         Err(e) => Ok(card(
             Vec::new(),
             true,
@@ -12842,9 +12852,7 @@ async fn render_snapshots(
                 can_restore,
                 can_manage,
                 engine: overview.map(|o| o.engine.clone()).unwrap_or_default(),
-                retention: overview
-                    .map(|o| o.retention.describe())
-                    .unwrap_or_default(),
+                retention: overview.map(|o| o.retention.describe()).unwrap_or_default(),
                 repo_size: overview
                     .filter(|o| o.repo_bytes > 0)
                     .map(|o| crate::handlers::stats::fmt_bytes(&(o.repo_bytes as i64)))
@@ -12892,7 +12900,12 @@ async fn render_snapshots(
     {
         Ok(RpcResponse::SnapshotOverview(o)) => o,
         Ok(RpcResponse::Error(e)) => {
-            return Ok(card(Vec::new(), detail.domain.clone(), None, Some(e.to_string())))
+            return Ok(card(
+                Vec::new(),
+                detail.domain.clone(),
+                None,
+                Some(e.to_string()),
+            ))
         }
         Ok(_) => {
             return Ok(card(
@@ -12964,13 +12977,12 @@ pub async fn post_snapshot_now(
     ctx: AuthCtx,
     Form(form): Form<SnapshotNowForm>,
 ) -> Result<Response, AppError> {
-    let sel =
-        match require_manage_for_selector(&state, &ctx, &form.selector, Capability::BackupRun)
-            .await
-        {
-            Ok(s) => s,
-            Err(r) => return Ok(r),
-        };
+    let sel = match require_manage_for_selector(&state, &ctx, &form.selector, Capability::BackupRun)
+        .await
+    {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
     let (_, owner) = find_hosting_anywhere(&state, sel.clone()).await?;
     let actor_uid = ctx.session.as_ref().map(|s| s.user_id).unwrap_or(0);
     let job_state = state.clone();
@@ -13050,13 +13062,12 @@ pub async fn post_snapshot_delete(
     ctx: AuthCtx,
     Form(form): Form<SnapshotDeleteForm>,
 ) -> Result<Response, AppError> {
-    let sel =
-        match require_manage_for_selector(&state, &ctx, &form.selector, Capability::BackupRun)
-            .await
-        {
-            Ok(s) => s,
-            Err(r) => return Ok(r),
-        };
+    let sel = match require_manage_for_selector(&state, &ctx, &form.selector, Capability::BackupRun)
+        .await
+    {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
     let all = matches!(form.all.as_str(), "1" | "true" | "on");
     let snapshot = form.snapshot.trim().to_string();
     if !all && snapshot.is_empty() {

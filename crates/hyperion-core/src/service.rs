@@ -9703,9 +9703,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// path (tests) keeps what it was built with.
     fn protection_mode_now(&self) -> hyperion_types::ProtectionMode {
         match self.agent_config_path.as_deref() {
-            Some(path) => {
-                hyperion_types::ProtectionMode::parse(&read_cluster_section(Some(path)).protection_mode)
-            }
+            Some(path) => hyperion_types::ProtectionMode::parse(
+                &read_cluster_section(Some(path)).protection_mode,
+            ),
             None => self.protection_mode,
         }
     }
@@ -36227,6 +36227,31 @@ mod tests {
         );
     }
 
+    #[test]
+    fn retention_fields_are_range_checked_where_they_are_typed() {
+        let one = |section: &str, key: &str, v: &str| {
+            let mut f = std::collections::BTreeMap::new();
+            f.insert(key.to_string(), v.to_string());
+            parse_agent_section_fields(section, &f).is_ok()
+        };
+        assert!(one("snapshots", "keep_days", "14"));
+        assert!(one("snapshots", "keep_days", "0"), "0 = never by age");
+        assert!(!one("snapshots", "keep_days", "-1"));
+        assert!(!one("snapshots", "keep_days", "99999"));
+        assert!(one("snapshots", "keep_last", "0"));
+        assert!(!one("snapshots", "keep_last", "abc"));
+        assert!(
+            !one("snapshots", "enabled_typo", "1"),
+            "unknown keys are refused"
+        );
+        assert!(one("backup_retention", "max_age_days", "30"));
+        assert!(
+            !one("backup_retention", "max_age_days", "0"),
+            "the agent floors this at 1"
+        );
+        assert!(!one("backup_retention", "keep_latest_n", "0"));
+    }
+
     /// "worker" is not a settable mode — it is a fact about the disk, and a
     /// key that can contradict it is a bug factory.
     #[tokio::test]
@@ -37772,6 +37797,36 @@ mod tests {
         a
     }
 
+    #[test]
+    fn retention_rules_read_from_agent_toml_default_to_what_the_agent_runs() {
+        let dir = tempfile::tempdir().expect("dir");
+        let cfg = dir.path().join("agent.toml");
+        // No retention tables at all: the agent's compiled defaults.
+        std::fs::write(&cfg, "[agent]\n").expect("write");
+        let archives = read_backup_retention_section(Some(&cfg));
+        assert_eq!((archives.max_age_days, archives.keep_latest_n), (30, 5));
+        let snaps = read_snapshot_retention(Some(&cfg));
+        assert_eq!((snaps.keep_days, snaps.keep_last), (30, 5));
+        // Snapshots follow [backup_retention] until they have their own rule.
+        std::fs::write(
+            &cfg,
+            "[backup_retention]\nmax_age_days = 60\nkeep_latest_n = 2\n",
+        )
+        .expect("write");
+        let snaps = read_snapshot_retention(Some(&cfg));
+        assert_eq!((snaps.keep_days, snaps.keep_last), (60, 2));
+        std::fs::write(
+            &cfg,
+            "[backup_retention]\nmax_age_days = 60\n[snapshots]\nkeep_days = 14\nkeep_last = 0\n",
+        )
+        .expect("write");
+        let snaps = read_snapshot_retention(Some(&cfg));
+        assert_eq!((snaps.keep_days, snaps.keep_last), (14, 0));
+        // A negative value on disk is clamped, never wrapped into a huge u32.
+        std::fs::write(&cfg, "[snapshots]\nkeep_days = -4\n").expect("write");
+        assert_eq!(read_snapshot_retention(Some(&cfg)).keep_days, 0);
+    }
+
     /// Snapshots end to end against a REAL restic. Run on a Linux box with
     /// restic installed, as root (the repository root is /var/lib/hyperion):
     /// `HYPERION_RESTIC_IT=1 cargo test -p hyperion-core --lib real_restic -- --ignored`
@@ -37853,9 +37908,17 @@ mod tests {
             ])
             .output()
             .expect("restic");
-        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         assert_eq!(
-            s.snapshot_overview(sel.clone()).await.expect("o").snapshots.len(),
+            s.snapshot_overview(sel.clone())
+                .await
+                .expect("o")
+                .snapshots
+                .len(),
             3
         );
         std::fs::write(&cfg, "[snapshots]\nkeep_days = 30\nkeep_last = 1\n").expect("cfg");

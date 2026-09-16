@@ -925,10 +925,23 @@ pub struct BackupRemoteConfigView {
     pub base_path: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BackupRetentionConfigView {
     pub max_age_days: i64,
     pub keep_latest_n: i64,
+}
+
+/// The agent's own defaults (`BackupRetentionSection`), NOT zeros. An
+/// agent.toml with no `[backup_retention]` table runs on 30 days / 5, so that
+/// is what a reader of the file must answer too: a zero here was clamped to
+/// "1 day, keep 1" by the archive prune the moment it read the rule live.
+impl Default for BackupRetentionConfigView {
+    fn default() -> Self {
+        Self {
+            max_age_days: 30,
+            keep_latest_n: 5,
+        }
+    }
 }
 
 /// Sanitised wire shape of one row of `web_users`. NEVER includes the
@@ -2613,7 +2626,10 @@ mod snapshot_retention_tests {
             keep_days: 14,
             keep_last: 3,
         };
-        assert_eq!(r.describe(), "deleted after 14 days (the newest 3 are always kept)");
+        assert_eq!(
+            r.describe(),
+            "deleted after 14 days (the newest 3 are always kept)"
+        );
         let r = SnapshotRetention {
             keep_days: 0,
             keep_last: 3,
