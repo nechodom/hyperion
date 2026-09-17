@@ -1057,10 +1057,27 @@ function isShortcutContext(ev) {
     if (!f) return;
     // Mark as confirmed so our submit handler lets it through.
     f.dataset.confirmed = '1';
-    if (f.requestSubmit) {
-      f.requestSubmit();
+    // Defensive: if the form was disconnected while the dialog was open
+    // (a live-refresh region swapped under it — held off above, but belt
+    // and braces), submit() on a detached form is a silent no-op. Find the
+    // live form for the same action + hidden fields and submit that.
+    let target = f;
+    if (!f.isConnected) {
+      const action = f.getAttribute('action');
+      const hidden = {};
+      f.querySelectorAll('input[type=hidden]').forEach(i => { hidden[i.name] = i.value; });
+      target = [...document.querySelectorAll(`form[action="${action}"]`)].find(g =>
+        Object.entries(hidden).every(([n, v]) => {
+          const el = g.querySelector(`input[name="${n}"]`);
+          return el && el.value === v;
+        })) || null;
+      if (target) target.dataset.confirmed = '1';
+    }
+    if (!target) return;
+    if (target.requestSubmit) {
+      target.requestSubmit();
     } else {
-      f.submit();
+      target.submit();
     }
   });
 
@@ -1608,6 +1625,15 @@ function isShortcutContext(ev) {
       if (!node.offsetParent && node.style.position !== 'fixed') return;
       if (!force && Date.now() - lastClick < 4000) return;
       if (inputFocused(node)) return;
+      // Never swap the region out from under an OPEN confirm dialog. The
+      // form the dialog is about to submit lives inside a live-refresh
+      // region (the backup Delete / Restore / DB-only buttons all do), and
+      // replacing innerHTML disconnects it. The confirmed submit then calls
+      // requestSubmit() on a form no longer in the document, which browsers
+      // silently ignore — so the operator confirms "Delete backup" and
+      // nothing happens. Hold the refresh while any dialog is up.
+      const confirmModal = document.getElementById('app-modal-backdrop');
+      if (confirmModal && confirmModal.style.display === 'flex') return;
       try {
         // no-store: the whole point is to defeat the stale HTTP cache the
         // user had to F5 past. Always pull a fresh render.
@@ -1616,6 +1642,10 @@ function isShortcutContext(ev) {
         const doc = new DOMParser().parseFromString(await r.text(), 'text/html');
         const fresh = doc.getElementById(id);
         const cur = document.getElementById(id);
+        // Re-check after the await: a dialog may have opened while the
+        // fetch was in flight, and swapping now would disconnect its form
+        // just the same.
+        if (confirmModal && confirmModal.style.display === 'flex') return;
         if (fresh && cur && fresh.innerHTML !== cur.innerHTML) {
           cur.innerHTML = fresh.innerHTML;
         }
