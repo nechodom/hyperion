@@ -1,0 +1,88 @@
+{# Core Web Vitals, lazy-loaded over HTMX from the owning node.
+
+   The render/speed half of "performance" lives in the page-check card above;
+   this card is the Core Web Vitals — the metrics Google grades the page
+   experience by, which need a browser to render the page and so come from the
+   source picked in Settings → Performance, not from the node's own curl. #}
+<div class="card" style="margin-bottom:0.9rem">
+  <div class="row" style="align-items:center;gap:0.6rem;margin-bottom:0.4rem;flex-wrap:wrap">
+    <h2 style="margin:0;font-size:0.95rem">
+      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+      Core Web Vitals
+    </h2>
+    {% if let Some(c) = cwv %}
+      {% if c.best_is_field() %}<span class="pill ok" style="font-size:0.6rem" title="From real visitors (Google CrUX)">real visitors</span>
+      {% else if c.has_data() %}<span class="pill" style="font-size:0.6rem" title="Synthetic lab test">lab test</span>{% endif %}
+    {% endif %}
+    <span class="grow"></span>
+    {% if can_measure && source != "off" %}
+    <form method="post" action="/hostings/performance/measure" style="margin:0">
+      <input type="hidden" name="_csrf" value="{{ csrf_measure }}">
+      <input type="hidden" name="selector" value="{{ selector }}">
+      <button class="btn ghost small" type="submit">Measure now</button>
+    </form>
+    {% endif %}
+  </div>
+
+  {% if let Some(e) = error %}
+  <div class="flash warn" style="margin:0 0 0.6rem"><div class="flash-body">{{ e }}</div></div>
+  {% endif %}
+
+  {% if source == "off" %}
+  <p class="text-soft small" style="margin:0;line-height:1.55">
+    No Core Web Vitals source is set for this site's node. Render and speed are still measured (the
+    page-check card above); to add LCP, CLS and INP, pick a source in
+    <a href="/settings#notifications" data-role-min="super_admin">Settings → Performance</a>.
+  </p>
+  {% else if source == "lighthouse" && !lighthouse_available %}
+  <div class="flash warn" style="margin:0"><div class="flash-body">
+    This site's node is set to measure with a local Lighthouse, but Lighthouse is not installed there.
+    Install it on that node, or switch to Google PageSpeed Insights in
+    <a href="/settings#notifications" data-role-min="super_admin">Settings → Performance</a>.
+  </div></div>
+  {% else if cwv.is_none() %}
+  <p class="text-soft small" style="margin:0">
+    No measurement yet. Care-plan sites are measured weekly; use <em>Measure now</em> to run it now.
+    Source: <strong>{{ source }}</strong>, {{ strategy }}.
+  </p>
+  {% else if let Some(c) = cwv %}
+    {% if !c.error.is_empty() %}
+    <div class="flash warn" style="margin:0 0 0.6rem"><div class="flash-body">
+      Last measurement failed: {{ c.error }}
+    </div></div>
+    {% endif %}
+    {% if let Some(m) = c.best() %}
+    <div class="row" style="gap:1.4rem;flex-wrap:wrap;margin:0.2rem 0 0.6rem">
+      <div>
+        <div class="text-soft small">LCP <span title="Largest Contentful Paint — when the main content appears">ⓘ</span></div>
+        {% if let Some(v) = m.lcp_ms %}<strong>{{ v }} ms</strong>
+          {% if let Some(r) = m.lcp_rating() %}<span class="pill {% if r.label() == "good" %}ok{% else if r.label() == "poor" %}err{% else %}warn{% endif %}" style="font-size:0.55rem;margin-left:0.3rem">{{ r.label() }}</span>{% endif %}
+        {% else %}<span class="text-soft">—</span>{% endif %}
+      </div>
+      <div>
+        <div class="text-soft small">CLS <span title="Cumulative Layout Shift — how much the page jumps while loading">ⓘ</span></div>
+        {% if let Some(d) = m.cls_display() %}<strong>{{ d }}</strong>
+          {% if let Some(r) = m.cls_rating() %}<span class="pill {% if r.label() == "good" %}ok{% else if r.label() == "poor" %}err{% else %}warn{% endif %}" style="font-size:0.55rem;margin-left:0.3rem">{{ r.label() }}</span>{% endif %}
+        {% else %}<span class="text-soft">—</span>{% endif %}
+      </div>
+      <div>
+        <div class="text-soft small">{% if m.inp_ms.is_some() %}INP{% else %}TBT{% endif %} <span title="Responsiveness to input; INP is from real visitors, TBT is the lab stand-in">ⓘ</span></div>
+        {% if let Some(v) = m.inp_ms %}<strong>{{ v }} ms</strong>
+          {% if let Some(r) = m.inp_rating() %}<span class="pill {% if r.label() == "good" %}ok{% else if r.label() == "poor" %}err{% else %}warn{% endif %}" style="font-size:0.55rem;margin-left:0.3rem">{{ r.label() }}</span>{% endif %}
+        {% else if let Some(v) = m.tbt_ms %}<strong>{{ v }} ms</strong>
+        {% else %}<span class="text-soft">—</span>{% endif %}
+      </div>
+      {% if let Some(s) = c.perf_score %}
+      <div>
+        <div class="text-soft small">Score</div>
+        <strong>{{ s }}/100</strong>
+      </div>
+      {% endif %}
+    </div>
+    <p class="text-soft small" style="margin:0">
+      {% if c.best_is_field() %}From real visitors over the last 28 days (Google CrUX).{% else %}Lab test — one synthetic load.{% endif %}
+      Source: {{ c.source }}, {{ c.strategy }}. Measured {{ measured_ago }}. Lower is better.
+    </p>
+    {% endif %}
+  {% endif %}
+</div>

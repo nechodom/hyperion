@@ -706,6 +706,18 @@
   </div>
 </div>
 
+{# Core Web Vitals, beside the page check: same question ("is it fast, does it
+   work"), the metrics half. Lazy — reads the owning node. #}
+<div id="performance-panel"
+     hx-get="/hostings/{{ detail.id.as_str() }}/performance-panel"
+     hx-trigger="intersect once"
+     hx-swap="innerHTML">
+  <div class="card" style="margin-bottom:0.9rem">
+    <span class="spinner-inline" style="margin-right:0.4rem"></span>
+    <span class="text-soft small">Reading Core Web Vitals…</span>
+  </div>
+</div>
+
 {# Security at a glance — the controls are spread across tabs (WAF on
    Settings, bans on Settings, updates on WordPress); this card is the
    single entry point. Status comes from the hosting's own vhost options;
