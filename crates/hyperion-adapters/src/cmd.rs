@@ -53,41 +53,76 @@ pub async fn run(program: &str, args: &[&str]) -> Result<String, AdapterError> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-/// Like [`run`], but the child is torn down if the returned future is dropped.
+/// Run a command in its OWN process group and, if `timeout` elapses, SIGKILL
+/// the WHOLE group before giving up. `label` names the command in the timeout
+/// error (e.g. "Lighthouse timed out").
 ///
-/// tokio's `Command` does NOT kill on drop by default, so a `tokio::time::timeout`
-/// wrapped around a plain `run` abandons a hung child — a headless Chrome that
-/// stalls would then run orphaned, one leaked browser per timed-out measurement.
-/// `kill_on_drop(true)` makes the drop reap the process tree.
-pub async fn run_killable(program: &str, args: &[&str]) -> Result<String, AdapterError> {
-    debug!(program, args = ?redact_args(args), "exec (kill on drop)");
-    let out = Command::new(program)
+/// tokio's `kill_on_drop(true)` SIGKILLs only the immediate child.
+/// For a `sudo -> env -> node (lighthouse) -> chrome` tree that means a timeout
+/// kills `sudo` alone; the browser processes reparent to init and keep running
+/// — one leaked headless Chrome (hundreds of MB) per timed-out measurement, on
+/// a weekly per-site tick, on a product already prone to OOM. Putting the child
+/// in a fresh process group (`process_group(0)` makes its pid the pgid, which
+/// every descendant that does not `setsid` inherits) and signalling the group
+/// on timeout reaps the whole tree. SIGKILL cannot be caught, so `sudo` cannot
+/// swallow it, and it needs no relaying.
+pub async fn run_group_timeout(
+    program: &str,
+    args: &[&str],
+    timeout: std::time::Duration,
+    label: &str,
+) -> Result<String, AdapterError> {
+    use std::process::Stdio;
+    debug!(program, args = ?redact_args(args), "exec (own process group, timed)");
+    let child = Command::new(program)
         .args(args)
+        .process_group(0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        // Belt-and-braces: if we return early for any other reason, the leader
+        // still dies. The group kill below is what reaps the descendants.
         .kill_on_drop(true)
-        .output()
-        .await?;
-    if !out.status.success() {
-        let code = out.status.code().unwrap_or(-1);
-        let mut combined = String::from_utf8_lossy(&out.stdout).into_owned();
-        if !combined.is_empty() && !combined.ends_with('\n') {
-            combined.push('\n');
+        .spawn()?;
+    // The group's pgid equals the leader's pid (we made it the group leader).
+    let pgid = child
+        .id()
+        .and_then(|p| rustix::process::Pid::from_raw(p as i32));
+    match tokio::time::timeout(timeout, child.wait_with_output()).await {
+        Ok(res) => {
+            let out = res?;
+            if !out.status.success() {
+                let code = out.status.code().unwrap_or(-1);
+                let mut combined = String::from_utf8_lossy(&out.stdout).into_owned();
+                if !combined.is_empty() && !combined.ends_with('\n') {
+                    combined.push('\n');
+                }
+                combined.push_str(&String::from_utf8_lossy(&out.stderr));
+                let tail: String = combined
+                    .chars()
+                    .rev()
+                    .take(4096)
+                    .collect::<String>()
+                    .chars()
+                    .rev()
+                    .collect();
+                return Err(AdapterError::Command {
+                    cmd: format!("{program} {}", redact_args(args).join(" ")),
+                    code,
+                    stderr_tail: tail,
+                });
+            }
+            Ok(String::from_utf8_lossy(&out.stdout).into_owned())
         }
-        combined.push_str(&String::from_utf8_lossy(&out.stderr));
-        let tail: String = combined
-            .chars()
-            .rev()
-            .take(4096)
-            .collect::<String>()
-            .chars()
-            .rev()
-            .collect();
-        return Err(AdapterError::Command {
-            cmd: format!("{program} {}", redact_args(args).join(" ")),
-            code,
-            stderr_tail: tail,
-        });
+        Err(_elapsed) => {
+            // `timeout` drops the wait future (kill_on_drop SIGKILLs the leader);
+            // signal the whole group so env/node/chrome die with it.
+            if let Some(pgid) = pgid {
+                let _ = rustix::process::kill_process_group(pgid, rustix::process::Signal::KILL);
+            }
+            Err(AdapterError::Other(format!("{label} timed out")))
+        }
     }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 /// Like [`run`], but on failure the error tail carries **stdout + stderr**
@@ -242,6 +277,95 @@ mod tests {
             .expect("wc");
         // wc -c prints "<bytes>\n" or similar
         assert!(out.contains('5'), "wc output: {out:?}");
+    }
+
+    #[tokio::test]
+    async fn run_group_timeout_returns_output_when_the_command_is_fast() {
+        let out = run_group_timeout(
+            "/bin/echo",
+            &["hi"],
+            std::time::Duration::from_secs(5),
+            "echo",
+        )
+        .await
+        .expect("echo");
+        assert_eq!(out.trim_end(), "hi");
+    }
+
+    #[tokio::test]
+    async fn run_group_timeout_gives_up_at_the_deadline() {
+        let start = std::time::Instant::now();
+        let err = run_group_timeout(
+            "/bin/sleep",
+            &["30"],
+            std::time::Duration::from_millis(300),
+            "sleep",
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(err, AdapterError::Other(ref m) if m.contains("timed out")),
+            "{err:?}"
+        );
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(3),
+            "must return at the deadline, not after the 30s sleep"
+        );
+    }
+
+    /// The whole point of `run_group_timeout`: a timeout must reap the DESCENDANTS,
+    /// not just the immediate child. The old `kill_on_drop`-only path killed the
+    /// leader (`sudo`) and orphaned the browser tree; this proves the group dies.
+    #[tokio::test]
+    async fn run_group_timeout_reaps_descendants_not_just_the_leader() {
+        let dir = tempfile::tempdir().unwrap();
+        let pidfile = dir.path().join("gc.pid");
+        // The shell (group leader) backgrounds a grandchild sleep, records its
+        // PID, then waits forever. Job control is off in `sh -c`, so the
+        // grandchild stays in the shell's process group.
+        let script = format!("/bin/sleep 60 & echo $! > '{}'; wait", pidfile.display());
+        let start = std::time::Instant::now();
+        let err = run_group_timeout(
+            "/bin/sh",
+            &["-c", &script],
+            std::time::Duration::from_millis(600),
+            "test",
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(err, AdapterError::Other(ref m) if m.contains("timed out")),
+            "{err:?}"
+        );
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(5),
+            "must return at the timeout, not the grandchild's 60s"
+        );
+        // Read the grandchild PID the shell recorded.
+        let mut gc = String::new();
+        for _ in 0..50 {
+            gc = std::fs::read_to_string(&pidfile).unwrap_or_default();
+            if !gc.trim().is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let gc = gc.trim().to_string();
+        assert!(!gc.is_empty(), "shell never recorded the grandchild pid");
+        // The grandchild must be gone. `kill -0` exits non-zero (ESRCH) once it
+        // is reaped; reparent-to-init + reap is async, so poll briefly.
+        let mut dead = false;
+        for _ in 0..100 {
+            if run("/bin/kill", &["-0", &gc]).await.is_err() {
+                dead = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        }
+        assert!(
+            dead,
+            "grandchild {gc} survived the group timeout — only the leader was killed"
+        );
     }
 }
 
