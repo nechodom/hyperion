@@ -191,6 +191,40 @@ impl CarePerformance {
     }
 }
 
+/// The whole Performance card of a site, in one round trip to the owning node.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PerformanceView {
+    #[serde(default)]
+    pub care: CarePerformance,
+    /// `off`, `psi` or `lighthouse` — the node's Core Web Vitals source.
+    #[serde(default)]
+    pub cwv_source: String,
+    /// `mobile` or `desktop`.
+    #[serde(default)]
+    pub strategy: String,
+    /// Is a local Lighthouse usable on the node? (Only meaningful when the
+    /// source is `lighthouse`.)
+    #[serde(default)]
+    pub lighthouse_available: bool,
+    /// Is a PSI API key configured? (The key itself never leaves the node.)
+    #[serde(default)]
+    pub psi_key_set: bool,
+}
+
+/// `[performance]` as the Settings page renders it. The API key is never
+/// carried — only whether one is set.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PerformanceConfigView {
+    #[serde(default)]
+    pub cwv_source: String,
+    #[serde(default)]
+    pub strategy: String,
+    #[serde(default)]
+    pub psi_key_set: bool,
+    #[serde(default)]
+    pub lighthouse_available: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

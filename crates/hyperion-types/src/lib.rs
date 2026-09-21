@@ -61,7 +61,9 @@ pub use package::{
 };
 pub use php::PhpVersion;
 pub use profile::{HostingProfile, ProfileApply, ProfileInput, WpAssetSummary};
-pub use perf::{CarePerformance, CwvMetrics, CwvResult, Vital};
+pub use perf::{
+    CarePerformance, CwvMetrics, CwvResult, PerformanceConfigView, PerformanceView, Vital,
+};
 pub use sitecheck::{SiteCheckFinding, SiteCheckPage, SiteCheckReport};
 pub use spf::SpfCheckResult;
 pub use stats::{decode_mime_header, render_html_shell, CountryTraffic};

@@ -9005,6 +9005,154 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         serde_json::from_str(&raw).ok()
     }
 
+    // ─────────────────────────── Page performance ───────────────────────────
+    //
+    // Two questions a care plan promises to answer and, until now, the report
+    // did not: does the site still render, and is it fast? The render/speed
+    // half reuses the site check (a real fetch of the pages, from the node).
+    // The Core Web Vitals half needs a browser the node does not have, so it
+    // is measured by whichever source the operator chose — Google's PageSpeed
+    // Insights or a local Lighthouse — or not at all.
+
+    /// This node's `[performance]` settings, read from agent.toml NOW. Live,
+    /// for the same reason the snapshot and backup settings are: the panel
+    /// saves them on every node and the acting code is here.
+    fn performance_config(&self) -> PerformanceConfig {
+        read_performance_section(self.agent_config_path.as_deref())
+    }
+
+    /// Measure Core Web Vitals for one site now, and store the result.
+    ///
+    /// Respects the node's configured source; with the source `off` there is
+    /// nothing to measure with, and that is an error the caller shows rather
+    /// than a silent no-op. The site's own public URL is measured — for PSI
+    /// that URL is sent to Google, which is the operator's explicit choice in
+    /// picking that source.
+    pub async fn cwv_measure(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<hyperion_types::CwvResult, RpcError> {
+        use hyperion_adapters::perf;
+        let detail = self.get(sel).await?;
+        let cfg = self.performance_config();
+        let strategy = cfg.strategy();
+        let url = format!("https://{}/", detail.domain.trim());
+        let result = match cfg.cwv_source.as_str() {
+            "psi" => perf::measure_psi(&url, &cfg.psi_api_key, strategy).await,
+            "lighthouse" => {
+                if !perf::lighthouse_available().await {
+                    return Err(RpcError::Validation {
+                        message: "Lighthouse is not installed on the node that owns this site.                                   Install it there, or switch the Core Web Vitals source to                                   Google PageSpeed Insights in Settings → Performance."
+                            .into(),
+                    });
+                }
+                perf::measure_lighthouse(&url, strategy).await
+            }
+            _ => {
+                return Err(RpcError::Validation {
+                    message: "no Core Web Vitals source is configured — set one in                               Settings → Performance."
+                        .into(),
+                })
+            }
+        };
+        match result {
+            Ok(mut r) => {
+                r.measured_at = now_secs();
+                if let Ok(json) = serde_json::to_string(&r) {
+                    let _ = hyperion_state::hosting_kv::set(
+                        &self.pool,
+                        detail.id.as_str(),
+                        CWV_KV_KEY,
+                        &json,
+                        now_secs(),
+                    )
+                    .await;
+                }
+                Ok(r)
+            }
+            Err(e) => {
+                // Persist the failure too, timestamped, so the card can say
+                // "tried on <date>, this is why" instead of an eternal blank.
+                let stored = hyperion_types::CwvResult {
+                    measured_at: now_secs(),
+                    source: cfg.cwv_source.clone(),
+                    strategy: strategy_str(strategy).into(),
+                    error: e.to_string(),
+                    ..Default::default()
+                };
+                if let Ok(json) = serde_json::to_string(&stored) {
+                    let _ = hyperion_state::hosting_kv::set(
+                        &self.pool,
+                        detail.id.as_str(),
+                        CWV_KV_KEY,
+                        &json,
+                        now_secs(),
+                    )
+                    .await;
+                }
+                Err(RpcError::Internal_with(format!("Core Web Vitals: {e}")))
+            }
+        }
+    }
+
+    /// The last stored Core Web Vitals result, without measuring again.
+    async fn cwv_last(&self, hosting_id: &str) -> Option<hyperion_types::CwvResult> {
+        let raw = hyperion_state::hosting_kv::get(&self.pool, hosting_id, CWV_KV_KEY)
+            .await
+            .ok()??;
+        serde_json::from_str(&raw).ok()
+    }
+
+    /// Fold the site check and the last CWV result into the report's
+    /// performance section. `None` when neither half has ever been measured.
+    pub async fn care_performance(&self, hosting_id: &str) -> Option<hyperion_types::CarePerformance> {
+        let sc = self.site_check_last(hosting_id).await;
+        let cwv = self.cwv_last(hosting_id).await.filter(|c| c.has_data());
+        let sc_ran = sc.as_ref().is_some_and(|r| r.ran());
+        if !sc_ran && cwv.is_none() {
+            return None;
+        }
+        let mut perf = hyperion_types::CarePerformance {
+            cwv,
+            ..Default::default()
+        };
+        if let Some(r) = sc.filter(|r| r.ran()) {
+            perf.checked_at = r.checked_at;
+            perf.pages_checked = r.pages.len() as i64;
+            perf.pages_ok = r.pages_ok() as i64;
+            perf.findings_error = r.count("error") as i64;
+            perf.findings_warn = r.count("warn") as i64;
+            perf.median_ttfb_ms = r.median_ttfb_ms();
+            perf.slowest_ttfb_ms = r.slowest_ttfb_ms();
+            perf.html_bytes = r.html_bytes();
+        }
+        Some(perf)
+    }
+
+    /// Everything the Performance card needs, from the owning node.
+    pub async fn performance_view(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<hyperion_types::PerformanceView, RpcError> {
+        use hyperion_adapters::perf;
+        let detail = self.get(sel).await?;
+        let cfg = self.performance_config();
+        let care = self
+            .care_performance(detail.id.as_str())
+            .await
+            .unwrap_or_default();
+        // Only pay the "is Lighthouse there?" spawn when that is the source.
+        let lighthouse_available =
+            cfg.cwv_source == "lighthouse" && perf::lighthouse_available().await;
+        Ok(hyperion_types::PerformanceView {
+            care,
+            cwv_source: cfg.cwv_source.clone(),
+            strategy: strategy_str(cfg.strategy()).into(),
+            lighthouse_available,
+            psi_key_set: !cfg.psi_api_key.trim().is_empty(),
+        })
+    }
+
     /// Run the check and keep the result.
     pub async fn site_check_run(
         &self,
@@ -9073,6 +9221,15 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 }
             };
             ran += 1;
+            // Core Web Vitals on the same weekly cadence and the same
+            // care-plan sites, when a source is set. Best-effort: a Google
+            // hiccup or a missing Lighthouse must not fail the site check, and
+            // cwv_measure records its own error for the card either way.
+            if self.performance_config().cwv_source != "off" {
+                if let Err(e) = self.cwv_measure(HostingSelector::Id(id.clone())).await {
+                    tracing::debug!(domain = %detail.domain, error = %e, "cwv measure failed");
+                }
+            }
             let broken = report.count("error");
             if broken > 0 {
                 let urls = report
@@ -16587,6 +16744,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         report.integrity = reports::integrity(&self.pool, id, from, to)
             .await
             .map_err(|e| wrap("integrity", e))?;
+        // Page performance: render + speed from the site check, Core Web
+        // Vitals from whatever source is configured. Both live in hosting_kv
+        // on this node, so this is a local read like the sections above.
+        report.performance = self.care_performance(id).await;
         Ok(report)
     }
 
@@ -30579,6 +30740,70 @@ const WP_MAIL_FORCE_LOCAL_KV_KEY: &str = "wp_mail_force_local_at";
 const WP_MAIL_FROM_KV_KEY: &str = "wp_mail_from";
 /// Last automated page walk, as JSON.
 const SITE_CHECK_KV_KEY: &str = "site_check_last";
+
+/// `hosting_kv` key: the last Core Web Vitals measurement (JSON `CwvResult`).
+const CWV_KV_KEY: &str = "cwv_last";
+
+/// This node's `[performance]` settings.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct PerformanceConfig {
+    /// `off` (default), `psi` or `lighthouse`.
+    pub cwv_source: String,
+    /// PSI API key. Stays on the node; only ever leaves it inside a request
+    /// to Google, on curl's stdin.
+    pub psi_api_key: String,
+    /// `mobile` (default) or `desktop`.
+    pub strategy: String,
+}
+
+impl PerformanceConfig {
+    fn strategy(&self) -> hyperion_adapters::perf::Strategy {
+        match self.strategy.as_str() {
+            "desktop" => hyperion_adapters::perf::Strategy::Desktop,
+            _ => hyperion_adapters::perf::Strategy::Mobile,
+        }
+    }
+}
+
+fn strategy_str(s: hyperion_adapters::perf::Strategy) -> &'static str {
+    match s {
+        hyperion_adapters::perf::Strategy::Desktop => "desktop",
+        hyperion_adapters::perf::Strategy::Mobile => "mobile",
+    }
+}
+
+/// `[performance]` as it is on disk. A source that is absent or unrecognised
+/// resolves to `off` — no measurement — which is the safe default: it never
+/// sends a customer URL to Google or spawns a browser without the operator
+/// choosing it.
+pub(crate) fn read_performance_section(
+    cfg_path: Option<&std::path::Path>,
+) -> PerformanceConfig {
+    let Some(doc) = read_agent_doc(cfg_path) else {
+        return PerformanceConfig::default();
+    };
+    let sec = doc.get("performance");
+    let str_at = |key: &str| {
+        sec.and_then(|s| s.get(key))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string()
+    };
+    let cwv_source = match str_at("cwv_source").as_str() {
+        s @ ("psi" | "lighthouse") => s.to_string(),
+        _ => "off".to_string(),
+    };
+    let strategy = match str_at("strategy").as_str() {
+        "desktop" => "desktop".to_string(),
+        _ => "mobile".to_string(),
+    };
+    PerformanceConfig {
+        cwv_source,
+        psi_api_key: str_at("psi_api_key"),
+        strategy,
+    }
+}
 /// How often the automated walk runs per site. Weekly: every request it
 /// makes lands on the customer's own traffic bill, and pages do not rot
 /// faster than that.
