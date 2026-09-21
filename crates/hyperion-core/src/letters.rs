@@ -454,6 +454,8 @@ pub static STRINGS: &[LetterString] = &[
              \n\
              {integrity}\n\
              \n\
+             {performance}\n\
+             \n\
              {service}\n\
              \n\
              --\n\
@@ -480,6 +482,8 @@ pub static STRINGS: &[LetterString] = &[
              {backups}\n\
              \n\
              {integrity}\n\
+             \n\
+             {performance}\n\
              \n\
              {service}\n\
              \n\
@@ -689,6 +693,66 @@ pub static STRINGS: &[LetterString] = &[
         cs: "\n  Pozn.: kontroly proběhly jen {counted} z {total} {total_unit} tohoto\n  \
              období, takže procento popisuje těchto {counted} {counted_unit} — ne\n  \
              celé období.",
+    },
+    // ── Performance ─────────────────────────────────────
+    //
+    // Two claims a care plan makes and the report never checked: does the
+    // site still render, and is it fast. "Not measured" stays a distinct line.
+    LetterString {
+        id: "care.performance.none",
+        group: "Care report — performance",
+        note: "Nothing measured: no site fetch and no Core Web Vitals.",
+        en: "PERFORMANCE: not measured\n  We did not measure this site's speed or rendering during the period.",
+        cs: "VÝKON: neměřeno\n  Rychlost ani zobrazení webu jsme v tomto období neměřili.",
+    },
+    LetterString {
+        id: "care.performance.header",
+        group: "Care report — performance",
+        note: "Heading line only.",
+        en: "PERFORMANCE:",
+        cs: "VÝKON A RYCHLOST:",
+    },
+    LetterString {
+        id: "care.performance.render_ok",
+        group: "Care report — performance",
+        note: "Pages fetched cleanly. Tokens: {pages}.",
+        en: "\n  Rendering: OK — we fetched {pages} of the main pages and every one loaded, with its links and images resolving.",
+        cs: "\n  Zobrazení: v pořádku — načetli jsme {pages} hlavních stránek a každá se zobrazila, včetně odkazů a obrázků.",
+    },
+    LetterString {
+        id: "care.performance.render_issues",
+        group: "Care report — performance",
+        note: "Broken things found. Tokens: {errors} {pages}.",
+        en: "\n  Rendering: {errors} problem(s) found while fetching {pages} of the main pages — a dead page, a broken link or a missing image. Details are in the panel; we look into anything that breaks the page itself.",
+        cs: "\n  Zobrazení: při načtení {pages} hlavních stránek jsme našli {errors} problém(ů) — nefunkční stránku, rozbitý odkaz nebo chybějící obrázek. Podrobnosti jsou v panelu; cokoli, co rozbíjí samotnou stránku, řešíme.",
+    },
+    LetterString {
+        id: "care.performance.speed",
+        group: "Care report — performance",
+        note: "Server think time. Tokens: {median} {slowest}.",
+        en: "\n  Server response: {median} ms typical, {slowest} ms on the slowest page (measured on the server, so this is its own thinking time).",
+        cs: "\n  Odezva serveru: obvykle {median} ms, nejpomalejší stránka {slowest} ms (měřeno na serveru, jde tedy o čas samotného serveru).",
+    },
+    LetterString {
+        id: "care.performance.cwv_field",
+        group: "Care report — performance",
+        note: "Field CWV (real visitors). Tokens: {lcp} {cls} {inp}.",
+        en: "\n  Core Web Vitals (from real visitors): LCP {lcp}, CLS {cls}, INP {inp}. These are Google's page-experience metrics; lower is better.",
+        cs: "\n  Core Web Vitals (od skutečných návštěvníků): LCP {lcp}, CLS {cls}, INP {inp}. Jsou to metriky dojmu ze stránky od Googlu; nižší je lepší.",
+    },
+    LetterString {
+        id: "care.performance.cwv_lab",
+        group: "Care report — performance",
+        note: "Lab CWV (synthetic). Tokens: {lcp} {cls} {score}.",
+        en: "\n  Core Web Vitals (lab test, performance score {score}/100): LCP {lcp}, CLS {cls}. A synthetic load — Google's page-experience metrics; lower is better.",
+        cs: "\n  Core Web Vitals (laboratorní test, skóre výkonu {score}/100): LCP {lcp}, CLS {cls}. Syntetické načtení — metriky dojmu ze stránky od Googlu; nižší je lepší.",
+    },
+    LetterString {
+        id: "care.performance.cwv_pending",
+        group: "Care report — performance",
+        note: "CWV source on but no data yet.",
+        en: "\n  Core Web Vitals: no data yet for this period.",
+        cs: "\n  Core Web Vitals: pro toto období zatím bez dat.",
     },
     // ── Backups ────────────────────────────────────────────────────────
     //

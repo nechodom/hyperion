@@ -456,6 +456,8 @@ pub const CARE_REPORT_DEFAULT_BODY_TEMPLATE: &str = "CARE REPORT\n\
      \n\
      {integrity}\n\
      \n\
+     {performance}\n\
+     \n\
      {service}\n\
      \n\
      --\n\

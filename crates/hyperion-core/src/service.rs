@@ -28479,6 +28479,29 @@ pub fn care_report_preview_fields(cat: &LetterCatalog) -> Vec<(&'static str, Str
             malware_scan_ran: true,
             ..Default::default()
         }),
+        performance: Some(hyperion_types::CarePerformance {
+            checked_at: to - 3600,
+            pages_checked: 8,
+            pages_ok: 8,
+            findings_error: 0,
+            findings_warn: 1,
+            median_ttfb_ms: 210,
+            slowest_ttfb_ms: 480,
+            html_bytes: 240_000,
+            cwv: Some(hyperion_types::CwvResult {
+                measured_at: to - 3600,
+                source: "psi".into(),
+                strategy: "mobile".into(),
+                field: Some(hyperion_types::CwvMetrics {
+                    lcp_ms: Some(2400),
+                    cls_x1000: Some(60),
+                    inp_ms: Some(180),
+                    ..Default::default()
+                }),
+                perf_score: Some(88),
+                ..Default::default()
+            }),
+        }),
         ..CareReport::empty(HostingId("preview".into()), "example.com".into(), from, to)
     };
     let (_, _, fields) = care_report_parts(cat, &report, "example.com");
@@ -28492,7 +28515,7 @@ fn care_report_parts(
     cat: &LetterCatalog,
     report: &CareReport,
     domain: &str,
-) -> (String, [String; 7], Vec<(&'static str, String)>) {
+) -> (String, [String; 8], Vec<(&'static str, String)>) {
     let days = care_days_spanned(report.period_start, report.period_end);
     // The period is half-open, so the last day INSIDE it is `end - 1`.
     let last_day = (report.period_end - 1).max(report.period_start);
@@ -28523,6 +28546,7 @@ fn care_report_parts(
         care_section_uptime(cat, report.uptime.as_ref()),
         care_section_backups(cat, report.backups.as_ref()),
         care_section_integrity(cat, report.integrity.as_ref()),
+        care_section_performance(cat, report.performance.as_ref()),
         care_section_service(cat, report.service_work.as_ref()),
     ];
     let fields = vec![
@@ -28538,9 +28562,11 @@ fn care_report_parts(
         ("uptime", parts[3].clone()),
         ("backups", parts[4].clone()),
         ("integrity", parts[5].clone()),
+        // Render + speed + Core Web Vitals.
+        ("performance", parts[6].clone()),
         // What a PERSON did. Not a measurement, and the section says so in
         // every branch — see `care_section_service`.
-        ("service", parts[6].clone()),
+        ("service", parts[7].clone()),
         // ── Bare values ────────────────────────────────────────────────
         //
         // The six placeholders above each expand to a whole SECTION —
@@ -29028,6 +29054,85 @@ fn care_section_integrity(cat: &LetterCatalog, integrity: Option<&CareIntegrity>
 /// record is empty, and the record says what happened. Collapsing the first
 /// two would turn "we do not know" into "we did not do it", and collapsing
 /// the last two would turn "we did not do it" into silence.
+/// The performance section: render + server speed (from the site check) and
+/// Core Web Vitals (from the configured source). `None` when nothing was
+/// measured, which the caller passes straight through from `care_performance`.
+fn care_section_performance(
+    cat: &LetterCatalog,
+    perf: Option<&hyperion_types::CarePerformance>,
+) -> String {
+    let Some(p) = perf else {
+        return cat.get("care.performance.none").to_string();
+    };
+    let mut out = cat.get("care.performance.header").to_string();
+    if p.has_site_check() {
+        if p.findings_error == 0 {
+            out.push_str(&cat.render(
+                "care.performance.render_ok",
+                &[("pages", &cat.group_int(p.pages_checked))],
+            ));
+        } else {
+            out.push_str(&cat.render(
+                "care.performance.render_issues",
+                &[
+                    ("errors", &cat.group_int(p.findings_error)),
+                    ("pages", &cat.group_int(p.pages_checked)),
+                ],
+            ));
+        }
+        out.push_str(&cat.render(
+            "care.performance.speed",
+            &[
+                ("median", &cat.group_int(p.median_ttfb_ms)),
+                ("slowest", &cat.group_int(p.slowest_ttfb_ms)),
+            ],
+        ));
+    }
+    // Core Web Vitals: field if we have real-visitor data, else lab, else —
+    // when a source is on but produced nothing — a plain "no data yet".
+    match p.cwv.as_ref() {
+        Some(cwv) if cwv.best_is_field() => {
+            let m = cwv.field.as_ref().expect("field present");
+            out.push_str(&cat.render(
+                "care.performance.cwv_field",
+                &[
+                    ("lcp", &cwv_ms(cat, m.lcp_ms)),
+                    ("cls", &cwv_cls(m)),
+                    ("inp", &cwv_ms(cat, m.inp_ms)),
+                ],
+            ));
+        }
+        Some(cwv) if cwv.has_data() => {
+            let m = cwv.lab.as_ref().expect("lab present");
+            out.push_str(&cat.render(
+                "care.performance.cwv_lab",
+                &[
+                    ("lcp", &cwv_ms(cat, m.lcp_ms)),
+                    ("cls", &cwv_cls(m)),
+                    ("score", &cwv.perf_score.map(|s| s.to_string()).unwrap_or_else(|| UNMEASURED.into())),
+                ],
+            ));
+        }
+        Some(_) => out.push_str(cat.get("care.performance.cwv_pending")),
+        None => {}
+    }
+    out
+}
+
+/// A CWV millisecond value for a letter: `"2400 ms"`, or the em dash when it
+/// was not reported.
+fn cwv_ms(_cat: &LetterCatalog, ms: Option<i64>) -> String {
+    match ms {
+        Some(v) => format!("{v} ms"),
+        None => UNMEASURED.to_string(),
+    }
+}
+
+/// CLS as its decimal, or the em dash.
+fn cwv_cls(m: &hyperion_types::CwvMetrics) -> String {
+    m.cls_display().unwrap_or_else(|| UNMEASURED.to_string())
+}
+
 fn care_section_service(
     cat: &LetterCatalog,
     work: Option<&hyperion_types::package::CareServiceWork>,
@@ -32565,6 +32670,34 @@ fn parse_agent_section_fields(
                     )))
                 }
             },
+            // [performance] — Core Web Vitals source. A rejecting match, like
+            // [protection] mode: a typo saved as a source would resolve back
+            // to "off" on read, so the operator would think measurement was on
+            // and see nothing, with nothing to explain it.
+            ("performance", "cwv_source") => match v.trim() {
+                m @ ("off" | "psi" | "lighthouse") => {
+                    crate::config_persist::FieldValue::Str(m.to_string())
+                }
+                other => {
+                    return Err(bad(format!(
+                        "Core Web Vitals source must be \"off\", \"psi\" or \"lighthouse\", \
+                         got {other:?}"
+                    )))
+                }
+            },
+            ("performance", "strategy") => match v.trim() {
+                m @ ("mobile" | "desktop") => {
+                    crate::config_persist::FieldValue::Str(m.to_string())
+                }
+                other => {
+                    return Err(bad(format!(
+                        "performance strategy must be \"mobile\" or \"desktop\", got {other:?}"
+                    )))
+                }
+            },
+            ("performance", "psi_api_key") => {
+                crate::config_persist::FieldValue::Str(v.trim().to_string())
+            }
             ("cluster", "trash_retention_days") => {
                 let n = parse_int(v)?;
                 if !(1..=365).contains(&n) {
@@ -37611,6 +37744,7 @@ mod tests {
             backups: None,
             integrity: None,
             service_work: None,
+            performance: None,
         };
         let (_, _, fields) = care_report_parts(&en(), &report, "example.cz");
         let map: std::collections::BTreeMap<&str, String> = fields.into_iter().collect();
