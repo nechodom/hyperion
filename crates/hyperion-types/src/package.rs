@@ -905,6 +905,11 @@ pub struct CareReport {
     /// different statement from "nothing was ticked" and is worded as one.
     #[serde(default)]
     pub service_work: Option<CareServiceWork>,
+    /// Page performance: whether the site still renders, how fast the server
+    /// answers, and its Core Web Vitals. `None` when nothing was measured for
+    /// the period.
+    #[serde(default)]
+    pub performance: Option<crate::perf::CarePerformance>,
 }
 
 /// Which monthly service checks were done inside a report period.
@@ -971,6 +976,7 @@ impl CareReport {
             backups: None,
             integrity: None,
             service_work: None,
+            performance: None,
         }
     }
 
@@ -985,6 +991,7 @@ impl CareReport {
             && self.uptime.is_none()
             && self.backups.is_none()
             && self.integrity.is_none()
+            && self.performance.is_none()
         // `service_work` is deliberately NOT part of this. It is a person
         // saying they looked, not a measurement, and a report carrying only
         // that would still be a report with nothing measured in it — which

@@ -344,6 +344,9 @@ pub struct AgentConfigView {
     /// `[backup_retention]` where unset.
     #[serde(default)]
     pub snapshot_retention: SnapshotRetention,
+    /// `[performance]` — the Core Web Vitals source and strategy.
+    #[serde(default)]
+    pub performance: crate::perf::PerformanceConfigView,
 }
 
 /// Editable templates for outbound notification wording. Each is a string
@@ -455,6 +458,8 @@ pub const CARE_REPORT_DEFAULT_BODY_TEMPLATE: &str = "CARE REPORT\n\
      {backups}\n\
      \n\
      {integrity}\n\
+     \n\
+     {performance}\n\
      \n\
      {service}\n\
      \n\

@@ -1403,6 +1403,38 @@ fn print_pretty(resp: &Response) {
             }
         }
         Response::SiteCheckLast(None) => println!("(no page check has run for this site yet)"),
+        Response::PerformanceView(v) => {
+            println!(
+                "cwv source: {}   strategy: {}   lighthouse: {}   psi key: {}",
+                v.cwv_source,
+                v.strategy,
+                if v.lighthouse_available { "installed" } else { "no" },
+                if v.psi_key_set { "set" } else { "no" }
+            );
+            if v.care.has_site_check() {
+                println!(
+                    "render: {}/{} pages ok, {} errors; ttfb median {} ms, slowest {} ms",
+                    v.care.pages_ok,
+                    v.care.pages_checked,
+                    v.care.findings_error,
+                    v.care.median_ttfb_ms,
+                    v.care.slowest_ttfb_ms
+                );
+            }
+            if let Some(c) = v.care.cwv.as_ref().and_then(|c| c.best()) {
+                println!(
+                    "cwv: LCP {:?} ms, CLS {:?}, INP {:?} ms",
+                    c.lcp_ms, c.cls_x1000, c.inp_ms
+                );
+            }
+        }
+        Response::CwvResult(c) => {
+            if c.error.is_empty() {
+                println!("measured ({}) at {}", c.source, c.measured_at);
+            } else {
+                println!("measurement failed: {}", c.error);
+            }
+        }
         Response::SnapshotList(rows) => {
             if rows.is_empty() {
                 println!("(no snapshots — the snapshot engine may not be installed)");

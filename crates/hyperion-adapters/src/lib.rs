@@ -25,6 +25,7 @@ pub mod mariadb;
 pub mod nginx;
 pub mod nodejs;
 pub mod os_updates;
+pub mod perf;
 pub mod phpfpm;
 pub mod postfix;
 pub mod postgres;

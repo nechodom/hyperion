@@ -9005,6 +9005,166 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         serde_json::from_str(&raw).ok()
     }
 
+    // ─────────────────────────── Page performance ───────────────────────────
+    //
+    // Two questions a care plan promises to answer and, until now, the report
+    // did not: does the site still render, and is it fast? The render/speed
+    // half reuses the site check (a real fetch of the pages, from the node).
+    // The Core Web Vitals half needs a browser the node does not have, so it
+    // is measured by whichever source the operator chose — Google's PageSpeed
+    // Insights or a local Lighthouse — or not at all.
+
+    /// This node's `[performance]` settings, read from agent.toml NOW. Live,
+    /// for the same reason the snapshot and backup settings are: the panel
+    /// saves them on every node and the acting code is here.
+    fn performance_config(&self) -> PerformanceConfig {
+        read_performance_section(self.agent_config_path.as_deref())
+    }
+
+    /// Measure Core Web Vitals for one site now, and store the result.
+    ///
+    /// Respects the node's configured source; with the source `off` there is
+    /// nothing to measure with, and that is an error the caller shows rather
+    /// than a silent no-op. The site's own public URL is measured — for PSI
+    /// that URL is sent to Google, which is the operator's explicit choice in
+    /// picking that source.
+    pub async fn cwv_measure(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<hyperion_types::CwvResult, RpcError> {
+        use hyperion_adapters::perf;
+        let detail = self.get(sel).await?;
+        let cfg = self.performance_config();
+        let strategy = cfg.strategy();
+        let url = format!("https://{}/", detail.domain.trim());
+        let result = match cfg.cwv_source.as_str() {
+            "psi" => perf::measure_psi(&url, &cfg.psi_api_key, strategy).await,
+            "lighthouse" => {
+                if !perf::lighthouse_available().await {
+                    return Err(RpcError::Validation {
+                        message: "Lighthouse is not installed on the node that owns this site.                                   Install it there, or switch the Core Web Vitals source to                                   Google PageSpeed Insights in Settings → Performance."
+                            .into(),
+                    });
+                }
+                perf::measure_lighthouse(
+                    &url,
+                    strategy,
+                    &detail.system_user,
+                    &home_dir_for(&detail),
+                )
+                .await
+            }
+            _ => {
+                return Err(RpcError::Validation {
+                    message: "no Core Web Vitals source is configured — set one in                               Settings → Performance."
+                        .into(),
+                })
+            }
+        };
+        match result {
+            Ok(mut r) => {
+                r.measured_at = now_secs();
+                if let Ok(json) = serde_json::to_string(&r) {
+                    let _ = hyperion_state::hosting_kv::set(
+                        &self.pool,
+                        detail.id.as_str(),
+                        CWV_KV_KEY,
+                        &json,
+                        now_secs(),
+                    )
+                    .await;
+                }
+                Ok(r)
+            }
+            Err(e) => {
+                // Persist the failure too, timestamped, so the card can say
+                // "tried on <date>, this is why" instead of an eternal blank.
+                let stored = hyperion_types::CwvResult {
+                    measured_at: now_secs(),
+                    source: cfg.cwv_source.clone(),
+                    strategy: strategy_str(strategy).into(),
+                    error: e.to_string(),
+                    ..Default::default()
+                };
+                if let Ok(json) = serde_json::to_string(&stored) {
+                    let _ = hyperion_state::hosting_kv::set(
+                        &self.pool,
+                        detail.id.as_str(),
+                        CWV_KV_KEY,
+                        &json,
+                        now_secs(),
+                    )
+                    .await;
+                }
+                Err(RpcError::Internal_with(format!("Core Web Vitals: {e}")))
+            }
+        }
+    }
+
+    /// The last stored Core Web Vitals result, without measuring again.
+    async fn cwv_last(&self, hosting_id: &str) -> Option<hyperion_types::CwvResult> {
+        let raw = hyperion_state::hosting_kv::get(&self.pool, hosting_id, CWV_KV_KEY)
+            .await
+            .ok()??;
+        serde_json::from_str(&raw).ok()
+    }
+
+    /// Fold the site check and the last CWV result into the report's
+    /// performance section. `None` when neither half has ever been measured.
+    pub async fn care_performance(
+        &self,
+        hosting_id: &str,
+    ) -> Option<hyperion_types::CarePerformance> {
+        let sc = self.site_check_last(hosting_id).await;
+        // Kept even when it holds only an error: the card shows "tried on
+        // <date>, this is why". The report's own builder drops a data-less
+        // result to "no data yet" — see care_section_performance.
+        let cwv = self.cwv_last(hosting_id).await;
+        let sc_ran = sc.as_ref().is_some_and(|r| r.ran());
+        if !sc_ran && cwv.is_none() {
+            return None;
+        }
+        let mut perf = hyperion_types::CarePerformance {
+            cwv,
+            ..Default::default()
+        };
+        if let Some(r) = sc.filter(|r| r.ran()) {
+            perf.checked_at = r.checked_at;
+            perf.pages_checked = r.pages.len() as i64;
+            perf.pages_ok = r.pages_ok() as i64;
+            perf.findings_error = r.count("error") as i64;
+            perf.findings_warn = r.count("warn") as i64;
+            perf.median_ttfb_ms = r.median_ttfb_ms();
+            perf.slowest_ttfb_ms = r.slowest_ttfb_ms();
+            perf.html_bytes = r.html_bytes();
+        }
+        Some(perf)
+    }
+
+    /// Everything the Performance card needs, from the owning node.
+    pub async fn performance_view(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<hyperion_types::PerformanceView, RpcError> {
+        use hyperion_adapters::perf;
+        let detail = self.get(sel).await?;
+        let cfg = self.performance_config();
+        let care = self
+            .care_performance(detail.id.as_str())
+            .await
+            .unwrap_or_default();
+        // Only pay the "is Lighthouse there?" spawn when that is the source.
+        let lighthouse_available =
+            cfg.cwv_source == "lighthouse" && perf::lighthouse_available().await;
+        Ok(hyperion_types::PerformanceView {
+            care,
+            cwv_source: cfg.cwv_source.clone(),
+            strategy: strategy_str(cfg.strategy()).into(),
+            lighthouse_available,
+            psi_key_set: !cfg.psi_api_key.trim().is_empty(),
+        })
+    }
+
     /// Run the check and keep the result.
     pub async fn site_check_run(
         &self,
@@ -9073,6 +9233,15 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 }
             };
             ran += 1;
+            // Core Web Vitals on the same weekly cadence and the same
+            // care-plan sites, when a source is set. Best-effort: a Google
+            // hiccup or a missing Lighthouse must not fail the site check, and
+            // cwv_measure records its own error for the card either way.
+            if self.performance_config().cwv_source != "off" {
+                if let Err(e) = self.cwv_measure(HostingSelector::Id(id.clone())).await {
+                    tracing::debug!(domain = %detail.domain, error = %e, "cwv measure failed");
+                }
+            }
             let broken = report.count("error");
             if broken > 0 {
                 let urls = report
@@ -16587,6 +16756,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         report.integrity = reports::integrity(&self.pool, id, from, to)
             .await
             .map_err(|e| wrap("integrity", e))?;
+        // Page performance: render + speed from the site check, Core Web
+        // Vitals from whatever source is configured. Both live in hosting_kv
+        // on this node, so this is a local read like the sections above.
+        report.performance = self.care_performance(id).await;
         Ok(report)
     }
 
@@ -23176,7 +23349,22 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             cluster: cluster_view,
             notifications: read_notifications_section(self.agent_config_path.as_deref()),
             snapshot_retention: read_snapshot_retention(self.agent_config_path.as_deref()),
+            performance: self.performance_config_view().await,
         })
+    }
+
+    /// `[performance]` for the Settings page: the source, strategy, whether a
+    /// key is set (never the key itself) and whether a local Lighthouse works.
+    async fn performance_config_view(&self) -> hyperion_types::PerformanceConfigView {
+        let cfg = self.performance_config();
+        let lighthouse_available =
+            cfg.cwv_source == "lighthouse" && hyperion_adapters::perf::lighthouse_available().await;
+        hyperion_types::PerformanceConfigView {
+            cwv_source: cfg.cwv_source.clone(),
+            strategy: cfg.strategy_label().to_string(),
+            psi_key_set: !cfg.psi_api_key.trim().is_empty(),
+            lighthouse_available,
+        }
     }
 
     /// Send a one-off test email through the configured SMTP relay
@@ -28318,6 +28506,29 @@ pub fn care_report_preview_fields(cat: &LetterCatalog) -> Vec<(&'static str, Str
             malware_scan_ran: true,
             ..Default::default()
         }),
+        performance: Some(hyperion_types::CarePerformance {
+            checked_at: to - 3600,
+            pages_checked: 8,
+            pages_ok: 8,
+            findings_error: 0,
+            findings_warn: 1,
+            median_ttfb_ms: 210,
+            slowest_ttfb_ms: 480,
+            html_bytes: 240_000,
+            cwv: Some(hyperion_types::CwvResult {
+                measured_at: to - 3600,
+                source: "psi".into(),
+                strategy: "mobile".into(),
+                field: Some(hyperion_types::CwvMetrics {
+                    lcp_ms: Some(2400),
+                    cls_x1000: Some(60),
+                    inp_ms: Some(180),
+                    ..Default::default()
+                }),
+                perf_score: Some(88),
+                ..Default::default()
+            }),
+        }),
         ..CareReport::empty(HostingId("preview".into()), "example.com".into(), from, to)
     };
     let (_, _, fields) = care_report_parts(cat, &report, "example.com");
@@ -28331,7 +28542,7 @@ fn care_report_parts(
     cat: &LetterCatalog,
     report: &CareReport,
     domain: &str,
-) -> (String, [String; 7], Vec<(&'static str, String)>) {
+) -> (String, [String; 8], Vec<(&'static str, String)>) {
     let days = care_days_spanned(report.period_start, report.period_end);
     // The period is half-open, so the last day INSIDE it is `end - 1`.
     let last_day = (report.period_end - 1).max(report.period_start);
@@ -28362,6 +28573,7 @@ fn care_report_parts(
         care_section_uptime(cat, report.uptime.as_ref()),
         care_section_backups(cat, report.backups.as_ref()),
         care_section_integrity(cat, report.integrity.as_ref()),
+        care_section_performance(cat, report.performance.as_ref()),
         care_section_service(cat, report.service_work.as_ref()),
     ];
     let fields = vec![
@@ -28377,9 +28589,11 @@ fn care_report_parts(
         ("uptime", parts[3].clone()),
         ("backups", parts[4].clone()),
         ("integrity", parts[5].clone()),
+        // Render + speed + Core Web Vitals.
+        ("performance", parts[6].clone()),
         // What a PERSON did. Not a measurement, and the section says so in
         // every branch — see `care_section_service`.
-        ("service", parts[6].clone()),
+        ("service", parts[7].clone()),
         // ── Bare values ────────────────────────────────────────────────
         //
         // The six placeholders above each expand to a whole SECTION —
@@ -28867,6 +29081,111 @@ fn care_section_integrity(cat: &LetterCatalog, integrity: Option<&CareIntegrity>
 /// record is empty, and the record says what happened. Collapsing the first
 /// two would turn "we do not know" into "we did not do it", and collapsing
 /// the last two would turn "we did not do it" into silence.
+/// The performance section: render + server speed (from the site check) and
+/// Core Web Vitals (from the configured source). `None` when nothing was
+/// measured, which the caller passes straight through from `care_performance`.
+fn care_section_performance(
+    cat: &LetterCatalog,
+    perf: Option<&hyperion_types::CarePerformance>,
+) -> String {
+    let Some(p) = perf else {
+        return cat.get("care.performance.none").to_string();
+    };
+    let mut out = cat.get("care.performance.header").to_string();
+    if p.has_site_check() {
+        // "OK — everything rendered" only when there is genuinely nothing to
+        // report: no errors, no warnings, and every page fetched answered. A
+        // 404 behind a menu item or a missing image is a `warn`, and claiming
+        // "every one loaded, with its links and images resolving" over the top
+        // of one is the flattering half-truth the whole report exists to avoid.
+        let all_clean =
+            p.findings_error == 0 && p.findings_warn == 0 && p.pages_ok == p.pages_checked;
+        if all_clean {
+            out.push_str(&cat.render(
+                "care.performance.render_ok",
+                &[("pages", &cat.group_int(p.pages_checked))],
+            ));
+        } else {
+            // Count everything not clean — a warn is still a problem worth the
+            // customer's eye, just not a page-down one.
+            let problems = p.findings_error + p.findings_warn + (p.pages_checked - p.pages_ok);
+            out.push_str(&cat.render(
+                "care.performance.render_issues",
+                &[
+                    ("errors", &cat.group_int(problems)),
+                    ("pages", &cat.group_int(p.pages_checked)),
+                ],
+            ));
+        }
+        // The server-speed line needs a page that actually answered to time.
+        // With none, `median_ttfb_ms` is a filtered-to-nothing 0, and "0 ms
+        // typical" is a fabricated measured-zero — so the line is omitted.
+        if p.pages_ok > 0 {
+            out.push_str(&cat.render(
+                "care.performance.speed",
+                &[
+                    ("median", &cat.group_int(p.median_ttfb_ms)),
+                    ("slowest", &cat.group_int(p.slowest_ttfb_ms)),
+                ],
+            ));
+        }
+    }
+    // Core Web Vitals: field if we have real-visitor data, else lab, else —
+    // when a source is on but produced nothing — a plain "no data yet".
+    // Field if we have real-visitor data, else lab, else — a source is on but
+    // produced nothing yet — a plain "no data".
+    match p.cwv.as_ref() {
+        Some(cwv) if cwv.best_is_field() => {
+            if let Some(m) = cwv.field.as_ref() {
+                out.push_str(&cat.render(
+                    "care.performance.cwv_field",
+                    &[
+                        ("lcp", &cwv_ms(cat, m.lcp_ms)),
+                        ("cls", &cwv_cls(m)),
+                        ("inp", &cwv_ms(cat, m.inp_ms)),
+                    ],
+                ));
+            }
+        }
+        Some(cwv) if cwv.has_data() => {
+            if let Some(m) = cwv.lab.as_ref() {
+                out.push_str(
+                    &cat.render(
+                        "care.performance.cwv_lab",
+                        &[
+                            ("lcp", &cwv_ms(cat, m.lcp_ms)),
+                            ("cls", &cwv_cls(m)),
+                            (
+                                "score",
+                                &cwv.perf_score
+                                    .map(|s| s.to_string())
+                                    .unwrap_or_else(|| UNMEASURED.into()),
+                            ),
+                        ],
+                    ),
+                );
+            }
+        }
+        Some(_) => out.push_str(cat.get("care.performance.cwv_pending")),
+        None => {}
+    }
+    out
+}
+
+/// A CWV millisecond value for a letter: `"2400 ms"`, or the em dash when it
+/// was not reported.
+fn cwv_ms(_cat: &LetterCatalog, ms: Option<i64>) -> String {
+    match ms {
+        Some(v) => format!("{v} ms"),
+        None => UNMEASURED.to_string(),
+    }
+}
+
+/// CLS as its decimal, or the em dash.
+fn cwv_cls(m: &hyperion_types::CwvMetrics) -> String {
+    m.cls_display().unwrap_or_else(|| UNMEASURED.to_string())
+}
+
 fn care_section_service(
     cat: &LetterCatalog,
     work: Option<&hyperion_types::package::CareServiceWork>,
@@ -30579,6 +30898,80 @@ const WP_MAIL_FORCE_LOCAL_KV_KEY: &str = "wp_mail_force_local_at";
 const WP_MAIL_FROM_KV_KEY: &str = "wp_mail_from";
 /// Last automated page walk, as JSON.
 const SITE_CHECK_KV_KEY: &str = "site_check_last";
+
+/// `hosting_kv` key: the last Core Web Vitals measurement (JSON `CwvResult`).
+const CWV_KV_KEY: &str = "cwv_last";
+
+/// A writable HOME/cache base for a site user, beside its htdocs. `root_dir`
+/// IS the htdocs; its parent is the site tree, owned by the user.
+fn home_dir_for(detail: &HostingDetail) -> String {
+    std::path::Path::new(detail.root_dir.trim())
+        .parent()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| format!("/home/{}", detail.system_user))
+}
+
+/// This node's `[performance]` settings.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct PerformanceConfig {
+    /// `off` (default), `psi` or `lighthouse`.
+    pub cwv_source: String,
+    /// PSI API key. Stays on the node; only ever leaves it inside a request
+    /// to Google, on curl's stdin.
+    pub psi_api_key: String,
+    /// `mobile` (default) or `desktop`.
+    pub strategy: String,
+}
+
+impl PerformanceConfig {
+    fn strategy_label(&self) -> &'static str {
+        strategy_str(self.strategy())
+    }
+    fn strategy(&self) -> hyperion_adapters::perf::Strategy {
+        match self.strategy.as_str() {
+            "desktop" => hyperion_adapters::perf::Strategy::Desktop,
+            _ => hyperion_adapters::perf::Strategy::Mobile,
+        }
+    }
+}
+
+fn strategy_str(s: hyperion_adapters::perf::Strategy) -> &'static str {
+    match s {
+        hyperion_adapters::perf::Strategy::Desktop => "desktop",
+        hyperion_adapters::perf::Strategy::Mobile => "mobile",
+    }
+}
+
+/// `[performance]` as it is on disk. A source that is absent or unrecognised
+/// resolves to `off` — no measurement — which is the safe default: it never
+/// sends a customer URL to Google or spawns a browser without the operator
+/// choosing it.
+pub(crate) fn read_performance_section(cfg_path: Option<&std::path::Path>) -> PerformanceConfig {
+    let Some(doc) = read_agent_doc(cfg_path) else {
+        return PerformanceConfig::default();
+    };
+    let sec = doc.get("performance");
+    let str_at = |key: &str| {
+        sec.and_then(|s| s.get(key))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string()
+    };
+    let cwv_source = match str_at("cwv_source").as_str() {
+        s @ ("psi" | "lighthouse") => s.to_string(),
+        _ => "off".to_string(),
+    };
+    let strategy = match str_at("strategy").as_str() {
+        "desktop" => "desktop".to_string(),
+        _ => "mobile".to_string(),
+    };
+    PerformanceConfig {
+        cwv_source,
+        psi_api_key: str_at("psi_api_key"),
+        strategy,
+    }
+}
 /// How often the automated walk runs per site. Weekly: every request it
 /// makes lands on the customer's own traffic bill, and pages do not rot
 /// faster than that.
@@ -32340,6 +32733,32 @@ fn parse_agent_section_fields(
                     )))
                 }
             },
+            // [performance] — Core Web Vitals source. A rejecting match, like
+            // [protection] mode: a typo saved as a source would resolve back
+            // to "off" on read, so the operator would think measurement was on
+            // and see nothing, with nothing to explain it.
+            ("performance", "cwv_source") => match v.trim() {
+                m @ ("off" | "psi" | "lighthouse") => {
+                    crate::config_persist::FieldValue::Str(m.to_string())
+                }
+                other => {
+                    return Err(bad(format!(
+                        "Core Web Vitals source must be \"off\", \"psi\" or \"lighthouse\", \
+                         got {other:?}"
+                    )))
+                }
+            },
+            ("performance", "strategy") => match v.trim() {
+                m @ ("mobile" | "desktop") => crate::config_persist::FieldValue::Str(m.to_string()),
+                other => {
+                    return Err(bad(format!(
+                        "performance strategy must be \"mobile\" or \"desktop\", got {other:?}"
+                    )))
+                }
+            },
+            ("performance", "psi_api_key") => {
+                crate::config_persist::FieldValue::Str(v.trim().to_string())
+            }
             ("cluster", "trash_retention_days") => {
                 let n = parse_int(v)?;
                 if !(1..=365).contains(&n) {
@@ -37367,6 +37786,50 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_warn_only_page_check_is_not_reported_as_everything_rendered() {
+        let cat = en();
+        // Every page answered, but a link 404s (a warn). Must NOT claim
+        // "every one loaded, with its links and images resolving".
+        let mut perf = hyperion_types::CarePerformance {
+            checked_at: 1,
+            pages_checked: 8,
+            pages_ok: 8,
+            findings_error: 0,
+            findings_warn: 1,
+            median_ttfb_ms: 200,
+            slowest_ttfb_ms: 400,
+            html_bytes: 1000,
+            cwv: None,
+        };
+        let out = care_section_performance(&cat, Some(&perf));
+        assert!(!out.contains("every one loaded"), "{out}");
+        assert!(out.contains("problem"), "{out}");
+        assert!(
+            out.contains("Server response"),
+            "a page answered, so speed is quoted: {out}"
+        );
+
+        // Nothing answered: no "0 ms typical" fabricated speed line.
+        perf.pages_ok = 0;
+        perf.findings_error = 8;
+        let out = care_section_performance(&cat, Some(&perf));
+        assert!(
+            !out.contains("Server response"),
+            "no page answered, no speed line: {out}"
+        );
+
+        // Genuinely clean: the OK line.
+        let clean = hyperion_types::CarePerformance {
+            findings_warn: 0,
+            findings_error: 0,
+            pages_ok: 8,
+            pages_checked: 8,
+            ..perf.clone()
+        };
+        assert!(care_section_performance(&cat, Some(&clean)).contains("every one loaded"));
+    }
+
     /// A value that was never measured prints a dash, never a zero. The whole
     /// letter is built on refusing to state a figure it cannot evidence, and
     /// "0 attacks blocked" on a site nobody watched is exactly that lie.
@@ -37386,6 +37849,7 @@ mod tests {
             backups: None,
             integrity: None,
             service_work: None,
+            performance: None,
         };
         let (_, _, fields) = care_report_parts(&en(), &report, "example.cz");
         let map: std::collections::BTreeMap<&str, String> = fields.into_iter().collect();

@@ -1066,7 +1066,7 @@
           <span class="hint">placeholders:
             <code>{domain}</code> <code>{period_start}</code> <code>{period_end}</code> <code>{days}</code>
             <code>{attacks}</code> <code>{updates}</code> <code>{traffic}</code> <code>{uptime}</code>
-            <code>{backups}</code> <code>{integrity}</code> <code>{service}</code>
+            <code>{backups}</code> <code>{integrity}</code> <code>{performance}</code> <code>{service}</code>
           </span>
           {#- The six above each expand to a whole SECTION: heading, figure and
               an English paragraph explaining it. Right for the built-in
@@ -1300,6 +1300,70 @@
       </div>
     </details>
   </div>
+
+  {# Core Web Vitals source. The render/speed half of the report is always
+     measured on the node from the existing site check; this card only picks
+     where the Core Web Vitals numbers come from. Saved on every node. #}
+  <div class="card" style="margin-top:1rem">
+    <h2>
+      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+      Performance &amp; Core Web Vitals
+    </h2>
+    <p class="text-soft small" style="margin:0.3rem 0 0.8rem;line-height:1.55">
+      The care report always includes whether the site still renders and how fast the server answers —
+      measured on the node itself. <strong>Core Web Vitals</strong> (LCP, CLS, INP) need a browser to
+      render the page, which the node has none of, so pick a source below. Measured weekly for
+      care-plan sites, and on demand from each site's Performance tab. Saved on every node.
+    </p>
+    <form method="post" action="/settings/config" autocomplete="off">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="section" value="performance">
+      <div class="field" style="max-width:34rem">
+        <label for="cwv_source">Core Web Vitals source</label>
+        <select id="cwv_source" name="cwv_source">
+          <option value="off"{% if config.performance.cwv_source == "off" %} selected{% endif %}>Off — no Core Web Vitals (render + speed still measured)</option>
+          <option value="psi"{% if config.performance.cwv_source == "psi" %} selected{% endif %}>Google PageSpeed Insights — real-visitor + lab data, needs an API key</option>
+          <option value="lighthouse"{% if config.performance.cwv_source == "lighthouse" %} selected{% endif %}>Local Lighthouse — lab data on this node, needs Lighthouse installed</option>
+        </select>
+      </div>
+      {% if config.performance.cwv_source == "psi" %}
+      <div class="field" style="max-width:34rem">
+        <label for="psi_api_key">Google PageSpeed Insights API key
+          {% if config.performance.psi_key_set %}<span class="text-soft">— stored; leave blank to keep</span>{% endif %}
+        </label>
+        <input id="psi_api_key" name="psi_api_key" type="password" autocomplete="new-password" value="" placeholder="{% if config.performance.psi_key_set %}(unchanged){% else %}AIza…{% endif %}">
+        <p class="text-soft small" style="margin:0.3rem 0 0">
+          Free from the Google Cloud console (enable the PageSpeed Insights API). Without a key PSI still
+          works at a low rate limit, which is enough for a weekly-per-site cadence. The key stays on the
+          node; the customer's URL is sent to Google when a site is measured.
+        </p>
+      </div>
+      {% else if config.performance.cwv_source == "lighthouse" %}
+      <div class="flash {% if config.performance.lighthouse_available %}info{% else %}warn{% endif %}" style="margin:0.2rem 0 0.8rem">
+        <div class="flash-body">
+          {% if config.performance.lighthouse_available %}
+          Lighthouse is installed on this master. Each node measures its own sites, so make sure
+          Lighthouse is installed on every node that owns care-plan sites.
+          {% else %}
+          Lighthouse is <strong>not</strong> installed on this master. Install it on each node that owns
+          care-plan sites — for example <code>apt-get install -y chromium &amp;&amp; npm install -g lighthouse</code>
+          — or use Google PageSpeed Insights instead. Lab data only; a headless Chrome uses real CPU and RAM
+          while it measures.
+          {% endif %}
+        </div>
+      </div>
+      {% endif %}
+      <div class="field" style="max-width:34rem">
+        <label for="cwv_strategy">Measure as</label>
+        <select id="cwv_strategy" name="strategy">
+          <option value="mobile"{% if config.performance.strategy == "mobile" %} selected{% endif %}>Mobile (what Google grades by)</option>
+          <option value="desktop"{% if config.performance.strategy == "desktop" %} selected{% endif %}>Desktop</option>
+        </select>
+      </div>
+      <button type="submit" class="btn primary">Save Core Web Vitals source</button>
+    </form>
+  </div>
+
 </div>
 
 <script>

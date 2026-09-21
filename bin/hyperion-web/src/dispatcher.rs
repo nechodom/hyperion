@@ -230,6 +230,9 @@ fn timeout_for_request(req: &Request) -> u64 {
         // slow page, and the timeout was reported to the operator as the
         // NODE being unreachable rather than the crawl still running.
         Request::SiteCheckRun { .. } => 900,
+        // A browser load (local Lighthouse) or a round trip to Google, either
+        // capped at 120 s on the node; give the dispatch headroom over that.
+        Request::CwvMeasure { .. } => 180,
         // A repair writes the mu-plugin and may run wp-cli to enumerate
         // plugins, which on a cold site is seconds, not milliseconds.
         Request::WpMailSelfCheck { .. } | Request::WpMailRepair { .. } => 300,

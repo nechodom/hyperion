@@ -26,6 +26,7 @@ pub mod jobs;
 pub mod limits;
 pub mod migration;
 pub mod package;
+pub mod perf;
 pub mod php;
 pub mod profile;
 pub mod sitecheck;
@@ -57,6 +58,9 @@ pub use migration::{HostingImportResult, HostingMigrationBundle, HostingMigratio
 pub use package::{
     BackupCadence, FeatureToggle, HostingPackage, LiveFeatureState, PackageFeatures, PackageInput,
     PackagePriorState, PackageState, ServicePackage,
+};
+pub use perf::{
+    CarePerformance, CwvMetrics, CwvResult, PerformanceConfigView, PerformanceView, Vital,
 };
 pub use php::PhpVersion;
 pub use profile::{HostingProfile, ProfileApply, ProfileInput, WpAssetSummary};

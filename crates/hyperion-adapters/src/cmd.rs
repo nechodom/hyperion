@@ -53,6 +53,43 @@ pub async fn run(program: &str, args: &[&str]) -> Result<String, AdapterError> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// Like [`run`], but the child is torn down if the returned future is dropped.
+///
+/// tokio's `Command` does NOT kill on drop by default, so a `tokio::time::timeout`
+/// wrapped around a plain `run` abandons a hung child — a headless Chrome that
+/// stalls would then run orphaned, one leaked browser per timed-out measurement.
+/// `kill_on_drop(true)` makes the drop reap the process tree.
+pub async fn run_killable(program: &str, args: &[&str]) -> Result<String, AdapterError> {
+    debug!(program, args = ?redact_args(args), "exec (kill on drop)");
+    let out = Command::new(program)
+        .args(args)
+        .kill_on_drop(true)
+        .output()
+        .await?;
+    if !out.status.success() {
+        let code = out.status.code().unwrap_or(-1);
+        let mut combined = String::from_utf8_lossy(&out.stdout).into_owned();
+        if !combined.is_empty() && !combined.ends_with('\n') {
+            combined.push('\n');
+        }
+        combined.push_str(&String::from_utf8_lossy(&out.stderr));
+        let tail: String = combined
+            .chars()
+            .rev()
+            .take(4096)
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect();
+        return Err(AdapterError::Command {
+            cmd: format!("{program} {}", redact_args(args).join(" ")),
+            code,
+            stderr_tail: tail,
+        });
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
 /// Like [`run`], but on failure the error tail carries **stdout + stderr**
 /// combined. Some tools — notably `apt-get`/`dpkg` — print the decisive
 /// diagnostic ("dpkg: error processing package … post-installation script

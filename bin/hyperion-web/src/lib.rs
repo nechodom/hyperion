@@ -728,6 +728,14 @@ pub fn build_router(state: SharedState) -> Router {
             get(handlers::hostings::get_sitecheck_panel),
         )
         .route(
+            "/hostings/:selector/performance-panel",
+            get(handlers::hostings::get_performance_panel),
+        )
+        .route(
+            "/hostings/performance/measure",
+            post(handlers::hostings::post_cwv_measure),
+        )
+        .route(
             "/hostings/site-check",
             post(handlers::hostings::post_site_check),
         )

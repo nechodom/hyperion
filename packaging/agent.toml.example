@@ -248,3 +248,34 @@ enabled = true
 # turning it off for the whole node.
 [permissions]
 enabled = true
+
+# ── Page performance (Core Web Vitals) ──────────────────────────────────────
+#
+# The care report always includes whether the site still renders and how fast
+# the server answers — both measured on this node from the ordinary site
+# check, no configuration needed.
+#
+# Core Web Vitals (LCP, CLS, INP — the metrics Google grades the page
+# experience by) need a browser to render the page, which this node has none
+# of, so pick a source:
+#
+#   cwv_source = "off"        the default — no Core Web Vitals
+#   cwv_source = "psi"        Google PageSpeed Insights: real-visitor (CrUX)
+#                             plus lab data. Set psi_api_key (free from the
+#                             Google Cloud console; without a key PSI still
+#                             works at a low rate limit). The customer's URL
+#                             is sent to Google when a site is measured.
+#   cwv_source = "lighthouse" a local Lighthouse: lab data only, nothing
+#                             leaves the node. Install it on every node that
+#                             owns care-plan sites, e.g.
+#                             apt-get install -y chromium && npm i -g lighthouse
+#                             A headless Chrome uses real CPU and RAM.
+#
+# strategy = "mobile" (Google's default) or "desktop".
+#
+# Measured weekly for care-plan sites, and on demand from a site's Performance
+# card. Edit this from Settings → Performance, which saves it on every node.
+[performance]
+cwv_source = "off"
+strategy = "mobile"
+# psi_api_key = ""

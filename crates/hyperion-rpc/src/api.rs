@@ -769,6 +769,16 @@ pub trait AgentApi: Send + Sync + 'static {
         &self,
         sel: HostingSelector,
     ) -> Result<Option<hyperion_types::SiteCheckReport>, RpcError>;
+    /// Everything the Performance card needs.
+    async fn performance_view(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<hyperion_types::PerformanceView, RpcError>;
+    /// Measure Core Web Vitals now, with the node's configured source.
+    async fn cwv_measure(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<hyperion_types::CwvResult, RpcError>;
     /// Snapshots this site has, newest last.
     async fn snapshot_list(
         &self,
