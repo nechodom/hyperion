@@ -322,6 +322,43 @@ mod tests {
         assert!(parse_field(None).is_none());
     }
 
+    /// Live check against the real PageSpeed Insights API (keyless), so the
+    /// parser is verified against Google's actual response shape, not a
+    /// hand-written sample. Run:
+    /// `HYPERION_PSI_IT=1 cargo test -p hyperion-adapters perf::real -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore]
+    async fn psi_live_against_a_public_site() {
+        if std::env::var("HYPERION_PSI_IT").is_err() {
+            return;
+        }
+        let key = std::env::var("HYPERION_PSI_KEY").unwrap_or_default();
+        let r = match super::measure_psi("https://www.wikipedia.org/", &key, super::Strategy::Mobile)
+            .await
+        {
+            Ok(r) => r,
+            // Keyless shares a Google project whose daily quota is usually
+            // spent; that still proves the request path and the JSON error
+            // envelope. Set HYPERION_PSI_KEY to exercise the data parser.
+            Err(e) if e.to_string().contains("Quota exceeded") => {
+                eprintln!("PSI quota exceeded (no key) — request+error path OK, data path needs a key");
+                return;
+            }
+            Err(e) => panic!("PSI measurement: {e}"),
+        };
+        eprintln!("source={} strategy={} score={:?}", r.source, r.strategy, r.perf_score);
+        eprintln!("lab={:?}", r.lab);
+        eprintln!("field={:?}", r.field);
+        assert!(r.has_data(), "a major site must return some metrics");
+        // A busy site has real-visitor data, and its LCP must parse to a
+        // sane millisecond figure rather than, say, a seconds value.
+        if let Some(f) = r.field.as_ref() {
+            if let Some(lcp) = f.lcp_ms {
+                assert!((200..30_000).contains(&lcp), "LCP {lcp} ms is out of range");
+            }
+        }
+    }
+
     #[test]
     fn missing_metrics_stay_none_rather_than_zero() {
         let json: Value = serde_json::from_str(r#"{"audits":{}}"#).unwrap();
