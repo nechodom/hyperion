@@ -9997,7 +9997,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         }
         let site_lock = snapshot_lock(&detail.id);
         let _one_at_a_time = site_lock.lock().await;
-        let listed = snapshot_summaries(&repo).await?;
+        // Clear a stale lock if a previous killed-mid-prune left one — otherwise
+        // the operator's retry cannot even list, let alone prune.
+        let listed = list_with_unlock(&repo).await?;
         let targets: Vec<String> = if all {
             listed.iter().map(|s| s.id.clone()).collect()
         } else {
@@ -10022,9 +10024,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             // delete that forgot everything and then failed while pruning. So
             // prune on its own, or that space is never freed.
             if all {
-                restic::prune(&repo)
-                    .await
-                    .map_err(|e| RpcError::Internal_with(format!("snapshot prune: {e}")))?;
+                prune_with_unlock(&repo).await?;
             }
             return Ok(0);
         }
@@ -10053,9 +10053,22 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 "warn",
             )
             .await;
+            // The retry advice depends on which delete this was. Telling a
+            // SINGLE-snapshot delete to "delete all again" would destroy every
+            // remaining snapshot — the one "delete all" control wipes the site.
+            // And the daily retention sweep only prunes when a snapshot expires,
+            // so it is not a reliable retry on a keep_days=0 (never-expire) site;
+            // do not promise it.
+            let retry = if all {
+                "Click Delete all snapshots again to retry — it now clears any \
+                 stale lock and reclaims the space."
+            } else {
+                "The space is reclaimed the next time this site's repository is \
+                 pruned — another delete here, or the retention sweep once a \
+                 snapshot expires."
+            };
             return Err(RpcError::Internal_with(format!(
-                "{} snapshot(s) were deleted, but freeing the space they used failed ({e}). \
-                 Delete all again to retry the cleanup; the daily retention sweep also retries it.",
+                "{} snapshot(s) were deleted, but reclaiming their disk space failed ({e}). {retry}",
                 removed.len()
             )));
         }
@@ -10651,14 +10664,40 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let Some(src) = find_restored_dump(&from_dir).await else {
             return Ok(None);
         };
+        // SECURITY (TOCTOU): the staging directory sits INSIDE the site
+        // directory, which the site's own unix user owns — so between restic
+        // writing the dump and this read, the tenant can rename staging aside
+        // and drop their OWN `<token>.sql` at the same path. Imported, it would
+        // run as the database superuser (a tenant -> DB-admin / cross-tenant
+        // escalation). Copying to a root-owned directory protects the copy's
+        // DESTINATION but not its SOURCE, so it is not enough on its own.
+        //
+        // Defence: open the file by a descriptor and verify THROUGH that
+        // descriptor that it is a regular file owned by ROOT (uid 0). restic
+        // restores the dump with the uid it carries in the snapshot, which is 0
+        // because hyperion stages every dump under a root-only /var/lib path;
+        // an unprivileged tenant cannot create a root-owned file. The copy then
+        // streams from this same descriptor, so the check and the read see one
+        // inode — a swapped-in tenant dump (uid != 0) is refused.
+        use tokio::io::AsyncWriteExt;
+        let mut src_file = open_root_owned_dump(&src).await?;
         let dst = restic::ensure_db_stage(hosting_id, &format!("restore-{token}"))
             .await
             .map_err(|e| e.to_string())?;
-        // A copy, not a rename: /var/lib and /home are routinely separate
-        // filesystems and a cross-device rename simply fails.
-        tokio::fs::copy(&src, &dst)
+        // A stream copy from the verified descriptor, not a rename: /var/lib and
+        // /home are routinely separate filesystems and a cross-device rename
+        // simply fails. Reading the fd (not the path again) keeps the ownership
+        // check and the copy on the same inode.
+        let mut dst_file = tokio::fs::File::create(&dst)
+            .await
+            .map_err(|e| format!("create dump copy: {e}"))?;
+        tokio::io::copy(&mut src_file, &mut dst_file)
             .await
             .map_err(|e| format!("copy dump: {e}"))?;
+        dst_file
+            .flush()
+            .await
+            .map_err(|e| format!("flush dump copy: {e}"))?;
         Ok(Some(dst))
     }
 
@@ -29107,8 +29146,14 @@ fn care_section_performance(
             ));
         } else {
             // Count everything not clean — a warn is still a problem worth the
-            // customer's eye, just not a page-down one.
-            let problems = p.findings_error + p.findings_warn + (p.pages_checked - p.pages_ok);
+            // customer's eye, just not a page-down one. `findings_error +
+            // findings_warn` ALREADY counts each broken page once (site_check
+            // pushes exactly one `page` finding per non-OK page — a home/sitemap
+            // page that errors or is missing), alongside the broken link/image
+            // findings. Adding `(pages_checked - pages_ok)` on top counted every
+            // broken page twice and could print more "problems" than pages
+            // fetched — the flattering-in-reverse inflation this report avoids.
+            let problems = p.findings_error + p.findings_warn;
             out.push_str(&cat.render(
                 "care.performance.render_issues",
                 &[
@@ -30575,6 +30620,64 @@ async fn forget_with_unlock(
                 .map_err(|e| RpcError::Internal_with(format!("snapshot delete: {e}")))
         }
         Err(e) => Err(RpcError::Internal_with(format!("snapshot delete: {e}"))),
+    }
+}
+
+/// `prune`, clearing a stale lock and trying once more.
+///
+/// The delete-all recovery path (a bare prune after a delete that forgot the
+/// snapshots and then died before pruning) exists precisely for the
+/// killed-mid-prune case — and a killed restic is exactly what leaves the
+/// stale lock behind. So this is the one prune that MUST clear the lock, or the
+/// operator's "delete all again" retry hits the very lock it is meant to clean
+/// up and the repository stays wedged.
+async fn prune_with_unlock(repo: &hyperion_adapters::restic::Repo) -> Result<(), RpcError> {
+    use hyperion_adapters::restic;
+    match restic::prune(repo).await {
+        Ok(()) => Ok(()),
+        Err(e) if restic::is_lock_error(&e) => {
+            restic::unlock_stale(repo)
+                .await
+                .map_err(|e| RpcError::Internal_with(format!("snapshot unlock: {e}")))?;
+            restic::prune(repo)
+                .await
+                .map_err(|e| RpcError::Internal_with(format!("snapshot prune: {e}")))
+        }
+        Err(e) => Err(RpcError::Internal_with(format!("snapshot prune: {e}"))),
+    }
+}
+
+/// List snapshots, clearing a stale lock and trying once more.
+///
+/// `restic snapshots` takes a shared lock, which a stale EXCLUSIVE lock (left by
+/// a killed `forget --prune`) blocks. The delete path lists before it acts, so
+/// without this the retry after a killed-mid-prune fails at the listing and
+/// never reaches the recovery prune.
+async fn list_with_unlock(
+    repo: &hyperion_adapters::restic::Repo,
+) -> Result<Vec<hyperion_types::SnapshotSummary>, RpcError> {
+    use hyperion_adapters::restic;
+    let map = |rows: Vec<restic::Snapshot>| -> Vec<hyperion_types::SnapshotSummary> {
+        rows.into_iter()
+            .map(|s| hyperion_types::SnapshotSummary {
+                id: s.id,
+                time: s.time,
+                tags: s.tags,
+            })
+            .collect()
+    };
+    match restic::snapshots(repo).await {
+        Ok(rows) => Ok(map(rows)),
+        Err(e) if restic::is_lock_error(&e) => {
+            restic::unlock_stale(repo)
+                .await
+                .map_err(|e| RpcError::Internal_with(format!("snapshot unlock: {e}")))?;
+            restic::snapshots(repo)
+                .await
+                .map(map)
+                .map_err(|e| RpcError::Internal_with(format!("snapshot list: {e}")))
+        }
+        Err(e) => Err(RpcError::Internal_with(format!("snapshot list: {e}"))),
     }
 }
 
@@ -34287,6 +34390,36 @@ async fn find_restored_dump(dir: &std::path::Path) -> Option<std::path::PathBuf>
     None
 }
 
+/// Open a restored database dump and verify, THROUGH the descriptor, that it is
+/// a regular file owned by ROOT.
+///
+/// The snapshot restore stages inside the site directory, which the tenant
+/// owns, so the dump's path is briefly tenant-swappable (see the call site in
+/// `lift_restored_dump`). A dump restic wrote carries uid 0 — hyperion stages
+/// every dump under a root-only `/var/lib` path — and an unprivileged tenant
+/// cannot create a root-owned file, so `uid == 0` distinguishes the real dump
+/// from a planted one. Returning the open descriptor lets the caller copy from
+/// the very inode it just checked, closing the check-then-use race.
+async fn open_root_owned_dump(src: &std::path::Path) -> Result<tokio::fs::File, String> {
+    use std::os::unix::fs::MetadataExt;
+    let f = tokio::fs::File::open(src)
+        .await
+        .map_err(|e| format!("open restored dump: {e}"))?;
+    let meta = f
+        .metadata()
+        .await
+        .map_err(|e| format!("stat restored dump: {e}"))?;
+    if !meta.is_file() || meta.uid() != 0 {
+        return Err(format!(
+            "the restored database dump at {} is not a root-owned regular file (uid {}) — \
+             refusing to import it: the restore's staging directory may have been tampered with",
+            src.display(),
+            meta.uid()
+        ));
+    }
+    Ok(f)
+}
+
 /// `chmod` a directory, as a hard error.
 ///
 /// Every caller here is protecting a plaintext copy of a customer's data on a
@@ -37828,6 +37961,55 @@ mod tests {
             ..perf.clone()
         };
         assert!(care_section_performance(&cat, Some(&clean)).contains("every one loaded"));
+    }
+
+    /// A broken page is counted ONCE. site_check pushes exactly one finding per
+    /// non-OK page, so a broken page is already in findings_error/findings_warn;
+    /// adding `(pages_checked - pages_ok)` on top counted it twice and could
+    /// print more "problems" than pages fetched.
+    #[test]
+    fn a_broken_page_is_counted_once_not_twice() {
+        let cat = en();
+        // One page, and it errors: one finding, one problem — not two.
+        let one = hyperion_types::CarePerformance {
+            checked_at: 1,
+            pages_checked: 1,
+            pages_ok: 0,
+            findings_error: 1,
+            findings_warn: 0,
+            median_ttfb_ms: 0,
+            slowest_ttfb_ms: 0,
+            html_bytes: 0,
+            cwv: None,
+        };
+        let out = care_section_performance(&cat, Some(&one));
+        assert!(
+            out.contains("1 problem"),
+            "one dead page is one problem: {out}"
+        );
+        assert!(
+            !out.contains("2 problem"),
+            "the page must not be counted twice: {out}"
+        );
+
+        // 8 fetched, 2 pages broken (2 page findings) plus 3 broken links
+        // (3 findings): five distinct problems, not seven.
+        let mixed = hyperion_types::CarePerformance {
+            pages_checked: 8,
+            pages_ok: 6,
+            findings_error: 2,
+            findings_warn: 3,
+            ..one.clone()
+        };
+        let out = care_section_performance(&cat, Some(&mixed));
+        assert!(
+            out.contains("5 problem"),
+            "2 broken pages + 3 broken links = 5 problems: {out}"
+        );
+        assert!(
+            !out.contains("7 problem"),
+            "the 2 broken pages must not be added a second time: {out}"
+        );
     }
 
     /// A value that was never measured prints a dash, never a zero. The whole
@@ -41857,6 +42039,30 @@ mod tests {
         let real = dir.join("zzz.sql");
         tokio::fs::write(&real, b"-- dump").await.expect("write");
         assert_eq!(find_restored_dump(&dir).await, Some(real));
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    /// A restored dump that is NOT owned by root is refused before import. The
+    /// snapshot restore stages inside the tenant-owned site directory, so the
+    /// dump path is briefly swappable; a file the tenant planted there carries
+    /// the tenant's uid, and importing it would run their SQL as the database
+    /// superuser. The test writes the file as the (non-root) test user, which
+    /// is exactly the tenant-planted case.
+    #[tokio::test]
+    async fn a_non_root_owned_restored_dump_is_refused() {
+        let dir = std::env::temp_dir().join(format!("lm-dump-owner-{}", std::process::id()));
+        tokio::fs::create_dir_all(&dir).await.expect("mkdir");
+        let planted = dir.join("evil.sql");
+        tokio::fs::write(&planted, b"GRANT ALL ON *.* TO 'attacker'@'%';")
+            .await
+            .expect("write");
+        let err = open_root_owned_dump(&planted)
+            .await
+            .expect_err("a non-root-owned dump must be refused");
+        assert!(
+            err.contains("root-owned"),
+            "the refusal must name the ownership check: {err}"
+        );
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 

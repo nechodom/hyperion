@@ -200,12 +200,17 @@ pub async fn measure_lighthouse(
         .output()
         .await;
     let argv: Vec<&str> = args.iter().map(String::as_str).collect();
-    let out = tokio::time::timeout(
+    // A hostile tenant page can hang Chrome past the ceiling. The measurement
+    // runs `sudo -> env -> node(lighthouse) -> chrome`, so the timeout must kill
+    // the whole PROCESS GROUP, not just `sudo` — otherwise the browser tree
+    // orphans and leaks. `run_group_timeout` spawns the group and reaps it.
+    let out = cmd::run_group_timeout(
+        "/usr/bin/sudo",
+        &argv,
         std::time::Duration::from_secs(MEASURE_TIMEOUT_SECS),
-        cmd::run_killable("/usr/bin/sudo", &argv),
+        "Lighthouse",
     )
-    .await
-    .map_err(|_| AdapterError::Other("Lighthouse timed out".into()))??;
+    .await?;
 
     // Lighthouse prints only the JSON on stdout with `--output=json --quiet`,
     // but a stray warning line has been seen; take from the first `{`.
