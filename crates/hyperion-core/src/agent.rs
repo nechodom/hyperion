@@ -1875,6 +1875,18 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         let detail = self.svc.get(sel).await?;
         Ok(self.svc.site_check_last(detail.id.as_str()).await)
     }
+    async fn performance_view(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<hyperion_types::PerformanceView, RpcError> {
+        self.svc.performance_view(sel).await
+    }
+    async fn cwv_measure(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<hyperion_types::CwvResult, RpcError> {
+        self.svc.cwv_measure(sel).await
+    }
     async fn snapshot_list(
         &self,
         sel: HostingSelector,

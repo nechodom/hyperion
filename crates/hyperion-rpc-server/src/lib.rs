@@ -1446,6 +1446,14 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(v) => Response::SiteCheck(v),
             Err(e) => Response::Error(e),
         },
+        Request::PerformanceView { sel } => match api.performance_view(sel).await {
+            Ok(v) => Response::PerformanceView(v),
+            Err(e) => Response::Error(e),
+        },
+        Request::CwvMeasure { sel } => match api.cwv_measure(sel).await {
+            Ok(v) => Response::CwvResult(v),
+            Err(e) => Response::Error(e),
+        },
         Request::SiteCheckLast { sel } => match api.site_check_last(sel).await {
             Ok(v) => Response::SiteCheckLast(v),
             Err(e) => Response::Error(e),
@@ -3264,6 +3272,18 @@ mod tests {
             _: HostingSelector,
         ) -> Result<Option<hyperion_types::SiteCheckReport>, RpcError> {
             Ok(None)
+        }
+        async fn performance_view(
+            &self,
+            _: HostingSelector,
+        ) -> Result<hyperion_types::PerformanceView, RpcError> {
+            Ok(Default::default())
+        }
+        async fn cwv_measure(
+            &self,
+            _: HostingSelector,
+        ) -> Result<hyperion_types::CwvResult, RpcError> {
+            Ok(Default::default())
         }
         async fn snapshot_list(
             &self,

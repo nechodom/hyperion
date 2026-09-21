@@ -1410,6 +1410,16 @@ pub enum Request {
     SiteCheckLast {
         sel: HostingSelector,
     },
+    /// Everything the Performance card needs: render + speed from the site
+    /// check, Core Web Vitals, the node's source and engine state.
+    PerformanceView {
+        sel: HostingSelector,
+    },
+    /// Measure Core Web Vitals for this site NOW, with the node's configured
+    /// source. Slow (a browser load); a background job on the web side.
+    CwvMeasure {
+        sel: HostingSelector,
+    },
     /// Snapshots this site has, newest last. Empty when the node has no
     /// snapshot engine — which is not an error, it is "none".
     SnapshotList {
@@ -2226,6 +2236,8 @@ pub enum Response {
     WpMailAutofixSet(bool),
     SiteCheck(hyperion_types::SiteCheckReport),
     SiteCheckLast(Option<hyperion_types::SiteCheckReport>),
+    PerformanceView(hyperion_types::PerformanceView),
+    CwvResult(hyperion_types::CwvResult),
     SnapshotList(Vec<hyperion_types::SnapshotSummary>),
     SnapshotOverview(hyperion_types::SnapshotOverview),
     /// How many snapshots were deleted.
