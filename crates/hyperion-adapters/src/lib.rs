@@ -30,6 +30,7 @@ pub mod postfix;
 pub mod postgres;
 pub mod restic;
 pub mod rollback;
+pub mod perf;
 pub mod sitecheck;
 pub mod ssh;
 pub mod users;
