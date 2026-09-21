@@ -23337,7 +23337,22 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             cluster: cluster_view,
             notifications: read_notifications_section(self.agent_config_path.as_deref()),
             snapshot_retention: read_snapshot_retention(self.agent_config_path.as_deref()),
+            performance: self.performance_config_view().await,
         })
+    }
+
+    /// `[performance]` for the Settings page: the source, strategy, whether a
+    /// key is set (never the key itself) and whether a local Lighthouse works.
+    async fn performance_config_view(&self) -> hyperion_types::PerformanceConfigView {
+        let cfg = self.performance_config();
+        let lighthouse_available = cfg.cwv_source == "lighthouse"
+            && hyperion_adapters::perf::lighthouse_available().await;
+        hyperion_types::PerformanceConfigView {
+            cwv_source: cfg.cwv_source.clone(),
+            strategy: cfg.strategy_label().to_string(),
+            psi_key_set: !cfg.psi_api_key.trim().is_empty(),
+            lighthouse_available,
+        }
     }
 
     /// Send a one-off test email through the configured SMTP relay
@@ -30862,6 +30877,9 @@ pub(crate) struct PerformanceConfig {
 }
 
 impl PerformanceConfig {
+    fn strategy_label(&self) -> &'static str {
+        strategy_str(self.strategy())
+    }
     fn strategy(&self) -> hyperion_adapters::perf::Strategy {
         match self.strategy.as_str() {
             "desktop" => hyperion_adapters::perf::Strategy::Desktop,

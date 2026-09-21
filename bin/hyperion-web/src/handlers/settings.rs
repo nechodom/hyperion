@@ -1529,9 +1529,16 @@ pub async fn post_config(
     // setting: they are ACTED ON by the node that owns each site (the
     // scheduled backup sweep, the pre-change snapshot, the retention sweeps),
     // so a value saved only on the master governed only the master's sites.
-    let notification_fields = matches!(
+    // [performance] is the same shape: the care report and the CWV measurement
+    // run on the owning node, so it too must reach every node.
+    let propagated_fields = matches!(
         form.section.as_str(),
-        "notifications" | "letters" | "protection" | "snapshots" | "backup_retention"
+        "notifications"
+            | "letters"
+            | "protection"
+            | "snapshots"
+            | "backup_retention"
+            | "performance"
     )
     .then(|| (form.section.clone(), fields.clone()));
     let is_letters = matches!(form.section.as_str(), "notifications" | "letters");
@@ -1594,7 +1601,7 @@ pub async fn post_config(
             // that is reported as an ERROR rather than folded into the
             // success banner: the operator has just edited what their
             // customers read, and "saved" would be a lie for that node's.
-            match notification_fields {
+            match propagated_fields {
                 Some((sect, f)) => match propagate_notifications(&state, &sect, f).await {
                     Ok(0) => format!(
                         "/settings?flash={}+saved+%E2%80%94+hyperion-agent+restarting+%28~5s%29#{}",
@@ -1783,6 +1790,7 @@ fn section_label(section: &str) -> &'static str {
         "backup_retention" => "Backup retention",
         "protection" => "What this panel keeps",
         "snapshots" => "Snapshot retention",
+        "performance" => "Performance",
         "cluster" => "Cluster settings",
         "notifications" => "Notification wording",
         "letters" => "Customer letter wording",
@@ -1910,6 +1918,7 @@ fn section_to_tab(section: &str) -> &'static str {
         // top of the tab that shows both — and unlike the cluster.* fields it
         // needs no `_return_tab` override, because this IS its tab.
         "backup_remote" | "backup_retention" | "protection" | "snapshots" => "backups",
+        "performance" => "notifications",
         // [cluster] fields are now split across two tabs: the Security card
         // (2FA + hardening flags) lives on General, Cluster placement on
         // Cluster. General is the default; the placement form carries a
