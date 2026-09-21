@@ -135,29 +135,74 @@ pub async fn measure_psi(
 }
 
 /// Measure via a local Lighthouse.
-pub async fn measure_lighthouse(url: &str, strategy: Strategy) -> Result<CwvResult, AdapterError> {
+pub async fn measure_lighthouse(
+    url: &str,
+    strategy: Strategy,
+    run_as: &str,
+    home_dir: &str,
+) -> Result<CwvResult, AdapterError> {
     if !valid_target(url) {
         return Err(AdapterError::Other(format!(
             "not a measurable URL: {url:?}"
         )));
     }
-    // Chrome as root refuses to sandbox itself, and the hyperion agent is
-    // root; --no-sandbox is required and safe here because the page fetched
-    // is the operator's own site, not attacker input.
-    let args = [
-        "lighthouse",
-        url,
-        "--quiet",
-        "--output=json",
-        "--only-categories=performance",
-        "--form-factor",
-        strategy.lighthouse_form_factor(),
-        "--chrome-flags=--headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage",
-        "--max-wait-for-load=45000",
+    if run_as.trim().is_empty()
+        || !run_as
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
+    {
+        return Err(AdapterError::Other(format!(
+            "not a system user: {run_as:?}"
+        )));
+    }
+    // The page being loaded is a TENANT's site — its HTML/JS/CSS is content
+    // the customer controls, so this is not "the operator's own input". Chrome
+    // is therefore run as the SITE's own user, never as the root agent: a
+    // renderer exploit in a hostile page reaches only that tenant's own uid,
+    // which the tenant already has, and never root or another tenant. Being
+    // unprivileged is also what lets --no-sandbox be safe here — dropped
+    // privileges are the sandbox.
+    let cache = format!("{}/.hyperion-lighthouse", home_dir.trim_end_matches('/'));
+    // `sudo -H -u <user> /usr/bin/env HOME=… lighthouse …`, the same shape
+    // wp-cli uses so Chrome and Lighthouse have a HOME/TMPDIR they can write.
+    let form_factor = strategy.lighthouse_form_factor();
+    let mut args: Vec<String> = vec![
+        "-H".into(),
+        "-u".into(),
+        run_as.to_string(),
+        "/usr/bin/env".into(),
+        format!("HOME={cache}"),
+        format!("TMPDIR={cache}"),
+        "lighthouse".into(),
+        url.to_string(),
+        "--quiet".into(),
+        "--output=json".into(),
+        "--only-categories=performance".into(),
+        format!("--chrome-flags=--headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --user-data-dir={cache}/chrome"),
+        "--max-wait-for-load=45000".into(),
     ];
+    // Desktop needs `--preset=desktop`: it sets the form factor AND the
+    // desktop screen emulation AND desktop throttling together. A bare
+    // `--form-factor desktop` changes only the scoring label and leaves the
+    // mobile viewport + Slow-4G + 4x-CPU throttling in place, so a desktop
+    // request came back scored as a throttled phone. Mobile is the config
+    // default, so it needs no flag.
+    match strategy {
+        Strategy::Desktop => args.push("--preset=desktop".into()),
+        Strategy::Mobile => {
+            args.push("--form-factor".into());
+            args.push(form_factor.to_string());
+        }
+    }
+    // The cache/HOME dir must exist and be writable by the site user.
+    let _ = tokio::process::Command::new("/usr/bin/sudo")
+        .args(["-u", run_as, "/bin/mkdir", "-p", &format!("{cache}/chrome")])
+        .output()
+        .await;
+    let argv: Vec<&str> = args.iter().map(String::as_str).collect();
     let out = tokio::time::timeout(
         std::time::Duration::from_secs(MEASURE_TIMEOUT_SECS),
-        cmd::run("/usr/bin/env", &args),
+        cmd::run_killable("/usr/bin/sudo", &argv),
     )
     .await
     .map_err(|_| AdapterError::Other("Lighthouse timed out".into()))??;
@@ -333,20 +378,26 @@ mod tests {
             return;
         }
         let key = std::env::var("HYPERION_PSI_KEY").unwrap_or_default();
-        let r = match super::measure_psi("https://www.wikipedia.org/", &key, super::Strategy::Mobile)
-            .await
-        {
-            Ok(r) => r,
-            // Keyless shares a Google project whose daily quota is usually
-            // spent; that still proves the request path and the JSON error
-            // envelope. Set HYPERION_PSI_KEY to exercise the data parser.
-            Err(e) if e.to_string().contains("Quota exceeded") => {
-                eprintln!("PSI quota exceeded (no key) — request+error path OK, data path needs a key");
-                return;
-            }
-            Err(e) => panic!("PSI measurement: {e}"),
-        };
-        eprintln!("source={} strategy={} score={:?}", r.source, r.strategy, r.perf_score);
+        let r =
+            match super::measure_psi("https://www.wikipedia.org/", &key, super::Strategy::Mobile)
+                .await
+            {
+                Ok(r) => r,
+                // Keyless shares a Google project whose daily quota is usually
+                // spent; that still proves the request path and the JSON error
+                // envelope. Set HYPERION_PSI_KEY to exercise the data parser.
+                Err(e) if e.to_string().contains("Quota exceeded") => {
+                    eprintln!(
+                    "PSI quota exceeded (no key) — request+error path OK, data path needs a key"
+                );
+                    return;
+                }
+                Err(e) => panic!("PSI measurement: {e}"),
+            };
+        eprintln!(
+            "source={} strategy={} score={:?}",
+            r.source, r.strategy, r.perf_score
+        );
         eprintln!("lab={:?}", r.lab);
         eprintln!("field={:?}", r.field);
         assert!(r.has_data(), "a major site must return some metrics");

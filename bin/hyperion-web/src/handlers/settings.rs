@@ -1425,6 +1425,7 @@ pub async fn post_config(
         "email" => &["smtp_password"],
         "slack" => &["default_webhook"],
         "backup_remote" => &["password"],
+        "performance" => &["psi_api_key"],
         _ => &[],
     };
     for k in drop_if_empty {

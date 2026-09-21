@@ -9046,7 +9046,13 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                             .into(),
                     });
                 }
-                perf::measure_lighthouse(&url, strategy).await
+                perf::measure_lighthouse(
+                    &url,
+                    strategy,
+                    &detail.system_user,
+                    &home_dir_for(&detail),
+                )
+                .await
             }
             _ => {
                 return Err(RpcError::Validation {
@@ -9110,7 +9116,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         hosting_id: &str,
     ) -> Option<hyperion_types::CarePerformance> {
         let sc = self.site_check_last(hosting_id).await;
-        let cwv = self.cwv_last(hosting_id).await.filter(|c| c.has_data());
+        // Kept even when it holds only an error: the card shows "tried on
+        // <date>, this is why". The report's own builder drops a data-less
+        // result to "no data yet" — see care_section_performance.
+        let cwv = self.cwv_last(hosting_id).await;
         let sc_ran = sc.as_ref().is_some_and(|r| r.ran());
         if !sc_ran && cwv.is_none() {
             return None;
@@ -29084,27 +29093,42 @@ fn care_section_performance(
     };
     let mut out = cat.get("care.performance.header").to_string();
     if p.has_site_check() {
-        if p.findings_error == 0 {
+        // "OK — everything rendered" only when there is genuinely nothing to
+        // report: no errors, no warnings, and every page fetched answered. A
+        // 404 behind a menu item or a missing image is a `warn`, and claiming
+        // "every one loaded, with its links and images resolving" over the top
+        // of one is the flattering half-truth the whole report exists to avoid.
+        let all_clean =
+            p.findings_error == 0 && p.findings_warn == 0 && p.pages_ok == p.pages_checked;
+        if all_clean {
             out.push_str(&cat.render(
                 "care.performance.render_ok",
                 &[("pages", &cat.group_int(p.pages_checked))],
             ));
         } else {
+            // Count everything not clean — a warn is still a problem worth the
+            // customer's eye, just not a page-down one.
+            let problems = p.findings_error + p.findings_warn + (p.pages_checked - p.pages_ok);
             out.push_str(&cat.render(
                 "care.performance.render_issues",
                 &[
-                    ("errors", &cat.group_int(p.findings_error)),
+                    ("errors", &cat.group_int(problems)),
                     ("pages", &cat.group_int(p.pages_checked)),
                 ],
             ));
         }
-        out.push_str(&cat.render(
-            "care.performance.speed",
-            &[
-                ("median", &cat.group_int(p.median_ttfb_ms)),
-                ("slowest", &cat.group_int(p.slowest_ttfb_ms)),
-            ],
-        ));
+        // The server-speed line needs a page that actually answered to time.
+        // With none, `median_ttfb_ms` is a filtered-to-nothing 0, and "0 ms
+        // typical" is a fabricated measured-zero — so the line is omitted.
+        if p.pages_ok > 0 {
+            out.push_str(&cat.render(
+                "care.performance.speed",
+                &[
+                    ("median", &cat.group_int(p.median_ttfb_ms)),
+                    ("slowest", &cat.group_int(p.slowest_ttfb_ms)),
+                ],
+            ));
+        }
     }
     // Core Web Vitals: field if we have real-visitor data, else lab, else —
     // when a source is on but produced nothing — a plain "no data yet".
@@ -30877,6 +30901,15 @@ const SITE_CHECK_KV_KEY: &str = "site_check_last";
 
 /// `hosting_kv` key: the last Core Web Vitals measurement (JSON `CwvResult`).
 const CWV_KV_KEY: &str = "cwv_last";
+
+/// A writable HOME/cache base for a site user, beside its htdocs. `root_dir`
+/// IS the htdocs; its parent is the site tree, owned by the user.
+fn home_dir_for(detail: &HostingDetail) -> String {
+    std::path::Path::new(detail.root_dir.trim())
+        .parent()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| format!("/home/{}", detail.system_user))
+}
 
 /// This node's `[performance]` settings.
 #[derive(Debug, Clone, Default)]
@@ -37751,6 +37784,50 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_warn_only_page_check_is_not_reported_as_everything_rendered() {
+        let cat = en();
+        // Every page answered, but a link 404s (a warn). Must NOT claim
+        // "every one loaded, with its links and images resolving".
+        let mut perf = hyperion_types::CarePerformance {
+            checked_at: 1,
+            pages_checked: 8,
+            pages_ok: 8,
+            findings_error: 0,
+            findings_warn: 1,
+            median_ttfb_ms: 200,
+            slowest_ttfb_ms: 400,
+            html_bytes: 1000,
+            cwv: None,
+        };
+        let out = care_section_performance(&cat, Some(&perf));
+        assert!(!out.contains("every one loaded"), "{out}");
+        assert!(out.contains("problem"), "{out}");
+        assert!(
+            out.contains("Server response"),
+            "a page answered, so speed is quoted: {out}"
+        );
+
+        // Nothing answered: no "0 ms typical" fabricated speed line.
+        perf.pages_ok = 0;
+        perf.findings_error = 8;
+        let out = care_section_performance(&cat, Some(&perf));
+        assert!(
+            !out.contains("Server response"),
+            "no page answered, no speed line: {out}"
+        );
+
+        // Genuinely clean: the OK line.
+        let clean = hyperion_types::CarePerformance {
+            findings_warn: 0,
+            findings_error: 0,
+            pages_ok: 8,
+            pages_checked: 8,
+            ..perf.clone()
+        };
+        assert!(care_section_performance(&cat, Some(&clean)).contains("every one loaded"));
     }
 
     /// A value that was never measured prints a dash, never a zero. The whole
