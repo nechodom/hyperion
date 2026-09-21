@@ -278,15 +278,45 @@ mod tests {
 
     #[test]
     fn cls_displays_as_a_decimal() {
-        assert_eq!(CwvMetrics { cls_x1000: Some(100), ..Default::default() }.cls_display().as_deref(), Some("0.10"));
-        assert_eq!(CwvMetrics { cls_x1000: Some(5), ..Default::default() }.cls_display().as_deref(), Some("0.00"));
-        assert_eq!(CwvMetrics { cls_x1000: Some(1234), ..Default::default() }.cls_display().as_deref(), Some("1.23"));
+        assert_eq!(
+            CwvMetrics {
+                cls_x1000: Some(100),
+                ..Default::default()
+            }
+            .cls_display()
+            .as_deref(),
+            Some("0.10")
+        );
+        assert_eq!(
+            CwvMetrics {
+                cls_x1000: Some(5),
+                ..Default::default()
+            }
+            .cls_display()
+            .as_deref(),
+            Some("0.00")
+        );
+        assert_eq!(
+            CwvMetrics {
+                cls_x1000: Some(1234),
+                ..Default::default()
+            }
+            .cls_display()
+            .as_deref(),
+            Some("1.23")
+        );
     }
 
     #[test]
     fn best_prefers_field_but_falls_back_to_lab() {
-        let lab = CwvMetrics { lcp_ms: Some(3000), ..Default::default() };
-        let field = CwvMetrics { lcp_ms: Some(2000), ..Default::default() };
+        let lab = CwvMetrics {
+            lcp_ms: Some(3000),
+            ..Default::default()
+        };
+        let field = CwvMetrics {
+            lcp_ms: Some(2000),
+            ..Default::default()
+        };
         let r = CwvResult {
             lab: Some(lab.clone()),
             field: Some(field.clone()),
@@ -295,7 +325,10 @@ mod tests {
         assert_eq!(r.best(), Some(&field));
         assert!(r.best_is_field());
 
-        let lab_only = CwvResult { lab: Some(lab.clone()), ..Default::default() };
+        let lab_only = CwvResult {
+            lab: Some(lab.clone()),
+            ..Default::default()
+        };
         assert_eq!(lab_only.best(), Some(&lab));
         assert!(!lab_only.best_is_field());
 

@@ -81,7 +81,9 @@ pub async fn measure_psi(
     strategy: Strategy,
 ) -> Result<CwvResult, AdapterError> {
     if !valid_target(url) {
-        return Err(AdapterError::Other(format!("not a measurable URL: {url:?}")));
+        return Err(AdapterError::Other(format!(
+            "not a measurable URL: {url:?}"
+        )));
     }
     let mut endpoint = format!(
         "https://www.googleapis.com/pagespeedonline/v5/runPagespeed\
@@ -135,7 +137,9 @@ pub async fn measure_psi(
 /// Measure via a local Lighthouse.
 pub async fn measure_lighthouse(url: &str, strategy: Strategy) -> Result<CwvResult, AdapterError> {
     if !valid_target(url) {
-        return Err(AdapterError::Other(format!("not a measurable URL: {url:?}")));
+        return Err(AdapterError::Other(format!(
+            "not a measurable URL: {url:?}"
+        )));
     }
     // Chrome as root refuses to sandbox itself, and the hyperion agent is
     // root; --no-sandbox is required and safe here because the page fetched
@@ -170,13 +174,17 @@ pub async fn measure_lighthouse(url: &str, strategy: Strategy) -> Result<CwvResu
         .and_then(|e| e.get("message"))
         .and_then(Value::as_str)
     {
-        return Err(AdapterError::Other(format!("Lighthouse could not load the page: {msg}")));
+        return Err(AdapterError::Other(format!(
+            "Lighthouse could not load the page: {msg}"
+        )));
     }
     let mut result = parse_lighthouse_result(&json);
     result.source = "lighthouse".into();
     result.strategy = strategy.as_str().into();
     if !result.has_data() {
-        return Err(AdapterError::Other("Lighthouse returned no usable metrics".into()));
+        return Err(AdapterError::Other(
+            "Lighthouse returned no usable metrics".into(),
+        ));
     }
     Ok(result)
 }
@@ -318,6 +326,9 @@ mod tests {
     fn missing_metrics_stay_none_rather_than_zero() {
         let json: Value = serde_json::from_str(r#"{"audits":{}}"#).unwrap();
         let r = parse_lighthouse_result(&json);
-        assert!(r.lab.is_none(), "no audits means no lab block, not a zeroed one");
+        assert!(
+            r.lab.is_none(),
+            "no audits means no lab block, not a zeroed one"
+        );
     }
 }

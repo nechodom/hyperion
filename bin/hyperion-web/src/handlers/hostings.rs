@@ -13502,26 +13502,41 @@ pub async fn get_performance_panel(
         Ok(v) => v,
         Err(e) => return Ok(card(Default::default(), Some(e.to_string()))),
     };
-    if require_hosting_access(&state, &ctx, detail.id.as_str(), false, Capability::HostingView)
-        .await
-        .is_err()
+    if require_hosting_access(
+        &state,
+        &ctx,
+        detail.id.as_str(),
+        false,
+        Capability::HostingView,
+    )
+    .await
+    .is_err()
     {
         return Ok(card(
             Default::default(),
             Some("You do not have access to this hosting.".into()),
         ));
     }
-    match crate::dispatcher::dispatch_to_node(&state, owner.as_deref(), Request::PerformanceView { sel })
-        .await
+    match crate::dispatcher::dispatch_to_node(
+        &state,
+        owner.as_deref(),
+        Request::PerformanceView { sel },
+    )
+    .await
     {
         Ok(RpcResponse::PerformanceView(v)) => Ok(card(v, None)),
         Ok(RpcResponse::Error(e)) => Ok(card(Default::default(), Some(e.to_string()))),
-        Ok(_) => Ok(card(Default::default(), Some("unexpected response from the node".into()))),
+        Ok(_) => Ok(card(
+            Default::default(),
+            Some("unexpected response from the node".into()),
+        )),
         // An older agent does not know PerformanceView — say so rather than
         // show a raw decode error.
         Err(e) => Ok(card(
             Default::default(),
-            Some(format!("Could not read performance from the owning node ({e}).")),
+            Some(format!(
+                "Could not read performance from the owning node ({e})."
+            )),
         )),
     }
 }
@@ -13562,11 +13577,13 @@ pub async fn post_cwv_measure(
         &ctx.username,
         actor_uid,
         move |reporter| async move {
-            reporter
-                .step("Measuring Core Web Vitals…", 20, "")
-                .await;
-            match crate::dispatcher::dispatch_to_node(&job_state, owner.as_deref(), Request::CwvMeasure { sel })
-                .await
+            reporter.step("Measuring Core Web Vitals…", 20, "").await;
+            match crate::dispatcher::dispatch_to_node(
+                &job_state,
+                owner.as_deref(),
+                Request::CwvMeasure { sel },
+            )
+            .await
             {
                 Ok(RpcResponse::CwvResult(c)) => {
                     let mut log = format!("source: {}, {}\n", c.source, c.strategy);
@@ -13580,7 +13597,11 @@ pub async fn post_cwv_measure(
                     reporter.finish(true, None).await;
                 }
                 Ok(RpcResponse::Error(e)) => reporter.finish(false, Some(e.to_string())).await,
-                Ok(_) => reporter.finish(false, Some("unexpected agent response".into())).await,
+                Ok(_) => {
+                    reporter
+                        .finish(false, Some("unexpected agent response".into()))
+                        .await
+                }
                 Err(e) => reporter.finish(false, Some(e.to_string())).await,
             }
         },

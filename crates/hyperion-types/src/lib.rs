@@ -26,9 +26,9 @@ pub mod jobs;
 pub mod limits;
 pub mod migration;
 pub mod package;
+pub mod perf;
 pub mod php;
 pub mod profile;
-pub mod perf;
 pub mod sitecheck;
 pub mod spf;
 pub mod stats;
@@ -59,11 +59,11 @@ pub use package::{
     BackupCadence, FeatureToggle, HostingPackage, LiveFeatureState, PackageFeatures, PackageInput,
     PackagePriorState, PackageState, ServicePackage,
 };
-pub use php::PhpVersion;
-pub use profile::{HostingProfile, ProfileApply, ProfileInput, WpAssetSummary};
 pub use perf::{
     CarePerformance, CwvMetrics, CwvResult, PerformanceConfigView, PerformanceView, Vital,
 };
+pub use php::PhpVersion;
+pub use profile::{HostingProfile, ProfileApply, ProfileInput, WpAssetSummary};
 pub use sitecheck::{SiteCheckFinding, SiteCheckPage, SiteCheckReport};
 pub use spf::SpfCheckResult;
 pub use stats::{decode_mime_header, render_html_shell, CountryTraffic};

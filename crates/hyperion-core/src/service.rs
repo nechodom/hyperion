@@ -9105,7 +9105,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
 
     /// Fold the site check and the last CWV result into the report's
     /// performance section. `None` when neither half has ever been measured.
-    pub async fn care_performance(&self, hosting_id: &str) -> Option<hyperion_types::CarePerformance> {
+    pub async fn care_performance(
+        &self,
+        hosting_id: &str,
+    ) -> Option<hyperion_types::CarePerformance> {
         let sc = self.site_check_last(hosting_id).await;
         let cwv = self.cwv_last(hosting_id).await.filter(|c| c.has_data());
         let sc_ran = sc.as_ref().is_some_and(|r| r.ran());
@@ -23345,8 +23348,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// key is set (never the key itself) and whether a local Lighthouse works.
     async fn performance_config_view(&self) -> hyperion_types::PerformanceConfigView {
         let cfg = self.performance_config();
-        let lighthouse_available = cfg.cwv_source == "lighthouse"
-            && hyperion_adapters::perf::lighthouse_available().await;
+        let lighthouse_available =
+            cfg.cwv_source == "lighthouse" && hyperion_adapters::perf::lighthouse_available().await;
         hyperion_types::PerformanceConfigView {
             cwv_source: cfg.cwv_source.clone(),
             strategy: cfg.strategy_label().to_string(),
@@ -29105,28 +29108,39 @@ fn care_section_performance(
     }
     // Core Web Vitals: field if we have real-visitor data, else lab, else —
     // when a source is on but produced nothing — a plain "no data yet".
+    // Field if we have real-visitor data, else lab, else — a source is on but
+    // produced nothing yet — a plain "no data".
     match p.cwv.as_ref() {
         Some(cwv) if cwv.best_is_field() => {
-            let m = cwv.field.as_ref().expect("field present");
-            out.push_str(&cat.render(
-                "care.performance.cwv_field",
-                &[
-                    ("lcp", &cwv_ms(cat, m.lcp_ms)),
-                    ("cls", &cwv_cls(m)),
-                    ("inp", &cwv_ms(cat, m.inp_ms)),
-                ],
-            ));
+            if let Some(m) = cwv.field.as_ref() {
+                out.push_str(&cat.render(
+                    "care.performance.cwv_field",
+                    &[
+                        ("lcp", &cwv_ms(cat, m.lcp_ms)),
+                        ("cls", &cwv_cls(m)),
+                        ("inp", &cwv_ms(cat, m.inp_ms)),
+                    ],
+                ));
+            }
         }
         Some(cwv) if cwv.has_data() => {
-            let m = cwv.lab.as_ref().expect("lab present");
-            out.push_str(&cat.render(
-                "care.performance.cwv_lab",
-                &[
-                    ("lcp", &cwv_ms(cat, m.lcp_ms)),
-                    ("cls", &cwv_cls(m)),
-                    ("score", &cwv.perf_score.map(|s| s.to_string()).unwrap_or_else(|| UNMEASURED.into())),
-                ],
-            ));
+            if let Some(m) = cwv.lab.as_ref() {
+                out.push_str(
+                    &cat.render(
+                        "care.performance.cwv_lab",
+                        &[
+                            ("lcp", &cwv_ms(cat, m.lcp_ms)),
+                            ("cls", &cwv_cls(m)),
+                            (
+                                "score",
+                                &cwv.perf_score
+                                    .map(|s| s.to_string())
+                                    .unwrap_or_else(|| UNMEASURED.into()),
+                            ),
+                        ],
+                    ),
+                );
+            }
         }
         Some(_) => out.push_str(cat.get("care.performance.cwv_pending")),
         None => {}
@@ -30899,9 +30913,7 @@ fn strategy_str(s: hyperion_adapters::perf::Strategy) -> &'static str {
 /// resolves to `off` — no measurement — which is the safe default: it never
 /// sends a customer URL to Google or spawns a browser without the operator
 /// choosing it.
-pub(crate) fn read_performance_section(
-    cfg_path: Option<&std::path::Path>,
-) -> PerformanceConfig {
+pub(crate) fn read_performance_section(cfg_path: Option<&std::path::Path>) -> PerformanceConfig {
     let Some(doc) = read_agent_doc(cfg_path) else {
         return PerformanceConfig::default();
     };
@@ -32704,9 +32716,7 @@ fn parse_agent_section_fields(
                 }
             },
             ("performance", "strategy") => match v.trim() {
-                m @ ("mobile" | "desktop") => {
-                    crate::config_persist::FieldValue::Str(m.to_string())
-                }
+                m @ ("mobile" | "desktop") => crate::config_persist::FieldValue::Str(m.to_string()),
                 other => {
                     return Err(bad(format!(
                         "performance strategy must be \"mobile\" or \"desktop\", got {other:?}"
