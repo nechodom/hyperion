@@ -3376,30 +3376,98 @@
 </div><!-- /tab-ftp -->
 
 <div class="tab-panel" id="tab-backups">
-{# Snapshots belong with the other copies of the site, not on the WordPress
-   tab: an operator asking "what do I have to fall back on?" looks here.
-   Lazy because it reaches the owning node and shells out to restic. #}
-{# What is on the off-site store. Above the local runs table on purpose: the
-   question "what do I still have if this box is gone?" is the one an operator
-   asks in the moment that matters, and the local list cannot answer it. #}
-<div id="offsite-panel"
-     hx-get="/hostings/{{ detail.id.as_str() }}/offsite-panel"
-     hx-trigger="intersect once"
-     hx-swap="innerHTML">
-  <div class="card" style="margin-bottom:0.9rem">
-    <span class="spinner-inline" style="margin-right:0.4rem"></span>
-    <span class="text-soft small">Asking the off-site store what it has…</span>
+{# One tab, three kinds of copy, in the order an operator reaches for them:
+   ARCHIVES (the whole site + database as a file, on a schedule, copied
+   off-site), SNAPSHOTS (before automatic updates or by hand, on the node,
+   restore replaces), OFF-SITE COPIES (archives on the remote — what is left if
+   the node is gone). The summary card on top says how this site is set up and
+   carries the one action most visits are for; the rarer restore paths are
+   folded away at the bottom. #}
+<div class="card" style="margin-bottom:0.9rem">
+  <div class="row" style="align-items:center;gap:0.6rem;margin-bottom:0.5rem;flex-wrap:wrap">
+    <h2 style="margin:0">
+      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+      Backups
+    </h2>
+    <span class="grow"></span>
+    <form method="post" action="/hostings/backup-now" style="margin:0">
+      <input type="hidden" name="_csrf" value="{{ csrf_backup_now }}">
+      <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
+      <button class="btn primary" type="submit">
+        <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+        Back up now
+      </button>
+    </form>
   </div>
-</div>
-
-<div id="snapshots-panel"
-     hx-get="/hostings/{{ detail.id.as_str() }}/snapshots-panel"
-     hx-trigger="intersect once"
-     hx-swap="innerHTML">
-  <div class="card" style="margin-bottom:0.9rem">
-    <span class="spinner-inline" style="margin-right:0.4rem"></span>
-    <span class="text-soft small">Reading snapshots…</span>
+  <p class="text-soft small" style="margin:0 0 0.7rem;line-height:1.6">
+    This site has three kinds of copy, listed below in this order.
+    <strong>Archives</strong> are a <code>.tar.gz</code> of the site's files with a database dump
+    beside it, kept on this site's node and made on a schedule or when you click <em>Back up now</em>.
+    <strong>Snapshots</strong> are taken before automatic updates or by hand; they stay on the node,
+    can show what changed, and restoring one replaces the site.
+    <strong>Off-site copies</strong> are the archives on the remote server — what is left if the node
+    itself is lost.
+  </p>
+  <div class="row" style="gap:1.2rem;flex-wrap:wrap;font-size:0.85rem;margin-bottom:0.2rem">
+    <span><span class="text-soft">Automatic backups:</span>
+      <strong>{% if backup_cadence == "daily" %}daily{% else if backup_cadence == "weekly" %}weekly{% else if backup_cadence == "monthly" %}monthly{% else %}off — only when you click{% endif %}</strong>
+      {% if backups_paused_by_mode && backup_cadence != "off" %}<span class="pill warn" style="font-size:0.6rem;margin-left:0.3rem" title="Settings → Backups is set to keep snapshots only. Scheduled archives run only for sites whose care package sells backups.">paused — snapshots-only mode</span>{% endif %}</span>
+    {% if !backup_target_options.is_empty() %}
+    <span><span class="text-soft">Off-site copy:</span>
+      <strong>{% if backup_target.is_empty() %}{{ backup_target_default_label }}{% else %}{{ backup_target }}{% endif %}</strong></span>
+    {% endif %}
   </div>
+  {% if !backup_target_warning.is_empty() %}
+    <div class="flash warn" style="margin:0.6rem 0 0">
+      <div class="flash-body">
+        <strong>Off-site copies are not happening for this site.</strong>
+        {{ backup_target_warning }}
+        Fix the target in <a href="/settings/backups">Settings → Backup targets</a>, or
+        pick a different destination below.
+      </div>
+    </div>
+  {% endif %}
+  <details style="margin-top:0.7rem" data-role-min="admin">
+    <summary class="text-soft small" style="cursor:pointer">Schedule and off-site destination</summary>
+    <form method="post" action="/hostings/backup-cadence" style="display:flex;align-items:flex-end;gap:0.5rem;flex-wrap:wrap;margin:0.7rem 0 0">
+      <input type="hidden" name="_csrf" value="{{ csrf_backup_cadence }}">
+      <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
+      <div class="field" style="margin:0">
+        <label for="backup_cadence" style="font-size:0.8rem">Automatic backups <span class="hint">checked every hour on this site's node</span></label>
+        <select id="backup_cadence" name="cadence">
+          <option value="off"{% if backup_cadence == "off" %} selected{% endif %}>Off — only when I click</option>
+          <option value="daily"{% if backup_cadence == "daily" %} selected{% endif %}>Daily</option>
+          <option value="weekly"{% if backup_cadence == "weekly" %} selected{% endif %}>Weekly</option>
+          <option value="monthly"{% if backup_cadence == "monthly" %} selected{% endif %}>Monthly</option>
+        </select>
+      </div>
+      <button class="btn" type="submit">Save schedule</button>
+    </form>
+    {% if !backup_target_options.is_empty() %}
+    {# Off-site destination for THIS site. Unset = the node default (every
+       enabled target), which is what every site did before this picker
+       existed. The list is cluster config. #}
+    <form method="post" action="/hostings/backup-target" style="display:flex;align-items:flex-end;gap:0.5rem;flex-wrap:wrap;margin:0.7rem 0 0">
+      <input type="hidden" name="_csrf" value="{{ csrf_backup_target }}">
+      <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
+      <div class="field" style="margin:0">
+        <label for="backup_target" style="font-size:0.8rem">S3 off-site copy <span class="hint">where this site's archives go after every backup</span></label>
+        <select id="backup_target" name="target">
+          <option value=""{% if backup_target.is_empty() %} selected{% endif %}>{{ backup_target_default_label }}</option>
+          {% for o in backup_target_options %}
+          <option value="{{ o.name }}"{% if o.name == backup_target %} selected{% else if !o.unusable.is_empty() %} disabled{% endif %}>{{ o.name }}{% if !o.unusable.is_empty() %} — {{ o.unusable }}{% endif %}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <button class="btn" type="submit">Save destination</button>
+    </form>
+    {% endif %}
+    <p class="text-soft small" style="margin:0.7rem 0 0">
+      How long archives and snapshots are kept, which kinds this node makes at all, and the FTP
+      off-site target are set in <a href="/settings#backups">Settings → Backups</a>; S3 targets in
+      <a href="/settings/backups">Settings → Backup targets</a>.
+    </p>
+  </details>
 </div>
 
 {# Live progress for anything running against THIS site, polled in place.
@@ -3416,75 +3484,29 @@
 <div id="hosting-jobs" hx-get="/hostings/{{ detail.id.as_str() }}/jobs-panel"
      hx-trigger="intersect once" hx-swap="outerHTML"></div>
 
-<p class="text-soft small" style="margin:0 0 0.6rem" data-role-min="admin">Backups land on local disk; off-site targets (S3 + age) are configured cluster-wide in <a href="/settings/backups">Settings → Backup targets</a>, and each site picks one of them below.</p>
-
-<div class="card hover">
-  <h2>
-    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-    Backups
+<div class="card hover" style="margin-bottom:0.9rem">
+  <h2 style="font-size:0.95rem">
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="4" rx="1"/><path d="M5 8v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8"/><line x1="10" y1="12" x2="14" y2="12"/></svg>
+    Archives
   </h2>
-  <form method="post" action="/hostings/backup-now" style="margin-bottom:1rem">
-    <input type="hidden" name="_csrf" value="{{ csrf_backup_now }}">
-    <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
-    <button class="btn primary" type="submit">
-      <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
-      Run backup now
-    </button>
-    <span class="muted" style="font-size:0.85rem;margin-left:0.4rem">Archives htdocs and dumps the database to <code>/var/lib/hyperion/backups/local/{{ detail.system_user }}/</code></span>
-  </form>
-  <form method="post" action="/hostings/backup-cadence" style="display:flex;align-items:flex-end;gap:0.5rem;flex-wrap:wrap;margin-bottom:1rem" data-role-min="admin">
-    <input type="hidden" name="_csrf" value="{{ csrf_backup_cadence }}">
-    <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
-    <div class="field" style="margin:0">
-      <label for="backup_cadence" style="font-size:0.8rem">Automatic backups <span class="hint">runs on this node's hourly schedule</span></label>
-      <select id="backup_cadence" name="cadence">
-        <option value="off"{% if backup_cadence == "off" %} selected{% endif %}>Off — only when I click</option>
-        <option value="daily"{% if backup_cadence == "daily" %} selected{% endif %}>Daily</option>
-        <option value="weekly"{% if backup_cadence == "weekly" %} selected{% endif %}>Weekly</option>
-        <option value="monthly"{% if backup_cadence == "monthly" %} selected{% endif %}>Monthly</option>
-      </select>
-    </div>
-    <button class="btn" type="submit">Save schedule</button>
-  </form>
-  {% if !backup_target_options.is_empty() %}
-  {# Off-site destination for THIS site. Unset = the node default (every
-     enabled target), which is what every site did before this picker
-     existed. Rendered only for admins — the list is cluster config. #}
-  <form method="post" action="/hostings/backup-target" style="display:flex;align-items:flex-end;gap:0.5rem;flex-wrap:wrap;margin-bottom:1rem" data-role-min="admin">
-    <input type="hidden" name="_csrf" value="{{ csrf_backup_target }}">
-    <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
-    <div class="field" style="margin:0">
-      <label for="backup_target" style="font-size:0.8rem">Off-site copy <span class="hint">where this site's archives go after every backup</span></label>
-      <select id="backup_target" name="target">
-        <option value=""{% if backup_target.is_empty() %} selected{% endif %}>{{ backup_target_default_label }}</option>
-        {% for o in backup_target_options %}
-        <option value="{{ o.name }}"{% if o.name == backup_target %} selected{% else if !o.unusable.is_empty() %} disabled{% endif %}>{{ o.name }}{% if !o.unusable.is_empty() %} — {{ o.unusable }}{% endif %}</option>
-        {% endfor %}
-      </select>
-    </div>
-    <button class="btn" type="submit">Save destination</button>
-  </form>
-  {% if !backup_target_warning.is_empty() %}
-    <div class="flash warn" style="margin-bottom:0.8rem">
-      <div class="flash-body">
-        <strong>Off-site copies are not happening for this site.</strong>
-        {{ backup_target_warning }}
-        Fix the target in <a href="/settings/backups">Settings → Backup targets</a>, or
-        pick a different destination above.
-      </div>
-    </div>
-  {% endif %}
-  {% endif %}
+  <p class="text-soft small" style="margin:0 0 0.6rem">
+    Kept in <code>/var/lib/hyperion/backups/local/{{ detail.system_user }}/</code> on this site's node,
+    each as the site's files (<code>.tar.gz</code>) plus a database dump (<code>.sql</code>). Restoring
+    writes the files <strong>over</strong> the site (files added since stay) and replaces the database.
+    <em>Download</em> gets the files archive only.
+  </p>
   {# Live region: a running backup flips to ok, and a backup started from the
-     job progress page shows up on return — no F5. Driver in base.html. #}
+     job progress page shows up on return — no F5. Driver in base.html. The
+     refresh re-renders only this region from the full page, and nothing in it
+     is processed by htmx again afterwards: keep it to plain forms. #}
   <div id="backups-live" data-live-refresh="15">
   {% if backups.is_empty() %}
-    <p class="muted" style="font-size:0.9rem">No backups yet. Run a backup to capture the files and database.</p>
+    <p class="muted" style="font-size:0.9rem;margin:0">No archives yet. <em>Back up now</em> makes the first one.</p>
   {% else %}
-    <div class="table-wrap" style="border-top:1px solid var(--border);margin-top:1rem">
+    <div class="table-wrap" style="border-top:1px solid var(--border)">
       <table>
         <thead><tr>
-          <th>Started</th><th>Target</th><th>State</th>
+          <th>Started</th><th>State</th>
           <th>Off-site</th>
           <th class="right">Size</th><th>Archive</th><th class="right">Actions</th>
         </tr></thead>
@@ -3492,27 +3514,22 @@
         {% for b in backups %}
           <tr>
             <td class="muted numeric" title="{{ b.started_at }}">{{ crate::handlers::stats::fmt_ago(b.started_at) }}</td>
-            <td><span class="tag">{{ b.target }}</span></td>
             <td>
               {% if b.state == "ok" %}<span class="pill ok">{{ b.state }}</span>
               {% else if b.state == "failed" %}<span class="pill err">{{ b.state }}</span>
               {% else %}<span class="pill warn pulse">{{ b.state }}</span>{% endif %}
             </td>
-            {#- What is known about the copy that is NOT on this box. Until
-                this column existed, nothing on the page said anything about
-                it: the outcome was written only to the cluster-wide audit
-                log, behind a capability most operators do not browse with.
-
-                "uploaded" and "off-site ✓" are different words on purpose —
-                one means the transfer returned success, the other means the
-                file was listed back at the right size. An em dash means we
-                have no record, which on a backup older than this feature is
-                the honest answer and not "no". -#}
+            {#- What is known about the copy that is NOT on this box. "uploaded"
+                and "off-site ✓" are different words on purpose — one means the
+                transfer returned success, the other means the file was listed
+                back at the right size. An em dash means we have no record,
+                which on a backup older than this feature is the honest answer
+                and not "no". -#}
             <td>
               <span class="{{ b.offsite_label().1 }}" style="font-size:0.6rem"
                     title="{% if !b.remote_error.is_empty() %}{{ b.remote_error }}{% else if !b.remote_blob_key.is_empty() %}{{ b.remote_blob_key }}{% else %}No off-site copy is recorded for this backup{% endif %}">{{ b.offsite_label().0 }}</span>
               {%- if !b.sha256_hex.is_empty() %}
-              <span class="text-soft" style="font-size:0.6rem;display:block" title="{{ b.sha256_hex }}">hashed</span>
+              <span class="text-soft" style="font-size:0.6rem;display:block" title="Content digest recorded when the archive was made: {{ b.sha256_hex }}">fingerprinted</span>
               {%- endif %}
             </td>
             <td class="right muted numeric">{{ crate::handlers::stats::fmt_bytes(b.bytes_total) }}</td>
@@ -3526,8 +3543,8 @@
                   <a class="btn small" href="/hostings/{{ detail.id.as_str() }}/backup-download/{{ b.id }}"
                      title="Download this archive">Download</a>
                   <form method="post" action="/hostings/restore" style="display:inline"
-                        data-confirm-title="Restore from backup"
-                        data-confirm-body="Files and database for {{ detail.domain }} will be overwritten with the snapshot from this backup. Current state cannot be recovered without another backup."
+                        data-confirm-title="Restore from this archive"
+                        data-confirm-body="The files of {{ detail.domain }} are overwritten with the ones in this archive (files added since are left in place){% if detail.database.is_some() %} and its database is replaced{% endif %}. The current state cannot be recovered without another backup."
                         data-confirm-confirm-label="Restore"
                         data-confirm-variant="danger">
                     <input type="hidden" name="_csrf" value="{{ csrf_restore }}">
@@ -3536,10 +3553,11 @@
                     <input type="hidden" name="mode" value="files_and_db">
                     <button class="btn small" type="submit">Restore</button>
                   </form>
+                  {% if detail.database.is_some() %}
                   <form method="post" action="/hostings/restore" style="display:inline"
-                        data-confirm-title="Restore database only"
-                        data-confirm-body="ONLY the database for {{ detail.domain }} will be rolled back to this snapshot. Files on disk are left untouched."
-                        data-confirm-confirm-label="Restore DB"
+                        data-confirm-title="Restore the database only"
+                        data-confirm-body="ONLY the database of {{ detail.domain }} is rolled back to this archive. Files on disk are left untouched."
+                        data-confirm-confirm-label="Restore database"
                         data-confirm-variant="danger">
                     <input type="hidden" name="_csrf" value="{{ csrf_restore }}">
                     <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
@@ -3548,12 +3566,13 @@
                     <button class="btn small" type="submit" title="Restore the database only">DB only</button>
                   </form>
                   {% endif %}
+                  {% endif %}
                 {% endif %}
                 {% if b.state != "running" %}
                 <form method="post" action="/hostings/backups/delete" style="display:inline"
-                      data-confirm-title="Delete backup"
-                      data-confirm-body="The archive file will be removed from disk. This cannot be undone."
-                      data-confirm-confirm-label="Delete backup"
+                      data-confirm-title="Delete this archive"
+                      data-confirm-body="The archive is removed from this node's disk. An off-site copy of it, if there is one, is not touched. This cannot be undone."
+                      data-confirm-confirm-label="Delete archive"
                       data-confirm-variant="danger">
                   <input type="hidden" name="_csrf" value="{{ csrf_token }}">
                   <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
@@ -3568,14 +3587,51 @@
         </tbody>
       </table>
     </div>
+    {% if backups.len() >= 10 %}
+    <p class="text-soft small" style="margin:0.5rem 0 0">The 10 most recent are shown.</p>
+    {% endif %}
   {% endif %}
   </div>{# #backups-live #}
+</div>
 
-  <div class="card-section">
-    <h2 style="font-size:0.95rem;margin:0 0 0.6rem">Restore from a .tar.gz upload</h2>
-    <p class="muted" style="margin:0 0 1rem;font-size:0.85rem">
-      Upload a previously taken archive (max 2 GiB). It is saved to
-      <code>/var/lib/hyperion/backups/incoming/</code>, then restored.
+{# Snapshots: lazy because it reaches the owning node and shells out to
+   restic. #}
+<div id="snapshots-panel"
+     hx-get="/hostings/{{ detail.id.as_str() }}/snapshots-panel"
+     hx-trigger="intersect once"
+     hx-swap="innerHTML">
+  <div class="card" style="margin-bottom:0.9rem">
+    <span class="spinner-inline" style="margin-right:0.4rem"></span>
+    <span class="text-soft small">Reading snapshots…</span>
+  </div>
+</div>
+
+{# What is on the off-site store: read from the remote server itself, so it is
+   what is actually there, not what we believe we uploaded. Lazy because it is
+   a round trip to somebody else's server. #}
+<div id="offsite-panel"
+     hx-get="/hostings/{{ detail.id.as_str() }}/offsite-panel"
+     hx-trigger="intersect once"
+     hx-swap="innerHTML">
+  <div class="card" style="margin-bottom:0.9rem">
+    <span class="spinner-inline" style="margin-right:0.4rem"></span>
+    <span class="text-soft small">Asking the off-site store what it has…</span>
+  </div>
+</div>
+
+<details class="card">
+  <summary style="cursor:pointer">
+    <h2 style="display:inline;font-size:0.95rem;margin:0">Other ways to restore</h2>
+    <span class="text-soft small" style="margin-left:0.4rem">from an uploaded file, a server path, or into a new domain</span>
+  </summary>
+
+  <div class="card-section" style="margin-top:0.8rem">
+    <h3 style="font-size:0.9rem;margin:0 0 0.5rem">From a .tar.gz upload</h3>
+    <p class="muted" style="margin:0 0 0.8rem;font-size:0.85rem">
+      Upload a previously taken files archive (max 2 GiB). It is saved to
+      <code>/var/lib/hyperion/backups/incoming/</code>, then restored. This restores
+      <strong>files only</strong> — the database dump is a separate file and is not part of the
+      upload.
     </p>
     {# CSRF token rides in the action URL because multipart bodies
        aren't parsed by the middleware (it would buffer the whole
@@ -3583,7 +3639,7 @@
     <form method="post" action="/hostings/restore-upload?_csrf={{ csrf_token }}"
           enctype="multipart/form-data"
           data-confirm-title="Restore from uploaded archive"
-          data-confirm-body="Files and database for {{ detail.domain }} will be overwritten with the uploaded archive."
+          data-confirm-body="The files of {{ detail.domain }} are overwritten with the ones in the uploaded archive. The database is not touched."
           data-confirm-confirm-label="Restore"
           data-confirm-variant="danger">
       <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
@@ -3597,14 +3653,15 @@
     </form>
   </div>
 
-  <div class="card-section">
-    <h2 style="font-size:0.95rem;margin:0 0 0.6rem">Restore from a custom archive path</h2>
-    <p class="muted" style="margin:0 0 1rem;font-size:0.85rem">
-      For archives already on disk under one of the backup roots. Give the full path to the archive.
+  <div class="card-section" data-role-min="admin">
+    <h3 style="font-size:0.9rem;margin:0 0 0.5rem">From an archive already on the server</h3>
+    <p class="muted" style="margin:0 0 0.8rem;font-size:0.85rem">
+      The full path of an archive under one of the backup roots on this site's node. Its database
+      is restored too when a dump with the same name (<code>.sql</code>) sits beside it.
     </p>
     <form method="post" action="/hostings/restore"
           data-confirm-title="Restore from archive"
-          data-confirm-body="Files and database for {{ detail.domain }} will be overwritten."
+          data-confirm-body="The files of {{ detail.domain }} are overwritten with the ones in that archive, and its database too if a matching .sql dump sits beside it."
           data-confirm-confirm-label="Restore"
           data-confirm-variant="danger">
       <input type="hidden" name="_csrf" value="{{ csrf_restore }}">
@@ -3620,16 +3677,13 @@
     </form>
   </div>
 
-  <div class="card-section">
-    <h2 style="font-size:0.95rem;margin:0 0 0.6rem">Restore into a new domain</h2>
-    <p class="muted" style="margin:0 0 1rem;font-size:0.85rem">
-      Create a <strong>brand-new hosting</strong> from a backup archive,
-      mirroring this site's PHP version, database engine and kind. For
-      WordPress sites the URL is rewritten to the new domain
-      automatically (<code>wp search-replace</code>). The original is left
-      untouched — handy for staging copies, or for recovering a single site
-      under a different name. Issue a certificate on the new hosting once
-      its DNS resolves.
+  <div class="card-section" data-role-min="admin">
+    <h3 style="font-size:0.9rem;margin:0 0 0.5rem">Into a new domain</h3>
+    <p class="muted" style="margin:0 0 0.8rem;font-size:0.85rem">
+      Creates a <strong>brand-new hosting</strong> from an archive, mirroring this site's PHP
+      version, database engine and kind. For WordPress sites the URL is rewritten to the new domain
+      (<code>wp search-replace</code>). The original is left untouched. To copy the live site
+      instead of an archive, use <a href="/hostings/transfer/{{ detail.id.as_str() }}">Move / copy</a>.
     </p>
     <form method="post" action="/hostings/restore-as-new"
           data-confirm-title="Restore into a new domain"
@@ -3652,7 +3706,7 @@
       </div>
     </form>
   </div>
-</div>
+</details>
 
 </div><!-- /tab-backups -->
 

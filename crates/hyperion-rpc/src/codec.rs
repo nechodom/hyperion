@@ -1415,6 +1415,19 @@ pub enum Request {
     SnapshotList {
         sel: HostingSelector,
     },
+    /// Snapshots, engine state, retention rule and repository size — the
+    /// whole Snapshots section of a site in one round trip.
+    SnapshotOverview {
+        sel: HostingSelector,
+    },
+    /// Delete snapshots: the listed ids, or every one when `all`.
+    SnapshotDelete {
+        sel: HostingSelector,
+        #[serde(default)]
+        snapshots: Vec<String>,
+        #[serde(default)]
+        all: bool,
+    },
     /// Take one now, tagged `manual`.
     SnapshotNow {
         sel: HostingSelector,
@@ -2214,6 +2227,9 @@ pub enum Response {
     SiteCheck(hyperion_types::SiteCheckReport),
     SiteCheckLast(Option<hyperion_types::SiteCheckReport>),
     SnapshotList(Vec<hyperion_types::SnapshotSummary>),
+    SnapshotOverview(hyperion_types::SnapshotOverview),
+    /// How many snapshots were deleted.
+    SnapshotDeleted(u32),
     SnapshotNow(String),
     SnapshotDiff(hyperion_types::SnapshotDiff),
     SnapshotRestore(hyperion_types::SnapshotRestoreOutcome),

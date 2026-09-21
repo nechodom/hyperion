@@ -199,10 +199,13 @@ fn timeout_for_request(req: &Request) -> u64 {
         // the archive backup above, and the first one on a site has nothing
         // to deduplicate against.
         Request::SnapshotNow { .. } => 3600,
-        // Pruning rewrites the repository's pack files.
+        // Deleting prunes, and pruning rewrites the repository's pack files.
+        Request::SnapshotDelete { .. } => 3600,
         // Listing and diffing are cheap, but both read repository metadata
         // that scales with the number of snapshots kept.
-        Request::SnapshotList { .. } | Request::SnapshotDiff { .. } => 120,
+        Request::SnapshotList { .. }
+        | Request::SnapshotDiff { .. }
+        | Request::SnapshotOverview { .. } => 120,
         // A restore reads the whole snapshot out of the repository, swaps the
         // tree and may import a database — the same order of work as taking
         // one, on a repository read with `--no-cache`. On the default 30s the

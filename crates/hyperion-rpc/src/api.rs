@@ -774,6 +774,18 @@ pub trait AgentApi: Send + Sync + 'static {
         &self,
         sel: HostingSelector,
     ) -> Result<Vec<hyperion_types::SnapshotSummary>, RpcError>;
+    /// Snapshots, engine state, retention and repository size.
+    async fn snapshot_overview(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<hyperion_types::SnapshotOverview, RpcError>;
+    /// Delete snapshots: the listed ids, or all. Returns how many.
+    async fn snapshot_delete(
+        &self,
+        sel: HostingSelector,
+        snapshots: Vec<String>,
+        all: bool,
+    ) -> Result<u32, RpcError>;
     /// Take one now. Returns its short id, or empty when the node has no
     /// snapshot engine.
     async fn snapshot_now(&self, sel: HostingSelector) -> Result<String, RpcError>;

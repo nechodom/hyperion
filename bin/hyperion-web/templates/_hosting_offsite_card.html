@@ -17,10 +17,10 @@
       <span class="pill warn">no target</span>
     {% else if !directory_exists %}
       <span class="pill warn">never pushed</span>
-    {% else if files.is_empty() %}
+    {% else if rows.is_empty() %}
       <span class="pill danger">empty</span>
     {% else %}
-      <span class="pill ok">{{ files.len() }}</span>
+      <span class="pill ok">{{ rows.len() }}</span>
     {% endif %}
   </div>
 
@@ -58,7 +58,7 @@
       <a href="/settings#backups">Backups settings</a> page to send the ones
       already on disk, or wait for this site's next scheduled backup.
     </p>
-  {% else if files.is_empty() %}
+  {% else if rows.is_empty() %}
     {#- Worse than "never pushed": something made the folder and the files are
         not in it. A remote prune, a failed transfer, or somebody tidying up. -#}
     <p class="text-soft small" style="margin:0;line-height:1.55">
@@ -70,26 +70,39 @@
   {% else %}
     <div class="table-wrap" style="margin:0">
       <table class="table small" style="margin:0">
-        <thead><tr><th>File</th><th class="right">Size</th><th class="right">Restore</th></tr></thead>
+        <thead><tr><th>Taken</th><th>Archive</th><th class="right">Size</th><th class="right">Restore</th></tr></thead>
         <tbody>
-        {% for f in files %}
+        {% for f in rows %}
           <tr>
+            <td style="white-space:nowrap" title="{{ f.when_exact }}">{% if f.when.is_empty() %}<span class="text-soft">—</span>{% else %}{{ f.when }}{% endif %}</td>
             <td><code style="font-size:0.74rem">{{ f.name }}</code></td>
-            <td class="right muted numeric">{{ crate::handlers::stats::fmt_bytes(f.bytes) }}</td>
+            <td class="right muted numeric">
+              {{ crate::handlers::stats::fmt_bytes(f.bytes) }}
+              {% if let Some(d) = f.dump_bytes %}<span class="text-soft" style="display:block;font-size:0.65rem">+ database {{ crate::handlers::stats::fmt_bytes(d) }}</span>{% endif %}
+            </td>
             <td class="right">
               {% if can_restore %}
               {#- The confirm goes on the FORM: the dialog driver reads the
                   submit event's target, so these attributes on the button
                   would be dead markup and the site would be overwritten with
                   no prompt. -#}
-              <form method="post" action="/hostings/offsite-restore" style="margin:0;display:inline"
+              <form method="post" action="/hostings/offsite-restore" style="margin:0;display:inline-flex;gap:0.3rem;align-items:center"
                     data-confirm-title="Restore {{ detail_domain }} from the off-site copy"
-                    data-confirm-body="Downloads {{ f.name }} from the remote server and restores it over {{ detail_domain }}. Files and database are overwritten with the contents of that archive; anything changed since is lost. The download alone can take a long time on a large site."
+                    data-confirm-body="Downloads {{ f.name }} from the remote server and restores it over {{ detail_domain }}. What you selected is overwritten with the contents of that backup; anything changed since is lost. The download alone can take a long time on a large site."
                     data-confirm-confirm-label="Download and restore"
                     data-confirm-variant="danger">
-                <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+                <input type="hidden" name="_csrf" value="{{ csrf_offsite_restore }}">
                 <input type="hidden" name="selector" value="{{ selector }}">
                 <input type="hidden" name="filename" value="{{ f.name }}">
+                {% if site_has_db && f.dump_bytes.is_some() %}
+                <select name="mode" style="font-size:0.72rem;padding:0.1rem 0.3rem;margin:0" aria-label="What to restore">
+                  <option value="files_and_db" selected>files + database</option>
+                  <option value="files_only">files only</option>
+                </select>
+                {% else %}
+                <input type="hidden" name="mode" value="files_only">
+                <span class="text-soft" style="font-size:0.7rem" title="{% if site_has_db %}No database dump was copied off-site with this archive{% else %}This site has no database{% endif %}">files only</span>
+                {% endif %}
                 <button class="btn ghost" type="submit" style="font-size:0.72rem;padding:0.15rem 0.45rem">Restore</button>
               </form>
               {% endif %}

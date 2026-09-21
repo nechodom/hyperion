@@ -1411,6 +1411,19 @@ fn print_pretty(resp: &Response) {
                 println!("{:<10} {:<26} {}", r.id, r.time, r.tags.join(","));
             }
         }
+        Response::SnapshotOverview(o) => {
+            println!(
+                "engine: {}   mode: {}   retention: {}   repository: {} bytes",
+                o.engine,
+                o.protection_mode,
+                o.retention.describe(),
+                o.repo_bytes
+            );
+            for r in &o.snapshots {
+                println!("{:<10} {:<26} {}", r.id, r.time, r.tags.join(","));
+            }
+        }
+        Response::SnapshotDeleted(n) => println!("deleted {n} snapshot(s)"),
         Response::SnapshotNow(id) => {
             if id.is_empty() {
                 println!("no snapshot taken (engine unavailable or site has no document tree)");

@@ -1881,6 +1881,20 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
     ) -> Result<Vec<hyperion_types::SnapshotSummary>, RpcError> {
         self.svc.snapshot_list(sel).await
     }
+    async fn snapshot_overview(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<hyperion_types::SnapshotOverview, RpcError> {
+        self.svc.snapshot_overview(sel).await
+    }
+    async fn snapshot_delete(
+        &self,
+        sel: HostingSelector,
+        snapshots: Vec<String>,
+        all: bool,
+    ) -> Result<u32, RpcError> {
+        self.svc.snapshot_delete(sel, snapshots, all).await
+    }
     async fn snapshot_now(&self, sel: HostingSelector) -> Result<String, RpcError> {
         let detail = self.svc.get(sel).await?;
         Ok(self
