@@ -1420,6 +1420,26 @@ pub enum Request {
     CwvMeasure {
         sel: HostingSelector,
     },
+    /// Everything the git-deploy card needs (config, secret-set flags, last run).
+    GitSyncView {
+        sel: HostingSelector,
+    },
+    /// Save the git-deploy config. `pat` `Some("")` clears the token, `None`
+    /// leaves it untouched.
+    GitSyncConfigSet {
+        sel: HostingSelector,
+        config: hyperion_types::gitsync::GitSyncConfig,
+        pat: Option<String>,
+    },
+    /// Generate a deploy keypair; the public half is returned to show.
+    GitSyncGenerateKey {
+        sel: HostingSelector,
+    },
+    /// Deploy the configured repo now. `trigger` is "manual" or "webhook".
+    GitSyncNow {
+        sel: HostingSelector,
+        trigger: String,
+    },
     /// Snapshots this site has, newest last. Empty when the node has no
     /// snapshot engine — which is not an error, it is "none".
     SnapshotList {
@@ -2238,6 +2258,10 @@ pub enum Response {
     SiteCheckLast(Option<hyperion_types::SiteCheckReport>),
     PerformanceView(hyperion_types::PerformanceView),
     CwvResult(hyperion_types::CwvResult),
+    GitSyncView(hyperion_types::gitsync::GitSyncView),
+    GitSyncLast(hyperion_types::gitsync::GitSyncLast),
+    GitSyncPubkey(String),
+    GitSyncAck,
     SnapshotList(Vec<hyperion_types::SnapshotSummary>),
     SnapshotOverview(hyperion_types::SnapshotOverview),
     /// How many snapshots were deleted.

@@ -1454,6 +1454,24 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(v) => Response::CwvResult(v),
             Err(e) => Response::Error(e),
         },
+        Request::GitSyncView { sel } => match api.git_sync_view(sel).await {
+            Ok(v) => Response::GitSyncView(v),
+            Err(e) => Response::Error(e),
+        },
+        Request::GitSyncConfigSet { sel, config, pat } => {
+            match api.git_sync_config_set(sel, config, pat).await {
+                Ok(()) => Response::GitSyncAck,
+                Err(e) => Response::Error(e),
+            }
+        }
+        Request::GitSyncGenerateKey { sel } => match api.git_sync_generate_key(sel).await {
+            Ok(k) => Response::GitSyncPubkey(k),
+            Err(e) => Response::Error(e),
+        },
+        Request::GitSyncNow { sel, trigger } => match api.git_sync_now(sel, trigger).await {
+            Ok(v) => Response::GitSyncLast(v),
+            Err(e) => Response::Error(e),
+        },
         Request::SiteCheckLast { sel } => match api.site_check_last(sel).await {
             Ok(v) => Response::SiteCheckLast(v),
             Err(e) => Response::Error(e),
@@ -3283,6 +3301,30 @@ mod tests {
             &self,
             _: HostingSelector,
         ) -> Result<hyperion_types::CwvResult, RpcError> {
+            Ok(Default::default())
+        }
+        async fn git_sync_view(
+            &self,
+            _: HostingSelector,
+        ) -> Result<hyperion_types::gitsync::GitSyncView, RpcError> {
+            Ok(Default::default())
+        }
+        async fn git_sync_config_set(
+            &self,
+            _: HostingSelector,
+            _: hyperion_types::gitsync::GitSyncConfig,
+            _: Option<String>,
+        ) -> Result<(), RpcError> {
+            Ok(())
+        }
+        async fn git_sync_generate_key(&self, _: HostingSelector) -> Result<String, RpcError> {
+            Ok(String::new())
+        }
+        async fn git_sync_now(
+            &self,
+            _: HostingSelector,
+            _: String,
+        ) -> Result<hyperion_types::gitsync::GitSyncLast, RpcError> {
             Ok(Default::default())
         }
         async fn snapshot_list(

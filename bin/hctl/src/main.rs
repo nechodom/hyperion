@@ -1435,6 +1435,20 @@ fn print_pretty(resp: &Response) {
                 println!("measurement failed: {}", c.error);
             }
         }
+        Response::GitSyncView(v) => {
+            println!(
+                "repo: {}   branch: {}   auth: {}",
+                v.config.repo, v.config.branch, v.config.auth
+            );
+            if v.last.at > 0 {
+                println!("last: {} {} {}", v.last.status, v.last.commit, v.last.message);
+            }
+        }
+        Response::GitSyncLast(l) => {
+            println!("deploy {}: {} {}", l.status, l.commit, l.message);
+        }
+        Response::GitSyncPubkey(k) => println!("{k}"),
+        Response::GitSyncAck => println!("ok"),
         Response::SnapshotList(rows) => {
             if rows.is_empty() {
                 println!("(no snapshots — the snapshot engine may not be installed)");

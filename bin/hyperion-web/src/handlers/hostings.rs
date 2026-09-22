@@ -13610,6 +13610,355 @@ pub async fn post_cwv_measure(
     Ok(Redirect::to(&format!("/jobs/{}", job_id)).into_response())
 }
 
+// ─────────────────────────── Git deploy ───────────────────────────
+
+#[derive(Template)]
+#[template(path = "_hosting_gitsync_card.html")]
+struct GitSyncCardTpl {
+    selector: String,
+    view: hyperion_types::gitsync::GitSyncView,
+    can_manage: bool,
+    csrf_config: String,
+    csrf_genkey: String,
+    csrf_sync: String,
+    webhook_url: String,
+    last_ago: String,
+    error: Option<String>,
+}
+
+/// GET /hostings/:selector/gitsync-panel — the deploy card (config + status),
+/// read from the OWNING node. Lazy-loaded.
+pub async fn get_gitsync_panel(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    headers: axum::http::HeaderMap,
+    Path(selector): Path<String>,
+) -> Result<Response, AppError> {
+    let can_manage =
+        require_manage_for_selector(&state, &ctx, &selector, Capability::HostingEditConfig)
+            .await
+            .is_ok();
+    // GitHub posts to the panel's own origin; reconstruct it from the request.
+    let host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("your-panel");
+    let card = |view: hyperion_types::gitsync::GitSyncView, error: Option<String>| {
+        let last_ago = if view.last.at > 0 {
+            crate::handlers::stats::fmt_ago(&view.last.at)
+        } else {
+            String::new()
+        };
+        let webhook_url = format!("https://{host}{}", view.webhook_path);
+        Html(
+            GitSyncCardTpl {
+                selector: selector.clone(),
+                csrf_config: csrf_token_for(&state, &ctx, "/hostings/gitsync/config"),
+                csrf_genkey: csrf_token_for(&state, &ctx, "/hostings/gitsync/genkey"),
+                csrf_sync: csrf_token_for(&state, &ctx, "/hostings/gitsync/sync"),
+                webhook_url,
+                last_ago,
+                can_manage,
+                view,
+                error,
+            }
+            .render()
+            .unwrap_or_default(),
+        )
+        .into_response()
+    };
+    let sel = match parse_selector(&selector) {
+        Ok(s) => s,
+        Err(e) => return Ok(card(Default::default(), Some(e.to_string()))),
+    };
+    let (detail, owner) = match find_hosting_anywhere(&state, sel.clone()).await {
+        Ok(v) => v,
+        Err(e) => return Ok(card(Default::default(), Some(e.to_string()))),
+    };
+    if require_hosting_access(
+        &state,
+        &ctx,
+        detail.id.as_str(),
+        false,
+        Capability::HostingView,
+    )
+    .await
+    .is_err()
+    {
+        return Ok(card(
+            Default::default(),
+            Some("You do not have access to this hosting.".into()),
+        ));
+    }
+    match crate::dispatcher::dispatch_to_node(
+        &state,
+        owner.as_deref(),
+        Request::GitSyncView { sel },
+    )
+    .await
+    {
+        Ok(RpcResponse::GitSyncView(v)) => Ok(card(v, None)),
+        Ok(RpcResponse::Error(e)) => Ok(card(Default::default(), Some(e.to_string()))),
+        Ok(_) => Ok(card(
+            Default::default(),
+            Some("unexpected response from the node".into()),
+        )),
+        Err(e) => Ok(card(
+            Default::default(),
+            Some(format!(
+                "Could not read the deploy config from the node ({e})."
+            )),
+        )),
+    }
+}
+
+#[derive(serde::Deserialize)]
+pub struct GitSyncConfigForm {
+    pub selector: String,
+    #[serde(default)]
+    pub repo: String,
+    #[serde(default)]
+    pub branch: String,
+    #[serde(default)]
+    pub subdir: String,
+    #[serde(default)]
+    pub auth: String,
+    #[serde(default)]
+    pub webhook_enabled: Option<String>,
+    #[serde(default)]
+    pub pat: String,
+}
+
+/// POST /hostings/gitsync/config — save the deploy configuration.
+pub async fn post_gitsync_config(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<GitSyncConfigForm>,
+) -> Result<Response, AppError> {
+    let sel = match require_manage_for_selector(
+        &state,
+        &ctx,
+        &form.selector,
+        Capability::HostingEditConfig,
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
+    let (_, owner) = find_hosting_anywhere(&state, sel.clone()).await?;
+    let auth = if form.auth.is_empty() {
+        "public".to_string()
+    } else {
+        form.auth.clone()
+    };
+    let config = hyperion_types::gitsync::GitSyncConfig {
+        repo: form.repo.trim().to_string(),
+        branch: form.branch.trim().to_string(),
+        subdir: form.subdir.trim().to_string(),
+        auth: auth.clone(),
+        webhook_enabled: form.webhook_enabled.is_some(),
+    };
+    // Only touch the token when the operator typed one in the token mode; a
+    // blank field keeps whatever is stored.
+    let pat = if auth == "pat" && !form.pat.trim().is_empty() {
+        Some(form.pat.clone())
+    } else {
+        None
+    };
+    let flash = match crate::dispatcher::dispatch_to_node(
+        &state,
+        owner.as_deref(),
+        Request::GitSyncConfigSet { sel, config, pat },
+    )
+    .await
+    {
+        Ok(RpcResponse::GitSyncAck) => "Deploy settings saved.".to_string(),
+        Ok(RpcResponse::Error(e)) => e.to_string(),
+        Ok(_) => "unexpected response from the node".into(),
+        Err(e) => format!("Could not save on the node ({e})."),
+    };
+    Ok(Redirect::to(&format!(
+        "/hostings/{}?flash={}#overview",
+        form.selector,
+        urlencoding(&flash)
+    ))
+    .into_response())
+}
+
+/// POST /hostings/gitsync/genkey — generate a deploy keypair on the node.
+pub async fn post_gitsync_genkey(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<CwvMeasureForm>,
+) -> Result<Response, AppError> {
+    let sel = match require_manage_for_selector(
+        &state,
+        &ctx,
+        &form.selector,
+        Capability::HostingEditConfig,
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
+    let (_, owner) = find_hosting_anywhere(&state, sel.clone()).await?;
+    let flash = match crate::dispatcher::dispatch_to_node(
+        &state,
+        owner.as_deref(),
+        Request::GitSyncGenerateKey { sel },
+    )
+    .await
+    {
+        Ok(RpcResponse::GitSyncPubkey(_)) => {
+            "Deploy key generated — add its public half to the repository.".to_string()
+        }
+        Ok(RpcResponse::Error(e)) => e.to_string(),
+        Ok(_) => "unexpected response from the node".into(),
+        Err(e) => format!("Could not generate a key on the node ({e})."),
+    };
+    Ok(Redirect::to(&format!(
+        "/hostings/{}?flash={}#overview",
+        form.selector,
+        urlencoding(&flash)
+    ))
+    .into_response())
+}
+
+/// POST /hostings/gitsync/sync — deploy now, as a job.
+pub async fn post_gitsync_now(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<CwvMeasureForm>,
+) -> Result<Response, AppError> {
+    let sel = match require_manage_for_selector(
+        &state,
+        &ctx,
+        &form.selector,
+        Capability::HostingEditConfig,
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
+    let (_, owner) = find_hosting_anywhere(&state, sel.clone()).await?;
+    let actor_uid = ctx.session.as_ref().map(|s| s.user_id).unwrap_or(0);
+    let job_state = state.clone();
+    let job_id = crate::handlers::jobs::spawn_job(
+        state.clone(),
+        "gitsync_deploy",
+        Some(&form.selector),
+        "{}",
+        &ctx.username,
+        actor_uid,
+        move |reporter| async move {
+            reporter.step("Deploying from GitHub…", 20, "").await;
+            match crate::dispatcher::dispatch_to_node(
+                &job_state,
+                owner.as_deref(),
+                Request::GitSyncNow {
+                    sel,
+                    trigger: "manual".into(),
+                },
+            )
+            .await
+            {
+                Ok(RpcResponse::GitSyncLast(l)) => {
+                    reporter
+                        .step(&format!("Deployed {} — {}", l.commit, l.message), 100, "")
+                        .await;
+                    reporter.finish(true, None).await;
+                }
+                Ok(RpcResponse::Error(e)) => reporter.finish(false, Some(e.to_string())).await,
+                Ok(_) => {
+                    reporter
+                        .finish(false, Some("unexpected agent response".into()))
+                        .await
+                }
+                Err(e) => reporter.finish(false, Some(e.to_string())).await,
+            }
+        },
+    )
+    .await?;
+    Ok(Redirect::to(&format!("/jobs/{}", job_id)).into_response())
+}
+
+/// POST /webhooks/git/:id — GitHub push webhook (PUBLIC: no session, no CSRF).
+///
+/// Authenticated by the per-hosting HMAC secret only. Verifies the signature,
+/// checks the push is on the configured branch, then deploys in the background
+/// so GitHub gets a fast answer.
+pub async fn post_git_webhook(
+    State(state): State<SharedState>,
+    Path(id): Path<String>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    use axum::http::StatusCode;
+    let sel = match parse_selector(&id) {
+        Ok(s) => s,
+        Err(_) => return (StatusCode::NOT_FOUND, "no such hosting").into_response(),
+    };
+    let Ok((_, owner)) = find_hosting_anywhere(&state, sel.clone()).await else {
+        return (StatusCode::NOT_FOUND, "no such hosting").into_response();
+    };
+    let view = match crate::dispatcher::dispatch_to_node(
+        &state,
+        owner.as_deref(),
+        Request::GitSyncView { sel: sel.clone() },
+    )
+    .await
+    {
+        Ok(RpcResponse::GitSyncView(v)) => v,
+        _ => return (StatusCode::NOT_FOUND, "no such hosting").into_response(),
+    };
+    if !view.config.webhook_enabled || view.webhook_secret.is_empty() {
+        return (StatusCode::NOT_FOUND, "auto-deploy is off").into_response();
+    }
+    let sig = headers
+        .get("x-hub-signature-256")
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("");
+    if !hyperion_types::gitsync::verify_webhook(&view.webhook_secret, &body, sig) {
+        return (StatusCode::UNAUTHORIZED, "bad signature").into_response();
+    }
+    let event = headers
+        .get("x-github-event")
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("");
+    if event == "ping" {
+        return (StatusCode::OK, "pong").into_response();
+    }
+    if event != "push" {
+        return (StatusCode::OK, "ignored").into_response();
+    }
+    let want = format!("refs/heads/{}", view.config.effective_branch());
+    let got = serde_json::from_slice::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|v| v.get("ref").and_then(|r| r.as_str()).map(String::from))
+        .unwrap_or_default();
+    if got != want {
+        return (StatusCode::OK, "not the deploy branch").into_response();
+    }
+    // Fire and forget: the deploy is slow (a git clone); GitHub wants a fast
+    // answer. The outcome is recorded on the node and shown in the card.
+    let st = state.clone();
+    tokio::spawn(async move {
+        let _ = crate::dispatcher::dispatch_to_node(
+            &st,
+            owner.as_deref(),
+            Request::GitSyncNow {
+                sel,
+                trigger: "webhook".into(),
+            },
+        )
+        .await;
+    });
+    (StatusCode::ACCEPTED, "deploying").into_response()
+}
+
 /// GET /hostings/:selector/sitecheck-panel — the LAST walk, from store.
 ///
 /// Never runs one: a crawl is up to fifty requests against the customer's

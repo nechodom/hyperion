@@ -19,6 +19,7 @@ pub mod clock;
 pub mod db;
 pub mod dkim;
 pub mod dns;
+pub mod gitsync;
 pub mod hosting;
 pub mod ids;
 pub mod import;

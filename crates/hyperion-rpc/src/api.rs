@@ -779,6 +779,26 @@ pub trait AgentApi: Send + Sync + 'static {
         &self,
         sel: HostingSelector,
     ) -> Result<hyperion_types::CwvResult, RpcError>;
+    /// Everything the git-deploy card needs.
+    async fn git_sync_view(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<hyperion_types::gitsync::GitSyncView, RpcError>;
+    /// Save the git-deploy config; `pat` `Some("")` clears the token.
+    async fn git_sync_config_set(
+        &self,
+        sel: HostingSelector,
+        config: hyperion_types::gitsync::GitSyncConfig,
+        pat: Option<String>,
+    ) -> Result<(), RpcError>;
+    /// Generate a deploy keypair; returns the public half.
+    async fn git_sync_generate_key(&self, sel: HostingSelector) -> Result<String, RpcError>;
+    /// Deploy the configured repo now.
+    async fn git_sync_now(
+        &self,
+        sel: HostingSelector,
+        trigger: String,
+    ) -> Result<hyperion_types::gitsync::GitSyncLast, RpcError>;
     /// Snapshots this site has, newest last.
     async fn snapshot_list(
         &self,

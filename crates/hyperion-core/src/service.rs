@@ -5425,6 +5425,251 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .map_err(|e| RpcError::Internal_with(format!("kv list: {e}")))
     }
 
+    /// One `hosting_kv` value, or "" when unset — a small reader the git-deploy
+    /// methods lean on.
+    async fn kvs(&self, hosting_id: &str, key: &str) -> String {
+        hyperion_state::hosting_kv::get(&self.pool, hosting_id, key)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default()
+    }
+
+    /// Everything the git-deploy card renders. Runs on the OWNING node (the
+    /// config, the secrets and `git` all live where the site's files do). The
+    /// webhook secret is NOT here — the master derives and shows that.
+    pub async fn git_sync_view(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<hyperion_types::gitsync::GitSyncView, RpcError> {
+        use hyperion_types::gitsync as t;
+        let detail = self.get(sel).await?;
+        let id = detail.id.as_str();
+        let auth = {
+            let a = self.kvs(id, "gitsync_auth").await;
+            if a.is_empty() {
+                t::AUTH_PUBLIC.to_string()
+            } else {
+                a
+            }
+        };
+        let config = t::GitSyncConfig {
+            repo: self.kvs(id, "gitsync_repo").await,
+            branch: self.kvs(id, "gitsync_branch").await,
+            subdir: self.kvs(id, "gitsync_subdir").await,
+            auth,
+            webhook_enabled: self.kvs(id, "gitsync_webhook").await == "1",
+        };
+        let last = serde_json::from_str(&self.kvs(id, "gitsync_last").await).unwrap_or_default();
+        Ok(t::GitSyncView {
+            config,
+            deploy_pubkey: self.kvs(id, "gitsync_pubkey").await,
+            pat_set: tokio::fs::try_exists(gitsync_pat_path(id))
+                .await
+                .unwrap_or(false),
+            webhook_secret: self.kvs(id, "gitsync_webhook_secret").await,
+            webhook_path: format!("/webhooks/git/{id}"),
+            git_available: hyperion_adapters::gitsync::git_available().await,
+            last,
+        })
+    }
+
+    /// Save the deploy configuration, and set/clear the access token when
+    /// `pat` is `Some` (`Some("")` clears it, `None` leaves it untouched).
+    pub async fn git_sync_config_set(
+        &self,
+        sel: HostingSelector,
+        config: hyperion_types::gitsync::GitSyncConfig,
+        pat: Option<String>,
+    ) -> Result<(), RpcError> {
+        use hyperion_adapters::gitsync as g;
+        use hyperion_types::gitsync as t;
+        let detail = self.get(sel).await?;
+        let id = detail.id.as_str();
+        let repo = config.repo.trim();
+        if !repo.is_empty() {
+            let bad = |m: &str| RpcError::Validation { message: m.into() };
+            if !g::valid_repo(repo) {
+                return Err(bad("not a GitHub repository URL (https or ssh)"));
+            }
+            if !g::valid_branch(config.effective_branch()) {
+                return Err(bad("not a valid branch name"));
+            }
+            if !g::valid_subdir(&config.subdir) {
+                return Err(bad("sub-directory must be relative, with no '..'"));
+            }
+            if ![t::AUTH_PUBLIC, t::AUTH_DEPLOY_KEY, t::AUTH_PAT].contains(&config.auth.as_str()) {
+                return Err(bad("unknown authentication method"));
+            }
+        }
+        let now = now_secs();
+        for (k, v) in [
+            ("gitsync_repo", repo.to_string()),
+            ("gitsync_branch", config.branch.trim().to_string()),
+            ("gitsync_subdir", config.subdir.trim().to_string()),
+            ("gitsync_auth", config.auth.clone()),
+            (
+                "gitsync_webhook",
+                if config.webhook_enabled { "1" } else { "0" }.to_string(),
+            ),
+        ] {
+            hyperion_state::hosting_kv::set(&self.pool, id, k, &v, now)
+                .await
+                .map_err(|e| RpcError::Internal_with(format!("kv set: {e}")))?;
+        }
+        // A webhook needs a secret to verify pushes: mint one the first time
+        // auto-deploy is enabled and keep it stable afterwards.
+        if config.webhook_enabled && self.kvs(id, "gitsync_webhook_secret").await.is_empty() {
+            let secret: String = {
+                use rand::RngCore;
+                let mut b = [0u8; 24];
+                rand::thread_rng().fill_bytes(&mut b);
+                b.iter().map(|x| format!("{x:02x}")).collect()
+            };
+            let _ = hyperion_state::hosting_kv::set(
+                &self.pool,
+                id,
+                "gitsync_webhook_secret",
+                &secret,
+                now,
+            )
+            .await;
+        }
+        if let Some(p) = pat {
+            let path = gitsync_pat_path(id);
+            if p.trim().is_empty() {
+                let _ = tokio::fs::remove_file(&path).await;
+            } else {
+                write_secret_file(&path, p.trim().as_bytes())
+                    .await
+                    .map_err(|e| RpcError::Internal_with(format!("store token: {e}")))?;
+            }
+        }
+        self.append_audit(
+            "hosting.gitsync.config",
+            Some(id),
+            &serde_json::json!({ "repo": repo, "auth": config.auth }).to_string(),
+            "ok",
+        )
+        .await;
+        Ok(())
+    }
+
+    /// Generate a deploy keypair, store the private half in the node secret
+    /// store, and return the public half for the operator to add to the repo.
+    pub async fn git_sync_generate_key(&self, sel: HostingSelector) -> Result<String, RpcError> {
+        let detail = self.get(sel).await?;
+        let id = detail.id.as_str();
+        let (priv_pem, pubkey) = hyperion_adapters::gitsync::generate_deploy_key()
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("generate deploy key: {e}")))?;
+        write_secret_file(&gitsync_key_path(id), priv_pem.as_bytes())
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("store deploy key: {e}")))?;
+        hyperion_state::hosting_kv::set(&self.pool, id, "gitsync_pubkey", &pubkey, now_secs())
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("kv set: {e}")))?;
+        Ok(pubkey)
+    }
+
+    /// Deploy now: make the webroot match the configured branch. `trigger` is
+    /// "manual" or "webhook". Stores the outcome either way (so the card can
+    /// show a failure), and returns `Err` on failure so a job fails visibly.
+    pub async fn git_sync_now(
+        &self,
+        sel: HostingSelector,
+        trigger: String,
+    ) -> Result<hyperion_types::gitsync::GitSyncLast, RpcError> {
+        use hyperion_adapters::gitsync as g;
+        use hyperion_types::gitsync as t;
+        let detail = self.get(sel).await?;
+        let id = detail.id.as_str();
+        let repo = self.kvs(id, "gitsync_repo").await;
+        if repo.trim().is_empty() {
+            return Err(RpcError::Validation {
+                message: "no repository is configured for this site".into(),
+            });
+        }
+        let branch = {
+            let b = self.kvs(id, "gitsync_branch").await;
+            if b.trim().is_empty() {
+                "main".to_string()
+            } else {
+                b.trim().to_string()
+            }
+        };
+        let subdir = self.kvs(id, "gitsync_subdir").await;
+        let auth = match self.kvs(id, "gitsync_auth").await.as_str() {
+            t::AUTH_DEPLOY_KEY => {
+                let pem = tokio::fs::read_to_string(gitsync_key_path(id))
+                    .await
+                    .map_err(|_| RpcError::Validation {
+                        message: "no deploy key has been generated yet".into(),
+                    })?;
+                g::Auth::DeployKey(pem)
+            }
+            t::AUTH_PAT => {
+                let tok = tokio::fs::read_to_string(gitsync_pat_path(id))
+                    .await
+                    .map_err(|_| RpcError::Validation {
+                        message: "no access token has been saved yet".into(),
+                    })?;
+                g::Auth::Pat(tok.trim().to_string())
+            }
+            _ => g::Auth::Public,
+        };
+        let home = home_dir_for(&detail);
+        let params = g::SyncParams {
+            repo: repo.trim(),
+            branch: branch.trim(),
+            subdir: subdir.trim(),
+            htdocs: detail.root_dir.trim(),
+            run_as: detail.system_user.as_str(),
+            home_dir: &home,
+            auth,
+        };
+        let last = match g::sync(params).await {
+            Ok(mut l) => {
+                l.at = now_secs();
+                l.status = "ok".into();
+                l.trigger = trigger.clone();
+                l
+            }
+            Err(e) => t::GitSyncLast {
+                at: now_secs(),
+                commit: String::new(),
+                status: "error".into(),
+                message: e.to_string().chars().take(300).collect(),
+                trigger: trigger.clone(),
+            },
+        };
+        let _ = hyperion_state::hosting_kv::set(
+            &self.pool,
+            id,
+            "gitsync_last",
+            &serde_json::to_string(&last).unwrap_or_default(),
+            now_secs(),
+        )
+        .await;
+        self.append_audit(
+            "hosting.gitsync.deploy",
+            Some(id),
+            &serde_json::json!({
+                "domain": detail.domain,
+                "commit": last.commit,
+                "status": last.status,
+                "trigger": trigger,
+            })
+            .to_string(),
+            if last.status == "ok" { "ok" } else { "error" },
+        )
+        .await;
+        if last.status == "error" {
+            return Err(RpcError::Internal_with(last.message.clone()));
+        }
+        Ok(last)
+    }
+
     pub async fn upcoming_expiries(
         &self,
         within_seconds: i64,
@@ -31004,6 +31249,15 @@ const SITE_CHECK_KV_KEY: &str = "site_check_last";
 
 /// `hosting_kv` key: the last Core Web Vitals measurement (JSON `CwvResult`).
 const CWV_KV_KEY: &str = "cwv_last";
+
+/// Where a hosting's deploy private key and access token live: the node's
+/// root-only secret store, one file each, keyed by hosting id.
+fn gitsync_key_path(id: &str) -> String {
+    format!("/etc/hyperion/secrets/gitsync-{id}.key")
+}
+fn gitsync_pat_path(id: &str) -> String {
+    format!("/etc/hyperion/secrets/gitsync-{id}.pat")
+}
 
 /// A writable HOME/cache base for a site user, beside its htdocs. `root_dir`
 /// IS the htdocs; its parent is the site tree, owned by the user.

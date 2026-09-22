@@ -7,6 +7,8 @@ license.workspace = true
 
 [dependencies]
 serde.workspace = true
+hmac = "0.12"
+sha2 = "0.10"
 # The care checklist is stored as one JSON value in `hosting_kv`, so its
 # (de)serialisation belongs with the type rather than at each call site.
 serde_json.workspace = true
