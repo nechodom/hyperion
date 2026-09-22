@@ -549,6 +549,17 @@ pre code {
   background: var(--surface-2);
 }
 .card + .card { margin-top: 1rem; }
+/* Vertical rhythm inside a hosting-detail tab. The `.card + .card` rule only
+   sees two cards that are DIRECT siblings, but a tab mixes plain cards,
+   collapsible `details.card`s, and lazy HTMX wrappers — a plain `<div hx-get>`
+   with a card inside. Those wrappers are not `.card`, so a wrapper sitting
+   between two cards swallowed the 1rem gap on BOTH sides (the card before it
+   and the card after it touched their neighbours). Treat a card, an accordion
+   or a lazy wrapper following any of the same as one 1rem step, so every
+   top-level block in a tab is evenly spaced regardless of its kind. */
+.tab-panel > :where(.card, [hx-get]) + :where(.card, [hx-get]) {
+  margin-top: 1rem;
+}
 .card h2 {
   font-size: 1rem;
   margin: 0 0 1rem;
