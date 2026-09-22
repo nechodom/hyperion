@@ -1,13 +1,15 @@
 {# SFTP panel — lazily swapped into the hosting detail FTP tab via
    hx-get="/hostings/:sel/sftp-panel". Key-only, chrooted SFTP for the
    hosting's system user. #}
-<div class="card hover">
-  <h2>
+<details class="card">
+  <summary>
     <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
-    SFTP (SSH keys)
-    {% if sftp.enabled %}<span class="pill ok" style="margin-left:0.4rem;font-size:0.65rem">enabled</span>
-    {% else %}<span class="pill" style="margin-left:0.4rem;font-size:0.65rem">disabled</span>{% endif %}
-  </h2>
+    <h2>SFTP (SSH keys)</h2>
+    <span class="acc-meta">
+    {% if sftp.enabled %}<span class="pill ok" style="font-size:0.65rem">enabled</span>
+    {% else %}<span class="pill" style="font-size:0.65rem">disabled</span>{% endif %}
+    <svg class="acc-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></span>
+  </summary>
   <p class="muted" style="margin:-0.3rem 0 0.75rem;font-size:0.85rem">
     Key-only, chrooted SFTP — no password, no shell. The customer lands in
     their site root and can upload to <code>htdocs</code>. Safer than FTP:
@@ -50,4 +52,4 @@
     </p>
     <button class="btn primary" type="submit">Save changes</button>
   </form>
-</div>
+</details>
