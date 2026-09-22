@@ -549,6 +549,17 @@ pre code {
   background: var(--surface-2);
 }
 .card + .card { margin-top: 1rem; }
+/* Vertical rhythm inside a hosting-detail tab. The `.card + .card` rule only
+   sees two cards that are DIRECT siblings, but a tab mixes plain cards,
+   collapsible `details.card`s, and lazy HTMX wrappers — a plain `<div hx-get>`
+   with a card inside. Those wrappers are not `.card`, so a wrapper sitting
+   between two cards swallowed the 1rem gap on BOTH sides (the card before it
+   and the card after it touched their neighbours). Treat a card, an accordion
+   or a lazy wrapper following any of the same as one 1rem step, so every
+   top-level block in a tab is evenly spaced regardless of its kind. */
+.tab-panel > :where(.card, [hx-get]) + :where(.card, [hx-get]) {
+  margin-top: 1rem;
+}
 .card h2 {
   font-size: 1rem;
   margin: 0 0 1rem;
@@ -588,6 +599,59 @@ pre code {
   padding-top: 1.25rem;
   margin-top: 1.25rem;
 }
+
+/* Collapsible card. A `<details class="card">` whose `<summary>` IS the card
+   header: the same icon + title as a plain card, an optional right-aligned
+   status (`.acc-meta`, e.g. a state pill or "3 kept") and a chevron. It lets a
+   set-and-forget or rarely-touched section fold away while its state stays
+   readable at a glance — the collapsed summary still answers "is this on?".
+   Reuses `.card`, so spacing, border and radius match its non-collapsible
+   peers exactly; only the header becomes a disclosure control. */
+details.card > summary {
+  list-style: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  /* Match `.card h2`, so a bare title in the summary reads as a card header
+     whether or not it is wrapped in an inner <h2>. */
+  font-size: 1rem;
+  font-weight: 600;
+  letter-spacing: -0.005em;
+}
+details.card > summary::-webkit-details-marker { display: none; }
+details.card > summary::marker { content: ""; }
+details.card > summary > .h-icon {
+  width: 18px;
+  height: 18px;
+  color: var(--text-dim);
+  stroke-width: 2;
+  flex: none;
+}
+details.card > summary > h2 {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 600;
+  letter-spacing: -0.005em;
+}
+details.card > summary .acc-meta {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-weight: 400;
+  font-size: 0.85rem;
+  color: var(--text-dim);
+}
+details.card > summary .acc-chevron {
+  width: 16px;
+  height: 16px;
+  color: var(--text-dim);
+  transition: transform var(--t-fast);
+  flex: none;
+}
+details.card[open] > summary { margin-bottom: 1rem; }
+details.card[open] > summary .acc-chevron { transform: rotate(90deg); }
 
 /* Grid of cards (e.g. dashboard stats) */
 .grid {

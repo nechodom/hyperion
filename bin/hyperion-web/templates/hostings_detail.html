@@ -767,11 +767,12 @@
   </div>
 </div>
 
-<div class="card hover">
-  <h2>
+<details class="card">
+  <summary>
     <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
-    Overview
-  </h2>
+    <h2>Overview</h2>
+    <span class="acc-meta"><code style="font-size:0.8rem">{{ detail.system_user }}</code>{% if let Some(v) = detail.php_version %} · PHP {{ v }}{% endif %}<svg class="acc-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></span>
+  </summary>
   <dl class="kv">
     <dt data-cluster-only>Node</dt>
     <dd data-cluster-only>
@@ -907,7 +908,7 @@
       {% endif %}
     {% endif %}
   </dl>
-</div>
+</details>
 
 {# Care packages — sits directly under the overview because it answers the
    same question the Plan / Next billing rows above it do, for the paid
@@ -923,11 +924,12 @@
      hx-trigger="load" hx-swap="outerHTML"></div>
 
 {% if let Some(db) = detail.database %}
-<div class="card hover">
-  <h2>
+<details class="card">
+  <summary>
     <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
-    Database
-  </h2>
+    <h2>Database</h2>
+    <span class="acc-meta">{{ db.engine }} · <code style="font-size:0.8rem">{{ db.db_name }}</code><svg class="acc-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></span>
+  </summary>
   <dl class="kv">
     <dt>Engine</dt><dd><span class="tag">{{ db.engine }}</span></dd>
     <dt>Name</dt><dd><code>{{ db.db_name }}</code></dd>
@@ -958,16 +960,16 @@
       </div>
     </form>
   </div>
-</div>
+</details>
 {% endif %}
 
 {% if let Some(s) = stats %}
-<div class="card hover">
-  <h2>
+<details class="card">
+  <summary>
     <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
-    Stats
-    <span class="text-soft small" style="font-weight:400;margin-left:0.5rem">last 48 hours</span>
-  </h2>
+    <h2>Stats</h2>
+    <span class="acc-meta">last 48 hours<svg class="acc-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></span>
+  </summary>
 
   {# Stat grid with inline sparklines. Each cell: big number,
      label, then a trend mini-chart over the last 48 hourly
@@ -1021,16 +1023,17 @@
     Sparklines normalise each metric to its own 48-hour max — they show shape, not absolute scale.
     Numbers come from the agent's 5-minute sampler (du on the hosting tree, plus a tail-parse of the nginx access.log).
   </p>
-</div>
+</details>
 {% endif %}
 
 {# Operator notes + tags — panel-side metadata, free-text reminder +
    labels for filtering. #}
-<div class="card hover">
-  <h2>
+<details class="card">
+  <summary>
     <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
-    Notes &amp; tags
-  </h2>
+    <h2>Notes &amp; tags</h2>
+    <span class="acc-meta">{% if !tags.is_empty() %}{{ tags.len() }} tag{% if tags.len() != 1 %}s{% endif %}{% else %}—{% endif %}<svg class="acc-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></span>
+  </summary>
   {% if !tags.is_empty() %}
   <div style="display:flex;gap:0.35rem;flex-wrap:wrap;margin:-0.3rem 0 0.8rem">
     {% for t in tags %}<span class="tag" style="font-size:0.72rem">{{ t }}</span>{% endfor %}
@@ -1053,7 +1056,7 @@
       <span class="muted hint">tags: ≤12, lowercased, a-z0-9 - _</span>
     </div>
   </form>
-</div>
+</details>
 
 </div><!-- /tab-overview -->
 
@@ -1063,11 +1066,12 @@
 
 {# Domains live here next to the certificate that covers them — add an alias,
    then re-issue the cert below so HTTPS covers the new name. #}
-<div class="card hover">
-  <h2>
+<details class="card">
+  <summary>
     <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
-    Domains
-  </h2>
+    <h2>Domains</h2>
+    <span class="acc-meta">{% if detail.aliases.is_empty() %}no aliases{% else %}{{ detail.aliases.len() }} alias{% if detail.aliases.len() != 1 %}es{% endif %}{% endif %}<svg class="acc-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></span>
+  </summary>
   <p class="text-soft" style="margin:0 0 0.75rem">
     The primary domain <code>{{ detail.domain }}</code> is fixed — recreate the
     hosting to change it. Aliases are additional names served by this site.
@@ -1088,7 +1092,7 @@
     </p>
     <button class="btn small primary" type="submit">Save aliases</button>
   </form>
-</div>
+</details>
 
 {# The card, the issuance form, the custom-certificate upload and the ACME
    contact field all used to sit inside `{% if let Some(cert) %}`. A site with
@@ -1238,8 +1242,12 @@
    multi-year cert, or a self-signed bootstrap. The agent validates the
    key↔cert match + domain coverage, then disables auto-renewal so the
    ACME sweep can't overwrite it. #}
-<div class="card" style="margin-top:1rem">
-  <h2 style="font-size:0.95rem;margin:0 0 0.35rem">Upload a custom certificate</h2>
+<details class="card" style="margin-top:1rem">
+  <summary>
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+    <h2>Upload a custom certificate</h2>
+    <span class="acc-meta">private CA / manual<svg class="acc-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></span>
+  </summary>
   <p class="text-soft" style="margin:0 0 0.85rem;font-size:0.88rem">
     Paste a PEM certificate and its private key — for a private CA, a
     pre-purchased certificate, or a self-signed bootstrap. Hyperion verifies the
@@ -1278,11 +1286,15 @@
       Upload &amp; install certificate
     </button>
   </form>
-</div>
+</details>
 
 {# ACME contact email override — per-hosting, falls back to agent-wide default. #}
-<div class="card" style="margin-top:1rem">
-  <h2 style="font-size:0.95rem;margin:0 0 0.35rem">ACME contact email</h2>
+<details class="card" style="margin-top:1rem">
+  <summary>
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
+    <h2>ACME contact email</h2>
+    <span class="acc-meta">{% if let Some(_) = detail.acme_contact_email %}override{% else %}default{% endif %}<svg class="acc-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></span>
+  </summary>
   <p class="text-soft" style="margin:0 0 0.85rem">
     Let's Encrypt sends expiry warnings and terms-of-service updates here.
     Leave blank to use the agent-wide default from
@@ -1303,7 +1315,7 @@
       <span class="pill" style="background:var(--surface-2);color:var(--text-soft)">using default</span>
     {% endif %}
   </form>
-</div>
+</details>
 
 </div><!-- /tab-ssl -->
 
@@ -1501,11 +1513,12 @@
 
 {# Staging → push-to-prod. Available once WP is installed. #}
 {% if detail.state.as_str() == "active" %}
-<div class="card hover" style="margin-top:1rem">
-  <h2>
+<details class="card" style="margin-top:1rem">
+  <summary>
     <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 3h5v5"/><path d="M21 3l-7 7"/><path d="M8 21H3v-5"/><path d="M3 21l7-7"/></svg>
-    Staging site
-  </h2>
+    <h2>Staging site</h2>
+    <span class="acc-meta">test copy<svg class="acc-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></span>
+  </summary>
   <p class="muted" style="margin:-0.3rem 0 0.85rem;font-size:0.85rem">
     Spin up a <code>{{ staging_domain }}</code> copy to test plugin and
     theme updates safely, then push it back over production. A push takes a
@@ -1548,7 +1561,7 @@
     <a class="btn ghost" href="https://{{ staging_domain }}" target="_blank" rel="noopener noreferrer">Open staging ↗</a>
   </div>
   {% endif %}
-</div>
+</details>
 {% endif %}
 
 <div class="card hover" style="margin-top:1rem">
@@ -1767,11 +1780,12 @@
 {% endif %}
 
 {% if let Some(_) = wp_status %}
-<div class="card hover">
-  <h2>
+<details class="card">
+  <summary>
     <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-    Debug
-  </h2>
+    <h2>Debug</h2>
+    <span class="acc-meta">WP_DEBUG<svg class="acc-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></span>
+  </summary>
   <p class="muted small">
     Toggles <code>WP_DEBUG</code>, <code>WP_DEBUG_LOG</code> and
     <code>WP_DEBUG_DISPLAY</code> in <code>wp-config.php</code>.
@@ -1828,13 +1842,14 @@
     <button class="btn" type="submit">Truncate debug.log</button>
   </form>
   {% endif %}
-</div>
+</details>
 
-<div class="card hover">
-  <h2>
+<details class="card">
+  <summary>
     <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
-    Redis object cache
-  </h2>
+    <h2>Redis object cache</h2>
+    <span class="acc-meta">object cache<svg class="acc-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></span>
+  </summary>
   {# Operators clicking Enable Redis here would otherwise miss the
      error banner that lived only inside the Debug card above —
      post-redirect they'd see no feedback at all. Repeat the banner
@@ -1919,7 +1934,7 @@
     <button class="btn primary" type="submit">Enable Redis</button>
   </form>
   {% endif %}
-</div>
+</details>
 {% endif %}
 
 {# ── Themes — folded into the WordPress tab ── #}
@@ -2084,11 +2099,12 @@
    the same risk and conflating them is how someone wipes a site meaning to
    fix one file. ───── #}
 {% if wp_status.is_some() %}
-<div class="card hover">
-  <h2>
+<details class="card">
+  <summary>
     <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg>
-    Reinstall
-  </h2>
+    <h2>Reinstall</h2>
+    <span class="acc-meta">core files<svg class="acc-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></span>
+  </summary>
 
   <p class="text-soft small" style="margin:0 0 0.7rem;line-height:1.55">
     <strong>Repair core files</strong> is what fixes most broken sites: a core file
@@ -2180,7 +2196,7 @@
       </form>
     </div>
   </details>
-</div>
+</details>
 {% endif %}
 </div><!-- /tab-wordpress (incl. themes) -->
 
@@ -2204,11 +2220,12 @@
 {% endif %}
 
 <div class="settings-group-label" style="text-transform:uppercase;font-size:0.72rem;letter-spacing:0.06em;color:var(--text-soft);font-weight:700;margin:0.2rem 0 0.5rem;opacity:0.85">HTTP &amp; access layer</div>
-<div class="card hover">
-  <h2>
+<details class="card">
+  <summary>
     <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-    Vhost options
-  </h2>
+    <h2>Vhost options</h2>
+    <span class="acc-meta">HTTPS · WAF · cache · geo<svg class="acc-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></span>
+  </summary>
   <p class="muted small">
     Toggles that map directly to the nginx vhost. Every save is validated
     with <code>nginx -t</code> before the new config is committed; on
@@ -2464,7 +2481,7 @@
       Save vhost options
     </button>
   </form>
-</div>
+</details>
 
 <div class="settings-group-label" style="text-transform:uppercase;font-size:0.72rem;letter-spacing:0.06em;color:var(--text-soft);font-weight:700;margin:1.2rem 0 0.5rem;opacity:0.85">Security</div>
 {# Banned IPs — lazily loaded so the page render isn't blocked on an
@@ -2662,11 +2679,12 @@
 {# Operator php.ini overrides, applied via a per-hosting .user.ini
    (no FPM restart; takes effect within ~5 min). Leave a field blank to
    fall back to the pool/global default. #}
-<div class="card hover">
-  <h2>
+<details class="card">
+  <summary>
     <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 17l6-6-6-6"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
-    PHP settings
-  </h2>
+    <h2>PHP settings</h2>
+    <span class="acc-meta">.user.ini overrides<svg class="acc-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></span>
+  </summary>
   <p class="muted" style="font-size:0.85rem;margin-top:-0.4rem;margin-bottom:0.9rem">
     Per-hosting <code>.user.ini</code> overrides. Blank = pool default. Sizes like <code>256M</code> / <code>1G</code>.
     {% if php_ini.any() %}<span class="pill ok small" style="margin-left:0.3rem">active</span>{% endif %}
@@ -2731,7 +2749,7 @@
       </span>
     </div>
   </form>
-</div>
+</details>
 
 <div class="settings-group-label" style="text-transform:uppercase;font-size:0.72rem;letter-spacing:0.06em;color:var(--text-soft);font-weight:700;margin:1.2rem 0 0.5rem;opacity:0.85">Lifecycle &amp; billing</div>
 <div class="card hover">
@@ -2818,11 +2836,12 @@
   </form>
 </div>
 
-<div class="card hover">
-  <h2>
+<details class="card">
+  <summary>
     <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 7h-9"/><path d="M14 17H5"/><circle cx="17" cy="17" r="3"/><circle cx="7" cy="7" r="3"/></svg>
-    Apply profile
-  </h2>
+    <h2>Apply profile</h2>
+    <span class="acc-meta">bulk preset<svg class="acc-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></span>
+  </summary>
   <p class="muted" style="font-size:0.85rem;margin-top:-0.4rem;margin-bottom:0.8rem">
     {% if let Some(name) = applied_profile_name %}
       Currently applied: <strong>{{ name }}</strong>. Re-applying refreshes the limits, expiry policy and pricing snapshot.
@@ -2904,14 +2923,15 @@
       hyperionApplyPreview();
     </script>
   {% endif %}
-</div>
+</details>
 
 <div class="settings-group-label" style="text-transform:uppercase;font-size:0.72rem;letter-spacing:0.06em;color:var(--text-soft);font-weight:700;margin:1.2rem 0 0.5rem;opacity:0.85">Scheduled tasks</div>
-<div class="card hover">
-  <h2>
+<details class="card">
+  <summary>
     <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-    Cron jobs
-  </h2>
+    <h2>Cron jobs</h2>
+    <span class="acc-meta">crontab<svg class="acc-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></span>
+  </summary>
   <p class="muted" style="font-size:0.85rem;margin-top:-0.4rem;margin-bottom:0.8rem">
     Crontab for system user <code>{{ detail.system_user }}</code>, in standard cron syntax. Lines containing backticks are refused for safety.
   </p>
@@ -2932,7 +2952,7 @@
       <span class="muted hint">empty body removes the crontab</span>
     </div>
   </form>
-</div>
+</details>
 
 </div><!-- /tab-settings -->
 
@@ -3123,12 +3143,12 @@
   </p>
 </div>
 
-<div class="card hover" style="margin-top:1rem">
-  <h2>
+<details class="card" style="margin-top:1rem">
+  <summary>
     <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><line x1="19" y1="8" x2="19" y2="14"/><line x1="22" y1="11" x2="16" y2="11"/></svg>
-    Extra FTP logins
-    <span class="text-soft small" style="font-weight:400;margin-left:0.5rem">{{ ftp_extra.len() }}</span>
-  </h2>
+    <h2>Extra FTP logins</h2>
+    <span class="acc-meta">{{ ftp_extra.len() }}<svg class="acc-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></span>
+  </summary>
   <p class="text-soft small" style="margin:0 0 0.8rem;line-height:1.55">
     Separate logins for the same site — one per person or deploy script, each
     with its own password you can revoke on its own. You pick the name and
@@ -3269,18 +3289,16 @@
       render();
     })();
   </script>
-</div>
+</details>
 
-<div class="card hover" style="margin-top:1rem">
-  <h2>
+<details class="card" style="margin-top:1rem">
+  <summary>
     <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
-    {# Named for what it now shows. It used to list every account on the
-       node, on a page about ONE hosting — confusing for an admin, and for a
-       tenant it handed over the domains and Linux usernames of everyone else
-       on the machine. #}
-    FTP account for this site
-    <span class="text-soft small" style="font-weight:400;margin-left:0.5rem">{{ ftp_accounts.len() }}</span>
-  </h2>
+    {# Named for what it now shows: this hosting's own FTP account, not every
+       account on the node (which leaked other tenants' domains and usernames). #}
+    <h2>FTP account for this site</h2>
+    <span class="acc-meta">{{ ftp_accounts.len() }}<svg class="acc-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></span>
+  </summary>
   {% if ftp_accounts.is_empty() %}
     <p class="muted" style="font-size:0.88rem;margin:0">
       No FTP account for this site yet. Set a password above to create one.
@@ -3369,7 +3387,7 @@
     </table>
   </div>
   {% endif %}
-</div>
+</details>
 
 {# SFTP (SSH keys) — lazily loaded so the page render isn't blocked on
    an SSH group + authorized_keys probe on the owning node. #}
@@ -3729,11 +3747,12 @@
 <p class="text-soft small" style="text-align:right;margin:0 0 0.6rem"><a href="/monitoring">Cluster monitoring overview →</a></p>
 
 {# ── Logs — folded into the Observability tab ── #}
-<div class="card hover">
-  <h2>
+<details class="card">
+  <summary>
     <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
-    Logs
-  </h2>
+    <h2>Logs</h2>
+    <span class="acc-meta">nginx tail<svg class="acc-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></span>
+  </summary>
   <p class="muted" style="font-size:0.85rem;margin-top:-0.4rem;margin-bottom:0.7rem">Tail this hosting's nginx logs without opening an SSH session.</p>
   <div class="row" style="margin:0 0 0.7rem;gap:0.5rem;align-items:center;flex-wrap:wrap">
     <input id="log-filter" class="input" type="search" placeholder="Filter lines (instant, client-side)…"
@@ -3773,7 +3792,7 @@
     </form>
     <span id="log-spinner" class="muted htmx-indicator" style="font-size:0.85rem">fetching…</span>
   </div>
-</div>
+</details>
 
 <script>
 (function () {

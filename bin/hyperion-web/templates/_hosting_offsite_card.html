@@ -6,23 +6,18 @@
    off-site copy exists.
 
    Lazily loaded, because it is a round trip to somebody else's FTP server. #}
-<div class="card" style="margin-bottom:0.9rem">
-  <div class="row" style="align-items:center;gap:0.6rem;margin-bottom:0.4rem">
-    <h2 style="margin:0;font-size:0.95rem">
-      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-      Off-site copies
-    </h2>
-    <span class="grow"></span>
-    {% if !configured %}
-      <span class="pill warn">no target</span>
-    {% else if !directory_exists %}
-      <span class="pill warn">never pushed</span>
-    {% else if rows.is_empty() %}
-      <span class="pill danger">empty</span>
-    {% else %}
-      <span class="pill ok">{{ rows.len() }}</span>
+<details class="card" style="margin-bottom:0.9rem">
+  <summary>
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+    <h2>Off-site copies</h2>
+    <span class="acc-meta">
+    {% if !configured %}<span class="pill warn">no target</span>
+    {% else if !directory_exists %}<span class="pill warn">never pushed</span>
+    {% else if rows.is_empty() %}<span class="pill danger">empty</span>
+    {% else %}<span class="pill ok">{{ rows.len() }}</span>
     {% endif %}
-  </div>
+    <svg class="acc-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></span>
+  </summary>
 
   {% if let Some(e) = error %}
   <div class="flash warn" style="margin:0 0 0.6rem">
@@ -122,4 +117,4 @@
       not on this server, so they cannot be listed or restored from here.
     </p>
   {% endif %}
-</div>
+</details>
