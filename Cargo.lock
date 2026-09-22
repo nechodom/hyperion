@@ -1641,8 +1641,10 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "chrono-tz",
+ "hmac",
  "serde",
  "serde_json",
+ "sha2",
  "ulid",
  "uuid",
 ]

@@ -736,6 +736,22 @@ pub fn build_router(state: SharedState) -> Router {
             post(handlers::hostings::post_cwv_measure),
         )
         .route(
+            "/hostings/:selector/gitsync-panel",
+            get(handlers::hostings::get_gitsync_panel),
+        )
+        .route(
+            "/hostings/gitsync/config",
+            post(handlers::hostings::post_gitsync_config),
+        )
+        .route(
+            "/hostings/gitsync/genkey",
+            post(handlers::hostings::post_gitsync_genkey),
+        )
+        .route(
+            "/hostings/gitsync/sync",
+            post(handlers::hostings::post_gitsync_now),
+        )
+        .route(
             "/hostings/site-check",
             post(handlers::hostings::post_site_check),
         )
@@ -967,6 +983,12 @@ pub fn build_router(state: SharedState) -> Router {
         .merge(api_v1)
         .route("/login", get(handlers::login::get_login))
         .route("/login", post(handlers::login::post_login))
+        // PUBLIC, no session and no CSRF: authenticated by the per-hosting
+        // webhook HMAC only. GitHub push → auto-deploy.
+        .route(
+            "/webhooks/git/:id",
+            post(handlers::hostings::post_git_webhook),
+        )
         .route("/login/2fa", get(handlers::login::get_login_2fa))
         .route("/login/2fa", post(handlers::login::post_login_2fa))
         .route("/static/app.css", get(handlers::statics::app_css))

@@ -1887,6 +1887,30 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
     ) -> Result<hyperion_types::CwvResult, RpcError> {
         self.svc.cwv_measure(sel).await
     }
+    async fn git_sync_view(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<hyperion_types::gitsync::GitSyncView, RpcError> {
+        self.svc.git_sync_view(sel).await
+    }
+    async fn git_sync_config_set(
+        &self,
+        sel: HostingSelector,
+        config: hyperion_types::gitsync::GitSyncConfig,
+        pat: Option<String>,
+    ) -> Result<(), RpcError> {
+        self.svc.git_sync_config_set(sel, config, pat).await
+    }
+    async fn git_sync_generate_key(&self, sel: HostingSelector) -> Result<String, RpcError> {
+        self.svc.git_sync_generate_key(sel).await
+    }
+    async fn git_sync_now(
+        &self,
+        sel: HostingSelector,
+        trigger: String,
+    ) -> Result<hyperion_types::gitsync::GitSyncLast, RpcError> {
+        self.svc.git_sync_now(sel, trigger).await
+    }
     async fn snapshot_list(
         &self,
         sel: HostingSelector,
