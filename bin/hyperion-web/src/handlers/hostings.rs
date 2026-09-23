@@ -9478,12 +9478,14 @@ pub async fn post_restore_upload(
 #[derive(Deserialize)]
 pub struct BulkForm {
     pub action: String,
-    /// Comma-separated list of selectors (domains). Browsers POST checkboxes
-    /// one per name, so we use serde to gather them into a Vec. Axum's Form
-    /// extractor surfaces repeated fields as comma-separated when the form
-    /// type expects a String — use the manual deserializer instead.
+    /// Comma-joined list of selectors (hosting ids). The list's per-row
+    /// checkboxes are UI-only; a script joins the ticked ids into this one
+    /// field. It is a `String`, not a `Vec`, on purpose: `axum::Form`
+    /// (serde_urlencoded) cannot gather repeated urlencoded keys
+    /// (`selected=a&selected=b`) into a `Vec` — it 422s with "expected a
+    /// sequence", even for a single value. Parse with `selected_ids()`.
     #[serde(default)]
-    pub selected: Vec<String>,
+    pub selected: String,
     /// Asset id for the `install_asset` bulk action. Empty string
     /// (the wizard's "no asset picked" state) and missing field
     /// both map to 0 — install_asset then gets refused with a clean
@@ -9507,6 +9509,26 @@ impl BulkForm {
     fn asset_id_parsed(&self) -> i64 {
         self.asset_id.trim().parse().unwrap_or(0)
     }
+
+    /// Split the comma-joined `selected` field into individual selectors,
+    /// de-duped and blank-dropped, with the batch capped. The field is
+    /// machine-written by the list script, so blanks/dupes mean a stale or
+    /// tampered POST rather than a user typo worth a message. The cap bounds
+    /// how many hostings one request can fan out over; selector *shape* is
+    /// validated later, per item, by `parse_selector` in the job loop.
+    fn selected_ids(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for tok in self.selected.split(',') {
+            let s = tok.trim();
+            if !s.is_empty() && !out.iter().any(|e| e == s) {
+                out.push(s.to_string());
+            }
+            if out.len() >= 1000 {
+                break;
+            }
+        }
+        out
+    }
 }
 
 pub async fn post_bulk(
@@ -9520,7 +9542,8 @@ pub async fn post_bulk(
     if !ctx.is_admin_or_higher() {
         return Err(AppError::Forbidden);
     }
-    if form.selected.is_empty() {
+    let selected = form.selected_ids();
+    if selected.is_empty() {
         return Ok(Redirect::to("/hostings?q=&state=").into_response());
     }
     // Pre-flight validation for install_asset — surface a single
@@ -9557,7 +9580,6 @@ pub async fn post_bulk(
     let actor_uid = ctx.session.as_ref().map(|s| s.user_id).unwrap_or(0);
     let actor_label = ctx.username.clone();
     let action = form.action.clone();
-    let selected = form.selected.clone();
     let asset_id = form.asset_id_parsed();
     let label = format!("{} × {} hosting(s)", action, selected.len());
     let job_state = state.clone();
@@ -12122,6 +12144,34 @@ mod tests {
             .collect::<Vec<_>>()
             .join(",");
         assert_eq!(bulk(&many).len(), 100);
+    }
+
+    fn bulk_selected(s: &str) -> Vec<String> {
+        BulkForm {
+            action: "suspend".into(),
+            selected: s.into(),
+            asset_id: String::new(),
+            activate: None,
+        }
+        .selected_ids()
+    }
+
+    #[test]
+    fn bulk_selected_ids_split_dedupe_drop_blanks_and_cap() {
+        // Ordinary case: three ids, order preserved.
+        assert_eq!(bulk_selected("h-a,h-b,h-c"), vec!["h-a", "h-b", "h-c"]);
+        // Whitespace tolerated; blank fragments (trailing/doubled commas) dropped.
+        assert_eq!(bulk_selected(" h-a , , h-b ,"), vec!["h-a", "h-b"]);
+        // Duplicates collapse — a doubled id must not act-twice / miscount.
+        assert_eq!(bulk_selected("h-a,h-a,h-b"), vec!["h-a", "h-b"]);
+        // Empty field (nothing ticked) yields nothing — the handler no-ops.
+        assert!(bulk_selected("").is_empty());
+        // A tampered POST can't fan out over an unbounded number of hostings.
+        let many: String = (0..2000)
+            .map(|n| format!("h-{n}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        assert_eq!(bulk_selected(&many).len(), 1000);
     }
 
     /// The cluster lookup takes the FIRST node that answers, and the same

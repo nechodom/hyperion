@@ -3163,3 +3163,110 @@ exit 0"#,
          migration, and that `bash -n` cannot see.\n--- stderr ---\n{stderr}\n--- stdout ---\n{stdout}"
     );
 }
+
+/// The hostings-list bulk action bar submits a multi-selection to
+/// `/hostings/bulk`. Its selectors ride in ONE comma-joined `selected`
+/// field, because `axum::Form` (serde_urlencoded) cannot gather a
+/// repeated urlencoded key into a `Vec` — it 422s with "expected a
+/// sequence", even for a single value (verified against axum 0.7.9).
+///
+/// So the fixed frontend joins the ticked ids into a single comma-joined
+/// `selected` field. This regression guards that such a submission reaches
+/// the handler and spawns the background job (303 → /jobs/…) instead of
+/// dying on deserialization with a 422.
+#[tokio::test]
+async fn bulk_action_multi_select_does_not_422() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d) = start_agent().await;
+    let app = build_app(sock, admin);
+
+    // Log in.
+    let login_body = b"username=kevin&password=good-pw&next=/";
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/login")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(login_body.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    let cookie = extract_cookie(&resp);
+
+    // Create a hosting so the list (and its bulk form + CSRF token) renders.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/hostings/new")
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    let csrf = extract_csrf(&body_string(resp).await);
+    let create =
+        format!("_csrf={csrf}&domain=bulk-e2e.cz&aliases=&php=8.3&db=mariadb&system_user=");
+    let _ = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/hostings")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header(header::COOKIE, &cookie)
+                .body(Body::from(create))
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+
+    // Grab the bulk form's CSRF token off the list page.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/hostings")
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bulk_csrf = extract_csrf_named(&body_string(resp).await, "/hostings/bulk");
+
+    // The shape the fixed frontend sends: one comma-joined `selected` field.
+    let body = format!("_csrf={bulk_csrf}&action=suspend&selected=bulk-e2e.cz,other-e2e.cz");
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/hostings/bulk")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header(header::COOKIE, &cookie)
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    assert!(
+        !resp.status().is_client_error() && !resp.status().is_server_error(),
+        "comma-joined bulk submit errored: {} (a 422 here is the serde_urlencoded \
+         Vec-of-repeated-keys bug)",
+        resp.status()
+    );
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let loc = resp
+        .headers()
+        .get(header::LOCATION)
+        .expect("redirect")
+        .to_str()
+        .expect("ascii");
+    assert!(loc.starts_with("/jobs/"), "expected a job redirect, got {loc}");
+}
