@@ -2382,7 +2382,12 @@ pub async fn get_detail(
             }
         }),
         backup_error: q.backup_error,
-        backup_flash: q.backup.map(|_| "Backup started — see list below.".into()),
+        // A bulk delete redirects back with a free-text summary; a "backup
+        // started" flash is the other producer. Both render escaped.
+        backup_flash: q
+            .backup_deleted
+            .clone()
+            .or_else(|| q.backup.map(|_| "Backup started — see list below.".into())),
         backup_target_error: q.backup_target_error,
         expiry_error: q.expiry_error,
         expiry_flash: q.expiry.map(|s| {
@@ -2546,6 +2551,10 @@ pub struct DetailQuery {
     pub backup: Option<String>,
     #[serde(default)]
     pub backup_error: Option<String>,
+    /// Free-text success summary from a bulk archive delete (e.g. "3 archives
+    /// deleted"). Rendered escaped as the backups-card flash.
+    #[serde(default)]
+    pub backup_deleted: Option<String>,
     /// Refusal from the off-site-target POST (unknown target), so the page
     /// says the pin did NOT change instead of redirecting silently.
     #[serde(default)]
@@ -4135,6 +4144,123 @@ pub async fn post_backup_delete(
         .into_response()),
         _ => Err(AppError::Internal("unexpected response".into())),
     }
+}
+
+#[derive(Deserialize)]
+pub struct BackupDeleteBulkForm {
+    selector: String,
+    /// Comma-separated backup ids. The template's checkboxes are UI-only; a
+    /// tiny script joins the ticked ones into this single field, because
+    /// axum's urlencoded `Form` can't gather repeated keys into a `Vec`
+    /// (verified: it 422s with "expected a sequence").
+    #[serde(default)]
+    backup_ids: String,
+}
+
+impl BackupDeleteBulkForm {
+    /// Parse, de-dupe and cap the id list. Non-numeric fragments are dropped
+    /// silently — the field is machine-written, so garbage means a tampered
+    /// POST, not a user typo worth a message. The cap bounds how many RPCs one
+    /// request can fan out to (the list only ever shows the 10 newest, so a
+    /// well-behaved client sends at most that many).
+    fn ids(&self) -> Vec<i64> {
+        let mut out: Vec<i64> = Vec::new();
+        for tok in self.backup_ids.split(',') {
+            if let Ok(n) = tok.trim().parse::<i64>() {
+                if n > 0 && !out.contains(&n) {
+                    out.push(n);
+                }
+            }
+            if out.len() >= 100 {
+                break;
+            }
+        }
+        out
+    }
+}
+
+/// POST /hostings/backups/delete-bulk — delete several backup runs (+ their
+/// archive files) in one request. Same authorization and owner-dispatch as the
+/// single delete; each id is deleted on the owning node, which re-checks that
+/// the id belongs to `sel`, so authorizing the selector here and forwarding a
+/// bare list can't reach another site's backups.
+pub async fn post_backup_delete_bulk(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<BackupDeleteBulkForm>,
+) -> Result<Response, AppError> {
+    let sel = match require_manage_for_selector(&state, &ctx, &form.selector, Capability::BackupRun)
+        .await
+    {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
+    let sel_url = urlencoding(&form.selector);
+    let ids = form.ids();
+    if ids.is_empty() {
+        // Nothing ticked (or a stale form) — no-op back to the list.
+        return Ok(Redirect::to(&format!("/hostings/{sel_url}#backups")).into_response());
+    }
+    let target_owned: Option<String> = find_hosting_anywhere(&state, sel.clone())
+        .await
+        .ok()
+        .and_then(|(_d, n)| n);
+
+    let mut deleted = 0usize;
+    let mut failed = 0usize;
+    let mut first_error: Option<String> = None;
+    for backup_id in ids {
+        let resp = crate::dispatcher::dispatch_to_node(
+            &state,
+            target_owned.as_deref(),
+            Request::BackupDelete {
+                sel: sel.clone(),
+                backup_id,
+            },
+        )
+        .await;
+        match resp {
+            Ok(RpcResponse::BackupDelete) => deleted += 1,
+            Ok(RpcResponse::Error(e)) => {
+                failed += 1;
+                first_error.get_or_insert_with(|| e.to_string());
+            }
+            Ok(_) => {
+                failed += 1;
+                first_error.get_or_insert_with(|| "unexpected response".into());
+            }
+            Err(e) => {
+                failed += 1;
+                first_error.get_or_insert_with(|| e.to_string());
+            }
+        }
+    }
+
+    // All failed → an error flash carrying the first reason (usually "backup is
+    // still running"). Otherwise a success summary that also notes any skips.
+    if deleted == 0 {
+        let msg = first_error.unwrap_or_else(|| "no archives were deleted".into());
+        return Ok(Redirect::to(&format!(
+            "/hostings/{sel_url}?backup_error={}#backups",
+            urlencoding(&msg)
+        ))
+        .into_response());
+    }
+    let mut summary = format!(
+        "{deleted} archive{} deleted",
+        if deleted == 1 { "" } else { "s" }
+    );
+    if failed > 0 {
+        summary.push_str(&format!(
+            " · {failed} skipped ({})",
+            first_error.unwrap_or_default()
+        ));
+    }
+    Ok(Redirect::to(&format!(
+        "/hostings/{sel_url}?backup_deleted={}#backups",
+        urlencoding(&summary)
+    ))
+    .into_response())
 }
 
 #[derive(Deserialize)]
@@ -11965,6 +12091,38 @@ async fn run_wp_staging_push_job(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn bulk(ids: &str) -> Vec<i64> {
+        BackupDeleteBulkForm {
+            selector: "s".into(),
+            backup_ids: ids.into(),
+        }
+        .ids()
+    }
+
+    #[test]
+    fn bulk_backup_ids_parses_dedupes_and_rejects_garbage() {
+        // Ordinary case: three ids, order preserved.
+        assert_eq!(bulk("3,1,2"), vec![3, 1, 2]);
+        // Whitespace tolerated (the field is joined client-side but be lenient).
+        assert_eq!(bulk(" 5 , 6 "), vec![5, 6]);
+        // Duplicates collapse — a doubled id must not delete-twice / miscount.
+        assert_eq!(bulk("4,4,4"), vec![4]);
+        // Non-numeric / non-positive fragments are dropped, not errors.
+        assert_eq!(bulk("7,abc,,-1,0,8"), vec![7, 8]);
+        // Empty field (nothing ticked) yields nothing — the handler no-ops.
+        assert!(bulk("").is_empty());
+    }
+
+    #[test]
+    fn bulk_backup_ids_are_capped() {
+        // A tampered POST can't fan out unbounded RPCs.
+        let many: String = (1..=500)
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        assert_eq!(bulk(&many).len(), 100);
+    }
 
     /// The cluster lookup takes the FIRST node that answers, and the same
     /// answer picks the node every later RPC is dispatched to. A node that

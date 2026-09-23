@@ -3536,6 +3536,80 @@
     writes the files <strong>over</strong> the site (files added since stay) and replaces the database.
     <em>Download</em> gets the files archive only.
   </p>
+  {# Bulk delete. The form + button sit OUTSIDE the live region below so their
+     handlers survive its 15s re-render; the row checkboxes inside the table are
+     read fresh on every click. axum's urlencoded Form can't gather repeated
+     fields into a Vec, so the button joins the checked ids into one hidden
+     field that the handler splits. #}
+  {% if !backups.is_empty() %}
+  <form id="bulk-backup-form" method="post" action="/hostings/backups/delete-bulk"
+        data-confirm-title="Delete selected archives"
+        data-confirm-body="The selected archives are removed from this node's disk. An off-site copy of any of them, if there is one, is not touched. This cannot be undone."
+        data-confirm-confirm-label="Delete selected"
+        data-confirm-variant="danger"
+        style="display:flex;align-items:center;gap:0.6rem;margin:0 0 0.6rem">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
+    <input type="hidden" name="backup_ids" id="bulk-backup-ids" value="">
+    <button type="button" class="btn small danger" id="bulk-backup-delete-btn" disabled
+            onclick="hyBulkBackupSubmit()">Delete selected</button>
+    <span class="text-soft small" id="bulk-backup-count">none selected</span>
+  </form>
+  <script>
+    // Bound once on page load, delegated on document so it keeps working after
+    // the #backups-live region re-renders (which drops any listener inside it).
+    (function () {
+      if (window.__hyBulkBackupBound) return;
+      window.__hyBulkBackupBound = true;
+      function checked() {
+        return Array.prototype.slice.call(
+          document.querySelectorAll('.bulk-backup-row:checked'));
+      }
+      function sync() {
+        var n = checked().length;
+        var btn = document.getElementById('bulk-backup-delete-btn');
+        var lbl = document.getElementById('bulk-backup-count');
+        if (btn) btn.disabled = n === 0;
+        if (lbl) lbl.textContent = n === 0 ? 'none selected'
+          : (n + ' selected');
+        var all = document.getElementById('bulk-backup-all');
+        var rows = document.querySelectorAll('.bulk-backup-row');
+        if (all) {
+          all.checked = rows.length > 0 && n === rows.length;
+          all.indeterminate = n > 0 && n < rows.length;
+        }
+      }
+      document.addEventListener('change', function (e) {
+        var t = e.target;
+        if (t && t.id === 'bulk-backup-all') {
+          document.querySelectorAll('.bulk-backup-row').forEach(function (c) {
+            c.checked = t.checked;
+          });
+          sync();
+        } else if (t && t.classList && t.classList.contains('bulk-backup-row')) {
+          sync();
+        }
+      });
+      window.hyBulkBackupSubmit = function () {
+        var ids = checked().map(function (c) { return c.value; });
+        if (!ids.length) return;
+        document.getElementById('bulk-backup-ids').value = ids.join(',');
+        var f = document.getElementById('bulk-backup-form');
+        f.dataset.confirmTitle = 'Delete ' + ids.length + ' archive'
+          + (ids.length === 1 ? '' : 's');
+        f.requestSubmit();
+      };
+      // The region re-renders on a timer, resetting checkbox state; re-sync so
+      // the button/label match what's actually ticked after each render.
+      document.addEventListener('htmx:afterSwap', sync);
+      var live = document.getElementById('backups-live');
+      if (live && window.MutationObserver) {
+        new MutationObserver(sync).observe(live, { childList: true, subtree: true });
+      }
+      sync();
+    })();
+  </script>
+  {% endif %}
   {# Live region: a running backup flips to ok, and a backup started from the
      job progress page shows up on return — no F5. Driver in base.html. The
      refresh re-renders only this region from the full page, and nothing in it
@@ -3547,6 +3621,7 @@
     <div class="table-wrap" style="border-top:1px solid var(--border)">
       <table>
         <thead><tr>
+          <th style="width:1px;padding-right:0"><input type="checkbox" id="bulk-backup-all" aria-label="Select all archives"></th>
           <th>Started</th><th>State</th>
           <th>Off-site</th>
           <th class="right">Size</th><th>Archive</th><th class="right">Actions</th>
@@ -3554,6 +3629,9 @@
         <tbody>
         {% for b in backups %}
           <tr>
+            <td style="padding-right:0">
+              {% if b.state != "running" %}<input type="checkbox" class="bulk-backup-row" value="{{ b.id }}" aria-label="Select this archive">{% endif %}
+            </td>
             <td class="muted numeric" title="{{ b.started_at }}">{{ crate::handlers::stats::fmt_ago(b.started_at) }}</td>
             <td>
               {% if b.state == "ok" %}<span class="pill ok">{{ b.state }}</span>
