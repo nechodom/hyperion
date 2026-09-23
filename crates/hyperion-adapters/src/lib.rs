@@ -30,6 +30,7 @@ pub mod perf;
 pub mod phpfpm;
 pub mod postfix;
 pub mod postgres;
+pub mod regguard;
 pub mod restic;
 pub mod rollback;
 pub mod sitecheck;

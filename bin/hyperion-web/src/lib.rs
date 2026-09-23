@@ -744,6 +744,14 @@ pub fn build_router(state: SharedState) -> Router {
             get(handlers::hostings::get_gitsync_panel),
         )
         .route(
+            "/hostings/:selector/regguard-panel",
+            get(handlers::hostings::get_regguard_panel),
+        )
+        .route(
+            "/hostings/regguard",
+            post(handlers::hostings::post_regguard),
+        )
+        .route(
             "/hostings/gitsync/config",
             post(handlers::hostings::post_gitsync_config),
         )

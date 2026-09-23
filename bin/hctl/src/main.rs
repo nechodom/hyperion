@@ -757,6 +757,12 @@ fn print_pretty(resp: &Response) {
             );
             println!("  redis_password_set  = {}", e.redis_password_set);
         }
+        Response::RegGuardView(v) | Response::RegGuardSet(v) => {
+            println!("✓ registration spam guard");
+            println!("  enabled     = {}", v.enabled);
+            println!("  installed   = {}", v.installed);
+            println!("  is_wordpress= {}", v.is_wordpress);
+        }
         Response::HostingRotateWpDebugLog => println!("✓ debug.log rotated"),
         Response::NotificationsFeed(f) => {
             println!("unread total: {}", f.unread_total);

@@ -215,6 +215,16 @@ pub enum Request {
         sel: HostingSelector,
         enabled: bool,
     },
+    /// Read the registration spam guard state for one hosting (owning node).
+    RegGuardView {
+        sel: HostingSelector,
+    },
+    /// Turn the registration spam guard on or off for one hosting. On enable,
+    /// writes the must-use plugin; on disable, removes it. Owning node.
+    RegGuardSet {
+        sel: HostingSelector,
+        enabled: bool,
+    },
     HostingRotateRedisPassword {
         sel: HostingSelector,
     },
@@ -1843,6 +1853,8 @@ pub enum Response {
     HostingSetAliases(hyperion_types::HostingDetail),
     HostingSetWpDebug(hyperion_types::WpExtras),
     HostingSetRedis(hyperion_types::WpExtras),
+    RegGuardView(hyperion_types::regguard::RegGuardView),
+    RegGuardSet(hyperion_types::regguard::RegGuardView),
     HostingRotateRedisPassword(hyperion_types::WpExtras),
     HostingRotateWpDebugLog,
     HostingUsage(Vec<HostingUsageBucket>),
