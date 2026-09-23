@@ -3163,3 +3163,160 @@ exit 0"#,
          migration, and that `bash -n` cannot see.\n--- stderr ---\n{stderr}\n--- stdout ---\n{stdout}"
     );
 }
+
+/// `PATCH /api/v1/hostings/:id/vhost` must honour the same raw-nginx gate the
+/// browser handler enforces: the snippet is spliced verbatim into a config
+/// root loads, so CHANGING it needs `HostingEditNginxRaw` on top of the
+/// `HostingEditConfig` that carries the rest of the vhost knobs. A key holding
+/// only `HostingEditConfig` is refused when it tries to set the snippet, but
+/// can still flip the other options. Regression guard for a WAF-audit finding
+/// where the API forwarded `body.options` wholesale, bypassing the admin gate.
+#[tokio::test]
+async fn api_v1_patch_vhost_snippet_needs_nginx_raw_cap() {
+    use hyperion_rpc::codec::{Request as RpcReq, Response as RpcResp};
+    use hyperion_state::capabilities::Capability;
+
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d) = start_agent().await;
+    let app = build_app(sock.clone(), admin);
+
+    // Create a hosting to patch (via the admin session + form, like the other
+    // e2e cases). Its stored snippet starts empty.
+    let login_body = b"username=kevin&password=good-pw&next=/";
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/login")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(login_body.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    let cookie = extract_cookie(&resp);
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/hostings/new")
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    let csrf = extract_csrf(&body_string(resp).await);
+    let create_body =
+        format!("_csrf={csrf}&domain=vhost-authz.cz&aliases=&php=8.3&db=mariadb&system_user=");
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/hostings")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header(header::COOKIE, &cookie)
+                .body(Body::from(create_body))
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    assert_eq!(resp.status(), StatusCode::OK, "hosting created");
+
+    // A real web_users row for the api_keys FK (bootstrap admin isn't a row).
+    let owner_id = match hyperion_rpc_client::call(
+        &sock,
+        RpcReq::WebUserCreate {
+            username: "vhost-authz-owner".into(),
+            email: "vhost-authz-owner@example.invalid".into(),
+            password: "owner-pw-1".into(),
+            role: "admin".into(),
+        },
+    )
+    .await
+    .expect("create owner")
+    {
+        RpcResp::WebUserCreate { id } => id,
+        other => panic!("unexpected create response: {other:?}"),
+    };
+
+    // Mint a key with HostingEditConfig ONLY (no HostingEditNginxRaw).
+    let edit_config = Capability::HostingEditConfig.bit();
+    let key = match hyperion_rpc_client::call(
+        &sock,
+        RpcReq::ApiKeyCreate {
+            label: "ci-editconfig".into(),
+            owner_user_id: owner_id,
+            caps: edit_config,
+            scope_all: true,
+            expires_at: None,
+            ip_allowlist: vec![],
+            rate_limit_per_min: 0,
+        },
+    )
+    .await
+    .expect("create key")
+    {
+        RpcResp::ApiKeyCreated(c) => c.raw_key,
+        other => panic!("unexpected: {other:?}"),
+    };
+
+    // 1. Changing the raw nginx snippet is refused — the admin-only cap gate.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PATCH)
+                .uri("/api/v1/hostings/vhost-authz.cz/vhost")
+                .header(header::AUTHORIZATION, format!("Bearer {key}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"custom_nginx_snippet":"location /pwn { deny all; }"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "EditConfig-only key must NOT change the raw nginx snippet via the API",
+    );
+    let body = body_string(resp).await;
+    assert!(
+        body.contains("hosting_edit_nginx_raw"),
+        "403 names the missing capability: {body}",
+    );
+
+    // 2. The same key CAN change other vhost options (snippet left at its
+    //    stored empty value). The handler returns the applied VhostOptions.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PATCH)
+                .uri("/api/v1/hostings/vhost-authz.cz/vhost")
+                .header(header::AUTHORIZATION, format!("Bearer {key}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"waf_enabled":true}"#))
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "EditConfig-only key CAN change non-snippet vhost options",
+    );
+    let body = body_string(resp).await;
+    assert!(
+        body.contains("\"waf_enabled\":true"),
+        "the non-snippet change was applied: {body}",
+    );
+    assert!(
+        body.contains("\"custom_nginx_snippet\":\"\""),
+        "the snippet stayed at its stored empty value: {body}",
+    );
+}
