@@ -3268,5 +3268,8 @@ async fn bulk_action_multi_select_does_not_422() {
         .expect("redirect")
         .to_str()
         .expect("ascii");
-    assert!(loc.starts_with("/jobs/"), "expected a job redirect, got {loc}");
+    assert!(
+        loc.starts_with("/jobs/"),
+        "expected a job redirect, got {loc}"
+    );
 }
