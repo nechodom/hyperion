@@ -2053,6 +2053,21 @@ mod tests {
         );
     }
 
+    /// A `From:` header: an encoded display name followed by the plain
+    /// `<address>`. The whole thing was showing raw in the site-mail list
+    /// because only `subject` was decoded; the address part must survive
+    /// untouched (it carries no encoded word).
+    #[test]
+    fn decodes_a_from_display_name_and_keeps_the_address() {
+        assert_eq!(
+            decode_mime_header(
+                "=?UTF-8?Q?Centrum_SRD=C3=8D=C4=8CKO_Litom=C4=9B=C5=99ice?= \
+                 <wordpress@centrumsrdicko.cz>"
+            ),
+            "Centrum SRDÍČKO Litoměřice <wordpress@centrumsrdicko.cz>"
+        );
+    }
+
     /// The exact line shape `site-mail-wrapper.sh` writes must parse.
     ///
     /// It did not, for the whole life of the feature: the wrapper emits
