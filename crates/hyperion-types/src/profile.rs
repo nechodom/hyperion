@@ -70,10 +70,18 @@ pub struct HostingProfile {
     #[serde(default)]
     pub mem_limit_mib: Option<i64>,
     /// Recurring-backup cadence seeded onto a hosting at apply (into hosting_kv
-    /// `backup_cadence`): "off" (default) | "daily" | "weekly" | "monthly".
-    /// The per-node scheduled-backup driver reads the per-hosting value.
+    /// `backup_cadence`): "off" (default) | "daily" | "weekly" | "monthly" |
+    /// "custom". The per-node scheduled-backup driver reads the per-hosting value.
     #[serde(default)]
     pub backup_cadence: String,
+    /// Custom backup period in days, used when `backup_cadence == "custom"`.
+    #[serde(default)]
+    pub backup_interval_days: i64,
+    /// Retention overrides seeded onto the hosting (0 = node-wide default).
+    #[serde(default)]
+    pub backup_keep_days: i64,
+    #[serde(default)]
+    pub backup_keep_last: i64,
     /// How many hostings are currently on this profile (rows in
     /// `hosting_profile_apply`). Computed at list/get time — drives the
     /// "in use: N" badge, the "re-apply to N sites" action, and the
@@ -168,9 +176,18 @@ pub struct ProfileInput {
     pub disk_soft_mb: Option<i64>,
     #[serde(default)]
     pub mem_limit_mib: Option<i64>,
-    /// See `HostingProfile::backup_cadence` ("off"|"daily"|"weekly"|"monthly").
+    /// See `HostingProfile::backup_cadence` ("off"|"daily"|"weekly"|"monthly"|"custom").
     #[serde(default)]
     pub backup_cadence: String,
+    /// Custom backup period in days, used when `backup_cadence == "custom"`.
+    #[serde(default)]
+    pub backup_interval_days: i64,
+    /// Retention overrides seeded onto the hosting (0 = node-wide default):
+    /// keep archives this many days / keep at least this many per hosting.
+    #[serde(default)]
+    pub backup_keep_days: i64,
+    #[serde(default)]
+    pub backup_keep_last: i64,
 }
 
 /// One row in the WordPress asset library — operator-uploaded
