@@ -718,7 +718,11 @@
   </div>
 </div>
 
-{# Deploy from GitHub — lazy, reads the owning node. #}
+{# Deploy from GitHub — lazy, reads the owning node. Hidden on WordPress: a
+   deploy is a `git reset --hard` mirror of the whole webroot, which would wipe
+   wp-content/uploads and the DB isn't in git anyway — it's for code-deployed
+   sites, not a content-managed WordPress. #}
+{% if wp_status.is_none() %}
 <div id="gitsync-panel"
      hx-get="/hostings/{{ detail.id.as_str() }}/gitsync-panel"
      hx-trigger="intersect once"
@@ -728,6 +732,7 @@
     <span class="text-soft small">Reading deploy settings…</span>
   </div>
 </div>
+{% endif %}
 
 {# Security at a glance — the controls are spread across tabs (WAF on
    Settings, bans on Settings, updates on WordPress); this card is the
