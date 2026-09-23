@@ -6551,10 +6551,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             }
         };
         let retention = BackupRetention {
-            max_age_days: over("backup_keep_days")
+            max_age_days: over(BACKUP_KV_KEEP_DAYS)
                 .await
                 .unwrap_or(global.max_age_days),
-            keep_latest_n: over("backup_keep_last")
+            keep_latest_n: over(BACKUP_KV_KEEP_LAST)
                 .await
                 .unwrap_or(global.keep_latest_n),
         };
@@ -15372,7 +15372,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 match hyperion_state::hosting_kv::get(
                     &self.pool,
                     h.id.as_str(),
-                    "backup_interval_days",
+                    BACKUP_KV_INTERVAL_DAYS,
                 )
                 .await
                 .ok()
@@ -15668,9 +15668,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // Written every apply, 0 included, so dropping them on the profile and
         // re-applying reverts a site to the presets / the node-wide rule.
         for (k, v) in [
-            ("backup_interval_days", p.backup_interval_days),
-            ("backup_keep_days", p.backup_keep_days),
-            ("backup_keep_last", p.backup_keep_last),
+            (BACKUP_KV_INTERVAL_DAYS, p.backup_interval_days),
+            (BACKUP_KV_KEEP_DAYS, p.backup_keep_days),
+            (BACKUP_KV_KEEP_LAST, p.backup_keep_last),
         ] {
             let _ = hyperion_state::hosting_kv::set(
                 &self.pool,
@@ -16665,6 +16665,15 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             monitoring: toggle_of(prior.monitoring),
             hardening: toggle_of(prior.hardening),
             backup_cadence: prior.backup_cadence.unwrap_or_default(),
+            // The custom period + retention ride with the cadence above: a
+            // non-`Leave` prior cadence re-opens the backup block in
+            // `package_push_features`, which writes these back; a `Leave`
+            // prior (the package never forced backups, or the fold below
+            // blanks it) closes it and leaves them untouched. `None` from an
+            // older row reads as 0, the same "no opinion" the site stores.
+            backup_interval_days: prior.backup_interval_days.unwrap_or(0),
+            backup_keep_days: prior.backup_keep_days.unwrap_or(0),
+            backup_keep_last: prior.backup_keep_last.unwrap_or(0),
             // `Leave` is the ONLY correct value here, and not because there
             // is nothing captured to restore: the report cadence is never
             // written to the site at all. It is derived live from the
@@ -16838,6 +16847,22 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// compares against it so it only writes where something moved.
     async fn package_live_state(&self, detail: &HostingDetail) -> LiveFeatureState {
         let id = detail.id.as_str();
+        // The custom period + the two retention overrides, read straight off
+        // the kv the profile/care-package apply seeds and the scheduler/prune
+        // sweep reads. Absent or unparseable is 0 ("no opinion"), never a
+        // guess — a wrong prior would be faithfully restored on cancel.
+        let kv_num = |key: &'static str| {
+            let pool = self.pool.clone();
+            let id = id.to_string();
+            async move {
+                hyperion_state::hosting_kv::get(&pool, &id, key)
+                    .await
+                    .ok()
+                    .flatten()
+                    .and_then(|v| v.trim().parse::<i64>().ok())
+                    .unwrap_or(0)
+            }
+        };
         LiveFeatureState {
             wp_auto_update: self.wp_auto_update_enabled(id).await,
             integrity_scan: self.integrity_scan_enabled(id).await,
@@ -16855,6 +16880,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 Ok(Some(v)) => BackupCadence::from_stored(canonical_backup_cadence(&v)),
                 _ => BackupCadence::Off,
             },
+            backup_interval_days: kv_num(BACKUP_KV_INTERVAL_DAYS).await,
+            backup_keep_days: kv_num(BACKUP_KV_KEEP_DAYS).await,
+            backup_keep_last: kv_num(BACKUP_KV_KEEP_LAST).await,
         }
     }
 
@@ -16940,6 +16968,13 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 );
             }
         }
+        // Backups: the cadence, and — only when the package speaks about
+        // backups at all (`kv_value()` is `Some` iff the cadence is not
+        // `Leave`) — the custom period and the two retention overrides that
+        // ride with it. A package that leaves backups alone writes none of
+        // these, so it never disturbs another package's schedule or history.
+        // Each value is asserted independently so the audit names exactly what
+        // drifted, and so a `custom` cadence and its interval both land.
         if let Some(cadence) = want.backup_cadence.kv_value() {
             if cadence != live.backup_cadence.as_str() {
                 let r = self
@@ -16953,6 +16988,40 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     cadence,
                     r,
                 );
+            }
+            for (key, feature, want_n, live_n) in [
+                (
+                    BACKUP_KV_INTERVAL_DAYS,
+                    "backup_interval_days",
+                    want.backup_interval_days,
+                    live.backup_interval_days,
+                ),
+                (
+                    BACKUP_KV_KEEP_DAYS,
+                    "backup_keep_days",
+                    want.backup_keep_days,
+                    live.backup_keep_days,
+                ),
+                (
+                    BACKUP_KV_KEEP_LAST,
+                    "backup_keep_last",
+                    want.backup_keep_last,
+                    live.backup_keep_last,
+                ),
+            ] {
+                if want_n != live_n {
+                    let r = self
+                        .hosting_kv_set(id.to_string(), key.into(), want_n.to_string())
+                        .await;
+                    push_change(
+                        &mut changed,
+                        detail,
+                        feature,
+                        &live_n.to_string(),
+                        &want_n.to_string(),
+                        r,
+                    );
+                }
             }
         }
         changed
@@ -28566,6 +28635,13 @@ fn validate_package(mut p: PackageInput) -> Result<PackageInput, RpcError> {
         });
     }
     p.check_items = validate_check_items(&p.check_items)?;
+    // Custom backup period + retention overrides, same bounds as a profile
+    // (migration 070): the scheduler only honours a 1..=365 interval, and
+    // the retention clamps stop a pasted number from becoming an absurd
+    // cutoff. 0 stays 0 — "no opinion", the preset schedule / node rule.
+    p.features.backup_interval_days = p.features.backup_interval_days.clamp(0, 365);
+    p.features.backup_keep_days = p.features.backup_keep_days.clamp(0, 36_500);
+    p.features.backup_keep_last = p.features.backup_keep_last.clamp(0, 1_000);
     Ok(p)
 }
 
@@ -34127,8 +34203,18 @@ const QUOTA_KV_ACTION: &str = "quota_exceed_action";
 /// `hosting_kv` key: de-dup state for the enforce loop ("ok"|"over"|"suspended").
 const QUOTA_KV_STATE: &str = "quota_exceed_state";
 /// `hosting_kv` key: per-hosting recurring-backup cadence
-/// ("off"|"daily"|"weekly"|"monthly"); seeded from the profile at apply.
+/// ("off"|"daily"|"weekly"|"monthly"|"custom"); seeded from a profile or a
+/// care package at apply/enforce time.
 const BACKUP_KV_CADENCE: &str = "backup_cadence";
+/// `hosting_kv` key: custom backup period in days, read only when
+/// [`BACKUP_KV_CADENCE`] is "custom" (1..=365). Seeded by a profile
+/// (migration 070) or a care package (071); 0/absent = not due.
+const BACKUP_KV_INTERVAL_DAYS: &str = "backup_interval_days";
+/// `hosting_kv` keys: per-hosting retention overrides read at prune time —
+/// keep archives this many days / keep at least this many. > 0 overrides the
+/// node-wide `[backup_retention]` rule; 0/absent = fall back to it.
+const BACKUP_KV_KEEP_DAYS: &str = "backup_keep_days";
+const BACKUP_KV_KEEP_LAST: &str = "backup_keep_last";
 /// `hosting_kv` key: unix-secs of the last successful scheduled backup.
 const BACKUP_KV_LAST_RUN: &str = "backup_last_run_at";
 /// `hosting_kv` key: the ONE off-site target this hosting's backups go to,
@@ -42645,6 +42731,105 @@ mod tests {
             kv_of(&pool, &hid, "wp_auto_update").await.as_deref(),
             Some("on"),
             "a double cancel must not replay the restore"
+        );
+    }
+
+    /// A care package that sells a CUSTOM schedule + retention seeds all four
+    /// kv keys on activate, captures the site's prior values, and puts them
+    /// back on cancel — the same contract profiles got in migration 070, but
+    /// enforced continuously and restore-aware.
+    #[tokio::test]
+    async fn custom_cadence_and_retention_apply_and_restore() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), package_mocks());
+        let detail = hosting_for_packages(&s, "example.cz").await;
+        let hid = detail.id.as_str().to_string();
+        // What the customer had before buying: a weekly schedule and a
+        // 14-day retention floor they set themselves; no keep-last override.
+        s.hosting_kv_set(hid.clone(), BACKUP_KV_CADENCE.into(), "weekly".into())
+            .await
+            .expect("seed cadence");
+        s.hosting_kv_set(hid.clone(), BACKUP_KV_KEEP_DAYS.into(), "14".into())
+            .await
+            .expect("seed keep_days");
+
+        let def = s
+            .package_create(care_input(
+                "Zálohy Pro",
+                PackageFeatures {
+                    backup_cadence: BackupCadence::Custom,
+                    backup_interval_days: 3,
+                    backup_keep_days: 90,
+                    backup_keep_last: 8,
+                    ..Default::default()
+                },
+            ))
+            .await
+            .expect("define");
+        let sel = HostingSelector::Id(detail.id.clone());
+        let act = s
+            .package_activate(sel.clone(), def.id, None)
+            .await
+            .expect("activate");
+
+        // All four keys are seeded — this is exactly what the scheduler and
+        // the prune sweep read.
+        assert_eq!(
+            kv_of(&pool, &hid, BACKUP_KV_CADENCE).await.as_deref(),
+            Some("custom")
+        );
+        assert_eq!(
+            kv_of(&pool, &hid, BACKUP_KV_INTERVAL_DAYS).await.as_deref(),
+            Some("3")
+        );
+        assert_eq!(
+            kv_of(&pool, &hid, BACKUP_KV_KEEP_DAYS).await.as_deref(),
+            Some("90")
+        );
+        assert_eq!(
+            kv_of(&pool, &hid, BACKUP_KV_KEEP_LAST).await.as_deref(),
+            Some("8")
+        );
+
+        // Prior state carries the site's values, captured because the package
+        // forces backups — so a cancel can put every one of them back.
+        let prior: PackagePriorState =
+            serde_json::from_str(&act.prior_state_json.expect("captured")).expect("de");
+        assert_eq!(prior.backup_cadence, Some(BackupCadence::Weekly));
+        assert_eq!(prior.backup_interval_days, Some(0));
+        assert_eq!(prior.backup_keep_days, Some(14));
+        assert_eq!(prior.backup_keep_last, Some(0));
+
+        // Someone weakens the retention by hand; the drift tick puts it back
+        // and touches nothing else.
+        s.hosting_kv_set(hid.clone(), BACKUP_KV_KEEP_DAYS.into(), "5".into())
+            .await
+            .expect("drift");
+        assert_eq!(s.package_enforce_tick().await.expect("tick"), 1);
+        assert_eq!(
+            kv_of(&pool, &hid, BACKUP_KV_KEEP_DAYS).await.as_deref(),
+            Some("90"),
+            "the tick re-asserts the paid retention"
+        );
+
+        // Cancel restores the site to exactly what it had before.
+        s.package_cancel(sel, act.id).await.expect("cancel");
+        assert_eq!(
+            kv_of(&pool, &hid, BACKUP_KV_CADENCE).await.as_deref(),
+            Some("weekly")
+        );
+        assert_eq!(
+            kv_of(&pool, &hid, BACKUP_KV_INTERVAL_DAYS).await.as_deref(),
+            Some("0")
+        );
+        assert_eq!(
+            kv_of(&pool, &hid, BACKUP_KV_KEEP_DAYS).await.as_deref(),
+            Some("14"),
+            "the customer's own retention comes back, not the package's"
+        );
+        assert_eq!(
+            kv_of(&pool, &hid, BACKUP_KV_KEEP_LAST).await.as_deref(),
+            Some("0")
         );
     }
 

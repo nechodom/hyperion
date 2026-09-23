@@ -167,6 +167,18 @@ pub struct PackageForm {
     pub feat_hardening: String,
     #[serde(default)]
     pub feat_backup_cadence: String,
+    /// Custom backup period in days (used when the cadence is "custom") and
+    /// the two retention overrides. `Option`, like the cadence below and for
+    /// the same reason: an older cached form that does not carry them must
+    /// leave the stored values alone, not silently reset a site to the
+    /// node-wide schedule / retention. Blank or unparseable ⇒ 0 ("no
+    /// opinion"); the service clamps the range.
+    #[serde(default)]
+    pub feat_backup_interval_days: Option<String>,
+    #[serde(default)]
+    pub feat_backup_keep_days: Option<String>,
+    #[serde(default)]
+    pub feat_backup_keep_last: Option<String>,
     /// The care-report cadence. `Option`, not `String`, and the
     /// distinction is load-bearing: `None` means the FORM did not carry
     /// the field at all. `packages.html` posts it today, but an older
@@ -321,6 +333,7 @@ impl PackageForm {
         current: Option<ReportCadence>,
         current_lang: Option<&str>,
         current_items: Option<&str>,
+        current_backup: Option<(i64, i64, i64)>,
     ) -> Result<PackageInput, AppError> {
         let price_minor = parse_price_major(&self.price_major)?;
         let currency = self.price_currency.trim().to_string();
@@ -356,6 +369,16 @@ impl PackageForm {
             }
             None => current_items.unwrap_or_default().to_string(),
         };
+        // Absent field = leave what is stored (older cached form); present =
+        // take it, blank/unparseable folding to 0. The service clamps the
+        // range, so this only has to decide carry-over vs. overwrite.
+        let (cur_iv, cur_kd, cur_kl) = current_backup.unwrap_or((0, 0, 0));
+        let num = |field: &Option<String>, cur: i64| -> i64 {
+            match field.as_deref() {
+                Some(s) => s.trim().parse::<i64>().unwrap_or(0),
+                None => cur,
+            }
+        };
         Ok(PackageInput {
             name: self.name.trim().to_string(),
             slug: self.slug.trim().to_string(),
@@ -372,6 +395,9 @@ impl PackageForm {
                 monitoring: FeatureToggle::from_stored(&self.feat_monitoring),
                 hardening: FeatureToggle::from_stored(&self.feat_hardening),
                 backup_cadence: BackupCadence::from_stored(&self.feat_backup_cadence),
+                backup_interval_days: num(&self.feat_backup_interval_days, cur_iv),
+                backup_keep_days: num(&self.feat_backup_keep_days, cur_kd),
+                backup_keep_last: num(&self.feat_backup_keep_last, cur_kl),
                 report_cadence,
             },
         })
@@ -386,7 +412,7 @@ pub async fn post_create(
     if !ctx.can(Capability::ProfilesManage) {
         return Err(AppError::Forbidden);
     }
-    let input = form.into_input(None, None, None)?;
+    let input = form.into_input(None, None, None, None)?;
     match hyperion_rpc_client::call(&state.agent_socket, Request::PackageCreate(input)).await? {
         RpcResponse::PackageCreate(p) => Ok(redirect_flash(&format!(
             "Package \"{}\" created. Activate it on a hosting from that site's detail page.",
@@ -410,17 +436,27 @@ pub async fn post_update(
     // incoming form might not post back — see
     // `PackageForm::feat_report_cadence` for why absent must not mean
     // "leave".
-    let (current, current_lang, current_items) =
+    let (current, current_lang, current_items, current_backup) =
         match hyperion_rpc_client::call(&state.agent_socket, Request::PackageGet { id }).await? {
             RpcResponse::PackageGet(p) => (
                 Some(p.features.report_cadence),
                 p.letters_lang,
                 p.check_items,
+                (
+                    p.features.backup_interval_days,
+                    p.features.backup_keep_days,
+                    p.features.backup_keep_last,
+                ),
             ),
             RpcResponse::Error(e) => return Ok(redirect_error(&e.to_string())),
             _ => return Err(AppError::Internal("unexpected response".into())),
         };
-    let input = form.into_input(current, Some(&current_lang), Some(&current_items))?;
+    let input = form.into_input(
+        current,
+        Some(&current_lang),
+        Some(&current_items),
+        Some(current_backup),
+    )?;
     match hyperion_rpc_client::call(&state.agent_socket, Request::PackageUpdate { id, input })
         .await?
     {
@@ -1311,12 +1347,29 @@ fn included_features(f: &PackageFeatures, live: Option<&LiveFeatureState>) -> Ve
             Some(c) if c.as_str() == want => ("active", String::new()),
             Some(c) => ("inactive", format!("currently {}", c.as_str())),
         };
-        out.push(IncludedFeature {
-            label: if want == "off" {
-                "Automatic backups switched off".into()
-            } else {
-                format!("Automatic backups — {want}")
+        // Say what was actually bought: "every 3 days", not the bare word
+        // "custom", and note a retention promise when the package carries one.
+        let cadence_phrase = match f.backup_cadence {
+            BackupCadence::Custom => match f.backup_interval_days {
+                1 => "every day".to_string(),
+                n if n > 0 => format!("every {n} days"),
+                _ => "custom".to_string(),
             },
+            _ => want.to_string(),
+        };
+        let label = if want == "off" {
+            "Automatic backups switched off".into()
+        } else {
+            let mut l = format!("Automatic backups — {cadence_phrase}");
+            match (f.backup_keep_days, f.backup_keep_last) {
+                (d, _) if d > 0 => l.push_str(&format!(", kept {d} days")),
+                (_, n) if n > 0 => l.push_str(&format!(", keeping the last {n}")),
+                _ => {}
+            }
+            l
+        };
+        out.push(IncludedFeature {
+            label,
             detail: "A full copy of the files and the database is taken on \
                      that cadence and kept, so a bad update or a broken \
                      plugin is an hour's problem rather than a lost site.",
@@ -1484,8 +1537,15 @@ async fn live_feature_state(
         Some("daily") => BackupCadence::Daily,
         Some("weekly") => BackupCadence::Weekly,
         Some("monthly") => BackupCadence::Monthly,
+        Some("custom") => BackupCadence::Custom,
         _ => BackupCadence::Off,
     };
+    // The custom period + retention overrides the site currently carries;
+    // absent or unparseable is 0 ("no opinion"), matching the service side.
+    let num = |key: &str| value(key).and_then(|v| v.parse::<i64>().ok()).unwrap_or(0);
+    let backup_interval_days = num("backup_interval_days");
+    let backup_keep_days = num("backup_keep_days");
+    let backup_keep_last = num("backup_keep_last");
     // A hosting with no monitor row is not being monitored, and a missing
     // row is exactly what MonitorGet answers with NotFound — so anything
     // other than a config that says enabled reads as off.
@@ -1505,6 +1565,9 @@ async fn live_feature_state(
         monitoring,
         hardening: detail.vhost_options.waf_enabled,
         backup_cadence,
+        backup_interval_days,
+        backup_keep_days,
+        backup_keep_last,
     })
 }
 
@@ -1611,6 +1674,9 @@ mod tests {
             monitoring,
             hardening: false,
             backup_cadence: cadence,
+            backup_interval_days: 0,
+            backup_keep_days: 0,
+            backup_keep_last: 0,
         }
     }
 
@@ -1787,6 +1853,9 @@ mod tests {
             feat_monitoring: "leave".into(),
             feat_hardening: "leave".into(),
             feat_backup_cadence: "leave".into(),
+            feat_backup_interval_days: None,
+            feat_backup_keep_days: None,
+            feat_backup_keep_last: None,
             feat_report_cadence: Some("leave".into()),
             letters_lang: Some(String::new()),
             check_items_text: text,
@@ -1798,7 +1867,7 @@ mod tests {
         let stored = "";
         let shown = check_items_to_text(&parse_check_items(stored));
         let out = form(Some(shown))
-            .into_input(None, None, Some(stored))
+            .into_input(None, None, Some(stored), None)
             .expect("input");
         assert_eq!(
             parse_check_items(&out.check_items),
@@ -1820,21 +1889,21 @@ mod tests {
         ]);
         let shown = check_items_to_text(&parse_check_items(&custom));
         let out = form(Some(shown))
-            .into_input(None, None, Some(&custom))
+            .into_input(None, None, Some(&custom), None)
             .expect("input");
         assert_eq!(out.check_items, custom);
 
         // A form that does not carry the field at all leaves the stored list
         // alone. Absent must never mean "clear it".
         let out = form(None)
-            .into_input(None, None, Some(&custom))
+            .into_input(None, None, Some(&custom), None)
             .expect("input");
         assert_eq!(out.check_items, custom);
 
         // A form that carries it EMPTY does mean "clear it" — which the agent
         // reads back as the built-in four, never as a plan promising nothing.
         let out = form(Some(String::new()))
-            .into_input(None, None, Some(&custom))
+            .into_input(None, None, Some(&custom), None)
             .expect("input");
         assert_eq!(out.check_items, "");
     }
