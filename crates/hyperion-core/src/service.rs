@@ -6524,7 +6524,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // Read now, not at boot: the panel saves the rule on every node, and a
         // worker applying the one it started with would ignore that save until
         // something restarted it.
-        let retention = match self.agent_config_path.as_deref() {
+        let global = match self.agent_config_path.as_deref() {
             Some(path) => {
                 let v = read_backup_retention_section(Some(path));
                 BackupRetention {
@@ -6533,6 +6533,30 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 }
             }
             None => self.retention.clone(),
+        };
+        // Per-hosting overrides (from a profile or care plan), 0/absent = fall
+        // back to the node-wide rule. So a plan can promise a customer a longer
+        // history without changing everyone else's.
+        let id = hosting_id.as_str();
+        let over = |k: &'static str| {
+            let pool = self.pool.clone();
+            let id = id.to_string();
+            async move {
+                hyperion_state::hosting_kv::get(&pool, &id, k)
+                    .await
+                    .ok()
+                    .flatten()
+                    .and_then(|v| v.trim().parse::<i64>().ok())
+                    .filter(|n| *n > 0)
+            }
+        };
+        let retention = BackupRetention {
+            max_age_days: over("backup_keep_days")
+                .await
+                .unwrap_or(global.max_age_days),
+            keep_latest_n: over("backup_keep_last")
+                .await
+                .unwrap_or(global.keep_latest_n),
         };
         let cutoff = now_secs() - retention.max_age_days.max(1) * 24 * 3600;
         let keep = retention.keep_latest_n.max(1) as usize;
@@ -15341,8 +15365,29 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     .ok()
                     .flatten()
                     .unwrap_or_default();
-            let Some(cadence_secs) = backup_cadence_secs(&cadence) else {
-                continue; // off / unknown
+            // A "custom" cadence reads its period from `backup_interval_days`
+            // (1..=365); the presets keep their fixed seconds. Off/unknown, or a
+            // custom cadence with no valid interval, is not due.
+            let cadence_secs = if cadence.trim() == "custom" {
+                match hyperion_state::hosting_kv::get(
+                    &self.pool,
+                    h.id.as_str(),
+                    "backup_interval_days",
+                )
+                .await
+                .ok()
+                .flatten()
+                .and_then(|v| v.trim().parse::<i64>().ok())
+                .filter(|d| (1..=365).contains(d))
+                {
+                    Some(days) => days * 86_400,
+                    None => continue,
+                }
+            } else {
+                match backup_cadence_secs(&cadence) {
+                    Some(s) => s,
+                    None => continue, // off / unknown
+                }
             };
             // In snapshots-only mode this sweep stops — EXCEPT where a care
             // package sells backups to this site.
@@ -15619,6 +15664,23 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             now_secs(),
         )
         .await;
+        // Custom period (used when cadence == "custom") + retention overrides.
+        // Written every apply, 0 included, so dropping them on the profile and
+        // re-applying reverts a site to the presets / the node-wide rule.
+        for (k, v) in [
+            ("backup_interval_days", p.backup_interval_days),
+            ("backup_keep_days", p.backup_keep_days),
+            ("backup_keep_last", p.backup_keep_last),
+        ] {
+            let _ = hyperion_state::hosting_kv::set(
+                &self.pool,
+                detail.id.as_str(),
+                k,
+                &v.to_string(),
+                now_secs(),
+            )
+            .await;
+        }
 
         // Push expiry policy (without changing expires_at — operator sets that).
         let cur = self
@@ -28314,6 +28376,9 @@ fn profile_input_to_new(input: ProfileInput) -> hyperion_state::profiles::NewPro
         disk_soft_mb: input.disk_soft_mb.filter(|m| *m > 0),
         mem_limit_mib: input.mem_limit_mib.filter(|m| *m > 0),
         backup_cadence: canonical_backup_cadence(&input.backup_cadence).to_string(),
+        backup_interval_days: input.backup_interval_days.clamp(0, 365),
+        backup_keep_days: input.backup_keep_days.clamp(0, 36_500),
+        backup_keep_last: input.backup_keep_last.clamp(0, 1_000),
     }
 }
 
@@ -28344,6 +28409,9 @@ fn profile_row_to_wire(r: hyperion_state::profiles::ProfileRow) -> HostingProfil
         disk_soft_mb: r.disk_soft_mb,
         mem_limit_mib: r.mem_limit_mib,
         backup_cadence: r.backup_cadence,
+        backup_interval_days: r.backup_interval_days,
+        backup_keep_days: r.backup_keep_days,
+        backup_keep_last: r.backup_keep_last,
         // Filled in by profile_list / profile_get; 0 from the bare conversion.
         in_use_count: 0,
         created_at: r.created_at,
@@ -34155,6 +34223,8 @@ fn canonical_backup_cadence(c: &str) -> &'static str {
         "daily" => "daily",
         "weekly" => "weekly",
         "monthly" => "monthly",
+        // "custom" reads its period from backup_interval_days.
+        "custom" => "custom",
         _ => "off",
     }
 }

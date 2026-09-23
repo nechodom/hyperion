@@ -58,6 +58,15 @@ pub struct ProfileRow {
     /// ("off"|"daily"|"weekly"|"monthly").
     #[sqlx(default)]
     pub backup_cadence: String,
+    /// Migration 070 — custom backup FREQUENCY (days, used when
+    /// `backup_cadence = "custom"`) and RETENTION overrides. Seeded into
+    /// hosting_kv at apply; 0 = use the preset / node-wide rule.
+    #[sqlx(default)]
+    pub backup_interval_days: i64,
+    #[sqlx(default)]
+    pub backup_keep_days: i64,
+    #[sqlx(default)]
+    pub backup_keep_last: i64,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -95,6 +104,10 @@ pub struct NewProfile {
     pub mem_limit_mib: Option<i64>,
     /// See ProfileRow::backup_cadence.
     pub backup_cadence: String,
+    /// See ProfileRow — custom frequency + retention overrides (0 = default).
+    pub backup_interval_days: i64,
+    pub backup_keep_days: i64,
+    pub backup_keep_last: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -124,8 +137,9 @@ pub async fn insert(pool: &SqlitePool, p: &NewProfile, now: i64) -> Result<i64, 
             price_interval, slack_webhook, alert_emails, wp_plugins, wp_themes,
             default_php_version, default_db_engine, quota_exceed_action,
             disk_soft_mb, mem_limit_mib, backup_cadence,
+            backup_interval_days, backup_keep_days, backup_keep_last,
             created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            RETURNING id"#,
     )
     .bind(&p.name)
@@ -152,6 +166,9 @@ pub async fn insert(pool: &SqlitePool, p: &NewProfile, now: i64) -> Result<i64, 
     .bind(p.disk_soft_mb)
     .bind(p.mem_limit_mib)
     .bind(&p.backup_cadence)
+    .bind(p.backup_interval_days)
+    .bind(p.backup_keep_days)
+    .bind(p.backup_keep_last)
     .bind(now)
     .bind(now)
     .fetch_one(pool)
@@ -174,6 +191,7 @@ pub async fn update(
             price_interval = ?, slack_webhook = ?, alert_emails = ?, wp_plugins = ?, wp_themes = ?,
             default_php_version = ?, default_db_engine = ?, quota_exceed_action = ?,
             disk_soft_mb = ?, mem_limit_mib = ?, backup_cadence = ?,
+            backup_interval_days = ?, backup_keep_days = ?, backup_keep_last = ?,
             updated_at = ?
            WHERE id = ?"#,
     )
@@ -201,6 +219,9 @@ pub async fn update(
     .bind(p.disk_soft_mb)
     .bind(p.mem_limit_mib)
     .bind(&p.backup_cadence)
+    .bind(p.backup_interval_days)
+    .bind(p.backup_keep_days)
+    .bind(p.backup_keep_last)
     .bind(now)
     .bind(id)
     .execute(pool)
@@ -223,6 +244,7 @@ const SELECT_ALL: &str =
             price_interval, slack_webhook, alert_emails, wp_plugins, wp_themes,
             default_php_version, default_db_engine, quota_exceed_action,
             disk_soft_mb, mem_limit_mib, backup_cadence,
+            backup_interval_days, backup_keep_days, backup_keep_last,
             created_at, updated_at
      FROM hosting_profiles";
 
@@ -480,7 +502,10 @@ mod tests {
             quota_exceed_action: "suspend".into(),
             disk_soft_mb: Some(1024),
             mem_limit_mib: Some(256),
-            backup_cadence: "daily".into(),
+            backup_cadence: "custom".into(),
+            backup_interval_days: 3,
+            backup_keep_days: 30,
+            backup_keep_last: 5,
         };
         let id = insert(&pool, &p, 100).await.expect("insert");
         assert!(id > 0);
@@ -491,7 +516,13 @@ mod tests {
         assert_eq!(all[0].quota_exceed_action, "suspend");
         assert_eq!(all[0].disk_soft_mb, Some(1024));
         assert_eq!(all[0].mem_limit_mib, Some(256));
-        assert_eq!(all[0].backup_cadence, "daily");
+        assert_eq!(all[0].backup_cadence, "custom");
+        // The custom-cadence + retention overrides must survive the round-trip:
+        // a dropped bind here silently NULLs them (defaults to 0) and the
+        // scheduler falls back to the node-wide cadence.
+        assert_eq!(all[0].backup_interval_days, 3);
+        assert_eq!(all[0].backup_keep_days, 30);
+        assert_eq!(all[0].backup_keep_last, 5);
     }
 
     #[tokio::test]
