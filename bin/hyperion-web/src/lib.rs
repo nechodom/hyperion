@@ -451,6 +451,10 @@ pub fn build_router(state: SharedState) -> Router {
             "/hostings/backups/delete",
             post(handlers::hostings::post_backup_delete),
         )
+        .route(
+            "/hostings/backups/delete-bulk",
+            post(handlers::hostings::post_backup_delete_bulk),
+        )
         .route("/profiles", get(handlers::profiles::get_profiles))
         .route("/profiles/create", post(handlers::profiles::post_create))
         .route(
