@@ -9,7 +9,7 @@
    touches what it explicitly forces, which is what lets a site hold a
    Backup package and a Monitoring package at the same time without each
    switching the other's feature off. #}
-{% macro feature_bundle(id_prefix, wp, integrity, monitoring, hardening, backup, report, lang, checks) %}
+{% macro feature_bundle(id_prefix, wp, integrity, monitoring, hardening, backup, report, lang, checks, interval, keep_days, keep_last) %}
 <div class="field-row">
   <div class="field">
     <label for="{{ id_prefix }}_wp">Automatic WordPress updates</label>
@@ -53,8 +53,28 @@
     <option value="daily"{% if backup == "daily" %} selected{% endif %}>Daily</option>
     <option value="weekly"{% if backup == "weekly" %} selected{% endif %}>Weekly</option>
     <option value="monthly"{% if backup == "monthly" %} selected{% endif %}>Monthly</option>
+    <option value="custom"{% if backup == "custom" %} selected{% endif %}>Custom — every N days</option>
     <option value="off"{% if backup == "off" %} selected{% endif %}>Off — keep scheduled backups switched off</option>
   </select>
+</div>
+{# Custom period + retention overrides, seeded into the site's hosting_kv while
+   the package is active — the same shape a profile carries. They apply only
+   when a cadence is set above (a package that leaves backups alone touches
+   none of them); blank / 0 falls back to the preset schedule and the
+   node-wide retention rule. #}
+<div class="field-row three">
+  <div class="field">
+    <label for="{{ id_prefix }}_interval">Custom period <span class="hint">days · only when the cadence is Custom</span></label>
+    <input id="{{ id_prefix }}_interval" name="feat_backup_interval_days" type="number" min="1" max="365"{% if interval > 0 %} value="{{ interval }}"{% endif %} placeholder="e.g. 3">
+  </div>
+  <div class="field">
+    <label for="{{ id_prefix }}_keep_days">Keep backups for <span class="hint">days · blank/0 = node default</span></label>
+    <input id="{{ id_prefix }}_keep_days" name="feat_backup_keep_days" type="number" min="0" max="36500"{% if keep_days > 0 %} value="{{ keep_days }}"{% endif %} placeholder="0">
+  </div>
+  <div class="field">
+    <label for="{{ id_prefix }}_keep_last">Always keep latest <span class="hint">per site · blank/0 = node default</span></label>
+    <input id="{{ id_prefix }}_keep_last" name="feat_backup_keep_last" type="number" min="0" max="1000"{% if keep_last > 0 %} value="{{ keep_last }}"{% endif %} placeholder="0">
+  </div>
 </div>
 <div class="field">
   <label for="{{ id_prefix }}_report">Care report e-mail <span class="hint">the only part of the package the customer ever sees — everything else is invisible when it works</span></label>
@@ -285,7 +305,10 @@
                                        v.pkg.features.backup_cadence.as_str(),
                                        v.pkg.features.report_cadence.as_str(),
                                        v.pkg.letters_lang.as_str(),
-                                       v.check_text.as_str()) %}
+                                       v.check_text.as_str(),
+                                       v.pkg.features.backup_interval_days,
+                                       v.pkg.features.backup_keep_days,
+                                       v.pkg.features.backup_keep_last) %}
                 <label class="field" style="display:flex;align-items:center;gap:0.5rem;margin-top:0.8rem">
                   <input type="checkbox" name="enabled" value="1"{% if v.pkg.enabled %} checked{% endif %} style="margin:0">
                   <span>Offered — show it in the activate picker. Untick to retire it without touching the {{ v.pkg.active_count }} site{% if v.pkg.active_count != 1 %}s{% endif %} already on it.</span>
@@ -364,7 +387,7 @@
        implied: an operator has to see what they are selling before they can
        decide it is wrong. Saved unedited, it collapses back to "the
        built-ins" rather than storing a copy. #}
-    {% call feature_bundle("n", "leave", "leave", "leave", "leave", "leave", "leave", "", builtin_check_text.as_str()) %}
+    {% call feature_bundle("n", "leave", "leave", "leave", "leave", "leave", "leave", "", builtin_check_text.as_str(), 0, 0, 0) %}
 
     <label class="field" style="display:flex;align-items:center;gap:0.5rem;margin-top:0.8rem">
       <input type="checkbox" name="enabled" value="1" checked style="margin:0">

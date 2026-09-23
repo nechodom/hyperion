@@ -98,9 +98,11 @@ impl FromStr for FeatureToggle {
 }
 
 /// The backup feature — the one that is not a boolean. A package either
-/// leaves the site's cadence alone or pins it to one of the four values the
+/// leaves the site's cadence alone or pins it to one of the values the
 /// per-node scheduled-backup driver understands (`hosting_kv` key
-/// `backup_cadence`).
+/// `backup_cadence`). `Custom` pins the cadence to "every N days", where N
+/// travels alongside in [`PackageFeatures::backup_interval_days`] — exactly
+/// the shape a profile carries (migration 070).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum BackupCadence {
@@ -110,6 +112,10 @@ pub enum BackupCadence {
     Daily,
     Weekly,
     Monthly,
+    /// "Every N days" — the period is `PackageFeatures::backup_interval_days`,
+    /// not encoded here, so this stays `Copy` and one lowercase word on the
+    /// wire like the presets.
+    Custom,
 }
 
 impl BackupCadence {
@@ -130,6 +136,7 @@ impl BackupCadence {
             Self::Daily => "daily",
             Self::Weekly => "weekly",
             Self::Monthly => "monthly",
+            Self::Custom => "custom",
         }
     }
 
@@ -153,24 +160,41 @@ impl BackupCadence {
         Self::from_str(s.trim()).unwrap_or(Self::Leave)
     }
 
-    /// How much backup this cadence buys. Only used to resolve two packages
-    /// that both pin a cadence.
-    fn frequency_rank(self) -> u8 {
+    /// Backup period in seconds for resolving two packages, given the custom
+    /// interval that rides with the cadence. `None` = "runs no backup to
+    /// compare": `Leave` (no opinion), `Off` (sells their absence), or a
+    /// `Custom` whose interval is out of the 1..=365 range the scheduler
+    /// honours. A shorter period is more backup, so it wins.
+    fn effective_secs(self, interval_days: i64) -> Option<i64> {
         match self {
-            Self::Leave => 0,
-            Self::Off => 1,
-            Self::Monthly => 2,
-            Self::Weekly => 3,
-            Self::Daily => 4,
+            Self::Leave | Self::Off => None,
+            Self::Daily => Some(86_400),
+            Self::Weekly => Some(7 * 86_400),
+            Self::Monthly => Some(30 * 86_400),
+            Self::Custom => (1..=365)
+                .contains(&interval_days)
+                .then_some(interval_days * 86_400),
         }
     }
 
-    /// Resolve two packages on the same hosting: the more frequent cadence
-    /// wins, for the same reason `On` beats `Off` — a customer who bought
-    /// daily backups keeps them even while holding a package that only
-    /// promises monthly.
+    /// Resolve two packages on the same hosting where NEITHER runs a
+    /// schedule (both `Leave`/`Off`): `Off` beats `Leave`, `Leave` never
+    /// overrides. Two running schedules are ranked by period in
+    /// [`PackageFeatures::combine_backup`] instead, which is the only path
+    /// that can see the custom interval — `Custom` therefore ranks below
+    /// every real preset here and this method is never asked to compare it.
     pub fn combine(self, other: Self) -> Self {
-        if other.frequency_rank() > self.frequency_rank() {
+        fn rank(c: BackupCadence) -> u8 {
+            match c {
+                BackupCadence::Leave => 0,
+                BackupCadence::Off => 1,
+                BackupCadence::Custom => 2,
+                BackupCadence::Monthly => 3,
+                BackupCadence::Weekly => 4,
+                BackupCadence::Daily => 5,
+            }
+        }
+        if rank(other) > rank(self) {
             other
         } else {
             self
@@ -193,6 +217,7 @@ impl FromStr for BackupCadence {
             "daily" => Ok(Self::Daily),
             "weekly" => Ok(Self::Weekly),
             "monthly" => Ok(Self::Monthly),
+            "custom" => Ok(Self::Custom),
             other => Err(format!("unknown backup cadence: {other}")),
         }
     }
@@ -328,6 +353,21 @@ pub struct PackageFeatures {
     /// node.
     #[serde(default)]
     pub backup_cadence: BackupCadence,
+    /// Custom backup period in days, used ONLY when `backup_cadence ==
+    /// Custom` (the presets carry their own fixed schedule). Seeded into
+    /// `hosting_kv` `backup_interval_days` on the owning node. 0 = none.
+    #[serde(default)]
+    pub backup_interval_days: i64,
+    /// Retention overrides seeded onto the hosting (`hosting_kv`
+    /// `backup_keep_days` / `backup_keep_last`): keep archives this many
+    /// days / keep at least this many. They ride with the cadence — a
+    /// package that leaves backups alone (`Leave`) contributes none — and 0
+    /// means "no opinion", so the node-wide `[backup_retention]` rule
+    /// stands. Same shape a profile seeds (migration 070).
+    #[serde(default)]
+    pub backup_keep_days: i64,
+    #[serde(default)]
+    pub backup_keep_last: i64,
     /// Periodic care report to the customer — `hosting_kv`
     /// `report_cadence` on the owning node. The only feature here the
     /// customer SEES; the other five are invisible when they work, which
@@ -362,17 +402,66 @@ impl PackageFeatures {
 
     /// Fold the bundles of two packages held by the SAME hosting into the
     /// single state to enforce. Per-field rules in [`FeatureToggle::combine`]
-    /// and [`BackupCadence::combine`]; the short version is that the
-    /// customer keeps the most they paid for.
+    /// and [`Self::combine_backup`]; the short version is that the customer
+    /// keeps the most they paid for.
     pub fn combine(self, other: Self) -> Self {
+        let (backup_cadence, backup_interval_days, backup_keep_days, backup_keep_last) =
+            self.combine_backup(other);
         Self {
             wp_auto_update: self.wp_auto_update.combine(other.wp_auto_update),
             integrity_scan: self.integrity_scan.combine(other.integrity_scan),
             monitoring: self.monitoring.combine(other.monitoring),
             hardening: self.hardening.combine(other.hardening),
-            backup_cadence: self.backup_cadence.combine(other.backup_cadence),
+            backup_cadence,
+            backup_interval_days,
+            backup_keep_days,
+            backup_keep_last,
             report_cadence: self.report_cadence.combine(other.report_cadence),
         }
+    }
+
+    /// Resolve the backup half of two bundles: the cadence, the custom
+    /// interval that travels with it, and the two retention overrides. The
+    /// customer keeps the most they paid for — the more frequent schedule
+    /// and the longer / deeper history — the same principle as `On` beating
+    /// `Off` for the booleans.
+    fn combine_backup(self, other: Self) -> (BackupCadence, i64, i64, i64) {
+        // Cadence and its interval move together, ranked by how often each
+        // side actually runs a backup: a `custom every 3 days` is not
+        // overridden by a coarser `weekly`, nor a `daily` by a `custom every
+        // 90 days` — comparing enum ranks alone could not tell those apart.
+        let a = self
+            .backup_cadence
+            .effective_secs(self.backup_interval_days);
+        let b = other
+            .backup_cadence
+            .effective_secs(other.backup_interval_days);
+        let (cadence, interval) = match (a, b) {
+            (Some(sa), Some(sb)) if sb < sa => (other.backup_cadence, other.backup_interval_days),
+            (Some(_), Some(_)) => (self.backup_cadence, self.backup_interval_days),
+            // One side runs backups, the other does not (`Off`, or a `Custom`
+            // with no usable interval): the running one wins.
+            (Some(_), None) => (self.backup_cadence, self.backup_interval_days),
+            (None, Some(_)) => (other.backup_cadence, other.backup_interval_days),
+            // Neither runs a schedule. `Off` beats `Leave`, `Leave` never
+            // overrides (the enum combine encodes that), and there is no
+            // interval to keep.
+            (None, None) => (self.backup_cadence.combine(other.backup_cadence), 0),
+        };
+        // Retention is a promise ABOUT backups, so a package that leaves the
+        // cadence alone contributes none — it must not silently lengthen a
+        // history another package is responsible for. Among packages that do
+        // speak, the longer / deeper wins.
+        let retention = |b: Self| {
+            if b.backup_cadence.is_leave() {
+                (0, 0)
+            } else {
+                (b.backup_keep_days, b.backup_keep_last)
+            }
+        };
+        let (ad, al) = retention(self);
+        let (bd, bl) = retention(other);
+        (cadence, interval, ad.max(bd), al.max(bl))
     }
 }
 
@@ -450,6 +539,13 @@ pub struct LiveFeatureState {
     /// Concrete cadence currently in `hosting_kv` — never `Leave`, which is
     /// a package intent, not a site state ("no cadence" is `Off`).
     pub backup_cadence: BackupCadence,
+    /// The custom period and retention overrides currently in `hosting_kv`
+    /// (`backup_interval_days` / `backup_keep_days` / `backup_keep_last`), 0
+    /// when unset. Read so the drift tick writes only where a value moved
+    /// and a cancel restores exactly what was there before.
+    pub backup_interval_days: i64,
+    pub backup_keep_days: i64,
+    pub backup_keep_last: i64,
 }
 
 /// What each feature a package FORCES was set to immediately before the
@@ -479,6 +575,17 @@ pub struct PackagePriorState {
     /// `Leave` never appears here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backup_cadence: Option<BackupCadence>,
+    /// Prior custom period + retention overrides in `hosting_kv`, captured
+    /// alongside the cadence whenever the package forced backups (0 = the
+    /// key was unset). `None` = the package left backups alone, so a cancel
+    /// touches none of them. `#[serde(default)]` so a row written before
+    /// these keys existed still restores its cadence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup_interval_days: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup_keep_days: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup_keep_last: Option<i64>,
 }
 
 impl Default for PackagePriorState {
@@ -490,6 +597,9 @@ impl Default for PackagePriorState {
             monitoring: None,
             hardening: None,
             backup_cadence: None,
+            backup_interval_days: None,
+            backup_keep_days: None,
+            backup_keep_last: None,
         }
     }
 }
@@ -498,6 +608,10 @@ impl PackagePriorState {
     /// Record the pre-activation value of ONLY the features `features`
     /// forces. `live` is what the owning node reports right now.
     pub fn capture(features: &PackageFeatures, live: &LiveFeatureState) -> Self {
+        // The custom interval and retention ride with the cadence: a package
+        // that pins backups (cadence not `Leave`) also owns those three keys,
+        // so their prior values are captured together and restored together.
+        let touches_backups = !features.backup_cadence.is_leave();
         Self {
             version: PRIOR_STATE_VERSION,
             // `.forces().map(...)` rather than a match on on/off: the value
@@ -513,7 +627,10 @@ impl PackagePriorState {
                 .map(|_| live.integrity_scan),
             monitoring: features.monitoring.forces().map(|_| live.monitoring),
             hardening: features.hardening.forces().map(|_| live.hardening),
-            backup_cadence: (!features.backup_cadence.is_leave()).then_some(live.backup_cadence),
+            backup_cadence: touches_backups.then_some(live.backup_cadence),
+            backup_interval_days: touches_backups.then_some(live.backup_interval_days),
+            backup_keep_days: touches_backups.then_some(live.backup_keep_days),
+            backup_keep_last: touches_backups.then_some(live.backup_keep_last),
         }
     }
 
@@ -525,6 +642,9 @@ impl PackagePriorState {
             && self.monitoring.is_none()
             && self.hardening.is_none()
             && self.backup_cadence.is_none()
+            && self.backup_interval_days.is_none()
+            && self.backup_keep_days.is_none()
+            && self.backup_keep_last.is_none()
     }
 }
 
@@ -1019,10 +1139,16 @@ mod tests {
             BackupCadence::Daily,
             BackupCadence::Weekly,
             BackupCadence::Monthly,
+            BackupCadence::Custom,
         ] {
             assert_eq!(BackupCadence::from_str(c.as_str()).unwrap(), c);
             assert_eq!(BackupCadence::from_stored(c.as_str()), c);
         }
+        // Custom is a real backup promise, not "no opinion" and not "off":
+        // `backups_are_sold_to` keys on this, so a wrong answer would stop
+        // taking backups a customer pays for.
+        assert!(!BackupCadence::Custom.is_leave_or_off());
+        assert_eq!(BackupCadence::Custom.kv_value(), Some("custom"));
     }
 
     #[test]
@@ -1083,7 +1209,10 @@ mod tests {
             integrity_scan: FeatureToggle::Off,
             monitoring: FeatureToggle::Leave,
             hardening: FeatureToggle::On,
-            backup_cadence: BackupCadence::Weekly,
+            backup_cadence: BackupCadence::Custom,
+            backup_interval_days: 3,
+            backup_keep_days: 90,
+            backup_keep_last: 10,
             report_cadence: ReportCadence::Monthly,
         };
         let s = serde_json::to_string(&f).expect("ser");
@@ -1092,8 +1221,98 @@ mod tests {
         // The wire form is the same lowercase vocabulary the DB stores, so
         // a value can move between column and JSON without translation.
         assert!(s.contains("\"wp_auto_update\":\"on\""), "{s}");
-        assert!(s.contains("\"backup_cadence\":\"weekly\""), "{s}");
+        assert!(s.contains("\"backup_cadence\":\"custom\""), "{s}");
+        assert!(s.contains("\"backup_interval_days\":3"), "{s}");
+        assert!(s.contains("\"backup_keep_days\":90"), "{s}");
+        assert!(s.contains("\"backup_keep_last\":10"), "{s}");
         assert!(s.contains("\"report_cadence\":\"monthly\""), "{s}");
+    }
+
+    #[test]
+    fn missing_backup_numbers_default_to_zero() {
+        // An older agent that sends a bundle without the retention keys must
+        // read as "no opinion" (0), never as some forced retention.
+        let f: PackageFeatures =
+            serde_json::from_str(r#"{"backup_cadence":"weekly"}"#).expect("de");
+        assert_eq!(f.backup_cadence, BackupCadence::Weekly);
+        assert_eq!(f.backup_interval_days, 0);
+        assert_eq!(f.backup_keep_days, 0);
+        assert_eq!(f.backup_keep_last, 0);
+    }
+
+    #[test]
+    fn combine_backup_keeps_the_shortest_period_and_deepest_retention() {
+        let daily = PackageFeatures {
+            backup_cadence: BackupCadence::Daily,
+            backup_keep_days: 30,
+            backup_keep_last: 5,
+            ..Default::default()
+        };
+        // Custom every 90 days is LESS backup than daily, even though the
+        // enum has no way to know that on its own.
+        let sparse_custom = PackageFeatures {
+            backup_cadence: BackupCadence::Custom,
+            backup_interval_days: 90,
+            backup_keep_days: 365,
+            backup_keep_last: 2,
+            ..Default::default()
+        };
+        let merged = daily.combine(sparse_custom);
+        assert_eq!(
+            merged.backup_cadence,
+            BackupCadence::Daily,
+            "daily is more frequent"
+        );
+        assert_eq!(
+            merged.backup_interval_days, 0,
+            "daily has no custom interval"
+        );
+        // …but the customer keeps the longer history and the deeper floor,
+        // whichever package carried them.
+        assert_eq!(merged.backup_keep_days, 365);
+        assert_eq!(merged.backup_keep_last, 5);
+        assert_eq!(
+            merged,
+            sparse_custom.combine(daily),
+            "order must not matter"
+        );
+
+        // Custom every 2 days beats weekly, and carries its own interval.
+        let dense_custom = PackageFeatures {
+            backup_cadence: BackupCadence::Custom,
+            backup_interval_days: 2,
+            ..Default::default()
+        };
+        let weekly = PackageFeatures {
+            backup_cadence: BackupCadence::Weekly,
+            ..Default::default()
+        };
+        let merged = weekly.combine(dense_custom);
+        assert_eq!(merged.backup_cadence, BackupCadence::Custom);
+        assert_eq!(merged.backup_interval_days, 2);
+    }
+
+    #[test]
+    fn a_package_leaving_backups_alone_contributes_no_retention() {
+        // Retention is a promise ABOUT backups. A monitoring-only package
+        // that happens to carry a stray keep_days must not lengthen the
+        // history of a backup package it is stacked with.
+        let backups = PackageFeatures {
+            backup_cadence: BackupCadence::Weekly,
+            backup_keep_days: 14,
+            ..Default::default()
+        };
+        let monitoring_with_stray = PackageFeatures {
+            monitoring: FeatureToggle::On,
+            backup_keep_days: 999, // cadence Leave → ignored
+            ..Default::default()
+        };
+        let merged = backups.combine(monitoring_with_stray);
+        assert_eq!(merged.backup_cadence, BackupCadence::Weekly);
+        assert_eq!(
+            merged.backup_keep_days, 14,
+            "the leave-cadence package's retention is ignored"
+        );
     }
 
     #[test]
@@ -1187,11 +1406,19 @@ mod tests {
             monitoring: true,
             hardening: false,
             backup_cadence: BackupCadence::Weekly,
+            backup_interval_days: 0,
+            backup_keep_days: 45,
+            backup_keep_last: 3,
         };
         let prior = PackagePriorState::capture(&features, &live);
         // Forced → the SITE's prior value is recorded, not the package's.
         assert_eq!(prior.wp_auto_update, Some(false));
         assert_eq!(prior.backup_cadence, Some(BackupCadence::Weekly));
+        // The retention keys ride with the cadence: forcing backups captures
+        // the site's prior retention too, so a cancel puts it back.
+        assert_eq!(prior.backup_interval_days, Some(0));
+        assert_eq!(prior.backup_keep_days, Some(45));
+        assert_eq!(prior.backup_keep_last, Some(3));
         // Left alone → absent, so a cancel never touches it. `monitoring`
         // is the load-bearing case: the customer had it on themselves and
         // must keep it.
@@ -1214,9 +1441,14 @@ mod tests {
             monitoring: true,
             hardening: true,
             backup_cadence: BackupCadence::Daily,
+            backup_interval_days: 7,
+            backup_keep_days: 30,
+            backup_keep_last: 5,
         };
         let prior = PackagePriorState::capture(&PackageFeatures::default(), &live);
         assert!(prior.is_empty());
+        // A no-op package captures nothing, retention keys included: the
+        // skip-if-none serde attrs must keep them out of the JSON entirely.
         assert_eq!(serde_json::to_string(&prior).expect("ser"), r#"{"v":1}"#);
     }
 

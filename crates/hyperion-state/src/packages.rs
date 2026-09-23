@@ -40,6 +40,17 @@ pub struct PackageRow {
     pub feat_hardening: String,
     pub feat_backup_cadence: String,
     pub feat_report_cadence: String,
+    /// Migration 071 — custom backup FREQUENCY (days, used when
+    /// `feat_backup_cadence = 'custom'`) and RETENTION overrides. Seeded into
+    /// the site's hosting_kv while the package is active; 0 = the preset /
+    /// node-wide rule. `#[sqlx(default)]` so an older row (or a partial
+    /// SELECT) reads 0 rather than failing the map.
+    #[sqlx(default)]
+    pub feat_backup_interval_days: i64,
+    #[sqlx(default)]
+    pub feat_backup_keep_days: i64,
+    #[sqlx(default)]
+    pub feat_backup_keep_last: i64,
     /// Default letter language for this package's customers. Empty = no
     /// opinion. Column order matters: this sits before the timestamps, matching
     /// SELECT_PACKAGES and the migration.
@@ -68,6 +79,9 @@ impl PackageRow {
             monitoring: FeatureToggle::from_stored(&self.feat_monitoring),
             hardening: FeatureToggle::from_stored(&self.feat_hardening),
             backup_cadence: BackupCadence::from_stored(&self.feat_backup_cadence),
+            backup_interval_days: self.feat_backup_interval_days,
+            backup_keep_days: self.feat_backup_keep_days,
+            backup_keep_last: self.feat_backup_keep_last,
             report_cadence: ReportCadence::from_stored(&self.feat_report_cadence),
         }
     }
@@ -185,8 +199,9 @@ pub struct NewActivation {
 const SELECT_PACKAGES: &str =
     "SELECT id, name, slug, description, enabled, price_minor, price_currency,
             price_interval, feat_wp_auto_update, feat_integrity_scan, feat_monitoring,
-            feat_hardening, feat_backup_cadence, feat_report_cadence, letters_lang,
-            check_items, created_at, updated_at
+            feat_hardening, feat_backup_cadence, feat_report_cadence,
+            feat_backup_interval_days, feat_backup_keep_days, feat_backup_keep_last,
+            letters_lang, check_items, created_at, updated_at
      FROM service_packages";
 
 /// Create a definition. A duplicate `name` or `slug` surfaces as a
@@ -196,12 +211,14 @@ pub async fn insert(pool: &SqlitePool, p: &NewPackage, now: i64) -> Result<i64, 
         r#"INSERT INTO service_packages
            (name, slug, description, enabled, price_minor, price_currency, price_interval,
             feat_wp_auto_update, feat_integrity_scan, feat_monitoring, feat_hardening,
-            feat_backup_cadence, feat_report_cadence, letters_lang, check_items,
+            feat_backup_cadence, feat_report_cadence,
+            feat_backup_interval_days, feat_backup_keep_days, feat_backup_keep_last,
+            letters_lang, check_items,
             created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            RETURNING id"#,
     )
-    // 16 columns, 16 placeholders, 16 binds — in column order.
+    // 19 columns, 19 placeholders, 19 binds — in column order.
     .bind(&p.name)
     .bind(&p.slug)
     .bind(&p.description)
@@ -215,6 +232,9 @@ pub async fn insert(pool: &SqlitePool, p: &NewPackage, now: i64) -> Result<i64, 
     .bind(p.features.hardening.as_str())
     .bind(p.features.backup_cadence.as_str())
     .bind(p.features.report_cadence.as_str())
+    .bind(p.features.backup_interval_days)
+    .bind(p.features.backup_keep_days)
+    .bind(p.features.backup_keep_last)
     .bind(&p.letters_lang)
     .bind(&p.check_items)
     .bind(now)
@@ -241,10 +261,11 @@ pub async fn update(
             price_minor = ?, price_currency = ?, price_interval = ?,
             feat_wp_auto_update = ?, feat_integrity_scan = ?, feat_monitoring = ?,
             feat_hardening = ?, feat_backup_cadence = ?, feat_report_cadence = ?,
+            feat_backup_interval_days = ?, feat_backup_keep_days = ?, feat_backup_keep_last = ?,
             letters_lang = ?, check_items = ?, updated_at = ?
            WHERE id = ?"#,
     )
-    // 15 SET placeholders + the WHERE id — the trailing `.bind(id)` is what
+    // 18 SET placeholders + the WHERE id — the trailing `.bind(id)` is what
     // keeps this from becoming `WHERE id = NULL` (a silent zero-row update).
     .bind(&p.name)
     .bind(&p.slug)
@@ -259,6 +280,9 @@ pub async fn update(
     .bind(p.features.hardening.as_str())
     .bind(p.features.backup_cadence.as_str())
     .bind(p.features.report_cadence.as_str())
+    .bind(p.features.backup_interval_days)
+    .bind(p.features.backup_keep_days)
+    .bind(p.features.backup_keep_last)
     .bind(&p.letters_lang)
     .bind(&p.check_items)
     .bind(now)
@@ -346,11 +370,12 @@ const SELECT_ACTIVATIONS: &str =
             a.activated_at, a.cancelled_at, a.prior_state_json,
             a.feat_wp_auto_update, a.feat_integrity_scan, a.feat_monitoring,
             a.feat_hardening, a.feat_backup_cadence, a.feat_report_cadence,
+            a.feat_backup_interval_days, a.feat_backup_keep_days, a.feat_backup_keep_last,
             a.letters_lang, a.check_items
      FROM hosting_packages a";
 
 /// Raw activation row. A `FromRow` struct rather than a tuple: sqlx only
-/// implements `FromRow` for tuples up to 16 elements and this has 18, and
+/// implements `FromRow` for tuples up to 16 elements and this has more, and
 /// name-mapping means adding a column can never silently shift the others.
 #[derive(sqlx::FromRow)]
 struct ActivationRowRaw {
@@ -372,6 +397,12 @@ struct ActivationRowRaw {
     feat_hardening: String,
     feat_backup_cadence: String,
     feat_report_cadence: String,
+    #[sqlx(default)]
+    feat_backup_interval_days: i64,
+    #[sqlx(default)]
+    feat_backup_keep_days: i64,
+    #[sqlx(default)]
+    feat_backup_keep_last: i64,
     letters_lang: String,
     check_items: String,
 }
@@ -393,6 +424,9 @@ fn map_activation(r: ActivationRowRaw) -> HostingPackageRow {
             monitoring: FeatureToggle::from_stored(&r.feat_monitoring),
             hardening: FeatureToggle::from_stored(&r.feat_hardening),
             backup_cadence: BackupCadence::from_stored(&r.feat_backup_cadence),
+            backup_interval_days: r.feat_backup_interval_days,
+            backup_keep_days: r.feat_backup_keep_days,
+            backup_keep_last: r.feat_backup_keep_last,
             report_cadence: ReportCadence::from_stored(&r.feat_report_cadence),
         },
         next_billing_at: r.next_billing_at,
@@ -418,11 +452,12 @@ pub async fn activate(pool: &SqlitePool, a: &NewActivation, now: i64) -> Result<
             price_interval, next_billing_at, state, activated_at, cancelled_at,
             prior_state_json, feat_wp_auto_update, feat_integrity_scan,
             feat_monitoring, feat_hardening, feat_backup_cadence, feat_report_cadence,
+            feat_backup_interval_days, feat_backup_keep_days, feat_backup_keep_last,
             letters_lang, check_items)
-           VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            RETURNING id"#,
     )
-    // 16 placeholders (state / cancelled_at are literals), 16 binds.
+    // 19 placeholders (state / cancelled_at are literals), 19 binds.
     .bind(a.hosting_id.as_str())
     .bind(a.package_id)
     .bind(&a.package_name)
@@ -438,6 +473,9 @@ pub async fn activate(pool: &SqlitePool, a: &NewActivation, now: i64) -> Result<
     .bind(a.features.hardening.as_str())
     .bind(a.features.backup_cadence.as_str())
     .bind(a.features.report_cadence.as_str())
+    .bind(a.features.backup_interval_days)
+    .bind(a.features.backup_keep_days)
+    .bind(a.features.backup_keep_last)
     .bind(&a.letters_lang)
     .bind(&a.check_items)
     .fetch_one(pool)
@@ -732,7 +770,10 @@ mod tests {
                 features: PackageFeatures {
                     wp_auto_update: FeatureToggle::Off,
                     hardening: FeatureToggle::On,
-                    backup_cadence: BackupCadence::Weekly,
+                    backup_cadence: BackupCadence::Custom,
+                    backup_interval_days: 3,
+                    backup_keep_days: 90,
+                    backup_keep_last: 8,
                     report_cadence: ReportCadence::Quarterly,
                     ..Default::default()
                 },
@@ -752,7 +793,13 @@ mod tests {
         let f = row.features();
         assert_eq!(f.wp_auto_update, FeatureToggle::Off);
         assert_eq!(f.hardening, FeatureToggle::On);
-        assert_eq!(f.backup_cadence, BackupCadence::Weekly);
+        assert_eq!(f.backup_cadence, BackupCadence::Custom);
+        // The custom period + retention overrides must survive the round-trip
+        // — a dropped bind here silently NULLs them and the site quietly
+        // reverts to the preset schedule / the node-wide retention rule.
+        assert_eq!(f.backup_interval_days, 3);
+        assert_eq!(f.backup_keep_days, 90);
+        assert_eq!(f.backup_keep_last, 8);
         assert_eq!(
             row.check_items, r#"[{"id":"gdpr","label":"GDPR"}]"#,
             "a custom checklist must survive an edit, or the plan silently \
@@ -860,10 +907,15 @@ mod tests {
             // bundle would pass even if the snapshot were dropped entirely.
             features: PackageFeatures {
                 wp_auto_update: FeatureToggle::On,
-                // The LAST bind of the activation INSERT — a dropped bind
-                // here shifts every feature column one to the left, which
-                // this fixture makes visible in every activation test.
                 report_cadence: ReportCadence::Monthly,
+                // Custom cadence + retention: the snapshot must carry the new
+                // integer feature columns, and a dropped bind among the three
+                // shifts letters_lang/check_items and this fixture makes it
+                // visible in every activation test.
+                backup_cadence: BackupCadence::Custom,
+                backup_interval_days: 4,
+                backup_keep_days: 60,
+                backup_keep_last: 6,
                 ..PackageFeatures::default()
             },
             next_billing_at: None,
@@ -887,7 +939,13 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].features.wp_auto_update, FeatureToggle::On);
         assert_eq!(rows[0].features.report_cadence, ReportCadence::Monthly);
-        assert_eq!(rows[0].features.backup_cadence, BackupCadence::Leave);
+        assert_eq!(rows[0].features.backup_cadence, BackupCadence::Custom);
+        // The custom period + retention overrides are part of the bundle a
+        // worker node enforces and a cancel reasons about, so they must
+        // survive the snapshot round-trip.
+        assert_eq!(rows[0].features.backup_interval_days, 4);
+        assert_eq!(rows[0].features.backup_keep_days, 60);
+        assert_eq!(rows[0].features.backup_keep_last, 6);
         assert_eq!(rows[0].package_name, format!("pkg-{id}"));
 
         // Re-scoping the definition must NOT reach back into what was sold.
@@ -1109,6 +1167,9 @@ mod tests {
             monitoring: true,
             hardening: false,
             backup_cadence: BackupCadence::Weekly,
+            backup_interval_days: 0,
+            backup_keep_days: 45,
+            backup_keep_last: 3,
         };
         let prior = PackagePriorState::capture(&features, &live);
         let json = serde_json::to_string(&prior).expect("ser");
@@ -1135,6 +1196,11 @@ mod tests {
         assert_eq!(back.wp_auto_update, Some(false));
         assert_eq!(back.monitoring, Some(true));
         assert_eq!(back.backup_cadence, Some(BackupCadence::Weekly));
+        // Forcing backups captures the retention keys alongside the cadence,
+        // so a cancel restores the site's prior retention too.
+        assert_eq!(back.backup_interval_days, Some(0));
+        assert_eq!(back.backup_keep_days, Some(45));
+        assert_eq!(back.backup_keep_last, Some(3));
         // The package says nothing about hardening, so cancellation has
         // nothing to restore there.
         assert_eq!(back.hardening, None);
