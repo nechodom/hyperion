@@ -94,13 +94,13 @@
   </div>
 </div>
 {% else %}
-{# Bulk form is INTENTIONALLY empty and lives OUTSIDE the table.
-   The bulk-action buttons + per-row checkboxes use HTML5
-   `form="bulk-form"` association to submit to it. The previous
-   structure (whole table wrapped in this form) caused the
-   per-row Delete <form> elements to nest — HTML forbids that,
-   browsers strip the inner form during parsing, and clicking
-   per-row Delete silently submitted the bulk form instead. #}
+{# Bulk form is INTENTIONALLY empty and lives OUTSIDE the table, so the
+   per-row Delete <form> elements don't nest inside it (HTML forbids that;
+   browsers strip the inner form and clicking per-row Delete would submit the
+   bulk form instead). The bulk-action buttons and per-row checkboxes are NOT
+   form-associated — they're driven by the script at the bottom, which reads
+   the ticked checkboxes via the document, joins their ids into the hidden
+   `selected` field below, and calls form.requestSubmit(). #}
 <form method="post" action="/hostings/bulk" id="bulk-form">
   <input type="hidden" name="_csrf" value="{{ csrf_bulk }}">
   <input type="hidden" name="action" id="bulk-action" value="">

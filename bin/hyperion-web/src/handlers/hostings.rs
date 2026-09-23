@@ -9511,25 +9511,37 @@ impl BulkForm {
     }
 
     /// Split the comma-joined `selected` field into individual selectors,
-    /// de-duped and blank-dropped, with the batch capped. The field is
+    /// de-duped and blank-dropped, order preserved. The field is
     /// machine-written by the list script, so blanks/dupes mean a stale or
-    /// tampered POST rather than a user typo worth a message. The cap bounds
-    /// how many hostings one request can fan out over; selector *shape* is
-    /// validated later, per item, by `parse_selector` in the job loop.
+    /// tampered POST rather than a user typo worth a message. Selector *shape*
+    /// is validated later, per item, by `parse_selector` in the job loop.
+    ///
+    /// NOT capped here: a cap in the parser would SILENTLY truncate a genuine
+    /// "select all" on a large, unpaginated list — the operator would confirm
+    /// "Delete 1200 hostings", the job would act on the first N, and finish
+    /// green, leaving the rest untouched with no signal. `post_bulk` instead
+    /// rejects an over-`MAX_BULK_SELECTION` batch outright, so the fan-out is
+    /// still bounded but the operator is told rather than quietly obeyed. The
+    /// de-dupe uses a set so parsing an oversized (bounded by the body limit)
+    /// POST stays linear.
     fn selected_ids(&self) -> Vec<String> {
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
         let mut out: Vec<String> = Vec::new();
         for tok in self.selected.split(',') {
             let s = tok.trim();
-            if !s.is_empty() && !out.iter().any(|e| e == s) {
+            if !s.is_empty() && seen.insert(s) {
                 out.push(s.to_string());
-            }
-            if out.len() >= 1000 {
-                break;
             }
         }
         out
     }
 }
+
+/// Most hostings one bulk POST may act on. A real "select all" on a big cluster
+/// can exceed this; `post_bulk` then refuses the whole batch with a flash
+/// telling the operator to narrow the filter, rather than silently acting on a
+/// truncated prefix. Bounds RPC fan-out from a stale/tampered POST too.
+const MAX_BULK_SELECTION: usize = 1000;
 
 pub async fn post_bulk(
     State(state): State<SharedState>,
@@ -9545,6 +9557,23 @@ pub async fn post_bulk(
     let selected = form.selected_ids();
     if selected.is_empty() {
         return Ok(Redirect::to("/hostings?q=&state=").into_response());
+    }
+    // Refuse an oversized batch instead of silently truncating it. The list is
+    // not paginated, so "select all" on a big cluster can tick more than we're
+    // willing to fan out in one job; acting on a prefix and finishing green
+    // would leave the rest untouched (and, for delete, is unrecoverable) with
+    // no signal. Tell the operator to narrow the filter and retry.
+    if selected.len() > MAX_BULK_SELECTION {
+        let msg = format!(
+            "Too many hostings selected at once ({}). This can act on at most {} in one go — \
+             narrow the list with the search or state filter and run it in smaller batches. \
+             Nothing was changed.",
+            selected.len(),
+            MAX_BULK_SELECTION,
+        );
+        return Ok(
+            Redirect::to(&format!("/hostings?bulk_flash={}", urlencoding(&msg))).into_response(),
+        );
     }
     // Pre-flight validation for install_asset — surface a single
     // clean error rather than echoing it per-selected hosting.
@@ -12157,7 +12186,7 @@ mod tests {
     }
 
     #[test]
-    fn bulk_selected_ids_split_dedupe_drop_blanks_and_cap() {
+    fn bulk_selected_ids_split_dedupe_drop_blanks_no_truncation() {
         // Ordinary case: three ids, order preserved.
         assert_eq!(bulk_selected("h-a,h-b,h-c"), vec!["h-a", "h-b", "h-c"]);
         // Whitespace tolerated; blank fragments (trailing/doubled commas) dropped.
@@ -12166,12 +12195,16 @@ mod tests {
         assert_eq!(bulk_selected("h-a,h-a,h-b"), vec!["h-a", "h-b"]);
         // Empty field (nothing ticked) yields nothing — the handler no-ops.
         assert!(bulk_selected("").is_empty());
-        // A tampered POST can't fan out over an unbounded number of hostings.
+        // The parser must NOT cap: a big "select all" has to come back whole so
+        // post_bulk can REJECT it (and say so) rather than the parser silently
+        // truncating it to a prefix that then finishes as a green "ok" job.
         let many: String = (0..2000)
             .map(|n| format!("h-{n}"))
             .collect::<Vec<_>>()
             .join(",");
-        assert_eq!(bulk_selected(&many).len(), 1000);
+        // 2000 exceeds MAX_BULK_SELECTION, so post_bulk will REJECT this batch
+        // with a flash rather than the parser quietly returning a 1000-prefix.
+        assert_eq!(bulk_selected(&many).len(), 2000);
     }
 
     /// The cluster lookup takes the FIRST node that answers, and the same
