@@ -264,6 +264,21 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.set_redis(sel, enabled).await
     }
 
+    async fn regguard_view(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<hyperion_types::regguard::RegGuardView, RpcError> {
+        self.svc.regguard_view(sel).await
+    }
+
+    async fn regguard_set(
+        &self,
+        sel: HostingSelector,
+        enabled: bool,
+    ) -> Result<hyperion_types::regguard::RegGuardView, RpcError> {
+        self.svc.regguard_set(sel, enabled).await
+    }
+
     async fn hosting_rotate_redis_password(
         &self,
         sel: HostingSelector,

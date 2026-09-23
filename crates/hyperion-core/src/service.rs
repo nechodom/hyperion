@@ -5162,6 +5162,77 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(wpe)
     }
 
+    /// Registration spam guard state for one hosting: the operator's intent
+    /// (from `hosting_kv`) plus what is actually on disk.
+    pub async fn regguard_view(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<hyperion_types::regguard::RegGuardView, RpcError> {
+        let detail = self.get(sel).await?;
+        self.regguard_view_for(&detail).await
+    }
+
+    async fn regguard_view_for(
+        &self,
+        detail: &hyperion_types::HostingDetail,
+    ) -> Result<hyperion_types::regguard::RegGuardView, RpcError> {
+        let enabled =
+            hyperion_state::hosting_kv::get(&self.pool, detail.id.as_str(), "regguard_enabled")
+                .await
+                .ok()
+                .flatten()
+                .map(|v| v == "1")
+                .unwrap_or(false);
+        let is_wordpress =
+            tokio::fs::try_exists(std::path::Path::new(&detail.root_dir).join("wp-content"))
+                .await
+                .unwrap_or(false);
+        let installed = if is_wordpress {
+            hyperion_adapters::regguard::is_installed(&detail.root_dir).await
+        } else {
+            false
+        };
+        Ok(hyperion_types::regguard::RegGuardView {
+            enabled,
+            installed,
+            is_wordpress,
+        })
+    }
+
+    /// Turn the guard on or off: install/remove the must-use plugin on the
+    /// owning node and record the operator's intent in `hosting_kv`.
+    pub async fn regguard_set(
+        &self,
+        sel: HostingSelector,
+        enabled: bool,
+    ) -> Result<hyperion_types::regguard::RegGuardView, RpcError> {
+        let detail = self.get(sel).await?;
+        if enabled {
+            hyperion_adapters::regguard::install(&detail.root_dir, &detail.system_user)
+                .await
+                .map_err(|e| RpcError::Internal_with(format!("install spam guard: {e}")))?;
+        } else {
+            hyperion_adapters::regguard::remove(&detail.root_dir).await;
+        }
+        hyperion_state::hosting_kv::set(
+            &self.pool,
+            detail.id.as_str(),
+            "regguard_enabled",
+            if enabled { "1" } else { "0" },
+            now_secs(),
+        )
+        .await
+        .map_err(|e| RpcError::Internal_with(format!("save spam guard state: {e}")))?;
+        self.append_audit(
+            "hosting.regguard_set",
+            Some(detail.id.as_str()),
+            &serde_json::json!({ "domain": detail.domain, "enabled": enabled }).to_string(),
+            "ok",
+        )
+        .await;
+        self.regguard_view_for(&detail).await
+    }
+
     pub async fn rotate_redis_password(
         &self,
         sel: HostingSelector,

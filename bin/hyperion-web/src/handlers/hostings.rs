@@ -14027,6 +14027,182 @@ pub async fn post_gitsync_config(
     .into_response())
 }
 
+// ───────────────────── Registration spam guard ─────────────────────
+
+#[derive(Template)]
+#[template(path = "_hosting_regguard_card.html")]
+struct RegGuardCardTpl {
+    selector: String,
+    view: hyperion_types::regguard::RegGuardView,
+    can_manage: bool,
+    csrf_toggle: String,
+    error: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct RegGuardToggleForm {
+    selector: String,
+    /// Present + "on" when the operator ticks the box; absent when unticked.
+    #[serde(default)]
+    enabled: Option<String>,
+}
+
+fn regguard_card(
+    state: &SharedState,
+    ctx: &AuthCtx,
+    selector: String,
+    view: hyperion_types::regguard::RegGuardView,
+    can_manage: bool,
+    error: Option<String>,
+) -> Response {
+    Html(
+        RegGuardCardTpl {
+            selector,
+            view,
+            can_manage,
+            csrf_toggle: csrf_token_for(state, ctx, "/hostings/regguard"),
+            error,
+        }
+        .render()
+        .unwrap_or_default(),
+    )
+    .into_response()
+}
+
+/// GET /hostings/:selector/regguard-panel — the spam-guard card, read from the
+/// owning node. Lazy-loaded, like the deploy panel.
+pub async fn get_regguard_panel(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Path(selector): Path<String>,
+) -> Result<Response, AppError> {
+    let can_manage =
+        require_manage_for_selector(&state, &ctx, &selector, Capability::HostingEditConfig)
+            .await
+            .is_ok();
+    let sel = match parse_selector(&selector) {
+        Ok(s) => s,
+        Err(e) => {
+            return Ok(regguard_card(
+                &state,
+                &ctx,
+                selector,
+                Default::default(),
+                can_manage,
+                Some(e.to_string()),
+            ))
+        }
+    };
+    let (detail, owner) = match find_hosting_anywhere(&state, sel.clone()).await {
+        Ok(v) => v,
+        Err(e) => {
+            return Ok(regguard_card(
+                &state,
+                &ctx,
+                selector,
+                Default::default(),
+                can_manage,
+                Some(e.to_string()),
+            ))
+        }
+    };
+    if require_hosting_access(
+        &state,
+        &ctx,
+        detail.id.as_str(),
+        false,
+        Capability::HostingView,
+    )
+    .await
+    .is_err()
+    {
+        return Ok(regguard_card(
+            &state,
+            &ctx,
+            selector,
+            Default::default(),
+            can_manage,
+            Some("You do not have access to this hosting.".into()),
+        ));
+    }
+    match crate::dispatcher::dispatch_to_node(
+        &state,
+        owner.as_deref(),
+        Request::RegGuardView { sel },
+    )
+    .await
+    {
+        Ok(RpcResponse::RegGuardView(v)) => {
+            Ok(regguard_card(&state, &ctx, selector, v, can_manage, None))
+        }
+        Ok(RpcResponse::Error(e)) => Ok(regguard_card(
+            &state,
+            &ctx,
+            selector,
+            Default::default(),
+            can_manage,
+            Some(e.to_string()),
+        )),
+        _ => Ok(regguard_card(
+            &state,
+            &ctx,
+            selector,
+            Default::default(),
+            can_manage,
+            Some("unexpected response from the node".into()),
+        )),
+    }
+}
+
+/// POST /hostings/regguard — turn the guard on/off; returns the re-rendered
+/// card for an HTMX swap.
+pub async fn post_regguard(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<RegGuardToggleForm>,
+) -> Result<Response, AppError> {
+    let sel = match require_manage_for_selector(
+        &state,
+        &ctx,
+        &form.selector,
+        Capability::HostingEditConfig,
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
+    let (_, owner) = find_hosting_anywhere(&state, sel.clone()).await?;
+    let enabled = matches!(form.enabled.as_deref(), Some("on" | "true" | "1"));
+    match crate::dispatcher::dispatch_to_node(
+        &state,
+        owner.as_deref(),
+        Request::RegGuardSet { sel, enabled },
+    )
+    .await
+    {
+        Ok(RpcResponse::RegGuardSet(v)) => {
+            Ok(regguard_card(&state, &ctx, form.selector, v, true, None))
+        }
+        Ok(RpcResponse::Error(e)) => Ok(regguard_card(
+            &state,
+            &ctx,
+            form.selector,
+            Default::default(),
+            true,
+            Some(e.to_string()),
+        )),
+        _ => Ok(regguard_card(
+            &state,
+            &ctx,
+            form.selector,
+            Default::default(),
+            true,
+            Some("unexpected response from the node".into()),
+        )),
+    }
+}
+
 /// POST /hostings/gitsync/genkey — generate a deploy keypair on the node.
 pub async fn post_gitsync_genkey(
     State(state): State<SharedState>,

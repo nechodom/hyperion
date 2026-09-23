@@ -104,6 +104,19 @@ pub trait AgentApi: Send + Sync + 'static {
         enabled: bool,
     ) -> Result<hyperion_types::WpExtras, RpcError>;
 
+    /// Read the registration spam guard state for one hosting.
+    async fn regguard_view(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<hyperion_types::regguard::RegGuardView, RpcError>;
+
+    /// Turn the registration spam guard on or off for one hosting.
+    async fn regguard_set(
+        &self,
+        sel: HostingSelector,
+        enabled: bool,
+    ) -> Result<hyperion_types::regguard::RegGuardView, RpcError>;
+
     /// Rotate the Redis password for an already-enabled hosting.
     async fn hosting_rotate_redis_password(
         &self,
