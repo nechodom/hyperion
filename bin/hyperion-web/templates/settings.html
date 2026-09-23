@@ -1360,6 +1360,16 @@
           <option value="desktop"{% if config.performance.strategy == "desktop" %} selected{% endif %}>Desktop</option>
         </select>
       </div>
+      <div class="field" style="max-width:34rem">
+        <label for="cwv_interval">Auto-measure how often</label>
+        <select id="cwv_interval" name="cwv_interval_days">
+          <option value="7"{% if config.performance.cwv_interval_days == 7 %} selected{% endif %}>Weekly (default)</option>
+          <option value="14"{% if config.performance.cwv_interval_days == 14 %} selected{% endif %}>Every two weeks</option>
+          <option value="30"{% if config.performance.cwv_interval_days == 30 %} selected{% endif %}>Monthly</option>
+          <option value="0"{% if config.performance.cwv_interval_days == 0 %} selected{% endif %}>Off — only on demand</option>
+        </select>
+        <p class="text-soft small" style="margin:0.3rem 0 0">How often care-plan sites are re-measured automatically. It rides the weekly site check, so it can be spaced further out but not made more frequent. On demand any time with <em>Measure now</em> on a site's Performance panel.</p>
+      </div>
       <button type="submit" class="btn primary">Save Core Web Vitals source</button>
     </form>
   </div>

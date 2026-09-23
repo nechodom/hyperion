@@ -223,6 +223,9 @@ pub struct PerformanceConfigView {
     pub psi_key_set: bool,
     #[serde(default)]
     pub lighthouse_available: bool,
+    /// How often to auto-measure, in days (7/14/30, or 0 = on demand only).
+    #[serde(default)]
+    pub cwv_interval_days: i64,
 }
 
 #[cfg(test)]
