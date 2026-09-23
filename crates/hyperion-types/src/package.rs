@@ -430,12 +430,14 @@ impl PackageFeatures {
         // side actually runs a backup: a `custom every 3 days` is not
         // overridden by a coarser `weekly`, nor a `daily` by a `custom every
         // 90 days` — comparing enum ranks alone could not tell those apart.
-        let a = self.backup_cadence.effective_secs(self.backup_interval_days);
-        let b = other.backup_cadence.effective_secs(other.backup_interval_days);
+        let a = self
+            .backup_cadence
+            .effective_secs(self.backup_interval_days);
+        let b = other
+            .backup_cadence
+            .effective_secs(other.backup_interval_days);
         let (cadence, interval) = match (a, b) {
-            (Some(sa), Some(sb)) if sb < sa => {
-                (other.backup_cadence, other.backup_interval_days)
-            }
+            (Some(sa), Some(sb)) if sb < sa => (other.backup_cadence, other.backup_interval_days),
             (Some(_), Some(_)) => (self.backup_cadence, self.backup_interval_days),
             // One side runs backups, the other does not (`Off`, or a `Custom`
             // with no usable interval): the running one wins.
@@ -1256,13 +1258,24 @@ mod tests {
             ..Default::default()
         };
         let merged = daily.combine(sparse_custom);
-        assert_eq!(merged.backup_cadence, BackupCadence::Daily, "daily is more frequent");
-        assert_eq!(merged.backup_interval_days, 0, "daily has no custom interval");
+        assert_eq!(
+            merged.backup_cadence,
+            BackupCadence::Daily,
+            "daily is more frequent"
+        );
+        assert_eq!(
+            merged.backup_interval_days, 0,
+            "daily has no custom interval"
+        );
         // …but the customer keeps the longer history and the deeper floor,
         // whichever package carried them.
         assert_eq!(merged.backup_keep_days, 365);
         assert_eq!(merged.backup_keep_last, 5);
-        assert_eq!(merged, sparse_custom.combine(daily), "order must not matter");
+        assert_eq!(
+            merged,
+            sparse_custom.combine(daily),
+            "order must not matter"
+        );
 
         // Custom every 2 days beats weekly, and carries its own interval.
         let dense_custom = PackageFeatures {
@@ -1296,7 +1309,10 @@ mod tests {
         };
         let merged = backups.combine(monitoring_with_stray);
         assert_eq!(merged.backup_cadence, BackupCadence::Weekly);
-        assert_eq!(merged.backup_keep_days, 14, "the leave-cadence package's retention is ignored");
+        assert_eq!(
+            merged.backup_keep_days, 14,
+            "the leave-cadence package's retention is ignored"
+        );
     }
 
     #[test]
