@@ -14349,10 +14349,16 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .filter_map(|line| serde_json::from_str(line).ok())
             .collect();
         for r in &mut out {
-            // Subjects arrive RFC 2047 encoded whenever they contain a
-            // non-ASCII character, which for a Czech site is most of them.
-            // Decode for display; an undecodable header comes back unchanged.
+            // Subjects AND the From/To display names arrive RFC 2047 encoded
+            // whenever they contain a non-ASCII character, which for a Czech
+            // site is most of them — the From showed as
+            // `=?UTF-8?Q?Centrum_SRD=C3=8D=C4=8CKO...?= <addr>` until this
+            // decoded it. `decode_mime_header` only touches the encoded word
+            // and leaves the `<address>` part intact; an undecodable header
+            // comes back unchanged.
             r.subject = hyperion_types::decode_mime_header(&r.subject);
+            r.from_address = hyperion_types::decode_mime_header(&r.from_address);
+            r.to_address = hyperion_types::decode_mime_header(&r.to_address);
             // Truncate the body excerpt for wire safety (the wrapper
             // already caps at ~1 KB but defence in depth).
             if r.body_excerpt.len() > 2048 {
