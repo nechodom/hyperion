@@ -9478,11 +9478,23 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 }
             };
             ran += 1;
-            // Core Web Vitals on the same weekly cadence and the same
-            // care-plan sites, when a source is set. Best-effort: a Google
-            // hiccup or a missing Lighthouse must not fail the site check, and
-            // cwv_measure records its own error for the card either way.
-            if self.performance_config().cwv_source != "off" {
+            // Core Web Vitals, when a source is set and the site is DUE by the
+            // operator's configured cadence ([performance] cwv_interval_days,
+            // default 7). It rides this weekly tick, so a longer interval spaces
+            // it out further; 0 means only the on-demand "Measure now". Gated on
+            // the last result's own timestamp. Best-effort: a Google hiccup or a
+            // missing Lighthouse must not fail the site check, and cwv_measure
+            // records its own error for the card either way.
+            let perf_cfg = self.performance_config();
+            let cwv_due = perf_cfg.cwv_interval_days > 0 && {
+                let elapsed = self
+                    .cwv_last(id.as_str())
+                    .await
+                    .map(|c| now_secs() - c.measured_at)
+                    .unwrap_or(i64::MAX);
+                elapsed >= perf_cfg.cwv_interval_days as i64 * 86_400
+            };
+            if perf_cfg.cwv_source != "off" && cwv_due {
                 if let Err(e) = self.cwv_measure(HostingSelector::Id(id.clone())).await {
                     tracing::debug!(domain = %detail.domain, error = %e, "cwv measure failed");
                 }
@@ -23648,6 +23660,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             strategy: cfg.strategy_label().to_string(),
             psi_key_set: !cfg.psi_api_key.trim().is_empty(),
             lighthouse_available,
+            cwv_interval_days: cfg.cwv_interval_days as i64,
         }
     }
 
@@ -31278,6 +31291,11 @@ pub(crate) struct PerformanceConfig {
     pub psi_api_key: String,
     /// `mobile` (default) or `desktop`.
     pub strategy: String,
+    /// How often to auto-measure, in days: 7 weekly (default), 14 fortnightly,
+    /// 30 monthly, 0 = never (only the on-demand "Measure now"). The measure
+    /// rides the weekly site-check tick, so this can space it OUT past a week
+    /// but not make it more frequent than the check itself.
+    pub cwv_interval_days: u32,
 }
 
 impl PerformanceConfig {
@@ -31323,10 +31341,16 @@ pub(crate) fn read_performance_section(cfg_path: Option<&std::path::Path>) -> Pe
         "desktop" => "desktop".to_string(),
         _ => "mobile".to_string(),
     };
+    let cwv_interval_days = sec
+        .and_then(|s| s.get("cwv_interval_days"))
+        .and_then(|v| v.as_integer())
+        .map(|v| v.clamp(0, 365) as u32)
+        .unwrap_or(7);
     PerformanceConfig {
         cwv_source,
         psi_api_key: str_at("psi_api_key"),
         strategy,
+        cwv_interval_days,
     }
 }
 /// How often the automated walk runs per site. Weekly: every request it
@@ -33116,6 +33140,15 @@ fn parse_agent_section_fields(
             ("performance", "psi_api_key") => {
                 crate::config_persist::FieldValue::Str(v.trim().to_string())
             }
+            ("performance", "cwv_interval_days") => {
+                let n = parse_int(v)?;
+                if !(0..=365).contains(&n) {
+                    return Err(bad(format!(
+                        "auto-measure interval must be 0..=365 days, got {n}"
+                    )));
+                }
+                crate::config_persist::FieldValue::Int(n)
+            }
             ("cluster", "trash_retention_days") => {
                 let n = parse_int(v)?;
                 if !(1..=365).contains(&n) {
@@ -33447,6 +33480,7 @@ async fn chmod_path(path: &str, mode: u32) -> Result<(), String> {
 #[cfg(test)]
 mod chmod_path_tests {
     use super::chmod_path;
+    use super::read_performance_section;
     use std::os::unix::fs::PermissionsExt;
 
     /// A directory has two links before it contains anything — its name in
@@ -33489,6 +33523,37 @@ mod chmod_path_tests {
         chmod_path(&plain.to_string_lossy(), 0o640)
             .await
             .expect("a single-link file should be allowed");
+    }
+
+    /// The auto-measure interval reads from `[performance] cwv_interval_days`,
+    /// defaults to weekly (7) when absent — NOT 0, which would silently stop
+    /// auto-measuring for anyone who set a source before this field existed —
+    /// and clamps out-of-range values.
+    #[test]
+    fn cwv_interval_reads_from_toml_and_defaults_to_weekly() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("agent.toml");
+
+        std::fs::write(
+            &path,
+            "[performance]\ncwv_source = \"psi\"\ncwv_interval_days = 14\n",
+        )
+        .expect("write");
+        let cfg = read_performance_section(Some(&path));
+        assert_eq!(cfg.cwv_interval_days, 14);
+        assert_eq!(cfg.cwv_source, "psi");
+
+        // Absent → weekly default, so an upgrade keeps the old behaviour.
+        std::fs::write(&path, "[performance]\ncwv_source = \"psi\"\n").expect("write");
+        assert_eq!(read_performance_section(Some(&path)).cwv_interval_days, 7);
+
+        // 0 = never (a real, distinct choice from the default).
+        std::fs::write(&path, "[performance]\ncwv_interval_days = 0\n").expect("write");
+        assert_eq!(read_performance_section(Some(&path)).cwv_interval_days, 0);
+
+        // Out of range clamps rather than panicking.
+        std::fs::write(&path, "[performance]\ncwv_interval_days = 9999\n").expect("write");
+        assert_eq!(read_performance_section(Some(&path)).cwv_interval_days, 365);
     }
 }
 

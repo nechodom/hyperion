@@ -279,3 +279,8 @@ enabled = true
 cwv_source = "off"
 strategy = "mobile"
 # psi_api_key = ""
+# How often care-plan sites are auto-measured, in days: 7 weekly (default),
+# 14 fortnightly, 30 monthly, 0 = never (only the on-demand "Measure now").
+# It rides the weekly site-check tick, so it can be spaced out but not made
+# more frequent than that.
+# cwv_interval_days = 7
