@@ -1958,7 +1958,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(())
     }
 
-    async fn notify_logo_data_uri(&self) -> Option<String> {
+    /// The logo file as raw bytes + its MIME, validated by magic bytes. `None`
+    /// when absent, empty, oversized, or an unrecognised format. This is the
+    /// form the actual mail uses — attached inline via Content-ID — because
+    /// mail clients block `data:` image URIs.
+    async fn notify_logo_bytes(&self) -> Option<(Vec<u8>, &'static str)> {
         let path = std::path::Path::new(EMAIL_LOGO_PATH);
         let bytes = tokio::fs::read(path).await.ok()?;
         // Cap it. A large image is slow for every recipient and some servers
@@ -1973,6 +1977,14 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             b if b.starts_with(b"<svg") || b.starts_with(b"<?xml") => "image/svg+xml",
             _ => return None,
         };
+        Some((bytes, mime))
+    }
+
+    /// The logo as a `data:` URI — for the settings-page preview only, which
+    /// renders in a browser where data URIs work. Real mail uses
+    /// [`Self::notify_logo_bytes`] + a Content-ID part instead.
+    async fn notify_logo_data_uri(&self) -> Option<String> {
+        let (bytes, mime) = self.notify_logo_bytes().await?;
         use base64::Engine;
         Some(format!(
             "data:{mime};base64,{}",
@@ -14197,16 +14209,28 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // Send both shapes. The plain text is exactly what was composed, so
         // nothing is lost for a client that refuses HTML — and a
         // text/html-ONLY message reads as spam to several filters.
+        //
+        // The logo rides as an inline Content-ID part, NOT a `data:` URI:
+        // Gmail and friends strip data-URI images, so the shell references
+        // `cid:hyperion-logo` and the bytes are attached below.
+        let logo = self.notify_logo_bytes().await;
+        let logo_src = logo
+            .as_ref()
+            .map(|_| format!("cid:{}", hyperion_adapters::email::LOGO_CID));
         let html = hyperion_adapters::email::render_html_shell(
             &self.notify_brand_name(),
             body,
-            self.notify_logo_data_uri().await.as_deref(),
+            logo_src.as_deref(),
             &self.notify_email_footer(),
         );
+        let logo_part = logo.as_ref().map(|(b, m)| (b.as_slice(), *m));
         let mut any_ok = false;
         for to in &recipients {
             let to = to.as_str();
-            any_ok |= match hyperion_adapters::email::send_html(cfg, to, subject, body, &html).await
+            any_ok |= match hyperion_adapters::email::send_html(
+                cfg, to, subject, body, &html, logo_part,
+            )
+            .await
             {
                 Ok(code) => {
                     self.append_audit(

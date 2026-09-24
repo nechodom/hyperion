@@ -85,19 +85,30 @@ pub fn normalize_smtp_host(raw: &str) -> (String, Option<u16>) {
 /// Re-exported so callers that already depend on the adapter keep working.
 pub use hyperion_types::render_html_shell;
 
+/// Content-ID the HTML shell references as `cid:hyperion-logo` when a logo is
+/// attached inline. Mail clients block `data:` image URIs (Gmail strips them
+/// outright), so the logo has to ride as a real MIME part, not a data URI in
+/// the `src`.
+pub const LOGO_CID: &str = "hyperion-logo";
+
 /// Send a notification as multipart/alternative — the plain text exactly as
 /// composed, plus the HTML shell around it.
 ///
 /// Multipart rather than HTML-only on purpose: a text/html-only message reads
 /// as spam to several filters, and some operators genuinely prefer text.
+///
+/// `logo` = `(bytes, mime)` attaches the image as an inline `multipart/related`
+/// part with Content-ID [`LOGO_CID`]; the HTML must reference it as
+/// `cid:hyperion-logo`. `None` sends without one.
 pub async fn send_html(
     cfg: &EmailConfig,
     to: &str,
     subject: &str,
     body_text: &str,
     body_html: &str,
+    logo: Option<(&[u8], &str)>,
 ) -> Result<String, AdapterError> {
-    send_inner(cfg, to, subject, Some((body_text, body_html)), None).await
+    send_inner(cfg, to, subject, Some((body_text, body_html)), None, logo).await
 }
 
 /// Send a plain-text email. Returns the SMTP server's response on
@@ -109,7 +120,62 @@ pub async fn send_text(
     subject: &str,
     body: &str,
 ) -> Result<String, AdapterError> {
-    send_inner(cfg, to, subject, None, Some(body)).await
+    send_inner(cfg, to, subject, None, Some(body), None).await
+}
+
+/// Build the MIME message (no I/O). Pure so the multipart shape — and the
+/// inline logo part in particular — can be unit-tested without a live SMTP
+/// server.
+fn build_message(
+    from_full: &str,
+    to: &str,
+    subject: &str,
+    alt: Option<(&str, &str)>,
+    plain: Option<&str>,
+    logo: Option<(&[u8], &str)>,
+) -> Result<Message, AdapterError> {
+    let msg = Message::builder()
+        .from(
+            from_full
+                .parse()
+                .map_err(|e| AdapterError::Other(format!("smtp: bad from address: {e}")))?,
+        )
+        .to(to
+            .parse()
+            .map_err(|e| AdapterError::Other(format!("smtp: bad to address: {e}")))?)
+        .subject(subject);
+    match (alt, plain) {
+        (Some((text, html)), _) => {
+            use lettre::message::{header, MultiPart, SinglePart};
+            let alternative = MultiPart::alternative_plain_html(text.to_string(), html.to_string());
+            // With a logo, wrap the alternative + the image in multipart/related
+            // so the HTML's `cid:hyperion-logo` resolves to a real inline part.
+            let body = match logo {
+                Some((bytes, mime)) if !bytes.is_empty() => {
+                    let ctype = header::ContentType::parse(mime).map_err(|e| {
+                        AdapterError::Other(format!("smtp: logo content-type {mime:?}: {e}"))
+                    })?;
+                    let image = SinglePart::builder()
+                        .header(ctype)
+                        .header(header::ContentTransferEncoding::Base64)
+                        .header(header::ContentDisposition::inline())
+                        .header(header::ContentId::from(format!("<{LOGO_CID}>")))
+                        .body(bytes.to_vec());
+                    MultiPart::related()
+                        .multipart(alternative)
+                        .singlepart(image)
+                }
+                _ => alternative,
+            };
+            msg.multipart(body)
+                .map_err(|e| AdapterError::Other(format!("smtp: build message: {e}")))
+        }
+        (None, Some(text)) => msg
+            .header(lettre::message::header::ContentType::TEXT_PLAIN)
+            .body(text.to_string())
+            .map_err(|e| AdapterError::Other(format!("smtp: build message: {e}"))),
+        (None, None) => Err(AdapterError::Other("smtp: no message body".into())),
+    }
 }
 
 /// Shared transport for both shapes. `alt` carries (plain, html) for a
@@ -121,6 +187,7 @@ async fn send_inner(
     subject: &str,
     alt: Option<(&str, &str)>,
     plain: Option<&str>,
+    logo: Option<(&[u8], &str)>,
 ) -> Result<String, AdapterError> {
     // The dedicated port field is authoritative; only fall back to a port
     // embedded in the host (legacy "host:port" configs) when it's unset.
@@ -136,31 +203,7 @@ async fn send_inner(
         format!("{} <{}>", cfg.from_name, cfg.from_address)
     };
 
-    let msg = Message::builder()
-        .from(
-            from_full
-                .parse()
-                .map_err(|e| AdapterError::Other(format!("smtp: bad from address: {e}")))?,
-        )
-        .to(to
-            .parse()
-            .map_err(|e| AdapterError::Other(format!("smtp: bad to address: {e}")))?)
-        .subject(subject);
-    let msg = match (alt, plain) {
-        (Some((text, html)), _) => msg
-            .multipart(lettre::message::MultiPart::alternative_plain_html(
-                text.to_string(),
-                html.to_string(),
-            ))
-            .map_err(|e| AdapterError::Other(format!("smtp: build message: {e}")))?,
-        (None, Some(text)) => msg
-            .header(lettre::message::header::ContentType::TEXT_PLAIN)
-            .body(text.to_string())
-            .map_err(|e| AdapterError::Other(format!("smtp: build message: {e}")))?,
-        (None, None) => {
-            return Err(AdapterError::Other("smtp: no message body".into()));
-        }
-    };
+    let msg = build_message(&from_full, to, subject, alt, plain, logo)?;
 
     // Only authenticate when a username is configured. A local/anonymous relay
     // (e.g. postfix on localhost:25 that accepts mail without auth) advertises
@@ -236,8 +279,56 @@ async fn send_inner(
 
 #[cfg(test)]
 mod tests {
+    use super::build_message;
     use super::is_loopback_host;
     use super::normalize_smtp_host;
+    use super::LOGO_CID;
+
+    #[test]
+    fn logo_rides_as_an_inline_content_id_part() {
+        // A `data:` URI in the HTML is stripped by mail clients; the logo must
+        // be a real inline part the HTML points at with `cid:`.
+        let png = [0x89u8, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4];
+        let html = format!("<img src=\"cid:{LOGO_CID}\">");
+        let msg = build_message(
+            "Acme <a@example.com>",
+            "b@example.com",
+            "Subj",
+            Some(("text body", &html)),
+            None,
+            Some((&png, "image/png")),
+        )
+        .expect("build");
+        let bytes = msg.formatted();
+        let raw = String::from_utf8_lossy(&bytes);
+        assert!(raw.contains("multipart/related"), "expected related: {raw}");
+        assert!(
+            raw.contains("Content-ID: <hyperion-logo>"),
+            "expected the CID header: {raw}"
+        );
+        assert!(raw.to_lowercase().contains("content-disposition: inline"));
+        assert!(
+            raw.contains("cid:hyperion-logo"),
+            "the HTML must reference the CID"
+        );
+    }
+
+    #[test]
+    fn no_logo_stays_a_plain_alternative() {
+        let msg = build_message(
+            "a@example.com",
+            "b@example.com",
+            "S",
+            Some(("t", "<p>h</p>")),
+            None,
+            None,
+        )
+        .expect("build");
+        let bytes = msg.formatted();
+        let raw = String::from_utf8_lossy(&bytes);
+        assert!(raw.contains("multipart/alternative"));
+        assert!(!raw.contains("Content-ID"), "no logo → no CID part");
+    }
 
     /// Certificate verification is skipped for these hosts, so the set has
     /// to be exactly the addresses that never leave the machine. A false
