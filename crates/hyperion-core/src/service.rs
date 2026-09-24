@@ -1406,12 +1406,33 @@ fn read_mail_fqdn() -> Option<String> {
     None
 }
 
-/// Hard cap on imported migration archives. 8 GB is far past any
-/// reasonable hosting archive (real ones land at 10s–100s of MB,
-/// the largest ever seen in dev was ~3 GB on a WP site with a 2-GB
-/// uploads dir). Without a cap, a malicious or accidentally-huge
-/// upstream can fill /var/lib partition.
-const MIGRATION_MAX_DOWNLOAD_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+/// Default hard cap on imported migration archives. The cap only exists so a
+/// malicious or accidentally-huge upstream can't fill the /var/lib partition;
+/// it is NOT a statement about a "normal" site. Real ones with a big uploads or
+/// media library legitimately reach tens of GB, so the default is generous and
+/// the operator can raise it per node via `[migration] max_download_gb`.
+const MIGRATION_MAX_DOWNLOAD_BYTES_DEFAULT: u64 = 64 * 1024 * 1024 * 1024;
+
+/// Per-node override for the migration download cap, from
+/// `[migration] max_download_gb`. Clamped to 1..=1024 GB so a typo (0, or a
+/// petabyte) can't disable the disk-fill guard or overflow. Absent / unreadable
+/// / out of range ⇒ the 64 GB default.
+fn read_migration_max_download_bytes(cfg_path: Option<&std::path::Path>) -> u64 {
+    let parsed = (|| {
+        let raw = std::fs::read_to_string(cfg_path?).ok()?;
+        let doc = raw.parse::<toml_edit::DocumentMut>().ok()?;
+        let gb = doc
+            .get("migration")?
+            .as_table_like()?
+            .get("max_download_gb")?
+            .as_integer()?;
+        u64::try_from(gb).ok()
+    })();
+    match parsed {
+        Some(gb) if (1..=1024).contains(&gb) => gb * 1024 * 1024 * 1024,
+        _ => MIGRATION_MAX_DOWNLOAD_BYTES_DEFAULT,
+    }
+}
 
 /// Rewrite a freshly-downloaded migration manifest in place to
 /// substitute `new_domain` (and optionally `new_aliases`) for the
@@ -1477,6 +1498,7 @@ async fn curl_to_file(
     url: &str,
     dest: &std::path::Path,
     resolve_pins: &[String],
+    max_bytes: u64,
 ) -> Result<(), RpcError> {
     // -f: fail with non-zero exit on 4xx/5xx (otherwise curl happily
     //     writes the error body to disk and we'd "import" garbage).
@@ -1528,7 +1550,7 @@ async fn curl_to_file(
         ),
         url = q(url),
         dest = q(&dest.display().to_string()),
-        maxsize = MIGRATION_MAX_DOWNLOAD_BYTES,
+        maxsize = max_bytes,
     );
     // SSRF guard (sec-findings #4): pin curl to the IP(s) the caller already
     // validated as non-internal, so a DNS-rebind can't swing the host to an
@@ -1548,7 +1570,12 @@ async fn curl_to_file(
         let stderr = stderr_tail.trim().to_string();
         tracing::warn!(code, %stderr, "migration download failed");
         let message = if code == 63 {
-            "download failed: archive larger than 8 GB — refusing to download".to_string()
+            format!(
+                "download failed: archive larger than {} GB — refusing to download. \
+                 If this site is legitimately that large, raise the limit with \
+                 `[migration] max_download_gb` in the target node's agent.toml.",
+                max_bytes / (1024 * 1024 * 1024)
+            )
         } else {
             "download failed: could not fetch the bundle from the source URL \
              (check the URL and token, and that the source is reachable)"
@@ -14012,9 +14039,22 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let manifest_url = format!("{base}/manifest.json?t={token_q}");
         let archive_url = format!("{base}/archive.tar.gz?t={token_q}");
 
+        // Per-node cap on the archive download (default 64 GB). The archive can
+        // legitimately be tens of GB; the cap only stops a runaway upstream from
+        // filling /var/lib.
+        let max_archive_bytes =
+            read_migration_max_download_bytes(self.agent_config_path.as_deref());
+
         // Download manifest first — small file, fail fast on bad
-        // signature / wrong URL before we burn time on the archive.
-        curl_to_file(&manifest_url, &manifest_path, &resolve_pins).await?;
+        // signature / wrong URL before we burn time on the archive. The manifest
+        // is JSON (KBs); cap it tight so a bogus URL can't stream GBs here.
+        curl_to_file(
+            &manifest_url,
+            &manifest_path,
+            &resolve_pins,
+            64 * 1024 * 1024,
+        )
+        .await?;
 
         // CLONE OVERRIDES: when the caller passed `override_domain`
         // (the typical `hosting clone` flow), rewrite the manifest
@@ -14037,7 +14077,13 @@ impl<A: AdapterPort + 'static> HostingService<A> {
 
         // Then the archive — can be many GB. curl streams to disk
         // directly so RSS stays flat.
-        curl_to_file(&archive_url, &archive_path, &resolve_pins).await?;
+        curl_to_file(
+            &archive_url,
+            &archive_path,
+            &resolve_pins,
+            max_archive_bytes,
+        )
+        .await?;
 
         // Delegate to the existing path-based importer. It re-reads
         // the SHA from disk and refuses on mismatch — that doubles
@@ -36904,6 +36950,42 @@ mod tests {
         assert_eq!(e.billing_lang, Some(LetterLang::Cs));
         assert!(!e.overrides.contains_key("operator_lang"));
         assert!(!e.overrides.contains_key("billing_lang"));
+    }
+
+    /// The migration download cap reads `[migration] max_download_gb`, defaults
+    /// to 64 GB, and clamps a nonsense value back to the default so the
+    /// disk-fill guard can neither be disabled (0) nor overflowed.
+    #[test]
+    fn migration_download_cap_reads_config_and_clamps() {
+        use std::io::Write;
+        let gb = 1024u64 * 1024 * 1024;
+        let write = |body: &str| {
+            let mut f = tempfile::NamedTempFile::new().expect("temp");
+            f.write_all(body.as_bytes()).expect("write");
+            f
+        };
+        // No path / empty file → the 64 GB default.
+        assert_eq!(read_migration_max_download_bytes(None), 64 * gb);
+        let empty = write("");
+        assert_eq!(
+            read_migration_max_download_bytes(Some(empty.path())),
+            64 * gb
+        );
+        // A legitimate override (a 200 GB media site).
+        let ok = write("[migration]\nmax_download_gb = 200\n");
+        assert_eq!(read_migration_max_download_bytes(Some(ok.path())), 200 * gb);
+        // Out of range clamps to the default — 0 must not disable the guard,
+        // and a petabyte must not overflow it.
+        let zero = write("[migration]\nmax_download_gb = 0\n");
+        assert_eq!(
+            read_migration_max_download_bytes(Some(zero.path())),
+            64 * gb
+        );
+        let huge = write("[migration]\nmax_download_gb = 5000\n");
+        assert_eq!(
+            read_migration_max_download_bytes(Some(huge.path())),
+            64 * gb
+        );
     }
 
     /// REPRODUCTION of an operator report: "I edited the report template but
