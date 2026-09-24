@@ -1470,17 +1470,23 @@ async fn rewrite_manifest_domain(
             "domain".into(),
             serde_json::Value::String(new_domain.to_string()),
         );
-        if !new_aliases.is_empty() {
-            obj.insert(
-                "aliases".into(),
-                serde_json::Value::Array(
-                    new_aliases
-                        .iter()
-                        .map(|a| serde_json::Value::String(a.clone()))
-                        .collect(),
-                ),
-            );
-        }
+        // ALWAYS replace the aliases, even with an empty list. A clone lands on
+        // a NEW domain, so it must NOT carry the source's aliases: alias domains
+        // are globally unique, so keeping e.g. `www.<source>` makes the import
+        // die on `UNIQUE constraint failed: hosting_aliases.alias_domain`
+        // against the still-present source. Empty override ⇒ no aliases (the
+        // operator adds `www.<new>` afterward); the previous `if !is_empty()`
+        // guard left the source's aliases in place and broke every clone whose
+        // source had one.
+        obj.insert(
+            "aliases".into(),
+            serde_json::Value::Array(
+                new_aliases
+                    .iter()
+                    .map(|a| serde_json::Value::String(a.clone()))
+                    .collect(),
+            ),
+        );
     } else {
         return Err(RpcError::Validation {
             message: "manifest must be a JSON object".into(),
@@ -37006,6 +37012,44 @@ mod tests {
             read_migration_max_download_bytes(Some(huge.path())),
             64 * gb
         );
+    }
+
+    /// A clone rewrites the manifest to a new domain; it must REPLACE the
+    /// source's aliases (with the operator's, or none), never keep them —
+    /// keeping `www.<source>` collided with the still-present source on
+    /// `hosting_aliases.alias_domain` and broke every clone whose source had an
+    /// alias.
+    #[tokio::test]
+    async fn clone_manifest_rewrite_replaces_aliases_never_keeps_the_source_ones() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mf = dir.path().join("manifest.json");
+        tokio::fs::write(
+            &mf,
+            r#"{"domain":"dluhopisar.cz","aliases":["www.dluhopisar.cz"]}"#,
+        )
+        .await
+        .expect("write");
+
+        // No override aliases → the source alias must be DROPPED, not carried.
+        rewrite_manifest_domain(&mf, "dluh.example.cz", &[])
+            .await
+            .expect("rewrite");
+        let v: serde_json::Value =
+            serde_json::from_slice(&tokio::fs::read(&mf).await.unwrap()).unwrap();
+        assert_eq!(v["domain"], "dluh.example.cz");
+        assert_eq!(
+            v["aliases"].as_array().expect("aliases array").len(),
+            0,
+            "source aliases must be dropped so the clone can't collide"
+        );
+
+        // With override aliases → exactly those are used.
+        rewrite_manifest_domain(&mf, "dluh2.example.cz", &["www.dluh2.example.cz".into()])
+            .await
+            .expect("rewrite2");
+        let v2: serde_json::Value =
+            serde_json::from_slice(&tokio::fs::read(&mf).await.unwrap()).unwrap();
+        assert_eq!(v2["aliases"][0], "www.dluh2.example.cz");
     }
 
     /// REPRODUCTION of an operator report: "I edited the report template but
