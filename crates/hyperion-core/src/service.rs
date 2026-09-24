@@ -1499,12 +1499,17 @@ async fn curl_to_file(
     dest: &std::path::Path,
     resolve_pins: &[String],
     max_bytes: u64,
+    // Whether `max_bytes` is the operator-raisable archive cap. The archive
+    // download's cap can be lifted via `[migration] max_download_gb`; the
+    // manifest's tight cap cannot, so its refusal must NOT point there.
+    cap_is_raisable: bool,
 ) -> Result<(), RpcError> {
     // -f: fail with non-zero exit on 4xx/5xx (otherwise curl happily
     //     writes the error body to disk and we'd "import" garbage).
     // --max-time 1800: 30-minute hard cap for multi-GB archives.
-    // --max-filesize: refuse downloads larger than 8 GB. Without
-    //   this a malicious upstream could fill the disk.
+    // --max-filesize: refuse a download larger than `max_bytes` (the caller's
+    //   cap — the configured archive limit, or the tight manifest limit).
+    //   Without this a malicious upstream could fill the disk.
     // --max-redirs 0: do NOT follow redirects. With -L set, an
     //   attacker who got the operator to paste their URL into the
     //   import form could 302 us to file:// / DNS-rebind /
@@ -1566,16 +1571,29 @@ async fn curl_to_file(
         // code back to the caller. The distinct messages for 404 vs connection-
         // refused vs timeout turn this into an internal-reachability oracle for
         // port/host enumeration. Log the detail server-side; return a generic,
-        // non-distinguishing error (the >8 GB case keeps a friendlier hint).
+        // non-distinguishing error (the over-limit case keeps a friendlier hint).
         let stderr = stderr_tail.trim().to_string();
         tracing::warn!(code, %stderr, "migration download failed");
         let message = if code == 63 {
-            format!(
-                "download failed: archive larger than {} GB — refusing to download. \
-                 If this site is legitimately that large, raise the limit with \
-                 `[migration] max_download_gb` in the target node's agent.toml.",
-                max_bytes / (1024 * 1024 * 1024)
-            )
+            // Report the cap in the unit it actually is — GB for the archive
+            // cap, MB for the tight sub-GB manifest cap (which floored to
+            // "0 GB" before). Only point at the config knob for the cap it
+            // actually governs.
+            let gib = 1024 * 1024 * 1024;
+            let human = if max_bytes >= gib {
+                format!("{} GB", max_bytes / gib)
+            } else {
+                format!("{} MB", max_bytes / (1024 * 1024))
+            };
+            let mut m =
+                format!("download failed: file larger than {human} — refusing to download.");
+            if cap_is_raisable {
+                m.push_str(
+                    " If this site is legitimately that large, raise the limit with \
+                     `[migration] max_download_gb` in the target node's agent.toml.",
+                );
+            }
+            m
         } else {
             "download failed: could not fetch the bundle from the source URL \
              (check the URL and token, and that the source is reachable)"
@@ -14053,6 +14071,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             &manifest_path,
             &resolve_pins,
             64 * 1024 * 1024,
+            false,
         )
         .await?;
 
@@ -14082,6 +14101,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             &archive_path,
             &resolve_pins,
             max_archive_bytes,
+            true,
         )
         .await?;
 
