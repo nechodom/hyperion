@@ -15220,7 +15220,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 .next_billing_at
                 .map(|t| ((t - now).max(0)) / 86400)
                 .unwrap_or(0);
-            let cat = self.letter_catalog();
+            let cat = self.billing_catalog();
             let (price_str, action) =
                 match (row.price_minor, &row.price_currency, &row.price_interval) {
                     (Some(m), Some(c), Some(iv)) => {
@@ -15257,9 +15257,14 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 .ok()
                 .and_then(|e| e.owner_email);
             let to = owner.unwrap_or_default();
-            let subj = format!("[Hyperion] Billing reminder — {domain}");
-            let body = format!(
-                "Hosting:    {domain}\nPrice:      {price_str}\nDue in:     {due_in_days} day(s)\n\n--\nHyperion\n"
+            let subj = cat.render("billing.email_subject", &[("domain", &domain)]);
+            let body = cat.render(
+                "billing.email_body",
+                &[
+                    ("domain", &domain),
+                    ("price", &price_str),
+                    ("days", &due_in_days.to_string()),
+                ],
             );
             self.notify_email(&to, &subj, &body, Some(row.hosting_id.as_str()), "billing")
                 .await;
@@ -15324,7 +15329,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             // that it means "raise an invoice for this amount". A recurring
             // care fee that nobody invoices is revenue quietly lost every
             // month, which is exactly what this message exists to prevent.
-            let cat = self.letter_catalog();
+            let cat = self.billing_catalog();
             let (price_str, action) =
                 match (row.price_minor, &row.price_currency, &row.price_interval) {
                     (Some(m), Some(c), Some(iv)) => {
@@ -15362,9 +15367,15 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 .ok()
                 .and_then(|e| e.owner_email);
             let to = owner.unwrap_or_default();
-            let subj = format!("[Hyperion] Care package reminder — {domain}");
-            let body = format!(
-                "Hosting:    {domain}\nPackage:    {label}\nPrice:      {price_str}\nDue in:     {due_in_days} day(s)\n\n--\nHyperion\n"
+            let subj = cat.render("billing.email_subject", &[("domain", &domain)]);
+            let body = cat.render(
+                "billing.email_body_package",
+                &[
+                    ("domain", &domain),
+                    ("package", &label),
+                    ("price", &price_str),
+                    ("days", &due_in_days.to_string()),
+                ],
             );
             self.notify_email(&to, &subj, &body, Some(row.hosting_id.as_str()), "billing")
                 .await;
@@ -17478,6 +17489,25 @@ impl<A: AdapterPort + 'static> HostingService<A> {
 
     fn letter_catalog(&self) -> LetterCatalog {
         read_letters_section(self.agent_config_path.as_deref())
+    }
+
+    /// Catalogue for OPERATOR-facing text (the notification bell, admin alerts),
+    /// in `[letters] operator_lang` (default English) rather than the customer
+    /// `lang`. So a Czech-customer operator keeps their own alerts in English.
+    fn operator_catalog(&self) -> LetterCatalog {
+        let cat = self.letter_catalog();
+        cat.in_language(cat.operator_lang)
+    }
+
+    /// Catalogue for the billing reminder. Follows `[letters] billing_lang`
+    /// when set, else the customer `lang` — the reminder is about that
+    /// customer's invoice, so it defaults to their language, not the operator's.
+    fn billing_catalog(&self) -> LetterCatalog {
+        let cat = self.letter_catalog();
+        match cat.billing_lang {
+            Some(l) => cat.in_language(l),
+            None => cat,
+        }
     }
 
     /// The operator's expiry-warning body template. Same empty-means-default
@@ -27445,12 +27475,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(n)
     }
 
-    /// An operator alert, in the operator's own language.
-    ///
-    /// The title and body come from the catalogue, so the same edit reaches
-    /// the e-mail and the notification-centre row together — they are one
-    /// message and drifting apart would make the panel disagree with the
-    /// mail somebody was reading on their phone.
+    /// An operator alert, in the OPERATOR's language (`[letters] operator_lang`,
+    /// default English) — NOT the customer `lang`. A Czech-customer operator
+    /// gets their bell in English while their customers still get Czech letters.
     ///
     /// WHICH alert fires and how severe it is stays decided here. An
     /// operator owning the wording cannot promote a warning to an error or
@@ -27464,7 +27491,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         href: &str,
         kind: &str,
     ) {
-        let cat = self.letter_catalog();
+        let cat = self.operator_catalog();
         let title = cat.render(&format!("{id}.title"), args);
         let body = cat.render(&format!("{id}.body"), args);
         self.notify_admins(severity, &title, &body, href, kind)
@@ -32936,8 +32963,27 @@ pub fn letter_catalog_from_toml(raw: &str) -> LetterCatalog {
         .map(str::trim)
         .filter(|v| matches!(v.to_ascii_lowercase().as_str(), "en" | "cs"))
         .map(LetterLang::parse);
+    // Operator-facing language (bell + admin mail). Default English: the panel
+    // is English, so an operator's own alerts should be too until they say
+    // otherwise — separate from the customer `lang` above.
+    cat.operator_lang = section
+        .get("operator_lang")
+        .and_then(|v| v.as_str())
+        .map(LetterLang::parse)
+        .unwrap_or_default();
+    // Billing-reminder language. Absent ⇒ follow the customer `lang` (the
+    // reminder is about that customer's invoice); an explicit en/cs pins it.
+    cat.billing_lang = section
+        .get("billing_lang")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| matches!(v.to_ascii_lowercase().as_str(), "en" | "cs"))
+        .map(LetterLang::parse);
     for (key, item) in section.iter() {
-        if key == "lang" || key == "overrides_lang" {
+        if matches!(
+            key,
+            "lang" | "overrides_lang" | "operator_lang" | "billing_lang"
+        ) {
             continue;
         }
         let Some(text) = item.as_str() else { continue };
@@ -36830,6 +36876,34 @@ mod tests {
         assert!(!parse("[letters]\noverrides_lang = \"cs\"\n")
             .overrides
             .contains_key("overrides_lang"));
+    }
+
+    /// operator_lang / billing_lang parse independently of the customer lang,
+    /// carry the right defaults, and don't leak into the sentence overrides.
+    #[test]
+    fn operator_and_billing_language_parse_and_default() {
+        let parse = |toml: &str| letter_catalog_from_toml(toml);
+
+        // Defaults: customer Czech, operator English, billing follows customer.
+        let d = parse("[letters]\nlang = \"cs\"\n");
+        assert_eq!(d.lang, LetterLang::Cs);
+        assert_eq!(
+            d.operator_lang,
+            LetterLang::En,
+            "operator defaults to English"
+        );
+        assert_eq!(d.billing_lang, None, "billing follows the customer lang");
+
+        // in_language gives the operator view: English, customer overrides gone.
+        let op = d.in_language(d.operator_lang);
+        assert_eq!(op.lang, LetterLang::En);
+
+        // Explicit values are honoured and kept out of the overrides map.
+        let e = parse("[letters]\nlang = \"cs\"\noperator_lang = \"en\"\nbilling_lang = \"cs\"\n");
+        assert_eq!(e.operator_lang, LetterLang::En);
+        assert_eq!(e.billing_lang, Some(LetterLang::Cs));
+        assert!(!e.overrides.contains_key("operator_lang"));
+        assert!(!e.overrides.contains_key("billing_lang"));
     }
 
     /// REPRODUCTION of an operator report: "I edited the report template but

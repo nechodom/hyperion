@@ -201,7 +201,14 @@ mail_threshold = 8    # postfix/dovecot SASL auth failures
 # watching. That is the property the whole report is built on.
 #
 # [letters]
-# lang = "cs"
+# lang = "cs"                # language of the CUSTOMER letters (care report, expiry)
+# operator_lang = "en"       # language of YOUR OWN messages: the notification bell +
+#                            # admin-addressed mail. Defaults to English even when the
+#                            # customer letters are Czech, so an operator keeps their
+#                            # own alerts in English.
+# billing_lang = ""          # the billing reminder ("invoice this client" mail + Slack).
+#                            # Empty = follow `lang` (it's about that customer's invoice);
+#                            # set "en"/"cs" to pin it.
 # "care.attacks.some" = """ZABLOKOVANÉ ÚTOKY: {count}
 #   Tolikrát jsme odstřihli adresu, která se opakovaně pokoušela..."""
 # "unit_day" = "den|dny|dní"

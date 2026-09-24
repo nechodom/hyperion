@@ -159,6 +159,15 @@ pub struct LetterCatalog {
     /// thrown away — the preview kept showing the built-in Czech letter no
     /// matter what they saved, and nothing on screen said why.
     pub overrides_lang: Option<LetterLang>,
+    /// Language for OPERATOR-facing messages — the notification-bell alerts and
+    /// the admin-addressed mail — separate from `lang`, which is the customer's.
+    /// A Czech-customer operator can keep their own alerts in English. Defaults
+    /// to English (`[letters] operator_lang`).
+    pub operator_lang: LetterLang,
+    /// Language for the billing reminder (the "invoice this client" mail + its
+    /// Slack line). `None` follows the customer `lang`, because the reminder is
+    /// about that customer's invoice; set `[letters] billing_lang` to pin it.
+    pub billing_lang: Option<LetterLang>,
 }
 
 impl LetterCatalog {
@@ -167,7 +176,27 @@ impl LetterCatalog {
             lang,
             overrides: BTreeMap::new(),
             overrides_lang: None,
+            operator_lang: LetterLang::En,
+            billing_lang: None,
         }
+    }
+
+    /// The catalogue rebased to a different language: the overrides are kept
+    /// only when they were written in that same language (else the built-in
+    /// pack speaks for it), which is exactly what `drop_foreign_overrides`
+    /// enforces. Used to render operator or billing text in a language that is
+    /// not the customer's.
+    pub fn in_language(&self, lang: LetterLang) -> LetterCatalog {
+        let mut c = self.clone();
+        if c.lang != lang {
+            c.lang = lang;
+            // Overrides written in the old customer language must not leak into
+            // the new one; keep them only if they match.
+            if c.overrides_lang != Some(lang) {
+                c.overrides.clear();
+            }
+        }
+        c
     }
 
     /// The operator's wording, else the pack's.
@@ -1337,6 +1366,27 @@ pub static STRINGS: &[LetterString] = &[
         note: "A care plan was activated on a site. Tokens: {domain} {price} {plan} {total} {next}.",
         en: ":package: *Care plan activated*\n• address: `{domain}`\n{price}\n{plan}{total}\n{next}",
         cs: ":package: *Aktivován plán údržby*\n• adresa: `{domain}`\n{price}\n{plan}{total}\n{next}",
+    },
+    LetterString {
+        id: "billing.email_subject",
+        group: "Billing",
+        note: "Subject of the billing reminder e-mail (reminds YOU to invoice the client). Token: {domain}.",
+        en: "Billing reminder — {domain}",
+        cs: "Připomenutí platby — {domain}",
+    },
+    LetterString {
+        id: "billing.email_body",
+        group: "Billing",
+        note: "Body of the billing reminder for a hosting. Tokens: {domain} {price} {days}.",
+        en: "Hosting: {domain}\nPrice:   {price}\nDue in:  {days} day(s)\n",
+        cs: "Web:      {domain}\nCena:     {price}\nZbývá dnů: {days}\n",
+    },
+    LetterString {
+        id: "billing.email_body_package",
+        group: "Billing",
+        note: "Body of the billing reminder for a care package. Tokens: {domain} {package} {price} {days}.",
+        en: "Hosting: {domain}\nPackage: {package}\nPrice:   {price}\nDue in:  {days} day(s)\n",
+        cs: "Web:      {domain}\nBalíček:  {package}\nCena:     {price}\nZbývá dnů: {days}\n",
     },
     LetterString {
         id: "slack.hosting_due",

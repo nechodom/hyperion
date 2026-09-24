@@ -1185,12 +1185,11 @@
           <option value="cs" {% if letter_lang == "cs" %}selected{% endif %}>Čeština</option>
         </select>
         <span class="hint" style="display:block;margin-top:0.3rem">
-          Applies to everything Hyperion writes that leaves the building: the
-          care report and the expiry warning to your customer, and the
-          operator alerts — Slack messages, and the mail that goes to every
-          administrator address. That last one matters since profiles gained
-          their own alert addresses: those can be a client's own IT contact.
-          The panel itself stays in English.
+          Applies to the <strong>customer</strong> letters — the care report and
+          the expiry warning. Your own operator alerts (the notification bell and
+          admin mail) follow <em>Language of your own alerts</em> below, and the
+          billing reminder follows its own setting, so a Czech-customer install
+          can keep its operator messages in English. The panel stays English.
         </span>
       </div>
 
@@ -1218,6 +1217,33 @@
           letters in that language only — a Czech sentence will not appear in
           an English letter. Left unspecified, your wording is used for every
           letter, whatever its language.
+        </span>
+      </div>
+
+      <div class="field">
+        <label for="lt_operator_lang">Language of your own alerts <span class="hint">bell + admin mail</span></label>
+        <select id="lt_operator_lang" name="operator_lang" style="min-width:14rem">
+          <option value="en" {% if letter_operator_lang == "en" %}selected{% endif %}>English</option>
+          <option value="cs" {% if letter_operator_lang == "cs" %}selected{% endif %}>Čeština</option>
+        </select>
+        <span class="hint" style="display:block;margin-top:0.3rem">
+          The notification bell and the mail sent to administrator addresses —
+          your messages, not your customers'. Defaults to English even when the
+          customer letters are Czech.
+        </span>
+      </div>
+
+      <div class="field">
+        <label for="lt_billing_lang">Language of the billing reminder <span class="hint">the "invoice this client" mail + Slack</span></label>
+        <select id="lt_billing_lang" name="billing_lang" style="min-width:14rem">
+          <option value="" {% if letter_billing_lang == "" %}selected{% endif %}>Follow the customer letter language</option>
+          <option value="cs" {% if letter_billing_lang == "cs" %}selected{% endif %}>Čeština</option>
+          <option value="en" {% if letter_billing_lang == "en" %}selected{% endif %}>English</option>
+        </select>
+        <span class="hint" style="display:block;margin-top:0.3rem">
+          It reminds you to invoice a client, so it defaults to that customer's
+          language rather than your operator language. Pin it here if you want it
+          fixed.
         </span>
       </div>
 

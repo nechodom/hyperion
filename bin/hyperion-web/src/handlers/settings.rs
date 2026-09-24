@@ -120,6 +120,13 @@ struct SettingsTpl<'a> {
     /// "", "en" or "cs". Empty means undeclared, which applies them to every
     /// letter.
     letter_overrides_lang: String,
+    /// `[letters] operator_lang` — the language of the operator's OWN messages
+    /// (notification bell, admin alerts), separate from the customer `lang`.
+    /// "en" (default) or "cs".
+    letter_operator_lang: String,
+    /// `[letters] billing_lang` — the billing reminder's language. "" follows
+    /// the customer `lang`; "en"/"cs" pins it.
+    letter_billing_lang: String,
     /// Every translatable string, grouped for the editor.
     letter_groups: Vec<LetterGroupCard>,
     /// One row per enrolled node: which customer letters that node would
@@ -1006,6 +1013,11 @@ pub async fn get_settings(
         letter_lang: letter_cat.lang.as_str().to_string(),
         letter_overrides_lang: letter_cat
             .overrides_lang
+            .map(|l| l.as_str().to_string())
+            .unwrap_or_default(),
+        letter_operator_lang: letter_cat.operator_lang.as_str().to_string(),
+        letter_billing_lang: letter_cat
+            .billing_lang
             .map(|l| l.as_str().to_string())
             .unwrap_or_default(),
         letter_groups: letter_group_cards(&letter_cat),
