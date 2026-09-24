@@ -70,17 +70,17 @@ pub use sitecheck::{SiteCheckFinding, SiteCheckPage, SiteCheckReport};
 pub use spf::SpfCheckResult;
 pub use stats::{decode_mime_header, render_html_shell, CountryTraffic};
 pub use stats::{
-    AcmeConfigView, AgentConfigView, BackupRemoteConfigView, BackupRetentionConfigView,
-    ClusterConfigView, ClusterStats, CustomRoleSummary, DashboardAlert, EffectiveRoleWire,
-    EmailConfigView, EmailLogEntry, FirewallPort, FirewallView, FsDiagnostics, FsFixStep,
-    FtpAccountSummary, FtpCheckItem, FtpCheckReport, FtpExtraAccount, HostingFileContent,
-    HostingFileEntry, HostingStats, MonitorConfigView, MonitorHistory, MonitorOverviewItem,
-    MonitorSamplePoint, MtaDiagnostics, MtaPortProbe, NodeMetricPoint, NodeMetricsHistory,
-    NodeStats, NodeSummary, NodeUpdateStatus, NotificationFeed, NotificationTemplatesView,
-    NotificationView, OsPendingPackage, OsUpdateStatus, ServiceHealth, ServiceInstallStatus,
-    ServicesHealth, SiteEmailLogEntry, SlackConfigView, SmtpAutodetect, SnapshotDiff,
-    SnapshotOverview, SnapshotRestoreOutcome, SnapshotRetention, SnapshotSummary, TrashEntry,
-    UpdateStatus, Web2faEnrollment, WebHostingAccess, WebLoginResult, WebUserSummary,
+    AcmeConfigView, AgentConfigView, BackupConfigView, BackupRemoteConfigView,
+    BackupRetentionConfigView, ClusterConfigView, ClusterStats, CustomRoleSummary, DashboardAlert,
+    EffectiveRoleWire, EmailConfigView, EmailLogEntry, FirewallPort, FirewallView, FsDiagnostics,
+    FsFixStep, FtpAccountSummary, FtpCheckItem, FtpCheckReport, FtpExtraAccount,
+    HostingFileContent, HostingFileEntry, HostingStats, MonitorConfigView, MonitorHistory,
+    MonitorOverviewItem, MonitorSamplePoint, MtaDiagnostics, MtaPortProbe, NodeMetricPoint,
+    NodeMetricsHistory, NodeStats, NodeSummary, NodeUpdateStatus, NotificationFeed,
+    NotificationTemplatesView, NotificationView, OsPendingPackage, OsUpdateStatus, ServiceHealth,
+    ServiceInstallStatus, ServicesHealth, SiteEmailLogEntry, SlackConfigView, SmtpAutodetect,
+    SnapshotDiff, SnapshotOverview, SnapshotRestoreOutcome, SnapshotRetention, SnapshotSummary,
+    TrashEntry, UpdateStatus, Web2faEnrollment, WebHostingAccess, WebLoginResult, WebUserSummary,
     WebVerify2faResult, WpRegistrationView, SNAPSHOT_TAG_WITH_DB,
 };
 pub use stats::{CARE_REPORT_DEFAULT_BODY_TEMPLATE, EXPIRY_WARNING_DEFAULT_BODY_TEMPLATE};

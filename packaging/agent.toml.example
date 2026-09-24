@@ -225,6 +225,25 @@ mail_threshold = 8    # postfix/dovecot SASL auth failures
 # [migration]
 # max_download_gb = 64
 
+# ─── Local backup copies ───────────────────────────────────────────────────
+#
+# Backups always land on local disk first, then a copy is pushed off-site (the
+# [backup_remote] FTP target and/or the S3 targets set per hosting). With
+# `drop_local_after_offsite = true`, the local archive + DB dump are deleted
+# after each backup — but ONLY once the off-site copy has been INDEPENDENTLY
+# re-verified present (size-checked for FTP and unencrypted S3; existence-only
+# for age-encrypted S3, whose ciphertext size cannot match the plaintext).
+# Never on a bare "upload returned success", and never for a run that had no
+# off-site destination. If any file cannot be confirmed, the local copy is
+# kept and a warning is logged. Restore then comes from the site's Off-site
+# panel. Read on the node that owns each site (its backup run acts on it).
+#
+# Default false: keeping the local copy means a faster restore and a second
+# copy, at the cost of disk.
+#
+# [backup]
+# drop_local_after_offsite = false
+
 # ─── Snapshots before a change ─────────────────────────────────────────────
 #
 # Before Hyperion applies this site's updates, it takes a content-addressed

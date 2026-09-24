@@ -329,6 +329,11 @@ pub struct AgentConfigView {
     pub slack: SlackConfigView,
     pub backup_remote: BackupRemoteConfigView,
     pub backup_retention: BackupRetentionConfigView,
+    /// `[backup]` — node-wide backup behaviour that is neither a destination
+    /// nor a retention rule. `#[serde(default)]` so an older agent's view
+    /// (which has no such field) still deserializes on a newer master.
+    #[serde(default)]
+    pub backup: BackupConfigView,
     /// Multi-node cluster placement preferences. Optional in the
     /// wire schema so older agents that pre-date the field keep
     /// deserializing.
@@ -934,6 +939,17 @@ pub struct BackupRemoteConfigView {
 pub struct BackupRetentionConfigView {
     pub max_age_days: i64,
     pub keep_latest_n: i64,
+}
+
+/// `[backup]` — node-wide backup behaviour flags. Default is the safe,
+/// pre-existing behaviour (keep the local copy).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct BackupConfigView {
+    /// When true, the local backup copy is deleted after the off-site copy is
+    /// INDEPENDENTLY re-verified present (never on a mere upload-returned-ok).
+    /// Off by default: keeping the local copy means a fast restore and a
+    /// second copy, at the cost of disk.
+    pub drop_local_after_offsite: bool,
 }
 
 /// The agent's own defaults (`BackupRetentionSection`), NOT zeros. An

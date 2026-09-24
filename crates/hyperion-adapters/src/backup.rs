@@ -1043,6 +1043,105 @@ pub async fn s3_prune_keep_latest(
     Ok(deleted)
 }
 
+/// Pull `ContentLength` out of an `aws s3api head-object --output json` body.
+///
+/// A number is the only thing that answers "how many bytes are on the far
+/// side"; anything else (absent field, non-integer, unparseable JSON) yields
+/// `None` — which the caller treats as "could not read a size", never as a
+/// size of zero.
+pub fn parse_content_length(json: &[u8]) -> Option<u64> {
+    let v: serde_json::Value = serde_json::from_slice(json).ok()?;
+    v.get("ContentLength").and_then(|c| c.as_u64())
+}
+
+/// Size of one S3 object, or whether it is there at all.
+///
+/// Three outcomes, kept distinct on purpose — the caller uses this to decide
+/// whether it is safe to delete the ONLY local copy of a backup:
+///   * `Ok(Some(n))` — the object is there, `n` bytes. We looked.
+///   * `Ok(None)`     — the object is confirmed ABSENT: the store answered
+///     404 / NoSuchKey. We looked; it is not there.
+///   * `Err(_)`       — we could NOT look (network, credentials, endpoint, or
+///     a HEAD that returned no readable size). The object may well be fine, so
+///     "could not look" must never be read as "present" — otherwise a
+///     transient error would license deleting the last copy.
+///
+/// Mirrors `s3_prune_keep_latest`'s aws-cli/env pattern (creds via env, never
+/// argv). `age_recipient` is irrelevant here — the caller passes the FINAL
+/// key, `.age` suffix and all.
+pub async fn s3_object_size(
+    key: &str,
+    t: &S3UploadTarget<'_>,
+) -> Result<Option<u64>, AdapterError> {
+    ensure_s3_tools(false)?;
+    let key = key.trim_start_matches('/');
+    let env = aws_env(t);
+    let mut cmd = tokio::process::Command::new(AWS_BIN);
+    cmd.args([
+        "--endpoint-url",
+        t.endpoint,
+        "s3api",
+        "head-object",
+        "--bucket",
+        t.bucket,
+        "--key",
+        key,
+        "--output",
+        "json",
+    ]);
+    for (k, v) in &env {
+        cmd.env(k, v);
+    }
+    let out = cmd
+        .output()
+        .await
+        .map_err(|e| AdapterError::Other(format!("spawn aws head-object: {e}")))?;
+    if out.status.success() {
+        // Success means the object EXISTS. A body with no readable
+        // ContentLength is "exists but I couldn't read its size" — an Err
+        // ("could not look"), NOT `Ok(None)` ("confirmed absent"). Folding it
+        // into absent would let a quirky response license a delete.
+        return match parse_content_length(&out.stdout) {
+            Some(n) => Ok(Some(n)),
+            None => Err(AdapterError::Other(
+                "aws head-object succeeded but returned no readable ContentLength".into(),
+            )),
+        };
+    }
+    // A missing object is not an error to us — it is a definite "not there".
+    // The aws CLI reports it as a 404 / "Not Found" / "NoSuchKey" on stderr
+    // with a non-zero exit; every OTHER non-zero exit is "could not look".
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let s = stderr.to_ascii_lowercase();
+    if s.contains("404") || s.contains("not found") || s.contains("nosuchkey") {
+        Ok(None)
+    } else {
+        Err(AdapterError::Other(format!(
+            "aws head-object failed: {}",
+            stderr.trim()
+        )))
+    }
+}
+
+/// Does an S3 head-object result confirm the local file is safely off-site?
+///
+/// `remote`: the object's size from `s3_object_size`, or `None` when it is
+/// absent (404) or could not be read — both mean "not confirmed present".
+/// `age_encrypted`: the object is age-ciphertext, so its size is DELIBERATELY
+/// different from the plaintext local file (`.age` is appended to the key and
+/// the stream is encrypted client-side) and only EXISTENCE can be checked; an
+/// UNENCRYPTED object is a byte-for-byte copy and must match `local` exactly.
+///
+/// This is the size-verification half of the "drop the local copy" safety
+/// gate, split out so it can be tested without shelling out to aws.
+pub fn s3_offsite_confirmed(remote: Option<u64>, local: u64, age_encrypted: bool) -> bool {
+    match remote {
+        None => false,
+        Some(n) if age_encrypted => n > 0,
+        Some(n) => n == local,
+    }
+}
+
 /// Restore a `pg_dump -Fc` archive (custom format) into `db_name`.
 pub async fn restore_postgres_dump(db_name: &str, dump_path: &Path) -> Result<(), AdapterError> {
     if !dump_path.exists() {
@@ -1092,6 +1191,45 @@ mod tests {
         assert_eq!(super::parse_remote_size("Content-Length: big"), None);
         assert_eq!(super::parse_remote_size("550 Not Found"), None);
         assert_eq!(super::parse_remote_size(""), None);
+    }
+
+    /// `s3_object_size` reads the byte count from a head-object body, and a
+    /// misread here decides whether the ONLY local copy of a backup is safe to
+    /// delete — so a body without a clean integer must be `None` (could not
+    /// read a size), never a guess.
+    #[test]
+    fn content_length_is_read_or_not_at_all() {
+        assert_eq!(
+            super::parse_content_length(br#"{"ContentLength": 4096, "ETag": "x"}"#),
+            Some(4096)
+        );
+        // No field, wrong type, and unparseable JSON all mean "no size".
+        assert_eq!(super::parse_content_length(br#"{"ETag": "x"}"#), None);
+        assert_eq!(
+            super::parse_content_length(br#"{"ContentLength": "4096"}"#),
+            None
+        );
+        assert_eq!(super::parse_content_length(b"not json"), None);
+        assert_eq!(super::parse_content_length(b""), None);
+    }
+
+    /// The size-verification gate for dropping a local backup. Getting any of
+    /// these wrong deletes the last copy of somebody's data.
+    #[test]
+    fn offsite_confirmed_matches_size_unless_encrypted() {
+        // Unencrypted: byte-for-byte or nothing.
+        assert!(super::s3_offsite_confirmed(Some(4096), 4096, false));
+        assert!(!super::s3_offsite_confirmed(Some(4095), 4096, false));
+        assert!(!super::s3_offsite_confirmed(Some(0), 4096, false));
+        // Age-encrypted: the ciphertext size differs on purpose, so only
+        // EXISTENCE (>0) is checked — a size that doesn't match local is still
+        // a pass here.
+        assert!(super::s3_offsite_confirmed(Some(4200), 4096, true));
+        assert!(super::s3_offsite_confirmed(Some(1), 4096, true));
+        assert!(!super::s3_offsite_confirmed(Some(0), 4096, true));
+        // "Could not look" / "confirmed absent" is never a pass, either way.
+        assert!(!super::s3_offsite_confirmed(None, 4096, false));
+        assert!(!super::s3_offsite_confirmed(None, 4096, true));
     }
 
     /// An empty listing and a missing directory are different answers, and

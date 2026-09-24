@@ -1704,6 +1704,39 @@
 
   <div class="card" style="margin-top:1rem">
     <h2>
+      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+      Local backup copies
+    </h2>
+    <p class="text-soft small" style="margin:0.3rem 0 0.6rem">
+      Backups always land on local disk first. If you also store them off-site,
+      the local copy can be dropped to stop backups filling the disk. Saved on
+      every node.
+    </p>
+    <form method="post" action="/settings/config" autocomplete="off">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="section" value="backup">
+      <input type="hidden" name="_checkboxes" value="drop_local_after_offsite">
+      <label class="field-checkbox" style="font-weight:600">
+        <input type="checkbox" name="drop_local_after_offsite" value="true"
+               {% if config.backup.drop_local_after_offsite %}checked{% endif %}>
+        Delete the local copy once it is verified off-site
+      </label>
+      <p class="text-soft small" style="margin:0.5rem 0 0.8rem;line-height:1.55">
+        After each backup, the local archive and database dump are deleted
+        <strong>only when the off-site copy has been re-checked and confirmed
+        present</strong> — never on a mere "upload finished". If a file cannot
+        be confirmed off-site, the local copy is kept and a warning is logged.
+        Restore then comes from the off-site copy via the site's
+        <strong>Off-site</strong> panel. A run with no off-site destination is
+        never touched. <strong>Off by default</strong>: keeping the local copy
+        means a faster restore and a second copy, at the cost of disk.
+      </p>
+      <button type="submit" class="btn primary">Save</button>
+    </form>
+  </div>
+
+  <div class="card" style="margin-top:1rem">
+    <h2>
       <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
       Backup retention
     </h2>
