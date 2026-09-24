@@ -213,6 +213,18 @@ mail_threshold = 8    # postfix/dovecot SASL auth failures
 #   Tolikrát jsme odstřihli adresu, která se opakovaně pokoušela..."""
 # "unit_day" = "den|dny|dní"
 
+# ─── Migration / clone downloads ───────────────────────────────────────────
+#
+# When this node IMPORTS a site (a Move/Copy/Clone from another node), it pulls
+# the bundle archive over HTTPS into /var/lib/hyperion/migration-incoming. The
+# download is capped so a runaway or malicious upstream can't fill the disk.
+# The default (64 GB) fits almost any real site; raise it only if a legitimate
+# site is bigger, and only to a value the /var/lib partition can actually hold.
+# Clamped to 1..=1024. Read on the TARGET node (the one doing the import).
+#
+# [migration]
+# max_download_gb = 64
+
 # ─── Snapshots before a change ─────────────────────────────────────────────
 #
 # Before Hyperion applies this site's updates, it takes a content-addressed
