@@ -1551,6 +1551,10 @@ pub async fn post_config(
             | "protection"
             | "snapshots"
             | "backup_retention"
+            // [backup] drop_local_after_offsite is ACTED ON by the node that
+            // owns each site (its backup run drops the local copy), so a value
+            // saved only on the master would govern only the master's sites.
+            | "backup"
             | "performance"
     )
     .then(|| (form.section.clone(), fields.clone()));
@@ -1801,6 +1805,7 @@ fn section_label(section: &str) -> &'static str {
     match section {
         "backup_remote" => "Off-site backup target",
         "backup_retention" => "Backup retention",
+        "backup" => "Local backup copies",
         "protection" => "What this panel keeps",
         "snapshots" => "Snapshot retention",
         "performance" => "Performance",
@@ -1930,7 +1935,7 @@ fn section_to_tab(section: &str) -> &'static str {
         // Which engine the install uses. It governs both, so it sits at the
         // top of the tab that shows both — and unlike the cluster.* fields it
         // needs no `_return_tab` override, because this IS its tab.
-        "backup_remote" | "backup_retention" | "protection" | "snapshots" => "backups",
+        "backup_remote" | "backup_retention" | "backup" | "protection" | "snapshots" => "backups",
         "performance" => "notifications",
         // [cluster] fields are now split across two tabs: the Security card
         // (2FA + hardening flags) lives on General, Cluster placement on

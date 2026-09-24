@@ -241,6 +241,27 @@ pub async fn list_needing_offsite(
     Ok(rows.into_iter().map(Into::into).collect())
 }
 
+/// Forget where the LOCAL copy of a backup was, once it has been dropped from
+/// disk after an off-site copy was verified.
+///
+/// The run itself stays — its off-site copy and digest are still the record
+/// that this backup exists. But `archive_path`/`db_dump_path` name files that
+/// no longer exist, and the Backups card keys its local Download + Restore
+/// buttons off `archive_path` being present: leaving a stale path there is a
+/// dead button that 404s. NULLing both makes the card show the run as
+/// off-site-only, which is what it now is.
+///
+/// This also keeps `list_needing_offsite` honest: it filters
+/// `archive_path IS NOT NULL`, so a run whose local file is gone is correctly
+/// no longer a candidate to "copy off-site" (there is nothing local to send).
+pub async fn clear_local_paths(pool: &SqlitePool, id: i64) -> Result<(), StateError> {
+    sqlx::query("UPDATE backup_runs SET archive_path = NULL, db_dump_path = NULL WHERE id = ?")
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 pub async fn delete_by_id(pool: &SqlitePool, id: i64) -> Result<(), StateError> {
     sqlx::query("DELETE FROM backup_runs WHERE id = ?")
         .bind(id)
@@ -340,6 +361,40 @@ mod tests {
             rows[0].archive_path.as_deref(),
             Some("/var/backups/ex.tar.gz")
         );
+    }
+
+    #[tokio::test]
+    async fn clear_local_paths_nulls_both_and_drops_from_offsite_candidates() {
+        let pool = open_memory().await.expect("open");
+        let id = fixture(&pool).await;
+        let run = start(&pool, &id, "local", 100).await.expect("start");
+        mark_ok(
+            &pool,
+            run,
+            "/var/backups/ex.tar.gz",
+            Some("/var/backups/ex.sql"),
+            1024,
+            200,
+        )
+        .await
+        .expect("ok");
+
+        // A local-only successful backup IS a backfill candidate.
+        let before = list_needing_offsite(&pool, 10).await.expect("list");
+        assert!(before.iter().any(|r| r.id == run));
+
+        clear_local_paths(&pool, run).await.expect("clear");
+
+        let rows = list_for(&pool, &id, 10).await.expect("list");
+        assert_eq!(rows[0].state, "ok", "the run itself survives");
+        assert_eq!(rows[0].archive_path, None);
+        assert_eq!(rows[0].db_dump_path, None);
+        assert_eq!(rows[0].bytes_total, 1024, "size history is preserved");
+
+        // With no local archive left, it is no longer something to copy
+        // off-site — there is nothing local to send.
+        let after = list_needing_offsite(&pool, 10).await.expect("list");
+        assert!(!after.iter().any(|r| r.id == run));
     }
 
     #[tokio::test]
