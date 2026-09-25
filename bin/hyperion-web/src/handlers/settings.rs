@@ -80,6 +80,9 @@ struct SettingsTpl<'a> {
     error: Option<String>,
     flash: Option<String>,
     flash_error: Option<String>,
+    /// Auto-fire the off-site FTP connection check on load (set right after a
+    /// save, so a config change is verified without a manual click).
+    auto_probe_backup_remote: bool,
     csrf_token: String,
     /// Whether a logo is on file — drives the preview thumbnail and the
     /// Remove button.
@@ -776,6 +779,10 @@ pub struct SettingsQuery {
     /// "" / "local" = master. Drives the per-node MtaDiagnostics fetch.
     #[serde(default)]
     mail_node: String,
+    /// Set by the redirect after saving the off-site FTP target: auto-run the
+    /// connection check once the page loads (after the agent restart settles).
+    #[serde(default)]
+    probe_backup_remote: Option<String>,
 }
 
 /// Read one cookie value from the request's `Cookie` header (none if absent).
@@ -1037,6 +1044,7 @@ pub async fn get_settings(
         error,
         flash: q.flash,
         flash_error: q.flash_error,
+        auto_probe_backup_remote: q.probe_backup_remote.is_some(),
         csrf_token,
         csrf_slack_test: super::hostings::csrf_token_for(&state, &ctx, "/settings/slack-test"),
         email_logo_set,
@@ -1713,11 +1721,23 @@ pub async fn post_config(
                         tab
                     ),
                 },
-                None => format!(
-                    "/settings?flash={}+saved+%E2%80%94+hyperion-agent+restarting+%28~5s%29#{}",
-                    urlencode(section_label(&form.section)),
-                    tab
-                ),
+                None => {
+                    // After saving the off-site FTP target, carry a flag so the
+                    // settings page auto-runs the connection check once the
+                    // agent has restarted with the new config. Goes BEFORE the
+                    // `#tab` fragment (a fragment must be last in the URL).
+                    let probe = if form.section == "backup_remote" {
+                        "&probe_backup_remote=1"
+                    } else {
+                        ""
+                    };
+                    format!(
+                        "/settings?flash={}+saved+%E2%80%94+hyperion-agent+restarting+%28~5s%29{}#{}",
+                        urlencode(section_label(&form.section)),
+                        probe,
+                        tab
+                    )
+                }
             }
         }
         RpcResponse::Error(e) => format!(
