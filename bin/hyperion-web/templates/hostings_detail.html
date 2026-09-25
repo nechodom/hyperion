@@ -529,11 +529,13 @@
     <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
     Overview
   </a>
+  {% if detail.kind != "reverse_proxy" %}
   <a class="tab" data-tab="wordpress" href="#wordpress" role="tab">
     <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20l9-5-9-5-9 5 9 5z"/><path d="M12 12l9-5-9-5-9 5 9 5z"/></svg>
     WordPress
     {% if wp_themes.updates_pending > 0 %}<span class="tab-badge" style="background:var(--warn);color:white">{{ wp_themes.updates_pending }}</span>{% endif %}
   </a>
+  {% endif %}
   <a class="tab" data-tab="ssl" href="#ssl" role="tab">
     <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
     SSL
@@ -542,11 +544,13 @@
     <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
     Settings &amp; limits
   </a>
+  {% if detail.kind != "reverse_proxy" %}
   <a class="tab" data-tab="backups" href="#backups" role="tab">
     <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
     Backups
     {% if !backups.is_empty() %}<span class="tab-badge">{{ backups.len() }}</span>{% endif %}
   </a>
+  {% endif %}
   <a class="tab" data-tab="monitor" href="#monitor" role="tab" title="HTTP availability monitoring, alerts + access/error logs">
     <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
     Monitor &amp; logs
@@ -804,6 +808,7 @@
     </dd>
     <dt>System user</dt><dd><code>{{ detail.system_user }}</code></dd>
     <dt>Document root</dt><dd><code>{{ detail.root_dir }}</code></dd>
+    {% if detail.kind != "reverse_proxy" %}
     <dt>PHP</dt>
     <dd>
       {% if let Some(v) = detail.php_version %}
@@ -906,6 +911,7 @@
         {% endif %}
       {% endif %}
     </dd>
+    {% endif %}
     {% if !detail.aliases.is_empty() %}
     <dt>Aliases</dt><dd>{{ detail.aliases.join(", ") }} <a class="hint" href="#ssl">edit on the SSL tab →</a></dd>
     {% endif %}
@@ -1335,6 +1341,7 @@
 
 </div><!-- /tab-ssl -->
 
+{% if detail.kind != "reverse_proxy" %}
 <div class="tab-panel" id="tab-wordpress">
 {# Site health first: when the site is down with a fatal, everything else
    on this tab is secondary. Lazy — the probe + possible wp-cli run must
@@ -2227,6 +2234,7 @@
 </details>
 {% endif %}
 </div><!-- /tab-wordpress (incl. themes) -->
+{% endif %}
 
 <div class="tab-panel" id="tab-settings">
 
@@ -3433,6 +3441,7 @@
 
 </div><!-- /tab-ftp -->
 
+{% if detail.kind != "reverse_proxy" %}
 <div class="tab-panel" id="tab-backups">
 {# One tab, three kinds of copy, in the order an operator reaches for them:
    ARCHIVES (the whole site + database as a file, on a schedule, copied
@@ -3845,6 +3854,7 @@
 </details>
 
 </div><!-- /tab-backups -->
+{% endif %}
 
 
 
