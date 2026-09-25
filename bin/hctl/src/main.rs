@@ -1288,7 +1288,7 @@ fn print_pretty(resp: &Response) {
                 println!("{:>14}  {}", f.bytes, f.name);
             }
         }
-        Response::BackupOffsiteBackfill(r) => {
+        Response::BackupOffsiteBackfill(r) | Response::BackupOffsitePushDrop(r) => {
             println!("considered: {}", r.considered);
             println!("pushed:     {}", r.pushed);
             println!("failed:     {}", r.failed);
@@ -1299,6 +1299,15 @@ fn print_pretty(resp: &Response) {
                 println!(
                     "GONE:       {} backup(s) had no local archive left to send",
                     r.missing_locally
+                );
+            }
+            if r.dropped > 0 {
+                println!("dropped:    {} local copy(ies) removed after verify", r.dropped);
+            }
+            if r.kept_local > 0 {
+                println!(
+                    "kept:       {} local copy(ies) kept — could not confirm off-site",
+                    r.kept_local
                 );
             }
         }

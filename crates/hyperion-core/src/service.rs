@@ -6587,15 +6587,16 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 if offsite != OffsiteSource::NotWanted
                     && read_backup_drop_local(self.agent_config_path.as_deref())
                 {
-                    self.maybe_drop_local_after_offsite(
-                        &detail,
-                        run_id,
-                        &archive_path,
-                        db_dump_path.as_deref(),
-                        &s3_pushed_targets,
-                        &s3_push_ok,
-                    )
-                    .await;
+                    let _ = self
+                        .maybe_drop_local_after_offsite(
+                            &detail,
+                            run_id,
+                            &archive_path,
+                            db_dump_path.as_deref(),
+                            &s3_pushed_targets,
+                            &s3_push_ok,
+                        )
+                        .await;
                 }
             }
             Err(e) => {
@@ -6764,6 +6765,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// The archive and the DB dump are the only files it touches — the tiny
     /// manifest.json stays on local disk, because the FTP transport does not
     /// push it, so deleting it could remove the only copy.
+    /// The verified-drop step re-verifies each local file INDEPENDENTLY off-site
+    /// and, only when every one is confirmed, clears the DB paths then deletes
+    /// the files. `run_id` names the row whose local paths are cleared first so
+    /// a crash mid-delete leaves a harmless orphan, never a row pointing at a
+    /// gone file.
     async fn maybe_drop_local_after_offsite(
         &self,
         detail: &hyperion_types::HostingDetail,
@@ -6772,7 +6778,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         db_dump_path: Option<&std::path::Path>,
         s3_targets: &[&hyperion_types::S3BackupTarget],
         s3_push_ok: &std::collections::HashSet<String>,
-    ) {
+    ) -> DropLocalOutcome {
         // The FTP destination this run pushed to, if any. Rebuilt here from the
         // same inputs the push used rather than threaded through, so the
         // borrow stays local to this step.
@@ -6788,7 +6794,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // fall back on — never delete the only copy.
         let used_offsite = ftp.is_some() || !s3_targets.is_empty();
         if !used_offsite {
-            return;
+            return DropLocalOutcome::NoDestination;
         }
 
         // Keys live under <system_user>/ , same prefix the S3 push used.
@@ -6822,7 +6828,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 "failed",
             )
             .await;
-            return;
+            return DropLocalOutcome::Kept;
         }
 
         // Every file is confirmed off-site. Clear the DB paths FIRST, then
@@ -6838,7 +6844,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 domain = %detail.domain, error = %e,
                 "drop-local: could not clear the local paths — keeping the local files"
             );
-            return;
+            return DropLocalOutcome::Kept;
         }
         // The paths are already NULL in the DB, so a remove that fails leaves
         // only a harmless orphan file that retention can no longer see (its row
@@ -6869,6 +6875,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             "ok",
         )
         .await;
+        DropLocalOutcome::Dropped
     }
 
     /// Is one local backup file INDEPENDENTLY confirmed present off-site, on
@@ -11106,21 +11113,195 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         })
     }
 
-    /// Push local backups that have never reached the off-site store.
+    /// Push ONE existing backup run off-site — FTP/FTPS/SFTP (the node-local
+    /// destination) and every resolved/pinned S3 target — record the outcome on
+    /// its row, and, when `drop_local`, hand the local files to the
+    /// verified-drop gate.
     ///
-    /// The backfill. Until the columns this reads were written, the panel had
-    /// no idea which backups were already off-site, so switching a target on
-    /// protected only what happened NEXT — every archive already on disk
-    /// stayed there, and nothing said so.
+    /// This is the single shared path behind both the estate-wide backfill and
+    /// the per-hosting on-demand action, so ALL the data-safety logic — the
+    /// independent re-verification, the clear-paths-then-delete ordering, and
+    /// the age/S3 existence caveat (an age target is trusted only when THIS
+    /// push to it fully succeeded, tracked in `s3_push_ok`) — lives in exactly
+    /// one place: `maybe_drop_local_after_offsite`. This method never deletes a
+    /// local file itself.
     ///
-    /// Oldest first: the oldest is the one closest to being pruned off local
-    /// disk, so it is the one with the least time left to be saved.
+    /// `s3_targets` are the master-resolved destinations shipped in the request
+    /// (the table is master-only). Empty is the historical FTP-only behaviour.
+    async fn push_run_offsite(
+        &self,
+        run: &hyperion_state::backups::BackupRun,
+        s3_targets: &[hyperion_types::S3BackupTarget],
+        drop_local: bool,
+    ) -> RunOffsiteOutcome {
+        let mut out = RunOffsiteOutcome::default();
+        let Some(archive) = run.archive_path.clone() else {
+            out.missing_locally = true;
+            return out;
+        };
+        // The row can outlive the file: retention prunes the archive and leaves
+        // the row. Nothing left to send — record it and move on.
+        if !tokio::fs::try_exists(&archive).await.unwrap_or(false) {
+            let _ = hyperion_state::backups::set_remote(
+                &self.pool,
+                run.id,
+                "",
+                "failed",
+                "the local archive is gone — pruned before it was ever copied off-site",
+            )
+            .await;
+            out.missing_locally = true;
+            return out;
+        }
+        let Ok(detail) = self.get(HostingSelector::Id(run.hosting_id.clone())).await else {
+            out.failed = true;
+            return out;
+        };
+        let archive_path = std::path::PathBuf::from(&archive);
+        // Only offer the dump to a push (and to the drop gate) if it still
+        // exists — a run may have been made before dumps were kept, or the
+        // dump pruned separately.
+        let dump_path: Option<std::path::PathBuf> = match run.db_dump_path.as_deref() {
+            Some(p) if tokio::fs::try_exists(p).await.unwrap_or(false) => {
+                Some(std::path::PathBuf::from(p))
+            }
+            _ => None,
+        };
+
+        // `landed` = at least one destination accepted the archive (and, for
+        // FTP, the dump too). It is deliberately NOT the same as "safe to
+        // drop": the drop gate re-verifies each file independently below.
+        let mut landed = false;
+
+        // ── FTP/FTPS/SFTP — the single node-local destination ──
+        if let Some((mut up, dir)) = self.remote_upload_for(&detail) {
+            up.remote_dir = &dir;
+            match hyperion_adapters::backup::upload_remote(&archive_path, &up).await {
+                Ok(url) => {
+                    // The dump is half the backup; a run whose dump did not make
+                    // it must not be recorded as safely off-site.
+                    let mut dump_note = String::new();
+                    if let Some(dp) = dump_path.as_ref() {
+                        if let Err(e) = hyperion_adapters::backup::upload_remote(dp, &up).await {
+                            dump_note = format!("archive pushed, database dump failed: {e}");
+                        }
+                    }
+                    if !dump_note.is_empty() {
+                        let _ = hyperion_state::backups::set_remote(
+                            &self.pool, run.id, &url, "failed", &dump_note,
+                        )
+                        .await;
+                    } else {
+                        // Tri-state, same words as a fresh backup: `Some(false)`
+                        // means we LOOKED and it is not there.
+                        let (state, note) = match hyperion_adapters::backup::verify_remote(
+                            &archive_path,
+                            &up,
+                        )
+                        .await
+                        {
+                            Ok(Some(true)) => ("verified", String::new()),
+                            Ok(Some(false)) => (
+                                "failed",
+                                "uploaded, but the remote copy is missing or the wrong size"
+                                    .to_string(),
+                            ),
+                            Ok(None) | Err(_) => ("ok", String::new()),
+                        };
+                        let _ = hyperion_state::backups::set_remote(
+                            &self.pool, run.id, &url, state, &note,
+                        )
+                        .await;
+                        if state != "failed" {
+                            landed = true;
+                        }
+                    }
+                }
+                Err(_e) => {
+                    // FTP failed. Don't stamp the row failed yet — an S3 target
+                    // below may still take the copy; the drop gate is what
+                    // actually decides safety.
+                }
+            }
+        }
+
+        // ── S3 (master-resolved, honouring the hosting's pin) ──
+        let mut s3_push_ok: std::collections::HashSet<String> = Default::default();
+        let mut s3_pushed_targets: Vec<&hyperion_types::S3BackupTarget> = Vec::new();
+        if !s3_targets.is_empty() {
+            let mut files: Vec<std::path::PathBuf> = vec![archive_path.clone()];
+            if let Some(dp) = dump_path.as_ref() {
+                files.push(dp.clone());
+            }
+            let pin = self.offsite_pin(detail.id.as_str()).await;
+            match choose_offsite_targets(pin.as_deref(), s3_targets) {
+                OffsiteChoice::NodeDefault(t) => {
+                    s3_push_ok.extend(self.push_backup_to_s3(&detail, &files, t).await);
+                    // Re-borrow from the fn-scoped slice, not the pin-tied one.
+                    s3_pushed_targets.extend(s3_targets.iter());
+                }
+                OffsiteChoice::Pinned(t) => {
+                    s3_push_ok.extend(
+                        self.push_backup_to_s3(&detail, &files, std::slice::from_ref(t))
+                            .await,
+                    );
+                    if let Some(row) = s3_targets.iter().find(|x| std::ptr::eq(*x, t)) {
+                        s3_pushed_targets.push(row);
+                    }
+                }
+                // Pinned-but-unusable, or nothing to push to: the fresh-backup
+                // path audits these; here the row already carries its state and
+                // a re-push adds no new information, so stay quiet.
+                OffsiteChoice::Unresolved(_) | OffsiteChoice::NoTargets => {}
+            }
+            if !s3_push_ok.is_empty() {
+                landed = true;
+            }
+        }
+
+        if landed {
+            out.pushed = true;
+        } else {
+            out.failed = true;
+        }
+
+        // The drop only ever runs on a push that landed somewhere, and even
+        // then the gate independently re-verifies before it removes anything.
+        if drop_local && landed {
+            match self
+                .maybe_drop_local_after_offsite(
+                    &detail,
+                    run.id,
+                    &archive_path,
+                    dump_path.as_deref(),
+                    &s3_pushed_targets,
+                    &s3_push_ok,
+                )
+                .await
+            {
+                DropLocalOutcome::Dropped => out.dropped = true,
+                DropLocalOutcome::Kept | DropLocalOutcome::NoDestination => out.kept_local = true,
+            }
+        }
+        out
+    }
+
+    /// Push local backups that have never reached the off-site store, oldest
+    /// first (the oldest is the closest to being pruned off local disk).
+    ///
+    /// `drop_local` additionally removes each local copy once it is
+    /// independently confirmed off-site; `s3_targets` are the master-resolved
+    /// S3 destinations (empty keeps the FTP-only behaviour). Estate-wide, so it
+    /// walks EVERY tenant's rows on this node — the caller must hold the
+    /// estate-wide authorization.
     pub async fn backup_offsite_backfill(
         &self,
         limit: i64,
+        drop_local: bool,
+        s3_targets: Vec<hyperion_types::S3BackupTarget>,
     ) -> Result<hyperion_types::OffsiteBackfillResult, RpcError> {
         let mut out = hyperion_types::OffsiteBackfillResult::default();
-        if self.remote_backup.is_none() {
+        if self.remote_backup.is_none() && s3_targets.is_empty() {
             return Err(RpcError::Validation {
                 message: "no off-site backup target is configured on this node".into(),
             });
@@ -11130,93 +11311,12 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .map_err(|e| RpcError::Internal_with(format!("backfill list: {e}")))?;
         out.considered = runs.len() as i64;
         for run in runs {
-            let Some(archive) = run.archive_path.clone() else {
-                continue;
-            };
-            // The row can outlive the file: retention prunes the archive and
-            // leaves the row. That is not a failure to report as one — there
-            // is simply nothing left to send.
-            if !tokio::fs::try_exists(&archive).await.unwrap_or(false) {
-                let _ = hyperion_state::backups::set_remote(
-                    &self.pool,
-                    run.id,
-                    "",
-                    "failed",
-                    "the local archive is gone — pruned before it was ever copied off-site",
-                )
-                .await;
-                out.missing_locally += 1;
-                continue;
-            }
-            let Ok(detail) = self.get(HostingSelector::Id(run.hosting_id.clone())).await else {
-                out.failed += 1;
-                continue;
-            };
-            let Some((mut up, dir)) = self.remote_upload_for(&detail) else {
-                break;
-            };
-            up.remote_dir = &dir;
-            let path = std::path::PathBuf::from(&archive);
-            match hyperion_adapters::backup::upload_remote(&path, &up).await {
-                Ok(url) => {
-                    // The DUMP first, and its failure is not thrown away. It
-                    // is a sibling file and just as much part of the backup —
-                    // a restore without it is half a site — so a run whose
-                    // dump did not make it must not be recorded as safely
-                    // off-site, which is what discarding this result did.
-                    let mut dump_note = String::new();
-                    if let Some(dump) = run.db_dump_path.as_deref() {
-                        let dp = std::path::PathBuf::from(dump);
-                        if tokio::fs::try_exists(&dp).await.unwrap_or(false) {
-                            if let Err(e) = hyperion_adapters::backup::upload_remote(&dp, &up).await
-                            {
-                                dump_note = format!("archive pushed, database dump failed: {e}");
-                            }
-                        }
-                    }
-                    if !dump_note.is_empty() {
-                        let _ = hyperion_state::backups::set_remote(
-                            &self.pool, run.id, &url, "failed", &dump_note,
-                        )
-                        .await;
-                        out.failed += 1;
-                        continue;
-                    }
-                    // The same three answers as a fresh backup, kept apart.
-                    // `Some(false)` means we LOOKED and it is not there;
-                    // recording that as "uploaded" reports a copy that
-                    // positively does not exist.
-                    let (state, note) =
-                        match hyperion_adapters::backup::verify_remote(&path, &up).await {
-                            Ok(Some(true)) => ("verified", String::new()),
-                            Ok(Some(false)) => (
-                                "failed",
-                                "uploaded, but the remote copy is missing or the wrong size"
-                                    .to_string(),
-                            ),
-                            Ok(None) | Err(_) => ("ok", String::new()),
-                        };
-                    let _ =
-                        hyperion_state::backups::set_remote(&self.pool, run.id, &url, state, &note)
-                            .await;
-                    if state == "failed" {
-                        out.failed += 1;
-                    } else {
-                        out.pushed += 1;
-                    }
-                }
-                Err(e) => {
-                    let _ = hyperion_state::backups::set_remote(
-                        &self.pool,
-                        run.id,
-                        "",
-                        "failed",
-                        &e.to_string(),
-                    )
-                    .await;
-                    out.failed += 1;
-                }
-            }
+            let o = self.push_run_offsite(&run, &s3_targets, drop_local).await;
+            out.pushed += o.pushed as i64;
+            out.failed += o.failed as i64;
+            out.missing_locally += o.missing_locally as i64;
+            out.dropped += o.dropped as i64;
+            out.kept_local += o.kept_local as i64;
         }
         self.append_audit(
             "backup.offsite_backfill",
@@ -11226,6 +11326,77 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 "pushed": out.pushed,
                 "failed": out.failed,
                 "missing_locally": out.missing_locally,
+                "dropped": out.dropped,
+                "kept_local": out.kept_local,
+                "drop_local": drop_local,
+            })
+            .to_string(),
+            "ok",
+        )
+        .await;
+        Ok(out)
+    }
+
+    /// Push one or more EXISTING local backups of a single hosting off-site,
+    /// then — when `drop_local` — delete each local copy once it is
+    /// independently confirmed off-site. The per-node backup id is bound to the
+    /// authorized hosting via `backup_owned_by`, so an unbound id cannot reach
+    /// another site's backups.
+    pub async fn backup_offsite_push_drop(
+        &self,
+        sel: HostingSelector,
+        backup_ids: Vec<i64>,
+        s3_targets: Vec<hyperion_types::S3BackupTarget>,
+        drop_local: bool,
+    ) -> Result<hyperion_types::OffsiteBackfillResult, RpcError> {
+        // There has to be somewhere to push, or this is a no-op that would read
+        // as success — and, with drop on, an invitation to delete a local copy
+        // that reached nowhere.
+        if self.remote_backup.is_none() && s3_targets.is_empty() {
+            return Err(RpcError::Validation {
+                message: "no off-site backup target is configured — nothing to push to".into(),
+            });
+        }
+        // Resolve the hosting once, both to fail fast on a bad selector and to
+        // label the audit; each id is still re-bound to it below.
+        let detail = self.get(sel.clone()).await?;
+        let mut out = hyperion_types::OffsiteBackfillResult::default();
+        for id in backup_ids {
+            let run = match self.backup_owned_by(sel.clone(), id).await {
+                Ok(r) => r,
+                // A tampered/stale id that does not belong to this hosting: not
+                // a push failure of a real backup, but the caller asked for it,
+                // so it is not silently ignored either.
+                Err(_) => {
+                    out.failed += 1;
+                    continue;
+                }
+            };
+            // A still-running backup has no complete archive to send.
+            if run.state == "running" {
+                out.failed += 1;
+                continue;
+            }
+            out.considered += 1;
+            let o = self.push_run_offsite(&run, &s3_targets, drop_local).await;
+            out.pushed += o.pushed as i64;
+            out.failed += o.failed as i64;
+            out.missing_locally += o.missing_locally as i64;
+            out.dropped += o.dropped as i64;
+            out.kept_local += o.kept_local as i64;
+        }
+        self.append_audit(
+            "backup.offsite_push_drop",
+            Some(detail.id.as_str()),
+            &serde_json::json!({
+                "domain": detail.domain,
+                "considered": out.considered,
+                "pushed": out.pushed,
+                "failed": out.failed,
+                "missing_locally": out.missing_locally,
+                "dropped": out.dropped,
+                "kept_local": out.kept_local,
+                "drop_local": drop_local,
             })
             .to_string(),
             "ok",
@@ -34925,6 +35096,33 @@ fn may_drop_local_after_offsite(used_offsite: bool, files_confirmed: &[bool]) ->
     used_offsite && !files_confirmed.is_empty() && files_confirmed.iter().all(|&c| c)
 }
 
+/// What `maybe_drop_local_after_offsite` actually did — so an on-demand caller
+/// can report "removed" vs "kept" instead of guessing from a fire-and-forget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DropLocalOutcome {
+    /// Every file was confirmed off-site and the local copy was removed.
+    Dropped,
+    /// A destination was used but the copy was KEPT — a file could not be
+    /// confirmed off-site, or the DB paths could not be cleared.
+    Kept,
+    /// No off-site destination was used, so there was nothing to fall back on
+    /// and the local copy was left in place.
+    NoDestination,
+}
+
+/// Per-run result of `push_run_offsite`, folded into an `OffsiteBackfillResult`
+/// by both the estate-wide backfill and the per-hosting push-drop. Exactly one
+/// of `pushed`/`failed`/`missing_locally` is set, plus at most one of
+/// `dropped`/`kept_local` when a drop was requested.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct RunOffsiteOutcome {
+    pushed: bool,
+    failed: bool,
+    missing_locally: bool,
+    dropped: bool,
+    kept_local: bool,
+}
+
 /// Canonicalise a backup cadence string to one of the four known values; any
 /// unknown/empty input becomes "off" so a stray value never schedules backups.
 fn canonical_backup_cadence(c: &str) -> &'static str {
@@ -36790,6 +36988,31 @@ mod tests {
         // A destination reported present-for-nothing (empty confirmations)
         // must not license a delete either.
         assert!(!may_drop_local_after_offsite(true, &[]));
+    }
+
+    /// Both on-demand entry points must REFUSE when the node has nowhere to
+    /// push — otherwise a "copy off-site then delete local" with no target is
+    /// an invitation to delete a copy that reached nowhere. The test svc has
+    /// `remote_backup: None`, and shipping no S3 targets is the empty case, so
+    /// there is genuinely no destination.
+    #[tokio::test]
+    async fn offsite_push_and_backfill_refuse_with_no_target() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), happy_mocks());
+        s.create(req("nod.cz")).await.expect("create");
+        let sel = HostingSelector::Domain(Domain::parse("nod.cz").unwrap());
+
+        let err = s
+            .backup_offsite_push_drop(sel, vec![1], vec![], true)
+            .await
+            .expect_err("no target → must refuse before any delete");
+        assert!(matches!(err, RpcError::Validation { .. }), "got: {err:?}");
+
+        let err = s
+            .backup_offsite_backfill(10, true, vec![])
+            .await
+            .expect_err("no target → must refuse");
+        assert!(matches!(err, RpcError::Validation { .. }), "got: {err:?}");
     }
 
     /// The empty target list is the whole question, and only the caller can

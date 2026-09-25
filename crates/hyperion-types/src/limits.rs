@@ -367,6 +367,16 @@ pub struct OffsiteBackfillResult {
     pub pushed: i64,
     pub failed: i64,
     pub missing_locally: i64,
+    /// Local copies removed after the off-site copy was INDEPENDENTLY
+    /// re-verified. Only ever non-zero when the caller asked to drop local.
+    #[serde(default)]
+    pub dropped: i64,
+    /// Drop was requested but the local copy was KEPT because not every file
+    /// could be confirmed off-site (missing, wrong size, or unreachable to
+    /// re-check). Distinct from `failed`: the push may have succeeded — the
+    /// conservative re-verify simply refused to license a delete.
+    #[serde(default)]
+    pub kept_local: i64,
 }
 
 /// One IP ban as shown in the UI / returned over the wire.

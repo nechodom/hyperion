@@ -3623,7 +3623,24 @@
     <input type="hidden" name="backup_ids" id="bulk-backup-ids" value="">
     <button type="button" class="btn small danger" id="bulk-backup-delete-btn" disabled
             onclick="hyBulkBackupSubmit()">Delete selected</button>
+    {# Same selection, different action: copy the ticked backups off-site and
+       then delete each local copy, but only after an independent re-verify.
+       Separate form so its own confirm/CSRF/hidden-ids don't collide with the
+       delete form's. #}
+    <button type="button" class="btn small" id="bulk-offsite-btn" disabled
+            onclick="hyBulkOffsiteSubmit()"
+            title="Copy the selected backups off-site, then delete the local copies once verified">Off-site &amp; delete local</button>
     <span class="text-soft small" id="bulk-backup-count">none selected</span>
+  </form>
+  <form id="bulk-offsite-form" method="post" action="/hostings/backups/offsite-drop"
+        data-confirm-title="Copy selected off-site, then delete local"
+        data-confirm-body="Each selected backup is uploaded to the configured off-site targets, then its local archive and database dump are deleted ONLY after an independent re-verify that the copy is really off-site. A copy that cannot be confirmed off-site is kept. The off-site copies remain and can still be restored. Runs as a background job."
+        data-confirm-confirm-label="Copy off-site &amp; delete local"
+        data-confirm-variant="danger"
+        style="display:none">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
+    <input type="hidden" name="backup_ids" id="bulk-offsite-ids" value="">
   </form>
   <script>
     // Bound once on page load, delegated on document so it keeps working after
@@ -3638,8 +3655,10 @@
       function sync() {
         var n = checked().length;
         var btn = document.getElementById('bulk-backup-delete-btn');
+        var off = document.getElementById('bulk-offsite-btn');
         var lbl = document.getElementById('bulk-backup-count');
         if (btn) btn.disabled = n === 0;
+        if (off) off.disabled = n === 0;
         if (lbl) lbl.textContent = n === 0 ? 'none selected'
           : (n + ' selected');
         var all = document.getElementById('bulk-backup-all');
@@ -3667,6 +3686,15 @@
         var f = document.getElementById('bulk-backup-form');
         f.dataset.confirmTitle = 'Delete ' + ids.length + ' archive'
           + (ids.length === 1 ? '' : 's');
+        f.requestSubmit();
+      };
+      window.hyBulkOffsiteSubmit = function () {
+        var ids = checked().map(function (c) { return c.value; });
+        if (!ids.length) return;
+        document.getElementById('bulk-offsite-ids').value = ids.join(',');
+        var f = document.getElementById('bulk-offsite-form');
+        f.dataset.confirmTitle = 'Copy ' + ids.length + ' backup'
+          + (ids.length === 1 ? '' : 's') + ' off-site, then delete local';
         f.requestSubmit();
       };
       // The region re-renders on a timer, resetting checkbox state; re-sync so
@@ -3756,6 +3784,22 @@
                   </form>
                   {% endif %}
                   {% endif %}
+                {% endif %}
+                {% if b.state == "ok" && b.archive_path.is_some() %}
+                {# Push THIS backup off-site, then delete the local copy — but
+                   only after an independent re-verify that it really landed.
+                   Shown whenever there is a local archive; the off-site copy
+                   stays and can still be restored. #}
+                <form method="post" action="/hostings/backups/offsite-drop" style="display:inline"
+                      data-confirm-title="Copy off-site, then delete local"
+                      data-confirm-body="This backup is uploaded to the configured off-site targets, then its local archive{% if b.db_dump_path.is_some() %} and database dump{% endif %} are deleted ONLY after an independent re-verify that the copy is really off-site. If it cannot be confirmed off-site, the local copy is kept. Runs as a background job."
+                      data-confirm-confirm-label="Copy off-site &amp; delete local"
+                      data-confirm-variant="danger">
+                  <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+                  <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
+                  <input type="hidden" name="backup_ids" value="{{ b.id }}">
+                  <button class="btn small" type="submit" title="Copy off-site, then delete the local copy">Off-site &amp; drop</button>
+                </form>
                 {% endif %}
                 {% if b.state != "running" %}
                 <form method="post" action="/hostings/backups/delete" style="display:inline"
