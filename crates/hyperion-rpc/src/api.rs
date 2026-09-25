@@ -78,6 +78,13 @@ pub trait AgentApi: Send + Sync + 'static {
         basic_auth_password: Option<String>,
     ) -> Result<hyperion_types::VhostOptions, RpcError>;
 
+    /// Change a reverse-proxy hosting's upstream URL + re-render its vhost.
+    async fn hosting_set_proxy_upstream(
+        &self,
+        sel: HostingSelector,
+        upstream_url: String,
+    ) -> Result<hyperion_types::HostingDetail, RpcError>;
+
     /// Replace a hosting's alias domains (SANs) and rewrite its nginx vhost.
     async fn hosting_set_aliases(
         &self,

@@ -238,6 +238,14 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
             .await
     }
 
+    async fn hosting_set_proxy_upstream(
+        &self,
+        sel: HostingSelector,
+        upstream_url: String,
+    ) -> Result<hyperion_types::HostingDetail, RpcError> {
+        self.svc.set_proxy_upstream(sel, upstream_url).await
+    }
+
     async fn hosting_set_aliases(
         &self,
         sel: HostingSelector,

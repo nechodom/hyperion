@@ -153,6 +153,12 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(v) => Response::HostingSetVhostOptions(v),
             Err(e) => Response::Error(e),
         },
+        Request::HostingSetProxyUpstream { sel, upstream_url } => {
+            match api.hosting_set_proxy_upstream(sel, upstream_url).await {
+                Ok(v) => Response::HostingSetProxyUpstream(v),
+                Err(e) => Response::Error(e),
+            }
+        }
         Request::HostingSetAliases { sel, aliases } => {
             match api.hosting_set_aliases(sel, aliases).await {
                 Ok(v) => Response::HostingSetAliases(v),
@@ -1898,6 +1904,16 @@ mod tests {
             _: Option<String>,
         ) -> Result<hyperion_types::VhostOptions, RpcError> {
             Ok(options)
+        }
+        async fn hosting_set_proxy_upstream(
+            &self,
+            _: HostingSelector,
+            _: String,
+        ) -> Result<hyperion_types::HostingDetail, RpcError> {
+            Err(RpcError::NotFound {
+                kind: "hosting".into(),
+                id: "x".into(),
+            })
         }
         async fn hosting_set_aliases(
             &self,

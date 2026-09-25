@@ -199,6 +199,13 @@ pub enum Request {
         /// treated as "leave alone" by the agent.
         basic_auth_password: Option<String>,
     },
+    /// Change a reverse-proxy hosting's upstream URL (its `proxy_pass` target).
+    /// Validates the URL, updates the row, and re-renders the vhost (gated on
+    /// `nginx -t`). Rejected for a non-proxy hosting.
+    HostingSetProxyUpstream {
+        sel: HostingSelector,
+        upstream_url: String,
+    },
     /// Replace a hosting's alias domains (SANs). Rewrites nginx server_name +
     /// reloads. New aliases are not covered by the existing cert until re-issued.
     HostingSetAliases {
@@ -1854,6 +1861,7 @@ pub enum Response {
     TrashRestore,
     TrashPurge,
     HostingSetVhostOptions(hyperion_types::VhostOptions),
+    HostingSetProxyUpstream(hyperion_types::HostingDetail),
     HostingSetAliases(hyperion_types::HostingDetail),
     HostingSetWpDebug(hyperion_types::WpExtras),
     HostingSetRedis(hyperion_types::WpExtras),

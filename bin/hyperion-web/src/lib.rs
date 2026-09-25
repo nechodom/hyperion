@@ -48,6 +48,10 @@ pub fn build_router(state: SharedState) -> Router {
             post(handlers::hostings::post_set_aliases),
         )
         .route(
+            "/hostings/proxy-upstream",
+            post(handlers::hostings::post_proxy_upstream),
+        )
+        .route(
             "/hostings/wp/debug",
             post(handlers::hostings::post_wp_debug),
         )

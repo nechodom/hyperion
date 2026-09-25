@@ -4702,6 +4702,53 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// Returns the persisted options (with `basic_auth_set = true`
     /// when a password was supplied, regardless of whether it was
     /// just set or already on file).
+    /// Change a reverse-proxy hosting's upstream URL: validate it, update the
+    /// row, and re-render the vhost (which `nginx -t`s and rolls back). Returns
+    /// the updated detail so the caller can re-render its card.
+    pub async fn set_proxy_upstream(
+        &self,
+        sel: HostingSelector,
+        upstream_url: String,
+    ) -> Result<hyperion_types::HostingDetail, RpcError> {
+        let detail = self.get(sel).await?;
+        if detail.kind != "reverse_proxy" {
+            return Err(RpcError::Validation {
+                message: "this hosting is not a reverse proxy".into(),
+            });
+        }
+        // The renderer is the real chokepoint (it re-validates on every write),
+        // but reject here too so the operator gets a clean message, not a vhost
+        // error, and the row never stores a value the renderer would refuse.
+        let clean =
+            hyperion_adapters::nginx::validate_upstream_url(&upstream_url).map_err(|e| {
+                RpcError::Validation {
+                    message: e.to_string(),
+                }
+            })?;
+        hyperion_state::hostings::set_kind(
+            &self.pool,
+            &detail.id,
+            "reverse_proxy",
+            Some(&clean),
+            now_secs(),
+        )
+        .await
+        .map_err(|e| RpcError::Internal_with(format!("save upstream: {e}")))?;
+
+        let mut updated = detail.clone();
+        updated.proxy_upstream_url = Some(clean.clone());
+        self.write_vhost_for_state(&updated).await?;
+
+        self.append_audit(
+            "hosting.set_proxy_upstream",
+            Some(detail.id.as_str()),
+            &serde_json::json!({ "domain": detail.domain, "upstream": clean }).to_string(),
+            "ok",
+        )
+        .await;
+        Ok(updated)
+    }
+
     pub async fn set_vhost_options(
         &self,
         sel: HostingSelector,
@@ -41412,6 +41459,65 @@ mod tests {
             .await
             .expect_err("a reverse proxy has no docroot");
         assert!(matches!(err, RpcError::Conflict { .. }), "got: {err:?}");
+    }
+
+    #[tokio::test]
+    async fn set_proxy_upstream_validates_persists_and_rejects_non_proxy() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), happy_mocks());
+
+        // A reverse proxy: the new upstream is validated, re-serialized and
+        // stored, and the returned detail reflects it.
+        let mut r = req("proxy.cz");
+        r.php_version = None;
+        r.kind = "reverse_proxy".into();
+        r.proxy_upstream_url = Some("http://127.0.0.1:3000".into());
+        r.database = None;
+        s.create(r).await.expect("create proxy");
+        let sel = HostingSelector::Domain(Domain::parse("proxy.cz").unwrap());
+
+        let updated = s
+            .set_proxy_upstream(sel.clone(), "http://10.0.0.5:8080".into())
+            .await
+            .expect("set upstream");
+        assert_eq!(
+            updated.proxy_upstream_url.as_deref(),
+            Some("http://10.0.0.5:8080/")
+        );
+        // Persisted, not just returned.
+        assert_eq!(
+            s.get(sel.clone())
+                .await
+                .expect("get")
+                .proxy_upstream_url
+                .as_deref(),
+            Some("http://10.0.0.5:8080/")
+        );
+
+        // A garbage URL is rejected (chokepoint validator), leaving the
+        // stored upstream untouched.
+        let err = s
+            .set_proxy_upstream(sel.clone(), "not a url; rm -rf".into())
+            .await
+            .expect_err("garbage upstream");
+        assert!(matches!(err, RpcError::Validation { .. }), "got: {err:?}");
+        assert_eq!(
+            s.get(sel).await.expect("get").proxy_upstream_url.as_deref(),
+            Some("http://10.0.0.5:8080/"),
+            "a rejected save must not clobber the stored upstream"
+        );
+
+        // A plain PHP hosting is not a proxy — the call is refused. Fresh
+        // service so the create's adapter expectations stand on their own.
+        let pool2 = open_memory().await.expect("open");
+        let s2 = svc(pool2.clone(), happy_mocks());
+        s2.create(req("php.cz")).await.expect("create php");
+        let php_sel = HostingSelector::Domain(Domain::parse("php.cz").unwrap());
+        let err = s2
+            .set_proxy_upstream(php_sel, "http://127.0.0.1:9000".into())
+            .await
+            .expect_err("not a reverse proxy");
+        assert!(matches!(err, RpcError::Validation { .. }), "got: {err:?}");
     }
 
     #[tokio::test]
