@@ -856,6 +856,16 @@ async fn main() -> anyhow::Result<()> {
                     tracing::warn!(rows = n, "startup: reaped stale jobs");
                 }
             }
+            // A backup run is `running` only during the local tar+hash (state
+            // flips to `ok` before the off-site push), which even on a big site
+            // is under an hour — so a run still `running` after 6h is a crash,
+            // not a slow backup. Reap it so it stops spinning forever.
+            const BACKUP_STALE_SECS: i64 = 6 * 3600;
+            if let Ok(n) = tick_svc.backups_reap_stale(BACKUP_STALE_SECS).await {
+                if n > 0 {
+                    tracing::warn!(rows = n, "startup: reaped stale backup runs");
+                }
+            }
             // Re-apply persisted IP bans to nftables ONCE at startup —
             // nft sets are in-memory and lost across reboots.
             match tick_svc.bans_reapply_on_boot().await {
@@ -934,6 +944,12 @@ async fn main() -> anyhow::Result<()> {
                 if let Ok(n) = tick_svc.jobs_reap_stale(JOB_STALE_SECS).await {
                     if n > 0 {
                         tracing::warn!(rows = n, "reaped stale jobs");
+                    }
+                }
+                // …and stuck backup runs (crashed mid-tar), same cheap UPDATE.
+                if let Ok(n) = tick_svc.backups_reap_stale(BACKUP_STALE_SECS).await {
+                    if n > 0 {
+                        tracing::warn!(rows = n, "reaped stale backup runs");
                     }
                 }
                 // Brute-force scan + auto-ban each tick.
