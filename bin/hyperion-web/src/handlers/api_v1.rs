@@ -845,6 +845,24 @@ pub async fn patch_vhost(
             Ok(v) => v,
             Err(r) => return r,
         };
+    // The raw nginx snippet is spliced verbatim into a config root loads, so
+    // it carries its OWN admin-level capability (HostingEditNginxRaw) rather
+    // than travelling with the rest of the vhost settings under
+    // HostingEditConfig — see the browser handler `post_vhost_options` and
+    // memory root-ops-in-tenant-dirs. Mirror that gate here: a key without the
+    // extra cap may still save every other vhost knob, but any attempt to
+    // CHANGE the snippet is refused. Comparing against the stored value means
+    // saving an unrelated field doesn't trip the gate, and a whitespace-only
+    // diff can't slip an edit past the trim() compare.
+    let mut options = body.options;
+    if !ctx.can(Capability::HostingEditNginxRaw) {
+        let snippet_changed =
+            options.custom_nginx_snippet.trim() != detail.vhost_options.custom_nginx_snippet.trim();
+        if snippet_changed {
+            return forbidden(Capability::HostingEditNginxRaw);
+        }
+        options.custom_nginx_snippet = detail.vhost_options.custom_nginx_snippet.clone();
+    }
     let sel = HostingSelector::Id(detail.id.clone());
     let basic_auth_password = body.basic_auth_password.filter(|s| !s.is_empty());
     match crate::dispatcher::dispatch_to_node(
@@ -852,7 +870,7 @@ pub async fn patch_vhost(
         node.as_deref(),
         Request::HostingSetVhostOptions {
             sel,
-            options: body.options,
+            options,
             basic_auth_password,
         },
     )
