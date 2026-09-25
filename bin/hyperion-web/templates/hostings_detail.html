@@ -3785,11 +3785,12 @@
                   {% endif %}
                   {% endif %}
                 {% endif %}
-                {% if b.state == "ok" && b.archive_path.is_some() %}
+                {% if b.state == "ok" && b.archive_path.is_some() && !b.no_offsite %}
                 {# Push THIS backup off-site, then delete the local copy — but
                    only after an independent re-verify that it really landed.
                    Shown whenever there is a local archive; the off-site copy
-                   stays and can still be restored. #}
+                   stays and can still be restored. Hidden for rollback
+                   snapshots (no_offsite): those must never leave the node. #}
                 <form method="post" action="/hostings/backups/offsite-drop" style="display:inline"
                       data-confirm-title="Copy off-site, then delete local"
                       data-confirm-body="This backup is uploaded to the configured off-site targets, then its local archive{% if b.db_dump_path.is_some() %} and database dump{% endif %} are deleted ONLY after an independent re-verify that the copy is really off-site. If it cannot be confirmed off-site, the local copy is kept. Runs as a background job."

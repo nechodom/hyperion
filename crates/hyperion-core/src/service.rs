@@ -6241,6 +6241,16 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let run_id = hyperion_state::backups::start(&self.pool, &detail.id, "local", now_secs())
             .await
             .map_err(|e| RpcError::Internal_with(format!("backup start: {e}")))?;
+        // A rollback snapshot exists to be a LOCAL copy to roll back to. Mark
+        // it never-off-site the moment its row exists, so the on-demand
+        // "copy off-site, then delete local" action can never push it away or
+        // drop the local copy. The fresh-backup path below already skips its
+        // own push/drop for NotWanted; this protects it from the LATER paths.
+        if offsite == OffsiteSource::NotWanted {
+            if let Err(e) = hyperion_state::backups::mark_no_offsite(&self.pool, run_id).await {
+                tracing::warn!(error = %e, "could not mark rollback snapshot no_offsite");
+            }
+        }
         // Build target dir
         let ts = now_secs();
         let archive_dir = std::path::PathBuf::from(&backup_root).join(&detail.system_user);
@@ -11135,6 +11145,14 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         drop_local: bool,
     ) -> RunOffsiteOutcome {
         let mut out = RunOffsiteOutcome::default();
+        // A rollback snapshot must never leave the node, and its local copy is
+        // the whole point of it — never push it, never drop it. Defence in
+        // depth: `list_needing_offsite` already excludes these, and the
+        // per-hosting caller skips them, but the single shared push path is the
+        // one place that must not be able to touch one.
+        if run.no_offsite {
+            return out;
+        }
         let Some(archive) = run.archive_path.clone() else {
             out.missing_locally = true;
             return out;
@@ -11375,6 +11393,13 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             // A still-running backup has no complete archive to send.
             if run.state == "running" {
                 out.failed += 1;
+                continue;
+            }
+            // A rollback snapshot is never eligible — skip it silently rather
+            // than counting a failure the operator did not cause. The button
+            // is hidden for these rows; reaching here means a tampered/stale
+            // POST, which is exactly what the shared-path guard also stops.
+            if run.no_offsite {
                 continue;
             }
             out.considered += 1;
@@ -34237,6 +34262,7 @@ fn run_to_wire(r: hyperion_state::backups::BackupRun) -> hyperion_types::BackupR
         remote_blob_key: r.remote_blob_key,
         remote_state: r.remote_state,
         remote_error: r.remote_error,
+        no_offsite: r.no_offsite,
         id: r.id,
         hosting_id: r.hosting_id,
         target: r.target,

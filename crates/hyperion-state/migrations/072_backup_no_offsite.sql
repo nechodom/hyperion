@@ -1,0 +1,16 @@
+-- Mark a backup run as one that must NEVER leave this node.
+--
+-- Rollback snapshots — the pre-export, pre-staging-create and pre-push safety
+-- copies taken with `OffsiteSource::NotWanted` — are persisted as ordinary
+-- `backup_runs` rows (state 'ok', target 'local', remote_state NULL). Their
+-- whole purpose is a LOCAL copy to roll back to, so the fresh-backup path
+-- already refuses to push OR drop them.
+--
+-- The on-demand "copy off-site, then delete local" action walks existing rows
+-- by state alone, so without a durable marker it could push such a snapshot
+-- off-site (possibly to a client's pinned bucket) and then delete the local
+-- rollback copy. This column is that marker: 1 = never copy off-site, never
+-- drop the local copy. Defaults to 0, so every existing row is treated as an
+-- ordinary backup — correct, because no NotWanted row has ever been eligible
+-- for off-site until now anyway.
+ALTER TABLE backup_runs ADD COLUMN no_offsite INTEGER NOT NULL DEFAULT 0;

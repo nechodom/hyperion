@@ -223,6 +223,10 @@ pub struct BackupRunWire {
     pub remote_state: String,
     #[serde(default)]
     pub remote_error: String,
+    /// A rollback snapshot that must never leave the node: no off-site push,
+    /// no local drop. The UI hides the "copy off-site & drop" control for it.
+    #[serde(default)]
+    pub no_offsite: bool,
 }
 
 impl BackupRunWire {

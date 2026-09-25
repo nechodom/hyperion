@@ -4478,13 +4478,13 @@ pub(crate) async fn run_offsite_drop_job(
                 r.kept_local,
                 if r.kept_local == 1 { "y" } else { "ies" },
             ));
-            // Nothing pushed at all is a failure worth the red job state; a
-            // partial (some kept) still did real work, so it is a success with
-            // the counts above telling the operator what was and wasn't freed.
+            // Red when anything the operator selected FAILED — including ids
+            // that no longer exist (a concurrent delete or a stale page): those
+            // land in `failed` without touching `considered`, so a
+            // `considered == 0` success clause would report green when every
+            // selected item failed. Mirror the estate-wide sweep's predicate.
             reporter.step("Finished.", 100, &log).await;
-            reporter
-                .finish(r.pushed > 0 || r.considered == 0, None)
-                .await;
+            reporter.finish(r.failed == 0, None).await;
         }
         Ok(RpcResponse::Error(e)) => reporter.finish(false, Some(e.to_string())).await,
         Ok(_) => {
