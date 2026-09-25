@@ -1700,6 +1700,23 @@
       </div>
       <button type="submit" class="btn primary">Save backup target</button>
     </form>
+    {# Connection check — probes the SAVED target (connect, log in, list the
+       directory), so it tells the operator whether off-site will actually work
+       without waiting for a whole backup to fail. #}
+    <div class="row" style="align-items:center;gap:0.6rem;margin-top:0.8rem;flex-wrap:wrap">
+      <button type="button" class="btn small"
+              hx-post="/settings/backup-remote/probe"
+              hx-vals='{"_csrf": "{{ csrf_token }}"}'
+              hx-target="#bk-probe-result"
+              hx-swap="innerHTML"
+              title="Connect, log in and list the target directory">
+        Test connection
+      </button>
+      <span id="bk-probe-result" style="margin-left:0.2rem"></span>
+    </div>
+    <p class="text-soft small" style="margin:0.4rem 0 0">
+      Tests the target as <strong>saved</strong> — save any changes above first.
+    </p>
   </div>
 
   <div class="card" style="margin-top:1rem">

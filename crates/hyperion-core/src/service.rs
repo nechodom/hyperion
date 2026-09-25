@@ -19349,6 +19349,33 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         })
     }
 
+    /// Connection check for the node's configured FTP/FTPS/SFTP off-site target
+    /// (`[backup_remote]`): connect + log in + list the base directory. Lets the
+    /// operator confirm the target works without running a whole backup.
+    pub async fn backup_remote_probe(&self) -> Result<hyperion_types::BackupTargetProbe, RpcError> {
+        let Some(remote) = self.remote_backup.as_ref() else {
+            return Ok(hyperion_types::BackupTargetProbe {
+                ok: false,
+                message: "no FTP/FTPS/SFTP off-site target is configured on this node".into(),
+                put_latency_ms: 0,
+            });
+        };
+        let upload = hyperion_adapters::backup::RemoteUpload {
+            scheme: &remote.scheme,
+            host: &remote.host,
+            port: remote.port,
+            user: &remote.user,
+            password: &remote.password,
+            remote_dir: &remote.base_path,
+        };
+        let (ok, message, latency_ms) = hyperion_adapters::backup::probe_remote(&upload).await;
+        Ok(hyperion_types::BackupTargetProbe {
+            ok,
+            message,
+            put_latency_ms: latency_ms as i64,
+        })
+    }
+
     // ============================================================
     //  hosting_quotas — per-hosting disk caps, kernel-enforced via
     //  `setquota -u`, plus the overage action the enforce tick applies.

@@ -378,6 +378,10 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(()) => Response::BackupTargetDeleted,
             Err(e) => Response::Error(e),
         },
+        Request::BackupRemoteProbe {} => match api.backup_remote_probe().await {
+            Ok(v) => Response::BackupRemoteProbe(v),
+            Err(e) => Response::Error(e),
+        },
         Request::BackupTargetProbe { id } => match api.backup_target_probe(id).await {
             Ok(v) => Response::BackupTargetProbe(v),
             Err(e) => Response::Error(e),
@@ -1983,6 +1987,9 @@ mod tests {
             &self,
             _: i64,
         ) -> Result<hyperion_types::BackupTargetProbe, RpcError> {
+            Ok(hyperion_types::BackupTargetProbe::default())
+        }
+        async fn backup_remote_probe(&self) -> Result<hyperion_types::BackupTargetProbe, RpcError> {
             Ok(hyperion_types::BackupTargetProbe::default())
         }
         async fn quota_get(

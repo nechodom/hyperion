@@ -886,6 +886,10 @@ pub enum Request {
     BackupTargetProbe {
         id: i64,
     },
+    /// Connection check for the node's configured FTP/FTPS/SFTP off-site target
+    /// (`[backup_remote]`): connect, log in, list the directory. No id — it
+    /// probes whatever this node has configured.
+    BackupRemoteProbe {},
     /// Read the current quota policy + usage report for one
     /// hosting. Returns zero-everywhere when no row exists.
     QuotaGet {
@@ -2076,6 +2080,7 @@ pub enum Response {
     },
     BackupTargetDeleted,
     BackupTargetProbe(hyperion_types::BackupTargetProbe),
+    BackupRemoteProbe(hyperion_types::BackupTargetProbe),
     /// Per-hosting quota report (policy + current usage).
     QuotaGet(hyperion_types::HostingQuotaReport),
     /// Ack for QuotaSet — returns the persisted (and possibly

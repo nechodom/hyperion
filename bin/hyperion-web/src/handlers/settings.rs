@@ -482,6 +482,46 @@ pub async fn post_email_logo(
     }
 }
 
+/// POST /settings/backup-remote/probe — connection check for the configured
+/// FTP/FTPS/SFTP off-site target: connect, log in, list the directory. Returns
+/// an HTMX fragment shown next to the button.
+pub async fn post_backup_remote_probe(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+) -> Result<Response, AppError> {
+    if !ctx.is_admin_or_higher() {
+        return Ok(
+            Html("<span class=\"pill err\">admin role required</span>".to_string()).into_response(),
+        );
+    }
+    let esc = |s: &str| askama_escape::escape(s, askama_escape::Html).to_string();
+    let resp =
+        hyperion_rpc_client::call(&state.agent_socket, Request::BackupRemoteProbe {}).await?;
+    let html = match resp {
+        RpcResponse::BackupRemoteProbe(p) => {
+            let cls = if p.ok { "pill ok" } else { "pill err" };
+            let latency = if p.ok && p.put_latency_ms > 0 {
+                format!(" · {}ms", p.put_latency_ms)
+            } else {
+                String::new()
+            };
+            format!(
+                "<span class=\"{cls}\">{}{}</span>",
+                esc(&p.message),
+                latency
+            )
+        }
+        RpcResponse::Error(e) => {
+            format!(
+                "<span class=\"pill err\">check failed: {}</span>",
+                esc(&e.to_string())
+            )
+        }
+        _ => "<span class=\"pill err\">unexpected response</span>".into(),
+    };
+    Ok(Html(html).into_response())
+}
+
 /// GET /settings/email-logo.img — the stored logo, for the settings preview.
 pub async fn get_email_logo_img(
     State(state): State<SharedState>,

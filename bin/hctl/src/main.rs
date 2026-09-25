@@ -2399,7 +2399,7 @@ fn print_pretty(resp: &Response) {
         }
         Response::BackupTargetUpserted { id } => println!("backup target upserted: id={id}"),
         Response::BackupTargetDeleted => println!("backup target deleted"),
-        Response::BackupTargetProbe(p) => {
+        Response::BackupTargetProbe(p) | Response::BackupRemoteProbe(p) => {
             println!(
                 "probe: ok={} latency={}ms message={}",
                 p.ok, p.put_latency_ms, p.message
