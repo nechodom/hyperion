@@ -211,6 +211,9 @@ struct DetailTpl<'a> {
     backup_target_error: Option<String>,
     expiry_error: Option<String>,
     expiry_flash: Option<String>,
+    /// Reverse-proxy upstream card: outcome of a `/hostings/proxy-upstream` save.
+    proxy_flash: Option<String>,
+    proxy_error: Option<String>,
     cert_error: Option<String>,
     cert_flash: Option<String>,
     restore_error: Option<String>,
@@ -305,6 +308,8 @@ struct DetailTpl<'a> {
     /// CSRF token for the vhost options form (basic auth, HSTS,
     /// FastCGI cache, custom snippet, maintenance mode, redirect).
     csrf_vhost_options: String,
+    /// CSRF token for the reverse-proxy upstream edit form.
+    csrf_proxy_upstream: String,
     /// Whether this viewer may write the raw nginx snippet. The server
     /// enforces it regardless; this only decides whether the textarea is
     /// shown, so a tenant is not handed a field whose every save 403s.
@@ -1383,6 +1388,8 @@ pub async fn post_create(
                 backup_target_error: None,
                 expiry_error: None,
                 expiry_flash: None,
+                proxy_flash: None,
+                proxy_error: None,
                 cert_error: None,
                 cert_flash: None,
                 restore_error: None,
@@ -1421,6 +1428,7 @@ pub async fn post_create(
                 wp_assets: fetch_wp_assets(&state).await.unwrap_or_default(),
                 wp_themes: hyperion_types::WpThemeListResponse::default(),
                 csrf_vhost_options: csrf_token_for(&state, &ctx, "/hostings/vhost-options"),
+                csrf_proxy_upstream: csrf_token_for(&state, &ctx, "/hostings/proxy-upstream"),
                 can_edit_nginx_raw: ctx.can(Capability::HostingEditNginxRaw),
                 quota: hyperion_types::HostingQuotaReport::default(),
                 csrf_quota_set: csrf_token_for(&state, &ctx, "/hostings/quota/set"),
@@ -2397,6 +2405,8 @@ pub async fn get_detail(
                 "Expiry updated.".to_string()
             }
         }),
+        proxy_flash: q.proxy_saved.map(|_| "Upstream updated.".to_string()),
+        proxy_error: q.proxy_error,
         cert_error: q.cert_error,
         cert_flash: q.cert.map(|s| match s.as_str() {
             "staging" => "Staging certificate issued — issuer 'letsencrypt-staging'.".into(),
@@ -2445,6 +2455,7 @@ pub async fn get_detail(
         wp_assets: fetch_wp_assets(&state).await.unwrap_or_default(),
         wp_themes,
         csrf_vhost_options: csrf_token_for(&state, &ctx, "/hostings/vhost-options"),
+        csrf_proxy_upstream: csrf_token_for(&state, &ctx, "/hostings/proxy-upstream"),
         can_edit_nginx_raw: ctx.can(Capability::HostingEditNginxRaw),
         quota,
         csrf_quota_set: csrf_token_for(&state, &ctx, "/hostings/quota/set"),
@@ -2563,6 +2574,11 @@ pub struct DetailQuery {
     pub expiry: Option<String>,
     #[serde(default)]
     pub expiry_error: Option<String>,
+    /// Reverse-proxy upstream save landed (any value ⇒ success flash).
+    #[serde(default)]
+    pub proxy_saved: Option<String>,
+    #[serde(default)]
+    pub proxy_error: Option<String>,
     #[serde(default)]
     pub cert: Option<String>,
     #[serde(default)]
@@ -3056,6 +3072,59 @@ pub async fn post_clear_expiry(
                 Redirect::to(&format!("/hostings/{}?expiry_error={}", sel_url, msg))
                     .into_response(),
             )
+        }
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct ProxyUpstreamForm {
+    pub selector: String,
+    /// New upstream origin, e.g. `http://127.0.0.1:8080`. Validated and
+    /// re-serialized service-side by `nginx::validate_upstream_url`.
+    pub upstream_url: String,
+}
+
+/// Change a reverse-proxy hosting's upstream URL, then re-render its vhost.
+/// Owner-dispatched: the vhost lives on the node that owns the hosting, so
+/// this must reach that node (mirrors `post_set_expiry`), not master-local.
+pub async fn post_proxy_upstream(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<ProxyUpstreamForm>,
+) -> Result<Response, AppError> {
+    let sel = match require_manage_for_selector(
+        &state,
+        &ctx,
+        &form.selector,
+        Capability::HostingEditConfig,
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
+    let sel_url = urlencoding(&form.selector);
+    let target_owned: Option<String> = find_hosting_anywhere(&state, sel.clone())
+        .await
+        .ok()
+        .and_then(|(_d, n)| n);
+    let resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        target_owned.as_deref(),
+        Request::HostingSetProxyUpstream {
+            sel,
+            upstream_url: form.upstream_url.trim().to_string(),
+        },
+    )
+    .await?;
+    match resp {
+        RpcResponse::HostingSetProxyUpstream(_) => {
+            Ok(Redirect::to(&format!("/hostings/{}?proxy_saved=1", sel_url)).into_response())
+        }
+        RpcResponse::Error(e) => {
+            let msg = urlencoding(&e.to_string());
+            Ok(Redirect::to(&format!("/hostings/{}?proxy_error={}", sel_url, msg)).into_response())
         }
         _ => Err(AppError::Internal("unexpected response".into())),
     }

@@ -475,6 +475,18 @@
     <div class="flash-body">{{ e }}</div>
   </div>
 {% endif %}
+{% if let Some(m) = proxy_flash %}
+  <div class="flash success">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+    <div class="flash-body">{{ m }}</div>
+  </div>
+{% endif %}
+{% if let Some(e) = proxy_error %}
+  <div class="flash error">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+    <div class="flash-body">{{ e }}</div>
+  </div>
+{% endif %}
 {% if let Some(m) = cert_flash %}
   <div class="flash success">
     <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
@@ -910,6 +922,38 @@
           <span class="text-soft">{{ detail.kind }} (no PHP)</span>
         {% endif %}
       {% endif %}
+    </dd>
+    {% endif %}
+    {% if detail.kind == "reverse_proxy" %}
+    <dt>Upstream</dt>
+    <dd>
+      {# The one piece of config a reverse proxy actually has: the origin
+         nginx forwards every request to. Shown + editable inline; the save
+         re-renders and reloads this vhost (nginx -t gated, service-side).
+         Static preview only — no JS builds the URL; the server validates
+         and re-serializes it via nginx::validate_upstream_url. #}
+      <div style="display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap">
+        {% if let Some(u) = detail.proxy_upstream_url.as_ref() %}
+          <code id="upstream-current">{{ u }}</code>
+        {% else %}
+          <span class="text-soft" id="upstream-current">— not set</span>
+        {% endif %}
+      </div>
+      <form method="post" action="/hostings/proxy-upstream"
+            style="display:flex;gap:0.4rem;align-items:center;margin:0.45rem 0 0;flex-wrap:wrap"
+            data-confirm-title="Change upstream"
+            data-confirm-body="nginx is re-tested and reloaded with the new upstream. A bad target does not take the vhost down — the config is validated before it is applied — but requests start hitting the new origin immediately."
+            data-confirm-confirm-label="Save upstream"
+            data-confirm-variant="primary">
+        <input type="hidden" name="_csrf" value="{{ csrf_proxy_upstream }}">
+        <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
+        <input type="url" name="upstream_url" required
+               value="{% if let Some(u) = detail.proxy_upstream_url.as_ref() %}{{ u }}{% endif %}"
+               placeholder="http://127.0.0.1:8080"
+               aria-label="Upstream URL"
+               style="padding:0.25rem 0.5rem;font-size:0.85rem;min-width:16rem">
+        <button type="submit" class="btn small">Save upstream</button>
+      </form>
     </dd>
     {% endif %}
     {% if !detail.aliases.is_empty() %}
