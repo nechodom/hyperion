@@ -70,4 +70,11 @@ server {
         proxy_send_timeout  3600s;
         proxy_buffering off;
     }
+
+    {%- if !custom_nginx_snippet.is_empty() %}
+
+    # ─── Custom snippet from operator (Settings → Custom nginx snippet) ───
+    {{ custom_nginx_snippet }}
+    # ─── end custom snippet ───
+    {%- endif %}
 }

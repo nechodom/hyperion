@@ -337,6 +337,9 @@ pub struct RedirectVhostInput<'a> {
     pub redirect_code: i64,
     /// When true, the request path is appended to the target.
     pub redirect_preserve_path: bool,
+    /// Operator's free-form nginx snippet, appended inside the HTTPS server
+    /// block. Admin-only; `write_redirect_vhost` now gates it behind `nginx -t`.
+    pub custom_nginx_snippet: &'a str,
 }
 
 #[derive(askama::Template)]
@@ -350,6 +353,7 @@ struct RedirectVhostTpl<'a> {
     key_path: &'a str,
     acme_challenge_root: &'a str,
     redirect_code: i64,
+    custom_nginx_snippet: &'a str,
     /// Rendered redirect target — `nginx_safe_target` for the HTTP
     /// (:80) listener; if `preserve_path` is on, this is the bare
     /// target and nginx appends $request_uri via the `return`
@@ -398,6 +402,7 @@ pub fn render_redirect(input: &RedirectVhostInput<'_>) -> Result<String, Adapter
         key_path: input.key_path,
         acme_challenge_root: input.acme_challenge_root,
         redirect_code: input.redirect_code,
+        custom_nginx_snippet: input.custom_nginx_snippet,
         redirect_target_http: http_t,
         redirect_target_https: https_t,
     };
@@ -411,9 +416,20 @@ pub async fn write_redirect_vhost(
 ) -> Result<(), AdapterError> {
     let body = render_redirect(input)?;
     let vhost = paths.vhost_file(input.domain);
-    crate::fs::atomic_write(&vhost, body.as_bytes(), 0o644).await?;
+    // Gate on `nginx -t` + restore, same as the proxy/php writers: now that a
+    // free-form custom snippet can land in this vhost, a syntax error must roll
+    // back rather than take nginx (and every site on it) down at the reload.
+    let backup = backup_existing(&vhost).await?;
+    atomic_write(&vhost, body.as_bytes(), 0o644).await?;
     let symlink = paths.symlink_file(input.domain);
     ensure_symlink(&vhost, &symlink).await?;
+    if let Err(e) = cmd::run("/usr/sbin/nginx", &["-t"]).await {
+        restore_or_remove(&vhost, backup.as_deref()).await;
+        if backup.is_none() {
+            let _ = tokio::fs::remove_file(&symlink).await;
+        }
+        return Err(e);
+    }
     reload().await
 }
 
@@ -581,6 +597,10 @@ pub struct ProxyVhostInput<'a> {
     pub acme_challenge_root: &'a str,
     /// Upstream URL — e.g. "http://localhost:3000" or "https://api.internal:8443".
     pub upstream_url: &'a str,
+    /// Operator's free-form nginx snippet, appended inside the HTTPS server
+    /// block. Admin-only (HostingEditNginxRaw); `write_vhost_proxy` gates it
+    /// behind `nginx -t`, so a bad snippet rolls back instead of bricking.
+    pub custom_nginx_snippet: &'a str,
 }
 
 #[derive(askama::Template)]
@@ -595,6 +615,7 @@ struct ProxyVhostTpl<'a> {
     key_path: &'a str,
     acme_challenge_root: &'a str,
     upstream_url: &'a str,
+    custom_nginx_snippet: &'a str,
 }
 
 /// Validate an upstream URL and give back the form that is safe to emit.
@@ -658,6 +679,7 @@ pub fn render_proxy(input: &ProxyVhostInput<'_>) -> Result<String, AdapterError>
         key_path: input.key_path,
         acme_challenge_root: input.acme_challenge_root,
         upstream_url: &upstream,
+        custom_nginx_snippet: input.custom_nginx_snippet,
     };
     Ok(tpl.render()?)
 }
@@ -2399,6 +2421,7 @@ mod tests {
             redirect_url: "https://new.example.cz",
             redirect_code: 301,
             redirect_preserve_path: false,
+            custom_nginx_snippet: "",
         };
         let out = render_redirect(&input).expect("render redirect");
         assert!(out.contains("server_name old.example.cz;"));
@@ -2421,6 +2444,7 @@ mod tests {
             redirect_url: "https://new.example.cz/",
             redirect_code: 302,
             redirect_preserve_path: true,
+            custom_nginx_snippet: "",
         };
         let out = render_redirect(&input).expect("render redirect");
         assert!(out.contains("return 302 https://new.example.cz$request_uri;"));
@@ -2439,6 +2463,7 @@ mod tests {
             redirect_url: "new.example.cz",
             redirect_code: 301,
             redirect_preserve_path: false,
+            custom_nginx_snippet: "",
         };
         assert!(render_redirect(&input).is_err());
     }
@@ -2598,7 +2623,48 @@ mod upstream_url_tests {
             key_path: "/c/privkey.pem",
             acme_challenge_root: "/var/lib/hyperion/acme",
             upstream_url: "http://127.0.0.1:3000; } location / { root /etc",
+            custom_nginx_snippet: "",
         });
         assert!(out.is_err(), "the renderer emitted an injected upstream");
+    }
+
+    /// The operator's custom nginx snippet must reach the reverse-proxy AND the
+    /// redirect vhost — not just the php/static one — so "edit the vhost" works
+    /// for every hosting type.
+    #[test]
+    fn custom_snippet_lands_in_proxy_and_redirect_vhosts() {
+        let aliases: Vec<String> = vec![];
+        let proxy = super::render_proxy(&super::ProxyVhostInput {
+            domain: "app.example.cz",
+            aliases: &aliases,
+            logs_dir: "/l",
+            cert_path: "/c",
+            key_path: "/k",
+            acme_challenge_root: "/a",
+            upstream_url: "http://127.0.0.1:3000",
+            custom_nginx_snippet: "add_header X-Test 1 always;",
+        })
+        .expect("proxy render");
+        assert!(
+            proxy.contains("add_header X-Test 1 always;"),
+            "the proxy vhost must carry the operator's snippet"
+        );
+
+        let redir = super::render_redirect(&super::RedirectVhostInput {
+            domain: "old.example.cz",
+            aliases: &aliases,
+            cert_path: "/c",
+            key_path: "/k",
+            acme_challenge_root: "/a",
+            redirect_url: "https://new.example.cz",
+            redirect_code: 301,
+            redirect_preserve_path: false,
+            custom_nginx_snippet: "client_max_body_size 5m;",
+        })
+        .expect("redirect render");
+        assert!(
+            redir.contains("client_max_body_size 5m;"),
+            "the redirect vhost must carry the operator's snippet"
+        );
     }
 }

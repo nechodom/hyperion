@@ -38,4 +38,11 @@ server {
     location / {
         return {{ redirect_code }} {{ redirect_target_https }};
     }
+
+    {%- if !custom_nginx_snippet.is_empty() %}
+
+    # ─── Custom snippet from operator (Settings → Custom nginx snippet) ───
+    {{ custom_nginx_snippet }}
+    # ─── end custom snippet ───
+    {%- endif %}
 }

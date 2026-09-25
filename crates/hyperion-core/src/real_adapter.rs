@@ -994,6 +994,7 @@ impl AdapterPort for RealAdapter {
                 key_path: &key_path,
                 acme_challenge_root: &acme_root,
                 upstream_url: upstream,
+                custom_nginx_snippet: &detail.vhost_options.custom_nginx_snippet,
             };
             return hyperion_adapters::nginx::write_vhost_proxy(&self.nginx_paths, &input).await;
         }
@@ -1023,6 +1024,7 @@ impl AdapterPort for RealAdapter {
                 redirect_url: target,
                 redirect_code: code,
                 redirect_preserve_path: detail.vhost_options.redirect_preserve_path,
+                custom_nginx_snippet: &detail.vhost_options.custom_nginx_snippet,
             };
             return hyperion_adapters::nginx::write_redirect_vhost(&self.nginx_paths, &input).await;
         }
