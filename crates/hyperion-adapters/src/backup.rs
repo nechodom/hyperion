@@ -487,7 +487,18 @@ pub async fn upload_remote(file: &Path, upload: &RemoteUpload<'_>) -> Result<Str
             "fail\n",
             "silent\n",
             "show-error\n",
-            "max-time = 300\n",
+            // A fixed `max-time = 300` used to cap the WHOLE transfer at 5
+            // minutes — fine for a small site, but a multi-GB archive can't
+            // finish in that window (a 22 GiB push needs ~76 MB/s to make it),
+            // so every large site's off-site copy failed with curl (28) "timed
+            // out ... with 0 bytes received". Instead: fail FAST on an
+            // unreachable target (connect-timeout), abort a genuinely STALLED
+            // transfer (below 1 KB/s for 5 min), but never cap a large upload
+            // that is still moving. A 24h absolute backstop guards a hung curl.
+            "connect-timeout = 60\n",
+            "speed-limit = 1024\n",
+            "speed-time = 300\n",
+            "max-time = 86400\n",
             // FTP: create missing remote directories.
             "ftp-create-dirs\n",
         ),
@@ -755,8 +766,16 @@ pub async fn download_remote(
             "fail\n",
             "silent\n",
             "show-error\n",
-            // A restore of a large site is not a 300-second job.
-            "max-time = 3600\n",
+            // A large restore is bound by transfer RATE, not a fixed clock: a
+            // fixed `max-time = 3600` capped a multi-GB restore at an hour and
+            // aborted it half-done on a slow link. Fail fast on an unreachable
+            // remote, abort a genuinely STALLED download (below 1 KB/s for 5
+            // min), but let a still-moving restore run; a 24h backstop guards a
+            // hung curl.
+            "connect-timeout = 60\n",
+            "speed-limit = 1024\n",
+            "speed-time = 300\n",
+            "max-time = 86400\n",
             // A remote that serves an endless stream would otherwise fill the
             // node's disk and take every site on it down. curl aborts past
             // this, and the caller's own free-space check decides the number.

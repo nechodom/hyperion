@@ -24919,6 +24919,22 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(n)
     }
 
+    /// Mark backup runs stuck in `running` past `stale_secs` as failed. A run
+    /// that crashed mid-backup (OOM, restart) otherwise sits `running` forever —
+    /// blocking retry and showing a permanent spinner. Nothing will finish it.
+    pub async fn backups_reap_stale(&self, stale_secs: i64) -> Result<u64, RpcError> {
+        let n = hyperion_state::backups::reap_stale(&self.pool, now_secs(), stale_secs)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("backups_reap_stale: {e}")))?;
+        if n > 0 {
+            tracing::warn!(
+                rows = n,
+                "reaped stale backup runs (agent crash mid-backup?)"
+            );
+        }
+        Ok(n)
+    }
+
     /// Full ROFS diagnose + (optional) auto-fix sequence.
     ///
     /// Gather phase (always runs):

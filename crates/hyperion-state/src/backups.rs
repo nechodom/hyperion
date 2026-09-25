@@ -152,6 +152,31 @@ pub async fn mark_failed(
     Ok(())
 }
 
+/// Mark backup runs stuck in `running` past `stale_secs` as failed, and return
+/// how many. A run is `running` only during the LOCAL tar+hash (state flips to
+/// `ok` before the off-site push, which is tracked separately as
+/// `remote_state`), so a run still `running` after hours means the agent died
+/// mid-backup (crash, OOM, restart) — nothing else will ever finish it, and it
+/// otherwise sits `running` forever, blocking retry and confusing the operator.
+/// Keyed on `started_at` because a run has no progress heartbeat; the threshold
+/// is set well above any real local backup.
+pub async fn reap_stale(pool: &SqlitePool, now: i64, stale_secs: i64) -> Result<u64, StateError> {
+    let cutoff = now - stale_secs;
+    let res = sqlx::query(
+        r#"UPDATE backup_runs
+              SET state='failed',
+                  error_message='the agent stopped before this backup finished (crash or restart mid-run)',
+                  finished_at=?
+            WHERE state='running'
+              AND started_at < ?"#,
+    )
+    .bind(now)
+    .bind(cutoff)
+    .execute(pool)
+    .await?;
+    Ok(res.rows_affected())
+}
+
 pub async fn list_for(
     pool: &SqlitePool,
     hosting_id: &HostingId,
@@ -314,6 +339,41 @@ mod tests {
             row.hosting_id, a,
             "a caller authorized for hosting a would be handed b's archive path \
              unless it checks hosting_id itself"
+        );
+    }
+
+    #[tokio::test]
+    async fn reap_stale_fails_only_old_running_runs() {
+        let pool = open_memory().await.expect("open");
+        let h = fixture(&pool).await;
+
+        // Running, started long ago → past the threshold, must be reaped.
+        let old = start(&pool, &h, "local", 100).await.expect("old");
+        // Running, started recently → still alive, must be left.
+        let fresh = start(&pool, &h, "local", 900).await.expect("fresh");
+        // Finished ok → never a candidate.
+        let done = start(&pool, &h, "local", 100).await.expect("done");
+        mark_ok(&pool, done, "/a.tar.gz", None, 10, 200)
+            .await
+            .expect("ok");
+
+        // now=1000, stale=500 → cutoff=500: only `old` (started 100) qualifies.
+        let n = reap_stale(&pool, 1000, 500).await.expect("reap");
+        assert_eq!(n, 1, "exactly the one old running run");
+
+        assert_eq!(
+            get_by_id(&pool, old).await.unwrap().unwrap().state,
+            "failed"
+        );
+        assert_eq!(
+            get_by_id(&pool, fresh).await.unwrap().unwrap().state,
+            "running",
+            "a recent run is not stuck"
+        );
+        assert_eq!(
+            get_by_id(&pool, done).await.unwrap().unwrap().state,
+            "ok",
+            "a finished run is never reaped"
         );
     }
 
