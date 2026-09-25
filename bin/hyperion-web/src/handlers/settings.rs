@@ -1888,10 +1888,23 @@ fn section_label(section: &str) -> &'static str {
 /// truncated sweep reporting "finished" leaves the rest uncopied silently.
 const BACKFILL_BATCH: i64 = 200;
 
-/// POST /settings/backups/backfill — send local backups that never left.
+/// Query for [`post_offsite_backfill`]. `drop=1` turns the copy into a
+/// copy-then-delete-local sweep; anything else keeps the historical
+/// copy-only behaviour. A string, not a bool, because `serde_urlencoded`
+/// only parses `true`/`false` for bools and the button sends `1`.
+#[derive(serde::Deserialize, Default)]
+pub struct OffsiteBackfillParams {
+    #[serde(default)]
+    drop: Option<String>,
+}
+
+/// POST /settings/backups/backfill — send local backups that never left, and
+/// (with `?drop=1`) delete each local copy once it is independently confirmed
+/// off-site.
 pub async fn post_offsite_backfill(
     State(state): State<SharedState>,
     ctx: AuthCtx,
+    axum::extract::Query(params): axum::extract::Query<OffsiteBackfillParams>,
 ) -> Result<Response, AppError> {
     // BackupRun is NOT enough. Every Customer role holds it, and this action
     // is not scoped to a hosting: it walks every successful backup on the
@@ -1910,6 +1923,11 @@ pub async fn post_offsite_backfill(
         )
         .into_response());
     }
+    let drop_local = matches!(params.drop.as_deref(), Some("1") | Some("true"));
+    // The S3 targets live in the master's table; resolving them here (reading
+    // each 0600 secret) lets the node push to them too, so the sweep is not
+    // silently FTP-only. Same read the per-hosting backup uses.
+    let s3_targets = crate::handlers::hostings::resolve_s3_targets(&state).await;
     // Real transfers, sized by the estate — a job, never a request.
     let actor_uid = ctx.session.as_ref().map(|s| s.user_id).unwrap_or(0);
     let actor_label = ctx.username.clone();
@@ -1923,12 +1941,22 @@ pub async fn post_offsite_backfill(
         actor_uid,
         move |reporter| async move {
             reporter
-                .step("Looking for backups with no off-site copy…", 5, "")
+                .step(
+                    if drop_local {
+                        "Copying backups off-site, then dropping the local copy once verified…"
+                    } else {
+                        "Looking for backups with no off-site copy…"
+                    },
+                    5,
+                    "",
+                )
                 .await;
             match hyperion_rpc_client::call(
                 &job_state.agent_socket,
                 Request::BackupOffsiteBackfill {
                     limit: BACKFILL_BATCH,
+                    drop_local,
+                    s3_targets,
                 },
             )
             .await
@@ -1938,6 +1966,17 @@ pub async fn post_offsite_backfill(
                         "considered: {}\npushed:     {}\nfailed:     {}\n",
                         r.considered, r.pushed, r.failed
                     );
+                    if drop_local {
+                        log.push_str(&format!(
+                            "dropped:    {} local cop{} removed after an independent off-site \
+                             re-verify\nkept local: {} cop{} kept — could NOT be confirmed \
+                             off-site (missing, wrong size, or unreachable to re-check)\n",
+                            r.dropped,
+                            if r.dropped == 1 { "y" } else { "ies" },
+                            r.kept_local,
+                            if r.kept_local == 1 { "y" } else { "ies" },
+                        ));
+                    }
                     // Separated from `failed` because no retry fixes it: the
                     // archive was pruned off local disk before anything copied
                     // it anywhere. Those backups are simply gone, and saying

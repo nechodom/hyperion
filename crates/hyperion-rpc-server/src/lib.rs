@@ -1530,12 +1530,29 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(v) => Response::BackupOffsiteList(v),
             Err(e) => Response::Error(e),
         },
-        Request::BackupOffsiteBackfill { limit } => {
-            match api.backup_offsite_backfill(limit).await {
-                Ok(v) => Response::BackupOffsiteBackfill(v),
-                Err(e) => Response::Error(e),
-            }
-        }
+        Request::BackupOffsiteBackfill {
+            limit,
+            drop_local,
+            s3_targets,
+        } => match api
+            .backup_offsite_backfill(limit, drop_local, s3_targets)
+            .await
+        {
+            Ok(v) => Response::BackupOffsiteBackfill(v),
+            Err(e) => Response::Error(e),
+        },
+        Request::BackupOffsitePushDrop {
+            sel,
+            backup_ids,
+            s3_targets,
+            drop_local,
+        } => match api
+            .backup_offsite_push_drop(sel, backup_ids, s3_targets, drop_local)
+            .await
+        {
+            Ok(v) => Response::BackupOffsitePushDrop(v),
+            Err(e) => Response::Error(e),
+        },
         Request::BackupOffsiteRestore {
             sel,
             filename,
@@ -3276,6 +3293,17 @@ mod tests {
         async fn backup_offsite_backfill(
             &self,
             _: i64,
+            _: bool,
+            _: Vec<hyperion_types::S3BackupTarget>,
+        ) -> Result<hyperion_types::OffsiteBackfillResult, RpcError> {
+            Ok(Default::default())
+        }
+        async fn backup_offsite_push_drop(
+            &self,
+            _: HostingSelector,
+            _: Vec<i64>,
+            _: Vec<hyperion_types::S3BackupTarget>,
+            _: bool,
         ) -> Result<hyperion_types::OffsiteBackfillResult, RpcError> {
             Ok(Default::default())
         }

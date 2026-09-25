@@ -1506,8 +1506,30 @@ pub enum Request {
         sel: HostingSelector,
     },
     /// Push local backups that never reached the off-site store.
+    ///
+    /// `s3_targets` are the master-resolved S3 destinations (the table is
+    /// master-only, so a worker cannot read them — they ride in the request
+    /// exactly like `BackupNow`). Empty keeps the historical FTP-only
+    /// behaviour. `drop_local` additionally removes each local copy AFTER an
+    /// independent re-verification that it is really off-site.
     BackupOffsiteBackfill {
         limit: i64,
+        #[serde(default)]
+        drop_local: bool,
+        #[serde(default)]
+        s3_targets: Vec<hyperion_types::S3BackupTarget>,
+    },
+    /// Push one or more EXISTING local backups of a single hosting off-site,
+    /// then (when `drop_local`) delete the local copy once it is independently
+    /// confirmed present off-site. Per-node backup ids, so the owning node
+    /// re-checks each belongs to `sel`. `s3_targets` are master-resolved.
+    BackupOffsitePushDrop {
+        sel: HostingSelector,
+        backup_ids: Vec<i64>,
+        #[serde(default)]
+        s3_targets: Vec<hyperion_types::S3BackupTarget>,
+        #[serde(default)]
+        drop_local: bool,
     },
     /// Fetch one backup back off the remote store and restore it.
     BackupOffsiteRestore {
@@ -2297,6 +2319,8 @@ pub enum Response {
     WpRegistration(hyperion_types::WpRegistrationView),
     BackupOffsiteList(hyperion_types::OffsiteListing),
     BackupOffsiteBackfill(hyperion_types::OffsiteBackfillResult),
+    /// Per-hosting push-then-maybe-drop summary (same shape as the backfill).
+    BackupOffsitePushDrop(hyperion_types::OffsiteBackfillResult),
     BackupOffsiteRestore(String),
     FtpAccountList(Vec<hyperion_types::FtpExtraAccount>),
     /// `(login, password)` — the password is shown once, and it is paired

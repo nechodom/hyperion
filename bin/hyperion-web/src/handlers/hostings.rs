@@ -4333,6 +4333,170 @@ pub async fn post_backup_delete_bulk(
 }
 
 #[derive(Deserialize)]
+pub struct BackupOffsiteDropForm {
+    selector: String,
+    /// Comma-separated backup ids. A per-row button sends one; the bulk button
+    /// joins the ticked rows into this single field (axum's urlencoded `Form`
+    /// can't gather repeated keys into a `Vec` — verified: it 422s).
+    #[serde(default)]
+    backup_ids: String,
+}
+
+impl BackupOffsiteDropForm {
+    /// Parse, de-dupe and cap the id list, same rules as the bulk delete.
+    fn ids(&self) -> Vec<i64> {
+        let mut out: Vec<i64> = Vec::new();
+        for tok in self.backup_ids.split(',') {
+            if let Ok(n) = tok.trim().parse::<i64>() {
+                if n > 0 && !out.contains(&n) {
+                    out.push(n);
+                }
+            }
+            if out.len() >= 100 {
+                break;
+            }
+        }
+        out
+    }
+}
+
+/// POST /hostings/backups/offsite-drop — push one or more existing local
+/// backups of a hosting off-site, then delete the local copy once it is
+/// independently confirmed off-site. Serves both the per-row button (one id)
+/// and the bulk button (many ids). Slow (real uploads), so it runs as a
+/// background job like the backup itself.
+pub async fn post_backup_offsite_drop(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<BackupOffsiteDropForm>,
+) -> Result<Response, AppError> {
+    // Same authorization + owner-dispatch as delete: the backup id is the
+    // owning node's per-node autoincrement, so the node re-checks each id
+    // belongs to `sel`.
+    let sel = match require_manage_for_selector(&state, &ctx, &form.selector, Capability::BackupRun)
+        .await
+    {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
+    let sel_url = urlencoding(&form.selector);
+    let ids = form.ids();
+    if ids.is_empty() {
+        return Ok(Redirect::to(&format!("/hostings/{sel_url}#backups")).into_response());
+    }
+    let node = find_hosting_anywhere(&state, sel.clone())
+        .await
+        .ok()
+        .and_then(|(_d, n)| n);
+    // Resolve the S3 targets on the request thread (master-local 0600 reads),
+    // so the owning node can push to them too — not just the FTP target.
+    let s3_targets = resolve_s3_targets(&state).await;
+
+    let actor_uid = ctx.session.as_ref().map(|s| s.user_id).unwrap_or(0);
+    let actor_label = ctx.username.clone();
+    let job_state = state.clone();
+    let job_id = crate::handlers::jobs::spawn_job(
+        state.clone(),
+        "offsite-drop",
+        Some(&form.selector),
+        "{}",
+        &actor_label,
+        actor_uid,
+        move |reporter| async move {
+            run_offsite_drop_job(reporter, job_state, node, sel, ids, s3_targets).await;
+        },
+    )
+    .await?;
+    Ok(Redirect::to(&format!("/jobs/{}", job_id)).into_response())
+}
+
+/// Background worker for [`post_backup_offsite_drop`]: push the chosen backups
+/// off-site on the owning node and drop each verified local copy.
+pub(crate) async fn run_offsite_drop_job(
+    reporter: crate::handlers::jobs::JobReporter,
+    state: SharedState,
+    node: Option<String>,
+    sel: HostingSelector,
+    backup_ids: Vec<i64>,
+    s3_targets: Vec<hyperion_types::S3BackupTarget>,
+) {
+    reporter
+        .step(
+            "Copying off-site, then dropping each local copy once verified…",
+            10,
+            "",
+        )
+        .await;
+    // One blocking RPC (uploads + verify + delete); heartbeat the job row so a
+    // large transfer is not reaped as stale mid-flight, same as the backup job.
+    let hb = {
+        let reporter = reporter.clone();
+        tokio::spawn(async move {
+            let mut pct = 10;
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(120)).await;
+                pct = (pct + 5).min(85);
+                reporter
+                    .step(
+                        "Still copying off-site — large archives take a while…",
+                        pct,
+                        "",
+                    )
+                    .await;
+            }
+        })
+    };
+    let outcome = crate::dispatcher::dispatch_to_node(
+        &state,
+        node.as_deref(),
+        Request::BackupOffsitePushDrop {
+            sel,
+            backup_ids,
+            s3_targets,
+            drop_local: true,
+        },
+    )
+    .await;
+    hb.abort();
+    match outcome {
+        Ok(RpcResponse::BackupOffsitePushDrop(r)) => {
+            let mut log = format!(
+                "considered: {}\npushed:     {}\nfailed:     {}\n",
+                r.considered, r.pushed, r.failed
+            );
+            if r.missing_locally > 0 {
+                log.push_str(&format!(
+                    "GONE:       {} had no local archive left to send\n",
+                    r.missing_locally
+                ));
+            }
+            log.push_str(&format!(
+                "dropped:    {} local cop{} removed after an independent off-site re-verify\n\
+                 kept local: {} cop{} kept — could NOT be confirmed off-site\n",
+                r.dropped,
+                if r.dropped == 1 { "y" } else { "ies" },
+                r.kept_local,
+                if r.kept_local == 1 { "y" } else { "ies" },
+            ));
+            // Red when anything the operator selected FAILED — including ids
+            // that no longer exist (a concurrent delete or a stale page): those
+            // land in `failed` without touching `considered`, so a
+            // `considered == 0` success clause would report green when every
+            // selected item failed. Mirror the estate-wide sweep's predicate.
+            reporter.step("Finished.", 100, &log).await;
+            reporter.finish(r.failed == 0, None).await;
+        }
+        Ok(RpcResponse::Error(e)) => reporter.finish(false, Some(e.to_string())).await,
+        Ok(_) => {
+            reporter
+                .finish(false, Some("unexpected agent response".into()))
+                .await
+        }
+        Err(e) => reporter.finish(false, Some(e.to_string())).await,
+    }
+}
+
+#[derive(Deserialize)]
 pub struct SetAcmeEmailForm {
     selector: String,
     #[serde(default)]

@@ -1619,10 +1619,27 @@
     </p>
     <form method="post" action="/settings/backups/backfill"
           data-confirm-title="Copy existing backups off-site"
-          data-confirm-body="Uploads backups that have no off-site copy to the configured FTP target, oldest first. This transfers real data and can take a long time and a lot of bandwidth. It never deletes anything."
+          data-confirm-body="Uploads backups that have no off-site copy to the configured off-site targets, oldest first. This transfers real data and can take a long time and a lot of bandwidth. It never deletes anything."
           data-confirm-confirm-label="Start copying">
       <input type="hidden" name="_csrf" value="{{ csrf_token }}">
       <button class="btn primary" type="submit">Copy existing backups off-site</button>
+    </form>
+    {# Same sweep, but frees local disk: each copy is deleted ONLY after an
+       independent re-verify that it is really off-site. A copy that can't be
+       confirmed is kept, so this never removes the only copy. #}
+    <p class="text-soft small" style="margin:0.9rem 0 0.6rem;line-height:1.55">
+      Short on disk? The same sweep can <strong>delete each local copy</strong>
+      once it has been independently re-verified off-site. A copy that cannot be
+      confirmed (missing, wrong size, or the target is unreachable) is
+      <strong>kept</strong> — this never deletes the only copy.
+    </p>
+    <form method="post" action="/settings/backups/backfill?drop=1"
+          data-confirm-title="Copy off-site, then delete local"
+          data-confirm-body="Uploads backups that have no off-site copy, then DELETES each local archive and database dump once it is independently re-verified present off-site. A copy that cannot be confirmed off-site is kept. The off-site copy remains and can still be restored. This transfers real data and can take a long time."
+          data-confirm-variant="danger"
+          data-confirm-confirm-label="Copy, then delete local">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <button class="btn danger" type="submit">Copy off-site &amp; delete local</button>
     </form>
   </div>
 

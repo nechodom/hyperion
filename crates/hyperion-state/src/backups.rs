@@ -35,6 +35,11 @@ pub struct BackupRun {
     pub remote_state: String,
     /// Why the off-site copy is not there, when it is not. Empty on success.
     pub remote_error: String,
+    /// This run must NEVER leave the node: a rollback snapshot (pre-export,
+    /// pre-staging, pre-push) whose whole purpose is a local copy to roll back
+    /// to. Set for `OffsiteSource::NotWanted` runs; keeps them out of the
+    /// off-site push + drop paths.
+    pub no_offsite: bool,
 }
 
 /// The row as SQLite hands it back, mapped BY NAME.
@@ -64,6 +69,8 @@ struct BackupRunRow {
     db_dump_path: Option<String>,
     bytes_total: i64,
     error_message: Option<String>,
+    #[sqlx(default)]
+    no_offsite: Option<i64>,
 }
 
 impl From<BackupRunRow> for BackupRun {
@@ -83,13 +90,14 @@ impl From<BackupRunRow> for BackupRun {
             db_dump_path: r.db_dump_path,
             bytes_total: r.bytes_total,
             error_message: r.error_message,
+            no_offsite: r.no_offsite.unwrap_or(0) != 0,
         }
     }
 }
 
 const SELECT_COLS: &str = "id, hosting_id, target, started_at, finished_at, state, \
      sha256_hex, remote_blob_key, remote_state, remote_error, archive_path, \
-     db_dump_path, bytes_total, error_message";
+     db_dump_path, bytes_total, error_message, no_offsite";
 
 pub async fn start(
     pool: &SqlitePool,
@@ -248,6 +256,16 @@ pub async fn set_remote(
 /// What a backfill works from. `state='ok'` because pushing the archive of a
 /// failed run would copy a file that may be truncated; oldest first because
 /// the oldest is the one closest to being pruned off local disk.
+/// Flag a run as never-off-site (a rollback snapshot). Keeps it out of
+/// `list_needing_offsite` and, defensively, out of the on-demand push+drop.
+pub async fn mark_no_offsite(pool: &SqlitePool, id: i64) -> Result<(), StateError> {
+    sqlx::query("UPDATE backup_runs SET no_offsite = 1 WHERE id = ?")
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 pub async fn list_needing_offsite(
     pool: &SqlitePool,
     limit: i64,
@@ -256,6 +274,7 @@ pub async fn list_needing_offsite(
         "SELECT {SELECT_COLS} FROM backup_runs \
           WHERE state = 'ok' \
             AND archive_path IS NOT NULL \
+            AND no_offsite = 0 \
             AND (remote_state IS NULL OR remote_state NOT IN ('ok', 'verified')) \
           ORDER BY started_at ASC \
           LIMIT ?"
@@ -455,6 +474,41 @@ mod tests {
         // off-site — there is nothing local to send.
         let after = list_needing_offsite(&pool, 10).await.expect("list");
         assert!(!after.iter().any(|r| r.id == run));
+    }
+
+    #[tokio::test]
+    async fn no_offsite_runs_are_never_offsite_candidates() {
+        let pool = open_memory().await.expect("open");
+        let id = fixture(&pool).await;
+        // A rollback snapshot: a successful local backup marked never-off-site.
+        let snap = start(&pool, &id, "local", 100).await.expect("start");
+        mark_ok(&pool, snap, "/var/backups/rollback.tar.gz", None, 512, 200)
+            .await
+            .expect("ok");
+        mark_no_offsite(&pool, snap).await.expect("mark");
+
+        // An ordinary local backup alongside it, for contrast.
+        let normal = start(&pool, &id, "local", 300).await.expect("start2");
+        mark_ok(&pool, normal, "/var/backups/normal.tar.gz", None, 512, 400)
+            .await
+            .expect("ok2");
+
+        // The flag round-trips, and only the rollback carries it.
+        assert!(get_by_id(&pool, snap).await.unwrap().unwrap().no_offsite);
+        assert!(!get_by_id(&pool, normal).await.unwrap().unwrap().no_offsite);
+
+        // The backfill/on-demand candidate list must EXCLUDE the rollback
+        // snapshot — pushing it off-site then dropping its local copy would
+        // destroy the very thing it exists to provide.
+        let cands = list_needing_offsite(&pool, 10).await.expect("list");
+        assert!(
+            !cands.iter().any(|r| r.id == snap),
+            "a no_offsite rollback snapshot must never be an off-site candidate"
+        );
+        assert!(
+            cands.iter().any(|r| r.id == normal),
+            "an ordinary local backup still is"
+        );
     }
 
     #[tokio::test]

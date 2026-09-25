@@ -854,10 +854,22 @@ pub trait AgentApi: Send + Sync + 'static {
         &self,
         sel: HostingSelector,
     ) -> Result<hyperion_types::OffsiteListing, RpcError>;
-    /// Push local backups that never reached the off-site store.
+    /// Push local backups that never reached the off-site store, optionally
+    /// dropping each local copy once independently confirmed off-site.
     async fn backup_offsite_backfill(
         &self,
         limit: i64,
+        drop_local: bool,
+        s3_targets: Vec<hyperion_types::S3BackupTarget>,
+    ) -> Result<hyperion_types::OffsiteBackfillResult, RpcError>;
+    /// Push one or more existing local backups of a single hosting off-site,
+    /// then (when `drop_local`) delete each local copy once confirmed off-site.
+    async fn backup_offsite_push_drop(
+        &self,
+        sel: HostingSelector,
+        backup_ids: Vec<i64>,
+        s3_targets: Vec<hyperion_types::S3BackupTarget>,
+        drop_local: bool,
     ) -> Result<hyperion_types::OffsiteBackfillResult, RpcError>;
     /// Fetch one backup back off the remote and restore it.
     async fn backup_offsite_restore(

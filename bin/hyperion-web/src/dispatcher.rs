@@ -217,7 +217,9 @@ fn timeout_for_request(req: &Request) -> u64 {
         // the default 30s the node would keep working while the master
         // reported it unreachable, and the operator would retry a restore
         // that was already running.
-        Request::BackupOffsiteRestore { .. } | Request::BackupOffsiteBackfill { .. } => 3600,
+        Request::BackupOffsiteRestore { .. }
+        | Request::BackupOffsiteBackfill { .. }
+        | Request::BackupOffsitePushDrop { .. } => 3600,
         // A directory listing is cheap, but it is still a round trip to a
         // remote host that may be slow to answer.
         Request::BackupOffsiteList { .. } => 120,

@@ -1983,8 +1983,23 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
     async fn backup_offsite_backfill(
         &self,
         limit: i64,
+        drop_local: bool,
+        s3_targets: Vec<hyperion_types::S3BackupTarget>,
     ) -> Result<hyperion_types::OffsiteBackfillResult, RpcError> {
-        self.svc.backup_offsite_backfill(limit).await
+        self.svc
+            .backup_offsite_backfill(limit, drop_local, s3_targets)
+            .await
+    }
+    async fn backup_offsite_push_drop(
+        &self,
+        sel: HostingSelector,
+        backup_ids: Vec<i64>,
+        s3_targets: Vec<hyperion_types::S3BackupTarget>,
+        drop_local: bool,
+    ) -> Result<hyperion_types::OffsiteBackfillResult, RpcError> {
+        self.svc
+            .backup_offsite_push_drop(sel, backup_ids, s3_targets, drop_local)
+            .await
     }
     async fn backup_offsite_restore(
         &self,
