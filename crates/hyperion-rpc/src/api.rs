@@ -166,6 +166,9 @@ pub trait AgentApi: Send + Sync + 'static {
         id: i64,
     ) -> Result<hyperion_types::BackupTargetProbe, RpcError>;
 
+    /// Connection check for the node's configured FTP/FTPS/SFTP off-site target.
+    async fn backup_remote_probe(&self) -> Result<hyperion_types::BackupTargetProbe, RpcError>;
+
     /// Read current per-hosting quota policy + usage.
     async fn quota_get(
         &self,

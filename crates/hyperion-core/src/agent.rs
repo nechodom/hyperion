@@ -356,6 +356,10 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.backup_target_probe(id).await
     }
 
+    async fn backup_remote_probe(&self) -> Result<hyperion_types::BackupTargetProbe, RpcError> {
+        self.svc.backup_remote_probe().await
+    }
+
     async fn quota_get(
         &self,
         sel: hyperion_rpc::HostingSelector,

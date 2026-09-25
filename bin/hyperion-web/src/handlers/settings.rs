@@ -80,6 +80,9 @@ struct SettingsTpl<'a> {
     error: Option<String>,
     flash: Option<String>,
     flash_error: Option<String>,
+    /// Auto-fire the off-site FTP connection check on load (set right after a
+    /// save, so a config change is verified without a manual click).
+    auto_probe_backup_remote: bool,
     csrf_token: String,
     /// Whether a logo is on file — drives the preview thumbnail and the
     /// Remove button.
@@ -482,6 +485,46 @@ pub async fn post_email_logo(
     }
 }
 
+/// POST /settings/backup-remote/probe — connection check for the configured
+/// FTP/FTPS/SFTP off-site target: connect, log in, list the directory. Returns
+/// an HTMX fragment shown next to the button.
+pub async fn post_backup_remote_probe(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+) -> Result<Response, AppError> {
+    if !ctx.is_admin_or_higher() {
+        return Ok(
+            Html("<span class=\"pill err\">admin role required</span>".to_string()).into_response(),
+        );
+    }
+    let esc = |s: &str| askama_escape::escape(s, askama_escape::Html).to_string();
+    let resp =
+        hyperion_rpc_client::call(&state.agent_socket, Request::BackupRemoteProbe {}).await?;
+    let html = match resp {
+        RpcResponse::BackupRemoteProbe(p) => {
+            let cls = if p.ok { "pill ok" } else { "pill err" };
+            let latency = if p.ok && p.put_latency_ms > 0 {
+                format!(" · {}ms", p.put_latency_ms)
+            } else {
+                String::new()
+            };
+            format!(
+                "<span class=\"{cls}\">{}{}</span>",
+                esc(&p.message),
+                latency
+            )
+        }
+        RpcResponse::Error(e) => {
+            format!(
+                "<span class=\"pill err\">check failed: {}</span>",
+                esc(&e.to_string())
+            )
+        }
+        _ => "<span class=\"pill err\">unexpected response</span>".into(),
+    };
+    Ok(Html(html).into_response())
+}
+
 /// GET /settings/email-logo.img — the stored logo, for the settings preview.
 pub async fn get_email_logo_img(
     State(state): State<SharedState>,
@@ -736,6 +779,10 @@ pub struct SettingsQuery {
     /// "" / "local" = master. Drives the per-node MtaDiagnostics fetch.
     #[serde(default)]
     mail_node: String,
+    /// Set by the redirect after saving the off-site FTP target: auto-run the
+    /// connection check once the page loads (after the agent restart settles).
+    #[serde(default)]
+    probe_backup_remote: Option<String>,
 }
 
 /// Read one cookie value from the request's `Cookie` header (none if absent).
@@ -997,6 +1044,7 @@ pub async fn get_settings(
         error,
         flash: q.flash,
         flash_error: q.flash_error,
+        auto_probe_backup_remote: q.probe_backup_remote.is_some(),
         csrf_token,
         csrf_slack_test: super::hostings::csrf_token_for(&state, &ctx, "/settings/slack-test"),
         email_logo_set,
@@ -1673,11 +1721,23 @@ pub async fn post_config(
                         tab
                     ),
                 },
-                None => format!(
-                    "/settings?flash={}+saved+%E2%80%94+hyperion-agent+restarting+%28~5s%29#{}",
-                    urlencode(section_label(&form.section)),
-                    tab
-                ),
+                None => {
+                    // After saving the off-site FTP target, carry a flag so the
+                    // settings page auto-runs the connection check once the
+                    // agent has restarted with the new config. Goes BEFORE the
+                    // `#tab` fragment (a fragment must be last in the URL).
+                    let probe = if form.section == "backup_remote" {
+                        "&probe_backup_remote=1"
+                    } else {
+                        ""
+                    };
+                    format!(
+                        "/settings?flash={}+saved+%E2%80%94+hyperion-agent+restarting+%28~5s%29{}#{}",
+                        urlencode(section_label(&form.section)),
+                        probe,
+                        tab
+                    )
+                }
             }
         }
         RpcResponse::Error(e) => format!(

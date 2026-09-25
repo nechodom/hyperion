@@ -562,6 +562,10 @@ pub fn build_router(state: SharedState) -> Router {
             "/settings/backups/:id/probe",
             post(handlers::backups::post_probe),
         )
+        .route(
+            "/settings/backup-remote/probe",
+            post(handlers::settings::post_backup_remote_probe),
+        )
         .route("/audit/verify", post(handlers::audit::post_verify_chain))
         .route("/settings/sessions", get(handlers::sessions::get_sessions))
         .route(

@@ -1688,10 +1688,26 @@
           <input id="bk_user" name="user" type="text" value="{{ config.backup_remote.user|e }}">
         </div>
         <div class="field" style="flex:1">
-          <label for="bk_password">Password
-            {% if config.backup_remote.password_set %}<span class="text-soft">— stored; leave blank to keep</span>{% endif %}
-          </label>
-          <input id="bk_password" name="password" type="password" autocomplete="new-password" value="">
+          <label for="bk_password">Password</label>
+          {% if config.backup_remote.password_set %}
+          {#- A password is already stored. Lock it inside a collapsed
+              disclosure so a stray keystroke can't overwrite it — you have to
+              open "change" before you can type a new one. Left closed, the
+              empty field submits nothing and the stored password is kept
+              (drop_if_empty on the handler). -#}
+          <details class="pw-locked">
+            <summary class="btn small" style="list-style:none;cursor:pointer;display:inline-flex;align-items:center;gap:0.35rem">
+              🔒 Stored — click to change it
+            </summary>
+            <input id="bk_password" name="password" type="password" autocomplete="new-password" value=""
+                   placeholder="Type a NEW password to replace the stored one"
+                   style="margin-top:0.5rem">
+            <p class="text-soft small" style="margin:0.3rem 0 0">Leave this closed to keep the current password.</p>
+          </details>
+          {% else %}
+          <input id="bk_password" name="password" type="password" autocomplete="new-password" value=""
+                 placeholder="Set a password">
+          {% endif %}
         </div>
       </div>
       <div class="field">
@@ -1700,6 +1716,35 @@
       </div>
       <button type="submit" class="btn primary">Save backup target</button>
     </form>
+    {# Connection check — probes the SAVED target (connect, log in, list the
+       directory), so it tells the operator whether off-site will actually work
+       without waiting for a whole backup to fail. #}
+    <div class="row" style="align-items:center;gap:0.6rem;margin-top:0.8rem;flex-wrap:wrap">
+      <button type="button" class="btn small"
+              hx-post="/settings/backup-remote/probe"
+              hx-vals='{"_csrf": "{{ csrf_token }}"}'
+              hx-target="#bk-probe-result"
+              hx-swap="innerHTML"
+              title="Connect, log in and list the target directory">
+        Test connection
+      </button>
+      {# After a save the agent restarts (~5s), so auto-fire the check on load
+         with a delay long enough for it to come back. The manual button above
+         targets this same span. #}
+      <span id="bk-probe-result" style="margin-left:0.2rem"
+        {% if auto_probe_backup_remote %}
+            hx-post="/settings/backup-remote/probe"
+            hx-vals='{"_csrf": "{{ csrf_token }}"}'
+            hx-trigger="load delay:6s"
+            hx-swap="innerHTML"
+        {% endif %}>
+        {% if auto_probe_backup_remote %}<span class="text-soft small"><span class="spinner-inline" style="margin-right:0.3rem"></span>testing the connection after the restart…</span>{% endif %}
+      </span>
+    </div>
+    <p class="text-soft small" style="margin:0.4rem 0 0">
+      Tests the target as <strong>saved</strong> — save any changes above first.
+      It runs automatically after each save.
+    </p>
   </div>
 
   <div class="card" style="margin-top:1rem">

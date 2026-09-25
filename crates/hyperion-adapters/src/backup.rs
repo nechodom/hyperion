@@ -511,6 +511,78 @@ pub async fn upload_remote(file: &Path, upload: &RemoteUpload<'_>) -> Result<Str
     Ok(url)
 }
 
+/// Connection check for the off-site target: connect, log in, and LIST the
+/// target directory — proving reachability + credentials + directory access
+/// without running a full backup. Returns `(ok, human message, latency_ms)`.
+///
+/// curl's exit code is the diagnosis here: the operator's actual failure was a
+/// (28) timeout with 0 bytes, which this turns into "the server did not
+/// respond" in 15s instead of after a 5-minute backup.
+pub async fn probe_remote(upload: &RemoteUpload<'_>) -> (bool, String, u64) {
+    let scheme = match upload.scheme {
+        s @ ("ftp" | "ftps" | "sftp") => s,
+        other => return (false, format!("unsupported remote scheme: {other}"), 0),
+    };
+    let dir = format!("/{}", upload.remote_dir.trim_matches('/'));
+    // The trailing slash makes curl LIST the directory instead of trying to
+    // download it as a file.
+    let url = format!(
+        "{scheme}://{host}:{port}{dir}/",
+        host = upload.host,
+        port = upload.port,
+    );
+    let config = format!(
+        concat!(
+            "user = \"{user}:{password}\"\n",
+            "url = \"{url}\"\n",
+            "list-only\n",
+            "fail\n",
+            "silent\n",
+            "show-error\n",
+            "connect-timeout = 15\n",
+            "max-time = 30\n",
+        ),
+        user = cmd::curl_config_quote(upload.user),
+        password = cmd::curl_config_quote(upload.password),
+        url = cmd::curl_config_quote(&url),
+    );
+    let start = std::time::Instant::now();
+    let res = cmd::curl_with_config_capture(&config).await;
+    let latency_ms = start.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+    match res {
+        Ok((_stdout, _stderr, 0)) => (
+            true,
+            "connected, logged in, and listed the target directory".to_string(),
+            latency_ms,
+        ),
+        Ok((_stdout, stderr, code)) => {
+            // Map the codes an operator actually hits to plain language; keep
+            // the raw stderr for anything else.
+            let msg = match code {
+                6 => "could not resolve the host — check the hostname / DNS".into(),
+                7 => "could not connect — the port is closed or refused (firewall, or wrong port?)"
+                    .into(),
+                28 => {
+                    "timed out — the server did not respond (firewall, or wrong host/port?)".into()
+                }
+                67 => "login failed — wrong username or password".into(),
+                9 => "connected and logged in, but the target directory is not accessible".into(),
+                78 => "connected and logged in, but the target directory does not exist".into(),
+                _ => {
+                    let s = stderr.trim();
+                    if s.is_empty() {
+                        format!("connection failed (curl exit {code})")
+                    } else {
+                        format!("connection failed: {s}")
+                    }
+                }
+            };
+            (false, msg, latency_ms)
+        }
+        Err(e) => (false, format!("could not run the check: {e}"), latency_ms),
+    }
+}
+
 /// Is the file really on the remote, at the right size?
 ///
 /// A zero exit from the upload means the transfer returned success. It does
