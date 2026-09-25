@@ -784,19 +784,29 @@ Themes:
   let current = 1;
   const total = steps.length;
 
+  // The WordPress step (the last one) only applies to a PHP site — a static
+  // site, reverse proxy or redirect can't run WordPress, so for those the
+  // wizard ends one step earlier and never asks about it.
+  const kindSel = document.getElementById('kind');
+  const wpApplies = () => !kindSel || kindSel.value === 'php';
+  const lastStep = () => (wpApplies() ? total : total - 1);
+
   function show(n) {
-    current = Math.max(1, Math.min(total, n));
+    const last = lastStep();
+    current = Math.max(1, Math.min(last, n));
     steps.forEach((el) => {
       const isMine = Number(el.dataset.step) === current;
       el.style.display = isMine ? '' : 'none';
     });
     stepper.querySelectorAll('li').forEach((li) => {
       const sn = Number(li.dataset.step);
+      // Hide any step past the last applicable one (the WP step for non-PHP).
+      li.style.display = sn <= last ? '' : 'none';
       li.classList.toggle('active', sn === current);
       li.classList.toggle('done', sn < current);
     });
     backBtn.style.display = current > 1 ? '' : 'none';
-    if (current === total) {
+    if (current === last) {
       nextBtn.style.display = 'none';
       submitBtn.style.display = '';
     } else {
@@ -831,6 +841,11 @@ Themes:
     show(current + 1);
   });
   backBtn.addEventListener('click', () => show(current - 1));
+
+  // Changing the hosting type can add or remove the WordPress step, so
+  // re-render (clamping if the operator was standing on a step that no longer
+  // applies).
+  if (kindSel) kindSel.addEventListener('change', () => show(current));
 
   // Also let the stepper itself be clickable — operator can jump
   // back to any prior step. Forward jumps go through validation.
