@@ -515,6 +515,27 @@ impl JobReporter {
             tracing::warn!(error=%e, id=%self.id, "job_finish RPC failed");
         }
     }
+
+    /// Replace the job's sub-step list — the named subjobs the progress page
+    /// renders. Best-effort: a failed mirror just means the card shows slightly
+    /// stale sub-steps, never a failed job.
+    pub async fn substeps(&self, subs: &[hyperion_types::JobSubstep]) {
+        let json = match serde_json::to_string(subs) {
+            Ok(j) => j,
+            Err(_) => return,
+        };
+        let r = hyperion_rpc_client::call(
+            &self.state.agent_socket,
+            Request::JobSubsteps {
+                id: self.id.clone(),
+                substeps_json: json,
+            },
+        )
+        .await;
+        if let Err(e) = r {
+            tracing::warn!(error=%e, id=%self.id, "job_substeps RPC failed");
+        }
+    }
 }
 
 /// Open a job row, then tokio::spawn the supplied closure with a

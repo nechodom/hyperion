@@ -527,8 +527,15 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         &self,
         sel: HostingSelector,
         s3_targets: Vec<hyperion_types::S3BackupTarget>,
+        progress_job_id: Option<String>,
     ) -> Result<BackupRunWire, RpcError> {
-        self.svc.backup_now(sel, s3_targets).await
+        self.svc.backup_now(sel, s3_targets, progress_job_id).await
+    }
+    async fn backup_progress(
+        &self,
+        job_id: String,
+    ) -> Result<Vec<hyperion_types::JobSubstep>, RpcError> {
+        Ok(self.svc.backup_progress(&job_id).await)
     }
 
     async fn backup_list(
@@ -1131,6 +1138,10 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc
             .job_finish_external(&id, ok, error.as_deref())
             .await
+    }
+
+    async fn job_substeps(&self, id: String, substeps_json: String) -> Result<(), RpcError> {
+        self.svc.job_substeps(&id, &substeps_json).await
     }
 
     async fn wp_plugin_list(

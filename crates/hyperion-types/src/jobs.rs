@@ -25,6 +25,10 @@ pub struct JobView {
     pub step_label: String,
     /// 0-100. Monotonic by convention; not enforced.
     pub progress_pct: i64,
+    /// Ordered named sub-steps ("subjobs") the progress page lists, each with
+    /// its own state + bar. Empty when the job has none.
+    #[serde(default)]
+    pub substeps: Vec<crate::JobSubstep>,
     /// Bounded ~16 KiB tail of the operation's log. Older bytes are
     /// dropped as the operation produces new output.
     pub log_tail: String,

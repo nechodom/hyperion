@@ -2886,34 +2886,88 @@ pub(crate) async fn run_backup_now_job(
     reporter
         .step("Backing up — files + database…", 10, "")
         .await;
-    // The backup is ONE blocking RPC, so nothing updates the job row while
-    // tar runs. The agent reaps jobs with no progress for an hour as stale —
-    // which on a large site meant a backup that was still working was
-    // reported as failed, and the archive it went on to produce looked
-    // orphaned. A heartbeat keeps the row alive; it claims no progress it
-    // cannot see, it just says the work is still going.
-    let hb = {
+    let job_id = reporter.id.clone();
+    // The backup runs as ONE blocking RPC on the owning node. While it runs we
+    // poll that node for the per-phase sub-steps it publishes under this job id
+    // and mirror them into the job row, so the progress page shows subjobs
+    // (files → database → off-site) advancing. The poll also keeps the row's
+    // updated_at fresh, so it doubles as the stale-reaper heartbeat. `last`
+    // remembers the newest non-empty sub-steps so we can finalize them from the
+    // master side without a last-second node read racing the node's cleanup.
+    let last: std::sync::Arc<tokio::sync::Mutex<Vec<hyperion_types::JobSubstep>>> =
+        std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let poll = {
+        let state = state.clone();
         let reporter = reporter.clone();
+        let node = node.clone();
+        let job_id = job_id.clone();
+        let last = last.clone();
         tokio::spawn(async move {
             let mut pct = 10;
             loop {
-                tokio::time::sleep(std::time::Duration::from_secs(120)).await;
-                // Creeps toward, never reaches, the completion the real
-                // result reports.
-                pct = (pct + 5).min(85);
-                reporter
-                    .step("Still backing up — large sites take a while…", pct, "")
-                    .await;
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                match crate::dispatcher::dispatch_to_node(
+                    &state,
+                    node.as_deref(),
+                    Request::BackupProgress {
+                        job_id: job_id.clone(),
+                    },
+                )
+                .await
+                {
+                    Ok(RpcResponse::BackupProgress(subs)) if !subs.is_empty() => {
+                        *last.lock().await = subs.clone();
+                        reporter.substeps(&subs).await;
+                    }
+                    _ => {
+                        // No sub-steps yet (or an older node): keep the row
+                        // alive with a coarse heartbeat so it is not reaped.
+                        pct = (pct + 2).min(85);
+                        reporter
+                            .step("Still backing up — large sites take a while…", pct, "")
+                            .await;
+                    }
+                }
             }
         })
     };
     let outcome = crate::dispatcher::dispatch_to_node(
         &state,
         node.as_deref(),
-        Request::BackupNow { sel, s3_targets },
+        Request::BackupNow {
+            sel,
+            s3_targets,
+            progress_job_id: Some(job_id),
+        },
     )
     .await;
-    hb.abort();
+    poll.abort();
+    // Finalize the sub-steps from the master's own last-seen list, so the card
+    // does not freeze on a "running" phase after the job goes terminal. Success
+    // ⇒ everything not skipped is done; failure ⇒ whatever was still in flight
+    // is marked failed.
+    {
+        let ok = matches!(outcome, Ok(RpcResponse::BackupNow(_)));
+        let mut subs = last.lock().await.clone();
+        if !subs.is_empty() {
+            for s in subs.iter_mut() {
+                // Only promote steps still in flight. A step the node already
+                // marked "failed" (e.g. a best-effort off-site copy that did
+                // not land) or "skipped" must survive — the overall job is a
+                // success, but forcing every step to green would hide exactly
+                // the phase that did not.
+                if s.state == "running" || s.state == "pending" {
+                    if ok {
+                        s.state = "done".to_string();
+                        s.pct = 100;
+                    } else {
+                        s.state = "failed".to_string();
+                    }
+                }
+            }
+            reporter.substeps(&subs).await;
+        }
+    }
     match outcome {
         Ok(RpcResponse::BackupNow(run)) => {
             let mut log = format!("state={} bytes_total={}\n", run.state, run.bytes_total);
@@ -6733,6 +6787,9 @@ pub async fn post_wp_reinstall(
                         Request::BackupNow {
                             sel: sel.clone(),
                             s3_targets,
+                            // "Back up first" before a destructive op runs
+                            // inline in this job; no separate sub-step card.
+                            progress_job_id: None,
                         },
                     )
                     .await,
@@ -9915,6 +9972,9 @@ async fn run_bulk_job(
             "backup" => Request::BackupNow {
                 sel,
                 s3_targets: s3_targets.clone(),
+                // Bulk action fan-out: one job covers many hostings, so a
+                // per-phase sub-step card for a single backup does not apply.
+                progress_job_id: None,
             },
             "delete" => Request::HostingDelete {
                 sel,

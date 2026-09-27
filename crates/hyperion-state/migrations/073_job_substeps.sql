@@ -1,0 +1,11 @@
+-- Named sub-steps ("subjobs") for a job.
+--
+-- A job row has always carried a single `step_label` + `progress_pct`, so a
+-- multi-phase operation (a backup: archive files, then dump the database, then
+-- copy off-site) showed one opaque line that jumped between phases. This column
+-- holds an ordered JSON array of {key,label,state,pct,note} so the progress
+-- page can list each phase as its own subjob with its own bar and state.
+--
+-- Defaults to '[]' (no sub-steps) so every existing row and every job that
+-- does not use sub-steps renders exactly as before.
+ALTER TABLE jobs ADD COLUMN substeps_json TEXT NOT NULL DEFAULT '[]';

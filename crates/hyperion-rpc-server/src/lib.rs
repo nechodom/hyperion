@@ -242,8 +242,16 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             },
             Err(e) => Response::Error(e),
         },
-        Request::BackupNow { sel, s3_targets } => match api.backup_now(sel, s3_targets).await {
+        Request::BackupNow {
+            sel,
+            s3_targets,
+            progress_job_id,
+        } => match api.backup_now(sel, s3_targets, progress_job_id).await {
             Ok(v) => Response::BackupNow(v),
+            Err(e) => Response::Error(e),
+        },
+        Request::BackupProgress { job_id } => match api.backup_progress(job_id).await {
+            Ok(v) => Response::BackupProgress(v),
             Err(e) => Response::Error(e),
         },
         Request::BackupList { sel, limit } => match api.backup_list(sel, limit).await {
@@ -951,6 +959,12 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(()) => Response::JobAck,
             Err(e) => Response::Error(e),
         },
+        Request::JobSubsteps { id, substeps_json } => {
+            match api.job_substeps(id, substeps_json).await {
+                Ok(()) => Response::JobAck,
+                Err(e) => Response::Error(e),
+            }
+        }
         Request::WpPluginList { hosting } => match api.wp_plugin_list(hosting).await {
             Ok(v) => Response::WpPluginList(v),
             Err(e) => Response::Error(e),
@@ -2144,10 +2158,17 @@ mod tests {
             &self,
             _: HostingSelector,
             _: Vec<hyperion_types::S3BackupTarget>,
+            _: Option<String>,
         ) -> Result<BackupRunWire, RpcError> {
             Err(RpcError::Internal {
                 message: "not supported by this agent".into(),
             })
+        }
+        async fn backup_progress(
+            &self,
+            _: String,
+        ) -> Result<Vec<hyperion_types::JobSubstep>, RpcError> {
+            Ok(Vec::new())
         }
         async fn backup_list(
             &self,
@@ -2667,6 +2688,9 @@ mod tests {
             Ok(())
         }
         async fn job_finish(&self, _: String, _: bool, _: Option<String>) -> Result<(), RpcError> {
+            Ok(())
+        }
+        async fn job_substeps(&self, _: String, _: String) -> Result<(), RpcError> {
             Ok(())
         }
         async fn wp_plugin_list(

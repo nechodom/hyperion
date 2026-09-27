@@ -185,6 +185,10 @@ fn timeout_for_request(req: &Request) -> u64 {
         // starts. 600s was a coin flip on a large site, and losing it was
         // misreported as "node unreachable".
         Request::BackupNow { .. } => 3600,
+        // A cheap in-memory read of the running backup's sub-steps, polled
+        // every couple of seconds — keep its timeout short so a slow poll
+        // never stacks up behind the long backup it is reporting on.
+        Request::BackupProgress { .. } => 15,
         // Move a bundle / install WordPress.
         Request::BackupFetchChunk { .. }
         | Request::HostingExport { .. }
