@@ -408,9 +408,13 @@ mod tests {
         .await
         .expect("start");
         // Fresh row has no sub-steps.
-        assert_eq!(read(&pool, "job-s").await.unwrap().unwrap().substeps_json, "[]");
+        assert_eq!(
+            read(&pool, "job-s").await.unwrap().unwrap().substeps_json,
+            "[]"
+        );
 
-        let subs = r#"[{"key":"files","label":"Back up files","state":"running","pct":-1,"note":""}]"#;
+        let subs =
+            r#"[{"key":"files","label":"Back up files","state":"running","pct":-1,"note":""}]"#;
         set_substeps(&pool, "job-s", subs, 150).await.expect("set");
         assert_eq!(
             read(&pool, "job-s").await.unwrap().unwrap().substeps_json,
@@ -418,7 +422,9 @@ mod tests {
         );
 
         // Once terminal, a late mirror-poll must not resurrect sub-steps.
-        finish(&pool, "job-s", true, None, 200).await.expect("finish");
+        finish(&pool, "job-s", true, None, 200)
+            .await
+            .expect("finish");
         set_substeps(&pool, "job-s", "[]", 250)
             .await
             .expect("set after finish is a no-op, not an error");
