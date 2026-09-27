@@ -33,6 +33,32 @@
          style="width:{{ job.progress_pct }}%"></div>
   </div>
 
+  {# Sub-steps ("subjobs"): the named phases this job publishes — e.g. a
+     backup's files → database → off-site — each with its own state and, while
+     running with a known fraction, its own bar. Re-swapped every 2s with the
+     rest of the card, so they advance live. #}
+  {% if !job.substeps.is_empty() %}
+    <div style="margin-top:0.9rem;display:flex;flex-direction:column;gap:0.55rem">
+      {% for s in job.substeps %}
+      <div style="display:flex;align-items:center;gap:0.6rem">
+        {% if s.state == "running" %}
+          <span class="spinner-inline" style="flex:none"></span>
+        {% else %}
+          <span class="{{ s.pill_class() }}" style="font-size:0.58rem;min-width:3.6rem;text-align:center;flex:none">{{ s.state }}</span>
+        {% endif %}
+        <div style="flex:1;min-width:0">
+          <div class="small">{{ s.label }}{% if !s.note.is_empty() %} <span class="text-soft">· {{ s.note }}</span>{% endif %}</div>
+          {% if s.state == "running" && s.pct >= 0 %}
+            <div class="progress-bar" style="height:5px;margin-top:0.25rem">
+              <div class="progress-bar-fill" style="width:{{ s.pct }}%"></div>
+            </div>
+          {% endif %}
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+  {% endif %}
+
   {% if let Some(e) = job.error %}
     <div class="job-error" style="margin-top:0.8rem">
       <strong>Error:</strong> <code>{{ e }}</code>

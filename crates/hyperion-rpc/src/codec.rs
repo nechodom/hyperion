@@ -271,6 +271,11 @@ pub enum Request {
         /// pair stays compatible.
         #[serde(default)]
         s3_targets: Vec<hyperion_types::S3BackupTarget>,
+        /// Master job id to publish per-phase sub-step progress under, readable
+        /// via `BackupProgress`. None = don't publish (internal/transient
+        /// backups). `#[serde(default)]` for master/worker version skew.
+        #[serde(default)]
+        progress_job_id: Option<String>,
     },
     BackupList {
         sel: HostingSelector,
@@ -963,6 +968,19 @@ pub enum Request {
         ok: bool,
         #[serde(default)]
         error: Option<String>,
+    },
+    /// Replace a job's ordered sub-step list — the named subjobs the progress
+    /// page renders. `substeps_json` is a JSON array of `JobSubstep`.
+    JobSubsteps {
+        id: String,
+        substeps_json: String,
+    },
+    /// Read the live sub-step progress a running operation is publishing under
+    /// this job id (kept in the agent's memory, keyed by the master job id the
+    /// caller passed into e.g. `BackupNow`). Empty when the operation has not
+    /// reported any (or already cleared them).
+    BackupProgress {
+        job_id: String,
     },
     /// Import a migration bundle from a source node's signed URL.
     /// `base_url` is e.g. `https://source-master/api/migration/bundle/<id>`
@@ -2153,9 +2171,12 @@ pub enum Response {
     JobStarted {
         job_id: String,
     },
-    /// Plain ack for `JobProgress` / `JobFinish`. No payload — the
-    /// caller already knows the id.
+    /// Plain ack for `JobProgress` / `JobFinish` / `JobSubsteps`. No payload —
+    /// the caller already knows the id.
     JobAck,
+    /// Live sub-step list a running operation is publishing under a job id,
+    /// answer to `BackupProgress`. Empty when nothing (yet) reported.
+    BackupProgress(Vec<hyperion_types::JobSubstep>),
     WpPluginList(hyperion_types::WpPluginListResponse),
     WpPluginAction(hyperion_types::WpPluginActionResult),
     // Web users / roles / 2FA

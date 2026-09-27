@@ -524,6 +524,13 @@ pub struct HostingService<A: AdapterPort + 'static> {
     /// `ServiceInstallStatus`. Single slot — apt would dpkg-lock
     /// concurrent jobs anyway.
     pub service_install_progress: Arc<tokio::sync::Mutex<hyperion_types::ServiceInstallStatus>>,
+    /// Live per-phase sub-step progress a running operation (e.g. a backup)
+    /// publishes, keyed by the master job id the caller passed in. Read back
+    /// over RPC (`BackupProgress`) by the master, which mirrors it into the job
+    /// row so the progress page shows subjobs. Shared across `HostingService`
+    /// clones so the concurrent read sees the running op's writes; ephemeral,
+    /// cleared when the op finishes.
+    pub backup_progress: Arc<tokio::sync::Mutex<HashMap<String, Vec<hyperion_types::JobSubstep>>>>,
 }
 
 /// Default renewal window — matches Let's Encrypt's recommended
@@ -1888,6 +1895,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             service_install_progress: Arc::new(tokio::sync::Mutex::new(
                 hyperion_types::ServiceInstallStatus::default(),
             )),
+            backup_progress: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -6221,8 +6229,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         &self,
         sel: HostingSelector,
         s3_targets: Vec<hyperion_types::S3BackupTarget>,
+        progress_job_id: Option<String>,
     ) -> Result<hyperion_types::BackupRunWire, RpcError> {
-        self.backup_run(sel, s3_targets, OffsiteSource::Caller)
+        self.backup_run(sel, s3_targets, OffsiteSource::Caller, progress_job_id)
             .await
     }
 
@@ -6235,9 +6244,34 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         sel: HostingSelector,
         s3_targets: Vec<hyperion_types::S3BackupTarget>,
         offsite: OffsiteSource,
+        progress_job_id: Option<String>,
     ) -> Result<hyperion_types::BackupRunWire, RpcError> {
         let detail = self.get(sel).await?;
         let backup_root = self.paths.backup_root.clone();
+        // Publish the phases up front as pending so the progress page shows the
+        // whole plan (files → database → off-site), then advance each as we go.
+        // `pj` borrowed as &str for the publish helper. Off-site only appears
+        // when this run actually has somewhere to send.
+        let pj = progress_job_id.as_deref();
+        let will_offsite = offsite != OffsiteSource::NotWanted
+            && (self.remote_backup.is_some() || !s3_targets.is_empty());
+        let mut subs: Vec<hyperion_types::JobSubstep> = vec![hyperion_types::JobSubstep::pending(
+            "files",
+            "Back up files",
+        )];
+        if detail.database.is_some() {
+            subs.push(hyperion_types::JobSubstep::pending(
+                "db",
+                "Back up database",
+            ));
+        }
+        if will_offsite {
+            subs.push(hyperion_types::JobSubstep::pending(
+                "offsite",
+                "Copy off-site",
+            ));
+        }
+        self.publish_backup_progress(pj, &subs).await;
         let run_id = hyperion_state::backups::start(&self.pool, &detail.id, "local", now_secs())
             .await
             .map_err(|e| RpcError::Internal_with(format!("backup start: {e}")))?;
@@ -6300,6 +6334,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // Run the backup. Failures roll the row to 'failed'.
         let result: Result<(u64, Option<u64>), String> = async {
             // 1. Archive htdocs (parent of htdocs)
+            self.bump_substep(pj, &mut subs, "files", "running", -1, "")
+                .await;
             let host_root = std::path::PathBuf::from(&self.paths.home_root)
                 .join(&detail.system_user)
                 .join(&detail.domain);
@@ -6307,10 +6343,21 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 hyperion_adapters::backup::make_archive(&host_root, "htdocs", &archive_path)
                     .await
                     .map_err(|e| format!("archive: {e}"))?;
+            self.bump_substep(
+                pj,
+                &mut subs,
+                "files",
+                "done",
+                100,
+                &human_bytes(archive_bytes as i64),
+            )
+            .await;
             // 2. Optional DB dump.
             let dump_bytes = if let (Some(db), Some(dump_p)) =
                 (detail.database.as_ref(), db_dump_path.as_ref())
             {
+                self.bump_substep(pj, &mut subs, "db", "running", -1, "")
+                    .await;
                 let n = match db.engine {
                     hyperion_types::DbProvision::MariaDB => {
                         hyperion_adapters::backup::dump_mariadb(&db.db_name, dump_p).await
@@ -6319,7 +6366,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                         hyperion_adapters::backup::dump_postgres(&db.db_name, dump_p).await
                     }
                 };
-                Some(n.map_err(|e| format!("db dump: {e}"))?)
+                let n = n.map_err(|e| format!("db dump: {e}"))?;
+                self.bump_substep(pj, &mut subs, "db", "done", 100, &human_bytes(n as i64))
+                    .await;
+                Some(n)
             } else {
                 None
             };
@@ -6402,6 +6452,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 let mut s3_pushed_targets: Vec<&hyperion_types::S3BackupTarget> = Vec::new();
                 let mut s3_push_ok: std::collections::HashSet<String> =
                     std::collections::HashSet::new();
+
+                if will_offsite {
+                    self.bump_substep(pj, &mut subs, "offsite", "running", -1, "")
+                        .await;
+                }
 
                 // Optional remote push. Failures don't roll back the
                 // local backup row — operator still has the local copy.
@@ -6587,6 +6642,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     }
                 }
 
+                if will_offsite {
+                    self.bump_substep(pj, &mut subs, "offsite", "done", 100, "")
+                        .await;
+                }
+
                 // Drop the local copy once it is VERIFIED off-site (global
                 // opt-in, off by default). Never for `NotWanted` runs — those
                 // are the pre-change rollback snapshots, whose whole purpose is
@@ -6610,13 +6670,24 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 }
             }
             Err(e) => {
+                // Mark whatever phase was in flight as failed so the progress
+                // page shows WHERE it broke, not just an opaque red job.
+                let trimmed: String = e.chars().take(2000).collect();
+                for s in subs.iter_mut() {
+                    if s.state == "running" || s.state == "pending" {
+                        s.state = "failed".to_string();
+                        if s.note.is_empty() {
+                            s.note = trimmed.clone();
+                        }
+                    }
+                }
+                self.publish_backup_progress(pj, &subs).await;
                 // Remove any partial/truncated files a failed run (e.g. ENOSPC)
                 // left behind, so a failed backup doesn't keep eating disk.
                 let _ = tokio::fs::remove_file(&archive_path).await;
                 if let Some(p) = db_dump_path.as_ref() {
                     let _ = tokio::fs::remove_file(p).await;
                 }
-                let trimmed: String = e.chars().take(2000).collect();
                 hyperion_state::backups::mark_failed(&self.pool, run_id, &trimmed, now_secs())
                     .await
                     .map_err(|e| RpcError::Internal_with(format!("mark_failed: {e}")))?;
@@ -14201,7 +14272,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // to a target must not collect a red "no off-site copy" row for a
         // snapshot that exists only to be turned into a bundle.
         let run = self
-            .backup_run(sel.clone(), Vec::new(), OffsiteSource::NotWanted)
+            .backup_run(sel.clone(), Vec::new(), OffsiteSource::NotWanted, None)
             .await?;
         let archive_path_str = run
             .archive_path
@@ -16129,6 +16200,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     HostingSelector::Id(h.id.clone()),
                     s3_targets.clone(),
                     OffsiteSource::ThisNode,
+                    None,
                 )
                 .await
             {
@@ -25372,6 +25444,75 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(())
     }
 
+    /// Replace a job's ordered sub-step list (the named subjobs the progress
+    /// page renders).
+    pub async fn job_substeps(&self, id: &str, substeps_json: &str) -> Result<(), RpcError> {
+        hyperion_state::jobs::set_substeps(&self.pool, id, substeps_json, now_secs())
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("job_substeps: {e}")))?;
+        Ok(())
+    }
+
+    /// Advance one sub-step by key (set state/pct/note) and republish the whole
+    /// list under `pj`. A method rather than a nested fn so it can see `Self`
+    /// and reach `publish_backup_progress`.
+    async fn bump_substep(
+        &self,
+        pj: Option<&str>,
+        subs: &mut [hyperion_types::JobSubstep],
+        key: &str,
+        state: &str,
+        pct: i64,
+        note: &str,
+    ) {
+        if let Some(s) = subs.iter_mut().find(|s| s.key == key) {
+            s.state = state.to_string();
+            s.pct = pct;
+            if !note.is_empty() {
+                s.note = note.to_string();
+            }
+        }
+        self.publish_backup_progress(pj, subs).await;
+    }
+
+    /// Read the live sub-steps a running operation is publishing under this job
+    /// id (in-memory, keyed by the master job id the caller passed in). Empty
+    /// when nothing has been reported (or it was already cleared).
+    pub async fn backup_progress(&self, job_id: &str) -> Vec<hyperion_types::JobSubstep> {
+        self.backup_progress
+            .lock()
+            .await
+            .get(job_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Publish/replace the sub-steps for a running operation under `job_id`.
+    /// Node-local + in-memory; the master mirrors it into the job row by
+    /// polling `backup_progress`, and finalizes the row from its OWN last-seen
+    /// value on completion — so this map never has to survive past the run.
+    /// A no-op when `job_id` is None (internal/transient backups).
+    ///
+    /// Bounds memory by pruning FULLY-terminal entries once the map grows: a
+    /// still-running op always has a non-terminal step, so it is never pruned
+    /// out from under itself; a finished op's entry is dropped on a later
+    /// insert. The master no longer needs it by then.
+    pub(crate) async fn publish_backup_progress(
+        &self,
+        job_id: Option<&str>,
+        substeps: &[hyperion_types::JobSubstep],
+    ) {
+        let Some(id) = job_id else { return };
+        let mut map = self.backup_progress.lock().await;
+        if map.len() > 128 {
+            map.retain(|_, subs| {
+                subs.iter()
+                    .any(|s| !matches!(s.state.as_str(), "done" | "failed" | "skipped"))
+            });
+        }
+        map.insert(id.to_string(), substeps.to_vec());
+    }
+
     /// Service-side terminal-state flip.
     pub async fn job_finish(
         &self,
@@ -28681,6 +28822,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 HostingSelector::Id(prod.id.clone()),
                 Vec::new(),
                 OffsiteSource::NotWanted,
+                None,
             )
             .await?;
         let archive = run
@@ -28788,6 +28930,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 HostingSelector::Id(prod.id.clone()),
                 Vec::new(),
                 OffsiteSource::NotWanted,
+                None,
             )
             .await?;
         // 2. Snapshot staging — our push source.
@@ -28796,6 +28939,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 HostingSelector::Id(staging.id.clone()),
                 Vec::new(),
                 OffsiteSource::NotWanted,
+                None,
             )
             .await?;
         let archive = run
@@ -36303,6 +36447,9 @@ fn job_row_to_view(r: hyperion_state::jobs::JobRow) -> hyperion_types::JobView {
         state: r.state,
         step_label: r.step_label,
         progress_pct: r.progress_pct,
+        // Best-effort: a malformed blob shows as "no sub-steps" rather than
+        // failing the whole job read.
+        substeps: serde_json::from_str(&r.substeps_json).unwrap_or_default(),
         log_tail: r.log_tail,
         error: r.error,
         payload_json: r.payload_json,
@@ -40279,6 +40426,7 @@ mod tests {
             service_install_progress: Arc::new(tokio::sync::Mutex::new(
                 hyperion_types::ServiceInstallStatus::default(),
             )),
+            backup_progress: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         };
         s2.create(req("test6.example.cz"))
             .await
@@ -40361,6 +40509,7 @@ mod tests {
             service_install_progress: Arc::new(tokio::sync::Mutex::new(
                 hyperion_types::ServiceInstallStatus::default(),
             )),
+            backup_progress: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         };
         s2.create(req("retry.cz")).await.expect(
             "second create must succeed — the orphan row should have been deleted by rollback",
@@ -40410,6 +40559,7 @@ mod tests {
             service_install_progress: Arc::new(tokio::sync::Mutex::new(
                 hyperion_types::ServiceInstallStatus::default(),
             )),
+            backup_progress: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         };
         s2.create(HostingCreateReq {
             domain: Domain::parse("b.cz").expect("parse"),
@@ -40531,6 +40681,7 @@ mod tests {
             service_install_progress: Arc::new(tokio::sync::Mutex::new(
                 hyperion_types::ServiceInstallStatus::default(),
             )),
+            backup_progress: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         };
         let r = s2.create(req("dup.cz")).await;
         match r {

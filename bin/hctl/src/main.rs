@@ -1312,6 +1312,19 @@ fn print_pretty(resp: &Response) {
             }
         }
         Response::BackupOffsiteRestore(msg) => println!("✓ {msg}"),
+        Response::BackupProgress(subs) => {
+            if subs.is_empty() {
+                println!("(no sub-step progress reported)");
+            }
+            for s in subs {
+                let pct = if s.pct < 0 {
+                    "…".to_string()
+                } else {
+                    format!("{}%", s.pct)
+                };
+                println!("  [{}] {} — {}", s.state, s.label, pct);
+            }
+        }
         Response::OsUpdates(s) => {
             if !s.was_checked() {
                 println!("OS updates: never checked on this node");

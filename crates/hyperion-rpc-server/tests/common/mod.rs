@@ -270,6 +270,7 @@ pub async fn build_agent() -> (Arc<dyn AgentApi>, tempfile::TempDir) {
         service_install_progress: Arc::new(tokio::sync::Mutex::new(
             hyperion_types::ServiceInstallStatus::default(),
         )),
+        backup_progress: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
     });
     let agent: Arc<dyn AgentApi> = Arc::new(AgentImpl::new(svc));
     (agent, dir)

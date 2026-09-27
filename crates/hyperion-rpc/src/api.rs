@@ -291,7 +291,13 @@ pub trait AgentApi: Send + Sync + 'static {
         &self,
         sel: HostingSelector,
         s3_targets: Vec<hyperion_types::S3BackupTarget>,
+        progress_job_id: Option<String>,
     ) -> Result<BackupRunWire, RpcError>;
+    /// Read the live per-phase sub-step progress published under a job id.
+    async fn backup_progress(
+        &self,
+        job_id: String,
+    ) -> Result<Vec<hyperion_types::JobSubstep>, RpcError>;
     async fn backup_list(
         &self,
         sel: HostingSelector,
@@ -720,6 +726,9 @@ pub trait AgentApi: Send + Sync + 'static {
     /// Flip a job to a terminal state.
     async fn job_finish(&self, id: String, ok: bool, error: Option<String>)
         -> Result<(), RpcError>;
+
+    /// Replace a job's ordered sub-step list (the named subjobs the UI renders).
+    async fn job_substeps(&self, id: String, substeps_json: String) -> Result<(), RpcError>;
 
     /// Import a migration bundle by URL — downloads from the source
     /// node's signed `/api/migration/bundle/<id>` endpoint then runs

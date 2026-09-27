@@ -21,6 +21,9 @@ pub struct JobRow {
     pub state: String,
     pub step_label: String,
     pub progress_pct: i64,
+    /// Ordered JSON array of `JobSubstep` — the named subjobs shown on the
+    /// progress page. `[]` when the job has no sub-steps.
+    pub substeps_json: String,
     pub log_tail: String,
     pub error: Option<String>,
     pub payload_json: String,
@@ -163,65 +166,97 @@ pub async fn finish(
     Ok(())
 }
 
-pub async fn read(pool: &SqlitePool, id: &str) -> Result<Option<JobRow>, StateError> {
-    let row: Option<(
-        String,
-        String,
-        Option<String>,
-        String,
-        String,
-        i64,
-        String,
-        Option<String>,
-        String,
-        i64,
-        String,
-        i64,
-        i64,
-        Option<i64>,
-    )> = sqlx::query_as(
-        r#"SELECT id, kind, target, state, step_label, progress_pct,
-                  log_tail, error, payload_json,
-                  actor_uid, actor_label,
-                  started_at, updated_at, finished_at
-             FROM jobs WHERE id = ?"#,
+/// Column list for the SELECTs below, in the exact order the row tuples
+/// destructure. Keep this and `ROW_TUPLE` phrasing in lockstep.
+const SELECT_COLS: &str = "id, kind, target, state, step_label, progress_pct, \
+     substeps_json, log_tail, error, payload_json, \
+     actor_uid, actor_label, started_at, updated_at, finished_at";
+
+/// The row tuple SQLite hands back for `SELECT_COLS`, mapped positionally.
+type JobRowTuple = (
+    String,         // id
+    String,         // kind
+    Option<String>, // target
+    String,         // state
+    String,         // step_label
+    i64,            // progress_pct
+    String,         // substeps_json
+    String,         // log_tail
+    Option<String>, // error
+    String,         // payload_json
+    i64,            // actor_uid
+    String,         // actor_label
+    i64,            // started_at
+    i64,            // updated_at
+    Option<i64>,    // finished_at
+);
+
+fn tuple_to_row(t: JobRowTuple) -> JobRow {
+    let (
+        id,
+        kind,
+        target,
+        state,
+        step_label,
+        progress_pct,
+        substeps_json,
+        log_tail,
+        error,
+        payload_json,
+        actor_uid,
+        actor_label,
+        started_at,
+        updated_at,
+        finished_at,
+    ) = t;
+    JobRow {
+        id,
+        kind,
+        target,
+        state,
+        step_label,
+        progress_pct,
+        substeps_json,
+        log_tail,
+        error,
+        payload_json,
+        actor_uid,
+        actor_label,
+        started_at,
+        updated_at,
+        finished_at,
+    }
+}
+
+/// Replace the sub-step list. `substeps_json` must be a JSON array of
+/// `JobSubstep`; callers serialize it. No-op once the job is terminal, same as
+/// `progress`, so a late mirror-poll can't resurrect a finished job's steps.
+pub async fn set_substeps(
+    pool: &SqlitePool,
+    id: &str,
+    substeps_json: &str,
+    now: i64,
+) -> Result<(), StateError> {
+    sqlx::query(
+        r#"UPDATE jobs
+              SET substeps_json = ?, updated_at = ?
+            WHERE id = ? AND state = 'running'"#,
     )
+    .bind(substeps_json)
+    .bind(now)
     .bind(id)
-    .fetch_optional(pool)
+    .execute(pool)
     .await?;
-    Ok(row.map(
-        |(
-            id,
-            kind,
-            target,
-            state,
-            step_label,
-            progress_pct,
-            log_tail,
-            error,
-            payload_json,
-            actor_uid,
-            actor_label,
-            started_at,
-            updated_at,
-            finished_at,
-        )| JobRow {
-            id,
-            kind,
-            target,
-            state,
-            step_label,
-            progress_pct,
-            log_tail,
-            error,
-            payload_json,
-            actor_uid,
-            actor_label,
-            started_at,
-            updated_at,
-            finished_at,
-        },
-    ))
+    Ok(())
+}
+
+pub async fn read(pool: &SqlitePool, id: &str) -> Result<Option<JobRow>, StateError> {
+    let row: Option<JobRowTuple> =
+        sqlx::query_as(&format!("SELECT {SELECT_COLS} FROM jobs WHERE id = ?"))
+            .bind(id)
+            .fetch_optional(pool)
+            .await?;
+    Ok(row.map(tuple_to_row))
 }
 
 /// List jobs, newest first. `kind=None` returns all kinds.
@@ -232,33 +267,12 @@ pub async fn list(
     limit: i64,
 ) -> Result<Vec<JobRow>, StateError> {
     let limit = limit.clamp(1, 1000);
-    let rows: Vec<(
-        String,
-        String,
-        Option<String>,
-        String,
-        String,
-        i64,
-        String,
-        Option<String>,
-        String,
-        i64,
-        String,
-        i64,
-        i64,
-        Option<i64>,
-    )> = match (kind, state) {
+    let rows: Vec<JobRowTuple> = match (kind, state) {
         (Some(k), Some(s)) => {
-            sqlx::query_as(
-                r#"SELECT id, kind, target, state, step_label, progress_pct,
-                      log_tail, error, payload_json,
-                      actor_uid, actor_label,
-                      started_at, updated_at, finished_at
-                 FROM jobs
-                WHERE kind = ? AND state = ?
-                ORDER BY started_at DESC
-                LIMIT ?"#,
-            )
+            sqlx::query_as(&format!(
+                "SELECT {SELECT_COLS} FROM jobs WHERE kind = ? AND state = ? \
+                 ORDER BY started_at DESC LIMIT ?"
+            ))
             .bind(k)
             .bind(s)
             .bind(limit)
@@ -266,88 +280,35 @@ pub async fn list(
             .await?
         }
         (Some(k), None) => {
-            sqlx::query_as(
-                r#"SELECT id, kind, target, state, step_label, progress_pct,
-                      log_tail, error, payload_json,
-                      actor_uid, actor_label,
-                      started_at, updated_at, finished_at
-                 FROM jobs
-                WHERE kind = ?
-                ORDER BY started_at DESC
-                LIMIT ?"#,
-            )
+            sqlx::query_as(&format!(
+                "SELECT {SELECT_COLS} FROM jobs WHERE kind = ? \
+                 ORDER BY started_at DESC LIMIT ?"
+            ))
             .bind(k)
             .bind(limit)
             .fetch_all(pool)
             .await?
         }
         (None, Some(s)) => {
-            sqlx::query_as(
-                r#"SELECT id, kind, target, state, step_label, progress_pct,
-                      log_tail, error, payload_json,
-                      actor_uid, actor_label,
-                      started_at, updated_at, finished_at
-                 FROM jobs
-                WHERE state = ?
-                ORDER BY started_at DESC
-                LIMIT ?"#,
-            )
+            sqlx::query_as(&format!(
+                "SELECT {SELECT_COLS} FROM jobs WHERE state = ? \
+                 ORDER BY started_at DESC LIMIT ?"
+            ))
             .bind(s)
             .bind(limit)
             .fetch_all(pool)
             .await?
         }
         (None, None) => {
-            sqlx::query_as(
-                r#"SELECT id, kind, target, state, step_label, progress_pct,
-                      log_tail, error, payload_json,
-                      actor_uid, actor_label,
-                      started_at, updated_at, finished_at
-                 FROM jobs
-                ORDER BY started_at DESC
-                LIMIT ?"#,
-            )
+            sqlx::query_as(&format!(
+                "SELECT {SELECT_COLS} FROM jobs ORDER BY started_at DESC LIMIT ?"
+            ))
             .bind(limit)
             .fetch_all(pool)
             .await?
         }
     };
-    Ok(rows
-        .into_iter()
-        .map(
-            |(
-                id,
-                kind,
-                target,
-                state,
-                step_label,
-                progress_pct,
-                log_tail,
-                error,
-                payload_json,
-                actor_uid,
-                actor_label,
-                started_at,
-                updated_at,
-                finished_at,
-            )| JobRow {
-                id,
-                kind,
-                target,
-                state,
-                step_label,
-                progress_pct,
-                log_tail,
-                error,
-                payload_json,
-                actor_uid,
-                actor_label,
-                started_at,
-                updated_at,
-                finished_at,
-            },
-        )
-        .collect())
+    Ok(rows.into_iter().map(tuple_to_row).collect())
 }
 
 /// On agent startup, sweep `running` rows whose updated_at is older
@@ -427,6 +388,45 @@ mod tests {
         let r = read(&pool, "job-a").await.expect("read").expect("present");
         assert_eq!(r.state, "done", "terminal state must be sticky");
         assert!(r.error.is_none(), "error must not be set on done job");
+    }
+
+    #[tokio::test]
+    async fn substeps_round_trip_and_stop_at_terminal() {
+        let pool = fresh_pool().await;
+        start(
+            &pool,
+            StartReq {
+                id: "job-s",
+                kind: "backup",
+                target: Some("ex.cz"),
+                payload_json: "{}",
+                actor_uid: 1,
+                actor_label: "kevin",
+                started_at: 100,
+            },
+        )
+        .await
+        .expect("start");
+        // Fresh row has no sub-steps.
+        assert_eq!(read(&pool, "job-s").await.unwrap().unwrap().substeps_json, "[]");
+
+        let subs = r#"[{"key":"files","label":"Back up files","state":"running","pct":-1,"note":""}]"#;
+        set_substeps(&pool, "job-s", subs, 150).await.expect("set");
+        assert_eq!(
+            read(&pool, "job-s").await.unwrap().unwrap().substeps_json,
+            subs
+        );
+
+        // Once terminal, a late mirror-poll must not resurrect sub-steps.
+        finish(&pool, "job-s", true, None, 200).await.expect("finish");
+        set_substeps(&pool, "job-s", "[]", 250)
+            .await
+            .expect("set after finish is a no-op, not an error");
+        assert_eq!(
+            read(&pool, "job-s").await.unwrap().unwrap().substeps_json,
+            subs,
+            "a finished job's sub-steps are frozen at their last running value"
+        );
     }
 
     /// Log tail must not grow without bound; the 16 KiB cap protects

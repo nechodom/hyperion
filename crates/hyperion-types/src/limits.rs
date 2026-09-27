@@ -185,6 +185,49 @@ impl HostingExpiry {
     }
 }
 
+/// One named sub-step of a job — a "subjob" the progress page lists with its
+/// own state and bar. A job carries an ordered list of these so the operator
+/// sees, say, a backup's files → database → off-site phases advance
+/// independently rather than one opaque label.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct JobSubstep {
+    /// Stable identifier within the job (e.g. "files", "db", "offsite"), so a
+    /// later update can find and advance the right row.
+    pub key: String,
+    /// Human label shown to the operator.
+    pub label: String,
+    /// One of: pending, running, done, failed, skipped.
+    pub state: String,
+    /// 0–100 for this sub-step; ignored while pending. -1 = indeterminate
+    /// (show a spinner, not a bar).
+    pub pct: i64,
+    /// Optional short detail (bytes written, "no database", the error).
+    #[serde(default)]
+    pub note: String,
+}
+
+impl JobSubstep {
+    pub fn pending(key: &str, label: &str) -> Self {
+        Self {
+            key: key.to_string(),
+            label: label.to_string(),
+            state: "pending".to_string(),
+            pct: 0,
+            note: String::new(),
+        }
+    }
+    /// Pill class for the UI, mirroring the backup off-site labels.
+    pub fn pill_class(&self) -> &'static str {
+        match self.state.as_str() {
+            "done" => "pill ok",
+            "running" => "pill",
+            "failed" => "pill danger",
+            "skipped" => "pill",
+            _ => "pill",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ExpiringHosting {
     pub id: crate::HostingId,
