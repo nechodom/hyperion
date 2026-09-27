@@ -6452,6 +6452,14 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 let mut s3_pushed_targets: Vec<&hyperion_types::S3BackupTarget> = Vec::new();
                 let mut s3_push_ok: std::collections::HashSet<String> =
                     std::collections::HashSet::new();
+                // Did the off-site copy actually land ANYWHERE? Drives the
+                // "offsite" sub-step's terminal state — the push is best-effort
+                // and its failures never propagate as Err, so without this the
+                // sub-step would show green "done" while the backup row records
+                // the copy as failed. Set true only on real evidence: an FTP
+                // upload that succeeded (and did not fail re-verify), or at
+                // least one S3 target whose push fully succeeded.
+                let mut offsite_ok = false;
 
                 if will_offsite {
                     self.bump_substep(pj, &mut subs, "offsite", "running", -1, "")
@@ -6506,6 +6514,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     // side — and those are different claims, so they get
                     // different words: `ok` versus `verified`.
                     if ok {
+                        // Upload returned success — the copy landed, unless the
+                        // re-verify below positively contradicts it.
+                        offsite_ok = true;
                         match hyperion_adapters::backup::verify_remote(&archive_path, &upload).await
                         {
                             Ok(Some(true)) => {
@@ -6515,6 +6526,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                                 .await;
                             }
                             Ok(Some(false)) => {
+                                // We LOOKED and it is not there at the right
+                                // size — that is a failed off-site copy.
+                                offsite_ok = false;
                                 let _ = hyperion_state::backups::set_remote(
                                     &self.pool,
                                     run_id,
@@ -6642,9 +6656,30 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     }
                 }
 
+                // At least one S3 target whose push FULLY succeeded also counts
+                // the off-site copy as landed.
+                if !s3_push_ok.is_empty() {
+                    offsite_ok = true;
+                }
                 if will_offsite {
-                    self.bump_substep(pj, &mut subs, "offsite", "done", 100, "")
+                    if offsite_ok {
+                        self.bump_substep(pj, &mut subs, "offsite", "done", 100, "")
+                            .await;
+                    } else {
+                        // Best-effort push reached nowhere (unreachable target,
+                        // bad credentials, an unusable pin, or a failed
+                        // re-verify). Say so instead of a green "done" that
+                        // contradicts the backup row.
+                        self.bump_substep(
+                            pj,
+                            &mut subs,
+                            "offsite",
+                            "failed",
+                            0,
+                            "off-site copy did not succeed — see the Backups tab",
+                        )
                         .await;
+                    }
                 }
 
                 // Drop the local copy once it is VERIFIED off-site (global

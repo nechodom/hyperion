@@ -2951,13 +2951,18 @@ pub(crate) async fn run_backup_now_job(
         let mut subs = last.lock().await.clone();
         if !subs.is_empty() {
             for s in subs.iter_mut() {
-                if ok {
-                    if s.state != "skipped" {
+                // Only promote steps still in flight. A step the node already
+                // marked "failed" (e.g. a best-effort off-site copy that did
+                // not land) or "skipped" must survive — the overall job is a
+                // success, but forcing every step to green would hide exactly
+                // the phase that did not.
+                if s.state == "running" || s.state == "pending" {
+                    if ok {
                         s.state = "done".to_string();
                         s.pct = 100;
+                    } else {
+                        s.state = "failed".to_string();
                     }
-                } else if s.state == "running" || s.state == "pending" {
-                    s.state = "failed".to_string();
                 }
             }
             reporter.substeps(&subs).await;
