@@ -293,6 +293,62 @@
     </div>
   </div>
 
+  {# ── Backups by site ───────────────────────────────────────────────
+     Answers "where are my backups?": for every site with a backup, how
+     many bytes sit on THIS node's disk vs are recorded off-site. A site
+     whose local copies were dropped after an off-site push shows bytes
+     under Off-site only — so "I deleted it locally, it's on FTP" reads
+     correctly, and the local total here matches the "Backups on disk"
+     KPI above (both count only archives still on disk). #}
+  {% if !backup_storage.is_empty() %}
+  <div class="card no-pad-table" style="margin-top:1.25rem">
+    <div>
+      <h3 style="margin:0;font-size:1.05rem">Backups by site</h3>
+      <div class="text-soft small">
+        {{ backup_storage.len() }} site{% if backup_storage.len() != 1 %}s{% endif %} with backups ·
+        on disk {{ crate::handlers::stats::fmt_bytes(backup_bytes_total) }} ·
+        off-site {{ crate::handlers::stats::fmt_bytes(backup_offsite_bytes_total) }}.
+        A local copy is counted only while its archive is still on the node;
+        off-site counts every copy the node recorded as uploaded/verified.
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table class="site-usage">
+        <thead>
+          <tr>
+            <th>Site</th>
+            <th class="right">On server</th>
+            <th class="right">Off-site</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for b in backup_storage %}
+          <tr>
+            <td><a href="/hostings/{{ b.hosting_id.as_str()|e }}#backups">{{ b.domain }}</a></td>
+            <td class="right">
+              {% if b.local_count > 0 %}
+                <strong>{{ crate::handlers::stats::fmt_bytes(b.local_bytes) }}</strong>
+                <span class="text-soft small">· {{ b.local_count }}</span>
+              {% else %}
+                <span class="text-soft">—</span>
+              {% endif %}
+            </td>
+            <td class="right">
+              {% if b.offsite_count > 0 %}
+                {{ crate::handlers::stats::fmt_bytes(b.offsite_bytes) }}
+                <span class="text-soft small">· {{ b.offsite_count }}</span>
+              {% else %}
+                <span class="text-soft">—</span>
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  {% endif %}
+
   {# ── Per-site breakdown ────────────────────────────────────────────
      "Which site is eating the box?" — one row per active hosting, the
      heaviest first. Sorting is a server-side ?sort= round trip on
