@@ -98,6 +98,15 @@ struct StatsTpl<'a> {
     spark_mem: Sparkline,
     spark_bw: Sparkline,
     spark_reqs: Sparkline,
+    /// Realtime network throughput sparklines — instantaneous rx/tx rate per
+    /// sample (bytes/sec), distinct from `spark_bw` which is the cumulative
+    /// 24 h bandwidth-out counter.
+    spark_net_in: Sparkline,
+    spark_net_out: Sparkline,
+    /// Live rx/tx rate of the selected node, read from /proc on each refresh —
+    /// the realtime headline the sparklines trend toward.
+    net_in_now: i64,
+    net_out_now: i64,
     /// Sample window size used for sparklines (oldest..=newest).
     samples_in_window: usize,
     /// How many minutes the sparkline window covers, for the legend.
@@ -315,6 +324,30 @@ pub async fn get_stats(
         "reqs",
         |v| format!("{}", v as i64),
     );
+    let spark_net_in = build_sparkline(
+        history.samples.iter().map(|s| (s.at, s.net_rx_bps as f64)),
+        "net",
+        |v| fmt_rate(&(v as i64)),
+    );
+    let spark_net_out = build_sparkline(
+        history.samples.iter().map(|s| (s.at, s.net_tx_bps as f64)),
+        "net",
+        |v| fmt_rate(&(v as i64)),
+    );
+    // Live headline rate: the selected node's just-read /proc value, or the
+    // cluster sum when no single node is selected.
+    let (net_in_now, net_out_now) = match selected_node.as_ref() {
+        Some(n) => (n.net_rx_bps, n.net_tx_bps),
+        None => cluster
+            .as_ref()
+            .map(|c| {
+                (
+                    c.nodes.iter().map(|n| n.net_rx_bps).sum(),
+                    c.nodes.iter().map(|n| n.net_tx_bps).sum(),
+                )
+            })
+            .unwrap_or((0, 0)),
+    };
 
     let tpl = StatsTpl {
         username: &ctx.username,
@@ -368,6 +401,10 @@ pub async fn get_stats(
         spark_mem,
         spark_bw,
         spark_reqs,
+        spark_net_in,
+        spark_net_out,
+        net_in_now,
+        net_out_now,
         samples_in_window,
         window_minutes,
         error,
