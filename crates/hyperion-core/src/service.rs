@@ -22658,36 +22658,41 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     }
 
     /// One tick of the dedicated high-resolution network sampler. `prev` holds
-    /// the last `(rx_bytes, tx_bytes, at)` this task saw; the delta over the
-    /// real elapsed time is the rate. Cheap — one /proc/net/dev read, no `du`
-    /// — so it can run every few seconds, unlike `stats_tick`. Keeps ~1h.
+    /// the last per-interface counters + the MONOTONIC instant they were read,
+    /// so the rate is bytes-since-last over real elapsed time. Cheap — one
+    /// /proc/net/dev read, no `du` — so it can run every few seconds, unlike
+    /// `stats_tick`. Keeps ~1h.
     ///
-    /// The first tick only seeds `prev` (no previous counters to diff), and a
-    /// counter that went BACKWARDS (reboot / interface reset) is skipped rather
-    /// than recorded as a negative or absurd spike.
-    pub async fn net_sample_tick(
-        &self,
-        prev: &mut Option<(u64, u64, i64)>,
-    ) -> Result<(), RpcError> {
+    /// Two traps this avoids deliberately:
+    ///   * `dt` comes from a MONOTONIC `Instant`, never the wall clock — a
+    ///     backward clock step (chrony/timesyncd at boot, VM suspend/resume)
+    ///     would otherwise shrink `dt` and report a spike many times the real
+    ///     rate.
+    ///   * the delta is summed PER INTERFACE over only the interfaces present
+    ///     in BOTH reads: an interface that appears (bringing a nonzero
+    ///     lifetime counter) or disappears between ticks contributes nothing,
+    ///     and one interface's counter reset is skipped for that interface
+    ///     alone instead of discarding the whole sample.
+    pub async fn net_sample_tick(&self, prev: &mut NetSamplerState) -> Result<(), RpcError> {
+        let mono = std::time::Instant::now();
         let now = now_secs();
-        let Some((rx, tx)) = read_net_bytes().await else {
+        let Some(cur) = read_net_by_iface().await else {
             return Ok(());
         };
-        if let Some((prx, ptx, pat)) = *prev {
-            let dt = (now - pat).max(1) as u64;
-            if rx >= prx && tx >= ptx {
-                let rx_bps = ((rx - prx) / dt) as i64;
-                let tx_bps = ((tx - ptx) / dt) as i64;
-                if let Err(e) =
-                    hyperion_state::net_samples::insert(&self.pool, now, rx_bps, tx_bps).await
-                {
-                    tracing::debug!(error=%e, "net sample insert failed");
-                }
-                // Short rolling window — the graph only shows the last hour.
-                let _ = hyperion_state::net_samples::prune_older_than(&self.pool, now - 3600).await;
+        let cur_map: std::collections::HashMap<String, (u64, u64)> =
+            cur.into_iter().map(|(n, r, t)| (n, (r, t))).collect();
+        if let Some((prev_map, pinstant)) = prev.as_ref() {
+            let dt = mono.saturating_duration_since(*pinstant).as_secs();
+            let (rx_bps, tx_bps) = net_rate_from_delta(prev_map, &cur_map, dt);
+            if let Err(e) =
+                hyperion_state::net_samples::insert(&self.pool, now, rx_bps, tx_bps).await
+            {
+                tracing::debug!(error=%e, "net sample insert failed");
             }
+            // Short rolling window — the graph only shows the last hour.
+            let _ = hyperion_state::net_samples::prune_older_than(&self.pool, now - 3600).await;
         }
-        *prev = Some((rx, tx, now));
+        *prev = Some((cur_map, mono));
         Ok(())
     }
 
@@ -33249,12 +33254,51 @@ async fn read_cpu_jiffies() -> Option<(u64, u64)> {
     Some((total.saturating_sub(idle), total))
 }
 
-/// `(rx_bytes, tx_bytes)` summed over every non-loopback interface in
-/// /proc/net/dev.
-async fn read_net_bytes() -> Option<(u64, u64)> {
-    let s = tokio::fs::read_to_string("/proc/net/dev").await.ok()?;
+/// Rolling state the network sampler carries between ticks: the last
+/// per-interface `(rx_bytes, tx_bytes)` counters and the monotonic instant they
+/// were read. `None` before the first tick. Owned by the agent's sampler task,
+/// passed to [`HostingService::net_sample_tick`].
+pub type NetSamplerState = Option<(
+    std::collections::HashMap<String, (u64, u64)>,
+    std::time::Instant,
+)>;
+
+/// bytes/sec (rx, tx) between two per-interface counter snapshots over `dt`
+/// seconds. Summed over only the interfaces present in BOTH maps, and a
+/// per-interface counter that went backwards is skipped for that interface —
+/// so a new/removed interface, or a single interface's reset, cannot dump a
+/// lifetime counter into one window. `dt` is floored at 1s (divide-by-zero
+/// guard); the caller sources it from a MONOTONIC clock so it is never
+/// negative.
+fn net_rate_from_delta(
+    prev: &std::collections::HashMap<String, (u64, u64)>,
+    cur: &std::collections::HashMap<String, (u64, u64)>,
+    dt_secs: u64,
+) -> (i64, i64) {
+    let dt = dt_secs.max(1);
     let mut rx = 0u64;
     let mut tx = 0u64;
+    for (name, (cr, ct)) in cur {
+        if let Some((pr, pt)) = prev.get(name) {
+            if cr >= pr {
+                rx += cr - pr;
+            }
+            if ct >= pt {
+                tx += ct - pt;
+            }
+        }
+    }
+    ((rx / dt) as i64, (tx / dt) as i64)
+}
+
+/// Per-interface `(name, rx_bytes, tx_bytes)` for every non-loopback interface
+/// in /proc/net/dev. Kept per-name (not pre-summed) so a rate sampler can diff
+/// each interface independently: an interface that appears or disappears
+/// between two reads then contributes nothing, instead of dumping its whole
+/// lifetime counter into one window.
+async fn read_net_by_iface() -> Option<Vec<(String, u64, u64)>> {
+    let s = tokio::fs::read_to_string("/proc/net/dev").await.ok()?;
+    let mut out = Vec::new();
     for line in s.lines() {
         let Some((iface, rest)) = line.split_once(':') else {
             continue;
@@ -33269,9 +33313,21 @@ async fn read_net_bytes() -> Option<(u64, u64)> {
             .collect();
         // /proc/net/dev: rx_bytes is col 0, tx_bytes is col 8.
         if let (Some(r), Some(t)) = (cols.first(), cols.get(8)) {
-            rx += *r;
-            tx += *t;
+            out.push((iface.to_string(), *r, *t));
         }
+    }
+    Some(out)
+}
+
+/// `(rx_bytes, tx_bytes)` summed over every non-loopback interface in
+/// /proc/net/dev.
+async fn read_net_bytes() -> Option<(u64, u64)> {
+    let per = read_net_by_iface().await?;
+    let mut rx = 0u64;
+    let mut tx = 0u64;
+    for (_, r, t) in per {
+        rx += r;
+        tx += t;
     }
     Some((rx, tx))
 }
@@ -37291,6 +37347,47 @@ mod tests {
         // A destination reported present-for-nothing (empty confirmations)
         // must not license a delete either.
         assert!(!may_drop_local_after_offsite(true, &[]));
+    }
+
+    /// The net-rate math the realtime sampler runs each tick. Every branch here
+    /// is one the adversarial review flagged as a false-spike source.
+    #[test]
+    fn net_rate_from_delta_handles_resets_and_new_interfaces() {
+        use super::net_rate_from_delta;
+        use std::collections::HashMap;
+        let m = |v: &[(&str, u64, u64)]| -> HashMap<String, (u64, u64)> {
+            v.iter()
+                .map(|(n, r, t)| (n.to_string(), (*r, *t)))
+                .collect()
+        };
+
+        // Plain delta over 10s: (2000-1000)/10 = 100 rx, (400-200)/10 = 20 tx.
+        let (rx, tx) =
+            net_rate_from_delta(&m(&[("eth0", 1000, 200)]), &m(&[("eth0", 2000, 400)]), 10);
+        assert_eq!((rx, tx), (100, 20));
+
+        // dt floored at 1 — a 0 window never divides by zero.
+        let (rx, _) = net_rate_from_delta(&m(&[("eth0", 0, 0)]), &m(&[("eth0", 50, 0)]), 0);
+        assert_eq!(rx, 50);
+
+        // A NEW interface (no prior baseline) contributes nothing, even with a
+        // huge lifetime counter — no spike.
+        let (rx, tx) = net_rate_from_delta(
+            &m(&[("eth0", 1000, 200)]),
+            &m(&[("eth0", 1000, 200), ("veth9", 5_000_000_000, 5_000_000_000)]),
+            10,
+        );
+        assert_eq!((rx, tx), (0, 0));
+
+        // A per-interface counter RESET is skipped for that interface only; a
+        // sibling interface's real delta still counts.
+        let (rx, tx) = net_rate_from_delta(
+            &m(&[("eth0", 9000, 0), ("eth1", 100, 0)]),
+            &m(&[("eth0", 10, 0), ("eth1", 1100, 0)]),
+            10,
+        );
+        assert_eq!(rx, 100, "eth0 reset skipped; eth1 (1100-100)/10 counted");
+        assert_eq!(tx, 0);
     }
 
     /// Both on-demand entry points must REFUSE when the node has nowhere to

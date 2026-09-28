@@ -1035,7 +1035,7 @@ async fn main() -> anyhow::Result<()> {
     {
         let net_svc = svc.clone();
         tokio::spawn(async move {
-            let mut prev: Option<(u64, u64, i64)> = None;
+            let mut prev: hyperion_core::NetSamplerState = None;
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(15));
             loop {
                 interval.tick().await;

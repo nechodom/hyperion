@@ -33,7 +33,8 @@ pub use agent::AgentImpl;
 pub use real_adapter::RealAdapter;
 pub use secrets::{SecretsError, SecretsStore};
 pub use service::{
-    AdapterPort, BackupRetention, Fail2banConfig, HostingPaths, HostingService, RemoteBackupConfig,
+    AdapterPort, BackupRetention, Fail2banConfig, HostingPaths, HostingService, NetSamplerState,
+    RemoteBackupConfig,
 };
 // Re-export the email config struct so the agent binary can construct
 // it without depending on hyperion-adapters directly.
