@@ -22568,39 +22568,12 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // reported bytes that are no longer on the node ("I deleted everything
         // and it still says 81 GiB"). The off-site copy is credited separately
         // in the per-hosting breakdown below.
+        // Aggregated in SQL (GROUP BY hosting_id), so the figures are exact no
+        // matter how many rows a busy node holds — an in-memory fold over a
+        // capped `list_all` silently undercounts past the cap.
         let (backup_bytes, backup_count, backup_storage) =
-            match hyperion_state::backups::list_all(&self.pool, 5000).await {
+            match hyperion_state::backups::storage_by_hosting(&self.pool).await {
                 Ok(rows) => {
-                    let mut total_bytes = 0i64;
-                    let mut total_count = 0i64;
-                    // hosting_id -> (local_bytes, local_count, offsite_bytes, offsite_count)
-                    let mut by_hosting: std::collections::HashMap<String, (i64, i64, i64, i64)> =
-                        std::collections::HashMap::new();
-                    for r in &rows {
-                        if r.state != "ok" {
-                            continue;
-                        }
-                        let on_disk = r.archive_path.is_some();
-                        // "recorded off-site": the upload returned success or
-                        // was verified. Independent of whether the local copy
-                        // was since dropped.
-                        let off_site = matches!(r.remote_state.as_str(), "ok" | "verified");
-                        if on_disk {
-                            total_bytes += r.bytes_total;
-                            total_count += 1;
-                        }
-                        if on_disk || off_site {
-                            let e = by_hosting.entry(r.hosting_id.0.clone()).or_default();
-                            if on_disk {
-                                e.0 += r.bytes_total;
-                                e.1 += 1;
-                            }
-                            if off_site {
-                                e.2 += r.bytes_total;
-                                e.3 += 1;
-                            }
-                        }
-                    }
                     // Domain for each hosting id, from the summaries we already
                     // fetched — an id with no summary (deleted hosting whose
                     // rows linger) falls back to the id so it is still visible.
@@ -22608,9 +22581,14 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                         .iter()
                         .map(|s| (s.id.as_str(), s.domain.as_str()))
                         .collect();
-                    let mut storage: Vec<hyperion_types::BackupStorageRow> = by_hosting
+                    // The on-disk TOTAL is the sum of the per-hosting local
+                    // footprints — same rows, so the KPI and the table can
+                    // never disagree.
+                    let total_bytes: i64 = rows.iter().map(|r| r.1).sum();
+                    let total_count: i64 = rows.iter().map(|r| r.2).sum();
+                    let mut storage: Vec<hyperion_types::BackupStorageRow> = rows
                         .into_iter()
-                        .map(|(hid, (lb, lc, ob, oc))| hyperion_types::BackupStorageRow {
+                        .map(|(hid, lb, lc, ob, oc)| hyperion_types::BackupStorageRow {
                             domain: domain_of
                                 .get(hid.as_str())
                                 .map(|d| d.to_string())

@@ -314,6 +314,33 @@ pub async fn delete_by_id(pool: &SqlitePool, id: i64) -> Result<(), StateError> 
     Ok(())
 }
 
+/// Per-hosting backup footprint, aggregated in SQL so it is exact regardless
+/// of how many rows a node holds (a `list_all` + in-memory fold silently
+/// undercounts once a busy node exceeds the row cap). Returns
+/// `(hosting_id, local_bytes, local_count, offsite_bytes, offsite_count)` for
+/// every hosting with at least one successful backup that is either still on
+/// disk (`archive_path` set) or recorded off-site (`remote_state` ok/verified).
+/// A backup dropped after an off-site push counts only under off-site.
+pub async fn storage_by_hosting(
+    pool: &SqlitePool,
+) -> Result<Vec<(String, i64, i64, i64, i64)>, StateError> {
+    let rows: Vec<(String, i64, i64, i64, i64)> = sqlx::query_as(
+        r#"SELECT hosting_id,
+                  COALESCE(SUM(CASE WHEN archive_path IS NOT NULL THEN bytes_total ELSE 0 END), 0),
+                  COALESCE(SUM(CASE WHEN archive_path IS NOT NULL THEN 1 ELSE 0 END), 0),
+                  COALESCE(SUM(CASE WHEN remote_state IN ('ok','verified') THEN bytes_total ELSE 0 END), 0),
+                  COALESCE(SUM(CASE WHEN remote_state IN ('ok','verified') THEN 1 ELSE 0 END), 0)
+             FROM backup_runs
+            WHERE state = 'ok'
+            GROUP BY hosting_id
+           HAVING SUM(CASE WHEN archive_path IS NOT NULL THEN 1 ELSE 0 END) > 0
+               OR SUM(CASE WHEN remote_state IN ('ok','verified') THEN 1 ELSE 0 END) > 0"#,
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
 pub async fn list_all(pool: &SqlitePool, limit: i64) -> Result<Vec<BackupRun>, StateError> {
     let rows = sqlx::query_as::<_, BackupRunRow>(&format!(
         "SELECT {SELECT_COLS} FROM backup_runs ORDER BY started_at DESC LIMIT ?"
@@ -509,6 +536,48 @@ mod tests {
             cands.iter().any(|r| r.id == normal),
             "an ordinary local backup still is"
         );
+    }
+
+    #[tokio::test]
+    async fn storage_by_hosting_splits_local_and_offsite() {
+        let pool = open_memory().await.expect("open");
+        let id = fixture(&pool).await;
+
+        // 1) local-only: on disk, never off-site.
+        let a = start(&pool, &id, "local", 100).await.expect("a");
+        mark_ok(&pool, a, "/b/a.tar.gz", None, 1000, 200)
+            .await
+            .expect("ok a");
+        // 2) pushed off-site then dropped locally: off-site only.
+        let b = start(&pool, &id, "local", 110).await.expect("b");
+        mark_ok(&pool, b, "/b/b.tar.gz", None, 2000, 210)
+            .await
+            .expect("ok b");
+        set_remote(&pool, b, "ftp://v/b", "verified", "")
+            .await
+            .expect("remote b");
+        clear_local_paths(&pool, b).await.expect("clear b");
+        // 3) on disk AND verified off-site (before any drop): counts in both.
+        let c = start(&pool, &id, "local", 120).await.expect("c");
+        mark_ok(&pool, c, "/b/c.tar.gz", None, 4000, 220)
+            .await
+            .expect("ok c");
+        set_remote(&pool, c, "ftp://v/c", "verified", "")
+            .await
+            .expect("remote c");
+        // 4) failed run: counted in neither.
+        let d = start(&pool, &id, "local", 130).await.expect("d");
+        mark_failed(&pool, d, "boom", 230).await.expect("fail d");
+
+        let rows = storage_by_hosting(&pool).await.expect("agg");
+        assert_eq!(rows.len(), 1, "one hosting");
+        let (_hid, local_bytes, local_count, offsite_bytes, offsite_count) = &rows[0];
+        // local = a (1000) + c (4000); b was dropped so not on disk.
+        assert_eq!(*local_bytes, 5000);
+        assert_eq!(*local_count, 2);
+        // off-site = b (2000) + c (4000); a never left.
+        assert_eq!(*offsite_bytes, 6000);
+        assert_eq!(*offsite_count, 2);
     }
 
     #[tokio::test]
