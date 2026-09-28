@@ -39,6 +39,14 @@ struct DashboardTpl<'a> {
     services_health: ServicesHealth,
     spark_load: Sparkline,
     spark_bw: Sparkline,
+    /// Realtime network in/out on one shared-scale chart.
+    spark_net: crate::handlers::stats::DualSparkline,
+    /// Live rx/tx headline rates (bytes/sec), summed across nodes.
+    net_in_now: i64,
+    net_out_now: i64,
+    /// Backup bytes still on node disk vs recorded off-site, cluster-wide.
+    backup_on_disk: i64,
+    backup_offsite: i64,
     samples_in_window: usize,
     update_status: UpdateStatus,
     update_current_short: String,
@@ -67,7 +75,7 @@ pub async fn get_dashboard(
     };
     // Fetch all the dashboard inputs in parallel — they're independent
     // and the page renders against whatever survives.
-    let (cluster_res, activity_res, alerts_res, health_res, history_res, update_res) = tokio::join!(
+    let (cluster_res, activity_res, alerts_res, health_res, history_res, net_res, update_res) = tokio::join!(
         hyperion_rpc_client::call(&state.agent_socket, Request::ClusterStats),
         hyperion_rpc_client::call(&state.agent_socket, Request::AuditList { limit: 10 }),
         hyperion_rpc_client::call(&state.agent_socket, Request::DashboardAlerts),
@@ -76,6 +84,8 @@ pub async fn get_dashboard(
             &state.agent_socket,
             Request::NodeMetricsHistory { limit: 48 }
         ),
+        // The realtime net ring (seconds-scale) for the live throughput graph.
+        hyperion_rpc_client::call(&state.agent_socket, Request::NetHistory { limit: 240 }),
         hyperion_rpc_client::call(
             &state.agent_socket,
             Request::UpdateCheck {
@@ -133,6 +143,41 @@ pub async fn get_dashboard(
         "bw",
         |v| crate::handlers::stats::fmt_bytes(&(v as i64)),
     );
+    // Realtime network in/out on one shared-scale chart.
+    let net_history = match net_res {
+        Ok(RpcResponse::NetHistory(h)) => h,
+        _ => hyperion_types::NetHistory::default(),
+    };
+    let net_in_pts: Vec<(i64, f64)> = net_history
+        .samples
+        .iter()
+        .map(|s| (s.at, s.rx_bps as f64))
+        .collect();
+    let net_out_pts: Vec<(i64, f64)> = net_history
+        .samples
+        .iter()
+        .map(|s| (s.at, s.tx_bps as f64))
+        .collect();
+    let spark_net = crate::handlers::stats::build_dual_sparkline(&net_in_pts, &net_out_pts, |v| {
+        crate::handlers::stats::fmt_rate(&(v as i64))
+    });
+    // Live headline rates + the backup on-disk/off-site split, summed across
+    // whatever nodes answered. Zero for tenant-scoped roles (no cluster view).
+    let (net_in_now, net_out_now, backup_on_disk, backup_offsite) = cluster
+        .as_ref()
+        .map(|c| {
+            (
+                c.nodes.iter().map(|n| n.net_rx_bps).sum(),
+                c.nodes.iter().map(|n| n.net_tx_bps).sum(),
+                c.nodes.iter().map(|n| n.backup_bytes).sum(),
+                c.nodes
+                    .iter()
+                    .flat_map(|n| n.backup_storage.iter())
+                    .map(|r| r.offsite_bytes)
+                    .sum(),
+            )
+        })
+        .unwrap_or((0, 0, 0, 0));
     // Build hosting_id → domain map from the full list so the
     // activity feed renders friendly site names instead of raw
     // ULIDs. Fetched once via HostingList (also feeds `recent`
@@ -167,6 +212,11 @@ pub async fn get_dashboard(
         services_health,
         spark_load,
         spark_bw,
+        spark_net,
+        net_in_now,
+        net_out_now,
+        backup_on_disk,
+        backup_offsite,
         samples_in_window,
         update_status,
         update_current_short,

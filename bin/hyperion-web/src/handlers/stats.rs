@@ -98,11 +98,10 @@ struct StatsTpl<'a> {
     spark_mem: Sparkline,
     spark_bw: Sparkline,
     spark_reqs: Sparkline,
-    /// Realtime network throughput sparklines — instantaneous rx/tx rate per
-    /// sample (bytes/sec), distinct from `spark_bw` which is the cumulative
-    /// 24 h bandwidth-out counter.
-    spark_net_in: Sparkline,
-    spark_net_out: Sparkline,
+    /// Realtime network throughput — rx and tx on one shared-scale chart,
+    /// distinct from `spark_bw` which is the cumulative 24 h bandwidth-out
+    /// counter.
+    spark_net: DualSparkline,
     /// Live rx/tx rate of the selected node, read from /proc on each refresh —
     /// the realtime headline the sparklines trend toward.
     net_in_now: i64,
@@ -339,18 +338,19 @@ pub async fn get_stats(
         "reqs",
         |v| format!("{}", v as i64),
     );
-    // Realtime rx/tx from the dedicated seconds-scale ring, not the 5-min
-    // metrics history — a genuinely live network graph.
-    let spark_net_in = build_sparkline(
-        net_history.samples.iter().map(|s| (s.at, s.rx_bps as f64)),
-        "net",
-        |v| fmt_rate(&(v as i64)),
-    );
-    let spark_net_out = build_sparkline(
-        net_history.samples.iter().map(|s| (s.at, s.tx_bps as f64)),
-        "net",
-        |v| fmt_rate(&(v as i64)),
-    );
+    // Realtime rx/tx from the dedicated seconds-scale ring, drawn as ONE chart
+    // with a shared y-scale so in and out cross where they actually cross.
+    let net_in_pts: Vec<(i64, f64)> = net_history
+        .samples
+        .iter()
+        .map(|s| (s.at, s.rx_bps as f64))
+        .collect();
+    let net_out_pts: Vec<(i64, f64)> = net_history
+        .samples
+        .iter()
+        .map(|s| (s.at, s.tx_bps as f64))
+        .collect();
+    let spark_net = build_dual_sparkline(&net_in_pts, &net_out_pts, |v| fmt_rate(&(v as i64)));
     // Live headline rate: the selected node's just-read /proc value, or the
     // cluster sum when no single node is selected.
     let (net_in_now, net_out_now) = match selected_node.as_ref() {
@@ -418,8 +418,7 @@ pub async fn get_stats(
         spark_mem,
         spark_bw,
         spark_reqs,
-        spark_net_in,
-        spark_net_out,
+        spark_net,
         net_in_now,
         net_out_now,
         samples_in_window,
@@ -803,6 +802,84 @@ where
         kind,
         has_data: true,
         points_json,
+    }
+}
+
+/// Two series drawn on ONE chart with a SHARED y-axis, so the lines actually
+/// cross where the two magnitudes cross (used for network in vs out).
+pub struct DualSparkline {
+    pub path_in: String,
+    pub area_in: String,
+    pub path_out: String,
+    pub in_latest: String,
+    pub out_latest: String,
+    pub in_peak: String,
+    pub out_peak: String,
+    pub has_data: bool,
+}
+
+/// Build a two-line sparkline: `a` ("in") and `b` ("out") scaled to the SAME
+/// max over both series and zero-based, so their crossings are meaningful. `a`
+/// gets a filled area for depth; `b` is a bare line so both stay readable where
+/// they overlap.
+pub fn build_dual_sparkline<F>(a: &[(i64, f64)], b: &[(i64, f64)], fmt: F) -> DualSparkline
+where
+    F: Fn(f64) -> String,
+{
+    const W: f64 = 600.0;
+    const H: f64 = 60.0;
+    const PAD: f64 = 4.0;
+
+    if a.len() < 2 && b.len() < 2 {
+        return DualSparkline {
+            path_in: String::new(),
+            area_in: String::new(),
+            path_out: String::new(),
+            in_latest: "—".into(),
+            out_latest: "—".into(),
+            in_peak: "—".into(),
+            out_peak: "—".into(),
+            has_data: false,
+        };
+    }
+    // Shared scale: the max over BOTH series, zero-based.
+    let max = a
+        .iter()
+        .chain(b.iter())
+        .map(|(_, v)| *v)
+        .fold(0.0_f64, f64::max);
+    let range = max.max(1e-9);
+    let line = |s: &[(i64, f64)]| -> (String, String) {
+        if s.len() < 2 {
+            return (String::new(), String::new());
+        }
+        let dx = W / (s.len() as f64 - 1.0);
+        let mut p = String::with_capacity(s.len() * 16);
+        for (i, (_, v)) in s.iter().enumerate() {
+            let x = i as f64 * dx;
+            let y = PAD + (1.0 - (*v / range)) * (H - 2.0 * PAD);
+            if i == 0 {
+                p.push_str(&format!("M{x:.1},{y:.1}"));
+            } else {
+                p.push_str(&format!(" L{x:.1},{y:.1}"));
+            }
+        }
+        let area = format!("{p} L{:.1},{H} L0,{H} Z", W);
+        (p, area)
+    };
+    let (path_in, area_in) = line(a);
+    let (path_out, _) = line(b);
+    let latest = |s: &[(i64, f64)]| s.last().map(|(_, v)| *v).unwrap_or(0.0);
+    let peak = |s: &[(i64, f64)]| s.iter().map(|(_, v)| *v).fold(0.0_f64, f64::max);
+    DualSparkline {
+        path_in,
+        area_in,
+        path_out,
+        in_latest: fmt(latest(a)),
+        out_latest: fmt(latest(b)),
+        in_peak: fmt(peak(a)),
+        out_peak: fmt(peak(b)),
+        has_data: a.len() >= 2 || b.len() >= 2,
     }
 }
 
@@ -1329,6 +1406,39 @@ mod tests {
         );
         assert_eq!(out[0].bw_bytes_24h, 1_000);
         assert!(out[0].has_samples);
+    }
+
+    #[test]
+    fn build_dual_sparkline_shares_scale_across_both_series() {
+        // "in" peaks at 100, "out" at 50 — a SHARED zero-based scale means the
+        // out line sits at half height where in sits at the top, so the two
+        // can cross meaningfully. viewBox is 0..60 high with 4px pad, so the
+        // max maps to y≈4 and half to y≈32.
+        let a = vec![(1i64, 10.0), (2, 100.0)]; // in
+        let b = vec![(1i64, 50.0), (2, 50.0)]; // out
+        let d = build_dual_sparkline(&a, &b, |v| format!("{v:.0}"));
+        assert!(d.has_data);
+        assert!(!d.path_in.is_empty() && !d.path_out.is_empty());
+        assert_eq!(d.in_peak, "100");
+        assert_eq!(d.out_peak, "50");
+        assert_eq!(d.in_latest, "100");
+        assert_eq!(d.out_latest, "50");
+        // in's second point is the shared max → the top: y = 4 + (1-1)*52 = 4.
+        assert!(d.path_in.contains(",4.0"), "in peak at top: {}", d.path_in);
+        // out is a flat 50 = half the shared max of 100 → y = 4 + 0.5*52 = 30,
+        // NOT the top. (Scaled to its OWN max it would be flat at the top.)
+        assert!(
+            d.path_out.contains(",30.0"),
+            "out at half height on the shared scale: {}",
+            d.path_out
+        );
+    }
+
+    #[test]
+    fn build_dual_sparkline_too_few_points_is_no_data() {
+        let d = build_dual_sparkline(&[(1i64, 5.0)], &[], |v| format!("{v}"));
+        assert!(!d.has_data);
+        assert_eq!(d.in_latest, "—");
     }
 
     #[test]
