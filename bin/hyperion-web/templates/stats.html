@@ -296,9 +296,8 @@
     {# Realtime network throughput — in and out on ONE chart with a shared
        y-scale, so the two lines cross where the traffic crosses. The "now"
        figures are read live from /proc every refresh (10s); the lines are the
-       seconds-scale ring. Spans the full grid width so the crossings are
-       readable. #}
-    <div class="spark-card" style="grid-column:1 / -1">
+       seconds-scale ring. Sits inline in the graph grid. #}
+    <div class="spark-card">
       <div class="spark-head">
         <span class="spark-title">Network throughput</span>
         <span class="spark-now">
