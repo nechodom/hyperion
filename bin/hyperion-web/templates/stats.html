@@ -49,8 +49,9 @@
   <label for="stats-refresh" class="text-soft small" style="margin:0">Refresh</label>
   <select id="stats-refresh" class="input small" style="width:auto;padding:0.25rem 0.5rem">
     <option value="5">every 5 s</option>
+    <option value="10" selected>every 10 s</option>
     <option value="15">every 15 s</option>
-    <option value="30" selected>every 30 s</option>
+    <option value="30">every 30 s</option>
     <option value="60">every minute</option>
     <option value="300">every 5 min</option>
     <option value="0">paused</option>
@@ -58,7 +59,7 @@
   <span id="stats-refresh-note" class="text-soft small"></span>
 </div>
 
-<div id="stats-live" data-live-refresh="30">
+<div id="stats-live" data-live-refresh="10">
 
 {% if let Some(e) = error %}
   <div class="flash error">
@@ -289,6 +290,49 @@
       <div class="spark-foot">
         <span><span class="spark-foot-label">avg</span> {{ spark_reqs.avg_label }}</span>
         <span><span class="spark-foot-label">peak</span> {{ spark_reqs.peak_label }}</span>
+      </div>
+    </div>
+
+    {# Realtime network throughput. The "now" figure is read live from /proc on
+       every refresh (10s), so it tracks actual traffic, not the 5-min sample;
+       the sparkline is the trend from the sampled history. #}
+    <div class="spark-card spark-{{ spark_net_in.kind }}">
+      <div class="spark-head">
+        <span class="spark-title">Network in</span>
+        <span class="spark-now">↓ {{ crate::handlers::stats::fmt_rate(net_in_now) }}</span>
+      </div>
+      {% if spark_net_in.has_data %}
+        <svg class="spark-svg" viewBox="0 0 600 60" preserveAspectRatio="none" aria-hidden="true" data-points='{{ spark_net_in.points_json|safe }}' data-spark-mount>
+          <defs><linearGradient id="grad-net-in" x1="0" y1="0" x2="0" y2="1"><stop offset="0%"  stop-color="currentColor" stop-opacity="0.35"/><stop offset="100%" stop-color="currentColor" stop-opacity="0"/></linearGradient></defs>
+          <path class="spark-area" d="{{ spark_net_in.area_d }}" fill="url(#grad-net-in)"/>
+          <path class="spark-line" d="{{ spark_net_in.path_d }}" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      {% else %}
+        <div class="spark-empty">Needs at least 2 samples — wait one more tick</div>
+      {% endif %}
+      <div class="spark-foot">
+        <span><span class="spark-foot-label">avg</span> {{ spark_net_in.avg_label }}</span>
+        <span><span class="spark-foot-label">peak</span> {{ spark_net_in.peak_label }}</span>
+      </div>
+    </div>
+
+    <div class="spark-card spark-{{ spark_net_out.kind }}">
+      <div class="spark-head">
+        <span class="spark-title">Network out</span>
+        <span class="spark-now">↑ {{ crate::handlers::stats::fmt_rate(net_out_now) }}</span>
+      </div>
+      {% if spark_net_out.has_data %}
+        <svg class="spark-svg" viewBox="0 0 600 60" preserveAspectRatio="none" aria-hidden="true" data-points='{{ spark_net_out.points_json|safe }}' data-spark-mount>
+          <defs><linearGradient id="grad-net-out" x1="0" y1="0" x2="0" y2="1"><stop offset="0%"  stop-color="currentColor" stop-opacity="0.35"/><stop offset="100%" stop-color="currentColor" stop-opacity="0"/></linearGradient></defs>
+          <path class="spark-area" d="{{ spark_net_out.area_d }}" fill="url(#grad-net-out)"/>
+          <path class="spark-line" d="{{ spark_net_out.path_d }}" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      {% else %}
+        <div class="spark-empty">Needs at least 2 samples — wait one more tick</div>
+      {% endif %}
+      <div class="spark-foot">
+        <span><span class="spark-foot-label">avg</span> {{ spark_net_out.avg_label }}</span>
+        <span><span class="spark-foot-label">peak</span> {{ spark_net_out.peak_label }}</span>
       </div>
     </div>
   </div>
