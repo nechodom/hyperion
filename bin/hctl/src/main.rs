@@ -1311,6 +1311,12 @@ fn print_pretty(resp: &Response) {
                 );
             }
         }
+        Response::NetHistory(h) => {
+            println!("net samples: {}", h.samples.len());
+            if let Some(s) = h.samples.last() {
+                println!("  latest: ↓ {} B/s ↑ {} B/s", s.rx_bps, s.tx_bps);
+            }
+        }
         Response::BackupOffsiteRestore(msg) => println!("✓ {msg}"),
         Response::BackupProgress(subs) => {
             if subs.is_empty() {

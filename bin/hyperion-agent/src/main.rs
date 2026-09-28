@@ -1027,6 +1027,24 @@ async fn main() -> anyhow::Result<()> {
             }
         });
     }
+    // Dedicated high-resolution network sampler. Separate from the 5-minute
+    // stats sampler (which also runs a per-hosting `du` and must stay coarse):
+    // this only diffs /proc/net/dev, so it can tick every few seconds to feed
+    // the realtime rx/tx sparkline. `prev` holds the last counters+time so the
+    // delta is over real elapsed wall-clock; the tick prunes its own ring.
+    {
+        let net_svc = svc.clone();
+        tokio::spawn(async move {
+            let mut prev: Option<(u64, u64, i64)> = None;
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(15));
+            loop {
+                interval.tick().await;
+                if let Err(e) = net_svc.net_sample_tick(&mut prev).await {
+                    tracing::debug!(error=%e, "net sample tick failed");
+                }
+            }
+        });
+    }
     // Background per-hosting HTTP monitor: every 60s the tick walks all
     // enabled hostings whose `monitor_interval_secs` has elapsed since
     // the last sample, probes each, records, and dispatches alerts.

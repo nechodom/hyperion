@@ -298,6 +298,8 @@ pub trait AgentApi: Send + Sync + 'static {
         &self,
         job_id: String,
     ) -> Result<Vec<hyperion_types::JobSubstep>, RpcError>;
+    /// High-resolution network throughput history for the realtime sparkline.
+    async fn net_history(&self, limit: i64) -> Result<hyperion_types::NetHistory, RpcError>;
     async fn backup_list(
         &self,
         sel: HostingSelector,

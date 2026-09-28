@@ -22657,6 +22657,56 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(ns)
     }
 
+    /// One tick of the dedicated high-resolution network sampler. `prev` holds
+    /// the last `(rx_bytes, tx_bytes, at)` this task saw; the delta over the
+    /// real elapsed time is the rate. Cheap — one /proc/net/dev read, no `du`
+    /// — so it can run every few seconds, unlike `stats_tick`. Keeps ~1h.
+    ///
+    /// The first tick only seeds `prev` (no previous counters to diff), and a
+    /// counter that went BACKWARDS (reboot / interface reset) is skipped rather
+    /// than recorded as a negative or absurd spike.
+    pub async fn net_sample_tick(
+        &self,
+        prev: &mut Option<(u64, u64, i64)>,
+    ) -> Result<(), RpcError> {
+        let now = now_secs();
+        let Some((rx, tx)) = read_net_bytes().await else {
+            return Ok(());
+        };
+        if let Some((prx, ptx, pat)) = *prev {
+            let dt = (now - pat).max(1) as u64;
+            if rx >= prx && tx >= ptx {
+                let rx_bps = ((rx - prx) / dt) as i64;
+                let tx_bps = ((tx - ptx) / dt) as i64;
+                if let Err(e) =
+                    hyperion_state::net_samples::insert(&self.pool, now, rx_bps, tx_bps).await
+                {
+                    tracing::debug!(error=%e, "net sample insert failed");
+                }
+                // Short rolling window — the graph only shows the last hour.
+                let _ = hyperion_state::net_samples::prune_older_than(&self.pool, now - 3600).await;
+            }
+        }
+        *prev = Some((rx, tx, now));
+        Ok(())
+    }
+
+    /// High-resolution network history (oldest → newest) for the realtime
+    /// stats sparkline. Empty until the sampler has taken two ticks.
+    pub async fn net_history(&self, limit: i64) -> Result<hyperion_types::NetHistory, RpcError> {
+        let samples = hyperion_state::net_samples::recent(&self.pool, limit)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("net_history: {e}")))?
+            .into_iter()
+            .map(|s| hyperion_types::NetSamplePoint {
+                at: s.at,
+                rx_bps: s.rx_bps,
+                tx_bps: s.tx_bps,
+            })
+            .collect();
+        Ok(hyperion_types::NetHistory { samples })
+    }
+
     /// Set or clear the per-hosting ACME contact email override.
     /// `email: None` (or empty) clears the override; the next cert
     /// issuance reverts to `[acme] contact_email` from agent.toml.

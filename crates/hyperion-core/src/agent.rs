@@ -537,6 +537,9 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
     ) -> Result<Vec<hyperion_types::JobSubstep>, RpcError> {
         Ok(self.svc.backup_progress(&job_id).await)
     }
+    async fn net_history(&self, limit: i64) -> Result<hyperion_types::NetHistory, RpcError> {
+        self.svc.net_history(limit).await
+    }
 
     async fn backup_list(
         &self,
