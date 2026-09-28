@@ -153,6 +153,17 @@
     <div class="kpi-meta">{% if let Some(c) = cluster %}{{ c.total_requests_24h }} requests · 24h{% else %}—{% endif %}</div>
   </div>
 
+  {# Backups: what is still on node disk vs what is recorded off-site. Surfaces
+     the backup-storage feature so the operator sees, at a glance, whether a
+     box filling up is backups and how much is safely off-site. #}
+  <div class="kpi-card disk">
+    <div class="kpi-label">Backups on disk</div>
+    <div class="kpi-value">{{ crate::handlers::stats::fmt_bytes(backup_on_disk) }}</div>
+    <div class="kpi-meta">
+      {% if backup_offsite > 0 %}{{ crate::handlers::stats::fmt_bytes(backup_offsite) }} off-site · {% endif %}<a href="/stats" style="color:inherit">by site →</a>
+    </div>
+  </div>
+
   <div class="kpi-card {% if services_health.critical_down > 0 %}kpi-bad{% else if services_health.warn_down > 0 %}kpi-warn{% else %}kpi-ok{% endif %}">
     <div class="kpi-label">Services</div>
     <div class="kpi-value" style="{% if services_health.critical_down > 0 %}color:var(--danger){% else if services_health.warn_down > 0 %}color:var(--warn){% else %}color:var(--success){% endif %}">
@@ -231,6 +242,34 @@
     <div class="spark-foot">
       <span><span class="spark-foot-label">avg</span> {{ spark_bw.avg_label }}</span>
       <span><span class="spark-foot-label">peak</span> {{ spark_bw.peak_label }}</span>
+    </div>
+  </div>
+
+  {# Realtime network in/out on one shared-scale chart — the lines cross where
+     the traffic crosses. "now" is the live /proc rate; the lines are the
+     seconds-scale ring. Spans the grid so the crossings read clearly. #}
+  <div class="spark-card" style="grid-column:1 / -1">
+    <div class="spark-head">
+      <span class="spark-title">Network throughput</span>
+      <span class="spark-now">
+        <span style="color:var(--primary)">↓ {{ crate::handlers::stats::fmt_rate(net_in_now) }}</span>
+        <span class="text-soft" style="margin:0 0.35rem">·</span>
+        <span style="color:var(--warn)">↑ {{ crate::handlers::stats::fmt_rate(net_out_now) }}</span>
+      </span>
+    </div>
+    {% if spark_net.has_data %}
+      <svg class="spark-svg" viewBox="0 0 600 60" preserveAspectRatio="none" aria-hidden="true">
+        <defs><linearGradient id="dash-grad-net" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="var(--primary)" stop-opacity="0.26"/><stop offset="100%" stop-color="var(--primary)" stop-opacity="0"/></linearGradient></defs>
+        <path d="{{ spark_net.area_in }}" fill="url(#dash-grad-net)"/>
+        <path d="{{ spark_net.path_in }}" fill="none" stroke="var(--primary)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="{{ spark_net.path_out }}" fill="none" stroke="var(--warn)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    {% else %}
+      <div class="spark-empty">Realtime graph fills in after a few seconds</div>
+    {% endif %}
+    <div class="spark-foot">
+      <span><span class="spark-foot-label" style="color:var(--primary)">in · peak</span> {{ spark_net.in_peak }}</span>
+      <span><span class="spark-foot-label" style="color:var(--warn)">out · peak</span> {{ spark_net.out_peak }}</span>
     </div>
   </div>
 </div>

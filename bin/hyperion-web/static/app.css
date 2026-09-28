@@ -548,7 +548,7 @@ pre code {
   border-color: var(--border-strong);
   background: var(--surface-2);
 }
-.card + .card { margin-top: 1rem; }
+.card + .card { margin-top: 1.25rem; }
 /* Vertical rhythm inside a hosting-detail tab. The `.card + .card` rule only
    sees two cards that are DIRECT siblings, but a tab mixes plain cards,
    collapsible `details.card`s, and lazy HTMX wrappers — a plain `<div hx-get>`
@@ -1069,7 +1069,10 @@ table {
   margin: 0 -1.5rem -1.4rem;
   border-radius: 0 0 var(--radius) var(--radius);
 }
-.card.no-pad-table { padding-bottom: 0; }
+/* A little breathing room after the last table row — with 0 the row sat flush
+   against the card's bottom border, so stacked tables read as one block with
+   no gap. */
+.card.no-pad-table { padding-bottom: 0.5rem; }
 .card.no-pad-table table { margin-top: 0.25rem; }
 th, td {
   text-align: left;
