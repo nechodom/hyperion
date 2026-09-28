@@ -84,6 +84,12 @@ struct StatsTpl<'a> {
     /// it hosts — the two disk figures above deliberately exclude it.
     backup_bytes_total: i64,
     backup_count_total: i64,
+    /// Per-hosting backup footprint across every node that answered — on this
+    /// node's disk vs recorded off-site. Biggest local footprint first. Drives
+    /// the "Backups by site" review that answers "where are my backups?".
+    backup_storage: Vec<hyperion_types::BackupStorageRow>,
+    /// Σ of `backup_storage` off-site bytes — the header total for the review.
+    backup_offsite_bytes_total: i64,
     /// The node selected via `?node=<id>`; defaults to the first node
     /// when the cluster has any. None means "no nodes yet".
     selected_node: Option<NodeStats>,
@@ -325,6 +331,36 @@ pub async fn get_stats(
         backup_count_total: cluster
             .as_ref()
             .map(|c| c.nodes.iter().map(|n| n.backup_count).sum())
+            .unwrap_or(0),
+        backup_storage: {
+            // Concatenate every answering node's per-hosting rows, then re-sort
+            // across nodes so the biggest LOCAL footprint leads regardless of
+            // which node it is on.
+            let mut v: Vec<hyperion_types::BackupStorageRow> = cluster
+                .as_ref()
+                .map(|c| {
+                    c.nodes
+                        .iter()
+                        .flat_map(|n| n.backup_storage.iter().cloned())
+                        .collect()
+                })
+                .unwrap_or_default();
+            v.sort_by(|a, b| {
+                b.local_bytes
+                    .cmp(&a.local_bytes)
+                    .then(b.offsite_bytes.cmp(&a.offsite_bytes))
+            });
+            v
+        },
+        backup_offsite_bytes_total: cluster
+            .as_ref()
+            .map(|c| {
+                c.nodes
+                    .iter()
+                    .flat_map(|n| n.backup_storage.iter())
+                    .map(|r| r.offsite_bytes)
+                    .sum()
+            })
             .unwrap_or(0),
         cluster,
         selected_node,
@@ -601,6 +637,7 @@ fn offline_placeholder(node_id: &str) -> hyperion_types::NodeStats {
         net_tx_bps: 0,
         oom_kills_24h: 0,
         last_oom_at: 0,
+        backup_storage: Vec::new(),
     }
 }
 

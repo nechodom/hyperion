@@ -103,6 +103,30 @@ pub struct NodeStats {
     /// Unix-secs of the most recent OOM-kill, 0 if none recorded.
     #[serde(default)]
     pub last_oom_at: i64,
+    /// Per-hosting breakdown of where this node's backups live — how many
+    /// bytes sit on THIS node's disk vs are recorded off-site. Lets the
+    /// operator see which site holds the local archives that a "Backups on
+    /// disk" figure is made of, and confirm a site is fully off-site. Only
+    /// hostings with at least one backup row appear.
+    #[serde(default)]
+    pub backup_storage: Vec<BackupStorageRow>,
+}
+
+/// One hosting's backup footprint, split by WHERE the copies live. Built from
+/// `backup_runs` rows (no remote round-trip): `local_*` counts runs whose
+/// archive is still on this node's disk (`archive_path` present); `offsite_*`
+/// counts runs recorded as copied off-site (`remote_state` ok/verified),
+/// whether or not the local copy was since dropped. A backup pushed off-site
+/// and then dropped locally therefore shows under off-site only — which is how
+/// "I deleted it locally and it's on FTP" reads correctly.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BackupStorageRow {
+    pub hosting_id: crate::HostingId,
+    pub domain: String,
+    pub local_bytes: i64,
+    pub local_count: i64,
+    pub offsite_bytes: i64,
+    pub offsite_count: i64,
 }
 
 /// Operator-facing alert surfaced on the dashboard. Computed from

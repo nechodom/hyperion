@@ -22561,15 +22561,57 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let summaries = self.list().await?;
         // Local backup archives that are still on disk. Summed here rather
         // than sampled, so the figure never lags a delete or a fresh run.
-        let (backup_bytes, backup_count) =
-            match hyperion_state::backups::list_all(&self.pool, 5000).await {
-                Ok(rows) => rows
-                    .iter()
-                    .filter(|r| r.state == "ok")
-                    .fold((0i64, 0i64), |(b, c), r| (b + r.bytes_total, c + 1)),
+        //
+        // CRITICAL: only rows whose `archive_path` is still set count as "on
+        // disk". A backup that was copied off-site and then dropped locally
+        // keeps state='ok' but has its archive_path cleared — counting it here
+        // reported bytes that are no longer on the node ("I deleted everything
+        // and it still says 81 GiB"). The off-site copy is credited separately
+        // in the per-hosting breakdown below.
+        // Aggregated in SQL (GROUP BY hosting_id), so the figures are exact no
+        // matter how many rows a busy node holds — an in-memory fold over a
+        // capped `list_all` silently undercounts past the cap.
+        let (backup_bytes, backup_count, backup_storage) =
+            match hyperion_state::backups::storage_by_hosting(&self.pool).await {
+                Ok(rows) => {
+                    // Domain for each hosting id, from the summaries we already
+                    // fetched — an id with no summary (deleted hosting whose
+                    // rows linger) falls back to the id so it is still visible.
+                    let domain_of: std::collections::HashMap<&str, &str> = summaries
+                        .iter()
+                        .map(|s| (s.id.as_str(), s.domain.as_str()))
+                        .collect();
+                    // The on-disk TOTAL is the sum of the per-hosting local
+                    // footprints — same rows, so the KPI and the table can
+                    // never disagree.
+                    let total_bytes: i64 = rows.iter().map(|r| r.1).sum();
+                    let total_count: i64 = rows.iter().map(|r| r.2).sum();
+                    let mut storage: Vec<hyperion_types::BackupStorageRow> = rows
+                        .into_iter()
+                        .map(|(hid, lb, lc, ob, oc)| hyperion_types::BackupStorageRow {
+                            domain: domain_of
+                                .get(hid.as_str())
+                                .map(|d| d.to_string())
+                                .unwrap_or_else(|| hid.clone()),
+                            hosting_id: hyperion_types::HostingId(hid),
+                            local_bytes: lb,
+                            local_count: lc,
+                            offsite_bytes: ob,
+                            offsite_count: oc,
+                        })
+                        .collect();
+                    // Biggest local footprint first — that is the row an
+                    // operator hunting for disk is looking for.
+                    storage.sort_by(|a, b| {
+                        b.local_bytes
+                            .cmp(&a.local_bytes)
+                            .then(b.offsite_bytes.cmp(&a.offsite_bytes))
+                    });
+                    (total_bytes, total_count, storage)
+                }
                 Err(e) => {
                     tracing::debug!(error=%e, "could not total backup sizes");
-                    (0, 0)
+                    (0, 0, Vec::new())
                 }
             };
         let mut ns = node_stats_from(
@@ -22580,6 +22622,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             backup_bytes,
             backup_count,
         );
+        ns.backup_storage = backup_storage;
         // RAM / load / uptime are INSTANTANEOUS readings. The background sampler
         // only writes them every 5 min, so the gauge could be minutes stale and
         // never match a live `htop`/`free`. Read them LIVE here (this runs on
@@ -29133,6 +29176,7 @@ fn node_stats_from(
             net_tx_bps: r.net_tx_bps,
             oom_kills_24h: 0, // filled by node_stats() (needs DB access)
             last_oom_at: 0,
+            backup_storage: Vec::new(),
         },
         None => NodeStats {
             backup_bytes,
@@ -29165,6 +29209,7 @@ fn node_stats_from(
             net_tx_bps: 0,
             oom_kills_24h: 0,
             last_oom_at: 0,
+            backup_storage: Vec::new(),
         },
     }
 }
@@ -37221,6 +37266,62 @@ mod tests {
             .await
             .expect_err("no target → must refuse");
         assert!(matches!(err, RpcError::Validation { .. }), "got: {err:?}");
+    }
+
+    /// The "Backups on disk" figure must count a backup ONLY while its archive
+    /// is still on disk, and the per-site review must credit a dropped-then-
+    /// off-site copy under off-site — otherwise "I deleted it locally and it's
+    /// on FTP" still reports gigabytes on the node.
+    #[tokio::test]
+    async fn node_stats_splits_local_vs_offsite_backups() {
+        use hyperion_state::backups;
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), happy_mocks());
+        s.create(req("bk.cz")).await.expect("create");
+        let sel = HostingSelector::Domain(Domain::parse("bk.cz").unwrap());
+        let detail = s.get(sel).await.expect("get");
+
+        // A local-only backup: on disk, not off-site.
+        let id = backups::start(&pool, &detail.id, "local", 100)
+            .await
+            .expect("start");
+        backups::mark_ok(&pool, id, "/backups/bk.cz-100.tar.gz", None, 1_000_000, 200)
+            .await
+            .expect("ok");
+
+        let ns = s.node_stats("s4", "dev").await.expect("stats");
+        assert_eq!(ns.backup_bytes, 1_000_000, "the on-disk archive counts");
+        assert_eq!(ns.backup_count, 1);
+        let row = ns
+            .backup_storage
+            .iter()
+            .find(|r| r.domain == "bk.cz")
+            .expect("a row for the site");
+        assert_eq!(row.local_bytes, 1_000_000);
+        assert_eq!(row.offsite_bytes, 0);
+
+        // Push it off-site, then drop the local copy (verified remote, paths
+        // cleared) — exactly what the on-demand action does.
+        backups::set_remote(&pool, id, "ftp://vault/bk.cz-100.tar.gz", "verified", "")
+            .await
+            .expect("set_remote");
+        backups::clear_local_paths(&pool, id).await.expect("clear");
+
+        let ns = s.node_stats("s4", "dev").await.expect("stats2");
+        assert_eq!(
+            ns.backup_bytes, 0,
+            "a backup whose local copy was dropped must NOT count as on-disk"
+        );
+        assert_eq!(ns.backup_count, 0);
+        let row = ns
+            .backup_storage
+            .iter()
+            .find(|r| r.domain == "bk.cz")
+            .expect("row still present, now off-site only");
+        assert_eq!(row.local_bytes, 0);
+        assert_eq!(row.local_count, 0);
+        assert_eq!(row.offsite_bytes, 1_000_000, "credited off-site");
+        assert_eq!(row.offsite_count, 1);
     }
 
     /// The empty target list is the whole question, and only the caller can
