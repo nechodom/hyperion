@@ -189,6 +189,9 @@ fn timeout_for_request(req: &Request) -> u64 {
         // every couple of seconds — keep its timeout short so a slow poll
         // never stacks up behind the long backup it is reporting on.
         Request::BackupProgress { .. } => 15,
+        // A cheap read of a tiny ring table — the realtime net sparkline polls
+        // it on the fast stats refresh, so keep the budget short.
+        Request::NetHistory { .. } => 15,
         // Move a bundle / install WordPress.
         Request::BackupFetchChunk { .. }
         | Request::HostingExport { .. }

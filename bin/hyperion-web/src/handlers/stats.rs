@@ -239,11 +239,19 @@ pub async fn get_stats(
     // with the history fetch — serialising a third cluster-wide round trip
     // would add a whole RPC latency to every /stats load on a multi-node
     // setup, and the two answers don't depend on each other.
-    let (history_res, (mut sites, sites_auth_warning)) = tokio::join!(
+    let (history_res, net_history_res, (mut sites, sites_auth_warning)) = tokio::join!(
         crate::dispatcher::dispatch_to_node(
             &state,
             history_target,
             Request::NodeMetricsHistory { limit: 48 },
+        ),
+        // The realtime net ring — seconds-scale samples, its own fetch so the
+        // network sparkline has fine resolution independent of the 5-min
+        // metrics history. limit 240 ≈ the last hour at a 15s cadence.
+        crate::dispatcher::dispatch_to_node(
+            &state,
+            history_target,
+            Request::NetHistory { limit: 240 }
         ),
         collect_site_rows(&state, target, is_cluster_view, &all_nodes, &current_label),
     );
@@ -269,6 +277,13 @@ pub async fn get_stats(
             NodeMetricsHistory::default()
         }
         _ => NodeMetricsHistory::default(),
+    };
+    // Best-effort: an old node without the net ring, or a fetch error, just
+    // leaves the realtime sparkline empty ("needs samples") rather than
+    // failing the page.
+    let net_history: hyperion_types::NetHistory = match net_history_res {
+        Ok(RpcResponse::NetHistory(h)) => h,
+        _ => hyperion_types::NetHistory::default(),
     };
 
     let selected_node = cluster.as_ref().and_then(|c| {
@@ -324,13 +339,15 @@ pub async fn get_stats(
         "reqs",
         |v| format!("{}", v as i64),
     );
+    // Realtime rx/tx from the dedicated seconds-scale ring, not the 5-min
+    // metrics history — a genuinely live network graph.
     let spark_net_in = build_sparkline(
-        history.samples.iter().map(|s| (s.at, s.net_rx_bps as f64)),
+        net_history.samples.iter().map(|s| (s.at, s.rx_bps as f64)),
         "net",
         |v| fmt_rate(&(v as i64)),
     );
     let spark_net_out = build_sparkline(
-        history.samples.iter().map(|s| (s.at, s.net_tx_bps as f64)),
+        net_history.samples.iter().map(|s| (s.at, s.tx_bps as f64)),
         "net",
         |v| fmt_rate(&(v as i64)),
     );

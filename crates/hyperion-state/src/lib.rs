@@ -29,6 +29,7 @@ pub mod jobs;
 pub mod limits;
 pub mod metrics;
 pub mod monitors;
+pub mod net_samples;
 pub mod node_kv;
 pub mod nodejs;
 pub mod nodes;

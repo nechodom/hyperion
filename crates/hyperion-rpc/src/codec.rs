@@ -982,6 +982,12 @@ pub enum Request {
     BackupProgress {
         job_id: String,
     },
+    /// High-resolution network throughput history (seconds-scale) for the
+    /// realtime stats sparkline. Fed by the dedicated net sampler, separate
+    /// from the 5-minute `NodeMetricsHistory`.
+    NetHistory {
+        limit: i64,
+    },
     /// Import a migration bundle from a source node's signed URL.
     /// `base_url` is e.g. `https://source-master/api/migration/bundle/<id>`
     /// — the agent appends `/manifest.json?t=<token>` and
@@ -2177,6 +2183,8 @@ pub enum Response {
     /// Live sub-step list a running operation is publishing under a job id,
     /// answer to `BackupProgress`. Empty when nothing (yet) reported.
     BackupProgress(Vec<hyperion_types::JobSubstep>),
+    /// High-resolution network history, answer to `NetHistory`.
+    NetHistory(hyperion_types::NetHistory),
     WpPluginList(hyperion_types::WpPluginListResponse),
     WpPluginAction(hyperion_types::WpPluginActionResult),
     // Web users / roles / 2FA

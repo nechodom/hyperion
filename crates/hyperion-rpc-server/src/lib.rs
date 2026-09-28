@@ -254,6 +254,10 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(v) => Response::BackupProgress(v),
             Err(e) => Response::Error(e),
         },
+        Request::NetHistory { limit } => match api.net_history(limit).await {
+            Ok(v) => Response::NetHistory(v),
+            Err(e) => Response::Error(e),
+        },
         Request::BackupList { sel, limit } => match api.backup_list(sel, limit).await {
             Ok(v) => Response::BackupList(v),
             Err(e) => Response::Error(e),
@@ -2169,6 +2173,9 @@ mod tests {
             _: String,
         ) -> Result<Vec<hyperion_types::JobSubstep>, RpcError> {
             Ok(Vec::new())
+        }
+        async fn net_history(&self, _: i64) -> Result<hyperion_types::NetHistory, RpcError> {
+            Ok(hyperion_types::NetHistory::default())
         }
         async fn backup_list(
             &self,

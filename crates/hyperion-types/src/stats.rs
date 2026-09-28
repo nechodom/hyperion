@@ -230,6 +230,22 @@ pub struct NodeMetricsHistory {
     pub samples: Vec<NodeMetricPoint>,
 }
 
+/// One high-resolution network sample: rx/tx bytes/sec at `at` (unix secs).
+/// Fed by the dedicated net sampler (seconds-scale), separate from the
+/// 5-minute `NodeMetricPoint` history.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct NetSamplePoint {
+    pub at: i64,
+    pub rx_bps: i64,
+    pub tx_bps: i64,
+}
+
+/// Short rolling window of high-resolution network samples, oldest → newest.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct NetHistory {
+    pub samples: Vec<NetSamplePoint>,
+}
+
 /// Status of one systemd unit on the node — collected by
 /// `services_health()` for the system-health page.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
