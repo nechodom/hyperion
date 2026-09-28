@@ -213,7 +213,7 @@
 
 {# Sparklines: load + bandwidth from node_metrics history. Mirrors stats page mini-charts. #}
 {% if samples_in_window >= 2 %}
-<div class="spark-grid" style="margin-top:1rem;grid-template-columns:repeat(auto-fit, minmax(min(22rem, 100%), 1fr))">
+<div class="spark-grid" style="margin-top:1.25rem;grid-template-columns:repeat(auto-fit, minmax(min(18rem, 100%), 1fr))">
   <div class="spark-card spark-{{ spark_load.kind }}">
     <div class="spark-head">
       <span class="spark-title">Load avg · 1m (last {{ samples_in_window }} samples)</span>
@@ -247,8 +247,8 @@
 
   {# Realtime network in/out on one shared-scale chart — the lines cross where
      the traffic crosses. "now" is the live /proc rate; the lines are the
-     seconds-scale ring. Spans the grid so the crossings read clearly. #}
-  <div class="spark-card" style="grid-column:1 / -1">
+     seconds-scale ring. Sits in the graph row alongside Load and Bandwidth. #}
+  <div class="spark-card">
     <div class="spark-head">
       <span class="spark-title">Network throughput</span>
       <span class="spark-now">
