@@ -132,7 +132,9 @@ mail_threshold = 8    # postfix/dovecot SASL auth failures
 # [notifications]
 # Editable outbound wording. Every key here is optional, and an empty or
 # missing one means "unchanged" — edit them in the panel under
-# Settings -> Notifications, which has a live preview.
+# Settings -> Alerts -> Alert wording (operator alerts) and
+# Settings -> Customer letters -> Care report & expiry warning, both with a
+# live preview.
 #
 # The first three WRAP what Hyperion already wrote (operator alerts,
 # reminders, test sends); their defaults are pass-through:
@@ -188,7 +190,7 @@ mail_threshold = 8    # postfix/dovecot SASL auth failures
 # Every other key is one string, keyed by its id, and overrides that pack.
 # Missing or empty means "use the pack's wording", so a file with only
 # `lang` in it is a fully translated letter. Edit them in the panel under
-# Settings -> Notifications -> Letter language and wording, which lists them
+# Settings -> Customer letters -> Letter language and wording, which lists them
 # grouped with the built-in text shown in each field.
 #
 # The operator alerts are worth translating since profiles gained their own
@@ -312,7 +314,7 @@ enabled = true
 # strategy = "mobile" (Google's default) or "desktop".
 #
 # Measured weekly for care-plan sites, and on demand from a site's Performance
-# card. Edit this from Settings → Performance, which saves it on every node.
+# card. Edit this from Settings → Customer letters → Care report · Core Web Vitals, which saves it on every node.
 [performance]
 cwv_source = "off"
 strategy = "mobile"

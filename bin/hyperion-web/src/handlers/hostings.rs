@@ -2762,7 +2762,7 @@ pub(crate) async fn configured_backup_targets(
         let unusable = if r.kind != "s3" {
             format!("a \"{}\" target — backups are only pushed to S3", r.kind)
         } else if !r.enabled {
-            "disabled in Settings → Backups & trash → S3 & other backup targets".to_string()
+            "disabled in Settings → Backup targets".to_string()
         } else {
             match r.secret_key_id.as_deref() {
                 None => "missing its secret key".to_string(),

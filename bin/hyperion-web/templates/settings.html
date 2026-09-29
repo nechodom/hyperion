@@ -432,7 +432,7 @@
       <li>Each hosting starts with a <strong>self-signed certificate</strong> right after provisioning — enough for nginx to come up.</li>
       <li>Once <code>http://&lt;domain&gt;</code> resolves to this server, you can issue a real <strong>Let's Encrypt certificate</strong> from the hosting's detail page → SSL tab.</li>
       <li>Site certificates use <strong>HTTP-01</strong> (a file under <code>{{ config.acme.challenge_dir }}/&lt;token&gt;</code>); wildcards (the preview wildcard above, or a per-site wildcard from the hosting's SSL tab) use <strong>DNS-01</strong>, where you publish a TXT record by hand.</li>
-      <li>Certificates auto-renew 30 days before expiry; failures alert via <a href="#notifications">Alerts</a>.</li>
+      <li>Certificates auto-renew 30 days before expiry; failures alert via <a href="#slack">Alerts</a>.</li>
       <li>A per-hosting contact email, set on the hosting detail page, overrides the Let's Encrypt contact above.</li>
       <li>The panel's own certificate is issued from <a href="#panel-domain">Panel &amp; updates → Panel domain</a>.</li>
     </ul>
@@ -444,7 +444,7 @@
    recipients, test send, local postfix health, how-it-works.
    ========================================================== #}
 <div class="tab-panel" id="tab-mail">
-  <p class="text-soft small" style="margin:0 0 0.9rem;line-height:1.55">How the node picked in Configure node sends e-mail (its SMTP relay or the local postfix), who receives its administrator alerts, and a test send to prove the path; every message sent is listed in the <a href="/emails">Email log</a>.</p>
+  <p class="text-soft small" style="margin:0 0 0.9rem;line-height:1.55">{% if nodes.is_empty() %}How this server sends e-mail{% else %}How the node picked in Configure node sends e-mail{% endif %} (its SMTP relay or the local postfix), who receives its administrator alerts, and a test send to prove the path; every message sent is listed in the <a href="/emails">Email log</a>.</p>
   <div class="card" id="smtp-relay">
     {# Per-node: each node has its own [email] in agent.toml. Pick a node to
        view + edit its mail config; saving writes + applies on THAT node. #}
@@ -693,7 +693,7 @@
             <code>{{ mta.sender_domain }}</code>
             <span class="pill err" style="margin-left:0.5rem">mail is silently destroyed</span>
             <span class="text-soft small" style="display:block;margin-top:0.25rem">
-              {{ mta.sender_auth_detail }} Fix <code>from_address</code> in the form below.
+              {{ mta.sender_auth_detail }} Fix the <a href="#from_address">Sender address</a> in the SMTP relay card.
             </span>
           {% else if mta.sender_auth_status == "no-spf" %}
             <code>{{ mta.sender_domain }}</code>
@@ -917,7 +917,7 @@
       <li><strong>Relay host</strong> — pick a real provider (Postmark, Mailgun, SendGrid, Brevo, AWS SES, Gmail SMTP) or point at a local postfix configured to relay outbound. Sending directly from a VPS to public mailboxes almost always lands in spam.</li>
       <li><strong>SPF</strong> — the recipient's mail server checks whether your relay's IP is on the From-address domain's permitted-sender list. Set this up with a DNS TXT record on your domain; Hyperion shows per-hosting SPF analysis on each hosting's detail page.</li>
       <li><strong>Sender address</strong> — must use a domain you control whose SPF includes your relay. Detection derives a sensible default from <code>/etc/mailname</code>.</li>
-      <li><strong>Per-node</strong> — each worker has its own <code>[email]</code> section in its own <code>agent.toml</code>. Pick a node in <strong>Configure node</strong> at the top of this tab; every card here follows it.</li>
+      {% if !nodes.is_empty() %}<li><strong>Per-node</strong> — each worker has its own <code>[email]</code> section in its own <code>agent.toml</code>. Pick a node in <strong>Configure node</strong> at the top of this tab; every card here follows it.</li>{% endif %}
       <li><strong>Every send is logged</strong> in the <a href="/emails">Email log</a> with the full SMTP response, so you can tell "queued" (250) from "rejected by relay" (550) without leaving the panel.</li>
     </ul>
   </div>
@@ -1265,10 +1265,11 @@
     <p class="text-soft small" style="margin:0 0 0.9rem;line-height:1.55">
       Every message Hyperion sends is assembled from the sentences below — the
       care report and expiry warning, disk-quota and billing letters, and your
-      own alerts and Slack messages. Pick a
-      language and every one of them changes — including the headings, the
-      month names, the thousands separator and the plural endings. Nothing
-      customer-facing is left in English by picking Čeština.
+      own alerts and Slack messages. Each language setting below switches every
+      message it covers — including the headings, the month names, the
+      thousands separator and the plural endings. Nothing customer-facing is
+      left in English by picking Čeština for the customer letters; your own
+      alerts follow their own setting.
       {#- This card exists because the placeholder approach could not finish
           the job: {attacks} expands to a whole SECTION, so a translated
           letter got English put straight back into it, and the branch that
@@ -2870,6 +2871,13 @@
   }));
   const hashId = (location.hash || '').replace(/^#/, '');
   if (!resolve(hashId) && !activate(remembered() || '')) activate('general');
+  // Give the entry we landed on a fragment naming the tab now shown, so
+  // following an in-page cross-link and pressing Back returns to it (an
+  // empty hash resolves to nothing and would leave the linked tab open).
+  if (!hashId && history.replaceState) {
+    const shown = document.querySelector('.tab[data-tab].active');
+    if (shown) history.replaceState(null, '', location.pathname + location.search + '#' + shown.dataset.tab);
+  }
   window.addEventListener('hashchange', () => {
     resolve((location.hash || '').replace(/^#/, ''));
   });

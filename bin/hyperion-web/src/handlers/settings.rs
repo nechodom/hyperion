@@ -1460,7 +1460,17 @@ pub async fn post_config(
     Form(form): Form<ConfigEditForm>,
 ) -> Result<Response, AppError> {
     if !ctx.is_super_admin() {
-        return Ok(Redirect::to("/").into_response());
+        // An Administrator can open Settings but not save agent.toml; say so
+        // on the card they tried to save instead of bouncing them to /.
+        let anchor = form
+            .fields
+            .get("_return_tab")
+            .and_then(|v| sanitize_return_tab(v))
+            .unwrap_or_else(|| section_to_tab(&form.section));
+        return Ok(Redirect::to(&format!(
+            "/settings?flash_error=owner+role+required#{anchor}"
+        ))
+        .into_response());
     }
     // Strip the `section` field from the bag — it's not a TOML field
     // itself, it's the routing key. axum's `#[serde(flatten)]` collects
@@ -1607,7 +1617,11 @@ pub async fn post_config(
             | "performance"
     )
     .then(|| (form.section.clone(), fields.clone()));
-    let is_letters = matches!(form.section.as_str(), "notifications" | "letters");
+    // [notifications] is written by two cards: the customer letters (whose
+    // failure message points at the per-node letter list) and Alert wording
+    // (operator alerts, which has no such list — it gets the generic text).
+    let is_letters = form.section == "letters"
+        || (form.section == "notifications" && return_tab_override != Some("alert-templates"));
     let resp = hyperion_rpc_client::call(
         &state.agent_socket,
         Request::AgentConfigUpdate {
@@ -2227,7 +2241,9 @@ pub async fn post_panel_provision(
     Form(form): Form<PanelProvisionForm>,
 ) -> Result<Response, AppError> {
     if !ctx.is_super_admin() {
-        return Ok(Redirect::to("/").into_response());
+        return Ok(
+            Redirect::to("/settings?flash_error=owner+role+required#panel-domain").into_response(),
+        );
     }
     let hostname = form.hostname.trim().to_lowercase();
     if hostname.is_empty() {
@@ -2573,10 +2589,13 @@ pub async fn post_mta_test(
     headers: HeaderMap,
     Form(form): Form<MtaTestForm>,
 ) -> Result<Response, AppError> {
+    // Resolved first so every early return keeps the node the operator was
+    // looking at, instead of snapping the Mail tab back to the master.
+    let (target, node_q) = mail_node_target(&form.target_node);
     if !ctx.can(Capability::SettingsManage) {
-        return Ok(Redirect::to(
-            "/settings?flash_error=admin+role+required+to+send+test+emails#mail",
-        )
+        return Ok(Redirect::to(&format!(
+            "/settings?flash_error=admin+role+required+to+send+test+emails{node_q}#mail"
+        ))
         .into_response());
     }
     // Same per-IP rate limit as the SMTP-relay test. Prevents a
@@ -2584,19 +2603,18 @@ pub async fn post_mta_test(
     // address-enumerator or spam vector.
     let ip = email_test_ip(&headers, peer);
     if !state.ratelimit.check("mta-test", ip, Bucket::per_minute(3)) {
-        return Ok(Redirect::to(
-            "/settings?flash_error=test+email+rate+limit+exceeded+%E2%80%94+wait+a+minute#mail",
-        )
+        return Ok(Redirect::to(&format!(
+            "/settings?flash_error=test+email+rate+limit+exceeded+%E2%80%94+wait+a+minute{node_q}#mail"
+        ))
         .into_response());
     }
     let to = form.to.trim().to_string();
     if to.len() > 254 {
-        return Ok(
-            Redirect::to("/settings?flash_error=address+too+long+%28max+254+chars%29#mail")
-                .into_response(),
-        );
+        return Ok(Redirect::to(&format!(
+            "/settings?flash_error=address+too+long+%28max+254+chars%29{node_q}#mail"
+        ))
+        .into_response());
     }
-    let (target, node_q) = mail_node_target(&form.target_node);
     let resp = crate::dispatcher::dispatch_to_node(
         &state,
         target.as_deref(),
@@ -2726,7 +2744,10 @@ pub async fn post_node_wildcard_begin(
     Form(form): Form<NodeWildcardBeginForm>,
 ) -> Result<Response, AppError> {
     if !ctx.is_super_admin() {
-        return Ok(Redirect::to("/").into_response());
+        return Ok(
+            Redirect::to("/settings?flash_error=owner+role+required#preview-wildcard")
+                .into_response(),
+        );
     }
     let (_, base) = match resolve_node_wildcard_base(&state, &form.node_id).await {
         Some(v) => v,
@@ -2806,7 +2827,10 @@ pub async fn post_node_wildcard_finish(
     Form(form): Form<NodeWildcardFinishForm>,
 ) -> Result<Response, AppError> {
     if !ctx.is_super_admin() {
-        return Ok(Redirect::to("/").into_response());
+        return Ok(
+            Redirect::to("/settings?flash_error=owner+role+required#preview-wildcard")
+                .into_response(),
+        );
     }
     let domain = match hyperion_validate::Domain::parse(form.base.trim()) {
         Ok(d) => d,
