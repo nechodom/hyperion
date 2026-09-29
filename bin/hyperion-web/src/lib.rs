@@ -1106,7 +1106,7 @@ pub fn build_router(state: SharedState) -> Router {
 }
 
 /// Once the operator's set up `cluster.panel_hostname` (via Panel
-/// domain provisioning in /settings#cluster), refuse requests
+/// domain provisioning in /settings#panel-domain), refuse requests
 /// whose Host header is a raw IP address — they get a 308 redirect
 /// to `https://<panel_hostname>:<port><path>` instead. Three reasons:
 ///

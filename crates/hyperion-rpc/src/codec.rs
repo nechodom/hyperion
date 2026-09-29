@@ -750,7 +750,7 @@ pub enum Request {
         skip_dns_check: bool,
     },
     /// Read the current panel-vhost ACME progress for the live
-    /// progress card on /settings#cluster. Returns None when no
+    /// progress card on /settings#panel-domain. Returns None when no
     /// panel hostname is configured yet.
     PanelCertStatus,
     /// `mount -o remount,rw /` — attempt to flip the rootfs to

@@ -18,7 +18,7 @@ use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::Form;
 use hyperion_rpc::codec::{Request, Response as RpcResponse};
 use hyperion_state::capabilities::Capability;
-use hyperion_types::{AgentConfigView, EmailLogEntry, SmtpAutodetect, UpdateStatus};
+use hyperion_types::{AgentConfigView, SmtpAutodetect, UpdateStatus};
 use serde::Deserialize;
 use std::net::SocketAddr;
 
@@ -37,16 +37,13 @@ struct SettingsTpl<'a> {
     update_status: UpdateStatus,
     update_current_short: String,
     update_latest_short: String,
-    /// Last 5 emails the agent sent (any kind, any state). Rendered
-    /// inline under the Send test button so the operator sees their
-    /// test send immediately without navigating to /emails.
-    recent_emails: Vec<EmailLogEntry>,
     /// Enrolled remote nodes — drives the "From: <node>" dropdown
     /// in the Send-test-email form. Empty on single-node setups.
     nodes: Vec<hyperion_types::NodeSummary>,
-    /// Test nodes that can carry a node-wide `*.<base>` wildcard cert,
-    /// each with its computed base domain. Drives the per-node wildcard
-    /// issuance rows in the "Test nodes & staging sites" card.
+    /// Nodes (the master first) that can carry a node-wide `*.<base>`
+    /// preview wildcard cert, each with its computed base domain. Drives the
+    /// per-node issuance rows in the "Preview wildcard certificates" card
+    /// on HTTPS & previews.
     wildcard_nodes: Vec<NodeWildcardRow>,
     /// Labels of enrolled nodes that have NOT published an Ed25519
     /// response-signing key yet. Readiness is decided by PRESENCE of the
@@ -63,7 +60,7 @@ struct SettingsTpl<'a> {
     /// the "Raw TOML" tab. Failing to read shows "(could not
     /// read /etc/hyperion/agent.toml: …)".
     raw_toml: String,
-    /// The master's `[fail2ban]` section, for the Brute force tab.
+    /// The master's `[fail2ban]` section, for the Bans & blocking tab.
     /// `None` when agent.toml couldn't be read or parsed — the card then
     /// says so instead of pre-filling a form with numbers nothing backs.
     fail2ban: Option<Fail2banView>,
@@ -100,12 +97,13 @@ struct SettingsTpl<'a> {
     api_key_cap_groups: Vec<ApiKeyCapGroup>,
     /// Existing API keys (prefix · label · caps summary · last used · expires).
     api_keys: Vec<ApiKeyRowView>,
-    /// True ⇒ render the "API keys" card (user holds ApiKeysManage).
+    /// True ⇒ render the "Create API key" and "Existing keys" cards on
+    /// Access & API (user holds ApiKeysManage).
     can_manage_api_keys: bool,
     /// A freshly-minted raw key to reveal exactly once (via ?api_key_new=).
     new_api_key: Option<String>,
     /// The built-in customer letters, as templates. Rendered into hidden
-    /// <textarea>s so the "Customer letters" card can (a) preview the
+    /// <textarea>s so the "Care report & expiry warning" card can (a) preview the
     /// default when the operator has written nothing and (b) hand them the
     /// real default as a starting point. They come from hyperion-types —
     /// the same constants a hyperion-core test pins to the built-in
@@ -440,7 +438,10 @@ pub async fn post_email_logo(
     mut multipart: axum::extract::Multipart,
 ) -> Result<Response, AppError> {
     if !ctx.is_super_admin() {
-        return Ok(Redirect::to("/settings?flash_error=owner+role+required").into_response());
+        return Ok(
+            Redirect::to("/settings?flash_error=owner+role+required#email-branding")
+                .into_response(),
+        );
     }
     let mut bytes: Vec<u8> = Vec::new();
     let mut clear = false;
@@ -462,7 +463,7 @@ pub async fn post_email_logo(
     let payload = if clear { Vec::new() } else { bytes };
     if payload.is_empty() && !clear {
         return Ok(
-            Redirect::to("/settings?flash_error=no+image+selected#notifications").into_response(),
+            Redirect::to("/settings?flash_error=no+image+selected#email-branding").into_response(),
         );
     }
     let resp = hyperion_rpc_client::call(
@@ -474,10 +475,10 @@ pub async fn post_email_logo(
     .await?;
     match resp {
         RpcResponse::EmailLogoSet => {
-            Ok(Redirect::to("/settings?flash=saved#notifications").into_response())
+            Ok(Redirect::to("/settings?flash=saved#email-branding").into_response())
         }
         RpcResponse::Error(e) => Ok(Redirect::to(&format!(
-            "/settings?flash_error={}#notifications",
+            "/settings?flash_error={}#email-branding",
             super::hostings::urlencoding(&e.to_string())
         ))
         .into_response()),
@@ -615,7 +616,7 @@ pub async fn post_geoip_creds(
     axum::extract::Form(form): axum::extract::Form<GeoipCredsForm>,
 ) -> Result<Response, AppError> {
     if !ctx.is_super_admin() {
-        return Ok(Redirect::to("/settings?flash_error=owner+role+required").into_response());
+        return Ok(Redirect::to("/settings?flash_error=owner+role+required#geoip").into_response());
     }
     let resp = hyperion_rpc_client::call(
         &state.agent_socket,
@@ -657,7 +658,7 @@ pub async fn post_geoip_refresh(
     ctx: AuthCtx,
 ) -> Result<Response, AppError> {
     if !ctx.is_super_admin() {
-        return Ok(Redirect::to("/settings?flash_error=owner+role+required").into_response());
+        return Ok(Redirect::to("/settings?flash_error=owner+role+required#geoip").into_response());
     }
     match hyperion_rpc_client::call(&state.agent_socket, Request::GeoipRefresh).await? {
         RpcResponse::GeoipRefresh(n) => Ok(Redirect::to(&format!(
@@ -684,8 +685,8 @@ fn fmt_date(ts: Option<i64>) -> String {
     }
 }
 
-/// The `[fail2ban]` section as it currently reads on disk, for the Brute
-/// force tab's form.
+/// The `[fail2ban]` section as it currently reads on disk, for the Bans &
+/// blocking tab's form.
 ///
 /// Not part of `AgentConfigView`: the section is read straight out of the
 /// same `/etc/hyperion/agent.toml` the Raw TOML tab already reads, so the
@@ -704,7 +705,7 @@ pub struct Fail2banView {
     pub clamped: bool,
 }
 
-/// Parse the `[fail2ban]` table out of agent.toml for the Brute force tab.
+/// Parse the `[fail2ban]` table out of agent.toml for the Bans & blocking tab.
 ///
 /// An absent table is not an error: the agent runs the built-in defaults
 /// then, which is exactly what's rendered — flagged with `in_toml = false`.
@@ -749,7 +750,8 @@ fn parse_fail2ban_section(raw: &str) -> Option<Fail2banView> {
     })
 }
 
-/// One test node's wildcard-cert row in the Settings card.
+/// One node's preview wildcard-cert row in the "Preview wildcard
+/// certificates" card.
 pub struct NodeWildcardRow {
     pub node_id: String,
     pub label: String,
@@ -807,26 +809,19 @@ pub async fn get_settings(
     // (set by post_api_key_create) instead of the URL; read + clear it here so
     // it's shown exactly once.
     let new_api_key = cookie_value(&headers, "hyp_new_api_key");
-    // Cluster/agent configuration, node topology, and the recent outbound-email
-    // log across ALL hostings. Every POST under /settings is admin-gated, but
+    // Cluster/agent configuration, node topology and every node's mail
+    // setup. Every POST under /settings is admin-gated, but
     // the GET page was reachable by any logged-in user (the nav only hides the
     // link). Tenant-scoped roles must not read it.
     if !ctx.can(Capability::SettingsManage) {
         return Ok(Redirect::to("/").into_response());
     }
-    let (config_res, update_res, emails_res) = tokio::join!(
+    let (config_res, update_res) = tokio::join!(
         hyperion_rpc_client::call(&state.agent_socket, Request::AgentConfigView),
         hyperion_rpc_client::call(
             &state.agent_socket,
             Request::UpdateCheck {
                 force_refresh: false
-            },
-        ),
-        hyperion_rpc_client::call(
-            &state.agent_socket,
-            Request::EmailLogList {
-                hosting_id: None,
-                limit: 5
             },
         ),
     );
@@ -842,10 +837,6 @@ pub async fn get_settings(
     let update_status: UpdateStatus = match update_res {
         Ok(RpcResponse::UpdateCheck(u)) => u,
         _ => UpdateStatus::default(),
-    };
-    let recent_emails: Vec<EmailLogEntry> = match emails_res {
-        Ok(RpcResponse::EmailLogList(rows)) => rows,
-        _ => vec![],
     };
     // The Mail tab edits ONE node's [email] config at a time. Fetch that
     // node's MTA diagnostics + config over the signed channel (master = local
@@ -891,9 +882,9 @@ pub async fn get_settings(
         .unwrap_or_default();
     let update_current_short = short_sha(&update_status.current_sha);
     let update_latest_short = short_sha(&update_status.latest_sha);
-    // Per-test-node wildcard rows: a `*.<base>` cert issued once covers
-    // every auto-subdomain the node spins up. Only test nodes with a
-    // derivable base domain qualify.
+    // Per-node preview wildcard rows: a `*.<base>` cert issued once covers
+    // every preview address on the node (and every auto-subdomain a test
+    // node spins up).
     // EVERY node with a derivable base — the master first, addressed by
     // the `local` sentinel. Previously filtered to test-marked workers,
     // which made previews unreachable on a single-server install (empty
@@ -956,7 +947,7 @@ pub async fn get_settings(
             }
         }
     }
-    // Response-auth readiness for the Security card's hardening ladder.
+    // Response-auth readiness for the Cluster channel hardening card's ladder.
     // A blank key counts as absent: the heartbeat boundary already
     // trims, but an empty string here would render a node "ready" that
     // the dispatcher treats as unverifiable.
@@ -972,7 +963,7 @@ pub async fn get_settings(
             }
         })
         .collect();
-    // API keys card (gated by ApiKeysManage). Fetch the list best-effort;
+    // API key cards (gated by ApiKeysManage). Fetch the list best-effort;
     // a failed RPC just shows an empty list. The capability multiselect
     // reuses the canonical roles groups.
     let can_manage_api_keys = ctx.can(Capability::ApiKeysManage);
@@ -1032,7 +1023,6 @@ pub async fn get_settings(
         update_status,
         update_current_short,
         update_latest_short,
-        recent_emails,
         nodes,
         wildcard_nodes,
         resp_auth_pending,
@@ -1280,8 +1270,6 @@ pub struct EmailTestForm {
     target_node: String,
 }
 
-/// POST /settings/email-test — fires a one-off SMTP send + redirects
-/// back to /settings with a flash message.
 /// POST /settings/slack-test — post a test message to the saved webhook.
 ///
 /// Same gate and rate limit as the e-mail test: this makes the box emit an
@@ -1296,7 +1284,7 @@ pub async fn post_slack_test(
 ) -> Result<Response, AppError> {
     if !ctx.can(Capability::SettingsManage) {
         return Ok(Redirect::to(
-            "/settings?flash_error=admin+role+required+to+send+a+test+message#notifications",
+            "/settings?flash_error=admin+role+required+to+send+a+test+message#slack",
         )
         .into_response());
     }
@@ -1306,24 +1294,26 @@ pub async fn post_slack_test(
         .check("slack-test", ip, Bucket::per_minute(3))
     {
         return Ok(Redirect::to(
-            "/settings?flash_error=test+message+rate+limit+exceeded+%E2%80%94+wait+a+minute#notifications",
+            "/settings?flash_error=test+message+rate+limit+exceeded+%E2%80%94+wait+a+minute#slack",
         )
         .into_response());
     }
     let resp = crate::dispatcher::dispatch_to_node(&state, None, Request::SlackSendTest).await?;
     Ok(match resp {
         RpcResponse::SlackSendTest => Redirect::to(
-            "/settings?flash=Test+message+posted+%E2%80%94+check+the+Slack+channel#notifications",
+            "/settings?flash=Test+message+posted+%E2%80%94+check+the+Slack+channel#slack",
         )
         .into_response(),
         RpcResponse::Error(e) => {
             let msg = super::hostings::urlencoding(&e.to_string());
-            Redirect::to(&format!("/settings?flash_error={msg}#notifications")).into_response()
+            Redirect::to(&format!("/settings?flash_error={msg}#slack")).into_response()
         }
         _ => return Err(AppError::Internal("unexpected response".into())),
     })
 }
 
+/// POST /settings/email-test — fires a one-off SMTP send + redirects
+/// back to the Mail tab with a flash message.
 pub async fn post_email_test(
     State(state): State<SharedState>,
     ctx: AuthCtx,
@@ -1331,14 +1321,18 @@ pub async fn post_email_test(
     headers: HeaderMap,
     Form(form): Form<EmailTestForm>,
 ) -> Result<Response, AppError> {
+    // Every redirect below returns to the Mail tab AND keeps the node the
+    // operator was looking at (`&mail_node=…`), so it is computed before
+    // any gate. ""/"local" (the master) adds no suffix.
+    let (_, node_q) = mail_node_target(&form.target_node);
     // Without this gate any authenticated viewer can use Hyperion's
     // SMTP relay as a free spam vector — the relay's daily quota
     // would also get blown out, breaking real cluster notifications.
     if !ctx.can(Capability::SettingsManage) {
-        return Ok(
-            Redirect::to("/settings?flash_error=admin+role+required+to+send+test+emails")
-                .into_response(),
-        );
+        return Ok(Redirect::to(&format!(
+            "/settings?flash_error=admin+role+required+to+send+test+emails{node_q}#mail"
+        ))
+        .into_response());
     }
     // Per-IP rate limit so a compromised admin cookie / leaked
     // session can't be used as an open relay or address enumerator.
@@ -1349,19 +1343,19 @@ pub async fn post_email_test(
         .ratelimit
         .check("email-test", ip, Bucket::per_minute(3))
     {
-        return Ok(Redirect::to(
-            "/settings?flash_error=test+email+rate+limit+exceeded+%E2%80%94+wait+a+minute",
-        )
+        return Ok(Redirect::to(&format!(
+            "/settings?flash_error=test+email+rate+limit+exceeded+%E2%80%94+wait+a+minute{node_q}#mail"
+        ))
         .into_response());
     }
     let to = form.to.trim().to_string();
     // Bound the address at the RFC5321 max so a 50 KB pathological
     // 'to' field can't blow out the Location header on the redirect.
     if to.len() > 254 {
-        return Ok(
-            Redirect::to("/settings?flash_error=address+too+long+%28max+254+chars%29")
-                .into_response(),
-        );
+        return Ok(Redirect::to(&format!(
+            "/settings?flash_error=address+too+long+%28max+254+chars%29{node_q}#mail"
+        ))
+        .into_response());
     }
     // Multi-node: when an operator picks a target_node, the test
     // dispatches via the signed RPC channel so the chosen worker
@@ -1393,13 +1387,20 @@ pub async fn post_email_test(
                 target_owned.clone()
             };
             let msg = format!("Test email sent from {node_label} to {to} · SMTP relay said {smtp_code} · check /emails for the delivery record");
-            Ok(Redirect::to(&format!("/settings?flash={}", urlencode(&msg))).into_response())
+            Ok(
+                Redirect::to(&format!("/settings?flash={}{node_q}#mail", urlencode(&msg)))
+                    .into_response(),
+            )
         }
         RpcResponse::Error(e) => {
             // Include a pointer to /emails so the operator can see the
             // failed-row in context (it's already logged there).
             let msg = format!("{e} — see /emails for the failed row");
-            Ok(Redirect::to(&format!("/settings?flash_error={}", urlencode(&msg))).into_response())
+            Ok(Redirect::to(&format!(
+                "/settings?flash_error={}{node_q}#mail",
+                urlencode(&msg)
+            ))
+            .into_response())
         }
         _ => Err(AppError::Internal("unexpected response".into())),
     }
@@ -1451,8 +1452,8 @@ fn synthesize_unchecked_checkboxes(
 }
 
 /// POST /settings/config — super_admin only. Updates one section of
-/// agent.toml in place, preserving comments. Operator must restart the
-/// agent to apply.
+/// agent.toml in place, preserving comments, then restarts hyperion-agent
+/// a few seconds after the redirect so the new value takes effect.
 pub async fn post_config(
     State(state): State<SharedState>,
     ctx: AuthCtx,
@@ -1617,14 +1618,21 @@ pub async fn post_config(
     .await
     .map_err(AppError::from)?;
     // Map TOML section → URL hash so the redirect lands the operator
-    // back on the SAME tab they just saved. Without this the redirect
-    // bounces them to /settings (no fragment) which always opens the
-    // first tab — annoying when you're iterating on cluster settings
-    // and keep getting yanked back to Mail. Forms can override the
-    // mapping with a hidden `_return_tab` field (sanitised), which
-    // is how the Retention tab — which writes cluster.* fields but
-    // visually lives elsewhere — keeps the operator in place.
+    // back on the SAME card they just saved. Without this the redirect
+    // bounces them to /settings (no fragment), which always opens the
+    // default tab. The hash is a tab id or a card anchor; the page's
+    // resolve() opens whichever tab holds that card. Forms can override
+    // the mapping with a hidden `_return_tab` field (sanitised), which
+    // is how every card of a section written from several places
+    // ([cluster] from Access, Cluster, HTTPS & previews and Backups &
+    // trash; [notifications] from Alerts and Customer letters) returns
+    // the operator to the card they used.
     let tab = return_tab_override.unwrap_or_else(|| section_to_tab(&form.section));
+    // The flash names the CARD that was saved when the form said which
+    // one it was, so a 2FA save does not read "Cluster settings saved".
+    let label = return_tab_override
+        .and_then(card_label)
+        .unwrap_or_else(|| section_label(&form.section));
     let dest = match resp {
         RpcResponse::AgentConfigUpdate => {
             // Spawn a delayed restart so the redirect response gets back
@@ -1670,7 +1678,7 @@ pub async fn post_config(
                 Some((sect, f)) => match propagate_notifications(&state, &sect, f).await {
                     Ok(0) => format!(
                         "/settings?flash={}+saved+%E2%80%94+hyperion-agent+restarting+%28~5s%29#{}",
-                        urlencode(section_label(&form.section)),
+                        urlencode(label),
                         tab
                     ),
                     Ok(n) if is_letters => format!(
@@ -1683,10 +1691,7 @@ pub async fn post_config(
                     ),
                     Ok(n) => format!(
                         "/settings?flash={}#{}",
-                        urlencode(&format!(
-                            "{} saved here and on {n} other node(s).",
-                            section_label(&form.section)
-                        )),
+                        urlencode(&format!("{label} saved here and on {n} other node(s).")),
                         tab
                     ),
                     Err(failed) if !is_letters => format!(
@@ -1709,8 +1714,9 @@ pub async fn post_config(
                         urlencode(&format!(
                             "Saved on this master, but {} did not take it: {}. \
                              Sites owned by those nodes keep sending the PREVIOUS letter \
-                             until a save reaches them — the per-node list in the \
-                             Customer letters card shows which is which.",
+                             until a save reaches them — the per-node list under \
+                             Customer letters → Care report & expiry warning shows \
+                             which is which.",
                             if failed.len() == 1 {
                                 "one node"
                             } else {
@@ -1733,7 +1739,7 @@ pub async fn post_config(
                     };
                     format!(
                         "/settings?flash={}+saved+%E2%80%94+hyperion-agent+restarting+%28~5s%29{}#{}",
-                        urlencode(section_label(&form.section)),
+                        urlencode(label),
                         probe,
                         tab
                     )
@@ -1845,16 +1851,6 @@ async fn propagate_notifications(
     }
 }
 
-/// Map the agent.toml section name to the /settings tab id. The two
-/// vocabularies don't line up 1:1 — the UI groups related sections
-/// onto one tab (e.g. backup_remote + backup_retention both live
-/// under #backups). Unknown sections fall back to "mail" because
-/// it's the leftmost tab; better than dumping the operator on a
-/// random screen.
-///
-/// Forms can override this entirely via a hidden `_return_tab` field
-/// — that's how the Retention tab (which writes `cluster.*` fields
-/// but lives on its own tab) keeps the operator in place after save.
 /// Operator-facing name for a config section.
 ///
 /// The redirect used to say "Section [backup_remote] saved", which is the name
@@ -1868,15 +1864,36 @@ fn section_label(section: &str) -> &'static str {
         "backup" => "Local backup copies",
         "protection" => "What this panel keeps",
         "snapshots" => "Snapshot retention",
-        "performance" => "Performance",
+        "performance" => "Core Web Vitals source",
         "cluster" => "Cluster settings",
         "notifications" => "Notification wording",
         "letters" => "Customer letter wording",
         "fail2ban" => "Brute-force thresholds",
         "update" => "Automatic updates",
-        "acme" => "TLS / ACME",
+        "acme" => "Let's Encrypt contact",
         "slack" => "Slack",
         _ => "Settings",
+    }
+}
+
+/// Operator-facing name for the CARD a `_return_tab` anchor points at, for
+/// the save flash. Only the cards of a section written by several forms are
+/// listed: seven forms write `[cluster]` and two write `[notifications]`, so
+/// [`section_label`] alone would call every one of them by its section's
+/// name ("Cluster settings saved" after turning on 2FA). Anything else —
+/// a tab id, a retired id — returns None and the section label is used.
+fn card_label(anchor: &str) -> Option<&'static str> {
+    match anchor {
+        "sign-in" => Some("Sign-in security"),
+        "hardening" => Some("Cluster channel hardening"),
+        "placement" => Some("Cluster placement"),
+        "test-nodes" => Some("Test nodes"),
+        "preview-address" => Some("Preview address"),
+        "trash" => Some("Trash settings"),
+        "audit-retention" => Some("Audit log retention"),
+        "alert-templates" => Some("Alert wording"),
+        "customer-letters" => Some("Care report & expiry warning"),
+        _ => None,
     }
 }
 
@@ -1919,7 +1936,7 @@ pub async fn post_offsite_backfill(
     // scope by definition.
     if !ctx.can(Capability::BackupTargets) || !ctx.scope_all() {
         return Ok(Redirect::to(
-            "/settings?flash_error=Copying+backups+off-site+needs+the+backup-targets+capability#backups",
+            "/settings?flash_error=Copying+backups+off-site+needs+the+backup-targets+capability#offsite-backfill",
         )
         .into_response());
     }
@@ -2020,50 +2037,76 @@ pub async fn post_offsite_backfill(
     Ok(Redirect::to(&format!("/jobs/{}", job_id)).into_response())
 }
 
+/// Map an agent.toml section to the redirect anchor that lands the operator
+/// back where they saved. The anchor is either a tab id or a card anchor, and
+/// the page's resolve() opens the tab that contains a card. A section with one
+/// form-card maps to that card. A section written by several cards
+/// ([cluster], [notifications]) maps to a fallback, because each of those
+/// forms sends its own `_return_tab`. Unknown sections fall back to `general`,
+/// the default tab, which is always visible.
 fn section_to_tab(section: &str) -> &'static str {
     match section {
+        // Per-node form. post_config returns early with its own
+        // `{node_q}#mail` redirect, so this arm only documents the mapping.
         "email" => "mail",
-        "acme" => "tls",
-        "slack" => "notifications",
-        // Both template cards (message wrappers + customer letters) live on
-        // the Notifications tab and write `[notifications]`. Without this
-        // the save bounced the operator to Mail mid-edit.
+        "acme" => "acme",
+        "update" => "updates",
+        "slack" => "slack",
+        // Two forms write [notifications]: Alert wording on Alerts, and
+        // Care report & expiry warning on Customer letters. Each sends
+        // `_return_tab`; this is only the fallback.
         "notifications" => "notifications",
-        // Every word the customer letters can say — same tab.
-        "letters" => "notifications",
-        // Which engine the install uses. It governs both, so it sits at the
-        // top of the tab that shows both — and unlike the cluster.* fields it
-        // needs no `_return_tab` override, because this IS its tab.
-        "backup_remote" | "backup_retention" | "backup" | "protection" | "snapshots" => "backups",
-        "performance" => "notifications",
-        // [cluster] fields are now split across two tabs: the Security card
-        // (2FA + hardening flags) lives on General, Cluster placement on
-        // Cluster. General is the default; the placement form carries a
-        // `_return_tab=cluster` override, same pattern the Retention tab
-        // already uses for its cluster.* fields.
-        "cluster" => "general",
-        "update" => "system",
+        "letters" => "letter-wording",
+        "performance" => "performance",
+        "protection" => "protection-mode",
+        "backup_remote" => "offsite-ftp",
+        "backup" => "local-copies",
+        "backup_retention" => "backup-retention",
+        "snapshots" => "snapshot-retention",
         "fail2ban" => "bruteforce",
-        _ => "mail",
+        // Seven forms on four tabs write [cluster]: sign-in (Access),
+        // placement / test-nodes / hardening (Cluster), preview-address
+        // (HTTPS & previews), trash (Backups & trash) and audit-retention
+        // (Access). Every one sends `_return_tab`, and the fallback stays on
+        // a tab that standalone installs can see.
+        "cluster" => "general",
+        _ => "general",
     }
 }
 
-/// Sanitise an operator-supplied `_return_tab` hint. Only known tab
-/// ids are honoured so a malicious / typo'd value can't poison the
-/// redirect URL.
+/// Sanitise an operator-supplied `_return_tab` hint (a tab id or a card
+/// anchor). Only known values are honoured, so a malicious or mistyped value
+/// cannot poison the redirect URL.
 fn sanitize_return_tab(v: &str) -> Option<&'static str> {
     match v.trim() {
-        "mail" => Some("mail"),
+        // Tab ids, in strip order.
+        "general" => Some("general"),
         "tls" => Some("tls"),
+        "mail" => Some("mail"),
         "notifications" => Some("notifications"),
+        "letters" => Some("letters"),
         "backups" => Some("backups"),
+        "access" => Some("access"),
         "bruteforce" => Some("bruteforce"),
         "cluster" => Some("cluster"),
-        "general" => Some("general"),
+        "raw" => Some("raw"),
+        // Card anchors of forms whose section is shared with other cards.
+        "alert-templates" => Some("alert-templates"),
+        "customer-letters" => Some("customer-letters"),
+        "sign-in" => Some("sign-in"),
+        "placement" => Some("placement"),
+        "test-nodes" => Some("test-nodes"),
+        "hardening" => Some("hardening"),
+        "preview-address" => Some("preview-address"),
+        "trash" => Some("trash"),
+        "audit-retention" => Some("audit-retention"),
+        // Retired tab ids, kept so a form rendered before the upgrade still
+        // lands. The page's LEGACY alias map resolves them to their new cards
+        // (system→updates, testnodes→preview-address, retention→trash).
+        // Remove after one release.
         "system" => Some("system"),
         "testnodes" => Some("testnodes"),
         "retention" => Some("retention"),
-        "raw" => Some("raw"),
         _ => None,
     }
 }
@@ -2083,25 +2126,8 @@ pub struct PanelProvisionForm {
     pub _csrf: String,
 }
 
-/// POST /settings/panel-provision — super_admin only. Binds the
-/// Hyperion control panel to a public hostname:
-///
-///   1. Validates hostname + DNS resolves to this box (unless
-///      `skip_dns_check` is on).
-///   2. Persists `cluster.panel_hostname` to agent.toml.
-///   3. Writes the panel's nginx vhost
-///      (`/etc/nginx/sites-enabled/hyperion-panel.conf`) with a
-///      self-signed cert so nginx will start even before ACME.
-///   4. Reloads nginx.
-///   5. Triggers a background ACME issuance via Let's Encrypt.
-///      Status `ok-cert-pending` means steps 1–4 succeeded and the
-///      cert will land within ~30s; flip the page or check
-///      /services for the new vhost.
-///
-/// Redirects back to /settings#cluster with a flash message
-/// containing the agent's reply (status + panel URL).
 /// GET /settings/panel-cert-status — tiny HTML fragment for the
-/// HTMX poll loop on /settings#cluster. The progress card polls
+/// HTMX poll loop on /settings#panel-domain. The progress card polls
 /// every 2 s while stage is "issuing" / "self-signed", and stops
 /// polling once it lands on "issued" / "failed". Output: a
 /// single <div> whose contents the page swaps in place.
@@ -2178,6 +2204,23 @@ fn html_escape(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
+/// POST /settings/panel-provision — super_admin only. Binds the
+/// Hyperion control panel to a public hostname:
+///
+///   1. Validates hostname + DNS resolves to this box (unless
+///      `skip_dns_check` is on).
+///   2. Persists `cluster.panel_hostname` to agent.toml.
+///   3. Writes the panel's nginx vhost
+///      (`/etc/nginx/sites-enabled/hyperion-panel.conf`) with a
+///      self-signed cert so nginx will start even before ACME.
+///   4. Reloads nginx.
+///   5. Triggers a background ACME issuance via Let's Encrypt.
+///      Status `ok-cert-pending` means steps 1–4 succeeded and the
+///      cert will land within ~30s; flip the page or check
+///      /services for the new vhost.
+///
+/// Redirects back to /settings#panel-domain with a flash message
+/// containing the agent's reply (status + panel URL).
 pub async fn post_panel_provision(
     State(state): State<SharedState>,
     ctx: AuthCtx,
@@ -2189,7 +2232,7 @@ pub async fn post_panel_provision(
     let hostname = form.hostname.trim().to_lowercase();
     if hostname.is_empty() {
         return Ok(
-            Redirect::to("/settings?flash_error=Panel+hostname+is+required#general")
+            Redirect::to("/settings?flash_error=Panel+hostname+is+required#panel-domain")
                 .into_response(),
         );
     }
@@ -2231,10 +2274,10 @@ pub async fn post_panel_provision(
                 format!(" — {}", panel_url)
             };
             let summary = format!("{status}: {first_line}{url_hint}");
-            format!("/settings?{key}={}#general", urlencode(&summary))
+            format!("/settings?{key}={}#panel-domain", urlencode(&summary))
         }
         RpcResponse::Error(e) => format!(
-            "/settings?flash_error={}#general",
+            "/settings?flash_error={}#panel-domain",
             urlencode(&e.to_string())
         ),
         _ => return Err(AppError::Internal("unexpected response".into())),
@@ -2597,11 +2640,12 @@ pub async fn post_mta_test(
     }
 }
 
-// ── Node-level wildcard certs for test nodes ──────────────────────────
+// ── Node-level preview wildcard certs ─────────────────────────────────
 //
-// A test node auto-creates `<name>.<base>` subdomains; rather than a
-// per-site ACME cert each time, the operator issues ONE `*.<base>`
-// wildcard here and every auto-subdomain reuses it. DNS-01 shows the TXT
+// Every site gets a `<name>.<base>` preview address (and a test node
+// auto-creates such subdomains); rather than a per-site ACME cert each
+// time, the operator issues ONE `*.<base>` wildcard per node and every
+// one of them reuses it. DNS-01 shows the TXT
 // records on an interstitial for the operator to publish — the server
 // holds no DNS credentials. The cert lives on the chosen node
 // (shared-nothing), so the flow is dispatched there.
@@ -2674,7 +2718,7 @@ pub struct NodeWildcardBeginForm {
     pub staging: Option<String>,
 }
 
-/// POST /settings/node-wildcard/begin — issue (or renew) a test node's
+/// POST /settings/node-wildcard/begin — issue (or renew) a node's preview
 /// `*.<base>` wildcard via the domain-only DNS-01 flow on that node.
 pub async fn post_node_wildcard_begin(
     State(state): State<SharedState>,
@@ -2688,7 +2732,7 @@ pub async fn post_node_wildcard_begin(
         Some(v) => v,
         None => {
             return Ok(Redirect::to(
-                "/settings?flash_error=node+is+not+a+test+node+or+has+no+wildcard+base#testnodes",
+                "/settings?flash_error=no+preview+base+for+this+node+%E2%80%94+set+the+template+in+Step+1+%C2%B7+Preview+address+first#preview-wildcard",
             )
             .into_response());
         }
@@ -2697,7 +2741,7 @@ pub async fn post_node_wildcard_begin(
         Ok(d) => d,
         Err(e) => {
             return Ok(Redirect::to(&format!(
-                "/settings?flash_error={}#testnodes",
+                "/settings?flash_error={}#preview-wildcard",
                 urlencode(&format!("invalid wildcard base {base}: {e}"))
             ))
             .into_response());
@@ -2718,7 +2762,7 @@ pub async fn post_node_wildcard_begin(
         RpcResponse::CertDns01BeginDomain {
             completed: true, ..
         } => Ok(Redirect::to(&format!(
-            "/settings?flash={}#testnodes",
+            "/settings?flash={}#preview-wildcard",
             urlencode(&format!("wildcard *.{base} issued on {}", form.node_id))
         ))
         .into_response()),
@@ -2740,7 +2784,7 @@ pub async fn post_node_wildcard_begin(
             Ok(Html(tpl.render()?).into_response())
         }
         RpcResponse::Error(e) => Ok(Redirect::to(&format!(
-            "/settings?flash_error={}#testnodes",
+            "/settings?flash_error={}#preview-wildcard",
             urlencode(&e.to_string())
         ))
         .into_response()),
@@ -2768,7 +2812,7 @@ pub async fn post_node_wildcard_finish(
         Ok(d) => d,
         Err(e) => {
             return Ok(Redirect::to(&format!(
-                "/settings?flash_error={}#cluster",
+                "/settings?flash_error={}#preview-wildcard",
                 urlencode(&format!("invalid wildcard base: {e}"))
             ))
             .into_response());
@@ -2782,7 +2826,7 @@ pub async fn post_node_wildcard_finish(
     .await?;
     match resp {
         RpcResponse::CertDns01FinishDomain(_) => Ok(Redirect::to(&format!(
-            "/settings?flash={}#testnodes",
+            "/settings?flash={}#preview-wildcard",
             urlencode(&format!(
                 "wildcard *.{} issued + applied to test sites",
                 form.base
@@ -2790,7 +2834,7 @@ pub async fn post_node_wildcard_finish(
         ))
         .into_response()),
         RpcResponse::Error(e) => Ok(Redirect::to(&format!(
-            "/settings?flash_error={}#cluster",
+            "/settings?flash_error={}#preview-wildcard",
             urlencode(&e.to_string())
         ))
         .into_response()),
@@ -2938,7 +2982,7 @@ pub async fn get_letters_export(
          # Language pack in use: {lang}\n\
          #\n\
          # Edit the values, then paste the whole file back into Settings →\n\
-         # Notifications → \"Letter language and wording\" → Replace all wording.\n\
+         # Customer letters → \"Letter language and wording\" → Replace all wording.\n\
          # A value left EXACTLY as the built-in wording is not stored as an\n\
          # override, so future improvements to that sentence still reach you;\n\
          # change one character and it becomes yours and stops tracking.\n\
@@ -3010,13 +3054,16 @@ pub async fn post_letters_import(
     Form(form): Form<LettersImportForm>,
 ) -> Result<Response, AppError> {
     if !ctx.is_super_admin() {
-        return Ok(Redirect::to("/settings?flash_error=super+admin+required").into_response());
+        return Ok(
+            Redirect::to("/settings?flash_error=super+admin+required#letter-wording")
+                .into_response(),
+        );
     }
     let doc: toml_edit::DocumentMut = match form.toml.parse() {
         Ok(d) => d,
         Err(e) => {
             return Ok(Redirect::to(&format!(
-                "/settings?flash_error={}#notifications",
+                "/settings?flash_error={}#letter-wording",
                 urlencode(&format!("that is not valid TOML: {e}"))
             ))
             .into_response())
@@ -3072,7 +3119,7 @@ pub async fn post_letters_import(
     }
     if let Some(bad) = bad_lang {
         return Ok(Redirect::to(&format!(
-            "/settings?flash_error={}#notifications",
+            "/settings?flash_error={}#letter-wording",
             urlencode(&format!(
                 "lang = \"{bad}\" is not a language this version has — the packs are \
                  English (en) and Czech (cs). Nothing was changed."
@@ -3159,7 +3206,7 @@ pub async fn post_letters_import(
             )
         };
         return Ok(Redirect::to(&format!(
-            "/settings?flash_error={}#notifications",
+            "/settings?flash_error={}#letter-wording",
             urlencode(&msg)
         ))
         .into_response());
@@ -3176,7 +3223,7 @@ pub async fn post_letters_import(
     .map_err(AppError::from)?;
     if let RpcResponse::Error(e) = resp {
         return Ok(Redirect::to(&format!(
-            "/settings?flash_error={}#notifications",
+            "/settings?flash_error={}#letter-wording",
             urlencode(&e.to_string())
         ))
         .into_response());
@@ -3216,7 +3263,7 @@ pub async fn post_letters_import(
         ));
     }
     Ok(Redirect::to(&format!(
-        "/settings?flash={}#notifications",
+        "/settings?flash={}#letter-wording",
         urlencode(&msg)
     ))
     .into_response())
@@ -3739,7 +3786,7 @@ from_address = "ops@example.cz"
     }
 
     // ============================================================
-    //  [fail2ban] section → Brute force tab
+    //  [fail2ban] section → Bans & blocking tab
     // ============================================================
 
     /// No section at all is the common case on an install that never
@@ -3789,5 +3836,279 @@ from_address = "ops@example.cz"
     #[test]
     fn unparseable_toml_yields_no_view() {
         assert!(super::parse_fail2ban_section("[fail2ban\nenabled = ").is_none());
+    }
+
+    // ============================================================
+    //  Save redirects: section_to_tab / sanitize_return_tab / card_label
+    // ============================================================
+
+    use super::{card_label, sanitize_return_tab, section_label, section_to_tab};
+
+    const SETTINGS_HTML: &str = include_str!("../../templates/settings.html");
+
+    /// Every `[section]` a /settings/config form can post, plus two that no
+    /// form posts, which must still land somewhere visible.
+    const SECTIONS: &[&str] = &[
+        "email",
+        "acme",
+        "update",
+        "slack",
+        "notifications",
+        "letters",
+        "performance",
+        "protection",
+        "backup_remote",
+        "backup",
+        "backup_retention",
+        "snapshots",
+        "fail2ban",
+        "cluster",
+        "",
+        "no-such-section",
+    ];
+
+    /// Tab ids of the strip, in order.
+    const TAB_IDS: &[&str] = &[
+        "general",
+        "tls",
+        "mail",
+        "notifications",
+        "letters",
+        "backups",
+        "access",
+        "bruteforce",
+        "cluster",
+        "raw",
+    ];
+
+    /// Card anchors the page's resolve() can open.
+    const CARD_ANCHORS: &[&str] = &[
+        "panel-domain",
+        "updates",
+        "acme",
+        "preview-address",
+        "preview-wildcard",
+        "https-howto",
+        "smtp-relay",
+        "mail-test",
+        "local-mta",
+        "mail-howto",
+        "slack",
+        "alert-recipients",
+        "alert-templates",
+        "customer-letters",
+        "letter-wording",
+        "performance",
+        "email-branding",
+        "protection-mode",
+        "offsite-ftp",
+        "offsite-s3",
+        "local-copies",
+        "backup-retention",
+        "snapshot-retention",
+        "trash",
+        "offsite-backfill",
+        "sign-in",
+        "users-roles",
+        "api",
+        "api-keys",
+        "audit-retention",
+        "bruteforce-scanner",
+        "geoip",
+        "placement",
+        "test-nodes",
+        "hardening",
+        "multinode-tips",
+        "raw-toml",
+    ];
+
+    /// Retired tab ids. Still accepted from a pre-upgrade form, but a form
+    /// on the current page must not send one.
+    const RETIRED: &[&str] = &["system", "testnodes", "retention"];
+
+    /// Every `_return_tab` value a form in settings.html sends. A plain string
+    /// scan: find `name="_return_tab"`, take the enclosing tag, read its
+    /// `value=` (quoted or bare).
+    fn template_return_tabs() -> Vec<String> {
+        let mut out = Vec::new();
+        for needle in [
+            "name=\"_return_tab\"",
+            "name='_return_tab'",
+            "name=_return_tab",
+        ] {
+            let mut from = 0;
+            while let Some(i) = SETTINGS_HTML[from..].find(needle) {
+                let at = from + i;
+                from = at + needle.len();
+                let start = SETTINGS_HTML[..at].rfind('<').expect("inside a tag");
+                let end = at + SETTINGS_HTML[at..].find('>').expect("tag closes");
+                let tag = &SETTINGS_HTML[start..end];
+                let v = tag
+                    .find("value=")
+                    .map(|p| &tag[p + "value=".len()..])
+                    .unwrap_or_else(|| panic!("_return_tab input without a value: {tag}"));
+                let value = match v.chars().next() {
+                    Some(q @ ('"' | '\'')) => v[1..].split(q).next().unwrap_or(""),
+                    _ => v
+                        .split(|c: char| c.is_whitespace() || c == '/')
+                        .next()
+                        .unwrap_or(""),
+                };
+                out.push(value.to_string());
+            }
+        }
+        out
+    }
+
+    /// Whether the page has something resolve() can open for `anchor`: a tab
+    /// in the strip, or an element with that id.
+    fn template_has_anchor(anchor: &str) -> bool {
+        if SETTINGS_HTML.contains(&format!("data-tab=\"{anchor}\"")) {
+            return true;
+        }
+        // `id="x"` as its own attribute, not the tail of `data-id="x"`.
+        [format!("id=\"{anchor}\""), format!("id='{anchor}'")]
+            .iter()
+            .any(|needle| {
+                SETTINGS_HTML.match_indices(needle.as_str()).any(|(at, _)| {
+                    SETTINGS_HTML[..at]
+                        .chars()
+                        .next_back()
+                        .is_some_and(char::is_whitespace)
+                })
+            })
+    }
+
+    #[test]
+    fn every_section_redirects_to_a_known_anchor() {
+        for s in SECTIONS {
+            let t = section_to_tab(s);
+            assert!(
+                sanitize_return_tab(t).is_some()
+                    || TAB_IDS.contains(&t)
+                    || CARD_ANCHORS.contains(&t),
+                "section [{s}] redirects to #{t}, which is neither a tab nor a known card"
+            );
+            assert!(
+                !RETIRED.contains(&t),
+                "section [{s}] redirects to the retired #{t}"
+            );
+        }
+        // Unknown input lands on the default tab, which is always visible.
+        assert_eq!(section_to_tab("no-such-section"), "general");
+        assert_eq!(section_to_tab(""), "general");
+        // [cluster] is written from four tabs; its fallback must not be the
+        // cluster-only tab a standalone install hides.
+        assert_eq!(section_to_tab("cluster"), "general");
+    }
+
+    #[test]
+    fn every_section_anchor_exists_on_the_page() {
+        for s in SECTIONS {
+            let t = section_to_tab(s);
+            assert!(
+                template_has_anchor(t),
+                "section [{s}] redirects to #{t}, but settings.html has no tab or id for it"
+            );
+        }
+    }
+
+    #[test]
+    fn sanitize_return_tab_accepts_every_template_value() {
+        let values = template_return_tabs();
+        assert!(
+            !values.is_empty(),
+            "the scan found no _return_tab inputs in settings.html"
+        );
+        for v in &values {
+            assert_eq!(
+                sanitize_return_tab(v),
+                Some(v.as_str()),
+                "settings.html sends _return_tab={v:?}, which the handler drops"
+            );
+            assert!(
+                !RETIRED.contains(&v.as_str()),
+                "settings.html still sends the retired _return_tab={v:?}"
+            );
+            assert!(
+                template_has_anchor(v),
+                "_return_tab={v:?} has no tab or card with that id on the page"
+            );
+        }
+    }
+
+    #[test]
+    fn sanitize_return_tab_is_identity_on_known_values() {
+        for v in TAB_IDS.iter().chain(RETIRED) {
+            assert_eq!(sanitize_return_tab(v), Some(*v), "{v}");
+        }
+        for v in [
+            "alert-templates",
+            "customer-letters",
+            "sign-in",
+            "placement",
+            "test-nodes",
+            "hardening",
+            "preview-address",
+            "trash",
+            "audit-retention",
+        ] {
+            assert_eq!(sanitize_return_tab(v), Some(v), "{v}");
+        }
+        assert_eq!(sanitize_return_tab("  trash \n"), Some("trash"));
+    }
+
+    #[test]
+    fn sanitize_return_tab_rejects_junk() {
+        for junk in [
+            "",
+            " ",
+            "evil",
+            "GENERAL",
+            "tab-general",
+            "general#x",
+            "trash&flash=pwned",
+            "\"><script>alert(1)</script>",
+            "https://evil.example/",
+            "../../login",
+            "sign in",
+            "cluster\r\nLocation: https://evil.example",
+        ] {
+            assert_eq!(sanitize_return_tab(junk), None, "{junk:?} must be dropped");
+        }
+    }
+
+    /// Each card that shares its section with other cards names ITSELF in the
+    /// save flash; everything else falls back to the section's label.
+    #[test]
+    fn card_label_names_shared_section_cards() {
+        for (anchor, label) in [
+            ("sign-in", "Sign-in security"),
+            ("hardening", "Cluster channel hardening"),
+            ("placement", "Cluster placement"),
+            ("test-nodes", "Test nodes"),
+            ("preview-address", "Preview address"),
+            ("trash", "Trash settings"),
+            ("audit-retention", "Audit log retention"),
+            ("alert-templates", "Alert wording"),
+            ("customer-letters", "Care report & expiry warning"),
+        ] {
+            assert_eq!(card_label(anchor), Some(label), "{anchor}");
+            assert!(
+                sanitize_return_tab(anchor).is_some(),
+                "{anchor} has a label but the handler would drop it"
+            );
+        }
+        for v in TAB_IDS.iter().chain(RETIRED) {
+            assert_eq!(card_label(v), None, "{v}");
+        }
+        // The flash wiring post_config uses: card first, section as fallback.
+        let flash = |rt: Option<&'static str>, section: &str| {
+            rt.and_then(card_label)
+                .unwrap_or_else(|| section_label(section))
+        };
+        assert_eq!(flash(Some("sign-in"), "cluster"), "Sign-in security");
+        assert_eq!(flash(Some("general"), "cluster"), "Cluster settings");
+        assert_eq!(flash(None, "acme"), "Let's Encrypt contact");
     }
 }

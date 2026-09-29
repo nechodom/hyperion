@@ -87,7 +87,7 @@
         </option>
         {# Master option only when [cluster] master_accepts_hostings
            is true (default). Operator can turn it off in Settings →
-           Cluster to make the master a control-plane-only node. #}
+           Cluster → Cluster placement to make the master a control-plane-only node. #}
         {% if master_accepts_hostings %}
         <option value="local"
                 data-label="master (this node)"
@@ -107,7 +107,7 @@
       </select>
       {% if !master_accepts_hostings %}
       <p class="text-soft small" style="margin:0.3rem 0 0">
-        <strong>The master is in control-plane-only mode.</strong> Hostings run on worker nodes only. Change this in <a href="/settings#cluster">Settings → Control plane</a>.
+        <strong>The master is in control-plane-only mode.</strong> Hostings run on worker nodes only. Change this in <a href="/settings#placement">Settings → Cluster → Cluster placement</a>.
       </p>
       {% endif %}
       <p class="text-soft small" style="margin:0.3rem 0 0">
@@ -291,8 +291,8 @@ Themes:
              value="" placeholder="blog" autocomplete="off"
              pattern="[a-z0-9][a-z0-9-]{0,30}[a-z0-9]?" maxlength="32">
       <p class="text-soft small" style="margin:0.3rem 0 0">
-        The full domain is built from the test-node template (Settings →
-        Cluster → Test nodes).
+        The full domain is built from the preview address template (Settings →
+        HTTPS &amp; previews → Preview address).
         <strong>Preview:</strong> <code id="test_domain_preview" style="color:var(--text-soft)">—</code>
       </p>
     </div>

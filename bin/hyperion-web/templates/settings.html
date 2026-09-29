@@ -7,7 +7,7 @@
     <div class="subtitle">
       Live view of <code>/etc/hyperion/agent.toml</code> (passwords and tokens hidden).
       Edits are written atomically with a <code>.bak</code> kept alongside.
-      The running agent applies them after a restart.
+      Saving a card restarts the agent for you (about 5 s).
     </div>
   </div>
 </div>
@@ -49,6 +49,7 @@
     <div class="kpi-meta">
       running <code>{{ update_current_short }}</code>
       {% if !update_status.latest_sha.is_empty() %}· upstream <code>{{ update_latest_short }}</code>{% endif %}
+      · <a href="#updates">auto-update</a>
     </div>
   </div>
   <div class="kpi-card disk">
@@ -61,78 +62,66 @@
   <div class="kpi-card bw">
     <div class="kpi-label">ACME contact</div>
     <div class="kpi-value" style="font-size:1.05rem">{{ config.acme.contact_email }}</div>
-    <div class="kpi-meta">where Let's Encrypt sends expiry notices</div>
+    <div class="kpi-meta">where Let's Encrypt sends expiry notices · <a href="#acme">change</a></div>
   </div>
 </div>
 
 {# Tabs — same pattern as the hosting detail page. Hash routing
-   so deep links like /settings#mail land directly on a section. #}
+   so deep links like /settings#mail land directly on a section, and a
+   card anchor (/settings#geoip) opens the tab that holds the card. #}
 <nav class="tabs" role="tablist">
-  <a class="tab" data-tab="general" href="#general" role="tab" title="The panel’s own domain and sign-in security">
+  <a class="tab" data-tab="general" href="#general" role="tab" title="Where the panel itself is reached, and whether Hyperion updates itself">
     <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.01a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.01a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.01a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-    General
+    Panel &amp; updates
   </a>
-  <a class="tab" data-tab="mail" href="#mail" role="tab">
+  <a class="tab" data-tab="tls" href="#tls" role="tab" title="The Let's Encrypt contact, preview addresses and their wildcard certificates, for every site, standalone included">
+    <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+    HTTPS &amp; previews
+  </a>
+  <a class="tab" data-tab="mail" href="#mail" role="tab" title="Per-node outbound mail: relay, sender, admin alert recipients, test send, postfix health">
     <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
     Mail
     {% if config.email.enabled %}<span class="tab-badge" style="background:var(--success);color:white">●</span>
     {% else %}<span class="tab-badge" style="background:var(--surface-2)">off</span>{% endif %}
   </a>
-  <a class="tab" data-tab="notifications" href="#notifications" role="tab">
+  <a class="tab" data-tab="notifications" href="#notifications" role="tab" title="Operator alerts: Slack, who else receives them, and how they are worded">
     <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
-    Notifications
+    Alerts
     {% if config.slack.default_webhook_set %}<span class="tab-badge" style="background:var(--success);color:white">●</span>
     {% else %}<span class="tab-badge" style="background:var(--surface-2)">off</span>{% endif %}
   </a>
-  <a class="tab" data-tab="tls" href="#tls" role="tab">
-    <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
-    SSL / TLS certs
+  <a class="tab" data-tab="letters" href="#letters" role="tab" title="What site owners receive: care report, expiry warning, language, wording, performance data, logo">
+    <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></svg>
+    Customer letters
   </a>
-  <a class="tab" data-tab="backups" href="#backups" role="tab">
+  <a class="tab" data-tab="backups" href="#backups" role="tab" title="What is kept, where off-site copies go, and how long archives, snapshots and deleted hostings are kept">
     <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-    Backups
+    Backups &amp; trash
     {% if config.backup_remote.enabled %}<span class="tab-badge" style="background:var(--success);color:white">●</span>
     {% else %}<span class="tab-badge" style="background:var(--surface-2)">local</span>{% endif %}
   </a>
-  <a class="tab" data-tab="bruteforce" href="#bruteforce" role="tab" title="How many failed logins earn an IP a firewall ban, and for how long">
+  <a class="tab" data-tab="access" href="#access" role="tab" title="Who can sign in (2FA rule, users, roles), API keys for scripts, and how long the audit log is kept">
+    <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>
+    Access &amp; API
+  </a>
+  <a class="tab" data-tab="bruteforce" href="#bruteforce" role="tab" title="How many failed logins earn an IP a firewall ban and for how long, and the GeoIP database behind country blocking">
     <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-    Brute force
+    Bans &amp; blocking
     {% if let Some(f) = fail2ban %}
-      {% if f.cfg.enabled %}<span class="tab-badge" style="background:var(--success);color:white">●</span>
-      {% else %}<span class="tab-badge" style="background:var(--surface-2)">off</span>{% endif %}
+      {% if f.cfg.enabled %}<span class="tab-badge" style="background:var(--success);color:white" title="Brute-force scanner on/off">●</span>
+      {% else %}<span class="tab-badge" style="background:var(--surface-2)" title="Brute-force scanner on/off">off</span>{% endif %}
     {% endif %}
   </a>
-  <a class="tab" data-tab="retention" href="#retention" role="tab" title="How long trashed hostings and audit-log entries are kept">
-    <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-    Data retention
-  </a>
-  <a class="tab" data-tab="system" href="#system" role="tab" title="Updates and the GeoIP database — settings about the BOX, not about a site">
-    <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg>
-    System
-  </a>
-  <a class="tab" data-tab="cluster" href="#cluster" role="tab" data-cluster-only title="Panel domain, hosting placement, and security policy">
+  <a class="tab" data-tab="cluster" href="#cluster" role="tab" data-cluster-only title="Worker-node settings: placement, test nodes, master↔worker channel hardening">
     <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>
-    Control plane
+    Cluster
     {# The "every node signs, enforcement still off" nag. The warning
-       itself lives in the Security card, and nobody opens this tab
-       unprompted — without the badge the downgrade branch stays open
-       forever because no one ever looks. #}
+       itself lives in the Cluster channel hardening card on this tab, and
+       nobody opens this tab unprompted — without the badge the downgrade
+       branch stays open forever because no one ever looks. #}
     {% if resp_auth_total > 0 && resp_auth_pending.is_empty() && !config.cluster.enforce_response_auth %}<span class="tab-badge" style="background:var(--warn);color:white" title="Every node can sign its responses but enforcement is still off">!</span>{% endif %}
   </a>
-  {# NOT data-cluster-only: preview subdomains are what this tab is mostly
-     for and they apply to EVERY site on the node, production included. On a
-     standalone box the cluster-only rule hid the tab entirely, so links that
-     told the operator to "set it up in Settings" pointed at a tab that was
-     not there. The test-node section inside stays cluster-gated. #}
-  <a class="tab" data-tab="testnodes" href="#testnodes" role="tab">
-    <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
-    Previews &amp; test nodes
-  </a>
-  <a class="tab" data-tab="api" href="#api" role="tab" title="Bearer API keys for the remote management API">
-    <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>
-    API keys
-  </a>
-  <a class="tab" data-tab="raw" href="#raw" role="tab" style="margin-left:auto">
+  <a class="tab" data-tab="raw" href="#raw" role="tab" style="margin-left:auto" title="The master's agent.toml as it is on disk, secrets masked (read-only)">
     <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
     Raw TOML
   </a>
@@ -141,11 +130,322 @@
 <div class="tab-panels">
 
 {# ==========================================================
-   MAIL — SMTP relay + test + how-it-works panel.
+   PANEL & UPDATES — the panel's own domain (its certificate is
+   issued live on that card) and Hyperion's self-update switch.
+   ========================================================== #}
+<div class="tab-panel" id="tab-general">
+  <p class="text-soft small" style="margin:0 0 0.9rem;line-height:1.55">The panel itself: the hostname it answers on (its own certificate is issued live on this card) and whether Hyperion keeps itself up to date.</p>
+  <div class="card" id="panel-domain">
+    <h2>
+      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+      Panel domain
+    </h2>
+    {% if !config.cluster.panel_hostname.is_empty() %}
+    <p class="text-soft small" style="margin:0 0 0.6rem;line-height:1.55">
+      The control panel is reachable at
+      <strong><a href="https://{{ config.cluster.panel_hostname }}:8443" target="_blank" rel="noopener">https://{{ config.cluster.panel_hostname }}:8443</a></strong>
+      (also on port 443 if you front the panel with nginx). To move it, save the form below with a new hostname; the existing vhost stays in place until the next nginx reload after a different hostname lands.
+    </p>
+    <p class="text-soft small" style="margin:0 0 0.6rem;line-height:1.55;padding:0.55rem 0.75rem;background:color-mix(in oklab,var(--success) 8%,transparent);border-left:3px solid var(--success);border-radius:4px">
+      <strong>🔒 Raw-IP access is disabled automatically.</strong> A request
+      that reaches the panel at <code>https://&lt;ip&gt;:8443</code>
+      gets a 308 redirect to <code>https://{{ config.cluster.panel_hostname }}:8443</code>.
+      Once set, the hostname is required. Loopback
+      (<code>localhost</code> / <code>127.0.0.1</code>) stays open
+      for local health probes and SSH-tunnel debugging.
+    </p>
+    {% else %}
+    <p class="text-soft small" style="margin:0 0 0.6rem;line-height:1.55">
+      Right now the panel is reachable only by raw IP and port (for example <code>https://1.2.3.4:8443</code>) with a self-signed certificate. Bind it to a real hostname below: the agent writes the nginx vhost, generates a temporary self-signed certificate so nginx starts, then triggers a Let's Encrypt issuance in the background.
+    </p>
+    {% endif %}
+    <form method="post" action="/settings/panel-provision" autocomplete="off">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+
+      <div class="field">
+        <label for="panel_hostname">Panel hostname <span class="hint">FQDN, e.g. panel.example.com</span></label>
+        <input id="panel_hostname" name="hostname" type="text"
+               autocomplete="off" autocapitalize="none" spellcheck="false"
+               value="{{ config.cluster.panel_hostname }}"
+               placeholder="panel.example.com"
+               pattern="[a-zA-Z0-9.\-]+"
+               required>
+        <p class="text-soft small" style="margin:0.3rem 0 0;line-height:1.55">
+          The A / AAAA record for this name <strong>must point to this server</strong>
+          before you submit (the agent runs a DNS preflight unless you tick the
+          override below). After provisioning, your URL becomes
+          <code>https://&lt;hostname&gt;:8443</code>. Bookmark it: the
+          old IP-based URL keeps working but won't have a trusted certificate.
+        </p>
+      </div>
+
+      <label class="field-checkbox" style="margin:0.4rem 0 0.6rem">
+        <input type="checkbox" name="skip_dns_check" value="on">
+        Skip DNS preflight <span class="text-soft small">— use when the record has propagated but a cache is stale</span>
+      </label>
+
+      <button type="submit" class="btn primary">Provision panel hostname</button>
+      <p class="text-soft small" style="margin:0.6rem 0 0;line-height:1.55">
+        <strong>What happens:</strong>
+        (1) DNS preflight,
+        (2) <code>cluster.panel_hostname</code> is saved to agent.toml,
+        (3) the nginx vhost lands at <code>/etc/nginx/sites-enabled/hyperion-panel.conf</code>
+        with a self-signed certificate so the reload doesn't fail,
+        (4) nginx <code>-t</code> and reload,
+        (5) Let's Encrypt issuance starts in the background — the
+        live progress bar below tracks it.
+      </p>
+    </form>
+
+    {# ─── Live ACME progress card ─────────────────────────────
+       Polls /settings/panel-cert-status every 2s while issuance
+       is in progress. Stops polling itself once stage flips to
+       "issued" or "failed". Initially loads once on page mount —
+       if no panel hostname is set yet the endpoint returns "not
+       in progress" and the card stays compact. #}
+    <div style="margin-top:1rem;padding:0.85rem 1rem;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm)">
+      <div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.4rem">
+        <svg class="h-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+        <strong style="font-size:0.92rem">Live certificate issuance</strong>
+      </div>
+      <div id="panel-cert-status"
+           hx-get="/settings/panel-cert-status"
+           hx-trigger="load"
+           hx-swap="innerHTML">
+        <div class="text-soft small" style="padding:0.4rem 0">Loading status…</div>
+      </div>
+    </div>
+  </div>
+
+  {# ───── Automatic updates. Off by default and deliberately so. ───── #}
+  <div class="card" id="updates">
+    <div class="row" style="align-items:center;gap:0.6rem;margin-bottom:0.4rem">
+      <h2 style="margin:0">
+        <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 4v6h-6"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+        Automatic updates
+      </h2>
+    </div>
+    <p class="text-soft small" style="margin:0 0 0.9rem;line-height:1.55">
+      When on, this node{% if !nodes.is_empty() %} (the master; workers are updated from
+      <a href="/install">Nodes</a>){% endif %} checks hourly for a new Hyperion release and installs
+      it <strong>in safe mode</strong>: the running binaries are snapshotted
+      first, and restored automatically if the node does not come back healthy.
+      Automatic and irreversible is a combination worth avoiding — you are
+      asleep exactly when this fires.
+      <br><br>
+      System packages are <strong>not</strong> touched: an unattended
+      <code>apt dist-upgrade</code> has a far bigger blast radius than a
+      Hyperion update, and is not what this promises. Run that from
+      <a href="/install">Nodes</a> when you are watching.
+      <br><br>
+      Note that a rollback restores <strong>binaries, not data</strong>.
+      Migrations in this project are additive, so an older binary starts
+      against a newer schema — which is the case this is built to survive.
+    </p>
+    <form method="post" action="/settings/config" class="row" style="gap:0.6rem;align-items:center">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="section" value="update">
+      <input type="hidden" name="_checkboxes" value="auto">
+      <label class="field-checkbox" style="margin:0">
+        <input type="checkbox" name="auto" value="true"
+               {% if config.update_auto %}checked{% endif %}>
+        <span><strong>Update this node automatically</strong></span>
+      </label>
+      <button class="btn primary" type="submit">Save</button>
+    </form>
+  </div>
+</div>
+
+{# ==========================================================
+   HTTPS & PREVIEWS — the Let's Encrypt contact, the preview
+   address template and its per-node wildcard certificates.
+   Not cluster-only: previews apply to EVERY site, standalone
+   included. Test nodes themselves live on the Cluster tab.
+   ========================================================== #}
+<div class="tab-panel" id="tab-tls">
+  <p class="text-soft small" style="margin:0 0 0.9rem;line-height:1.55">How sites get trusted certificates, and how to open any site at a preview address with valid TLS before its DNS points here, on this server and on every node (the panel’s own certificate is on <a href="#panel-domain">Panel &amp; updates → Panel domain</a>).</p>
+  <div class="card" id="acme">
+    <h2>
+      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+      Let's Encrypt contact
+    </h2>
+    <form method="post" action="/settings/config" autocomplete="off">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="section" value="acme">
+      <div class="field">
+        <label for="acme_email">Contact email <span class="hint">Let's Encrypt sends expiry warnings here, per-account</span></label>
+        <input id="acme_email" name="contact_email" type="email" required
+               value="{{ config.acme.contact_email|e }}"
+               style="width:100%">
+      </div>
+      <p class="text-soft small" style="margin:0 0 0.8rem">
+        {#- The ACME directory used to be printed from a config field that
+            nothing populated, so it always rendered empty. Issuance picks the
+            endpoint itself — production, or staging when the operator asks
+            for it per-issuance — so state that instead of showing a box that
+            can only ever be blank. -#}
+        Challenge dir: <code>{{ config.acme.challenge_dir }}</code> · ACME directory: <code>Let's Encrypt production</code>{% if !nodes.is_empty() %}<br>Saved on this master only.{% endif %}
+      </p>
+      <button type="submit" class="btn primary">Save contact</button>
+    </form>
+  </div>
+
+  {# Step 1 · Preview address. Split out of the old "Mark test nodes & set
+     the auto-domain" card: the template is what turns preview URLs on for
+     EVERY site, so it lives on a tab standalone installs can see. The form
+     posts only test_domain_template and declares no _checkboxes, so
+     post_config's per-field [cluster] merge leaves test_node_ids and
+     test_wp_no_index (Cluster → Test nodes) untouched. #}
+  <div class="card" id="preview-address">
+    <h2 style="font-size:0.95rem;margin:0 0 0.6rem">
+      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+      Step 1 · Preview address
+    </h2>
+    {# Examples are built from THIS server's hostname. They used to be a
+       hardcoded domain from the author's own install, which read as an
+       instruction to type someone else's domain in. #}
+    <p class="text-soft small" style="margin:0 0 0.8rem;padding:0.55rem 0.75rem;background:var(--surface-1);border-radius:6px">
+      <strong>This is what turns on preview URLs — for EVERY site on the node, production
+      included, not just test nodes.</strong> The part after <code>{name}</code> is the
+      wildcard base: with <code>{name}.{{ config.hostname }}</code>, every hosting gets an
+      internal address like <code>mysite.{{ config.hostname }}</code> once you issue the
+      <code>*.{{ config.hostname }}</code> certificate in Step 2. A <em>Preview site</em> button
+      then appears on each site's detail page.
+    </p>
+    <form method="post" action="/settings/config" autocomplete="off">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="section" value="cluster">
+      <input type="hidden" name="_return_tab" value="preview-address">
+
+      <div class="field">
+        <label for="test_domain_template">Preview address template <span class="hint">the base for every site's preview subdomain</span></label>
+        <input id="test_domain_template" name="test_domain_template" type="text" autocomplete="off"
+               value="{{ config.cluster.test_domain_template }}"
+               placeholder="e.g. {name}.{{ config.hostname }}">
+        <p class="text-soft small" style="margin:0.3rem 0 0">
+          Tokens: <code>{name}</code> — the site's first label (or the name typed in the wizard on
+          a test node); <code>{node}</code> — the node ID. Result is lower-cased.
+          <span data-cluster-only>On a test node this template also builds the site's whole
+          domain — mark test nodes under <a href="#test-nodes">Cluster → Test nodes</a>.</span>
+        </p>
+        <p class="text-soft small" style="margin:0.5rem 0 0;padding:0.55rem 0.75rem;background:var(--surface-1);border-radius:6px">
+          <strong>Example.</strong> With template
+          <code>{name}.{node}.staging.example.com</code>, an
+          operator who types <code>blog</code> in the wizard
+          on node <code>lab-01</code>
+          gets the domain <code>blog.lab-01.staging.example.com</code>.
+          <br>
+          Add a wildcard DNS record (for example
+          <code>*.staging.example.com</code> → your test-node IP)
+          so the auto-generated subdomains resolve.
+        </p>
+      </div>
+
+      <button type="submit" class="btn primary">Save preview address</button>
+    </form>
+  </div>
+
+  {# Node-level wildcard certs — one *.<base> per node, reused by every
+     preview address on it (and every auto-subdomain on a test node).
+     Issued here, not per site. #}
+  <div class="card" id="preview-wildcard" style="margin-top:1rem">
+    <h2 style="font-size:0.95rem;margin:0 0 0.35rem">Step 2 · Preview wildcard certificates</h2>
+    <p class="text-soft small" style="margin:0 0 0.5rem">
+      Works on <strong>any node, this server included</strong> — previews are not tied to
+      test nodes. Once the wildcard exists, every site on the node gets an
+      internal address under it (a <em>Preview</em> link appears on the site's detail page):
+      production sites keep their real domain, and a site whose DNS is not switched yet is
+      reachable immediately. Needs a DNS record <code>*.&lt;base&gt;</code> → this node's IP
+      (grey-cloud it in Cloudflare — the universal certificate does not cover two-level
+      subdomains).
+    </p>
+    <p class="text-soft small" style="margin:0 0 0.8rem">
+      Issue one <code>*.&lt;base&gt;</code> certificate per node; every preview address on it (and
+      every auto-subdomain on a test node) reuses it — instant HTTPS, with no per-site Let's
+      Encrypt rate-limit hits.
+      A wildcard has to be renewed by hand roughly every 60 days — it can only be validated
+      over DNS, and this server holds no DNS credentials. The <strong>Status</strong> column below shows
+      whether each wildcard is live and when it expires — after a manual validation, reload this
+      page and the row turns green. The full cert list is on the
+      <a href="/certs">Certificates page</a>.
+    </p>
+    {% if wildcard_nodes.is_empty() %}
+      <p class="text-soft small empty" style="margin:0">
+        No preview base yet. Set the template in Step 1 · Preview address first.
+      </p>
+    {% else %}
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Node</th><th>Wildcard</th><th>Status</th><th class="right">Issue / renew</th></tr></thead>
+          <tbody>
+          {% for n in wildcard_nodes %}
+            <tr>
+              <td>
+                <strong>{{ n.label }}</strong><br>
+                <span class="text-soft small"><code>{{ n.node_id }}</code></span>
+              </td>
+              <td><code style="word-break:break-all">{{ n.wildcard }}</code></td>
+              <td>
+                {% if n.status == "ok" %}
+                  <span class="pill ok">valid</span>
+                  <span class="text-soft small" style="display:block;margin-top:0.2rem">expires {{ n.expires }} · {{ n.days_left }} d</span>
+                {% else if n.status == "warning" %}
+                  <span class="pill warn">valid · renews soon</span>
+                  <span class="text-soft small" style="display:block;margin-top:0.2rem">expires {{ n.expires }} · {{ n.days_left }} d</span>
+                {% else if n.status == "critical" %}
+                  <span class="pill err">expires in {{ n.days_left }} d</span>
+                  <span class="text-soft small" style="display:block;margin-top:0.2rem">{{ n.expires }} — renew now</span>
+                {% else if n.status == "expired" %}
+                  <span class="pill err">expired</span>
+                  <span class="text-soft small" style="display:block;margin-top:0.2rem">{{ n.expires }} — re-issue</span>
+                {% else if n.status == "missing" %}
+                  <span class="pill warn">not issued yet</span>
+                {% else %}
+                  <span class="text-soft small">unknown (node unreachable)</span>
+                {% endif %}
+              </td>
+              <td class="right">
+                <form method="post" action="/settings/node-wildcard/begin"
+                      style="display:inline-flex;gap:0.4rem;flex-wrap:wrap;justify-content:flex-end">
+                  <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+                  <input type="hidden" name="node_id" value="{{ n.node_id }}">
+                  <button class="btn small primary" type="submit" name="provider" value="manual"
+                          title="Show the TXT records to publish, then validate">Issue wildcard</button>
+                </form>
+              </td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <p class="text-soft small" style="margin:0.6rem 0 0">
+        Requires control of the base domain's DNS: the flow shows you the TXT records to publish,
+        then validates them. Keep that browser tab open until you finish — starting over generates
+        different values and invalidates the ones you just published.
+      </p>
+    {% endif %}
+  </div>
+
+  <div class="card muted" id="https-howto" style="margin-top:1rem">
+    <h2 style="font-size:0.95rem;margin:0 0 0.6rem">How HTTPS issuing works</h2>
+    <ul class="text-soft small" style="margin:0;padding-left:1.2rem;line-height:1.7">
+      <li>Each hosting starts with a <strong>self-signed certificate</strong> right after provisioning — enough for nginx to come up.</li>
+      <li>Once <code>http://&lt;domain&gt;</code> resolves to this server, you can issue a real <strong>Let's Encrypt certificate</strong> from the hosting's detail page → SSL tab.</li>
+      <li>Site certificates use <strong>HTTP-01</strong> (a file under <code>{{ config.acme.challenge_dir }}/&lt;token&gt;</code>); wildcards (the preview wildcard above, or a per-site wildcard from the hosting's SSL tab) use <strong>DNS-01</strong>, where you publish a TXT record by hand.</li>
+      <li>Certificates auto-renew 30 days before expiry; failures alert via <a href="#notifications">Alerts</a>.</li>
+      <li>A per-hosting contact email, set on the hosting detail page, overrides the Let's Encrypt contact above.</li>
+      <li>The panel's own certificate is issued from <a href="#panel-domain">Panel &amp; updates → Panel domain</a>.</li>
+    </ul>
+  </div>
+</div>
+
+{# ==========================================================
+   MAIL — per node (Configure node): SMTP relay + administrator alert
+   recipients, test send, local postfix health, how-it-works.
    ========================================================== #}
 <div class="tab-panel" id="tab-mail">
-  <p class="text-soft small" style="margin:0 0 0.9rem;line-height:1.55">How this node sends e-mail: through your SMTP relay when one is set, otherwise via the local postfix. The test send below is the fastest way to prove the path works.</p>
-  <div class="card">
+  <p class="text-soft small" style="margin:0 0 0.9rem;line-height:1.55">How the node picked in Configure node sends e-mail (its SMTP relay or the local postfix), who receives its administrator alerts, and a test send to prove the path; every message sent is listed in the <a href="/emails">Email log</a>.</p>
+  <div class="card" id="smtp-relay">
     {# Per-node: each node has its own [email] in agent.toml. Pick a node to
        view + edit its mail config; saving writes + applies on THAT node. #}
     {% if !nodes.is_empty() %}
@@ -254,7 +554,7 @@
   </div>
 
   {% if mta.cfg_enabled %}
-  <div class="card" style="margin-top:1rem">
+  <div class="card" id="mail-test" style="margin-top:1rem">
     <h2>
       <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="3 11 22 2 13 21 11 13 3 11"/></svg>
       Send a test email
@@ -280,42 +580,13 @@
     </form>
     <p class="text-soft small" style="margin:0.6rem 0 0">
       The selected node opens a TCP connection to its own SMTP relay (each node has its own <code>[email]</code> section in <code>agent.toml</code>). The flash banner shows the relay's SMTP response code; 250 means the message was queued.
+      Every send, test or real, is logged in the <a href="/emails">Email log</a>.
     </p>
   </div>
-
-  {% if !recent_emails.is_empty() %}
-  <div class="card" style="margin-top:1rem">
-    <h2 style="display:flex;align-items:center;gap:0.5rem">
-      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-      Recent emails
-      <a href="/emails" class="text-soft" style="font-size:0.78rem;font-weight:400;margin-left:auto">view all →</a>
-    </h2>
-    <div class="table-wrap">
-      <table>
-        <thead><tr><th>Sent</th><th>State</th><th>To</th><th>Subject</th><th>SMTP / error</th></tr></thead>
-        <tbody>
-          {% for e in recent_emails %}
-          <tr>
-            <td class="muted numeric" title="{{ e.sent_at }}">{{ crate::handlers::stats::fmt_ago(e.sent_at) }}</td>
-            <td>{% if e.state == "ok" %}<span class="pill ok">sent</span>{% else %}<span class="pill err">failed</span>{% endif %}</td>
-            <td><code style="font-size:0.78rem">{{ e.to_address }}</code></td>
-            <td>{{ e.subject }}</td>
-            <td>
-              {% if let Some(err) = e.error %}<code class="muted" style="font-size:0.74rem;color:var(--danger)">{{ err|truncate(80) }}</code>
-              {% else if let Some(c) = e.smtp_code %}<code class="muted" style="font-size:0.74rem">{{ c }}</code>
-              {% else %}<span class="text-soft">—</span>{% endif %}
-            </td>
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-    </div>
-  </div>
-  {% endif %}
   {% endif %}
 
   {# ─── Local MTA (postfix) card ─────────────────────────────── #}
-  <div class="card" style="margin-top:1rem">
+  <div class="card" id="local-mta" style="margin-top:1rem">
     <div class="row" style="align-items:center;gap:0.6rem;margin-bottom:0.8rem">
       <h2 style="margin:0">
         <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
@@ -332,8 +603,8 @@
     </div>
     <p class="text-soft small" style="margin:0 0 1rem">
       Site <code>mail()</code> goes through <code>/usr/sbin/sendmail</code> → postfix.
-      Hyperion configures postfix automatically when the agent boots, based on the <code>[email]</code>
-      section above: smart-host when a relay is set, direct MX otherwise.
+      Hyperion configures postfix automatically when the agent boots, based on the SMTP relay
+      card: smart-host when a relay is set, direct MX otherwise.
     </p>
 
     {% if mta.mode == "not-installed" %}
@@ -496,7 +767,7 @@
                     {% if probe.reachable && probe.port != 25 %}
                     <li>
                       <strong>Port {{ probe.port }} is open</strong> — set up a smart-host
-                      on it. Fill in the SMTP relay form above with
+                      on it. Fill in the SMTP relay card with
                       a host that accepts authenticated submission on this port
                       (your own postfix on another VPS with outbound port 25, or any
                       submission host you control). The agent re-applies the postfix
@@ -621,193 +892,44 @@
           <input type="hidden" name="target_node" value="{{ mail_node }}">
           <div class="field" style="margin:0;flex:1;min-width:14rem">
             <label for="mta_test_to" style="font-size:0.78rem">
-              Send a test through /usr/sbin/sendmail
+              Test via local sendmail (the path site <code>mail()</code> uses)
             </label>
             <input id="mta_test_to" name="to" type="email" required
                    placeholder="you@example.cz" style="margin:0"
                    value="{% if !mta.cfg_default_to.is_empty() %}{{ mta.cfg_default_to }}{% endif %}">
           </div>
-          <button class="btn primary" type="submit">Send via sendmail</button>
+          <button class="btn primary" type="submit">Test via local sendmail</button>
         </form>
       </div>
       <p class="text-soft small" style="margin:0.6rem 0 0">
         <strong>Reconfigure postfix</strong> re-runs the same self-heal the agent does at boot:
-        it picks smart-host or direct-MX based on the <code>[email]</code> section above.
-        <strong>Send via sendmail</strong> exercises the same path that PHP <code>mail()</code>
+        it picks smart-host or direct-MX based on the SMTP relay card.
+        <strong>Test via local sendmail</strong> exercises the same path that PHP <code>mail()</code>
         from hosted sites uses (wrapper → postfix → relay/MX). Exit 0 means postfix queued the message;
         the delivery result appears in <code>/var/log/mail.log</code> a few seconds later.
       </p>
     {% endif %}
   </div>
 
-  <div class="card muted" style="margin-top:1rem">
+  <div class="card muted" id="mail-howto" style="margin-top:1rem">
     <h2 style="font-size:0.95rem;margin:0 0 0.6rem">How outbound mail works</h2>
     <ul class="text-soft small" style="margin:0;padding-left:1.2rem;line-height:1.7">
       <li><strong>Relay host</strong> — pick a real provider (Postmark, Mailgun, SendGrid, Brevo, AWS SES, Gmail SMTP) or point at a local postfix configured to relay outbound. Sending directly from a VPS to public mailboxes almost always lands in spam.</li>
       <li><strong>SPF</strong> — the recipient's mail server checks whether your relay's IP is on the From-address domain's permitted-sender list. Set this up with a DNS TXT record on your domain; Hyperion shows per-hosting SPF analysis on each hosting's detail page.</li>
       <li><strong>Sender address</strong> — must use a domain you control whose SPF includes your relay. Detection derives a sensible default from <code>/etc/mailname</code>.</li>
-      <li><strong>Per-node</strong> — each worker has its own <code>[email]</code> section in its own <code>agent.toml</code>. Pick a node in the From dropdown above to verify that node's outbound path.</li>
-      <li><strong>Every send is logged</strong> at <a href="/emails">Emails</a> with the full SMTP response, so you can tell "queued" (250) from "rejected by relay" (550) without leaving the panel.</li>
+      <li><strong>Per-node</strong> — each worker has its own <code>[email]</code> section in its own <code>agent.toml</code>. Pick a node in <strong>Configure node</strong> at the top of this tab; every card here follows it.</li>
+      <li><strong>Every send is logged</strong> in the <a href="/emails">Email log</a> with the full SMTP response, so you can tell "queued" (250) from "rejected by relay" (550) without leaving the panel.</li>
     </ul>
   </div>
 </div>
 
 {# ==========================================================
-   TLS / ACME — Let's Encrypt contact email
-   ========================================================== #}
-<div class="tab-panel" id="tab-system">
-  <p class="text-soft small" style="margin:0 0 0.9rem;line-height:1.55">Settings about this machine itself — automatic Hyperion updates and the GeoIP database behind the per-site traffic map and country blocking.</p>
-  {# Settings about the MACHINE rather than about a site or a message.
-     These lived under Notifications, where neither belonged: an operator
-     looking for "does this box update itself" does not think of it as a
-     notification setting, and could not find it. #}
-  {# ───── GeoIP database ───── #}
-  <div class="card" id="geoip">
-    <div class="row" style="align-items:center;gap:0.6rem;margin-bottom:0.4rem">
-      <h2 style="margin:0">
-        <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
-        GeoIP database
-      </h2>
-      {% if geoip_installed %}
-        <span class="pill ok">installed</span>
-      {% else %}
-        <span class="pill warn">not installed</span>
-      {% endif %}
-    </div>
-    <p class="text-soft small" style="margin:0 0 0.9rem;line-height:1.55">
-      MaxMind GeoLite2 Country, used for per-site country blocking and the
-      traffic-by-country view. Credentials are read from
-      <code>/etc/GeoIP.conf</code> — the same file MaxMind's own
-      <code>geoipupdate</code> uses — so if you already run that tool there is
-      nothing to configure here. The key is never copied into Hyperion's
-      config or into this page.
-      {% if geoip_installed %}
-        <br><br>Last refreshed {{ geoip_updated_at|datetime }} UTC.
-        MaxMind publishes updates twice a week; refreshing more often than
-        that just re-downloads the same data.
-      {% else %}
-        <br><br>Until this is installed, every visitor resolves to
-        <code>ZZ</code> and no country rule matches — sites are never cut off
-        by a rule set before the data existed.
-      {% endif %}
-    </p>
-    <form method="post" action="/settings/geoip-creds" class="field-row" style="align-items:flex-end">
-      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-      <div class="field">
-        <label for="mm_account">MaxMind account ID</label>
-        <input id="mm_account" name="account_id" type="text" autocomplete="off"
-               value="{{ geoip_account_id }}" placeholder="123456">
-      </div>
-      <div class="field">
-        <label for="mm_key">Licence key
-          <span class="hint">{% if geoip_configured %}stored — type a new one to replace it{% else %}from MaxMind → My Account → Manage licence keys{% endif %}</span>
-        </label>
-        <input id="mm_key" name="license_key" type="password" autocomplete="off"
-               placeholder="{% if geoip_configured %}••••••••••••{% else %}paste the key{% endif %}">
-      </div>
-      <div class="field" style="flex:0">
-        <button class="btn primary" type="submit">Save &amp; download</button>
-      </div>
-    </form>
-    <p class="text-soft small" style="margin:0.2rem 0 0.9rem">
-      Saving downloads the database straight away, so a wrong key fails here
-      and now rather than silently at 03:00 in a background refresh. The key
-      is written to <code>/etc/GeoIP.conf</code> (owner-only) and is never
-      shown back on this page.
-    </p>
-    <form method="post" action="/settings/geoip-refresh">
-      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-      <button class="btn" type="submit">
-        {% if geoip_installed %}Refresh now{% else %}Download using /etc/GeoIP.conf{% endif %}
-      </button>
-    </form>
-  </div>
-
-  {# ───── Automatic updates. Off by default and deliberately so. ───── #}
-  <div class="card">
-    <div class="row" style="align-items:center;gap:0.6rem;margin-bottom:0.4rem">
-      <h2 style="margin:0">
-        <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 4v6h-6"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
-        Automatic updates
-      </h2>
-    </div>
-    <p class="text-soft small" style="margin:0 0 0.9rem;line-height:1.55">
-      When on, this node checks hourly for a new Hyperion release and installs
-      it <strong>in safe mode</strong>: the running binaries are snapshotted
-      first, and restored automatically if the node does not come back healthy.
-      Automatic and irreversible is a combination worth avoiding — you are
-      asleep exactly when this fires.
-      <br><br>
-      System packages are <strong>not</strong> touched: an unattended
-      <code>apt dist-upgrade</code> has a far bigger blast radius than a
-      Hyperion update, and is not what this promises. Run that from
-      <a href="/install">Nodes</a> when you are watching.
-      <br><br>
-      Note that a rollback restores <strong>binaries, not data</strong>.
-      Migrations in this project are additive, so an older binary starts
-      against a newer schema — which is the case this is built to survive.
-    </p>
-    <form method="post" action="/settings/config" class="row" style="gap:0.6rem;align-items:center">
-      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-      <input type="hidden" name="section" value="update">
-      <input type="hidden" name="_checkboxes" value="auto">
-      <label class="field-checkbox" style="margin:0">
-        <input type="checkbox" name="auto" value="true"
-               {% if config.update_auto %}checked{% endif %}>
-        <span><strong>Update this node automatically</strong></span>
-      </label>
-      <button class="btn primary" type="submit">Save</button>
-    </form>
-  </div>
-
-</div>
-
-<div class="tab-panel" id="tab-tls">
-  <p class="text-soft small" style="margin:0 0 0.9rem;line-height:1.55">The Let’s Encrypt account this node uses when issuing certificates. Per-site issuance lives on each hosting’s SSL tab; only the shared contact belongs here.</p>
-  <div class="card">
-    <h2>
-      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
-      Let's Encrypt contact
-    </h2>
-    <form method="post" action="/settings/config" autocomplete="off">
-      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-      <input type="hidden" name="section" value="acme">
-      <div class="field">
-        <label for="acme_email">Contact email <span class="hint">Let's Encrypt sends expiry warnings here, per-account</span></label>
-        <input id="acme_email" name="contact_email" type="email" required
-               value="{{ config.acme.contact_email|e }}"
-               style="width:100%">
-      </div>
-      <p class="text-soft small" style="margin:0 0 0.8rem">
-        {#- The ACME directory used to be printed from a config field that
-            nothing populated, so it always rendered empty. Issuance picks the
-            endpoint itself — production, or staging when the operator asks
-            for it per-issuance — so state that instead of showing a box that
-            can only ever be blank. -#}
-        Challenge dir: <code>{{ config.acme.challenge_dir }}</code> · ACME directory: <code>Let's Encrypt production</code>
-      </p>
-      <button type="submit" class="btn primary">Save TLS settings</button>
-    </form>
-  </div>
-
-  <div class="card muted" style="margin-top:1rem">
-    <h2 style="font-size:0.95rem;margin:0 0 0.6rem">How HTTPS issuing works</h2>
-    <ul class="text-soft small" style="margin:0;padding-left:1.2rem;line-height:1.7">
-      <li>Each hosting starts with a <strong>self-signed certificate</strong> right after provisioning — enough for nginx to come up.</li>
-      <li>Once <code>http://&lt;domain&gt;</code> resolves to this server, you can issue a real <strong>Let's Encrypt certificate</strong> from the hosting's detail page → SSL tab.</li>
-      <li>Hyperion uses the <strong>HTTP-01</strong> challenge (a file under <code>{{ config.acme.challenge_dir }}/&lt;token&gt;</code>), so no DNS API integration is needed.</li>
-      <li>Certificates auto-renew 30 days before expiry; failures alert via Slack or email.</li>
-      <li>A per-hosting contact email, set on the hosting detail page, overrides this one.</li>
-    </ul>
-  </div>
-</div>
-
-{# ==========================================================
-   NOTIFICATIONS — Slack webhook (email is in its own tab)
+   ALERTS — operator-facing: Slack, recipients, wording.
+   (Letters to site owners are on the Customer letters tab.)
    ========================================================== #}
 <div class="tab-panel" id="tab-notifications">
-  <p class="text-soft small" style="margin:0 0 0.9rem;line-height:1.55">Where alerts go and what they look like — Slack, the e-mail design and wording, and the letters customers receive.</p>
-  <div class="card">
+  <p class="text-soft small" style="margin:0 0 0.9rem;line-height:1.55">What Hyperion tells you and your team, and where: the Slack channel and the wording wrapped around every alert. Letters to your customers are on <a href="#letters">Customer letters</a>.</p>
+  <div class="card" id="slack">
     <div class="row" style="align-items:center;gap:0.6rem;margin-bottom:0.5rem">
       <h2 style="margin:0">
         <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/></svg>
@@ -817,7 +939,7 @@
       {% else %}<span class="pill warn">not configured</span>{% endif %}
     </div>
     <p class="text-soft small" style="margin:0 0 0.8rem">
-      Cluster-wide alerts (backup failures, certificate renewals, monitor down/up, billing reminders) post here. A per-hosting webhook, set on the hosting's detail page, overrides this one.
+      Operator alerts (backup failures, certificate renewals, monitor down/up, billing reminders) post here. A per-hosting webhook, set on the hosting's detail page, overrides this one.
     </p>
     {% if config.slack.default_webhook_set %}
     {# Connected: no URL field at all. The old card left the input showing
@@ -861,85 +983,50 @@
     {% endif %}
   </div>
 
-  {# ───── E-mail branding: the logo embedded into every notification,
-     with a live preview of the rendered message. ───── #}
-  <div class="card">
-    <div class="row" style="align-items:center;gap:0.6rem;margin-bottom:0.4rem">
-      <h2 style="margin:0">
-        <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
-        E-mail branding
-      </h2>
-    </div>
-    <p class="text-soft small" style="margin:0 0 0.9rem;line-height:1.55">
-      Notifications go out as HTML with a plain-text alternative, so nothing is
-      lost for a client that refuses HTML. The logo is <strong>embedded</strong>
-      in each message rather than linked — mail clients block remote images by
-      default, and a linked logo would show as a broken box for most
-      recipients. PNG, JPEG or GIF, 512 KB max. With no logo the panel hostname
-      is used as the heading.
-    </p>
-    {# Multipart: the CSRF middleware does not buffer these bodies, so the
-       token MUST ride in the query string. A hidden _csrf field is never
-       read here and the upload 403s every single time. #}
-    <form method="post" action="/settings/email-logo?_csrf={{ csrf_token }}"
-          enctype="multipart/form-data"
-          class="row" style="gap:0.6rem;align-items:flex-end;flex-wrap:wrap">
-      <div class="field" style="margin:0">
-        <label for="email_logo">Logo image</label>
-        <input id="email_logo" name="logo" type="file" accept="image/png,image/jpeg,image/gif">
-      </div>
-      <button class="btn primary" type="submit">Upload logo</button>
-      <span class="grow"></span>
-      <a class="btn ghost" href="/settings/email-preview" target="_blank" rel="noopener">
-        Preview a message ↗
-      </a>
-    </form>
-    {% if email_logo_set %}
-    {# Its own form on purpose. The confirm driver reads data-confirm-* off
-       the FORM (the submit event's target), so these attributes were dead on
-       the button — and moving them onto the upload form would have made
-       uploading a logo prompt "Remove the logo?" too. #}
-    <form method="post" action="/settings/email-logo?_csrf={{ csrf_token }}"
-          enctype="multipart/form-data" style="margin:0.5rem 0 0"
-          data-confirm-title="Remove the logo"
-          data-confirm-body="Notification e-mails fall back to the panel hostname as their heading."
-          data-confirm-confirm-label="Remove">
-      <input type="hidden" name="clear" value="1">
-      <button class="btn" type="submit">Remove</button>
-    </form>
-    {% endif %}
-    {% if email_logo_set %}
-    <div style="margin-top:0.8rem;padding:0.8rem;background:#fff;border:1px solid var(--border);border-radius:var(--radius-xs);display:inline-block">
-      <img src="/settings/email-logo.img" alt="Current e-mail logo" style="max-height:44px;max-width:220px;display:block">
-    </div>
-    {% endif %}
+  {# Who else gets these, in what language, and where the history is. The
+     answers live on other tabs and pages (the per-node recipients stay on
+     Mail, under its node selector); this card only points at them. #}
+  <div class="card muted" id="alert-recipients" style="margin-top:1rem">
+    <h2 style="font-size:0.95rem;margin:0 0 0.6rem">Recipients, language &amp; history</h2>
+    <ul class="text-soft small" style="margin:0;padding-left:1.2rem;line-height:1.7">
+      <li><strong>Who gets alert e-mails</strong> — set per node on <a href="/settings#default_to">Mail → Administrator notifications</a>, plus per plan on <a href="/profiles">Profiles</a>.</li>
+      <li><strong>Per-site channels</strong> — each hosting's <strong>Monitor &amp; logs</strong> tab.</li>
+      <li><strong>Alert language and single sentences</strong> — <a href="#letter-wording">Customer letters → Letter language and wording</a>.</li>
+      <li><strong>Logo on alert e-mails</strong> — <a href="#email-branding">Customer letters → E-mail branding</a>.</li>
+      <li><strong>Past alerts</strong> — <a href="/notifications">Notifications</a> (the bell's archive).</li>
+      <li><strong>Delivery record</strong> — <a href="/emails">Email log</a>.</li>
+    </ul>
   </div>
 
-  {# ───── Message templates: editable Slack + email wording with a
-     live preview. Defaults are pass-through, so wording is unchanged
-     until you customise a template. ───── #}
-  <div class="card">
+  {# ───── Alert wording (was "Message templates"): editable Slack + email
+     wording with a live preview. Defaults are pass-through, so wording
+     is unchanged until you customise a template. The preview script sits
+     after the tab panels, so it finds these fields whatever the tab
+     order. ───── #}
+  <div class="card" id="alert-templates">
     <div class="row" style="align-items:center;gap:0.6rem;margin-bottom:0.4rem">
       <h2 style="margin:0">
         <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-        Message templates
+        Alert wording
       </h2>
     </div>
     <p class="text-soft small" style="margin:0 0 0.9rem;line-height:1.55">
       Per-site alert channels (e-mail / Slack / webhook) live on each hosting's
-      <strong>Monitor &amp; logs</strong> tab and override the default webhook above;
+      <strong>Monitor &amp; logs</strong> tab and override the Slack webhook card's default;
       the wording of every send comes from the templates here.
       Customise the wording of the Slack and email messages Hyperion sends
       (alerts, reminders, test sends). Type a template and watch the preview
       update with sample data. Leave a template empty to use the default
       pass-through wording. Insert a placeholder in
       <code>{curly braces}</code>; an unknown one is shown as-is so a typo
-      is easy to spot.
+      is easy to spot. Alert language and single sentences are under
+      <a href="#letter-wording">Customer letters → Letter language and wording</a>.
     </p>
 
     <form method="post" action="/settings/config" autocomplete="off">
       <input type="hidden" name="_csrf" value="{{ csrf_token }}">
       <input type="hidden" name="section" value="notifications">
+      <input type="hidden" name="_return_tab" value="alert-templates">
 
       <div class="field">
         <label for="nt_slack">Slack message
@@ -975,26 +1062,35 @@
       </div>
 
       <p class="text-soft small" style="margin:0.9rem 0 0.8rem;line-height:1.5">
-        Applies within ~30&nbsp;s, no restart needed. The rendered text is
+        Applies within ~30&nbsp;s on its own; the panel also restarts the agent
+        after saving (~5&nbsp;s). The rendered text is
         what gets sent and what the <a href="/emails">email log</a> records,
         so the log always shows exactly what the recipient received. Each node
         wraps its own messages, so saving pushes this wording to every
         enrolled node as well — the banner names any that did not take it.
       </p>
-      <button type="submit" class="btn primary">Save message templates</button>
+      <button type="submit" class="btn primary">Save alert wording</button>
     </form>
   </div>
+</div>
 
-  {# ───── Customer letters: the two letters that go to the SITE OWNER
+{# ==========================================================
+   CUSTOMER LETTERS — what site owners receive: the care report
+   and expiry warning, their language and wording, the Core Web
+   Vitals in the report, and the logo on every e-mail.
+   ========================================================== #}
+<div class="tab-panel" id="tab-letters">
+  <p class="text-soft small" style="margin:0 0 0.9rem;line-height:1.55">Everything a site owner receives from you: the care report and the expiry warning, their language and exact wording, the Core Web Vitals in the report, and the logo on every e-mail. All of it is saved on every node except the logo.</p>
+  {# ───── Care report & expiry warning: the two letters that go to the SITE OWNER
      rather than to the operator — the care report and the hosting-expiry
      warning. Body only; the subject stays ours. Empty = the built-in
      letter, so an operator who never opens this card keeps sending
      exactly what Hyperion has always sent. ───── #}
-  <div class="card">
+  <div class="card" id="customer-letters">
     <div class="row" style="align-items:center;gap:0.6rem;margin-bottom:0.4rem">
       <h2 style="margin:0">
         <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></svg>
-        Customer letters
+        Care report &amp; expiry warning
       </h2>
     </div>
     <p class="text-soft small" style="margin:0 0 0.9rem;line-height:1.55">
@@ -1027,7 +1123,8 @@
       that is where the report's data lives — using that node's own
       <code>agent.toml</code>. Saving here writes this master's copy
       <em>and pushes the same wording to every enrolled node</em>; the banner
-      after saving names any node that did not take it. No restart is needed:
+      after saving names any node that did not take it. It applies on its own;
+      the panel also restarts the agent after saving (~5&nbsp;s), and
       the next letter uses the new wording. To see what one specific customer
       will get, use <strong>Preview</strong> on that site's care-package card —
       it renders on the owning node, so it is the letter that site's owner
@@ -1060,6 +1157,7 @@
     <form method="post" action="/settings/config" autocomplete="off">
       <input type="hidden" name="_csrf" value="{{ csrf_token }}">
       <input type="hidden" name="section" value="notifications">
+      <input type="hidden" name="_return_tab" value="customer-letters">
 
       <div class="field">
         <label for="nt_care_subject">Care report — subject and body
@@ -1157,7 +1255,7 @@
     <textarea id="nt_expiry_default" hidden>{{ expiry_warning_default_template }}</textarea>
   </div>
 
-  <div class="card">
+  <div class="card" id="letter-wording">
     <div class="row" style="align-items:center;gap:0.6rem;margin-bottom:0.4rem">
       <h2 style="margin:0">
         <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m5 8 6 6"/><path d="m4 14 6-6 2-3"/><path d="M2 5h12"/><path d="M7 2h1"/><path d="m22 22-5-10-5 10"/><path d="M14 18h6"/></svg>
@@ -1165,7 +1263,9 @@
       </h2>
     </div>
     <p class="text-soft small" style="margin:0 0 0.9rem;line-height:1.55">
-      The two customer letters are assembled from the sentences below. Pick a
+      Every message Hyperion sends is assembled from the sentences below — the
+      care report and expiry warning, disk-quota and billing letters, and your
+      own alerts and Slack messages. Pick a
       language and every one of them changes — including the headings, the
       month names, the thousands separator and the plural endings. Nothing
       customer-facing is left in English by picking Čeština.
@@ -1330,10 +1430,10 @@
   {# Core Web Vitals source. The render/speed half of the report is always
      measured on the node from the existing site check; this card only picks
      where the Core Web Vitals numbers come from. Saved on every node. #}
-  <div class="card" style="margin-top:1rem">
+  <div class="card" id="performance">
     <h2>
       <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/></svg>
-      Performance &amp; Core Web Vitals
+      Care report · Core Web Vitals
     </h2>
     <p class="text-soft small" style="margin:0.3rem 0 0.8rem;line-height:1.55">
       The care report always includes whether the site still renders and how fast the server answers —
@@ -1400,154 +1500,75 @@
     </form>
   </div>
 
+  {# ───── E-mail branding: the logo embedded into every notification,
+     with a live preview of the rendered message. ───── #}
+  <div class="card" id="email-branding">
+    <div class="row" style="align-items:center;gap:0.6rem;margin-bottom:0.4rem">
+      <h2 style="margin:0">
+        <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+        E-mail branding
+      </h2>
+    </div>
+    <p class="text-soft small" style="margin:0 0 0.9rem;line-height:1.55">
+      Notifications go out as HTML with a plain-text alternative, so nothing is
+      lost for a client that refuses HTML. The logo is <strong>embedded</strong>
+      in each message rather than linked — mail clients block remote images by
+      default, and a linked logo would show as a broken box for most
+      recipients. PNG, JPEG or GIF, 512 KB max. With no logo the panel hostname
+      is used as the heading. The same logo heads your own alert e-mails too.
+      {% if !nodes.is_empty() %}Stored on this master only — mail sent by worker
+      nodes does not carry it yet.{% endif %}
+    </p>
+    {# Multipart: the CSRF middleware does not buffer these bodies, so the
+       token MUST ride in the query string. A hidden _csrf field is never
+       read here and the upload 403s every single time. #}
+    <form method="post" action="/settings/email-logo?_csrf={{ csrf_token }}"
+          enctype="multipart/form-data"
+          class="row" style="gap:0.6rem;align-items:flex-end;flex-wrap:wrap">
+      <div class="field" style="margin:0">
+        <label for="email_logo">Logo image</label>
+        <input id="email_logo" name="logo" type="file" accept="image/png,image/jpeg,image/gif">
+      </div>
+      <button class="btn primary" type="submit">Upload logo</button>
+      <span class="grow"></span>
+      <a class="btn ghost" href="/settings/email-preview" target="_blank" rel="noopener">
+        Preview a message ↗
+      </a>
+    </form>
+    {% if email_logo_set %}
+    {# Its own form on purpose. The confirm driver reads data-confirm-* off
+       the FORM (the submit event's target), so these attributes were dead on
+       the button — and moving them onto the upload form would have made
+       uploading a logo prompt "Remove the logo?" too. #}
+    <form method="post" action="/settings/email-logo?_csrf={{ csrf_token }}"
+          enctype="multipart/form-data" style="margin:0.5rem 0 0"
+          data-confirm-title="Remove the logo"
+          data-confirm-body="Notification e-mails fall back to the panel hostname as their heading."
+          data-confirm-confirm-label="Remove">
+      <input type="hidden" name="clear" value="1">
+      <button class="btn" type="submit">Remove</button>
+    </form>
+    {% endif %}
+    {% if email_logo_set %}
+    <div style="margin-top:0.8rem;padding:0.8rem;background:#fff;border:1px solid var(--border);border-radius:var(--radius-xs);display:inline-block">
+      <img src="/settings/email-logo.img" alt="Current e-mail logo" style="max-height:44px;max-width:220px;display:block">
+    </div>
+    {% endif %}
+  </div>
 </div>
 
-<script>
-// Live preview for the notification message templates. Mirrors the
-// server-side single-pass {key} substitution (unknown tokens are left
-// verbatim, substituted values are NOT re-scanned).
-(function () {
-  function hypRender(tmpl, fields) {
-    var out = '', rest = tmpl;
-    while (true) {
-      var open = rest.indexOf('{');
-      if (open === -1) { out += rest; break; }
-      out += rest.slice(0, open);
-      var after = rest.slice(open + 1);
-      var close = after.indexOf('}');
-      if (close !== -1) {
-        var key = after.slice(0, close);
-        if (Object.prototype.hasOwnProperty.call(fields, key)) {
-          out += fields[key];
-          rest = after.slice(close + 1);
-          continue;
-        }
-      }
-      out += '{';
-      rest = after;
-    }
-    return out;
-  }
-  var sample = {
-    message: 'Backup of example.com failed: not enough free disk space.',
-    subject: 'Backup failed — example.com',
-    body: 'The scheduled backup of example.com did not finish.\nReason: not enough free disk space on the node.',
-    time: '2026-06-19 03:00 UTC',
-    panel: 'https://panel.example.com',
-    kind: 'backup'
-  };
-  function setPreview(id, text) {
-    var el = document.getElementById(id);
-    if (el) el.textContent = text.length ? text : '(empty)';
-  }
-  function update() {
-    var slack = document.getElementById('nt_slack');
-    var subj = document.getElementById('nt_subject');
-    var body = document.getElementById('nt_body');
-    if (slack) setPreview('nt_slack_preview', hypRender(slack.value, { message: sample.message, time: sample.time, panel: sample.panel }));
-    if (subj) setPreview('nt_subject_preview', hypRender(subj.value, { subject: sample.subject, time: sample.time }));
-    if (body) setPreview('nt_body_preview', hypRender(body.value, { body: sample.body, time: sample.time, panel: sample.panel, kind: sample.kind }));
-  }
-  ['nt_slack', 'nt_subject', 'nt_body'].forEach(function (id) {
-    var el = document.getElementById(id);
-    if (el) el.addEventListener('input', update);
-  });
-
-  // ── Customer letters (care report + expiry warning) ──────────────
-  // The care sample is rendered SERVER-SIDE by the very functions that
-  // build a customer's letter, so this preview cannot drift from what
-  // actually gets sent — it previously did, because the strings were
-  // hand-copied prose sitting right here.
-  //
-  // Availability arrives deliberately unmeasured: the operator must be
-  // able to see what an unmonitored section looks like inside their own
-  // wording before a customer does. There is no sample for "the number
-  // behind a section" because no such placeholder exists — a section is
-  // either its measured wording or its honest "we were not looking"
-  // wording, never a bare figure.
-  var careSample = {{ care_preview_json|safe }};
-  {#- Kept in step with the renderer's placeholder list by hand, because this
-      letter's sample is not server-generated the way the care report's is. A
-      placeholder missing here previews as its own name, which reads as "this
-      does not work" for something that does. -#}
-  var expirySample = {
-    domain: 'example.com',
-    expires_at: '1 Sep 2026',
-    days_left: '7 days',
-    grace_days: '14 days',
-    delete_at: '15 Sep 2026',
-    when: 'expires on 1 Sep 2026 — 7 days left',
-    days_left_count: '7',
-    grace_days_count: '14',
-    expires_at_iso: '2026-09-01',
-    delete_at_iso: '2026-09-15'
-  };
-  function letterPreview(inputId, defaultId, previewId, fields) {
-    var el = document.getElementById(inputId);
-    var def = document.getElementById(defaultId);
-    var out = document.getElementById(previewId);
-    if (!el || !def || !out) return;
-    // Empty means "send the built-in letter", so preview exactly that —
-    // the same rule the renderer applies server-side.
-    var tmpl = el.value.trim().length ? el.value : def.value;
-    out.textContent = hypRender(tmpl, fields);
-  }
-  function updateLetters() {
-    letterPreview('nt_care', 'nt_care_default', 'nt_care_preview', careSample);
-    letterPreview('nt_expiry', 'nt_expiry_default', 'nt_expiry_preview', expirySample);
-  }
-  ['nt_care', 'nt_expiry', 'nt_care_subject', 'nt_expiry_subject'].forEach(function (id) {
-    var el = document.getElementById(id);
-    if (el) el.addEventListener('input', updateLetters);
-  });
-  document.querySelectorAll('[data-fill]').forEach(function (btn) {
-    btn.addEventListener('click', function () {
-      var target = document.getElementById(btn.getAttribute('data-fill'));
-      var src = document.getElementById(btn.getAttribute('data-from'));
-      if (target && src) { target.value = src.value; updateLetters(); }
-    });
-  });
-  // Copy every built-in placeholder into its field, so the operator can EDIT
-  // the sentence instead of retyping it from what they can see but not select.
-  // It only fills fields that are still empty — pressing it must never wipe
-  // wording someone has already written.
-  var prefill = document.getElementById('lt-prefill');
-  if (prefill) {
-    prefill.addEventListener('click', function () {
-      var n = 0;
-      document.querySelectorAll('[placeholder]').forEach(function (el) {
-        if (!el.name || el.value !== '' || !el.closest('form')) return;
-        var f = el.closest('form');
-        var sec = f.querySelector('input[name="section"]');
-        if (!sec || sec.value !== 'letters') return;
-        el.value = el.getAttribute('placeholder');
-        n++;
-      });
-      prefill.textContent = n + ' field(s) filled in — edit them, then Save letter wording';
-    });
-  }
-  document.querySelectorAll('[data-clear]').forEach(function (btn) {
-    btn.addEventListener('click', function () {
-      var target = document.getElementById(btn.getAttribute('data-clear'));
-      if (target) { target.value = ''; updateLetters(); }
-    });
-  });
-
-  update();
-  updateLetters();
-})();
-</script>
-
 {# ==========================================================
-   BACKUPS — remote target + retention policy
+   BACKUPS & TRASH — what is kept, where off-site copies go,
+   archive / snapshot retention, the trash window, and (last)
+   the one-off sweep that copies existing backups off-site.
    ========================================================== #}
 <div class="tab-panel" id="tab-backups">
-  <p class="text-soft small" style="margin:0 0 0.9rem;line-height:1.55">Cluster-wide backup targets and how many copies are kept. Each site chooses its own schedule and target on its Backups tab.</p>
+  <p class="text-soft small" style="margin:0 0 0.9rem;line-height:1.55">How sites stay recoverable: what the panel keeps, where off-site copies go, how long archives and snapshots are kept, how long a deleted hosting waits in Trash, and a one-off sweep for backups already on disk. Each site picks its own schedule and target on its Backups tab.</p>
 
   {# Which engine this install uses. First card on the tab because it decides
      what the rest of the tab even means — and because the two are not
      substitutes, which is the thing operators get wrong. #}
-  <div class="card">
+  <div class="card" id="protection-mode">
     <div class="row" style="align-items:center;gap:0.6rem;margin-bottom:0.5rem">
       <h2 style="margin:0">
         <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v6"/><path d="m8 6 4-4 4 4"/><rect x="3" y="10" width="18" height="11" rx="2"/><path d="M7 15h10"/></svg>
@@ -1598,78 +1619,19 @@
     </form>
   </div>
 
-  {# The backfill. Switching a target on only ever protected what happened
-     NEXT — every archive already on disk stayed there, and nothing said so. #}
-  <div class="card">
-    <div class="row" style="align-items:center;gap:0.6rem;margin-bottom:0.5rem">
-      <h2 style="margin:0">
-        <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-        Copy existing backups off-site
-      </h2>
-    </div>
-    <p class="text-soft small" style="margin:0 0 0.8rem;line-height:1.55">
-      Off-site copies are made as each backup runs, so anything already on
-      local disk when you configured the target was never sent. This walks the
-      backups that have no off-site copy recorded — <strong>oldest first</strong>,
-      because the oldest is closest to being pruned off local disk — and
-      uploads them.
-      <br>
-      Backups whose archive has already been pruned are reported separately
-      and counted as gone: nothing can retry those.
-    </p>
-    <form method="post" action="/settings/backups/backfill"
-          data-confirm-title="Copy existing backups off-site"
-          data-confirm-body="Uploads backups that have no off-site copy to the configured off-site targets, oldest first. This transfers real data and can take a long time and a lot of bandwidth. It never deletes anything."
-          data-confirm-confirm-label="Start copying">
-      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-      <button class="btn primary" type="submit">Copy existing backups off-site</button>
-    </form>
-    {# Same sweep, but frees local disk: each copy is deleted ONLY after an
-       independent re-verify that it is really off-site. A copy that can't be
-       confirmed is kept, so this never removes the only copy. #}
-    <p class="text-soft small" style="margin:0.9rem 0 0.6rem;line-height:1.55">
-      Short on disk? The same sweep can <strong>delete each local copy</strong>
-      once it has been independently re-verified off-site. A copy that cannot be
-      confirmed (missing, wrong size, or the target is unreachable) is
-      <strong>kept</strong> — this never deletes the only copy.
-    </p>
-    <form method="post" action="/settings/backups/backfill?drop=1"
-          data-confirm-title="Copy off-site, then delete local"
-          data-confirm-body="Uploads backups that have no off-site copy, then DELETES each local archive and database dump once it is independently re-verified present off-site. A copy that cannot be confirmed off-site is kept. The off-site copy remains and can still be restored. This transfers real data and can take a long time."
-          data-confirm-variant="danger"
-          data-confirm-confirm-label="Copy, then delete local">
-      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-      <button class="btn danger" type="submit">Copy off-site &amp; delete local</button>
-    </form>
-  </div>
-
-  {# Two off-site destination types: the FTP/FTPS/SFTP single-target push
-     (below) is the path that runs TODAY; the S3 multi-target page is the
-     config layer for the upcoming scheduler. Frame them as complementary,
-     not legacy-vs-new. #}
-  <div class="flash info" style="margin-bottom:1rem">
-    <div class="flash-body">
-      Backups always land on local disk first. For an off-site copy you have
-      two destination types, both pushed immediately after each backup: the
-      single-target <strong>FTP/FTPS/SFTP</strong> push below, or
-      <strong>S3-compatible</strong> storage with age encryption and multiple
-      targets at <a href="/settings/backups">Settings → Backup targets</a>.
-    </div>
-  </div>
-
-  <div class="card">
+  <div class="card" id="offsite-ftp">
     <div class="row" style="align-items:center;gap:0.6rem;margin-bottom:0.5rem">
       <h2 style="margin:0">
         <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
         Off-site backup target (FTP/FTPS/SFTP)
       </h2>
-    <p class="text-soft small" style="margin:0.3rem 0 0.6rem">
-      Applies to <strong>this master node's</strong> agent.toml. Per-site overrides — including
-      S3 targets — are on each hosting's Backups tab.
-    </p>
       {% if config.backup_remote.enabled %}<span class="pill ok">pushing</span>
       {% else %}<span class="pill warn">local only</span>{% endif %}
     </div>
+    <p class="text-soft small" style="margin:0 0 0.6rem">
+      Saved on <strong>this master's</strong> agent.toml only. S3-compatible targets are on the
+      next card; each site picks its schedule and target on its own Backups tab.
+    </p>
     <p class="text-soft small" style="margin:0 0 1rem">
       Backups always land on local disk first, under <code>/var/lib/hyperion/backups/local</code>. Hyperion can also push a copy to an off-site FTP/FTPS/SFTP server as soon as the local backup finishes.
     </p>
@@ -1759,12 +1721,25 @@
       </span>
     </div>
     <p class="text-soft small" style="margin:0.4rem 0 0">
-      Tests the target as <strong>saved</strong> — save any changes above first.
+      Tests the target as <strong>saved</strong> — save the form first.
       It runs automatically after each save.
     </p>
   </div>
 
-  <div class="card" style="margin-top:1rem">
+  {# S3-compatible targets are configured on their own page. This card
+     replaces the loose, untitled info flash that used to sit between the
+     cards, so it has a title and an anchor like everything else here. #}
+  <div class="card muted" id="offsite-s3" style="margin-top:1rem">
+    <h2 style="font-size:0.95rem;margin:0 0 0.6rem">S3 &amp; other backup targets</h2>
+    <p class="text-soft small" style="margin:0;line-height:1.55">
+      S3-compatible storage (Wasabi, Backblaze B2, MinIO, AWS) with age encryption, several
+      targets and per-target retention is configured on <a href="/settings/backups">Backup targets</a>.
+      It is pushed right after each backup, alongside or instead of the FTP target above. The
+      Local backup copies and backfill below act on both.
+    </p>
+  </div>
+
+  <div class="card" id="local-copies" style="margin-top:1rem">
     <h2>
       <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
       Local backup copies
@@ -1792,20 +1767,22 @@
         <strong>Off-site</strong> panel. A run with no off-site destination is
         never touched. <strong>Off by default</strong>: keeping the local copy
         means a faster restore and a second copy, at the cost of disk.
+        To do the same once for backups already on disk, use
+        <a href="#offsite-backfill">Copy existing backups off-site</a> at the end of this tab.
       </p>
       <button type="submit" class="btn primary">Save</button>
     </form>
   </div>
 
-  <div class="card" style="margin-top:1rem">
+  <div class="card" id="backup-retention" style="margin-top:1rem">
     <h2>
       <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
       Backup retention
     </h2>
     <p class="text-soft small" style="margin:0.3rem 0 0.6rem">
       This governs <strong>backup archives</strong> — and snapshots too, until the Snapshot retention
-      card below has been saved once. Trash and audit-log retention live on the
-      <a href="/settings#retention">Data retention tab</a>. Saved on every node.
+      card below has been saved once. Deleted hostings are kept per the
+      <a href="#trash">Trash</a> card on this tab. Saved on every node.
     </p>
     <form method="post" action="/settings/config" autocomplete="off">
       <input type="hidden" name="_csrf" value="{{ csrf_token }}">
@@ -1833,14 +1810,14 @@
      own: "can old snapshots be deleted after N days?" — and the answer used to
      be hidden inside the archive rule, measured from the newest snapshot, and
      applied only when a new one was taken. #}
-  <div class="card" style="margin-top:1rem">
+  <div class="card" id="snapshot-retention" style="margin-top:1rem">
     <h2>
       <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v6"/><path d="m8 6 4-4 4 4"/><rect x="3" y="10" width="18" height="11" rx="2"/><path d="M7 15h10"/></svg>
       Snapshot retention
     </h2>
     <p class="text-soft small" style="margin:0.3rem 0 0.6rem">
       Currently: snapshots are <strong>{{ config.snapshot_retention.describe() }}</strong>.
-      Until this card is saved, snapshots follow the archive rule above. Saved on every node.
+      Until this card is saved, snapshots follow Backup retention. Saved on every node.
     </p>
     <form method="post" action="/settings/config" autocomplete="off">
       <input type="hidden" name="_csrf" value="{{ csrf_token }}">
@@ -1865,13 +1842,305 @@
       <button type="submit" class="btn primary">Save snapshot retention</button>
     </form>
   </div>
+
+  <div class="card" id="trash" style="margin-top:1rem">
+    <h2 style="margin:0 0 0.4rem">
+      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
+      Trash / soft-delete
+    </h2>
+    <p class="text-soft small" style="margin:0 0 0.8rem">
+      When on, deleting a hosting moves it to <a href="/trash">Trash</a>:
+      nginx serves 503, FPM stops, and the database and OS users are locked,
+      but the files, database, certificates, and user are preserved. After the retention
+      window, the scheduler runs the permanent-delete pipeline automatically.
+      When off (the default), deletes are permanent immediately, as before.
+      {% if !nodes.is_empty() %}Saved on this master only.{% endif %}
+    </p>
+    <form method="post" action="/settings/config" autocomplete="off">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="section" value="cluster">
+      <input type="hidden" name="_return_tab" value="trash">
+      <input type="hidden" name="_checkboxes" value="trash_enabled">
+
+      <label class="field-checkbox" style="font-weight:600">
+        <input type="checkbox" name="trash_enabled" value="true"
+               {% if config.cluster.trash_enabled %}checked{% endif %}>
+        Enable trash for hosting deletes
+      </label>
+
+      <div class="field">
+        <label for="trash_retention_days">Retention <span class="hint">days · 1..=365</span></label>
+        <input id="trash_retention_days" name="trash_retention_days" type="number"
+               min="1" max="365" step="1"
+               value="{{ config.cluster.trash_retention_days }}">
+        <p class="text-soft small" style="margin:0.3rem 0 0">
+          The scheduler permanently deletes any trashed hosting older than this.
+          Before the timer expires, you can still Restore a hosting or Delete it
+          permanently from <a href="/trash">Trash</a>.
+        </p>
+      </div>
+
+      <button type="submit" class="btn primary">Save trash settings</button>
+    </form>
+  </div>
+
+  {# The backfill. Last on the tab on purpose: settings first, then this
+     one-off action, whose second button deletes local copies. Switching a
+     target on only ever protected what happened
+     NEXT — every archive already on disk stayed there, and nothing said so. #}
+  <div class="card" id="offsite-backfill">
+    <div class="row" style="align-items:center;gap:0.6rem;margin-bottom:0.5rem">
+      <h2 style="margin:0">
+        <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+        Copy existing backups off-site
+      </h2>
+    </div>
+    <p class="text-soft small" style="margin:0 0 0.8rem;line-height:1.55">
+      Off-site copies are made as each backup runs, so anything already on
+      local disk when you configured the target was never sent. This walks the
+      backups that have no off-site copy recorded — <strong>oldest first</strong>,
+      because the oldest is closest to being pruned off local disk — and
+      uploads them.
+      <br>
+      Backups whose archive has already been pruned are reported separately
+      and counted as gone: nothing can retry those.
+    </p>
+    <form method="post" action="/settings/backups/backfill"
+          data-confirm-title="Copy existing backups off-site"
+          data-confirm-body="Uploads backups that have no off-site copy to the configured off-site targets, oldest first. This transfers real data and can take a long time and a lot of bandwidth. It never deletes anything."
+          data-confirm-confirm-label="Start copying">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <button class="btn primary" type="submit">Copy existing backups off-site</button>
+    </form>
+    {# Same sweep, but frees local disk: each copy is deleted ONLY after an
+       independent re-verify that it is really off-site. A copy that can't be
+       confirmed is kept, so this never removes the only copy. #}
+    <p class="text-soft small" style="margin:0.9rem 0 0.6rem;line-height:1.55">
+      Short on disk? The same sweep can <strong>delete each local copy</strong>
+      once it has been independently re-verified off-site. A copy that cannot be
+      confirmed (missing, wrong size, or the target is unreachable) is
+      <strong>kept</strong> — this never deletes the only copy.
+    </p>
+    <form method="post" action="/settings/backups/backfill?drop=1"
+          data-confirm-title="Copy off-site, then delete local"
+          data-confirm-body="Uploads backups that have no off-site copy, then DELETES each local archive and database dump once it is independently re-verified present off-site. A copy that cannot be confirmed off-site is kept. The off-site copy remains and can still be restored. This transfers real data and can take a long time."
+          data-confirm-variant="danger"
+          data-confirm-confirm-label="Copy, then delete local">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <button class="btn danger" type="submit">Copy off-site &amp; delete local</button>
+    </form>
+  </div>
 </div>
 
 {# ==========================================================
-   BRUTE FORCE — the native scanner's [fail2ban] section
+   ACCESS & API — who can sign in (2FA rule, users, roles),
+   API keys for scripts, and how long the audit log is kept.
+   ========================================================== #}
+<div class="tab-panel" id="tab-access">
+  <p class="text-soft small" style="margin:0 0 0.9rem;line-height:1.55">Who can get into the panel and with what: the 2FA rule for administrators, user accounts and roles, and API keys for scripts. This tab also sets how long the audit log keeps its record of what they did.</p>
+  {# Sign-in security. Split from the old General → Security card; the
+     cluster channel hardening half now lives on the Cluster tab. This form
+     declares ONLY enforce_admin_2fa in _checkboxes: synthesize_unchecked_
+     checkboxes writes false for every declared name missing from the POST,
+     so listing the hardening toggles here would switch them off on every
+     2FA save. #}
+  <div class="card" id="sign-in">
+    <h2>
+      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+      Sign-in security
+    </h2>
+    <form method="post" action="/settings/config" autocomplete="off">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="section" value="cluster">
+      <input type="hidden" name="_return_tab" value="sign-in">
+      <input type="hidden" name="_checkboxes" value="enforce_admin_2fa">
+      <label class="field-checkbox" style="font-weight:600">
+        <input type="checkbox" name="enforce_admin_2fa" value="true"
+               {% if config.cluster.enforce_admin_2fa %}checked{% endif %}>
+        Require 2FA for Administrator and Owner accounts
+      </label>
+      <p class="text-soft small" style="margin:0.4rem 0 0.8rem;line-height:1.55">
+        When on, an Administrator or Owner who signs in without 2FA enrolled is sent straight to
+        the enrollment card and can't reach the rest of the panel until they set it
+        up. Operators and read-only users are unaffected. Turn it off only briefly,
+        for example during a server move. Applies within about 30 s on its own; the panel
+        also restarts the agent after saving (~5 s).
+      </p>
+      <button type="submit" class="btn primary">Save sign-in security</button>
+    </form>
+  </div>
+
+  <div class="card muted" id="users-roles" style="margin-top:1rem">
+    <h2 style="font-size:0.95rem;margin:0 0 0.6rem">Users &amp; roles</h2>
+    <p class="text-soft small" style="margin:0;line-height:1.55">
+      Panel accounts are managed on <a href="/admin/users">Users</a> and custom permissions on
+      <a href="/roles">Roles</a>; your own 2FA, password and signed-in devices are on
+      <a href="/profile">My profile</a>.
+    </p>
+  </div>
+
+  {# API keys — Bearer credentials for the /api/v1 remote API. Gated by
+     ApiKeysManage; the gate wraps only these two cards, so a user with
+     SettingsManage but not ApiKeysManage still gets the rest of this tab.
+     id="api" sits on the wrapper around the one-time key reveal and the
+     create form, so every #api redirect scrolls to the reveal, not past it.
+     The create form reuses the roles capability groups + clamps to the
+     caller's own caps. #}
+  {% if can_manage_api_keys %}
+  <div id="api" style="margin-top:1rem">
+    {% if new_api_key.is_some() %}
+    <div class="flash ok" style="margin-bottom:1rem">
+      <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+      <div class="flash-body">
+        <strong>Copy this key now — it won't be shown again.</strong>
+        <pre style="background:var(--surface-1);border-radius:6px;padding:0.7rem 0.9rem;margin:0.5rem 0 0;font-size:0.85rem;word-break:break-all;user-select:all">{{ new_api_key.as_ref().unwrap() }}</pre>
+      </div>
+    </div>
+    {% endif %}
+
+    <div class="card">
+      <h2>
+        <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>
+        Create API key
+      </h2>
+      <p class="text-soft small" style="margin:0 0 0.8rem">
+        An API key authenticates the <code>/api/v1</code> remote management API via
+        <code>Authorization: Bearer hyp_…</code>. Capabilities are clamped to your own —
+        a key can never do more than you can. Reference: <a href="/api/v1/docs">API docs</a> ·
+        <a href="/api/v1/openapi.json">OpenAPI</a>.
+      </p>
+      <form method="post" action="/settings/api-keys#api" autocomplete="off">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <div class="field-row" style="display:flex;gap:1rem;flex-wrap:wrap;align-items:flex-end">
+          <div class="field" style="flex:1;min-width:14rem">
+            <label for="api_key_label">Label</label>
+            <input id="api_key_label" name="label" type="text" required placeholder="ci-deploy" maxlength="120">
+          </div>
+          <div class="field">
+            <label for="api_key_expires">Expires (optional)</label>
+            <input id="api_key_expires" name="expires" type="date">
+          </div>
+        </div>
+        <div class="field-row" style="display:flex;gap:1rem;flex-wrap:wrap;align-items:flex-end;margin-top:0.6rem">
+          <div class="field" style="flex:1;min-width:14rem">
+            <label for="api_key_ips">Allowed IPs / CIDRs (optional)</label>
+            <input id="api_key_ips" name="ip_allowlist" type="text" placeholder="203.0.113.0/24, 198.51.100.7" autocomplete="off">
+            <span class="text-soft small">Comma-separated. Empty = any address.</span>
+          </div>
+          <div class="field">
+            <label for="api_key_rate">Rate limit (req/min)</label>
+            <input id="api_key_rate" name="rate_limit" type="number" min="0" step="1" placeholder="0" style="width:9rem">
+            <span class="text-soft small">0 = unlimited</span>
+          </div>
+        </div>
+        <fieldset style="border:1px solid var(--border);border-radius:8px;padding:0.8rem 1rem;margin:0.9rem 0">
+          <legend class="text-soft small" style="padding:0 0.4rem">Capabilities</legend>
+          <div class="cap-groups" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(min(16rem, 100%), 1fr));gap:0.8rem 1.4rem">
+            {% for g in api_key_cap_groups %}
+            <div class="cap-group">
+              <div class="text-soft small" style="font-weight:600;margin-bottom:0.3rem">{{ g.label }}</div>
+              {% for c in g.caps %}
+              <label class="cap-row" style="display:flex;align-items:center;gap:0.45rem;padding:0.18rem 0">
+                <input type="checkbox" name="{{ c.machine }}">
+                <span class="cap-label" style="flex:1">{{ c.label }}</span>
+              </label>
+              {% endfor %}
+            </div>
+            {% endfor %}
+          </div>
+        </fieldset>
+        <button type="submit" class="btn primary">Create key</button>
+      </form>
+    </div>
+  </div>
+
+  <div class="card" id="api-keys" style="margin-top:1rem">
+    <h2>Existing keys</h2>
+    {% if api_keys.is_empty() %}
+    <p class="text-soft small" style="margin:0">No API keys yet.</p>
+    {% else %}
+    <div class="scroll-x">
+<table class="data-table" style="width:100%">
+      <thead>
+        <tr>
+          <th>Prefix</th><th>Label</th><th>Capabilities</th><th>Restrictions</th><th>Last used</th><th>Expires</th><th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for k in api_keys %}
+        <tr{% if k.is_revoked %} class="text-soft" style="opacity:0.55"{% endif %}>
+          <td><code>{{ k.key_prefix }}…</code></td>
+          <td>{{ k.label }}</td>
+          <td class="text-soft small">{{ k.caps_summary }}</td>
+          <td class="text-soft small">{{ k.restrictions }}</td>
+          <td class="text-soft small">{{ k.last_used }}</td>
+          <td class="text-soft small">{{ k.expires }}</td>
+          <td style="text-align:right">
+            {% if k.is_revoked %}
+            <span class="badge" style="background:var(--surface-2)">revoked</span>
+            {% else %}
+            <form method="post" action="/settings/api-keys/revoke#api" style="margin:0;display:inline"
+                  data-confirm-title="Revoke this API key"
+                  data-confirm-body="Any client using it stops working immediately."
+                  data-confirm-confirm-label="Revoke"
+                  data-confirm-variant="danger">
+              <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+              <input type="hidden" name="id" value="{{ k.id }}">
+              <button type="submit" class="btn small danger">Revoke</button>
+            </form>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+</div>
+    {% endif %}
+  </div>
+  {% endif %}
+
+  <div class="card" id="audit-retention" style="margin-top:1rem">
+    <h2 style="margin:0 0 0.4rem">
+      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M7 14l4-4 4 4 6-6"/></svg>
+      Audit log retention
+    </h2>
+    <p class="text-soft small" style="margin:0 0 0.8rem;line-height:1.55">
+      The audit log records every state-changing operation as a
+      tamper-evident BLAKE3 hash chain. Without retention it grows
+      indefinitely — on a busy cluster, tens of MB per month.
+      Set a window in days below to purge older entries automatically; the
+      chain re-anchors at the oldest surviving row, so
+      <code>verify_chain</code> still works on what's left.
+      <strong>0 (the default) keeps everything forever.</strong>
+    </p>
+    <form method="post" action="/settings/config" autocomplete="off">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="section" value="cluster">
+      <input type="hidden" name="_return_tab" value="audit-retention">
+      <div class="field">
+        <label for="audit_retention_days">Retain audit entries for <span class="hint">days · 0..=3650 · 0 = forever</span></label>
+        <input id="audit_retention_days" name="audit_retention_days" type="number"
+               min="0" max="3650" step="1"
+               value="{{ config.cluster.audit_retention_days }}">
+        <p class="text-soft small" style="margin:0.3rem 0 0;line-height:1.55">
+          Typical values: <code>90</code> for compliance-light setups,
+          <code>365</code> for tighter rules, or <code>0</code> if you
+          export the <a href="/audit">Audit log</a> off-cluster (with <code>?export=csv</code>) and
+          want everything kept locally. Purges run on the normal
+          scheduler tick (about every 60 s); no extra cron job is needed.
+        </p>
+      </div>
+      <button type="submit" class="btn primary">Save audit retention</button>
+    </form>
+  </div>
+</div>
+
+{# ==========================================================
+   BANS & BLOCKING — the native scanner's [fail2ban] section
+   and the GeoIP database behind per-site country blocking.
    ========================================================== #}
 <div class="tab-panel" id="tab-bruteforce">
-  <p class="text-soft small" style="margin:0 0 0.9rem;line-height:1.55">How many failed logins earn an IP a firewall ban, and for how long. Applies to FTP, mail and WordPress logins on this node.</p>
+  <p class="text-soft small" style="margin:0 0 0.9rem;line-height:1.55">Keeping hostile traffic out. This tab sets how many failed SSH, FTP, mail and WordPress logins earn an IP a firewall ban and for how long, and holds the GeoIP database behind per-site country blocking. Live bans are on <a href="/bans">Banned IPs</a>; ports and the default policy are on <a href="/firewall">Firewall</a>.</p>
 
   <div class="flash info" style="margin-bottom:1rem">
     <div class="flash-body">
@@ -1879,12 +2148,12 @@
       firewall: each site's own <code>access.log</code> (POSTs to
       <code>wp-login.php</code> / <code>xmlrpc.php</code>) and the node-wide
       <strong>ssh</strong>, <strong>ftp</strong> and <strong>mail</strong> journals.
-      Bans in force are listed on <a href="/bans">Bans</a>.
+      Bans in force are listed on <a href="/bans">Banned IPs</a>.
     </div>
   </div>
 
   {% if let Some(f) = fail2ban %}
-  <div class="card">
+  <div class="card" id="bruteforce-scanner">
     <div class="row" style="align-items:center;gap:0.6rem;margin-bottom:0.5rem">
       <h2 style="margin:0">
         <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
@@ -2025,7 +2294,7 @@
     </form>
   </div>
   {% else %}
-  <div class="card">
+  <div class="card" id="bruteforce-scanner">
     <h2 style="font-size:0.95rem;margin:0 0 0.6rem">
       <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
       Brute-force scanner — config unreadable
@@ -2037,136 +2306,207 @@
     </p>
   </div>
   {% endif %}
+
+  {# ───── GeoIP database ───── #}
+  <div class="card" id="geoip">
+    <div class="row" style="align-items:center;gap:0.6rem;margin-bottom:0.4rem">
+      <h2 style="margin:0">
+        <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+        GeoIP database
+      </h2>
+      {% if geoip_installed %}
+        <span class="pill ok">installed</span>
+      {% else %}
+        <span class="pill warn">not installed</span>
+      {% endif %}
+    </div>
+    <p class="text-soft small" style="margin:0 0 0.9rem;line-height:1.55">
+      MaxMind GeoLite2 Country, used for per-site country blocking and the
+      traffic-by-country view. Credentials are read from
+      <code>/etc/GeoIP.conf</code> — the same file MaxMind's own
+      <code>geoipupdate</code> uses — so if you already run that tool there is
+      nothing to configure here. The key is never copied into Hyperion's
+      config or into this page.{% if !nodes.is_empty() %} Downloaded to this master only.{% endif %}
+      {% if geoip_installed %}
+        <br><br>Last refreshed {{ geoip_updated_at|datetime }} UTC.
+        MaxMind publishes updates twice a week; refreshing more often than
+        that just re-downloads the same data.
+      {% else %}
+        <br><br>Until this is installed, every visitor resolves to
+        <code>ZZ</code> and no country rule matches — sites are never cut off
+        by a rule set before the data existed.
+      {% endif %}
+    </p>
+    <form method="post" action="/settings/geoip-creds" class="field-row" style="align-items:flex-end">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <div class="field">
+        <label for="mm_account">MaxMind account ID</label>
+        <input id="mm_account" name="account_id" type="text" autocomplete="off"
+               value="{{ geoip_account_id }}" placeholder="123456">
+      </div>
+      <div class="field">
+        <label for="mm_key">Licence key
+          <span class="hint">{% if geoip_configured %}stored — type a new one to replace it{% else %}from MaxMind → My Account → Manage licence keys{% endif %}</span>
+        </label>
+        <input id="mm_key" name="license_key" type="password" autocomplete="off"
+               placeholder="{% if geoip_configured %}••••••••••••{% else %}paste the key{% endif %}">
+      </div>
+      <div class="field" style="flex:0">
+        <button class="btn primary" type="submit">Save &amp; download</button>
+      </div>
+    </form>
+    <p class="text-soft small" style="margin:0.2rem 0 0.9rem">
+      Saving downloads the database straight away, so a wrong key fails here
+      and now rather than silently at 03:00 in a background refresh. The key
+      is written to <code>/etc/GeoIP.conf</code> (owner-only) and is never
+      shown back on this page.
+    </p>
+    <form method="post" action="/settings/geoip-refresh">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <button class="btn" type="submit">
+        {% if geoip_installed %}Refresh now{% else %}Download using /etc/GeoIP.conf{% endif %}
+      </button>
+    </form>
+  </div>
 </div>{# /tab-bruteforce #}
 
 {# ==========================================================
-   CLUSTER — multi-node controls
+   CLUSTER — worker-node settings only (data-cluster-only tab):
+   placement, test nodes, master↔worker channel hardening, tips.
    ========================================================== #}
-<div class="tab-panel" id="tab-general">
-  <p class="text-soft small" style="margin:0 0 0.9rem;line-height:1.55">
-    The two things every install has to decide once: what domain the
-    panel itself answers on, and how signing in is protected. These
-    lived under “Cluster”, where nobody running one server thought to
-    look for them.
-  </p>
-<div class="card">
+<div class="tab-panel" id="tab-cluster">
+  <p class="text-soft small" style="margin:0 0 0.9rem;line-height:1.55">Only with worker nodes: whether new sites may land on the master, which nodes are disposable test boxes, and the ordered hardening of master↔worker traffic. Enrolling and updating nodes happens on <a href="/install">Nodes</a>.</p>
+  <div class="card" id="placement">
     <h2>
-      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
-      Panel domain
-    </h2>
-    {% if !config.cluster.panel_hostname.is_empty() %}
-    <p class="text-soft small" style="margin:0 0 0.6rem;line-height:1.55">
-      The control panel is reachable at
-      <strong><a href="https://{{ config.cluster.panel_hostname }}:8443" target="_blank" rel="noopener">https://{{ config.cluster.panel_hostname }}:8443</a></strong>
-      (also on port 443 if you front the panel with nginx). To move it, save the form below with a new hostname; the existing vhost stays in place until the next nginx reload after a different hostname lands.
-    </p>
-    <p class="text-soft small" style="margin:0 0 0.6rem;line-height:1.55;padding:0.55rem 0.75rem;background:color-mix(in oklab,var(--success) 8%,transparent);border-left:3px solid var(--success);border-radius:4px">
-      <strong>🔒 Raw-IP access is disabled automatically.</strong> A request
-      that reaches the panel at <code>https://&lt;ip&gt;:8443</code>
-      gets a 308 redirect to <code>https://{{ config.cluster.panel_hostname }}:8443</code>.
-      Once set, the hostname is required. Loopback
-      (<code>localhost</code> / <code>127.0.0.1</code>) stays open
-      for local health probes and SSH-tunnel debugging.
-    </p>
-    {% else %}
-    <p class="text-soft small" style="margin:0 0 0.6rem;line-height:1.55">
-      Right now the panel is reachable only by raw IP and port (for example <code>https://1.2.3.4:8443</code>) with a self-signed certificate. Bind it to a real hostname below: the agent writes the nginx vhost, generates a temporary self-signed certificate so nginx starts, then triggers a Let's Encrypt issuance in the background.
-    </p>
-    {% endif %}
-    <form method="post" action="/settings/panel-provision" autocomplete="off">
-      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-
-      <div class="field">
-        <label for="panel_hostname">Panel hostname <span class="hint">FQDN, e.g. panel.example.com</span></label>
-        <input id="panel_hostname" name="hostname" type="text"
-               autocomplete="off" autocapitalize="none" spellcheck="false"
-               value="{{ config.cluster.panel_hostname }}"
-               placeholder="panel.example.com"
-               pattern="[a-zA-Z0-9.\-]+"
-               required>
-        <p class="text-soft small" style="margin:0.3rem 0 0;line-height:1.55">
-          The A / AAAA record for this name <strong>must point to this server</strong>
-          before you submit (the agent runs a DNS preflight unless you tick the
-          override below). After provisioning, your URL becomes
-          <code>https://&lt;hostname&gt;:8443</code>. Bookmark it: the
-          old IP-based URL keeps working but won't have a trusted certificate.
-        </p>
-      </div>
-
-      <label class="field-checkbox" style="margin:0.4rem 0 0.6rem">
-        <input type="checkbox" name="skip_dns_check" value="on">
-        Skip DNS preflight <span class="text-soft small">— use when the record has propagated but a cache is stale</span>
-      </label>
-
-      <button type="submit" class="btn primary">Provision panel hostname</button>
-      <p class="text-soft small" style="margin:0.6rem 0 0;line-height:1.55">
-        <strong>What happens:</strong>
-        (1) DNS preflight,
-        (2) <code>cluster.panel_hostname</code> is saved to agent.toml,
-        (3) the nginx vhost lands at <code>/etc/nginx/sites-enabled/hyperion-panel.conf</code>
-        with a self-signed certificate so the reload doesn't fail,
-        (4) nginx <code>-t</code> and reload,
-        (5) Let's Encrypt issuance starts in the background — the
-        live progress bar below tracks it.
-      </p>
-    </form>
-
-    {# ─── Live ACME progress card ─────────────────────────────
-       Polls /settings/panel-cert-status every 2s while issuance
-       is in progress. Stops polling itself once stage flips to
-       "issued" or "failed". Initially loads once on page mount —
-       if no panel hostname is set yet the endpoint returns "not
-       in progress" and the card stays compact. #}
-    <div style="margin-top:1rem;padding:0.85rem 1rem;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm)">
-      <div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.4rem">
-        <svg class="h-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-        <strong style="font-size:0.92rem">Live certificate issuance</strong>
-      </div>
-      <div id="panel-cert-status"
-           hx-get="/settings/panel-cert-status"
-           hx-trigger="load"
-           hx-swap="innerHTML">
-        <div class="text-soft small" style="padding:0.4rem 0">Loading status…</div>
-      </div>
-    </div>
-  </div>
-
-  <div class="card">
-    <h2 style="font-size:0.95rem;margin:0 0 0.6rem">
-      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
-      Security
+      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>
+      Cluster placement
     </h2>
     <form method="post" action="/settings/config" autocomplete="off">
       <input type="hidden" name="_csrf" value="{{ csrf_token }}">
       <input type="hidden" name="section" value="cluster">
-      <input type="hidden" name="_checkboxes" value="enforce_admin_2fa,enforce_worker_cert_pinning,enforce_response_auth">
+      <input type="hidden" name="_return_tab" value="placement">
+      <input type="hidden" name="_checkboxes" value="master_accepts_hostings">
       <label class="field-checkbox" style="font-weight:600">
-        <input type="checkbox" name="enforce_admin_2fa" value="true"
-               {% if config.cluster.enforce_admin_2fa %}checked{% endif %}>
-        Require 2FA for Administrator and Owner accounts
+        <input type="checkbox" name="master_accepts_hostings" value="true"
+               {% if config.cluster.master_accepts_hostings %}checked{% endif %}>
+        Allow new hostings to be created on the master node
       </label>
       <p class="text-soft small" style="margin:0.4rem 0 0.8rem;line-height:1.55">
-        When on, an Administrator or Owner who signs in without 2FA enrolled is sent straight to
-        the enrollment card and can't reach the rest of the panel until they set it
-        up. Operators and read-only users are unaffected. Turn it off only briefly,
-        for example during a server move. Applies within about 30 s; no restart needed.
+        Turn this off to make the master a <strong>control plane only</strong>, with every hosting living on a worker.
+        <br>
+        While off, the target-node dropdown in the create wizard hides the master option, and creating directly with <code>hctl</code> on the master is refused. Existing hostings on the master stay put — this toggle affects new creates only.
+      </p>
+      <button type="submit" class="btn primary">Save cluster settings</button>
+    </form>
+  </div>
+
+  {# Test nodes. Split from the old "Mark test nodes & set the auto-domain"
+     card; the preview address template now lives on HTTPS & previews. This
+     form posts test_node_ids + test_wp_no_index and declares only
+     test_wp_no_index in _checkboxes. It omits test_domain_template, so a
+     save here leaves the template alone. #}
+  <div class="card" id="test-nodes" style="margin-top:1rem">
+    <h2>
+      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
+      Test nodes
+    </h2>
+    <p class="text-soft small" style="margin:0 0 0.4rem">
+      Mark nodes as <strong>test-only</strong> for staging and preview work.
+      Hostings created on a test node get an auto-generated subdomain,
+      so you can't accidentally take over a real customer's domain there.
+      The create wizard also refuses to put a production domain on a test node,
+      and vice versa.
+      Sites on a test node take their domain from the preview address template
+      (<a href="#preview-address">HTTPS &amp; previews → Preview address</a>).
+    </p>
+    <p class="text-soft small" style="margin:0 0 0.8rem;font-style:italic">
+      <strong>Tip:</strong> the quickest way to mark a node as test is on the
+      <a href="/install">Nodes</a> page — each row has a one-click toggle.
+      Use this card when you want to bulk-edit or paste a list.
+    </p>
+    <form method="post" action="/settings/config" autocomplete="off">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="section" value="cluster">
+      <input type="hidden" name="_return_tab" value="test-nodes">
+      <input type="hidden" name="_checkboxes" value="test_wp_no_index">
+
+      <div class="field">
+        <label>Test nodes <span class="hint">tick the nodes to treat as test-only</span></label>
+        {# Hidden input the form actually submits — built from the
+           checkboxes below by JS. Server-side stays unchanged
+           (parses CSV from agent.toml). #}
+        <input id="test_node_ids" name="test_node_ids" type="hidden"
+               value="{{ config.cluster.test_node_ids }}">
+        <div id="test-node-checkboxes" class="row" style="flex-direction:column;gap:0.4rem;padding:0.6rem;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--surface-1)">
+          {% if nodes.is_empty() %}
+            <p class="text-soft small" style="margin:0">
+              No worker nodes enrolled yet. Enroll nodes on the
+              <a href="/install">Nodes</a> page and they'll appear here as checkboxes.
+            </p>
+          {% else %}
+            {% for n in nodes %}
+            <label class="field-checkbox" style="margin:0;font-weight:500">
+              <input type="checkbox" class="test-node-toggle"
+                     value="{{ n.node_id }}"
+                     data-node-id="{{ n.node_id }}">
+              <strong>{{ n.label }}</strong>
+              <span class="text-soft small" style="margin-left:0.4rem">
+                <code style="font-size:0.74rem">{{ n.node_id }}</code>
+                {% if let Some(ip) = n.public_ip.as_ref() %} · {{ ip }}{% endif %}
+              </span>
+            </label>
+            {% endfor %}
+          {% endif %}
+        </div>
+        <p class="text-soft small" style="margin:0.3rem 0 0">
+          With no node ticked, the test-node feature is off and every node is
+          treated as production.
+        </p>
+      </div>
+
+      <label class="field-checkbox" style="font-weight:600">
+        <input type="checkbox" name="test_wp_no_index" value="true"
+               {% if config.cluster.test_wp_no_index %}checked{% endif %}>
+        Discourage search engines on WordPress installs on test nodes
+      </label>
+      <p class="text-soft small" style="margin:0.3rem 0 0.8rem">
+        Sets <code>blog_public = 0</code> in WordPress right after a fresh
+        install on a test node, asking search engines not to index it.
+        You can change this later in WP admin → Settings → Reading.
       </p>
 
-      {# ─── Cluster channel hardening ───────────────────────────────
-         Three rungs, and the order is load-bearing. Step 0 is not a
-         toggle: it lives in each node's own agent.toml because it is
-         the node that decides whether to trust the master's cert, and
-         it comes first because it is the leg that carries the node's
-         plaintext secret. Steps 1 and 2 are master→worker: step 1 keeps
-         an on-path attacker out of the channel, step 2 keeps the master
-         from believing what comes back if the channel is defeated
-         anyway. Turning on step 2 alone still leaves every secret in a
-         reply (reset passwords, enrollment tokens) readable on the
-         wire, so the numbering is UI, not decoration. #}
-      <div style="display:flex;align-items:center;gap:0.5rem;margin:1.4rem 0 0.4rem">
-        <svg class="h-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-        <strong style="font-size:0.92rem">Cluster channel hardening</strong>
-      </div>
+      <button type="submit" class="btn primary">Save test nodes</button>
+    </form>
+  </div>
+
+  {# ─── Cluster channel hardening ───────────────────────────────
+     Three rungs, and the order is load-bearing. Step 0 is not a
+     toggle: it lives in each node's own agent.toml because it is
+     the node that decides whether to trust the master's cert, and
+     it comes first because it is the leg that carries the node's
+     plaintext secret. Steps 1 and 2 are master→worker: step 1 keeps
+     an on-path attacker out of the channel, step 2 keeps the master
+     from believing what comes back if the channel is defeated
+     anyway. Turning on step 2 alone still leaves every secret in a
+     reply (reset passwords, enrollment tokens) readable on the
+     wire, so the numbering is UI, not decoration.
+
+     Split from the old General → Security card and placed after
+     placement and test nodes, because these are the settings that can
+     cut nodes off.
+     _checkboxes names ONLY the two hardening toggles — never
+     enforce_admin_2fa, which lives on Access & API → Sign-in
+     security and would be switched off by every save here. #}
+  <div class="card" id="hardening" style="margin-top:1rem">
+    <h2>
+      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+      Cluster channel hardening
+    </h2>
+    <form method="post" action="/settings/config" autocomplete="off">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="section" value="cluster">
+      <input type="hidden" name="_return_tab" value="hardening">
+      <input type="hidden" name="_checkboxes" value="enforce_worker_cert_pinning,enforce_response_auth">
       <p class="text-soft small" style="margin:0 0 0.8rem;line-height:1.55">
         Every command the master sends already carries an Ed25519 <em>request</em>
         signature, so a worker never acts on a forged instruction. The steps below
@@ -2212,7 +2552,7 @@
         mid-upgrade, or whose agent has been restarted within the last heartbeat,
         <em>will</em> be cut off until its 🔒 chip appears. A stale pin behaves the same way:
         use <em>Clear pinned crypto</em> on that node's card after a key change you expected.
-        Applies within about 30 s; no restart needed.
+        Applies within about 30 s on its own; the panel also restarts the agent after saving (~5 s).
       </p>
 
       <label class="field-checkbox" style="font-weight:600">
@@ -2232,7 +2572,7 @@
         more trusted than one that merely dropped its signature, and suppressing the key
         report is how an attacker would arrange exactly that. So a worker that is still
         mid-upgrade <em>will</em> be cut off until it publishes its key. Applies within about
-        30 s; no restart needed.
+        30 s on its own; the panel also restarts the agent after saving (~5 s).
       </p>
 
       {# Readiness, computed server-side from nodes.resp_pubkey. The
@@ -2275,234 +2615,11 @@
       </p>
       {% endif %}
 
-      <button type="submit" class="btn primary">Save security settings</button>
-    </form>
-  </div>
-</div>
-
-<div class="tab-panel" id="tab-cluster">
-  <p class="text-soft small" style="margin:0 0 0.9rem;line-height:1.55">
-    Where new hostings land when this box drives worker nodes, and the
-    hardening that protects master↔node traffic. On a single server
-    nothing here applies — the panel’s own domain and access security
-    moved to <strong>General</strong>.
-  </p>
-<div class="card">
-    <h2>
-      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>
-      Cluster placement
-    </h2>
-    <form method="post" action="/settings/config" autocomplete="off">
-      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-      <input type="hidden" name="section" value="cluster">
-      <input type="hidden" name="_return_tab" value="cluster">
-      <input type="hidden" name="_checkboxes" value="master_accepts_hostings">
-      <label class="field-checkbox" style="font-weight:600">
-        <input type="checkbox" name="master_accepts_hostings" value="true"
-               {% if config.cluster.master_accepts_hostings %}checked{% endif %}>
-        Allow new hostings to be created on the master node
-      </label>
-      <p class="text-soft small" style="margin:0.4rem 0 0.8rem;line-height:1.55">
-        Turn this off to make the master a <strong>control plane only</strong>, with every hosting living on a worker.
-        <br>
-        While off, the target-node dropdown in the create wizard hides the master option, and creating directly with <code>hctl</code> on the master is refused. Existing hostings on the master stay put — this toggle affects new creates only.
-      </p>
-      <button type="submit" class="btn primary">Save cluster settings</button>
+      <button type="submit" class="btn primary">Save hardening settings</button>
     </form>
   </div>
 
-  </div><div class="tab-panel" id="tab-testnodes">
-  <p class="text-soft small" style="margin:0 0 0.9rem;line-height:1.55">Gives every site on this server an internal preview address with valid TLS, so you can open a site before its real DNS points here — production sites included. The same wildcard also backs <em>test nodes</em>: whole machines marked disposable, whose sites additionally get an auto-generated domain and no-index.</p>
-
-  <div class="card">
-    <h2 style="font-size:0.95rem;margin:0 0 0.6rem">
-      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
-      Step 1 · Mark test nodes &amp; set the auto-domain
-    </h2>
-    <p class="text-soft small" style="margin:0 0 0.4rem">
-      Mark nodes as <strong>test-only</strong> for staging and preview work.
-      Hostings created on a test node get an auto-generated subdomain,
-      so you can't accidentally take over a real customer's domain there.
-      The create wizard also refuses to put a production domain on a test node,
-      and vice versa.
-    </p>
-    <p class="text-soft small" style="margin:0 0 0.8rem;font-style:italic">
-      <strong>Tip:</strong> the quickest way to mark a node as test is on the
-      <a href="/install">Nodes</a> page — each row has a one-click toggle.
-      Use this card when you want to bulk-edit or paste a list.
-    </p>
-    <form method="post" action="/settings/config" autocomplete="off">
-      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-      <input type="hidden" name="section" value="cluster">
-      {# This card lives on the Test nodes tab — return there after save,
-         not the Cluster tab that section=cluster maps to by default. #}
-      <input type="hidden" name="_return_tab" value="testnodes">
-      <input type="hidden" name="_checkboxes" value="test_wp_no_index">
-
-      <div class="field">
-        <label>Test nodes <span class="hint">tick the nodes to treat as test-only</span></label>
-        {# Hidden input the form actually submits — built from the
-           checkboxes below by JS. Server-side stays unchanged
-           (parses CSV from agent.toml). #}
-        <input id="test_node_ids" name="test_node_ids" type="hidden"
-               value="{{ config.cluster.test_node_ids }}">
-        <div id="test-node-checkboxes" class="row" style="flex-direction:column;gap:0.4rem;padding:0.6rem;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--surface-1)">
-          {% if nodes.is_empty() %}
-            <p class="text-soft small" style="margin:0">
-              No worker nodes enrolled yet. Enroll nodes on the
-              <a href="/install">Nodes</a> page and they'll appear here as checkboxes.
-            </p>
-          {% else %}
-            {% for n in nodes %}
-            <label class="field-checkbox" style="margin:0;font-weight:500">
-              <input type="checkbox" class="test-node-toggle"
-                     value="{{ n.node_id }}"
-                     data-node-id="{{ n.node_id }}">
-              <strong>{{ n.label }}</strong>
-              <span class="text-soft small" style="margin-left:0.4rem">
-                <code style="font-size:0.74rem">{{ n.node_id }}</code>
-                {% if let Some(ip) = n.public_ip.as_ref() %} · {{ ip }}{% endif %}
-              </span>
-            </label>
-            {% endfor %}
-          {% endif %}
-        </div>
-        <p class="text-soft small" style="margin:0.3rem 0 0">
-          Quicker option: on the <a href="/install">Nodes</a> page each row has a
-          "Mark as test" button that does the same thing. With no node ticked, the
-          test-node feature is off and every node is treated as production.
-        </p>
-      </div>
-
-      <div class="field">
-        <label for="test_domain_template">Preview / auto-domain template <span class="hint">the base for every site's preview subdomain</span></label>
-        <input id="test_domain_template" name="test_domain_template" type="text" autocomplete="off"
-               value="{{ config.cluster.test_domain_template }}"
-               placeholder="e.g. {name}.{{ config.hostname }}">
-        {# Examples are built from THIS server's hostname. They used to be a
-           hardcoded domain from the author's own install, which read as an
-           instruction to type someone else's domain in. #}
-        <p class="text-soft small" style="margin:0.3rem 0 0;padding:0.55rem 0.75rem;background:var(--surface-1);border-radius:6px">
-          <strong>This is what turns on preview URLs — for EVERY site on the node, production
-          included, not just test nodes.</strong> The part after <code>{name}</code> is the
-          wildcard base: with <code>{name}.{{ config.hostname }}</code>, every hosting gets an
-          internal address like <code>mysite.{{ config.hostname }}</code> once you issue the
-          <code>*.{{ config.hostname }}</code> certificate in Step 2. A <em>Preview site</em> button
-          then appears on each site's detail page.
-        </p>
-        <p class="text-soft small" style="margin:0.3rem 0 0">
-          Tokens: <code>{name}</code> — the site's first label (or the name typed in the wizard on
-          a test node); <code>{node}</code> — the node ID. Result is lower-cased.
-        </p>
-        <p class="text-soft small" style="margin:0.5rem 0 0;padding:0.55rem 0.75rem;background:var(--surface-1);border-radius:6px">
-          <strong>Example.</strong> With template
-          <code>{name}.{node}.staging.example.com</code>, an
-          operator who types <code>blog</code> in the wizard
-          on node <code>lab-01</code>
-          gets the domain <code>blog.lab-01.staging.example.com</code>.
-          <br>
-          Add a wildcard DNS record (for example
-          <code>*.staging.example.com</code> → your test-node IP)
-          so the auto-generated subdomains resolve.
-        </p>
-      </div>
-
-      <label class="field-checkbox" style="font-weight:600">
-        <input type="checkbox" name="test_wp_no_index" value="true"
-               {% if config.cluster.test_wp_no_index %}checked{% endif %}>
-        Discourage search engines on WordPress installs on test nodes
-      </label>
-      <p class="text-soft small" style="margin:0.3rem 0 0.8rem">
-        Sets <code>blog_public = 0</code> in WordPress right after a fresh
-        install on a test node, asking search engines not to index it.
-        You can change this later in WP admin → Settings → Reading.
-      </p>
-
-      <button type="submit" class="btn primary">Save test-node settings</button>
-    </form>
-  </div>
-
-  {# Node-level wildcard certs — one *.<base> per test node, reused by
-     every auto-subdomain it spins up. Issued here, not per site. #}
-  <div class="card" style="margin-top:1rem">
-    <h2 style="font-size:0.95rem;margin:0 0 0.35rem">Step 2 · Preview wildcard certificates</h2>
-    <p class="text-soft small" style="margin:0 0 0.5rem">
-      Works on <strong>any node, this server included</strong> — previews are not tied to the
-      test-node marking above. Once the wildcard exists, every site on the node gets an
-      internal address under it (a <em>Preview</em> link appears on the site's detail page):
-      production sites keep their real domain, and a site whose DNS is not switched yet is
-      reachable immediately. Needs a DNS record <code>*.&lt;base&gt;</code> → this node's IP
-      (grey-cloud it in Cloudflare — the universal certificate does not cover two-level
-      subdomains).
-    </p>
-    <p class="text-soft small" style="margin:0 0 0.8rem">
-      Issue one <code>*.&lt;base&gt;</code> certificate per test node, and every auto-subdomain it
-      creates reuses it — instant HTTPS, with no per-site Let's Encrypt rate-limit hits.
-      A wildcard has to be renewed by hand roughly every 60 days — it can only be validated
-      over DNS, and this server holds no DNS credentials. The <strong>Status</strong> column below shows
-      whether each wildcard is live and when it expires — after a manual validation, reload this
-      page and the row turns green. The full cert list is on the
-      <a href="/certs">Certificates page</a>.
-    </p>
-    {% if wildcard_nodes.is_empty() %}
-      <p class="text-soft small empty" style="margin:0">
-        No test nodes yet. Tick a node above and set an auto-domain template first.
-      </p>
-    {% else %}
-      <div class="table-wrap">
-        <table>
-          <thead><tr><th>Node</th><th>Wildcard</th><th>Status</th><th class="right">Issue / renew</th></tr></thead>
-          <tbody>
-          {% for n in wildcard_nodes %}
-            <tr>
-              <td>
-                <strong>{{ n.label }}</strong><br>
-                <span class="text-soft small"><code>{{ n.node_id }}</code></span>
-              </td>
-              <td><code style="word-break:break-all">{{ n.wildcard }}</code></td>
-              <td>
-                {% if n.status == "ok" %}
-                  <span class="pill ok">valid</span>
-                  <span class="text-soft small" style="display:block;margin-top:0.2rem">expires {{ n.expires }} · {{ n.days_left }} d</span>
-                {% else if n.status == "warning" %}
-                  <span class="pill warn">valid · renews soon</span>
-                  <span class="text-soft small" style="display:block;margin-top:0.2rem">expires {{ n.expires }} · {{ n.days_left }} d</span>
-                {% else if n.status == "critical" %}
-                  <span class="pill err">expires in {{ n.days_left }} d</span>
-                  <span class="text-soft small" style="display:block;margin-top:0.2rem">{{ n.expires }} — renew now</span>
-                {% else if n.status == "expired" %}
-                  <span class="pill err">expired</span>
-                  <span class="text-soft small" style="display:block;margin-top:0.2rem">{{ n.expires }} — re-issue</span>
-                {% else if n.status == "missing" %}
-                  <span class="pill warn">not issued yet</span>
-                {% else %}
-                  <span class="text-soft small">unknown (node unreachable)</span>
-                {% endif %}
-              </td>
-              <td class="right">
-                <form method="post" action="/settings/node-wildcard/begin"
-                      style="display:inline-flex;gap:0.4rem;flex-wrap:wrap;justify-content:flex-end">
-                  <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-                  <input type="hidden" name="node_id" value="{{ n.node_id }}">
-                  <button class="btn small primary" type="submit" name="provider" value="manual"
-                          title="Show the TXT records to publish, then validate">Issue wildcard</button>
-                </form>
-              </td>
-            </tr>
-          {% endfor %}
-          </tbody>
-        </table>
-      </div>
-      <p class="text-soft small" style="margin:0.6rem 0 0">
-        Requires control of the base domain's DNS: the flow shows you the TXT records to publish,
-        then validates them. Keep that browser tab open until you finish — starting over generates
-        different values and invalidates the ones you just published.
-      </p>
-    {% endif %}
-  </div>
-
-
-  <div class="card muted" style="margin-top:1rem">
+  <div class="card muted" id="multinode-tips" style="margin-top:1rem">
     <h2 style="font-size:0.95rem;margin:0 0 0.6rem">Multi-node tips</h2>
     <ul class="text-soft small" style="margin:0;padding-left:1.2rem;line-height:1.7">
       <li>The <strong><a href="/install">Nodes</a></strong> page lists enrolled workers, mints invite tokens for new ones, runs a connectivity test, and triggers remote apt and Hyperion updates.</li>
@@ -2514,233 +2631,170 @@
 </div>
 
 {# ==========================================================
-   RETENTION — trash window + audit-log retention. These both
-   write to cluster.* TOML keys but live in their own tab so
-   the Cluster tab can focus on placement / topology, and
-   compliance-minded operators can find the retention knobs at
-   a glance without scrolling past four other cards.
-   ========================================================== #}
-<div class="tab-panel" id="tab-retention">
-  <p class="text-soft small" style="margin:0 0 0.9rem;line-height:1.55">How long deleted things stay recoverable: trashed hostings and audit-log history. Backup copies have their own retention under Backups.</p>
-  <div class="card">
-    <h2 style="margin:0 0 0.4rem">
-      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
-      Trash / soft-delete
-    </h2>
-    <p class="text-soft small" style="margin:0 0 0.8rem">
-      Backup-archive retention is separate — it lives with its backups on the
-      <a href="/settings#backups">Backups tab</a>.
-      When on, deleting a hosting moves it to <a href="/trash">Trash</a>:
-      nginx serves 503, FPM stops, and the database and OS users are locked,
-      but the files, database, certificates, and user are preserved. After the retention
-      window, the scheduler runs the permanent-delete pipeline automatically.
-      When off (the default), deletes are permanent immediately, as before.
-    </p>
-    <form method="post" action="/settings/config" autocomplete="off">
-      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-      <input type="hidden" name="section" value="cluster">
-      {# Tell post_config to land us back on /settings#retention
-         instead of the section→tab default (which would send us
-         to #cluster). #}
-      <input type="hidden" name="_return_tab" value="retention">
-      <input type="hidden" name="_checkboxes" value="trash_enabled">
-
-      <label class="field-checkbox" style="font-weight:600">
-        <input type="checkbox" name="trash_enabled" value="true"
-               {% if config.cluster.trash_enabled %}checked{% endif %}>
-        Enable trash for hosting deletes
-      </label>
-
-      <div class="field">
-        <label for="trash_retention_days">Retention <span class="hint">days · 1..=365</span></label>
-        <input id="trash_retention_days" name="trash_retention_days" type="number"
-               min="1" max="365" step="1"
-               value="{{ config.cluster.trash_retention_days }}">
-        <p class="text-soft small" style="margin:0.3rem 0 0">
-          The scheduler permanently deletes any trashed hosting older than this.
-          Before the timer expires, you can still Restore a hosting or Delete it
-          permanently from <a href="/trash">Trash</a>.
-        </p>
-      </div>
-
-      <button type="submit" class="btn primary">Save trash settings</button>
-    </form>
-  </div>
-
-  <div class="card" style="margin-top:1rem">
-    <h2 style="margin:0 0 0.4rem">
-      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M7 14l4-4 4 4 6-6"/></svg>
-      Audit log retention
-    </h2>
-    <p class="text-soft small" style="margin:0 0 0.8rem;line-height:1.55">
-      The audit log records every state-changing operation as a
-      tamper-evident BLAKE3 hash chain. Without retention it grows
-      indefinitely — on a busy cluster, tens of MB per month.
-      Set a window in days below to purge older entries automatically; the
-      chain re-anchors at the oldest surviving row, so
-      <code>verify_chain</code> still works on what's left.
-      <strong>0 (the default) keeps everything forever.</strong>
-    </p>
-    <form method="post" action="/settings/config" autocomplete="off">
-      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-      <input type="hidden" name="section" value="cluster">
-      <input type="hidden" name="_return_tab" value="retention">
-      <div class="field">
-        <label for="audit_retention_days">Retain audit entries for <span class="hint">days · 0..=3650 · 0 = forever</span></label>
-        <input id="audit_retention_days" name="audit_retention_days" type="number"
-               min="0" max="3650" step="1"
-               value="{{ config.cluster.audit_retention_days }}">
-        <p class="text-soft small" style="margin:0.3rem 0 0;line-height:1.55">
-          Typical values: <code>90</code> for compliance-light setups,
-          <code>365</code> for tighter rules, or <code>0</code> if you
-          export <code>/audit?export=csv</code> off-cluster and
-          want everything kept locally. Purges run on the normal
-          scheduler tick (about every 60 s); no extra cron job is needed.
-        </p>
-      </div>
-      <button type="submit" class="btn primary">Save audit retention</button>
-    </form>
-  </div>
-</div>
-
-{# ==========================================================
-   RAW TOML — read-only view of agent.toml with secrets masked
+   RAW TOML — read-only view of the master's agent.toml as it is on
+   disk, secrets masked
    ========================================================== #}
 <div class="tab-panel" id="tab-raw">
-  <p class="text-soft small" style="margin:0 0 0.9rem;line-height:1.55">The agent’s raw configuration file, read-only. For checking what is actually on disk when a setting misbehaves.</p>
-  <div class="card">
+  <p class="text-soft small" style="margin:0 0 0.9rem;line-height:1.55">The master’s <code>/etc/hyperion/agent.toml</code> exactly as it is on disk, secrets masked, for checking what a save really wrote when a setting misbehaves.</p>
+  <div class="card" id="raw-toml">
     <h2>
       <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
       Raw agent.toml
     </h2>
     <p class="text-soft small" style="margin:0 0 0.8rem">
-      Read-only snapshot of what the agent currently holds in memory. Passwords and tokens are shown as <code>«set»</code> markers. To edit on disk, run <code>sudo $EDITOR /etc/hyperion/agent.toml</code>, then <code>systemctl restart hyperion-agent</code> to apply.
+      Read-only copy of the file as it is on disk right now — after a save it can run a few seconds ahead of what the restarting agent holds. Passwords and tokens are shown as <code>«set»</code> markers. To edit on disk, run <code>sudo $EDITOR /etc/hyperion/agent.toml</code>, then <code>systemctl restart hyperion-agent</code> to apply.
     </p>
     <pre style="background:var(--surface-1);border-radius:6px;padding:0.9rem 1rem;font-size:0.78rem;line-height:1.55;overflow:auto;max-height:36rem">{{ raw_toml }}</pre>
   </div>
 </div>
 
-{# ==========================================================
-   API KEYS — Bearer credentials for the /api/v1 remote API.
-   Gated by ApiKeysManage; the create form reuses the roles
-   capability groups + clamps to the caller's own caps.
-   ========================================================== #}
-{% if can_manage_api_keys %}
-<div class="tab-panel" id="tab-api">
-  <p class="text-soft small" style="margin:0 0 0.9rem;line-height:1.55">Bearer keys for the management API — for scripts and integrations. Every key is clamped to the permissions of the user who created it.</p>
-  {% if new_api_key.is_some() %}
-  <div class="flash ok" style="margin-bottom:1rem">
-    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-    <div class="flash-body">
-      <strong>Copy this key now — it won't be shown again.</strong>
-      <pre style="background:var(--surface-1);border-radius:6px;padding:0.7rem 0.9rem;margin:0.5rem 0 0;font-size:0.85rem;word-break:break-all;user-select:all">{{ new_api_key.as_ref().unwrap() }}</pre>
-    </div>
-  </div>
-  {% endif %}
-
-  <div class="card">
-    <h2>
-      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>
-      Create API key
-    </h2>
-    <p class="text-soft small" style="margin:0 0 0.8rem">
-      An API key authenticates the <code>/api/v1</code> remote management API via
-      <code>Authorization: Bearer hyp_…</code>. Capabilities are clamped to your own —
-      a key can never do more than you can.
-    </p>
-    <form method="post" action="/settings/api-keys#api" autocomplete="off">
-      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-      <div class="field-row" style="display:flex;gap:1rem;flex-wrap:wrap;align-items:flex-end">
-        <div class="field" style="flex:1;min-width:14rem">
-          <label for="api_key_label">Label</label>
-          <input id="api_key_label" name="label" type="text" required placeholder="ci-deploy" maxlength="120">
-        </div>
-        <div class="field">
-          <label for="api_key_expires">Expires (optional)</label>
-          <input id="api_key_expires" name="expires" type="date">
-        </div>
-      </div>
-      <div class="field-row" style="display:flex;gap:1rem;flex-wrap:wrap;align-items:flex-end;margin-top:0.6rem">
-        <div class="field" style="flex:1;min-width:14rem">
-          <label for="api_key_ips">Allowed IPs / CIDRs (optional)</label>
-          <input id="api_key_ips" name="ip_allowlist" type="text" placeholder="203.0.113.0/24, 198.51.100.7" autocomplete="off">
-          <span class="text-soft small">Comma-separated. Empty = any address.</span>
-        </div>
-        <div class="field">
-          <label for="api_key_rate">Rate limit (req/min)</label>
-          <input id="api_key_rate" name="rate_limit" type="number" min="0" step="1" placeholder="0" style="width:9rem">
-          <span class="text-soft small">0 = unlimited</span>
-        </div>
-      </div>
-      <fieldset style="border:1px solid var(--border);border-radius:8px;padding:0.8rem 1rem;margin:0.9rem 0">
-        <legend class="text-soft small" style="padding:0 0.4rem">Capabilities</legend>
-        <div class="cap-groups" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(min(16rem, 100%), 1fr));gap:0.8rem 1.4rem">
-          {% for g in api_key_cap_groups %}
-          <div class="cap-group">
-            <div class="text-soft small" style="font-weight:600;margin-bottom:0.3rem">{{ g.label }}</div>
-            {% for c in g.caps %}
-            <label class="cap-row" style="display:flex;align-items:center;gap:0.45rem;padding:0.18rem 0">
-              <input type="checkbox" name="{{ c.machine }}">
-              <span class="cap-label" style="flex:1">{{ c.label }}</span>
-            </label>
-            {% endfor %}
-          </div>
-          {% endfor %}
-        </div>
-      </fieldset>
-      <button type="submit" class="btn primary">Create key</button>
-    </form>
-  </div>
-
-  <div class="card" style="margin-top:1rem">
-    <h2>Existing keys</h2>
-    {% if api_keys.is_empty() %}
-    <p class="text-soft small" style="margin:0">No API keys yet.</p>
-    {% else %}
-    <div class="scroll-x">
-<table class="data-table" style="width:100%">
-      <thead>
-        <tr>
-          <th>Prefix</th><th>Label</th><th>Capabilities</th><th>Restrictions</th><th>Last used</th><th>Expires</th><th></th>
-        </tr>
-      </thead>
-      <tbody>
-        {% for k in api_keys %}
-        <tr{% if k.is_revoked %} class="text-soft" style="opacity:0.55"{% endif %}>
-          <td><code>{{ k.key_prefix }}…</code></td>
-          <td>{{ k.label }}</td>
-          <td class="text-soft small">{{ k.caps_summary }}</td>
-          <td class="text-soft small">{{ k.restrictions }}</td>
-          <td class="text-soft small">{{ k.last_used }}</td>
-          <td class="text-soft small">{{ k.expires }}</td>
-          <td style="text-align:right">
-            {% if k.is_revoked %}
-            <span class="badge" style="background:var(--surface-2)">revoked</span>
-            {% else %}
-            <form method="post" action="/settings/api-keys/revoke#api" style="margin:0;display:inline"
-                  onsubmit="return confirm('Revoke this API key? Any client using it stops working immediately.')">
-              <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-              <input type="hidden" name="id" value="{{ k.id }}">
-              <button type="submit" class="btn small danger">Revoke</button>
-            </form>
-            {% endif %}
-          </td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-</div>
-    {% endif %}
-  </div>
-</div>
-{% endif %}
-
 </div>{# /tab-panels #}
+
+{# Live preview for Alert wording and the customer letters. A parse-time
+   IIFE that looks up fields on the Alerts and Customer letters tabs by id,
+   so it must come after EVERY tab panel in DOM order — left inside the
+   panel stream, any card moved below it silently lost its previews and
+   its fill / clear / prefill buttons. #}
+<script>
+// Live preview for the notification message templates. Mirrors the
+// server-side single-pass {key} substitution (unknown tokens are left
+// verbatim, substituted values are NOT re-scanned).
+(function () {
+  function hypRender(tmpl, fields) {
+    var out = '', rest = tmpl;
+    while (true) {
+      var open = rest.indexOf('{');
+      if (open === -1) { out += rest; break; }
+      out += rest.slice(0, open);
+      var after = rest.slice(open + 1);
+      var close = after.indexOf('}');
+      if (close !== -1) {
+        var key = after.slice(0, close);
+        if (Object.prototype.hasOwnProperty.call(fields, key)) {
+          out += fields[key];
+          rest = after.slice(close + 1);
+          continue;
+        }
+      }
+      out += '{';
+      rest = after;
+    }
+    return out;
+  }
+  var sample = {
+    message: 'Backup of example.com failed: not enough free disk space.',
+    subject: 'Backup failed — example.com',
+    body: 'The scheduled backup of example.com did not finish.\nReason: not enough free disk space on the node.',
+    time: '2026-06-19 03:00 UTC',
+    panel: 'https://panel.example.com',
+    kind: 'backup'
+  };
+  function setPreview(id, text) {
+    var el = document.getElementById(id);
+    if (el) el.textContent = text.length ? text : '(empty)';
+  }
+  function update() {
+    var slack = document.getElementById('nt_slack');
+    var subj = document.getElementById('nt_subject');
+    var body = document.getElementById('nt_body');
+    if (slack) setPreview('nt_slack_preview', hypRender(slack.value, { message: sample.message, time: sample.time, panel: sample.panel }));
+    if (subj) setPreview('nt_subject_preview', hypRender(subj.value, { subject: sample.subject, time: sample.time }));
+    if (body) setPreview('nt_body_preview', hypRender(body.value, { body: sample.body, time: sample.time, panel: sample.panel, kind: sample.kind }));
+  }
+  ['nt_slack', 'nt_subject', 'nt_body'].forEach(function (id) {
+    var el = document.getElementById(id);
+    if (el) el.addEventListener('input', update);
+  });
+
+  // ── Customer letters (care report + expiry warning) ──────────────
+  // The care sample is rendered SERVER-SIDE by the very functions that
+  // build a customer's letter, so this preview cannot drift from what
+  // actually gets sent — it previously did, because the strings were
+  // hand-copied prose sitting right here.
+  //
+  // Availability arrives deliberately unmeasured: the operator must be
+  // able to see what an unmonitored section looks like inside their own
+  // wording before a customer does. There is no sample for "the number
+  // behind a section" because no such placeholder exists — a section is
+  // either its measured wording or its honest "we were not looking"
+  // wording, never a bare figure.
+  var careSample = {{ care_preview_json|safe }};
+  {#- Kept in step with the renderer's placeholder list by hand, because this
+      letter's sample is not server-generated the way the care report's is. A
+      placeholder missing here previews as its own name, which reads as "this
+      does not work" for something that does. -#}
+  var expirySample = {
+    domain: 'example.com',
+    expires_at: '1 Sep 2026',
+    days_left: '7 days',
+    grace_days: '14 days',
+    delete_at: '15 Sep 2026',
+    when: 'expires on 1 Sep 2026 — 7 days left',
+    days_left_count: '7',
+    grace_days_count: '14',
+    expires_at_iso: '2026-09-01',
+    delete_at_iso: '2026-09-15'
+  };
+  function letterPreview(inputId, defaultId, previewId, fields) {
+    var el = document.getElementById(inputId);
+    var def = document.getElementById(defaultId);
+    var out = document.getElementById(previewId);
+    if (!el || !def || !out) return;
+    // Empty means "send the built-in letter", so preview exactly that —
+    // the same rule the renderer applies server-side.
+    var tmpl = el.value.trim().length ? el.value : def.value;
+    out.textContent = hypRender(tmpl, fields);
+  }
+  function updateLetters() {
+    letterPreview('nt_care', 'nt_care_default', 'nt_care_preview', careSample);
+    letterPreview('nt_expiry', 'nt_expiry_default', 'nt_expiry_preview', expirySample);
+  }
+  ['nt_care', 'nt_expiry', 'nt_care_subject', 'nt_expiry_subject'].forEach(function (id) {
+    var el = document.getElementById(id);
+    if (el) el.addEventListener('input', updateLetters);
+  });
+  document.querySelectorAll('[data-fill]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var target = document.getElementById(btn.getAttribute('data-fill'));
+      var src = document.getElementById(btn.getAttribute('data-from'));
+      if (target && src) { target.value = src.value; updateLetters(); }
+    });
+  });
+  // Copy every built-in placeholder into its field, so the operator can EDIT
+  // the sentence instead of retyping it from what they can see but not select.
+  // It only fills fields that are still empty — pressing it must never wipe
+  // wording someone has already written.
+  var prefill = document.getElementById('lt-prefill');
+  if (prefill) {
+    prefill.addEventListener('click', function () {
+      var n = 0;
+      document.querySelectorAll('[placeholder]').forEach(function (el) {
+        if (!el.name || el.value !== '' || !el.closest('form')) return;
+        var f = el.closest('form');
+        var sec = f.querySelector('input[name="section"]');
+        if (!sec || sec.value !== 'letters') return;
+        el.value = el.getAttribute('placeholder');
+        n++;
+      });
+      prefill.textContent = n + ' field(s) filled in — edit them, then Save letter wording';
+    });
+  }
+  document.querySelectorAll('[data-clear]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var target = document.getElementById(btn.getAttribute('data-clear'));
+      if (target) { target.value = ''; updateLetters(); }
+    });
+  });
+
+  update();
+  updateLetters();
+})();
+</script>
 
 <div class="flash warn" style="margin-top:1rem">
   <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
   <div class="flash-body">
-    Edits are written to <code>/etc/hyperion/agent.toml</code> with comments preserved (atomic write plus a <code>.bak</code> backup). The running agent keeps its old in-memory config until you restart it. Use the <strong>Restart</strong> button on <a href="/services" style="color:inherit;text-decoration:underline">Service health</a>, or run <code>systemctl restart hyperion-agent</code> on this node.
+    Edits are written to <code>/etc/hyperion/agent.toml</code> with comments preserved (atomic write plus a <code>.bak</code> backup). Saving a card writes the file and restarts <code>hyperion-agent</code> automatically (~5 s). If a change still does not show, restart it from <a href="/services" style="color:inherit;text-decoration:underline">Service health</a>.
   </div>
 </div>
 
@@ -2752,15 +2806,24 @@
   const panels = document.querySelectorAll('.tab-panels .tab-panel');
   if (!tabs.length || !panels.length) return;
   function activate(id) {
+    // Nothing to activate — leave the page exactly as it is. Blanking every
+    // panel because an id matched nothing is how a retired or mistyped hash
+    // (or a stale remembered tab) produced an empty page. The match is
+    // computed FIRST so a miss touches no .active class at all.
+    if (!id) return false;
     let matched = false;
-    tabs.forEach(t => {
-      const isMe = t.dataset.tab === id;
-      t.classList.toggle('active', isMe);
-      if (isMe) matched = true;
-    });
+    tabs.forEach(t => { if (t.dataset.tab === id) matched = true; });
+    if (!matched) return false;
+    tabs.forEach(t => t.classList.toggle('active', t.dataset.tab === id));
     panels.forEach(p => p.classList.toggle('active', p.id === 'tab-' + id));
-    return matched;
+    return true;
   }
+  // Tab ids retired by the Settings reorganisation, mapped to the card that
+  // took over their job, so old bookmarks and a _return_tab rendered before
+  // the upgrade still land somewhere sensible. #api, #geoip, #bruteforce,
+  // #mail, #notifications, #tls, #cluster, #backups, #general and #raw
+  // still resolve natively, as a tab id or a card id.
+  const LEGACY = { system: 'updates', testnodes: 'preview-address', retention: 'trash' };
   // A hash can name a TAB (#tls) or an element INSIDE one (#geoip — the
   // redirect anchor after saving GeoIP credentials). The old code only
   // handled the first, so every deep link into a card landed on the
@@ -2768,6 +2831,7 @@
   // as "nothing happened" even when it worked.
   function resolve(id) {
     if (!id) return false;
+    if (Object.prototype.hasOwnProperty.call(LEGACY, id)) id = LEGACY[id];
     if (activate(id)) { remember(id); return true; }
     const el = document.getElementById(id);
     const panel = el && el.closest('.tab-panel');
@@ -2794,8 +2858,12 @@
     try { return localStorage.getItem(memKey); } catch (_) { return null; }
   }
   tabs.forEach(t => t.addEventListener('click', ev => {
-    ev.preventDefault();
+    // Not every item in a strip has to be a tab: one without data-tab is a
+    // plain link, so let the browser follow its href instead of swallowing
+    // the click and activating nothing.
     const id = t.dataset.tab;
+    if (!id) return;
+    ev.preventDefault();
     activate(id);
     remember(id);
     if (history.replaceState) history.replaceState(null, '', '#' + id);
@@ -2831,7 +2899,10 @@
         if (!document.getElementById('from_address').value) {
           document.getElementById('from_address').value = j.suggested_from;
         }
-        const en = document.querySelector('input[name="enabled"]');
+        // Scoped to the SMTP relay card: the off-site FTP and brute-force
+        // forms have a name="enabled" checkbox too, and panel order must
+        // not decide which one gets ticked.
+        const en = document.querySelector('#smtp-relay input[name="enabled"]');
         if (en) en.checked = true;
         result.innerHTML = `<div class="flash success" style="margin-bottom:0.85rem"><div class="flash-body"><strong>Detected:</strong> ${j.smtp_host}:${j.smtp_port} (${j.security}). ${escapeHtml(j.notes)} <em>Save the section below to persist.</em></div></div>`;
       } else {
