@@ -77,6 +77,11 @@ struct NewTpl<'a> {
     /// "" = default php, otherwise echoes back kind selector
     #[allow(dead_code)]
     kind_in: String,
+    /// Type-first choice echoed back after a validation error so the
+    /// selected "What do you want to create?" card stays highlighted.
+    /// One of "" | "wordpress" | "php" | "static" | "reverse_proxy"
+    /// | "redirect".
+    site_type_in: String,
     /// Echoed-back upstream URL when create failed and kind=reverse_proxy
     proxy_upstream_url_in: String,
     /// Enrolled remote nodes (master excluded). When empty, the
@@ -577,6 +582,7 @@ pub async fn get_new(State(state): State<SharedState>, ctx: AuthCtx) -> Result<R
         php_in: "8.3".to_string(),
         db_in: "mariadb".to_string(),
         kind_in: "php".to_string(),
+        site_type_in: String::new(),
         proxy_upstream_url_in: String::new(),
         nodes,
         target_node_in: String::new(),
@@ -697,6 +703,18 @@ pub struct CreateForm {
     /// the case.
     #[serde(default)]
     pub issue_cert: String,
+    /// Type-first UI selection: one of "wordpress" | "php" | "static"
+    /// | "reverse_proxy" | "redirect". When non-empty it is the
+    /// AUTHORITATIVE source for the backend `kind` and whether
+    /// WordPress installs — the redesigned create form drives one
+    /// radio-backed choice card into this single field so the no-JS
+    /// path submits a coherent intent without having to set `kind`
+    /// and `install_wp` separately. When empty (the JSON API has its
+    /// own struct, and the e2e form tests POST a flat field set), we
+    /// fall back to the legacy `kind` + `install_wp` fields so those
+    /// paths are untouched.
+    #[serde(default)]
+    pub site_type: String,
 }
 
 pub async fn post_create(
@@ -807,6 +825,30 @@ pub async fn post_create(
         }
     }
 
+    // ─── Type-first intent resolution ───────────────────────────
+    // The redesigned create form drives a single radio-backed choice
+    // card into `site_type`. When present it is AUTHORITATIVE for the
+    // backend kind and whether WordPress installs, so the no-JS path
+    // submits a coherent intent in one field instead of juggling
+    // `kind` + `install_wp`. Empty → fall back to the legacy `kind`
+    // field (the JSON API has its own struct and the flat-field e2e
+    // form tests never send site_type, so both are unaffected).
+    //   wordpress      → php + a database + WordPress install
+    //   php            → php, no forced WP (DB optional via Advanced)
+    //   static         → static files only
+    //   reverse_proxy  → proxy to an upstream URL
+    //   redirect       → 301/302 to a target URL (provisioned static)
+    let site_type = form.site_type.trim().to_ascii_lowercase();
+    let wp_from_type = site_type == "wordpress";
+    let effective_kind: String = match site_type.as_str() {
+        "wordpress" | "php" => "php".to_string(),
+        "static" => "static".to_string(),
+        "reverse_proxy" => "reverse_proxy".to_string(),
+        "redirect" => "redirect".to_string(),
+        // Empty or unrecognised → legacy `kind` field (unchanged).
+        _ => form.kind.clone(),
+    };
+
     // Parse inputs; render the form with an error if anything is malformed.
     let domain = match Domain::parse(&effective_domain) {
         Ok(d) => d,
@@ -816,18 +858,45 @@ pub async fn post_create(
         Ok(v) => v,
         Err(e) => return Ok(render_new_error(&ctx, &csrf_token, &form, &e)),
     };
-    let php_version = if form.php.is_empty() || form.php == "none" {
+    // WordPress needs a PHP runtime AND a database. When the operator
+    // chose the WordPress card but left the runtime at its blank/none
+    // default — the common path, and the old footgun where the agent
+    // then refused the install — backfill a supported PHP version and
+    // MariaDB here. An explicit Advanced-options value still wins.
+    // For WordPress with no explicit PHP version, fall back to the
+    // same "8.3" default get_new() renders; parse it through the real
+    // validator (never expected to fail, but handled rather than
+    // unwrapped so a future rename surfaces cleanly).
+    let php_choice = if form.php.is_empty() || form.php == "none" {
+        if wp_from_type {
+            "8.3"
+        } else {
+            ""
+        }
+    } else {
+        form.php.as_str()
+    };
+    let php_version = if php_choice.is_empty() {
         None
     } else {
-        match PhpVersion::from_str(&form.php) {
+        match PhpVersion::from_str(php_choice) {
             Ok(v) => Some(v),
             Err(e) => return Ok(render_new_error(&ctx, &csrf_token, &form, &e)),
         }
     };
-    let database = if form.db.is_empty() || form.db == "none" {
+    let db_choice = if form.db.is_empty() || form.db == "none" {
+        if wp_from_type {
+            "mariadb"
+        } else {
+            ""
+        }
+    } else {
+        form.db.as_str()
+    };
+    let database = if db_choice.is_empty() {
         None
     } else {
-        match DbProvision::from_str(&form.db) {
+        match DbProvision::from_str(db_choice) {
             Ok(v) => Some(v),
             Err(e) => return Ok(render_new_error(&ctx, &csrf_token, &form, &e)),
         }
@@ -843,10 +912,10 @@ pub async fn post_create(
     // A "redirect" hosting has no distinct backend kind — it is provisioned
     // as a plain static site whose vhost we then switch to a 301/302 (applied
     // right after HostingCreate succeeds, below).
-    let is_redirect = form.kind == "redirect";
-    let kind = if form.kind == "reverse_proxy" {
+    let is_redirect = effective_kind == "redirect";
+    let kind = if effective_kind == "reverse_proxy" {
         "reverse_proxy".to_string()
-    } else if form.kind == "static" || is_redirect {
+    } else if effective_kind == "static" || is_redirect {
         "static".to_string()
     } else {
         "php".to_string()
@@ -1085,7 +1154,12 @@ pub async fn post_create(
             let wp_form_checked = form.install_wp.eq_ignore_ascii_case("on")
                 || form.install_wp == "true"
                 || form.install_wp == "1";
-            let wp_was_requested = wp_form_checked || profile_forces_wp;
+            // `wp_from_type` is the type-first "WordPress website" card:
+            // it implies php + a database (backfilled above), so the
+            // feasibility checks below pass by construction. It is an
+            // independent signal from the legacy install_wp checkbox so
+            // the no-JS card path installs WordPress without that box.
+            let wp_was_requested = wp_form_checked || profile_forces_wp || wp_from_type;
             let issue_cert_checked = form.issue_cert.eq_ignore_ascii_case("on")
                 || form.issue_cert == "true"
                 || form.issue_cert == "1";
@@ -5510,6 +5584,7 @@ fn render_new_error<'a>(
         php_in: form.php.clone(),
         db_in: form.db.clone(),
         kind_in: form.kind.clone(),
+        site_type_in: form.site_type.clone(),
         proxy_upstream_url_in: form.proxy_upstream_url.clone(),
         // Re-rendering on validation error doesn't need a fresh
         // NodesList — we'd repeat the agent RPC for no UX gain.
