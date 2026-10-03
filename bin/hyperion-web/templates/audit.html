@@ -16,7 +16,11 @@
   </div>
 </div>
 
-<div class="card" style="margin-bottom:1rem;padding:0.85rem 1rem">
+{% include "_node_auth_banner.html" %}
+
+<div class="group" style="margin-bottom:1rem">
+  <div class="ghead">Search &amp; verify</div>
+  <div class="item">
   <form method="get" action="/audit"
         class="audit-filter-grid" style="display:grid;grid-template-columns:1fr auto auto auto;gap:0.5rem 0.75rem;align-items:center">
     <input type="search" name="q" value="{{ q|e }}"
@@ -66,15 +70,13 @@
       <input type="hidden" name="since" value="{{ since_filter|e }}">
     </div>
   </form>
-</div>
+  </div>
 
-{% include "_node_auth_banner.html" %}
-
-{# Tamper-evident verify button — walks every row in audit_log and
-   re-computes row_hash from prev_hash + canonical fields. Lands a
-   green/red pill into #audit-chain-result. The check is read-only,
-   no CSRF needed (admin role gate is enough). #}
-<div class="card" style="margin-bottom:1rem;padding:0.7rem 1rem;display:flex;gap:0.6rem;align-items:center;flex-wrap:wrap">
+  {# Tamper-evident verify button — walks every row in audit_log and
+     re-computes row_hash from prev_hash + canonical fields. Lands a
+     green/red pill into #audit-chain-result. The check is read-only,
+     no CSRF needed (admin role gate is enough). #}
+  <div class="item" style="display:flex;gap:0.6rem;align-items:center;flex-wrap:wrap">
   <button class="btn small"
           type="button"
           hx-post="/audit/verify"
@@ -90,6 +92,7 @@
   </span>
   <span id="audit-chain-spinner" class="htmx-indicator text-soft small">Checking…</span>
   <span id="audit-chain-result" style="margin-left:auto"></span>
+  </div>
 </div>
 
 <div class="card no-pad-table">

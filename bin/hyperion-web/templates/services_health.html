@@ -197,12 +197,14 @@
    the agent for current state; if no install has ever run, it
    shows a short hint instead. #}
 {% if is_super_admin %}
-<div class="card" id="install-progress" style="margin-top:1.4rem">
-  <h2 style="display:flex;align-items:center;gap:0.5rem;margin:0 0 0.5rem">
-    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-    Service install progress
-    <span class="text-soft" style="font-weight:400;font-size:0.75em">· {{ current_label }}</span>
-  </h2>
+<div class="group" style="margin-top:1.4rem">
+  <div class="ghead">Service maintenance</div>
+  <div class="item" id="install-progress">
+    <h3>
+      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+      Service install progress
+      <span class="text-soft" style="font-weight:400;font-size:0.75em">· {{ current_label }}</span>
+    </h3>
   <div id="install-progress-body"
        hx-get="/services/install-status?node={{ current_node }}"
        hx-trigger="load, every 2s"
@@ -217,9 +219,9 @@
     but still verbose — so the real cause of a failure is shown rather
     than the generic "dpkg returned 1" wrapper.
   </p>
-</div>
+  </div>
 
-{# Rootfs read-only diagnose + auto-fix. Two HTMX-driven buttons:
+  {# Rootfs read-only diagnose + auto-fix. Two HTMX-driven buttons:
      - "Diagnose" runs the gather-only RPC and renders mount lines,
        fstab, immutable attrs, image kind — operator can read what's
        wrong before touching anything.
@@ -227,11 +229,11 @@
        /usr → remount,rw /usr) and shows each step's outcome.
    Results swap into #fs-diagnose-result; no page reload, the install
    live-log panel above keeps streaming. #}
-<div class="card" style="margin-top:1rem">
-  <h2 style="display:flex;align-items:center;gap:0.5rem;margin:0 0 0.4rem">
-    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-    Read-only rootfs — diagnose and auto-fix
-  </h2>
+  <div class="item">
+    <h3>
+      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+      Read-only rootfs — diagnose and auto-fix
+    </h3>
   <p class="text-soft small" style="margin:0 0 0.7rem">
     If an Install above failed with <code>/usr is not writable</code> or
     <code>Read-only file system (os error 30)</code>, the buttons below
@@ -300,6 +302,7 @@
       </button>
     </form>
   </details>
+  </div>
 </div>
 {% endif %}
 

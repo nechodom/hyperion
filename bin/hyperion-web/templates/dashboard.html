@@ -281,17 +281,18 @@
 <div hx-get="/dashboard/care-panel" hx-trigger="load" hx-swap="outerHTML"></div>
 
 <div class="dashboard-grid">
-<div class="card hover">
-  <div class="spread" style="margin-bottom:1rem">
-    <h2 style="margin:0">
+<div class="group">
+  <div class="ghead">Overview</div>
+  <div class="item">
+    <h3>
       <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
       Recent hostings
-    </h2>
-    <a href="/hostings" class="btn small ghost">
-      View all
-      <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
-    </a>
-  </div>
+      <span class="grow"></span>
+      <a href="/hostings" class="btn small ghost">
+        View all
+        <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
+      </a>
+    </h3>
   {% if recent.is_empty() %}
     <div class="empty">
       <div class="empty-illustration">
@@ -325,18 +326,20 @@
       </table>
     </div>
   {% endif %}
+  </div>
 </div>
 
-<div class="card hover">
-  <div class="spread" style="margin-bottom:0.6rem">
-    <h2 style="margin:0">
+<div class="group">
+  <div class="ghead">Activity</div>
+  <div class="item">
+    <h3>
       <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
       Recent activity
-    </h2>
-    {% if !activity.is_empty() %}
-      <a href="/audit" class="btn small ghost">View audit log →</a>
-    {% endif %}
-  </div>
+      {% if !activity.is_empty() %}
+        <span class="grow"></span>
+        <a href="/audit" class="btn small ghost">View audit log →</a>
+      {% endif %}
+    </h3>
   {% if activity.is_empty() %}
     <p class="muted" style="font-size:0.88rem;margin:0">No activity yet. Actions across the cluster will show up here.</p>
   {% else %}
@@ -365,6 +368,7 @@
       {% endfor %}
     </ul>
   {% endif %}
+  </div>
 </div>
 </div>
 {% endblock %}

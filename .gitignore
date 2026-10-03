@@ -9,3 +9,4 @@ STATUS-*.md
 SCRATCH-*.md
 NOTES-*.md
 bin/hyperion-web/repro_tmp/
+.superpowers/
