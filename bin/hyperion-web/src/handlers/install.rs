@@ -460,7 +460,7 @@ pub async fn post_remove_node(
         }
         RpcResponse::NodeRemoved { removed: false, hostings_blocking } if hostings_blocking > 0 => {
             (false, format!(
-                "Refused — {} hosting(s) still live on {}. Migrate them off first (Settings → Cluster placement), OR re-submit with the Force option ticked to orphan them and delete the node anyway.",
+                "Refused — {} hosting(s) still live on {}. Move them to another node first (Move / copy on each hosting), OR re-submit with the Force option ticked to orphan them and delete the node anyway.",
                 hostings_blocking, node_id
             ))
         }

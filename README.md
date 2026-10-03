@@ -171,7 +171,7 @@ selection, non-interactive mode, private-repo and air-gapped sources). See
 A scriptable HTTP API at `/api/v1` — provision and operate the whole cluster
 from CI, cron, or your own tooling.
 
-- **Auth** — a Bearer key minted in **Settings → API keys**, carrying a
+- **Auth** — a Bearer key minted in **Settings → Access & API**, carrying a
   capability set clamped to its owner and re-checked live on every call (lock or
   demote the owner and the key loses power immediately).
 - **Hardening** — optional per-key IP allowlist and rate limit.

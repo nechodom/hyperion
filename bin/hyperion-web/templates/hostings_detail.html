@@ -656,14 +656,14 @@
 <p class="text-soft" style="font-size:0.8rem;margin:-0.4rem 0 1rem">
   <strong>Preview subdomain not active yet.</strong> This site (and every other on this node)
   will get an internal address under <code>*.{{ preview_domain.base }}</code> once you issue that
-  wildcard certificate — <a href="/settings#testnodes">Settings → Previews &amp; test nodes → Step 2</a>.
+  wildcard certificate — <a href="/settings#preview-wildcard">Settings → HTTPS &amp; previews → Preview wildcard certificates</a>.
 </p>
 {% else if preview_domain.reason == "no-template" %}
 <p class="text-soft" style="font-size:0.8rem;margin:-0.4rem 0 1rem">
   <strong>Want a preview URL for this site?</strong> Preview subdomains give every hosting on the
   node an internal address (e.g. <code>{{ detail.domain }}</code> → <code>preview.&lt;base&gt;</code>)
   with valid TLS, so you can open a site before its real DNS points here. Set it up once in
-  <a href="/settings#testnodes">Settings → Previews &amp; test nodes</a> — it applies to all sites,
+  <a href="/settings#preview-address">Settings → HTTPS &amp; previews</a> — it applies to all sites,
   production included.
 </p>
 {% else if preview_domain.reason == "under-base" %}
@@ -1290,7 +1290,7 @@
     </p>
     <p class="text-soft small" style="margin:-0.3rem 0 0.7rem;padding:0.5rem 0.7rem;background:var(--surface-1);border-radius:6px">
       On a <strong>test node</strong>? Issue one <code>*.&lt;base&gt;</code> wildcard for the
-      whole node under <a href="/settings#testnodes">Settings → Previews &amp; test nodes</a> instead — every
+      whole node under <a href="/settings#preview-wildcard">Settings → HTTPS &amp; previews</a> instead — every
       auto-subdomain reuses it, so this per-site certificate isn't needed there.
     </p>
     <form method="post" action="/hostings/cert/dns01/begin">
@@ -2477,7 +2477,7 @@
     <h3 class="section-title">Countries</h3>
     <p class="muted small" style="margin:-0.3rem 0 0.6rem">
       Refuse visitors by country. Needs the GeoIP database
-      (<a href="/settings#geoip">Settings → GeoIP</a>) — without it every
+      (<a href="/settings#geoip">Settings → Bans &amp; blocking → GeoIP</a>) — without it every
       visitor resolves to <code>ZZ</code> and nothing is blocked, so turning
       this on early cannot cut the site off by accident.
       <strong>Blocking a country blocks its people, not just its bots</strong>
@@ -3522,7 +3522,7 @@
   <div class="row" style="gap:1.2rem;flex-wrap:wrap;font-size:0.85rem;margin-bottom:0.2rem">
     <span><span class="text-soft">Automatic backups:</span>
       <strong>{% if backup_cadence == "daily" %}daily{% else if backup_cadence == "weekly" %}weekly{% else if backup_cadence == "monthly" %}monthly{% else %}off — only when you click{% endif %}</strong>
-      {% if backups_paused_by_mode && backup_cadence != "off" %}<span class="pill warn" style="font-size:0.6rem;margin-left:0.3rem" title="Settings → Backups is set to keep snapshots only. Scheduled archives run only for sites whose care package sells backups.">paused — snapshots-only mode</span>{% endif %}</span>
+      {% if backups_paused_by_mode && backup_cadence != "off" %}<span class="pill warn" style="font-size:0.6rem;margin-left:0.3rem" title="Settings → Backups &amp; trash → What this panel keeps is set to snapshots only. Scheduled archives run only for sites whose care package sells backups.">paused — snapshots-only mode</span>{% endif %}</span>
     {% if !backup_target_options.is_empty() %}
     <span><span class="text-soft">Off-site copy:</span>
       <strong>{% if backup_target.is_empty() %}{{ backup_target_default_label }}{% else %}{{ backup_target }}{% endif %}</strong></span>
@@ -3575,7 +3575,7 @@
     {% endif %}
     <p class="text-soft small" style="margin:0.7rem 0 0">
       How long archives and snapshots are kept, which kinds this node makes at all, and the FTP
-      off-site target are set in <a href="/settings#backups">Settings → Backups</a>; S3 targets in
+      off-site target are set in <a href="/settings#backups">Settings → Backups &amp; trash</a>; S3 targets in
       <a href="/settings/backups">Settings → Backup targets</a>.
     </p>
   </details>
@@ -4134,8 +4134,8 @@
 
     <h3 style="font-size:0.95rem;margin:1rem 0 0.4rem">Alert channels</h3>
       <span class="hint" style="display:block;margin-top:0.2rem">
-        These override the cluster default webhook (<a href="/settings#notifications">Settings → Notifications</a>);
-        the wording of every send comes from its message templates.
+        These override the cluster default webhook (<a href="/settings#slack">Settings → Alerts → Slack webhook</a>);
+        the wording of every send comes from the Alert wording card there.
       </span>
     <p class="text-soft small" style="margin:0 0 0.6rem">
       Configure any combination — channels left blank are skipped.
@@ -4355,7 +4355,7 @@
 
   {% if email_log.is_empty() %}
     <div class="empty" style="padding:1.5rem 1rem">
-      <p class="muted">No emails sent for this hosting yet. Configure SMTP in <a href="/settings#mail">Settings</a>, and the next monitor alert or certificate renewal will appear here.</p>
+      <p class="muted">No emails sent for this hosting yet. Configure SMTP in <a href="/settings#smtp-relay">Settings → Mail</a>, and the next monitor alert or certificate renewal will appear here.</p>
     </div>
   {% else %}
   <div class="table-wrap" style="margin:0 -1.5rem">

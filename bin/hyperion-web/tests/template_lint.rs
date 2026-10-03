@@ -751,6 +751,674 @@ fn every_tab_either_switches_a_panel_or_navigates() {
     );
 }
 
+// ── The settings page ──────────────────────────────────────────────────────
+//
+// Settings is ONE template: a tab strip, ten tab panels switched by a script at
+// the bottom of settings.html, and a page that a dozen other templates and
+// handlers link into by fragment. Nothing below is visible to rustc or to
+// Askama, which never parses the HTML: a panel that loses its tab, one missing
+// `</div>`, or a link to a card that moved to another tab all compile, render,
+// and show the operator a blank or wrong tab.
+
+const ASKAMA_COMMENTS: (&str, &str) = ("{#", "#}");
+const SCRIPTS: (&str, &str) = ("<script", "</script>");
+
+/// `body` with every span from an `open` marker through its `close` marker
+/// replaced by spaces. Newlines are kept and each character becomes as many
+/// spaces as it has bytes, so offsets and line numbers still match the
+/// original. The earliest marker wins, so a `{#` inside a script belongs to
+/// the script, and an unterminated span runs to the end.
+fn blank_spans(body: &str, pairs: &[(&str, &str)]) -> String {
+    let mut out = String::with_capacity(body.len());
+    let mut rest = body;
+    loop {
+        let next = pairs
+            .iter()
+            .filter_map(|&(open, close)| rest.find(open).map(|at| (at, open, close)))
+            .min_by_key(|&(at, _, _)| at);
+        let Some((at, open, close)) = next else {
+            out.push_str(rest);
+            return out;
+        };
+        out.push_str(&rest[..at]);
+        let end = rest[at + open.len()..]
+            .find(close)
+            .map_or(rest.len(), |e| at + open.len() + e + close.len());
+        for c in rest[at..end].chars() {
+            if c == '\n' {
+                out.push('\n');
+            } else {
+                for _ in 0..c.len_utf8() {
+                    out.push(' ');
+                }
+            }
+        }
+        rest = &rest[end..];
+    }
+}
+
+fn line_of(text: &str, at: usize) -> usize {
+    text[..at].matches('\n').count() + 1
+}
+
+/// The tag that starts at the `<` at `lt`, through its `>`.
+fn tag_at(text: &str, lt: usize) -> &str {
+    let end = text[lt..].find('>').map_or(text.len(), |e| lt + e + 1);
+    &text[lt..end]
+}
+
+/// Every value of attribute `name` in `text`, with the attribute's offset.
+/// Only a whitespace-preceded name counts, so `id` is not found inside
+/// `data-id` or `node-id`.
+fn attr_values<'a>(text: &'a str, name: &str) -> Vec<(usize, &'a str)> {
+    let needle = format!("{name}=\"");
+    let mut out = Vec::new();
+    for (at, _) in text.match_indices(&needle) {
+        if !text[..at].ends_with(|c: char| c.is_ascii_whitespace()) {
+            continue;
+        }
+        let value = &text[at + needle.len()..];
+        if let Some(end) = value.find('"') {
+            out.push((at, &value[..end]));
+        }
+    }
+    out
+}
+
+fn attr<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
+    attr_values(tag, name).first().map(|&(_, v)| v)
+}
+
+fn has_class(tag: &str, class: &str) -> bool {
+    attr(tag, "class").is_some_and(|v| v.split_whitespace().any(|c| c == class))
+}
+
+/// Every `<div …>` open (`true`) and `</div>` close (`false`) in `text`, as
+/// `(byte offset, is_open)` in document order.
+fn div_tags(text: &str) -> Vec<(usize, bool)> {
+    let name_ends = |at: usize| {
+        matches!(
+            text.as_bytes().get(at),
+            Some(b' ' | b'\t' | b'\r' | b'\n' | b'>' | b'/')
+        )
+    };
+    let mut out: Vec<(usize, bool)> = text
+        .match_indices("<div")
+        .filter(|&(at, _)| name_ends(at + "<div".len()))
+        .map(|(at, _)| (at, true))
+        .chain(
+            text.match_indices("</div")
+                .filter(|&(at, _)| name_ends(at + "</div".len()))
+                .map(|(at, _)| (at, false)),
+        )
+        .collect();
+    out.sort_unstable();
+    out
+}
+
+/// One `.tab-panel` element of settings.html.
+struct TabPanel {
+    /// Its `id`: `tab-` plus its tab's `data-tab` when it is wired up right.
+    id: Option<String>,
+    /// Offset of its opening `<div`.
+    open: usize,
+    /// Offset of the `</div>` that closes it, when the divs balance that far.
+    close: Option<usize>,
+    /// Divs already open when it starts; 1 = directly inside `.tab-panels`.
+    depth: usize,
+    /// Index of the panel it has ended up nested inside, if any.
+    inside: Option<usize>,
+}
+
+/// settings.html as its tab switcher sees it.
+struct SettingsPage {
+    /// The template with only its Askama comments blanked.
+    source: String,
+    /// The template with Askama comments AND `<script>` elements blanked:
+    /// the markup a browser builds elements from.
+    markup: String,
+    /// `data-tab` values in the tab strip, with their offsets.
+    tabs: Vec<(usize, String)>,
+    /// From the `.tab-panels` wrapper's `<div` to its `/tab-panels` comment.
+    region: std::ops::Range<usize>,
+    /// Every `.tab-panel` inside the region, in document order.
+    panels: Vec<TabPanel>,
+    /// `.tab-panel` elements outside the region.
+    stray_panels: Vec<usize>,
+    /// `<div` opens and `</div>` closes inside the region.
+    opens: usize,
+    closes: usize,
+    /// The `</div>` that closes the `.tab-panels` wrapper itself.
+    wrapper_close: Option<usize>,
+    /// `</div>`s in the region with nothing left open to close.
+    unmatched_closes: Vec<usize>,
+    /// `<div`s in the region still open when it ends.
+    unclosed_opens: Vec<usize>,
+}
+
+fn read_settings_page() -> SettingsPage {
+    let body =
+        std::fs::read_to_string(templates_dir().join("settings.html")).expect("read settings.html");
+    let source = blank_spans(&body, &[ASKAMA_COMMENTS]);
+    let markup = blank_spans(&body, &[ASKAMA_COMMENTS, SCRIPTS]);
+
+    // The switcher binds `.tabs .tab`, so the strip is the `.tabs` element.
+    let class_at = |class: &str| {
+        attr_values(&markup, "class")
+            .into_iter()
+            .find(|(_, v)| v.split_whitespace().any(|c| c == class))
+            .and_then(|(at, _)| markup[..at].rfind('<'))
+    };
+    let strip = class_at("tabs")
+        .expect("settings.html has no `.tabs` strip — the settings lints have drifted");
+    let strip_tag: String = markup[strip + 1..]
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric())
+        .collect();
+    let strip_end = markup[strip..]
+        .find(&format!("</{strip_tag}>"))
+        .map_or(markup.len(), |e| strip + e);
+    let tabs = attr_values(&markup[strip..strip_end], "data-tab")
+        .into_iter()
+        .map(|(at, v)| (strip + at, v.to_string()))
+        .collect();
+
+    let start = class_at("tab-panels").expect(
+        "settings.html has no `<div class=\"tab-panels\">` — the settings lints have drifted",
+    );
+    let end = body[start..].find("/tab-panels").map(|e| start + e).expect(
+        "settings.html has no `{# /tab-panels #}` comment after the `.tab-panels` \
+         wrapper — the settings lints have drifted",
+    );
+
+    let mut panels: Vec<TabPanel> = Vec::new();
+    // One entry per open div: its offset, and its index in `panels` if it is one.
+    let mut open_stack: Vec<(usize, Option<usize>)> = Vec::new();
+    let mut unmatched_closes = Vec::new();
+    let mut wrapper_close = None;
+    let (mut opens, mut closes) = (0usize, 0usize);
+    for (rel, is_open) in div_tags(&markup[start..end]) {
+        let at = start + rel;
+        if is_open {
+            opens += 1;
+            let tag = tag_at(&markup, at);
+            let mut panel = None;
+            if has_class(tag, "tab-panel") {
+                panels.push(TabPanel {
+                    id: attr(tag, "id").map(str::to_string),
+                    open: at,
+                    close: None,
+                    depth: open_stack.len(),
+                    inside: open_stack.iter().rev().find_map(|&(_, p)| p),
+                });
+                panel = Some(panels.len() - 1);
+            }
+            open_stack.push((at, panel));
+        } else {
+            closes += 1;
+            match open_stack.pop() {
+                Some((_, Some(i))) => panels[i].close = Some(at),
+                Some((opened, None)) if opened == start => wrapper_close = Some(at),
+                Some((_, None)) => {}
+                None => unmatched_closes.push(at),
+            }
+        }
+    }
+    let unclosed_opens = open_stack.into_iter().map(|(at, _)| at).collect();
+    let stray_panels = div_tags(&markup)
+        .into_iter()
+        .filter(|&(at, is_open)| {
+            is_open && !(start..end).contains(&at) && has_class(tag_at(&markup, at), "tab-panel")
+        })
+        .map(|(at, _)| at)
+        .collect();
+
+    SettingsPage {
+        source,
+        markup,
+        tabs,
+        region: start..end,
+        panels,
+        stray_panels,
+        opens,
+        closes,
+        wrapper_close,
+        unmatched_closes,
+        unclosed_opens,
+    }
+}
+
+/// Every tab in the settings strip must have exactly one panel, and every
+/// panel a tab.
+///
+/// The switcher toggles `.active` on the strip item whose `data-tab` is X and
+/// on the panel whose id is `tab-X`. A tab with no panel therefore blanks the
+/// page when clicked. A panel with no tab can never be opened, by a click or
+/// by any deep link into one of its cards, so every card on it is lost. Two
+/// panels with one id both show at once. All three are one typo away when
+/// cards and whole tabs move, and none of them is an error anywhere.
+#[test]
+fn settings_tabs_and_panels_match() {
+    let page = read_settings_page();
+    let line = |at: usize| line_of(&page.markup, at);
+    let mut offenders = Vec::new();
+    assert!(
+        !page.tabs.is_empty(),
+        "no data-tab in the settings tab strip — the lint has drifted"
+    );
+    assert!(
+        !page.panels.is_empty(),
+        "no .tab-panel inside .tab-panels on the settings page — the lint has drifted"
+    );
+
+    let mut strip = std::collections::BTreeSet::new();
+    for (at, tab) in &page.tabs {
+        if !strip.insert(tab.as_str()) {
+            offenders.push(format!(
+                "settings.html:{}: data-tab=\"{tab}\" is in the strip twice",
+                line(*at)
+            ));
+        }
+    }
+    // The switcher's last resort is `activate('general')`: with no such tab, a
+    // URL naming nothing it knows opens onto an empty page.
+    if !strip.contains("general") {
+        offenders
+            .push("settings.html: no `general` tab, which the switcher falls back to".to_string());
+    }
+
+    for p in &page.panels {
+        match p.id.as_deref().and_then(|id| id.strip_prefix("tab-")) {
+            None => offenders.push(format!(
+                "settings.html:{}: .tab-panel with id {:?} — it must be `tab-<data-tab>`",
+                line(p.open),
+                p.id
+            )),
+            Some(tab) if !strip.contains(tab) => offenders.push(format!(
+                "settings.html:{}: panel `tab-{tab}` has no data-tab=\"{tab}\" in the strip, \
+                 so nothing can open it",
+                line(p.open)
+            )),
+            Some(_) => {}
+        }
+    }
+    for at in &page.stray_panels {
+        offenders.push(format!(
+            "settings.html:{}: .tab-panel outside `<div class=\"tab-panels\">`; the switcher \
+             only toggles `.tab-panels .tab-panel`",
+            line(*at)
+        ));
+    }
+
+    let ids = attr_values(&page.markup, "id");
+    for tab in &strip {
+        let want = format!("tab-{tab}");
+        let panels = page
+            .panels
+            .iter()
+            .filter(|p| p.id.as_deref() == Some(want.as_str()))
+            .count();
+        let elements = ids.iter().filter(|(_, id)| *id == want).count();
+        if panels != 1 || elements != 1 {
+            offenders.push(format!(
+                "settings.html: tab `{tab}` has {panels} .tab-panel with id=\"{want}\" and \
+                 {elements} element(s) with that id in all; it needs exactly one of each"
+            ));
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "the settings tab strip and its panels disagree — a tab opens a blank page or \
+         a panel can never be opened:\n  {}",
+        offenders.join("\n  ")
+    );
+}
+
+/// Between `<div class="tab-panels">` and its `{# /tab-panels #}` comment,
+/// every `<div>` must be closed, and every panel must sit directly inside the
+/// wrapper.
+///
+/// Only the active panel is shown. One missing `</div>` nests the NEXT panel
+/// inside the current one, so that tab opens onto a blank page whenever the
+/// tab above it is not the active one. One extra `</div>` closes `.tab-panels`
+/// early, and every panel after it drops out of `.tab-panels .tab-panel`,
+/// which is what the switcher toggles. Moving cards between tabs is cutting
+/// and pasting runs of divs, which is exactly how both happen.
+///
+/// Askama comments and `<script>` elements are ignored: markup in either is
+/// never parsed as markup by the browser.
+#[test]
+fn settings_panels_div_balanced() {
+    let page = read_settings_page();
+    let line = |at: usize| line_of(&page.markup, at);
+    let mut offenders = Vec::new();
+    assert!(
+        !page.panels.is_empty(),
+        "no .tab-panel inside .tab-panels on the settings page — the lint has drifted"
+    );
+
+    // Only the last `</div>` before the comment may close the wrapper.
+    if let Some(at) = page.wrapper_close {
+        if !page.unmatched_closes.is_empty() || page.panels.iter().any(|p| p.open > at) {
+            offenders.push(format!(
+                "settings.html:{}: this </div> closes `.tab-panels` early — one </div> too \
+                 many in the panel above it",
+                line(at)
+            ));
+        }
+    }
+    for at in &page.unmatched_closes {
+        offenders.push(format!(
+            "settings.html:{}: </div> with nothing left open — `.tab-panels` is already closed",
+            line(*at)
+        ));
+    }
+    for at in &page.unclosed_opens {
+        offenders.push(format!(
+            "settings.html:{}: <div> still open at the /tab-panels comment",
+            line(*at)
+        ));
+    }
+    for p in &page.panels {
+        let name = p.id.as_deref().unwrap_or("(no id)");
+        if p.depth == 0 {
+            offenders.push(format!(
+                "settings.html:{}: panel {name} starts after `.tab-panels` was closed by an \
+                 extra </div>",
+                line(p.open)
+            ));
+        } else if p.depth > 1 {
+            let unclosed = p.depth - 1;
+            offenders.push(match p.inside {
+                Some(i) => {
+                    let around = page.panels[i].id.as_deref().unwrap_or("(no id)");
+                    format!(
+                        "settings.html:{}: panel {name} is nested inside panel {around} \
+                         ({unclosed} unclosed <div> above it), so it only shows while \
+                         {around} is active",
+                        line(p.open)
+                    )
+                }
+                None => format!(
+                    "settings.html:{}: panel {name} is not directly inside .tab-panels \
+                     ({unclosed} unclosed <div> between the panels above it)",
+                    line(p.open)
+                ),
+            });
+        }
+    }
+
+    assert!(
+        page.opens == page.closes && offenders.is_empty(),
+        "settings.html has {} <div> and {} </div> between <div class=\"tab-panels\"> and \
+         {{# /tab-panels #}} (comments and scripts ignored):\n  {}",
+        page.opens,
+        page.closes,
+        offenders.join("\n  ")
+    );
+}
+
+/// The value `alias` is mapped to in `js` — by an object literal
+/// (`system: 'updates'`, `'system': "updates"`) or a pair list
+/// (`['system', 'updates']`) — if anything maps it.
+fn js_alias_target<'a>(js: &'a str, alias: &str) -> Option<&'a str> {
+    for (at, _) in js.match_indices(alias) {
+        let before = js[..at].chars().next_back();
+        if before.is_some_and(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.')) {
+            continue;
+        }
+        let rest = js[at + alias.len()..]
+            .trim_start_matches(['\'', '"'])
+            .trim_start();
+        let Some(rest) = rest.strip_prefix([':', ',']) else {
+            continue;
+        };
+        let rest = rest.trim_start();
+        let Some(quote) = rest.chars().next().filter(|&c| c == '\'' || c == '"') else {
+            continue;
+        };
+        let value = &rest[1..];
+        if let Some(end) = value.find(quote) {
+            return Some(&value[..end]);
+        }
+    }
+    None
+}
+
+/// The fragment of a URL into the settings page (`/settings#X`,
+/// `/settings?…#X`), or None for another page such as `/settings/backups`,
+/// for no fragment, and for a fragment only known at render time.
+fn settings_fragment(url: &str) -> Option<&str> {
+    let tail = url.strip_prefix("/settings")?;
+    if !(tail.is_empty() || tail.starts_with(['#', '?', '{'])) {
+        return None;
+    }
+    let (_, frag) = tail.split_once('#')?;
+    (!frag.is_empty() && !frag.contains('{')).then_some(frag)
+}
+
+/// The string literals the arms of `fn name`'s `match` evaluate to (`"acme"`
+/// from `"acme" => "acme",` or `"trash" => Some("trash"),`), or None when
+/// the function is not in `src`.
+fn match_arm_values(src: &str, name: &str) -> Option<Vec<String>> {
+    let start = src.find(&format!("fn {name}("))?;
+    let body = &src[start..];
+    let body = &body[..body.find("\n}").unwrap_or(body.len())];
+    Some(
+        body.lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .filter_map(|l| {
+                let (_, rhs) = l.split_once("=>")?;
+                let rhs = rhs.trim_start();
+                let lit = rhs.strip_prefix("Some(").unwrap_or(rhs).strip_prefix('"')?;
+                Some(lit[..lit.find('"')?].to_string())
+            })
+            .collect(),
+    )
+}
+
+/// Every link into the settings page must land on something.
+///
+/// `/settings#X` opens the tab whose `data-tab` is X, or the tab holding the
+/// element whose id is X — but only an element INSIDE a `.tab-panel`, because
+/// the switcher climbs to the panel to learn which tab to open. Anything else
+/// does nothing: the page opens on whatever tab was last used, and the
+/// operator sent to "Settings → Trash" has to go looking for it. Deep links
+/// come from four places, all checked here: `href`s in every template (and
+/// the bare `#X` links on the settings page itself), the `_return_tab` a
+/// settings form sends back, the redirect URLs the handlers write, and the
+/// `section_to_tab` / `sanitize_return_tab` tables every config save
+/// redirects through.
+///
+/// The retired tab ids (`system`, `testnodes`, `retention`) stay valid for
+/// as long as the page's LEGACY alias map rewrites them to the cards that
+/// replaced them. The map is read from the page's own script, so an alias
+/// that points nowhere, or one that shadows a live id, is reported too.
+#[test]
+fn settings_deep_links_resolve() {
+    const RETIRED: &[&str] = &["system", "testnodes", "retention"];
+    let page = read_settings_page();
+    let mut offenders = Vec::new();
+
+    // What a fragment can name: a tab, or an id inside a panel.
+    let mut targets: std::collections::BTreeSet<&str> =
+        page.tabs.iter().map(|(_, t)| t.as_str()).collect();
+    for p in &page.panels {
+        let end = p.close.unwrap_or(page.region.end);
+        for (_, id) in attr_values(&page.markup[p.open..end], "id") {
+            if !id.contains('{') {
+                targets.insert(id);
+            }
+        }
+    }
+
+    // resolve() rewrites a retired id before it looks anything up.
+    let mut scripts = String::new();
+    let mut rest = page.source.as_str();
+    while let Some(at) = rest.find("<script") {
+        let script = &rest[at..];
+        let end = script.find("</script>").unwrap_or(script.len());
+        scripts.push_str(&script[..end]);
+        scripts.push('\n');
+        rest = &script[end..];
+    }
+    let legacy: std::collections::BTreeMap<&str, &str> = RETIRED
+        .iter()
+        .filter_map(|&alias| js_alias_target(&scripts, alias).map(|to| (alias, to)))
+        .collect();
+    for (&alias, &to) in &legacy {
+        if targets.contains(alias) {
+            offenders.push(format!(
+                "settings.html: `{alias}` is both a retired id in the LEGACY alias map and a \
+                 live tab or id; the map rewrites it first, so the live one is unreachable"
+            ));
+        }
+        if !targets.contains(to) {
+            offenders.push(format!(
+                "settings.html: the LEGACY alias map sends #{alias} to #{to}, which is neither \
+                 a tab nor an id inside a panel"
+            ));
+        }
+    }
+
+    // (where, fragment)
+    let mut links: Vec<(String, String)> = Vec::new();
+    let mut from_other_pages = 0usize;
+    for entry in std::fs::read_dir(templates_dir()).expect("read templates dir") {
+        let path = entry.expect("dir entry").path();
+        if path.extension().and_then(|e| e.to_str()) != Some("html") {
+            continue;
+        }
+        let body = std::fs::read_to_string(&path).expect("read template");
+        let text = blank_spans(&body, &[ASKAMA_COMMENTS]);
+        let name = path
+            .file_name()
+            .expect("file name")
+            .to_string_lossy()
+            .into_owned();
+        let mut hrefs = vec!["href=\"/settings"];
+        if name == "settings.html" {
+            // In-page links on the settings page itself go through the same resolve().
+            hrefs.push("href=\"#");
+        }
+        for needle in hrefs {
+            for (at, _) in text.match_indices(needle) {
+                let url_at = at + "href=\"".len();
+                let Some(len) = text[url_at..].find('"') else {
+                    continue;
+                };
+                let url = &text[url_at..url_at + len];
+                let frag = match url.strip_prefix('#') {
+                    Some(f) if !f.is_empty() && !f.contains('{') => Some(f),
+                    Some(_) => None,
+                    None => settings_fragment(url),
+                };
+                if let Some(frag) = frag {
+                    if name != "settings.html" {
+                        from_other_pages += 1;
+                    }
+                    links.push((format!("{name}:{}", line_of(&text, at)), frag.to_string()));
+                }
+            }
+        }
+        if name == "settings.html" {
+            // A form's `_return_tab` becomes the fragment of the redirect after it saves.
+            for (at, _) in text.match_indices("name=\"_return_tab\"") {
+                let Some(lt) = text[..at].rfind('<') else {
+                    continue;
+                };
+                if let Some(value) = attr(tag_at(&text, lt), "value") {
+                    if !value.contains('{') {
+                        links.push((
+                            format!("settings.html:{} (_return_tab)", line_of(&text, at)),
+                            value.to_string(),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    // Redirects written as literals anywhere in the handlers.
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut stack = vec![manifest.join("src")];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).expect("read src dir") {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let body = std::fs::read_to_string(&path).expect("read source");
+            let rel = path
+                .strip_prefix(manifest)
+                .unwrap_or(&path)
+                .display()
+                .to_string();
+            for (i, line) in body.lines().enumerate() {
+                if line.trim_start().starts_with("//") {
+                    continue;
+                }
+                for (at, _) in line.match_indices("\"/settings") {
+                    let lit = &line[at + 1..];
+                    let lit = &lit[..lit.find('"').unwrap_or(lit.len())];
+                    if let Some(frag) = settings_fragment(lit) {
+                        links.push((format!("{rel}:{}", i + 1), frag.to_string()));
+                    }
+                }
+            }
+        }
+    }
+
+    // Every config save redirects to `#{tab}`, where tab comes from these two.
+    let settings_rs = std::fs::read_to_string(manifest.join("src/handlers/settings.rs"))
+        .expect("read src/handlers/settings.rs");
+    for f in ["section_to_tab", "sanitize_return_tab"] {
+        let values = match_arm_values(&settings_rs, f).unwrap_or_else(|| {
+            panic!(
+                "fn {f} is gone from src/handlers/settings.rs — config saves redirect \
+                 through it, so this lint has to follow it"
+            )
+        });
+        assert!(
+            !values.is_empty(),
+            "read no anchors out of fn {f} in settings.rs — the lint has drifted"
+        );
+        links.extend(
+            values
+                .into_iter()
+                .map(|v| (format!("settings.rs {f}()"), v)),
+        );
+    }
+
+    assert!(
+        from_other_pages > 0,
+        "found no links into /settings from other pages — the scanner stopped matching"
+    );
+    for (from, frag) in &links {
+        let lands = legacy.get(frag.as_str()).copied().unwrap_or(frag.as_str());
+        if !targets.contains(lands) {
+            let hint = if RETIRED.contains(&frag.as_str()) && !legacy.contains_key(frag.as_str()) {
+                " (a retired tab id, and the page's LEGACY alias map no longer rewrites it)"
+            } else {
+                ""
+            };
+            offenders.push(format!("{from} → #{frag}{hint}"));
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "links into /settings that land on nothing — no tab has that data-tab and no \
+         element inside a tab panel has that id, so the page opens on some other tab:\n  {}",
+        offenders.join("\n  ")
+    );
+}
+
 /// The add-website wizard's step panels and its stepper must list the
 /// same steps.
 ///

@@ -677,7 +677,7 @@ pub trait AgentApi: Send + Sync + 'static {
     ) -> Result<(String, String, String), RpcError>;
 
     /// Live snapshot of the panel ACME issuance — drives the
-    /// progress card on /settings#cluster.
+    /// progress card on /settings#panel-domain.
     async fn panel_cert_status(
         &self,
     ) -> Result<Option<hyperion_types::PanelCertProgress>, RpcError>;

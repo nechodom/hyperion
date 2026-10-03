@@ -3,7 +3,7 @@
    The render/speed half of "performance" lives in the page-check card above;
    this card is the Core Web Vitals — the metrics Google grades the page
    experience by, which need a browser to render the page and so come from the
-   source picked in Settings → Performance, not from the node's own curl. #}
+   source picked in Settings → Customer letters → Care report · Core Web Vitals, not from the node's own curl. #}
 <div class="card" style="margin-bottom:0.9rem">
   <div class="row" style="align-items:center;gap:0.6rem;margin-bottom:0.4rem;flex-wrap:wrap">
     <h2 style="margin:0;font-size:0.95rem">
@@ -32,13 +32,13 @@
   <p class="text-soft small" style="margin:0;line-height:1.55">
     No Core Web Vitals source is set for this site's node. Render and speed are still measured (the
     page-check card above); to add LCP, CLS and INP, pick a source in
-    <a href="/settings#notifications" data-role-min="super_admin">Settings → Performance</a>.
+    <a href="/settings#performance" data-role-min="super_admin">Settings → Customer letters → Core Web Vitals</a>.
   </p>
   {% else if source == "lighthouse" && !lighthouse_available %}
   <div class="flash warn" style="margin:0"><div class="flash-body">
     This site's node is set to measure with a local Lighthouse, but Lighthouse is not installed there.
     Install it on that node, or switch to Google PageSpeed Insights in
-    <a href="/settings#notifications" data-role-min="super_admin">Settings → Performance</a>.
+    <a href="/settings#performance" data-role-min="super_admin">Settings → Customer letters → Core Web Vitals</a>.
   </div></div>
   {% else if cwv.is_none() %}
   <p class="text-soft small" style="margin:0">

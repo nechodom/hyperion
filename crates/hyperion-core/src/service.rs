@@ -491,7 +491,7 @@ pub struct HostingService<A: AdapterPort + 'static> {
     /// privkey.pem.
     pub cert_issue_locks: Arc<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
     /// Live state of the panel-vhost ACME issuance — drives the
-    /// progress card on /settings#cluster. None ⇒ no panel hostname
+    /// progress card on /settings#panel-domain. None ⇒ no panel hostname
     /// configured (or agent just started and hasn't checked yet).
     /// Updated by `panel_provision` + its background ACME task.
     pub panel_progress: Arc<tokio::sync::RwLock<Option<PanelProgress>>>,
@@ -2174,7 +2174,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         .await
         .map_err(|_| RpcError::Validation {
             message: "the GeoIP database is not installed — download it in \
-                          Settings -> GeoIP, then reload this tab."
+                          Settings -> Bans & blocking -> GeoIP database, then reload this tab."
                 .into(),
         })?;
 
@@ -9882,7 +9882,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             "lighthouse" => {
                 if !perf::lighthouse_available().await {
                     return Err(RpcError::Validation {
-                        message: "Lighthouse is not installed on the node that owns this site.                                   Install it there, or switch the Core Web Vitals source to                                   Google PageSpeed Insights in Settings → Performance."
+                        message: "Lighthouse is not installed on the node that owns this site.                                   Install it there, or switch the Core Web Vitals source to                                   Google PageSpeed Insights in Settings → Customer letters → Core Web Vitals."
                             .into(),
                     });
                 }
@@ -9896,7 +9896,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             }
             _ => {
                 return Err(RpcError::Validation {
-                    message: "no Core Web Vitals source is configured — set one in                               Settings → Performance."
+                    message: "no Core Web Vitals source is configured — set one in                               Settings → Customer letters → Core Web Vitals."
                         .into(),
                 })
             }
@@ -18102,7 +18102,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     ///
     /// THIS NODE's agent.toml, and that is the whole subtlety: the report is
     /// rendered wherever the hosting lives, because that is the only node
-    /// holding its metrics. Settings → Notifications writes the file it can
+    /// holding its metrics. Settings → Customer letters writes the file it can
     /// reach — the master's — so until the same text reaches a worker, that
     /// worker's customers keep receiving the built-in letter. hyperion-web
     /// pushes the section to every enrolled node on save and shows, per node,
@@ -23179,12 +23179,12 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             {
                 tracing::warn!(error = %e, "email-change: send failed");
                 return Err(RpcError::Internal_with(format!(
-                    "couldn't send verification email: {e}. Check Settings → Email."
+                    "couldn't send verification email: {e}. Check Settings → Mail."
                 )));
             }
         } else {
             return Err(RpcError::Conflict {
-                message: "no SMTP configured — configure Settings → Email first".into(),
+                message: "no SMTP configured — configure Settings → Mail first".into(),
             });
         }
 
@@ -25302,7 +25302,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 hostname: hostname.clone(),
                 stage: "failed".into(),
                 message: format!(
-                    "ACME contact email \"{email_trimmed}\" is a placeholder. Edit Settings → TLS / ACME and retry."
+                    "ACME contact email \"{email_trimmed}\" is a placeholder. Edit Settings → HTTPS & previews → Let's Encrypt contact and retry."
                 ),
                 started_at: now_secs(),
                 not_after: bootstrap_not_after,

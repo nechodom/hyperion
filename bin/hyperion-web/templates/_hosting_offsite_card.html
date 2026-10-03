@@ -29,7 +29,7 @@
   {% if !configured %}
     <p class="text-soft small" style="margin:0;line-height:1.55">
       This node has no <strong>FTP/FTPS/SFTP</strong> off-site target, so this
-      card has nothing to list — <a href="/settings#backups">set one up</a>.
+      card has nothing to list — <a href="/settings#offsite-ftp">set one up</a>.
       <br>
       S3 targets are configured separately at
       <a href="/settings/backups">Backup targets</a> and are
@@ -49,8 +49,8 @@
       folder for it yet, and one is created by the first upload.
       <br>
       Backups taken before the target was configured are <strong>not</strong>
-      sent retroactively. Use <em>Copy existing backups off-site</em> on the
-      <a href="/settings#backups">Backups settings</a> page to send the ones
+      sent retroactively. Use <em>Copy existing backups off-site</em> in
+      <a href="/settings#offsite-backfill">Settings → Backups &amp; trash</a> to send the ones
       already on disk, or wait for this site's next scheduled backup.
     </p>
   {% else if rows.is_empty() %}

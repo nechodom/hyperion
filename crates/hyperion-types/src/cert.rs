@@ -39,7 +39,7 @@ pub struct CertRenewResult {
 
 /// Snapshot of the panel-vhost ACME issuance state. Returned by
 /// the `PanelCertStatus` RPC and rendered as a progress card on
-/// /settings#cluster. `stage` is one of:
+/// /settings#panel-domain. `stage` is one of:
 ///
 ///   - "self-signed" — bootstrap cert serving, ACME hasn't started yet
 ///   - "issuing"     — ACME flow in progress (HTTP-01 challenge)

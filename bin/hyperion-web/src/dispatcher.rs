@@ -86,7 +86,8 @@ fn classify_curl_failure(code: Option<i32>) -> Option<&'static str> {
         Some(90) => Some(
             "TLS certificate pin mismatch — the worker's cert no longer matches the SPKI \
              pin it reported. Restart the worker's agent so it re-reports its pin, or turn \
-             off Enforce worker TLS certificate pinning in Settings → Cluster.",
+             off Enforce worker TLS certificate pinning in Settings → Cluster → Cluster \
+             channel hardening.",
         ),
         _ => None,
     }
@@ -555,7 +556,8 @@ fn check_cert_pinning(
                  pin on file, so the RPC would run over an unverified connection with nothing \
                  to check the cert against. Refused. Restart the node's agent and wait one \
                  heartbeat for it to report its pin (the 🔒 chip on Nodes), or turn off \
-                 Enforce worker TLS certificate pinning in Settings → Cluster."
+                 Enforce worker TLS certificate pinning in Settings → Cluster → Cluster \
+                 channel hardening."
             );
             Err(DispatchError::CertPinMissing {
                 node_id: node_id.to_string(),
@@ -578,8 +580,9 @@ fn check_cert_pinning(
 /// arm that cannot actually verify has to refuse. Otherwise an attacker
 /// who suppresses `resp_pubkey` from a node's heartbeat (leaving the
 /// column NULL) walks straight through the feature that exists to stop
-/// exactly that. Settings → Cluster is where the operator confirms every
-/// node shows its "🔑 Response auth on file" chip before flipping this;
+/// exactly that. Settings → Cluster → Cluster channel hardening is where
+/// the operator confirms every node shows its "🔑 Response auth on file"
+/// chip before flipping this;
 /// that chip, not `agent_version`, is the readiness signal.
 fn check_response_auth(
     node_id: &str,
@@ -707,8 +710,8 @@ fn check_response_auth(
                     "SECURITY (warn-only): worker publishes a response-signing key but \
                      answered UNSIGNED — a downgrade would look exactly like this. \
                      Response auth is NOT enforced yet, so this request was allowed. \
-                     Turn on Enforce response authentication in Settings → Cluster once \
-                     every node signs."
+                     Turn on Enforce response authentication in Settings → Cluster → \
+                     Cluster channel hardening once every node signs."
                 );
                 Ok(())
             }
@@ -774,10 +777,10 @@ impl From<DispatchError> for crate::error::AppError {
             // pin keeps the protection, switching the toggle off drops it.
             DispatchError::CertPinMissing { node_id } => AppError::Rpc(format!(
                 "node {node_id} has not reported a TLS certificate pin, and Enforce worker TLS \
-                 certificate pinning is on in Settings → Cluster — so the master refused to \
-                 dispatch over a connection it cannot check. Restart hyperion-agent on that node \
-                 and wait one heartbeat (about 30 s) for the 🔒 chip to appear on Nodes, or turn \
-                 the setting off."
+                 certificate pinning is on in Settings → Cluster → Cluster channel hardening — \
+                 so the master refused to dispatch over a connection it cannot check. Restart \
+                 hyperion-agent on that node and wait one heartbeat (about 30 s) for the 🔒 chip \
+                 to appear on Nodes, or turn the setting off."
             )),
             DispatchError::UnknownNode(n) => AppError::BadRequest(format!(
                 "node {n} is not enrolled — pick a different target"

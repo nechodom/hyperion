@@ -355,7 +355,7 @@ pub async fn write_creds(creds: &MaxmindCreds, path: &Path) -> Result<(), Adapte
         .unwrap_or_else(|| "EditionIDs GeoLite2-Country".to_string());
 
     let body = format!(
-        "# Managed by Hyperion (Settings -> GeoIP). Also read by geoipupdate.\n\
+        "# Managed by Hyperion (Settings -> Bans & blocking -> GeoIP database). Also read by geoipupdate.\n\
          AccountID {}\n\
          LicenseKey {}\n\
          {}\n",

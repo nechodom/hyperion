@@ -44,7 +44,7 @@ impl utoipa::Modify for SecurityAddon {
         version = "v1",
         description = "Scriptable remote management for a Hyperion hosting cluster. \
                        Authenticate every request with a Bearer API key minted in \
-                       Settings → API keys. Slow mutations return 202 + a job id you \
+                       Settings → Access & API. Slow mutations return 202 + a job id you \
                        poll at /api/v1/jobs/{id}."
     ),
     paths(

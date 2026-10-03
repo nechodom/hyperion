@@ -94,7 +94,8 @@ struct NewTpl<'a> {
     /// Echoes the [cluster] master_accepts_hostings setting from
     /// agent.toml. When false the template hides the master from
     /// the Target-node dropdown — operator turned the master into
-    /// a control-plane-only node via Settings → Cluster.
+    /// a control-plane-only node via Settings → Cluster → Cluster
+    /// placement.
     master_accepts_hostings: bool,
     /// CSV of node ids flagged as test-only. JS uses this to know
     /// when to swap "Primary domain" for the "Test-site short name"
@@ -745,7 +746,7 @@ pub async fn post_create(
                 &ctx,
                 &csrf_token,
                 &form,
-                "Target is a test node but Settings → Test nodes has no domain template. Set one first.",
+                "Target is a test node but no preview address template is set (Settings → HTTPS & previews → Preview address). Set one first.",
             ));
         }
         // Validate the short-name: lowercase alphanum + dash, no
@@ -797,9 +798,9 @@ pub async fn post_create(
                     &csrf_token,
                     &form,
                     &format!(
-                        "Test-node hostings must end with `{suffix}` (per Settings → Test nodes). \
-                         Either pick a production node, fill the short Site name field, or \
-                         change the typed domain."
+                        "Test-node hostings must end with `{suffix}` (per Settings → HTTPS & \
+                         previews → Preview address). Either pick a production node, fill the \
+                         short Site name field, or change the typed domain."
                     ),
                 ));
             }
@@ -982,7 +983,7 @@ pub async fn post_create(
                         &form,
                         "Auto-placement found no online workers and master is \
                          in control-plane-only mode. Enrol a worker or enable \
-                         master hosting in Settings → Cluster.",
+                         master hosting in Settings → Cluster → Cluster placement.",
                     ));
                 }
             }
@@ -1003,7 +1004,7 @@ pub async fn post_create(
             &ctx,
             &csrf_token,
             &form,
-            "Master is in control-plane-only mode (Settings → Cluster). Pick a worker node from the dropdown.",
+            "Master is in control-plane-only mode (Settings → Cluster → Cluster placement). Pick a worker node from the dropdown.",
         ));
     }
     // Server-side cluster-wide duplicate-domain guard. The wizard runs a
@@ -2835,7 +2836,7 @@ pub(crate) async fn configured_backup_targets(
         let unusable = if r.kind != "s3" {
             format!("a \"{}\" target — backups are only pushed to S3", r.kind)
         } else if !r.enabled {
-            "disabled in Settings → Backups".to_string()
+            "disabled in Settings → Backup targets".to_string()
         } else {
             match r.secret_key_id.as_deref() {
                 None => "missing its secret key".to_string(),
@@ -5667,10 +5668,11 @@ pub(crate) async fn fetch_cluster_config(state: &SharedState) -> hyperion_types:
 /// `CertOverview` (dispatched to the OWNER node) and confirm a cert
 /// whose `domain == base` exists there. By construction that base
 /// hostname (a node's auto-subdomain parent) only ever receives the
-/// `*.<base>` wildcard cert issued in Settings → Test nodes, so a cert
-/// at that exact domain on that node IS the wildcard. This is strictly
-/// more accurate than assuming "test node ⇒ has wildcard" and needs no
-/// new RPC, schema, or wire change.
+/// `*.<base>` wildcard cert issued in Settings → HTTPS & previews →
+/// Preview wildcard certificates, so a cert at that exact domain on
+/// that node IS the wildcard. This is strictly more accurate than
+/// assuming "test node ⇒ has wildcard" and needs no new RPC, schema,
+/// or wire change.
 /// Preview affordance for ONE hosting — shown on EVERY site's detail
 /// page, not just those with a live wildcard.
 ///
@@ -13675,8 +13677,9 @@ pub async fn post_snapshot_now(
                             Some(
                                 "No snapshot was taken. Either restic is not installed on the \
                                  node that owns this site, snapshots are switched off there \
-                                 (Settings → Backups → What this panel keeps), or the site has \
-                                 no document tree. The agent log on that node says which."
+                                 (Settings → Backups & trash → What this panel keeps), or the \
+                                 site has no document tree. The agent log on that node says \
+                                 which."
                                     .into(),
                             ),
                         )
