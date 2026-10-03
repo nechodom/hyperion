@@ -64,6 +64,17 @@
   --radius-xs:  4px;
   --radius-pill:9999px;
 
+  /* Spacing scale — single source for gaps that were hand-set at three
+     different values (1.25rem / 1rem / 0.9rem). Unitless rems, no color,
+     so they need no light-mode override. */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.5rem;
+  --space-6: 2rem;
+  --group-gap: var(--space-5);   /* the one vertical gap between groups */
+
   --t-fast: 100ms cubic-bezier(0.4, 0, 0.2, 1);
   --t-med:  200ms cubic-bezier(0.4, 0, 0.2, 1);
 
@@ -652,6 +663,76 @@ details.card > summary .acc-chevron {
 }
 details.card[open] > summary { margin-bottom: 1rem; }
 details.card[open] > summary .acc-chevron { transform: rotate(90deg); }
+
+/* ============================================================
+ *  Grouped-flat panels
+ * ============================================================ */
+
+/* Direction B: related settings share one bordered panel instead of each
+   sitting in its own card. A `.group` is the panel, led by an uppercase
+   `.ghead` wayfinding label; `.item`s inside are split by hairlines, not
+   boxes. Coexists with `.card` above (standalone one-offs keep it) — same
+   Vercel-monochrome chrome, just a tighter reading rhythm. */
+
+/* Grouped-flat panel: one theme-section. */
+.group {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+.group + .group,
+.tab-panel > .group + .group { margin-top: var(--group-gap); }
+
+/* Section header — the new-user wayfinding label. */
+.group > .ghead {
+  padding: 0.8rem 1.25rem;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--border);
+  font-size: 0.73rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-weight: 600;
+  color: var(--text-dim);
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+/* A single setting block inside a group. */
+.group > .item { padding: 1.25rem 1.25rem; border-bottom: 1px solid var(--border); }
+.group > .item:last-child { border-bottom: none; }
+.group > .item.muted { background: var(--bg-2); }
+
+/* Item header: same icon+title treatment the old .card h2 had, one notch
+   smaller. Descendant (not child) selector on purpose — many titles sit inside
+   a status-pill `.row`, so the <h3> is not a direct child of `.item`. */
+.item h3 {
+  font-size: 0.92rem;
+  font-weight: 600;
+  margin: 0 0 0.3rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  letter-spacing: -0.005em;
+}
+.item h3 .h-icon { width: 16px; height: 16px; color: var(--text-dim); stroke-width: 2; }
+.item .help, .item .text-soft.small { color: var(--text-soft); line-height: 1.6; }
+
+/* Right-aligned inline save, replaces the lone button at card bottom. */
+.item .item-actions { display: flex; justify-content: flex-end; gap: 0.5rem; margin-top: 1rem; }
+
+/* Collapsible item (maps the existing details.card). */
+details.item > summary { list-style: none; cursor: pointer; }
+details.item > summary::-webkit-details-marker { display: none; }
+
+/* Danger item keeps the existing accent. */
+.item.danger h3 { color: var(--danger); }
+
+/* Two-column grids (e.g. the dashboard) lay groups side by side, so the bare
+   `.group + .group` top-margin would shove the right column down out of line.
+   Zero it when groups are direct grid children; the grid `gap` spaces them. */
+.dashboard-grid > .group + .group { margin-top: 0; }
 
 /* Grid of cards (e.g. dashboard stats) */
 .grid {
