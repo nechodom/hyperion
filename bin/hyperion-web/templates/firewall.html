@@ -237,11 +237,13 @@
    ports + a one-line description. Clicking "Show snippet" reveals
    the nft commands to paste via SSH. Read-only by design — we
    don't apply rules from the UI (lock-yourself-out risk). #}
-<div class="card" style="margin-top:1.5rem">
-  <h2>
+<div class="group" style="margin-top:1.5rem">
+  <div class="ghead">Open ports</div>
+  <div class="item">
+  <h3>
     <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
     Port templates
-  </h2>
+  </h3>
   <p class="text-soft small" style="margin:0 0 1rem">
     Common port sets that are typically opened together. Each template
     can be <strong>applied directly</strong> on any reachable node. It
@@ -333,11 +335,11 @@
    No server round-trip, no firewall mutation — pure JS that
    composes the nft command from the inputs. Operator copy-pastes
    into SSH. #}
-<div class="card" style="margin-top:1rem">
-  <h2>
+<div class="item">
+  <h3>
     <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
     Open a custom port
-  </h2>
+  </h3>
   <p class="text-soft small" style="margin:0 0 1rem">
     Generates the exact <code>nft add rule</code> command for any port.
     Hyperion deliberately does not apply it for you — a typo could lock
@@ -369,6 +371,7 @@
     <pre id="fw-snippet" style="background:var(--bg-2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:0.75rem;overflow:auto;font-size:0.82rem;margin:0"></pre>
     <button type="button" class="btn small" id="fw-copy" style="margin-top:0.4rem">Copy to clipboard</button>
     <span id="fw-copy-status" class="text-soft small" style="margin-left:0.5rem"></span>
+  </div>
   </div>
 </div>
 

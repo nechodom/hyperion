@@ -18,7 +18,9 @@
   </div>
 </div>
 
-<div class="card" style="margin-bottom:1rem;padding:0.85rem 1rem">
+<div class="group" style="margin-bottom:1rem">
+  <div class="ghead">Filter</div>
+  <div class="item">
   <form method="get" action="/notifications"
         style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap">
     <label style="display:flex;gap:0.4rem;align-items:center">
@@ -36,6 +38,7 @@
       {{ items.len() }} notification{% if items.len() != 1 %}s{% endif %}
     </span>
   </form>
+  </div>
 </div>
 
 {% if items.is_empty() %}

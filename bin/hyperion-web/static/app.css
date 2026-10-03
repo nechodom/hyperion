@@ -683,6 +683,10 @@ details.card[open] > summary .acc-chevron { transform: rotate(90deg); }
 }
 .group + .group,
 .tab-panel > .group + .group { margin-top: var(--group-gap); }
+/* On the non-tab pages a group sits next to a standalone card (an exempt table
+   or accent card). Keep the same vertical step between the two kinds. */
+.card + .group,
+.group + .card { margin-top: var(--group-gap); }
 
 /* Section header — the new-user wayfinding label. */
 .group > .ghead {
