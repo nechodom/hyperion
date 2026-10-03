@@ -1418,3 +1418,64 @@ fn settings_deep_links_resolve() {
         offenders.join("\n  ")
     );
 }
+
+/// The add-website wizard's step panels and its stepper must list the
+/// same steps.
+///
+/// The wizard shows one `.wizard-step` at a time; the stepper's
+/// `<li data-step="N">` pills drive navigation and JS marks the matching
+/// panel `.is-active`. If a panel's `data-step` has no stepper pill — or
+/// a pill points at a panel that no longer exists — the operator gets a
+/// step they cannot reach, or a pill that activates nothing. That is the
+/// create form's analogue of the blank-tab bug this file already guards
+/// against, so pin the two lists to each other.
+#[test]
+fn the_add_website_wizard_steps_match_its_stepper() {
+    let body = std::fs::read_to_string(templates_dir().join("hostings_new.html"))
+        .expect("read hostings_new.html");
+
+    // data-step values on `<div class="wizard-step …" data-step="N">`.
+    let mut panels = Vec::new();
+    let mut rest = body.as_str();
+    while let Some(start) = rest.find("class=\"wizard-step") {
+        let after = &rest[start..];
+        let tag_end = after.find('>').unwrap_or(after.len());
+        let tag = &after[..tag_end];
+        if let Some(ds) = tag.find("data-step=\"") {
+            let v: String = tag[ds + "data-step=\"".len()..]
+                .chars()
+                .take_while(|c| *c != '"')
+                .collect();
+            if !v.is_empty() {
+                panels.push(v);
+            }
+        }
+        rest = &after[tag_end..];
+    }
+    panels.sort();
+    panels.dedup();
+
+    // data-step values on the stepper's `<li data-step="N">` pills.
+    let mut pills = Vec::new();
+    let mut rest = body.as_str();
+    while let Some(start) = rest.find("<li data-step=\"") {
+        let after = &rest[start + "<li data-step=\"".len()..];
+        let v: String = after.chars().take_while(|c| *c != '"').collect();
+        if !v.is_empty() {
+            pills.push(v);
+        }
+        rest = after;
+    }
+    pills.sort();
+    pills.dedup();
+
+    assert!(
+        !panels.is_empty(),
+        "no .wizard-step panels found in hostings_new.html — the lint has drifted"
+    );
+    assert_eq!(
+        panels, pills,
+        "the add-website wizard's step panels {panels:?} and its stepper pills \
+         {pills:?} disagree; every step must appear in both or navigation breaks"
+    );
+}
