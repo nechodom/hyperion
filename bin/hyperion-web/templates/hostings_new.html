@@ -1,16 +1,16 @@
 {% extends "base.html" %}
-{% block title %}New hosting · Hyperion{% endblock %}
+{% block title %}Add a website · Hyperion{% endblock %}
 {% block main %}
 <div class="breadcrumbs">
-  <a href="/hostings">Hostings</a>
+  <a href="/hostings">Websites</a>
   <span class="sep">›</span>
-  <span>New</span>
+  <span>Add</span>
 </div>
 <div class="page-header">
   <div>
-    <h1>Create a hosting</h1>
+    <h1>Add a website</h1>
     <div class="subtitle">
-      nginx vhost, PHP-FPM pool, database, and TLS certificate — provisioned atomically.
+      Pick what you want to put online, choose its web address, and Hyperion sets it up for you.
     </div>
   </div>
   <span class="grow"></span>
@@ -22,9 +22,10 @@
   </div>
 </div>
 
-{# Loud "where is this going to land?" banner — same data the
-   inline dropdown below carries, surfaced where the operator can't
-   miss it. The chip updates live as the dropdown changes. #}
+{# "Where will this live?" banner — only shown to operators who have
+   more than one node enrolled. On a single-node install the whole
+   block is absent and the site silently lands on this server. The
+   chip tracks the Advanced-options node dropdown live. #}
 {% if !nodes.is_empty() %}
 <div id="target-banner"
      style="display:flex;align-items:center;gap:0.6rem;padding:0.8rem 1rem;margin-bottom:1rem;border-radius:8px;background:var(--surface-1);border-left:4px solid var(--accent)">
@@ -38,7 +39,7 @@
     <strong id="target-banner-name" style="font-size:1.05rem">master (this node)</strong>
     <span id="target-banner-detail" class="text-soft small" style="margin-left:0.5rem"></span>
   </div>
-  <a href="#target-node" class="btn small ghost" onclick="document.getElementById('target_node').focus(); return false;">Change node</a>
+  <a href="#advanced-options" class="btn small ghost" id="target-banner-change">Change</a>
 </div>
 {% endif %}
 
@@ -49,280 +50,117 @@
   </div>
 {% endif %}
 
-{# Wizard step indicator. JS toggles which `.wizard-step` is
-   visible; without JS the whole form renders top-to-bottom which
-   is the original behaviour. #}
+{# Wizard step indicator. With JS, only one `.wizard-step` is visible
+   at a time and the stepper drives navigation. Without JS the stepper
+   stays hidden and every step renders top-to-bottom as one plain form
+   with a visible submit button — a genuine no-JS fallback. #}
 <ol class="wizard-stepper" id="wizard-stepper" style="display:none">
-  <li data-step="1" class="active"><span class="num">1</span> Placement</li>
-  <li data-step="2"><span class="num">2</span> Type</li>
-  <li data-step="3"><span class="num">3</span> Domain &amp; TLS</li>
-  <li data-step="4"><span class="num">4</span> WordPress</li>
+  <li data-step="1" class="active"><span class="num">1</span> What to create</li>
+  <li data-step="2"><span class="num">2</span> Web address</li>
+  <li data-step="3"><span class="num">3</span> Details</li>
 </ol>
 
 <div style="display:grid;grid-template-columns:minmax(0,2fr) minmax(0,1fr);gap:1.25rem;align-items:start">
 <div class="card">
   <form method="post" action="/hostings" id="wizard-form">
     <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-
-    <div class="wizard-step" data-step="1">
-    {# Target node selector. Only renders when there's at least one
-       remote enrolled node; on a single-node setup the form silently
-       targets the master, which is the existing behaviour. #}
-    {% if !nodes.is_empty() %}
-    <h2>
-      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>
-      Target node
-    </h2>
-    <div class="field">
-      <label for="target_node">Which node should host this hosting?</label>
-      <select id="target_node" name="target_node">
-        {# Auto-placement — picks the best-fit node by current load,
-           memory pressure, and hosting count. Falls back to master
-           if no workers are online + master accepts hostings. #}
-        <option value="auto"
-                data-label="auto (best-fit)"
-                data-detail="picks the node with the lowest load / memory / hosting count"
-                {% if target_node_in == "auto" %}selected{% endif %}>
-          ★  Auto — pick the best-fit node by current load (recommended)
-        </option>
-        {# Master option only when [cluster] master_accepts_hostings
-           is true (default). Operator can turn it off in Settings →
-           Cluster to make the master a control-plane-only node. #}
-        {% if master_accepts_hostings %}
-        <option value="local"
-                data-label="master (this node)"
-                data-detail=""
-                {% if target_node_in.is_empty() || target_node_in == "local" %}selected{% endif %}>
-          ◯  master (this node)
-        </option>
-        {% endif %}
-        {% for n in nodes %}
-        <option value="{{ n.node_id }}"
-                data-label="{{ n.label }}"
-                data-detail="{% if let Some(ip) = n.public_ip.as_ref() %}{{ ip }} · {% endif %}{{ n.node_id }}"
-                {% if target_node_in == n.node_id || (!master_accepts_hostings && target_node_in.is_empty() && loop.first) %}selected{% endif %}>
-          ▸  {{ n.label }}{% if let Some(ip) = n.public_ip.as_ref() %} — {{ ip }}{% endif %}
-        </option>
-        {% endfor %}
-      </select>
-      {% if !master_accepts_hostings %}
-      <p class="text-soft small" style="margin:0.3rem 0 0">
-        <strong>The master is in control-plane-only mode.</strong> Hostings run on worker nodes only. Change this in <a href="/settings#cluster">Settings → Control plane</a>.
-      </p>
-      {% endif %}
-      <p class="text-soft small" style="margin:0.3rem 0 0">
-        Worker nodes are reached over signed HTTPS RPC (port 9443).
-        The node needs <code>[remote_rpc] enabled = true</code> in its
-        agent.toml, and the port must be open in its firewall.
-        <strong>To trace a dispatch after you submit:</strong>
-        <code>journalctl -u hyperion-web -g 'dispatch'</code>
-      </p>
-    </div>
-    {% else %}
-    {# Single-node setup — preserve the form contract by sending the
-       sentinel even though there's no choice to make. #}
-    <input type="hidden" name="target_node" value="local">
-    {% endif %}
-
-    {# Profile picker — wizard step 1. Selecting one stamps
-       profile_id; post_create dispatches profile_apply right after
-       the hosting goes Active so limits / plugins / themes land
-       without an extra operator click. #}
-    <h2 style="margin-top:1rem">
-      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 7h-9"/><path d="M14 17H5"/><circle cx="17" cy="17" r="3"/><circle cx="7" cy="7" r="3"/></svg>
-      Profile
-    </h2>
+    {# profile_id is stamped by the Advanced-options profile picker's
+       JS; kept here so the field always submits even if the picker is
+       never opened. #}
     <input type="hidden" name="profile_id" id="profile_id" value="0">
-    <div class="profile-picker">
-      {# "None" option keeps the previous behaviour for operators
-         who don't want a profile. data-wp-plugins / data-wp-themes
-         are empty here — JS reads them and unlocks the WP toggle
-         in step 4. #}
-      <label class="profile-card selected" data-pid="0" data-wp-plugins="" data-wp-themes="">
-        <input type="radio" name="profile_radio" value="0" checked>
-        <div class="profile-card-body">
-          <div class="profile-name">None / custom</div>
-          <div class="profile-meta">Start from defaults and tune limits later from the hosting's detail page.</div>
+
+    {# ─── Step 1 · What do you want to create? ─────────────────── #}
+    <div class="wizard-step is-active" data-step="1">
+    <h2 style="margin-top:0">
+      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/></svg>
+      What do you want to create?
+    </h2>
+    <div class="type-picker">
+      {# Radio-backed choice cards. The selected card's value is the
+         single `site_type` field the server reads — it is authoritative
+         for the backend kind and whether WordPress installs, so this
+         works with JavaScript disabled too. WordPress is the default
+         because it is the most common thing people put online here. #}
+      <label class="type-card{% if site_type_in.is_empty() || site_type_in == "wordpress" %} selected{% endif %}" data-site-type="wordpress">
+        <input type="radio" name="site_type" value="wordpress" {% if site_type_in.is_empty() || site_type_in == "wordpress" %}checked{% endif %}>
+        <div class="type-card-body">
+          <div class="type-name">WordPress website</div>
+          <div class="type-meta">A ready-to-use WordPress site. We install WordPress, create the database, and give you the admin login.</div>
         </div>
       </label>
-      {% for p in profiles %}
-      {# data-wp-plugins / data-wp-themes carry the raw newline-
-         separated lists from the profile so the wizard JS can:
-           1. Show "installs N plugins" on the card itself
-           2. Force-check + lock the "Install WordPress" toggle in
-              step 4 when the profile has any meaningful WP content
-              (commented-out lines don't count — same filter as the
-              server-side `profile_has_meaningful_wp_content`).
-         askama escapes the data-* values for us — only the
-         template author needs to be careful about newlines, and
-         our serialiser uses `\n` which survives HTML attr escaping
-         fine. #}
-      <label class="profile-card" data-pid="{{ p.id }}"
-             data-wp-plugins="{{ p.wp_plugins }}"
-             data-wp-themes="{{ p.wp_themes }}"
-             data-default-php-version="{% if let Some(v) = p.default_php_version.as_ref() %}{{ v }}{% endif %}"
-             data-default-db-engine="{% if let Some(e) = p.default_db_engine.as_ref() %}{{ e }}{% endif %}">
-        <input type="radio" name="profile_radio" value="{{ p.id }}">
-        <div class="profile-card-body">
-          <div class="profile-name">{{ p.name }}</div>
-          {% if !p.description.is_empty() %}
-            <div class="profile-meta">{{ p.description }}</div>
-          {% endif %}
-          <div class="profile-limits">
-            <span title="PHP memory_limit">{{ p.php_memory_mb }} MB PHP</span>
-            <span title="PHP-FPM max_children">{{ p.php_max_children }} workers</span>
-            <span title="DB max connections">{{ p.db_max_connections }} DB conn</span>
-            {% if let Some(d) = p.disk_hard_mb %}<span title="Disk hard cap">{{ d }} MB disk</span>{% endif %}
-            {# WP install indicator — server-side handler decides
-               whether to force WP install based on the meaningful-
-               line filter. Template-side we render a rough "has
-               WP" hint based on non-empty fields. The JS reads
-               data-wp-plugins / data-wp-themes (raw fields) and
-               recomputes the same logic to lock the checkbox. #}
-            {% if !p.wp_plugins.is_empty() %}
-              <span class="profile-wp-badge" title="Installs WordPress plugins after provisioning">
-                WP plugins
-              </span>
-            {% endif %}
-            {% if !p.wp_themes.is_empty() %}
-              <span class="profile-wp-badge" title="Installs WordPress themes after provisioning">
-                WP themes
-              </span>
-            {% endif %}
-          </div>
-          {% if !p.wp_plugins.is_empty() || !p.wp_themes.is_empty() %}
-          <div class="profile-meta" style="margin-top:0.35rem;color:var(--accent);font-weight:500">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:0.2rem"><polyline points="20 6 9 17 4 12"/></svg>
-            This profile requires a WordPress install
-          </div>
-          {# Name what actually gets installed. "WP plugins" as a badge told
-             the operator that SOMETHING would be installed but not what, so
-             choosing between two profiles meant opening /profiles in another
-             tab to find out. #}
-          <details style="margin-top:0.3rem">
-            <summary class="text-soft small" style="cursor:pointer">What it installs</summary>
-            <div class="text-soft small" style="margin-top:0.25rem;white-space:pre-wrap;font-family:var(--font-mono,ui-monospace,monospace);font-size:0.72rem;max-height:9rem;overflow:auto">{% if !p.wp_plugins.is_empty() %}Plugins:
-{{ p.wp_plugins }}{% endif %}{% if !p.wp_themes.is_empty() %}
-Themes:
-{{ p.wp_themes }}{% endif %}</div>
-          </details>
-          {% endif %}
+      <label class="type-card{% if site_type_in == "static" %} selected{% endif %}" data-site-type="static">
+        <input type="radio" name="site_type" value="static" {% if site_type_in == "static" %}checked{% endif %}>
+        <div class="type-card-body">
+          <div class="type-name">Static website</div>
+          <div class="type-meta">Plain HTML, CSS, and images. Nothing to run — upload your files and they are served as-is.</div>
         </div>
       </label>
-      {% endfor %}
+      <label class="type-card{% if site_type_in == "php" %} selected{% endif %}" data-site-type="php">
+        <input type="radio" name="site_type" value="php" {% if site_type_in == "php" %}checked{% endif %}>
+        <div class="type-card-body">
+          <div class="type-name">PHP application</div>
+          <div class="type-meta">A custom PHP app (Laravel, a bespoke site, …). You get PHP and, optionally, a database.</div>
+        </div>
+      </label>
+      <label class="type-card{% if site_type_in == "reverse_proxy" %} selected{% endif %}" data-site-type="reverse_proxy">
+        <input type="radio" name="site_type" value="reverse_proxy" {% if site_type_in == "reverse_proxy" %}checked{% endif %}>
+        <div class="type-card-body">
+          <div class="type-name">App behind a proxy</div>
+          <div class="type-meta">Forward the domain to an app already running elsewhere — Node, Python, a container. You give the address it runs on.</div>
+        </div>
+      </label>
+      <label class="type-card{% if site_type_in == "redirect" %} selected{% endif %}" data-site-type="redirect">
+        <input type="radio" name="site_type" value="redirect" {% if site_type_in == "redirect" %}checked{% endif %}>
+        <div class="type-card-body">
+          <div class="type-name">Redirect</div>
+          <div class="type-meta">Send everyone who visits this domain straight to another web address.</div>
+        </div>
+      </label>
     </div>
-    {% if profiles.is_empty() %}
-    <p class="text-soft small" style="margin:0.5rem 0 0">
-      No profiles yet. <a href="/profiles">Create a profile</a> to bundle
-      PHP, database, plugin, and theme defaults under one name and reuse them across hostings.
-    </p>
-    {% endif %}
     </div><!-- /wizard-step 1 -->
 
-    <div class="wizard-step" data-step="2" style="display:none">
-    <h2>
-      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 22h20"/><path d="M2 12h20"/><path d="M2 2h20"/><path d="M6 22V2"/><path d="M18 22V2"/></svg>
-      Hosting type
-    </h2>
-    <div class="field">
-      <label for="kind">What kind of hosting is this?</label>
-      <select id="kind" name="kind"
-              onchange="document.getElementById('proxy-row').style.display=this.value==='reverse_proxy'?'block':'none';
-                       document.getElementById('redirect-row').style.display=this.value==='redirect'?'block':'none';
-                       document.getElementById('php-row').style.display=this.value==='php'?'block':'none';
-                       document.getElementById('db-row').style.display=this.value==='php'?'block':'none';">
-        <option value="php" selected>PHP site — nginx, PHP-FPM, and an optional database</option>
-        <option value="static">Static files — nginx serves HTML, CSS, and JS only</option>
-        <option value="reverse_proxy">Reverse proxy — forward to an upstream app (Node, Python, a container)</option>
-        <option value="redirect">Redirect — send every request to another URL</option>
-      </select>
-    </div>
-    <div class="field" id="proxy-row" style="display:none">
-      <label for="proxy_upstream_url">Upstream URL <span class="hint">required for a reverse proxy</span></label>
-      <input id="proxy_upstream_url" name="proxy_upstream_url" type="url"
-             placeholder="http://localhost:3000 or http://10.0.0.5:8080"
-             value="{{ proxy_upstream_url_in|e }}">
-      <p class="text-soft small" style="margin:0.3rem 0 0">
-        nginx forwards every request to this URL with <code>proxy_pass</code>.
-        WebSocket upgrades are enabled, and the standard
-        <code>X-Real-IP</code>, <code>X-Forwarded-For</code>, and <code>Host</code> headers are set.
-      </p>
-    </div>
-    <div id="redirect-row" style="display:none">
-      <div class="field">
-        <label for="redirect_url">Redirect target URL <span class="hint">required for a redirect</span></label>
-        <input id="redirect_url" name="redirect_url" type="url"
-               placeholder="https://www.example.com">
-        <p class="text-soft small" style="margin:0.3rem 0 0">
-          Every request to this domain is sent to the target URL. No files, PHP,
-          or database are created.
-        </p>
-      </div>
-      <div class="field-row">
-        <div class="field" style="width:12rem">
-          <label for="redirect_code">Redirect type</label>
-          <select id="redirect_code" name="redirect_code">
-            <option value="301" selected>301 — permanent</option>
-            <option value="302">302 — temporary</option>
-          </select>
-        </div>
-        <div class="field" style="flex:1">
-          <label class="field-checkbox" style="margin-top:1.7rem">
-            <input type="checkbox" name="redirect_preserve_path" value="on">
-            Preserve the request path (append <code>/foo?bar</code> to the target URL)
-          </label>
-        </div>
-      </div>
-    </div>
-
-    </div><!-- /wizard-step 2 -->
-
-    <div class="wizard-step" data-step="3" style="display:none">
+    {# ─── Step 2 · Web address ─────────────────────────────────── #}
+    <div class="wizard-step" data-step="2">
     <h2 style="margin-top:0">
       <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
-      Domains
+      What is the web address?
     </h2>
-    {# Test-node short-name field — only meaningful when the target
-       is a test node + cluster.test_domain_template is set. JS
-       hides it when target is a prod node. Server validates anyway. #}
+
+    {# Test-node short-name field — only meaningful when the target is
+       a test node + cluster.test_domain_template is set. JS hides it on
+       a normal node. The server validates regardless. #}
     <div class="field test-only-field" id="test_site_name_field" style="display:none">
       <label for="test_site_name">Test-site short name <span class="hint">lowercase letters, digits, and dashes</span></label>
       <input id="test_site_name" name="test_site_name" type="text"
              value="" placeholder="blog" autocomplete="off"
              pattern="[a-z0-9][a-z0-9-]{0,30}[a-z0-9]?" maxlength="32">
       <p class="text-soft small" style="margin:0.3rem 0 0">
-        The full domain is built from the test-node template (Settings →
-        Cluster → Test nodes).
+        The full address is built from the test-node template (Advanced options → the test node).
         <strong>Preview:</strong> <code id="test_domain_preview" style="color:var(--text-soft)">—</code>
       </p>
     </div>
 
     <div class="field" id="domain_field">
-      <label for="domain">Primary domain <span class="hint">root hostname, for example <code>example.com</code></span></label>
+      <label for="domain">Domain <span class="hint">the web address people will type, like <code>example.com</code></span></label>
       <input id="domain" name="domain" type="text" required autofocus
              value="{{ domain_in|e }}" placeholder="example.com">
-      {# Live preflight — JS at the bottom of this template debounces
-         input events and hits /api/check-domain. When the domain is
-         already claimed somewhere in the cluster, this slot fills
-         with a red "already exists on node X" hint instead of
-         waiting for the DB UNIQUE constraint to fire on submit. #}
+      {# Live availability check — debounced JS hitting /api/check-domain.
+         Fills with a red "already in use" hint before submit instead of
+         waiting for the DB UNIQUE constraint to fire. #}
       <div id="domain-check-result" class="text-soft small" style="margin-top:0.3rem;min-height:1.2em"></div>
     </div>
     <div class="field">
-      <label for="aliases">Aliases <span class="hint">optional, comma- or space-separated</span></label>
+      <label for="aliases">Other addresses <span class="hint">optional — e.g. the <code>www.</code> version, comma- or space-separated</span></label>
       <input id="aliases" name="aliases" type="text"
              value="{{ aliases_in|e }}" placeholder="www.example.com, m.example.com">
     </div>
 
-    {# DNS preflight — visible by default, auto-fires when the
-       domain field loses focus. Operators kept skipping the old
-       collapsed <details> version and then chased a failed cert
-       flow on a domain that pointed elsewhere. Warn-with-override:
-       a mismatch shows a yellow box but does NOT block the form
-       (operators legitimately create hostings before DNS swap). #}
+    {# DNS preflight — auto-fires when the domain field loses focus.
+       Warn-with-override: a mismatch shows a hint but never blocks the
+       form (sites are routinely created before the DNS is switched). #}
     <div class="field" style="margin-top:0.5rem">
       <div style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap;margin-bottom:0.4rem">
-        <span style="font-weight:600;font-size:0.85rem">DNS preflight</span>
+        <span style="font-weight:600;font-size:0.85rem">Is the address pointing here yet?</span>
         <button class="btn small ghost"
                 type="button"
                 hx-post="/hostings/dns-check-domain"
@@ -331,14 +169,11 @@ Themes:
                 hx-include="closest form input[name='domain']"
                 hx-vals='{"_csrf": "{{ csrf_token }}"}'>
           <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-          Check now
+          Check
         </button>
-        <span class="text-soft small">Confirms the primary domain resolves to the target node's public IP.</span>
+        <span class="text-soft small">Optional — confirms the domain already resolves to this server. You can create the site first and point the domain later.</span>
       </div>
       <div id="dns-create-result"></div>
-      {# Auto-check trigger: HTMX listens for a custom `dnsblur` event
-         dispatched by base.html's domain-field handler. Avoids the
-         operator forgetting to click before submit. #}
       <span hidden
             hx-post="/hostings/dns-check-domain"
             hx-trigger="dnsblur from:body"
@@ -347,36 +182,241 @@ Themes:
             hx-include="closest form input[name='domain']"
             hx-vals='{"_csrf": "{{ csrf_token }}"}'></span>
     </div>
+    </div><!-- /wizard-step 2 -->
 
-    {# Auto-issue the real Let's Encrypt cert right after the hosting
-       is provisioned. Runs as the FIRST phase of the post-create
-       background job (before the optional WP install, so WordPress
-       starts life behind a trusted cert). Off by default — issuance
-       only succeeds when DNS already points at the target node, and
-       operators routinely create hostings ahead of the DNS swap. #}
-    <div class="field" style="margin-top:0.5rem">
-      <label class="field-checkbox" style="font-weight:600">
-        <input type="checkbox" name="issue_cert" value="on">
-        Issue a Let's Encrypt certificate right after provisioning
+    {# ─── Step 3 · Details (per type) + Advanced options ───────── #}
+    <div class="wizard-step" data-step="3">
+    <h2 style="margin-top:0">
+      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
+      <span id="details-heading">WordPress admin</span>
+    </h2>
+
+    {# WordPress details — all optional. Blank admin fields auto-fill
+       (user "admin", email admin@your-domain) and a strong password is
+       generated and shown once on the next page. #}
+    <div class="details-block is-active" id="details-wordpress">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.5rem">
+        <div class="field" style="margin:0">
+          <label for="wp_admin_email">Your email <span class="hint">where the WordPress welcome goes — blank uses <code>admin@your-domain</code></span></label>
+          <input id="wp_admin_email" name="wp_admin_email" type="email" placeholder="you@example.cz">
+        </div>
+        <div class="field" style="margin:0">
+          <label for="wp_title">Site title <span class="hint">optional — defaults to the domain</span></label>
+          <input id="wp_title" name="wp_title" type="text" placeholder="My website">
+        </div>
+        <div class="field" style="margin:0">
+          <label for="wp_admin_user">Admin username <span class="hint">leave blank for <code>admin</code> — but a non-obvious name is safer</span></label>
+          <input id="wp_admin_user" name="wp_admin_user" type="text"
+                 maxlength="60"
+                 pattern="[A-Za-z0-9._@\-]+"
+                 placeholder="admin"
+                 title="Letters, digits, and . _ @ -">
+        </div>
+        <div class="field" style="margin:0">
+          <label for="wp_admin_password">Admin password <span class="hint">blank (or under 8 chars) = we generate a strong one, shown once</span></label>
+          <input id="wp_admin_password" name="wp_admin_password" type="text" minlength="0" placeholder="Leave blank to auto-generate">
+        </div>
+        <div class="field" style="margin:0">
+          <label for="wp_locale">Language</label>
+          <select id="wp_locale" name="wp_locale">
+            <option value="en_US" selected>English (en_US)</option>
+            <option value="cs_CZ">Čeština (cs_CZ)</option>
+            <option value="sk_SK">Slovenčina (sk_SK)</option>
+            <option value="de_DE">Deutsch (de_DE)</option>
+            <option value="es_ES">Español (es_ES)</option>
+            <option value="fr_FR">Français (fr_FR)</option>
+            <option value="pl_PL">Polski (pl_PL)</option>
+          </select>
+        </div>
+      </div>
+      <label class="field-checkbox" style="margin-top:0.6rem">
+        <input type="checkbox" name="wp_no_index" value="on">
+        Keep this site out of Google for now
+        <span class="muted" style="margin-left:0.4rem;font-size:0.82rem">— for a site still being built; turn it off before launch</span>
       </label>
-      <p class="text-soft small" style="margin:0.4rem 0 0;line-height:1.5">
-        Enable this only when the DNS preflight above shows a match.
-        Let's Encrypt validates over HTTP, so the domain must already
-        resolve to the target node. Until a trusted certificate lands,
-        the site serves a self-signed bootstrap certificate — you can
-        issue one later from the hosting's SSL tab. Progress shows live
-        on the next page.
+      <p class="text-soft small" style="margin-top:0.4rem">
+        WordPress is installed right after the site is created — usually 10–60 seconds. The admin login
+        appears on the next page, and progress shows live while it runs.
       </p>
     </div>
 
-    <div class="card-section">
-      <h2 style="margin-bottom:1rem">
-        <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
-        Runtime
-      </h2>
+    {# Reverse-proxy details. #}
+    <div class="details-block" id="details-reverse_proxy">
+      <div class="field">
+        <label for="proxy_upstream_url">Where is the app running? <span class="hint">the address Hyperion forwards traffic to</span></label>
+        <input id="proxy_upstream_url" name="proxy_upstream_url" type="url"
+               placeholder="http://localhost:3000 or http://10.0.0.5:8080"
+               value="{{ proxy_upstream_url_in|e }}">
+        <p class="text-soft small" style="margin:0.3rem 0 0">
+          Every request to your domain is forwarded here. WebSocket connections work,
+          and the visitor's real IP and host are passed through.
+        </p>
+      </div>
+    </div>
+
+    {# Redirect details. #}
+    <div class="details-block" id="details-redirect">
+      <div class="field">
+        <label for="redirect_url">Send visitors to <span class="hint">the full address, including https://</span></label>
+        <input id="redirect_url" name="redirect_url" type="url"
+               placeholder="https://www.example.com">
+        <p class="text-soft small" style="margin:0.3rem 0 0">
+          Everyone who opens this domain is sent to that address. No files, PHP, or database are created.
+        </p>
+      </div>
+      <div class="field-row">
+        <div class="field" style="width:14rem">
+          <label for="redirect_code">Kind of redirect</label>
+          <select id="redirect_code" name="redirect_code">
+            <option value="301" selected>Permanent (301)</option>
+            <option value="302">Temporary (302)</option>
+          </select>
+        </div>
+        <div class="field" style="flex:1">
+          <label class="field-checkbox" style="margin-top:1.7rem">
+            <input type="checkbox" name="redirect_preserve_path" value="on">
+            Keep the path (send <code>/foo?bar</code> to the same path on the target)
+          </label>
+        </div>
+      </div>
+    </div>
+
+    {# Static / plain-PHP need nothing extra on this step. #}
+    <div class="details-block" id="details-none">
+      <p class="text-soft" style="margin:0.25rem 0 0">
+        Nothing else to set up here. Open <strong>Advanced options</strong> below only if you
+        need to change the runtime, placement, or certificate. Otherwise just create the site.
+      </p>
+    </div>
+
+    {# ─── Advanced options ─────────────────────────────────────── #}
+    {# Everything an operator might tune, folded away with safe
+       defaults so the common path never has to see it. Native
+       <details> works without JS. #}
+    <details class="advanced-options" id="advanced-options" style="margin-top:1.25rem">
+      <summary>Advanced options</summary>
+      <div class="advanced-body">
+
+      {# HTTPS certificate. #}
+      <div class="field">
+        <label class="field-checkbox" style="font-weight:600">
+          <input type="checkbox" name="issue_cert" value="on">
+          Turn on HTTPS now (get a free Let's Encrypt certificate)
+        </label>
+        <p class="text-soft small" style="margin:0.4rem 0 0;line-height:1.5">
+          Only works once the domain already points at this server (use the check on the
+          previous step). Until then the site runs on a temporary self-signed certificate —
+          you can switch HTTPS on later from the site's SSL tab.
+        </p>
+      </div>
+
+      {# Target node — only when more than one node is enrolled. On a
+         single-node install we send the sentinel so the form contract
+         is unchanged. #}
+      {% if !nodes.is_empty() %}
+      <div class="field">
+        <label for="target_node">Which server should host this?</label>
+        <select id="target_node" name="target_node">
+          <option value="auto"
+                  data-label="auto (best-fit)"
+                  data-detail="picks the server with the most free capacity"
+                  {% if target_node_in == "auto" %}selected{% endif %}>
+            ★  Auto — pick the best-fit server (recommended)
+          </option>
+          {% if master_accepts_hostings %}
+          <option value="local"
+                  data-label="master (this node)"
+                  data-detail=""
+                  {% if target_node_in.is_empty() || target_node_in == "local" %}selected{% endif %}>
+            ◯  master (this node)
+          </option>
+          {% endif %}
+          {% for n in nodes %}
+          <option value="{{ n.node_id }}"
+                  data-label="{{ n.label }}"
+                  data-detail="{% if let Some(ip) = n.public_ip.as_ref() %}{{ ip }} · {% endif %}{{ n.node_id }}"
+                  {% if target_node_in == n.node_id || (!master_accepts_hostings && target_node_in.is_empty() && loop.first) %}selected{% endif %}>
+            ▸  {{ n.label }}{% if let Some(ip) = n.public_ip.as_ref() %} — {{ ip }}{% endif %}
+          </option>
+          {% endfor %}
+        </select>
+        {% if !master_accepts_hostings %}
+        <p class="text-soft small" style="margin:0.3rem 0 0">
+          <strong>This server is set to control-plane only.</strong> Sites run on worker servers.
+          Change that in <a href="/settings#cluster">Settings → Control plane</a>.
+        </p>
+        {% endif %}
+      </div>
+      {% else %}
+      <input type="hidden" name="target_node" value="local">
+      {% endif %}
+
+      {# Profile — bundles limits, plugins/themes, and runtime defaults.
+         Picking one stamps profile_id (JS) and can pre-fill PHP/DB. #}
+      {% if !profiles.is_empty() %}
+      <div class="field">
+        <label>Profile <span class="hint">optional — apply saved limits, plugins, and defaults</span></label>
+        <div class="profile-picker">
+          <label class="profile-card selected" data-pid="0" data-wp-plugins="" data-wp-themes="">
+            <input type="radio" name="profile_radio" value="0" checked>
+            <div class="profile-card-body">
+              <div class="profile-name">None</div>
+              <div class="profile-meta">Start from defaults; tune limits later from the site's page.</div>
+            </div>
+          </label>
+          {% for p in profiles %}
+          <label class="profile-card" data-pid="{{ p.id }}"
+                 data-wp-plugins="{{ p.wp_plugins }}"
+                 data-wp-themes="{{ p.wp_themes }}"
+                 data-default-php-version="{% if let Some(v) = p.default_php_version.as_ref() %}{{ v }}{% endif %}"
+                 data-default-db-engine="{% if let Some(e) = p.default_db_engine.as_ref() %}{{ e }}{% endif %}">
+            <input type="radio" name="profile_radio" value="{{ p.id }}">
+            <div class="profile-card-body">
+              <div class="profile-name">{{ p.name }}</div>
+              {% if !p.description.is_empty() %}
+                <div class="profile-meta">{{ p.description }}</div>
+              {% endif %}
+              <div class="profile-limits">
+                <span title="PHP memory_limit">{{ p.php_memory_mb }} MB PHP</span>
+                <span title="PHP-FPM max_children">{{ p.php_max_children }} workers</span>
+                <span title="DB max connections">{{ p.db_max_connections }} DB conn</span>
+                {% if let Some(d) = p.disk_hard_mb %}<span title="Disk hard cap">{{ d }} MB disk</span>{% endif %}
+                {% if !p.wp_plugins.is_empty() %}
+                  <span class="profile-wp-badge" title="Installs WordPress plugins after provisioning">WP plugins</span>
+                {% endif %}
+                {% if !p.wp_themes.is_empty() %}
+                  <span class="profile-wp-badge" title="Installs WordPress themes after provisioning">WP themes</span>
+                {% endif %}
+              </div>
+              {% if !p.wp_plugins.is_empty() || !p.wp_themes.is_empty() %}
+              <div class="profile-meta" style="margin-top:0.35rem;color:var(--accent);font-weight:500">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:0.2rem"><polyline points="20 6 9 17 4 12"/></svg>
+                Installs WordPress (so its plugins/themes have somewhere to land)
+              </div>
+              <details style="margin-top:0.3rem">
+                <summary class="text-soft small" style="cursor:pointer">What it installs</summary>
+                <div class="text-soft small" style="margin-top:0.25rem;white-space:pre-wrap;font-family:var(--font-mono,ui-monospace,monospace);font-size:0.72rem;max-height:9rem;overflow:auto">{% if !p.wp_plugins.is_empty() %}Plugins:
+{{ p.wp_plugins }}{% endif %}{% if !p.wp_themes.is_empty() %}
+Themes:
+{{ p.wp_themes }}{% endif %}</div>
+              </details>
+              {% endif %}
+            </div>
+          </label>
+          {% endfor %}
+        </div>
+      </div>
+      {% else %}
+      <p class="text-soft small" style="margin:0 0 0.5rem">
+        No profiles yet. <a href="/profiles">Create one</a> to reuse limits, plugins, and defaults across sites.
+      </p>
+      {% endif %}
+
+      {# Runtime — PHP version + database + system user. Blank defaults
+         are safe: the WordPress type fills PHP + MariaDB for you. #}
       <div class="field-row" id="php-row">
         <div class="field" style="flex:1">
-          <label for="php">PHP version</label>
+          <label for="php">PHP version <span class="hint">WordPress & PHP apps only</span></label>
           <select id="php" name="php">
             <option value="none" {% if php_in.is_empty() || php_in == "none" %}selected{% endif %}>none (static)</option>
             <option value="8.1" {% if php_in == "8.1" %}selected{% endif %}>PHP 8.1</option>
@@ -395,483 +435,48 @@ Themes:
         </div>
       </div>
       <div class="field">
-        <label for="system_user">System user <span class="hint">leave blank to derive from domain</span></label>
+        <label for="system_user">System user <span class="hint">leave blank to derive from the domain</span></label>
         <input id="system_user" name="system_user" type="text" placeholder="auto">
       </div>
-    </div>
+
+      </div><!-- /advanced-body -->
+    </details>
 
     </div><!-- /wizard-step 3 -->
-
-    <div class="wizard-step" data-step="4" style="display:none">
-    {# Install WordPress on create — toggle reveals extra fields.
-       Profile-driven mode: when the selected profile carries WP
-       plugins / themes, the profile picker's JS force-checks AND
-       disables this checkbox so the operator can't opt out (the
-       agent would silently fail to install the profile's plugins
-       on a non-WP hosting). #}
-    <div class="card-section" id="wp-install-row" style="margin-top:1rem">
-      <label class="field-checkbox" style="font-weight:600">
-        <input type="checkbox" id="install-wp-checkbox" name="install_wp" value="on"
-               onchange="document.getElementById('wp-fields').style.display=this.checked?'grid':'none';">
-        Install WordPress on this hosting after provisioning
-      </label>
-      <p class="text-soft small" style="margin:0.4rem 0 0;line-height:1.5">
-        Hyperion downloads the latest WordPress core, seeds the database,
-        creates the admin user, and — if a profile is selected — installs
-        every plugin and theme it lists. A live progress card appears on
-        the hosting page while it runs, usually 10–60 s depending on
-        plugin count.
-      </p>
-      <p id="install-wp-forced-notice"
-         style="display:none;margin:0.4rem 0 0;padding:0.55rem 0.75rem;
-                background:color-mix(in oklab, var(--accent) 8%, transparent);
-                border:1px solid color-mix(in oklab, var(--accent) 35%, transparent);
-                border-radius:6px;font-size:0.85rem;color:var(--text)">
-        <strong>Required by the selected profile.</strong> WordPress is installed automatically
-        so the profile's plugins and themes have somewhere to land. To skip the WordPress install,
-        change the profile back to <em>None / custom</em> in step 1.
-      </p>
-      <div id="wp-fields" style="display:none;grid-template-columns:1fr 1fr;gap:0.5rem;margin-top:0.6rem">
-        <div class="field" style="margin:0">
-          <label for="wp_admin_user">Admin username <span class="hint">leave blank for <code>admin</code></span></label>
-          <input id="wp_admin_user" name="wp_admin_user" type="text"
-                 maxlength="60"
-                 pattern="[A-Za-z0-9._@\-]+"
-                 placeholder="admin"
-                 title="ASCII letters, digits, and . _ @ -">
-        </div>
-        <div class="field" style="margin:0">
-          <label for="wp_admin_email">Admin email <span class="hint">leave blank for <code>admin@your-domain</code></span></label>
-          <input id="wp_admin_email" name="wp_admin_email" type="email" placeholder="you@example.cz">
-        </div>
-        <div class="field" style="margin:0">
-          <label for="wp_admin_password">Admin password <span class="hint">leave blank (or under 8 chars) to auto-generate a strong one, shown once on the next page</span></label>
-          <input id="wp_admin_password" name="wp_admin_password" type="text" minlength="0" placeholder="At least 8 characters, or leave blank to auto-generate">
-        </div>
-        <div class="field" style="margin:0">
-          <label for="wp_title">Site title (optional)</label>
-          <input id="wp_title" name="wp_title" type="text" placeholder="defaults to the domain">
-        </div>
-        <div class="field" style="margin:0">
-          <label for="wp_locale">Locale</label>
-          <select id="wp_locale" name="wp_locale">
-            <option value="en_US" selected>English (en_US)</option>
-            <option value="cs_CZ">Čeština (cs_CZ)</option>
-            <option value="sk_SK">Slovenčina (sk_SK)</option>
-            <option value="de_DE">Deutsch (de_DE)</option>
-            <option value="es_ES">Español (es_ES)</option>
-            <option value="fr_FR">Français (fr_FR)</option>
-            <option value="pl_PL">Polski (pl_PL)</option>
-          </select>
-        </div>
-      </div>
-      {# A site under construction that Google indexes is a real problem and
-         an annoying one to undo — the pages stay in the index long after the
-         flag is flipped back. Offer it at the moment the site is created,
-         which is the only moment it is free. #}
-      <label class="field-checkbox" style="margin-top:0.6rem">
-        <input type="checkbox" name="wp_no_index" value="on">
-        Discourage search engines from indexing this site
-        <span class="muted" style="margin-left:0.4rem;font-size:0.82rem">— for a site still being built; turn it off before launch</span>
-      </label>
-      <p class="text-soft small" style="margin-top:0.4rem">
-        Choose a non-obvious admin username — <code>admin</code> is the
-        first guess every brute-force attack tries. WordPress is installed
-        at the site root after provisioning, and the admin credentials
-        appear in the hosting's credentials panel.
-      </p>
-    </div>
-
-    </div><!-- /wizard-step 4 -->
 
     <div class="btn-group wizard-nav" style="margin-top:1rem;justify-content:space-between;display:flex">
       <a href="/hostings" class="btn ghost">Cancel</a>
       <div style="display:flex;gap:0.5rem">
         <button class="btn" type="button" id="wizard-back" style="display:none">← Back</button>
-        <button class="btn primary" type="button" id="wizard-next">Next →</button>
-        <button class="btn primary lg" type="submit" id="provision-submit" style="display:none">
+        <button class="btn primary" type="button" id="wizard-next" style="display:none">Next →</button>
+        <button class="btn primary lg" type="submit" id="provision-submit">
           <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
-          <span id="provision-submit-label">Create hosting</span>
+          <span id="provision-submit-label">Create website</span>
         </button>
       </div>
     </div>
   </form>
 </div>
 
-{# Live banner + submit-button updater for the Target node dropdown.
-   No-op when the dropdown isn't rendered (single-node setup). #}
-<script>
-(function () {
-  'use strict';
-  const sel = document.getElementById('target_node');
-  if (!sel) return;
-  const bannerName = document.getElementById('target-banner-name');
-  const bannerDetail = document.getElementById('target-banner-detail');
-  const submitLabel = document.getElementById('provision-submit-label');
-  const banner = document.getElementById('target-banner');
-
-  function refresh() {
-    const opt = sel.options[sel.selectedIndex];
-    const label = opt.dataset.label || opt.textContent.trim();
-    const detail = opt.dataset.detail || '';
-    if (bannerName) bannerName.textContent = label;
-    if (bannerDetail) bannerDetail.textContent = detail ? '· ' + detail : '';
-    if (submitLabel) submitLabel.textContent = 'Create on ' + label;
-    // Visual cue: when targeting a remote node, switch the banner
-    // accent to indicate "this is going somewhere non-default".
-    if (banner) {
-      banner.style.borderLeftColor = (sel.value && sel.value !== 'local')
-        ? 'var(--warn)' : 'var(--accent)';
-    }
-  }
-  sel.addEventListener('change', refresh);
-  refresh();
-})();
-
-// Test-node UX: swap "Primary domain" field for "Test-site short
-// name" when the operator picks a test node, and live-preview the
-// derived domain from the template.
-(function () {
-  'use strict';
-  {# `test_node_ids` is plain CSV from operator settings; `test_domain_template` is
-     a printf-ish template. Emit them as JS string literals via double-encoding
-     through .replace(). They never contain control chars (input validated). #}
-  const TEST_NODES = "{{ test_node_ids }}".split(',').map(s => s.trim()).filter(Boolean);
-  const TEMPLATE = "{{ test_domain_template }}";
-  if (TEST_NODES.length === 0 || !TEMPLATE) return;
-  const sel = document.getElementById('target_node');
-  const nameField = document.getElementById('test_site_name_field');
-  const domField = document.getElementById('domain_field');
-  const nameInput = document.getElementById('test_site_name');
-  const preview = document.getElementById('test_domain_preview');
-  const domInput = document.getElementById('domain');
-  if (!sel || !nameField || !domField || !nameInput) return;
-
-  function renderPreview() {
-    const v = (nameInput.value || '').toLowerCase().trim();
-    if (!v) { preview.textContent = '—'; return; }
-    // Substitute {node} with the node's HOSTNAME (label) instead
-    // of the long node_id — operator-friendly URL like
-    // test.blog.s4.example.cz not
-    // test.blog.node_01kt9d6hrsbaw1pyzjdmwnmrhp.example.cz.
-    // The option's data-label is the hostname; fall back to the
-    // value (node_id) if that's empty.
-    const opt = sel.options[sel.selectedIndex];
-    const hostname = (opt && opt.dataset.label || sel.value || '').trim();
-    const out = TEMPLATE
-      .replace('{name}', v)
-      .replace('{node}', hostname)
-      .replace('{node_id}', sel.value)
-      .replace('{hostname}', hostname)
-      .toLowerCase();
-    preview.textContent = out;
-    // Mirror into the hidden domain field so server-side validation
-    // sees a non-empty value even if the operator never touched the
-    // domain row directly. The server-side test-node path takes
-    // `test_site_name` over `domain` anyway, but this keeps the
-    // ":required" client check happy.
-    domInput.value = out;
-  }
-
-  function applyMode() {
-    const isTest = TEST_NODES.includes(sel.value);
-    if (isTest) {
-      nameField.style.display = '';
-      domField.style.display = 'none';
-      // Make the short-name required + the domain non-required.
-      nameInput.required = true;
-      domInput.required = false;
-      renderPreview();
-    } else {
-      nameField.style.display = 'none';
-      domField.style.display = '';
-      nameInput.required = false;
-      domInput.required = true;
-    }
-  }
-  sel.addEventListener('change', applyMode);
-  nameInput.addEventListener('input', renderPreview);
-  applyMode();
-})();
-
-// Domain availability preflight — debounced live check that hits
-// /api/check-domain and surfaces "already taken" before the operator
-// clicks submit. Without this the operator sees "UNIQUE constraint
-// failed: hostings.domain" SQL error from the agent, which is both
-// late + confusing.
-(function () {
-  'use strict';
-  const domainInput = document.getElementById('domain');
-  const resultDiv = document.getElementById('domain-check-result');
-  if (!domainInput || !resultDiv) return;
-
-  let abortCtrl = null;
-  let debounceTimer = null;
-
-  async function checkDomain(value) {
-    const needle = (value || '').trim();
-    // Heuristic: only probe when it looks vaguely like a real
-    // domain. Saves a fan-out per keystroke on partial typing.
-    if (needle.length < 4 || !needle.includes('.')) {
-      resultDiv.textContent = '';
-      resultDiv.style.color = '';
-      domainInput.classList.remove('domain-taken');
-      return;
-    }
-    if (abortCtrl) abortCtrl.abort();
-    abortCtrl = new AbortController();
-    try {
-      const r = await fetch(
-        '/api/check-domain?domain=' + encodeURIComponent(needle),
-        { signal: abortCtrl.signal, credentials: 'same-origin' }
-      );
-      if (!r.ok) return;
-      const j = await r.json();
-      if (!j.checked) {
-        resultDiv.textContent = '';
-        resultDiv.style.color = '';
-        return;
-      }
-      if (j.exists) {
-        resultDiv.style.color = 'var(--danger)';
-        const where = j.node && j.node !== 'local' ? ' on node ' + j.node : ' on the master';
-        resultDiv.innerHTML =
-          '⚠ <strong>' + escape(j.domain) + '</strong> already exists' +
-          escape(where) + ' (state: ' + escape(j.state || 'unknown') + ').' +
-          ' Choose a different domain, or delete the existing hosting first.';
-        domainInput.classList.add('domain-taken');
-      } else {
-        resultDiv.style.color = 'var(--success)';
-        resultDiv.textContent = '✓ Available — no hosting in the cluster claims this domain';
-        domainInput.classList.remove('domain-taken');
-      }
-    } catch (_) { /* aborted or network failure — swallow */ }
-  }
-
-  function escape(s) {
-    return String(s).replace(/[&<>"']/g, c => ({
-      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
-    }[c]));
-  }
-
-  domainInput.addEventListener('input', () => {
-    if (debounceTimer) clearTimeout(debounceTimer);
-    resultDiv.textContent = '';   // clear stale verdict while typing
-    debounceTimer = setTimeout(() => checkDomain(domainInput.value), 450);
-  });
-  // Also probe immediately on blur in case the operator's last
-  // keystroke happened right before they Tab'd away.
-  domainInput.addEventListener('blur', () => {
-    if (debounceTimer) clearTimeout(debounceTimer);
-    checkDomain(domainInput.value);
-  });
-  // Run once on page load — useful when re-render after a
-  // validation error echoes the typed value back.
-  checkDomain(domainInput.value);
-})();
-
-// Profile picker — selecting a card stamps profile_id and (when
-// the profile mandates WP) force-checks + locks the "Install
-// WordPress" toggle in step 4. JS is the UI side; post_create on
-// the server is the source of truth and also forces install_wp on
-// when the profile has WP content (so a hand-crafted POST can't
-// skip the install).
-(function () {
-  'use strict';
-  const profileIdField = document.getElementById('profile_id');
-  const cards = document.querySelectorAll('.profile-card');
-  if (!profileIdField || cards.length === 0) return;
-
-  const wpToggle = document.getElementById('install-wp-checkbox');
-  const wpForcedNotice = document.getElementById('install-wp-forced-notice');
-  const wpFields = document.getElementById('wp-fields');
-
-  function hasMeaningfulLines(s) {
-    if (!s) return false;
-    return s.split(/\r?\n/).some(raw => {
-      const line = raw.trim();
-      if (!line) return false;
-      if (line.startsWith('#') || line.startsWith(';')) return false;
-      return true;
-    });
-  }
-
-  function selectCard(card) {
-    cards.forEach(c => c.classList.remove('selected'));
-    card.classList.add('selected');
-    profileIdField.value = card.dataset.pid || '0';
-    const plugins = card.dataset.wpPlugins || '';
-    const themes = card.dataset.wpThemes || '';
-    const profileForcesWp = hasMeaningfulLines(plugins) || hasMeaningfulLines(themes);
-
-    // ─── Pre-fill PHP version + DB engine from the profile ──
-    // Each profile carries optional defaults on its data attrs.
-    // When set, we move the wizard's step-3 dropdowns to match
-    // BEFORE the operator gets there — they can still override,
-    // but the common case ("WordPress Pro" needs PHP 8.4 +
-    // MariaDB) is one click instead of three.
-    const defaultPhp = (card.dataset.defaultPhpVersion || '').trim();
-    const defaultDb = (card.dataset.defaultDbEngine || '').trim();
-    const phpSelect = document.getElementById('php');
-    const dbSelect = document.getElementById('db');
-    if (phpSelect && defaultPhp) {
-      // map "8.4" -> the option whose value matches
-      phpSelect.value = defaultPhp;
-    }
-    if (dbSelect && defaultDb) {
-      dbSelect.value = defaultDb;
-    }
-    // When WP is required, ensure PHP isn't set to "none" (would
-    // make the agent refuse the WP install). Only override when
-    // the profile didn't already specify a PHP version.
-    if (profileForcesWp && phpSelect && phpSelect.value === 'none' && !defaultPhp) {
-      phpSelect.value = '8.3';
-    }
-    // Similarly for DB — WP needs MariaDB.
-    if (profileForcesWp && dbSelect && dbSelect.value === 'none' && !defaultDb) {
-      dbSelect.value = 'mariadb';
-    }
-
-    if (!wpToggle) return;
-    if (profileForcesWp) {
-      // Force checked + locked. Operator can't uncheck without
-      // changing the profile selection (better UX than a silently-
-      // skipped plugin install).
-      wpToggle.checked = true;
-      wpToggle.disabled = true;
-      if (wpFields) wpFields.style.display = 'grid';
-      if (wpForcedNotice) wpForcedNotice.style.display = '';
-    } else {
-      wpToggle.disabled = false;
-      if (wpForcedNotice) wpForcedNotice.style.display = 'none';
-      // Don't auto-uncheck — operator may have ticked it manually.
-    }
-  }
-
-  cards.forEach(card => {
-    card.addEventListener('click', () => selectCard(card));
-    const radio = card.querySelector('input[type="radio"]');
-    if (radio) {
-      radio.addEventListener('change', () => {
-        if (radio.checked) selectCard(card);
-      });
-    }
-  });
-
-  // Initial sync from whatever's pre-selected (e.g. when the form
-  // re-renders after a server-side validation error and the
-  // operator's last choice is checked).
-  const initial = document.querySelector('.profile-card input[type="radio"]:checked');
-  if (initial) selectCard(initial.closest('.profile-card'));
-})();
-
-// Wizard step navigation. Without JS, all `.wizard-step` blocks
-// render (default style block keeps them inline-display). With JS,
-// only one is visible at a time and Next/Back buttons drive the
-// transition. The final step swaps Next for the submit button.
-(function () {
-  'use strict';
-  const stepper = document.getElementById('wizard-stepper');
-  const steps = document.querySelectorAll('.wizard-step');
-  const backBtn = document.getElementById('wizard-back');
-  const nextBtn = document.getElementById('wizard-next');
-  const submitBtn = document.getElementById('provision-submit');
-  if (!stepper || steps.length === 0) return;
-
-  // JS is on — un-hide the stepper.
-  stepper.style.display = 'flex';
-
-  let current = 1;
-  const total = steps.length;
-
-  // The WordPress step (the last one) only applies to a PHP site — a static
-  // site, reverse proxy or redirect can't run WordPress, so for those the
-  // wizard ends one step earlier and never asks about it.
-  const kindSel = document.getElementById('kind');
-  const wpApplies = () => !kindSel || kindSel.value === 'php';
-  const lastStep = () => (wpApplies() ? total : total - 1);
-
-  function show(n) {
-    const last = lastStep();
-    current = Math.max(1, Math.min(last, n));
-    steps.forEach((el) => {
-      const isMine = Number(el.dataset.step) === current;
-      el.style.display = isMine ? '' : 'none';
-    });
-    stepper.querySelectorAll('li').forEach((li) => {
-      const sn = Number(li.dataset.step);
-      // Hide any step past the last applicable one (the WP step for non-PHP).
-      li.style.display = sn <= last ? '' : 'none';
-      li.classList.toggle('active', sn === current);
-      li.classList.toggle('done', sn < current);
-    });
-    backBtn.style.display = current > 1 ? '' : 'none';
-    if (current === last) {
-      nextBtn.style.display = 'none';
-      submitBtn.style.display = '';
-    } else {
-      nextBtn.style.display = '';
-      submitBtn.style.display = 'none';
-    }
-    // Scroll the stepper into view on transition so the operator
-    // sees the new step from the top, not from wherever they last
-    // scrolled.
-    if (stepper.scrollIntoView) stepper.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  }
-
-  // Validate the inputs in the current step before advancing.
-  // Browser's native :required + pattern validity handles this for
-  // free — we just call checkValidity() on every input in the
-  // current step.
-  function validateCurrentStep() {
-    const stepEl = document.querySelector('.wizard-step[data-step="' + current + '"]');
-    if (!stepEl) return true;
-    const inputs = stepEl.querySelectorAll('input, select, textarea');
-    for (const el of inputs) {
-      if (!el.checkValidity()) {
-        el.reportValidity();
-        return false;
-      }
-    }
-    return true;
-  }
-
-  nextBtn.addEventListener('click', () => {
-    if (!validateCurrentStep()) return;
-    show(current + 1);
-  });
-  backBtn.addEventListener('click', () => show(current - 1));
-
-  // Changing the hosting type can add or remove the WordPress step, so
-  // re-render (clamping if the operator was standing on a step that no longer
-  // applies).
-  if (kindSel) kindSel.addEventListener('change', () => show(current));
-
-  // Also let the stepper itself be clickable — operator can jump
-  // back to any prior step. Forward jumps go through validation.
-  stepper.querySelectorAll('li').forEach((li) => {
-    li.addEventListener('click', () => {
-      const target = Number(li.dataset.step);
-      if (target < current) {
-        show(target);
-      } else if (target > current) {
-        // Walk forward step by step so each gets validated.
-        while (current < target) {
-          if (!validateCurrentStep()) return;
-          show(current + 1);
-        }
-      }
-    });
-  });
-
-  show(1);
-})();
-</script>
+<div class="card muted">
+  <h2 style="margin-bottom:0.6rem">
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+    What happens next
+  </h2>
+  <p style="margin:0 0 0.6rem;font-size:0.92rem;line-height:1.6">
+    When you create the site, Hyperion sets everything up for you — the files, the runtime and
+    database if your type needs them, and the web server — then takes you to the site's page.
+  </p>
+  <p class="muted" style="font-size:0.85rem;margin:0">
+    It is all-or-nothing: if any step fails, Hyperion undoes the earlier ones, so you never end up
+    with a half-created site.
+  </p>
+</div>
+</div>
 
 <style>
-/* Wizard stepper — horizontal pill row at the top of the create
-   form. Hidden by default + revealed by JS so a non-JS browser
-   sees the original single-page form. */
+/* Wizard stepper — horizontal pill row. Hidden by default and revealed
+   by JS so a non-JS browser sees the original single-page form. */
 .wizard-stepper {
   list-style: none;
   padding: 0.5rem 0.75rem;
@@ -916,13 +521,30 @@ Themes:
   font-size: 0.72rem;
 }
 
-/* Profile picker — single-column on phones, 2-up otherwise. */
+/* No-JS fallback: every step renders top-to-bottom. Only once JS adds
+   `js-on` to the form do we collapse to one visible step at a time. */
+.wizard-step { display: block; }
+#wizard-form.js-on .wizard-step { display: none; }
+#wizard-form.js-on .wizard-step.is-active { display: block; }
+
+/* Per-type detail blocks follow the SAME no-JS pattern as the steps:
+   every block renders by default (so the proxy/redirect URL fields are
+   reachable with JS off), and only once JS is on do we collapse to the
+   one matching the chosen type. */
+.details-block { display: block; }
+#wizard-form.js-on .details-block { display: none; }
+#wizard-form.js-on .details-block.is-active { display: block; }
+
+/* Choice-card grid — shared by the type picker and the profile picker
+   so both read as one visual system (no new styling introduced). */
+.type-picker,
 .profile-picker {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr));
   gap: 0.6rem;
   margin: 0.5rem 0 0.4rem;
 }
+.type-card,
 .profile-card {
   position: relative;
   display: block;
@@ -933,26 +555,33 @@ Themes:
   background: var(--surface);
   transition: border-color var(--t-fast), background var(--t-fast);
 }
+.type-card:hover,
 .profile-card:hover { border-color: var(--primary-h); }
+.type-card.selected,
 .profile-card.selected {
   border-color: var(--primary);
   background: color-mix(in oklab, var(--primary) 8%, transparent);
 }
+.type-card input[type="radio"],
 .profile-card input[type="radio"] {
   position: absolute;
   top: 0.7rem;
   right: 0.7rem;
   accent-color: var(--primary);
 }
+.type-card-body .type-name,
 .profile-card-body .profile-name {
   font-weight: 600;
-  font-size: 0.92rem;
+  font-size: 0.95rem;
   color: var(--text);
+  padding-right: 1.4rem;
 }
+.type-card-body .type-meta,
 .profile-card-body .profile-meta {
-  font-size: 0.78rem;
+  font-size: 0.8rem;
   color: var(--text-soft);
-  margin-top: 0.2rem;
+  margin-top: 0.25rem;
+  line-height: 1.45;
 }
 .profile-card-body .profile-limits {
   display: flex;
@@ -968,38 +597,385 @@ Themes:
   font-size: 0.7rem;
   color: var(--text-dim);
 }
-/* WP badge on profile cards — visually distinct so the operator
-   sees AT A GLANCE that picking this profile triggers a WP
-   install. Accent-tinted instead of the muted limits chips. */
 .profile-card-body .profile-limits span.profile-wp-badge {
   background: color-mix(in oklab, var(--accent) 14%, transparent);
   border-color: color-mix(in oklab, var(--accent) 35%, transparent);
   color: var(--accent);
   font-weight: 600;
 }
+
+/* Advanced options disclosure — reuses surface/border tokens only. */
+.advanced-options {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+.advanced-options > summary {
+  cursor: pointer;
+  padding: 0.65rem 0.85rem;
+  font-weight: 600;
+  font-size: 0.9rem;
+  color: var(--text);
+  list-style-position: inside;
+}
+.advanced-options > summary:hover { color: var(--primary); }
+.advanced-options[open] > summary { border-bottom: 1px solid var(--border); }
+.advanced-options .advanced-body { padding: 0.85rem; }
+.advanced-options .advanced-body .field:first-child { margin-top: 0; }
 </style>
 
-<div class="card muted">
-  <h2 style="margin-bottom:0.6rem">
-    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
-    What happens next
-  </h2>
-  <ol style="margin:0;padding-left:1.25rem;font-size:0.92rem;line-height:1.7">
-    <li>A Linux user is created with a chroot-style home.</li>
-    <li>The directory tree is laid out under <code>/home/{user}/{domain}</code>.</li>
-    <li>The PHP-FPM pool is rendered and the service is reloaded.</li>
-    <li>The database and its user are created; the password is shown <em>once</em>.</li>
-    <li>The TLS certificate is issued and the nginx vhost goes live.</li>
-  </ol>
-  <p class="muted" style="font-size:0.85rem;margin-top:1rem;margin-bottom:0">If any step fails, Hyperion rolls back the earlier ones in reverse order — a hosting is never left half-created.</p>
-</div>
-</div>
-
-{# Auto-fire DNS preflight when the operator leaves the domain field
-   with a non-empty value. Dispatches a `dnsblur` event on the body
-   that the hidden HTMX listener picks up. Debounced so a rapid
-   re-focus doesn't fire twice. No external deps, CSP-safe. #}
 <script>
+// ── Type picker ────────────────────────────────────────────────────
+// Selecting a type card stamps the `site_type` radio, highlights the
+// card, swaps the step-3 details block, sets any required field for
+// that type, and relabels the submit button. The server re-derives all
+// of this from `site_type`, so this is a UI mirror only.
+(function () {
+  'use strict';
+  const cards = document.querySelectorAll('.type-card');
+  if (cards.length === 0) return;
+  const heading = document.getElementById('details-heading');
+  const submitLabel = document.getElementById('provision-submit-label');
+  const blocks = {
+    wordpress: document.getElementById('details-wordpress'),
+    reverse_proxy: document.getElementById('details-reverse_proxy'),
+    redirect: document.getElementById('details-redirect'),
+    none: document.getElementById('details-none'),
+  };
+  const upstream = document.getElementById('proxy_upstream_url');
+  const redirectUrl = document.getElementById('redirect_url');
+
+  const META = {
+    wordpress:     { block: 'wordpress',     heading: 'WordPress admin',  label: 'Create WordPress site' },
+    static:        { block: 'none',          heading: 'Details',          label: 'Create static site' },
+    php:           { block: 'none',          heading: 'Details',          label: 'Create PHP site' },
+    reverse_proxy: { block: 'reverse_proxy', heading: 'Where it forwards', label: 'Create proxy' },
+    redirect:      { block: 'redirect',      heading: 'Where it sends',   label: 'Create redirect' },
+  };
+
+  function apply(type) {
+    const meta = META[type] || META.wordpress;
+    cards.forEach(c => c.classList.toggle('selected', c.dataset.siteType === type));
+    // Toggle the .is-active class (not inline display) so the CSS keeps
+    // every block visible when JS is off; only #wizard-form.js-on hides
+    // the inactive ones.
+    Object.keys(blocks).forEach(k => { if (blocks[k]) blocks[k].classList.remove('is-active'); });
+    if (blocks[meta.block]) blocks[meta.block].classList.add('is-active');
+    if (heading) heading.textContent = meta.heading;
+    if (submitLabel) submitLabel.textContent = meta.label;
+    // Required-ness follows the active type so native validation helps
+    // instead of bouncing the operator to a full-page server error.
+    if (upstream) upstream.required = (type === 'reverse_proxy');
+    if (redirectUrl) redirectUrl.required = (type === 'redirect');
+    // Let the wizard know the step layout may have changed.
+    document.dispatchEvent(new CustomEvent('sitetypechange', { detail: { type } }));
+  }
+
+  cards.forEach(card => {
+    const radio = card.querySelector('input[type="radio"]');
+    card.addEventListener('click', () => { if (radio) { radio.checked = true; apply(card.dataset.siteType); } });
+    if (radio) radio.addEventListener('change', () => { if (radio.checked) apply(card.dataset.siteType); });
+  });
+
+  const checked = document.querySelector('.type-card input[name="site_type"]:checked');
+  apply(checked ? checked.closest('.type-card').dataset.siteType : 'wordpress');
+})();
+
+// ── Target-node banner (operators with >1 node) ────────────────────
+(function () {
+  'use strict';
+  const sel = document.getElementById('target_node');
+  if (!sel) return;
+  const bannerName = document.getElementById('target-banner-name');
+  const bannerDetail = document.getElementById('target-banner-detail');
+  const banner = document.getElementById('target-banner');
+
+  function refresh() {
+    const opt = sel.options[sel.selectedIndex];
+    const label = opt.dataset.label || opt.textContent.trim();
+    const detail = opt.dataset.detail || '';
+    if (bannerName) bannerName.textContent = label;
+    if (bannerDetail) bannerDetail.textContent = detail ? '· ' + detail : '';
+    if (banner) {
+      banner.style.borderLeftColor = (sel.value && sel.value !== 'local')
+        ? 'var(--warn)' : 'var(--accent)';
+    }
+  }
+  // The "Change" link is wired by the wizard IIFE (it needs to drive
+  // step navigation, which lives in that closure).
+  sel.addEventListener('change', refresh);
+  refresh();
+})();
+
+// ── Test-node short-name mode ──────────────────────────────────────
+(function () {
+  'use strict';
+  const TEST_NODES = "{{ test_node_ids }}".split(',').map(s => s.trim()).filter(Boolean);
+  const TEMPLATE = "{{ test_domain_template }}";
+  if (TEST_NODES.length === 0 || !TEMPLATE) return;
+  const sel = document.getElementById('target_node');
+  const nameField = document.getElementById('test_site_name_field');
+  const domField = document.getElementById('domain_field');
+  const nameInput = document.getElementById('test_site_name');
+  const preview = document.getElementById('test_domain_preview');
+  const domInput = document.getElementById('domain');
+  if (!sel || !nameField || !domField || !nameInput) return;
+
+  function renderPreview() {
+    const v = (nameInput.value || '').toLowerCase().trim();
+    if (!v) { preview.textContent = '—'; return; }
+    const opt = sel.options[sel.selectedIndex];
+    const hostname = (opt && opt.dataset.label || sel.value || '').trim();
+    const out = TEMPLATE
+      .replace('{name}', v)
+      .replace('{node}', hostname)
+      .replace('{node_id}', sel.value)
+      .replace('{hostname}', hostname)
+      .toLowerCase();
+    preview.textContent = out;
+    domInput.value = out;
+  }
+
+  function applyMode() {
+    const isTest = TEST_NODES.includes(sel.value);
+    if (isTest) {
+      nameField.style.display = '';
+      domField.style.display = 'none';
+      nameInput.required = true;
+      domInput.required = false;
+      renderPreview();
+    } else {
+      nameField.style.display = 'none';
+      domField.style.display = '';
+      nameInput.required = false;
+      domInput.required = true;
+    }
+  }
+  sel.addEventListener('change', applyMode);
+  nameInput.addEventListener('input', renderPreview);
+  applyMode();
+})();
+
+// ── Domain availability preflight ──────────────────────────────────
+(function () {
+  'use strict';
+  const domainInput = document.getElementById('domain');
+  const resultDiv = document.getElementById('domain-check-result');
+  if (!domainInput || !resultDiv) return;
+
+  let abortCtrl = null;
+  let debounceTimer = null;
+
+  async function checkDomain(value) {
+    const needle = (value || '').trim();
+    if (needle.length < 4 || !needle.includes('.')) {
+      resultDiv.textContent = '';
+      resultDiv.style.color = '';
+      domainInput.classList.remove('domain-taken');
+      return;
+    }
+    if (abortCtrl) abortCtrl.abort();
+    abortCtrl = new AbortController();
+    try {
+      const r = await fetch(
+        '/api/check-domain?domain=' + encodeURIComponent(needle),
+        { signal: abortCtrl.signal, credentials: 'same-origin' }
+      );
+      if (!r.ok) return;
+      const j = await r.json();
+      if (!j.checked) {
+        resultDiv.textContent = '';
+        resultDiv.style.color = '';
+        return;
+      }
+      if (j.exists) {
+        resultDiv.style.color = 'var(--danger)';
+        const where = j.node && j.node !== 'local' ? ' on server ' + j.node : ' on this server';
+        resultDiv.innerHTML =
+          '⚠ <strong>' + escape(j.domain) + '</strong> is already in use' +
+          escape(where) + ' (state: ' + escape(j.state || 'unknown') + ').' +
+          ' Choose a different address, or remove the existing site first.';
+        domainInput.classList.add('domain-taken');
+      } else {
+        resultDiv.style.color = 'var(--success)';
+        resultDiv.textContent = '✓ Available — no other site is using this address';
+        domainInput.classList.remove('domain-taken');
+      }
+    } catch (_) { /* aborted or network failure — swallow */ }
+  }
+
+  function escape(s) {
+    return String(s).replace(/[&<>"']/g, c => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    }[c]));
+  }
+
+  domainInput.addEventListener('input', () => {
+    if (debounceTimer) clearTimeout(debounceTimer);
+    resultDiv.textContent = '';
+    debounceTimer = setTimeout(() => checkDomain(domainInput.value), 450);
+  });
+  domainInput.addEventListener('blur', () => {
+    if (debounceTimer) clearTimeout(debounceTimer);
+    checkDomain(domainInput.value);
+  });
+  checkDomain(domainInput.value);
+})();
+
+// ── Profile picker (Advanced options) ──────────────────────────────
+// Stamps profile_id and, when a profile carries WordPress content,
+// pre-fills the runtime so its plugins/themes have a WP to land on.
+// The server still forces WordPress for such profiles — this is a UI
+// convenience, not the source of truth.
+(function () {
+  'use strict';
+  const profileIdField = document.getElementById('profile_id');
+  const cards = document.querySelectorAll('.profile-card');
+  if (!profileIdField || cards.length === 0) return;
+
+  function hasMeaningfulLines(s) {
+    if (!s) return false;
+    return s.split(/\r?\n/).some(raw => {
+      const line = raw.trim();
+      if (!line) return false;
+      if (line.startsWith('#') || line.startsWith(';')) return false;
+      return true;
+    });
+  }
+
+  function selectCard(card) {
+    cards.forEach(c => c.classList.remove('selected'));
+    card.classList.add('selected');
+    profileIdField.value = card.dataset.pid || '0';
+    const plugins = card.dataset.wpPlugins || '';
+    const themes = card.dataset.wpThemes || '';
+    const profileForcesWp = hasMeaningfulLines(plugins) || hasMeaningfulLines(themes);
+
+    const defaultPhp = (card.dataset.defaultPhpVersion || '').trim();
+    const defaultDb = (card.dataset.defaultDbEngine || '').trim();
+    const phpSelect = document.getElementById('php');
+    const dbSelect = document.getElementById('db');
+    if (phpSelect && defaultPhp) phpSelect.value = defaultPhp;
+    if (dbSelect && defaultDb) dbSelect.value = defaultDb;
+    if (profileForcesWp && phpSelect && phpSelect.value === 'none' && !defaultPhp) phpSelect.value = '8.3';
+    if (profileForcesWp && dbSelect && dbSelect.value === 'none' && !defaultDb) dbSelect.value = 'mariadb';
+  }
+
+  cards.forEach(card => {
+    card.addEventListener('click', () => selectCard(card));
+    const radio = card.querySelector('input[type="radio"]');
+    if (radio) radio.addEventListener('change', () => { if (radio.checked) selectCard(card); });
+  });
+
+  const initial = document.querySelector('.profile-card input[type="radio"]:checked');
+  if (initial) selectCard(initial.closest('.profile-card'));
+})();
+
+// ── Wizard navigation ──────────────────────────────────────────────
+// Without JS, all steps render and the submit button is visible. With
+// JS, we show one step at a time and swap Next for Submit on the last
+// step. Three fixed steps: What → Address → Details.
+(function () {
+  'use strict';
+  const form = document.getElementById('wizard-form');
+  const stepper = document.getElementById('wizard-stepper');
+  const steps = document.querySelectorAll('.wizard-step');
+  const backBtn = document.getElementById('wizard-back');
+  const nextBtn = document.getElementById('wizard-next');
+  const submitBtn = document.getElementById('provision-submit');
+  if (!form || !stepper || steps.length === 0) return;
+
+  // JS is on — switch to one-step-at-a-time mode and reveal the chrome.
+  form.classList.add('js-on');
+  stepper.style.display = 'flex';
+  nextBtn.style.display = '';
+
+  let current = 1;
+  const total = steps.length;
+
+  function show(n) {
+    current = Math.max(1, Math.min(total, n));
+    steps.forEach((el) => {
+      el.classList.toggle('is-active', Number(el.dataset.step) === current);
+    });
+    stepper.querySelectorAll('li').forEach((li) => {
+      const sn = Number(li.dataset.step);
+      li.classList.toggle('active', sn === current);
+      li.classList.toggle('done', sn < current);
+    });
+    backBtn.style.display = current > 1 ? '' : 'none';
+    if (current === total) {
+      nextBtn.style.display = 'none';
+      submitBtn.style.display = '';
+    } else {
+      nextBtn.style.display = '';
+      submitBtn.style.display = 'none';
+    }
+    if (stepper.scrollIntoView) stepper.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+
+  function validateCurrentStep() {
+    const stepEl = document.querySelector('.wizard-step[data-step="' + current + '"]');
+    if (!stepEl) return true;
+    const inputs = stepEl.querySelectorAll('input, select, textarea');
+    for (const el of inputs) {
+      // Skip validation for fields hidden by the current type/mode.
+      if (el.offsetParent === null && el.type !== 'hidden') continue;
+      if (!el.checkValidity()) {
+        el.reportValidity();
+        return false;
+      }
+    }
+    return true;
+  }
+
+  nextBtn.addEventListener('click', () => { if (validateCurrentStep()) show(current + 1); });
+  backBtn.addEventListener('click', () => show(current - 1));
+
+  // An Enter keypress on an early step would otherwise fire the hidden
+  // submit button and POST the whole form, skipping the remaining steps
+  // (and, for proxy/redirect, submitting with the URL field never shown).
+  // Intercept it: advance like Next, and only let a real submit through
+  // on the last step.
+  form.addEventListener('submit', (e) => {
+    if (current !== total) {
+      e.preventDefault();
+      if (validateCurrentStep()) show(current + 1);
+    }
+  });
+
+  // The multi-node "Change" banner lives above the form; its target is
+  // the node dropdown inside the (JS-hidden) Details step. Jump the
+  // wizard there, open Advanced options, and focus the dropdown.
+  const bannerChange = document.getElementById('target-banner-change');
+  if (bannerChange) {
+    bannerChange.addEventListener('click', (e) => {
+      e.preventDefault();
+      show(total);
+      const adv = document.getElementById('advanced-options');
+      const sel = document.getElementById('target_node');
+      if (adv) adv.open = true;
+      if (sel) { sel.scrollIntoView({ behavior: 'smooth', block: 'center' }); sel.focus(); }
+    });
+  }
+
+  stepper.querySelectorAll('li').forEach((li) => {
+    li.addEventListener('click', () => {
+      const target = Number(li.dataset.step);
+      if (target < current) { show(target); return; }
+      while (current < target) {
+        if (!validateCurrentStep()) return;
+        show(current + 1);
+      }
+    });
+  });
+
+  show(1);
+})();
+
+// ── DNS preflight auto-fire ─────────────────────────────────────────
+// Dispatches a `dnsblur` event the hidden HTMX listener in step 2 picks
+// up, so leaving the domain field triggers the check without a click.
 (function () {
   'use strict';
   const dom = document.querySelector('input[name="domain"]');
