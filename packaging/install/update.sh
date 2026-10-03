@@ -967,10 +967,15 @@ done
 # (or had it trimmed) never gets the extras. wp-cli `core download` needs
 # ZipArchive (php*-zip) and a bare WordPress needs gd/mbstring/xml/curl/
 # mysql — the symptom is a mid-install "Extracting a zip file requires
-# ZipArchive". For every PHP version whose -fpm unit IS present, ensure
-# the full extension set. apt-get install is idempotent; we only call it
-# when dpkg reports at least one missing, so a healthy box pays nothing.
-PHP_EXT_SUFFIXES=(zip gd mbstring xml curl mysql)
+# ZipArchive". soap is here too: many WordPress plugins (shipping,
+# invoicing, payment gateways) hard-require the SOAP extension and fail
+# with "Plugin requires an active Soap library ... contact your server
+# administrator". Listing it here is what gets it onto the whole existing
+# fleet on the next update, not just freshly installed servers.
+# For every PHP version whose -fpm unit IS present, ensure the full
+# extension set. apt-get install is idempotent; we only call it when dpkg
+# reports at least one missing, so a healthy box pays nothing.
+PHP_EXT_SUFFIXES=(zip gd mbstring xml curl mysql soap)
 for ver in 8.1 8.2 8.3 8.4; do
   unit_installed "php${ver}-fpm.service" || continue
   missing=0

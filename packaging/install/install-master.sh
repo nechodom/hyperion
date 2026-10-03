@@ -291,9 +291,12 @@ if [[ ! -f "$SURY_LIST" ]] || ! grep -qxF "$SURY_LINE" "$SURY_LIST"; then
   apt-get update -qq
 fi
 log "Installing PHP 8.3..."
+# Full extension set: wp-cli `core download` needs php8.3-zip (ZipArchive),
+# WordPress needs gd/mbstring/xml/curl, and soap is required by many plugins
+# (shipping, invoicing, payment gateways) that refuse to run without it.
 apt-get install -y -qq \
   php8.3-fpm php8.3-cli php8.3-mysql php8.3-pgsql \
-  php8.3-curl php8.3-gd php8.3-mbstring php8.3-xml php8.3-zip
+  php8.3-curl php8.3-gd php8.3-mbstring php8.3-xml php8.3-zip php8.3-soap
 systemctl enable --now php8.3-fpm
 # nginx is required; the DBs are enabled only if selected.
 systemctl enable --now nginx || true
