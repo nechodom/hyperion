@@ -307,7 +307,7 @@ async fn install_php_version(php_version: PhpVersion) -> Result<(), AdapterError
     let _ = apt(vec!["update".into(), "-qq".into()]).await;
     let mut install: Vec<String> = vec!["install".into(), "-y".into(), "-qq".into()];
     for ext in [
-        "fpm", "cli", "mysql", "pgsql", "curl", "gd", "mbstring", "xml", "zip",
+        "fpm", "cli", "mysql", "pgsql", "curl", "gd", "mbstring", "xml", "zip", "soap",
     ] {
         install.push(format!("php{v}-{ext}"));
     }
