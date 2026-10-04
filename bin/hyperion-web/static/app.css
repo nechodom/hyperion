@@ -3564,3 +3564,972 @@ summary.btn::marker { content: ""; }
   color: var(--text-dim);
 }
 .country-tile-pct { display: block; font-weight: 700; font-size: 0.9rem; }
+
+/* ============================================================
+ *  Hosting detail — the "site page"
+ *  ----------------------------------------------------------
+ *  One hosting, a dozen sections. The page is built from:
+ *    .site-bar     a compact sticky identity bar (domain, state,
+ *                  the two or three actions an operator reaches
+ *                  for from anywhere on the page)
+ *    .site-meta    a row of fact chips under it (kind, PHP, node,
+ *                  system user, created…)
+ *    .site-shell   a two-column shell: a sticky vertical section
+ *                  nav on the left, the active section on the right.
+ *                  Below 1100px the nav folds into a horizontal strip.
+ *    .site-main    the section area; a CSS container, so the grids
+ *                  inside it respond to ITS width, not the viewport
+ *                  (the app sidebar and the section nav both eat
+ *                  width before the content gets any).
+ *
+ *  The section nav reuses the `.tabs .tab[data-tab]` contract the
+ *  switcher script and the template lints already know; only the
+ *  presentation is different, and every rule here is scoped to
+ *  `.site-nav` so the Settings page strip is untouched.
+ * ============================================================ */
+
+:root { --site-bar-h: 3.5rem; }
+
+/* ── Sticky identity bar ──────────────────────────────────────── */
+.site-bar {
+  position: sticky;
+  top: 0;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  flex-wrap: nowrap;
+  gap: 0.75rem;
+  min-height: var(--site-bar-h);
+  margin: -0.5rem calc(-1 * clamp(1.5rem, 3vw, 3rem)) 0;
+  padding: 0.5rem clamp(1.5rem, 3vw, 3rem);
+  background: color-mix(in srgb, var(--bg) 86%, transparent);
+  backdrop-filter: saturate(140%) blur(12px);
+  -webkit-backdrop-filter: saturate(140%) blur(12px);
+  border-bottom: 1px solid var(--border);
+}
+.site-bar-id {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+.site-bar-back {
+  display: inline-grid;
+  place-items: center;
+  width: 2rem;
+  height: 2rem;
+  border-radius: var(--radius-sm);
+  color: var(--text-dim);
+  flex: none;
+  transition: background var(--t-fast), color var(--t-fast);
+}
+.site-bar-back:hover { background: var(--surface-2); color: var(--text); }
+.site-bar-back svg { width: 16px; height: 16px; }
+.site-bar h1 {
+  margin: 0;
+  font-size: 1.2rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.site-bar .pill { flex: none; }
+.site-bar .pill.maint {
+  background: var(--accent, var(--warn));
+  color: #fff;
+  border-color: transparent;
+  letter-spacing: 0.05em;
+  font-size: 0.66rem;
+}
+.site-bar .pill.maint::before { display: none; }
+.site-bar-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  flex: none;
+  margin-left: auto;
+}
+.site-bar-actions form { margin: 0; display: inline-flex; }
+
+/* ── Meta chips under the bar ─────────────────────────────────── */
+.site-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.4rem 0.5rem;
+  margin: 0.9rem 0 0;
+  font-size: 0.8rem;
+}
+.meta-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.22rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  color: var(--text-dim);
+  white-space: nowrap;
+  max-width: 100%;
+  min-width: 0;
+}
+.meta-chip svg { width: 13px; height: 13px; flex: none; color: var(--text-soft); }
+.meta-chip strong { color: var(--text); font-weight: 600; }
+.meta-chip code {
+  background: transparent;
+  border: 0;
+  padding: 0;
+  font-size: 0.78rem;
+  color: inherit;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.meta-chip.copy-field {
+  cursor: pointer;
+  padding: 0.22rem 0.6rem;
+  background: var(--surface);
+  border-radius: var(--radius-pill);
+}
+.meta-chip.copy-field .copy-value { font-size: 0.74rem; overflow: hidden; text-overflow: ellipsis; max-width: 11rem; }
+.meta-chip.copy-field .copy-hint { font-size: 0.64rem; }
+.meta-chip.kind strong { letter-spacing: 0.01em; }
+.site-meta .meta-sep { color: var(--text-soft); opacity: 0.6; }
+
+/* ── Shell: nav + section ─────────────────────────────────────── */
+.site-shell {
+  display: grid;
+  grid-template-columns: 14.5rem minmax(0, 1fr);
+  gap: 1.75rem;
+  align-items: start;
+  margin-top: 1.25rem;
+}
+.site-main {
+  min-width: 0;
+  container-type: inline-size;
+  container-name: sitemain;
+}
+
+/* The vertical section nav. */
+.site-nav {
+  position: sticky;
+  top: calc(var(--site-bar-h) + 1rem);
+  max-height: calc(100dvh - var(--site-bar-h) - 2rem);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 0;
+  margin: 0;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  scrollbar-width: thin;
+}
+.site-nav .nav-group {
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--text-soft);
+  padding: 1.1rem 0.75rem 0.35rem;
+}
+.site-nav .nav-group:first-child { padding-top: 0.2rem; }
+.site-nav .tab {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.5rem 0.75rem;
+  font-size: 0.88rem;
+  font-weight: 500;
+  color: var(--text-dim);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  box-shadow: none;
+}
+.site-nav .tab:hover { background: var(--surface-2); color: var(--text); }
+.site-nav .tab.active {
+  background: var(--surface-2);
+  color: var(--text);
+  border-color: var(--border);
+  box-shadow: none;
+}
+.site-nav .tab .tab-icon { width: 16px; height: 16px; flex: none; }
+.site-nav .tab .tab-badge { margin-left: auto; }
+.site-nav .tab .tab-ext { margin-left: auto; width: 12px; height: 12px; opacity: 0.55; flex: none; }
+.site-nav .tab[data-tone="danger"] { color: var(--danger); }
+.site-nav .tab[data-tone="danger"]:hover { background: color-mix(in oklab, var(--danger) 8%, var(--surface)); }
+.site-nav .tab[data-tone="danger"].active {
+  background: color-mix(in oklab, var(--danger) 10%, var(--surface));
+  border-color: color-mix(in oklab, var(--danger) 35%, var(--border));
+}
+/* A small status dot inside a nav badge (monitor: healthy / alerting). */
+.tab-badge.dot-ok   { background: var(--success); color: #fff; }
+.tab-badge.dot-bad  { background: var(--danger);  color: #fff; }
+.tab-badge.dot-warn { background: var(--warn);    color: #fff; }
+.tab.active .tab-badge.dot-ok   { background: var(--success); color: #fff; }
+.tab.active .tab-badge.dot-bad  { background: var(--danger);  color: #fff; }
+.tab.active .tab-badge.dot-warn { background: var(--warn);    color: #fff; }
+
+/* Fold the nav into a scrollable strip once the two columns stop fitting. */
+@media (max-width: 1100px) {
+  .site-shell { grid-template-columns: minmax(0, 1fr); gap: 1rem; }
+  .site-nav {
+    position: static;
+    max-height: none;
+    flex-direction: row;
+    align-items: stretch;
+    gap: 0.15rem;
+    padding: 0.35rem;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
+  .site-nav .nav-group { display: none; }
+  .site-nav .tab { flex: none; padding: 0.5rem 0.8rem; }
+  .site-nav .tab .tab-badge,
+  .site-nav .tab .tab-ext { margin-left: 0; }
+}
+@media (max-width: 880px) {
+  .site-bar {
+    position: static;
+    flex-wrap: wrap;
+    min-height: 0;
+    margin: 0 0 0.25rem;
+    padding: 0 0 0.85rem;
+    background: transparent;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+  .site-bar-actions { flex: 1 1 100%; margin-left: 0; }
+  .site-bar-actions form { flex: 1; }
+  .site-bar-actions .btn { flex: 1; }
+  .site-bar h1 { white-space: normal; font-size: 1.1rem; }
+  .site-meta { margin-top: 0.5rem; }
+}
+
+/* ── Section header inside a panel ────────────────────────────── */
+/* A grid, not a wrapping flex row: a flex item's wrap decision uses its
+   max-width-clamped size, so a 78ch description happily sat BESIDE a short
+   title instead of under it. */
+.panel-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 0.45rem 1.25rem;
+  margin: 0 0 1rem;
+}
+.panel-head h2 {
+  grid-column: 1;
+  margin: 0;
+  font-size: 1.15rem;
+  font-weight: 700;
+  letter-spacing: -0.015em;
+}
+.panel-head p {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-size: 0.86rem;
+  color: var(--text-dim);
+  max-width: 78ch;
+  line-height: 1.5;
+}
+.panel-head .panel-links {
+  grid-column: 2;
+  justify-self: end;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  font-size: 0.82rem;
+}
+.panel-head .panel-links a { color: var(--text-dim); }
+.panel-head .panel-links a:hover { color: var(--text); }
+@media (max-width: 640px) {
+  .panel-head { grid-template-columns: minmax(0, 1fr); }
+  .panel-head .panel-links { grid-column: 1; justify-self: start; justify-content: flex-start; }
+}
+.panel-head + .panel-head { margin-top: 1.75rem; }
+/* The same thing one level down: a group label between cards. */
+.panel-group {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  margin: 1.6rem 0 0.6rem;
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-soft);
+}
+.panel-group:first-child { margin-top: 0; }
+.panel-group span.note { text-transform: none; letter-spacing: 0; font-weight: 400; font-size: 0.78rem; }
+
+/* ── Card header component ────────────────────────────────────── */
+.card-head {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  margin: 0 0 0.9rem;
+}
+.card-head h2 { margin: 0; }
+.card-head .card-tools {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+.card-head .card-tools form { margin: 0; }
+.card-head .pill { flex: none; }
+.card-desc {
+  margin: -0.45rem 0 0.9rem;
+  font-size: 0.84rem;
+  color: var(--text-dim);
+  line-height: 1.55;
+  max-width: 78ch;
+}
+.card-desc:last-child { margin-bottom: 0; }
+.card-head + .card-desc { margin-top: -0.4rem; }
+.card.compact { padding: 1rem 1.15rem; }
+.card.compact .card-head { margin-bottom: 0.6rem; }
+.card h2 .pill { font-size: 0.62rem; margin-left: 0.15rem; }
+
+/* Cards laid out by the page, not by `.card + .card`. */
+.site-col,
+.card-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  min-width: 0;
+}
+.site-col > .card + .card,
+.card-stack > .card + .card,
+.card-grid > .card + .card { margin-top: 0; }
+/* Lazy panels render their own card with an inline bottom margin that was
+   tuned for a stacked tab; in a gap-driven column or grid it double-spaces. */
+.site-col > .card,
+.site-col > * > .card:last-child,
+.card-stack > .card,
+.card-stack > * > .card:last-child,
+.card-grid > .card,
+.card-grid > * > .card:last-child { margin-bottom: 0 !important; }
+
+/* Two or three cards side by side when the section is wide enough. */
+.card-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 1rem;
+  align-items: start;
+}
+@container sitemain (min-width: 46rem) {
+  .card-grid.cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@container sitemain (min-width: 64rem) {
+  .card-grid.cols-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+@container sitemain (min-width: 46rem) and (max-width: 63.98rem) {
+  .card-grid.cols-3 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+.card-grid > .span-2 { grid-column: 1 / -1; }
+
+/* ── Overview: KPI strip + two columns ────────────────────────── */
+.site-kpis {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(11rem, 100%), 1fr));
+  gap: 0.75rem;
+  margin: 0 0 1rem;
+}
+.site-kpi {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  min-width: 0;
+  padding: 0.8rem 0.95rem 0.75rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: inherit;
+  text-decoration: none;
+  transition: border-color var(--t-fast), background var(--t-fast);
+}
+a.site-kpi:hover { border-color: var(--border-strong); background: var(--surface-2); color: inherit; }
+.site-kpi .k-label {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-soft);
+}
+.site-kpi .k-label svg { width: 12px; height: 12px; }
+.site-kpi .k-value {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  font-size: 1.3rem;
+  font-weight: 700;
+  letter-spacing: -0.015em;
+  line-height: 1.2;
+  font-variant-numeric: tabular-nums;
+  min-width: 0;
+}
+.site-kpi .k-value > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.site-kpi .k-value small { font-size: 0.76rem; font-weight: 500; color: var(--text-dim); letter-spacing: 0; }
+.site-kpi .k-meta {
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.site-kpi .k-spark { margin-top: 0.3rem; color: var(--text-dim); }
+.site-kpi .k-spark svg { height: 26px !important; }
+.site-kpi[data-tone="good"] .k-value { color: var(--success); }
+.site-kpi[data-tone="warn"] .k-value { color: var(--warn); }
+.site-kpi[data-tone="bad"]  .k-value { color: var(--danger); }
+.site-kpi[data-tone="good"]::before,
+.site-kpi[data-tone="warn"]::before,
+.site-kpi[data-tone="bad"]::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 3px;
+  border-radius: var(--radius) 0 0 var(--radius);
+}
+.site-kpi[data-tone="good"]::before { background: var(--success); }
+.site-kpi[data-tone="warn"]::before { background: var(--warn); }
+.site-kpi[data-tone="bad"]::before  { background: var(--danger); }
+
+.site-overview {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 1rem;
+  align-items: start;
+}
+@container sitemain (min-width: 58rem) {
+  .site-overview { grid-template-columns: minmax(0, 1fr) 21rem; gap: 1.25rem; }
+  .site-overview .site-col.aside { position: sticky; top: calc(var(--site-bar-h) + 1rem); }
+}
+@media (max-width: 880px) {
+  .site-overview .site-col.aside { position: static; }
+}
+
+/* Health grade square. */
+.grade {
+  display: inline-grid;
+  place-items: center;
+  width: 2.7rem;
+  height: 2.7rem;
+  border-radius: var(--radius-sm);
+  font-size: 1.35rem;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  flex: none;
+}
+.grade[data-grade="A"] { color: var(--success); border-color: color-mix(in oklab, var(--success) 40%, transparent); background: color-mix(in oklab, var(--success) 10%, var(--surface)); }
+.grade[data-grade="B"] { color: #84cc16; border-color: color-mix(in oklab, #84cc16 40%, transparent); background: color-mix(in oklab, #84cc16 10%, var(--surface)); }
+.grade[data-grade="C"] { color: var(--warn); border-color: color-mix(in oklab, var(--warn) 40%, transparent); background: color-mix(in oklab, var(--warn) 10%, var(--surface)); }
+.grade[data-grade="D"],
+.grade[data-grade="F"] { color: var(--danger); border-color: color-mix(in oklab, var(--danger) 40%, transparent); background: color-mix(in oklab, var(--danger) 10%, var(--surface)); }
+
+/* Check list with a coloured dot per row (health, to-do). */
+.checklist {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.45rem;
+}
+.checklist li {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+  font-size: 0.88rem;
+  line-height: 1.45;
+}
+.checklist .dot {
+  flex: none;
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: 50%;
+  margin-top: 0.42rem;
+  background: var(--text-soft);
+}
+.checklist .dot.good { background: var(--success); }
+.checklist .dot.warn { background: var(--warn); }
+.checklist .dot.bad  { background: var(--danger); }
+.checklist .dot.info { background: var(--text-soft); }
+.checklist li .text-soft { color: var(--text-dim); }
+
+/* Fact list for the overview aside: label over value. */
+.facts {
+  display: flex;
+  flex-direction: column;
+  gap: 0.8rem;
+  margin: 0;
+}
+.facts .fact { min-width: 0; }
+.facts dt {
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--text-soft);
+  margin: 0 0 0.2rem;
+}
+.facts dd {
+  margin: 0;
+  font-size: 0.88rem;
+  color: var(--text);
+  min-width: 0;
+  word-break: break-word;
+  line-height: 1.45;
+}
+.facts dd code { font-size: 0.8rem; }
+.facts .fact-sub {
+  display: block;
+  font-size: 0.76rem;
+  color: var(--text-soft);
+  margin-top: 0.2rem;
+  line-height: 1.4;
+}
+.facts .fact-row {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+}
+.facts form.inline-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin: 0;
+}
+.facts form.inline-switch select {
+  width: auto;
+  padding: 0.3rem 1.9rem 0.3rem 0.55rem;
+  font-size: 0.82rem;
+  background-position: right 0.55rem center;
+}
+.facts form.inline-switch input[type="url"] {
+  padding: 0.35rem 0.6rem;
+  font-size: 0.84rem;
+}
+
+/* Security tiles on the overview. */
+.tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(13rem, 100%), 1fr));
+  gap: 0.7rem;
+}
+.tile {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0.75rem 0.85rem;
+  background: var(--bg-2);
+  min-width: 0;
+}
+.tile .tile-title {
+  font-size: 0.78rem;
+  color: var(--text-dim);
+  margin-bottom: 0.4rem;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+.tile .tile-body { font-size: 0.82rem; color: var(--text-dim); margin-bottom: 0.45rem; line-height: 1.45; }
+.tile .tile-links { display: flex; gap: 0.35rem 0.8rem; flex-wrap: wrap; font-size: 0.78rem; }
+.tile .tile-links a { color: var(--text-dim); }
+.tile .tile-links a:hover { color: var(--text); }
+/* The brute-force tile is a lazy partial that paints its own box. */
+.tiles > [hx-get] > div,
+.tiles > #bf-scan-tile { background: var(--bg-2); }
+
+/* Link list: "across the cluster". */
+.link-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.link-list a {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.4rem 0.55rem;
+  margin: 0 -0.55rem;
+  border-radius: var(--radius-sm);
+  color: var(--text-dim);
+  font-size: 0.86rem;
+}
+.link-list a:hover { background: var(--surface-2); color: var(--text); }
+.link-list a svg { width: 14px; height: 14px; color: var(--text-soft); flex: none; }
+.link-list a .arr { margin-left: auto; opacity: 0.5; }
+
+/* Usage sparklines grid (48 h). */
+.usage-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(8rem, 100%), 1fr));
+  gap: 0.9rem 1.25rem;
+}
+.usage-grid > div { min-width: 0; }
+.usage-grid .u-label { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-soft); font-weight: 600; }
+.usage-grid .u-value { font-size: 1.25rem; font-weight: 700; margin: 0.1rem 0 0.25rem; font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
+.usage-grid .u-spark svg { height: 32px !important; }
+
+/* ── Settings: rows + switches ───────────────────────────────── */
+.setting-list { display: flex; flex-direction: column; }
+.setting-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  column-gap: 1.25rem;
+  row-gap: 0.2rem;
+  padding: 0.9rem 0;
+  border-top: 1px solid var(--border);
+  align-items: start;
+}
+.setting-list > .setting-row:first-child,
+.setting-row.first { border-top: 0; padding-top: 0.25rem; }
+.setting-row > .s-label {
+  grid-column: 1;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--text);
+}
+.setting-row > .s-label .hint { font-weight: 400; color: var(--text-dim); font-size: 0.78rem; }
+/* Help text flows in column 1, one paragraph per row — an element per
+   paragraph, never two in one named area, which is how they overlapped. */
+.setting-row > .s-help {
+  grid-column: 1;
+  font-size: 0.82rem;
+  color: var(--text-dim);
+  line-height: 1.5;
+  max-width: 70ch;
+  margin: 0;
+}
+.setting-row > .s-help + .s-help { margin-top: 0.3rem; }
+.setting-row > .s-control {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  align-self: center;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.setting-row > .s-field {
+  grid-column: 1 / -1;
+  margin-top: 0.55rem;
+  min-width: 0;
+}
+.setting-row > .s-field .field { margin-bottom: 0; }
+.setting-row > .s-field .field + .field { margin-top: 0.75rem; }
+.setting-row > .s-field .field-row { margin-top: 0; }
+.setting-row > .s-field .field-row .field { margin-bottom: 0; }
+.setting-row > .s-field .help,
+.setting-row > .s-field .muted.small,
+.setting-row > .s-field p.small { font-size: 0.78rem; color: var(--text-dim); margin: 0.35rem 0 0; line-height: 1.5; }
+.setting-row.stacked { grid-template-columns: minmax(0, 1fr); }
+.setting-row.stacked > .s-control { grid-column: 1; grid-row: auto; margin-top: 0.5rem; }
+.setting-row > .s-label label { cursor: pointer; }
+/* Group title inside a long form. */
+.setting-group {
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-soft);
+  margin: 1.6rem 0 0.2rem;
+  padding-bottom: 0.4rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.setting-group:first-child { margin-top: 0.2rem; }
+.setting-group svg { width: 13px; height: 13px; }
+.setting-group + .setting-list > .setting-row:first-child { border-top: 0; padding-top: 0.2rem; }
+
+/* A checkbox that reads as a switch. Same input, no JS. */
+input[type="checkbox"].switch {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 2.45rem;
+  height: 1.4rem;
+  margin: 0;
+  flex: none;
+  border-radius: var(--radius-pill);
+  background: var(--surface-3);
+  border: 1px solid var(--border-strong);
+  position: relative;
+  cursor: pointer;
+  vertical-align: middle;
+  transition: background var(--t-fast), border-color var(--t-fast);
+}
+input[type="checkbox"].switch::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: calc(1.4rem - 6px);
+  height: calc(1.4rem - 6px);
+  border-radius: 50%;
+  background: var(--text-dim);
+  transition: transform var(--t-fast), background var(--t-fast);
+}
+input[type="checkbox"].switch:checked {
+  background: var(--primary);
+  border-color: var(--primary);
+}
+input[type="checkbox"].switch:checked::after {
+  background: var(--primary-fg);
+  transform: translateX(1.05rem);
+}
+input[type="checkbox"].switch:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--primary) 30%, transparent);
+}
+input[type="checkbox"].switch:disabled { opacity: 0.45; cursor: not-allowed; }
+/* A row that IS a switch: label on the left, switch on the right. */
+label.switch-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  cursor: pointer;
+  font-size: 0.9rem;
+  color: var(--text);
+  padding: 0.5rem 0;
+}
+label.switch-row .sw-text { flex: 1; min-width: 0; }
+label.switch-row .sw-text .hint { display: block; color: var(--text-dim); font-size: 0.8rem; font-weight: 400; margin-top: 0.1rem; }
+label.switch-row strong { font-weight: 600; }
+
+/* Form footer: primary action right, note left. */
+.form-footer {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  margin-top: 1.1rem;
+  padding-top: 0.9rem;
+  border-top: 1px solid var(--border);
+}
+.form-footer .note { font-size: 0.78rem; color: var(--text-soft); }
+.form-footer .btn.primary { margin-left: auto; }
+.form-footer.start .btn.primary { margin-left: 0; }
+
+/* Inline actions row (used under headings, inside cards). */
+.actions-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+.actions-row form { margin: 0; display: inline-flex; }
+
+/* Popover under a <summary class="btn"> (install plugin / theme). */
+details.inline-action { position: relative; display: inline-block; }
+details.inline-action > summary { list-style: none; cursor: pointer; }
+details.inline-action > summary::-webkit-details-marker { display: none; }
+details.inline-action > summary::marker { content: ""; }
+details.inline-action > .popover {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 0.4rem);
+  left: 0;
+  width: min(24rem, calc(100vw - 1.5rem));
+  padding: 0.85rem;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow);
+}
+details.inline-action > .popover.right { left: auto; right: 0; }
+details.inline-action > .popover .field { margin-bottom: 0; }
+details.inline-action > .popover .popover-foot { display: flex; justify-content: flex-end; gap: 0.4rem; margin-top: 0.6rem; }
+
+/* ── Log console ─────────────────────────────────────────────── */
+.log-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin: 0 0 0.6rem;
+}
+.log-toolbar .log-filter { flex: 1 1 14rem; min-width: 0; }
+.log-toolbar .log-filter input { padding: 0.45rem 0.7rem; font-size: 0.85rem; }
+.log-toolbar form { margin: 0; }
+.log-toolbar .seg-btns { display: inline-flex; gap: 0; border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; }
+.log-toolbar .seg-btns form + form { border-left: 1px solid var(--border); }
+.log-toolbar .seg-btns .btn { border: 0; border-radius: 0; }
+.log-console {
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0.75rem 0.9rem;
+  min-height: 9rem;
+  font-size: 0.82rem;
+}
+.log-console pre {
+  margin: 0;
+  background: transparent;
+  border: 0;
+  padding: 0;
+}
+.log-console .muted { color: var(--text-soft); }
+
+/* ── Table modifiers used on the site page ───────────────────── */
+.table-wrap.flush { margin: 0.25rem -1.5rem 0; border-radius: 0; }
+.table-wrap.flush-b { margin: 0.25rem -1.5rem -1.4rem; }
+.table-wrap.inset {
+  margin: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.table-wrap.inset th:first-child, .table-wrap.inset td:first-child { padding-left: 0.85rem; }
+.table-wrap.inset th:last-child,  .table-wrap.inset td:last-child  { padding-right: 0.85rem; }
+@media (max-width: 760px) {
+  .table-wrap.flush { margin: 0.25rem -1rem 0; }
+  .table-wrap.flush-b { margin: 0.25rem -1rem -1rem; }
+}
+td .cell-sub { display: block; font-size: 0.76rem; color: var(--text-soft); margin-top: 0.1rem; }
+td .cell-sub code { font-size: 0.74rem; }
+
+/* ── Small helpers used throughout the site page ─────────────── */
+.note {
+  font-size: 0.8rem;
+  color: var(--text-dim);
+  line-height: 1.55;
+  margin: 0;
+}
+.note + .note { margin-top: 0.4rem; }
+.note.boxed {
+  padding: 0.6rem 0.8rem;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.stack-sm { display: flex; flex-direction: column; gap: 0.5rem; }
+.stack-md { display: flex; flex-direction: column; gap: 0.9rem; }
+.cluster { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+.cluster form { margin: 0; }
+.mt-0 { margin-top: 0 !important; }
+.mb-0 { margin-bottom: 0 !important; }
+.w-full { width: 100%; }
+.mono { font-family: var(--font-mono); }
+.text-danger { color: var(--danger); }
+.text-warn { color: var(--warn); }
+.text-success { color: var(--success); }
+.pill.neutral { background: var(--surface-2); color: var(--text-soft); }
+.pill.accent { background: var(--primary-soft); color: var(--primary-h); border-color: transparent; }
+.pill.accent::before { display: none; }
+.tag.accent { background: var(--primary-soft); color: var(--primary-h); border-color: transparent; }
+.tag.warn { background: var(--warn-soft); color: var(--warn); border-color: color-mix(in oklab, var(--warn) 30%, transparent); }
+.tag.success { background: var(--success-soft); color: var(--success); border-color: color-mix(in oklab, var(--success) 30%, transparent); }
+.tag.info { background: var(--info-soft); color: var(--info); border-color: color-mix(in oklab, var(--info) 30%, transparent); }
+.tag.muted { opacity: 0.75; }
+
+/* Danger zone layout. */
+.danger-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.5rem 1.5rem;
+  align-items: center;
+  padding: 1rem 0;
+  border-top: 1px solid var(--border);
+}
+.danger-row:first-of-type { border-top: 0; padding-top: 0.25rem; }
+.danger-row .d-title { font-weight: 600; font-size: 0.92rem; }
+.danger-row .d-help { font-size: 0.82rem; color: var(--text-dim); line-height: 1.5; max-width: 70ch; }
+.danger-row .d-opts { display: flex; gap: 0.5rem 1.25rem; flex-wrap: wrap; margin-top: 0.45rem; }
+.danger-row .d-opts .field-checkbox { margin: 0; }
+@media (max-width: 640px) {
+  .danger-row { grid-template-columns: minmax(0, 1fr); }
+  .setting-row { grid-template-columns: minmax(0, 1fr) auto; }
+}
+
+/* Monitor probe bars. */
+.probe-bars {
+  display: flex;
+  gap: 2px;
+  height: 40px;
+  align-items: flex-end;
+  padding: 0.4rem;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+}
+.probe-bars span {
+  display: inline-block;
+  flex: 1 1 0;
+  min-width: 2px;
+  max-width: 6px;
+  border-radius: 1px;
+  background: var(--success);
+  min-height: 6px;
+}
+.probe-bars span.fail { background: var(--danger); height: 100%; }
+
+/* Credentials panel sits above the site bar on a fresh create; give it
+   the page gutter back since the bar bleeds past it. */
+.creds-panel { margin-top: 0.75rem; }
+
+/* Site page — the small pieces the sections above lean on. */
+.site-alerts {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  margin-top: 1rem;
+}
+.site-alerts .flash { margin: 0 !important; }
+.site-alerts:not(:has(.flash)) { display: none; }
+.site-alerts > [hx-get]:empty { display: none; }
+
+/* A plain text disclosure inside a card: "Reset the password…". */
+details.disclosure > summary {
+  list-style: none;
+  cursor: pointer;
+  font-size: 0.84rem;
+  color: var(--text-dim);
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+details.disclosure > summary::-webkit-details-marker { display: none; }
+details.disclosure > summary::marker { content: ""; }
+details.disclosure > summary::before {
+  content: "";
+  width: 0.4rem;
+  height: 0.4rem;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(-45deg);
+  transition: transform var(--t-fast);
+  flex: none;
+  margin-right: 0.15rem;
+}
+details.disclosure[open] > summary::before { transform: rotate(45deg); }
+details.disclosure > summary:hover { color: var(--text); }
+details.disclosure.danger > summary { color: var(--danger); font-weight: 600; }
+
+/* The "Resources" and "How this site is backed up" fact rows run inline. */
+.facts.inline { flex-direction: row; flex-wrap: wrap; gap: 0.75rem 2rem; }
+.help { font-size: 0.78rem; color: var(--text-dim); line-height: 1.5; margin-top: 0.2rem; display: block; }

@@ -26541,25 +26541,27 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             "postfix" => Some("postfix"),
             // PHP installs pull the FULL extension set, not just -fpm:
             // wp-cli `core download` needs ZipArchive (php*-zip) and a
-            // bare WordPress needs gd/mbstring/xml/curl/mysql. Installing
-            // only -fpm left every fresh PHP version unable to run a WP
-            // install ("Extracting a zip file requires ZipArchive").
+            // bare WordPress needs gd/mbstring/xml/curl/mysql. soap is in
+            // too — many WordPress plugins (shipping, invoicing, payment
+            // gateways) hard-require it and refuse to run otherwise.
+            // Installing only -fpm left every fresh PHP version unable to
+            // run a WP install ("Extracting a zip file requires ZipArchive").
             // run_service_install splits this on whitespace into apt args.
             "php8.1-fpm" => Some(
                 "php8.1-fpm php8.1-cli php8.1-mysql php8.1-pgsql \
-                 php8.1-curl php8.1-gd php8.1-mbstring php8.1-xml php8.1-zip",
+                 php8.1-curl php8.1-gd php8.1-mbstring php8.1-xml php8.1-zip php8.1-soap",
             ),
             "php8.2-fpm" => Some(
                 "php8.2-fpm php8.2-cli php8.2-mysql php8.2-pgsql \
-                 php8.2-curl php8.2-gd php8.2-mbstring php8.2-xml php8.2-zip",
+                 php8.2-curl php8.2-gd php8.2-mbstring php8.2-xml php8.2-zip php8.2-soap",
             ),
             "php8.3-fpm" => Some(
                 "php8.3-fpm php8.3-cli php8.3-mysql php8.3-pgsql \
-                 php8.3-curl php8.3-gd php8.3-mbstring php8.3-xml php8.3-zip",
+                 php8.3-curl php8.3-gd php8.3-mbstring php8.3-xml php8.3-zip php8.3-soap",
             ),
             "php8.4-fpm" => Some(
                 "php8.4-fpm php8.4-cli php8.4-mysql php8.4-pgsql \
-                 php8.4-curl php8.4-gd php8.4-mbstring php8.4-xml php8.4-zip",
+                 php8.4-curl php8.4-gd php8.4-mbstring php8.4-xml php8.4-zip php8.4-soap",
             ),
             // ClamAV for the per-hosting malware scan. The scanner is the
             // `clamscan` CLI (from the `clamav` package), not a daemon, so
