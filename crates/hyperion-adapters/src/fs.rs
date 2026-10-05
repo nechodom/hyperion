@@ -81,9 +81,12 @@ pub fn open_no_follow(path: &Path) -> Result<std::fs::File, AdapterError> {
     use rustix::fs::{Mode, OFlags};
     use std::os::unix::fs::MetadataExt;
 
+    // NONBLOCK: a FIFO in place of the log would otherwise block the open
+    // itself — before the regular-file check below could refuse it — and
+    // hang whichever loop asked. It changes nothing for a regular file.
     let fd = rustix::fs::open(
         path,
-        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
         Mode::empty(),
     )
     .map_err(|e| {
@@ -196,6 +199,75 @@ pub fn truncate_no_follow(path: &Path) -> Result<(), AdapterError> {
 ///
 /// Replaces shelling out to `tail`, which takes a PATH and therefore resolves
 /// it again — after any check the caller made, and as root.
+/// What [`read_appended`] found: the new text plus where to resume.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Appended {
+    pub text: String,
+    pub ino: u64,
+    pub offset: u64,
+}
+
+/// Read what was appended to a log since `(ino, offset)`, the way `tail -F`
+/// would, opened through [`open_no_follow`] (the logs live in a directory
+/// the site user owns).
+///
+/// * First sight (`ino == 0`): nothing is returned and the position is set
+///   to the end — history is not news.
+/// * Rotated (inode changed) or truncated (shorter than `offset`): read the
+///   new file from its start.
+/// * More than `max` bytes new: only the newest `max` are read.
+///
+/// The returned offset stops after the last complete line, so a line nginx
+/// is still writing is read whole next time instead of half now.
+pub fn read_appended(
+    path: &Path,
+    ino: u64,
+    offset: u64,
+    max: u64,
+) -> Result<Appended, AdapterError> {
+    use std::io::{Read, Seek, SeekFrom};
+    use std::os::unix::fs::MetadataExt;
+
+    let mut file = open_no_follow(path)?;
+    let md = file
+        .metadata()
+        .map_err(|e| AdapterError::Other(format!("stat: {e}")))?;
+    let (cur_ino, len) = (md.ino(), md.len());
+    if ino == 0 {
+        return Ok(Appended {
+            text: String::new(),
+            ino: cur_ino,
+            offset: len,
+        });
+    }
+    let from = if cur_ino != ino || len < offset {
+        0
+    } else {
+        offset
+    };
+    let start = from.max(len.saturating_sub(max));
+    if start >= len {
+        return Ok(Appended {
+            text: String::new(),
+            ino: cur_ino,
+            offset: len,
+        });
+    }
+    file.seek(SeekFrom::Start(start))
+        .map_err(|e| AdapterError::Other(format!("seek: {e}")))?;
+    let mut buf = Vec::with_capacity((len - start) as usize);
+    file.take(len - start)
+        .read_to_end(&mut buf)
+        .map_err(|e| AdapterError::Other(format!("read: {e}")))?;
+    let complete = buf.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
+    buf.truncate(complete);
+    Ok(Appended {
+        text: String::from_utf8_lossy(&buf).into_owned(),
+        ino: cur_ino,
+        offset: start + complete as u64,
+    })
+}
+
 pub async fn tail_lines(path: &Path, lines: usize) -> Result<String, AdapterError> {
     use std::io::{Read, Seek, SeekFrom};
 
@@ -448,6 +520,58 @@ fn with_extension(p: &Path, ext: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn read_appended_follows_a_growing_log() {
+        use std::io::Write;
+        let d = tempfile::tempdir().expect("tempdir");
+        let p = d.path().join("error.log");
+        std::fs::write(&p, "old line\n").expect("write");
+
+        // First sight: history is skipped.
+        let a = read_appended(&p, 0, 0, 1 << 20).expect("read");
+        assert_eq!(a.text, "");
+        assert_eq!(a.offset, 9);
+
+        // Appended text, with a half-written last line held back.
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&p)
+            .expect("open");
+        f.write_all(b"one\ntwo\npart").expect("append");
+        let b = read_appended(&p, a.ino, a.offset, 1 << 20).expect("read");
+        assert_eq!(b.text, "one\ntwo\n");
+        assert_eq!(b.offset, 17);
+
+        // The finished line arrives next time.
+        f.write_all(b"ial\n").expect("append");
+        let c = read_appended(&p, b.ino, b.offset, 1 << 20).expect("read");
+        assert_eq!(c.text, "partial\n");
+
+        // Truncated (rotation by copytruncate): read from the start.
+        std::fs::write(&p, "fresh\n").expect("write");
+        let e = read_appended(&p, c.ino, c.offset, 1 << 20).expect("read");
+        assert_eq!(e.text, "fresh\n");
+
+        // A burst larger than `max`: only the newest part.
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&p)
+            .expect("open");
+        f.write_all(b"aaaaaaaaaa\nbbbb\n").expect("append");
+        let g = read_appended(&p, e.ino, e.offset, 8).expect("read");
+        assert_eq!(g.text, "aa\nbbbb\n");
+    }
+
+    #[test]
+    fn read_appended_refuses_a_symlink() {
+        let d = tempfile::tempdir().expect("tempdir");
+        let target = d.path().join("secret");
+        std::fs::write(&target, "x\n").expect("write");
+        let link = d.path().join("error.log");
+        std::os::unix::fs::symlink(&target, &link).expect("symlink");
+        assert!(read_appended(&link, 1, 0, 1 << 20).is_err());
+    }
 
     #[tokio::test]
     async fn atomic_write_creates_parent_and_file() {

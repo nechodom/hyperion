@@ -1067,6 +1067,26 @@ async fn main() -> anyhow::Result<()> {
             }
         });
     }
+    // Automatic PHP memory_limit: answer "Allowed memory size … exhausted" in
+    // a site's error.log by raising its pool one step (bounded), and step it
+    // back down after a quiet fortnight. Its own two-minute task: a site
+    // erroring out should not wait for the five-minute loop, and reading
+    // tenant logs must never hold fail2ban or quota enforcement up.
+    {
+        let mem_svc = svc.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(90)).await;
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(120));
+            loop {
+                interval.tick().await;
+                match mem_svc.php_mem_auto_tick().await {
+                    Ok(n) if n > 0 => tracing::info!(pools = n, "php mem auto: rewrote pools"),
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!(error=%e, "php mem auto tick failed"),
+                }
+            }
+        });
+    }
     // The weekly page walk. On its OWN task, not in the five-minute loop:
     // one pass fetches up to eight pages plus forty links PER SITE, each
     // with a 20-second ceiling, so on a node with a few dozen care-plan

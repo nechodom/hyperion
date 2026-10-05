@@ -4079,6 +4079,31 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         limits: hyperion_types::HostingLimits,
     ) -> Result<hyperion_types::HostingLimits, RpcError> {
         let detail = self.get(sel).await?;
+        let before = hyperion_state::limits::get(&self.pool, &detail.id)
+            .await
+            .ok()
+            .flatten()
+            .map(|r| r.php_memory_mb);
+        let limits = self.store_and_apply_limits(&detail, limits).await?;
+        // A memory value typed by hand (or applied by a profile) is the new
+        // floor for the automatic memory_limit. Saving the card UNCHANGED —
+        // it shows the value the automation raised to — must not adopt that
+        // raised value as the operator's own, or it would never come down.
+        if before != Some(limits.php_memory_mb) {
+            self.php_mem_auto_rebase(detail.id.as_str(), limits.php_memory_mb)
+                .await;
+        }
+        Ok(limits)
+    }
+
+    /// Persist the limits row and rewrite the pool, without touching the
+    /// automatic-memory floor. Shared by the operator path above and by
+    /// [`Self::php_mem_auto_tick`].
+    async fn store_and_apply_limits(
+        &self,
+        detail: &HostingDetail,
+        limits: hyperion_types::HostingLimits,
+    ) -> Result<hyperion_types::HostingLimits, RpcError> {
         let limits = clamp_limits(limits);
         let row = limits_to_row(&detail.id, &limits, now_secs());
         hyperion_state::limits::upsert(&self.pool, &row)
@@ -4100,6 +4125,226 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             return Err(e.into());
         }
         Ok(limits)
+    }
+
+    /// Make `base_mb` the floor of an existing automatic-memory state.
+    async fn php_mem_auto_rebase(&self, hosting_id: &str, base_mb: i64) {
+        use hyperion_types::phpmem;
+        let Some(mut st) =
+            hyperion_state::hosting_kv::get(&self.pool, hosting_id, phpmem::KV_STATE)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|v| phpmem::State::parse(&v))
+        else {
+            return;
+        };
+        let now = now_secs();
+        st.base_mb = base_mb;
+        st.last_change_at = now;
+        let _ = hyperion_state::hosting_kv::set(
+            &self.pool,
+            hosting_id,
+            phpmem::KV_STATE,
+            &st.to_json(),
+            now,
+        )
+        .await;
+    }
+
+    /// Automatic PHP `memory_limit` (see `hyperion_types::phpmem`).
+    ///
+    /// For every live site with the automation on, read what nginx appended
+    /// to its `error.log`, and when PHP ran out of memory at the limit in
+    /// force, raise the pool's limit one step — bounded by the site's ceiling
+    /// and by the node's RAM. A fortnight without running out takes it one
+    /// step back towards the operator's own value. Turning the automation off
+    /// puts the operator's value back.
+    ///
+    /// Returns how many pools it rewrote.
+    pub async fn php_mem_auto_tick(&self) -> Result<i64, RpcError> {
+        use hyperion_types::phpmem::{self, Step};
+        let mem_total_mb = read_mem_total_mb().await;
+        let mut acted = 0i64;
+        for s in self.list().await? {
+            let id = s.id.as_str().to_string();
+            let kv = |k: &'static str| {
+                let id = id.clone();
+                async move {
+                    hyperion_state::hosting_kv::get(&self.pool, &id, k)
+                        .await
+                        .ok()
+                        .flatten()
+                }
+            };
+            let enabled = kv(phpmem::KV_ENABLED).await.as_deref() == Some("on");
+            let stored = kv(phpmem::KV_STATE)
+                .await
+                .and_then(|v| phpmem::State::parse(&v));
+            if !enabled && stored.is_none() {
+                continue;
+            }
+            // Suspended or trashed: the pool is not serving, nothing to learn
+            // from its log and nothing worth rewriting.
+            if s.state != HostingState::Active {
+                continue;
+            }
+            let Ok(detail) = self.get(HostingSelector::Id(s.id.clone())).await else {
+                continue;
+            };
+            if detail.php_version.is_none() || detail.system_user.trim().is_empty() {
+                continue;
+            }
+            let limits = hyperion_state::limits::get(&self.pool, &detail.id)
+                .await
+                .ok()
+                .flatten()
+                .map(row_to_limits)
+                .unwrap_or_else(hyperion_types::HostingLimits::defaults);
+            let current = limits.php_memory_mb;
+            let now = now_secs();
+
+            if !enabled {
+                // Turned off: hand back the operator's value, then forget.
+                let base = stored.map(|st| st.base_mb).unwrap_or(current);
+                if base > 0 && base != current {
+                    let mut l = limits.clone();
+                    l.php_memory_mb = base;
+                    if let Err(e) = self.store_and_apply_limits(&detail, l).await {
+                        tracing::warn!(domain = %detail.domain, error = %e, "php mem auto: restoring the operator's limit failed; will retry");
+                        continue;
+                    }
+                    acted += 1;
+                    self.append_audit(
+                        "php.mem_auto.restore",
+                        Some(&id),
+                        &serde_json::json!({"from_mb": current, "to_mb": base}).to_string(),
+                        "ok",
+                    )
+                    .await;
+                }
+                let _ = hyperion_state::hosting_kv::delete(&self.pool, &id, phpmem::KV_STATE).await;
+                continue;
+            }
+
+            let mut st = stored.unwrap_or_else(|| phpmem::State {
+                base_mb: current,
+                ..Default::default()
+            });
+            let before = st.clone();
+            let path = std::path::PathBuf::from(&self.paths.home_root)
+                .join(&detail.system_user)
+                .join(&detail.domain)
+                .join("logs")
+                .join("error.log");
+            let (ino, off) = (st.log_ino, st.log_offset);
+            let read = tokio::task::spawn_blocking(move || {
+                hyperion_adapters::fs::read_appended(&path, ino, off, phpmem::MAX_SCAN_BYTES)
+            })
+            .await;
+            match read {
+                Ok(Ok(a)) => {
+                    if phpmem::count_ooms(&a.text, current) > 0 {
+                        st.last_oom_at = now;
+                    }
+                    st.log_ino = a.ino;
+                    st.log_offset = a.offset;
+                }
+                // No log yet, or one root must not read (a symlink): nothing
+                // seen. The lowering below still runs on time alone.
+                Ok(Err(e)) => {
+                    tracing::debug!(domain = %detail.domain, error = %e, "php mem auto: error.log not read")
+                }
+                Err(e) => tracing::warn!(error = %e, "php mem auto: log reader panicked"),
+            }
+
+            let ceiling = kv(phpmem::KV_MAX_MB)
+                .await
+                .and_then(|v| v.trim().parse::<i64>().ok())
+                .unwrap_or(phpmem::DEFAULT_MAX_MB)
+                .clamp(16, 8192);
+            let ram_cap = mem_total_mb.and_then(|t| phpmem::ram_cap_mb(t, limits.php_max_children));
+            let href = format!("/hostings/{}#limits", detail.domain);
+            match phpmem::decide(now, current, ceiling, ram_cap, &st) {
+                Step::Nothing => {}
+                Step::Raise { to } | Step::Lower { to } if to == current => {}
+                step @ (Step::Raise { to } | Step::Lower { to }) => {
+                    let raise = matches!(step, Step::Raise { .. });
+                    let mut l = limits.clone();
+                    l.php_memory_mb = to;
+                    match self.store_and_apply_limits(&detail, l).await {
+                        Ok(_) => {
+                            st.last_change_at = now;
+                            acted += 1;
+                            let (from_s, to_s) = (current.to_string(), to.to_string());
+                            self.append_audit(
+                                if raise {
+                                    "php.mem_auto.raise"
+                                } else {
+                                    "php.mem_auto.lower"
+                                },
+                                Some(&id),
+                                &serde_json::json!({"from_mb": current, "to_mb": to, "ceiling_mb": ceiling}).to_string(),
+                                "ok",
+                            )
+                            .await;
+                            if raise {
+                                let ceiling_s = ceiling.to_string();
+                                self.notify_admins_say(
+                                    "info",
+                                    "ops.php_mem_raised",
+                                    &[
+                                        ("domain", detail.domain.as_str()),
+                                        ("from", from_s.as_str()),
+                                        ("to", to_s.as_str()),
+                                        ("ceiling", ceiling_s.as_str()),
+                                    ],
+                                    &href,
+                                    "php_mem_auto",
+                                )
+                                .await;
+                            }
+                        }
+                        Err(e) => {
+                            // State untouched (bar the log position), so the
+                            // next tick tries the same step again.
+                            tracing::warn!(domain = %detail.domain, to_mb = to, error = %e, "php mem auto: pool rewrite failed; will retry");
+                        }
+                    }
+                }
+                Step::Capped { at, by_ram } => {
+                    st.capped_alert_at = now;
+                    let at_s = at.to_string();
+                    // Still running out at the most it may get. Not an
+                    // outage of the whole site — the pages that need less
+                    // still serve — so a warning: a plugin to look at, or a
+                    // ceiling to raise on purpose.
+                    self.notify_admins_say(
+                        "warn",
+                        if by_ram {
+                            "ops.php_mem_capped_ram"
+                        } else {
+                            "ops.php_mem_capped"
+                        },
+                        &[("domain", detail.domain.as_str()), ("limit", at_s.as_str())],
+                        &href,
+                        "php_mem_auto",
+                    )
+                    .await;
+                }
+            }
+            if st != before {
+                let _ = hyperion_state::hosting_kv::set(
+                    &self.pool,
+                    &id,
+                    phpmem::KV_STATE,
+                    &st.to_json(),
+                    now,
+                )
+                .await;
+            }
+        }
+        Ok(acted)
     }
 
     pub async fn get_limits(
@@ -33776,6 +34021,18 @@ async fn read_psi_some_avg10(resource: &str) -> i64 {
     0
 }
 
+/// `MemTotal` from /proc/meminfo, in MiB. `None` off Linux or on a parse
+/// failure — callers then skip the RAM bound rather than guess one.
+async fn read_mem_total_mb() -> Option<i64> {
+    let s = tokio::fs::read_to_string("/proc/meminfo").await.ok()?;
+    s.lines()
+        .find_map(|l| l.strip_prefix("MemTotal:"))
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|kib| kib.parse::<i64>().ok())
+        .map(|kib| kib / 1024)
+        .filter(|&mb| mb > 0)
+}
+
 async fn read_proc_metrics() -> ProcMetrics {
     let loadavg = tokio::fs::read_to_string("/proc/loadavg").await.ok();
     let la_1m = loadavg
@@ -42461,6 +42718,102 @@ mod tests {
             .await
             .expect("get");
         assert!(susp.is_none(), "suspension row removed on resume");
+    }
+
+    /// Out-of-memory in the site's error.log raises the pool one step; a hand
+    /// save of the UNCHANGED card keeps the operator's floor, a changed value
+    /// becomes the new floor; turning the automation off restores the floor.
+    #[tokio::test]
+    async fn php_mem_auto_raises_rebases_and_restores() {
+        use hyperion_types::phpmem;
+        use std::io::Write;
+        let pool = open_memory().await.expect("open");
+        let home = tempfile::tempdir().expect("dir");
+        let mut a = happy_mocks();
+        a.expect_apply_php_limits()
+            .returning(|_, _, _, _, _, _, _| Ok(()));
+        let s = svc(pool.clone(), a).with_paths(HostingPaths {
+            home_root: home.path().display().to_string(),
+            ..HostingPaths::default()
+        });
+        s.create(req("ex.cz")).await.expect("create");
+        let sel = HostingSelector::Domain(Domain::parse("ex.cz").unwrap());
+        let d = s.get(sel.clone()).await.expect("get");
+        let id = d.id.as_str().to_string();
+        let logs = home
+            .path()
+            .join(&d.system_user)
+            .join(&d.domain)
+            .join("logs");
+        std::fs::create_dir_all(&logs).expect("mkdir");
+        let log = logs.join("error.log");
+        std::fs::write(
+            &log,
+            "Allowed memory size of 268435456 bytes exhausted (old)\n",
+        )
+        .expect("write");
+        hyperion_state::hosting_kv::set(&pool, &id, phpmem::KV_ENABLED, "on", 0)
+            .await
+            .expect("kv");
+        let state = || async {
+            phpmem::State::parse(
+                &hyperion_state::hosting_kv::get(&pool, &id, phpmem::KV_STATE)
+                    .await
+                    .expect("kv")
+                    .unwrap_or_default(),
+            )
+        };
+        let mem = || async {
+            s.get_limits(sel.clone())
+                .await
+                .expect("limits")
+                .php_memory_mb
+        };
+
+        // First sight: the history already in the log is not acted on.
+        assert_eq!(s.php_mem_auto_tick().await.expect("tick"), 0);
+        assert_eq!(mem().await, 256);
+        assert_eq!(state().await.expect("state").base_mb, 256);
+
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&log)
+            .expect("open");
+        f.write_all(
+            b"FastCGI sent in stderr: \"PHP message: PHP Fatal error:  Allowed memory size of 268435456 bytes exhausted (tried to allocate 20480 bytes)\"\n",
+        )
+        .expect("append");
+        assert_eq!(s.php_mem_auto_tick().await.expect("tick"), 1);
+        assert_eq!(mem().await, 384);
+        // Same lines are not read twice, and the cooldown holds anyway.
+        assert_eq!(s.php_mem_auto_tick().await.expect("tick"), 0);
+
+        // Saving the card as shown keeps the operator's own 256 as the floor.
+        let mut l = s.get_limits(sel.clone()).await.expect("limits");
+        s.set_limits(sel.clone(), l.clone()).await.expect("set");
+        assert_eq!(state().await.expect("state").base_mb, 256);
+        // A new value typed by hand becomes the floor.
+        l.php_memory_mb = 320;
+        s.set_limits(sel.clone(), l).await.expect("set");
+        assert_eq!(state().await.expect("state").base_mb, 320);
+
+        // Raise once more, then switch off: the floor comes back.
+        f.write_all(b"Allowed memory size of 335544320 bytes exhausted\n")
+            .expect("append");
+        let mut st = state().await.expect("state");
+        st.last_change_at = 0; // past the cooldown
+        hyperion_state::hosting_kv::set(&pool, &id, phpmem::KV_STATE, &st.to_json(), 0)
+            .await
+            .expect("kv");
+        assert_eq!(s.php_mem_auto_tick().await.expect("tick"), 1);
+        assert_eq!(mem().await, 448);
+        hyperion_state::hosting_kv::set(&pool, &id, phpmem::KV_ENABLED, "off", 0)
+            .await
+            .expect("kv");
+        assert_eq!(s.php_mem_auto_tick().await.expect("tick"), 1);
+        assert_eq!(mem().await, 320);
+        assert!(state().await.is_none(), "state forgotten once off");
+        assert_eq!(s.php_mem_auto_tick().await.expect("tick"), 0);
     }
 
     #[tokio::test]
