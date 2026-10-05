@@ -2422,6 +2422,29 @@
 
 <div class="panel-group">Web server</div>
 
+{% if detail.domain.starts_with("www.") %}
+<div class="card" id="normalize-www">
+  <div class="card-head"><h2>Use {{ detail.domain.trim_start_matches("www.") }} as the main address</h2></div>
+  <p class="s-help">
+    This site is registered under <code>{{ detail.domain }}</code>. Hyperion can make
+    <code>{{ detail.domain.trim_start_matches("www.") }}</code> the canonical address and 301-redirect
+    <code>{{ detail.domain }}</code> to it. The bare name is added as an alias, the certificate is
+    re-issued for both, and WordPress's Site Address follows. If DNS for the bare name does not point
+    here yet, or the certificate cannot be issued, nothing is redirected.
+    Folders, FTP logins and mail keys keep their current names.
+  </p>
+  <form method="post" action="/hostings/normalize-www" data-role-min="operator"
+        data-confirm-title="Switch to {{ detail.domain.trim_start_matches("www.") }}"
+        data-confirm-body="Adds the bare name as an alias, re-issues the certificate and redirects {{ detail.domain }} to it. Reversible under Vhost options → Canonical hostname."
+        data-confirm-confirm-label="Switch address">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
+    <input type="hidden" name="target_node" value="{{ target_node }}">
+    <button class="btn small primary" type="submit">Switch to {{ detail.domain.trim_start_matches("www.") }}</button>
+  </form>
+</div>
+{% endif %}
+
 <div class="card" id="vhost-options">
   <div class="card-head">
     <h2>
@@ -2497,7 +2520,7 @@
         <label class="s-label" for="canonical_host">Canonical hostname <span class="hint">301 the other spelling onto one address</span></label>
         <p class="s-help">
           Search engines treat www and non-www as two different sites; picking one keeps rankings and
-          cookies in a single place. The www option needs the <code>www.{{ detail.domain }}</code> alias on
+          cookies in a single place. The www option needs the <code>www.{{ detail.domain.trim_start_matches("www.") }}</code> alias on
           this hosting first (<a href="#ssl">add it on Domains &amp; SSL</a>) — the alias is what puts the
           name into the certificate.
         </p>
@@ -2509,8 +2532,8 @@
         <div class="s-field">
           <select id="canonical_host" name="canonical_host">
             <option value="" {% if detail.vhost_options.canonical_host.is_empty() %}selected{% endif %}>Serve both as-is (no redirect)</option>
-            <option value="non-www" {% if detail.vhost_options.canonical_host == "non-www" %}selected{% endif %}>Redirect www.{{ detail.domain }} → {{ detail.domain }}</option>
-            <option value="www" {% if detail.vhost_options.canonical_host == "www" %}selected{% endif %}>Redirect {{ detail.domain }} → www.{{ detail.domain }}</option>
+            <option value="non-www" {% if detail.vhost_options.canonical_host == "non-www" %}selected{% endif %}>Redirect www.{{ detail.domain.trim_start_matches("www.") }} → {{ detail.domain.trim_start_matches("www.") }}</option>
+            <option value="www" {% if detail.vhost_options.canonical_host == "www" %}selected{% endif %}>Redirect {{ detail.domain.trim_start_matches("www.") }} → www.{{ detail.domain.trim_start_matches("www.") }}</option>
           </select>
         </div>
       </div>

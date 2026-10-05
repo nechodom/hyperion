@@ -772,6 +772,14 @@ pub async fn apply_suspended(
     reload().await
 }
 
+/// `www.example.cz` → `example.cz`; anything else is returned unchanged.
+fn apex_of(domain: &str) -> &str {
+    match domain.strip_prefix("www.") {
+        Some(rest) if rest.contains('.') => rest,
+        _ => domain,
+    }
+}
+
 pub fn render(input: &VhostInput<'_>) -> Result<String, AdapterError> {
     let tpl = VhostTpl {
         http2_directive: nginx_wants_http2_directive(),
@@ -794,8 +802,11 @@ pub fn render(input: &VhostInput<'_>) -> Result<String, AdapterError> {
         maintenance_mode: input.options.maintenance_mode,
         fastcgi_cache_enabled: input.options.fastcgi_cache_enabled,
         canonical_server_name: match input.options.canonical_host.as_str() {
-            "www" => format!("www.{}", input.domain),
-            "non-www" => input.domain.to_string(),
+            // A hosting whose primary name is itself `www.<name>` has the bare
+            // name as its apex; deriving from the primary verbatim would
+            // yield `www.www.<name>` / a no-op.
+            "www" => format!("www.{}", apex_of(input.domain)),
+            "non-www" => apex_of(input.domain).to_string(),
             _ => String::new(),
         },
         fastcgi_cache_ttl: input.options.fastcgi_cache_ttl,
@@ -2020,6 +2031,41 @@ mod tests {
                 !out.contains("return 301 https://$host$request_uri;"),
                 "{mode}: http block still redirects to $host:\n{out}"
             );
+        }
+    }
+
+    /// A hosting registered under `www.example.cz` redirects to the BARE
+    /// name for "non-www" (never `www.www.…`, never a no-op onto itself).
+    #[test]
+    fn canonical_host_uses_apex_for_a_www_primary() {
+        let aliases = vec!["example.cz".to_string()];
+        for (mode, canon) in [("non-www", "example.cz"), ("www", "www.example.cz")] {
+            let opts = hyperion_types::VhostOptions {
+                canonical_host: mode.to_string(),
+                ..Default::default()
+            };
+            let out = render(&VhostInput {
+                domain: "www.example.cz",
+                aliases: &aliases,
+                root_dir: "/home/example_cz/www.example.cz/htdocs",
+                logs_dir: "/home/example_cz/www.example.cz/logs",
+                system_user: "example_cz",
+                php_version: Some("8.3"),
+                cert_path: "/etc/lm/certs/www.example.cz/fullchain.pem",
+                key_path: "/etc/lm/certs/www.example.cz/privkey.pem",
+                acme_challenge_root: "/var/lib/lm/acme-challenges",
+                hosting_id: "01H0000000000000000000",
+                options: &opts,
+                preview_server_name: None,
+                preview_cert_path: None,
+                preview_cert_key_path: None,
+            })
+            .expect("render");
+            assert!(
+                out.contains(&format!("return 301 https://{canon}$request_uri;")),
+                "{mode}: wrong 301 target:\n{out}"
+            );
+            assert!(!out.contains("www.www."), "{mode}: doubled www:\n{out}");
         }
     }
 
