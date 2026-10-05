@@ -24399,16 +24399,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 kind: "hosting".into(),
                 id: detail.id.as_str().to_string(),
             })?;
-        let url = format!(
-            "https://{}{}",
-            detail.domain,
-            if cfg.url_path.is_empty() {
-                "/"
-            } else {
-                cfg.url_path.as_str()
-            }
-        );
-        let sample = probe_http(&url).await;
+        let sample = probe_site(&detail.domain, &cfg.url_path).await;
         let now = now_secs();
         hyperion_state::monitors::insert_sample(
             &self.pool,
@@ -24461,16 +24452,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     continue;
                 }
             }
-            let url = format!(
-                "https://{}{}",
-                cfg.domain,
-                if cfg.url_path.is_empty() {
-                    "/"
-                } else {
-                    cfg.url_path.as_str()
-                }
-            );
-            let result = probe_http(&url).await;
+            let result = probe_site(&cfg.domain, &cfg.url_path).await;
             if let Err(e) = hyperion_state::monitors::insert_sample(
                 &self.pool,
                 &cfg.hosting_id,
@@ -24486,10 +24468,22 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 continue;
             }
             sampled += 1;
+            // Decide from the RECENT WINDOW, not from a bare consecutive
+            // counter: a site that fails every other sample used to reset the
+            // streak on each success and never alerted at all.
+            let window = (cfg.alert_after_fails * 2).max(4);
+            let recent: Vec<bool> =
+                hyperion_state::monitors::history(&self.pool, &cfg.hosting_id, window)
+                    .await
+                    .map(|v| v.iter().map(|s| s.success).collect())
+                    .unwrap_or_else(|_| vec![result.success]);
             if result.success {
                 let _ = hyperion_state::monitors::reset_streak(&self.pool, &cfg.hosting_id).await;
-                // Resolved alert?
-                if cfg.alert_state == "alerting" {
+            } else {
+                let _ = hyperion_state::monitors::record_fail(&self.pool, &cfg.hosting_id).await;
+            }
+            if cfg.alert_state == "alerting" {
+                if monitor_recovered(&recent, cfg.alert_after_fails) {
                     self.dispatch_monitor_alert(&cfg, &result, true).await;
                     let _ = hyperion_state::monitors::set_alert_state(
                         &self.pool,
@@ -24499,20 +24493,15 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     )
                     .await;
                 }
-            } else {
-                let n = hyperion_state::monitors::record_fail(&self.pool, &cfg.hosting_id)
-                    .await
-                    .unwrap_or(cfg.consecutive_fails + 1);
-                if n >= cfg.alert_after_fails && cfg.alert_state != "alerting" {
-                    self.dispatch_monitor_alert(&cfg, &result, false).await;
-                    let _ = hyperion_state::monitors::set_alert_state(
-                        &self.pool,
-                        &cfg.hosting_id,
-                        "alerting",
-                        Some(now),
-                    )
-                    .await;
-                }
+            } else if monitor_should_alert(&recent, cfg.alert_after_fails, result.hard_failure) {
+                self.dispatch_monitor_alert(&cfg, &result, false).await;
+                let _ = hyperion_state::monitors::set_alert_state(
+                    &self.pool,
+                    &cfg.hosting_id,
+                    "alerting",
+                    Some(now),
+                )
+                .await;
             }
         }
         Ok(sampled)
@@ -33980,49 +33969,163 @@ struct HttpProbeResult {
     http_status: Option<i64>,
     response_ms: i64,
     error_message: Option<String>,
+    /// The site answered and what it said is unambiguously broken (a 5xx, or
+    /// a 2xx whose body is a WordPress/PHP fatal-error page). Such a failure
+    /// is not a network blip, so it alerts after fewer consecutive samples.
+    hard_failure: bool,
+}
+
+/// Should the monitor raise an alert? `recent` is the newest-last success
+/// flags of the latest samples, the current one included. Alert on
+/// `threshold` failures IN A ROW (`2` at most when the site answered with an
+/// error page: it is down, not flaky), or on `threshold` failures within the
+/// last `2 * threshold` samples — a site flapping every other request is
+/// broken even though no streak ever builds.
+fn monitor_should_alert(recent: &[bool], threshold: i64, hard: bool) -> bool {
+    let threshold = threshold.max(1) as usize;
+    let streak_needed = if hard { threshold.min(2) } else { threshold };
+    let streak = recent.iter().rev().take_while(|ok| !**ok).count();
+    let window = recent.len().saturating_sub(threshold * 2);
+    let fails_in_window = recent[window..].iter().filter(|ok| !**ok).count();
+    streak >= streak_needed || fails_in_window >= threshold
+}
+
+/// An open alert resolves only after a few clean samples in a row (two, or
+/// the threshold if smaller), so a flapping site does not resolve and re-fire
+/// on every lucky request.
+fn monitor_recovered(recent: &[bool], threshold: i64) -> bool {
+    let need = (threshold.max(1) as usize).min(2);
+    recent.len() >= need && recent.iter().rev().take(need).all(|ok| *ok)
+}
+
+/// Probe the configured path and, when that is the homepage, a second page
+/// that renders through a different template. The homepage is often cached or
+/// near-static while the rest of a WordPress site is broken (a plugin fatal on
+/// archive/search templates, a theme error off the front page). The second
+/// probe only counts when it is unambiguously broken (5xx / error page): a 404
+/// there is just a non-WordPress site and must not alert.
+async fn probe_site(domain: &str, url_path: &str) -> HttpProbeResult {
+    let path = if url_path.is_empty() { "/" } else { url_path };
+    let primary = probe_http(&format!("https://{domain}{path}")).await;
+    if !primary.success || path != "/" {
+        return primary;
+    }
+    let second_path = "/?s=hyperion-probe";
+    let second = probe_http(&format!("https://{domain}{second_path}")).await;
+    if second.hard_failure {
+        return HttpProbeResult {
+            error_message: second
+                .error_message
+                .map(|m| format!("{m} (on {second_path})")),
+            ..second
+        };
+    }
+    primary
+}
+
+/// Marker for the status line appended after the body in the probe's curl
+/// output, so one process yields both.
+const PROBE_STATUS_MARK: &str = "\n__HYPERION_PROBE_STATUS__";
+/// Only the head of the body is inspected; fatal-error pages are tiny.
+const PROBE_BODY_CAP: usize = 64 * 1024;
+
+/// Text that only ever appears on a broken page. Matched case-insensitively
+/// against the head of a 2xx body. Deliberately specific — "fatal error" alone
+/// would flag a blog post ABOUT fatal errors.
+const PROBE_BODY_MARKERS: &[(&str, &str)] = &[
+    (
+        "critical error on this website",
+        "WordPress critical error page",
+    ),
+    (
+        "error establishing a database connection",
+        "database connection error",
+    ),
+    ("<b>fatal error</b>:", "PHP fatal error in page"),
+    ("<b>parse error</b>:", "PHP parse error in page"),
+    ("fatal error: uncaught", "PHP fatal error in page"),
+    ("allowed memory size of", "PHP out of memory in page"),
+];
+
+/// Decide whether a response that arrived is a broken site. `None` = healthy.
+/// A status in 200..400 is NOT enough: WordPress/PHP error pages are routinely
+/// served as 200 (display_errors, caching layers, error-catching plugins), and
+/// a white screen is a 200 with nothing in it.
+fn classify_probe(code: i64, body: &str) -> Option<(String, bool)> {
+    if code >= 500 {
+        return Some((format!("HTTP {code}"), true));
+    }
+    if !(200..400).contains(&code) {
+        return Some((format!("HTTP {code}"), false));
+    }
+    if code == 200 {
+        if body.trim().is_empty() {
+            return Some(("HTTP 200 with an empty body (white screen)".into(), true));
+        }
+        let lower = body.to_lowercase();
+        for (needle, what) in PROBE_BODY_MARKERS {
+            if lower.contains(needle) {
+                return Some((format!("HTTP 200 but {what}"), true));
+            }
+        }
+    }
+    None
 }
 
 /// 5-second timeout, follow up to 3 redirects, ignore TLS hostname
 /// verification (operator picks the URL — they're targeting their own
-/// host). Considered "success" iff status is 2xx OR 3xx.
+/// host). A full GET (not HEAD: HEAD is cached separately from GET and some
+/// plugins/themes only break while rendering), with a unique query string so
+/// the FastCGI cache cannot answer for a PHP that is already dead. Success
+/// means a 2xx/3xx AND a body that is not a known error page.
 async fn probe_http(url: &str) -> HttpProbeResult {
     use std::time::Instant;
     let start = Instant::now();
+    let sep = if url.contains('?') { '&' } else { '?' };
+    let probe_url = format!("{url}{sep}hyperion_probe={}", now_secs());
     // Shell out to curl — adds an external dep that's already on
     // every node (we use it for backups). Avoids pulling in a full
     // reqwest+tls stack and the rustls CryptoProvider dance.
     let res = tokio::process::Command::new("/usr/bin/curl")
         .args([
-            "-skLI", // silent + insecure + follow + HEAD
+            "-skL", // silent + insecure + follow redirects
             "--max-time",
             "5",
             "--max-redirs",
             "3",
-            "-o",
-            "/dev/null",
+            "-H",
+            "Cache-Control: no-cache",
             "-w",
-            "%{http_code}",
-            url,
+            &format!("{PROBE_STATUS_MARK}%{{http_code}}"),
+            &probe_url,
         ])
         .output()
         .await;
     let elapsed = start.elapsed().as_millis() as i64;
     match res {
         Ok(out) => {
-            let code_str = String::from_utf8_lossy(&out.stdout);
+            let raw = String::from_utf8_lossy(&out.stdout);
+            let (body, code_str) = raw
+                .rsplit_once(PROBE_STATUS_MARK)
+                .unwrap_or((raw.as_ref(), "0"));
             let code: i64 = code_str.trim().parse().unwrap_or(0);
-            let success = (200..400).contains(&code);
+            let head: String = body.chars().take(PROBE_BODY_CAP).collect();
+            if code == 0 {
+                return HttpProbeResult {
+                    success: false,
+                    http_status: None,
+                    response_ms: elapsed,
+                    error_message: Some(String::from_utf8_lossy(&out.stderr).to_string()),
+                    hard_failure: false,
+                };
+            }
+            let verdict = classify_probe(code, &head);
             HttpProbeResult {
-                success,
-                http_status: if code > 0 { Some(code) } else { None },
+                success: verdict.is_none(),
+                http_status: Some(code),
                 response_ms: elapsed,
-                error_message: if success {
-                    None
-                } else if code == 0 {
-                    Some(String::from_utf8_lossy(&out.stderr).to_string())
-                } else {
-                    Some(format!("HTTP {code}"))
-                },
+                hard_failure: verdict.as_ref().is_some_and(|v| v.1),
+                error_message: verdict.map(|v| v.0),
             }
         }
         Err(e) => HttpProbeResult {
@@ -34030,6 +34133,7 @@ async fn probe_http(url: &str) -> HttpProbeResult {
             http_status: None,
             response_ms: elapsed,
             error_message: Some(e.to_string()),
+            hard_failure: false,
         },
     }
 }
@@ -37358,6 +37462,45 @@ impl Rollback for CertRowDelete {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn monitor_alert_window() {
+        use super::{monitor_recovered, monitor_should_alert};
+        // Plain streak of 3 at threshold 3.
+        assert!(monitor_should_alert(&[true, false, false, false], 3, false));
+        assert!(!monitor_should_alert(&[true, true, false, false], 3, false));
+        // Hard failure alerts after 2.
+        assert!(monitor_should_alert(&[true, true, false, false], 3, true));
+        // Flapping: 3 fails in the last 6, never 2 in a row.
+        let flap = [false, true, false, true, false, true];
+        assert!(monitor_should_alert(&flap, 3, false));
+        // Mostly healthy stays quiet.
+        assert!(!monitor_should_alert(
+            &[false, true, true, true, false, true],
+            3,
+            false
+        ));
+        // Recovery needs two clean samples in a row.
+        assert!(!monitor_recovered(&[false, false, true], 3));
+        assert!(monitor_recovered(&[false, true, true], 3));
+        assert!(monitor_recovered(&[false, true], 1));
+    }
+
+    #[test]
+    fn probe_classifies_wordpress_failures() {
+        use super::classify_probe;
+        assert!(classify_probe(200, "<html>ok</html>").is_none());
+        assert!(classify_probe(301, "").is_none());
+        assert_eq!(classify_probe(503, "x").map(|v| v.1), Some(true));
+        assert_eq!(classify_probe(404, "x").map(|v| v.1), Some(false));
+        assert_eq!(classify_probe(200, "  \n").map(|v| v.1), Some(true));
+        let wp = "<p>There has been a critical error on this website.</p>";
+        assert_eq!(classify_probe(200, wp).map(|v| v.1), Some(true));
+        let db = "<h1>Error establishing a database connection</h1>";
+        assert!(classify_probe(200, db).is_some());
+        assert!(classify_probe(200, "<b>Fatal error</b>: Uncaught Error").is_some());
+        // A post that merely mentions the phrase is not a failure.
+        assert!(classify_probe(200, "<p>how to debug a fatal error</p>").is_none());
+    }
 
     use super::*;
 
