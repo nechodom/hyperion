@@ -300,7 +300,8 @@ pub async fn mark_no_offsite(pool: &SqlitePool, id: i64) -> Result<(), StateErro
     Ok(())
 }
 
-/// Successful local backups with no off-site copy, oldest first.
+/// Successful local backups with no off-site copy on record (no FTP `ok` /
+/// `verified`, no completed S3 push), oldest first.
 ///
 /// What a backfill works from. `state='ok'` because pushing the archive of a
 /// failed run would copy a file that may be truncated; oldest first because
@@ -315,6 +316,7 @@ pub async fn list_needing_offsite(
             AND archive_path IS NOT NULL \
             AND no_offsite = 0 \
             AND (remote_state IS NULL OR remote_state NOT IN ('ok', 'verified')) \
+            AND (s3_ok_targets IS NULL OR s3_ok_targets IN ('', '[]')) \
           ORDER BY started_at ASC \
           LIMIT ?"
     ))
@@ -734,6 +736,26 @@ mod tests {
         clear_local_paths(&pool, run).await.expect("clear");
         let r = get_by_id(&pool, run).await.unwrap().unwrap();
         assert_eq!(r.s3_ok_targets.len(), 2);
+
+        // A completed S3 push means "off-site on record": not a backfill
+        // candidate any more (it used to be re-uploaded by every backfill).
+        let fresh = start(&pool, &id, "local", 200).await.expect("start2");
+        mark_ok(&pool, fresh, "/b/f.tar.gz", None, 1, 210)
+            .await
+            .expect("ok2");
+        assert!(list_needing_offsite(&pool, 10)
+            .await
+            .unwrap()
+            .iter()
+            .any(|r| r.id == fresh));
+        set_s3_ok_targets(&pool, fresh, &["vault#ab".into()])
+            .await
+            .expect("set2");
+        assert!(!list_needing_offsite(&pool, 10)
+            .await
+            .unwrap()
+            .iter()
+            .any(|r| r.id == fresh));
 
         set_s3_ok_targets(&pool, run, &[]).await.expect("empty");
         assert!(get_by_id(&pool, run)

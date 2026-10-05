@@ -279,8 +279,11 @@ pub struct BackupRunWire {
     ///     off-site" is off on the node that owns the site;
     ///   * `"keep_newest"` — the option is on, but this is one of the newest
     ///     local copies the node is set to keep;
-    ///   * `"unconfirmed"` — the option is on, but the drop step could not
-    ///     confirm every file off-site, so it kept the copy.
+    ///   * `"unconfirmed"` — a drop step could not confirm every file
+    ///     off-site, so it kept the copy;
+    ///   * `"pending"` — the option is on and this copy goes at the site's
+    ///     next archive backup;
+    ///   * `"missing"` — the row lists local files that are not on disk.
     #[serde(default)]
     pub local_kept: String,
     /// The same, in words, for a tooltip/sub-line. Empty when `local_kept` is.
@@ -311,6 +314,16 @@ impl BackupRunWire {
         }
     }
 
+    /// The S3 target names of `s3_ok_targets`, without the configuration
+    /// fingerprint each is recorded with, for display.
+    pub fn s3_target_names(&self) -> String {
+        self.s3_ok_targets
+            .iter()
+            .map(|k| k.rsplit_once('#').map(|(n, _)| n).unwrap_or(k))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
     /// A few words under the off-site pill for why the LOCAL copy is still on
     /// disk (see `local_kept`); the full reason goes in its tooltip. Empty when
     /// there is nothing to explain.
@@ -320,6 +333,7 @@ impl BackupRunWire {
             "keep_newest" => "kept locally (newest)",
             "unconfirmed" => "local kept: not confirmed off-site",
             "pending" => "local copy: drops at next backup",
+            "missing" => "local files not on disk",
             _ => "",
         }
     }
@@ -467,6 +481,11 @@ pub struct OffsiteBackfillResult {
     /// again. Lets the job log say why `pushed` is lower than `dropped`.
     #[serde(default)]
     pub already_offsite: i64,
+    /// Something the operator must know about the run as a whole (e.g. the
+    /// drop phase was skipped because the keep count is unreadable). Empty =
+    /// nothing.
+    #[serde(default)]
+    pub note: String,
 }
 
 /// One IP ban as shown in the UI / returned over the wire.

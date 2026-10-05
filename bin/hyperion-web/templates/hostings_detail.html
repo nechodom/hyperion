@@ -3435,7 +3435,7 @@
                 back at the right size. An em dash means we have no record. -#}
             <td>
               <span class="{{ b.offsite_label().1 }}" style="font-size:0.6rem"
-                    title="{% if !b.remote_error.is_empty() %}{{ b.remote_error }}{% else if !b.remote_blob_key.is_empty() %}{{ b.remote_blob_key }}{% else if !b.s3_ok_targets.is_empty() %}Pushed in full to S3: {{ b.s3_ok_targets.join(", ") }}{% else %}No off-site copy is recorded for this backup{% endif %}">{{ b.offsite_label().0 }}</span>
+                    title="{% if !b.remote_error.is_empty() %}{{ b.remote_error }}{% else if !b.remote_blob_key.is_empty() %}{{ b.remote_blob_key }}{% else if !b.s3_ok_targets.is_empty() %}Pushed in full to S3: {{ b.s3_target_names() }}{% else %}No off-site copy is recorded for this backup{% endif %}">{{ b.offsite_label().0 }}</span>
               {%- if !b.sha256_hex.is_empty() %}
               <span class="cell-sub" style="font-size:0.6rem" title="Content digest recorded when the archive was made: {{ b.sha256_hex }}">fingerprinted</span>
               {%- endif %}

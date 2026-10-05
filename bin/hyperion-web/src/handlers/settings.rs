@@ -2129,6 +2129,9 @@ pub async fn post_offsite_backfill(
                              continue.\n",
                         );
                     }
+                    if !r.note.is_empty() {
+                        log.push_str(&format!("\n{}\n", r.note));
+                    }
                     reporter.step("Finished.", 100, &log).await;
                     // A kept copy is not a failure of the sweep, but with
                     // "delete local" asked for it is not done either — say so
@@ -2142,6 +2145,7 @@ pub async fn post_offsite_backfill(
                             if r.kept_local == 1 { "y was" } else { "ies were" },
                         )
                         });
+                    let kept = kept.or_else(|| (!r.note.is_empty()).then(|| r.note.clone()));
                     reporter.finish(r.failed == 0 && kept.is_none(), kept).await;
                 }
                 Ok(RpcResponse::Error(e)) => reporter.finish(false, Some(e.to_string())).await,

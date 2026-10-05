@@ -6629,8 +6629,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// + streamed when a recipient is set), prunes the remote to the newest
     /// `retention_daily` backups, and audits one row per target. Never errors.
     ///
-    /// Returns the names of the targets whose push FULLY succeeded (every file
-    /// uploaded). The drop-local step needs this for age-encrypted targets:
+    /// Returns the evidence keys (`s3_evidence_key`: name + a fingerprint of
+    /// endpoint, bucket and age recipient) of the targets whose push FULLY
+    /// succeeded (every file uploaded). The drop-local step needs this for age-encrypted targets:
     /// their off-site copy can only be re-verified by EXISTENCE (the ciphertext
     /// size cannot match the plaintext), and an age stream that dies part-way
     /// can leave a non-empty but truncated — undecryptable — object behind
@@ -6688,7 +6689,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             if !ok {
                 tracing::warn!(domain=%detail.domain, target=%row.name, note=%summary, "S3 backup push failed");
             } else {
-                fully_ok.push(row.name.clone());
+                fully_ok.push(s3_evidence_key(row));
             }
             self.audit_s3(detail, &row.name, ok, &summary).await;
         }
@@ -6717,14 +6718,14 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// rows qualify). Returns each attempted run with what happened to it.
     ///
     /// `push_evidence` holds the runs pushed moments ago by the caller (the
-    /// backup that just finished, or a backfill's uploads), mapped to the S3
-    /// targets each push FULLY succeeded to. Those runs are candidates even
-    /// before their row is updated, and — merged with the targets the row
-    /// itself records (`s3_ok_targets`) — the target set is what lets an
-    /// age-encrypted target confirm a copy (see `file_is_offsite`). Anything
-    /// else is confirmed by FTP size or unencrypted S3 size alone — which is the
-    /// point: a copy that is already off-site is dropped without being sent
-    /// again.
+    /// backup that just finished, or a backfill's uploads). Those runs are
+    /// candidates whatever their row says. The S3 evidence an age-encrypted
+    /// target needs (see `file_is_offsite`) is read from each run's row, FRESH,
+    /// at the moment it is checked — the pushes above already wrote it there,
+    /// and a later push that failed has already taken it away again. Anything
+    /// else is confirmed by FTP size or unencrypted S3 size alone — which is
+    /// the point: a copy that is already off-site is dropped without being
+    /// sent again.
     ///
     /// Stops at the first run whose off-site copy could not be LOOKED at
     /// (every destination failed to answer): the next run would ask the same
@@ -6746,24 +6747,24 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             }
         };
         let just_pushed: std::collections::HashSet<i64> = push_evidence.keys().copied().collect();
+        let candidates = local_copies_to_drop(&rows, keep_latest, &just_pushed);
+        // A stored "could not confirm" belongs to a copy the drop step will
+        // still ask about. One the node now keeps on purpose (inside the keep
+        // window, or with no off-site record) would otherwise show a stale
+        // warning until retention removes it.
+        for r in rows
+            .iter()
+            .filter(|r| is_local_copy(r) && !r.local_note.is_empty() && !candidates.contains(&r.id))
+        {
+            let _ = hyperion_state::backups::set_local_note(&self.pool, r.id, "").await;
+        }
         let mut done = Vec::new();
-        for id in local_copies_to_drop(&rows, keep_latest, &just_pushed) {
+        for id in candidates {
             let Some(run) = rows.iter().find(|r| r.id == id) else {
                 continue;
             };
-            let mut evidence: std::collections::HashSet<String> =
-                run.s3_ok_targets.iter().cloned().collect();
-            if let Some(more) = push_evidence.get(&id) {
-                evidence.extend(more.iter().cloned());
-            }
             let outcome = self
-                .drop_run_local_if_offsite(
-                    detail,
-                    run,
-                    s3_targets,
-                    &evidence,
-                    Some(&run.local_note),
-                )
+                .drop_run_local_if_offsite(detail, run.id, s3_targets, Some(&run.local_note))
                 .await;
             done.push((id, outcome));
             // Nowhere off-site to look, or nobody answered: no other run of
@@ -6778,28 +6779,33 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         done
     }
 
-    /// Hand one EXISTING run's local files to the verified-drop gate.
+    /// Hand one EXISTING run's local files to the verified-drop gate, from its
+    /// row as it is NOW (a sweep's list can be minutes old: a re-push may have
+    /// failed and taken a target off the run's S3 evidence since).
     ///
     /// * A run some operation on this node is using right now — a restore
     ///   reading it, a backup or a push still sending it — is left alone
-    ///   (`Busy`): deleting it would cut that operation off part-way.
+    ///   (`Busy`): deleting it would cut that operation off part-way. The gate
+    ///   checks again, atomically, right before it deletes.
     /// * Only the files still on disk are offered: a dump that was removed
     ///   separately has nothing left to lose, and asking the remote about a
     ///   file we cannot even stat would keep the archive forever.
-    /// * An archive that is already gone (removed by hand, lost with a disk)
-    ///   is not a drop: if its dump is gone too, the row is set straight —
-    ///   the local paths are cleared, since there is no local copy left to
-    ///   protect — and the run is reported `MissingLocally`, never as a copy
-    ///   that was "kept". If the dump is still there, the dump alone goes
-    ///   through the gate.
+    /// * When NONE of the run's files is on disk, nothing is deleted and the
+    ///   row is left as it is — absence alone is not proof (a backup volume
+    ///   that did not mount looks exactly like this, and clearing every row
+    ///   then would orphan every archive once it is back). The run is reported
+    ///   `MissingLocally`, with a note, never as a copy that was "kept".
     async fn drop_run_local_if_offsite(
         &self,
         detail: &hyperion_types::HostingDetail,
-        run: &hyperion_state::backups::BackupRun,
+        run_id: i64,
         s3_targets: &[&hyperion_types::S3BackupTarget],
-        s3_push_ok: &std::collections::HashSet<String>,
         record_keep: Option<&str>,
     ) -> DropLocalOutcome {
+        let run = match hyperion_state::backups::get_by_id(&self.pool, run_id).await {
+            Ok(Some(r)) if r.hosting_id == detail.id => r,
+            _ => return DropLocalOutcome::Kept,
+        };
         // Defence in depth: the callers already skip these, but this is the
         // one door every sweep goes through.
         if run.no_offsite || run.state != "ok" {
@@ -6812,7 +6818,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             return DropLocalOutcome::Busy;
         }
         // Exists / gone / could-not-look are three answers; only a definite
-        // "gone" licenses setting the row straight.
+        // "gone" is reported as missing.
         let archive_here = match tokio::fs::try_exists(archive).await {
             Ok(b) => b,
             Err(_) => return DropLocalOutcome::Kept,
@@ -6833,38 +6839,36 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             files.push(("database dump", d));
         }
         if files.is_empty() {
-            // Nothing of this run is on disk any more. The row still says
-            // otherwise; make it say what is true, so it stops being offered
-            // as a local copy (and stops reading "kept" on every sweep).
-            if hyperion_state::backups::clear_local_paths(&self.pool, run.id)
-                .await
-                .is_ok()
-            {
-                if let Some(m) = manifest_path_for(archive) {
-                    let _ = tokio::fs::remove_file(m).await;
+            if let Some(prev) = record_keep {
+                if prev != LOCAL_FILES_MISSING_NOTE {
+                    let _ = hyperion_state::backups::set_local_note(
+                        &self.pool,
+                        run.id,
+                        LOCAL_FILES_MISSING_NOTE,
+                    )
+                    .await;
+                    self.append_audit(
+                        "hosting.backup.drop_local",
+                        Some(detail.id.as_str()),
+                        &serde_json::json!({ "run_id": run.id, "note": LOCAL_FILES_MISSING_NOTE })
+                            .to_string(),
+                        "failed",
+                    )
+                    .await;
                 }
-                self.append_audit(
-                    "hosting.backup.drop_local",
-                    Some(detail.id.as_str()),
-                    &serde_json::json!({
-                        "run_id": run.id,
-                        "note": "the local copy was already gone from disk; the row no longer \
-                                 lists it (the off-site copy on record is untouched)"
-                    })
-                    .to_string(),
-                    "ok",
-                )
-                .await;
             }
             return DropLocalOutcome::MissingLocally;
         }
+        let evidence: std::collections::HashSet<String> =
+            run.s3_ok_targets.iter().cloned().collect();
         self.maybe_drop_local_after_offsite(
             detail,
-            run.id,
+            &run,
             archive,
             &files,
             s3_targets,
-            s3_push_ok,
+            &evidence,
+            0,
             record_keep,
         )
         .await
@@ -6896,17 +6900,26 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// a warning and an audit row — the last two only when the reason differs
     /// from `prev`, the row's current note, so a copy that stays unconfirmed is
     /// not re-reported after every backup.
+    ///
+    /// `run` is the row as the caller read it; `own_claims` is how many holds
+    /// on the archive the caller itself has (1 when it pushed the file under a
+    /// claim, else 0). Before anything is cleared, the archive is reserved for
+    /// deletion — refused (`Busy`) while anyone else holds it — and the row is
+    /// read again: if its paths or its S3 evidence moved since `run` was read,
+    /// nothing is deleted.
     #[allow(clippy::too_many_arguments)]
     async fn maybe_drop_local_after_offsite(
         &self,
         detail: &hyperion_types::HostingDetail,
-        run_id: i64,
+        run: &hyperion_state::backups::BackupRun,
         archive_path: &std::path::Path,
         files: &[(&str, &std::path::Path)],
         s3_targets: &[&hyperion_types::S3BackupTarget],
         s3_push_ok: &std::collections::HashSet<String>,
+        own_claims: usize,
         record_keep: Option<&str>,
     ) -> DropLocalOutcome {
+        let run_id = run.id;
         // The FTP destination, if this node has one. Rebuilt here from the
         // same inputs the push uses rather than threaded through, so the
         // borrow stays local to this step.
@@ -6974,7 +6987,25 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             return outcome;
         }
 
-        // Every file is confirmed off-site. Clear the DB paths FIRST, then
+        // Every file is confirmed off-site. Reserve the archive for deletion:
+        // from here until the files are gone, no restore or push can start on
+        // it, and if one is running now, nothing is deleted.
+        let Some(_reservation) = try_reserve_drop(archive_path, own_claims) else {
+            return DropLocalOutcome::Busy;
+        };
+        // And the row must still be the one that was checked: same local
+        // files, same S3 evidence (a push that failed meanwhile takes its
+        // target off the list — the object it vouched for may now be cut
+        // short).
+        match hyperion_state::backups::get_by_id(&self.pool, run_id).await {
+            Ok(Some(now))
+                if now.archive_path == run.archive_path
+                    && now.db_dump_path == run.db_dump_path
+                    && now.s3_ok_targets == run.s3_ok_targets
+                    && !now.no_offsite => {}
+            _ => return DropLocalOutcome::Kept,
+        }
+        // Clear the DB paths FIRST, then
         // delete: if the process dies between the two, the worst case is a
         // harmless orphan file on disk (the next prune ignores it, since its
         // row no longer names it) rather than a row pointing at a file that is
@@ -7071,6 +7102,15 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             match hyperion_adapters::backup::verify_remote(file, &upload).await {
                 Ok(Some(true)) => return OffsiteCheck::Confirmed,
                 Ok(_) => answered += 1,
+                // Reached, logged in, and the server said no: no such
+                // directory (9), could not access the file (19), command
+                // refused (21), no such file (78). That is an ANSWER about
+                // this file — the next one may well be there.
+                Err(hyperion_adapters::AdapterError::Command { code, .. }) if ftp_said_no(code) => {
+                    answered += 1
+                }
+                // Transport failures (refused, timed out, TLS, login) stay
+                // "could not look".
                 Err(_) => {}
             }
         }
@@ -7106,7 +7146,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 // age target only counts with a complete push on record.
                 // Unencrypted needs no such gate: `n == local` below catches a
                 // short copy on its own.
-                if age && !s3_push_ok.contains(&row.name) {
+                if age && !s3_push_ok.contains(&s3_evidence_key(row)) {
                     continue;
                 }
                 let key = if age {
@@ -11342,16 +11382,20 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             return out;
         };
         // The row can name a file that is gone — removed by hand, or lost with
-        // a disk. Nothing left to send — record it and move on.
+        // a disk. Nothing left to send. Only a run with NO off-site copy on
+        // record is marked failed: one that is already off-site keeps that
+        // record, which is still true.
         if !tokio::fs::try_exists(&archive).await.unwrap_or(false) {
-            let _ = hyperion_state::backups::set_remote(
-                &self.pool,
-                run.id,
-                "",
-                "failed",
-                "the local archive is gone — pruned before it was ever copied off-site",
-            )
-            .await;
+            if !run.offsite_on_record() {
+                let _ = hyperion_state::backups::set_remote(
+                    &self.pool,
+                    run.id,
+                    "",
+                    "failed",
+                    "the local archive is gone — removed before it was ever copied off-site",
+                )
+                .await;
+            }
             out.missing_locally = true;
             return out;
         }
@@ -11361,8 +11405,12 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         };
         let archive_path = std::path::PathBuf::from(&archive);
         // Busy while it is being sent, so a sweep elsewhere does not drop it
-        // mid-upload. This method's own drop below goes straight to the gate.
-        let _busy = ArchiveInUse::claim(&archive_path);
+        // mid-upload. A drop deleting it right now wins: there is nothing to
+        // send once it is gone, and it is gone because it was verified
+        // off-site.
+        let Some(_busy) = ArchiveInUse::try_claim(&archive_path) else {
+            return out;
+        };
         // Only offer the dump to a push (and to the drop gate) if it still
         // exists — a run may have been made before dumps were kept, or the
         // dump pruned separately.
@@ -11461,7 +11509,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             let mut on_record: std::collections::HashSet<String> = run
                 .s3_ok_targets
                 .iter()
-                .filter(|n| !attempted.contains(n.as_str()))
+                .filter(|k| !attempted.contains(s3_evidence_name(k)))
                 .cloned()
                 .collect();
             on_record.extend(s3_push_ok.iter().cloned());
@@ -11488,15 +11536,26 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             if let Some(d) = dump_path.as_deref() {
                 files.push(("database dump", d));
             }
+            // The row as this push left it (remote state, S3 evidence): the
+            // gate re-reads it before deleting and refuses if it moved.
+            let fresh = match hyperion_state::backups::get_by_id(&self.pool, run.id).await {
+                Ok(Some(r)) => r,
+                _ => {
+                    out.kept_local = true;
+                    out.s3_push_ok = s3_push_ok;
+                    return out;
+                }
+            };
             match self
                 .maybe_drop_local_after_offsite(
                     &detail,
-                    run.id,
+                    &fresh,
                     &archive_path,
                     &files,
                     &s3_pushed_targets,
                     &s3_push_ok,
-                    Some(&run.local_note),
+                    1,
+                    Some(&fresh.local_note),
                 )
                 .await
             {
@@ -11568,7 +11627,17 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 Err(e) => tracing::warn!(error = %e,
                     "backfill: could not list sites with off-site copies still on disk"),
             }
-            let keep = read_local_copy_policy(self.agent_config_path.as_deref()).keep_latest;
+            let policy = read_local_copy_policy(self.agent_config_path.as_deref());
+            let keep = policy.keep_latest;
+            if policy.keep_unreadable {
+                // "Keep none" is the most aggressive reading of a typo; refuse
+                // to drop anything until the file says what it means.
+                sites.clear();
+                out.note = "No local copy was deleted: [backup] keep_local_latest in this node's \
+                            agent.toml is not a whole number — fix it (Settings → Backups & trash \
+                            → Local backup copies) and run this again."
+                    .into();
+            }
             let targets: Vec<&hyperion_types::S3BackupTarget> = s3_targets.iter().collect();
             for h in sites {
                 let Ok(detail) = self.get(HostingSelector::Id(h)).await else {
@@ -11668,10 +11737,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             // push below is the fallback and reports for itself.
             if drop_local && run.offsite_on_record() && run.archive_path.is_some() {
                 let targets: Vec<&hyperion_types::S3BackupTarget> = s3_targets.iter().collect();
-                let evidence: std::collections::HashSet<String> =
-                    run.s3_ok_targets.iter().cloned().collect();
                 match self
-                    .drop_run_local_if_offsite(&detail, &run, &targets, &evidence, None)
+                    .drop_run_local_if_offsite(&detail, run.id, &targets, None)
                     .await
                 {
                     DropLocalOutcome::Dropped => {
@@ -29086,8 +29153,16 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             });
         }
         // The archive (and its dump beside it) is in use until this returns:
-        // the drop-local sweep and the retention prune leave it alone.
-        let _busy = ArchiveInUse::claim(&canonical);
+        // the drop-local sweep and the retention prune leave it alone. If a
+        // drop is deleting it at this very moment, refuse rather than extract
+        // a file that is going away — it was verified off-site first.
+        let Some(_busy) = ArchiveInUse::try_claim(&canonical) else {
+            return Err(RpcError::Validation {
+                message: "this backup is being removed from local disk right now (it is verified \
+                          off-site) — restore it from the site's Off-site panel instead"
+                    .into(),
+            });
+        };
         // Where the dump is, and whether it is there NOW — before minutes of
         // extraction. A dump that was here at the start and is gone by the
         // database step is a restore that would put back the files of one
@@ -35067,6 +35142,11 @@ pub(crate) struct LocalCopyPolicy {
     /// `keep_local_latest` — 0 drops every local copy that is verified
     /// off-site, which is what the option meant before this knob existed.
     pub keep_latest: usize,
+    /// `keep_local_latest` is there but does not read as a whole number >= 0.
+    /// Nothing may drop local copies then — not the per-backup step (`drop`
+    /// is forced off) and not an on-demand sweep that would otherwise read
+    /// `keep_latest` 0 as "keep none".
+    pub keep_unreadable: bool,
 }
 
 /// `[backup]` as it is ON DISK, defaulting to "keep every local copy".
@@ -35099,11 +35179,18 @@ pub(crate) fn read_local_copy_policy(cfg_path: Option<&std::path::Path>) -> Loca
                         "[backup] keep_local_latest is not a whole number >= 0 — \
                          not dropping any local backup copy until it is fixed");
                 }
-                return LocalCopyPolicy::default();
+                return LocalCopyPolicy {
+                    keep_unreadable: true,
+                    ..LocalCopyPolicy::default()
+                };
             }
         },
     };
-    LocalCopyPolicy { drop, keep_latest }
+    LocalCopyPolicy {
+        drop,
+        keep_latest,
+        keep_unreadable: false,
+    }
 }
 
 /// Parse agent.toml once, for the readers above.
@@ -36478,6 +36565,9 @@ fn local_kept_reason(
     // there is — including an on-demand "Off-site & drop" on a node where the
     // automatic option is off, or on one of the newest copies. The note is
     // cleared with the local paths, so it exists only while the copy does.
+    if r.local_note == LOCAL_FILES_MISSING_NOTE {
+        return ("missing", r.local_note.clone());
+    }
     if !r.local_note.is_empty() {
         return ("unconfirmed", r.local_note.clone());
     }
@@ -36529,6 +36619,22 @@ fn local_kept_unconfirmed_note(unconfirmed: &[&str]) -> String {
         "Kept on this node: {what} could not be confirmed (missing, the wrong size, or the \
          target could not be reached to check)."
     )
+}
+
+/// The note on a run whose local files are not on disk although its row
+/// lists them — nothing deleted, row left as it is (an unmounted backup volume
+/// looks exactly like this). Shown as its own kind on the Backups card.
+const LOCAL_FILES_MISSING_NOTE: &str =
+    "The local files of this backup are not on disk, although it is listed here (removed outside \
+     the panel, or the backup volume is not mounted). Nothing was deleted; retention retires the \
+     entry as usual.";
+
+/// curl exit codes that mean the FTP/SFTP server was reached and logged into,
+/// and ANSWERED "no" about this path: no such directory (9), could not access
+/// the file (19), a command was refused (21), no such file (78). Unlike a
+/// transport failure, another file on the same server may still be there.
+fn ftp_said_no(curl_exit: i32) -> bool {
+    matches!(curl_exit, 9 | 19 | 21 | 78)
 }
 
 /// The `.manifest.json` written beside a backup archive:
@@ -36636,14 +36742,24 @@ enum OffsiteCheck {
 
 /// Backup archives some operation on THIS node is using right now — a
 /// restore reading one, a backup writing and pushing its own, an on-demand
-/// push sending one — counted, because two operations can hold the same file.
-/// The drop-local sweep and the retention prune leave a busy archive alone:
-/// deleting it under a restore lets `tar` finish from its open handle and then
-/// finds the database dump gone, so the restore "succeeds" with the files of
-/// one moment and the database of another. In-process is enough: only the
+/// push sending one — counted, because two operations can hold the same file;
+/// and the ones a drop is deleting right now.
+///
+/// The two sides exclude each other ATOMICALLY, under this one mutex: a drop
+/// reserves an archive only while nobody else holds it (`try_reserve_drop`),
+/// and nobody new can take it while the reservation stands
+/// (`ArchiveInUse::try_claim`). Deleting an archive under a restore lets `tar`
+/// finish from its open handle and then finds the database dump gone — files
+/// of one moment over the database of another. In-process is enough: only the
 /// agent that owns the files ever deletes them.
-fn archives_in_use() -> &'static std::sync::Mutex<HashMap<std::path::PathBuf, usize>> {
-    static IN_USE: std::sync::OnceLock<std::sync::Mutex<HashMap<std::path::PathBuf, usize>>> =
+#[derive(Default)]
+struct ArchiveUse {
+    claims: usize,
+    dropping: bool,
+}
+
+fn archives_in_use() -> &'static std::sync::Mutex<HashMap<std::path::PathBuf, ArchiveUse>> {
+    static IN_USE: std::sync::OnceLock<std::sync::Mutex<HashMap<std::path::PathBuf, ArchiveUse>>> =
         std::sync::OnceLock::new();
     IN_USE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
@@ -36661,14 +36777,15 @@ fn archive_use_key(p: &std::path::Path) -> std::path::PathBuf {
     }
 }
 
-/// Is some operation on this node using this archive right now?
+/// Is some operation on this node using (or dropping) this archive right
+/// now? A cheap pre-filter; the decision that counts is `try_reserve_drop`.
 fn archive_in_use(p: &std::path::Path) -> bool {
     let key = archive_use_key(p);
     archives_in_use()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .get(&key)
-        .is_some_and(|n| *n > 0)
+        .is_some_and(|u| u.claims > 0 || u.dropping)
 }
 
 /// Holds an archive as in use until dropped — on every exit path, so an early
@@ -36676,27 +36793,101 @@ fn archive_in_use(p: &std::path::Path) -> bool {
 struct ArchiveInUse(std::path::PathBuf);
 
 impl ArchiveInUse {
+    /// Claim an archive nobody can be dropping: one this backup is about to
+    /// write.
     fn claim(p: &std::path::Path) -> Self {
         let key = archive_use_key(p);
-        *archives_in_use()
+        archives_in_use()
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .entry(key.clone())
-            .or_insert(0) += 1;
+            .or_default()
+            .claims += 1;
         ArchiveInUse(key)
+    }
+
+    /// Claim an existing archive, unless a drop is deleting it right now.
+    fn try_claim(p: &std::path::Path) -> Option<Self> {
+        let key = archive_use_key(p);
+        let mut map = archives_in_use().lock().unwrap_or_else(|e| e.into_inner());
+        let u = map.entry(key.clone()).or_default();
+        if u.dropping {
+            return None;
+        }
+        u.claims += 1;
+        Some(ArchiveInUse(key))
     }
 }
 
 impl Drop for ArchiveInUse {
     fn drop(&mut self) {
         let mut map = archives_in_use().lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(n) = map.get_mut(&self.0) {
-            *n = n.saturating_sub(1);
-            if *n == 0 {
+        if let Some(u) = map.get_mut(&self.0) {
+            u.claims = u.claims.saturating_sub(1);
+            if u.claims == 0 && !u.dropping {
                 map.remove(&self.0);
             }
         }
     }
+}
+
+/// A drop's hold on an archive while it clears the row and deletes the files.
+struct DropReservation(std::path::PathBuf);
+
+/// Reserve an archive for deletion — only if nobody but the caller holds it
+/// (`own_claims`: 1 when the caller itself pushed it under a claim, else 0)
+/// and no other drop has it. While the reservation stands, `try_claim` fails,
+/// so a restore or push cannot start on a file being deleted.
+fn try_reserve_drop(p: &std::path::Path, own_claims: usize) -> Option<DropReservation> {
+    let key = archive_use_key(p);
+    let mut map = archives_in_use().lock().unwrap_or_else(|e| e.into_inner());
+    let u = map.entry(key.clone()).or_default();
+    if u.dropping || u.claims > own_claims {
+        if u.claims == 0 && !u.dropping {
+            map.remove(&key);
+        }
+        return None;
+    }
+    u.dropping = true;
+    Some(DropReservation(key))
+}
+
+impl Drop for DropReservation {
+    fn drop(&mut self) {
+        let mut map = archives_in_use().lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(u) = map.get_mut(&self.0) {
+            u.dropping = false;
+            if u.claims == 0 {
+                map.remove(&self.0);
+            }
+        }
+    }
+}
+
+/// How a completed S3 push is recorded on a run: the target's name plus a
+/// short fingerprint of WHERE and HOW it wrote — endpoint, bucket, age
+/// recipient. Evidence earned against one configuration must not vouch for
+/// another: an operator who edits a target in place to a new age recipient
+/// (because the old identity was lost) has made every older ciphertext
+/// undecryptable, and a name-only record would still let those objects
+/// "confirm" a copy by existence and get the last readable copy deleted.
+fn s3_evidence_key(t: &hyperion_types::S3BackupTarget) -> String {
+    let mut h = blake3::Hasher::new();
+    for part in [
+        t.endpoint.trim(),
+        t.bucket.trim(),
+        t.age_recipient.as_deref().map(str::trim).unwrap_or(""),
+    ] {
+        h.update(part.as_bytes());
+        h.update(&[0]);
+    }
+    let hex = h.finalize().to_hex();
+    format!("{}#{}", t.name, &hex[..16])
+}
+
+/// The target name part of an evidence key (`name#fingerprint`).
+fn s3_evidence_name(key: &str) -> &str {
+    key.rsplit_once('#').map(|(n, _)| n).unwrap_or(key)
 }
 
 /// Per-run result of `push_run_offsite`, folded into an `OffsiteBackfillResult`
@@ -38694,6 +38885,81 @@ mod tests {
         assert_eq!(local_copies_to_drop(&rows, 1, &none), vec![3, 4]);
     }
 
+    /// A drop and a restore/push exclude each other atomically: no
+    /// reservation while someone else holds the archive, and no new hold
+    /// while a drop has it.
+    #[test]
+    fn drop_reservation_and_claims_exclude_each_other() {
+        use super::{try_reserve_drop, ArchiveInUse};
+        let dir = tempfile::tempdir().expect("dir");
+        let p = dir.path().join("y.cz-1.tar.gz");
+        std::fs::write(&p, b"x").expect("w");
+
+        let restore = ArchiveInUse::try_claim(&p).expect("free");
+        assert!(try_reserve_drop(&p, 0).is_none(), "a restore holds it");
+        // A caller that holds ONE claim itself (a push about to drop what it
+        // just sent) may reserve only if nobody else holds it too.
+        let push = ArchiveInUse::try_claim(&p).expect("free");
+        assert!(
+            try_reserve_drop(&p, 1).is_none(),
+            "restore + push = 2 holders"
+        );
+        drop(restore);
+        let r = try_reserve_drop(&p, 1).expect("only the pusher holds it");
+        // While reserved, nobody new can start on it.
+        assert!(ArchiveInUse::try_claim(&p).is_none());
+        assert!(try_reserve_drop(&p, 1).is_none(), "one drop at a time");
+        drop(r);
+        drop(push);
+        assert!(ArchiveInUse::try_claim(&p).is_some());
+        assert!(try_reserve_drop(&p, 0).is_some());
+    }
+
+    /// S3 evidence is tied to the target configuration it was earned
+    /// against: a new age recipient (or bucket/endpoint) makes old evidence
+    /// inert.
+    #[test]
+    fn s3_evidence_key_tracks_the_target_configuration() {
+        use super::{s3_evidence_key, s3_evidence_name};
+        let t = |rcpt: Option<&str>, bucket: &str| hyperion_types::S3BackupTarget {
+            name: "vault".into(),
+            endpoint: "https://s3.example".into(),
+            bucket: bucket.into(),
+            region: "eu".into(),
+            access_key_id: "k".into(),
+            secret_access_key: "s".into(),
+            age_recipient: rcpt.map(Into::into),
+            retention_daily: 0,
+        };
+        let a = s3_evidence_key(&t(Some("age1aaa"), "b"));
+        assert_eq!(
+            a,
+            s3_evidence_key(&t(Some(" age1aaa "), "b")),
+            "trimmed, stable"
+        );
+        assert_ne!(
+            a,
+            s3_evidence_key(&t(Some("age1bbb"), "b")),
+            "new recipient"
+        );
+        assert_ne!(a, s3_evidence_key(&t(Some("age1aaa"), "c")), "new bucket");
+        assert_ne!(a, s3_evidence_key(&t(None, "b")), "encryption switched off");
+        assert_eq!(s3_evidence_name(&a), "vault");
+        assert_eq!(s3_evidence_name("plain"), "plain");
+    }
+
+    #[test]
+    fn ftp_said_no_is_an_answer_transport_errors_are_not() {
+        use super::ftp_said_no;
+        for c in [9, 19, 21, 78] {
+            assert!(ftp_said_no(c), "{c}");
+        }
+        // refused, resolve, timeout, TLS, login denied: could not look.
+        for c in [6, 7, 28, 35, 67] {
+            assert!(!ftp_said_no(c), "{c}");
+        }
+    }
+
     /// The busy-archive registry counts: two holders of one archive keep it
     /// busy until BOTH let go, and a key taken before the file exists matches
     /// the path spelled the same way afterwards.
@@ -38724,14 +38990,17 @@ mod tests {
         let off = LocalCopyPolicy {
             drop: false,
             keep_latest: 0,
+            ..LocalCopyPolicy::default()
         };
         let on = LocalCopyPolicy {
             drop: true,
             keep_latest: 0,
+            ..LocalCopyPolicy::default()
         };
         let on_keep2 = LocalCopyPolicy {
             drop: true,
             keep_latest: 2,
+            ..LocalCopyPolicy::default()
         };
         let verified = bk_run(1, "ok", true, "verified", false);
         let uploaded = bk_run(1, "ok", true, "ok", false);
@@ -38783,6 +39052,11 @@ mod tests {
             "unconfirmed"
         );
         assert_eq!(local_kept_reason(&local_only, on, Some(3)).0, "");
+        // Files listed but not on disk: its own kind, whatever the policy.
+        let mut missing = verified.clone();
+        missing.local_note = super::LOCAL_FILES_MISSING_NOTE.into();
+        assert_eq!(local_kept_reason(&missing, off, Some(0)).0, "missing");
+        assert_eq!(local_kept_reason(&missing, on, Some(5)).0, "missing");
         // An S3-only backup with a completed push is on record too.
         let mut s3_only = local_only.clone();
         s3_only.s3_ok_targets = vec!["vault".into()];
@@ -38876,7 +39150,8 @@ mod tests {
             read_local_copy_policy(Some(&cfg)),
             LocalCopyPolicy {
                 drop: true,
-                keep_latest: 2
+                keep_latest: 2,
+                keep_unreadable: false,
             }
         );
 
@@ -38892,10 +39167,7 @@ mod tests {
             "[backup]\ndrop_local_after_offsite = \"true\"\nkeep_local_latest = -5\n",
         )
         .expect("write");
-        assert_eq!(
-            read_local_copy_policy(Some(&cfg)),
-            LocalCopyPolicy::default()
-        );
+        assert!(!read_local_copy_policy(Some(&cfg)).drop);
         // …and a keep count that does not read as a whole number turns
         // dropping OFF — never into "keep 0", the most aggressive setting.
         for bad in ["\"3\"", "3.0", "-5", "true"] {
@@ -38904,11 +39176,9 @@ mod tests {
                 format!("[backup]\ndrop_local_after_offsite = true\nkeep_local_latest = {bad}\n"),
             )
             .expect("write");
-            assert_eq!(
-                read_local_copy_policy(Some(&cfg)),
-                LocalCopyPolicy::default(),
-                "keep_local_latest = {bad}"
-            );
+            let p = read_local_copy_policy(Some(&cfg));
+            assert!(!p.drop, "keep_local_latest = {bad}");
+            assert!(p.keep_unreadable, "keep_local_latest = {bad}");
         }
         // Too large is clamped down, which keeps more.
         std::fs::write(
@@ -38920,7 +39190,8 @@ mod tests {
             read_local_copy_policy(Some(&cfg)),
             LocalCopyPolicy {
                 drop: true,
-                keep_latest: 1000
+                keep_latest: 1000,
+                keep_unreadable: false,
             }
         );
     }
@@ -39126,6 +39397,68 @@ mod tests {
         assert_eq!(audit_fails(pool.clone()).await, 1);
     }
 
+    /// A stored "could not confirm" goes once the copy is kept on purpose
+    /// (inside the keep window), and an unreadable keep count stops the
+    /// estate sweep from dropping anything — it never reads as "keep 0".
+    #[tokio::test]
+    async fn stale_notes_clear_and_unreadable_keep_blocks_the_sweep() {
+        use hyperion_state::backups;
+        let pool = open_memory().await.expect("open");
+        let mut s = svc(pool.clone(), happy_mocks());
+        s.remote_backup = Some(RemoteBackupConfig {
+            scheme: "ftp".into(),
+            host: "127.0.0.1".into(),
+            port: 1,
+            user: "u".into(),
+            password: "p".into(),
+            base_path: "/backups".into(),
+        });
+        let dir = tempfile::tempdir().expect("dir");
+        let cfg = dir.path().join("agent.toml");
+        std::fs::write(
+            &cfg,
+            "[backup]\ndrop_local_after_offsite = true\nkeep_local_latest = \"3\"\n",
+        )
+        .expect("cfg");
+        s.agent_config_path = Some(cfg);
+        s.create(req("stale.cz")).await.expect("create");
+        let detail = s
+            .get(HostingSelector::Domain(Domain::parse("stale.cz").unwrap()))
+            .await
+            .expect("get");
+        let archive = dir.path().join("stale.cz-100.tar.gz");
+        std::fs::write(&archive, b"x").expect("w");
+        let run = backups::start(&pool, &detail.id, "local", 100)
+            .await
+            .expect("start");
+        backups::mark_ok(&pool, run, &archive.display().to_string(), None, 1, 101)
+            .await
+            .expect("ok");
+        backups::set_remote(&pool, run, "ftp://x/y", "verified", "")
+            .await
+            .expect("remote");
+        backups::set_local_note(&pool, run, "Kept on this node: old news")
+            .await
+            .expect("note");
+
+        // Unreadable keep count → the estate sweep drops nothing and says why.
+        let r = s
+            .backup_offsite_backfill(10, true, vec![])
+            .await
+            .expect("backfill");
+        assert_eq!((r.dropped, r.kept_local), (0, 0));
+        assert!(r.note.contains("keep_local_latest"), "{}", r.note);
+        assert!(archive.exists());
+
+        // Inside the keep window (keep 1, it is the newest) → not a candidate,
+        // so its old warning is cleared.
+        let empty = std::collections::HashMap::new();
+        let out = s.enforce_local_copies(&detail, 1, &[], &empty).await;
+        assert!(out.is_empty());
+        let row = backups::get_by_id(&pool, run).await.unwrap().unwrap();
+        assert_eq!(row.local_note, "");
+    }
+
     /// The other ways a candidate is NOT a kept copy, against a destination
     /// that cannot be reached (so nothing could ever be confirmed — whatever
     /// happens here happens without an off-site answer):
@@ -39204,11 +39537,17 @@ mod tests {
         let out = s.enforce_local_copies(&detail, 0, &[], &empty).await;
         assert_eq!(out, vec![(gone, DropLocalOutcome::MissingLocally)]);
         let row = backups::get_by_id(&pool, gone).await.unwrap().unwrap();
-        assert_eq!((row.archive_path, row.db_dump_path), (None, None));
+        // Absence alone is not proof (an unmounted volume looks the same):
+        // the row keeps its paths and says so.
+        assert!(row.archive_path.is_some() && row.db_dump_path.is_some());
+        assert_eq!(row.local_note, super::LOCAL_FILES_MISSING_NOTE);
         assert_eq!(
             row.remote_state, "verified",
             "the off-site record is untouched"
         );
+        let list = s.backup_list(sel.clone(), 10).await.expect("list");
+        let b = list.iter().find(|b| b.id == gone).expect("row");
+        assert_eq!(b.local_kept, "missing");
 
         // Dump only: archive gone, dump still on disk → the dump is checked.
         let dump = dir.path().join("odd.cz-100.sql");
@@ -39220,7 +39559,13 @@ mod tests {
         )
         .await;
         let out = s.enforce_local_copies(&detail, 0, &[], &empty).await;
-        assert_eq!(out, vec![(half, DropLocalOutcome::Unreachable)]);
+        assert_eq!(
+            out,
+            vec![
+                (gone, DropLocalOutcome::MissingLocally),
+                (half, DropLocalOutcome::Unreachable)
+            ]
+        );
         assert!(dump.exists());
         let row = backups::get_by_id(&pool, half).await.unwrap().unwrap();
         assert!(
