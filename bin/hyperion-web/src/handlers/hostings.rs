@@ -4111,7 +4111,10 @@ async fn run_normalize_www_job(
         Ok(()) => {
             reporter
                 .step(
-                    &format!("Done: {bare} is the canonical address, {} redirects to it.", detail.domain),
+                    &format!(
+                        "Done: {bare} is the canonical address, {} redirects to it.",
+                        detail.domain
+                    ),
                     100,
                     "",
                 )
@@ -4133,18 +4136,24 @@ async fn normalize_www_steps(
     let bare_dom = Domain::parse(bare).map_err(|e| e.to_string())?;
     let sel = HostingSelector::Id(detail.id.clone());
 
-    reporter.step(&format!("Checking that {bare} is free…"), 5, "").await;
+    reporter
+        .step(&format!("Checking that {bare} is free…"), 5, "")
+        .await;
     if let Ok(rows) = list_hostings(state).await {
         if rows
             .iter()
             .any(|h| h.id != detail.id && h.domain.eq_ignore_ascii_case(bare))
         {
-            return Err(format!("{bare} is already a separate hosting in this cluster."));
+            return Err(format!(
+                "{bare} is already a separate hosting in this cluster."
+            ));
         }
     }
 
     // Never redirect visitors to an address that does not reach this node.
-    reporter.step(&format!("Checking DNS for {bare}…"), 15, "").await;
+    reporter
+        .step(&format!("Checking DNS for {bare}…"), 15, "")
+        .await;
     match dispatch_to_node(state, node, Request::DnsCheck { domain: bare_dom.clone() }).await {
         Ok(RpcResponse::DnsCheck(r)) if r.matches => {}
         Ok(RpcResponse::DnsCheck(r)) => {
@@ -4158,7 +4167,9 @@ async fn normalize_www_steps(
         Err(e) => return Err(e.to_string()),
     }
 
-    reporter.step(&format!("Adding {bare} as an alias…"), 30, "").await;
+    reporter
+        .step(&format!("Adding {bare} as an alias…"), 30, "")
+        .await;
     let old_aliases = detail.aliases.clone();
     let mut with_bare: Vec<Domain> = old_aliases
         .iter()
@@ -4170,7 +4181,10 @@ async fn normalize_www_steps(
     match dispatch_to_node(
         state,
         node,
-        Request::HostingSetAliases { sel: sel.clone(), aliases: with_bare },
+        Request::HostingSetAliases {
+            sel: sel.clone(),
+            aliases: with_bare,
+        },
     )
     .await
     {
@@ -4181,18 +4195,39 @@ async fn normalize_www_steps(
     }
 
     let revert = || async {
-        let restore: Vec<Domain> = old_aliases.iter().filter_map(|a| Domain::parse(a).ok()).collect();
+        let restore: Vec<Domain> = old_aliases
+            .iter()
+            .filter_map(|a| Domain::parse(a).ok())
+            .collect();
         let _ = dispatch_to_node(
             state,
             node,
-            Request::HostingSetAliases { sel: sel.clone(), aliases: restore },
+            Request::HostingSetAliases {
+                sel: sel.clone(),
+                aliases: restore,
+            },
         )
         .await;
     };
 
-    reporter.step("Issuing a certificate that covers both names…", 45, "").await;
-    let cert_req = CertIssueRequest { staging: false, require_dns_match: true, extra_sans: vec![] };
-    match dispatch_to_node(state, node, Request::CertIssueAcme { sel: sel.clone(), req: cert_req }).await {
+    reporter
+        .step("Issuing a certificate that covers both names…", 45, "")
+        .await;
+    let cert_req = CertIssueRequest {
+        staging: false,
+        require_dns_match: true,
+        extra_sans: vec![],
+    };
+    match dispatch_to_node(
+        state,
+        node,
+        Request::CertIssueAcme {
+            sel: sel.clone(),
+            req: cert_req,
+        },
+    )
+    .await
+    {
         Ok(RpcResponse::CertIssueAcme(_)) => {}
         Ok(RpcResponse::Error(e)) => {
             revert().await;
@@ -4208,7 +4243,9 @@ async fn normalize_www_steps(
         }
     }
 
-    reporter.step(&format!("Redirecting {} to {bare}…", detail.domain), 75, "").await;
+    reporter
+        .step(&format!("Redirecting {} to {bare}…", detail.domain), 75, "")
+        .await;
     let mut options = detail.vhost_options.clone();
     options.canonical_host = "non-www".into();
     match dispatch_to_node(
@@ -12719,7 +12756,10 @@ mod tests {
 
     #[test]
     fn bare_name_drops_one_www_and_keeps_two_labels() {
-        assert_eq!(bare_name_of("www.example.cz").as_deref(), Some("example.cz"));
+        assert_eq!(
+            bare_name_of("www.example.cz").as_deref(),
+            Some("example.cz")
+        );
         assert_eq!(bare_name_of("example.cz"), None);
         assert_eq!(bare_name_of("www.cz"), None);
     }
