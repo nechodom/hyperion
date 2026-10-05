@@ -343,11 +343,12 @@ pub async fn get_jobs(
         },
     )
     .await?;
-    let jobs = match resp {
+    let mut jobs = match resp {
         RpcResponse::JobList(v) => v,
         RpcResponse::Error(e) => return Err(AppError::Rpc(e.to_string())),
         _ => return Err(AppError::Internal("unexpected response".into())),
     };
+    humanize_targets(&state, &mut jobs).await;
     let tpl = JobsListTpl {
         username: &ctx.username,
         user_initial: super::user_initial(&ctx.username),
@@ -371,7 +372,7 @@ pub async fn get_job_detail(
             axum::response::Redirect::to("/?flash_error=admin+role+required").into_response(),
         );
     }
-    let job = match fetch_job(&state, &id).await? {
+    let mut job = match fetch_job(&state, &id).await? {
         Some(j) => j,
         None => {
             return Ok(axum::response::Redirect::to(
@@ -380,6 +381,7 @@ pub async fn get_job_detail(
             .into_response());
         }
     };
+    humanize_targets(&state, std::slice::from_mut(&mut job)).await;
     let is_running = !job.is_terminal();
     let elapsed = format_elapsed(&job);
     let csrf_token = super::session_csrf_token(&state, &ctx);
@@ -407,7 +409,7 @@ pub async fn get_job_progress(
             Html("<div class=\"text-soft\">admin role required</div>".to_string()).into_response(),
         );
     }
-    let job = match fetch_job(&state, &id).await? {
+    let mut job = match fetch_job(&state, &id).await? {
         Some(j) => j,
         None => {
             return Ok(
@@ -416,6 +418,7 @@ pub async fn get_job_progress(
             );
         }
     };
+    humanize_targets(&state, std::slice::from_mut(&mut job)).await;
     let is_running = !job.is_terminal();
     let terminal = job.is_terminal();
     let elapsed = format_elapsed(&job);
@@ -449,6 +452,52 @@ async fn fetch_job(
         RpcResponse::JobGet(v) => Ok(v),
         RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),
         _ => Err(AppError::Internal("unexpected response".into())),
+    }
+}
+
+/// True for a hosting id (a UUID: 36 chars, hyphens at 8/13/18/23, hex
+/// elsewhere). Domains always contain a dot; job labels never look like this.
+fn looks_like_hosting_id(s: &str) -> bool {
+    s.len() == 36
+        && s.char_indices().all(|(i, c)| match i {
+            8 | 13 | 18 | 23 => c == '-',
+            _ => c.is_ascii_hexdigit(),
+        })
+}
+
+/// [`humanize_targets`] for a single subject, before it is stored.
+async fn humanize_target(state: &SharedState, target: &mut Option<String>) {
+    let mut probe = [hyperion_types::JobView {
+        target: target.take(),
+        ..Default::default()
+    }];
+    humanize_targets(state, &mut probe).await;
+    *target = probe[0].target.take();
+}
+
+/// Show the hosting's domain instead of its id for jobs whose subject is
+/// an id — rows written before `spawn_job` stored the domain. One cluster
+/// listing for the whole batch, and none at all when no row needs it, so
+/// the 2-second progress poll stays a single RPC for new jobs. A hosting
+/// that has since been deleted keeps its id: nothing else names it.
+async fn humanize_targets(state: &SharedState, jobs: &mut [hyperion_types::JobView]) {
+    if !jobs
+        .iter()
+        .any(|j| j.target.as_deref().is_some_and(looks_like_hosting_id))
+    {
+        return;
+    }
+    let Ok(rows) = crate::handlers::hostings::list_hostings(state).await else {
+        return;
+    };
+    for j in jobs.iter_mut() {
+        if let Some(h) = j
+            .target
+            .as_deref()
+            .and_then(|t| rows.iter().find(|h| h.id.as_str() == t))
+        {
+            j.target = Some(h.domain.clone());
+        }
     }
 }
 
@@ -559,11 +608,18 @@ where
     F: FnOnce(JobReporter) -> Fut + Send + 'static,
     Fut: std::future::Future<Output = ()> + Send + 'static,
 {
+    // Most per-hosting forms post the hosting's id as their selector, and
+    // that id used to be stored as the job's subject — so the job pages
+    // read "target 01a0f15b-…" where the operator expects "example.cz".
+    // Store the domain instead. After a delete it is the only name left:
+    // the id no longer resolves to anything.
+    let mut target = target.map(String::from);
+    humanize_target(&state, &mut target).await;
     let resp = hyperion_rpc_client::call(
         &state.agent_socket,
         Request::JobStart {
             kind: kind.to_string(),
-            target: target.map(String::from),
+            target,
             payload_json: payload_json.to_string(),
             actor_label: actor_label.to_string(),
             actor_uid,
@@ -581,4 +637,24 @@ where
     };
     tokio::spawn(work(reporter));
     Ok(id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::looks_like_hosting_id;
+
+    #[test]
+    fn hosting_id_shape() {
+        assert!(looks_like_hosting_id(
+            "01a0f15b-b22e-750c-b871-6b348ee5ad1c"
+        ));
+        assert!(!looks_like_hosting_id("example.cz"));
+        assert!(!looks_like_hosting_id("3 hostings"));
+        assert!(!looks_like_hosting_id(
+            "01a0f15b-b22e-750c-b871-6b348ee5ad1"
+        ));
+        assert!(!looks_like_hosting_id(
+            "01a0f15bxb22e-750c-b871-6b348ee5ad1c"
+        ));
+    }
 }

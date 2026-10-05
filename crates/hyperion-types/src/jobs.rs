@@ -74,6 +74,11 @@ impl JobView {
             "profile_apply",
             "wp_install",
         ];
+        // A finished delete has nothing left to go back to — the link
+        // would land on a 404.
+        if self.kind == "hosting_delete" && self.state == "done" {
+            return None;
+        }
         match &self.target {
             Some(t) if HOSTING_KINDS.contains(&self.kind.as_str()) => Some(t.as_str()),
             _ => None,
@@ -318,4 +323,24 @@ pub struct QuotaEnableSummary {
     pub mount_point: String,
     /// Human-readable result / next-step message.
     pub message: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::JobView;
+
+    #[test]
+    fn finished_delete_has_no_back_link() {
+        let mut j = JobView {
+            kind: "hosting_delete".into(),
+            target: Some("example.cz".into()),
+            state: "running".into(),
+            ..Default::default()
+        };
+        assert_eq!(j.hosting_target(), Some("example.cz"));
+        j.state = "failed".into();
+        assert_eq!(j.hosting_target(), Some("example.cz"));
+        j.state = "done".into();
+        assert_eq!(j.hosting_target(), None);
+    }
 }
