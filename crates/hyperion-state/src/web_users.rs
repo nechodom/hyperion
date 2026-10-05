@@ -134,6 +134,21 @@ pub async fn list(pool: &SqlitePool) -> Result<Vec<WebUserRow>, StateError> {
     Ok(rows)
 }
 
+/// `user_id -> custom_role_id` for every user linked to a custom role that
+/// still exists (a dangling id resolves to the built-in role, same as
+/// `effective_role`).
+pub async fn custom_role_assignments(
+    pool: &SqlitePool,
+) -> Result<std::collections::HashMap<i64, i64>, StateError> {
+    let rows: Vec<(i64, i64)> = sqlx::query_as(
+        "SELECT u.id, u.custom_role_id FROM web_users u \
+             JOIN custom_roles c ON c.id = u.custom_role_id",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().collect())
+}
+
 pub async fn count(pool: &SqlitePool) -> Result<i64, StateError> {
     let (n,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM web_users")
         .fetch_one(pool)
@@ -960,6 +975,28 @@ mod tests {
         )
         .await
         .expect("insert")
+    }
+
+    #[tokio::test]
+    async fn custom_role_assignments_lists_linked_users_only() {
+        let pool = open_memory().await.expect("open");
+        let plain = fresh_user(&pool, "plain").await;
+        let linked = fresh_user(&pool, "linked").await;
+        let role = crate::custom_roles::create(&pool, "Support desk", 0, false, 10)
+            .await
+            .expect("role");
+        set_custom_role(&pool, linked, role, 11).await.expect("set");
+        let map = custom_role_assignments(&pool).await.expect("list");
+        assert_eq!(map.get(&linked), Some(&role));
+        assert_eq!(map.get(&plain), None);
+        // Back to a built-in role clears the link.
+        set_role(&pool, linked, WebRole::Viewer, 12)
+            .await
+            .expect("reset");
+        assert!(custom_role_assignments(&pool)
+            .await
+            .expect("list")
+            .is_empty());
     }
 
     #[tokio::test]
