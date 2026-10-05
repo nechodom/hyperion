@@ -27,7 +27,7 @@
 <div class="card" style="margin-bottom:1rem">
   <h2 style="margin:0 0 0.6rem">Add user</h2>
   <form method="post" action="/admin/users" autocomplete="off"
-        style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr auto;gap:0.5rem;align-items:end">
+        class="m-stack" style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr auto;gap:0.5rem;align-items:end">
     <input type="hidden" name="_csrf" value="{{ csrf_token }}">
     <div class="field" style="margin:0">
       <label for="new_username">Username</label>

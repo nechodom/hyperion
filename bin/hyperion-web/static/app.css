@@ -160,7 +160,15 @@ code {
   border-radius: var(--radius-xs);
   padding: 0.12em 0.45em;
   border: 1px solid var(--border);
+  /* Paths, JSON samples and hashes are one unbreakable "word"; on a
+     phone they ran straight past the card edge. break-word, NOT
+     anywhere: `anywhere` also shrinks the min-content width, so auto
+     table layout squeezed code cells (/jobs kind + target) to one
+     character per line on desktop. Code inside <pre> keeps the pre's
+     own wrapping/scrolling. */
+  overflow-wrap: break-word;
 }
+pre code { overflow-wrap: normal; }
 pre {
   background: var(--bg-2);
   border: 1px solid var(--border);
@@ -406,73 +414,96 @@ pre code {
   max-width: 70ch;
 }
 
-/* Mobile: collapse sidebar to a top bar */
+/* Menu toggle — only exists for the mobile top bar. The checkbox is
+   visually hidden but stays focusable, so Tab + Space opens the menu
+   without any JS; the label is the visible hamburger. */
+.nav-toggle-cb {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+.nav-toggle { display: none; }
+
+/* Mobile: collapse sidebar to a top bar with a drop-down menu.
+   The old top bar scrolled sideways, which at 375px showed about two
+   links with the account controls parked on top of the rest — most of
+   the panel was reachable only by a horizontal swipe nobody discovers.
+   The bar now holds brand + account + a menu button; the full grouped
+   nav (labels and icons included) opens beneath it. */
 @media (max-width: 880px) {
-  /* minmax(0, …) lets the single column shrink below the nav's min-content
-     width; without it the horizontal top-bar (.sidebar, below) forces the
-     track — and the whole page — to the full nav width, causing app-wide
-     horizontal overflow on every page at ≤880px. */
-  .app { grid-template-columns: minmax(0, 1fr); }
+  /* minmax(0, …) lets the single column shrink below its content.
+     `auto 1fr` rows: the grid has min-height:100dvh, and with implicit
+     rows a short page split the spare height between the top bar and
+     the content, leaving a tall empty band above the bar. */
+  .app {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto 1fr;
+  }
   .sidebar {
     position: static;
     height: auto;
     flex-direction: row;
+    flex-wrap: wrap;
     align-items: center;
     padding: 0.6rem 1rem;
     gap: 0.5rem;
     border-right: 0;
     border-bottom: 1px solid var(--border);
-    /* Scroll the top-bar within the viewport instead of stretching the page. */
-    overflow-x: auto;
+    overflow: visible;
     min-width: 0;
   }
-  /* Dissolve the desktop scroll wrapper so the two nav-sections
-     flow directly in the horizontal top-bar exactly as before —
-     the vertical-overflow fix only matters on the tall desktop
-     sidebar. */
-  .sidebar-nav {
-    display: contents;
-  }
   .sidebar .brand { padding: 0; }
-  /* The top bar is the scroller (`.sidebar`, above). These sections must
-     NOT be scrollers too, and must not shrink: as flex items they default
-     to flex-shrink:1, and their own `overflow-x:auto` let them shrink below
-     min-content — so at 375px each section collapsed to about ten pixels
-     and the links became unreadable slivers of chopped text rather than
-     the sidebar scrolling sideways as intended. */
-  .sidebar .nav-section {
-    flex-direction: row;
-    padding: 0;
-    overflow: visible;
-    flex: 0 0 auto;
-  }
-  .sidebar .nav-label { display: none; }
-  .sidebar a.nav-link {
-    padding: 0.4rem 0.7rem;
-    font-size: 0.85rem;
-    flex: 0 0 auto;
-    white-space: nowrap;
-  }
-  .sidebar a.nav-link.active::before { display: none; }
-  .sidebar a.nav-link .nav-icon { display: none; }
-  /* Sticky, not `margin-left:auto`: once the bar scrolls for real, an
-     auto margin parks the account controls at the END of the scroll
-     content, so signing out means scrolling past every nav link first.
-     Sticky keeps them against the right edge with the links passing
-     underneath — hence the background, which the transparent original
-     did not need. */
   .sidebar-footer {
-    margin-top: 0;
-    margin-left: auto;
-    padding: 0 0 0 0.5rem;
+    order: 2;
+    margin: 0 0 0 auto;
+    padding: 0;
     border-top: 0;
-    position: sticky;
-    right: 0;
     flex: 0 0 auto;
-    background: var(--bg-2);
   }
   .sidebar .user-pill { padding: 0.3rem 0.5rem; }
   .sidebar .user-role { display: none; }
+  .nav-toggle {
+    order: 3;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 2.5rem;
+    height: 2.5rem;
+    border-radius: var(--radius-xs);
+    color: var(--text-dim);
+    cursor: pointer;
+    flex: 0 0 auto;
+  }
+  .nav-toggle:hover,
+  .nav-toggle-cb:checked + .nav-toggle {
+    color: var(--text);
+    background: var(--surface-3);
+  }
+  .nav-toggle-cb:focus-visible + .nav-toggle {
+    outline: 2px solid var(--primary);
+    outline-offset: 2px;
+  }
+  .nav-toggle svg { width: 1.3rem; height: 1.3rem; }
+  .nav-toggle .icon-close { display: none; }
+  .nav-toggle-cb:checked + .nav-toggle .icon-open { display: none; }
+  .nav-toggle-cb:checked + .nav-toggle .icon-close { display: block; }
+  .sidebar-nav {
+    order: 4;
+    display: none;
+    flex: 1 0 100%;
+    max-height: none;
+    overflow: visible;
+    padding: 0.4rem 0 0.2rem;
+  }
+  .nav-toggle-cb:checked ~ .sidebar-nav {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(10rem, 1fr));
+    gap: 0.25rem 0.75rem;
+  }
+  .sidebar .nav-section { padding: 0; }
+  .sidebar a.nav-link { padding: 0.55rem 0.7rem; }
   .content { padding: 1.25rem 1rem 3rem; }
 }
 
@@ -1014,7 +1045,7 @@ details.item > summary::-webkit-details-marker { display: none; }
 }
 .creds-row {
   display: grid;
-  grid-template-columns: 7rem 1fr auto;
+  grid-template-columns: 7rem minmax(0, 1fr) auto;
   gap: 0.5rem;
   align-items: center;
 }
@@ -4533,3 +4564,16 @@ details.disclosure.danger > summary { color: var(--danger); font-weight: 600; }
 /* The "Resources" and "How this site is backed up" fact rows run inline. */
 .facts.inline { flex-direction: row; flex-wrap: wrap; gap: 0.75rem 2rem; }
 .help { font-size: 0.78rem; color: var(--text-dim); line-height: 1.5; margin-top: 0.2rem; display: block; }
+
+/* Phone-width escape hatch for inline-styled rows. Many filter bars and
+   inline forms set their grid/flex layout in a style="" attribute (one-off
+   layouts not worth a class each), so a media query can only reach them
+   with !important. `.m-stack` folds a multi-column grid into one column;
+   `.m-wrap` lets a flex row wrap instead of pushing its last control
+   past the right edge (the /jobs "Clear filters" button sat at 405px on
+   a 375px screen). */
+@media (max-width: 640px) {
+  .m-stack { grid-template-columns: minmax(0, 1fr) !important; }
+  .m-wrap { flex-wrap: wrap !important; }
+  .m-stack > *, .m-wrap > * { min-width: 0; }
+}

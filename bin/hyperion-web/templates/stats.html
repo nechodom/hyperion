@@ -17,7 +17,7 @@
     {# Switching nodes re-runs the cluster_stats + history RPCs on
        the chosen node — so the sparklines reflect that node's /proc
        data, not just the master's. #}
-    <form method="get" action="/stats" style="display:flex;gap:0.4rem;align-items:center">
+    <form method="get" action="/stats" class="m-wrap" style="display:flex;gap:0.4rem;align-items:center">
       <label for="node-switcher" class="text-soft small">View node</label>
       <select id="node-switcher" name="node"
               onchange="this.form.submit()"

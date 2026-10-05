@@ -351,10 +351,11 @@ async fn devserver() {
     let (sock, _dir) = start_agent().await;
     let (router, _signer) =
         build_app_with_signer(sock, admin, Arc::new(SessionSigner::new_random()));
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:8190")
+    let port = std::env::var("PORT").unwrap_or_else(|_| "8190".into());
+    let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}"))
         .await
-        .expect("bind 127.0.0.1:8190");
-    eprintln!("devserver: http://127.0.0.1:8190  (kevin / secret-pw-1)");
+        .expect("bind devserver port");
+    eprintln!("devserver: http://127.0.0.1:{port}  (kevin / secret-pw-1)");
     axum::serve(
         listener,
         router.into_make_service_with_connect_info::<std::net::SocketAddr>(),

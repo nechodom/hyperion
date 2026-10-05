@@ -13,7 +13,7 @@
       · started by {{ job.actor_label }}
     </div>
   </div>
-  <div style="display:flex;gap:0.5rem;align-items:center">
+  <div class="m-wrap" style="display:flex;gap:0.5rem;align-items:center">
     {# Retry only renders for terminal jobs of a retryable kind.
        Migration + clone payloads are stable schemas the
        /jobs/<id>/retry handler reconstructs into a fresh form

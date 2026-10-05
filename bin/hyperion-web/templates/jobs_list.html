@@ -14,7 +14,7 @@
    to relearn. Filters are server-side via query string (no JS). #}
 <div class="card" style="margin-bottom:1rem;padding:0.85rem 1rem">
   <form method="get" action="/jobs"
-        style="display:grid;grid-template-columns:auto auto 1fr;gap:0.5rem 0.75rem;align-items:center">
+        class="m-stack" style="display:grid;grid-template-columns:auto auto 1fr;gap:0.5rem 0.75rem;align-items:center">
     <label style="display:flex;gap:0.4rem;align-items:center">
       <span class="text-soft small">Kind</span>
       <select name="kind" class="input">
@@ -45,7 +45,7 @@
         <option value="cancelled" {% if state_filter == "cancelled" %}selected{% endif %}>cancelled</option>
       </select>
     </label>
-    <div style="display:flex;gap:0.5rem;justify-content:flex-end">
+    <div class="m-wrap" style="display:flex;gap:0.5rem;justify-content:flex-end">
       <button type="submit" class="btn">Apply filters</button>
       <a href="/jobs" class="btn ghost">Clear filters</a>
     </div>
