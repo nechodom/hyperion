@@ -58,6 +58,9 @@ pub struct PackageRow {
     /// The monthly checklist, as a JSON array of {id,label,detail}. Empty = the
     /// built-in four.
     pub check_items: String,
+    /// Migration 075 — care-report sections the plan leaves out (comma list).
+    /// Empty = every section is sent.
+    pub report_omit: String,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -103,6 +106,8 @@ pub struct NewPackage {
     pub letters_lang: String,
     /// The monthly checklist. Empty = the built-in four.
     pub check_items: String,
+    /// Care-report sections left out (comma list). Empty = send them all.
+    pub report_omit: String,
 }
 
 impl Default for NewPackage {
@@ -125,6 +130,8 @@ impl Default for NewPackage {
             // Empty = the built-in four, which is what every package meant
             // before the list was editable.
             check_items: String::new(),
+            // Nothing left out: every section is sent.
+            report_omit: String::new(),
         }
     }
 }
@@ -169,6 +176,21 @@ pub struct HostingPackageRow {
     pub letters_lang: String,
     /// The monthly checklist as it stood at activation, same reasoning.
     pub check_items: String,
+    /// Care-report sections this activation leaves out, same reasoning as the
+    /// checklist: read on the owning node, which has no definitions.
+    pub report_omit: String,
+    /// Operator-set start of the term. `None` = `activated_at`.
+    pub valid_from: Option<i64>,
+    /// `false` while the activation waits for `valid_from`: nothing has been
+    /// captured or forced yet. See migration 075.
+    pub enforcement_started: bool,
+}
+
+impl HostingPackageRow {
+    /// Waiting for its start date: nothing is captured or enforced yet.
+    pub fn is_pending(&self) -> bool {
+        !self.enforcement_started
+    }
 }
 
 /// Values for [`activate`]. A struct rather than nine positional arguments:
@@ -192,6 +214,13 @@ pub struct NewActivation {
     pub letters_lang: String,
     /// Copied from the definition at activation. See [`HostingPackageRow`].
     pub check_items: String,
+    /// Copied from the definition at activation. See [`HostingPackageRow`].
+    pub report_omit: String,
+    /// The operator's start date. `None` = now.
+    pub valid_from: Option<i64>,
+    /// `false` for an activation dated in the future: the features are not
+    /// forced and the prior state is not captured until it starts.
+    pub enforcement_started: bool,
 }
 
 // ---------------------------------------------------------------- definitions
@@ -201,7 +230,7 @@ const SELECT_PACKAGES: &str =
             price_interval, feat_wp_auto_update, feat_integrity_scan, feat_monitoring,
             feat_hardening, feat_backup_cadence, feat_report_cadence,
             feat_backup_interval_days, feat_backup_keep_days, feat_backup_keep_last,
-            letters_lang, check_items, created_at, updated_at
+            letters_lang, check_items, report_omit, created_at, updated_at
      FROM service_packages";
 
 /// Create a definition. A duplicate `name` or `slug` surfaces as a
@@ -213,12 +242,12 @@ pub async fn insert(pool: &SqlitePool, p: &NewPackage, now: i64) -> Result<i64, 
             feat_wp_auto_update, feat_integrity_scan, feat_monitoring, feat_hardening,
             feat_backup_cadence, feat_report_cadence,
             feat_backup_interval_days, feat_backup_keep_days, feat_backup_keep_last,
-            letters_lang, check_items,
+            letters_lang, check_items, report_omit,
             created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            RETURNING id"#,
     )
-    // 19 columns, 19 placeholders, 19 binds — in column order.
+    // 21 columns, 21 placeholders, 21 binds — in column order.
     .bind(&p.name)
     .bind(&p.slug)
     .bind(&p.description)
@@ -237,6 +266,7 @@ pub async fn insert(pool: &SqlitePool, p: &NewPackage, now: i64) -> Result<i64, 
     .bind(p.features.backup_keep_last)
     .bind(&p.letters_lang)
     .bind(&p.check_items)
+    .bind(&p.report_omit)
     .bind(now)
     .bind(now)
     .fetch_one(pool)
@@ -262,10 +292,10 @@ pub async fn update(
             feat_wp_auto_update = ?, feat_integrity_scan = ?, feat_monitoring = ?,
             feat_hardening = ?, feat_backup_cadence = ?, feat_report_cadence = ?,
             feat_backup_interval_days = ?, feat_backup_keep_days = ?, feat_backup_keep_last = ?,
-            letters_lang = ?, check_items = ?, updated_at = ?
+            letters_lang = ?, check_items = ?, report_omit = ?, updated_at = ?
            WHERE id = ?"#,
     )
-    // 18 SET placeholders + the WHERE id — the trailing `.bind(id)` is what
+    // 19 SET placeholders + the WHERE id — the trailing `.bind(id)` is what
     // keeps this from becoming `WHERE id = NULL` (a silent zero-row update).
     .bind(&p.name)
     .bind(&p.slug)
@@ -285,6 +315,7 @@ pub async fn update(
     .bind(p.features.backup_keep_last)
     .bind(&p.letters_lang)
     .bind(&p.check_items)
+    .bind(&p.report_omit)
     .bind(now)
     .bind(id)
     .execute(pool)
@@ -371,7 +402,8 @@ const SELECT_ACTIVATIONS: &str =
             a.feat_wp_auto_update, a.feat_integrity_scan, a.feat_monitoring,
             a.feat_hardening, a.feat_backup_cadence, a.feat_report_cadence,
             a.feat_backup_interval_days, a.feat_backup_keep_days, a.feat_backup_keep_last,
-            a.letters_lang, a.check_items
+            a.letters_lang, a.check_items, a.report_omit, a.valid_from,
+            a.enforcement_started
      FROM hosting_packages a";
 
 /// Raw activation row. A `FromRow` struct rather than a tuple: sqlx only
@@ -405,6 +437,9 @@ struct ActivationRowRaw {
     feat_backup_keep_last: i64,
     letters_lang: String,
     check_items: String,
+    report_omit: String,
+    valid_from: Option<i64>,
+    enforcement_started: i64,
 }
 
 fn map_activation(r: ActivationRowRaw) -> HostingPackageRow {
@@ -418,6 +453,9 @@ fn map_activation(r: ActivationRowRaw) -> HostingPackageRow {
         price_interval: r.price_interval,
         letters_lang: r.letters_lang,
         check_items: r.check_items,
+        report_omit: r.report_omit,
+        valid_from: r.valid_from,
+        enforcement_started: r.enforcement_started != 0,
         features: PackageFeatures {
             wp_auto_update: FeatureToggle::from_stored(&r.feat_wp_auto_update),
             integrity_scan: FeatureToggle::from_stored(&r.feat_integrity_scan),
@@ -453,11 +491,11 @@ pub async fn activate(pool: &SqlitePool, a: &NewActivation, now: i64) -> Result<
             prior_state_json, feat_wp_auto_update, feat_integrity_scan,
             feat_monitoring, feat_hardening, feat_backup_cadence, feat_report_cadence,
             feat_backup_interval_days, feat_backup_keep_days, feat_backup_keep_last,
-            letters_lang, check_items)
-           VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            letters_lang, check_items, report_omit, valid_from, enforcement_started)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            RETURNING id"#,
     )
-    // 19 placeholders (state / cancelled_at are literals), 19 binds.
+    // 22 placeholders (state / cancelled_at are literals), 22 binds.
     .bind(a.hosting_id.as_str())
     .bind(a.package_id)
     .bind(&a.package_name)
@@ -478,6 +516,9 @@ pub async fn activate(pool: &SqlitePool, a: &NewActivation, now: i64) -> Result<
     .bind(a.features.backup_keep_last)
     .bind(&a.letters_lang)
     .bind(&a.check_items)
+    .bind(&a.report_omit)
+    .bind(a.valid_from)
+    .bind(a.enforcement_started as i64)
     .fetch_one(pool)
     .await?;
     Ok(row.0)
@@ -501,6 +542,26 @@ pub async fn list_for_hosting(
     let q = format!(
         "{SELECT_ACTIVATIONS} WHERE a.hosting_id = ? AND a.state = 'active' \
          ORDER BY a.activated_at"
+    );
+    let rows: Vec<ActivationRowRaw> = sqlx::query_as(&q)
+        .bind(hosting_id.as_str())
+        .fetch_all(pool)
+        .await?;
+    Ok(rows.into_iter().map(map_activation).collect())
+}
+
+/// The activations that are actually IN FORCE on this hosting: active and past
+/// their start date. A plan dated for the future is still shown on the card
+/// ([`list_for_hosting`]) but must not be enforced, reported on, billed as a
+/// service the customer already has, or counted as a promise the site owes —
+/// every consumer that acts on a plan wants this one.
+pub async fn list_in_force_for_hosting(
+    pool: &SqlitePool,
+    hosting_id: &HostingId,
+) -> Result<Vec<HostingPackageRow>, StateError> {
+    let q = format!(
+        "{SELECT_ACTIVATIONS} WHERE a.hosting_id = ? AND a.state = 'active' \
+         AND a.enforcement_started = 1 ORDER BY a.activated_at"
     );
     let rows: Vec<ActivationRowRaw> = sqlx::query_as(&q)
         .bind(hosting_id.as_str())
@@ -536,6 +597,39 @@ pub async fn list_all_active(pool: &SqlitePool) -> Result<Vec<HostingPackageRow>
           ORDER BY a.hosting_id, a.activated_at"
     );
     let rows: Vec<ActivationRowRaw> = sqlx::query_as(&q).fetch_all(pool).await?;
+    Ok(rows.into_iter().map(map_activation).collect())
+}
+
+/// [`list_all_active`] minus the activations still waiting for their start
+/// date — the work list for every tick that ACTS on a plan (enforcement,
+/// reports, site checks, the care dashboard).
+pub async fn list_all_in_force(pool: &SqlitePool) -> Result<Vec<HostingPackageRow>, StateError> {
+    let q = format!(
+        "{SELECT_ACTIVATIONS}
+           JOIN hostings h ON h.id = a.hosting_id
+          WHERE a.state = 'active' AND a.enforcement_started = 1 AND h.state != 'trashed'
+          ORDER BY a.hosting_id, a.activated_at"
+    );
+    let rows: Vec<ActivationRowRaw> = sqlx::query_as(&q).fetch_all(pool).await?;
+    Ok(rows.into_iter().map(map_activation).collect())
+}
+
+/// Activations whose start date has arrived but that have not been started
+/// yet: `valid_from <= now` and `enforcement_started = 0`. The tick starts
+/// these before it enforces anything.
+pub async fn list_due_to_start(
+    pool: &SqlitePool,
+    now: i64,
+) -> Result<Vec<HostingPackageRow>, StateError> {
+    let q = format!(
+        "{SELECT_ACTIVATIONS}
+           JOIN hostings h ON h.id = a.hosting_id
+          WHERE a.state = 'active' AND a.enforcement_started = 0
+            AND a.valid_from IS NOT NULL AND a.valid_from <= ?
+            AND h.state != 'trashed'
+          ORDER BY a.valid_from, a.id"
+    );
+    let rows: Vec<ActivationRowRaw> = sqlx::query_as(&q).bind(now).fetch_all(pool).await?;
     Ok(rows.into_iter().map(map_activation).collect())
 }
 
@@ -602,6 +696,77 @@ pub async fn set_check_items(
     .await?
     .rows_affected();
     Ok(n)
+}
+
+/// Push a definition's care-report section choice onto its ACTIVE activations.
+///
+/// Same reasoning, and same limit, as [`set_check_items`]: which sections the
+/// letter carries is a presentation promise the operator edits expecting the
+/// sites already on the plan to follow — not a price the customer agreed to.
+/// A report already sent is history and is not touched; the next one uses the
+/// new choice.
+///
+/// Cancelled activations are left alone.
+pub async fn set_report_omit(
+    pool: &SqlitePool,
+    package_id: i64,
+    omit: &str,
+) -> Result<u64, StateError> {
+    let n = sqlx::query(
+        "UPDATE hosting_packages SET report_omit = ? \
+         WHERE package_id = ? AND state = 'active'",
+    )
+    .bind(omit)
+    .bind(package_id)
+    .execute(pool)
+    .await?
+    .rows_affected();
+    Ok(n)
+}
+
+/// Move one ACTIVE activation's start date and re-aim its reminder clock.
+///
+/// `next_billing_at` is passed in rather than derived: the billing interval
+/// math lives with the billing sweep in the service layer, and this module
+/// stores intent without interpreting it. Returns `false` when the row is
+/// cancelled or absent.
+pub async fn set_valid_from(
+    pool: &SqlitePool,
+    id: i64,
+    valid_from: i64,
+    next_billing_at: Option<i64>,
+) -> Result<bool, StateError> {
+    let r = sqlx::query(
+        "UPDATE hosting_packages SET valid_from = ?, next_billing_at = ? \
+         WHERE id = ? AND state = 'active'",
+    )
+    .bind(valid_from)
+    .bind(next_billing_at)
+    .bind(id)
+    .execute(pool)
+    .await?;
+    Ok(r.rows_affected() > 0)
+}
+
+/// Flip a waiting activation to started and record the prior state captured at
+/// THAT moment. Compare-and-set on `enforcement_started = 0`, so two passes
+/// racing to start the same row cannot both capture (the second would capture
+/// the state the first had already forced, and a cancel would then "restore"
+/// the package's own values). Returns `true` only for the winner.
+pub async fn mark_started(
+    pool: &SqlitePool,
+    id: i64,
+    prior_state_json: Option<&str>,
+) -> Result<bool, StateError> {
+    let r = sqlx::query(
+        "UPDATE hosting_packages SET enforcement_started = 1, prior_state_json = ? \
+         WHERE id = ? AND state = 'active' AND enforcement_started = 0",
+    )
+    .bind(prior_state_json)
+    .bind(id)
+    .execute(pool)
+    .await?;
+    Ok(r.rows_affected() > 0)
 }
 
 pub async fn cancel(pool: &SqlitePool, id: i64, now: i64) -> Result<bool, StateError> {
@@ -767,6 +932,7 @@ mod tests {
                 price_interval: Some("yearly".into()),
                 letters_lang: "cs".into(),
                 check_items: r#"[{"id":"gdpr","label":"GDPR"}]"#.into(),
+                report_omit: "attacks,uptime".into(),
                 features: PackageFeatures {
                     wp_auto_update: FeatureToggle::Off,
                     hardening: FeatureToggle::On,
@@ -804,6 +970,11 @@ mod tests {
             row.check_items, r#"[{"id":"gdpr","label":"GDPR"}]"#,
             "a custom checklist must survive an edit, or the plan silently \
              reverts to the built-in four"
+        );
+        assert_eq!(
+            row.report_omit, "attacks,uptime",
+            "the section choice must survive an edit, or the plan silently \
+             goes back to sending every section"
         );
         // The last SET column before `updated_at` — if its bind were
         // missing, `updated_at` would absorb the id and the whole UPDATE
@@ -886,6 +1057,128 @@ mod tests {
         let _ = read;
     }
 
+    /// The plan's section choice must reach the sites ALREADY on it, like the
+    /// checklist and the language — and only the active ones.
+    #[tokio::test]
+    async fn a_report_section_edit_reaches_active_sites_but_not_cancelled_ones() {
+        let pool = fresh().await;
+        activate(&pool, &activation("h1", 7, 100), 0).await.unwrap();
+        let gone_id = activate(&pool, &activation("h2", 7, 100), 0).await.unwrap();
+        activate(&pool, &activation("h1", 9, 100), 0).await.unwrap();
+        cancel(&pool, gone_id, 1).await.unwrap();
+
+        let moved = set_report_omit(&pool, 7, "attacks,traffic").await.unwrap();
+        assert_eq!(moved, 1, "only the ACTIVE activation of package 7 moves");
+
+        let h1: Vec<(i64, String)> = list_for_hosting(&pool, &HostingId("h1".into()))
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| (r.package_id.unwrap_or(0), r.report_omit))
+            .collect();
+        assert!(h1.contains(&(7, "attacks,traffic".to_string())), "{h1:?}");
+        assert!(
+            h1.contains(&(9, "uptime".to_string())),
+            "other plan untouched: {h1:?}"
+        );
+        let gone: (String,) =
+            sqlx::query_as("SELECT report_omit FROM hosting_packages WHERE id = ?")
+                .bind(gone_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(gone.0, "uptime", "a cancelled activation is history");
+    }
+
+    #[tokio::test]
+    async fn the_start_date_and_started_flag_round_trip() {
+        let pool = fresh().await;
+        let mut a = activation("h1", 7, 100);
+        a.valid_from = Some(5_000);
+        a.enforcement_started = false;
+        let id = activate(&pool, &a, 10).await.unwrap();
+        let row = get_activation(&pool, id).await.unwrap().unwrap();
+        assert_eq!(row.valid_from, Some(5_000));
+        assert!(!row.enforcement_started);
+        assert_eq!(
+            row.activated_at, 10,
+            "activated_at stays the click, not the term"
+        );
+
+        assert!(set_valid_from(&pool, id, 9_000, Some(12_345))
+            .await
+            .unwrap());
+        let row = get_activation(&pool, id).await.unwrap().unwrap();
+        assert_eq!(row.valid_from, Some(9_000));
+        assert_eq!(row.next_billing_at, Some(12_345));
+
+        // A cancelled activation's term is history.
+        cancel(&pool, id, 20).await.unwrap();
+        assert!(!set_valid_from(&pool, id, 1, None).await.unwrap());
+    }
+
+    /// Only one pass may start a waiting activation, or the second would
+    /// capture the state the first had already forced as the "prior" one.
+    #[tokio::test]
+    async fn starting_an_activation_is_compare_and_set() {
+        let pool = fresh().await;
+        let mut a = activation("h1", 7, 100);
+        a.enforcement_started = false;
+        let id = activate(&pool, &a, 0).await.unwrap();
+
+        assert!(
+            mark_started(&pool, id, Some(r#"{"v":1,"monitoring":false}"#))
+                .await
+                .unwrap()
+        );
+        assert!(
+            !mark_started(&pool, id, Some(r#"{"v":1,"monitoring":true}"#))
+                .await
+                .unwrap(),
+            "the second pass lost the race"
+        );
+        let row = get_activation(&pool, id).await.unwrap().unwrap();
+        assert!(row.enforcement_started);
+        assert_eq!(
+            row.prior_state_json.as_deref(),
+            Some(r#"{"v":1,"monitoring":false}"#),
+            "the winner's capture stands"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_waiting_activation_is_listed_but_not_in_force_until_it_starts() {
+        let pool = fresh().await;
+        let mut waiting = activation("h1", 7, 100);
+        waiting.valid_from = Some(1_000);
+        waiting.enforcement_started = false;
+        let w = activate(&pool, &waiting, 0).await.unwrap();
+        activate(&pool, &activation("h1", 9, 100), 0).await.unwrap();
+
+        let h1 = HostingId("h1".into());
+        assert_eq!(
+            list_for_hosting(&pool, &h1).await.unwrap().len(),
+            2,
+            "the card shows both"
+        );
+        let live = list_in_force_for_hosting(&pool, &h1).await.unwrap();
+        assert_eq!(live.len(), 1, "only the started one is in force");
+        assert_eq!(live[0].package_id, Some(9));
+        assert_eq!(list_all_in_force(&pool).await.unwrap().len(), 1);
+
+        // Not due before the date, due on it.
+        assert!(list_due_to_start(&pool, 999).await.unwrap().is_empty());
+        let due = list_due_to_start(&pool, 1_000).await.unwrap();
+        assert_eq!(due.iter().map(|r| r.id).collect::<Vec<_>>(), vec![w]);
+
+        assert!(mark_started(&pool, w, None).await.unwrap());
+        assert!(list_due_to_start(&pool, 5_000).await.unwrap().is_empty());
+        assert_eq!(
+            list_in_force_for_hosting(&pool, &h1).await.unwrap().len(),
+            2
+        );
+    }
+
     fn activation(hosting: &str, package_id: i64, price_minor: i64) -> NewActivation {
         NewActivation {
             hosting_id: HostingId(hosting.into()),
@@ -902,6 +1195,11 @@ mod tests {
             // of the activation INSERT — the position a misalignment lands on
             // first.
             check_items: r#"[{"id":"gdpr","label":"GDPR"}]"#.into(),
+            // The last binds of the INSERT now — the position a misalignment
+            // lands on first. Non-empty / non-default for that reason.
+            report_omit: "uptime".into(),
+            valid_from: Some(40),
+            enforcement_started: true,
             // A non-default bundle on purpose: the snapshot is what the drift
             // tick enforces, so a test that activated with an all-`leave`
             // bundle would pass even if the snapshot were dropped entirely.

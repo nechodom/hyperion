@@ -20,8 +20,11 @@
   <h2>
     <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.59 13.41 13.42 20.58a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/></svg>
     Care packages
-    {% if !held.is_empty() %}
-      <span class="pill ok" style="margin-left:0.4rem;font-size:0.65rem">{{ held.len() }} active</span>
+    {% if in_force_count > 0 %}
+      <span class="pill ok" style="margin-left:0.4rem;font-size:0.65rem">{{ in_force_count }} active</span>
+    {% endif %}
+    {% if held.len() > in_force_count %}
+      <span class="pill warn" style="margin-left:0.4rem;font-size:0.65rem">{{ held.len() - in_force_count }} starts later</span>
     {% endif %}
   </h2>
 
@@ -44,13 +47,37 @@
       <div style="border:1px solid var(--border);border-radius:var(--radius-sm);padding:0.8rem 0.9rem;background:var(--bg-2)">
         <div style="display:flex;align-items:baseline;gap:0.5rem;flex-wrap:wrap">
           <strong style="font-size:0.98rem">{{ p.name }}</strong>
-          <span class="pill ok" style="font-size:0.6rem">active</span>
+          {% if p.pending %}
+            <span class="pill warn" style="font-size:0.6rem">starts {{ p.valid_from_label }}</span>
+          {% else %}
+            <span class="pill ok" style="font-size:0.6rem">active</span>
+          {% endif %}
           <span class="grow"></span>
           <span class="numeric" style="font-weight:600">{{ p.price }}</span>
         </div>
 
         {% if !p.description.is_empty() %}
           <p class="muted" style="margin:0.35rem 0 0;font-size:0.85rem;line-height:1.55">{{ p.description }}</p>
+        {% endif %}
+
+        {# The term. A plan dated for the future is RECORDED and billed from its
+           date but not enforced, so it says so in the same breath — otherwise
+           "active" would promise features that are not on yet. #}
+        {% if p.pending %}
+          <div class="flash warn" style="margin:0.6rem 0 0">
+            <div class="flash-body">
+              <strong>Starts {{ p.valid_from_label }}</strong> ({{ p.starts_label }}).
+              Until then nothing is switched on, no report is sent and no monthly
+              check is asked for.
+            </div>
+          </div>
+        {% else %}
+          <p class="text-soft small" style="margin:0.4rem 0 0">
+            Valid from <span class="numeric">{{ p.valid_from_label }}</span>
+          </p>
+        {% endif %}
+        {% if !p.sections_note.is_empty() %}
+          <p class="text-soft small" style="margin:0.25rem 0 0">Care report sends {{ p.sections_note }}.</p>
         {% endif %}
 
         {% if let Some(ts) = p.next_billing_at %}
@@ -81,7 +108,9 @@
                  own answer and must not borrow the green one — a false
                  all-clear on a paid feature is the failure mode that costs
                  the operator the customer. #}
-              {% if f.status == "active" %}
+              {% if f.status == "pending" %}
+                <span class="pill" style="font-size:0.58rem;flex:none;margin-top:0.15rem;background:var(--surface-2);color:var(--text-soft)">waiting</span>
+              {% else if f.status == "active" %}
                 <span class="pill ok" style="font-size:0.58rem;flex:none;margin-top:0.15rem">on</span>
               {% else if f.status == "inactive" %}
                 <span class="pill warn" style="font-size:0.58rem;flex:none;margin-top:0.15rem">not on</span>
@@ -90,7 +119,9 @@
               {% endif %}
               <span style="min-width:0">
                 <strong style="font-size:0.88rem">{{ f.label }}</strong>
-                {% if f.status == "inactive" %}
+                {% if f.status == "pending" %}
+                  <span class="text-soft small">— switched on from the start date</span>
+                {% else if f.status == "inactive" %}
                   <span class="text-soft small">— {{ f.live_label }}; it will be switched back on automatically</span>
                 {% else if f.status == "unknown" %}
                   <span class="text-soft small">— couldn't check the server just now</span>
@@ -108,6 +139,29 @@
         {% endif %}
 
         {% if can_manage %}
+        {# When the term begins. Backdated, the first care report and the billing
+           clock count from it; a date in the future is accepted only while the
+           plan has not started (the node refuses to postpone one that is in
+           force, since that would mean un-forcing features). #}
+        <form hx-post="/hostings/packages/valid-from" hx-target="#packages-card" hx-swap="outerHTML"
+              style="margin-top:0.7rem;display:flex;gap:0.5rem;align-items:flex-end;flex-wrap:wrap" data-require-caps="profiles_manage">
+          <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+          <input type="hidden" name="selector" value="{{ selector }}">
+          <input type="hidden" name="activation_id" value="{{ p.activation_id }}">
+          <div class="field" style="margin:0">
+            <label for="vf_{{ p.activation_id }}">Valid from <span class="hint">UTC date</span></label>
+            <input id="vf_{{ p.activation_id }}" type="date" name="valid_from" value="{{ p.valid_from_input }}"
+                   min="2015-01-01" max="{{ p.max_date }}" required>
+          </div>
+          <button class="btn small ghost" type="submit">Save date</button>
+        </form>
+        <p class="text-soft small" style="margin:0.35rem 0 0;line-height:1.5">
+          Earlier than today: the first care report and the billing clock count
+          from that date (a report already sent is not redone).
+          {%- if p.pending %} Later: the plan is switched on that day.
+          {%- else %} A plan already in force cannot be pushed into the future —
+          cancel it and activate it again with the later date.{% endif %}
+        </p>
         <div style="margin-top:0.7rem" data-require-caps="profiles_manage">
           {# Cancelling restores what this package switched on — except
              anything another package the site still holds also pays for.
@@ -332,19 +386,25 @@
         <input type="hidden" name="_csrf" value="{{ csrf_token }}">
         <input type="hidden" name="selector" value="{{ selector }}">
         <div class="field" style="margin:0;flex:1;min-width:16rem">
-          <label for="pkg_activate">Activate a package <span class="hint">switches on everything it includes, right now</span></label>
+          <label for="pkg_activate">Activate a package <span class="hint">switches on everything it includes</span></label>
           <select id="pkg_activate" name="package_id">
             {% for o in offerable %}
             <option value="{{ o.id }}">{{ o.name }} — {{ o.price }}</option>
             {% endfor %}
           </select>
         </div>
+        <div class="field" style="margin:0">
+          <label for="pkg_valid_from">Valid from <span class="hint">UTC date · empty = today</span></label>
+          <input id="pkg_valid_from" type="date" name="valid_from" min="2015-01-01">
+        </div>
         <button class="btn" type="submit">Activate</button>
       </form>
       <p class="text-soft small" style="margin:0.5rem 0 0">
         Packages are defined in <a href="/packages">Care packages</a>. Only the
         features a package explicitly includes are touched — everything else on
-        this site is left exactly as it is.
+        this site is left exactly as it is. An earlier date counts the first
+        report and the billing from then; a later one records the plan now and
+        switches it on that day.
       </p>
     </div>
     {% else if held.is_empty() %}

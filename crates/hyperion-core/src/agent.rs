@@ -1885,9 +1885,10 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         package_id: i64,
         letters_lang: String,
         check_items: String,
+        report_omit: String,
     ) -> Result<(u64, u64), RpcError> {
         self.svc
-            .package_relist(package_id, &letters_lang, &check_items)
+            .package_relist(package_id, &letters_lang, &check_items, &report_omit)
             .await
     }
     async fn package_activations(
@@ -2068,8 +2069,21 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         sel: HostingSelector,
         package_id: i64,
         package: Option<hyperion_types::ServicePackage>,
+        valid_from: Option<i64>,
     ) -> Result<hyperion_types::HostingPackage, RpcError> {
-        self.svc.package_activate(sel, package_id, package).await
+        self.svc
+            .package_activate(sel, package_id, package, valid_from)
+            .await
+    }
+    async fn package_set_valid_from(
+        &self,
+        sel: HostingSelector,
+        activation_id: i64,
+        valid_from: i64,
+    ) -> Result<hyperion_types::HostingPackage, RpcError> {
+        self.svc
+            .package_set_valid_from(sel, activation_id, valid_from)
+            .await
     }
     async fn package_cancel(
         &self,

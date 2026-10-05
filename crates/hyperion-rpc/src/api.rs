@@ -1344,6 +1344,7 @@ pub trait AgentApi: Send + Sync + 'static {
         package_id: i64,
         letters_lang: String,
         check_items: String,
+        report_omit: String,
     ) -> Result<(u64, u64), RpcError>;
     /// Activations a hosting holds; `history` also returns cancelled ones.
     async fn package_activations(
@@ -1365,6 +1366,15 @@ pub trait AgentApi: Send + Sync + 'static {
         sel: HostingSelector,
         package_id: i64,
         package: Option<hyperion_types::ServicePackage>,
+        valid_from: Option<i64>,
+    ) -> Result<hyperion_types::HostingPackage, RpcError>;
+    /// Change when an activation's term begins (unix seconds). Earlier is
+    /// always accepted; later only for a plan that has not started yet.
+    async fn package_set_valid_from(
+        &self,
+        sel: HostingSelector,
+        activation_id: i64,
+        valid_from: i64,
     ) -> Result<hyperion_types::HostingPackage, RpcError>;
     /// Cancel an activation, restoring the features it forced except those
     /// another still-active package also forces.

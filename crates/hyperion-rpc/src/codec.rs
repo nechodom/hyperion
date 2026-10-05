@@ -1818,6 +1818,12 @@ pub enum Request {
         package_id: i64,
         letters_lang: String,
         check_items: String,
+        /// Care-report sections the plan leaves out (comma list). Empty = send
+        /// them all. `#[serde(default)]`, so a master one release behind that
+        /// does not send it reads as "send everything" — which is all such a
+        /// master could have meant, since it has no way to leave a section out.
+        #[serde(default)]
+        report_omit: String,
     },
     /// Every site on THIS node that holds a care package, with how much of
     /// `period`'s monthly service checklist is done.
@@ -1853,6 +1859,18 @@ pub enum Request {
         /// correct only when the node IS the master.
         #[serde(default)]
         package: Option<hyperion_types::ServicePackage>,
+        /// When the plan's term begins, unix seconds. `None` = now. In the past
+        /// it backdates the first report and the billing clock; in the future
+        /// the plan is recorded but not enforced until then.
+        #[serde(default)]
+        valid_from: Option<i64>,
+    },
+    /// Change when an activation's term begins. Earlier is always accepted;
+    /// later only for a plan that has not started yet.
+    PackageSetValidFrom {
+        sel: HostingSelector,
+        activation_id: i64,
+        valid_from: i64,
     },
     /// Cancel one activation and restore the features it forced — except
     /// any another still-active package also forces.
@@ -2411,6 +2429,7 @@ pub enum Response {
     PackageActivations(Vec<hyperion_types::HostingPackage>),
     CareOverview(Vec<hyperion_types::care_check::CareOverviewRow>),
     PackageActivate(hyperion_types::HostingPackage),
+    PackageSetValidFrom(hyperion_types::HostingPackage),
     PackageCancel(hyperion_types::HostingPackage),
     /// How many individual features the pass had to put back. 0 = nothing
     /// had drifted, which is the healthy answer.

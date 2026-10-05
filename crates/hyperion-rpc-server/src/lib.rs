@@ -1778,8 +1778,9 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             package_id,
             letters_lang,
             check_items,
+            report_omit,
         } => match api
-            .package_relist(package_id, letters_lang, check_items)
+            .package_relist(package_id, letters_lang, check_items, report_omit)
             .await
         {
             Ok((relanguaged, relisted)) => Response::PackageRelist {
@@ -1802,8 +1803,23 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             sel,
             package_id,
             package,
-        } => match api.package_activate(sel, package_id, package).await {
+            valid_from,
+        } => match api
+            .package_activate(sel, package_id, package, valid_from)
+            .await
+        {
             Ok(v) => Response::PackageActivate(v),
+            Err(e) => Response::Error(e),
+        },
+        Request::PackageSetValidFrom {
+            sel,
+            activation_id,
+            valid_from,
+        } => match api
+            .package_set_valid_from(sel, activation_id, valid_from)
+            .await
+        {
+            Ok(v) => Response::PackageSetValidFrom(v),
             Err(e) => Response::Error(e),
         },
         Request::PackageCancel { sel, activation_id } => {
@@ -3312,6 +3328,7 @@ mod tests {
             _: i64,
             _: String,
             _: String,
+            _: String,
         ) -> Result<(u64, u64), RpcError> {
             Ok((0, 0))
         }
@@ -3481,6 +3498,17 @@ mod tests {
             _: HostingSelector,
             _: i64,
             _: Option<hyperion_types::ServicePackage>,
+            _: Option<i64>,
+        ) -> Result<hyperion_types::HostingPackage, RpcError> {
+            Err(RpcError::Internal {
+                message: "not supported by this agent".into(),
+            })
+        }
+        async fn package_set_valid_from(
+            &self,
+            _: HostingSelector,
+            _: i64,
+            _: i64,
         ) -> Result<hyperion_types::HostingPackage, RpcError> {
             Err(RpcError::Internal {
                 message: "not supported by this agent".into(),

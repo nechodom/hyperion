@@ -676,6 +676,13 @@ pub struct ServicePackage {
     /// older agent that doesn't send it still deserialises.
     #[serde(default)]
     pub check_items: String,
+    /// Care-report sections this plan LEAVES OUT, as a comma list of
+    /// [`crate::report_sections::ReportSection`] ids. Empty = every section
+    /// is sent, which is what every plan meant before the choice existed.
+    /// `#[serde(default)]` so an older agent that doesn't send it still
+    /// deserialises.
+    #[serde(default)]
+    pub report_omit: String,
     #[serde(default)]
     pub features: PackageFeatures,
     /// How many hostings currently hold this package (active activations).
@@ -722,6 +729,9 @@ pub struct PackageInput {
     /// `{id,label,detail}`. Empty = the built-in four.
     #[serde(default)]
     pub check_items: String,
+    /// Care-report sections to leave out (comma list). Empty = send them all.
+    #[serde(default)]
+    pub report_omit: String,
     #[serde(default)]
     pub features: PackageFeatures,
 }
@@ -746,6 +756,9 @@ impl Default for PackageInput {
             // Empty = the built-in four. Same reasoning: a plan that says
             // nothing must not silently shrink what it promises.
             check_items: String::new(),
+            // Nothing left out: a plan that says nothing must not quietly
+            // shorten the letter its customers already receive.
+            report_omit: String::new(),
         }
     }
 }
@@ -773,6 +786,26 @@ pub struct HostingPackage {
     /// on the OWNING node, which has no `service_packages` rows to resolve.
     #[serde(default)]
     pub check_items: String,
+    /// Care-report sections this activation leaves out, snapshotted from the
+    /// definition (and re-pushed when the plan is edited, like the checklist).
+    /// Empty = every section. Read on the OWNING node, which has no
+    /// `service_packages` rows, so it cannot be resolved through `package_id`.
+    #[serde(default)]
+    pub report_omit: String,
+    /// When this activation's term begins, set by the operator. `None` = the
+    /// moment it was activated, which is what every row before this existed
+    /// means. Backdated, it is where the first care report and the billing
+    /// clock start counting from; in the future, nothing is enforced and no
+    /// report is sent until it arrives.
+    #[serde(default)]
+    pub valid_from: Option<i64>,
+    /// False while the activation is waiting for its `valid_from`: its
+    /// features have not been captured or forced yet, so there is no prior
+    /// state to restore and nothing the site is "supposed" to be doing.
+    /// `#[serde(default = ...)]` is TRUE: an older node that predates the
+    /// field only ever wrote activations that were enforced at once.
+    #[serde(default = "default_true")]
+    pub enforcement_started: bool,
     /// Price the customer agreed to, snapshotted at activation — a later
     /// re-price or delete of the definition never rewrites it.
     pub price_minor: Option<i64>,
@@ -789,7 +822,26 @@ pub struct HostingPackage {
     pub prior_state_json: Option<String>,
 }
 
+fn default_true() -> bool {
+    true
+}
+
 impl HostingPackage {
+    /// When the term begins: the operator's date, else the activation moment.
+    pub fn effective_start(&self) -> i64 {
+        self.valid_from.unwrap_or(self.activated_at)
+    }
+
+    /// Waiting for its start date — nothing is enforced and no report is sent.
+    pub fn is_pending(&self) -> bool {
+        !self.enforcement_started
+    }
+
+    /// The sections this activation leaves out of the customer letter.
+    pub fn report_omit_set(&self) -> crate::report_sections::ReportOmit {
+        crate::report_sections::ReportOmit::parse(&self.report_omit)
+    }
+
     /// Pretty snapshot price like "490.00 Kč/month" or "—".
     pub fn pretty_price(&self) -> String {
         pretty_price(
@@ -1105,13 +1157,22 @@ impl CareReport {
     /// the customer nothing and invites the question of what they pay
     /// for.
     pub fn is_entirely_unmeasured(&self) -> bool {
-        self.attacks_blocked.is_none()
-            && self.updates_applied.is_none()
-            && self.usage.is_none()
-            && self.uptime.is_none()
-            && self.backups.is_none()
-            && self.integrity.is_none()
-            && self.performance.is_none()
+        self.is_entirely_unmeasured_for(crate::report_sections::ReportOmit::NONE)
+    }
+
+    /// [`Self::is_entirely_unmeasured`] for a letter that leaves some sections
+    /// out. Only the sections actually SENT count: a plan that sends just
+    /// "Availability" and has no uptime samples is a letter of nothing, even
+    /// if the (unsent) traffic section would have had figures.
+    pub fn is_entirely_unmeasured_for(&self, omit: crate::report_sections::ReportOmit) -> bool {
+        use crate::report_sections::ReportSection as S;
+        (omit.contains(S::Attacks) || self.attacks_blocked.is_none())
+            && (omit.contains(S::Updates) || self.updates_applied.is_none())
+            && (omit.contains(S::Traffic) || self.usage.is_none())
+            && (omit.contains(S::Uptime) || self.uptime.is_none())
+            && (omit.contains(S::Backups) || self.backups.is_none())
+            && (omit.contains(S::Integrity) || self.integrity.is_none())
+            && (omit.contains(S::Performance) || self.performance.is_none())
         // `service_work` is deliberately NOT part of this. It is a person
         // saying they looked, not a measurement, and a report carrying only
         // that would still be a report with nothing measured in it — which
@@ -1484,6 +1545,7 @@ mod tests {
             price_interval: Some("monthly".into()),
             letters_lang: String::new(),
             check_items: String::new(),
+            report_omit: String::new(),
             features: PackageFeatures::default(),
             active_count: 0,
             created_at: 0,
@@ -1492,6 +1554,34 @@ mod tests {
         assert_eq!(p.pretty_price(), "490.00 Kč/month");
         p.price_interval = None;
         assert_eq!(p.pretty_price(), "—");
+    }
+
+    #[test]
+    fn unmeasured_guard_only_counts_the_sections_that_are_sent() {
+        use crate::report_sections::{ReportOmit, ReportSection as S};
+        let mut r = CareReport::empty(HostingId("h".into()), "a.cz".into(), 0, 86_400);
+        assert!(r.is_entirely_unmeasured());
+        // Only traffic has figures.
+        r.usage = Some(CareUsage::default());
+        assert!(!r.is_entirely_unmeasured());
+        // A plan that sends everything BUT traffic has nothing to say.
+        assert!(r.is_entirely_unmeasured_for(ReportOmit::from_sections([S::Traffic])));
+        // A plan that sends traffic still does.
+        assert!(!r.is_entirely_unmeasured_for(ReportOmit::from_sections([S::Attacks])));
+    }
+
+    #[test]
+    fn activation_without_the_new_fields_reads_as_started_and_unbackdated() {
+        // A row an older node wrote: no valid_from, no enforcement_started.
+        let json = r#"{"id":1,"hosting_id":"h","package_id":1,"price_minor":null,
+            "price_currency":null,"price_interval":null,"next_billing_at":null,
+            "state":"active","activated_at":500,"cancelled_at":null}"#;
+        let a: HostingPackage = serde_json::from_str(json).expect("de");
+        assert!(a.enforcement_started, "older rows were enforced at once");
+        assert!(!a.is_pending());
+        assert_eq!(a.valid_from, None);
+        assert_eq!(a.effective_start(), 500);
+        assert!(a.report_omit_set().is_empty());
     }
 
     #[test]
@@ -1511,6 +1601,9 @@ mod tests {
             package_name: "Péče Plus".into(),
             letters_lang: "cs".into(),
             check_items: r#"[{"id":"render","label":"Vzhled"}]"#.into(),
+            report_omit: "attacks,uptime".into(),
+            valid_from: Some(1_699_000_000),
+            enforcement_started: false,
             price_minor: Some(49_000),
             price_currency: Some("Kč".into()),
             price_interval: Some("monthly".into()),
