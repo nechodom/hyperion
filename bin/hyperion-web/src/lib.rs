@@ -545,6 +545,10 @@ pub fn build_router(state: SharedState) -> Router {
             "/hostings/packages/report-send",
             post(handlers::packages::post_report_send),
         )
+        .route(
+            "/hostings/packages/report-recipients",
+            post(handlers::packages::post_report_recipients),
+        )
         .route("/certs", get(handlers::certs::get_certs))
         .route("/vulns", get(handlers::vulns::get_vulns))
         .route("/bans", get(handlers::bans::get_bans))

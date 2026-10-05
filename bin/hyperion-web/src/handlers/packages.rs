@@ -645,7 +645,8 @@ struct PackagesCardTpl {
     /// the only thing that makes the preview / send-now controls
     /// meaningful, so they are absent otherwise.
     sells_report: bool,
-    /// Where a care report would be sent — the hosting's owner e-mail.
+    /// Where a care report would be sent — the care plan's own recipient
+    /// list, NOT the expiry owner e-mail.
     /// Empty when none is set, which is the case worth shouting about: a
     /// package that SELLS a periodic report and has nowhere to send it is
     /// a promise the customer paid for and will never receive, and nothing
@@ -1093,6 +1094,92 @@ pub struct ReportForm {
     pub selector: String,
 }
 
+#[derive(Deserialize)]
+pub struct ReportRecipientsForm {
+    pub selector: String,
+    #[serde(default)]
+    pub recipients: String,
+}
+
+/// Split a free-typed recipient list and check each entry looks like an
+/// address. `Err` names the first bad one; an empty list is valid (it clears
+/// the setting, and the scheduled report then waits for one).
+fn parse_report_recipients(raw: &str) -> Result<Vec<String>, String> {
+    let mut out: Vec<String> = Vec::new();
+    for part in raw.split([',', ';', '\n', '\r', ' ', '\t']) {
+        let a = part.trim();
+        if a.is_empty() {
+            continue;
+        }
+        let ok = a.len() <= 254
+            && a.matches('@').count() == 1
+            && !a.starts_with('@')
+            && !a.ends_with('@')
+            && a.rsplit('@').next().is_some_and(|d| d.contains('.'))
+            && !a.chars().any(|c| c.is_control() || c == '<' || c == '>' || c == '"');
+        if !ok {
+            return Err(format!("\"{a}\" is not a valid e-mail address."));
+        }
+        if !out.iter().any(|e| e.eq_ignore_ascii_case(a)) {
+            out.push(a.to_string());
+        }
+    }
+    if out.len() > 10 {
+        return Err("At most 10 addresses.".into());
+    }
+    Ok(out)
+}
+
+/// POST /hostings/packages/report-recipients — who the care report is mailed
+/// to. Kept on the owning node in `hosting_kv`, apart from the expiry owner
+/// e-mail: different mail, different readers.
+pub async fn post_report_recipients(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<ReportRecipientsForm>,
+) -> Result<Response, AppError> {
+    let sel = match super::hostings::require_manage_for_selector(
+        &state,
+        &ctx,
+        &form.selector,
+        Capability::ProfilesManage,
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
+    let list = match parse_report_recipients(&form.recipients) {
+        Ok(l) => l,
+        Err(e) => return render_card(&state, &ctx, form.selector, None, Some(e), None).await,
+    };
+    let (detail, owner) = super::hostings::find_hosting_anywhere(&state, sel).await?;
+    let resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        owner.as_deref(),
+        Request::HostingKvSet {
+            hosting_id: detail.id.as_str().to_string(),
+            key: "care_report_recipients".into(),
+            value: list.join(", "),
+        },
+    )
+    .await;
+    let (flash, error) = match resp {
+        Ok(RpcResponse::HostingKvSet) => (
+            Some(if list.is_empty() {
+                "Care report recipients cleared — reports are held until one is set.".to_string()
+            } else {
+                format!("Care report will go to {}.", list.join(", "))
+            }),
+            None,
+        ),
+        Ok(RpcResponse::Error(e)) => (None, Some(format!("the owning node refused the change: {e}"))),
+        Ok(_) => (None, Some("unexpected response from the owning node".into())),
+        Err(e) => (None, Some(format!("the owning node could not be reached: {e}"))),
+    };
+    render_card(&state, &ctx, form.selector, flash, error, None).await
+}
+
 /// POST /hostings/packages/report-preview — render the report and send
 /// NOTHING.
 ///
@@ -1310,18 +1397,24 @@ async fn render_card(
         })
         .collect();
 
+    // Read from the same kv list as everything else on this card; an
+    // unreadable node shows as "no recipient", which is also what it sends.
     let report_to = crate::dispatcher::dispatch_to_node(
         state,
         owner.as_deref(),
-        Request::HostingGetExpiry(sel.clone()),
+        Request::HostingKvList {
+            hosting_id: detail.id.as_str().to_string(),
+        },
     )
     .await
     .ok()
     .and_then(|r| match r {
-        RpcResponse::HostingGetExpiry(e) => e.owner_email,
+        RpcResponse::HostingKvList(v) => v
+            .into_iter()
+            .find(|(k, _)| k == "care_report_recipients")
+            .map(|(_, v)| v.trim().to_string()),
         _ => None,
     })
-    .map(|s| s.trim().to_string())
     .unwrap_or_default();
 
     // The monthly checklist lives on the owning node beside the feature

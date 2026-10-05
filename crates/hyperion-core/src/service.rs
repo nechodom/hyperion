@@ -5551,10 +5551,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     pub async fn clear_expiry(&self, sel: HostingSelector) -> Result<(), RpcError> {
         let detail = self.get(sel).await?;
         // Clearing an expiry DATE must not also forget who to write to. The
-        // same `owner_email` is the recipient of the paid care report, so
-        // nulling it here silently stops a deliverable the customer is still
-        // paying for — and the address itself is then gone, with nothing in
-        // the UI saying it was dropped.
+        // `owner_email` is who the expiry warnings go to; clearing the date
+        // must not forget it, or the customer stops hearing from us at all.
         let existing = hyperion_state::scheduler::get_expiry(&self.pool, &detail.id)
             .await
             .ok()
@@ -18290,15 +18288,15 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// never read "sent to …" for a letter nobody received.
     ///
     /// Refuses (rather than falling back to the cluster's default
-    /// address) when the site has no owner e-mail — the report belongs to
+    /// address) when the site has no care report e-mail — the report belongs to
     /// the customer, and quietly mailing it to the operator instead would
     /// leave the customer with nothing while everything looked fine.
     pub async fn care_report_send(&self, sel: HostingSelector) -> Result<CareReportMail, RpcError> {
         let (detail, mail, letter) = self.care_report_mail(sel).await?;
         if mail.to.is_empty() {
             return Err(RpcError::Validation {
-                message: "this site has no owner e-mail — set one on the hosting first, \
-                          otherwise the report has nowhere to go"
+                message: "this site has no care report e-mail — set one on the care plan \
+                          first, otherwise the report has nowhere to go"
                     .into(),
             });
         }
@@ -18639,8 +18637,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 tracing::warn!(
                     domain = %detail.domain,
                     hosting_id = %detail.id.as_str(),
-                    "care report: due, but the site has no owner e-mail — nothing sent. \
-                     Set one on the hosting; the period stays open until then"
+                    "care report: due, but the site has no care report e-mail — nothing sent. \
+                     Set one on the care plan; the period stays open until then"
                 );
                 // Leave a marker so this is visible in the PANEL, not only in
                 // journalctl. A warning nobody reads is the same as no warning,
@@ -18841,16 +18839,22 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         }
     }
 
-    /// The customer's address for this site: the owner e-mail set on the
-    /// hosting, or empty. Deliberately no cluster-wide fallback — see
-    /// `care_report_send`.
+    /// Where this site's care report goes: the addresses saved on the care
+    /// plan (`care_report_recipients`), comma-joined. Deliberately NOT the
+    /// expiry `owner_email` — the report and the expiry warnings are
+    /// different mail for different readers — and deliberately no
+    /// cluster-wide fallback, see `care_report_send`. Empty when none is set.
     async fn care_report_recipient(&self, detail: &HostingDetail) -> String {
-        self.get_expiry(HostingSelector::Id(detail.id.clone()))
-            .await
-            .ok()
-            .and_then(|e| e.owner_email)
-            .map(|s| s.trim().to_string())
-            .unwrap_or_default()
+        let raw = hyperion_state::hosting_kv::get(
+            &self.pool,
+            detail.id.as_str(),
+            CARE_REPORT_RECIPIENTS_KV_KEY,
+        )
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+        parse_recipient_list(&raw).join(", ")
     }
 
     /// Compute the operator dashboard alert list. Scans hostings + certs
@@ -18881,7 +18885,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     severity: "warn".into(),
                     message: format!(
                         "{domain} is paying for a care report that cannot be sent — the site \
-                         has no owner e-mail. Set one under Expiration on the site, then the \
+                         has no care report e-mail. Set one on its care plan, then the \
                          report goes out on the next sweep with the period intact."
                     ),
                     hosting: Some(if domain.is_empty() { hid } else { domain }),
@@ -30738,6 +30742,8 @@ const UNMEASURED: &str = "—";
 
 /// `hosting_kv` key holding the monthly service checklist JSON.
 pub const CARE_CHECKS_KV_KEY: &str = "care_service_checks";
+/// Care report recipients (comma-separated), set on the care plan card.
+pub const CARE_REPORT_RECIPIENTS_KV_KEY: &str = "care_report_recipients";
 
 /// A count, or [`UNMEASURED`] when there is none.
 fn opt_num(cat: &LetterCatalog, v: Option<i64>) -> String {
@@ -38361,11 +38367,18 @@ mod tests {
         s.create(req("pece.cz")).await.expect("create");
         let sel = HostingSelector::Domain(Domain::parse("pece.cz").expect("parse"));
         let detail = s.get(sel.clone()).await.expect("get");
-        // The customer's address. No expires_at: this is about the report,
-        // not the expiry chain.
-        let mut e = hyperion_types::HostingExpiry::defaults();
-        e.owner_email = Some("zakaznik@pece.cz".into());
-        s.set_expiry(sel, e).await.expect("expiry");
+        // The customer's report address, kept apart from the expiry
+        // `owner_email` on purpose.
+        hyperion_state::hosting_kv::set(
+            pool,
+            detail.id.as_str(),
+            CARE_REPORT_RECIPIENTS_KV_KEY,
+            "zakaznik@pece.cz",
+            1,
+        )
+        .await
+        .expect("recipients");
+        let _ = sel;
         // Bought 40 days ago ⇒ the first period is [activated_at, now) and
         // is more than one month wide, so the report is due.
         packages::activate(
