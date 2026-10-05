@@ -655,6 +655,8 @@ struct PackagesCardTpl {
     /// preview. `None` on every other render; a preview is never sticky,
     /// because a stale one would show a period that has since moved.
     preview: Option<ReportPreview>,
+    /// `YYYY-MM-DD` (UTC) — the latest day the custom-range picker offers.
+    today: String,
     /// Set after an action so the swapped-in card carries its own result.
     flash: Option<String>,
     error: Option<String>,
@@ -715,6 +717,12 @@ struct ReportPreview {
     /// report; the operator should see why rather than wonder where their
     /// customer's mail went.
     entirely_unmeasured: bool,
+    /// The operator's own range, as the date inputs took it, when this is a
+    /// one-off custom-range preview — empty for the scheduled period. The
+    /// "Send this report" button posts these back verbatim, so what goes out
+    /// is the range that was just read, not whatever the pickers say now.
+    range_from: String,
+    range_to: String,
 }
 
 impl ReportPreview {
@@ -737,6 +745,8 @@ impl ReportPreview {
             to: m.to,
             cadence: m.cadence,
             entirely_unmeasured: m.entirely_unmeasured,
+            range_from: String::new(),
+            range_to: String::new(),
         }
     }
 }
@@ -1189,6 +1199,128 @@ pub async fn post_report_send(
     render_card(&state, &ctx, form.selector, flash, error, None).await
 }
 
+#[derive(Deserialize)]
+pub struct ReportRangeForm {
+    pub selector: String,
+    /// First day the report covers, `YYYY-MM-DD` (UTC).
+    #[serde(default)]
+    pub from: String,
+    /// Last day it covers, inclusive, `YYYY-MM-DD` (UTC).
+    #[serde(default)]
+    pub to: String,
+}
+
+/// The picker's two inclusive UTC days as the half-open `[from, to)` every
+/// report period uses: midnight of the first day up to midnight AFTER the
+/// last one. The node clamps the end to now, so "to: today" covers today so
+/// far.
+fn report_range(form: &ReportRangeForm) -> Result<(i64, i64), String> {
+    let from = parse_date_input(&form.from)?.ok_or("pick the first day of the report")?;
+    let to = parse_date_input(&form.to)?.ok_or("pick the last day of the report")?;
+    if to < from {
+        return Err("the last day is before the first one".into());
+    }
+    Ok((from, to + 86_400))
+}
+
+/// POST /hostings/packages/report-range-preview — render a one-off report
+/// for a range the operator picks, and send NOTHING.
+///
+/// Same gate, same owning-node dispatch and same renderer as
+/// [`post_report_preview`]; only the period differs. The preview it returns
+/// carries the range, so its "Send this report" button can only ever send
+/// what was just read.
+pub async fn post_report_range_preview(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<ReportRangeForm>,
+) -> Result<Response, AppError> {
+    let sel = match super::hostings::require_manage_for_selector(
+        &state,
+        &ctx,
+        &form.selector,
+        Capability::ProfilesManage,
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
+    let (from, to) = match report_range(&form) {
+        Ok(r) => r,
+        Err(e) => return render_card(&state, &ctx, form.selector, None, Some(e), None).await,
+    };
+    let owner = owner_node(&state, &form.selector).await;
+    let resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        owner.as_deref(),
+        Request::CareReportPreviewRange { sel, from, to },
+    )
+    .await;
+    let (preview, error) = match resp {
+        Ok(RpcResponse::CareReportPreviewRange(m)) => {
+            let mut p = ReportPreview::from_mail(m);
+            p.range_from = form.from.trim().to_string();
+            p.range_to = form.to.trim().to_string();
+            (Some(p), None)
+        }
+        Ok(RpcResponse::Error(e)) => (None, Some(e.to_string())),
+        Ok(_) => (None, Some("unexpected response".into())),
+        Err(e) => (None, Some(e.to_string())),
+    };
+    render_card(&state, &ctx, form.selector, None, error, preview).await
+}
+
+/// POST /hostings/packages/report-range-send — mail that one-off report.
+///
+/// Outside the schedule: the node leaves the period marker alone, so the
+/// next scheduled report covers exactly what it would have anyway. Refuses
+/// like Send now does (no owner e-mail, no relay, relay said no).
+pub async fn post_report_range_send(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<ReportRangeForm>,
+) -> Result<Response, AppError> {
+    let sel = match super::hostings::require_manage_for_selector(
+        &state,
+        &ctx,
+        &form.selector,
+        Capability::ProfilesManage,
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
+    let (from, to) = match report_range(&form) {
+        Ok(r) => r,
+        Err(e) => return render_card(&state, &ctx, form.selector, None, Some(e), None).await,
+    };
+    let owner = owner_node(&state, &form.selector).await;
+    let resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        owner.as_deref(),
+        Request::CareReportSendRange { sel, from, to },
+    )
+    .await;
+    let (flash, error) = match resp {
+        Ok(RpcResponse::CareReportSendRange(m)) => {
+            let p = ReportPreview::from_mail(m);
+            (
+                Some(format!(
+                    "Care report for {} sent to {}. The scheduled report is unaffected.",
+                    p.period, p.to
+                )),
+                None,
+            )
+        }
+        Ok(RpcResponse::Error(e)) => (None, Some(e.to_string())),
+        Ok(_) => (None, Some("unexpected response".into())),
+        Err(e) => (None, Some(e.to_string())),
+    };
+    render_card(&state, &ctx, form.selector, flash, error, None).await
+}
+
 /// Build and render the card, or collapse to nothing.
 ///
 /// Empty response (the HTMX swap removes the skeleton) in two cases:
@@ -1398,6 +1530,7 @@ async fn render_card(
         can_manage,
         sells_report,
         preview,
+        today: date_input(chrono::Utc::now().timestamp()),
         flash,
         error,
     };
@@ -2007,6 +2140,92 @@ fn urlencoding(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn range(from: &str, to: &str) -> Result<(i64, i64), String> {
+        report_range(&ReportRangeForm {
+            selector: "x".into(),
+            from: from.into(),
+            to: to.into(),
+        })
+    }
+
+    fn card(preview: Option<ReportPreview>) -> String {
+        PackagesCardTpl {
+            selector: "id:abc".into(),
+            csrf_token: "tok".into(),
+            held: Vec::new(),
+            in_force_count: 1,
+            offerable: Vec::new(),
+            can_manage: true,
+            sells_report: true,
+            report_to: "zakaznik@pece.cz".into(),
+            preview,
+            today: "2026-10-05".into(),
+            flash: None,
+            error: None,
+            check_period: "2026-10".into(),
+            check_period_label: String::new(),
+            checks: Vec::new(),
+            checks_done: 0,
+            checks_total: 0,
+            prev_period_label: String::new(),
+            prev_outstanding: 0,
+            prev_total: 0,
+            show_checks: false,
+        }
+        .render()
+        .expect("render")
+    }
+
+    fn mail() -> CareReportMail {
+        CareReportMail {
+            subject: "Report".into(),
+            body: "body".into(),
+            period_start: 1_767_225_600,
+            period_end: 1_769_904_000,
+            to: "zakaznik@pece.cz".into(),
+            cadence: "monthly".into(),
+            entirely_unmeasured: false,
+        }
+    }
+
+    /// The range picker is always there; the send button only on a
+    /// custom-range preview, carrying exactly the range that was rendered.
+    #[test]
+    fn card_offers_a_range_send_only_for_a_range_preview() {
+        let html = card(None);
+        assert!(html.contains("/hostings/packages/report-range-preview"));
+        assert!(!html.contains("/hostings/packages/report-range-send"));
+
+        let scheduled = card(Some(ReportPreview::from_mail(mail())));
+        assert!(!scheduled.contains("/hostings/packages/report-range-send"));
+
+        let mut p = ReportPreview::from_mail(mail());
+        p.range_from = "2026-01-01".into();
+        p.range_to = "2026-01-31".into();
+        let html = card(Some(p));
+        assert!(html.contains("/hostings/packages/report-range-send"));
+        assert!(html.contains(r#"name="from" value="2026-01-01""#), "{html}");
+        assert!(html.contains(r#"name="to" value="2026-01-31""#), "{html}");
+        assert!(html.contains("custom range preview"));
+        assert!(html.contains("1 Jan 2026 – 31 Jan 2026"), "{html}");
+    }
+
+    #[test]
+    fn report_range_is_half_open_over_inclusive_days() {
+        // 1 Jan 2026 .. 31 Jan 2026 inclusive = [1 Jan 00:00, 1 Feb 00:00).
+        assert_eq!(
+            range("2026-01-01", "2026-01-31"),
+            Ok((1_767_225_600, 1_769_904_000))
+        );
+        // One day is a real window.
+        let (a, b) = range("2026-01-01", "2026-01-01").expect("one day");
+        assert_eq!(b - a, 86_400);
+        assert!(range("2026-02-01", "2026-01-31").is_err(), "reversed");
+        assert!(range("", "2026-01-31").is_err(), "missing start");
+        assert!(range("2026-01-01", "").is_err(), "missing end");
+        assert!(range("nope", "2026-01-31").is_err(), "not a date");
+    }
 
     fn live(monitoring: bool, cadence: BackupCadence) -> LiveFeatureState {
         LiveFeatureState {

@@ -1600,7 +1600,10 @@ fn print_pretty(resp: &Response) {
                 println!("✓ re-asserted {corrected} paid feature(s) that had been switched off");
             }
         }
-        Response::CareReportPreview(m) | Response::CareReportSend(m) => {
+        Response::CareReportPreview(m)
+        | Response::CareReportSend(m)
+        | Response::CareReportPreviewRange(m)
+        | Response::CareReportSendRange(m) => {
             // The body is the point — print it verbatim, because the whole
             // reason preview exists is to read exactly what the customer
             // gets. Everything else goes above it as a short header.

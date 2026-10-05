@@ -18258,7 +18258,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         &self,
         sel: HostingSelector,
     ) -> Result<CareReportMail, RpcError> {
-        let (detail, mail, letter) = self.care_report_mail(sel).await?;
+        let (detail, mail, letter) = self.care_report_mail(sel, None).await?;
         // Audited even though it sends nothing: the preview renders the
         // customer's owner e-mail, their traffic figures, the attacks-blocked
         // count and the integrity verdict. "It only reads" is not a reason to
@@ -18294,7 +18294,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// the customer, and quietly mailing it to the operator instead would
     /// leave the customer with nothing while everything looked fine.
     pub async fn care_report_send(&self, sel: HostingSelector) -> Result<CareReportMail, RpcError> {
-        let (detail, mail, letter) = self.care_report_mail(sel).await?;
+        let (detail, mail, letter) = self.care_report_mail(sel, None).await?;
         if mail.to.is_empty() {
             return Err(RpcError::Validation {
                 message: "this site has no owner e-mail — set one on the hosting first, \
@@ -18343,6 +18343,97 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 // Which body the customer just received — see the preview's
                 // audit row for why the answer is per-node and therefore
                 // worth recording next to the send itself.
+                "letter": letter,
+            })
+            .to_string(),
+            "ok",
+        )
+        .await;
+        Ok(mail)
+    }
+
+    /// Render a report for the operator's own `[from, to)` WITHOUT sending
+    /// anything — the preview half of a one-off, custom-range report.
+    pub async fn care_report_preview_range(
+        &self,
+        sel: HostingSelector,
+        from: i64,
+        to: i64,
+    ) -> Result<CareReportMail, RpcError> {
+        let (detail, mail, letter) = self.care_report_mail(sel, Some((from, to))).await?;
+        self.append_audit(
+            "package.report.preview",
+            Some(detail.id.as_str()),
+            &serde_json::json!({
+                "domain": detail.domain,
+                "letter": letter,
+                "custom_range": true,
+                "period_start": mail.period_start,
+                "period_end": mail.period_end,
+            })
+            .to_string(),
+            "ok",
+        )
+        .await;
+        Ok(mail)
+    }
+
+    /// Send a report for the operator's own `[from, to)` now — a one-off,
+    /// OUTSIDE the schedule.
+    ///
+    /// Same refusals as [`Self::care_report_send`] (no owner e-mail, no
+    /// relay, relay said no), with one deliberate difference: the period
+    /// marker is never touched. The schedule's periods stay contiguous no
+    /// matter what range the operator picked — a custom report for last
+    /// year must not swallow the month the next scheduled letter is about,
+    /// and one for last week must not make the schedule repeat it.
+    pub async fn care_report_send_range(
+        &self,
+        sel: HostingSelector,
+        from: i64,
+        to: i64,
+    ) -> Result<CareReportMail, RpcError> {
+        let (detail, mail, letter) = self.care_report_mail(sel, Some((from, to))).await?;
+        if mail.to.is_empty() {
+            return Err(RpcError::Validation {
+                message: "this site has no owner e-mail — set one on the hosting first, \
+                          otherwise the report has nowhere to go"
+                    .into(),
+            });
+        }
+        if self.email_config.is_none() {
+            return Err(RpcError::Validation {
+                message: "no SMTP relay is configured on the node that owns this site, \
+                          so nothing can be sent"
+                    .into(),
+            });
+        }
+        if !self
+            .notify_email(
+                &mail.to,
+                &mail.subject,
+                &mail.body,
+                Some(detail.id.as_str()),
+                CARE_REPORT_EMAIL_KIND,
+            )
+            .await
+        {
+            return Err(RpcError::Internal_with(format!(
+                "the SMTP relay refused this report, so nothing was sent — \
+                 open the Emails tab on {} for the relay's own message.",
+                detail.domain
+            )));
+        }
+        // No `care_report_mark_reported`: see the doc above.
+        self.append_audit(
+            "package.report.send",
+            Some(detail.id.as_str()),
+            &serde_json::json!({
+                "to": mail.to,
+                "period_start": mail.period_start,
+                "period_end": mail.period_end,
+                "manual": true,
+                "custom_range": true,
                 "letter": letter,
             })
             .to_string(),
@@ -18464,19 +18555,29 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// Build the current period's mail for one hosting — the shared body
     /// of preview and send, so the two can never render different text.
     ///
+    /// `range` is the operator's own `[from, to)` for a one-off report;
+    /// `None` is the open period the schedule would report next. Everything
+    /// else — recipient, sections left out, letter — is the same either way,
+    /// so a custom-range letter reads exactly like a scheduled one.
+    ///
     /// Returns the letter's origin alongside it (`letter_origin`), read from
     /// the SAME string that was rendered: re-reading agent.toml at the audit
     /// site could name a letter the mail wasn't built from.
     async fn care_report_mail(
         &self,
         sel: HostingSelector,
+        range: Option<(i64, i64)>,
     ) -> Result<(HostingDetail, CareReportMail, &'static str), RpcError> {
         let detail = self.get(sel).await?;
         let now = now_secs();
         let (cadence, started_at, omit) = self.care_report_entitlement(&detail.id).await;
-        let (from, to) = self
-            .care_report_period(&detail.id, cadence, started_at, now)
-            .await;
+        let (from, to) = match range {
+            Some(r) => care_report_custom_range(r, now)?,
+            None => {
+                self.care_report_period(&detail.id, cadence, started_at, now)
+                    .await
+            }
+        };
         let report = self
             .care_report_build(HostingSelector::Id(detail.id.clone()), from, to)
             .await?;
@@ -30267,6 +30368,27 @@ pub fn care_report_render(
     care_report_render_with(cat, report, domain, "")
 }
 
+/// Validate an operator-picked report range and clamp its end to `now`.
+///
+/// Half-open `[from, to)` in UNIX seconds, like every other report period.
+/// The end is clamped rather than refused so "to: today" works at any hour —
+/// a report cannot describe time that has not happened. What is left must
+/// still be a real window: a reversed or empty range would render as a
+/// period in which nothing at all happened, which reads as a clean bill of
+/// health rather than as a typo.
+pub(crate) fn care_report_custom_range(
+    (from, to): (i64, i64),
+    now: i64,
+) -> Result<(i64, i64), RpcError> {
+    let to = to.min(now);
+    if from < 0 || from >= to {
+        return Err(RpcError::Validation {
+            message: "the report range must start before it ends, and before now".into(),
+        });
+    }
+    Ok((from, to))
+}
+
 /// The sample a Settings preview shows for each `{placeholder}`, as
 /// `(name, value)` pairs ready to hand to the page.
 ///
@@ -38805,6 +38927,90 @@ mod tests {
         assert!(
             !audit.iter().any(|a| a.action == "package.report.send"),
             "nothing was sent, so nothing may be audited as sent: {audit:?}"
+        );
+    }
+
+    /// A custom-range preview covers exactly the operator's range, clamped
+    /// to now, and leaves the schedule's marker where it was.
+    #[tokio::test]
+    async fn care_report_range_preview_uses_the_given_range_and_marks_nothing() {
+        let pool = open_memory().await.expect("open");
+        let (s, detail) = site_owing_a_care_report(&pool).await;
+        let now = now_secs();
+        let from = now - 365 * 86_400;
+        // An end in the future: "to: today" posts tomorrow's midnight.
+        let mail = s
+            .care_report_preview_range(HostingSelector::Id(detail.id.clone()), from, now + 86_400)
+            .await
+            .expect("preview");
+        assert_eq!(mail.period_start, from);
+        assert!(
+            mail.period_end <= now_secs() && mail.period_end >= now,
+            "the end is clamped to now: {}",
+            mail.period_end
+        );
+        assert_eq!(mail.to, "zakaznik@pece.cz");
+        assert_eq!(
+            hyperion_state::hosting_kv::get(&pool, detail.id.as_str(), CARE_REPORT_KV_PERIOD_END)
+                .await
+                .expect("kv"),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn care_report_range_refuses_an_empty_or_reversed_range() {
+        let pool = open_memory().await.expect("open");
+        let (s, detail) = site_owing_a_care_report(&pool).await;
+        let now = now_secs();
+        for (from, to) in [
+            (now - 86_400, now - 2 * 86_400), // reversed
+            (now - 86_400, now - 86_400),     // empty
+            (now + 86_400, now + 2 * 86_400), // wholly in the future
+        ] {
+            let err = s
+                .care_report_preview_range(HostingSelector::Id(detail.id.clone()), from, to)
+                .await
+                .expect_err("not a real window");
+            assert!(
+                matches!(err, RpcError::Validation { .. }),
+                "{from}..{to}: {err}"
+            );
+        }
+    }
+
+    /// A one-off send never moves the schedule: not when it fails, and the
+    /// success path has no marker write at all (see `care_report_send_range`).
+    #[tokio::test]
+    async fn care_report_range_send_leaves_the_schedule_marker_alone() {
+        let pool = open_memory().await.expect("open");
+        let (s, detail) = site_owing_a_care_report(&pool).await;
+        let marker = (now_secs() - 10 * 86_400).to_string();
+        hyperion_state::hosting_kv::set(
+            &pool,
+            detail.id.as_str(),
+            CARE_REPORT_KV_PERIOD_END,
+            &marker,
+            now_secs(),
+        )
+        .await
+        .expect("kv");
+        let now = now_secs();
+        let err = s
+            .care_report_send_range(
+                HostingSelector::Id(detail.id.clone()),
+                now - 90 * 86_400,
+                now,
+            )
+            .await
+            .expect_err("the relay refuses");
+        assert!(err.to_string().contains("Emails tab"), "got: {err}");
+        assert_eq!(
+            hyperion_state::hosting_kv::get(&pool, detail.id.as_str(), CARE_REPORT_KV_PERIOD_END)
+                .await
+                .expect("kv")
+                .as_deref(),
+            Some(marker.as_str())
         );
     }
 

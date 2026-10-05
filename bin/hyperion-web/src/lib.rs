@@ -545,6 +545,16 @@ pub fn build_router(state: SharedState) -> Router {
             "/hostings/packages/report-send",
             post(handlers::packages::post_report_send),
         )
+        // A one-off report for a range the operator picks. Outside the
+        // schedule: the period marker is left alone.
+        .route(
+            "/hostings/packages/report-range-preview",
+            post(handlers::packages::post_report_range_preview),
+        )
+        .route(
+            "/hostings/packages/report-range-send",
+            post(handlers::packages::post_report_range_send),
+        )
         .route("/certs", get(handlers::certs::get_certs))
         .route("/vulns", get(handlers::vulns::get_vulns))
         .route("/bans", get(handlers::bans::get_bans))
