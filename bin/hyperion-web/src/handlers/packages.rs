@@ -1116,7 +1116,9 @@ fn parse_report_recipients(raw: &str) -> Result<Vec<String>, String> {
             && !a.starts_with('@')
             && !a.ends_with('@')
             && a.rsplit('@').next().is_some_and(|d| d.contains('.'))
-            && !a.chars().any(|c| c.is_control() || c == '<' || c == '>' || c == '"');
+            && !a
+                .chars()
+                .any(|c| c.is_control() || c == '<' || c == '>' || c == '"');
         if !ok {
             return Err(format!("\"{a}\" is not a valid e-mail address."));
         }
@@ -1173,9 +1175,18 @@ pub async fn post_report_recipients(
             }),
             None,
         ),
-        Ok(RpcResponse::Error(e)) => (None, Some(format!("the owning node refused the change: {e}"))),
-        Ok(_) => (None, Some("unexpected response from the owning node".into())),
-        Err(e) => (None, Some(format!("the owning node could not be reached: {e}"))),
+        Ok(RpcResponse::Error(e)) => (
+            None,
+            Some(format!("the owning node refused the change: {e}")),
+        ),
+        Ok(_) => (
+            None,
+            Some("unexpected response from the owning node".into()),
+        ),
+        Err(e) => (
+            None,
+            Some(format!("the owning node could not be reached: {e}")),
+        ),
     };
     render_card(&state, &ctx, form.selector, flash, error, None).await
 }
