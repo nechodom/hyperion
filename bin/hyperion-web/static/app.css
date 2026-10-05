@@ -503,6 +503,9 @@ pre code {
     gap: 0.25rem 0.75rem;
   }
   .sidebar .nav-section { padding: 0; }
+  /* The desktop active bar hangs off the sidebar's left edge; in the
+     drop-down it would sit on the screen edge. The filled pill is enough. */
+  .sidebar a.nav-link.active::before { display: none; }
   .sidebar a.nav-link { padding: 0.55rem 0.7rem; }
   .content { padding: 1.25rem 1rem 3rem; }
 }
@@ -561,12 +564,20 @@ pre code {
 
 .breadcrumbs {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 0.45rem;
+  gap: 0.2rem 0.45rem;
   color: var(--text-dim);
   font-size: 0.85rem;
   margin-bottom: 0.4rem;
+  /* Wrap whole crumbs; only a long domain may break inside itself. On a
+     phone the flex items used to squeeze into narrow columns instead. */
+  overflow-wrap: anywhere;
 }
+/* A sticky header pulls itself up by its own padding (-0.85rem) and has
+   an opaque background, so it painted over the lower half of a crumb
+   line — visible as soon as a crumb wrapped on a phone. */
+.breadcrumbs:has(+ .page-header.sticky) { margin-bottom: 1.25rem; }
 .breadcrumbs a { color: var(--text-dim); }
 .breadcrumbs a:hover { color: var(--text); }
 .breadcrumbs .sep { color: var(--text-soft); }
@@ -3046,6 +3057,11 @@ hr.divider {
 
   /* Cards: tighter still. */
   .card { padding: 0.85rem 0.85rem; }
+  /* Tables bleed to the card edge with a negative margin equal to the
+     card padding; the ≤760 rule set -1rem, so at this tighter padding
+     every table overshot its card by a sliver and scrolled sideways. */
+  .table-wrap { margin: 0 -0.85rem -0.85rem; }
+  .bulk-bar { margin: 0 -0.85rem; }
 
   /* Forms inside cards: pull-in the per-field padding. */
   .field input,
@@ -3059,6 +3075,16 @@ hr.divider {
      less-essential columns (created_at, node, etc.). The first
      and last columns (domain + actions) always stay visible. */
   .hide-on-phone { display: none !important; }
+
+  /* Row actions (View / Delete …) stack in their cell: side by side
+     they made the last column ~110px wide, pushing it past the edge
+     of the /hostings table so Delete needed a sideways scroll. */
+  td .row-actions { flex-direction: column; align-items: stretch; gap: 0.3rem; }
+  td .row-actions form { display: block !important; }
+  td .row-actions .btn { width: 100%; justify-content: center; }
+  /* Long domains break inside the cell instead of widening the table. */
+  td a:not(.btn) { overflow-wrap: anywhere; }
+  .bulk-bar { padding: 0.7rem 0.85rem !important; }
 
   /* Activity feed: simpler layout on phones. */
   .activity-target { max-width: 100%; white-space: normal; }
@@ -3078,7 +3104,10 @@ hr.divider {
 @media (pointer: coarse) {
   /* Anyone on a touch device — including iPads in desktop view —
      gets larger hit areas on inline links inside tables. */
-  td a, td button { padding: 0.25rem 0.4rem; margin: -0.25rem -0.4rem; }
+  /* Bare links/buttons only: a `.btn` already has its own padding,
+     and the negative margin shoved stacked row-action buttons
+     sideways out of line with each other. */
+  td a:not(.btn), td button:not(.btn) { padding: 0.25rem 0.4rem; margin: -0.25rem -0.4rem; }
 }
 
 /* ────────────────────────────────────────────────────────────────
@@ -4441,6 +4470,11 @@ details.inline-action > .popover .popover-foot { display: flex; justify-content:
   .table-wrap.flush { margin: 0.25rem -1rem 0; }
   .table-wrap.flush-b { margin: 0.25rem -1rem -1rem; }
 }
+@media (max-width: 480px) {
+  /* Match the ≤480 card padding (0.85rem), see .table-wrap there. */
+  .table-wrap.flush { margin: 0.25rem -0.85rem 0; }
+  .table-wrap.flush-b { margin: 0.25rem -0.85rem -0.85rem; }
+}
 td .cell-sub { display: block; font-size: 0.76rem; color: var(--text-soft); margin-top: 0.1rem; }
 td .cell-sub code { font-size: 0.74rem; }
 
@@ -4577,3 +4611,14 @@ details.disclosure.danger > summary { color: var(--danger); font-weight: 600; }
   .m-wrap { flex-wrap: wrap !important; }
   .m-stack > *, .m-wrap > * { min-width: 0; }
 }
+
+/* Page-header children may shrink to the row: a title with a long domain
+   or a "Back to <domain>" button otherwise kept its max-content width
+   and ran past the right edge at phone width. Buttons there may wrap. */
+.page-header > * { min-width: 0; max-width: 100%; }
+.page-header .actions .btn,
+.page-header .m-wrap .btn { white-space: normal; overflow-wrap: anywhere; text-align: center; }
+
+/* A native file input has a fixed intrinsic width (~230px) that ignores
+   its container; next to the avatar on /profile it poked out of the card. */
+input[type="file"] { max-width: 100%; min-width: 0; }

@@ -2952,7 +2952,7 @@
   <form method="post" action="/hostings/php-ini" hx-post="/hostings/php-ini" hx-swap="none">
     <input type="hidden" name="_csrf" value="{{ csrf_php_ini }}">
     <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
-    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(180px, 100%), 1fr));gap:1rem">
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(10rem, 100%), 1fr));gap:1rem">
       <div class="field" style="margin:0">
         <label for="pi_upload"><code>upload_max_filesize</code></label>
         <input id="pi_upload" name="upload_max_filesize" value="{{ php_ini.upload_max_filesize }}" placeholder="64M" autocomplete="off">
