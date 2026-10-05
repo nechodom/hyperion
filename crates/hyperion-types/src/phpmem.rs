@@ -180,6 +180,24 @@ pub fn decide(
     Step::Nothing
 }
 
+/// The operator's own `memory_limit` once a limits-card save lands — the
+/// value the automation steps back down to, so the one its ceiling must be
+/// above. Mirrors `set_limits`: a value different from the stored one becomes
+/// the new floor; resubmitting the stored (possibly raised) value keeps the
+/// floor already in `st`.
+pub fn floor_after_save(typed_mb: i64, stored_mb: Option<i64>, st: Option<&State>) -> i64 {
+    match (stored_mb, st) {
+        (Some(stored), Some(s)) if typed_mb == stored && s.base_mb > 0 => s.base_mb,
+        _ => typed_mb,
+    }
+}
+
+/// A ceiling at or under the floor leaves the automation nothing to raise
+/// to: every out-of-memory ends as a "stuck at the ceiling" alert.
+pub fn ceiling_leaves_no_room(ceiling_mb: i64, floor_mb: i64) -> bool {
+    ceiling_mb <= floor_mb
+}
+
 /// Per-worker memory the node can afford: three quarters of its RAM shared
 /// by every worker the pool may run at once.
 pub fn ram_cap_mb(mem_total_mb: i64, max_children: i64) -> Option<i64> {
@@ -358,5 +376,32 @@ mod tests {
         assert_eq!(State::parse(&s.to_json()), Some(s));
         assert_eq!(State::parse(r#"{"base_mb":128}"#), Some(st(128)));
         assert_eq!(State::parse("garbage"), None);
+    }
+
+    #[test]
+    fn floor_after_save_follows_set_limits() {
+        // Raised 512 → 640; the card resubmits 640 unchanged: floor stays 512.
+        assert_eq!(floor_after_save(640, Some(640), Some(&st(512))), 512);
+        // A new value typed by hand is the new floor.
+        assert_eq!(floor_after_save(1024, Some(640), Some(&st(512))), 1024);
+        // No state yet (never on) or no stored row: the typed value.
+        assert_eq!(floor_after_save(1024, Some(1024), None), 1024);
+        assert_eq!(floor_after_save(256, None, Some(&st(512))), 256);
+        assert_eq!(floor_after_save(256, Some(256), Some(&st(0))), 256);
+    }
+
+    #[test]
+    fn a_ceiling_at_or_under_the_floor_leaves_no_room() {
+        // The reported case: 1024 MB of its own, ceiling 512.
+        assert!(ceiling_leaves_no_room(512, 1024));
+        assert!(ceiling_leaves_no_room(1024, 1024));
+        assert!(!ceiling_leaves_no_room(1152, 1024));
+        // And decide() agrees: an OOM there only ever reports Capped.
+        let mut s = st(1024);
+        s.last_oom_at = 1_000_000;
+        assert!(matches!(
+            decide(1_000_000, 1024, 512, None, &s),
+            Step::Capped { .. }
+        ));
     }
 }

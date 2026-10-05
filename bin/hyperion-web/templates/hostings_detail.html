@@ -2771,16 +2771,52 @@
     <div class="field-row">
       <div class="field">
         <label class="field-checkbox" style="margin-top:1.6rem">
-          <input type="checkbox" name="mem_auto" value="on"{% if mem_auto.enabled %} checked{% endif %}>
+          <input id="mem_auto" type="checkbox" name="mem_auto" value="on"{% if mem_auto.enabled %} checked{% endif %}>
           <span>Raise PHP memory automatically when the site runs out <span class="hint">— +128 MB per step, back down after 2 quiet weeks</span></span>
         </label>
       </div>
       <div class="field">
         <label for="mem_auto_max_mb">Automatic ceiling <span class="hint">MB</span></label>
         <input id="mem_auto_max_mb" name="mem_auto_max_mb" type="number" min="16" max="8192"
-               value="{{ mem_auto.max_mb }}">
+               value="{{ mem_auto.max_mb }}"
+               data-shown-mb="{{ limits.php_memory_mb }}"
+               data-floor-mb="{{ mem_auto.floor_mb }}">
       </div>
     </div>
+    {# Ceiling at or under the site's own value = nothing to raise to; the
+       save refuses it. Rendered for a stored bad pair, kept live by the
+       script below while the fields are edited. Floor mirrors set_limits:
+       the shown (possibly raised) value resubmitted keeps the old floor. #}
+    <p id="mem_auto_warn" class="note text-warn" style="margin:0 0 0.8rem"{% if !mem_auto.no_room() %} hidden{% endif %}>
+      The ceiling must be above the site's own PHP memory (<span data-floor>{{ mem_auto.floor_mb }}</span> MB) —
+      at or under it the automation has nothing to raise to and only sends a daily
+      "still runs out at its ceiling" alert.
+    </p>
+    <script>
+    (function () {
+      'use strict';
+      const on = document.getElementById('mem_auto');
+      const max = document.getElementById('mem_auto_max_mb');
+      const mem = document.getElementById('php_memory_mb');
+      const warn = document.getElementById('mem_auto_warn');
+      if (!on || !max || !mem || !warn) return;
+      function check() {
+        const typed = parseInt(mem.value, 10);
+        const floor = String(typed) === max.dataset.shownMb
+          ? parseInt(max.dataset.floorMb, 10)
+          : typed;
+        const ceiling = parseInt(max.value, 10);
+        const bad = on.checked && Number.isFinite(floor) && Number.isFinite(ceiling) && ceiling <= floor;
+        warn.querySelector('[data-floor]').textContent = Number.isFinite(floor) ? floor : '?';
+        warn.hidden = !bad;
+      }
+      [on, max, mem].forEach(function (el) {
+        el.addEventListener('input', check);
+        el.addEventListener('change', check);
+      });
+      check();
+    })();
+    </script>
     {% if mem_auto.enabled %}
     <p class="note" style="margin:0 0 0.8rem">
       {% if let Some(from) = mem_auto.raised_from_mb %}Raised automatically from your {{ from }} MB to {{ limits.php_memory_mb }} MB.{% else %}At your own value.{% endif %}

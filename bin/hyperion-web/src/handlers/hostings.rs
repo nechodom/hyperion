@@ -1802,6 +1802,8 @@ pub struct PhpMemAutoView {
     pub raised_from_mb: Option<i64>,
     /// Last out-of-memory fatal seen; 0 = none since it was turned on.
     pub last_oom_at: i64,
+    /// The operator's own limit — what the ceiling must be above.
+    pub floor_mb: i64,
 }
 
 impl PhpMemAutoView {
@@ -1814,17 +1816,24 @@ impl PhpMemAutoView {
                 .map(|(_, v)| v.as_str())
         };
         let st = get(phpmem::KV_STATE).and_then(phpmem::State::parse);
+        let raised_from_mb = st
+            .as_ref()
+            .map(|s| s.base_mb)
+            .filter(|&b| b > 0 && b < current_mb);
         PhpMemAutoView {
             enabled: get(phpmem::KV_ENABLED) == Some("on"),
             max_mb: get(phpmem::KV_MAX_MB)
                 .and_then(|v| v.trim().parse().ok())
                 .unwrap_or(phpmem::DEFAULT_MAX_MB),
-            raised_from_mb: st
-                .as_ref()
-                .map(|s| s.base_mb)
-                .filter(|&b| b > 0 && b < current_mb),
+            raised_from_mb,
             last_oom_at: st.map(|s| s.last_oom_at).unwrap_or(0),
+            floor_mb: raised_from_mb.unwrap_or(current_mb),
         }
+    }
+
+    /// Switched on with a ceiling that leaves nothing to raise to.
+    pub fn no_room(&self) -> bool {
+        self.enabled && hyperion_types::phpmem::ceiling_leaves_no_room(self.max_mb, self.floor_mb)
     }
 }
 
@@ -5074,6 +5083,56 @@ pub async fn post_set_limits(
     };
     let mem_auto_on = form.mem_auto.trim() == "on";
     let target = node_target(&form.target_node);
+    let hosting_id = find_hosting_anywhere(&state, sel.clone())
+        .await?
+        .0
+        .id
+        .as_str()
+        .to_string();
+    if mem_auto_on {
+        // A ceiling at or under the operator's own value gives the
+        // automation nothing to raise to — every out-of-memory would end as
+        // a daily "stuck at the ceiling" alert. Refuse it before anything is
+        // written. The floor is decided the way set_limits will decide it,
+        // from what the OWNING node has stored.
+        use hyperion_types::phpmem;
+        let stored = fetch_limits(&state, target, sel.clone())
+            .await
+            .ok()
+            .map(|l| l.php_memory_mb);
+        let st = match crate::dispatcher::dispatch_to_node(
+            &state,
+            target,
+            Request::HostingKvList {
+                hosting_id: hosting_id.clone(),
+            },
+        )
+        .await
+        {
+            Ok(RpcResponse::HostingKvList(v)) => v
+                .into_iter()
+                .find(|(k, _)| k == phpmem::KV_STATE)
+                .and_then(|(_, v)| phpmem::State::parse(&v)),
+            _ => None,
+        };
+        let floor = phpmem::floor_after_save(form.php_memory_mb, stored, st.as_ref());
+        if phpmem::ceiling_leaves_no_room(mem_auto_max, floor) {
+            let msg = format!(
+                "Automatic ceiling ({mem_auto_max} MB) must be above the site's own PHP memory \
+                 ({floor} MB), or there is nothing to raise to."
+            );
+            return Ok(save_result(
+                &headers,
+                false,
+                &msg,
+                format!(
+                    "/hostings/{}?flash_error={}#limits",
+                    urlencoding(&form.selector),
+                    urlencoding(&msg)
+                ),
+            ));
+        }
+    }
     let resp = crate::dispatcher::dispatch_to_node(
         &state,
         target,
@@ -5088,10 +5147,6 @@ pub async fn post_set_limits(
         // hosting_kv, beside the state its tick keeps — the pool it rewrites
         // is there. Written after the limits, so a refused save above leaves
         // them as they were.
-        let hosting_id = match find_hosting_anywhere(&state, sel).await {
-            Ok((d, _)) => d.id.as_str().to_string(),
-            Err(e) => return Err(e),
-        };
         for (key, value) in [
             (
                 hyperion_types::phpmem::KV_ENABLED,
