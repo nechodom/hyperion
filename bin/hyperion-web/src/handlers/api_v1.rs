@@ -676,10 +676,13 @@ pub async fn post_create(
     if let Some(r) = require(&ctx, Capability::HostingCreate) {
         return r;
     }
-    let Json(body) = match body {
+    let Json(mut body) = match body {
         Ok(b) => b,
         Err(e) => return validation(&e.body_text()),
     };
+    // `www.example.cz` is the alias of `example.cz`; normalise before the
+    // duplicate guard so it sees the name the hosting will really get.
+    body.req.domain = body.req.domain.without_www();
     let domain = body.req.domain.as_str().to_string();
     // Cluster-wide duplicate-domain guard: the same domain on ANOTHER node
     // would create a second vhost and collide in nginx. Mirrors the UI wizard.

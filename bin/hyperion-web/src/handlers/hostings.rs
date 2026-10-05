@@ -852,7 +852,7 @@ pub async fn post_create(
 
     // Parse inputs; render the form with an error if anything is malformed.
     let domain = match Domain::parse(&effective_domain) {
-        Ok(d) => d,
+        Ok(d) => d.without_www(),
         Err(e) => return Ok(render_new_error(&ctx, &csrf_token, &form, &e.to_string())),
     };
     let aliases = match parse_aliases(&form.aliases) {
@@ -4025,6 +4025,210 @@ pub async fn post_vhost_options(
 }
 
 #[derive(Deserialize)]
+pub struct NormalizeWwwForm {
+    pub selector: String,
+    #[serde(default)]
+    pub target_node: String,
+}
+
+/// POST /hostings/normalize-www — move a hosting whose primary name is
+/// `www.<name>` onto the bare `<name>`.
+///
+/// This is deliberately NOT an on-disk rename: the home directory, certificate
+/// directory, vhost file, DKIM keys, FTP logins and log paths are all derived
+/// from the primary name, and moving them under a live site is how outages
+/// happen. The visitor-facing result is the same, though: the bare name is
+/// added as an alias (so it is served and put into the certificate), the
+/// certificate is re-issued, and only THEN is the canonical hostname switched
+/// so `www.<name>` 301s to `<name>` (WordPress's Site Address follows, and the
+/// redirect-loop probe rolls it back if it cycles). Every step that could
+/// leave visitors on a dead address is checked first, and a failed step puts
+/// the aliases back.
+pub async fn post_normalize_www(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<NormalizeWwwForm>,
+) -> Result<Response, AppError> {
+    let sel = match require_manage_for_selector(
+        &state,
+        &ctx,
+        &form.selector,
+        Capability::HostingEditConfig,
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
+    if !ctx.can(Capability::CertManage) {
+        return Err(AppError::Forbidden);
+    }
+    let (detail, node) = find_hosting_anywhere(&state, sel).await?;
+    let sel_url = urlencoding(&form.selector);
+    let Some(bare) = bare_name_of(&detail.domain) else {
+        return Ok(Redirect::to(&format!(
+            "/hostings/{sel_url}?flash_error={}",
+            urlencoding("This hosting's name does not start with www. — nothing to move.")
+        ))
+        .into_response());
+    };
+
+    let actor_uid = ctx.session.as_ref().map(|s| s.user_id).unwrap_or(0);
+    let actor_label = ctx.username.clone();
+    let job_state = state.clone();
+    let job_id = crate::handlers::jobs::spawn_job(
+        state.clone(),
+        "normalize_www",
+        Some(&form.selector),
+        "{}",
+        &actor_label,
+        actor_uid,
+        move |reporter| async move {
+            run_normalize_www_job(reporter, job_state, node, detail, bare).await;
+        },
+    )
+    .await?;
+    Ok(Redirect::to(&format!("/jobs/{job_id}")).into_response())
+}
+
+/// `www.example.cz` → `Some("example.cz")`; `None` when there is no `www.`
+/// prefix to drop or dropping it would leave a single label.
+fn bare_name_of(domain: &str) -> Option<String> {
+    domain
+        .strip_prefix("www.")
+        .filter(|rest| rest.contains('.'))
+        .map(str::to_string)
+}
+
+async fn run_normalize_www_job(
+    reporter: crate::handlers::jobs::JobReporter,
+    state: SharedState,
+    node: Option<String>,
+    detail: HostingDetail,
+    bare: String,
+) {
+    match normalize_www_steps(&reporter, &state, node.as_deref(), &detail, &bare).await {
+        Ok(()) => {
+            reporter
+                .step(
+                    &format!("Done: {bare} is the canonical address, {} redirects to it.", detail.domain),
+                    100,
+                    "",
+                )
+                .await;
+            reporter.finish(true, None).await;
+        }
+        Err(e) => reporter.finish(false, Some(e)).await,
+    }
+}
+
+async fn normalize_www_steps(
+    reporter: &crate::handlers::jobs::JobReporter,
+    state: &SharedState,
+    node: Option<&str>,
+    detail: &HostingDetail,
+    bare: &str,
+) -> Result<(), String> {
+    use crate::dispatcher::dispatch_to_node;
+    let bare_dom = Domain::parse(bare).map_err(|e| e.to_string())?;
+    let sel = HostingSelector::Id(detail.id.clone());
+
+    reporter.step(&format!("Checking that {bare} is free…"), 5, "").await;
+    if let Ok(rows) = list_hostings(state).await {
+        if rows
+            .iter()
+            .any(|h| h.id != detail.id && h.domain.eq_ignore_ascii_case(bare))
+        {
+            return Err(format!("{bare} is already a separate hosting in this cluster."));
+        }
+    }
+
+    // Never redirect visitors to an address that does not reach this node.
+    reporter.step(&format!("Checking DNS for {bare}…"), 15, "").await;
+    match dispatch_to_node(state, node, Request::DnsCheck { domain: bare_dom.clone() }).await {
+        Ok(RpcResponse::DnsCheck(r)) if r.matches => {}
+        Ok(RpcResponse::DnsCheck(r)) => {
+            return Err(format!(
+                "DNS for {bare} does not point at this server yet ({}). Point it here, then run this again — nothing was changed.",
+                r.note
+            ))
+        }
+        Ok(RpcResponse::Error(e)) => return Err(e.to_string()),
+        Ok(_) => return Err("unexpected agent response".into()),
+        Err(e) => return Err(e.to_string()),
+    }
+
+    reporter.step(&format!("Adding {bare} as an alias…"), 30, "").await;
+    let old_aliases = detail.aliases.clone();
+    let mut with_bare: Vec<Domain> = old_aliases
+        .iter()
+        .filter_map(|a| Domain::parse(a).ok())
+        .collect();
+    if !old_aliases.iter().any(|a| a == bare) {
+        with_bare.push(bare_dom);
+    }
+    match dispatch_to_node(
+        state,
+        node,
+        Request::HostingSetAliases { sel: sel.clone(), aliases: with_bare },
+    )
+    .await
+    {
+        Ok(RpcResponse::HostingSetAliases(_)) => {}
+        Ok(RpcResponse::Error(e)) => return Err(format!("could not add the alias: {e}")),
+        Ok(_) => return Err("unexpected agent response".into()),
+        Err(e) => return Err(e.to_string()),
+    }
+
+    let revert = || async {
+        let restore: Vec<Domain> = old_aliases.iter().filter_map(|a| Domain::parse(a).ok()).collect();
+        let _ = dispatch_to_node(
+            state,
+            node,
+            Request::HostingSetAliases { sel: sel.clone(), aliases: restore },
+        )
+        .await;
+    };
+
+    reporter.step("Issuing a certificate that covers both names…", 45, "").await;
+    let cert_req = CertIssueRequest { staging: false, require_dns_match: true, extra_sans: vec![] };
+    match dispatch_to_node(state, node, Request::CertIssueAcme { sel: sel.clone(), req: cert_req }).await {
+        Ok(RpcResponse::CertIssueAcme(_)) => {}
+        Ok(RpcResponse::Error(e)) => {
+            revert().await;
+            return Err(format!("certificate not issued, aliases put back: {e}"));
+        }
+        Ok(_) => {
+            revert().await;
+            return Err("unexpected agent response".into());
+        }
+        Err(e) => {
+            revert().await;
+            return Err(e.to_string());
+        }
+    }
+
+    reporter.step(&format!("Redirecting {} to {bare}…", detail.domain), 75, "").await;
+    let mut options = detail.vhost_options.clone();
+    options.canonical_host = "non-www".into();
+    match dispatch_to_node(
+        state,
+        node,
+        Request::HostingSetVhostOptions { sel, options, basic_auth_password: None },
+    )
+    .await
+    {
+        Ok(RpcResponse::HostingSetVhostOptions(_)) => Ok(()),
+        // The alias and certificate stay: both names work, nothing redirects.
+        Ok(RpcResponse::Error(e)) => Err(format!(
+            "both names are served and covered by the certificate, but the redirect was not applied: {e}"
+        )),
+        Ok(_) => Err("unexpected agent response".into()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+#[derive(Deserialize)]
 pub struct AliasesForm {
     pub selector: String,
     /// Comma / space / newline separated alias domains. Empty clears all.
@@ -6238,7 +6442,7 @@ pub async fn post_dns_check_domain(
     }
     let trimmed = form.domain.trim();
     let parsed = match Domain::parse(trimmed) {
-        Ok(d) => d,
+        Ok(d) => d.without_www(),
         Err(e) => {
             return Ok(Html(format!(
                 "<div class=\"flash error\"><div class=\"flash-body\">Invalid domain: {}</div></div>",
@@ -12512,6 +12716,13 @@ async fn run_wp_staging_push_job(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bare_name_drops_one_www_and_keeps_two_labels() {
+        assert_eq!(bare_name_of("www.example.cz").as_deref(), Some("example.cz"));
+        assert_eq!(bare_name_of("example.cz"), None);
+        assert_eq!(bare_name_of("www.cz"), None);
+    }
 
     fn bulk(ids: &str) -> Vec<i64> {
         BackupDeleteBulkForm {

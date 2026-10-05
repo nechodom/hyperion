@@ -59,6 +59,16 @@ impl Domain {
         &self.0
     }
 
+    /// Drop a single leading `www.` label: a site's identity is its bare
+    /// name, and `www.<name>` is an alias of it. Left alone when stripping
+    /// would leave fewer than two labels (`www.cz`).
+    pub fn without_www(self) -> Self {
+        match self.0.strip_prefix("www.") {
+            Some(rest) if rest.contains('.') => Self(rest.to_string()),
+            _ => self,
+        }
+    }
+
     pub fn into_inner(self) -> String {
         self.0
     }
@@ -139,6 +149,16 @@ mod tests {
     fn lowercased_on_parse() {
         let d = Domain::parse("Example.CZ").expect("parse");
         assert_eq!(d.as_str(), "example.cz");
+    }
+
+    #[test]
+    fn without_www_strips_one_leading_label() {
+        let strip = |s: &str| Domain::parse(s).expect("parse").without_www();
+        assert_eq!(strip("www.example.cz").as_str(), "example.cz");
+        assert_eq!(strip("example.cz").as_str(), "example.cz");
+        assert_eq!(strip("www.www.example.cz").as_str(), "www.example.cz");
+        assert_eq!(strip("www.cz").as_str(), "www.cz");
+        assert_eq!(strip("shop.example.cz").as_str(), "shop.example.cz");
     }
 
     #[test]

@@ -2481,7 +2481,13 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     }
 
     /// Provision a hosting end-to-end with LIFO rollback on partial failure.
-    pub async fn create(&self, req: HostingCreateReq) -> Result<HostingCreated, RpcError> {
+    pub async fn create(&self, mut req: HostingCreateReq) -> Result<HostingCreated, RpcError> {
+        // A typed `www.example.cz` is the alias of `example.cz`, never a site
+        // of its own (it would offer `www.www.example.cz` as canonical host).
+        // Every caller (panel, API, CLI) lands here, so normalise once.
+        req.domain = req.domain.without_www();
+        let bare = req.domain.as_str().to_string();
+        req.aliases.retain(|a| a.as_str() != bare);
         let user = req
             .system_user
             .clone()
@@ -4794,7 +4800,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // first, and refusing here with the reason beats a browser
         // certificate warning the operator has to reverse-engineer.
         if options.canonical_host == "www" {
-            let www = format!("www.{}", detail.domain);
+            let www = format!("www.{}", detail.domain.trim_start_matches("www."));
             if !detail.aliases.iter().any(|a| a == &www) {
                 return Err(RpcError::Validation {
                     message: format!(
@@ -4950,8 +4956,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             // this cannot reach — a redirect plugin, a hard-coded constant in
             // wp-config.php, an application that is not WordPress at all.
             let canonical = match options.canonical_host.as_str() {
-                "www" => format!("www.{}", detail.domain),
-                _ => detail.domain.clone(),
+                "www" => format!("www.{}", detail.domain.trim_start_matches("www.")),
+                _ => detail.domain.trim_start_matches("www.").to_string(),
             };
             self.wp_align_site_url(&detail, &canonical).await;
             if let Some(loop_hint) = self.redirect_loop_probe(&detail.domain).await {
