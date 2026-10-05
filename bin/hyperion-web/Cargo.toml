@@ -73,3 +73,4 @@ hyperion-state = { path = "../../crates/hyperion-state" }
 hyperion-rpc-server = { path = "../../crates/hyperion-rpc-server" }
 rand.workspace = true
 http-body-util.workspace = true
+sqlx.workspace = true

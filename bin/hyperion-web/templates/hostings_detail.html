@@ -2936,45 +2936,58 @@
 
 {# Operator php.ini overrides, applied via a per-hosting .user.ini (no FPM
    restart; takes effect within ~5 min). Leave a field blank to fall back to
-   the pool/global default. #}
+   the pool/global default. One row per directive, named by what it does —
+   the directive itself is the hint, for the operator who searches for it. #}
 <details class="card" style="margin-top:1rem">
   <summary>
     <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 17l6-6-6-6"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
     <h2>PHP settings &amp; file repair</h2>
-    <span class="acc-meta">{% if php_ini.any() %}<span class="pill ok">.user.ini active</span>{% else %}.user.ini overrides{% endif %}{% call chevron() %}</span>
+    <span class="acc-meta">{% if php_ini.any() %}<span class="pill ok">.user.ini active</span>{% else %}pool defaults{% endif %}{% call chevron() %}</span>
   </summary>
-  <p class="card-desc">
-    Per-hosting <code>.user.ini</code> overrides. Blank = pool default. Sizes like <code>256M</code> / <code>1G</code>.
-    <code>memory_limit</code> and <code>max_execution_time</code> live in
-    <a href="#limits">PHP-FPM &amp; DB limits</a> instead: the pool applies them as
-    <code>php_admin_value</code>, which <code>.user.ini</code> is not permitted to override.
-  </p>
+
   <form method="post" action="/hostings/php-ini" hx-post="/hostings/php-ini" hx-swap="none">
     <input type="hidden" name="_csrf" value="{{ csrf_php_ini }}">
     <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
-    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(10rem, 100%), 1fr));gap:1rem">
-      <div class="field" style="margin:0">
-        <label for="pi_upload"><code>upload_max_filesize</code></label>
-        <input id="pi_upload" name="upload_max_filesize" value="{{ php_ini.upload_max_filesize }}" placeholder="64M" autocomplete="off">
+
+    <div class="setting-group" style="margin-top:0">PHP overrides <span style="text-transform:none;letter-spacing:0;font-weight:400">· <code>.user.ini</code> · blank = pool default</span></div>
+    <div class="setting-list">
+      <div class="setting-row">
+        <label class="s-label" for="pi_upload">Largest upload <span class="hint"><code>upload_max_filesize</code></span></label>
+        <p class="s-help">Biggest single file the media library or a form accepts. Sizes like <code>64M</code> or <code>1G</code>.</p>
+        <div class="s-control"><input type="text" id="pi_upload" name="upload_max_filesize" value="{{ php_ini.upload_max_filesize }}" placeholder="64M" autocomplete="off" class="mono" style="width:7.5rem;text-align:right"></div>
       </div>
-      <div class="field" style="margin:0">
-        <label for="pi_post"><code>post_max_size</code></label>
-        <input id="pi_post" name="post_max_size" value="{{ php_ini.post_max_size }}" placeholder="64M" autocomplete="off">
+      <div class="setting-row">
+        <label class="s-label" for="pi_post">Largest request <span class="hint"><code>post_max_size</code></span></label>
+        <p class="s-help">The whole form submission, files included — keep it at or above the upload size.</p>
+        <div class="s-control"><input type="text" id="pi_post" name="post_max_size" value="{{ php_ini.post_max_size }}" placeholder="64M" autocomplete="off" class="mono" style="width:7.5rem;text-align:right"></div>
       </div>
-      <div class="field" style="margin:0">
-        <label for="pi_vars"><code>max_input_vars</code></label>
-        <input id="pi_vars" name="max_input_vars" value="{{ php_ini.max_input_vars }}" placeholder="3000" autocomplete="off">
+      <div class="setting-row">
+        <label class="s-label" for="pi_vars">Form fields per request <span class="hint"><code>max_input_vars</code></span></label>
+        <p class="s-help">Raise it when a long menu or a product with many variations saves only partly.</p>
+        <div class="s-control"><input type="text" id="pi_vars" name="max_input_vars" value="{{ php_ini.max_input_vars }}" placeholder="3000" autocomplete="off" inputmode="numeric" class="mono" style="width:7.5rem;text-align:right"></div>
       </div>
-      <div class="field" style="margin:0">
-        <label for="pi_display"><code>display_errors</code></label>
-        <select id="pi_display" name="display_errors">
-          <option value="" {% if php_ini.display_errors.is_empty() %}selected{% endif %}>(default)</option>
-          <option value="Off" {% if php_ini.display_errors == "Off" %}selected{% endif %}>Off</option>
-          <option value="On" {% if php_ini.display_errors == "On" %}selected{% endif %}>On</option>
-        </select>
+      <div class="setting-row">
+        <label class="s-label" for="pi_display">Show errors on the page <span class="hint"><code>display_errors</code></span></label>
+        <p class="s-help">Only while debugging — visitors see file paths and stack traces.</p>
+        <div class="s-control">
+          <select id="pi_display" name="display_errors" style="width:7.5rem">
+            <option value="" {% if php_ini.display_errors.is_empty() %}selected{% endif %}>Default</option>
+            <option value="Off" {% if php_ini.display_errors == "Off" %}selected{% endif %}>Off</option>
+            <option value="On" {% if php_ini.display_errors == "On" %}selected{% endif %}>On</option>
+          </select>
+        </div>
+      </div>
+      <div class="setting-row">
+        <span class="s-label">Memory &amp; time limit</span>
+        <p class="s-help">
+          <code>memory_limit</code> and <code>max_execution_time</code> are set by the pool as
+          <code>php_admin_value</code>, which <code>.user.ini</code> cannot override.
+        </p>
+        <div class="s-control"><a class="btn ghost small" href="#limits">PHP-FPM limits →</a></div>
       </div>
     </div>
-    <div class="form-footer start" style="margin-top:0.9rem">
+
+    <div class="form-footer start" style="margin-top:0.4rem">
       <button class="btn primary" type="submit">
         <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
         Save PHP settings
@@ -2986,23 +2999,24 @@
   {# Ownership repair. Lives here because the symptom an operator arrives
      with — "WordPress can't write", "FTP won't overwrite" — reads as a PHP
      problem, so this is where they look. #}
-  <form method="post" action="/hostings/repair-permissions" class="setting-row" style="margin-top:1rem;border-top:1px solid var(--border);padding-top:1rem">
-    <input type="hidden" name="_csrf" value="{{ csrf_repair_perms }}">
-    <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
-    <span class="s-label">Repair file permissions</span>
-    <p class="s-help">
-      Gives every file back to <code>{{ detail.system_user }}</code> and normalises modes
-      (directories 0755, files 0644). Fixes "could not create directory", failed plugin
-      updates and uploads that vanish — and FTP, which signs in as the same account.
-      Use after a restore, a migration, or unpacking an archive over SSH as root.
-    </p>
-    <div class="s-control">
-      <button class="btn" type="submit">
-        <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-        Repair now
-      </button>
-    </div>
-  </form>
+  <div class="setting-group">File ownership</div>
+  <div class="setting-list">
+    <form method="post" action="/hostings/repair-permissions" class="setting-row">
+      <input type="hidden" name="_csrf" value="{{ csrf_repair_perms }}">
+      <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
+      <span class="s-label">Repair file permissions <span class="hint">owner <code>{{ detail.system_user }}</code> · dirs 0755 · files 0644</span></span>
+      <p class="s-help">
+        Fixes "could not create directory", failed plugin updates, vanishing uploads and
+        FTP that cannot overwrite. Use after a restore, a migration, or unpacking an archive over SSH as root.
+      </p>
+      <div class="s-control">
+        <button class="btn" type="submit">
+          <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+          Repair now
+        </button>
+      </div>
+    </form>
+  </div>
 </details>
 
 <div class="panel-group">Lifecycle &amp; billing</div>
