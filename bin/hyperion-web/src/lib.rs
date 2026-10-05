@@ -44,6 +44,10 @@ pub fn build_router(state: SharedState) -> Router {
             post(handlers::hostings::post_vhost_options),
         )
         .route(
+            "/hostings/normalize-www",
+            post(handlers::hostings::post_normalize_www),
+        )
+        .route(
             "/hostings/aliases",
             post(handlers::hostings::post_set_aliases),
         )
@@ -554,6 +558,10 @@ pub fn build_router(state: SharedState) -> Router {
         .route(
             "/hostings/packages/report-range-send",
             post(handlers::packages::post_report_range_send),
+        )
+        .route(
+            "/hostings/packages/report-recipients",
+            post(handlers::packages::post_report_recipients),
         )
         .route("/certs", get(handlers::certs::get_certs))
         .route("/vulns", get(handlers::vulns::get_vulns))
