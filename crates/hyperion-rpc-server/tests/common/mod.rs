@@ -264,9 +264,6 @@ pub async fn build_agent() -> (Arc<dyn AgentApi>, tempfile::TempDir) {
         panel_progress: Arc::new(tokio::sync::RwLock::new(None)),
         master_rpc_signer: None,
         node_state_file: None,
-        node_update: Arc::new(tokio::sync::Mutex::new(
-            hyperion_types::NodeUpdateStatus::default(),
-        )),
         service_install_progress: Arc::new(tokio::sync::Mutex::new(
             hyperion_types::ServiceInstallStatus::default(),
         )),

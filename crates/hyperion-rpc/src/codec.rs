@@ -578,7 +578,9 @@ pub enum Request {
         /// update can take down.
         #[serde(default)]
         safe: bool,
-        /// `apt-get update && apt-get dist-upgrade -y --quiet`.
+        /// Repair any half-installed packages, `apt-get update`, then
+        /// `apt-get upgrade --with-new-pkgs` (never removes a package).
+        /// Runs as its own systemd unit, outside the agent's sandbox.
         /// Typically 1–10 min depending on what's outdated.
         do_apt: bool,
         /// `/opt/hyperion/packaging/install/update.sh`. Rebuilds
@@ -1899,6 +1901,25 @@ pub enum Request {
     CareReportSend {
         sel: HostingSelector,
     },
+    /// Render a one-off report for the operator's own half-open
+    /// `[from, to)` (UNIX seconds) and send NOTHING. Owning node, like
+    /// CareReportPreview.
+    ///
+    /// A separate method rather than optional fields on CareReportSend on
+    /// purpose: a node too old to know about ranges must REFUSE this, not
+    /// ignore the fields and mail the scheduled period — moving its marker
+    /// as it goes.
+    CareReportPreviewRange {
+        sel: HostingSelector,
+        from: i64,
+        to: i64,
+    },
+    /// Send that one-off report. Leaves the schedule's period marker alone.
+    CareReportSendRange {
+        sel: HostingSelector,
+        from: i64,
+        to: i64,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2440,6 +2461,10 @@ pub enum Response {
     CareReportPreview(CareReportMail),
     /// The rendered report, as sent — `to` is who actually received it.
     CareReportSend(CareReportMail),
+    /// A one-off, custom-range report, sent nowhere.
+    CareReportPreviewRange(CareReportMail),
+    /// A one-off, custom-range report, as sent.
+    CareReportSendRange(CareReportMail),
     Error(RpcError),
 }
 

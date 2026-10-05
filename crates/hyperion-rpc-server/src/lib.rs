@@ -1840,6 +1840,18 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(v) => Response::CareReportSend(v),
             Err(e) => Response::Error(e),
         },
+        Request::CareReportPreviewRange { sel, from, to } => {
+            match api.care_report_preview_range(sel, from, to).await {
+                Ok(v) => Response::CareReportPreviewRange(v),
+                Err(e) => Response::Error(e),
+            }
+        }
+        Request::CareReportSendRange { sel, from, to } => {
+            match api.care_report_send_range(sel, from, to).await {
+                Ok(v) => Response::CareReportSendRange(v),
+                Err(e) => Response::Error(e),
+            }
+        }
     }
 }
 
@@ -3537,6 +3549,26 @@ mod tests {
         async fn care_report_send(
             &self,
             _: HostingSelector,
+        ) -> Result<hyperion_rpc::codec::CareReportMail, RpcError> {
+            Err(RpcError::Internal {
+                message: "not supported by this agent".into(),
+            })
+        }
+        async fn care_report_preview_range(
+            &self,
+            _: HostingSelector,
+            _: i64,
+            _: i64,
+        ) -> Result<hyperion_rpc::codec::CareReportMail, RpcError> {
+            Err(RpcError::Internal {
+                message: "not supported by this agent".into(),
+            })
+        }
+        async fn care_report_send_range(
+            &self,
+            _: HostingSelector,
+            _: i64,
+            _: i64,
         ) -> Result<hyperion_rpc::codec::CareReportMail, RpcError> {
             Err(RpcError::Internal {
                 message: "not supported by this agent".into(),

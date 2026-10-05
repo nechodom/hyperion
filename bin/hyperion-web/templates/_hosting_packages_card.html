@@ -341,16 +341,52 @@
       <button class="btn small" type="submit">Save</button>
     </form>
 
+    {# A one-off report for any range the operator picks — a year in review,
+       a month re-sent after a dispute. Preview only: the send button lives
+       on the preview below, carrying the exact range that was read. Outside
+       the schedule, so it never moves the next scheduled period. #}
+    <form hx-post="/hostings/packages/report-range-preview" hx-target="#packages-card" hx-swap="outerHTML"
+          style="display:flex;gap:0.5rem;align-items:flex-end;flex-wrap:wrap;margin-top:0.6rem">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="selector" value="{{ selector }}">
+      <div class="field" style="margin:0">
+        <label for="report_range_from">Custom range from <span class="hint">UTC</span></label>
+        <input id="report_range_from" type="date" name="from" required min="2015-01-01" max="{{ today }}"
+               value="{% if let Some(p) = preview %}{{ p.range_from }}{% endif %}">
+      </div>
+      <div class="field" style="margin:0">
+        <label for="report_range_to">to <span class="hint">inclusive</span></label>
+        <input id="report_range_to" type="date" name="to" required min="2015-01-01" max="{{ today }}"
+               value="{% if let Some(p) = preview %}{{ p.range_to }}{% endif %}">
+      </div>
+      <button class="btn small ghost" type="submit">Preview range</button>
+    </form>
+
     {% if let Some(p) = preview %}
       {# Scrolls inside itself — a care report is long and a customer's site
          name is not, so an unbounded <pre> would widen the whole detail
          page. #}
       <div style="margin-top:0.7rem;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg-2);padding:0.7rem 0.8rem;min-width:0">
         <div style="display:flex;gap:0.5rem;align-items:baseline;flex-wrap:wrap">
-          <span class="pill" style="font-size:0.58rem;background:var(--surface-2);color:var(--text-soft)">preview — nothing was sent</span>
+          <span class="pill" style="font-size:0.58rem;background:var(--surface-2);color:var(--text-soft)">{% if p.range_from.is_empty() %}preview — nothing was sent{% else %}custom range preview — nothing was sent{% endif %}</span>
           <span class="text-soft small numeric">{{ p.period }}</span>
           <span class="grow"></span>
+          {% if p.range_from.is_empty() %}
           <span class="text-soft small">{{ p.cadence }}</span>
+          {% else %}
+          {# The exact range just rendered, posted back verbatim — never what
+             the pickers above happen to say by the time this is pressed. #}
+          <form hx-post="/hostings/packages/report-range-send" hx-target="#packages-card" hx-swap="outerHTML"
+                data-confirm-title="Send this care report"
+                data-confirm-body="This really e-mails the report for {{ p.period }} to {{ p.to }}. It is a one-off: the scheduled report is not affected and will still cover its own period."
+                data-confirm-confirm-label="Send">
+            <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+            <input type="hidden" name="selector" value="{{ selector }}">
+            <input type="hidden" name="from" value="{{ p.range_from }}">
+            <input type="hidden" name="to" value="{{ p.range_to }}">
+            <button class="btn small" type="submit"{% if p.to.is_empty() %} disabled{% endif %}>Send this report</button>
+          </form>
+          {% endif %}
         </div>
 
         {# No recipient is the state in which the scheduled send has nowhere
@@ -359,9 +395,8 @@
         {% if p.to.is_empty() %}
           <div class="flash warn" style="margin:0.55rem 0 0">
             <div class="flash-body">
-              This site has no owner e-mail, so nothing can be sent — not by
-              the button above and not on schedule. Set one on the hosting
-              first.
+              This site has no care report e-mail, so nothing can be sent —
+              not by hand and not on schedule. Set one on the care plan first.
             </div>
           </div>
         {% else %}

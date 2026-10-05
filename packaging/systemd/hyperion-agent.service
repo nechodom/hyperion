@@ -26,7 +26,12 @@ RestartSec=3s
 #
 # /boot stays read-only, which is the half that matters: the agent has no
 # business touching a bootloader or a kernel image, and nothing it does
-# ever needs to. A writable /usr is not a meaningful additional exposure
+# ever needs to. The one job that DOES — the panel's OS upgrade, which
+# installs kernels into /boot and /lib/modules (hidden by
+# ProtectKernelModules below) — is deliberately not run in here: the agent
+# starts it with systemd-run as hyperion-node-update.service, a transient
+# unit with neither this sandbox nor this cgroup. Do not "fix" a kernel
+# upgrade failure by loosening this file. A writable /usr is not a meaningful additional exposure
 # here — this unit already creates users and writes unit files, so an
 # attacker who controls it has better options than editing a binary.
 NoNewPrivileges=true
