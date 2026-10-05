@@ -29,6 +29,7 @@ pub mod migration;
 pub mod package;
 pub mod perf;
 pub mod php;
+pub mod phpmem;
 pub mod profile;
 pub mod regguard;
 pub mod report_sections;

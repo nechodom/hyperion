@@ -2763,6 +2763,30 @@
                value="{{ limits.db_max_connections }}">
       </div>
     </div>
+    {# Automatic memory_limit: the owning node watches this site's error.log
+       for "Allowed memory size … exhausted" and raises the pool one 128 MB
+       step at a time up to the ceiling (and what the node's RAM allows);
+       two quiet weeks take it one step back. Unticking restores the value
+       above. State lives in the owning node's hosting_kv. #}
+    <div class="field-row">
+      <div class="field">
+        <label class="field-checkbox" style="margin-top:1.6rem">
+          <input type="checkbox" name="mem_auto" value="on"{% if mem_auto.enabled %} checked{% endif %}>
+          <span>Raise PHP memory automatically when the site runs out <span class="hint">— +128 MB per step, back down after 2 quiet weeks</span></span>
+        </label>
+      </div>
+      <div class="field">
+        <label for="mem_auto_max_mb">Automatic ceiling <span class="hint">MB</span></label>
+        <input id="mem_auto_max_mb" name="mem_auto_max_mb" type="number" min="16" max="8192"
+               value="{{ mem_auto.max_mb }}">
+      </div>
+    </div>
+    {% if mem_auto.enabled %}
+    <p class="note" style="margin:0 0 0.8rem">
+      {% if let Some(from) = mem_auto.raised_from_mb %}Raised automatically from your {{ from }} MB to {{ limits.php_memory_mb }} MB.{% else %}At your own value.{% endif %}
+      {% if mem_auto.last_oom_at > 0 %}Last ran out of memory {{ crate::handlers::stats::fmt_ago(mem_auto.last_oom_at) }}.{% else %}No out-of-memory errors seen since it was turned on.{% endif %}
+    </p>
+    {% endif %}
     {# Disk and bandwidth caps are deliberately NOT here. This card once
        carried its own "Disk limit" and "Monthly bandwidth" fields, and they
        were placebo: stored in a column nothing enforced and nothing alerted
