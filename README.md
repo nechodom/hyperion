@@ -36,7 +36,12 @@ or CloudPanel.
 | Dashboard | Cluster stats |
 | --- | --- |
 | [![Dashboard](docs/screenshots/dashboard.png)](docs/screenshots/dashboard.png) | [![Stats](docs/screenshots/stats.png)](docs/screenshots/stats.png) |
-| KPI tiles, load and bandwidth sparklines, audit feed. | Cluster and per-node metrics, sampled every 5 minutes. |
+| KPI tiles, load, bandwidth and live network throughput, recent sites and activity. | Cluster and per-node metrics, sampled every 5 minutes, plus a live node view. |
+
+| Hostings | Site detail |
+| --- | --- |
+| [![Hostings](docs/screenshots/hostings.png)](docs/screenshots/hostings.png) | [![Site detail](docs/screenshots/hosting.png)](docs/screenshots/hosting.png) |
+| Every site in the cluster with state, PHP and node; bulk suspend, resume, back up. | One site at a glance: health score, HTTPS, backups, uptime, security and database. |
 
 ---
 
