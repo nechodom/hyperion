@@ -126,6 +126,7 @@ struct DetailTpl<'a> {
     htmx_version: &'static str,
     detail: HostingDetail,
     limits: hyperion_types::HostingLimits,
+    mem_auto: PhpMemAutoView,
     wp_status: Option<WpInstallStatus>,
     expiry: hyperion_types::HostingExpiry,
     backups: Vec<hyperion_types::BackupRunWire>,
@@ -1394,6 +1395,7 @@ pub async fn post_create(
                 .unwrap_or_else(|_| hyperion_types::HostingLimits::defaults());
             let staging_domain_default = format!("staging.{}", detail.domain);
             let preview_domain = compute_preview_domain(&state, target, &detail.domain).await;
+            let mem_auto = PhpMemAutoView::from_kv(&[], limits.php_memory_mb);
             let tpl = DetailTpl {
                 username: &ctx.username,
                 user_initial: super::user_initial(&ctx.username),
@@ -1402,6 +1404,7 @@ pub async fn post_create(
                 htmx_version: super::htmx_version(),
                 detail,
                 limits,
+                mem_auto,
                 wp_status: None,
                 expiry: hyperion_types::HostingExpiry::defaults(),
                 backups: vec![],
@@ -1785,6 +1788,43 @@ pub(crate) fn compute_hosting_health(
         grade: health_grade(score),
         checks,
         todo,
+    }
+}
+
+/// The automatic PHP memory_limit, as the OWNING node stores it
+/// (`hyperion_types::phpmem`).
+pub struct PhpMemAutoView {
+    pub enabled: bool,
+    /// The most the automation may set, in MiB.
+    pub max_mb: i64,
+    /// The operator's own limit, when the automation currently has the pool
+    /// above it.
+    pub raised_from_mb: Option<i64>,
+    /// Last out-of-memory fatal seen; 0 = none since it was turned on.
+    pub last_oom_at: i64,
+}
+
+impl PhpMemAutoView {
+    fn from_kv(pairs: &[(String, String)], current_mb: i64) -> Self {
+        use hyperion_types::phpmem;
+        let get = |k: &str| {
+            pairs
+                .iter()
+                .find(|(key, _)| key == k)
+                .map(|(_, v)| v.as_str())
+        };
+        let st = get(phpmem::KV_STATE).and_then(phpmem::State::parse);
+        PhpMemAutoView {
+            enabled: get(phpmem::KV_ENABLED) == Some("on"),
+            max_mb: get(phpmem::KV_MAX_MB)
+                .and_then(|v| v.trim().parse().ok())
+                .unwrap_or(phpmem::DEFAULT_MAX_MB),
+            raised_from_mb: st
+                .as_ref()
+                .map(|s| s.base_mb)
+                .filter(|&b| b > 0 && b < current_mb),
+            last_oom_at: st.map(|s| s.last_oom_at).unwrap_or(0),
+        }
     }
 }
 
@@ -2213,6 +2253,7 @@ pub async fn get_detail(
         Ok(RpcResponse::HostingKvList(v)) => v,
         _ => vec![],
     };
+    let mem_auto = PhpMemAutoView::from_kv(&owner_kv, limits.php_memory_mb);
     let backup_cadence = owner_kv
         .iter()
         .find(|(k, _)| k == "backup_cadence")
@@ -2398,6 +2439,7 @@ pub async fn get_detail(
         htmx_version: super::htmx_version(),
         detail,
         limits,
+        mem_auto,
         wp_status,
         expiry,
         backups,
@@ -4529,6 +4571,11 @@ pub struct SetLimitsForm {
     php_max_children: i64,
     php_max_requests: i64,
     db_max_connections: i64,
+    /// Checkbox: absent when unticked.
+    #[serde(default)]
+    mem_auto: String,
+    #[serde(default)]
+    mem_auto_max_mb: String,
     #[serde(default)]
     target_node: String,
 }
@@ -5037,13 +5084,68 @@ pub async fn post_set_limits(
     // The enforced caps are the hosting_quotas row (the quota card), which
     // profiles also write through quota_set. Saving this card now clears
     // any stale ghost value, so old rows converge on the truth.
+    let mem_auto_max: i64 = match form.mem_auto_max_mb.trim() {
+        "" => hyperion_types::phpmem::DEFAULT_MAX_MB,
+        v => match v.parse::<i64>() {
+            Ok(n) if (16..=8192).contains(&n) => n,
+            _ => {
+                return Ok(save_result(
+                    &headers,
+                    false,
+                    "Automatic memory ceiling must be 16–8192 MB.",
+                    format!(
+                        "/hostings/{}?flash_error={}#limits",
+                        urlencoding(&form.selector),
+                        urlencoding("Automatic memory ceiling must be 16–8192 MB.")
+                    ),
+                ))
+            }
+        },
+    };
+    let mem_auto_on = form.mem_auto.trim() == "on";
     let target = node_target(&form.target_node);
     let resp = crate::dispatcher::dispatch_to_node(
         &state,
         target,
-        Request::HostingSetLimits { sel, limits: l },
+        Request::HostingSetLimits {
+            sel: sel.clone(),
+            limits: l,
+        },
     )
     .await?;
+    if let RpcResponse::HostingSetLimits(_) = resp {
+        // The automation's switch and ceiling live in the OWNING node's
+        // hosting_kv, beside the state its tick keeps — the pool it rewrites
+        // is there. Written after the limits, so a refused save above leaves
+        // them as they were.
+        let hosting_id = match find_hosting_anywhere(&state, sel).await {
+            Ok((d, _)) => d.id.as_str().to_string(),
+            Err(e) => return Err(e),
+        };
+        for (key, value) in [
+            (
+                hyperion_types::phpmem::KV_ENABLED,
+                if mem_auto_on { "on" } else { "off" }.to_string(),
+            ),
+            (hyperion_types::phpmem::KV_MAX_MB, mem_auto_max.to_string()),
+        ] {
+            match crate::dispatcher::dispatch_to_node(
+                &state,
+                target,
+                Request::HostingKvSet {
+                    hosting_id: hosting_id.clone(),
+                    key: key.into(),
+                    value,
+                },
+            )
+            .await?
+            {
+                RpcResponse::HostingKvSet => {}
+                RpcResponse::Error(e) => return Err(AppError::Rpc(e.to_string())),
+                _ => return Err(AppError::Internal("unexpected response".into())),
+            }
+        }
+    }
     match resp {
         RpcResponse::HostingSetLimits(_) => Ok(save_result(
             &headers,

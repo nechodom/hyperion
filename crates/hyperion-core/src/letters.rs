@@ -1125,6 +1125,62 @@ pub static STRINGS: &[LetterString] = &[
         cs: "{domain} — automatická kontrola stránek našla {count} nefunkčních stránek: {urls}",
     },
     LetterString {
+        id: "ops.php_mem_raised.title",
+        group: "Operator alerts — hostings",
+        note: "The automatic memory_limit raised a site's PHP memory.",
+        en: "PHP memory raised for a site",
+        cs: "Webu byla navýšena paměť PHP",
+    },
+    LetterString {
+        id: "ops.php_mem_raised.body",
+        group: "Operator alerts — hostings",
+        note: "Tokens: {domain} {from} {to} {ceiling} (MiB).",
+        en: "{domain} ran out of PHP memory at {from} MB, so Hyperion raised its memory_limit \
+             to {to} MB (ceiling {ceiling} MB). It steps back down after two weeks without \
+             running out.",
+        cs: "{domain} došla paměť PHP při {from} MB, takže Hyperion zvýšil memory_limit na \
+             {to} MB (strop {ceiling} MB). Po dvou týdnech bez nedostatku paměti se sníží \
+             zpět.",
+    },
+    LetterString {
+        id: "ops.php_mem_capped.title",
+        group: "Operator alerts — hostings",
+        note: "A site keeps running out of PHP memory at its automatic ceiling.",
+        en: "Site still runs out of PHP memory at its ceiling",
+        cs: "Webu dochází paměť PHP i na stropu",
+    },
+    LetterString {
+        id: "ops.php_mem_capped.body",
+        group: "Operator alerts — hostings",
+        note: "Tokens: {domain} {limit} (MiB).",
+        en: "{domain} keeps running out of PHP memory at {limit} MB, the ceiling set for it. \
+             That much is rarely a real need: look for a plugin or theme leaking memory, or \
+             raise the ceiling on the site's PHP-FPM & DB limits card if it is deliberate.",
+        cs: "{domain} dochází paměť PHP i při {limit} MB, což je jeho nastavený strop. Tolik \
+             paměti je skutečně potřeba jen výjimečně: hledejte plugin nebo šablonu, která \
+             paměť plýtvá, nebo strop vědomě zvyšte v kartě PHP-FPM & DB limity.",
+    },
+    LetterString {
+        id: "ops.php_mem_capped_ram.title",
+        group: "Operator alerts — hostings",
+        note: "A site runs out of PHP memory but the node's RAM stops a further raise.",
+        en: "Site runs out of PHP memory; server RAM blocks a raise",
+        cs: "Webu dochází paměť PHP; RAM serveru brání navýšení",
+    },
+    LetterString {
+        id: "ops.php_mem_capped_ram.body",
+        group: "Operator alerts — hostings",
+        note: "Tokens: {domain} {limit} (MiB).",
+        en: "{domain} keeps running out of PHP memory at {limit} MB. Its ceiling allows more, \
+             but every PHP worker the site may run at once would then not fit in three \
+             quarters of this server's RAM. Lower the site's max_children, add RAM, or find \
+             what is using the memory.",
+        cs: "{domain} dochází paměť PHP při {limit} MB. Strop by dovolil víc, ale všechny \
+             PHP procesy, které web smí spustit najednou, by se pak nevešly do tří čtvrtin \
+             RAM serveru. Snižte webu max_children, přidejte RAM, nebo zjistěte, co paměť \
+             spotřebovává.",
+    },
+    LetterString {
         id: "ops.mail_override.title",
         group: "Operator alerts — WordPress",
         note: "Hyperion took mail off a failing SMTP plugin.",
