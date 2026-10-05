@@ -91,9 +91,13 @@ sudo usermod -aG hyperion-admin "$USER"   # log out and back in, then open the U
 one-liner on another Debian 12+ VPS. It enrolls in about 30 seconds and appears
 in the Nodes table; from then on you provision hostings on it from the master.
 
-**Update** — `sudo /opt/hyperion/packaging/install/update.sh`, or from the UI at
-**/install**. While the panel restarts, its vhost serves a self-refreshing
-"updating…" page instead of a bare error, and returns automatically.
+**Update** — `sudo hyperion update` (the same as
+`sudo /opt/hyperion/packaging/install/update.sh`), or from the UI at
+**/install**. If this box is in the middle of a job (a backup, a migration, an
+install, …) it waits for that to finish first, so nothing is cut off; `--no-wait` skips that and
+`--wait-timeout=SECS` makes it give up instead. While the panel restarts, its
+vhost serves a self-refreshing "updating…" page instead of a bare error, and
+returns automatically.
 
 The installer is configurable through environment variables (component and port
 selection, non-interactive mode, private-repo and air-gapped sources). See

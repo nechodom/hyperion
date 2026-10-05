@@ -21,9 +21,13 @@ hyperion — Hyperion control panel
 
 Usage:
   hyperion update [args...]   Update this box in place (runs as root).
+                              Waits for running jobs (backups, migrations, ...)
+                              to finish first, so none is cut off.
                               Extra args pass through to update.sh, e.g.
                                 hyperion update --repair
                                 hyperion update --from-source
+                                hyperion update --no-wait          (don't wait)
+                                hyperion update --wait-timeout=900 (give up after 15 min)
   hyperion version            Show the running agent's version.
   hyperion status             systemd status for the Hyperion services.
   hyperion logs [-f]          Tail the agent + web logs.
