@@ -614,6 +614,7 @@ fn render_update_status(s: &hyperion_types::NodeUpdateStatus) -> String {
         "running" => "<span class=\"pill warn pulse\">running</span>",
         "succeeded" => "<span class=\"pill ok\">done</span>",
         "failed" => "<span class=\"pill err\">failed</span>",
+        "interrupted" => "<span class=\"pill err\">interrupted</span>",
         _ => "<span class=\"pill\">unknown</span>",
     };
     let scope = match (s.do_apt, s.do_hyperion) {
@@ -631,6 +632,15 @@ fn render_update_status(s: &hyperion_types::NodeUpdateStatus) -> String {
             " <span class=\"text-soft small\">exit {}</span>",
             s.exit_code
         ));
+    }
+    if s.state == "interrupted" {
+        // The job's unit is gone and wrote no result — killed by a reboot or
+        // by hand. Packages may be half-installed; the next run finishes them
+        // before it upgrades anything.
+        out.push_str(
+            " <span class=\"text-soft small\">stopped before it could finish (reboot?) — \
+             run it again: it repairs any half-installed packages first</span>",
+        );
     }
     out.push_str("</div>");
     if !s.log_tail.is_empty() {
