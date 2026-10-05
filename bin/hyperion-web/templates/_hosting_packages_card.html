@@ -318,20 +318,28 @@
       <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
       <div class="flash-body">
         <strong>No recipient — this report cannot be sent.</strong>
-        This package includes a periodic care report, but the site has no owner
-        e-mail, so every scheduled send will be skipped silently. Set one under
-        <a href="#settings">Expiration → Owner email</a> on this page —
-        <strong>leave the date empty</strong> if you do not want an expiry;
-        saving the address alone does not create one.
+        Add the address(es) below. They are separate from the expiry owner
+        e-mail, which this report never uses.
       </div>
     </div>
     {% else %}
     <p class="text-soft small" style="margin:0.45rem 0 0">
       Goes to <code>{{ report_to }}</code> on its own schedule. Preview renders
       it without sending anything; Send now mails it and starts the next period
-      here. Change the address under <a href="#settings">Expiration</a>.
+      here.
     </p>
     {% endif %}
+    <form hx-post="/hostings/packages/report-recipients" hx-target="#packages-card" hx-swap="outerHTML"
+          style="display:flex;gap:0.5rem;align-items:end;flex-wrap:wrap;margin-top:0.5rem">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="selector" value="{{ selector }}">
+      <div class="field" style="flex:1;min-width:14rem;margin:0">
+        <label for="care_recipients">Care report e-mails <span class="hint">comma-separated · not the expiry address</span></label>
+        <input id="care_recipients" name="recipients" type="text" value="{{ report_to }}"
+               placeholder="client@example.com, accounting@example.com">
+      </div>
+      <button class="btn small" type="submit">Save</button>
+    </form>
 
     {% if let Some(p) = preview %}
       {# Scrolls inside itself — a care report is long and a customer's site
