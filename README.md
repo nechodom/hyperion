@@ -15,7 +15,7 @@ or CloudPanel.
 [![License](https://img.shields.io/badge/license-AGPL--3.0-blue)](#license)
 [![Debian](https://img.shields.io/badge/debian-12%2B-red?logo=debian)](#install)
 [![API](https://img.shields.io/badge/API-OpenAPI_3-purple)](#remote-api)
-[![Status](https://img.shields.io/badge/status-beta-orange)](#status)
+[![Status](https://img.shields.io/badge/status-in_production-green)](#status)
 
 [Install](#install) · [Features](#features) · [Remote API](#remote-api) · [Import](#import-from-another-panel) · [Architecture](#architecture) · [Status](#status)
 
@@ -23,13 +23,11 @@ or CloudPanel.
 
 ---
 
-> [!WARNING]
-> **Young project — not yet proven at scale.** Hyperion compiles cleanly, its
-> test suite is green, and it has run real customer sites since v0.10 — but it
-> has not been exercised across a large fleet, and the multi-node path has seen
-> far less traffic than the single-node one. Run it on servers you can afford to
-> rebuild, keep backups, and report anything that breaks. Testers and reviewers
-> are the most valuable contribution right now.
+> [!NOTE]
+> **Running in production.** Hyperion currently serves real customer sites on
+> two production deployments. It is still a young project — it has not been
+> exercised across a large fleet, and the multi-node path has seen less traffic
+> than the single-node one — so keep backups and report anything that breaks.
 
 ---
 
@@ -277,10 +275,11 @@ packaging/install/      install-master.sh · install-node.sh · update.sh
 
 ## Status
 
-**Beta, with production mileage.** Everything is unit-tested, and the panel has
-run real customer sites since v0.10. Read the feature list as "shipped and
-exercised on a real box", not "proven at scale": it has not been run across a
-large fleet, and multi-node has had less real traffic than single-node.
+**In production.** Two live deployments run real customer sites on Hyperion,
+and every change ships through CI (format, clippy, the full test suite, a
+release build, and template/script lints) before it is tagged. It is not yet
+proven on a large fleet, and multi-node has had less real traffic than
+single-node — feedback from bigger installs is the most useful contribution.
 
 **Shipped (single node):** hosting CRUD across PHP/static/reverse-proxy with
 DB + TLS · multi-version PHP + MariaDB/PostgreSQL · suspend/resume, limits,
@@ -309,7 +308,7 @@ API keys · restic/borg backup targets · SSO/OIDC login.
 git clone https://github.com/nechodom/hyperion && cd hyperion
 cargo build --release --workspace     # → target/release/{hyperion-agent,hyperion-web,hctl}
 
-cargo test --workspace                # ~1,400 tests, green, run in seconds
+cargo test --workspace                # ~1,500 tests, run in seconds
 cargo clippy --workspace --all-targets   # clean under -D warnings
 ```
 
