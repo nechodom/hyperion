@@ -101,11 +101,13 @@
   {% endif %}
 </div>
 
-<div class="card hover">
-  <h2>
+<div class="group" style="margin-top:1.25rem">
+  <div class="ghead">New profile</div>
+  <div class="item">
+  <h3>
     <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
     New profile
-  </h2>
+  </h3>
   <form method="post" action="/profiles/create">
     <input type="hidden" name="_csrf" value="{{ csrf_create }}">
     <div class="field-row">
@@ -418,12 +420,13 @@
       })();
     </script>
 
-    <div class="row" style="margin-top:1rem">
+    <div class="item-actions">
       <button class="btn primary" type="submit">
         <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
         Create profile
       </button>
     </div>
   </form>
+  </div>
 </div>
 {% endblock %}

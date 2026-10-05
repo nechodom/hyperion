@@ -33,7 +33,9 @@
   </div>
 {% endif %}
 
-<div class="card hover">
+<div class="group">
+  <div class="ghead">Profile settings</div>
+  <div class="item">
   <form method="post" action="/profiles/{{ profile.id }}/update">
     <input type="hidden" name="_csrf" value="{{ csrf_update }}">
     <div class="field-row">
@@ -374,7 +376,7 @@
       })();
     </script>
 
-    <div class="row" style="margin-top:1rem;gap:0.5rem">
+    <div class="item-actions">
       <button class="btn primary" type="submit">
         <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
         Save changes
@@ -382,10 +384,10 @@
       <a class="btn ghost" href="/profiles">Cancel</a>
     </div>
   </form>
-</div>
+  </div>
 
-<div class="card hover" style="margin-top:1rem">
-  <h2 style="font-size:0.95rem;margin:0 0 0.4rem">Living plan</h2>
+  <div class="item">
+    <h3>Living plan</h3>
   {% if profile.in_use_count > 0 %}
     <p class="text-soft" style="margin:0 0 0.8rem">
       <strong>{{ profile.in_use_count }}</strong> hosting{% if profile.in_use_count != 1 %}s{% endif %}
@@ -404,5 +406,6 @@
   {% else %}
     <p class="text-soft" style="margin:0">No hostings use this profile yet. Apply it from a hosting's Profile tab, or pick it in the create wizard.</p>
   {% endif %}
+  </div>
 </div>
 {% endblock %}
