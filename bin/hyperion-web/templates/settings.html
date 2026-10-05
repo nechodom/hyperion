@@ -1808,17 +1808,29 @@
                {% if config.backup.drop_local_after_offsite %}checked{% endif %}>
         Delete the local copy once it is verified off-site
       </label>
+      <div class="field" style="margin:0.7rem 0 0">
+        <label for="keep_local_latest">Keep the newest local copies anyway <span class="hint">per site, 0 = keep none</span></label>
+        <input type="number" id="keep_local_latest" name="keep_local_latest" min="0" max="1000" step="1"
+               value="{{ config.backup.keep_local_latest }}" style="max-width:8rem">
+      </div>
       <p class="text-soft small" style="margin:0.5rem 0 0.8rem;line-height:1.55">
-        After each backup, the local archive and database dump are deleted
-        <strong>only when the off-site copy has been re-checked and confirmed
-        present</strong> — never on a mere "upload finished". If a file cannot
-        be confirmed off-site, the local copy is kept and a warning is logged.
-        Restore then comes from the off-site copy via the site's
-        <strong>Off-site</strong> panel. A run with no off-site destination is
-        never touched. <strong>Off by default</strong>: keeping the local copy
-        means a faster restore and a second copy, at the cost of disk.
-        To do the same once for backups already on disk, use
-        <a href="#offsite-backfill">Copy existing backups off-site</a> at the end of this tab.
+        After each backup of a site, its local archives and database dumps are
+        deleted — this backup's and any older one already off-site, except the
+        newest copies kept above — <strong>only once each off-site copy has been
+        re-checked and confirmed present</strong>, never on a mere "upload
+        finished". A copy that cannot be confirmed is kept, and the site's
+        Backups tab says why. Restore then comes from the off-site copy via the
+        site's <strong>Off-site</strong> panel. A node with no off-site
+        destination never deletes anything. <strong>Off by default</strong>:
+        keeping the local copy means a faster restore and a second copy, at the
+        cost of disk. Turning it on frees a site's existing copies after its
+        next archive backup, on whichever node owns it. To do it now for the
+        sites on this node, use
+        <a href="#offsite-backfill">Copy off-site &amp; delete local</a> at the
+        end of this tab; for a site on another node, <em>Off-site &amp; drop</em>
+        on that site's Backups tab. A node running an older agent ignores the
+        keep count; if dropping is on there, it does not take a count above 0
+        until it is upgraded.
       </p>
       <div class="item-actions"><button type="submit" class="btn primary">Save</button></div>
     </form>
@@ -1970,13 +1982,17 @@
        confirmed is kept, so this never removes the only copy. #}
     <p class="text-soft small" style="margin:0.9rem 0 0.6rem;line-height:1.55">
       Short on disk? The same sweep can <strong>delete each local copy</strong>
-      once it has been independently re-verified off-site. A copy that cannot be
-      confirmed (missing, wrong size, or the target is unreachable) is
-      <strong>kept</strong> — this never deletes the only copy.
+      once it has been independently re-verified off-site — including the
+      copies that were <strong>already off-site</strong>, which are re-checked
+      where they are rather than uploaded again. Each site's newest copies set
+      under <a href="#local-copies">Local backup copies</a> stay. A copy that
+      cannot be confirmed (missing, wrong size, or the target is unreachable) is
+      <strong>kept</strong> — this never deletes the only copy. Both buttons
+      cover the backups stored on <strong>this</strong> node.
     </p>
     <form method="post" action="/settings/backups/backfill?drop=1"
           data-confirm-title="Copy off-site, then delete local"
-          data-confirm-body="Uploads backups that have no off-site copy, then DELETES each local archive and database dump once it is independently re-verified present off-site. A copy that cannot be confirmed off-site is kept. The off-site copy remains and can still be restored. This transfers real data and can take a long time."
+          data-confirm-body="Uploads backups that have no off-site copy, then DELETES each local archive and database dump — of those and of backups already off-site — once it is independently re-verified present off-site. Each site's newest local copies set under Local backup copies stay. A copy that cannot be confirmed off-site is kept. The off-site copy remains and can still be restored. This transfers real data and can take a long time."
           data-confirm-variant="danger"
           data-confirm-confirm-label="Copy, then delete local">
       <input type="hidden" name="_csrf" value="{{ csrf_token }}">

@@ -3259,7 +3259,8 @@
       {% endif %}
     </div>
     <p class="note" style="margin-top:0.8rem">
-      How long archives and snapshots are kept, which kinds this node makes at all, and the FTP
+      How long archives and snapshots are kept, whether the local copy is deleted once it is
+      verified off-site, which kinds this node makes at all, and the FTP
       off-site target are set in <a href="/settings#backups">Settings → Backups &amp; trash</a>; S3 targets in
       <a href="/settings/backups">Settings → Backup targets</a>.
     </p>
@@ -3312,11 +3313,11 @@
        delete form's. #}
     <button type="button" class="btn small" id="bulk-offsite-btn" disabled
             onclick="hyBulkOffsiteSubmit()"
-            title="Copy the selected backups off-site, then delete the local copies once verified">Off-site &amp; delete local</button>
+            title="Delete the local copies of the selected backups once each is confirmed off-site — uploading it first only if it is not there yet">Off-site &amp; delete local</button>
   </form>
   <form id="bulk-offsite-form" method="post" action="/hostings/backups/offsite-drop"
         data-confirm-title="Copy selected off-site, then delete local"
-        data-confirm-body="Each selected backup is uploaded to the configured off-site targets, then its local archive and database dump are deleted ONLY after an independent re-verify that the copy is really off-site. A copy that cannot be confirmed off-site is kept. The off-site copies remain and can still be restored. Runs as a background job."
+        data-confirm-body="A selected backup that is already off-site is re-checked there; any other is uploaded to the configured off-site targets first. Its local archive and database dump are then deleted ONLY after an independent re-verify that the copy is really off-site. A copy that cannot be confirmed off-site is kept. The off-site copies remain and can still be restored. Runs as a background job."
         data-confirm-confirm-label="Copy off-site &amp; delete local"
         data-confirm-variant="danger"
         style="display:none">
@@ -3395,6 +3396,16 @@
      refresh re-renders only this region from the full page, and nothing in it
      is processed by htmx again afterwards: keep it to plain forms. #}
   <div id="backups-live" data-live-refresh="15">
+  {% if crate::handlers::hostings::backups_kept_by_setting(backups.as_slice()) %}
+    <p class="note" style="margin:0 0 0.6rem">
+      Backups already off-site (<em>uploaded</em> or <em>off-site ✓</em>) still keep their local copy
+      on this site's node, because <strong>Delete the local copy once it is verified off-site</strong> is
+      off there. Turn it on in
+      <a href="/settings#local-copies">Settings → Backups &amp; trash → Local backup copies</a> and this
+      site's copies are dropped after its next archive backup (scheduled, or <em>Back up now</em>) — or use
+      <em>Off-site &amp; drop</em> on a row now.
+    </p>
+  {% endif %}
   {% if backups.is_empty() %}
     <p class="note">No archives yet. <em>Back up now</em> makes the first one.</p>
   {% else %}
@@ -3424,9 +3435,15 @@
                 back at the right size. An em dash means we have no record. -#}
             <td>
               <span class="{{ b.offsite_label().1 }}" style="font-size:0.6rem"
-                    title="{% if !b.remote_error.is_empty() %}{{ b.remote_error }}{% else if !b.remote_blob_key.is_empty() %}{{ b.remote_blob_key }}{% else %}No off-site copy is recorded for this backup{% endif %}">{{ b.offsite_label().0 }}</span>
+                    title="{% if !b.remote_error.is_empty() %}{{ b.remote_error }}{% else if !b.remote_blob_key.is_empty() %}{{ b.remote_blob_key }}{% else if !b.s3_ok_targets.is_empty() %}Pushed in full to S3: {{ b.s3_ok_targets.join(", ") }}{% else %}No off-site copy is recorded for this backup{% endif %}">{{ b.offsite_label().0 }}</span>
               {%- if !b.sha256_hex.is_empty() %}
               <span class="cell-sub" style="font-size:0.6rem" title="Content digest recorded when the archive was made: {{ b.sha256_hex }}">fingerprinted</span>
+              {%- endif %}
+              {#- Why the local copy is still here although it is off-site —
+                  so "off-site ✓" beside a local path never reads as a delete
+                  that silently failed. Reason from the OWNING node. -#}
+              {%- if !b.local_kept.is_empty() %}
+              <span class="cell-sub" style="font-size:0.6rem{% if b.local_kept == "unconfirmed" %};color:var(--warn){% endif %}" title="{{ b.local_note }}">{{ b.local_kept_label() }}</span>
               {%- endif %}
             </td>
             <td class="right muted numeric">{{ crate::handlers::stats::fmt_bytes(b.bytes_total) }}</td>
@@ -3472,13 +3489,13 @@
                    leave the node. #}
                 <form method="post" action="/hostings/backups/offsite-drop" style="display:inline"
                       data-confirm-title="Copy off-site, then delete local"
-                      data-confirm-body="This backup is uploaded to the configured off-site targets, then its local archive{% if b.db_dump_path.is_some() %} and database dump{% endif %} are deleted ONLY after an independent re-verify that the copy is really off-site. If it cannot be confirmed off-site, the local copy is kept. Runs as a background job."
+                      data-confirm-body="{% if b.remote_state == "verified" || b.remote_state == "ok" || !b.s3_ok_targets.is_empty() %}This backup is already off-site: it is re-checked there (and uploaded again only if that fails){% else %}This backup is uploaded to the configured off-site targets{% endif %}, then its local archive{% if b.db_dump_path.is_some() %} and database dump{% endif %} are deleted ONLY after an independent re-verify that the copy is really off-site. If it cannot be confirmed off-site, the local copy is kept. Runs as a background job."
                       data-confirm-confirm-label="Copy off-site &amp; delete local"
                       data-confirm-variant="danger">
                   <input type="hidden" name="_csrf" value="{{ csrf_token }}">
                   <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
                   <input type="hidden" name="backup_ids" value="{{ b.id }}">
-                  <button class="btn small" type="submit" title="Copy off-site, then delete the local copy">Off-site &amp; drop</button>
+                  <button class="btn small" type="submit" title="Delete the local copy once it is confirmed off-site — uploading it first only if it is not there yet">Off-site &amp; drop</button>
                 </form>
                 {% endif %}
                 {% if b.state != "running" %}

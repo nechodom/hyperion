@@ -990,6 +990,12 @@ pub struct BackupConfigView {
     /// Off by default: keeping the local copy means a fast restore and a
     /// second copy, at the cost of disk.
     pub drop_local_after_offsite: bool,
+    /// With `drop_local_after_offsite` on: how many of each site's newest
+    /// local copies stay on disk anyway (a fast restore without a download).
+    /// 0 = drop every local copy that is verified off-site. `#[serde(default)]`
+    /// so an older agent's view (no such key) still deserializes.
+    #[serde(default)]
+    pub keep_local_latest: i64,
 }
 
 /// The agent's own defaults (`BackupRetentionSection`), NOT zeros. An

@@ -270,6 +270,27 @@ pub struct BackupRunWire {
     /// no local drop. The UI hides the "copy off-site & drop" control for it.
     #[serde(default)]
     pub no_offsite: bool,
+    /// Why this backup's LOCAL copy is still on disk although it is on record
+    /// as off-site — so "off-site ✓" next to a local path never reads as a
+    /// delete that silently failed. One of:
+    ///   * `""` — nothing to explain (no local copy, no off-site copy on
+    ///     record, a rollback snapshot, or an older node that does not say);
+    ///   * `"setting_off"` — "Delete the local copy once it is verified
+    ///     off-site" is off on the node that owns the site;
+    ///   * `"keep_newest"` — the option is on, but this is one of the newest
+    ///     local copies the node is set to keep;
+    ///   * `"unconfirmed"` — the option is on, but the drop step could not
+    ///     confirm every file off-site, so it kept the copy.
+    #[serde(default)]
+    pub local_kept: String,
+    /// The same, in words, for a tooltip/sub-line. Empty when `local_kept` is.
+    #[serde(default)]
+    pub local_note: String,
+    /// The S3 targets a push of this backup reached in full. The S3 push
+    /// writes no `remote_state` (that is the FTP target's), so for an
+    /// S3-only backup this is the only sign it is off-site.
+    #[serde(default)]
+    pub s3_ok_targets: Vec<String>,
 }
 
 impl BackupRunWire {
@@ -279,10 +300,27 @@ impl BackupRunWire {
             "verified" => ("off-site ✓", "pill ok"),
             "ok" => ("uploaded", "pill"),
             "failed" => ("off-site FAILED", "pill danger"),
+            // No FTP state, but an S3 push completed: "uploaded", the same
+            // claim strength as an FTP `ok` — the push succeeded, nobody
+            // listed the copy back.
+            _ if !self.s3_ok_targets.is_empty() => ("uploaded", "pill"),
             // Nothing recorded. On a run older than the feature this means
             // "we do not know", and saying "no" would be a claim we cannot
             // support.
             _ => ("—", "pill"),
+        }
+    }
+
+    /// A few words under the off-site pill for why the LOCAL copy is still on
+    /// disk (see `local_kept`); the full reason goes in its tooltip. Empty when
+    /// there is nothing to explain.
+    pub fn local_kept_label(&self) -> &'static str {
+        match self.local_kept.as_str() {
+            "setting_off" => "local copy kept",
+            "keep_newest" => "kept locally (newest)",
+            "unconfirmed" => "local kept: not confirmed off-site",
+            "pending" => "local copy: drops at next backup",
+            _ => "",
         }
     }
 }
@@ -424,6 +462,11 @@ pub struct OffsiteBackfillResult {
     /// conservative re-verify simply refused to license a delete.
     #[serde(default)]
     pub kept_local: i64,
+    /// Of `dropped`: local copies that were ALREADY on record as off-site, so
+    /// they were re-checked where they are and dropped without being sent
+    /// again. Lets the job log say why `pushed` is lower than `dropped`.
+    #[serde(default)]
+    pub already_offsite: i64,
 }
 
 /// One IP ban as shown in the UI / returned over the wire.
