@@ -528,6 +528,11 @@ pub fn build_router(state: SharedState) -> Router {
             "/hostings/packages/cancel",
             post(handlers::packages::post_cancel),
         )
+        // When an activation's term begins — see `post_valid_from`.
+        .route(
+            "/hostings/packages/valid-from",
+            post(handlers::packages::post_valid_from),
+        )
         // The care report. Preview sends nothing and exists so the operator
         // reads exactly what their customer will get; send-now really mails
         // it. Both are gated in the handler on the same capability as

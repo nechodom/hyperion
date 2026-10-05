@@ -9,7 +9,7 @@
    touches what it explicitly forces, which is what lets a site hold a
    Backup package and a Monitoring package at the same time without each
    switching the other's feature off. #}
-{% macro feature_bundle(id_prefix, wp, integrity, monitoring, hardening, backup, report, lang, checks, interval, keep_days, keep_last) %}
+{% macro feature_bundle(id_prefix, wp, integrity, monitoring, hardening, backup, report, lang, checks, interval, keep_days, keep_last, sections) %}
 <div class="field-row">
   <div class="field">
     <label for="{{ id_prefix }}_wp">Automatic WordPress updates</label>
@@ -85,6 +85,33 @@
     <option value="quarterly"{% if report == "quarterly" %} selected{% endif %}>Quarterly</option>
     <option value="off"{% if report == "off" %} selected{% endif %}>Off — send no report</option>
   </select>
+</div>
+{# WHICH sections of that report this plan's customers receive. A plan that
+   sells no uptime monitoring has nothing honest to say under "Availability";
+   one sold on backups alone should not carry a page of attack statistics.
+   Unticked = left out of the letter entirely: never mentioned, and never
+   counted as "not measured", because the customer did not buy it.
+
+   The hidden marker is what tells the server this form carried the group at
+   all — an unticked box is simply absent from a POST, so without it "the
+   operator unticked everything" and "an older cached form" look identical. #}
+<div class="field">
+  <label>Sections of the care report <span class="hint">tick what this plan's customers receive — it applies only if the report above is on</span></label>
+  <input type="hidden" name="report_sections_form" value="1">
+  <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(15rem,1fr));gap:0.4rem 1.2rem;margin-top:0.2rem">
+    {% for s in sections %}
+    <label style="display:flex;align-items:center;gap:0.5rem;font-weight:400;cursor:pointer">
+      <input type="checkbox" name="rs_{{ s.id }}" value="on"{% if s.sent %} checked{% endif %} style="margin:0">
+      <span>{{ s.label }}</span>
+    </label>
+    {% endfor %}
+  </div>
+  <div class="text-soft small" style="margin-top:0.35rem;line-height:1.55">
+    At least one section has to stay ticked; to send no report at all, set the
+    cadence above to "Off". Editing this reaches the sites already on the plan
+    from their next report — a report already sent is not rewritten. A site on
+    two plans receives every section either of them includes.
+  </div>
 </div>
 {# The language every letter to THIS package's customers is written in. It is
    a DEFAULT: a site with its own setting keeps that, and a package that says
@@ -214,6 +241,14 @@
                 {% if !v.pkg.features.report_cadence.is_leave() %}<span class="pill">report {{ v.pkg.features.report_cadence }}</span>{% endif %}
               </div>
             {% endif %}
+            {#- Only shown when the plan actually trims the letter: "8 of 8" on
+                every row would be noise, and the absence of the pill already
+                says "everything". -#}
+            {% if v.sections_sent < v.sections_total %}
+            <div style="margin-top:0.25rem">
+              <span class="pill" title="Care-report sections this plan's customers receive">report: {{ v.sections_sent }} of {{ v.sections_total }} sections</span>
+            </div>
+            {% endif %}
             <div style="margin-top:0.25rem">
               <span class="pill" title="Checks an operator confirms by hand every month{% if v.pkg.check_items.is_empty() %} — the built-in list{% else %}, set on this plan{% endif %}">{{ v.check_count }} monthly check{% if v.check_count != 1 %}s{% endif %}{% if !v.pkg.check_items.is_empty() %} · custom{% endif %}</span>
             </div>
@@ -309,7 +344,8 @@
                                        v.check_text.as_str(),
                                        v.pkg.features.backup_interval_days,
                                        v.pkg.features.backup_keep_days,
-                                       v.pkg.features.backup_keep_last) %}
+                                       v.pkg.features.backup_keep_last,
+                                       v.sections.clone()) %}
                 <label class="field" style="display:flex;align-items:center;gap:0.5rem;margin-top:0.8rem">
                   <input type="checkbox" name="enabled" value="1"{% if v.pkg.enabled %} checked{% endif %} style="margin:0">
                   <span>Offered — show it in the activate picker. Untick to retire it without touching the {{ v.pkg.active_count }} site{% if v.pkg.active_count != 1 %}s{% endif %} already on it.</span>
@@ -388,7 +424,7 @@
        implied: an operator has to see what they are selling before they can
        decide it is wrong. Saved unedited, it collapses back to "the
        built-ins" rather than storing a copy. #}
-    {% call feature_bundle("n", "leave", "leave", "leave", "leave", "leave", "leave", "", builtin_check_text.as_str(), 0, 0, 0) %}
+    {% call feature_bundle("n", "leave", "leave", "leave", "leave", "leave", "leave", "", builtin_check_text.as_str(), 0, 0, 0, new_sections.clone()) %}
 
     <label class="field" style="display:flex;align-items:center;gap:0.5rem;margin-top:0.8rem">
       <input type="checkbox" name="enabled" value="1" checked style="margin:0">

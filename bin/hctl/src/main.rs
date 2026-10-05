@@ -1563,11 +1563,32 @@ fn print_pretty(resp: &Response) {
             }
         }
         Response::PackageActivate(a) => {
-            println!("✓ package active (activation {})", a.id);
+            if a.is_pending() {
+                // Recorded, not enforced: say so, or "active" reads as features
+                // that are on.
+                println!(
+                    "✓ package recorded (activation {}) — starts at unix:{}, nothing is enforced until then",
+                    a.id,
+                    a.effective_start()
+                );
+            } else {
+                println!("✓ package active (activation {})", a.id);
+            }
             println!("  price: {}", a.pretty_price());
+            if let Some(ts) = a.valid_from {
+                println!("  valid from: unix:{ts}");
+            }
             if let Some(ts) = a.next_billing_at {
                 println!("  next reminder: {ts}");
             }
+        }
+        Response::PackageSetValidFrom(a) => {
+            println!(
+                "✓ activation {} valid from unix:{}{}",
+                a.id,
+                a.effective_start(),
+                if a.is_pending() { " (not started yet)" } else { "" }
+            );
         }
         Response::PackageCancel(a) => {
             println!("✓ package cancelled (activation {} kept as history)", a.id);

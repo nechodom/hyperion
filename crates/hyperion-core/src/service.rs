@@ -16,6 +16,7 @@ use hyperion_state::{
 use hyperion_types::package::{
     CareBackups, CareIntegrity, CareReport, CareUptime, CareUsage, ReportCadence,
 };
+use hyperion_types::report_sections::{ReportOmit, ReportSection};
 use hyperion_types::{
     now_secs, BackupCadence, CertInfo, CertIssueRequest, CertRenewOutcome, CertRenewResult,
     ClusterStats, DashboardAlert, DbProvision, DbSummary, DnsCheckResult, FeatureToggle,
@@ -10036,7 +10037,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// images are real and are left in the panel: waking somebody at 3 a.m.
     /// for an image is how alerting gets ignored.
     pub async fn site_check_tick(&self) -> Result<i64, RpcError> {
-        let held = packages::list_all_active(&self.pool)
+        let held = packages::list_all_in_force(&self.pool)
             .await
             .map_err(|e| RpcError::Internal_with(format!("site check: read held failed: {e}")))?;
         if held.is_empty() {
@@ -16880,6 +16881,12 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let relisted = packages::set_check_items(&self.pool, id, &new.check_items)
             .await
             .map_err(|e| RpcError::Internal_with(format!("package checklist: {e}")))?;
+        // And which care-report sections the letter carries — the same kind of
+        // presentation promise, so it follows the plan onto the sites already
+        // sold. A report already sent is history; the next one uses this.
+        let resectioned = packages::set_report_omit(&self.pool, id, &new.report_omit)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("package report sections: {e}")))?;
         let out = self.package_get(id).await?;
         self.append_audit(
             "package.update",
@@ -16888,6 +16895,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 "id": id, "name": out.name, "slug": out.slug,
                 "letters_lang": lang, "activations_relanguaged": moved,
                 "activations_relisted": relisted,
+                "report_omit": new.report_omit,
+                "activations_resectioned": resectioned,
             })
             .to_string(),
             "ok",
@@ -16906,7 +16915,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// the only safe direction for a question about whether a customer is
     /// owed them.
     async fn backups_are_sold_to(&self, id: &HostingId) -> bool {
-        match packages::list_for_hosting(&self.pool, id).await {
+        // IN FORCE only: a plan that starts next month is not yet owed backups.
+        match packages::list_in_force_for_hosting(&self.pool, id).await {
             Ok(rows) => rows
                 .iter()
                 .any(|r| !r.features.backup_cadence.is_leave_or_off()),
@@ -16936,22 +16946,41 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         package_id: i64,
         letters_lang: &str,
         check_items: &str,
+        report_omit: &str,
     ) -> Result<(u64, u64), RpcError> {
+        // Re-normalised, not trusted: this arrives over RPC from a master that
+        // may be a different build, and a malformed value stored on a worker
+        // would be read back by `ReportOmit::parse` on every report.
+        let report_omit = hyperion_types::report_sections::ReportOmit::parse(report_omit);
+        // A value that leaves out everything is refused rather than stored —
+        // the same rule `validate_package` applies on the master. A worker
+        // that stored it would send a letter with no body.
+        if report_omit.leaves_out_everything() {
+            return Err(RpcError::Validation {
+                message: "a care plan must send at least one report section".into(),
+            });
+        }
+        let report_omit = report_omit.to_stored();
+        let resectioned = packages::set_report_omit(&self.pool, package_id, &report_omit)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("package relist sections: {e}")))?;
         let relanguaged = packages::set_letters_lang(&self.pool, package_id, letters_lang)
             .await
             .map_err(|e| RpcError::Internal_with(format!("package relist language: {e}")))?;
         let relisted = packages::set_check_items(&self.pool, package_id, check_items)
             .await
             .map_err(|e| RpcError::Internal_with(format!("package relist checklist: {e}")))?;
-        if relanguaged > 0 || relisted > 0 {
+        if relanguaged > 0 || relisted > 0 || resectioned > 0 {
             self.append_audit(
                 "package.relist",
                 None,
                 &serde_json::json!({
                     "package_id": package_id,
                     "letters_lang": letters_lang,
+                    "report_omit": report_omit,
                     "activations_relanguaged": relanguaged,
                     "activations_relisted": relisted,
+                    "activations_resectioned": resectioned,
                 })
                 .to_string(),
                 "ok",
@@ -17022,7 +17051,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         &self,
         hosting_id: &HostingId,
     ) -> Vec<hyperion_types::care_check::CheckItemDef> {
-        let rows = packages::list_for_hosting(&self.pool, hosting_id)
+        // In force only: a plan waiting for its start date asks for no checks.
+        let rows = packages::list_in_force_for_hosting(&self.pool, hosting_id)
             .await
             .unwrap_or_default();
         let snapshots: Vec<&str> = rows.iter().map(|r| r.check_items.as_str()).collect();
@@ -17114,7 +17144,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         period: String,
     ) -> Result<Vec<hyperion_types::care_check::CareOverviewRow>, RpcError> {
         use hyperion_types::care_check::{CareOverviewRow, CareServiceChecks};
-        let rows = packages::list_all_active(&self.pool)
+        let rows = packages::list_all_in_force(&self.pool)
             .await
             .map_err(|e| RpcError::Internal_with(format!("care overview: {e}")))?;
         if rows.is_empty() {
@@ -17234,8 +17264,18 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         sel: HostingSelector,
         package_id: i64,
         package: Option<ServicePackage>,
+        valid_from: Option<i64>,
     ) -> Result<HostingPackage, RpcError> {
         let detail = self.get(sel).await?;
+        let now = now_secs();
+        // The operator's start date, checked before anything is written. `None`
+        // means "starts now", which is stored as NULL so a row nobody dated
+        // stays byte-identical to what this function wrote before.
+        let valid_from = validate_valid_from(valid_from, now)?;
+        // A start date in the future makes this a plan the site does not have
+        // YET: it is recorded, shown and billed from its date, but nothing is
+        // captured or forced until then (see `package_start_due`).
+        let starts_now = valid_from.map_or(true, |t| t <= now);
         // The master passes the resolved definition inline (`service_packages`
         // lives in ITS database); a node that is itself the master falls back
         // to a local lookup. Same split as profile_apply, for the same reason.
@@ -17258,12 +17298,17 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             });
         }
         let features = def.features;
-        let now = now_secs();
 
         let held = packages::list_for_hosting(&self.pool, &detail.id)
             .await
             .map_err(|e| RpcError::Internal_with(format!("package activate: read held: {e}")))?;
         if let Some(existing) = held.iter().find(|a| a.package_id == Some(package_id)) {
+            // A plan still waiting for its start date is re-asserted by NOBODY:
+            // forcing its features now would be activating it early. Moving the
+            // date is `package_set_valid_from`'s job, not this call's.
+            if existing.is_pending() {
+                return Ok(activation_row_to_wire(existing.clone(), def.name));
+            }
             let live = self.package_live_state(&detail).await;
             let changed = self.package_push_features(&detail, &features, &live).await;
             self.append_audit(
@@ -17286,23 +17331,35 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // Read the site BEFORE writing to it. This is the only moment the
         // pre-package state still exists, and it is exactly what a cancel
         // puts back.
+        //
+        // Only when the plan starts now. A plan dated for the future captures
+        // nothing: the state read today would be restored over whatever was
+        // changed in the weeks between, so the capture happens when the plan
+        // actually starts (`package_start_due`).
         let live = self.package_live_state(&detail).await;
-        let prior = PackagePriorState::capture(&features, &live);
-        let prior_state_json = match serde_json::to_string(&prior) {
-            Ok(j) => Some(j),
-            Err(e) => {
-                // Losing the snapshot would make a later cancel silently
-                // leave paid features switched on forever — refuse instead.
-                return Err(RpcError::Internal_with(format!(
-                    "package activate: serialise prior state: {e}"
-                )));
+        let prior_state_json = if starts_now {
+            let prior = PackagePriorState::capture(&features, &live);
+            match serde_json::to_string(&prior) {
+                Ok(j) => Some(j),
+                Err(e) => {
+                    // Losing the snapshot would make a later cancel silently
+                    // leave paid features switched on forever — refuse instead.
+                    return Err(RpcError::Internal_with(format!(
+                        "package activate: serialise prior state: {e}"
+                    )));
+                }
             }
+        } else {
+            None
         };
+        // The reminder clock counts from the START of the term, not from the
+        // click: a plan backdated to the 1st renews on the next whole interval
+        // after today, and one that starts next month renews an interval after
+        // that.
         let next_billing_at = def
             .price_interval
             .as_deref()
-            .and_then(billing_interval_secs)
-            .map(|s| now + s);
+            .and_then(|iv| advance_billing_date(valid_from.unwrap_or(now), iv, now));
         let activation_id = packages::activate(
             &self.pool,
             &packages::NewActivation {
@@ -17316,6 +17373,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 // Snapshotted for the same reason: the monthly checklist is
                 // rendered and ticked on the owning node too.
                 check_items: def.check_items.clone(),
+                // Snapshotted for the same reason: the letter is rendered on the
+                // owning node, which cannot look the plan's choice up.
+                report_omit: def.report_omit.clone(),
+                valid_from,
+                enforcement_started: starts_now,
                 // Snapshot the name, price AND bundle: a later re-price,
                 // re-scope or delete of the definition must not rewrite what
                 // this customer agreed to. The bundle snapshot is also what
@@ -17341,7 +17403,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // still there with the correct prior state and the drift tick
         // finishes the job; the other order can leave features switched on
         // with nothing saying who paid for them.
-        let changed = self.package_push_features(&detail, &features, &live).await;
+        let changed = if starts_now {
+            self.package_push_features(&detail, &features, &live).await
+        } else {
+            Vec::new()
+        };
         self.append_audit(
             "package.activate",
             Some(detail.id.as_str()),
@@ -17351,6 +17417,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 "activation_id": activation_id,
                 "price_minor": def.price_minor,
                 "next_billing_at": next_billing_at,
+                "valid_from": valid_from,
+                "pending": !starts_now,
                 "changed": changed,
             })
             .to_string(),
@@ -17398,6 +17466,188 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         self.notify_slack(webhook.as_deref(), &msg).await;
 
         Ok(activation_row_to_wire(row, def.name))
+    }
+
+    /// Start every activation whose `valid_from` has arrived.
+    ///
+    /// Runs at the head of the enforcement tick, so a plan dated for the 1st
+    /// is live within one pass of the 1st. Returns how many were started.
+    pub(crate) async fn package_start_due(&self) -> i64 {
+        let due = match packages::list_due_to_start(&self.pool, now_secs()).await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(error = %e, "care package: reading plans due to start failed");
+                return 0;
+            }
+        };
+        let mut started = 0;
+        for row in due {
+            if self.package_start_one(&row).await {
+                started += 1;
+            }
+        }
+        started
+    }
+
+    /// Begin ONE waiting activation: capture the prior state NOW, flip the row
+    /// to started, then force the bundle through the real setters.
+    ///
+    /// Order matters and matches `package_activate`: the prior state is read
+    /// before anything is written, and the row is recorded before the setters
+    /// run, so a setter that fails half-way leaves a row the drift tick finishes
+    /// rather than features switched on that nothing accounts for. The state
+    /// layer's compare-and-set means two passes racing here cannot both capture.
+    ///
+    /// A site that is not Active (suspended, trashed) is skipped and retried on
+    /// the next pass: re-rendering the vhost of a suspended site is not this
+    /// tick's job, and starting must not capture the state of a site that is
+    /// about to change.
+    async fn package_start_one(&self, row: &hyperion_state::packages::HostingPackageRow) -> bool {
+        let detail = match self.get(HostingSelector::Id(row.hosting_id.clone())).await {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::warn!(hosting_id = %row.hosting_id.as_str(), error = %e, "care package start: hosting read failed");
+                return false;
+            }
+        };
+        if detail.state != HostingState::Active {
+            return false;
+        }
+        let live = self.package_live_state(&detail).await;
+        let prior = PackagePriorState::capture(&row.features, &live);
+        let prior_json = match serde_json::to_string(&prior) {
+            Ok(j) => j,
+            Err(e) => {
+                // Same rule as activation: no snapshot, no start — a cancel
+                // could not restore, and would leave the features on forever.
+                tracing::warn!(error = %e, "care package start: serialise prior state failed");
+                return false;
+            }
+        };
+        match packages::mark_started(&self.pool, row.id, Some(&prior_json)).await {
+            Ok(true) => {}
+            // Another pass (or a cancel) got there first.
+            Ok(false) => return false,
+            Err(e) => {
+                tracing::warn!(error = %e, "care package start: could not record the start");
+                return false;
+            }
+        }
+        let changed = self
+            .package_push_features(&detail, &row.features, &live)
+            .await;
+        self.append_audit(
+            "package.start",
+            Some(detail.id.as_str()),
+            &serde_json::json!({
+                "activation_id": row.id,
+                "package_name": row.package_name,
+                "valid_from": row.valid_from,
+                "changed": changed,
+            })
+            .to_string(),
+            "ok",
+        )
+        .await;
+        true
+    }
+
+    /// Change when an activation's term begins.
+    ///
+    /// Earlier is always fine — it moves where the first care report and the
+    /// billing clock count from (a report already sent is history and keeps its
+    /// period; the next one still starts where the last ended). Later is fine
+    /// for a plan that has not started. What is refused is moving a plan that is
+    /// ALREADY IN FORCE into the future: that would mean un-forcing features and
+    /// restoring a prior state long since overtaken, which is what cancelling
+    /// and re-activating are for.
+    pub async fn package_set_valid_from(
+        &self,
+        sel: HostingSelector,
+        activation_id: i64,
+        valid_from: i64,
+    ) -> Result<HostingPackage, RpcError> {
+        let detail = self.get(sel).await?;
+        let row = packages::get_activation(&self.pool, activation_id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("package valid_from: {e}")))?
+            .ok_or(RpcError::NotFound {
+                kind: "package activation".into(),
+                id: activation_id.to_string(),
+            })?;
+        // The selector and the activation must agree, as in cancel.
+        if row.hosting_id != detail.id {
+            return Err(RpcError::NotFound {
+                kind: "package activation".into(),
+                id: activation_id.to_string(),
+            });
+        }
+        if !row.state.is_active() {
+            return Err(RpcError::Conflict {
+                message: "this package was cancelled — its dates are history".into(),
+            });
+        }
+        let now = now_secs();
+        let Some(valid_from) = validate_valid_from(Some(valid_from), now)? else {
+            // `validate_valid_from(Some(_))` never yields None.
+            return Err(RpcError::Internal {
+                message: "package valid_from: no date after validation".into(),
+            });
+        };
+        if row.enforcement_started && valid_from > now {
+            return Err(RpcError::Conflict {
+                message: "this package is already in force, so its start date cannot be moved \
+                          into the future — cancel it and activate it again with the later date"
+                    .into(),
+            });
+        }
+        // The reminder clock follows the term. A plan with no price interval has
+        // no clock to move.
+        let next_billing_at = match row.price_interval.as_deref() {
+            Some(iv) if row.next_billing_at.is_some() || !row.enforcement_started => {
+                advance_billing_date(valid_from, iv, now)
+            }
+            _ => row.next_billing_at,
+        };
+        let moved =
+            packages::set_valid_from(&self.pool, activation_id, valid_from, next_billing_at)
+                .await
+                .map_err(|e| RpcError::Internal_with(format!("package valid_from: {e}")))?;
+        if !moved {
+            return Err(RpcError::Conflict {
+                message: "this package was cancelled while the date was being changed".into(),
+            });
+        }
+        self.append_audit(
+            "package.valid_from",
+            Some(detail.id.as_str()),
+            &serde_json::json!({
+                "activation_id": activation_id,
+                "package_name": row.package_name,
+                "from": row.valid_from,
+                "to": valid_from,
+                "next_billing_at": next_billing_at,
+            })
+            .to_string(),
+            "ok",
+        )
+        .await;
+        // Moving a waiting plan to today or earlier starts it NOW — the
+        // operator who just fixed the date expects the plan to be live, not
+        // "within one enforcement pass".
+        if !row.enforcement_started && valid_from <= now {
+            if let Ok(Some(fresh)) = packages::get_activation(&self.pool, activation_id).await {
+                self.package_start_one(&fresh).await;
+            }
+        }
+        let row = packages::get_activation(&self.pool, activation_id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("package valid_from: re-read: {e}")))?
+            .ok_or(RpcError::Internal {
+                message: "activation vanished after write (concurrent delete?)".into(),
+            })?;
+        let name = row.package_name.clone();
+        Ok(activation_row_to_wire(row, name))
     }
 
     /// End an activation and put back what it changed.
@@ -17542,7 +17792,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// isn't Active, because re-rendering a suspended site's vhost is not
     /// this tick's job. Returns the number of feature corrections made.
     pub async fn package_enforce_tick(&self) -> Result<i64, RpcError> {
-        let rows = packages::list_all_active(&self.pool)
+        // Activations whose start date has arrived are started first (prior
+        // state captured NOW, features forced), so the fold below sees them.
+        self.package_start_due().await;
+        let rows = packages::list_all_in_force(&self.pool)
             .await
             .map_err(|e| RpcError::Internal_with(format!("package enforce: {e}")))?;
         if rows.is_empty() {
@@ -17623,7 +17876,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// feature means no package held here speaks about it, so nothing may
     /// touch it.
     async fn package_desired_state(&self, hosting_id: &HostingId) -> PackageFeatures {
-        let rows = match packages::list_for_hosting(&self.pool, hosting_id).await {
+        // In force only. This is also what `package_cancel` reads to decide
+        // which features a sibling still pays for — a sibling that has not
+        // started yet is not paying for anything.
+        let rows = match packages::list_in_force_for_hosting(&self.pool, hosting_id).await {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!(hosting_id = %hosting_id.as_str(), error = %e, "package: read held failed");
@@ -18217,7 +18473,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     ) -> Result<(HostingDetail, CareReportMail, &'static str), RpcError> {
         let detail = self.get(sel).await?;
         let now = now_secs();
-        let (cadence, started_at) = self.care_report_entitlement(&detail.id).await;
+        let (cadence, started_at, omit) = self.care_report_entitlement(&detail.id).await;
         let (from, to) = self
             .care_report_period(&detail.id, cadence, started_at, now)
             .await;
@@ -18230,12 +18486,13 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let template = self.care_report_template();
         let subject_template = read_notifications_section(self.agent_config_path.as_deref())
             .care_report_subject_template;
-        let (subject, body) = care_report_render_full(
+        let (subject, body) = care_report_render_full_omitting(
             &self.letter_catalog_for(&detail.id).await,
             &report,
             &detail.domain,
             &template,
             &subject_template,
+            omit,
         );
         let mail = CareReportMail {
             subject,
@@ -18244,7 +18501,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             period_end: to,
             to: self.care_report_recipient(&detail).await,
             cadence: cadence.as_str().to_string(),
-            entirely_unmeasured: report.is_entirely_unmeasured(),
+            entirely_unmeasured: report.is_entirely_unmeasured_for(omit),
         };
         Ok((detail, mail, letter_origin(&template)))
     }
@@ -18272,7 +18529,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     ///
     /// Returns how many reports went out.
     pub async fn care_report_tick(&self) -> Result<i64, RpcError> {
-        let rows = packages::list_all_active(&self.pool)
+        let rows = packages::list_all_in_force(&self.pool)
             .await
             .map_err(|e| RpcError::Internal_with(format!("care report tick: {e}")))?;
         if rows.is_empty() {
@@ -18286,26 +18543,33 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // sends monthly, and a package that pins reports `off` cannot
         // silence one that sells them.
         let mut order: Vec<HostingId> = Vec::new();
-        let mut wanted: HashMap<String, (ReportCadence, i64)> = HashMap::new();
+        let mut wanted: HashMap<String, (ReportCadence, i64, Vec<ReportOmit>)> = HashMap::new();
         for row in rows {
             let c = row.features.report_cadence;
             // Only an activation that actually SELLS a report may set the
             // entitlement's start date; `i64::MAX` is the "none yet" seed
             // and is unreachable once one does (see `care_report_period`,
-            // which only reads it for a sellable cadence).
-            let starts = report_cadence_secs(c).map(|_| row.activated_at);
+            // which only reads it for a sellable cadence). The operator's
+            // `valid_from` wins over the click: backdated, the first report
+            // reaches back to the day the customer started paying.
+            let sells = report_cadence_secs(c).is_some();
+            let starts = sells.then(|| row.valid_from.unwrap_or(row.activated_at));
+            // Same rule for the sections: only a plan that sells a report has a
+            // say in what it holds.
+            let omit = sells.then(|| ReportOmit::parse(&row.report_omit));
             match wanted.get_mut(row.hosting_id.as_str()) {
-                Some((cadence, since)) => {
+                Some((cadence, since, omits)) => {
                     *cadence = cadence.combine(c);
                     if let Some(t) = starts {
                         *since = (*since).min(t);
                     }
+                    omits.extend(omit);
                 }
                 None => {
                     order.push(row.hosting_id.clone());
                     wanted.insert(
                         row.hosting_id.as_str().to_string(),
-                        (c, starts.unwrap_or(i64::MAX)),
+                        (c, starts.unwrap_or(i64::MAX), omit.into_iter().collect()),
                     );
                 }
             }
@@ -18327,9 +18591,12 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let letter = letter_origin(&body_template);
         let mut sent = 0i64;
         for hosting_id in order {
-            let Some(&(cadence, started_at)) = wanted.get(hosting_id.as_str()) else {
+            let Some((cadence, started_at, omits)) = wanted.get(hosting_id.as_str()) else {
                 continue;
             };
+            let (cadence, started_at) = (*cadence, *started_at);
+            // What this site's plans, folded, leave out of the letter.
+            let omit = ReportOmit::fold_sites(omits.iter().copied());
             let Some(cadence_secs) = report_cadence_secs(cadence) else {
                 continue; // leave / off — this site buys no report
             };
@@ -18401,7 +18668,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     continue;
                 }
             };
-            if report.is_entirely_unmeasured() {
+            if report.is_entirely_unmeasured_for(omit) {
                 // Six "not measured" lines is a true statement and a
                 // terrible invoice attachment, and it almost always means
                 // the report was assembled somewhere the data isn't.
@@ -18414,12 +18681,13 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 );
                 continue;
             }
-            let (subject, body) = care_report_render_full(
+            let (subject, body) = care_report_render_full_omitting(
                 &self.letter_catalog_for(&detail.id).await,
                 &report,
                 &detail.domain,
                 &body_template,
                 &subject_template,
+                omit,
             );
             // Fourth guard, on exactly the terms of the three above. The
             // marker is BOTH "already reported" and the next period's start,
@@ -18471,24 +18739,34 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     async fn care_report_entitlement(
         &self,
         hosting_id: &HostingId,
-    ) -> (ReportCadence, Option<i64>) {
-        let rows = match packages::list_for_hosting(&self.pool, hosting_id).await {
+    ) -> (ReportCadence, Option<i64>, ReportOmit) {
+        // In force only: a plan waiting for its start date entitles the site
+        // to nothing yet, and its start date must not pull the first period
+        // into the future.
+        let rows = match packages::list_in_force_for_hosting(&self.pool, hosting_id).await {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!(hosting_id = %hosting_id.as_str(), error = %e, "care report: read held failed");
-                return (ReportCadence::Leave, None);
+                return (ReportCadence::Leave, None, ReportOmit::NONE);
             }
         };
         let mut cadence = ReportCadence::Leave;
         let mut started: Option<i64> = None;
+        // Only a plan that SELLS a report has a say in what the report holds.
+        let mut omits: Vec<ReportOmit> = Vec::new();
         for row in rows {
             let c = row.features.report_cadence;
             cadence = cadence.combine(c);
             if report_cadence_secs(c).is_some() {
-                started = Some(started.map_or(row.activated_at, |s: i64| s.min(row.activated_at)));
+                // The operator's start date when there is one — a customer who
+                // started paying on the 1st and was entered on the 5th is
+                // reported on from the 1st.
+                let from = row.valid_from.unwrap_or(row.activated_at);
+                started = Some(started.map_or(from, |s: i64| s.min(from)));
+                omits.push(ReportOmit::parse(&row.report_omit));
             }
         }
-        (cadence, started)
+        (cadence, started, ReportOmit::fold_sites(omits))
     }
 
     /// The half-open period the next report covers, `[from, now)`.
@@ -29672,6 +29950,7 @@ fn validate_package(mut p: PackageInput) -> Result<PackageInput, RpcError> {
         });
     }
     p.check_items = validate_check_items(&p.check_items)?;
+    p.report_omit = validate_report_omit(&p.report_omit)?;
     // Custom backup period + retention overrides, same bounds as a profile
     // (migration 070): the scheduler only honours a 1..=365 interval, and
     // the retention clamps stop a pasted number from becoming an absurd
@@ -29680,6 +29959,50 @@ fn validate_package(mut p: PackageInput) -> Result<PackageInput, RpcError> {
     p.features.backup_keep_days = p.features.backup_keep_days.clamp(0, 36_500);
     p.features.backup_keep_last = p.features.backup_keep_last.clamp(0, 1_000);
     Ok(p)
+}
+
+/// Earliest start date accepted: 2015-01-01 UTC. Far enough back for any
+/// customer who ever paid, near enough that a pasted epoch-in-milliseconds or a
+/// year typed as `0024` is refused instead of becoming a first report that
+/// "covers" a century.
+const VALID_FROM_MIN: i64 = 1_420_070_400;
+/// Furthest a start date may lie ahead: a plan signed now for next year's term.
+const VALID_FROM_MAX_AHEAD_SECS: i64 = 366 * 86_400;
+
+/// Check the operator's start date. `None` passes through (starts now).
+fn validate_valid_from(valid_from: Option<i64>, now: i64) -> Result<Option<i64>, RpcError> {
+    let Some(t) = valid_from else {
+        return Ok(None);
+    };
+    if t < VALID_FROM_MIN {
+        return Err(RpcError::Validation {
+            message: "the start date cannot be before 1 January 2015".into(),
+        });
+    }
+    if t > now + VALID_FROM_MAX_AHEAD_SECS {
+        return Err(RpcError::Validation {
+            message: "the start date cannot be more than a year ahead".into(),
+        });
+    }
+    Ok(Some(t))
+}
+
+/// Normalise the sections a plan leaves out of the customer letter into the
+/// exact comma list that gets stored: known ids only, in letter order.
+///
+/// A plan that leaves out EVERY section would send a letter with no body, which
+/// is never what anybody meant — the way to send no report is the cadence, and
+/// saying so here beats the customer receiving a salutation and a signature.
+fn validate_report_omit(raw: &str) -> Result<String, RpcError> {
+    let omit = hyperion_types::report_sections::ReportOmit::parse(raw);
+    if omit.leaves_out_everything() {
+        return Err(RpcError::Validation {
+            message: "a care plan must send at least one report section — to send no report, \
+                      set the report cadence to off"
+                .into(),
+        });
+    }
+    Ok(omit.to_stored())
 }
 
 /// How many items one plan may promise, and how long each may be.
@@ -29825,6 +30148,7 @@ fn package_input_to_new(input: PackageInput) -> hyperion_state::packages::NewPac
         features: input.features,
         letters_lang: input.letters_lang,
         check_items: input.check_items,
+        report_omit: input.report_omit,
     }
 }
 
@@ -29843,6 +30167,7 @@ fn package_row_to_wire(r: hyperion_state::packages::PackageRow) -> ServicePackag
         price_interval: r.price_interval,
         letters_lang: r.letters_lang,
         check_items: r.check_items,
+        report_omit: r.report_omit,
         features,
         // Filled in by package_list / package_get; 0 from the bare conversion.
         active_count: 0,
@@ -29864,6 +30189,9 @@ fn activation_row_to_wire(
         package_name,
         letters_lang: r.letters_lang,
         check_items: r.check_items,
+        report_omit: r.report_omit,
+        valid_from: r.valid_from,
+        enforcement_started: r.enforcement_started,
         price_minor: r.price_minor,
         price_currency: r.price_currency,
         price_interval: r.price_interval,
@@ -30021,6 +30349,22 @@ fn care_report_parts(
     report: &CareReport,
     domain: &str,
 ) -> (String, [String; 8], Vec<(&'static str, String)>) {
+    care_report_parts_omitting(cat, report, domain, ReportOmit::NONE)
+}
+
+/// [`care_report_parts`] for a plan that leaves some sections out.
+///
+/// A section the plan leaves out renders as the EMPTY string, and its bare
+/// values (`{attacks_count}`, `{uptime_pct}`, …) as the same dash an
+/// unmeasured one gets: the customer did not buy it, so the letter has no
+/// figure to quote, and a custom sentence wrapped around one must not
+/// reintroduce what the plan left out.
+fn care_report_parts_omitting(
+    cat: &LetterCatalog,
+    report: &CareReport,
+    domain: &str,
+    omit: ReportOmit,
+) -> (String, [String; 8], Vec<(&'static str, String)>) {
     let days = care_days_spanned(report.period_start, report.period_end);
     // The period is half-open, so the last day INSIDE it is `end - 1`.
     let last_day = (report.period_end - 1).max(report.period_start);
@@ -30044,7 +30388,7 @@ fn care_report_parts(
             ("period_end_iso", &end_iso),
         ],
     );
-    let parts = [
+    let mut parts = [
         care_section_attacks(cat, report.attacks_blocked, report.attacks_covered_since),
         care_section_updates(cat, report.updates_applied),
         care_section_usage(cat, report.usage.as_ref()),
@@ -30054,7 +30398,7 @@ fn care_report_parts(
         care_section_performance(cat, report.performance.as_ref()),
         care_section_service(cat, report.service_work.as_ref()),
     ];
-    let fields = vec![
+    let mut fields = vec![
         ("domain", domain.to_string()),
         ("period_start", from_str),
         // Inclusive last day of the period, same as the default letter.
@@ -30164,7 +30508,62 @@ fn care_report_parts(
                 .unwrap_or_else(|| UNMEASURED.to_string()),
         ),
     ];
+    // The plan's choice, applied last so it covers every placeholder in one
+    // place instead of being threaded through each of the twenty tuples above.
+    if !omit.is_empty() {
+        for (i, sec) in ReportSection::ALL.into_iter().enumerate() {
+            if omit.contains(sec) {
+                parts[i].clear();
+            }
+        }
+        for (name, value) in fields.iter_mut() {
+            if let Some(sec) = ReportSection::parse(name) {
+                if omit.contains(sec) {
+                    value.clear();
+                }
+            } else if let Some(sec) = bare_value_section(name) {
+                if omit.contains(sec) {
+                    *value = UNMEASURED.to_string();
+                }
+            }
+        }
+    }
     (subject, parts, fields)
+}
+
+/// Which section a bare-value placeholder belongs to, so a plan that leaves the
+/// section out takes its figures with it.
+fn bare_value_section(name: &str) -> Option<ReportSection> {
+    match name {
+        "attacks_count" => Some(ReportSection::Attacks),
+        "updates_count" => Some(ReportSection::Updates),
+        "traffic_requests" | "traffic_sent" | "traffic_received" | "disk_peak" => {
+            Some(ReportSection::Traffic)
+        }
+        "uptime_pct" => Some(ReportSection::Uptime),
+        "backups_count" | "backups_failed" | "backup_last_iso" => Some(ReportSection::Backups),
+        _ => None,
+    }
+}
+
+/// Collapse the blank lines a left-out section leaves behind.
+///
+/// The built-in letter separates sections with one blank line, so an empty
+/// `{attacks}` between two of them would print two. Only ever applied to a
+/// letter that actually left something out, and line-based so a template saved
+/// with CRLF endings keeps them. At most one blank line in a row survives.
+fn collapse_blank_runs(body: &str) -> String {
+    let mut out: Vec<&str> = Vec::new();
+    let mut prev_blank = false;
+    for line in body.split('\n') {
+        let blank = line.trim().is_empty();
+        if blank && prev_blank {
+            continue;
+        }
+        prev_blank = blank;
+        out.push(line);
+    }
+    out.join("\n")
 }
 
 pub fn care_report_render_with(
@@ -30173,7 +30572,22 @@ pub fn care_report_render_with(
     domain: &str,
     body_template: &str,
 ) -> (String, String) {
-    let (subject, _, fields) = care_report_parts(cat, report, domain);
+    care_report_render_with_omitting(cat, report, domain, body_template, ReportOmit::NONE)
+}
+
+/// [`care_report_render_with`] for a plan that leaves sections out of the
+/// letter. Left-out sections are never mentioned — not as a section, not as a
+/// bare value, and not in the "we could not measure …" disclosure, because the
+/// customer did not buy them and "not measured" would imply they should have
+/// been.
+pub fn care_report_render_with_omitting(
+    cat: &LetterCatalog,
+    report: &CareReport,
+    domain: &str,
+    body_template: &str,
+    omit: ReportOmit,
+) -> (String, String) {
+    let (subject, _, fields) = care_report_parts_omitting(cat, report, domain, omit);
     // Empty means "the built-in letter", and the built-in letter is now a
     // catalogue string like every other word in it — so a Czech install
     // that has customised nothing still sends a Czech report. The custom
@@ -30186,7 +30600,10 @@ pub fn care_report_render_with(
     };
     let pairs: Vec<(&str, &str)> = fields.iter().map(|(k, v)| (*k, v.as_str())).collect();
     let mut body = render_template(&template, &pairs);
-    body.push_str(&care_omitted_unmeasured_note(cat, report, &template));
+    if !omit.is_empty() {
+        body = collapse_blank_runs(&body);
+    }
+    body.push_str(&care_omitted_unmeasured_note(cat, report, &template, omit));
     (subject, body)
 }
 
@@ -30204,11 +30621,33 @@ pub fn care_report_render_full(
     body_template: &str,
     subject_template: &str,
 ) -> (String, String) {
-    let (built_in_subject, body) = care_report_render_with(cat, report, domain, body_template);
+    care_report_render_full_omitting(
+        cat,
+        report,
+        domain,
+        body_template,
+        subject_template,
+        ReportOmit::NONE,
+    )
+}
+
+/// [`care_report_render_full`] for a plan that leaves sections out. This is the
+/// path the scheduled send, the preview and send-now all share, so what the
+/// operator reads is what the customer receives.
+pub fn care_report_render_full_omitting(
+    cat: &LetterCatalog,
+    report: &CareReport,
+    domain: &str,
+    body_template: &str,
+    subject_template: &str,
+    omit: ReportOmit,
+) -> (String, String) {
+    let (built_in_subject, body) =
+        care_report_render_with_omitting(cat, report, domain, body_template, omit);
     if subject_template.trim().is_empty() {
         return (built_in_subject, body);
     }
-    let (_, _, fields) = care_report_parts(cat, report, domain);
+    let (_, _, fields) = care_report_parts_omitting(cat, report, domain, omit);
     let pairs: Vec<(&str, &str)> = fields.iter().map(|(k, v)| (*k, v.as_str())).collect();
     (render_template(subject_template, &pairs), body)
 }
@@ -30232,6 +30671,7 @@ fn care_omitted_unmeasured_note(
     cat: &LetterCatalog,
     report: &CareReport,
     body_template: &str,
+    omit: ReportOmit,
 ) -> String {
     let unmeasured: Vec<&str> = [
         (
@@ -30267,7 +30707,10 @@ fn care_omitted_unmeasured_note(
     ]
     .into_iter()
     .filter(|(placeholder, is_unmeasured, _)| {
-        *is_unmeasured && !body_template.contains(&format!("{{{placeholder}}}"))
+        // A section the PLAN leaves out is not "unmeasured": nobody promised
+        // it, so the letter has nothing to disclose about it.
+        let plan_sends = ReportSection::parse(placeholder).map_or(true, |sec| omit.sends(sec));
+        *is_unmeasured && plan_sends && !body_template.contains(&format!("{{{placeholder}}}"))
     })
     .map(|(_, _, id)| cat.get(id))
     .collect();
@@ -37928,6 +38371,9 @@ mod tests {
         packages::activate(
             pool,
             &packages::NewActivation {
+                report_omit: String::new(),
+                valid_from: None,
+                enforcement_started: true,
                 hosting_id: detail.id.clone(),
                 package_id: 1,
                 package_name: "Péče".into(),
@@ -37995,6 +38441,9 @@ mod tests {
         hyperion_state::packages::activate(
             &pool,
             &hyperion_state::packages::NewActivation {
+                report_omit: String::new(),
+                valid_from: None,
+                enforcement_started: true,
                 hosting_id: detail.id.clone(),
                 package_id: 1,
                 package_name: "Péče".into(),
@@ -43724,6 +44173,9 @@ mod tests {
         hyperion_state::packages::activate(
             &pool,
             &hyperion_state::packages::NewActivation {
+                report_omit: String::new(),
+                valid_from: None,
+                enforcement_started: true,
                 hosting_id: detail.id.clone(),
                 package_id: 1,
                 package_name: "Péče".into(),
@@ -43806,7 +44258,7 @@ mod tests {
         // than nothing — "0 of 0" would render as a finished month.
         assert_eq!(s.care_check_items(&detail.id).await.len(), 4);
 
-        s.package_activate(HostingSelector::Id(detail.id.clone()), pkg.id, None)
+        s.package_activate(HostingSelector::Id(detail.id.clone()), pkg.id, None, None)
             .await
             .expect("activate");
         let ids: Vec<String> = s
@@ -43879,6 +44331,9 @@ mod tests {
         hyperion_state::packages::activate(
             &pool,
             &hyperion_state::packages::NewActivation {
+                report_omit: String::new(),
+                valid_from: None,
+                enforcement_started: true,
                 hosting_id: detail.id.clone(),
                 package_id: 42,
                 package_name: "Péče Plus".into(),
@@ -43912,7 +44367,10 @@ mod tests {
                 detail: String::new(),
             },
         ]);
-        let (relanguaged, relisted) = s.package_relist(42, "cs", &items).await.expect("relist");
+        let (relanguaged, relisted) = s
+            .package_relist(42, "cs", &items, "")
+            .await
+            .expect("relist");
         assert_eq!((relanguaged, relisted), (1, 1));
 
         let ids: Vec<String> = s
@@ -43935,7 +44393,7 @@ mod tests {
         // A package this node holds nothing for is a no-op, not an error: the
         // master fans this out to every node, most of which own no site on it.
         assert_eq!(
-            s.package_relist(999, "cs", &items).await.expect("noop"),
+            s.package_relist(999, "cs", &items, "").await.expect("noop"),
             (0, 0)
         );
     }
@@ -44065,7 +44523,7 @@ mod tests {
         assert_eq!(def.active_count, 0);
 
         let act = s
-            .package_activate(HostingSelector::Id(detail.id.clone()), def.id, None)
+            .package_activate(HostingSelector::Id(detail.id.clone()), def.id, None, None)
             .await
             .expect("activate");
 
@@ -44120,7 +44578,7 @@ mod tests {
             .expect("define");
         let sel = HostingSelector::Id(detail.id.clone());
         let first = s
-            .package_activate(sel.clone(), def.id, None)
+            .package_activate(sel.clone(), def.id, None, None)
             .await
             .expect("activate");
 
@@ -44130,7 +44588,7 @@ mod tests {
             .await
             .expect("drift");
         let again = s
-            .package_activate(sel.clone(), def.id, None)
+            .package_activate(sel.clone(), def.id, None, None)
             .await
             .expect("re-activate");
 
@@ -44185,7 +44643,7 @@ mod tests {
             .expect("define");
         let sel = HostingSelector::Id(detail.id.clone());
         let act = s
-            .package_activate(sel.clone(), def.id, None)
+            .package_activate(sel.clone(), def.id, None, None)
             .await
             .expect("activate");
 
@@ -44258,7 +44716,7 @@ mod tests {
             .expect("define");
         let sel = HostingSelector::Id(detail.id.clone());
         let act = s
-            .package_activate(sel.clone(), def.id, None)
+            .package_activate(sel.clone(), def.id, None, None)
             .await
             .expect("activate");
 
@@ -44361,10 +44819,10 @@ mod tests {
             .expect("define watch");
         let sel = HostingSelector::Id(detail.id.clone());
         let act_plus = s
-            .package_activate(sel.clone(), plus.id, None)
+            .package_activate(sel.clone(), plus.id, None, None)
             .await
             .expect("activate plus");
-        s.package_activate(sel.clone(), watch.id, None)
+        s.package_activate(sel.clone(), watch.id, None, None)
             .await
             .expect("activate watch");
         assert!(monitoring_on(&pool, &detail.id).await);
@@ -44410,7 +44868,7 @@ mod tests {
             .await
             .expect("define");
         let sel = HostingSelector::Id(detail.id.clone());
-        s.package_activate(sel.clone(), def.id, None)
+        s.package_activate(sel.clone(), def.id, None, None)
             .await
             .expect("activate");
 
@@ -44479,7 +44937,7 @@ mod tests {
             .expect("define");
         let sel = HostingSelector::Id(detail.id.clone());
         let act = s
-            .package_activate(sel.clone(), def.id, None)
+            .package_activate(sel.clone(), def.id, None, None)
             .await
             .expect("activate");
         s.package_cancel(sel, act.id).await.expect("cancel");
@@ -44514,7 +44972,7 @@ mod tests {
             .expect("define");
         let sel = HostingSelector::Id(detail.id.clone());
         let act = s
-            .package_activate(sel.clone(), def.id, None)
+            .package_activate(sel.clone(), def.id, None, None)
             .await
             .expect("activate");
 
@@ -44579,7 +45037,7 @@ mod tests {
             .await
             .expect("define");
         let act = s
-            .package_activate(HostingSelector::Id(a.id.clone()), def.id, None)
+            .package_activate(HostingSelector::Id(a.id.clone()), def.id, None, None)
             .await
             .expect("activate on a");
 
@@ -44594,5 +45052,577 @@ mod tests {
             .package_cancel(HostingSelector::Id(b.id.clone()), act.id)
             .await
             .is_err());
+    }
+
+    // ============================================================
+    //  Care-plan start date ("valid from") and report sections.
+    // ============================================================
+
+    fn omit_of(ids: &str) -> ReportOmit {
+        ReportOmit::parse(ids)
+    }
+
+    /// A plan that leaves sections out of the letter: they are gone — as
+    /// sections, as bare values, and from the "we could not measure" note —
+    /// and the blank lines they leave behind are tidied. Everything else is
+    /// byte-for-byte what the full letter says.
+    #[test]
+    fn a_plan_that_leaves_sections_out_sends_a_shorter_honest_letter() {
+        let r = mk_care_report(); // uptime is UNMEASURED here, on purpose
+        let (_, full) =
+            care_report_render_with_omitting(&en(), &r, "example.cz", "", ReportOmit::NONE);
+        let (_, short) = care_report_render_with_omitting(
+            &en(),
+            &r,
+            "example.cz",
+            "",
+            omit_of("attacks,uptime,traffic"),
+        );
+
+        // Unchanged when nothing is left out — the default path is untouched.
+        assert_eq!(
+            full,
+            care_report_render_with(&en(), &r, "example.cz", "").1,
+            "no omit = today's letter, byte for byte"
+        );
+        // The three sections are not mentioned at all…
+        let attacks = care_section_attacks(&en(), r.attacks_blocked, r.attacks_covered_since);
+        let traffic = care_section_usage(&en(), r.usage.as_ref());
+        assert!(full.contains(&attacks) && full.contains(&traffic));
+        assert!(!short.contains(&attacks), "{short}");
+        assert!(!short.contains(&traffic), "{short}");
+        // …the sections it does send are exactly as before…
+        for kept in [
+            care_section_updates(&en(), r.updates_applied),
+            care_section_backups(&en(), r.backups.as_ref()),
+            care_section_integrity(&en(), r.integrity.as_ref()),
+        ] {
+            assert!(short.contains(&kept), "{kept}\n---\n{short}");
+        }
+        // …and the unmeasured UPTIME section the plan does not sell is not
+        // disclosed as "not measured": the customer never bought it.
+        let uptime_unmeasured = care_section_uptime(&en(), None);
+        assert!(full.contains(&uptime_unmeasured));
+        assert!(!short.contains(&uptime_unmeasured), "{short}");
+        assert!(
+            !short.to_uppercase().contains("AVAILABILITY"),
+            "an omitted section must never be reported as unmeasured: {short}"
+        );
+        // (PERFORMANCE is sent by this plan and unmeasured in the fixture, so
+        // the letter rightly still says "not measured" for THAT section.)
+        // No run of blank lines where a section used to be.
+        assert!(!short.contains("\n\n\n"), "{short:?}");
+    }
+
+    /// The disclosure rule is untouched for sections the plan DOES send: an
+    /// operator who deletes `{uptime}` from a custom letter still gets the
+    /// "not measured" note appended — unless the plan itself leaves uptime out.
+    #[test]
+    fn the_unmeasured_note_still_covers_what_the_plan_sends() {
+        let r = mk_care_report();
+        let tpl = "{domain}\n{attacks}";
+        let (_, sent) =
+            care_report_render_with_omitting(&en(), &r, "example.cz", tpl, ReportOmit::NONE);
+        assert!(
+            sent.contains("uptime") || sent.to_lowercase().contains("availability"),
+            "uptime is sent by the plan but absent from the letter and unmeasured, so it is disclosed: {sent}"
+        );
+        let (_, left_out) =
+            care_report_render_with_omitting(&en(), &r, "example.cz", tpl, omit_of("uptime"));
+        assert!(
+            !left_out.to_lowercase().contains("availability"),
+            "uptime is left out by the plan, so there is nothing to disclose: {left_out}"
+        );
+    }
+
+    /// A custom sentence around a bare value must not reintroduce a figure the
+    /// plan left out.
+    #[test]
+    fn bare_values_of_a_left_out_section_become_a_dash() {
+        let r = mk_care_report();
+        let tpl = "{attacks_count}|{updates_count}|{traffic_sent}|{backups_count}|{attacks}";
+        let (_, body) = care_report_render_with_omitting(
+            &en(),
+            &r,
+            "example.cz",
+            tpl,
+            omit_of("attacks,traffic"),
+        );
+        let first_line = body.lines().next().expect("line");
+        assert!(first_line.starts_with("—|3|—|30|"), "{first_line}");
+    }
+
+    /// CRLF templates keep their line endings when sections are left out.
+    #[test]
+    fn collapsing_blank_lines_keeps_crlf() {
+        assert_eq!(
+            collapse_blank_runs("a\r\n\r\n\r\n\r\nb\r\n"),
+            "a\r\n\r\nb\r\n"
+        );
+        assert_eq!(collapse_blank_runs("a\n\nb\n"), "a\n\nb\n");
+        assert_eq!(collapse_blank_runs("a\n \n\t\nb"), "a\n \nb");
+    }
+
+    #[test]
+    fn a_plan_may_not_leave_out_every_section() {
+        assert!(validate_report_omit("").is_ok());
+        assert_eq!(
+            validate_report_omit(" uptime,attacks,bogus ").unwrap(),
+            "attacks,uptime"
+        );
+        let all = ReportSection::ALL
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+        assert!(validate_report_omit(&all).is_err());
+    }
+
+    #[test]
+    fn a_start_date_must_be_plausible() {
+        let now = 1_800_000_000;
+        assert_eq!(validate_valid_from(None, now).unwrap(), None);
+        assert_eq!(
+            validate_valid_from(Some(now - 40 * 86_400), now).unwrap(),
+            Some(now - 40 * 86_400)
+        );
+        assert_eq!(
+            validate_valid_from(Some(now + 300 * 86_400), now).unwrap(),
+            Some(now + 300 * 86_400)
+        );
+        assert!(
+            validate_valid_from(Some(now + 400 * 86_400), now).is_err(),
+            "over a year ahead"
+        );
+        assert!(validate_valid_from(Some(0), now).is_err(), "before 2015");
+        assert!(
+            validate_valid_from(Some(1_700_000_000_000), now).is_err(),
+            "epoch milliseconds"
+        );
+    }
+
+    /// Backdated: the plan is in force at once, but the first report and the
+    /// billing clock count from the operator's date, not from the click.
+    #[tokio::test]
+    async fn a_backdated_plan_counts_reports_and_billing_from_its_date() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), package_mocks());
+        let detail = hosting_for_packages(&s, "zpetne.cz").await;
+        let hid = detail.id.as_str().to_string();
+        s.hosting_kv_set(hid.clone(), "wp_auto_update".into(), "off".into())
+            .await
+            .expect("seed");
+        let mut input = care_input(
+            "Péče Plus",
+            PackageFeatures {
+                wp_auto_update: FeatureToggle::On,
+                report_cadence: ReportCadence::Monthly,
+                ..Default::default()
+            },
+        );
+        input.report_omit = "attacks".into();
+        let def = s.package_create(input).await.expect("define");
+        let sel = HostingSelector::Id(detail.id.clone());
+        let now = now_secs();
+        let started = now - 100 * 86_400;
+
+        let act = s
+            .package_activate(sel.clone(), def.id, None, Some(started))
+            .await
+            .expect("activate backdated");
+        assert_eq!(act.valid_from, Some(started));
+        assert!(
+            act.enforcement_started,
+            "a date in the past starts the plan now"
+        );
+        assert_eq!(
+            act.report_omit, "attacks",
+            "the plan's section choice is snapshotted"
+        );
+        // Enforced immediately.
+        assert_eq!(
+            kv_of(&pool, &hid, "wp_auto_update").await.as_deref(),
+            Some("on")
+        );
+        // The reminder clock is the next whole interval AFTER today, counted
+        // from the start date — not "30 days from the click".
+        let next = act.next_billing_at.expect("clock armed");
+        assert!(next > now);
+        assert_eq!((next - started) % (30 * 86_400), 0, "aligned to the term");
+        assert!(next - now <= 30 * 86_400);
+
+        // The first report runs from the operator's date, and carries the
+        // plan's sections.
+        let (cadence, from, omit) = s.care_report_entitlement(&detail.id).await;
+        assert_eq!(cadence, ReportCadence::Monthly);
+        assert_eq!(from, Some(started));
+        assert_eq!(omit.to_stored(), "attacks");
+    }
+
+    /// A plan dated for the future is recorded and shown, and does NOTHING:
+    /// no features forced, no prior state captured, no report entitlement, no
+    /// monthly checks. When its date arrives the next pass starts it, capturing
+    /// the site as it is THEN.
+    #[tokio::test]
+    async fn a_future_plan_does_nothing_until_it_starts() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), package_mocks());
+        let detail = hosting_for_packages(&s, "budouci.cz").await;
+        let hid = detail.id.as_str().to_string();
+        s.hosting_kv_set(hid.clone(), "wp_auto_update".into(), "off".into())
+            .await
+            .expect("seed");
+        let def = s
+            .package_create(care_input(
+                "Péče Plus",
+                PackageFeatures {
+                    wp_auto_update: FeatureToggle::On,
+                    report_cadence: ReportCadence::Monthly,
+                    ..Default::default()
+                },
+            ))
+            .await
+            .expect("define");
+        let sel = HostingSelector::Id(detail.id.clone());
+        let now = now_secs();
+        let start = now + 20 * 86_400;
+
+        let act = s
+            .package_activate(sel.clone(), def.id, None, Some(start))
+            .await
+            .expect("activate for the future");
+        assert!(act.is_pending());
+        assert_eq!(act.valid_from, Some(start));
+        assert_eq!(act.prior_state_json, None, "nothing captured yet");
+        // Billing starts with the term: a first renewal a whole interval after it.
+        assert_eq!(act.next_billing_at, Some(start + 30 * 86_400));
+        // Not forced…
+        assert_eq!(
+            kv_of(&pool, &hid, "wp_auto_update").await.as_deref(),
+            Some("off")
+        );
+        // …not re-asserted by the drift tick…
+        assert_eq!(s.package_enforce_tick().await.expect("tick"), 0);
+        assert_eq!(
+            kv_of(&pool, &hid, "wp_auto_update").await.as_deref(),
+            Some("off")
+        );
+        // …not entitled to a report…
+        let (cadence, from, _) = s.care_report_entitlement(&detail.id).await;
+        assert_eq!((cadence, from), (ReportCadence::Leave, None));
+        // …not asked for monthly checks beyond the built-in fallback, and not
+        // counted on the care dashboard.
+        assert!(s
+            .care_overview("2026-10".into())
+            .await
+            .expect("overview")
+            .is_empty());
+        // …and re-activating it must not start it early.
+        let again = s
+            .package_activate(sel.clone(), def.id, None, None)
+            .await
+            .expect("re-activate");
+        assert_eq!(again.id, act.id);
+        assert_eq!(
+            kv_of(&pool, &hid, "wp_auto_update").await.as_deref(),
+            Some("off")
+        );
+        // The card still lists it (it is held).
+        assert_eq!(
+            s.package_activations(sel.clone(), false)
+                .await
+                .expect("held")
+                .len(),
+            1
+        );
+
+        // The site changes in the meantime…
+        s.hosting_kv_set(hid.clone(), "wp_auto_update".into(), "on".into())
+            .await
+            .expect("changed by hand");
+        // …and the date arrives (moved into the past directly, as time passing would).
+        packages::set_valid_from(&pool, act.id, now - 60, act.next_billing_at)
+            .await
+            .expect("time passes");
+        assert_eq!(s.package_enforce_tick().await.expect("tick"), 0);
+        let started = packages::get_activation(&pool, act.id)
+            .await
+            .expect("read")
+            .expect("row");
+        assert!(started.enforcement_started, "the pass started it");
+        // The prior state is the site as it was AT THE START (on), not as it was
+        // when the form was submitted (off): cancelling must not switch off a
+        // setting the customer turned on themselves in the weeks between.
+        let prior: PackagePriorState =
+            serde_json::from_str(&started.prior_state_json.expect("captured")).expect("de");
+        assert_eq!(prior.wp_auto_update, Some(true));
+        let (cadence, from, _) = s.care_report_entitlement(&detail.id).await;
+        assert_eq!(cadence, ReportCadence::Monthly);
+        assert_eq!(from, Some(now - 60), "reports count from the start date");
+    }
+
+    /// Cancelling a plan that never started touches nothing.
+    #[tokio::test]
+    async fn cancelling_a_waiting_plan_restores_nothing() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), package_mocks());
+        let detail = hosting_for_packages(&s, "zrusit.cz").await;
+        let hid = detail.id.as_str().to_string();
+        s.hosting_kv_set(hid.clone(), "wp_auto_update".into(), "on".into())
+            .await
+            .expect("seed");
+        let def = s
+            .package_create(care_input(
+                "Péče",
+                PackageFeatures {
+                    wp_auto_update: FeatureToggle::Off,
+                    ..Default::default()
+                },
+            ))
+            .await
+            .expect("define");
+        let sel = HostingSelector::Id(detail.id.clone());
+        let act = s
+            .package_activate(sel.clone(), def.id, None, Some(now_secs() + 5 * 86_400))
+            .await
+            .expect("activate");
+        s.package_cancel(sel, act.id).await.expect("cancel");
+        assert_eq!(
+            kv_of(&pool, &hid, "wp_auto_update").await.as_deref(),
+            Some("on"),
+            "nothing was forced, so nothing is put back"
+        );
+    }
+
+    /// The date can be corrected; a plan already in force cannot be pushed into
+    /// the future (that would mean un-forcing features).
+    #[tokio::test]
+    async fn changing_a_start_date_follows_the_rules() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), package_mocks_two_sites());
+        s.create(req_no_db("datum.cz")).await.expect("create");
+        let detail = s
+            .get(HostingSelector::Domain(
+                Domain::parse("datum.cz").expect("parse"),
+            ))
+            .await
+            .expect("get");
+        let hid = detail.id.as_str().to_string();
+        s.hosting_kv_set(hid.clone(), "wp_auto_update".into(), "off".into())
+            .await
+            .expect("seed");
+        let def = s
+            .package_create(care_input(
+                "Péče",
+                PackageFeatures {
+                    wp_auto_update: FeatureToggle::On,
+                    ..Default::default()
+                },
+            ))
+            .await
+            .expect("define");
+        let sel = HostingSelector::Id(detail.id.clone());
+        let now = now_secs();
+
+        // In force → backdate: fine, and it re-aims the billing clock.
+        let act = s
+            .package_activate(sel.clone(), def.id, None, None)
+            .await
+            .expect("activate");
+        assert_eq!(act.valid_from, None);
+        let earlier = now - 70 * 86_400;
+        let moved = s
+            .package_set_valid_from(sel.clone(), act.id, earlier)
+            .await
+            .expect("backdate");
+        assert_eq!(moved.valid_from, Some(earlier));
+        assert!(moved
+            .next_billing_at
+            .is_some_and(|t| t > now && (t - earlier) % (30 * 86_400) == 0));
+
+        // In force → future: refused, nothing changes.
+        let err = s
+            .package_set_valid_from(sel.clone(), act.id, now + 10 * 86_400)
+            .await
+            .expect_err("cannot postpone a plan in force");
+        assert!(err.to_string().contains("already in force"), "{err}");
+        let unchanged = packages::get_activation(&pool, act.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(unchanged.valid_from, Some(earlier));
+
+        // Out of range: refused.
+        assert!(s
+            .package_set_valid_from(sel.clone(), act.id, 5)
+            .await
+            .is_err());
+
+        // An activation id from another site is a 404.
+        s.create(req_no_db("jiny.cz")).await.expect("create other");
+        let other = s
+            .get(HostingSelector::Domain(
+                Domain::parse("jiny.cz").expect("parse"),
+            ))
+            .await
+            .expect("get other");
+        assert!(s
+            .package_set_valid_from(HostingSelector::Id(other.id.clone()), act.id, earlier)
+            .await
+            .is_err());
+
+        // Waiting → later: fine. Waiting → today: starts at once.
+        s.package_cancel(sel.clone(), act.id).await.expect("cancel");
+        let waiting = s
+            .package_activate(sel.clone(), def.id, None, Some(now + 30 * 86_400))
+            .await
+            .expect("activate for later");
+        assert!(waiting.is_pending());
+        let later = s
+            .package_set_valid_from(sel.clone(), waiting.id, now + 45 * 86_400)
+            .await
+            .expect("postpone a waiting plan");
+        assert!(later.is_pending());
+        assert_eq!(later.valid_from, Some(now + 45 * 86_400));
+        assert_eq!(
+            kv_of(&pool, &hid, "wp_auto_update").await.as_deref(),
+            Some("off"),
+            "a waiting plan forces nothing, even after being moved"
+        );
+
+        let started = s
+            .package_set_valid_from(sel.clone(), waiting.id, now - 3_600)
+            .await
+            .expect("bring it forward");
+        assert!(
+            !started.is_pending(),
+            "a date that has passed starts the plan now"
+        );
+        assert_eq!(
+            kv_of(&pool, &hid, "wp_auto_update").await.as_deref(),
+            Some("on")
+        );
+
+        // A cancelled activation's dates are history.
+        s.package_cancel(sel.clone(), waiting.id)
+            .await
+            .expect("cancel");
+        assert!(s
+            .package_set_valid_from(sel, waiting.id, earlier)
+            .await
+            .is_err());
+    }
+
+    /// Editing a plan's section choice reaches the sites already on it, and the
+    /// relist refuses a value that would send an empty letter.
+    #[tokio::test]
+    async fn a_plans_report_sections_follow_an_edit() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), package_mocks());
+        let detail = hosting_for_packages(&s, "sekce.cz").await;
+        let def = s
+            .package_create(care_input(
+                "Péče",
+                PackageFeatures {
+                    report_cadence: ReportCadence::Monthly,
+                    ..Default::default()
+                },
+            ))
+            .await
+            .expect("define");
+        let sel = HostingSelector::Id(detail.id.clone());
+        s.package_activate(sel.clone(), def.id, None, None)
+            .await
+            .expect("activate");
+        let omit_now = || async {
+            let (_, _, o) = s.care_report_entitlement(&detail.id).await;
+            o.to_stored()
+        };
+        assert_eq!(omit_now().await, "");
+
+        let mut edit = care_input(
+            "Péče",
+            PackageFeatures {
+                report_cadence: ReportCadence::Monthly,
+                ..Default::default()
+            },
+        );
+        edit.report_omit = " uptime , attacks ".into();
+        let updated = s
+            .package_update(def.id, edit.clone())
+            .await
+            .expect("update");
+        assert_eq!(updated.report_omit, "attacks,uptime", "stored canonically");
+        assert_eq!(
+            omit_now().await,
+            "attacks,uptime",
+            "the sold site follows the edit"
+        );
+
+        // The worker-node path: the relist takes values, not an id lookup.
+        let (_, _) = s
+            .package_relist(def.id, "", "", "traffic")
+            .await
+            .expect("relist");
+        assert_eq!(omit_now().await, "traffic");
+        let all = ReportSection::ALL
+            .iter()
+            .map(|x| x.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+        assert!(s.package_relist(def.id, "", "", &all).await.is_err());
+        assert_eq!(
+            omit_now().await,
+            "traffic",
+            "a refused relist changes nothing"
+        );
+
+        // And the definition itself refuses to be saved empty.
+        edit.report_omit = all;
+        assert!(s.package_update(def.id, edit).await.is_err());
+    }
+
+    /// Two plans on one site send the union of their sections.
+    #[tokio::test]
+    async fn two_plans_send_every_section_either_includes() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), package_mocks());
+        let detail = hosting_for_packages(&s, "dva.cz").await;
+        let sel = HostingSelector::Id(detail.id.clone());
+        let mk = |name: &str, omit: &str, cadence: ReportCadence| {
+            let mut i = care_input(
+                name,
+                PackageFeatures {
+                    report_cadence: cadence,
+                    ..Default::default()
+                },
+            );
+            i.report_omit = omit.into();
+            i
+        };
+        let a = s
+            .package_create(mk("A", "attacks,uptime,traffic", ReportCadence::Monthly))
+            .await
+            .unwrap();
+        let b = s
+            .package_create(mk("B", "uptime,integrity", ReportCadence::Weekly))
+            .await
+            .unwrap();
+        // A plan that sells NO report has no say in what the report holds.
+        let c = s
+            .package_create(mk("C", "", ReportCadence::Leave))
+            .await
+            .unwrap();
+        for id in [a.id, b.id, c.id] {
+            s.package_activate(sel.clone(), id, None, None)
+                .await
+                .expect("activate");
+        }
+        let (_, _, omit) = s.care_report_entitlement(&detail.id).await;
+        assert_eq!(
+            omit.to_stored(),
+            "uptime",
+            "left out only where every report-selling plan leaves it out"
+        );
     }
 }

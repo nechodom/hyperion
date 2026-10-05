@@ -31,6 +31,7 @@ pub mod perf;
 pub mod php;
 pub mod profile;
 pub mod regguard;
+pub mod report_sections;
 pub mod sitecheck;
 pub mod spf;
 pub mod stats;

@@ -33,6 +33,7 @@ use hyperion_rpc::codec::{CareReportMail, Request, Response as RpcResponse};
 use hyperion_rpc::wire::HostingSelector;
 use hyperion_state::capabilities::Capability;
 use hyperion_types::package::ReportCadence;
+use hyperion_types::report_sections::{ReportOmit, ReportSection};
 use hyperion_types::{
     BackupCadence, FeatureToggle, HostingPackage, LiveFeatureState, PackageFeatures, PackageInput,
     ServicePackage,
@@ -54,6 +55,9 @@ struct PackagesTpl<'a> {
     packages: Vec<PackageView>,
     /// The four built-ins as textarea lines, for the "new package" form.
     builtin_check_text: String,
+    /// Every report section ticked, for the "new package" form: a new plan
+    /// sends the whole letter until the operator unticks something.
+    new_sections: Vec<SectionChoice>,
     csrf_token: String,
     flash: Option<String>,
     error: Option<String>,
@@ -73,6 +77,32 @@ struct PackageView {
     /// than counted in the template, which cannot tell an empty definition
     /// (the built-in four) from a plan that lists four of its own.
     check_count: usize,
+    /// One checkbox per care-report section, ticked where the plan SENDS it.
+    sections: Vec<SectionChoice>,
+    /// How many sections the plan sends, of how many there are — the row badge.
+    sections_sent: usize,
+    sections_total: usize,
+}
+
+/// One checkbox in the "report sections" group of the plan editor.
+#[derive(Clone)]
+pub struct SectionChoice {
+    pub id: &'static str,
+    pub label: &'static str,
+    /// Ticked = the customer's letter carries this section.
+    pub sent: bool,
+}
+
+/// The eight sections as checkboxes, ticked where `omit` does NOT leave them out.
+fn section_choices(omit: ReportOmit) -> Vec<SectionChoice> {
+    ReportSection::ALL
+        .into_iter()
+        .map(|s| SectionChoice {
+            id: s.as_str(),
+            label: s.label(),
+            sent: omit.sends(s),
+        })
+        .collect()
 }
 
 #[derive(Deserialize, Default)]
@@ -101,6 +131,9 @@ pub async fn get_packages(
         .into_iter()
         .map(|pkg| PackageView {
             price_major: price_major(pkg.price_minor),
+            sections: section_choices(ReportOmit::parse(&pkg.report_omit)),
+            sections_sent: ReportOmit::parse(&pkg.report_omit).sent_count(),
+            sections_total: ReportSection::ALL.len(),
             check_count: hyperion_types::care_check::parse_check_items(&pkg.check_items).len(),
             check_text: check_items_to_text(&hyperion_types::care_check::parse_check_items(
                 &pkg.check_items,
@@ -116,6 +149,7 @@ pub async fn get_packages(
         htmx_version: super::htmx_version(),
         packages,
         builtin_check_text: check_items_to_text(&hyperion_types::care_check::builtin_check_items()),
+        new_sections: section_choices(ReportOmit::NONE),
         csrf_token: super::session_csrf_token(&state, &ctx),
         flash: q.flash,
         error: q.error,
@@ -209,6 +243,35 @@ pub struct PackageForm {
     /// four the next time somebody fixes a typo in the name.
     #[serde(default)]
     pub check_items_text: Option<String>,
+    /// Marker that the form carried the report-section checkboxes at all.
+    ///
+    /// An unticked checkbox is simply ABSENT from a POST body, so eight absent
+    /// fields cannot tell "the operator unticked everything" from "this is an
+    /// older cached form that never had the group" — and reading the second as
+    /// the first would silently strip every section from a plan the next time
+    /// somebody fixed a typo in its name. The marker is what separates them:
+    /// absent marker = leave the stored choice alone.
+    #[serde(default)]
+    pub report_sections_form: Option<String>,
+    // One field per section, "on" when ticked. Named `rs_<id>` — the ids are
+    // `ReportSection::as_str`, and `axum::Form` cannot collect repeated keys
+    // into a `Vec`, so a fixed set of fields it is.
+    #[serde(default)]
+    pub rs_attacks: Option<String>,
+    #[serde(default)]
+    pub rs_updates: Option<String>,
+    #[serde(default)]
+    pub rs_traffic: Option<String>,
+    #[serde(default)]
+    pub rs_uptime: Option<String>,
+    #[serde(default)]
+    pub rs_backups: Option<String>,
+    #[serde(default)]
+    pub rs_integrity: Option<String>,
+    #[serde(default)]
+    pub rs_performance: Option<String>,
+    #[serde(default)]
+    pub rs_service: Option<String>,
 }
 
 /// Render a plan's checklist for the textarea: one item per line.
@@ -334,6 +397,7 @@ impl PackageForm {
         current_lang: Option<&str>,
         current_items: Option<&str>,
         current_backup: Option<(i64, i64, i64)>,
+        current_omit: Option<&str>,
     ) -> Result<PackageInput, AppError> {
         let price_minor = parse_price_major(&self.price_major)?;
         let currency = self.price_currency.trim().to_string();
@@ -369,6 +433,26 @@ impl PackageForm {
             }
             None => current_items.unwrap_or_default().to_string(),
         };
+        // The sections the plan LEAVES OUT are the ones whose box is unticked.
+        // Only when the form carried the group (see `report_sections_form`);
+        // otherwise the stored choice stands. Creating a plan has no stored
+        // choice, so a form without the group sends everything.
+        let report_omit = if self.report_sections_form.is_some() {
+            let ticked = [
+                (ReportSection::Attacks, &self.rs_attacks),
+                (ReportSection::Updates, &self.rs_updates),
+                (ReportSection::Traffic, &self.rs_traffic),
+                (ReportSection::Uptime, &self.rs_uptime),
+                (ReportSection::Backups, &self.rs_backups),
+                (ReportSection::Integrity, &self.rs_integrity),
+                (ReportSection::Performance, &self.rs_performance),
+                (ReportSection::Service, &self.rs_service),
+            ];
+            ReportOmit::from_sections(ticked.iter().filter(|(_, v)| v.is_none()).map(|(s, _)| *s))
+                .to_stored()
+        } else {
+            current_omit.unwrap_or("").to_string()
+        };
         // Absent field = leave what is stored (older cached form); present =
         // take it, blank/unparseable folding to 0. The service clamps the
         // range, so this only has to decide carry-over vs. overwrite.
@@ -389,6 +473,7 @@ impl PackageForm {
             price_interval: (!interval.is_empty()).then_some(interval),
             letters_lang,
             check_items,
+            report_omit,
             features: PackageFeatures {
                 wp_auto_update: FeatureToggle::from_stored(&self.feat_wp_auto_update),
                 integrity_scan: FeatureToggle::from_stored(&self.feat_integrity_scan),
@@ -412,7 +497,7 @@ pub async fn post_create(
     if !ctx.can(Capability::ProfilesManage) {
         return Err(AppError::Forbidden);
     }
-    let input = form.into_input(None, None, None, None)?;
+    let input = form.into_input(None, None, None, None, None)?;
     match hyperion_rpc_client::call(&state.agent_socket, Request::PackageCreate(input)).await? {
         RpcResponse::PackageCreate(p) => Ok(redirect_flash(&format!(
             "Package \"{}\" created. Activate it on a hosting from that site's detail page.",
@@ -436,7 +521,7 @@ pub async fn post_update(
     // incoming form might not post back — see
     // `PackageForm::feat_report_cadence` for why absent must not mean
     // "leave".
-    let (current, current_lang, current_items, current_backup) =
+    let (current, current_lang, current_items, current_backup, current_omit) =
         match hyperion_rpc_client::call(&state.agent_socket, Request::PackageGet { id }).await? {
             RpcResponse::PackageGet(p) => (
                 Some(p.features.report_cadence),
@@ -447,6 +532,7 @@ pub async fn post_update(
                     p.features.backup_keep_days,
                     p.features.backup_keep_last,
                 ),
+                p.report_omit,
             ),
             RpcResponse::Error(e) => return Ok(redirect_error(&e.to_string())),
             _ => return Err(AppError::Internal("unexpected response".into())),
@@ -456,6 +542,7 @@ pub async fn post_update(
         Some(&current_lang),
         Some(&current_items),
         Some(current_backup),
+        Some(&current_omit),
     )?;
     match hyperion_rpc_client::call(&state.agent_socket, Request::PackageUpdate { id, input })
         .await?
@@ -470,7 +557,14 @@ pub async fn post_update(
             // not answer keeps selling the old checklist and the old letter
             // language with nothing on screen to say so, which is the one
             // outcome this must not produce silently.
-            let missed = relist_on_every_node(&state, p.id, &p.letters_lang, &p.check_items).await;
+            let missed = relist_on_every_node(
+                &state,
+                p.id,
+                &p.letters_lang,
+                &p.check_items,
+                &p.report_omit,
+            )
+            .await;
             if missed.is_empty() {
                 Ok(redirect_flash(&format!(
                     "Package \"{}\" updated. Sites already holding it pick the change up on the next enforcement pass.",
@@ -479,7 +573,7 @@ pub async fn post_update(
             } else {
                 Ok(redirect_error(&format!(
                     "Package \"{}\" was saved, but {} did not answer, so sites there still hold the \
-                     previous checklist and letter language. Re-save this package once {} reachable.",
+                     previous checklist, letter language and report sections. Re-save this package once {} reachable.",
                     p.name,
                     missed.join(", "),
                     if missed.len() == 1 { "it is" } else { "they are" },
@@ -534,6 +628,9 @@ struct PackagesCardTpl {
     csrf_token: String,
     /// Packages this hosting holds right now, oldest activation first.
     held: Vec<HeldPackage>,
+    /// How many of them are in force — the header badge. A plan waiting for
+    /// its start date is held but is not "active".
+    in_force_count: usize,
     /// Definitions an admin could still activate here (enabled, and not
     /// already held — the state layer refuses a second active row for
     /// the same package, so offering one would only produce an error).
@@ -680,15 +777,36 @@ struct HeldPackage {
     /// there is no bundle left to enforce. Says so instead of rendering
     /// an empty feature list that looks like a package selling nothing.
     orphaned: bool,
+    /// The plan has not started: nothing is enforced and no report is sent
+    /// until its start date. The feature lines below say "waiting" rather
+    /// than "on" / "not on", which would describe a site that is not yet
+    /// supposed to be doing anything.
+    pending: bool,
+    /// "in 12 days" while waiting for a future date, or "on the next
+    /// enforcement pass" once the date has arrived but the node has not yet
+    /// started it. Empty for a plan in force.
+    starts_label: String,
+    /// The term's start as the card words it ("1 Sep 2026"), and as a date
+    /// input wants it ("2026-09-01").
+    valid_from_label: String,
+    valid_from_input: String,
+    /// Latest date the picker accepts: today for a plan in force (which may
+    /// be backdated but not postponed), a year ahead for one that is waiting.
+    max_date: String,
+    /// "6 of 8 report sections" when this activation leaves some out, else
+    /// empty. Read from the activation's own snapshot, which is what the
+    /// letter is rendered from.
+    sections_note: String,
 }
 
 /// One capability a package promises, and whether the site is keeping it.
 struct IncludedFeature {
     label: String,
     /// Customer-facing "what this actually does" — no jargon, because
-    /// the person reading it is the person paying for it.
-    detail: &'static str,
-    /// "active" | "inactive" | "unknown". Precomputed so the template
+    /// the person reading it is the person paying for it. Owned, because the
+    /// care report's line is built from the sections the plan sends.
+    detail: String,
+    /// "active" | "inactive" | "unknown" | "pending". Precomputed so the template
     /// stays layout rather than becoming a rules engine, and so
     /// "couldn't read the node" can never render as a green tick.
     status: &'static str,
@@ -747,6 +865,9 @@ pub async fn get_packages_panel(
 pub struct ActivateForm {
     pub selector: String,
     pub package_id: i64,
+    /// When the plan's term begins, a `YYYY-MM-DD` date. Empty = today.
+    #[serde(default)]
+    pub valid_from: String,
 }
 
 /// POST /hostings/packages/activate — an admin puts a package on a site.
@@ -785,6 +906,10 @@ pub async fn post_activate(
         _ => return Err(AppError::Internal("unexpected response".into())),
     };
     let name = def.as_ref().map(|p| p.name.clone()).unwrap_or_default();
+    let valid_from = match parse_date_input(&form.valid_from) {
+        Ok(v) => v,
+        Err(e) => return render_card(&state, &ctx, form.selector, None, Some(e), None).await,
+    };
     let owner = owner_node(&state, &form.selector).await;
     let resp = crate::dispatcher::dispatch_to_node(
         &state,
@@ -793,10 +918,32 @@ pub async fn post_activate(
             sel,
             package_id: form.package_id,
             package: def,
+            valid_from,
         },
     )
     .await;
     let (flash, error) = match resp {
+        // We asked for a date and the activation that came back has none: the
+        // owning node is an older build that does not know the field, and
+        // serde skipped it. The plan IS active — from today, with features
+        // forced — which is not what was asked, and nothing else would say so.
+        Ok(RpcResponse::PackageActivate(a)) if valid_from.is_some() && a.valid_from.is_none() => (
+            None,
+            Some(format!(
+                "\"{name}\" was activated, but the node that owns this site runs an older \
+                 Hyperion that ignores start dates, so it started today. Upgrade that node, \
+                 then set the date here."
+            )),
+        ),
+        // A plan dated for the future is recorded, not enforced: say so, or the
+        // operator reads "active" and expects features that are not on yet.
+        Ok(RpcResponse::PackageActivate(a)) if a.is_pending() => (
+            Some(format!(
+                "\"{name}\" is recorded and starts {}. Nothing is switched on, and no report is sent, until then.",
+                preview_date(a.effective_start())
+            )),
+            None,
+        ),
         // Deliberately doesn't claim every feature landed: the card
         // re-renders from the node's LIVE state right below this message,
         // and a setter that failed shows there as "not on".
@@ -853,6 +1000,84 @@ pub async fn post_cancel(
             Some(format!(
                 "\"{}\" cancelled. Anything it had switched on — and that nothing else pays for — has been put back the way it was.",
                 if a.package_name.is_empty() { "Package".into() } else { a.package_name }
+            )),
+            None,
+        ),
+        Ok(RpcResponse::Error(e)) => (None, Some(e.to_string())),
+        Ok(_) => (None, Some("unexpected response".into())),
+        Err(e) => (None, Some(e.to_string())),
+    };
+    render_card(&state, &ctx, form.selector, flash, error, None).await
+}
+
+#[derive(Deserialize)]
+pub struct ValidFromForm {
+    pub selector: String,
+    pub activation_id: i64,
+    /// `YYYY-MM-DD`, required here: saving an empty date has no meaning.
+    pub valid_from: String,
+}
+
+/// POST /hostings/packages/valid-from — change when a plan's term begins.
+///
+/// Backdating moves where the first care report and the billing clock count
+/// from; a date in the future is accepted only while the plan has not started.
+/// The rule lives on the owning node, which knows whether the plan is in force
+/// — this handler only has to carry the date there.
+pub async fn post_valid_from(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<ValidFromForm>,
+) -> Result<Response, AppError> {
+    let sel = match super::hostings::require_manage_for_selector(
+        &state,
+        &ctx,
+        &form.selector,
+        Capability::ProfilesManage,
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
+    let valid_from = match parse_date_input(&form.valid_from) {
+        Ok(Some(t)) => t,
+        Ok(None) => {
+            return render_card(
+                &state,
+                &ctx,
+                form.selector,
+                None,
+                Some("Pick a start date.".into()),
+                None,
+            )
+            .await;
+        }
+        Err(e) => return render_card(&state, &ctx, form.selector, None, Some(e), None).await,
+    };
+    let owner = owner_node(&state, &form.selector).await;
+    let resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        owner.as_deref(),
+        Request::PackageSetValidFrom {
+            sel,
+            activation_id: form.activation_id,
+            valid_from,
+        },
+    )
+    .await;
+    let (flash, error) = match resp {
+        Ok(RpcResponse::PackageSetValidFrom(a)) if a.is_pending() => (
+            Some(format!(
+                "Start date set to {}. The plan is switched on then.",
+                preview_date(a.effective_start())
+            )),
+            None,
+        ),
+        Ok(RpcResponse::PackageSetValidFrom(a)) => (
+            Some(format!(
+                "Start date set to {}. The first care report and the billing clock count from it.",
+                preview_date(a.effective_start())
             )),
             None,
         ),
@@ -1043,6 +1268,8 @@ async fn render_card(
     // shows what it is about to do.
     let cadence = activations
         .iter()
+        // A plan waiting for its start date sells nothing yet.
+        .filter(|a| !a.is_pending())
         .filter_map(|a| {
             a.package_id
                 .and_then(|pid| definitions.iter().find(|d| d.id == pid))
@@ -1059,13 +1286,14 @@ async fn render_card(
     } else {
         ReportDelivery::NotScheduled
     };
+    let now = hyperion_types::now_secs();
     let held: Vec<HeldPackage> = activations
         .iter()
         .map(|a| {
             let def = a
                 .package_id
                 .and_then(|pid| definitions.iter().find(|d| d.id == pid));
-            build_held(a, def, live.as_ref(), &delivery)
+            build_held(a, def, live.as_ref(), &delivery, now)
         })
         .collect();
     // Don't offer what the site already holds: the partial unique index
@@ -1103,7 +1331,6 @@ async fn render_card(
     let checks = read_service_checks(state, owner.as_deref(), detail.id.as_str())
         .await
         .unwrap_or_default();
-    let now = hyperion_types::now_secs();
     let period = hyperion_types::care_check::period_key(now);
     let prev = hyperion_types::care_check::previous_period(&period).unwrap_or_default();
     // What THIS site is asked, from the packages it holds — read off the
@@ -1111,7 +1338,13 @@ async fn render_card(
     // definitions: the snapshot is what the owning node ticks against, and
     // showing the operator a different list from the one their tick lands in
     // is the seam this whole feature could fail at.
-    let live_items = resolve_site_check_items(&activations);
+    // Plans still waiting for their start date ask for nothing.
+    let in_force: Vec<HostingPackage> = activations
+        .iter()
+        .filter(|a| !a.is_pending())
+        .cloned()
+        .collect();
+    let live_items = resolve_site_check_items(&in_force);
     // A month already ticked keeps the list it was ticked against, so editing
     // a plan mid-month never rescores what somebody already signed off.
     let check_rows: Vec<ServiceCheckRow> = checks
@@ -1156,7 +1389,8 @@ async fn render_card(
         prev_period_label: month_label(&prev),
         prev_outstanding,
         prev_total,
-        show_checks: !held.is_empty(),
+        show_checks: held.iter().any(|h| !h.pending),
+        in_force_count: held.iter().filter(|h| !h.pending).count(),
         selector,
         csrf_token: super::session_csrf_token(state, ctx),
         held,
@@ -1188,6 +1422,7 @@ async fn relist_on_every_node(
     package_id: i64,
     letters_lang: &str,
     check_items: &str,
+    report_omit: &str,
 ) -> Vec<String> {
     let nodes: Vec<hyperion_types::NodeSummary> =
         match hyperion_rpc_client::call(&state.agent_socket, Request::NodesList).await {
@@ -1207,6 +1442,7 @@ async fn relist_on_every_node(
         package_id,
         letters_lang: letters_lang.to_string(),
         check_items: check_items.to_string(),
+        report_omit: report_omit.to_string(),
     };
     let (answered, failed) = crate::dispatcher::fan_out_reporting(state, nodes, req).await;
     let mut missed: Vec<String> = Vec::new();
@@ -1272,8 +1508,58 @@ fn build_held(
     def: Option<&ServicePackage>,
     live: Option<&LiveFeatureState>,
     delivery: &ReportDelivery,
+    now: i64,
 ) -> HeldPackage {
+    let pending = a.is_pending();
+    let start = a.effective_start();
+    let omit = a.report_omit_set();
+    let mut included = def
+        .map(|d| {
+            let mut lines = included_features(&d.features, live);
+            // The report is the sixth feature the bundle sells, and the
+            // only one whose "is it actually happening?" is a send
+            // marker rather than a live setting — hence its own builder
+            // and its own site-level input.
+            lines.extend(report_feature(d.features.report_cadence, delivery, omit));
+            lines
+        })
+        .unwrap_or_default();
+    if pending {
+        // A plan that has not started is not "not on" — it is not supposed to
+        // be on yet. Reporting the site's live state against it would put an
+        // amber "not on" next to every line of a plan that is behaving exactly
+        // as scheduled.
+        for line in &mut included {
+            line.status = "pending";
+            line.live_label = String::new();
+        }
+    }
     HeldPackage {
+        pending,
+        starts_label: if !pending {
+            String::new()
+        } else if start > now {
+            // Whole days, rounded UP: "in 0 days" for a plan that starts in
+            // five hours would read as already started.
+            match (start - now + 86_399) / 86_400 {
+                1 => "tomorrow".to_string(),
+                n => format!("in {n} days"),
+            }
+        } else {
+            "on the next enforcement pass".to_string()
+        },
+        valid_from_label: preview_date(start),
+        valid_from_input: date_input(start),
+        max_date: date_input(if pending { now + 365 * 86_400 } else { now }),
+        sections_note: if omit.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "{} of {} report sections",
+                omit.sent_count(),
+                ReportSection::ALL.len()
+            )
+        },
         activation_id: a.id,
         // The activation carries the name; the definition carries the
         // sales copy. Falling back to the activation's copy keeps a
@@ -1289,19 +1575,32 @@ fn build_held(
         // the customer agreed to is what the card must show.
         price: a.pretty_price(),
         next_billing_at: a.next_billing_at,
-        included: def
-            .map(|d| {
-                let mut lines = included_features(&d.features, live);
-                // The report is the sixth feature the bundle sells, and the
-                // only one whose "is it actually happening?" is a send
-                // marker rather than a live setting — hence its own builder
-                // and its own site-level input.
-                lines.extend(report_feature(d.features.report_cadence, delivery));
-                lines
-            })
-            .unwrap_or_default(),
+        included,
         orphaned: def.is_none(),
     }
+}
+
+/// `YYYY-MM-DD` (UTC) — what `<input type="date">` takes and returns.
+fn date_input(ts: i64) -> String {
+    chrono::DateTime::<chrono::Utc>::from_timestamp(ts, 0)
+        .map(|d| d.format("%Y-%m-%d").to_string())
+        .unwrap_or_default()
+}
+
+/// A date input back to midnight UTC. Empty = no date given. UTC because every
+/// period key and report window in the product is UTC, so a date the operator
+/// types means the same instant on every node.
+fn parse_date_input(raw: &str) -> Result<Option<i64>, String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    let d = chrono::NaiveDate::parse_from_str(raw, "%Y-%m-%d")
+        .map_err(|_| format!("\"{raw}\" is not a date — expected YYYY-MM-DD"))?;
+    let midnight = d
+        .and_hms_opt(0, 0, 0)
+        .ok_or_else(|| format!("\"{raw}\" is not a date"))?;
+    Ok(Some(midnight.and_utc().timestamp()))
 }
 
 /// Turn a bundle into customer-facing lines, one per feature the package
@@ -1372,7 +1671,8 @@ fn included_features(f: &PackageFeatures, live: Option<&LiveFeatureState>) -> Ve
             label,
             detail: "A full copy of the files and the database is taken on \
                      that cadence and kept, so a bad update or a broken \
-                     plugin is an hour's problem rather than a lost site.",
+                     plugin is an hour's problem rather than a lost site."
+                .to_string(),
             status,
             live_label,
         });
@@ -1401,7 +1701,7 @@ fn bool_feature(
     };
     Some(IncludedFeature {
         label: if want { on_label } else { off_label }.to_string(),
-        detail,
+        detail: detail.to_string(),
         status,
         live_label,
     })
@@ -1414,7 +1714,11 @@ fn bool_feature(
 /// node we couldn't read renders "couldn't check", never a report that went
 /// out. `Leave` produces no line at all: a package with no opinion about
 /// reports must not appear to sell one.
-fn report_feature(cadence: ReportCadence, delivery: &ReportDelivery) -> Option<IncludedFeature> {
+fn report_feature(
+    cadence: ReportCadence,
+    delivery: &ReportDelivery,
+    omit: ReportOmit,
+) -> Option<IncludedFeature> {
     let label = report_cadence_label(cadence)?;
     let (status, live_label) = match delivery {
         ReportDelivery::Unknown => ("unknown", String::new()),
@@ -1457,13 +1761,50 @@ fn report_feature(cadence: ReportCadence, delivery: &ReportDelivery) -> Option<I
     };
     Some(IncludedFeature {
         label: format!("Care report — {label}"),
-        detail: "A plain-language e-mail to the site's owner covering the \
-                 period: attacks blocked, updates applied, traffic, uptime, \
-                 backups taken and what the integrity scan found. It is what \
-                 makes work nobody notices visible.",
+        detail: report_detail(omit),
         status,
         live_label,
     })
+}
+
+/// What the care report covers, in the words the card uses.
+///
+/// The long-standing sentence when the plan sends everything — unchanged, so a
+/// plan nobody trimmed reads exactly as before. When it leaves sections out the
+/// sentence names the ones it SENDS: a card that listed "attacks blocked" for a
+/// plan that does not send them would be selling something the customer never
+/// receives.
+fn report_detail(omit: ReportOmit) -> String {
+    if omit.is_empty() {
+        return "A plain-language e-mail to the site's owner covering the \
+                period: attacks blocked, updates applied, traffic, uptime, \
+                backups taken and what the integrity scan found. It is what \
+                makes work nobody notices visible."
+            .to_string();
+    }
+    let phrases: Vec<&str> = ReportSection::ALL
+        .into_iter()
+        .filter(|s| omit.sends(*s))
+        .map(|s| match s {
+            ReportSection::Attacks => "attacks blocked",
+            ReportSection::Updates => "updates applied",
+            ReportSection::Traffic => "traffic",
+            ReportSection::Uptime => "uptime",
+            ReportSection::Backups => "backups taken",
+            ReportSection::Integrity => "what the integrity scan found",
+            ReportSection::Performance => "speed and Core Web Vitals",
+            ReportSection::Service => "the monthly checks done by hand",
+        })
+        .collect();
+    let list = match phrases.as_slice() {
+        [] => String::new(),
+        [one] => (*one).to_string(),
+        [rest @ .., last] => format!("{} and {}", rest.join(", "), last),
+    };
+    format!(
+        "A plain-language e-mail to the site's owner covering the period: {list}. \
+         It is what makes work nobody notices visible."
+    )
 }
 
 /// Czech label for a report cadence, or `None` when the package has no
@@ -1859,6 +2200,15 @@ mod tests {
             feat_report_cadence: Some("leave".into()),
             letters_lang: Some(String::new()),
             check_items_text: text,
+            report_sections_form: None,
+            rs_attacks: None,
+            rs_updates: None,
+            rs_traffic: None,
+            rs_uptime: None,
+            rs_backups: None,
+            rs_integrity: None,
+            rs_performance: None,
+            rs_service: None,
         };
 
         // A plan on the built-ins: the textarea shows them, and saving them
@@ -1867,7 +2217,7 @@ mod tests {
         let stored = "";
         let shown = check_items_to_text(&parse_check_items(stored));
         let out = form(Some(shown))
-            .into_input(None, None, Some(stored), None)
+            .into_input(None, None, Some(stored), None, None)
             .expect("input");
         assert_eq!(
             parse_check_items(&out.check_items),
@@ -1889,23 +2239,185 @@ mod tests {
         ]);
         let shown = check_items_to_text(&parse_check_items(&custom));
         let out = form(Some(shown))
-            .into_input(None, None, Some(&custom), None)
+            .into_input(None, None, Some(&custom), None, None)
             .expect("input");
         assert_eq!(out.check_items, custom);
 
         // A form that does not carry the field at all leaves the stored list
         // alone. Absent must never mean "clear it".
         let out = form(None)
-            .into_input(None, None, Some(&custom), None)
+            .into_input(None, None, Some(&custom), None, None)
             .expect("input");
         assert_eq!(out.check_items, custom);
 
         // A form that carries it EMPTY does mean "clear it" — which the agent
         // reads back as the built-in four, never as a plan promising nothing.
         let out = form(Some(String::new()))
-            .into_input(None, None, Some(&custom), None)
+            .into_input(None, None, Some(&custom), None, None)
             .expect("input");
         assert_eq!(out.check_items, "");
+    }
+
+    /// An unticked checkbox is ABSENT from a POST body, so the form carries a
+    /// marker that says the group was there at all. Without it, saving a typo
+    /// fix from an older cached form would silently strip every section.
+    #[test]
+    fn the_section_choice_round_trips_and_absent_never_means_leave_out() {
+        let base = || PackageForm {
+            name: "Péče Plus".into(),
+            slug: String::new(),
+            description: String::new(),
+            enabled: Some("1".into()),
+            price_major: String::new(),
+            price_currency: String::new(),
+            price_interval: String::new(),
+            feat_wp_auto_update: "leave".into(),
+            feat_integrity_scan: "leave".into(),
+            feat_monitoring: "leave".into(),
+            feat_hardening: "leave".into(),
+            feat_backup_cadence: "leave".into(),
+            feat_backup_interval_days: None,
+            feat_backup_keep_days: None,
+            feat_backup_keep_last: None,
+            feat_report_cadence: Some("monthly".into()),
+            letters_lang: None,
+            check_items_text: None,
+            report_sections_form: None,
+            rs_attacks: None,
+            rs_updates: None,
+            rs_traffic: None,
+            rs_uptime: None,
+            rs_backups: None,
+            rs_integrity: None,
+            rs_performance: None,
+            rs_service: None,
+        };
+
+        // No marker: the stored choice stands, ticked boxes or not.
+        let out = base()
+            .into_input(None, None, None, None, Some("attacks,uptime"))
+            .expect("input");
+        assert_eq!(out.report_omit, "attacks,uptime");
+        // …and creating a plan from a form with no group sends everything.
+        let out = base()
+            .into_input(None, None, None, None, None)
+            .expect("input");
+        assert_eq!(out.report_omit, "");
+
+        // Marker present: the UNticked boxes are the ones left out.
+        let mut f = base();
+        f.report_sections_form = Some("1".into());
+        for slot in [
+            &mut f.rs_updates,
+            &mut f.rs_traffic,
+            &mut f.rs_backups,
+            &mut f.rs_integrity,
+            &mut f.rs_performance,
+            &mut f.rs_service,
+        ] {
+            *slot = Some("on".into());
+        }
+        let out = f
+            .into_input(None, None, None, None, Some(""))
+            .expect("input");
+        assert_eq!(out.report_omit, "attacks,uptime");
+
+        // Marker present, everything ticked: nothing left out, stored as "".
+        let mut f = base();
+        f.report_sections_form = Some("1".into());
+        for slot in [
+            &mut f.rs_attacks,
+            &mut f.rs_updates,
+            &mut f.rs_traffic,
+            &mut f.rs_uptime,
+            &mut f.rs_backups,
+            &mut f.rs_integrity,
+            &mut f.rs_performance,
+            &mut f.rs_service,
+        ] {
+            *slot = Some("on".into());
+        }
+        let out = f
+            .into_input(None, None, None, None, Some("attacks"))
+            .expect("input");
+        assert_eq!(out.report_omit, "");
+    }
+
+    #[test]
+    fn a_start_date_is_midnight_utc_and_empty_means_none() {
+        assert_eq!(parse_date_input(""), Ok(None));
+        assert_eq!(parse_date_input("   "), Ok(None));
+        // 2026-09-01 00:00:00 UTC
+        assert_eq!(parse_date_input("2026-09-01"), Ok(Some(1_788_220_800)));
+        assert_eq!(date_input(1_788_220_800), "2026-09-01");
+        assert_eq!(date_input(1_788_220_800 + 86_399), "2026-09-01");
+        assert!(parse_date_input("1.9.2026").is_err());
+        assert!(parse_date_input("2026-13-40").is_err());
+    }
+
+    #[test]
+    fn a_waiting_plan_shows_waiting_not_not_on() {
+        let a = HostingPackage {
+            id: 8,
+            hosting_id: hyperion_types::HostingId("h1".into()),
+            package_id: None,
+            package_name: "Plus".into(),
+            letters_lang: String::new(),
+            check_items: String::new(),
+            report_omit: "attacks,uptime".into(),
+            valid_from: Some(2_000_000_000),
+            enforcement_started: false,
+            price_minor: None,
+            price_currency: None,
+            price_interval: None,
+            next_billing_at: None,
+            state: hyperion_types::PackageState::Active,
+            activated_at: 1,
+            cancelled_at: None,
+            prior_state_json: None,
+        };
+        let held = build_held(&a, None, None, &ReportDelivery::Unknown, 1_000_000_000);
+        assert!(held.pending);
+        assert_eq!(
+            held.starts_label,
+            format!(
+                "in {} days",
+                (2_000_000_000 - 1_000_000_000 + 86_399) / 86_400
+            )
+        );
+        assert_eq!(held.valid_from_input, "2033-05-18");
+        assert_eq!(held.sections_note, "6 of 8 report sections");
+        // A plan in force may be backdated, not postponed.
+        let mut live = a.clone();
+        live.enforcement_started = true;
+        let held = build_held(&live, None, None, &ReportDelivery::Unknown, 1_000_000_000);
+        assert!(!held.pending);
+        assert_eq!(held.max_date, date_input(1_000_000_000));
+    }
+
+    /// The card must not sell what the customer is not sent: the report line
+    /// names the sections the plan carries, and is the old sentence unchanged
+    /// when it carries them all.
+    #[test]
+    fn the_report_line_names_only_the_sections_that_are_sent() {
+        let all = report_detail(ReportOmit::NONE);
+        assert!(
+            all.contains("attacks blocked") && all.contains("uptime"),
+            "{all}"
+        );
+        let trimmed = report_detail(ReportOmit::parse(
+            "attacks,uptime,traffic,performance,service",
+        ));
+        assert_eq!(
+            trimmed,
+            "A plain-language e-mail to the site's owner covering the period: \
+             updates applied, backups taken and what the integrity scan found. \
+             It is what makes work nobody notices visible."
+        );
+        let one = report_detail(ReportOmit::parse(
+            "attacks,updates,traffic,uptime,integrity,performance,service",
+        ));
+        assert!(one.contains("period: backups taken. It is"), "{one}");
     }
 
     #[test]
@@ -1917,6 +2429,9 @@ mod tests {
             package_name: String::new(),
             letters_lang: String::new(),
             check_items: String::new(),
+            report_omit: String::new(),
+            valid_from: None,
+            enforcement_started: true,
             price_minor: Some(49_000),
             price_currency: Some("Kč".into()),
             price_interval: Some("monthly".into()),
@@ -1926,7 +2441,7 @@ mod tests {
             cancelled_at: None,
             prior_state_json: None,
         };
-        let held = build_held(&a, None, None, &ReportDelivery::Unknown);
+        let held = build_held(&a, None, None, &ReportDelivery::Unknown, 0);
         assert!(held.orphaned);
         assert_eq!(held.price, "490.00 Kč/month");
         assert!(held.included.is_empty());
