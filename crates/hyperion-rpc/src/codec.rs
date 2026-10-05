@@ -578,7 +578,9 @@ pub enum Request {
         /// update can take down.
         #[serde(default)]
         safe: bool,
-        /// `apt-get update && apt-get dist-upgrade -y --quiet`.
+        /// Repair any half-installed packages, `apt-get update`, then
+        /// `apt-get upgrade --with-new-pkgs` (never removes a package).
+        /// Runs as its own systemd unit, outside the agent's sandbox.
         /// Typically 1–10 min depending on what's outdated.
         do_apt: bool,
         /// `/opt/hyperion/packaging/install/update.sh`. Rebuilds

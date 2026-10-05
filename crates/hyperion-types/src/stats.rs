@@ -1792,7 +1792,8 @@ pub struct ServiceInstallStatus {
     /// Unix seconds when the job finished. 0 → still running, or
     /// no job has ever run.
     pub finished_at: i64,
-    /// "idle" | "running" | "succeeded" | "failed".
+    /// "idle" | "running" | "succeeded" | "failed" | "interrupted"
+    /// (the job was killed — a reboot — before it recorded a result).
     pub state: String,
     /// Combined stdout+stderr tail of apt-get + systemctl enable,
     /// capped at ~8 kB. Live during the run, frozen after.
@@ -1942,7 +1943,8 @@ pub struct NodeUpdateStatus {
     /// Unix seconds when the job finished. 0 → still running, or
     /// no job has ever run.
     pub finished_at: i64,
-    /// "idle" | "running" | "succeeded" | "failed".
+    /// "idle" | "running" | "succeeded" | "failed" | "interrupted"
+    /// (the job was killed — a reboot — before it recorded a result).
     pub state: String,
     /// Whether the apt step was requested for this job.
     pub do_apt: bool,

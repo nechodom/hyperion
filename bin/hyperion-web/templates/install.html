@@ -230,7 +230,7 @@
     <summary class="text-soft small" style="cursor:pointer">Install system updates on this server…</summary>
     <form method="post" action="/install/update-node"
           data-confirm-title="Install system updates on this server"
-          data-confirm-body="apt-get dist-upgrade will run on the master — the machine serving this panel. Services it upgrades (nginx, PHP, MariaDB) restart as part of the upgrade, so sites and the panel may be briefly unavailable. Hyperion itself is not updated by this. A kernel or library update will ask for a reboot afterwards; that is left to you."
+          data-confirm-body="System packages will be upgraded on the master — the machine serving this panel. Nothing is removed; anything that would need a removal is held back and listed. Services it upgrades (nginx, PHP, MariaDB) restart as part of the upgrade, so sites and the panel may be briefly unavailable. Hyperion itself is not updated by this. A kernel or library update will ask for a reboot afterwards; that is left to you."
           data-confirm-confirm-label="Install updates"
           data-confirm-variant="primary"
           style="margin-top:0.6rem">
@@ -461,7 +461,7 @@
         <div id="upd-{{ n.node_id }}" class="node-card__pane" hidden>
           <form method="post" action="/install/update-node"
                 data-confirm-title="Update {{ n.label }}"
-                data-confirm-body="apt-get dist-upgrade and/or the Hyperion update will run on {{ n.label }} ({% if let Some(ip) = n.public_ip.as_ref() %}{{ ip }}{% else %}{{ n.node_id }}{% endif %}). The node's services may briefly restart. This can take several minutes. With Safe update ticked, the previous binaries are restored automatically if the node does not come back healthy — note that this restores BINARIES, not data."
+                data-confirm-body="The system-package upgrade and/or the Hyperion update will run on {{ n.label }} ({% if let Some(ip) = n.public_ip.as_ref() %}{{ ip }}{% else %}{{ n.node_id }}{% endif %}). The node's services may briefly restart. This can take several minutes. With Safe update ticked, the previous binaries are restored automatically if the node does not come back healthy — note that this restores BINARIES, not data."
                 data-confirm-confirm-label="Start update"
                 data-confirm-variant="primary"
                 class="node-card__inline-form" style="grid-template-columns:1fr 1fr 1fr auto auto">
@@ -469,7 +469,7 @@
             <input type="hidden" name="node_id" value="{{ n.node_id }}">
             <label class="field-checkbox" style="margin:0">
               <input type="checkbox" name="do_apt" value="on" checked>
-              <span><strong>System packages</strong> <span class="text-soft small">(apt dist-upgrade)</span></span>
+              <span><strong>System packages</strong> <span class="text-soft small">(apt upgrade, never removes a package)</span></span>
             </label>
             <label class="field-checkbox" style="margin:0">
               <input type="checkbox" name="do_hyperion" value="on" checked>

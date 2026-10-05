@@ -24,6 +24,7 @@ pub mod integrity;
 pub mod logscan;
 pub mod mariadb;
 pub mod nginx;
+pub mod node_update;
 pub mod nodejs;
 pub mod os_updates;
 pub mod perf;

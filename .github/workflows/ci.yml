@@ -87,6 +87,11 @@ jobs:
       - name: Syntax-check the import runner
         run: bash -n bin/hyperion-web/assets/import-runner.sh
 
+      # The node-update runner is embedded in the agent and run as root by
+      # systemd-run on every node the operator updates from the panel.
+      - name: Syntax-check the node update runner
+        run: bash -n crates/hyperion-adapters/assets/node-update.sh
+
       # update.sh runs as root on production boxes and stops the services as one
       # of its first acts, so a syntax error or a silently-broken job check is
       # found at the worst time. The test runs update.sh's wait-for-jobs block

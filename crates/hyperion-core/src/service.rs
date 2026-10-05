@@ -513,12 +513,6 @@ pub struct HostingService<A: AdapterPort + 'static> {
     /// hyperion-web should be flagged as a critical service.
     /// `None` means "treat as master" (no file to check).
     pub node_state_file: Option<std::path::PathBuf>,
-    /// In-memory state of the most-recent / in-progress node
-    /// update job. Polled via `NodeUpdateStatus` so the operator
-    /// can watch apt-get / update.sh progress without ssh-ing in.
-    /// A single shared slot per agent — concurrent updates are
-    /// refused with a "another update is already running" error.
-    pub node_update: Arc<tokio::sync::Mutex<hyperion_types::NodeUpdateStatus>>,
     /// In-memory state of the most-recent / in-progress
     /// service-install job (apt-get install + systemctl enable
     /// for a whitelisted unit like php8.4-fpm). Polled via
@@ -1141,182 +1135,6 @@ async fn run_service_install(
     );
 }
 
-/// Drive a node-update job: run `apt-get upgrade -y` and/or the
-/// hyperion `update.sh` script, streaming combined stdout+stderr
-/// into the given shared status slot. Caller has already marked
-/// the slot as `state="running"`. We update `log_tail` (capped at
-/// ~8 kB) as output arrives so the UI polling sees live progress.
-///
-/// Failure of either step sets `state="failed"`; both ok sets
-/// `state="succeeded"`. Exit code is the last failing step's code,
-/// or 0.
-async fn run_update_script(
-    slot: std::sync::Arc<tokio::sync::Mutex<hyperion_types::NodeUpdateStatus>>,
-    do_apt: bool,
-    do_hyperion: bool,
-    safe: bool,
-) {
-    use tokio::io::AsyncBufReadExt;
-    /// Roughly 8 kB of tail — enough to see what's currently
-    /// happening without ballooning agent memory if some step
-    /// emits megabytes of output.
-    const LOG_TAIL_BYTES: usize = 8 * 1024;
-
-    async fn append_line(
-        slot: &std::sync::Arc<tokio::sync::Mutex<hyperion_types::NodeUpdateStatus>>,
-        line: &str,
-    ) {
-        let mut g = slot.lock().await;
-        g.log_tail.push_str(line);
-        g.log_tail.push('\n');
-        if g.log_tail.len() > LOG_TAIL_BYTES {
-            // Drop oldest data — find a char boundary above the
-            // overrun.
-            let drop = g.log_tail.len() - LOG_TAIL_BYTES;
-            let mut cut = drop;
-            while !g.log_tail.is_char_boundary(cut) && cut < g.log_tail.len() {
-                cut += 1;
-            }
-            g.log_tail.drain(..cut);
-        }
-    }
-
-    async fn run_one(
-        slot: &std::sync::Arc<tokio::sync::Mutex<hyperion_types::NodeUpdateStatus>>,
-        label: &str,
-        cmd: &str,
-        args: &[&str],
-    ) -> i32 {
-        append_line(
-            slot,
-            &format!("\n──── {label}: {cmd} {} ────", args.join(" ")),
-        )
-        .await;
-        let mut child = match tokio::process::Command::new(cmd)
-            .args(args)
-            .env("DEBIAN_FRONTEND", "noninteractive")
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-        {
-            Ok(c) => c,
-            Err(e) => {
-                append_line(slot, &format!("spawn {cmd} failed: {e}")).await;
-                return 127;
-            }
-        };
-        if let Some(stdout) = child.stdout.take() {
-            let s = slot.clone();
-            let label = label.to_string();
-            tokio::spawn(async move {
-                let r = tokio::io::BufReader::new(stdout);
-                let mut lines = r.lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    append_line(&s, &format!("[{label}] {line}")).await;
-                }
-            });
-        }
-        if let Some(stderr) = child.stderr.take() {
-            let s = slot.clone();
-            let label = label.to_string();
-            tokio::spawn(async move {
-                let r = tokio::io::BufReader::new(stderr);
-                let mut lines = r.lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    append_line(&s, &format!("[{label}!] {line}")).await;
-                }
-            });
-        }
-        match child.wait().await {
-            Ok(status) => status.code().unwrap_or(-1),
-            Err(e) => {
-                append_line(slot, &format!("wait {label} failed: {e}")).await;
-                -1
-            }
-        }
-    }
-
-    let mut last_code: i32 = 0;
-
-    if do_apt {
-        // Not at the same time as an update CHECK: both run `apt-get update`,
-        // and whichever comes second fails on apt's lock — here that would fail
-        // the operator's upgrade over a background refresh. Held through the
-        // upgrade too, so a check never reads the list half-way through it.
-        let _no_check_meanwhile = match OS_UPDATES_RUNNING.try_lock() {
-            Ok(guard) => guard,
-            Err(_) => {
-                append_line(
-                    &slot,
-                    "waiting for a package-index check to finish before starting",
-                )
-                .await;
-                OS_UPDATES_RUNNING.lock().await
-            }
-        };
-        let upd = run_one(&slot, "apt-update", "/usr/bin/apt-get", &["update", "-qq"]).await;
-        if upd == 0 {
-            last_code = run_one(
-                &slot,
-                "apt-upgrade",
-                "/usr/bin/apt-get",
-                &[
-                    "dist-upgrade",
-                    "-y",
-                    "-qq",
-                    "-o",
-                    "Dpkg::Options::=--force-confold",
-                ],
-            )
-            .await;
-        } else {
-            last_code = upd;
-        }
-    }
-
-    if do_hyperion && last_code == 0 {
-        // update.sh path is hardcoded — install-master.sh and
-        // install-node.sh both drop it here. Bail with a clear log
-        // line if it's missing rather than spawning into the void.
-        let script = std::path::PathBuf::from("/opt/hyperion/packaging/install/update.sh");
-        if !script.exists() {
-            append_line(
-                &slot,
-                &format!("update.sh missing at {} — node was not installed via install-node.sh / install-master.sh", script.display()),
-            )
-            .await;
-            last_code = 2;
-        } else {
-            let path = script
-                .to_str()
-                .unwrap_or("/opt/hyperion/packaging/install/update.sh");
-            // --safe snapshots the running binaries first and restores them
-            // if the post-update health check fails.
-            let args: Vec<&str> = if safe {
-                vec![path, "--safe"]
-            } else {
-                vec![path]
-            };
-            last_code = run_one(&slot, "hyperion-update", "/bin/bash", &args).await;
-        }
-    }
-
-    let final_state = if last_code == 0 {
-        "succeeded"
-    } else {
-        "failed"
-    };
-    let mut g = slot.lock().await;
-    g.state = final_state.to_string();
-    g.finished_at = now_secs();
-    g.exit_code = last_code;
-    tracing::info!(
-        exit_code = last_code,
-        state = final_state,
-        "node update job finished"
-    );
-}
-
 /// Remove stale migration artifacts under `root` whose mtime is older than
 /// `max_age`. Returns the count removed. Extracted as a free function so it has
 /// a fs-only signature that's easy to unit-test with `tempfile::tempdir`. Caller
@@ -1890,9 +1708,6 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             panel_progress: Arc::new(tokio::sync::RwLock::new(None)),
             master_rpc_signer: None,
             node_state_file: None,
-            node_update: Arc::new(tokio::sync::Mutex::new(
-                hyperion_types::NodeUpdateStatus::default(),
-            )),
             service_install_progress: Arc::new(tokio::sync::Mutex::new(
                 hyperion_types::ServiceInstallStatus::default(),
             )),
@@ -27685,82 +27500,114 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(())
     }
 
-    /// Spawn a background job that runs the requested update steps
-    /// on THIS node:
-    ///   1. (optional) `apt-get update && apt-get dist-upgrade -y`
-    ///   2. (optional) `/opt/hyperion/packaging/install/update.sh`
+    /// Start the node update job on THIS node: the operating-system upgrade
+    /// and/or `update.sh`, in that order.
     ///
-    /// Returns the start timestamp. The job runs detached and
-    /// writes a rolling log tail into `self.node_update` so
-    /// `node_update_status()` can return progress to the UI.
+    /// The job runs as its own transient systemd unit (see
+    /// `hyperion_adapters::node_update` for why it must not be a child of the
+    /// agent), so it survives the agent restart `update.sh` performs, and its
+    /// state is read back from disk by [`Self::node_update_status`].
     ///
-    /// Refuses to start when an update is already running (one job
-    /// per node at a time — `apt-get` would lock dpkg anyway).
+    /// Refuses while a job is already running — one per node.
     pub async fn node_update_run(
         &self,
         do_apt: bool,
         do_hyperion: bool,
         safe: bool,
     ) -> Result<i64, RpcError> {
+        use hyperion_adapters::node_update;
         if !do_apt && !do_hyperion {
             return Err(RpcError::Validation {
                 message: "node_update_run: nothing to do (do_apt=false, do_hyperion=false)".into(),
             });
         }
-        let started_at = now_secs();
-        {
-            let mut guard = self.node_update.lock().await;
-            if guard.state == "running" {
-                return Err(RpcError::Conflict {
-                    message: format!(
-                        "another update is already running on this node (started at unix:{}). \
-                         Wait for it to finish before starting a new one.",
-                        guard.started_at
-                    ),
-                });
-            }
-            *guard = hyperion_types::NodeUpdateStatus {
-                started_at,
-                finished_at: 0,
-                state: "running".into(),
-                do_apt,
-                do_hyperion,
-                log_tail: String::new(),
-                exit_code: 0,
-            };
+        if node_update::is_running().await {
+            let since = node_update::status()
+                .await
+                .spec
+                .map(|s| s.started_at)
+                .unwrap_or_default();
+            return Err(RpcError::Conflict {
+                message: format!(
+                    "another update is already running on this node (started at unix:{since}). \
+                     Wait for it to finish before starting a new one."
+                ),
+            });
         }
-        // Spawn the work. We deliberately don't await — the caller
-        // gets the start time back and polls status.
-        let slot = self.node_update.clone();
-        let pool = self.pool.clone();
-        tokio::spawn(async move {
-            run_update_script(slot, do_apt, do_hyperion, safe).await;
-            // The job just refreshed the index and installed packages, so the
-            // stored check is out of date in both halves — including a refresh
-            // error from before the operator fixed the mirrors, which would
-            // otherwise keep saying so for up to six hours. Re-check properly
-            // (with the strict refresh) rather than trust the job's own
-            // `apt-get update`, which exits 0 on a mirror it could not reach.
-            if do_apt {
-                if let Err(e) = os_updates_check_in(&pool, true).await {
-                    tracing::warn!(error = %e, "os updates re-check after node update failed");
-                }
-            }
-        });
+        let spec = node_update::JobSpec {
+            started_at: now_secs(),
+            do_apt,
+            do_hyperion,
+            safe,
+        };
+        let started = node_update::start(&spec).await;
         self.append_audit(
             "node.update.start",
             None,
-            &serde_json::json!({"do_apt": do_apt, "do_hyperion": do_hyperion}).to_string(),
-            "ok",
+            &serde_json::json!({"do_apt": do_apt, "do_hyperion": do_hyperion, "safe": safe})
+                .to_string(),
+            if started.is_ok() { "ok" } else { "error" },
         )
         .await;
-        Ok(started_at)
+        started.map_err(|e| RpcError::Internal_with(format!("start node update: {e}")))?;
+        Ok(spec.started_at)
     }
 
-    /// Read the current node-update job state. Cheap — just clones
-    /// the in-memory state slot.
+    /// The current (or last) node update job, read from disk and systemd —
+    /// never from agent memory, which `update.sh` wipes by restarting us.
     pub async fn node_update_status(&self) -> Result<hyperion_types::NodeUpdateStatus, RpcError> {
-        Ok(self.node_update.lock().await.clone())
+        use hyperion_adapters::node_update::{self, JobState};
+        let st = node_update::status().await;
+        let spec = st.spec.unwrap_or_default();
+        let (state, finished_at, exit_code) = match st.state {
+            JobState::Never => ("idle", 0, 0),
+            JobState::Running => ("running", 0, 0),
+            JobState::Finished {
+                exit_code: 0,
+                finished_at,
+            } => ("succeeded", finished_at, 0),
+            JobState::Finished {
+                exit_code,
+                finished_at,
+            } => ("failed", finished_at, exit_code),
+            JobState::Interrupted => ("interrupted", 0, -1),
+        };
+        // An OS upgrade just changed what is installed, so the stored update
+        // check is wrong in both halves. Re-check once per finished job, with
+        // the strict refresh (the job's own `apt-get update` is not what the
+        // panel trusts). Done here, lazily, because the job outlives the agent
+        // that started it — nothing is left waiting on it to finish.
+        if spec.do_apt && finished_at > 0 {
+            let done = hyperion_state::node_kv::get(&self.pool, NODE_UPDATE_RECHECKED_KV)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|v| v.parse::<i64>().ok());
+            if done != Some(spec.started_at) {
+                let _ = hyperion_state::node_kv::set(
+                    &self.pool,
+                    NODE_UPDATE_RECHECKED_KV,
+                    &spec.started_at.to_string(),
+                    now_secs(),
+                )
+                .await;
+                let pool = self.pool.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = os_updates_check_in(&pool, true).await {
+                        tracing::warn!(error = %e, "os updates re-check after node update failed");
+                    }
+                });
+            }
+        }
+        Ok(hyperion_types::NodeUpdateStatus {
+            started_at: spec.started_at,
+            finished_at,
+            state: state.into(),
+            do_apt: spec.do_apt,
+            do_hyperion: spec.do_hyperion,
+            log_tail: st.log_tail,
+            exit_code,
+        })
     }
 
     /// Status of every system service Hyperion depends on. Run via
@@ -32735,6 +32582,10 @@ const OS_UPDATES_KV: &str = "os_updates.last";
 /// unapplied security update must not reset because one refresh timed out.
 const OS_SECURITY_SINCE_KV: &str = "os_updates.security_since";
 
+/// `node_kv` key: `started_at` of the last node update job whose finish
+/// already triggered an OS update re-check, so it triggers exactly one.
+const NODE_UPDATE_RECHECKED_KV: &str = "node_update.rechecked_for";
+
 /// The last OS update check exactly as persisted, with nothing re-read.
 async fn os_updates_stored_in(
     pool: &sqlx::SqlitePool,
@@ -32755,6 +32606,12 @@ async fn os_updates_check_in(
 ) -> Result<hyperion_types::OsUpdateStatus, RpcError> {
     use hyperion_adapters::os_updates;
     let _one_at_a_time = OS_UPDATES_RUNNING.lock().await;
+    // A node update owns apt for its whole run, and runs outside this process,
+    // so the mutex above cannot see it. Refreshing now would lose the race for
+    // apt's lock and record a "could not refresh" that is not a mirror
+    // problem. Read the list without refreshing; the job's finish triggers a
+    // proper re-check (`node_update_status`).
+    let refresh = refresh && !hyperion_adapters::node_update::is_running().await;
     let now = now_secs();
     let mut status = os_updates_stored_in(pool).await.unwrap_or_default();
 
@@ -41522,9 +41379,6 @@ mod tests {
             panel_progress: Arc::new(tokio::sync::RwLock::new(None)),
             master_rpc_signer: None,
             node_state_file: None,
-            node_update: Arc::new(tokio::sync::Mutex::new(
-                hyperion_types::NodeUpdateStatus::default(),
-            )),
             service_install_progress: Arc::new(tokio::sync::Mutex::new(
                 hyperion_types::ServiceInstallStatus::default(),
             )),
@@ -41605,9 +41459,6 @@ mod tests {
             panel_progress: Arc::new(tokio::sync::RwLock::new(None)),
             master_rpc_signer: None,
             node_state_file: None,
-            node_update: Arc::new(tokio::sync::Mutex::new(
-                hyperion_types::NodeUpdateStatus::default(),
-            )),
             service_install_progress: Arc::new(tokio::sync::Mutex::new(
                 hyperion_types::ServiceInstallStatus::default(),
             )),
@@ -41655,9 +41506,6 @@ mod tests {
             panel_progress: Arc::new(tokio::sync::RwLock::new(None)),
             master_rpc_signer: None,
             node_state_file: None,
-            node_update: Arc::new(tokio::sync::Mutex::new(
-                hyperion_types::NodeUpdateStatus::default(),
-            )),
             service_install_progress: Arc::new(tokio::sync::Mutex::new(
                 hyperion_types::ServiceInstallStatus::default(),
             )),
@@ -41777,9 +41625,6 @@ mod tests {
             panel_progress: Arc::new(tokio::sync::RwLock::new(None)),
             master_rpc_signer: None,
             node_state_file: None,
-            node_update: Arc::new(tokio::sync::Mutex::new(
-                hyperion_types::NodeUpdateStatus::default(),
-            )),
             service_install_progress: Arc::new(tokio::sync::Mutex::new(
                 hyperion_types::ServiceInstallStatus::default(),
             )),
