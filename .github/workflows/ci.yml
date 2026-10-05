@@ -86,3 +86,14 @@ jobs:
       # checks the asset on its own so a break is attributed to the right file.
       - name: Syntax-check the import runner
         run: bash -n bin/hyperion-web/assets/import-runner.sh
+
+      # update.sh runs as root on production boxes and stops the services as one
+      # of its first acts, so a syntax error or a silently-broken job check is
+      # found at the worst time. The test runs update.sh's wait-for-jobs block
+      # against a DB built from the real migrations, so a renamed column in
+      # `jobs` / `backup_runs` fails here rather than turning the wait into a
+      # no-op. (sqlite3 ships on the runner image.)
+      - name: Syntax-check the install scripts and test update.sh's job wait
+        run: |
+          for f in packaging/install/*.sh; do bash -n "$f"; done
+          packaging/install/tests/update-wait.sh

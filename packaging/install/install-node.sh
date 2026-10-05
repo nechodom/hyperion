@@ -262,6 +262,10 @@ apt-get install -y -qq \
    # "what did last night's update actually change?". Without it the
    # snapshot code is inert and sites fall back to archive backups.` \
   restic \
+  `# sqlite3 is how update.sh sees whether a job is running, so it can wait
+   # for it instead of killing it. It heals a missing one on the first update,
+   # but a fresh install should not depend on that.` \
+  sqlite3 \
   bind9-dnsutils \
   nginx "${optional_pkgs[@]}"
 

@@ -2,6 +2,8 @@
 # Hyperion in-place update.
 #
 # What it does:
+#   0. Wait for running jobs (backups, migrations, installs, ...) to finish,
+#      so stopping the services never kills one half-way — see --no-wait
 #   1. Stop hyperion-* services (if present)
 #   2. git fetch + reset --hard to origin/$HYPERION_REF (refuses if local
 #      changes — commit/stash first)
@@ -28,8 +30,17 @@
 #   HYPERION_RELEASE_REPO  default nechodom/hyperion — owner/repo for releases
 #   HYPERION_RELEASE_TAG   default rolling — release tag to pull
 #                          (CI overwrites it on every push to main)
+#   HYPERION_STATE_DB      default /var/lib/hyperion/state.db — read to find
+#                          running jobs (agent.toml's state_db, if you moved it)
 #
 # Flags:
+#   --no-wait      Do not wait for running jobs — stop the services right away
+#                  and interrupt whatever is running. Without this flag the
+#                  script polls the job list and only starts once it is empty.
+#   --wait-timeout=SECS
+#                  Give up (changing nothing) if jobs are still running after
+#                  SECS seconds. Default: wait as long as real work is running;
+#                  Ctrl-C is safe at any point during the wait.
 #   --repair       Also drop orphan hostings rows in
 #                  state IN ('provisioning','failed','deleting'). Does NOT
 #                  touch on-disk artefacts (vhost, db, system user) — use
@@ -156,6 +167,10 @@ DO_BUILD=1
 PREFER_PREBUILT=1
 SAFE=0
 ROLLED_BACK=0
+STATE_DB="${HYPERION_STATE_DB:-/var/lib/hyperion/state.db}"
+WAIT_FOR_JOBS=1
+WAIT_TIMEOUT=0                            # seconds; 0 = no limit
+WAIT_POLL="${HYPERION_WAIT_POLL:-10}"     # seconds between job-list checks
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -163,9 +178,15 @@ while [[ $# -gt 0 ]]; do
     --no-build)      DO_BUILD=0; shift;;
     --from-source)   PREFER_PREBUILT=0; shift;;
     --safe)          SAFE=1; shift;;
+    --no-wait)       WAIT_FOR_JOBS=0; shift;;
+    --wait-timeout=*)
+      WAIT_TIMEOUT="${1#*=}"
+      [[ "$WAIT_TIMEOUT" =~ ^[0-9]+$ ]] \
+        || { printf -- '--wait-timeout wants a whole number of seconds, got: %s\n' "$WAIT_TIMEOUT" >&2; exit 2; }
+      shift;;
     --release=*)     RELEASE_TAG="${1#*=}"; shift;;
     --ref=*)         REF="${1#*=}"; shift;;
-    -h|--help)       sed -n '2,40p' "$0"; exit 0;;
+    -h|--help)       sed -n '2,/^#=====/p' "$0" | sed '$d'; exit 0;;
     *) printf 'unknown arg: %s\n' "$1" >&2; exit 2;;
   esac
 done
@@ -283,6 +304,103 @@ export PATH="$HOME/.cargo/bin:/root/.cargo/bin:$PATH"
 if (( DO_BUILD )); then
   command -v cargo >/dev/null 2>&1 || fail "cargo not found. Re-run install-master.sh."
 fi
+
+#-------- 0b. Wait for running jobs ---------------------------------------
+# Stopping the services below kills whatever they are doing: a backup is cut
+# off mid-archive, a migration or WordPress job dies half-way, and on restart
+# the agent marks the orphaned rows "failed". An operator who types
+# `hyperion update` the moment a release lands has no way to know a job is
+# running, so check first and hold off until the box is idle.
+#
+# "Running" is read straight from the state DB, because it is the one source
+# that works before the new binaries are installed and whichever version is
+# currently running: `jobs` (everything the panel starts as a background job)
+# and `backup_runs` (backups, including the scheduled ones nothing in the panel
+# started). Rows whose heartbeat is older than the agent's own reaper threshold
+# are ghosts of a crash, not work, and are ignored — otherwise one orphaned row
+# would hold every future update hostage. Keep the two ages in step with
+# JOB_STALE_SECS / BACKUP_STALE_SECS in bin/hyperion-agent/src/main.rs.
+#
+# This does not stop new work from starting while we wait; it narrows the race
+# to the moment between the last check and the stop, it does not close it.
+# >>> wait-for-jobs
+JOB_STALE_SECS=3600
+BACKUP_STALE_SECS=$(( 6 * 3600 ))
+
+# One line per piece of work in flight: "kind | what | where it is". Empty
+# output = idle. A non-zero exit means "could not tell", which the caller treats
+# differently from "nothing running".
+running_work() {
+  sqlite3 -readonly -separator ' | ' "$STATE_DB" \
+    ".timeout 5000" \
+    "SELECT kind, COALESCE(target, ''), step_label || ' ' || progress_pct || '%'
+       FROM jobs
+      WHERE state = 'running'
+        AND updated_at >= CAST(strftime('%s','now') AS INTEGER) - ${JOB_STALE_SECS};" \
+    "SELECT 'backup', COALESCE(h.domain, b.hosting_id), 'started ' || datetime(b.started_at, 'unixepoch') || ' UTC'
+       FROM backup_runs b LEFT JOIN hostings h ON h.id = b.hosting_id
+      WHERE b.state = 'running'
+        AND b.started_at >= CAST(strftime('%s','now') AS INTEGER) - ${BACKUP_STALE_SECS};"
+}
+
+wait_for_running_work() {
+  if (( ! WAIT_FOR_JOBS )); then
+    log "--no-wait: not waiting for running jobs — anything in flight will be interrupted."
+    return 0
+  fi
+  # The re-exec below hands us to a fresh copy of this script AFTER the services
+  # were stopped. Rows left "running" by the stopped agent can never finish, so
+  # waiting for them would just burn an hour.
+  [[ -z "${HYPERION_JOBS_CHECKED:-}" ]] || return 0
+  [[ -f "$STATE_DB" ]] || return 0
+  # Nothing can be mid-run if neither service is up. The rows are leftovers.
+  if ! systemctl --quiet is-active hyperion-agent 2>/dev/null \
+     && ! systemctl --quiet is-active hyperion-web 2>/dev/null; then
+    return 0
+  fi
+  if ! command -v sqlite3 >/dev/null 2>&1; then
+    log "Installing sqlite3 — needed to see whether any job is running ..."
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq sqlite3 >/dev/null 2>&1 || true
+  fi
+  if ! command -v sqlite3 >/dev/null 2>&1; then
+    warn "sqlite3 is not installed — cannot check for running jobs; updating without waiting."
+    return 0
+  fi
+
+  local out last="" waited=0 beat=0
+  while :; do
+    if ! out="$(running_work 2>&1)"; then
+      # Failing open is deliberate: a DB we cannot read must not make the box
+      # un-updatable. The old behaviour (update now) is the fallback.
+      warn "Could not read the job list (${out//$'\n'/ }) — updating without waiting."
+      return 0
+    fi
+    if [[ -z "$out" ]]; then
+      (( waited == 0 )) || log "Running jobs finished after ${waited}s."
+      export HYPERION_JOBS_CHECKED=1
+      return 0
+    fi
+    if [[ "$out" != "$last" ]]; then
+      log "Waiting for running jobs to finish before updating — nothing is interrupted:"
+      printf '%s\n' "$out" | sed 's/^/    /'
+      log "  (Ctrl-C is safe — nothing has been stopped yet. --no-wait skips this.)"
+      last="$out"
+      beat=0
+    elif (( beat >= 60 )); then
+      log "  still waiting (${waited}s) for $(printf '%s\n' "$out" | wc -l | tr -d ' ') job(s) ..."
+      beat=0
+    fi
+    if (( WAIT_TIMEOUT > 0 && waited >= WAIT_TIMEOUT )); then
+      fail "Jobs were still running after ${WAIT_TIMEOUT}s — nothing was changed.
+       Re-run later, or pass --no-wait to update now and interrupt them."
+    fi
+    sleep "$WAIT_POLL"
+    waited=$(( waited + WAIT_POLL ))
+    beat=$(( beat + WAIT_POLL ))
+  done
+}
+# <<< wait-for-jobs
+wait_for_running_work
 
 #-------- 1. Stop services ------------------------------------------------
 snapshot_binaries
@@ -1232,7 +1350,6 @@ fi
 
 #-------- 6. --repair: drop orphan provisioning rows ----------------------
 if (( REPAIR )); then
-  STATE_DB="/var/lib/hyperion/state.db"
   if [[ ! -f "$STATE_DB" ]]; then
     warn "--repair: $STATE_DB not present yet, nothing to clean."
   elif ! command -v sqlite3 >/dev/null 2>&1; then
