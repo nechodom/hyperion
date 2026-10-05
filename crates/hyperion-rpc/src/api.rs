@@ -1398,6 +1398,22 @@ pub trait AgentApi: Send + Sync + 'static {
         &self,
         sel: HostingSelector,
     ) -> Result<crate::codec::CareReportMail, RpcError>;
+    /// Render a one-off care report for the operator's own `[from, to)`
+    /// (UNIX seconds, end clamped to now) and send nothing.
+    async fn care_report_preview_range(
+        &self,
+        sel: HostingSelector,
+        from: i64,
+        to: i64,
+    ) -> Result<crate::codec::CareReportMail, RpcError>;
+    /// Send that one-off report. OUTSIDE the schedule: the period marker is
+    /// left alone, so the next scheduled report covers what it always would.
+    async fn care_report_send_range(
+        &self,
+        sel: HostingSelector,
+        from: i64,
+        to: i64,
+    ) -> Result<crate::codec::CareReportMail, RpcError>;
 
     /// Reset the WordPress admin password (wp user update --user_pass).
     /// Returns the new password (the caller usually shows it to the

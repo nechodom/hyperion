@@ -2107,6 +2107,22 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
     ) -> Result<hyperion_rpc::codec::CareReportMail, RpcError> {
         self.svc.care_report_send(sel).await
     }
+    async fn care_report_preview_range(
+        &self,
+        sel: HostingSelector,
+        from: i64,
+        to: i64,
+    ) -> Result<hyperion_rpc::codec::CareReportMail, RpcError> {
+        self.svc.care_report_preview_range(sel, from, to).await
+    }
+    async fn care_report_send_range(
+        &self,
+        sel: HostingSelector,
+        from: i64,
+        to: i64,
+    ) -> Result<hyperion_rpc::codec::CareReportMail, RpcError> {
+        self.svc.care_report_send_range(sel, from, to).await
+    }
 }
 
 #[cfg(test)]
