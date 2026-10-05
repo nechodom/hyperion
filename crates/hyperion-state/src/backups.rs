@@ -40,6 +40,24 @@ pub struct BackupRun {
     /// to. Set for `OffsiteSource::NotWanted` runs; keeps them out of the
     /// off-site push + drop paths.
     pub no_offsite: bool,
+    /// Why the local copy is still on disk although local copies were to be
+    /// dropped once verified off-site — written by the drop step when it
+    /// could not confirm a file off-site. Empty = nothing to report.
+    pub local_note: String,
+    /// The S3 targets a push of this run reached IN FULL (every file; for an
+    /// age-encrypted target, the whole ciphertext). The S3 push writes no
+    /// `remote_state`, so this is the only record that an S3-only backup is
+    /// off-site — and, for an age target, what makes a later existence check
+    /// mean "the complete copy is there". Sorted, deduplicated.
+    pub s3_ok_targets: Vec<String>,
+}
+
+impl BackupRun {
+    /// Is there a record that this run has an off-site copy: the FTP push
+    /// returned success (`ok`) or was verified, or an S3 push completed.
+    pub fn offsite_on_record(&self) -> bool {
+        matches!(self.remote_state.as_str(), "ok" | "verified") || !self.s3_ok_targets.is_empty()
+    }
 }
 
 /// The row as SQLite hands it back, mapped BY NAME.
@@ -71,6 +89,10 @@ struct BackupRunRow {
     error_message: Option<String>,
     #[sqlx(default)]
     no_offsite: Option<i64>,
+    #[sqlx(default)]
+    local_note: Option<String>,
+    #[sqlx(default)]
+    s3_ok_targets: Option<String>,
 }
 
 impl From<BackupRunRow> for BackupRun {
@@ -91,13 +113,30 @@ impl From<BackupRunRow> for BackupRun {
             bytes_total: r.bytes_total,
             error_message: r.error_message,
             no_offsite: r.no_offsite.unwrap_or(0) != 0,
+            local_note: r.local_note.unwrap_or_default(),
+            s3_ok_targets: parse_target_list(r.s3_ok_targets.as_deref()),
         }
     }
 }
 
 const SELECT_COLS: &str = "id, hosting_id, target, started_at, finished_at, state, \
      sha256_hex, remote_blob_key, remote_state, remote_error, archive_path, \
-     db_dump_path, bytes_total, error_message, no_offsite";
+     db_dump_path, bytes_total, error_message, no_offsite, local_note, s3_ok_targets";
+
+/// The stored JSON array of S3 target names, sorted and deduplicated. Anything
+/// unreadable is "none on record" — the safe reading, since this list can only
+/// ever ADD evidence that a copy is off-site.
+fn parse_target_list(raw: Option<&str>) -> Vec<String> {
+    let mut v: Vec<String> = raw
+        .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|n| !n.is_empty())
+        .collect();
+    v.sort();
+    v.dedup();
+    v
+}
 
 pub async fn start(
     pool: &SqlitePool,
@@ -251,11 +290,6 @@ pub async fn set_remote(
     Ok(())
 }
 
-/// Successful local backups with no off-site copy, oldest first.
-///
-/// What a backfill works from. `state='ok'` because pushing the archive of a
-/// failed run would copy a file that may be truncated; oldest first because
-/// the oldest is the one closest to being pruned off local disk.
 /// Flag a run as never-off-site (a rollback snapshot). Keeps it out of
 /// `list_needing_offsite` and, defensively, out of the on-demand push+drop.
 pub async fn mark_no_offsite(pool: &SqlitePool, id: i64) -> Result<(), StateError> {
@@ -266,6 +300,12 @@ pub async fn mark_no_offsite(pool: &SqlitePool, id: i64) -> Result<(), StateErro
     Ok(())
 }
 
+/// Successful local backups with no off-site copy on record (no FTP `ok` /
+/// `verified`, no completed S3 push), oldest first.
+///
+/// What a backfill works from. `state='ok'` because pushing the archive of a
+/// failed run would copy a file that may be truncated; oldest first because
+/// the oldest is the one closest to being pruned off local disk.
 pub async fn list_needing_offsite(
     pool: &SqlitePool,
     limit: i64,
@@ -276,6 +316,7 @@ pub async fn list_needing_offsite(
             AND archive_path IS NOT NULL \
             AND no_offsite = 0 \
             AND (remote_state IS NULL OR remote_state NOT IN ('ok', 'verified')) \
+            AND (s3_ok_targets IS NULL OR s3_ok_targets IN ('', '[]')) \
           ORDER BY started_at ASC \
           LIMIT ?"
     ))
@@ -298,12 +339,73 @@ pub async fn list_needing_offsite(
 /// This also keeps `list_needing_offsite` honest: it filters
 /// `archive_path IS NOT NULL`, so a run whose local file is gone is correctly
 /// no longer a candidate to "copy off-site" (there is nothing local to send).
+///
+/// The row's `local_note` goes with them: it explains why a local copy is
+/// still on disk, and there no longer is one.
 pub async fn clear_local_paths(pool: &SqlitePool, id: i64) -> Result<(), StateError> {
-    sqlx::query("UPDATE backup_runs SET archive_path = NULL, db_dump_path = NULL WHERE id = ?")
+    sqlx::query(
+        "UPDATE backup_runs SET archive_path = NULL, db_dump_path = NULL, local_note = NULL \
+         WHERE id = ?",
+    )
+    .bind(id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Record (or, with `""`, clear) why the local copy of a run is still on
+/// disk although the drop-local option asked for it to go.
+pub async fn set_local_note(pool: &SqlitePool, id: i64, note: &str) -> Result<(), StateError> {
+    sqlx::query("UPDATE backup_runs SET local_note = ? WHERE id = ?")
+        .bind(if note.is_empty() { None } else { Some(note) })
         .bind(id)
         .execute(pool)
         .await?;
     Ok(())
+}
+
+/// Record the S3 targets a push of this run reached in full (see
+/// `BackupRun::s3_ok_targets`). An empty list stores NULL.
+pub async fn set_s3_ok_targets(
+    pool: &SqlitePool,
+    id: i64,
+    targets: &[String],
+) -> Result<(), StateError> {
+    let mut v: Vec<&String> = targets.iter().filter(|n| !n.is_empty()).collect();
+    v.sort();
+    v.dedup();
+    let json = if v.is_empty() {
+        None
+    } else {
+        Some(serde_json::to_string(&v).unwrap_or_else(|_| "[]".into()))
+    };
+    sqlx::query("UPDATE backup_runs SET s3_ok_targets = ? WHERE id = ?")
+        .bind(json)
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Hostings that still hold a LOCAL copy of a backup which has an off-site
+/// copy on record (FTP `remote_state` ok or verified, or an S3 push that
+/// completed) — the ones a "drop local copies that are already off-site"
+/// sweep has work on. Rollback snapshots never qualify.
+pub async fn hostings_with_offsite_local_copies(
+    pool: &SqlitePool,
+) -> Result<Vec<HostingId>, StateError> {
+    let rows: Vec<(String,)> = sqlx::query_as(
+        "SELECT DISTINCT hosting_id FROM backup_runs \
+          WHERE state = 'ok' \
+            AND archive_path IS NOT NULL \
+            AND no_offsite = 0 \
+            AND (remote_state IN ('ok', 'verified') \
+                 OR (s3_ok_targets IS NOT NULL AND s3_ok_targets NOT IN ('', '[]'))) \
+          ORDER BY hosting_id",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(|(h,)| HostingId(h)).collect())
 }
 
 pub async fn delete_by_id(pool: &SqlitePool, id: i64) -> Result<(), StateError> {
@@ -501,6 +603,167 @@ mod tests {
         // off-site — there is nothing local to send.
         let after = list_needing_offsite(&pool, 10).await.expect("list");
         assert!(!after.iter().any(|r| r.id == run));
+    }
+
+    /// Write-then-read-back: a missing `.bind()` here would silently update
+    /// `WHERE id = NULL` and the note would never reach the Backups card.
+    #[tokio::test]
+    async fn local_note_round_trips_and_clears_with_the_local_paths() {
+        let pool = open_memory().await.expect("open");
+        let id = fixture(&pool).await;
+        let run = start(&pool, &id, "local", 100).await.expect("start");
+        mark_ok(&pool, run, "/b/ex.tar.gz", Some("/b/ex.sql"), 10, 200)
+            .await
+            .expect("ok");
+        let other = start(&pool, &id, "local", 300).await.expect("start2");
+        mark_ok(&pool, other, "/b/ex2.tar.gz", None, 10, 400)
+            .await
+            .expect("ok2");
+
+        assert_eq!(get_by_id(&pool, run).await.unwrap().unwrap().local_note, "");
+        set_local_note(&pool, run, "kept: dump not confirmed")
+            .await
+            .expect("note");
+        assert_eq!(
+            get_by_id(&pool, run).await.unwrap().unwrap().local_note,
+            "kept: dump not confirmed"
+        );
+        assert_eq!(
+            get_by_id(&pool, other).await.unwrap().unwrap().local_note,
+            "",
+            "the note lands on the named row only"
+        );
+        // "" clears it.
+        set_local_note(&pool, run, "").await.expect("clear note");
+        assert_eq!(get_by_id(&pool, run).await.unwrap().unwrap().local_note, "");
+
+        // Dropping the local copy takes the note with it: there is no longer a
+        // local copy for it to explain.
+        set_local_note(&pool, run, "kept").await.expect("note2");
+        clear_local_paths(&pool, run).await.expect("clear");
+        let r = get_by_id(&pool, run).await.unwrap().unwrap();
+        assert_eq!(r.archive_path, None);
+        assert_eq!(r.local_note, "");
+    }
+
+    /// Only hostings with a still-local copy of a backup that is on record as
+    /// off-site are work for the "drop what is already off-site" sweep.
+    #[tokio::test]
+    async fn hostings_with_offsite_local_copies_filters_to_real_work() {
+        let pool = open_memory().await.expect("open");
+        let id = fixture(&pool).await;
+        // Local, never off-site → not work for this sweep.
+        let local = start(&pool, &id, "local", 100).await.expect("s1");
+        mark_ok(&pool, local, "/b/a.tar.gz", None, 1, 110)
+            .await
+            .expect("ok1");
+        assert!(hostings_with_offsite_local_copies(&pool)
+            .await
+            .unwrap()
+            .is_empty());
+
+        // A rollback snapshot that somehow carries an off-site state → still
+        // never work.
+        let snap = start(&pool, &id, "local", 200).await.expect("s2");
+        mark_ok(&pool, snap, "/b/s.tar.gz", None, 1, 210)
+            .await
+            .expect("ok2");
+        mark_no_offsite(&pool, snap).await.expect("mark");
+        set_remote(&pool, snap, "ftp://x/s.tar.gz", "verified", "")
+            .await
+            .expect("remote");
+        assert!(hostings_with_offsite_local_copies(&pool)
+            .await
+            .unwrap()
+            .is_empty());
+
+        // Verified off-site and still local → work.
+        set_remote(&pool, local, "ftp://x/a.tar.gz", "verified", "")
+            .await
+            .expect("remote2");
+        assert_eq!(
+            hostings_with_offsite_local_copies(&pool).await.unwrap(),
+            vec![id.clone()]
+        );
+
+        // Local copy gone → no longer work.
+        clear_local_paths(&pool, local).await.expect("clear");
+        assert!(hostings_with_offsite_local_copies(&pool)
+            .await
+            .unwrap()
+            .is_empty());
+
+        // An S3-only backup (no FTP state at all) with a completed push is
+        // work too — the S3 push writes no remote_state.
+        let s3 = start(&pool, &id, "local", 300).await.expect("s3");
+        mark_ok(&pool, s3, "/b/c.tar.gz", None, 1, 310)
+            .await
+            .expect("ok3");
+        assert!(hostings_with_offsite_local_copies(&pool)
+            .await
+            .unwrap()
+            .is_empty());
+        set_s3_ok_targets(&pool, s3, &["vault".to_string()])
+            .await
+            .expect("s3 ok");
+        assert_eq!(
+            hostings_with_offsite_local_copies(&pool).await.unwrap(),
+            vec![id.clone()]
+        );
+    }
+
+    /// Write-then-read-back of the S3 evidence list, including "clear".
+    #[tokio::test]
+    async fn s3_ok_targets_round_trip_sorted_and_clearable() {
+        let pool = open_memory().await.expect("open");
+        let id = fixture(&pool).await;
+        let run = start(&pool, &id, "local", 100).await.expect("start");
+        mark_ok(&pool, run, "/b/a.tar.gz", None, 1, 110)
+            .await
+            .expect("ok");
+        let r = get_by_id(&pool, run).await.unwrap().unwrap();
+        assert!(r.s3_ok_targets.is_empty());
+        assert!(!r.offsite_on_record());
+
+        set_s3_ok_targets(&pool, run, &["b".into(), "a".into(), "b".into(), "".into()])
+            .await
+            .expect("set");
+        let r = get_by_id(&pool, run).await.unwrap().unwrap();
+        assert_eq!(r.s3_ok_targets, vec!["a".to_string(), "b".to_string()]);
+        assert!(r.offsite_on_record());
+
+        // Clearing the local copy keeps the off-site evidence.
+        clear_local_paths(&pool, run).await.expect("clear");
+        let r = get_by_id(&pool, run).await.unwrap().unwrap();
+        assert_eq!(r.s3_ok_targets.len(), 2);
+
+        // A completed S3 push means "off-site on record": not a backfill
+        // candidate any more (it used to be re-uploaded by every backfill).
+        let fresh = start(&pool, &id, "local", 200).await.expect("start2");
+        mark_ok(&pool, fresh, "/b/f.tar.gz", None, 1, 210)
+            .await
+            .expect("ok2");
+        assert!(list_needing_offsite(&pool, 10)
+            .await
+            .unwrap()
+            .iter()
+            .any(|r| r.id == fresh));
+        set_s3_ok_targets(&pool, fresh, &["vault#ab".into()])
+            .await
+            .expect("set2");
+        assert!(!list_needing_offsite(&pool, 10)
+            .await
+            .unwrap()
+            .iter()
+            .any(|r| r.id == fresh));
+
+        set_s3_ok_targets(&pool, run, &[]).await.expect("empty");
+        assert!(get_by_id(&pool, run)
+            .await
+            .unwrap()
+            .unwrap()
+            .s3_ok_targets
+            .is_empty());
     }
 
     #[tokio::test]

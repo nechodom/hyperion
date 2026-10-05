@@ -2757,6 +2757,14 @@ async fn fetch_expiry(
     }
 }
 
+/// Does any listed backup keep its local copy only because the owning node
+/// has "Delete the local copy once it is verified off-site" switched off? The
+/// Archives card then says so once, above the table — "off-site ✓" next to a
+/// local path otherwise reads as a delete that silently failed.
+pub(crate) fn backups_kept_by_setting(backups: &[hyperion_types::BackupRunWire]) -> bool {
+    backups.iter().any(|b| b.local_kept == "setting_off")
+}
+
 async fn fetch_backup_list(
     state: &SharedState,
     target: Option<&str>,
@@ -4895,13 +4903,35 @@ pub(crate) async fn run_offsite_drop_job(
                 r.kept_local,
                 if r.kept_local == 1 { "y" } else { "ies" },
             ));
+            if r.already_offsite > 0 {
+                log.push_str(&format!(
+                    "            ({} of those were already off-site: re-checked there and \
+                     dropped without being uploaded again)\n",
+                    r.already_offsite
+                ));
+            }
             // Red when anything the operator selected FAILED — including ids
             // that no longer exist (a concurrent delete or a stale page): those
             // land in `failed` without touching `considered`, so a
             // `considered == 0` success clause would report green when every
             // selected item failed. Mirror the estate-wide sweep's predicate.
+            //
+            // And red when a copy was KEPT: the operator asked for the local
+            // copy to go, and a green job next to a backup that is still on
+            // disk reads as "done" when it is not.
             reporter.step("Finished.", 100, &log).await;
-            reporter.finish(r.failed == 0, None).await;
+            let kept = (r.kept_local > 0).then(|| {
+                format!(
+                    "{} local cop{} kept — not confirmed off-site; the Backups tab says why",
+                    r.kept_local,
+                    if r.kept_local == 1 {
+                        "y was"
+                    } else {
+                        "ies were"
+                    },
+                )
+            });
+            reporter.finish(r.failed == 0 && kept.is_none(), kept).await;
         }
         Ok(RpcResponse::Error(e)) => reporter.finish(false, Some(e.to_string())).await,
         Ok(_) => {

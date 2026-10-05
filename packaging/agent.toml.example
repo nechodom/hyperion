@@ -231,20 +231,26 @@ mail_threshold = 8    # postfix/dovecot SASL auth failures
 #
 # Backups always land on local disk first, then a copy is pushed off-site (the
 # [backup_remote] FTP target and/or the S3 targets set per hosting). With
-# `drop_local_after_offsite = true`, the local archive + DB dump are deleted
-# after each backup — but ONLY once the off-site copy has been INDEPENDENTLY
-# re-verified present (size-checked for FTP and unencrypted S3; existence-only
-# for age-encrypted S3, whose ciphertext size cannot match the plaintext).
-# Never on a bare "upload returned success", and never for a run that had no
-# off-site destination. If any file cannot be confirmed, the local copy is
-# kept and a warning is logged. Restore then comes from the site's Off-site
+# `drop_local_after_offsite = true`, after each backup of a site the local
+# archive + DB dump are deleted — of this backup and of any older backup of the
+# site already on record as off-site — but ONLY once each off-site copy has
+# been INDEPENDENTLY re-verified present (size-checked for FTP and unencrypted
+# S3; existence-only for age-encrypted S3, whose ciphertext size cannot match
+# the plaintext, and then only right after a full push of it). Never on a bare
+# "upload returned success", and never for a run that had no off-site
+# destination. If any file cannot be confirmed, the local copy is kept and the
+# site's Backups tab says why. Restore then comes from the site's Off-site
 # panel. Read on the node that owns each site (its backup run acts on it).
+#
+# `keep_local_latest = N` keeps each site's N newest local copies on disk even
+# so (a fast restore without a download); 0 drops every verified copy.
 #
 # Default false: keeping the local copy means a faster restore and a second
 # copy, at the cost of disk.
 #
 # [backup]
 # drop_local_after_offsite = false
+# keep_local_latest = 0
 
 # ─── Snapshots before a change ─────────────────────────────────────────────
 #

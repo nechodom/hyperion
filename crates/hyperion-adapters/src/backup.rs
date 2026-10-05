@@ -633,6 +633,10 @@ pub async fn verify_remote(
             "fail\n",
             "silent\n",
             "show-error\n",
+            // A host that drops packets would otherwise hold every re-check
+            // for the full max-time; the drop-local sweep asks about several
+            // files in a row, and the connection probe already uses 15 s.
+            "connect-timeout = 15\n",
             "max-time = 60\n",
             "write-out = \"%{{size_download}} %{{size_upload}} %{{filename_effective}}\"\n",
         ),

@@ -1833,12 +1833,46 @@ async fn propagate_notifications(
                 Some(node_id.as_str()),
                 Request::AgentConfigUpdate {
                     section: sect.to_string(),
-                    fields: f.into(),
+                    fields: f.clone().into(),
                 },
             )
             .await;
             match resp {
                 Ok(RpcResponse::AgentConfigUpdate) => Ok(()),
+                // An agent from before "keep the newest local copies" refuses
+                // the whole [backup] save over that one key — and with it the
+                // on/off switch it does understand. Resend without the key
+                // when leaving it out changes nothing on that node.
+                Ok(RpcResponse::Error(e))
+                    if backup_keep_unknown_to_old_node(&sect, &e.to_string()) =>
+                {
+                    match backup_fields_for_old_node(&f) {
+                        Some(f_old) => {
+                            match crate::dispatcher::dispatch_to_node(
+                                &st,
+                                Some(node_id.as_str()),
+                                Request::AgentConfigUpdate {
+                                    section: sect.to_string(),
+                                    fields: f_old.into(),
+                                },
+                            )
+                            .await
+                            {
+                                Ok(RpcResponse::AgentConfigUpdate) => Ok(()),
+                                Ok(RpcResponse::Error(e)) => {
+                                    Err(format!("{label} refused it ({e})"))
+                                }
+                                Ok(_) => Err(format!("{label} answered with something unexpected")),
+                                Err(e) => Err(format!("{label} could not be updated ({e})")),
+                            }
+                        }
+                        None => Err(format!(
+                            "{label} runs an older agent that cannot keep the newest local \
+                             copies, so it kept its previous setting — upgrade it, or set the \
+                             count to 0 to change dropping there"
+                        )),
+                    }
+                }
                 // An older agent that doesn't know these keys refuses the
                 // write; the operator needs to hear THAT, not "unreachable".
                 Ok(RpcResponse::Error(e)) => Err(format!("{label} refused it ({e})")),
@@ -1863,6 +1897,39 @@ async fn propagate_notifications(
         failed.sort();
         Err(failed)
     }
+}
+
+/// Did a node refuse a `[backup]` save only because it predates
+/// `keep_local_latest`? (Its config parser rejects unknown keys by name.)
+fn backup_keep_unknown_to_old_node(section: &str, error: &str) -> bool {
+    section == "backup" && error.contains("keep_local_latest")
+}
+
+/// The `[backup]` fields to send a node that predates `keep_local_latest`, or
+/// `None` when leaving the key out would change what that node does. An old
+/// node behaves as "keep 0", so the key can go when it says 0 (or nothing), or
+/// when dropping is being switched off. A keep count above 0 with dropping on
+/// must NOT be stripped: the old node would then drop the very copies the
+/// operator asked to keep.
+fn backup_fields_for_old_node(
+    fields: &std::collections::BTreeMap<String, String>,
+) -> Option<std::collections::BTreeMap<String, String>> {
+    let keep = fields
+        .get("keep_local_latest")
+        .map(|v| v.trim())
+        .unwrap_or("");
+    let drop_on = fields.get("drop_local_after_offsite").is_some_and(|v| {
+        matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "true" | "on" | "1" | "yes"
+        )
+    });
+    if !(keep.is_empty() || keep == "0" || !drop_on) {
+        return None;
+    }
+    let mut f = fields.clone();
+    f.remove("keep_local_latest");
+    Some(f)
 }
 
 /// Operator-facing name for a config section.
@@ -1982,7 +2049,27 @@ pub async fn post_offsite_backfill(
                     "",
                 )
                 .await;
-            match hyperion_rpc_client::call(
+            // One blocking RPC that uploads and, with drop on, re-checks every
+            // site's local copies: heartbeat the job row so a long sweep is not
+            // reaped as stale (and its real result thrown away) mid-flight.
+            let hb = {
+                let reporter = reporter.clone();
+                tokio::spawn(async move {
+                    let mut pct = 5;
+                    loop {
+                        tokio::time::sleep(std::time::Duration::from_secs(120)).await;
+                        pct = (pct + 5).min(90);
+                        reporter
+                            .step(
+                                "Still working — copying off-site and re-checking local copies…",
+                                pct,
+                                "",
+                            )
+                            .await;
+                    }
+                })
+            };
+            let resp = hyperion_rpc_client::call(
                 &job_state.agent_socket,
                 Request::BackupOffsiteBackfill {
                     limit: BACKFILL_BATCH,
@@ -1990,8 +2077,9 @@ pub async fn post_offsite_backfill(
                     s3_targets,
                 },
             )
-            .await
-            {
+            .await;
+            hb.abort();
+            match resp {
                 Ok(RpcResponse::BackupOffsiteBackfill(r)) => {
                     let mut log = format!(
                         "considered: {}\npushed:     {}\nfailed:     {}\n",
@@ -2007,6 +2095,13 @@ pub async fn post_offsite_backfill(
                             r.kept_local,
                             if r.kept_local == 1 { "y" } else { "ies" },
                         ));
+                        if r.already_offsite > 0 {
+                            log.push_str(&format!(
+                                "            ({} of those were already off-site: re-checked \
+                                 there and dropped without being uploaded again)\n",
+                                r.already_offsite
+                            ));
+                        }
                     }
                     // Separated from `failed` because no retry fixes it: the
                     // archive was pruned off local disk before anything copied
@@ -2034,8 +2129,24 @@ pub async fn post_offsite_backfill(
                              continue.\n",
                         );
                     }
+                    if !r.note.is_empty() {
+                        log.push_str(&format!("\n{}\n", r.note));
+                    }
                     reporter.step("Finished.", 100, &log).await;
-                    reporter.finish(r.failed == 0, None).await;
+                    // A kept copy is not a failure of the sweep, but with
+                    // "delete local" asked for it is not done either — say so
+                    // rather than show green over copies still on disk.
+                    let kept =
+                        (drop_local && r.kept_local > 0).then(|| {
+                            format!(
+                            "{} local cop{} kept — not confirmed off-site; each site's Backups \
+                             tab says why",
+                            r.kept_local,
+                            if r.kept_local == 1 { "y was" } else { "ies were" },
+                        )
+                        });
+                    let kept = kept.or_else(|| (!r.note.is_empty()).then(|| r.note.clone()));
+                    reporter.finish(r.failed == 0 && kept.is_none(), kept).await;
                 }
                 Ok(RpcResponse::Error(e)) => reporter.finish(false, Some(e.to_string())).await,
                 Ok(_) => {
@@ -3321,6 +3432,48 @@ mod tests {
         flatten_toml_strings, letter_verdict, mask_secrets_in_toml,
         synthesize_unchecked_checkboxes, toml_key, toml_value,
     };
+
+    /// A node from before `keep_local_latest` gets the [backup] save without
+    /// it only when that cannot change what the node does.
+    #[test]
+    fn backup_fields_for_old_node_strips_only_when_harmless() {
+        use super::{backup_fields_for_old_node, backup_keep_unknown_to_old_node};
+        let m = |pairs: &[(&str, &str)]| -> std::collections::BTreeMap<String, String> {
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect()
+        };
+        assert!(backup_keep_unknown_to_old_node(
+            "backup",
+            "validation: field `keep_local_latest` is not editable in section `backup`"
+        ));
+        assert!(!backup_keep_unknown_to_old_node("backup", "something else"));
+        assert!(!backup_keep_unknown_to_old_node(
+            "snapshots",
+            "keep_local_latest"
+        ));
+
+        // keep 0 = what the old node does anyway → strip.
+        let f = backup_fields_for_old_node(&m(&[
+            ("drop_local_after_offsite", "true"),
+            ("keep_local_latest", "0"),
+        ]))
+        .expect("harmless");
+        assert_eq!(f, m(&[("drop_local_after_offsite", "true")]));
+        // Switching dropping OFF must reach it whatever the count says.
+        assert!(backup_fields_for_old_node(&m(&[
+            ("drop_local_after_offsite", "false"),
+            ("keep_local_latest", "3"),
+        ]))
+        .is_some());
+        // Dropping on with a keep count: stripping would drop the kept copies.
+        assert!(backup_fields_for_old_node(&m(&[
+            ("drop_local_after_offsite", "TRUE"),
+            ("keep_local_latest", "3"),
+        ]))
+        .is_none());
+    }
     use std::collections::BTreeMap;
 
     /// The fork guard must survive a `<textarea>`.
