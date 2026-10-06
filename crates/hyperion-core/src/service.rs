@@ -5107,9 +5107,16 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             } else {
                 hyperion_types::waf::WafLevel::Off
             };
-            options.set_waf_level(level);
             if options.waf_overrides.trim().is_empty() {
                 options.waf_overrides = detail.vhost_options.waf_overrides.clone();
+            }
+            if level == hyperion_types::waf::WafLevel::Off
+                && stored != hyperion_types::waf::WafLevel::Off
+            {
+                // The old switch turned off: that is "no WAF", pins included.
+                options.waf_turn_off();
+            } else {
+                options.set_waf_level(level);
             }
         } else {
             let Some(level) = hyperion_types::waf::WafLevel::parse(&options.waf_level) else {
@@ -13651,6 +13658,34 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         }
     }
 
+    /// Addresses no automatic ban may hit, whatever a log says: this
+    /// machine's own — a site calling itself on its public address (WP-cron,
+    /// Site Health) arrives FROM it, and a tenant's PHP can make that
+    /// address look like an attacker in any site's log — and the other
+    /// cluster members, whose loss cuts master↔node RPC. Operators can still
+    /// ban any of them by hand.
+    async fn ban_protected_ips(&self) -> std::collections::HashSet<std::net::IpAddr> {
+        let mut set: std::collections::HashSet<std::net::IpAddr> =
+            hyperion_adapters::logscan::local_interface_ips()
+                .await
+                .into_iter()
+                .collect();
+        if let Ok(nodes) = hyperion_state::nodes::list(&self.pool).await {
+            for n in nodes {
+                if let Some(ip) = n.public_ip.as_deref().and_then(|s| s.trim().parse().ok()) {
+                    set.insert(ip);
+                }
+                if let Some(url) = n.master_url.as_deref() {
+                    set.extend(resolve_url_host(url).await);
+                }
+            }
+        }
+        if let Some(url) = read_master_url(self.agent_config_path.as_deref()) {
+            set.extend(resolve_url_host(&url).await);
+        }
+        set
+    }
+
     /// Whether WAF refusals on this site may earn an automatic ban. Default
     /// ON (absent ⇒ on) and a read error answers "on" too, matching the
     /// brute-force switch: a DB hiccup must not quietly stop protection.
@@ -13744,7 +13779,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 });
             }
         }
-        let _ = hyperion_state::waf::prune(&self.pool, now).await;
+        let _ = hyperion_state::waf::prune(&self.pool, now, self.fail2ban.window_secs).await;
         intents
     }
 
@@ -13899,14 +13934,33 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         if !self.fail2ban.enabled {
             return Ok(0);
         }
+        let scan_intents = self.fail2ban_scan(since).await?;
+        // Looked up only when something is about to be banned.
+        let protected = if waf_intents.is_empty() && scan_intents.is_empty() {
+            std::collections::HashSet::new()
+        } else {
+            self.ban_protected_ips().await
+        };
+        let is_protected = |ip: &str| {
+            ip.parse::<std::net::IpAddr>()
+                .map(|a| protected.contains(&a))
+                .unwrap_or(false)
+        };
         let mut new_bans = 0i64;
         for intent in waf_intents {
             let Some(site) = intent.site.as_ref() else {
                 continue;
             };
-            let banned = self
-                .auto_ban(&intent.ip, Some(&site.id), intent.reason, now)
-                .await;
+            let banned = if is_protected(&intent.ip) {
+                tracing::warn!(
+                    ip = %intent.ip, domain = %site.domain,
+                    "fail2ban: WAF refusals from this node's own or a cluster member's address — not banning"
+                );
+                false
+            } else {
+                self.auto_ban(&intent.ip, Some(&site.id), intent.reason, now)
+                    .await
+            };
             // Spent either way. Banned now, or refused because the address
             // is already banned (or never bannable): left in place, the same
             // hits would ban it again the moment an earlier, shorter ban
@@ -13919,8 +13973,15 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             new_bans += 1;
             tracing::info!(ip = %intent.ip, domain = %site.domain, "fail2ban: auto-banned (waf)");
         }
-        for intent in self.fail2ban_scan(since).await? {
+        for intent in scan_intents {
             let hosting_id = intent.site.as_ref().map(|s| s.id.as_str());
+            if is_protected(&intent.ip) {
+                tracing::warn!(
+                    ip = %intent.ip, reason = intent.reason,
+                    "fail2ban: flood from this node's own or a cluster member's address — not banning"
+                );
+                continue;
+            }
             if !self
                 .auto_ban(&intent.ip, hosting_id, intent.reason, now)
                 .await
@@ -19128,12 +19189,14 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let mut options = detail.vhost_options.clone();
         // Enabling keeps a stricter level the operator already chose;
         // the package's promise is "protected", and Strict is that too.
-        let level = match (enabled, detail.vhost_options.effective_waf_level()) {
-            (false, _) => hyperion_types::waf::WafLevel::Off,
-            (true, hyperion_types::waf::WafLevel::Off) => hyperion_types::waf::WafLevel::Standard,
-            (true, current) => current,
-        };
-        options.set_waf_level(level);
+        // Disabling is "no WAF" — rules pinned on go as well.
+        match (enabled, detail.vhost_options.effective_waf_level()) {
+            (false, _) => options.waf_turn_off(),
+            (true, hyperion_types::waf::WafLevel::Off) => {
+                options.set_waf_level(hyperion_types::waf::WafLevel::Standard)
+            }
+            (true, current) => options.set_waf_level(current),
+        }
         self.set_vhost_options(HostingSelector::Id(detail.id.clone()), options, None)
             .await?;
         Ok(())
@@ -34841,6 +34904,48 @@ const WAF_LOG_POS_KV_KEY: &str = "waf_log_pos";
 /// Refusals listed in the activity panel.
 const WAF_RECENT_SHOWN: i64 = 50;
 
+/// The host of an `https://host[:port]/…` URL, resolved to addresses. A
+/// literal IP needs no lookup; a name gets a short, bounded one.
+async fn resolve_url_host(url: &str) -> Vec<std::net::IpAddr> {
+    let rest = url.split("://").nth(1).unwrap_or(url);
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let authority = authority.rsplit('@').next().unwrap_or(authority);
+    let host = if let Some(v6) = authority.strip_prefix('[') {
+        v6.split(']').next().unwrap_or("")
+    } else {
+        authority.split(':').next().unwrap_or("")
+    };
+    if host.is_empty() {
+        return Vec::new();
+    }
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        return vec![ip];
+    }
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        tokio::net::lookup_host((host, 443)),
+    )
+    .await
+    {
+        Ok(Ok(addrs)) => addrs.map(|a| a.ip()).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// `[enrollment] master_url` from agent.toml — the master this node talks
+/// to. `None` on the master itself or when unreadable.
+fn read_master_url(cfg_path: Option<&std::path::Path>) -> Option<String> {
+    let raw = std::fs::read_to_string(cfg_path?).ok()?;
+    let doc = raw.parse::<toml_edit::DocumentMut>().ok()?;
+    let url = doc
+        .get("enrollment")?
+        .get("master_url")?
+        .as_str()?
+        .trim()
+        .to_string();
+    (!url.is_empty()).then_some(url)
+}
+
 /// Remove one hosting's WAF hit log and its rotated copies (`<id>.log`,
 /// `<id>.log.1`, `<id>.log.2.gz`, …) from `dir`. Best-effort.
 async fn remove_waf_logs(dir: &std::path::Path, hosting_id: &str) {
@@ -41426,6 +41531,42 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn url_hosts_resolve_without_dns_for_literals() {
+        async fn v(u: &str) -> Vec<String> {
+            resolve_url_host(u)
+                .await
+                .iter()
+                .map(|i| i.to_string())
+                .collect()
+        }
+        assert_eq!(
+            v("https://203.0.113.9:8443/agent-rpc").await,
+            vec!["203.0.113.9"]
+        );
+        assert_eq!(v("https://[2001:db8::9]:9443/x").await, vec!["2001:db8::9"]);
+        assert_eq!(v("https://user@198.51.100.4/").await, vec!["198.51.100.4"]);
+        assert!(v("").await.is_empty());
+    }
+
+    #[test]
+    fn master_url_is_read_from_the_enrollment_section() {
+        let dir = tempfile::tempdir().expect("dir");
+        let p = dir.path().join("agent.toml");
+        std::fs::write(
+            &p,
+            "[enrollment]\nmaster_url = \"https://m.example.cz:8443\"\n",
+        )
+        .expect("w");
+        assert_eq!(
+            read_master_url(Some(&p)).as_deref(),
+            Some("https://m.example.cz:8443")
+        );
+        std::fs::write(&p, "[cluster]\nmode = \"master\"\n").expect("w");
+        assert_eq!(read_master_url(Some(&p)), None);
+        assert_eq!(read_master_url(None), None);
+    }
+
     /// An empty level from an older caller keeps the stored level and pins
     /// while the bool still agrees with them; flipping the bool decides.
     #[tokio::test]
@@ -41438,7 +41579,7 @@ mod tests {
         let sel = HostingSelector::Domain(Domain::parse("example.cz").expect("parse"));
         let mut opts = vh_defaults();
         opts.waf_level = "strict".into();
-        opts.waf_overrides = r#"{"xmlrpc":false}"#.into();
+        opts.waf_overrides = r#"{"dotfiles":true,"xmlrpc":false}"#.into();
         s.set_vhost_options(sel.clone(), opts, None)
             .await
             .expect("set");
@@ -41450,7 +41591,7 @@ mod tests {
             .expect("legacy");
         let got = s.get(sel.clone()).await.expect("get").vhost_options;
         assert_eq!(got.waf_level, "strict");
-        assert_eq!(got.waf_overrides, r#"{"xmlrpc":false}"#);
+        assert_eq!(got.waf_overrides, r#"{"dotfiles":true,"xmlrpc":false}"#);
 
         let legacy_off = vh_defaults();
         s.set_vhost_options(sel.clone(), legacy_off, None)
@@ -41459,6 +41600,9 @@ mod tests {
         let got = s.get(sel.clone()).await.expect("get").vhost_options;
         assert_eq!(got.waf_level, "off");
         assert!(!got.waf_enabled);
+        // "Off" from the old switch means no WAF: the rule pinned ON went
+        // with it; the pin that only matters once a rule is on stayed.
+        assert_eq!(got.waf_overrides, r#"{"xmlrpc":false}"#);
 
         let mut bad = vh_defaults();
         bad.waf_level = "paranoid".into();

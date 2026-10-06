@@ -4119,8 +4119,11 @@ pub struct VhostOptionsForm {
     force_https: Option<String>,
     #[serde(default)]
     hsts_max_age: i64,
+    /// Absent when the card was rendered for someone without the raw-nginx
+    /// capability (the textarea is not on the page at all) — that means
+    /// "leave it", not "set it to empty".
     #[serde(default)]
-    custom_nginx_snippet: String,
+    custom_nginx_snippet: Option<String>,
     #[serde(default)]
     maintenance_mode: Option<String>,
     #[serde(default)]
@@ -4334,8 +4337,13 @@ pub async fn post_vhost_options(
         // other vhost setting, so dropping the submitted value would let a
         // tenant WIPE an admin's snippet by saving an unrelated checkbox.
         // Only an actual attempt to CHANGE it is an error.
+        // A form without the field at all — the card hides the textarea
+        // from anyone without the capability — changes nothing either:
+        // treating the missing field as "" refused every save such a user
+        // made on a site whose admin had written a snippet.
+        let submitted_snippet = form.custom_nginx_snippet.as_deref();
         if !ctx.can(Capability::HostingEditNginxRaw)
-            && form.custom_nginx_snippet.trim() != stored.custom_nginx_snippet.trim()
+            && submitted_snippet.is_some_and(|v| v.trim() != stored.custom_nginx_snippet.trim())
         {
             return Ok((
                 axum::http::StatusCode::FORBIDDEN,
@@ -4347,8 +4355,8 @@ pub async fn post_vhost_options(
             )
                 .into_response());
         }
-        if ctx.can(Capability::HostingEditNginxRaw) {
-            options.custom_nginx_snippet = form.custom_nginx_snippet.clone();
+        if let (true, Some(v)) = (ctx.can(Capability::HostingEditNginxRaw), submitted_snippet) {
+            options.custom_nginx_snippet = v.to_string();
         }
         options.basic_auth_enabled = checkbox_on(&form.basic_auth_enabled);
         options.basic_auth_user = form.basic_auth_user.trim().to_string();
@@ -6276,6 +6284,17 @@ mod waf_form_tests {
         let f = parse("selector=x&section=protection&bot_ai=on&bot_seo=on&waf_level=strict");
         assert_eq!(f.blocked_bots(), "ai,seo");
         assert_eq!(f.section, "protection");
+    }
+
+    /// The raw snippet textarea is not on the page for users without the
+    /// capability; its absence must read as "unchanged", not as "".
+    #[test]
+    fn a_missing_snippet_field_is_not_an_empty_snippet() {
+        assert_eq!(parse("selector=x&section=vhost").custom_nginx_snippet, None);
+        assert_eq!(
+            parse("selector=x&section=vhost&custom_nginx_snippet=").custom_nginx_snippet,
+            Some(String::new())
+        );
     }
 
     #[test]
@@ -9700,11 +9719,27 @@ pub async fn post_waf_rule(
     .await;
     let label = hyperion_types::waf::label_for(&form.rule);
     let notice = match resp {
-        Ok(RpcResponse::HostingSetVhostOptions(_)) => Some(match form.pin.trim() {
-            "off" => format!("\u{201c}{label}\u{201d} is now off for this site. Reload to see it on the Protection card."),
-            "on" => format!("\u{201c}{label}\u{201d} is now always on for this site."),
-            _ => format!("\u{201c}{label}\u{201d} follows the level again."),
-        }),
+        // Reload the whole page, not just this panel: the Protection card's
+        // rule selects still hold the old pin, and its next save would put
+        // the rule straight back.
+        Ok(RpcResponse::HostingSetVhostOptions(_)) => {
+            let text = match form.pin.trim() {
+                "off" => format!("\u{201c}{label}\u{201d} is now off for this site."),
+                "on" => format!("\u{201c}{label}\u{201d} is now always on for this site."),
+                _ => format!("\u{201c}{label}\u{201d} follows the level again."),
+            };
+            return Ok((
+                axum::http::StatusCode::NO_CONTENT,
+                [
+                    ("HX-Refresh", "true".to_string()),
+                    (
+                        "HX-Trigger",
+                        serde_json::json!({"toast": {"level": "ok", "text": text}}).to_string(),
+                    ),
+                ],
+            )
+                .into_response());
+        }
         Ok(RpcResponse::Error(e)) => Some(format!("not saved: {e}")),
         Ok(_) => Some("unexpected response from the owning node".into()),
         Err(e) => Some(format!("not saved: {e}")),

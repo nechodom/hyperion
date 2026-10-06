@@ -143,6 +143,7 @@ pub async fn recent(
             method,
             uri,
             ua,
+            ..Default::default()
         })
         .collect())
 }
@@ -179,14 +180,19 @@ pub async fn clear_ip(pool: &SqlitePool, hosting_id: &str, ip: &str) -> Result<(
     Ok(())
 }
 
-/// Drop rows past their retention.
-pub async fn prune(pool: &SqlitePool, now: i64) -> Result<(), StateError> {
+/// Drop rows past their retention. `ban_window_secs` is the auto-ban
+/// window: per-address counts older than twice it can never matter again,
+/// and keeping them only grows the table a flood fills.
+pub async fn prune(pool: &SqlitePool, now: i64, ban_window_secs: i64) -> Result<(), StateError> {
     sqlx::query("DELETE FROM waf_hits_hourly WHERE hour < ?")
         .bind(now - HOURLY_KEEP_SECS)
         .execute(pool)
         .await?;
+    let ip_keep = ban_window_secs
+        .saturating_mul(2)
+        .clamp(600, IP_MINUTE_KEEP_SECS);
     sqlx::query("DELETE FROM waf_ip_minute WHERE minute < ?")
-        .bind(now - IP_MINUTE_KEEP_SECS)
+        .bind(now - ip_keep)
         .execute(pool)
         .await?;
     Ok(())
@@ -216,6 +222,7 @@ mod tests {
             method: "GET".into(),
             uri: "/x".into(),
             ua: "ua".into(),
+            ..Default::default()
         }
     }
 
@@ -334,7 +341,7 @@ mod tests {
         )
         .await
         .expect("r");
-        prune(&pool, t + HOURLY_KEEP_SECS + 7200)
+        prune(&pool, t + HOURLY_KEEP_SECS + 7200, 600)
             .await
             .expect("prune");
         assert!(totals(&pool, "h1", 0).await.expect("t").is_empty());

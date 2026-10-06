@@ -303,6 +303,17 @@ impl VhostOptions {
         self.waf_level = level.as_str().to_string();
         self.waf_enabled = level != crate::waf::WafLevel::Off;
     }
+
+    /// "WAF off" as a caller that knows only the old switch means it: the
+    /// level goes to Off AND rules pinned on go too, or they would keep
+    /// refusing requests on a site everything reports as unprotected.
+    /// Pins that force a rule off stay — they only matter once it is on.
+    pub fn waf_turn_off(&mut self) {
+        self.set_waf_level(crate::waf::WafLevel::Off);
+        let mut pins = crate::waf::parse_overrides(&self.waf_overrides);
+        pins.retain(|_, on| !*on);
+        self.waf_overrides = crate::waf::overrides_to_string(&pins);
+    }
 }
 
 fn default_kind() -> String {

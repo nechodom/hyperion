@@ -30,12 +30,12 @@ One source of truth in `hyperion-types::waf`. Each rule: `id`, `label`,
 | `scanner_ua` | Standard | yes | nikto, sqlmap, wpscan… (today's regex) |
 | `xmlrpc` | Standard | no | `/xmlrpc.php` |
 | `sensitive_files` | Standard | yes | `wp-config.php`, `readme.html`, `license.txt` |
-| `dump_files` | Standard | yes | `.sql .bak .old .orig .save .swp .tar .gz .tgz .zip .log .ini .sh` |
-| `php_in_uploads` | Standard | yes | PHP under `wp-content/uploads|cache` (php only) |
+| `dump_files` | Standard | no | `.sql .bak .old .orig .save .swp .tar .gz .tgz .zip .log .ini .sh` |
+| `php_in_uploads` | Standard | no | PHP under `wp-content/uploads|cache` (php only) |
 | `dotfiles` | Strict | yes | `/.env`, `/.git/`, `/.svn/`, `/.hg/`, `.DS_Store` (logged + banned; other dotfiles stay a silent 404) |
 | `author_enum` | Strict | no | `?author=<n>` |
 | `rest_user_enum` | Strict | no | `/wp-json/wp/v2/users` and `?rest_route=/wp/v2/users` |
-| `bad_methods` | Strict | yes | anything but GET HEAD POST PUT PATCH DELETE OPTIONS |
+| `bad_methods` | Strict | no | anything but GET HEAD POST PUT PATCH DELETE OPTIONS |
 | `empty_ua` | Strict | no | empty / `-` User-Agent |
 
 Standard = exactly today's rule set, so a migrated site refuses exactly what it
@@ -82,37 +82,54 @@ Ingest offset per hosting in `hosting_kv` `waf_log_pos` = `"<inode>:<offset>"`.
 
 ## nginx
 
-- Every WAF refusal becomes `set $hyperion_waf "<id>"; return 403;` instead of
-  `deny all`. Server-level checks (args, UA, method, empty UA, author) fold into
-  the existing `$hyperion_deny` pass so the ACME path is cleared in the same
-  rewrite phase — no rule can ever block an ACME challenge.
+- Every WAF refusal becomes `set $hyperion_waf "<id>"; return 403;`. All
+  server-level checks — including `sensitive_files` and `dotfiles` — record a
+  verdict in one pass, the ACME path is cleared in the same rewrite phase, and
+  one `if` refuses. Every match overwrites the verdict, so the refuse-only
+  tags come first and the ban-counted ones last: a scanner that also drops its
+  User-Agent or comes from a blocked country is still recorded as a scanner.
+  `xmlrpc`, `dump_files` and `php_in_uploads` stay `location` rules (first
+  match, before the PHP location).
 - Server block gets a second, conditional log:
-  `access_log /var/log/hyperion/waf/<hosting_id>.log hyperion_waf if=$hyperion_waf;`
+  `access_log /var/log/hyperion-waf/<hosting_id>.log hyperion_waf if=$hyperion_waf;`
   It sits next to the tenant `access_log`, so both apply.
-- `log_format hyperion_waf escape=json` lives in the node-wide http-level conf
-  `ensure_ratelimit_conf` already writes:
-  `$time_iso8601\t$remote_addr\t$hyperion_waf\t$request_method\t$request_uri\t$http_user_agent`.
-- The log dir `/var/log/hyperion/waf` is root:adm 0750, created by the agent
-  before rendering. It is **not tenant-writable**: today's brute-force scanner
-  reads the tenant-writable access.log, so a tenant can forge lines and get an
-  arbitrary IP banned. WAF bans come only from the root-owned log.
+- `/etc/nginx/conf.d/hyperion-waf.conf` declares `$hyperion_waf` with a `map`
+  default (a config naming an undefined variable fails `nginx -t` once no
+  vhost sets it) and the `log_format hyperion_waf escape=json`:
+  `$msec\t$remote_addr\t$hyperion_waf\t$request_method\t$request_uri\t$http_user_agent\t$http_sec_fetch_site`.
+- The log dir `/var/log/hyperion-waf` is root:<nginx group> 0750: nginx
+  workers reopen their logs on USR1 (Debian's own nginx logrotate sends it
+  daily) and need to reach it; site users cannot. It is **not
+  tenant-writable**: today's brute-force scanner reads the tenant-writable
+  access.log, so a tenant can forge lines and get an arbitrary IP banned. WAF
+  bans come only from this log.
 - `geo` and `bot` refusals set `$hyperion_waf` to their id.
 - logrotate: `/etc/logrotate.d/hyperion-waf`, daily, rotate 7, compress,
-  `postrotate` nginx reopen (`nginx -s reopen`).
+  `copytruncate` — the live file keeps its inode, so rotation never depends on
+  a reopen.
 
 ## Ingest + auto-ban
 
 In the fail2ban tick on each node, per hosting with a WAF log:
 
-1. Read from stored offset; inode change or size < offset ⇒ start at 0. At most
-   8 MiB per tick.
+1. Read from the stored offset, streamed and aggregated, at most 64 MiB per
+   tick; a larger backlog is skipped from its oldest end so bans are decided on
+   recent hits. A truncation (`copytruncate`) or inode change finishes the rest
+   from `<log>.1` first.
 2. Parse lines (tab-separated, JSON-escaped fields). Malformed lines are skipped;
    unknown rule ids count as `other` and are never ban-counted.
-3. Upsert hourly counts, insert recent rows, prune.
-4. Per-IP count of `counts_for_ban` hits inside the window; ≥ `waf_threshold`
+3. Upsert hourly counts, insert recent rows, prune (per-address counts are
+   kept twice the ban window).
+4. Per-IP count of ban-counted hits inside the window; ≥ `waf_threshold`
    (new `[fail2ban]` key, default 20, clamped 3..=1000) ⇒ `BanIntent` through the
    existing `auto_ban` (public-IP guard, repeat escalation). Source label `waf`.
-5. Per-hosting opt-out: `hosting_kv` `waf_autoban_enabled` = `off`.
+   Not counted: requests another page made a browser send
+   (`Sec-Fetch-Site: cross-site`/`same-site` — an `<img>` on someone else's
+   page must not get its viewers banned). At most 10,000 address counters per
+   batch.
+5. Never banned, from any source: this node's own interface addresses and the
+   cluster's (node public IPs, the master's address).
+6. Per-hosting opt-out: `hosting_kv` `waf_autoban_enabled` = `off`.
 
 ## UI
 

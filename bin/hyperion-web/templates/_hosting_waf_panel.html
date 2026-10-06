@@ -34,7 +34,8 @@
           Automatic banning is switched off for this whole node (<a href="/settings#bruteforce">Settings → Bans &amp; blocking</a>). Refusals are still recorded.
         {% else if autoban_enabled %}
           An address refused {{ threshold }} times within {{ window_min }} min is banned at the firewall — on the whole node, SSH included.
-          Only rules no honest visitor or crawler trips over and over count: {{ ban_rules }}. Everything else is refused but never leads to a ban.
+          Only rules no honest visitor or crawler trips over and over count: {{ ban_rules }}. Everything else is refused but never leads to a ban —
+          and so is a request another site's page made a visitor's browser send. This server's own and the cluster's addresses are never banned.
         {% else %}
           Refusals are recorded but never lead to a firewall ban for this site.
         {% endif %}

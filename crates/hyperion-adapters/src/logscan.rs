@@ -115,6 +115,37 @@ pub fn is_public_bannable_ip(ip: &str) -> bool {
     }
 }
 
+/// Addresses in `ip -o addr show` output (`inet 10.0.0.5/24 …`,
+/// `inet6 2001:db8::1/64 …`).
+pub fn parse_ip_addr_output(out: &str) -> Vec<IpAddr> {
+    let mut ips = Vec::new();
+    for line in out.lines() {
+        let mut words = line.split_whitespace();
+        while let Some(w) = words.next() {
+            if w == "inet" || w == "inet6" {
+                if let Some(ip) = words
+                    .next()
+                    .and_then(|a| a.split('/').next())
+                    .and_then(|a| a.parse::<IpAddr>().ok())
+                {
+                    ips.push(ip);
+                }
+            }
+        }
+    }
+    ips
+}
+
+/// This machine's own interface addresses. Empty when `ip` is unavailable.
+pub async fn local_interface_ips() -> Vec<IpAddr> {
+    for bin in ["/usr/sbin/ip", "/usr/bin/ip", "/sbin/ip"] {
+        if let Ok(out) = crate::cmd::run(bin, &["-o", "addr", "show"]).await {
+            return parse_ip_addr_output(&out);
+        }
+    }
+    Vec::new()
+}
+
 /// IPs in `counts` whose failure count reached `threshold`.
 pub fn over_threshold(counts: &HashMap<String, u32>, threshold: u32) -> Vec<String> {
     counts
@@ -152,6 +183,19 @@ Jul  6 12:00:04 s4 dovecot: imap-login: Login: user=<al>, rip=198.51.100.5
         assert_eq!(c.get("203.0.113.7"), Some(&2)); // one postfix + one dovecot
         assert_eq!(c.get("198.51.100.4"), None); // successful connect
         assert_eq!(c.get("198.51.100.5"), None); // successful login
+    }
+
+    #[test]
+    fn ip_addr_output_parses_both_families() {
+        let out = "1: lo    inet 127.0.0.1/8 scope host lo\\       valid_lft forever\n\
+                   2: eth0    inet 203.0.113.7/24 brd 203.0.113.255 scope global eth0\n\
+                   2: eth0    inet6 2001:db8::7/64 scope global \\       valid_lft forever\n";
+        let ips: Vec<String> = parse_ip_addr_output(out)
+            .iter()
+            .map(|i| i.to_string())
+            .collect();
+        assert_eq!(ips, vec!["127.0.0.1", "203.0.113.7", "2001:db8::7"]);
+        assert!(parse_ip_addr_output("garbage").is_empty());
     }
 
     #[test]

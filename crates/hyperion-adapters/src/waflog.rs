@@ -100,13 +100,19 @@ fn clean_rule(s: &str) -> String {
 /// address that does not parse, since a hit without a real address can
 /// neither be shown honestly nor banned.
 pub fn parse_line(line: &str) -> Option<WafHit> {
-    let mut f = line.trim_end_matches(['\r', '\n']).splitn(6, '\t');
+    let mut f = line.trim_end_matches(['\r', '\n']).splitn(7, '\t');
     let msec = f.next()?;
     let ip = f.next()?;
     let rule = f.next()?;
     let method = f.next()?;
     let uri = f.next()?;
     let ua = f.next()?;
+    // `$http_sec_fetch_site`, absent from lines written before it was added.
+    // Browsers send it on every request and a page cannot forge it: a
+    // `cross-site`/`same-site` request was made BY ANOTHER PAGE — an <img>
+    // or a script on someone else's site — so its refusal says nothing
+    // about the visitor and must never earn them a ban.
+    let fetch_site = f.next().unwrap_or("");
     let ts = msec.split('.').next()?.parse::<i64>().ok()?;
     let ip: std::net::IpAddr = ip.parse().ok()?;
     let method = if method.len() <= 16 && method.bytes().all(|b| b.is_ascii_alphabetic()) {
@@ -121,10 +127,12 @@ pub fn parse_line(line: &str) -> Option<WafHit> {
         method,
         uri: unescape(uri),
         ua: unescape(ua),
+        cross_site: matches!(fetch_site, "cross-site" | "same-site"),
     })
 }
 
-/// Where logrotate (`create`, `delaycompress`) leaves yesterday's file.
+/// Where logrotate (`delaycompress`) leaves yesterday's file — the renamed
+/// original (`create`) or the copy (`copytruncate`).
 fn rotated_sibling(path: &Path) -> Option<PathBuf> {
     let name = path.file_name()?.to_str()?;
     Some(path.with_file_name(format!("{name}.1")))
@@ -179,7 +187,22 @@ fn read_new_with_budget(
 
     let mut offset = match pos {
         Some(p) if p.inode == inode && p.offset <= len => p.offset,
-        Some(p) if p.inode != inode => {
+        Some(p) if p.inode == inode => {
+            // Shrank under us: logrotate's `copytruncate` copied the file to
+            // `<log>.1` and emptied it. The lines we had not read yet are in
+            // the copy, from our old offset on.
+            if let Some(rot) = rotated_sibling(path) {
+                if let Ok(mut copy) = std::fs::File::open(&rot) {
+                    let copy_len = copy.metadata().map(|m| m.len()).unwrap_or(0);
+                    if p.offset < copy_len {
+                        copy.seek(SeekFrom::Start(p.offset))?;
+                        read_lines(copy, (copy_len - p.offset).min(budget), &mut batch)?;
+                    }
+                }
+            }
+            0
+        }
+        Some(p) => {
             // Finish the file we were reading before it was rotated away.
             if let Some(rot) = rotated_sibling(path) {
                 if let Ok(old) = std::fs::File::open(&rot) {
@@ -324,6 +347,48 @@ mod tests {
         // And the new file is tracked from here on.
         let (b, _) = read_new(&path, Some(pos2)).expect("read");
         assert!(b.is_empty());
+    }
+
+    /// logrotate `copytruncate`: same inode, emptied; the unread tail is in
+    /// the copy.
+    #[test]
+    fn copytruncate_keeps_the_lines_written_just_before_it() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let path = dir.path().join("h.log");
+        std::fs::write(&path, line(1, "1.1.1.1", "r") + &line(2, "1.1.1.1", "r")).expect("w");
+        let (_, pos) = read_new(&path, None).expect("read");
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("open");
+        f.write_all(line(3, "1.1.1.1", "r").as_bytes()).expect("w");
+        std::fs::copy(&path, dir.path().join("h.log.1")).expect("copy");
+        f.set_len(0).expect("truncate");
+        f.write_all(line(4, "1.1.1.1", "r").as_bytes()).expect("w");
+        let (b, pos2) = read_new(&path, Some(pos)).expect("read");
+        assert_eq!(ts_of(&b), vec![3, 4]);
+        assert_eq!(pos2.inode, pos.inode);
+        let (b, _) = read_new(&path, Some(pos2)).expect("read");
+        assert!(b.is_empty());
+    }
+
+    #[test]
+    fn cross_site_requests_never_count_towards_a_ban() {
+        let ok = |tail: &str| {
+            parse_line(&format!(
+                "1.0\t8.8.8.8\tprobe_args\tGET\t/?x=../a\tua{tail}"
+            ))
+            .expect("parse")
+        };
+        assert!(!ok("").cross_site, "old 6-field lines");
+        assert!(!ok("\t").cross_site);
+        assert!(!ok("\tnone").cross_site);
+        assert!(!ok("\tsame-origin").cross_site);
+        assert!(ok("\tcross-site").cross_site);
+        assert!(ok("\tsame-site").cross_site);
+        let b = WafBatch::from_hits([ok("\tcross-site"), ok("\tnone")]);
+        assert_eq!(b.ip_minute.values().sum::<i64>(), 1);
+        assert_eq!(b.hourly.values().sum::<i64>(), 2, "still shown");
     }
 
     #[test]

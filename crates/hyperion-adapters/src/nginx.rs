@@ -805,10 +805,16 @@ pub fn uses_waf_log(input: &VhostInput<'_>) -> bool {
         || !country_codes(&input.options.blocked_countries).is_empty()
 }
 
-/// Directory of the per-hosting WAF hit logs. Root-owned on purpose: the
-/// auto-ban trusts what is in it, and the tenant's own log dir is writable
-/// by the tenant.
-pub const WAF_LOG_DIR: &str = "/var/log/hyperion/waf";
+/// Directory of the per-hosting WAF hit logs.
+///
+/// Not the tenant's own log dir: the auto-ban trusts what is in here, and a
+/// tenant can write its own logs. Not under `/var/log/hyperion` either:
+/// that is root-only, and nginx WORKERS (not the root master) reopen their
+/// log files on USR1 — which Debian's own nginx logrotate sends daily — so
+/// a worker that cannot traverse the path keeps writing into the rotated
+/// file and the live one stays empty. root:<nginx group> 0750: the workers
+/// can reach it, site users cannot.
+pub const WAF_LOG_DIR: &str = "/var/log/hyperion-waf";
 /// http-level conf holding the `hyperion_waf` log_format.
 pub const WAF_CONF: &str = "/etc/nginx/conf.d/hyperion-waf.conf";
 /// logrotate policy for the WAF logs.
@@ -842,12 +848,16 @@ map $host $hyperion_waf {
 }
 
 log_format hyperion_waf escape=json
-    '$msec\t$remote_addr\t$hyperion_waf\t$request_method\t$request_uri\t$http_user_agent';
+    '$msec\t$remote_addr\t$hyperion_waf\t$request_method\t$request_uri\t$http_user_agent\t$http_sec_fetch_site';
 "#;
     TEMPLATE.to_string()
 }
 
 fn render_waf_logrotate() -> String {
+    // copytruncate: the live file keeps its inode, so rotation never
+    // depends on every nginx worker managing to reopen it. The reader
+    // (`waflog::read_new`) sees the truncation and finishes the copy in
+    // `<log>.1` from where it left off.
     const TEMPLATE: &str = r#"# Auto-managed by Hyperion.
 __DIR__/*.log {
     daily
@@ -856,15 +866,14 @@ __DIR__/*.log {
     notifempty
     compress
     delaycompress
-    create 0640 root adm
-    sharedscripts
-    postrotate
-        if [ -s /run/nginx.pid ]; then kill -USR1 "$(cat /run/nginx.pid)"; fi
-    endscript
+    copytruncate
 }
 "#;
     TEMPLATE.replace("__DIR__", WAF_LOG_DIR)
 }
+
+/// Mode of [`WAF_LOG_DIR`].
+const WAF_LOG_DIR_MODE: u32 = 0o750;
 
 /// Write `path` only when its content differs — rewriting an identical file
 /// would still bump its mtime and invite a needless reload. Atomically: a
@@ -887,11 +896,26 @@ pub async fn ensure_waf_logging() -> Result<(), AdapterError> {
         .await
         .map_err(|e| AdapterError::Other(format!("create {WAF_LOG_DIR}: {e}")))?;
     {
-        use std::os::unix::fs::PermissionsExt;
-        // root:adm 0750, like /var/log/nginx: readable by the agent (root)
-        // and log tooling, never by a site user.
-        let _ = cmd::run("/usr/bin/chown", &["root:adm", WAF_LOG_DIR]).await;
-        let _ = tokio::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o750)).await;
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        // root:<nginx group> 0750 (see WAF_LOG_DIR). Fixed only when it is
+        // not already so: finding the nginx user runs nginx, and this is
+        // called on every vhost write.
+        let needs_fix = match tokio::fs::metadata(dir).await {
+            Ok(m) => m.gid() == 0 || m.mode() & 0o7777 != WAF_LOG_DIR_MODE,
+            Err(_) => true,
+        };
+        if needs_fix {
+            let group = detect_user().await;
+            if cmd::run("/usr/bin/chown", &[&format!("root:{group}"), WAF_LOG_DIR])
+                .await
+                .is_err()
+            {
+                let _ = cmd::run("/usr/bin/chown", &["root:adm", WAF_LOG_DIR]).await;
+            }
+            let _ =
+                tokio::fs::set_permissions(dir, std::fs::Permissions::from_mode(WAF_LOG_DIR_MODE))
+                    .await;
+        }
     }
     write_if_changed(WAF_CONF, &render_waf_conf()).await?;
     // Rotation is housekeeping: a box without logrotate still serves.
@@ -2677,7 +2701,7 @@ mod tests {
                 r.id
             );
             assert!(out.contains(
-                "access_log /var/log/hyperion/waf/01HWAF.log hyperion_waf if=$hyperion_waf;"
+                "access_log /var/log/hyperion-waf/01HWAF.log hyperion_waf if=$hyperion_waf;"
             ));
 
             let mut off = hyperion_types::VhostOptions::default();
@@ -2713,11 +2737,22 @@ mod tests {
                 .find("if ($uri ~ \"^/\\.well-known/acme-challenge/\") {\n        set $hyperion_waf \"\";")
                 .expect("exemption");
             let act = block.find("if ($hyperion_waf) {").expect("act");
-            let last_server_rule = ["\"bot\";", "\"geo\";", "\"empty_ua\";", "\"bad_methods\";"]
-                .iter()
-                .filter_map(|t| block.find(&format!("set $hyperion_waf {t}")))
-                .max()
-                .expect("rules");
+            let last_server_rule = [
+                "empty_ua",
+                "bad_methods",
+                "author_enum",
+                "rest_user_enum",
+                "geo",
+                "bot",
+                "scanner_ua",
+                "sensitive_files",
+                "dotfiles",
+                "probe_args",
+            ]
+            .iter()
+            .filter_map(|t| block.find(&format!("set $hyperion_waf \"{t}\";")))
+            .max()
+            .expect("rules");
             assert!(last_server_rule < exempt && exempt < act);
         }
         // Location rules never shadow the challenge location.
@@ -2762,10 +2797,10 @@ mod tests {
         }
     }
 
-    /// Location WAF rules must precede the PHP and hidden-file locations:
-    /// regex locations are first-match, so after them they never fire.
+    /// Location WAF rules must precede the PHP location: regex locations
+    /// are first-match, so after it they would never fire.
     #[test]
-    fn waf_locations_precede_php_and_dotfile_handlers() {
+    fn waf_locations_precede_the_php_handler() {
         let mut opts = hyperion_types::VhostOptions::default();
         opts.set_waf_level(hyperion_types::waf::WafLevel::Strict);
         let out = render_with(&opts, Some("8.3"));
@@ -2774,12 +2809,51 @@ mod tests {
             .find(|b| b.contains("listen 443 ssl"))
             .expect("tls block");
         let uploads = first_tls.find("\"php_in_uploads\"").expect("uploads");
-        let dot = first_tls.find("\"dotfiles\"").expect("dotfiles");
+        let dumps = first_tls.find("\"dump_files\"").expect("dumps");
         let php = first_tls.find("location ~ \\.php$ {").expect("php");
-        let hidden = first_tls
-            .find("location ~ /\\.(?!well-known)")
-            .expect("hidden");
-        assert!(uploads < php && dot < hidden);
+        assert!(uploads < php && dumps < php);
+    }
+
+    /// Every match overwrites the verdict, so the last wins: the rules whose
+    /// hits earn a ban must come after the ones that only refuse, or a
+    /// scanner without a User-Agent (or from a blocked country) is recorded
+    /// as the harmless tag and never banned.
+    #[test]
+    fn ban_counted_verdicts_come_after_refuse_only_ones() {
+        let mut opts = hyperion_types::VhostOptions {
+            blocked_bots: "ai".into(),
+            blocked_countries: "RU".into(),
+            ..Default::default()
+        };
+        opts.set_waf_level(hyperion_types::waf::WafLevel::Strict);
+        let out = render_with(&opts, Some("8.3"));
+        let first_tls = out
+            .split("\nserver {")
+            .find(|b| b.contains("listen 443 ssl"))
+            .expect("tls block");
+        let pos = |tag: &str| {
+            first_tls
+                .find(&format!("set $hyperion_waf \"{tag}\";"))
+                .unwrap_or_else(|| panic!("{tag} missing"))
+        };
+        let last_refuse_only = [
+            "empty_ua",
+            "bad_methods",
+            "author_enum",
+            "rest_user_enum",
+            "geo",
+            "bot",
+        ]
+        .iter()
+        .map(|t| pos(t))
+        .max()
+        .expect("refuse-only");
+        for r in hyperion_types::waf::RULES
+            .iter()
+            .filter(|r| r.counts_for_ban)
+        {
+            assert!(pos(r.id) > last_refuse_only, "{} must come last", r.id);
+        }
     }
 
     #[test]
@@ -2793,11 +2867,15 @@ mod tests {
             .find("map $host $hyperion_waf {")
             .expect("variable declared");
         assert!(map < conf.find("log_format hyperion_waf").expect("format"));
-        assert!(conf.contains("'$msec\\t$remote_addr\\t$hyperion_waf\\t$request_method\\t$request_uri\\t$http_user_agent'"));
+        assert!(conf.contains(
+            "'$msec\\t$remote_addr\\t$hyperion_waf\\t$request_method\\t$request_uri\\t$http_user_agent\\t$http_sec_fetch_site'"
+        ));
         let lr = render_waf_logrotate();
         assert!(lr.starts_with("# Auto-managed"));
-        assert!(lr.contains("/var/log/hyperion/waf/*.log {"));
-        assert!(lr.contains("kill -USR1"));
+        assert!(lr.contains("/var/log/hyperion-waf/*.log {"));
+        // The live file keeps its inode: no worker has to reopen anything.
+        assert!(lr.contains("copytruncate"));
+        assert!(!lr.contains("USR1"));
     }
 
     #[test]
