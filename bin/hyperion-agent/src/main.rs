@@ -866,6 +866,15 @@ async fn main() -> anyhow::Result<()> {
                     tracing::warn!(rows = n, "startup: reaped stale backup runs");
                 }
             }
+            // Rebuild hyperion's firewall chain (presets, confirmed
+            // default-drop) BEFORE the bans: nft rules do not survive a
+            // reboot, and the ban infra would otherwise create the chain
+            // first as plain accept.
+            match tick_svc.firewall_reapply_on_boot().await {
+                Ok(s) if !s.is_empty() => tracing::info!(what=%s, "startup: firewall re-applied"),
+                Ok(_) => {}
+                Err(e) => tracing::warn!(error=%e, "startup: firewall re-apply failed"),
+            }
             // Re-apply persisted IP bans to nftables ONCE at startup —
             // nft sets are in-memory and lost across reboots.
             match tick_svc.bans_reapply_on_boot().await {

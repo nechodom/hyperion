@@ -6,83 +6,86 @@
   <div>
     <h1>Firewall</h1>
     <div class="subtitle">
-      Each node's firewall posture at a glance: <strong>open ports</strong>
-      with the reason each one is open, <strong>active brute-force bans</strong>,
-      and node health. Port templates and a custom <code>nft</code> snippet
-      generator are at the bottom of the page.<span data-require-caps="settings_manage"> Brute-force thresholds are in
+      Per node: whether it filters at all, what is open and to whom, the
+      port presets applied, and who is banned.<span data-require-caps="settings_manage"> Brute-force thresholds are in
       <a href="/settings#bruteforce">Settings → Bans &amp; blocking</a>.</span>
     </div>
   </div>
 </div>
 
-{# Cluster posture roll-up — the headline numbers, so you can tell
-   "quiet" from "under attack" without reading every node card. #}
-<div class="grid cols-3" style="margin-bottom:1.2rem">
+<div class="kpi-grid" style="margin-bottom:var(--group-gap)">
   <div class="kpi-card">
     <div class="kpi-label">Nodes reachable</div>
     <div class="kpi-value">{{ summary.nodes_reachable }}<span class="text-soft" style="font-size:0.55em"> / {{ summary.nodes_total }}</span></div>
   </div>
   <div class="kpi-card">
-    <div class="kpi-label">IPs banned (cluster)</div>
-    <div class="kpi-value">{{ summary.ban_total }}</div>
-    <div class="text-soft small">{{ summary.ban_auto }} auto · {{ summary.ban_manual }} manual · <a href="/bans">View all bans →</a></div>
+    <div class="kpi-label">Filtering (default-drop)</div>
+    <div class="kpi-value">{{ summary.nodes_filtering }}<span class="text-soft" style="font-size:0.55em"> / {{ summary.nodes_total }}</span></div>
+    {% if summary.nodes_filtering < summary.nodes_total %}<div class="kpi-foot text-soft">The rest accept everything</div>{% endif %}
   </div>
   <div class="kpi-card">
-    <div class="kpi-label">Open ports (cluster)</div>
-    <div class="kpi-value">{{ summary.open_ports_total }}</div>
+    <div class="kpi-label">IPs banned</div>
+    <div class="kpi-value">{{ summary.ban_total }}</div>
+    <div class="kpi-foot text-soft">{{ summary.ban_auto }} auto · {{ summary.ban_manual }} manual · <a href="/bans">All bans →</a></div>
   </div>
 </div>
 
-{% if nodes.is_empty() %}
-  <div class="card empty">
-    <h3>No nodes yet</h3>
-    <p class="text-soft">No master or enrolled workers to query. Enrol a node from <a href="/install">Install</a> to see its firewall posture here.</p>
+{% for n in nodes %}
+<section class="group fw-node" id="node-{{ n.node_id }}">
+  <div class="ghead">
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+    <span>{{ n.label }}</span>
+    {% if n.node_id != n.label %}<code class="fw-nodeid">{{ n.node_id }}</code>{% endif %}
+    <span class="grow"></span>
+    {% if n.unreachable %}
+      <span class="pill err">unreachable</span>
+    {% else %}
+      {% if n.drained %}<span class="pill warn" title="Drained — intentionally quiet, not offline">drained</span>{% endif %}
+      {% if n.armed_seconds_left.is_some() %}
+        <span class="pill err">drop · unconfirmed</span>
+      {% else if n.policy == "drop" %}
+        <span class="pill ok">filtering</span>
+      {% else if n.policy == "accept" || n.policy.is_empty() && n.view.backend == "nft" %}
+        <span class="pill warn">accepts everything</span>
+      {% else %}
+        <span class="pill muted">{{ n.view.backend }}</span>
+      {% endif %}
+    {% endif %}
   </div>
-{% else %}
-  {# Per-node cards — service-health-style. Each open port is its
-     own row with a category-coloured pill (web/mail/db/etc.), the
-     port + proto, and the "why" label. Raw ruleset stays available
-     in the collapsed details at the bottom of each card for the
-     "I want to verify by eye" workflow. #}
-  {% for n in nodes %}
-    <div class="card" style="margin-bottom:1rem">
-      <h2 style="display:flex;align-items:center;gap:0.7rem;flex-wrap:wrap">
-        <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
-        <span>{{ n.label }}</span>
-        {% if n.node_id != n.label %}<code class="text-soft small">{{ n.node_id }}</code>{% endif %}
-        {% if n.unreachable %}
-          <span class="pill err">unreachable</span>
-        {% else %}
-          <span class="tag" title="Backend used to read the ruleset on this node">{{ n.view.backend }}</span>
-          <span class="text-soft small">· {{ n.view.ports.len() }} open port{% if n.view.ports.len() != 1 %}s{% endif %}</span>
-          {% if n.ban_total > 0 %}<span class="pill err" title="IPs currently dropped by nftables">{{ n.ban_total }} banned</span>{% else %}<span class="pill ok">0 banned</span>{% endif %}
-          {% if n.drained %}<span class="pill warn" title="Drained — intentionally quiet, not offline">DRAINED</span>{% endif %}
-        {% endif %}
-      </h2>
 
-      {% if !n.unreachable %}
-      {#- Default-drop. Until this is on, every "open port X" rule hyperion
-          writes is decoration: the chain's policy is ACCEPT, so it already
-          passes everything and the rules change nothing unless some other
-          ruleset drops first. Saying so plainly beats a page that looks like
-          it is managing a firewall it is not. -#}
-      {% if let Some(left) = n.armed_seconds_left %}
-        <div class="flash error" style="margin:0 0 0.7rem">
-          <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-          <div class="flash-body">
-            <strong>Default-drop is on and unconfirmed.</strong>
-            Open a NEW terminal and check you can still reach
-            <code>{{ n.label }}</code> over SSH. If you do not confirm,
-            the firewall goes back to accepting everything
-            {% if left.clone() > 0 %}in about {{ left }} s{% else %}at the next check{% endif %} —
-            deliberately, so a mistake here cannot lock you out for good.
-            <form method="post" action="/firewall/default-drop" style="margin-top:0.5rem;display:inline-flex;gap:0.4rem">
+  {% if n.unreachable %}
+  <div class="item">
+    <p class="text-soft small" style="margin:0">
+      Could not reach this node's agent. The rest of the cluster is still
+      shown — reload to retry, or check its last heartbeat on
+      <a href="/install">Install</a>.
+    </p>
+  </div>
+  {% else %}
+
+  {#- 1. Is it filtering? Everything else on the panel depends on this: with
+      `policy accept` hyperion's accept rules change nothing at all — nft
+      runs every base chain, and an accept in one cannot rescue a packet
+      another drops, nor stop one that nobody drops. -#}
+  <div class="item">
+    {% if let Some(left) = n.armed_seconds_left %}
+      <div class="flash error" style="margin:0">
+        <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+        <div class="flash-body">
+          <strong>Default-drop is on and unconfirmed.</strong>
+          Check from a NEW terminal that you can still reach
+          <code>{{ n.label }}</code> over SSH. Without confirmation it goes back
+          to accepting everything
+          {% if left.clone() > 0 %}in about {{ left }} s{% else %}at the next check{% endif %}
+          — so a mistake here cannot lock you out for good.
+          <div class="fw-actions">
+            <form method="post" action="/firewall/default-drop">
               <input type="hidden" name="_csrf" value="{{ csrf_token }}">
               <input type="hidden" name="target_node" value="{{ n.node_id }}">
               <input type="hidden" name="action" value="confirm">
               <button class="btn small primary" type="submit">I am still connected — keep it</button>
             </form>
-            <form method="post" action="/firewall/default-drop" style="margin-top:0.5rem;display:inline-flex;gap:0.4rem">
+            <form method="post" action="/firewall/default-drop">
               <input type="hidden" name="_csrf" value="{{ csrf_token }}">
               <input type="hidden" name="target_node" value="{{ n.node_id }}">
               <input type="hidden" name="action" value="disable">
@@ -90,347 +93,251 @@
             </form>
           </div>
         </div>
-      {% else %}
-        {#- Nothing armed. Either the chain is already dropping and confirmed,
-            or — far more likely — it is still `policy accept` and every rule
-            below is inert. The page used to imply otherwise simply by listing
-            "open ports" beside an Apply button. -#}
-        <div class="row" style="gap:0.5rem;align-items:center;flex-wrap:wrap;margin:0 0 0.7rem;font-size:0.85rem">
-          <form method="post" action="/firewall/default-drop" style="display:inline-flex;gap:0.4rem"
-                data-confirm-title="Switch {{ n.label }} to default-drop"
-                data-confirm-variant="danger"
-                data-confirm-body="The chain stops accepting anything that is not explicitly allowed. Loopback, established connections and every port sshd listens on are allowed first and verified before the switch — but if something is still wrong you lose SSH to this machine. You then have 5 minutes to confirm from a NEW terminal; without that confirmation it reverts on its own. Continue?"
-                data-confirm-confirm-label="Switch to default-drop">
-            <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-            <input type="hidden" name="target_node" value="{{ n.node_id }}">
-            <input type="hidden" name="action" value="enable">
-            <button class="btn small" type="submit">Switch to default-drop</button>
-          </form>
-          <span class="text-soft small">Until this is on, the chain's policy is
-            <code>accept</code> — it already lets everything through, so the
-            rules below only matter if something else drops first (a cloud
-            security group, or another ruleset).</span>
-        </div>
-      {% endif %}
-
-      {# Brute-force ban posture — the active nftables drops, which the
-         old page hid entirely. Counts + the newest few IPs, with a jump
-         to the full /bans table. #}
-      <div style="display:flex;gap:0.5rem;flex-wrap:wrap;align-items:center;margin:0 0 0.7rem;font-size:0.85rem">
-        <span class="text-soft">Brute-force bans:</span>
-        <strong>{{ n.ban_total }}</strong>
-        <span class="text-soft small">({{ n.ban_v4 }} IPv4 · {{ n.ban_v6 }} IPv6 · {{ n.ban_auto }} auto / {{ n.ban_manual }} manual)</span>
-        {% if !n.recent_bans.is_empty() %}
-          <span class="text-soft">— recent:</span>
-          {% for b in n.recent_bans %}<code class="text-soft small" title="{{ b.reason }} ({{ b.source }})">{{ b.ip }}</code>{% if !loop.last %} {% endif %}{% endfor %}
-        {% endif %}
-        <a class="text-soft small" href="/bans" style="margin-left:auto">View all bans →</a>
       </div>
-      {% if n.drained && !n.drain_reason.is_empty() %}
-        <p class="text-soft small" style="margin:-0.4rem 0 0.6rem">Drain reason: {{ n.drain_reason }}</p>
-      {% endif %}
-      {% endif %}
-
-      {% if n.unreachable %}
-        <p class="text-soft">
-          Could not reach this node's agent over RPC. The rest of the
-          cluster is still shown. Reload the page to retry, or check the
-          node's last heartbeat on <a href="/install">Install</a>.
-        </p>
-      {% else if n.view.ports.is_empty() && n.view.raw.is_empty() %}
-        <div class="flash warn" style="margin:0.4rem 0 0.6rem;padding:0.55rem 0.85rem">
-          <div class="flash-body">
-            <strong>No firewall configured.</strong> The kernel
-            accepts traffic on every port by default — the normal state
-            of a freshly imaged Debian box. Lock it down with
-            <code>nft</code> using one of the templates below.
-            {% if !n.view.error.is_empty() %}<br><br><strong>Probe error:</strong> <code>{{ n.view.error }}</code>{% endif %}
-          </div>
+    {% else if n.policy == "drop" %}
+      <div class="fw-policy">
+        <div class="fw-policy-text">
+          <h3>Default-drop is on</h3>
+          <p class="text-soft small" style="margin:0">
+            Anything not allowed below is dropped. SSH, the panel's own ports,
+            loopback, ICMP and established connections are always kept.
+          </p>
         </div>
-      {% else if n.view.ports.is_empty() %}
-        <p class="text-soft small" style="margin:0.4rem 0">
-          No explicit accept rules were recognised. This can happen with
-          uncommon configurations (port ranges, named sets, or chains
-          Hyperion does not introspect). The raw ruleset below is
-          authoritative — scan it for "accept" / "ACCEPT" lines.
-        </p>
-      {% else %}
-        {# Service-health-style table: one row per port. #}
-        <div class="table-wrap" style="margin-top:0.6rem">
-          <table style="width:100%;border-collapse:collapse;font-size:0.88rem">
-            <thead>
-              <tr style="border-bottom:1px solid var(--border)">
-                <th style="text-align:left;padding:0.4rem 0.6rem;width:6rem">Port</th>
-                <th style="text-align:left;padding:0.4rem 0.6rem;width:4.5rem">Proto</th>
-                <th style="text-align:left;padding:0.4rem 0.6rem;width:8rem">Category</th>
-                <th style="text-align:left;padding:0.4rem 0.6rem;width:8rem">Opened by</th>
-                <th style="text-align:left;padding:0.4rem 0.6rem">Reason or service</th>
-              </tr>
-            </thead>
-            <tbody>
-              {% for p in n.view.ports %}
-              <tr style="border-bottom:1px solid var(--border-subtle)">
-                <td style="padding:0.5rem 0.6rem;font-family:ui-monospace,Menlo,Consolas,monospace;font-weight:600">{{ p.port }}</td>
-                <td style="padding:0.5rem 0.6rem;color:var(--text-soft)">{{ p.proto }}</td>
-                <td style="padding:0.5rem 0.6rem">
-                  {% if p.category == "web" %}
-                    <span class="pill" style="background:#0ea5e9;color:white;font-size:0.7rem">web</span>
-                  {% else if p.category == "mail" %}
-                    <span class="pill" style="background:#8b5cf6;color:white;font-size:0.7rem">mail</span>
-                  {% else if p.category == "db" %}
-                    <span class="pill" style="background:#f59e0b;color:white;font-size:0.7rem">db</span>
-                  {% else if p.category == "hyperion" %}
-                    <span class="pill" style="background:var(--accent);color:white;font-size:0.7rem">hyperion</span>
-                  {% else if p.category == "infra" %}
-                    <span class="pill" style="background:#64748b;color:white;font-size:0.7rem">infra</span>
-                  {% else %}
-                    <span class="pill" style="background:var(--surface-2);color:var(--text-soft);font-size:0.7rem">unknown</span>
-                  {% endif %}
-                </td>
-                <td style="padding:0.5rem 0.6rem">
-                  {#- Read from the rule's own `comment "hyperion:…"` tag, not
-                      guessed from the port number — otherwise the panel would
-                      claim credit for whatever else happens to be open. -#}
-                  {% if p.opened_by_hyperion %}
-                    <span class="pill ok" style="font-size:0.7rem">hyperion</span>
-                  {% else %}
-                    <span class="text-soft" style="font-size:0.78rem">not by hyperion</span>
-                  {% endif %}
-                </td>
-                <td style="padding:0.5rem 0.6rem">
-                  {% if p.label == "Unknown" %}
-                    <span class="text-soft" style="font-style:italic">No match in the well-known port table</span>
-                  {% else %}
-                    {{ p.label }}
-                  {% endif %}
-                </td>
-              </tr>
-              {% endfor %}
-            </tbody>
-          </table>
+        <form method="post" action="/firewall/default-drop"
+              data-confirm-title="Stop filtering on {{ n.label }}"
+              data-confirm-body="The chain goes back to accepting everything: every listening port on this machine becomes reachable again. Presets and bans stay. Continue?"
+              data-confirm-confirm-label="Accept everything">
+          <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+          <input type="hidden" name="target_node" value="{{ n.node_id }}">
+          <input type="hidden" name="action" value="disable">
+          <button class="btn small" type="submit">Switch off</button>
+        </form>
+      </div>
+    {% else if n.view.backend == "nft" %}
+      <div class="fw-policy">
+        <div class="fw-policy-text">
+          <h3>Not filtering — every listening port is reachable</h3>
+          <p class="text-soft small" style="margin:0">
+            Hyperion's chain accepts everything, so the presets below change
+            nothing until default-drop is on. Switching keeps SSH (every port
+            sshd listens on), the panel, web and FTP open, and reverts by
+            itself unless you confirm within 5 minutes.
+          </p>
         </div>
+        <form method="post" action="/firewall/default-drop"
+              data-confirm-title="Switch {{ n.label }} to default-drop"
+              data-confirm-variant="danger"
+              data-confirm-body="The chain stops accepting anything that is not explicitly allowed. Loopback, ICMP, established connections, every port sshd listens on and the panel's own ports are allowed first and verified before the switch — but if something is still wrong you lose SSH to this machine. You then have 5 minutes to confirm from a NEW terminal; without that it reverts on its own. Continue?"
+              data-confirm-confirm-label="Switch to default-drop">
+          <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+          <input type="hidden" name="target_node" value="{{ n.node_id }}">
+          <input type="hidden" name="action" value="enable">
+          <button class="btn small primary" type="submit">Switch to default-drop</button>
+        </form>
+      </div>
+    {% else %}
+      <h3>Firewall state unknown</h3>
+      <p class="text-soft small" style="margin:0">
+        {% if n.view.backend == "iptables" %}This node answered with legacy
+        iptables; Hyperion's presets and default-drop need nftables.
+        {% else %}Neither <code>nft</code> nor <code>iptables</code> returned a
+        ruleset.{% endif %}
+        {% if !n.view.error.is_empty() %}<br><code>{{ n.view.error }}</code>{% endif %}
+      </p>
+    {% endif %}
 
-        {% if !n.view.error.is_empty() %}
-          <div class="flash warn" style="margin-top:0.6rem;padding:0.45rem 0.7rem">
-            <div class="flash-body">
-              <strong>Parser note</strong> — <code>{{ n.view.error }}</code>
-            </div>
-          </div>
-        {% endif %}
-
-        <details style="margin-top:0.6rem">
-          <summary style="cursor:pointer;color:var(--text-dim);font-size:0.88rem;padding:0.3rem 0">
-            Show raw ruleset
-            {% if !n.view.raw.is_empty() %}
-              <span class="text-soft small">({{ n.view.raw.lines().count() }} lines)</span>
-            {% endif %}
-          </summary>
-          <pre style="background:var(--bg-2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:0.75rem;overflow:auto;font-size:0.78rem;line-height:1.4;max-height:32rem;margin-top:0.5rem">{{ n.view.raw }}</pre>
-        </details>
-      {% endif %}
-    </div>
-  {% endfor %}
-{% endif %}
-
-{# ===== Port templates =====
-   Hardcoded "open these together" sets. Each template shows the
-   ports + a one-line description. Clicking "Show snippet" reveals
-   the nft commands to paste via SSH. Read-only by design — we
-   don't apply rules from the UI (lock-yourself-out risk). #}
-<div class="group" style="margin-top:1.5rem">
-  <div class="ghead">Open ports</div>
-  <div class="item">
-  <h3>
-    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-    Port templates
-  </h3>
-  <p class="text-soft small" style="margin:0 0 1rem">
-    Common port sets that are typically opened together. Each template
-    can be <strong>applied directly</strong> on any reachable node. It
-    writes to Hyperion's own <code>inet hyperion</code> nft table, so
-    your existing rules stay intact, and the change persists to
-    <code>/etc/nftables.conf</code> to survive a reboot. Use
-    <em>Show snippet</em> if you prefer to copy and paste over SSH.
-  </p>
-  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(22rem, 100%), 1fr));gap:0.85rem">
-    {% for t in templates %}
-    <article class="fw-template">
-      <header class="fw-template__head">
-        <strong>{{ t.name }}</strong>
-        <span class="text-soft small">· {{ t.ports_summary }}</span>
-      </header>
-      <p class="text-soft small" style="margin:0.5rem 0">{{ t.description }}</p>
-
-      {% if t.applyable %}
-        {# Per-node Apply row — buttons disabled for unreachable
-           nodes so the operator sees the option exists but can't
-           run it right now. Each click HTMX-POSTs to /firewall/apply
-           and swaps the result into the adjacent <span>. #}
-        <div class="fw-apply-row">
-          <span class="text-soft small">Apply on:</span>
-          {% for tgt in apply_targets %}
-          <form hx-post="/firewall/apply"
-                hx-target="#fw-apply-result-{{ t.apply_id }}-{{ tgt.node_id }}"
-                hx-swap="innerHTML"
-                hx-indicator="#fw-apply-result-{{ t.apply_id }}-{{ tgt.node_id }}"
-                style="display:inline">
-            <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-            <input type="hidden" name="template_id" value="{{ t.apply_id }}">
-            <input type="hidden" name="target_node" value="{{ tgt.node_id }}">
-            <button type="submit" class="btn small"
-                    {% if !tgt.applyable %}disabled title="Node unreachable — cannot apply"{% endif %}>
-              {{ tgt.label }}
-            </button>
-          </form>
-          <span id="fw-apply-result-{{ t.apply_id }}-{{ tgt.node_id }}" class="fw-apply-result"></span>
-          {% endfor %}
-        </div>
-      {% else %}
-        <p class="text-soft small" style="margin:0.5rem 0;font-style:italic">
-          Snippet only — needs a value from you first
-          (for example, substituting <code>&lt;MASTER_IP&gt;</code>).
-        </p>
-      {% endif %}
-
-      <details style="margin-top:0.6rem">
-        <summary class="text-soft small" style="cursor:pointer">Show snippet</summary>
-        <pre style="background:var(--bg-2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:0.6rem;overflow:auto;font-size:0.78rem;margin:0.4rem 0 0">{{ t.snippet }}</pre>
-      </details>
-    </article>
-    {% endfor %}
+    {% if !n.other_chains.is_empty() %}
+      <div class="fw-note">
+        <strong>Another firewall also filters here.</strong>
+        A port must be allowed by every one of these, not just Hyperion's —
+        an accept in one cannot override a drop in another:
+        {% for c in n.other_chains %}<code>{{ c }}</code>{% if !loop.last %}, {% endif %}{% endfor %}
+      </div>
+    {% endif %}
+    {% if n.drained && !n.drain_reason.is_empty() %}
+      <p class="text-soft small" style="margin:0.6rem 0 0">Drain reason: {{ n.drain_reason }}</p>
+    {% endif %}
   </div>
-</div>
+
+  {#- 2. What is open. -#}
+  <div class="item">
+    <h3>Open ports
+      <span class="text-soft small" style="font-weight:400">· {{ n.open_to_world() }} open to anyone{% if n.view.ports.len() > n.open_to_world() %}, {{ n.view.ports.len() - n.open_to_world() }} restricted{% endif %}</span>
+    </h3>
+    {% if n.view.ports.is_empty() %}
+      <p class="text-soft small" style="margin:0">
+        {% if n.view.raw.is_empty() %}No ruleset at all — the kernel accepts every port.
+        {% else %}No accept rule with a port was recognised. Named sets or
+        uncommon matches are not parsed; the raw ruleset below is authoritative.{% endif %}
+      </p>
+    {% else %}
+      <div class="table-wrap fw-table">
+        <table>
+          <thead>
+            <tr><th>Port</th><th>Service</th><th>Reachable from</th><th>Added by</th></tr>
+          </thead>
+          <tbody>
+            {% for p in n.view.ports %}
+            <tr>
+              <td><code class="fw-port">{{ p.port }}{% if p.port_end > 0 %}–{{ p.port_end }}{% endif %}</code> <span class="text-soft small">{{ p.proto }}</span></td>
+              <td>{% if p.label == "Unknown" %}<span class="text-soft">—</span>{% else %}{{ p.label }}{% endif %}</td>
+              <td>{% if p.source_restricted %}<span class="tag">restricted</span>{% else %}<span class="text-soft small">anyone</span>{% endif %}</td>
+              <td>{% if p.opened_by_hyperion %}<span class="tag accent">hyperion</span>{% else %}<span class="text-soft small">other</span>{% endif %}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% endif %}
+  </div>
+
+  {#- 3. Presets — apply or remove on THIS node. -#}
+  {% if n.view.backend == "nft" %}
+  <div class="item">
+    <h3>Presets</h3>
+    <p class="text-soft small" style="margin:0 0 0.6rem">
+      Rules go into Hyperion's own <code>inet hyperion</code> table, so other
+      rules stay untouched, and are re-applied after a reboot.
+    </p>
+    <ul class="fw-presets">
+      {% for pr in n.presets %}
+      <li>
+        <div class="fw-preset-main">
+          <strong>{{ pr.name }}</strong>
+          <span class="text-soft small">{{ pr.ports_summary }}</span>
+        </div>
+        {% if pr.applied %}
+          <span class="pill ok">applied</span>
+          <form method="post" action="/firewall/apply"
+                data-confirm-title="Remove {{ pr.name }} on {{ n.label }}"
+                {% if n.policy == "drop" %}data-confirm-variant="danger"{% endif %}
+                data-confirm-body="Deletes this preset's rules ({{ pr.ports_summary }}).{% if n.policy == "drop" %} The node drops by default, so these ports close unless another rule allows them.{% endif %} Continue?"
+                data-confirm-confirm-label="Remove">
+            <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+            <input type="hidden" name="template_id" value="{{ pr.id }}">
+            <input type="hidden" name="target_node" value="{{ n.node_id }}">
+            <input type="hidden" name="action" value="remove">
+            <button class="btn small" type="submit">Remove</button>
+          </form>
+        {% else %}
+          <span class="pill muted">off</span>
+          <form method="post" action="/firewall/apply">
+            <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+            <input type="hidden" name="template_id" value="{{ pr.id }}">
+            <input type="hidden" name="target_node" value="{{ n.node_id }}">
+            <input type="hidden" name="action" value="apply">
+            <button class="btn small" type="submit">Apply</button>
+          </form>
+        {% endif %}
+      </li>
+      {% endfor %}
+      {% for c in n.custom %}
+      <li>
+        <div class="fw-preset-main">
+          <strong>Port {{ c.label }}</strong>
+          <span class="text-soft small">opened here</span>
+        </div>
+        <span class="pill ok">applied</span>
+        <form method="post" action="/firewall/apply"
+              data-confirm-title="Close port {{ c.label }} on {{ n.label }}"
+              data-confirm-body="Deletes this rule.{% if n.policy == "drop" %} The node drops by default, so the port closes unless another rule allows it.{% endif %} Continue?"
+              data-confirm-confirm-label="Close port">
+          <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+          <input type="hidden" name="template_id" value="{{ c.id }}">
+          <input type="hidden" name="target_node" value="{{ n.node_id }}">
+          <input type="hidden" name="action" value="remove">
+          <button class="btn small" type="submit">Remove</button>
+        </form>
+      </li>
+      {% endfor %}
+    </ul>
+    <form method="post" action="/firewall/apply" class="m-stack fw-gen">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="target_node" value="{{ n.node_id }}">
+      <input type="hidden" name="action" value="apply">
+      <div class="field" style="margin:0">
+        <label for="fw-port-{{ n.node_id }}">Open a port</label>
+        <input id="fw-port-{{ n.node_id }}" name="port" type="number" min="1" max="65535" required placeholder="8080" style="margin:0">
+      </div>
+      <div class="field" style="margin:0">
+        <label for="fw-proto-{{ n.node_id }}">Protocol</label>
+        <select id="fw-proto-{{ n.node_id }}" name="proto" style="margin:0">
+          <option value="tcp">tcp</option>
+          <option value="udp">udp</option>
+        </select>
+      </div>
+      <div class="field" style="margin:0">
+        <label for="fw-src-{{ n.node_id }}">Only from <span class="text-soft">(optional IP or CIDR)</span></label>
+        <input id="fw-src-{{ n.node_id }}" name="source" type="text" placeholder="anyone" pattern="[0-9a-fA-F:.]+(/[0-9]{1,3})?" style="margin:0">
+      </div>
+      <button type="submit" class="btn">Open port</button>
+    </form>
+  </div>
+  {% endif %}
+
+  {#- 4. Bans. -#}
+  <div class="item muted">
+    <div class="fw-bans">
+      <span><strong>{{ n.ban_total }}</strong> banned
+        <span class="text-soft small">({{ n.ban_v4 }} IPv4 · {{ n.ban_v6 }} IPv6 · {{ n.ban_auto }} auto / {{ n.ban_manual }} manual)</span></span>
+      {% if !n.recent_bans.is_empty() %}
+        <span class="text-soft small">newest:
+          {% for b in n.recent_bans %}<code title="{{ b.reason }} ({{ b.source }})">{{ b.ip }}</code>{% if !loop.last %} {% endif %}{% endfor %}</span>
+      {% endif %}
+      <a class="small" href="/bans" style="margin-left:auto">All bans →</a>
+    </div>
+  </div>
+
+  {% if !n.view.raw.is_empty() %}
+  <details class="item">
+    <summary class="text-soft small">Raw ruleset ({{ n.view.raw.lines().count() }} lines)</summary>
+    <pre class="fw-pre" style="max-height:32rem;margin-top:0.6rem">{{ n.view.raw }}</pre>
+  </details>
+  {% endif %}
+  {% endif %}
+</section>
+{% endfor %}
+
+{# Copy-paste reference for operators who would rather run it over SSH, and
+   the one preset that needs a value from them first. #}
+<section class="group">
+  <div class="ghead">Commands for SSH</div>
+  <details class="item">
+    <summary><h3 style="margin:0">Preset commands</h3>
+      <span class="text-soft small">The same rules the buttons add, to paste over SSH. Prefer the buttons: a rule pasted by hand survives a reboot only once the agent has adopted it, at its next start.</span></summary>
+    {% for t in templates %}
+    <div class="fw-snippet">
+      <div><strong>{{ t.name }}</strong> <span class="text-soft small">· {{ t.ports_summary }}</span></div>
+      <p class="text-soft small" style="margin:0.2rem 0 0.4rem">{{ t.description }}</p>
+      <pre class="fw-pre">{{ t.snippet }}</pre>
+    </div>
+    {% endfor %}
+  </details>
+</section>
 
 <style>
-  .fw-template {
-    background: var(--surface-1);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-md);
-    padding: 0.85rem 1rem;
-    display: flex;
-    flex-direction: column;
-    gap: 0.4rem;
-  }
-  .fw-template__head { display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; }
-  .fw-apply-row {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 0.4rem;
-    padding: 0.5rem 0.65rem;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
-  }
-  .fw-apply-result {
-    display: inline-flex;
-    align-items: center;
-    font-size: 0.78rem;
-    min-height: 1.4em;
-  }
-  .fw-apply-result .pill { font-size: 0.68rem; padding: 0.1rem 0.4rem; }
+  .fw-node .ghead { text-transform: none; letter-spacing: 0; font-size: 0.9rem; color: var(--text); }
+  .fw-node .ghead .h-icon { width: 16px; height: 16px; flex: none; color: var(--text-dim); }
+  .fw-node .ghead .fw-nodeid { font-size: 0.75rem; color: var(--text-soft); font-weight: 400; }
+  .fw-policy { display: flex; gap: 1rem; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+  .fw-policy-text { flex: 1 1 22rem; min-width: 0; }
+  .fw-actions { display: flex; gap: 0.4rem; flex-wrap: wrap; margin-top: 0.6rem; }
+  .fw-note { margin-top: 0.8rem; padding: 0.6rem 0.8rem; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg-2); font-size: 0.85rem; line-height: 1.6; }
+  .fw-table { margin: 0.4rem 0 0; }
+  .fw-table th, .fw-table td { padding: 0.45rem 0.6rem; font-size: 0.86rem; }
+  .fw-port { font-weight: 600; }
+  .fw-presets { list-style: none; margin: 0; padding: 0; }
+  .fw-presets li { display: flex; align-items: center; gap: 0.6rem; padding: 0.5rem 0; border-top: 1px solid var(--border); }
+  .fw-presets li:first-child { border-top: none; }
+  .fw-presets form { display: inline; }
+  .fw-presets .btn { min-width: 5rem; }
+  .fw-preset-main { flex: 1; min-width: 0; display: flex; gap: 0.5rem; align-items: baseline; flex-wrap: wrap; }
+  .fw-bans { display: flex; gap: 0.6rem; flex-wrap: wrap; align-items: baseline; font-size: 0.88rem; }
+  .fw-pre { background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 0.6rem 0.75rem; overflow: auto; font-size: 0.78rem; line-height: 1.45; margin: 0; white-space: pre; }
+  .fw-snippet { margin-top: 1rem; }
+  .fw-gen { display: grid; grid-template-columns: 8rem 7rem minmax(10rem, 16rem) auto; gap: 0.6rem; align-items: end; justify-content: start; margin-top: 0.9rem; padding-top: 0.9rem; border-top: 1px solid var(--border); }
+  details.item > summary h3 { display: inline-flex; }
 </style>
 
-{# ===== Custom port snippet generator =====
-   No server round-trip, no firewall mutation — pure JS that
-   composes the nft command from the inputs. Operator copy-pastes
-   into SSH. #}
-<div class="item">
-  <h3>
-    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-    Open a custom port
-  </h3>
-  <p class="text-soft small" style="margin:0 0 1rem">
-    Generates the exact <code>nft add rule</code> command for any port.
-    Hyperion deliberately does not apply it for you — a typo could lock
-    you out of SSH on a remote box. Copy the command, verify it, then
-    SSH in and paste.
-  </p>
-  <div class="m-stack" style="display:grid;grid-template-columns:1fr 1fr 2fr auto;gap:0.6rem;align-items:end;max-width:48rem">
-    <div class="field" style="margin:0">
-      <label for="fw-port">Port</label>
-      <input id="fw-port" type="number" min="1" max="65535" placeholder="8080" style="margin:0">
-    </div>
-    <div class="field" style="margin:0">
-      <label for="fw-proto">Protocol</label>
-      <select id="fw-proto" style="margin:0">
-        <option value="tcp">tcp</option>
-        <option value="udp">udp</option>
-      </select>
-    </div>
-    <div class="field" style="margin:0">
-      <label for="fw-reason">Reason (added as a comment)</label>
-      <input id="fw-reason" type="text" placeholder="myapp backend" style="margin:0">
-    </div>
-    <button type="button" class="btn primary" id="fw-gen">Generate snippet</button>
-  </div>
-  <div id="fw-snippet-wrap" hidden style="margin-top:1rem">
-    <p class="text-soft small" style="margin:0 0 0.4rem">
-      <strong>Snippet</strong> — SSH to the node and paste:
-    </p>
-    <pre id="fw-snippet" style="background:var(--bg-2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:0.75rem;overflow:auto;font-size:0.82rem;margin:0"></pre>
-    <button type="button" class="btn small" id="fw-copy" style="margin-top:0.4rem">Copy to clipboard</button>
-    <span id="fw-copy-status" class="text-soft small" style="margin-left:0.5rem"></span>
-  </div>
-  </div>
-</div>
-
-<script>
-(function () {
-  'use strict';
-  const portEl = document.getElementById('fw-port');
-  const protoEl = document.getElementById('fw-proto');
-  const reasonEl = document.getElementById('fw-reason');
-  const genBtn = document.getElementById('fw-gen');
-  const wrap = document.getElementById('fw-snippet-wrap');
-  const pre = document.getElementById('fw-snippet');
-  const copyBtn = document.getElementById('fw-copy');
-  const copyStatus = document.getElementById('fw-copy-status');
-  if (!portEl || !genBtn) return;
-
-  function buildSnippet() {
-    const port = parseInt(portEl.value, 10);
-    const proto = protoEl.value;
-    const reason = (reasonEl.value || '').trim().replace(/[\r\n]/g, ' ');
-    if (!port || port < 1 || port > 65535) {
-      wrap.hidden = true;
-      portEl.focus();
-      return;
-    }
-    // Detect-or-create a hyperion-managed chain. The first line is
-    // idempotent (-c creates only if absent), the second adds the
-    // single accept rule. The comment carries the operator's
-    // reason so an `nft list ruleset` later answers "why is this
-    // port open?" without grep'ing the audit log.
-    const lines = [
-      '# Apply via SSH on the target node:',
-      'sudo nft -c \'add table inet hyperion { }\'',
-      'sudo nft -c \'add chain inet hyperion input { type filter hook input priority 0 \\; policy accept \\; }\'',
-      `sudo nft add rule inet hyperion input ${proto} dport ${port} accept ${reason ? `comment "${reason.replace(/"/g, '\\"')}"` : ''}`.trim(),
-      '# Persist so the rule survives reboot:',
-      'sudo nft list ruleset > /etc/nftables.conf',
-      'sudo systemctl reload nftables 2>/dev/null || sudo systemctl restart nftables',
-    ];
-    pre.textContent = lines.join('\n');
-    wrap.hidden = false;
-  }
-
-  genBtn.addEventListener('click', buildSnippet);
-  [portEl, protoEl, reasonEl].forEach(el => {
-    el.addEventListener('keydown', ev => {
-      if (ev.key === 'Enter') { ev.preventDefault(); buildSnippet(); }
-    });
-  });
-  copyBtn.addEventListener('click', () => {
-    if (!pre.textContent) return;
-    navigator.clipboard.writeText(pre.textContent).then(() => {
-      copyStatus.textContent = '✓ copied';
-      setTimeout(() => { copyStatus.textContent = ''; }, 1800);
-    }).catch(() => {
-      copyStatus.textContent = 'copy failed — select + cmd-C';
-    });
-  });
-})();
-</script>
 
 {% endblock %}

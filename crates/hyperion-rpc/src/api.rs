@@ -437,6 +437,10 @@ pub trait AgentApi: Send + Sync + 'static {
         &self,
         template_id: String,
     ) -> Result<(bool, String, String), RpcError>;
+    async fn firewall_remove_template(
+        &self,
+        template_id: String,
+    ) -> Result<(bool, String, String), RpcError>;
 
     /// Restart a whitelisted systemd unit.
     async fn service_restart(&self, name: String) -> Result<(), RpcError>;

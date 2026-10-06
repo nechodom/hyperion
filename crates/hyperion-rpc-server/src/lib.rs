@@ -619,6 +619,16 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
                 Err(e) => Response::Error(e),
             }
         }
+        Request::FirewallRemoveTemplate { template_id } => {
+            match api.firewall_remove_template(template_id).await {
+                Ok((applied, output, error)) => Response::FirewallTemplateApplied {
+                    applied,
+                    output,
+                    error,
+                },
+                Err(e) => Response::Error(e),
+            }
+        }
         Request::ServiceRestart { name } => match api.service_restart(name).await {
             Ok(()) => Response::ServiceRestart,
             Err(e) => Response::Error(e),
@@ -2400,6 +2410,12 @@ mod tests {
             Ok(None)
         }
         async fn firewall_apply_template(
+            &self,
+            _: String,
+        ) -> Result<(bool, String, String), RpcError> {
+            Ok((true, String::new(), String::new()))
+        }
+        async fn firewall_remove_template(
             &self,
             _: String,
         ) -> Result<(bool, String, String), RpcError> {

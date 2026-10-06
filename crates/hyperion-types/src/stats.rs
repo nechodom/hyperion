@@ -345,6 +345,13 @@ pub struct FirewallPort {
     /// only be answered by reading the raw ruleset.
     #[serde(default)]
     pub opened_by_hyperion: bool,
+    /// Last port of a range (`40000-50000`), or 0 for a single port.
+    #[serde(default)]
+    pub port_end: u16,
+    /// The accepting rule is limited to a source address or an interface,
+    /// so the port is NOT open to the world.
+    #[serde(default)]
+    pub source_restricted: bool,
 }
 
 /// Operator-facing view of the agent's effective config — minus
