@@ -97,8 +97,10 @@ jobs:
       # found at the worst time. The test runs update.sh's wait-for-jobs block
       # against a DB built from the real migrations, so a renamed column in
       # `jobs` / `backup_runs` fails here rather than turning the wait into a
-      # no-op. (sqlite3 ships on the runner image.)
-      - name: Syntax-check the install scripts and test update.sh's job wait
+      # no-op. The status test checks the JSON the panel's "updating" page
+      # polls. (sqlite3 and python3 ship on the runner image.)
+      - name: Syntax-check the install scripts and test update.sh's job wait + status
         run: |
           for f in packaging/install/*.sh; do bash -n "$f"; done
           packaging/install/tests/update-wait.sh
+          packaging/install/tests/update-status.sh

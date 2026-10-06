@@ -21,6 +21,7 @@ pub mod dispatcher;
 pub mod error;
 pub mod filters;
 pub mod handlers;
+pub mod pma_tls;
 pub mod ratelimit;
 pub mod state;
 
