@@ -509,6 +509,18 @@ async fn devserver() {
     if std::env::var_os("DEVSERVER_DEMO").is_some() {
         seed_demo(&svc).await;
     }
+    // An enrolled worker nobody is listening for (127.0.0.1:9443 refuses at
+    // once), so the cluster-only pages — e.g. the /services all-nodes
+    // overview — render with an unreachable node.
+    if std::env::var_os("DEVSERVER_FAKE_NODE").is_some() {
+        sqlx::query(
+            "INSERT INTO nodes (node_id, label, enrolled_at, last_seen_at, public_ip, enrolled_via) \
+             VALUES ('worker-1', 'worker-1', 0, 0, '127.0.0.1', 'dev')",
+        )
+        .execute(&svc.pool)
+        .await
+        .expect("fake node");
+    }
     let (router, _signer) =
         build_app_with_signer(sock, admin, Arc::new(SessionSigner::new_random()));
     let port = std::env::var("DEVSERVER_PORT").unwrap_or_else(|_| "8190".into());

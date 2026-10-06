@@ -43,29 +43,18 @@
     <h1>Service health <span class="text-soft" style="font-weight:400;font-size:0.7em">· {{ current_label }}</span></h1>
     <div class="subtitle">systemd units Hyperion depends on, checked live.</div>
   </div>
-  {% if !nodes.is_empty() %}
-  <span class="grow"></span>
-  <div class="actions">
-    {# Node switcher — navigate to /services?node=<id>. JS-free
-       fallback uses a tiny form; with JS the change handler fires
-       immediately so the operator doesn't have to click "Go". #}
-    <form method="get" action="/services" style="display:flex;gap:0.4rem;align-items:center">
-      <label for="node-switcher" class="text-soft small">View on node:</label>
-      <select id="node-switcher" name="node"
-              onchange="this.form.submit()"
-              style="min-width:14rem">
-        <option value="" {% if current_node.is_empty() %}selected{% endif %}>master (this node)</option>
-        {% for n in nodes %}
-        <option value="{{ n.node_id }}" {% if current_node == n.node_id %}selected{% endif %}>
-          {{ n.label }}{% if let Some(ip) = n.public_ip.as_ref() %} — {{ ip }}{% endif %}
-        </option>
-        {% endfor %}
-      </select>
-      <noscript><button class="btn small" type="submit">View node</button></noscript>
-    </form>
-  </div>
-  {% endif %}
 </div>
+
+{% if !nodes.is_empty() %}
+{# Cluster: back to the overview, or hop straight to another node. #}
+<nav class="node-chips" aria-label="Nodes">
+  <a href="/services">← All nodes</a>
+  <a href="/services?node=local" {% if current_node.is_empty() %}class="on" aria-current="page"{% endif %}>master</a>
+  {% for n in nodes %}
+  <a href="/services?node={{ n.node_id }}" {% if current_node == n.node_id %}class="on" aria-current="page"{% endif %}>{{ n.label }}</a>
+  {% endfor %}
+</nav>
+{% endif %}
 
 {% if let Some(e) = error %}
   <div class="flash error">

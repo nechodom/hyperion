@@ -210,6 +210,133 @@ pub(crate) fn install_flags(
     (show, rofs)
 }
 
+#[derive(Template)]
+#[template(path = "services_overview.html")]
+struct ServicesOverviewTpl<'a> {
+    username: &'a str,
+    user_initial: char,
+    active: &'static str,
+    css_version: &'static str,
+    htmx_version: &'static str,
+    cards: Vec<NodeCard>,
+    /// `ok` / `warn` / `err` — colours the cluster verdict.
+    tone: &'static str,
+    verdict: String,
+    flash: Option<String>,
+    flash_error: Option<String>,
+    node_auth_warning: Option<String>,
+}
+
+/// Why a node has no rows on the overview.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum NodeProbeFail {
+    /// Plain downtime — the reason is already IP-free.
+    Unreachable(String),
+    /// The node answered but the master could not authenticate the answer.
+    /// Must not read as downtime: it may be a forged response.
+    AuthFailed,
+}
+
+/// One node on the all-nodes overview: its verdict and only the units that
+/// need a look. Healthy units collapse into a count.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NodeCard {
+    /// Value for `?node=` — `local` for the master.
+    pub param: String,
+    pub label: String,
+    pub ip: Option<String>,
+    pub tone: &'static str,
+    pub verdict: String,
+    pub attention: Vec<SvcRow>,
+    pub healthy: usize,
+    pub fail: Option<NodeProbeFail>,
+}
+
+impl NodeCard {
+    fn rank(&self) -> u8 {
+        match (&self.fail, self.tone) {
+            (Some(NodeProbeFail::AuthFailed), _) => 0,
+            (Some(_), _) => 1,
+            (None, "err") => 2,
+            (None, "warn") => 3,
+            (None, "muted") => 4,
+            _ => 5,
+        }
+    }
+    pub fn auth_failed(&self) -> bool {
+        matches!(self.fail, Some(NodeProbeFail::AuthFailed))
+    }
+    pub fn unreachable_reason(&self) -> Option<&str> {
+        match &self.fail {
+            Some(NodeProbeFail::Unreachable(r)) => Some(r.as_str()),
+            _ => None,
+        }
+    }
+}
+
+pub(crate) fn node_card(
+    param: String,
+    label: String,
+    ip: Option<String>,
+    probe: Result<&ServicesHealth, NodeProbeFail>,
+) -> NodeCard {
+    match probe {
+        Err(fail) => NodeCard {
+            param,
+            label,
+            ip,
+            tone: "err",
+            verdict: match &fail {
+                NodeProbeFail::AuthFailed => {
+                    "Answer failed signature check — discarded, status not shown.".into()
+                }
+                NodeProbeFail::Unreachable(_) => "Unreachable, status unknown:".into(),
+            },
+            attention: Vec::new(),
+            healthy: 0,
+            fail: Some(fail),
+        },
+        Ok(h) => {
+            let v = build_view(h, false);
+            let (attention, healthy): (Vec<SvcRow>, Vec<SvcRow>) = v
+                .core
+                .into_iter()
+                .chain(v.optional)
+                .partition(|r| r.problem || r.tone == "warn");
+            NodeCard {
+                param,
+                label,
+                ip,
+                tone: v.tone,
+                verdict: v.verdict,
+                attention,
+                healthy: healthy.len(),
+                fail: None,
+            }
+        }
+    }
+}
+
+/// Order cards worst-first and phrase the cluster-wide verdict.
+pub(crate) fn overview_verdict(cards: &mut [NodeCard]) -> (&'static str, String) {
+    cards.sort_by(|a, b| a.rank().cmp(&b.rank()).then_with(|| a.label.cmp(&b.label)));
+    let n = cards.len();
+    let bad = cards.iter().filter(|c| c.tone != "ok").count();
+    let core_bad = cards.iter().any(|c| c.tone == "err");
+    let nodes = if n == 1 { "node" } else { "nodes" };
+    if bad == 0 {
+        (
+            "ok",
+            format!("{n} {nodes} · every installed service running."),
+        )
+    } else {
+        (
+            if core_bad { "err" } else { "warn" },
+            format!("{bad} of {n} {nodes} need attention."),
+        )
+    }
+}
+
 #[derive(Deserialize, Default)]
 pub struct ServicesQuery {
     #[serde(default)]
@@ -231,6 +358,12 @@ pub async fn get_services_health(
     // tenant preset), so the cap check alone restricts it correctly.
     if !ctx.can(Capability::ServicesView) {
         return Ok(Redirect::to("/?flash_error=admin+role+required").into_response());
+    }
+    let nodes = fetch_node_list(&state).await.unwrap_or_default();
+    // Multi-node cluster with no node picked: the all-nodes overview.
+    // Single-node setups go straight to the one detail page, as before.
+    if q.node.is_none() && !nodes.is_empty() {
+        return overview(&state, &ctx, nodes, q).await;
     }
     let target = q.node.as_deref();
     let (dispatch, install) = tokio::join!(
@@ -255,7 +388,6 @@ pub async fn get_services_health(
         ),
         Err(e) => (ServicesHealth::default(), Some(e.to_string())),
     };
-    let nodes = fetch_node_list(&state).await.unwrap_or_default();
     let current_node = match target {
         None | Some("") | Some("local") => String::new(),
         Some(s) => s.to_string(),
@@ -279,6 +411,96 @@ pub async fn get_services_health(
         current_label,
         show_install,
         rofs_suspected,
+    };
+    Ok(Html(tpl.render()?).into_response())
+}
+
+async fn overview(
+    state: &SharedState,
+    ctx: &AuthCtx,
+    nodes: Vec<NodeSummary>,
+    q: ServicesQuery,
+) -> Result<Response, AppError> {
+    // The master answers over the local socket; workers fan out in
+    // parallel, so the page waits for the slowest node, not the sum.
+    let (local, (answered, failed)) = tokio::join!(
+        crate::dispatcher::dispatch_to_node(state, None, Request::ServicesHealth),
+        crate::dispatcher::fan_out_reporting(state, nodes, Request::ServicesHealth),
+    );
+    let node_auth_warning = super::node_auth_warning(&failed);
+    let mut cards = Vec::with_capacity(answered.len() + failed.len() + 1);
+    let master_label = "master (this node)".to_string();
+    let master_param = crate::dispatcher::LOCAL_NODE_SENTINEL.to_string();
+    cards.push(match local {
+        Ok(RpcResponse::ServicesHealth(h)) => node_card(master_param, master_label, None, Ok(&h)),
+        Ok(_) => node_card(
+            master_param,
+            master_label,
+            None,
+            Err(NodeProbeFail::Unreachable("unexpected agent answer".into())),
+        ),
+        Err(_) => node_card(
+            master_param,
+            master_label,
+            None,
+            Err(NodeProbeFail::Unreachable(
+                "local agent did not answer".into(),
+            )),
+        ),
+    });
+    for (n, resp) in answered {
+        let label = if n.label.is_empty() {
+            n.node_id.clone()
+        } else {
+            n.label.clone()
+        };
+        cards.push(match resp {
+            RpcResponse::ServicesHealth(h) => node_card(n.node_id, label, n.public_ip, Ok(&h)),
+            RpcResponse::Error(e) => node_card(
+                n.node_id,
+                label,
+                n.public_ip,
+                Err(NodeProbeFail::Unreachable(format!("agent error: {e}"))),
+            ),
+            _ => node_card(
+                n.node_id,
+                label,
+                n.public_ip,
+                Err(NodeProbeFail::Unreachable("unexpected agent answer".into())),
+            ),
+        });
+    }
+    for (n, e) in failed {
+        let label = if n.label.is_empty() {
+            n.node_id.clone()
+        } else {
+            n.label.clone()
+        };
+        // Only the pre-scrubbed `kind` is shown: a raw transport error can
+        // carry the worker's IP.
+        let fail = match e {
+            crate::dispatcher::DispatchError::ResponseAuthFailed { .. }
+            | crate::dispatcher::DispatchError::CertPinMissing { .. } => NodeProbeFail::AuthFailed,
+            crate::dispatcher::DispatchError::NodeUnreachable { kind, .. } => {
+                NodeProbeFail::Unreachable(kind)
+            }
+            _ => NodeProbeFail::Unreachable("no answer to the probe".into()),
+        };
+        cards.push(node_card(n.node_id, label, n.public_ip, Err(fail)));
+    }
+    let (tone, verdict) = overview_verdict(&mut cards);
+    let tpl = ServicesOverviewTpl {
+        username: &ctx.username,
+        user_initial: super::user_initial(&ctx.username),
+        active: "services",
+        css_version: super::css_version(),
+        htmx_version: super::htmx_version(),
+        cards,
+        tone,
+        verdict,
+        flash: q.flash,
+        flash_error: q.flash_error,
+        node_auth_warning,
     };
     Ok(Html(tpl.render()?).into_response())
 }
@@ -506,13 +728,14 @@ fn escape(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
-/// Render `node=<id>&` for redirects, or empty for the master so
-/// the URL stays clean. Always include the trailing `&` because
+/// Render `node=<id>&` for redirects (`node=local&` for the master). Always include the trailing `&` because
 /// the callers chain `flash=` after it.
 fn query_node_prefix(target: Option<&str>) -> String {
+    // The master gets an explicit `node=local`: a bare /services is the
+    // all-nodes overview on a cluster, which is not where the operator was.
     match target {
         Some(id) if !id.is_empty() => format!("node={}&", urlencode(id)),
-        _ => String::new(),
+        _ => format!("node={}&", crate::dispatcher::LOCAL_NODE_SENTINEL),
     }
 }
 
@@ -900,5 +1123,68 @@ mod tests {
             (false, true)
         );
         assert_eq!(install_flags(None, 0), (false, false));
+    }
+    fn card(label: &str, probe: Result<&ServicesHealth, NodeProbeFail>) -> NodeCard {
+        node_card(label.into(), label.into(), None, probe)
+    }
+
+    #[test]
+    fn node_card_names_only_units_needing_a_look() {
+        let h = health(vec![
+            svc("nginx", true, true, "active"),
+            svc("postfix", true, false, "inactive"),
+            svc("mariadb", true, true, "active"),
+            svc("vsftpd", false, false, "inactive"),
+        ]);
+        let c = card("w1", Ok(&h));
+        assert_eq!(c.tone, "warn");
+        assert_eq!(c.attention.len(), 1);
+        assert_eq!(c.attention[0].name, "postfix");
+        // Not-installed optional units are neither healthy nor attention.
+        assert_eq!(c.healthy, 2);
+    }
+
+    #[test]
+    fn overview_sorts_worst_first_and_auth_failure_is_distinct() {
+        let ok = health(vec![svc("nginx", true, true, "active")]);
+        let down = health(vec![svc("nginx", true, false, "failed")]);
+        let mut cards = vec![
+            card("a-ok", Ok(&ok)),
+            card("b-down", Ok(&down)),
+            card(
+                "c-gone",
+                Err(NodeProbeFail::Unreachable("Timed out".into())),
+            ),
+            card("d-forged", Err(NodeProbeFail::AuthFailed)),
+        ];
+        let (tone, verdict) = overview_verdict(&mut cards);
+        let order: Vec<&str> = cards.iter().map(|c| c.label.as_str()).collect();
+        assert_eq!(order, ["d-forged", "c-gone", "b-down", "a-ok"]);
+        assert_eq!(tone, "err");
+        assert_eq!(verdict, "3 of 4 nodes need attention.");
+        assert!(cards[0].auth_failed());
+        assert!(cards[0].verdict.contains("signature"));
+        assert_eq!(cards[1].unreachable_reason(), Some("Timed out"));
+    }
+
+    #[test]
+    fn overview_all_healthy() {
+        let ok = health(vec![svc("nginx", true, true, "active")]);
+        let mut cards = vec![card("a", Ok(&ok)), card("b", Ok(&ok))];
+        assert_eq!(
+            overview_verdict(&mut cards),
+            (
+                "ok",
+                "2 nodes · every installed service running.".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn master_redirects_name_the_master_explicitly() {
+        // A bare /services is the overview on a cluster; the master's own
+        // actions must land back on the master's detail page.
+        assert_eq!(query_node_prefix(None), "node=local&");
+        assert_eq!(query_node_prefix(Some("w1")), "node=w1&");
     }
 }
