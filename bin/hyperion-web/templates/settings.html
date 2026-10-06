@@ -2512,7 +2512,7 @@
     </p>
     <p class="text-soft small" style="margin:0 0 0.8rem;font-style:italic">
       <strong>Tip:</strong> the quickest way to mark a node as test is on the
-      <a href="/install">Nodes</a> page — each row has a one-click toggle.
+      <a href="/install">Nodes</a> page — open the node and use <em>Mark as test</em>.
       Use this card when you want to bulk-edit or paste a list.
     </p>
     <form method="post" action="/settings/config" autocomplete="off">
@@ -2606,7 +2606,7 @@
         signature, so a worker never acts on a forged instruction. The steps below
         protect the rest of the exchange — who can read the channel, and whether the
         master can trust the answer. Work through them <strong>in order</strong>, and only
-        after <a href="/install">Nodes</a> shows the matching chip on every node.
+        after <a href="/install">Nodes</a> shows the matching item on file for every node (open a node → Connection). Nodes missing one are named at the top of that page.
       </p>
 
       <p class="text-soft small" style="margin:0 0 0.8rem;line-height:1.55">
@@ -2638,14 +2638,14 @@
         <em>different</em> pin later is refused and logged, so nothing on the wire can
         re-aim the pin the master enforces against.
         <strong>Turn this on only after</strong> <em>every</em> node on
-        <a href="/install">Nodes</a> shows <em>🔒 TLS pin on file</em> and you have seen no
+        <a href="/install">Nodes</a> shows <em>TLS pin on file</em> and you have seen no
         <code>warn-only</code> pin-mismatch warnings in the logs. While this is on, a worker
         with <strong>no pin on file is refused too</strong> — with nothing to check the
         certificate against there is no protection to give it, and suppressing the pin
         report is exactly how an attacker would arrange that. So a worker that is still
         mid-upgrade, or whose agent has been restarted within the last heartbeat,
-        <em>will</em> be cut off until its 🔒 chip appears. A stale pin behaves the same way:
-        use <em>Clear pinned crypto</em> on that node's card after a key change you expected.
+        <em>will</em> be cut off until its TLS pin is on file again. A stale pin behaves the same way:
+        use <em>Clear pinned crypto</em> on that node (Nodes → open it → Connection) after a key change you expected.
         Applies within about 30 s on its own; the panel also restarts the agent after saving (~5 s).
       </p>
 
@@ -2660,7 +2660,7 @@
         What this toggle adds is refusing a reply that arrives <strong>unsigned</strong> from
         a node known to sign — which is exactly what stripping the signature header on the
         wire looks like. <strong>Turn this on only after</strong> Step 1 is on and every node
-        on <a href="/install">Nodes</a> shows <em>🔑 Response auth on file</em>; that chip,
+        on <a href="/install">Nodes</a> shows <em>Response auth on file</em>; that,
         not the agent version, is the readiness signal. While this is on, a node with
         <strong>no key on file is refused too</strong> — an unverifiable node must not end up
         more trusted than one that merely dropped its signature, and suppressing the key
@@ -2692,7 +2692,7 @@
           <strong>Do not turn Step 2 on yet</strong> — while it is on, a node with no key on
           file is refused, so {% if resp_auth_pending.len() == 1 %}this node{% else %}these
           nodes{% endif %} would be cut off (their sites would drop out of every list) until
-          the <em>🔑 Response auth on file</em> chip appears for each.
+          <em>Response auth on file</em> shows for each.
         </div>
         {% else if !config.cluster.enforce_response_auth %}
         <div class="alert alert-warn" role="alert" style="margin:0 0 0.8rem">
@@ -2720,7 +2720,7 @@
     <h3 style="font-size:0.95rem;margin:0 0 0.6rem">Multi-node tips</h3>
     <ul class="text-soft small" style="margin:0;padding-left:1.2rem;line-height:1.7">
       <li>The <strong><a href="/install">Nodes</a></strong> page lists enrolled workers, mints invite tokens for new ones, runs a connectivity test, and triggers remote apt and Hyperion updates.</li>
-      <li><strong>Updates</strong> — on the <a href="/install">Nodes</a> page, pick any enrolled node, click <em>Update…</em>, tick <em>System packages</em> and/or <em>Hyperion</em>, and the log streams live in the row.</li>
+      <li><strong>Updates</strong> — on the <a href="/install">Nodes</a> page, open any node, tick <em>System packages</em> and/or <em>Hyperion</em> under <em>Update</em>, and the log streams live under the form.</li>
       <li><strong>Stats</strong> at <a href="/stats">Stats</a> default to the <em>cluster total</em>: hostings, disk, and bandwidth summed across the master and all workers. Switch the dropdown to a node for its own sparklines.</li>
       <li><strong>Service health</strong> at <a href="/services">Services</a> shows each node's systemd units. Click <em>Install</em> to apt-install a missing service; the output streams live, with the full error instead of a bare "dpkg returned an error".</li>
     </ul>

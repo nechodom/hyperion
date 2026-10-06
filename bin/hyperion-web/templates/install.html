@@ -4,49 +4,20 @@
 <div class="page-header">
   <div>
     <h1>Nodes</h1>
-    <div class="subtitle">Enroll new machines into the cluster and manage the ones already joined.</div>
-  </div>
-</div>
-
-{# Warning banner when the auto-detected master URL points at a
-   loopback / unspecified address — no node can reach it. The
-   handler tags this with "CHANGE-ME-set-master-url-below" when
-   both Host detection AND public-IP fallback failed. #}
-{% if master_url.contains("CHANGE-ME") || master_url.contains("0.0.0.0") || master_url.contains("127.0.0.1") || master_url.contains("://localhost") %}
-<div class="flash error" style="margin-bottom:1rem">
-  <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
-  <div class="flash-body">
-    <strong>The auto-detected master URL (<code>{{ master_url }}</code>) is not reachable from a remote node.</strong>
-    A new node cannot connect to <code>0.0.0.0</code>, <code>127.0.0.1</code>, or <code>localhost</code> from another machine.
-    Set the externally reachable URL below before you generate an install command. The install one-liner updates as you type.
-  </div>
-</div>
-{% endif %}
-
-{# Editable master URL. Defaults to whatever the operator's browser
-   actually used to reach us (Host header). Some setups need an
-   override — e.g. operator accessed via IP but nodes should call
-   back via DNS, or vice versa. Edits update the install one-liner
-   below live, and are persisted to localStorage per browser. #}
-<div class="card" style="margin-bottom:1rem">
-  <div class="copy-row" style="margin:0">
-    <label class="copy-label" for="master-url-override">Master URL that new nodes will call back to</label>
-    <div class="copy-input">
-      <input id="master-url-override" type="url"
-             value="{{ master_url }}"
-             placeholder="https://master.example.com"
-             style="font-family:var(--font-mono);font-size:0.88rem">
-      <button type="button" class="btn small" id="master-url-reset"
-              title="Restore the auto-detected URL">Reset</button>
+    <div class="subtitle">
+      {% if worker_count == 0 %}
+        This server runs every site. Add a worker node to spread them across machines.
+      {% else %}
+        This server and {{ worker_count }} worker node{% if worker_count != 1 %}s{% endif %}. Open a node to update, test or retire it.
+      {% endif %}
     </div>
-    <p class="muted" style="font-size:0.78rem;margin:0.4rem 0 0">
-      Auto-detected from your browser's <code>Host</code> header. If your new
-      nodes can't reach <code id="master-url-detected">{{ master_url }}</code>
-      from outside (for example, you're connected via the server's IP but only
-      its DNS name is reachable externally), edit the URL above. The install
-      one-liners below update as you type. This preference is remembered in
-      this browser only.
-    </p>
+  </div>
+  <span class="grow"></span>
+  <div class="actions">
+    <a href="#add-node" class="btn primary">
+      <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+      Add a node
+    </a>
   </div>
 </div>
 
@@ -58,10 +29,10 @@
 {% endif %}
 
 {% if let Some(m) = just_minted %}
-<div class="flash success">
+<div class="flash success" id="new-invite">
   <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
   <div class="flash-body">
-    <strong>Invite created for {{ m.label }}.</strong> The plaintext token is shown <strong>once, below</strong>. Copy it now; only its hash is stored on the master.
+    <strong>Invite created for {{ m.label }}.</strong> Run this on the new machine. The token is shown <strong>once</strong>: copy it now, only its hash is stored on the master.
     {# The token is hidden by default. Two reasons:
        1) "shoulder surfing" — someone behind the operator screen
           shouldn't see the bearer credential at a glance.
@@ -71,107 +42,460 @@
        The Copy + Reveal buttons keep the workflow one-click,
        and the install one-liner can be copied without ever
        showing the token in cleartext. #}
-    <pre style="margin-top:0.7rem;position:relative">
-      <code id="install-cmd"
+    <pre class="invite-cmd"><code id="install-cmd"
             data-token="{{ m.token }}"
             data-default-master="{{ master_url }}"
             data-hidden="1">curl -fsSL https://raw.githubusercontent.com/nechodom/hyperion/main/packaging/install/install-node.sh \
-  | sudo bash -s -- --token=&lt;hidden — click Reveal or Copy&gt; --master={{ master_url }}</code>
-    </pre>
-    <div style="display:flex;gap:0.5rem;flex-wrap:wrap;margin-top:0.4rem">
-      <button type="button" class="btn small" id="install-cmd-reveal" data-revealed="0">Reveal token</button>
+  | sudo bash -s -- --token=&lt;hidden — click Reveal or Copy&gt; --master={{ master_url }}</code></pre>
+    <div class="invite-cmd-actions">
       <button type="button" class="btn small" id="install-cmd-copy">Copy install command</button>
-      <span id="install-cmd-copied" class="muted" style="font-size:0.78rem;align-self:center;display:none">Copied to clipboard</span>
+      <button type="button" class="btn small ghost" id="install-cmd-reveal" data-revealed="0">Reveal token</button>
+      <span id="install-cmd-copied" class="text-soft small" hidden>Copied to clipboard</span>
     </div>
-    <div class="muted" style="margin-top:0.5rem;font-size:0.82rem">Token hash, to revoke this invite later: <code>{{ m.token_hash }}</code></div>
+    <div class="text-soft small invite-cmd-note">
+      It calls back to <code>{{ master_url }}</code>; change that under <a href="#add-node">Add a node</a> if new machines reach this server by another name.
+      Token hash, to revoke this invite later: <code>{{ m.token_hash }}</code>
+    </div>
   </div>
 </div>
 {% endif %}
 
-<div class="card hover">
-  <h2>
-    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-    Create a node invite
-  </h2>
-  <p class="muted" style="margin-top:-0.4rem">Generates a one-time enrollment token. Run the install one-liner it prints on the new Debian 12 machine to join it to the cluster.</p>
-
-  <form method="post" action="/install/invite" style="margin-top:1rem">
-    <input type="hidden" name="_csrf" value="{{ csrf_create }}">
-    <div class="field-row">
-      <div class="field">
-        <label for="label">Label <span class="hint">a name for the new node, e.g. <code>node5.example.com</code></span></label>
-        <input id="label" name="label" type="text" required placeholder="node5.example.com">
-      </div>
-      <div class="field">
-        <label for="ttl_hours">Token expires after <span class="hint">hours (1–720)</span></label>
-        <input id="ttl_hours" name="ttl_hours" type="number" min="1" max="720" value="24">
-      </div>
-    </div>
-    <button class="btn primary" type="submit">
-      <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
-      Create invite
-    </button>
-  </form>
+<div class="svc-verdict {{ verdict.tone }}">
+  <span class="dot"></span>
+  <span>{{ verdict.text }}</span>
 </div>
 
-<div class="card hover">
-  <h2>
-    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 16 12 12 8 16"/><line x1="12" y1="12" x2="12" y2="21"/><path d="M20.39 18.39A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.3"/><polyline points="16 16 12 12 8 16"/></svg>
-    Re-install the master
-  </h2>
-  <p class="muted" style="margin-top:-0.4rem">Run this on a fresh machine to redeploy the master or set up a sibling control-plane node.</p>
-  <pre><code>curl -fsSL https://raw.githubusercontent.com/nechodom/hyperion/main/packaging/install/install-master.sh \
+{# ── Nodes ──────────────────────────────────────────────────────────
+   One row per machine, this server first. The summary line is what you
+   scan: who answers, how many sites, whether updates wait. The live half
+   (`/install/node-facts`) loads per row so one dead node can't stall the
+   page. Opening a row reveals everything you can do to that node; the
+   `id="node-…"` anchors are what every action redirects back to. #}
+<div class="group" id="nodes">
+  <div class="ghead">
+    Nodes
+    <span class="grow"></span>
+    <span class="ghead-note">{{ rows.len() }} machine{% if rows.len() != 1 %}s{% endif %}</span>
+  </div>
+  {% for r in rows %}
+  {% let n = r.summary() %}
+  <details class="node-row{% if !r.tone().is_empty() %} tone-row-{{ r.tone() }}{% endif %}" id="node-{{ n.node_id }}">
+    <summary>
+      <span class="node-dot {% if r.online %}on{% else %}off{% endif %}" title="{% if r.is_master %}Serving this panel{% else if r.online %}Heartbeat {{ crate::handlers::stats::fmt_ago(n.last_seen_at) }}{% else %}No heartbeat since {{ crate::handlers::stats::fmt_ago(n.last_seen_at) }}{% endif %}"></span>
+      <span class="node-main">
+        <span class="node-title">
+          <strong>{{ n.label }}</strong>
+          {% if r.is_master %}<span class="pill muted small">this server</span>{% endif %}
+          {% if r.is_test %}<span class="flag warn" title="Test node — new sites here use the auto-subdomain preview address instead of a real domain">Test</span>{% endif %}
+          {% if n.is_drained %}<span class="flag info" title="{% if !n.drain_reason.is_empty() %}{{ n.drain_reason }} — {% endif %}new sites are not placed here; existing ones keep serving">Drained</span>{% endif %}
+        </span>
+        <span class="node-sub">
+          {% if let Some(ip) = n.public_ip.as_ref() %}<code>{{ ip }}</code>{% endif %}
+          {% if !n.agent_version.is_empty() %}<span class="{% if r.version_skew %}tone-warn{% endif %}">{{ n.agent_version }}</span>{% endif %}
+          {% if !r.is_master %}<span{% if !r.online %} class="tone-err"{% endif %}>seen {{ crate::handlers::stats::fmt_ago(n.last_seen_at) }}</span>{% endif %}
+        </span>
+        {% if !r.issues.is_empty() %}
+        <span class="node-issues">
+          {% for (tone, text) in r.issues %}<span class="tone-{{ tone }}">{{ text }}</span>{% endfor %}
+        </span>
+        {% endif %}
+      </span>
+      <span class="node-facts"
+            hx-get="/install/node-facts?node_id={{ n.node_id }}"
+            hx-trigger="intersect once"
+            hx-swap="innerHTML">
+        <span class="node-fact">checking…</span>
+      </span>
+      <svg class="node-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+    </summary>
+
+    <div class="node-body">
+      {# ─── Facts ─── #}
+      <dl class="stat-facts node-facts-strip">
+        {% if !r.is_master %}
+        <div><dt>Node ID</dt><dd><code title="Permanent enrollment identifier — does not change when you rename the node">{{ n.node_id }}</code></dd></div>
+        {% endif %}
+        <div><dt>Public IP</dt><dd>{% if let Some(ip) = n.public_ip.as_ref() %}<code>{{ ip }}</code>{% else %}—{% endif %}</dd></div>
+        <div><dt>Agent</dt><dd class="{% if r.version_skew %}tone-warn{% endif %}" {% if r.version_skew %}title="Differs from the master's agent. Older agents may not support newer features; run Update below."{% endif %}>{% if n.agent_version.is_empty() %}—{% else %}{{ n.agent_version }}{% endif %}</dd></div>
+        {% if !r.is_master %}
+        <div><dt>Enrolled</dt><dd title="{{ n.enrolled_at }}">{{ crate::handlers::stats::fmt_ago(n.enrolled_at) }}</dd></div>
+        <div><dt>Last heartbeat</dt><dd class="{% if !r.online %}tone-err{% endif %}" title="{{ n.last_seen_at }}">{{ crate::handlers::stats::fmt_ago(n.last_seen_at) }}</dd></div>
+        {% endif %}
+        <div><dt>See also</dt><dd><a href="/stats?node={{ n.node_id }}">Stats</a> · <a href="/services?node={{ n.node_id }}">Services</a></dd></div>
+      </dl>
+
+      {% if !r.is_master %}
+      {# ─── Connection ─── #}
+      <section class="node-sec">
+        <h4>Connection</h4>
+        <div class="node-sec-row">
+          <form hx-post="/install/test-node"
+                hx-target="#rpc-status-{{ n.node_id }}"
+                hx-swap="innerHTML"
+                hx-indicator="#rpc-status-{{ n.node_id }}"
+                class="inline-form">
+            <input type="hidden" name="_csrf" value="{{ csrf_test }}">
+            <input type="hidden" name="node_id" value="{{ n.node_id }}">
+            <button type="submit" class="btn small">Test connection</button>
+          </form>
+          <span id="rpc-status-{{ n.node_id }}" class="text-soft small">Sends a signed call to the agent on port 9443 and reports the answer.</span>
+        </div>
+        {# Readiness for the hardening ladder in Settings → Cluster. Both
+           are pinned on first sight and a CHANGED key is refused, so the
+           "Clear pinned crypto" escape hatch lives right beside them. #}
+        <ul class="node-trust">
+          <li>
+            {% if let Some(pin) = n.tls_spki_pin %}
+            <span title="curl --pinnedpubkey sha256//{{ pin }}">TLS pin on file</span>
+            {% else %}
+            <span class="tone-warn">No TLS pin</span> <span class="text-soft">— restart hyperion-agent there and wait one heartbeat. While pinning is enforced this node is refused.</span>
+            {% endif %}
+          </li>
+          <li>
+            {% if let Some(key) = n.resp_pubkey %}
+            <span title="Ed25519 response-signing key {{ key }}">Response auth on file</span>
+            {% else %}
+            <span class="tone-warn">No response auth</span> <span class="text-soft">— its replies are taken on trust. Run Update below, then wait one heartbeat.</span>
+            {% endif %}
+          </li>
+        </ul>
+        <p class="text-soft small node-note">
+          Turn on a step of <a href="/settings#hardening">Settings → Cluster → channel hardening</a> only once every node shows it on file.
+          Whether a node verifies <em>this master's</em> certificate is set on the node itself (<code>[enrollment] verify_tls</code> in <code>/etc/hyperion/agent.toml</code>).
+        </p>
+        {% if n.resp_pubkey.is_some() || n.tls_spki_pin.is_some() %}
+        <form method="post" action="/install/reset-node-crypto"
+              data-confirm-title="Clear pinned crypto for {{ n.label }}"
+              data-confirm-body="The master will forget the TLS pin and the response-signing key it has on file for this node, and will trust whatever the node presents on its next heartbeat (about 30 seconds) — so whichever machine answers next becomes the new trust anchor. Do this only if you deliberately reinstalled the agent or rotated its keys. If you did not expect this node's keys to change, a changed key is exactly what an on-path attacker looks like, and clearing the pins would accept them. Nothing is sent to the node; only master-side state changes. Type the label to confirm."
+              data-confirm-confirm-label="Clear pinned crypto"
+              data-confirm-variant="danger"
+              data-confirm-require="{{ n.label }}">
+          <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+          <input type="hidden" name="node_id" value="{{ n.node_id }}">
+          <button type="submit" class="btn small ghost"
+                  title="Forget the TLS pin and response-signing key so this node re-pins on its next heartbeat. The fix after a deliberate agent reinstall or key rotation — and the wrong move if you did not expect this node's keys to change.">
+            Clear pinned crypto…
+          </button>
+        </form>
+        {% endif %}
+      </section>
+      {% endif %}
+
+      {# ─── Operating-system updates ─── lazy, `intersect once`: it fires
+         when the row is opened, not for every closed row on page load. #}
+      <section class="node-sec">
+        <h4>Operating system updates</h4>
+        <div id="os-upd-{{ n.node_id }}"
+             hx-get="/install/os-updates-panel?node_id={{ n.node_id }}"
+             hx-trigger="intersect once"
+             hx-swap="innerHTML">
+          <span class="text-soft small">Loading…</span>
+        </div>
+      </section>
+
+      {# ─── Update ─── #}
+      <section class="node-sec">
+        {% if r.is_master %}
+        <h4>Install system updates</h4>
+        <form method="post" action="/install/update-node"
+              data-confirm-title="Install system updates on this server"
+              data-confirm-body="System packages will be upgraded on the master — the machine serving this panel. Nothing is removed; anything that would need a removal is held back and listed. Services it upgrades (nginx, PHP, MariaDB) restart as part of the upgrade, so sites and the panel may be briefly unavailable. Hyperion itself is not updated by this. A kernel or library update will ask for a reboot afterwards; that is left to you."
+              data-confirm-confirm-label="Install updates"
+              data-confirm-variant="primary"
+              class="node-sec-row">
+          <input type="hidden" name="_csrf" value="{{ csrf_update }}">
+          <input type="hidden" name="node_id" value="local">
+          <input type="hidden" name="do_apt" value="on">
+          <button type="submit" class="btn small primary">Install system updates</button>
+          <span class="text-soft small">apt upgrade on this server; never removes a package. Hyperion itself updates on its own schedule (Settings → Updates).</span>
+        </form>
+        {% else %}
+        <h4>Update</h4>
+        <form method="post" action="/install/update-node"
+              data-confirm-title="Update {{ n.label }}"
+              data-confirm-body="The system-package upgrade and/or the Hyperion update will run on {{ n.label }} ({% if let Some(ip) = n.public_ip.as_ref() %}{{ ip }}{% else %}{{ n.node_id }}{% endif %}). The node's services may briefly restart. This can take several minutes. With Safe update ticked, the previous binaries are restored automatically if the node does not come back healthy — note that this restores BINARIES, not data."
+              data-confirm-confirm-label="Start update"
+              data-confirm-variant="primary"
+              class="node-update-form">
+          <input type="hidden" name="_csrf" value="{{ csrf_update }}">
+          <input type="hidden" name="node_id" value="{{ n.node_id }}">
+          <label class="field-checkbox">
+            <input type="checkbox" name="do_apt" value="on" checked>
+            <span><strong>System packages</strong> <span class="text-soft small">apt upgrade, never removes a package</span></span>
+          </label>
+          <label class="field-checkbox">
+            <input type="checkbox" name="do_hyperion" value="on" checked>
+            <span><strong>Hyperion</strong> <span class="text-soft small">rebuild and restart the agent and web</span></span>
+          </label>
+          {# Default ON. The operator is usually clicking this from the very
+             panel an update can take down, so "it broke, now SSH in" is the
+             worst outcome available — and the cost of the snapshot is a
+             binary copy. Untick only to reproduce a failure deliberately. #}
+          <label class="field-checkbox"
+                 title="Copies the running binaries aside first. If the health check fails after the restart, they are put back automatically and the update is reported as failed.">
+            <input type="checkbox" name="safe" value="on" checked>
+            <span><strong>Safe update</strong> <span class="text-soft small">snapshot + auto-rollback</span></span>
+          </label>
+          <div><button type="submit" class="btn small primary">Start update</button></div>
+        </form>
+        {% endif %}
+        <div id="upd-status-{{ n.node_id }}" class="node-upd-status"
+             hx-get="/install/update-node-status?node_id={{ n.node_id }}"
+             hx-trigger="load, every 3s"
+             hx-swap="innerHTML">
+          <span class="text-soft small">Loading status…</span>
+        </div>
+      </section>
+
+      {% if !r.is_master %}
+      {# ─── Placement: where new sites may land ─── #}
+      <section class="node-sec">
+        <h4>Placement</h4>
+        <div class="node-sec-row">
+          <form method="post" action="/install/drain-node" class="inline-form"
+                data-confirm-title="{% if n.is_drained %}Return {{ n.label }} to service{% else %}Drain {{ n.label }} for maintenance{% endif %}"
+                data-confirm-body="{% if n.is_drained %}This node returns to active service. The auto-placer and create wizard will place new hostings here again.{% else %}New hostings will not be placed on this node until you return it to service. Existing hostings keep serving traffic — draining only affects new placement.{% endif %}"
+                data-confirm-confirm-label="{% if n.is_drained %}Return to service{% else %}Drain node{% endif %}"
+                data-confirm-variant="primary">
+            <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+            <input type="hidden" name="node_id" value="{{ n.node_id }}">
+            {% if n.is_drained %}
+              <button type="submit" class="btn small">Return to service</button>
+            {% else %}
+              <input type="hidden" name="drain" value="on">
+              <input type="hidden" name="reason" value="Maintenance">
+              <button type="submit" class="btn small">Drain</button>
+            {% endif %}
+          </form>
+          <span class="text-soft small">{% if n.is_drained %}Drained: no new sites are placed here. Existing ones keep serving.{% else %}Stop placing new sites here; existing ones keep serving.{% endif %}</span>
+        </div>
+        <div class="node-sec-row">
+          <form method="post" action="/install/toggle-test-node" class="inline-form"
+                data-confirm-title="{% if r.is_test %}Unmark {{ n.label }} as a test node{% else %}Mark {{ n.label }} as a test node{% endif %}"
+                data-confirm-body="{% if r.is_test %}This node returns to production-only mode. Existing hostings stay where they are, the wizard accepts production domains here again, and the TEST chip on /hostings clears on the next refresh.{% else %}This node becomes test-only. New hostings created here must use the auto-subdomain template (see Settings → HTTPS &amp; previews → Preview address), and the wizard refuses to put a production domain on it. Existing hostings are unaffected but will show a TEST chip.{% endif %}"
+                data-confirm-confirm-label="{% if r.is_test %}Unmark as test{% else %}Mark as test{% endif %}"
+                data-confirm-variant="primary">
+            <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+            <input type="hidden" name="node_id" value="{{ n.node_id }}">
+            <button type="submit" class="btn small">{% if r.is_test %}Unmark as test{% else %}Mark as test{% endif %}</button>
+          </form>
+          <span class="text-soft small">{% if r.is_test %}Test node: new sites get a preview subdomain, never a real domain.{% else %}A test node only takes sites on a preview subdomain.{% endif %}</span>
+        </div>
+        <form method="post" action="/install/rename-node" class="node-sec-row">
+          <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+          <input type="hidden" name="node_id" value="{{ n.node_id }}">
+          <input id="label-{{ n.node_id }}" name="label" type="text" class="node-rename"
+                 aria-label="New label for {{ n.label }}"
+                 value="{{ n.label|e }}" maxlength="80" required>
+          <button class="btn small" type="submit">Rename</button>
+          <span class="text-soft small">Shown in lists and the test-domain template. The node ID stays.</span>
+        </form>
+      </section>
+
+      {# ─── Remove ─── last, collapsed, red. #}
+      <details class="node-danger">
+        <summary>Remove from the cluster…</summary>
+        <form method="post" action="/install/remove-node"
+              data-confirm-title="Remove node {{ n.label }}"
+              data-confirm-body="Removes the node from the master's registry. The agent on the remote machine keeps running and Hyperion stays installed there. Type the label to confirm."
+              data-confirm-confirm-label="Remove node"
+              data-confirm-variant="danger"
+              data-confirm-require="{{ n.label }}">
+          <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+          <input type="hidden" name="node_id" value="{{ n.node_id }}">
+          <p class="text-soft small">
+            The master forgets this node; its agent keeps running, and a fresh invite enrolls it again.
+            If sites still live here the removal is refused unless you tick <em>Force</em>: those sites
+            keep serving from the detached machine but can no longer be managed from this panel.
+          </p>
+          <label class="field-checkbox">
+            <input type="checkbox" name="force" value="on">
+            Force — orphan any sites still on this node
+          </label>
+          <button type="submit" class="btn small danger">Remove node</button>
+        </form>
+      </details>
+      {% endif %}
+    </div>
+  </details>
+  {% endfor %}
+</div>
+
+{# ── Add a node ─────────────────────────────────────────────────────── #}
+<div class="group" id="add-node">
+  <div class="ghead">Add a node</div>
+
+  {# Warning when the auto-detected master URL points at a loopback /
+     unspecified address — no node can reach it. The handler tags this with
+     "CHANGE-ME-set-master-url-below" when both Host detection AND the
+     public-IP fallback failed. #}
+  {% if master_url.contains("CHANGE-ME") || master_url.contains("0.0.0.0") || master_url.contains("127.0.0.1") || master_url.contains("://localhost") %}
+  <div class="item">
+    <div class="flash error" style="margin:0">
+      <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+      <div class="flash-body">
+        <strong>The auto-detected master URL (<code>{{ master_url }}</code>) is not reachable from another machine.</strong>
+        Set the externally reachable URL below before you create an invite.
+      </div>
+    </div>
+  </div>
+  {% endif %}
+
+  <div class="item">
+    <h3>1 · Create an invite</h3>
+    <p class="text-soft small">A one-time enrollment token for one new Debian machine. Its install command is shown once, at the top of this page.</p>
+    <form method="post" action="/install/invite">
+      <input type="hidden" name="_csrf" value="{{ csrf_create }}">
+      <div class="field-row">
+        <div class="field">
+          <label for="label">Label <span class="hint">a name for the new node, e.g. <code>node5.example.com</code></span></label>
+          <input id="label" name="label" type="text" required placeholder="node5.example.com">
+        </div>
+        <div class="field">
+          <label for="ttl_hours">Token expires after <span class="hint">hours (1–720)</span></label>
+          <input id="ttl_hours" name="ttl_hours" type="number" min="1" max="720" value="24">
+        </div>
+      </div>
+      {# Editable master URL. Defaults to whatever the operator's browser
+         used to reach us (Host header). Some setups need an override —
+         e.g. accessed via IP but nodes should call back via DNS. Edits
+         update the install one-liner live and persist per browser. #}
+      <div class="field">
+        <label for="master-url-override">Master URL the new node calls back to <span class="hint">remembered in this browser</span></label>
+        <div class="copy-input">
+          <input id="master-url-override" type="url"
+                 value="{{ master_url }}"
+                 placeholder="https://master.example.com"
+                 class="mono-input">
+          <button type="button" class="btn small" id="master-url-reset"
+                  title="Restore the auto-detected URL">Reset</button>
+        </div>
+        <p class="text-soft small field-note">
+          Detected from your browser's <code>Host</code> header (<code id="master-url-detected">{{ master_url }}</code>).
+          Change it if new machines reach this server by another name or address.
+        </p>
+      </div>
+      <div class="item-actions">
+        <button class="btn primary" type="submit">Create invite</button>
+      </div>
+    </form>
+  </div>
+
+  <div class="item">
+    <h3>2 · Pending invites</h3>
+    {% if invites.is_empty() %}
+      <p class="text-soft small" style="margin:0">None. An invite disappears from here once a node uses it or it expires.</p>
+    {% else %}
+    <div class="table-wrap invites-table">
+      <table>
+        <thead>
+          <tr>
+            <th>Label</th>
+            <th>Created</th>
+            <th>Expires</th>
+            <th class="hide-on-phone">Token hash</th>
+            <th class="right"></th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for i in invites %}
+          <tr>
+            <td><strong>{{ i.label }}</strong></td>
+            <td class="muted numeric" title="{{ i.created_at }}">{{ crate::handlers::stats::fmt_ago(i.created_at) }}</td>
+            <td class="muted numeric" title="{{ i.expires_at }}">{{ crate::handlers::stats::fmt_future(i.expires_at) }}</td>
+            <td class="hide-on-phone"><code class="small">{{ i.token_hash }}</code></td>
+            <td class="right">
+              <form method="post" action="/install/invite/revoke" class="inline-form"
+                    data-confirm-title="Revoke invite for {{ i.label }}"
+                    data-confirm-body="This invalidates the invite for {{ i.label }}. Any node still using this token to enroll will be rejected — create a new invite to onboard it."
+                    data-confirm-confirm-label="Revoke invite"
+                    data-confirm-variant="danger">
+                <input type="hidden" name="_csrf" value="{{ csrf_revoke }}">
+                <input type="hidden" name="token_hash" value="{{ i.token_hash }}">
+                <button class="btn small danger" type="submit">Revoke</button>
+              </form>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
+  </div>
+
+  <details class="item muted">
+    <summary><h3>How enrollment works</h3></summary>
+    <ol class="enroll-steps">
+      <li>Create an invite above. <strong>The plaintext token is shown once</strong>; only its hash is stored on the master.</li>
+      <li>Run the printed <code>curl … | sudo bash …</code> command on the new machine.</li>
+      <li>The install script provisions dependencies, builds <code>hyperion-agent</code>, saves the token and master URL into <code>/etc/hyperion/agent.toml</code>, and starts the service.</li>
+      <li>Before writing that file it probes this master's TLS certificate from the new machine: <code>verify_tls = true</code> when the certificate verified, <code>verify_tls = false</code> (plus the reason) when it did not, and nothing when the master could not be reached — the agent then verifies any <code>https://</code> master with a DNS hostname.</li>
+      <li>The agent calls <code>POST /api/enroll</code> with the token and joins the cluster. It appears under Nodes within about 30 s. If the certificate check fails the agent stops rather than retrying unverified; <code>journalctl -u hyperion-agent -g 'TLS policy'</code> on the node carries the fix. The same command explains a node that stops checking in right after you change this master's certificate.</li>
+    </ol>
+  </details>
+
+  <details class="item muted">
+    <summary><h3>Reinstall the master</h3></summary>
+    <p class="text-soft small">Run this on a fresh machine to redeploy the master or set up a sibling control-plane server.</p>
+    <pre><code>curl -fsSL https://raw.githubusercontent.com/nechodom/hyperion/main/packaging/install/install-master.sh \
   | sudo bash</code></pre>
+  </details>
 </div>
 
 <script>
 (function () {
   'use strict';
+  // A redirect back here lands on #node-<id>; open that row so the result
+  // of the action (update log, new label, drain state) is in view.
+  function openFromHash() {
+    const id = decodeURIComponent(location.hash.slice(1));
+    if (!id) return;
+    const el = document.getElementById(id);
+    if (el && el.tagName === 'DETAILS') {
+      el.open = true;
+      el.scrollIntoView({ block: 'start' });
+    }
+  }
+  openFromHash();
+  window.addEventListener('hashchange', openFromHash);
+
   const KEY = 'hyperion.master_url_override';
   const input = document.getElementById('master-url-override');
-  const detected = document.getElementById('master-url-detected');
   const reset = document.getElementById('master-url-reset');
   if (!input) return;
   const defaultUrl = input.value;
-  const saved = localStorage.getItem(KEY);
+  let saved = null;
+  try { saved = localStorage.getItem(KEY); } catch (_) {}
   if (saved) input.value = saved;
 
-  function applyToCommand() {
+  function commandFor(token) {
     const url = input.value.trim().replace(/\/+$/, '') || defaultUrl;
+    return `curl -fsSL https://raw.githubusercontent.com/nechodom/hyperion/main/packaging/install/install-node.sh \\\n  | sudo bash -s -- --token=${token} --master=${url}`;
+  }
+  // The visible command masks the token while data-hidden=1. Copy always
+  // takes the FULL command, so it can be pasted without ever showing it.
+  function applyToCommand() {
     const cmd = document.getElementById('install-cmd');
     if (!cmd) return;
-    const token = cmd.dataset.token;
     const hidden = cmd.dataset.hidden === '1';
-    // Render the visible textContent with the token masked when
-    // data-hidden=1. The Copy button copies the FULL command with
-    // the real token regardless of the visible state, so the
-    // operator can paste straight into ssh without ever flashing
-    // the token on screen.
-    const tokenDisplay = hidden ? '<hidden — click Reveal or Copy>' : token;
-    cmd.textContent = `curl -fsSL https://raw.githubusercontent.com/nechodom/hyperion/main/packaging/install/install-node.sh \\\n  | sudo bash -s -- --token=${tokenDisplay} --master=${url}`;
+    cmd.textContent = commandFor(hidden ? '<hidden — click Reveal or Copy>' : cmd.dataset.token);
   }
 
   input.addEventListener('input', () => {
     const v = input.value.trim();
-    if (v && v !== defaultUrl) {
-      localStorage.setItem(KEY, v);
-    } else {
-      localStorage.removeItem(KEY);
-    }
+    try {
+      if (v && v !== defaultUrl) localStorage.setItem(KEY, v);
+      else localStorage.removeItem(KEY);
+    } catch (_) {}
     applyToCommand();
   });
   reset.addEventListener('click', () => {
     input.value = defaultUrl;
-    localStorage.removeItem(KEY);
+    try { localStorage.removeItem(KEY); } catch (_) {}
     applyToCommand();
   });
-
-  // Initial render — picks up the localStorage value if set.
   applyToCommand();
 
-  // Reveal toggle for the install-cmd <code> block. Operator can
-  // either copy (preferred, never shows the token) or reveal (e.g.
-  // to verify the token visually before pasting it elsewhere).
   const revealBtn = document.getElementById('install-cmd-reveal');
   const copyBtn = document.getElementById('install-cmd-copy');
   const copiedNote = document.getElementById('install-cmd-copied');
@@ -186,19 +510,15 @@
   }
   if (copyBtn && cmd) {
     copyBtn.addEventListener('click', async () => {
-      const url = input.value.trim().replace(/\/+$/, '') || defaultUrl;
-      const token = cmd.dataset.token;
-      // Copy the FULL command regardless of the visible state.
-      const full = `curl -fsSL https://raw.githubusercontent.com/nechodom/hyperion/main/packaging/install/install-node.sh \\\n  | sudo bash -s -- --token=${token} --master=${url}`;
       try {
-        await navigator.clipboard.writeText(full);
+        await navigator.clipboard.writeText(commandFor(cmd.dataset.token));
         if (copiedNote) {
-          copiedNote.style.display = 'inline';
-          setTimeout(() => { copiedNote.style.display = 'none'; }, 2000);
+          copiedNote.hidden = false;
+          setTimeout(() => { copiedNote.hidden = true; }, 2000);
         }
       } catch (e) {
-        // Fallback: temporarily reveal so the operator can manually
-        // copy if clipboard API is blocked (insecure context, etc.).
+        // Clipboard API blocked (insecure context, etc.): reveal so the
+        // operator can copy by hand.
         cmd.dataset.hidden = '0';
         applyToCommand();
         alert('Clipboard API unavailable — token revealed above for manual copy.');
@@ -207,509 +527,4 @@
   }
 })();
 </script>
-
-{# The master is not an enrolled node, so it has no card below — but it is
-   a Debian machine with its own packages, and usually the one everything
-   else depends on. `node_id=local` is the dispatcher's name for it. #}
-<div class="card" id="node-local">
-  <h2>
-    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="8" rx="2"/><rect x="2" y="13" width="20" height="8" rx="2"/><line x1="6" y1="7" x2="6.01" y2="7"/><line x1="6" y1="17" x2="6.01" y2="17"/></svg>
-    This server
-  </h2>
-  <p class="text-soft small" style="margin:0 0 0.8rem">
-    The master running this panel. Hyperion refreshes its package index every 6 hours and never installs anything on its own.
-  </p>
-  <div class="text-soft small" style="font-weight:600;margin-bottom:0.3rem">Operating system updates</div>
-  <div id="os-upd-local"
-       hx-get="/install/os-updates-panel?node_id=local"
-       hx-trigger="intersect once"
-       hx-swap="innerHTML">
-    <span class="text-soft small">Loading…</span>
-  </div>
-  <details style="margin-top:0.8rem">
-    <summary class="text-soft small" style="cursor:pointer">Install system updates on this server…</summary>
-    <form method="post" action="/install/update-node"
-          data-confirm-title="Install system updates on this server"
-          data-confirm-body="System packages will be upgraded on the master — the machine serving this panel. Nothing is removed; anything that would need a removal is held back and listed. Services it upgrades (nginx, PHP, MariaDB) restart as part of the upgrade, so sites and the panel may be briefly unavailable. Hyperion itself is not updated by this. A kernel or library update will ask for a reboot afterwards; that is left to you."
-          data-confirm-confirm-label="Install updates"
-          data-confirm-variant="primary"
-          style="margin-top:0.6rem">
-      <input type="hidden" name="_csrf" value="{{ csrf_update }}">
-      <input type="hidden" name="node_id" value="local">
-      <input type="hidden" name="do_apt" value="on">
-      <button type="submit" class="btn small primary">Install system updates</button>
-    </form>
-    <div id="upd-status-local"
-         hx-get="/install/update-node-status?node_id=local"
-         hx-trigger="load, every 3s"
-         hx-swap="innerHTML"
-         style="margin-top:0.7rem">
-      <span class="text-soft small">Loading status…</span>
-    </div>
-  </details>
-</div>
-
-<div class="card">
-  <h2>
-    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>
-    Enrolled nodes
-  </h2>
-  {% if nodes.is_empty() %}
-    <div class="empty">
-      <p>No nodes have enrolled yet. Create an invite above and run its install command on a new machine. The node appears here the first time its agent enrolls with a valid token.</p>
-    </div>
-  {% else %}
-    <p class="text-soft small" style="margin:0 0 1rem">
-      One card per node. <strong>Test</strong> probes the node over a signed Ed25519 envelope on port 9443 (no DNS lookup).
-      <strong>Update</strong> runs apt and Hyperion upgrades, then streams the log tail.
-      <strong>Drain</strong> stops new hostings from being placed here without disturbing the ones already running.
-      The <strong>Danger zone</strong> at the bottom of each card removes the node from the cluster. The remote agent keeps running locally afterward.
-    </p>
-    <p class="text-soft small" style="margin:0 0 1rem">
-      The <strong>🔒 TLS pin</strong> and <strong>🔑 Response auth</strong> chips are the readiness
-      signal for the hardening ladder in <a href="/settings#hardening">Settings → Cluster → Cluster channel hardening</a>.
-      Turn a step on only once <em>every</em> node below carries its chip: while a step is on,
-      a node missing that chip is <strong>refused</strong>, and its sites drop out of every
-      list until it reports the missing value.
-      Both are pinned on first sight and a <em>changed</em> key is refused, so a node whose agent
-      you deliberately reinstalled stays refused until you use <strong>Clear pinned crypto</strong>
-      on its card. Only reach for that after a key change you expected.
-    </p>
-    <p class="text-soft small" style="margin:0 0 1rem">
-      Neither chip says anything about the other direction — whether a node verifies
-      <em>this master's</em> certificate when it enrolls and heartbeats. That is set on the node
-      itself, in <code>/etc/hyperion/agent.toml</code> under <code>[enrollment] verify_tls</code>,
-      and the install command below measures it while it runs. A node that stops appearing under
-      <strong>Last seen</strong> shortly after you changed this master's certificate is the
-      symptom: check <code>journalctl -u hyperion-agent -g 'TLS policy'</code> there. The agent
-      never falls back to an unverified connection on its own.
-    </p>
-    <div class="node-grid">
-    {# Server-side pre-tagged: each `nodes` entry is `(NodeSummary,
-       is_test, version_skew)` so the template doesn't string-search or
-       version-compare inside the loop. askama destructures the tuple
-       as `(n, is_test, version_skew)`. #}
-    {% for (n, is_test, version_skew) in nodes %}
-      {# One card per node. No tables; everything is a flex column
-         that grows downwards instead of right, so 6 actions don't
-         spill off the viewport and the "Remove" panel doesn't have
-         to position itself absolutely. #}
-      <article id="node-{{ n.node_id }}" class="node-card{% if is_test %} node-card--test{% endif %}{% if n.is_drained %} node-card--drained{% endif %}">
-        {# ─── Header ─── #}
-        <header class="node-card__header">
-          <div class="node-card__title">
-            <h3>{{ n.label }}</h3>
-            <div class="node-card__chips">
-              {% if is_test %}
-              <span class="pill" style="background:var(--warn);color:white" title="Marked as a test node (Settings → Cluster → Test nodes, or the toggle on this card). Hostings here use the auto-subdomain template instead of free-form domains">TEST</span>
-              {% endif %}
-              {% if n.is_drained %}
-              <span class="pill" style="background:#64748b;color:white" title="{% if !n.drain_reason.is_empty() %}{{ n.drain_reason }}{% else %}Maintenance — new hostings are not placed here{% endif %}">DRAINED</span>
-              {% endif %}
-              {% if version_skew %}
-              <span class="pill" style="background:var(--warn);color:white" title="This worker's agent ({{ n.agent_version }}) is a different version from the master. Older agents may not support newer features. Use Update below to bring it in sync.">⚠ {{ n.agent_version }} · out of sync</span>
-              {% else %}
-              <span class="pill" style="background:var(--surface-2);color:var(--text-soft)">{{ n.agent_version }}</span>
-              {% endif %}
-              {# Rendered in BOTH states, for the same reason as the
-                 response-auth chip below: an absent chip is invisible
-                 when you are scanning a grid of cards, and a node
-                 without a pin is the one that gets cut off the moment
-                 step 1 of the hardening ladder goes on. #}
-              {% if let Some(pin) = n.tls_spki_pin %}
-              <span class="pill" style="background:var(--surface-2);color:var(--text-soft)" title="TLS certificate SPKI pin reported by this node — curl --pinnedpubkey sha256//{{ pin }}. Pinned on first sight and never silently replaced: a node reporting a different pin is refused and logged. Enforcing it is Step 1 in Settings → Cluster → Cluster channel hardening.">🔒 TLS pin on file</span>
-              {% else %}
-              <span class="pill" style="background:var(--warn);color:white" title="This node has not reported a TLS certificate pin, so the master has nothing to check its certificate against and an on-path attacker would be indistinguishable from the node. Restart hyperion-agent there and wait one heartbeat. While step 1 (Enforce worker TLS certificate pinning) is on, this node is REFUSED — there is no protection to give a connection with no pin.">⚠ No TLS pin</span>
-              {% endif %}
-              {# Response-signing readiness. Rendered in BOTH states, unlike
-                 the TLS pin above: the operator has to confirm that EVERY
-                 node is covered before turning on step 2 of the hardening
-                 ladder, and an absent chip is invisible when you're
-                 scanning a grid of cards. Readiness is the PRESENCE of the
-                 published key — never n.agent_version, which is an
-                 unorderable git-describe string and lags a node restart by
-                 a full heartbeat. #}
-              {% if let Some(key) = n.resp_pubkey %}
-              <span class="pill" style="background:var(--surface-2);color:var(--text-soft)" title="This node published the Ed25519 response-signing key {{ key }} and signs every RPC reply, so the master can prove an answer came from the node itself and not from an on-path attacker. Mis-signed replies are always refused; refusing UNSIGNED ones is Step 2 in Settings → Cluster → Cluster channel hardening.">🔑 Response auth on file</span>
-              {% else %}
-              <span class="pill" style="background:var(--warn);color:white" title="This node has not published a response-signing key, so the master takes its RPC replies on trust — a forged reply would be indistinguishable from a real one. Run Update below, then wait one heartbeat. Enforcing signed responses never blocks this node; it simply leaves it unprotected.">⚠ No response auth</span>
-              {% endif %}
-            </div>
-            {# Escape hatch for the two chips directly above. Both pins
-               are trust-on-first-use with refuse-on-change, so a node
-               that legitimately regenerated its keys (agent reinstall —
-               node-id.json survives, node-rpc.key and the inbound TLS
-               cert do not) is refused on every later heartbeat with no
-               other way out. Rendered right here, next to the chips the
-               operator is staring at when that happens, and only when
-               there is actually something on file to clear. #}
-            {% if n.resp_pubkey.is_some() || n.tls_spki_pin.is_some() %}
-            <form method="post" action="/install/reset-node-crypto" class="node-card__pin-reset"
-                  data-confirm-title="Clear pinned crypto for {{ n.label }}"
-                  data-confirm-body="The master will forget the TLS pin and the response-signing key it has on file for this node, and will trust whatever the node presents on its next heartbeat (about 30 seconds) — so whichever machine answers next becomes the new trust anchor. Do this only if you deliberately reinstalled the agent or rotated its keys. If you did not expect this node's keys to change, a changed key is exactly what an on-path attacker looks like, and clearing the pins would accept them. Nothing is sent to the node; only master-side state changes. Type the label to confirm."
-                  data-confirm-confirm-label="Clear pinned crypto"
-                  data-confirm-variant="danger"
-                  data-confirm-require="{{ n.label }}">
-              <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-              <input type="hidden" name="node_id" value="{{ n.node_id }}">
-              <button type="submit" class="btn small ghost"
-                      title="Forget the TLS pin and response-signing key recorded above so this node re-pins on its next heartbeat. The fix after a deliberate agent reinstall or key rotation — and the wrong move if you did not expect this node's keys to change.">
-                Clear pinned crypto
-              </button>
-            </form>
-            {% endif %}
-          </div>
-          <code class="node-card__id" title="Permanent enrollment identifier — does not change when you rename the node">{{ n.node_id }}</code>
-        </header>
-
-        {# ─── Stats grid ─── #}
-        <dl class="node-card__stats">
-          <div><dt>Public IP</dt><dd>{% if let Some(ip) = n.public_ip.as_ref() %}<code>{{ ip }}</code>{% else %}<span class="text-soft">—</span>{% endif %}</dd></div>
-          <div><dt>Enrolled</dt><dd class="muted" title="{{ n.enrolled_at }}">{{ crate::handlers::stats::fmt_ago(n.enrolled_at) }}</dd></div>
-          <div><dt>Last seen</dt><dd class="muted" title="{{ n.last_seen_at }}">{{ crate::handlers::stats::fmt_ago(n.last_seen_at) }}</dd></div>
-          <div><dt>Remote RPC</dt><dd id="rpc-status-{{ n.node_id }}"><span class="text-soft small">Click Test to check</span></dd></div>
-        </dl>
-
-        {# ─── Operating-system updates ─── lazy: the node may spend a second
-           or two re-reading apt's list, and one slow node must not hold up
-           the page. `intersect once`, not `revealed` — see base.html. #}
-        <div class="node-card__os" style="margin:0.2rem 0 0.8rem">
-          <div class="text-soft small" style="font-weight:600;margin-bottom:0.3rem">Operating system updates</div>
-          <div id="os-upd-{{ n.node_id }}"
-               hx-get="/install/os-updates-panel?node_id={{ n.node_id }}"
-               hx-trigger="intersect once"
-               hx-swap="innerHTML">
-            <span class="text-soft small">Loading…</span>
-          </div>
-        </div>
-
-        {# ─── Primary actions row (always visible) ─── #}
-        <div class="node-card__actions">
-          {# Connectivity probe — HTMX swaps the result into the
-             Remote RPC dd cell above. #}
-          <form hx-post="/install/test-node"
-                hx-target="#rpc-status-{{ n.node_id }}"
-                hx-swap="innerHTML"
-                hx-indicator="#rpc-status-{{ n.node_id }}"
-                style="display:contents">
-            <input type="hidden" name="_csrf" value="{{ csrf_test }}">
-            <input type="hidden" name="node_id" value="{{ n.node_id }}">
-            <button type="submit" class="btn small">Test</button>
-          </form>
-          <button type="button" class="btn small primary"
-                  onclick="document.getElementById('upd-{{ n.node_id }}').hidden=false;this.disabled=true">
-            Update
-          </button>
-          <button type="button" class="btn small ghost"
-                  onclick="document.getElementById('rename-{{ n.node_id }}').hidden=false;this.disabled=true"
-                  title="Change the display label — the node ID stays the same">
-            Rename
-          </button>
-          {# Drain toggle #}
-          <form method="post" action="/install/drain-node" style="display:contents"
-                data-confirm-title="{% if n.is_drained %}Return {{ n.label }} to service{% else %}Drain {{ n.label }} for maintenance{% endif %}"
-                data-confirm-body="{% if n.is_drained %}This node returns to active service. The auto-placer and create wizard will place new hostings here again.{% else %}New hostings will not be placed on this node until you return it to service. Existing hostings keep serving traffic — draining only affects new placement.{% endif %}"
-                data-confirm-confirm-label="{% if n.is_drained %}Return to service{% else %}Drain node{% endif %}"
-                data-confirm-variant="primary">
-            <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-            <input type="hidden" name="node_id" value="{{ n.node_id }}">
-            {% if n.is_drained %}
-              <button type="submit" class="btn small ghost" title="Currently drained — return this node to active service">Undrain</button>
-            {% else %}
-              <input type="hidden" name="drain" value="on">
-              <input type="hidden" name="reason" value="Maintenance">
-              <button type="submit" class="btn small ghost" title="Stop placing new hostings here — existing ones keep serving">Drain</button>
-            {% endif %}
-          </form>
-          {# Test / production toggle #}
-          <form method="post" action="/install/toggle-test-node" style="display:contents"
-                data-confirm-title="{% if is_test %}Unmark {{ n.label }} as a test node{% else %}Mark {{ n.label }} as a test node{% endif %}"
-                data-confirm-body="{% if is_test %}This node returns to production-only mode. Existing hostings stay where they are, the wizard accepts production domains here again, and the TEST chip on /hostings clears on the next refresh.{% else %}This node becomes test-only. New hostings created here must use the auto-subdomain template (see Settings → HTTPS &amp; previews → Preview address), and the wizard refuses to put a production domain on it. Existing hostings are unaffected but will show a TEST chip.{% endif %}"
-                data-confirm-confirm-label="{% if is_test %}Unmark as test{% else %}Mark as test{% endif %}"
-                data-confirm-variant="primary">
-            <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-            <input type="hidden" name="node_id" value="{{ n.node_id }}">
-            {% if is_test %}
-              <button type="submit" class="btn small ghost" title="Return this node to production — the wizard accepts production domains again">Unmark test</button>
-            {% else %}
-              <button type="submit" class="btn small ghost" title="Make this node test-only — new hostings use auto-subdomains">Mark as test</button>
-            {% endif %}
-          </form>
-        </div>
-
-        {# ─── Inline rename pane (hidden by default) ─── #}
-        <div id="rename-{{ n.node_id }}" class="node-card__pane" hidden>
-          <form method="post" action="/install/rename-node" class="node-card__inline-form">
-            <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-            <input type="hidden" name="node_id" value="{{ n.node_id }}">
-            <label for="label-{{ n.node_id }}" class="text-soft small">New label</label>
-            <input id="label-{{ n.node_id }}" name="label" type="text"
-                   value="{{ n.label|e }}" maxlength="80" required
-                   style="margin:0">
-            <button class="btn small primary" type="submit">Save changes</button>
-            <button class="btn small ghost" type="button"
-                    onclick="document.getElementById('rename-{{ n.node_id }}').hidden=true;this.closest('.node-card').querySelector('button[onclick*=\\'rename-{{ n.node_id }}\\']').disabled=false">
-              Cancel
-            </button>
-            <p class="text-soft small" style="grid-column:1/-1;margin:0">
-              The label appears in dropdowns, the sidebar, and the test-domain template. The node ID stays the same.
-            </p>
-          </form>
-        </div>
-
-        {# ─── Update pane (hidden by default) ─── #}
-        <div id="upd-{{ n.node_id }}" class="node-card__pane" hidden>
-          <form method="post" action="/install/update-node"
-                data-confirm-title="Update {{ n.label }}"
-                data-confirm-body="The system-package upgrade and/or the Hyperion update will run on {{ n.label }} ({% if let Some(ip) = n.public_ip.as_ref() %}{{ ip }}{% else %}{{ n.node_id }}{% endif %}). The node's services may briefly restart. This can take several minutes. With Safe update ticked, the previous binaries are restored automatically if the node does not come back healthy — note that this restores BINARIES, not data."
-                data-confirm-confirm-label="Start update"
-                data-confirm-variant="primary"
-                class="node-card__inline-form m-stack" style="grid-template-columns:1fr 1fr 1fr auto auto">
-            <input type="hidden" name="_csrf" value="{{ csrf_update }}">
-            <input type="hidden" name="node_id" value="{{ n.node_id }}">
-            <label class="field-checkbox" style="margin:0">
-              <input type="checkbox" name="do_apt" value="on" checked>
-              <span><strong>System packages</strong> <span class="text-soft small">(apt upgrade, never removes a package)</span></span>
-            </label>
-            <label class="field-checkbox" style="margin:0">
-              <input type="checkbox" name="do_hyperion" value="on" checked>
-              <span><strong>Hyperion</strong> <span class="text-soft small">(rebuild and restart the agent and web)</span></span>
-            </label>
-            {# Default ON. The operator is usually clicking this from the very
-               panel an update can take down, so "it broke, now SSH in" is the
-               worst outcome available — and the cost of the snapshot is a
-               binary copy. Untick only to reproduce a failure deliberately. #}
-            <label class="field-checkbox" style="margin:0"
-                   title="Copies the running binaries aside first. If the health check fails after the restart, they are put back automatically and the update is reported as failed.">
-              <input type="checkbox" name="safe" value="on" checked>
-              <span><strong>Safe update</strong> <span class="text-soft small">(snapshot + auto-rollback)</span></span>
-            </label>
-            <button type="submit" class="btn small primary">Start update</button>
-            <button type="button" class="btn small ghost"
-                    onclick="document.getElementById('upd-{{ n.node_id }}').hidden=true;this.closest('.node-card').querySelector('button[onclick*=\\'upd-{{ n.node_id }}\\']').disabled=false">
-              Cancel
-            </button>
-          </form>
-          <div id="upd-status-{{ n.node_id }}"
-               hx-get="/install/update-node-status?node_id={{ n.node_id }}"
-               hx-trigger="load, every 3s"
-               hx-swap="innerHTML"
-               style="margin-top:0.7rem">
-            <span class="text-soft small">Loading status…</span>
-          </div>
-        </div>
-
-        {# ─── Danger zone (always at the bottom, always collapsed
-           by default) — keeps the destructive Remove flow visually
-           separated from the everyday actions above. Inline
-           expansion, no absolute positioning. #}
-        <details class="node-card__danger">
-          <summary>
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:0.4rem"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
-            Danger zone
-          </summary>
-          <form method="post" action="/install/remove-node"
-                class="node-card__danger-form"
-                data-confirm-title="Remove node {{ n.label }}"
-                data-confirm-body="Removes the node from the master's registry. The agent on the remote machine keeps running and Hyperion stays installed there. Type the label to confirm."
-                data-confirm-confirm-label="Remove node"
-                data-confirm-variant="danger"
-                data-confirm-require="{{ n.label }}">
-            <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-            <input type="hidden" name="node_id" value="{{ n.node_id }}">
-            <p class="text-soft small" style="margin:0 0 0.6rem;line-height:1.55">
-              <strong>Remove this node from the cluster.</strong> The node is removed from the master's registry, but the remote agent keeps running locally. To bring it back, enroll it again with a fresh invite token. If hostings still live here, the removal is refused unless you tick <em>Force</em> below — those hostings are then orphaned: they keep serving from the detached machine but can no longer be managed from the master.
-            </p>
-            <label class="field-checkbox" style="margin:0 0 0.7rem">
-              <input type="checkbox" name="force" value="on">
-              Force — orphan any hostings still on this node
-            </label>
-            <button type="submit" class="btn small danger">Remove node</button>
-          </form>
-        </details>
-      </article>
-    {% endfor %}
-    </div>
-  {% endif %}
-</div>
-
-<style>
-/* ── Enrolled-nodes card grid ────────────────────────────────
-   One card per node; primary actions in a flex-wrapping row,
-   inline expansion panes for Rename / Update / Remove that
-   open IN PLACE (no absolute positioning, no horizontal
-   overflow). Replaces the previous wide 8-column table that
-   pushed the Remove dropdown off the right edge of the viewport. */
-.node-grid {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 0.85rem;
-}
-.node-card {
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  background: var(--surface-1);
-  padding: 1rem 1.1rem;
-  display: flex;
-  flex-direction: column;
-  gap: 0.85rem;
-}
-.node-card--test { border-color: color-mix(in oklab, var(--warn) 45%, var(--border)); }
-.node-card--drained { opacity: 0.92; }
-.node-card__header {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  gap: 1rem;
-  flex-wrap: wrap;
-}
-.node-card__title { display: flex; flex-direction: column; gap: 0.3rem; min-width: 0; }
-.node-card__title h3 { margin: 0; font-size: 1.05rem; font-weight: 700; }
-.node-card__chips { display: flex; gap: 0.35rem; flex-wrap: wrap; }
-/* Sits directly under the readiness chips it undoes, so the fix is
-   where the operator is already looking. Not a primary action — it
-   stays out of the actions row and out of the danger zone. */
-.node-card__pin-reset { margin-top: 0.1rem; }
-.node-card__id {
-  font-family: ui-monospace, Menlo, Consolas, monospace;
-  font-size: 0.72rem;
-  color: var(--text-soft);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-width: 18rem;
-}
-.node-card__stats {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(8rem, 100%), 1fr));
-  gap: 0.5rem 1rem;
-  margin: 0;
-  padding: 0.6rem 0.8rem;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-}
-.node-card__stats > div { display: flex; flex-direction: column; gap: 0.15rem; min-width: 0; }
-.node-card__stats dt {
-  font-size: 0.7rem;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--text-soft);
-}
-.node-card__stats dd { margin: 0; font-size: 0.88rem; min-width: 0; overflow-wrap: anywhere; }
-.node-card__actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.4rem;
-  align-items: center;
-}
-.node-card__pane {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  padding: 0.85rem 1rem;
-}
-.node-card__inline-form {
-  display: grid;
-  grid-template-columns: auto 1fr auto auto;
-  gap: 0.55rem;
-  align-items: center;
-}
-.node-card__danger {
-  border-top: 1px dashed var(--border);
-  padding-top: 0.85rem;
-}
-.node-card__danger > summary {
-  cursor: pointer;
-  font-size: 0.85rem;
-  font-weight: 600;
-  color: var(--danger);
-  list-style: none;
-  user-select: none;
-  padding: 0.25rem 0;
-}
-.node-card__danger > summary::-webkit-details-marker { display: none; }
-.node-card__danger > summary::after {
-  content: "▾";
-  margin-left: 0.4rem;
-  display: inline-block;
-  transition: transform 0.15s ease;
-  color: var(--text-soft);
-}
-.node-card__danger[open] > summary::after { transform: rotate(180deg); }
-.node-card__danger-form {
-  margin-top: 0.7rem;
-  padding: 0.85rem 1rem;
-  background: color-mix(in oklab, var(--danger) 6%, transparent);
-  border: 1px solid color-mix(in oklab, var(--danger) 40%, var(--border));
-  border-radius: var(--radius-sm);
-}
-
-@media (max-width: 720px) {
-  .node-card__inline-form { grid-template-columns: 1fr; }
-  .node-card__id { max-width: none; white-space: normal; overflow-wrap: anywhere; }
-}
-</style>
-
-<div class="card no-pad-table">
-  <h2 style="padding:1.4rem 1.5rem 0">
-    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-    Pending invites
-  </h2>
-  {% if invites.is_empty() %}
-    <div class="empty">
-      <p>No pending invites. Create one above to onboard a new node.</p>
-    </div>
-  {% else %}
-  <div class="table-wrap">
-    <table>
-      <thead>
-        <tr>
-          <th>Label</th>
-          <th>Created</th>
-          <th>Expires</th>
-          <th>Token hash</th>
-          <th class="right">Actions</th>
-        </tr>
-      </thead>
-      <tbody>
-        {% for i in invites %}
-        <tr>
-          <td><strong>{{ i.label }}</strong></td>
-          <td class="muted numeric" title="{{ i.created_at }}">{{ crate::handlers::stats::fmt_ago(i.created_at) }}</td>
-          <td class="muted numeric" title="{{ i.expires_at }}">{{ crate::handlers::stats::fmt_future(i.expires_at) }}</td>
-          <td><code style="font-size:0.74rem">{{ i.token_hash }}</code></td>
-          <td class="right">
-            <form method="post" action="/install/invite/revoke" style="display:inline"
-                  data-confirm-title="Revoke invite for {{ i.label }}"
-                  data-confirm-body="This invalidates the invite for {{ i.label }}. Any node still using this token to enroll will be rejected — create a new invite to onboard it."
-                  data-confirm-confirm-label="Revoke invite"
-                  data-confirm-variant="danger">
-              <input type="hidden" name="_csrf" value="{{ csrf_revoke }}">
-              <input type="hidden" name="token_hash" value="{{ i.token_hash }}">
-              <button class="btn small danger" type="submit">Revoke</button>
-            </form>
-          </td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-  </div>
-  {% endif %}
-</div>
-
-<div class="card muted">
-  <h2>
-    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
-    How enrollment works
-  </h2>
-  <ol style="margin:0;padding-left:1.25rem;font-size:0.92rem;line-height:1.7">
-    <li>Create a labeled token above. <strong>The plaintext is shown once</strong> — copy it immediately; only its hash is stored on the master.</li>
-    <li>Run the printed <code>curl … | sudo bash …</code> command on the new machine.</li>
-    <li>The install script provisions dependencies, builds <code>hyperion-agent</code>, saves the token and master URL into <code>/etc/hyperion/agent.toml</code>, and starts the service.</li>
-    <li>Before writing that file the installer probes this master's TLS certificate from the new machine and records what it found: <code>verify_tls = true</code> when the certificate verified, <code>verify_tls = false</code> (plus the reason) when it did not, and nothing at all when the master could not be reached — in which case the agent decides from the URL, verifying any <code>https://</code> master with a DNS hostname.</li>
-    <li>The agent calls <code>POST /api/enroll</code> with the token, signs an mTLS certificate, and joins the cluster. The new node appears in Enrolled nodes above within about 30 s. If the certificate check fails the agent stops rather than retrying unverified, and <code>journalctl -u hyperion-agent</code> on the node carries the fix.</li>
-  </ol>
-</div>
 {% endblock %}

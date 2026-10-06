@@ -601,6 +601,66 @@ async fn seed_demo(svc: &StubService) {
     }
 }
 
+/// `DEVSERVER_DEMO_NODES=1`: enroll three fake worker nodes so the Nodes
+/// page renders every row state — healthy, drained + test, and one that
+/// stopped checking in without pins. Kept apart from `DEVSERVER_DEMO`:
+/// nothing answers on their addresses, so every cluster fan-out (hostings
+/// list, stats) would show them as offline in the README screenshots.
+async fn seed_demo_nodes(svc: &StubService) {
+    let pool = &svc.pool;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let nodes: [(&str, &str, &str, i64, Option<&str>); 3] = [
+        (
+            "web-2",
+            "web-2.example.net",
+            "203.0.113.12",
+            now - 20,
+            Some("pin"),
+        ),
+        (
+            "web-3",
+            "web-3.example.net",
+            "203.0.113.13",
+            now - 40,
+            Some("pin"),
+        ),
+        (
+            "stage-1",
+            "stage-1.example.net",
+            "203.0.113.40",
+            now - 2 * 3600,
+            None,
+        ),
+    ];
+    for (id, label, ip, seen, pin) in nodes {
+        sqlx::query(
+            "INSERT INTO nodes (node_id, label, enrolled_at, last_seen_at, agent_version, \
+             public_ip, enrolled_via, tls_spki_pin, resp_pubkey) VALUES (?, ?, ?, ?, ?, ?, 'demo', ?, ?)",
+        )
+        .bind(id)
+        .bind(label)
+        .bind(now - 40 * 86_400)
+        .bind(seen)
+        .bind(env!("CARGO_PKG_VERSION"))
+        .bind(ip)
+        .bind(pin)
+        .bind(pin)
+        .execute(pool)
+        .await
+        .expect("demo node");
+    }
+    sqlx::query(
+        "INSERT INTO node_drain (node_id, drained_at, reason) VALUES ('web-3', ?, 'Disk swap')",
+    )
+    .bind(now - 3600)
+    .execute(pool)
+    .await
+    .expect("drain");
+}
+
 #[tokio::test]
 #[ignore]
 async fn devserver() {
@@ -608,6 +668,9 @@ async fn devserver() {
     let (sock, _dir, svc) = start_agent_with_service().await;
     if std::env::var_os("DEVSERVER_DEMO").is_some() {
         seed_demo(&svc).await;
+    }
+    if std::env::var_os("DEVSERVER_DEMO_NODES").is_some() {
+        seed_demo_nodes(&svc).await;
     }
     let (router, _signer) =
         build_app_with_signer(sock, admin, Arc::new(SessionSigner::new_random()));

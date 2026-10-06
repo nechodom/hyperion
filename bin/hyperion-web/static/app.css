@@ -870,6 +870,107 @@ details.svc-fold .svc-row .pill.muted { display: none; }
   .jobs-filter select { max-width: none; flex: 1 1 100%; }
 }
 
+/* /install (Nodes) — one details row per machine, this server first. The
+   summary is the scan line (who answers, sites, pending updates); the body
+   holds everything you can do to that node, in sections split by hairlines,
+   with Remove folded away at the bottom. Colour means state only. */
+.group > .node-row { border-bottom: 1px solid var(--border); }
+.group > .node-row:last-child { border-bottom: none; }
+.node-row > summary {
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
+  padding: 0.85rem 1.25rem;
+  cursor: pointer;
+  list-style: none;
+  transition: background var(--t-fast);
+}
+.node-row > summary::-webkit-details-marker { display: none; }
+.node-row > summary:hover { background: var(--surface-2); }
+.node-row[open] > summary { background: var(--surface-2); border-bottom: 1px solid var(--border); }
+.node-row.tone-row-err > summary { box-shadow: inset 2px 0 0 var(--danger); }
+.node-row.tone-row-warn > summary { box-shadow: inset 2px 0 0 var(--warn); }
+.node-row .node-dot { flex: none; }
+.node-row .node-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 0.2rem; }
+.node-row .node-title { display: flex; flex-wrap: wrap; align-items: center; gap: 0.45rem; }
+.node-row .node-sub,
+.node-row .node-issues {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.2rem 0.9rem;
+  font-size: 0.78rem;
+  color: var(--text-soft);
+  font-variant-numeric: tabular-nums;
+}
+.node-row .node-sub code { font-size: 0.78rem; color: var(--text-dim); }
+.node-row .node-facts {
+  flex: none;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 0.35rem 0.8rem;
+  max-width: 50%;
+}
+.node-fact { font-size: 0.8rem; color: var(--text-dim); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.node-chevron { width: 16px; height: 16px; flex: none; color: var(--text-soft); transition: transform var(--t-fast); }
+.node-row[open] .node-chevron { transform: rotate(90deg); }
+
+.node-body > .node-facts-strip { border-bottom: 1px solid var(--border); }
+.node-sec { padding: 1rem 1.25rem; border-bottom: 1px solid var(--border); display: flex; flex-direction: column; gap: 0.6rem; }
+.node-sec h4 {
+  margin: 0;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.node-sec-row { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem 0.75rem; margin: 0; }
+.node-sec-row > .text-soft { flex: 1 1 16rem; }
+.node-trust { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.85rem; }
+.node-note { margin: 0; }
+.node-update-form { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 1.25rem; }
+.node-update-form .field-checkbox { margin: 0; }
+.node-upd-status:empty { display: none; }
+.node-upd-status pre { max-height: 14rem; }
+.node-sec-row input.node-rename { flex: 0 1 18rem; width: auto; min-width: 0; margin: 0; }
+.node-danger { padding: 0.75rem 1.25rem; background: color-mix(in oklab, var(--danger) 4%, var(--surface)); }
+.node-danger > summary { cursor: pointer; font-size: 0.85rem; font-weight: 600; color: var(--danger); }
+.node-danger form { margin-top: 0.6rem; }
+.node-danger p { margin: 0 0 0.6rem; line-height: 1.55; }
+.node-danger .field-checkbox { margin: 0 0 0.7rem; }
+
+/* Fresh invite: the one-time install command. */
+.invite-cmd { margin: 0.7rem 0 0; }
+.invite-cmd code { white-space: pre-wrap; overflow-wrap: anywhere; }
+.invite-cmd-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; margin-top: 0.5rem; }
+.invite-cmd-note { margin-top: 0.5rem; line-height: 1.6; }
+.mono-input { font-family: var(--font-mono); }
+.field-note { margin: 0.4rem 0 0; }
+#add-node .item > h3 + .text-soft { margin: 0 0 0.9rem; }
+#add-node details.item > summary h3 { margin: 0; }
+#add-node details.item[open] > summary { margin-bottom: 0.8rem; }
+#add-node .invites-table { margin-top: 0.5rem; }
+.enroll-steps { margin: 0; padding-left: 1.25rem; font-size: 0.88rem; line-height: 1.7; }
+
+@media (max-width: 720px) {
+  /* Dot · name · chevron on the first line, the live facts under the name. */
+  .node-row > summary {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    grid-template-areas: "dot main chev" ". facts facts";
+    gap: 0.4rem 0.75rem;
+    padding: 0.8rem 1rem;
+  }
+  .node-row .node-dot { grid-area: dot; align-self: start; margin-top: 0.45rem; }
+  .node-row .node-main { grid-area: main; }
+  .node-row .node-chevron { grid-area: chev; align-self: start; margin-top: 0.2rem; }
+  .node-row .node-facts { grid-area: facts; max-width: none; justify-content: flex-start; }
+  .node-sec { padding: 0.9rem 1rem; }
+  .node-danger { padding: 0.75rem 1rem; }
+}
+
 /* /admin/users — one grouped panel; each user is a details row whose summary
    is the scan line and whose body holds role / sign-in / password side by
    side, with delete split off at the bottom. */

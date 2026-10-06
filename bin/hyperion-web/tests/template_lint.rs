@@ -311,6 +311,8 @@ fn every_page_is_reachable_from_the_nav() {
         "/import/progress",
         "/import/wizard",
         "/install/update-node-status",
+        // Per-row fragment the Nodes page lazy-loads into each summary.
+        "/install/node-facts",
         "/services/install-status",
         "/settings/panel-cert-status",
         "/settings/email-preview",
