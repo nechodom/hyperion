@@ -21624,8 +21624,70 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 // Master tags this after a cross-node fan-in; the agent
                 // can't know its own cluster label.
                 node: None,
+                row_hash: e.row_hash,
             })
             .collect())
+    }
+
+    pub async fn audit_search(
+        &self,
+        filter: hyperion_rpc::AuditSearchFilter,
+    ) -> Result<
+        (
+            Vec<hyperion_rpc::AuditEntryWire>,
+            Vec<hyperion_rpc::AuditActionCount>,
+            i64,
+        ),
+        RpcError,
+    > {
+        let limit = filter.limit.clamp(1, 1000);
+        let f = hyperion_state::audit::AuditFilter {
+            q: filter.q,
+            q_alt: filter.q_alt,
+            action: filter.action,
+            prefixes: filter.prefixes,
+            not_prefixes: filter.not_prefixes,
+            failed_only: filter.failed_only,
+            since: filter.since,
+            before: filter.before,
+        };
+        let err = |e: hyperion_state::db::StateError| {
+            RpcError::Internal_with(format!("audit search: {e}"))
+        };
+        let rows = hyperion_state::audit::search(&self.pool, &f, limit)
+            .await
+            .map_err(err)?;
+        let actions = hyperion_state::audit::action_counts(&self.pool, &f)
+            .await
+            .map_err(err)?;
+        let total = hyperion_state::audit::count(&self.pool)
+            .await
+            .map_err(err)?;
+        Ok((
+            rows.into_iter()
+                .map(|e| hyperion_rpc::AuditEntryWire {
+                    id: e.id,
+                    ts: e.ts,
+                    actor_uid: e.actor_uid,
+                    actor_label: e.actor_label,
+                    action: e.action,
+                    target: e.target,
+                    payload_json: e.payload_json,
+                    result: e.result,
+                    node: None,
+                    row_hash: e.row_hash,
+                })
+                .collect(),
+            actions
+                .into_iter()
+                .map(|c| hyperion_rpc::AuditActionCount {
+                    action: c.action,
+                    total: c.total,
+                    failed: c.failed,
+                })
+                .collect(),
+            total,
+        ))
     }
 
     pub(crate) async fn append_audit(

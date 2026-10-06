@@ -155,7 +155,7 @@ fn state_tone(state: &str) -> (&'static str, &'static str) {
     }
 }
 
-fn fmt_local(ts: i64, fmt: &str) -> String {
+pub(crate) fn fmt_local(ts: i64, fmt: &str) -> String {
     use chrono::{Local, TimeZone};
     Local
         .timestamp_opt(ts, 0)
@@ -166,7 +166,7 @@ fn fmt_local(ts: i64, fmt: &str) -> String {
 
 /// "Today" / "Yesterday" / "Mon 5 Oct" for the day a job started, in the
 /// panel host's local time.
-fn day_label(ts: i64, now: i64) -> String {
+pub(crate) fn day_label(ts: i64, now: i64) -> String {
     use chrono::{Local, TimeZone};
     let day = |t: i64| Local.timestamp_opt(t, 0).single().map(|d| d.date_naive());
     match (day(ts), day(now)) {
@@ -232,7 +232,7 @@ fn jobs_href(state: &str, kind: &str, q: &str) -> String {
     }
 }
 
-fn urlencode(s: &str) -> String {
+pub(crate) fn urlencode(s: &str) -> String {
     s.bytes()
         .map(|b| match b {
             b' ' => "+".to_string(),
@@ -816,7 +816,7 @@ async fn fetch_job(
 
 /// True for a hosting id (a UUID: 36 chars, hyphens at 8/13/18/23, hex
 /// elsewhere). Domains always contain a dot; job labels never look like this.
-fn looks_like_hosting_id(s: &str) -> bool {
+pub(crate) fn looks_like_hosting_id(s: &str) -> bool {
     s.len() == 36
         && s.char_indices().all(|(i, c)| match i {
             8 | 13 | 18 | 23 => c == '-',
