@@ -281,6 +281,26 @@ pub struct ServiceHealth {
     /// "restarting" badge instead of green "running".
     #[serde(default)]
     pub transient: bool,
+    // ---- Detail facts. All optional: an older agent sends none of them and
+    // the page simply leaves the detail line out. ----
+    /// Unix seconds when the unit entered its current state — up since when
+    /// running, down since when stopped or failed.
+    #[serde(default)]
+    pub since: Option<i64>,
+    /// `MemoryCurrent` (bytes); absent when accounting is off.
+    #[serde(default)]
+    pub memory_bytes: Option<u64>,
+    #[serde(default)]
+    pub main_pid: Option<u32>,
+    /// systemd's automatic restarts (`NRestarts`). Non-zero = crash loop.
+    #[serde(default)]
+    pub restarts: Option<u32>,
+    /// systemd `Result` when not `success` — `oom-kill`, `exit-code`, …
+    #[serde(default)]
+    pub result: Option<String>,
+    /// Installed package version, upstream part only (`1.26.3`).
+    #[serde(default)]
+    pub version: Option<String>,
 }
 
 /// Bundle of all service-health rows.

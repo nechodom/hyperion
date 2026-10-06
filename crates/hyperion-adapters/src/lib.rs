@@ -47,7 +47,7 @@ pub mod files;
 /// boolean active alone collapsed both into the same state and
 /// gave operators "down + stop-sigterm" false alarms on every
 /// restart.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct UnitStatus {
     /// True for any of: `active`, `activating`, `reloading`,
     /// `deactivating`. False for `inactive` / `failed` / probe
@@ -70,6 +70,154 @@ pub struct UnitStatus {
     /// "static" | "indirect" | "generated" | "masked" | … |
     /// empty string when the unit isn't installed.
     pub unit_file_state: String,
+    /// `ActiveEnterTimestampMonotonic` — µs since boot when the unit last
+    /// became active. Monotonic (not the formatted wall-clock property) so
+    /// it parses the same on every systemd version; [`boot_relative_to_unix`]
+    /// turns it into a timestamp. `None` when systemd reports 0 (never).
+    pub active_enter_mono_us: Option<u64>,
+    /// `InactiveEnterTimestampMonotonic` — when it last went down.
+    pub inactive_enter_mono_us: Option<u64>,
+    /// `MemoryCurrent` in bytes. `None` when memory accounting is off
+    /// (`[not set]` or u64::MAX) or the unit is not running.
+    pub memory_bytes: Option<u64>,
+    /// `MainPID`; `None` for 0 (no main process).
+    pub main_pid: Option<u32>,
+    /// `NRestarts` — automatic restarts by systemd since the unit was
+    /// started by hand. A climbing number is a crash loop.
+    pub restarts: Option<u32>,
+    /// `Result` when it is not `success` — `exit-code`, `oom-kill`,
+    /// `timeout`, `signal`, `core-dump`…
+    pub result: Option<String>,
+}
+
+/// Properties [`systemctl_status_rich`] asks for. Parsed by KEY, never by
+/// position: `systemctl show --value` prints values in systemd's own
+/// property order, not the order of the `-p` flags, so positional reads
+/// only worked while there were three that happened to line up.
+const SHOW_PROPS: &[&str] = &[
+    "ActiveState",
+    "SubState",
+    "UnitFileState",
+    "ActiveEnterTimestampMonotonic",
+    "InactiveEnterTimestampMonotonic",
+    "MemoryCurrent",
+    "MainPID",
+    "NRestarts",
+    "Result",
+];
+
+/// Turn `systemctl show` `Key=Value` output into a [`UnitStatus`].
+pub fn parse_unit_show(stdout: &str) -> UnitStatus {
+    let mut kv: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+    for line in stdout.lines() {
+        if let Some((k, v)) = line.split_once('=') {
+            kv.insert(k.trim(), v.trim());
+        }
+    }
+    let get = |k: &str| kv.get(k).copied().unwrap_or("").to_string();
+    let num = |k: &str| -> Option<u64> {
+        kv.get(k)
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|n| *n != 0 && *n != u64::MAX)
+    };
+    let active_state = get("ActiveState");
+    let sub_state = get("SubState");
+    let unit_file_state = get("UnitFileState");
+    let active = matches!(
+        active_state.as_str(),
+        "active" | "activating" | "reloading" | "deactivating"
+    );
+    let enabled = matches!(
+        unit_file_state.as_str(),
+        "enabled" | "enabled-runtime" | "alias" | "static" | "indirect" | "generated" | "transient"
+    );
+    let result = Some(get("Result")).filter(|r| !r.is_empty() && r != "success");
+    UnitStatus {
+        active,
+        enabled,
+        active_state,
+        sub_state: if sub_state.is_empty() {
+            "?".into()
+        } else {
+            sub_state
+        },
+        unit_file_state,
+        active_enter_mono_us: num("ActiveEnterTimestampMonotonic"),
+        inactive_enter_mono_us: num("InactiveEnterTimestampMonotonic"),
+        memory_bytes: num("MemoryCurrent"),
+        main_pid: num("MainPID").and_then(|n| u32::try_from(n).ok()),
+        // NRestarts=0 is a real, useful answer — keep it.
+        restarts: kv.get("NRestarts").and_then(|v| v.parse::<u32>().ok()),
+        result,
+    }
+}
+
+/// Seconds since boot, from `/proc/uptime`.
+pub fn uptime_secs() -> Option<f64> {
+    std::fs::read_to_string("/proc/uptime")
+        .ok()?
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()
+}
+
+/// Convert a systemd monotonic timestamp (µs since boot) into unix seconds,
+/// given the current unix time and seconds since boot.
+pub fn boot_relative_to_unix(mono_us: u64, now_unix: i64, uptime_secs: f64) -> i64 {
+    let ago = uptime_secs - mono_us as f64 / 1_000_000.0;
+    now_unix - ago.max(0.0).round() as i64
+}
+
+/// Debian package that ships each probed unit, for the version column.
+/// Units missing here (the panel's own) report no version.
+pub fn unit_package(unit: &str) -> Option<&str> {
+    match unit {
+        "mariadb" => Some("mariadb-server"),
+        "nginx" | "postgresql" | "redis-server" | "vsftpd" | "postfix" | "clamav-freshclam" => {
+            Some(unit)
+        }
+        u if u.starts_with("php") && u.ends_with("-fpm") => Some(u),
+        _ => None,
+    }
+}
+
+/// Short upstream version from a Debian version string:
+/// `1:11.8.3-0+deb13u1` → `11.8.3`, `17+278` → `17`.
+pub fn short_deb_version(v: &str) -> String {
+    let v = v.split_once(':').map(|(_, r)| r).unwrap_or(v);
+    let v = v.split('-').next().unwrap_or(v);
+    v.split('+').next().unwrap_or(v).to_string()
+}
+
+/// Parse `dpkg-query -W -f '${Package}\t${Version}\n'` output.
+pub fn parse_dpkg_versions(stdout: &str) -> std::collections::HashMap<String, String> {
+    stdout
+        .lines()
+        .filter_map(|l| l.split_once('\t'))
+        .filter(|(_, v)| !v.trim().is_empty())
+        .map(|(p, v)| (p.trim().to_string(), short_deb_version(v.trim())))
+        .collect()
+}
+
+/// Installed versions of `pkgs` in one `dpkg-query` call. Missing packages
+/// are simply absent (dpkg-query exits non-zero for them but still prints
+/// the rest, so the exit code is ignored).
+pub async fn dpkg_versions(pkgs: &[&str]) -> std::collections::HashMap<String, String> {
+    if pkgs.is_empty() {
+        return Default::default();
+    }
+    let out = tokio::process::Command::new("dpkg-query")
+        .arg("-W")
+        .arg("-f")
+        .arg("${Package}\t${Version}\n")
+        .args(pkgs)
+        .output()
+        .await;
+    match out {
+        Ok(o) => parse_dpkg_versions(&String::from_utf8_lossy(&o.stdout)),
+        Err(_) => Default::default(),
+    }
 }
 
 impl UnitStatus {
@@ -101,32 +249,21 @@ impl UnitStatus {
 ///     services as "enabled=no".
 ///
 /// New approach: one `systemctl show -p ActiveState -p SubState
-/// -p UnitFileState --value` call. Parses the structured output
-/// and maps it correctly. Returns `UnitStatus` with both the
+/// -p UnitFileState …` call (see [`SHOW_PROPS`]), parsed by key in
+/// [`parse_unit_show`]. Returns `UnitStatus` with both the
 /// derived booleans + the raw strings so the UI can distinguish
 /// "restarting" from "down".
 pub async fn systemctl_status_rich(unit: &str) -> UnitStatus {
-    let out = tokio::process::Command::new("/usr/bin/systemctl")
-        .args([
-            "show",
-            "-p",
-            "ActiveState",
-            "-p",
-            "SubState",
-            "-p",
-            "UnitFileState",
-            "--value",
-            "--no-pager",
-            unit,
-        ])
-        .output()
-        .await;
+    let mut cmd = tokio::process::Command::new("/usr/bin/systemctl");
+    cmd.arg("show");
+    for p in SHOW_PROPS {
+        cmd.arg("-p").arg(p);
+    }
+    let out = cmd.arg("--no-pager").arg(unit).output().await;
     let unknown = |reason: &str| UnitStatus {
-        active: false,
-        enabled: false,
         active_state: "unknown".into(),
         sub_state: reason.into(),
-        unit_file_state: String::new(),
+        ..Default::default()
     };
     let Ok(out) = out else {
         return unknown("spawn-failed");
@@ -138,32 +275,7 @@ pub async fn systemctl_status_rich(unit: &str) -> UnitStatus {
         // don't know" from "service is genuinely missing".
         return unknown("no-such-unit");
     }
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let mut lines = stdout.lines();
-    let active_state = lines.next().unwrap_or("").trim().to_string();
-    let sub_state = lines.next().unwrap_or("").trim().to_string();
-    let unit_file_state = lines.next().unwrap_or("").trim().to_string();
-
-    let active = matches!(
-        active_state.as_str(),
-        "active" | "activating" | "reloading" | "deactivating"
-    );
-    let enabled = matches!(
-        unit_file_state.as_str(),
-        "enabled" | "enabled-runtime" | "alias" | "static" | "indirect" | "generated" | "transient"
-    );
-    let sub = if sub_state.is_empty() {
-        "?".into()
-    } else {
-        sub_state
-    };
-    UnitStatus {
-        active,
-        enabled,
-        active_state,
-        sub_state: sub,
-        unit_file_state,
-    }
+    parse_unit_show(&String::from_utf8_lossy(&out.stdout))
 }
 
 /// Backwards-compatible adapter for callers that only want the
@@ -405,6 +517,7 @@ mod tests {
                 active_state: s.to_string(),
                 sub_state: "start-pre".into(),
                 unit_file_state: "enabled".into(),
+                ..Default::default()
             };
             assert!(us.transient(), "expected transient for {s}");
         }
@@ -415,9 +528,70 @@ mod tests {
                 active_state: s.to_string(),
                 sub_state: "?".into(),
                 unit_file_state: String::new(),
+                ..Default::default()
             };
             assert!(!us.transient(), "expected non-transient for {s}");
         }
+    }
+
+    #[test]
+    fn parse_unit_show_reads_by_key_in_any_order() {
+        // systemd prints properties in its own order, not the -p order.
+        let out = "MainPID=1234\nNRestarts=3\nResult=success\n\
+                   ActiveEnterTimestampMonotonic=5000000\nInactiveEnterTimestampMonotonic=0\n\
+                   MemoryCurrent=148897792\nUnitFileState=enabled\nSubState=running\n\
+                   ActiveState=active\n";
+        let s = parse_unit_show(out);
+        assert!(s.active && s.enabled && !s.transient());
+        assert_eq!(s.sub_state, "running");
+        assert_eq!(s.main_pid, Some(1234));
+        assert_eq!(s.restarts, Some(3));
+        assert_eq!(s.result, None);
+        assert_eq!(s.memory_bytes, Some(148_897_792));
+        assert_eq!(s.active_enter_mono_us, Some(5_000_000));
+        assert_eq!(s.inactive_enter_mono_us, None);
+    }
+
+    #[test]
+    fn parse_unit_show_unset_and_failed_values() {
+        let out = "ActiveState=failed\nSubState=failed\nUnitFileState=enabled\n\
+                   MemoryCurrent=[not set]\nMainPID=0\nNRestarts=0\nResult=oom-kill\n\
+                   InactiveEnterTimestampMonotonic=9000000\n";
+        let s = parse_unit_show(out);
+        assert!(!s.active);
+        assert_eq!(s.memory_bytes, None);
+        assert_eq!(s.main_pid, None);
+        assert_eq!(s.restarts, Some(0));
+        assert_eq!(s.result.as_deref(), Some("oom-kill"));
+        assert_eq!(s.inactive_enter_mono_us, Some(9_000_000));
+        // Memory accounting off reports u64::MAX.
+        let s = parse_unit_show("MemoryCurrent=18446744073709551615\n");
+        assert_eq!(s.memory_bytes, None);
+        assert_eq!(s.sub_state, "?");
+    }
+
+    #[test]
+    fn boot_relative_timestamps() {
+        // Booted 1000 s ago; unit went active 100 s after boot → 900 s ago.
+        assert_eq!(boot_relative_to_unix(100_000_000, 10_000, 1000.0), 9_100);
+        // Clock skew never yields a future timestamp.
+        assert_eq!(boot_relative_to_unix(2_000_000_000, 10_000, 1000.0), 10_000);
+    }
+
+    #[test]
+    fn dpkg_versions_shortened() {
+        let out = "nginx\t1.26.3-3+deb13u1\nmariadb-server\t1:11.8.3-0+deb13u1\n\
+                   postgresql\t17+278\nvsftpd\t\nphp8.3-fpm\t8.3.25-1+0~20250904.62+debian13~1.gbp\n";
+        let m = parse_dpkg_versions(out);
+        assert_eq!(m["nginx"], "1.26.3");
+        assert_eq!(m["mariadb-server"], "11.8.3");
+        assert_eq!(m["postgresql"], "17");
+        assert_eq!(m["php8.3-fpm"], "8.3.25");
+        // A known-but-not-installed package prints an empty version.
+        assert!(!m.contains_key("vsftpd"));
+        assert_eq!(unit_package("mariadb"), Some("mariadb-server"));
+        assert_eq!(unit_package("php8.4-fpm"), Some("php8.4-fpm"));
+        assert_eq!(unit_package("hyperion-agent"), None);
     }
 
     /// strip_ansi must remove the colour codes systemctl sometimes

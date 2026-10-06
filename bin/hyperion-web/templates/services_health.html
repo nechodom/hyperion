@@ -4,6 +4,12 @@
 <div class="svc-row">
   <div class="svc-main">
     <div class="svc-title"><strong>{{ r.label }}</strong> <code class="text-soft">{{ r.name }}</code></div>
+    {% if !r.facts.is_empty() || r.restarts.is_some() %}
+    <div class="svc-facts small">
+      {% for f in r.facts %}<span>{{ f }}</span>{% endfor %}
+      {% if let Some(rs) = r.restarts %}<span class="warn" title="systemd restarted it on its own (NRestarts)">{{ rs }}</span>{% endif %}
+    </div>
+    {% endif %}
     {% if let Some(n) = r.note %}<div class="text-soft small">{{ n }}</div>{% endif %}
   </div>
   <span class="pill {{ r.tone }}">{{ r.status }}</span>
