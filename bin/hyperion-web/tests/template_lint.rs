@@ -336,7 +336,7 @@ fn every_page_is_reachable_from_the_nav() {
         "certs.html",
         "jobs_list.html",
         "profile.html",
-        "services.html",
+        "services_health.html",
         "stats.html",
         "audit.html",
         "install.html",

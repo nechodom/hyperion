@@ -27482,6 +27482,68 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(())
     }
 
+    /// `systemctl start|stop|enable|disable <name>` on a whitelisted unit.
+    pub async fn service_control(&self, name: String, action: String) -> Result<(), RpcError> {
+        service_control_allowed(&name, &action)
+            .map_err(|message| RpcError::Validation { message })?;
+        Self::service_whitelist_for(&name, false).ok_or_else(|| RpcError::Validation {
+            message: format!("service `{name}` is not on the services whitelist"),
+        })?;
+        let out = tokio::process::Command::new("/usr/bin/systemctl")
+            .args([action.as_str(), name.as_str()])
+            .output()
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("systemctl: {e}")))?;
+        let outcome = if out.status.success() { "ok" } else { "failed" };
+        self.append_audit(
+            &format!("service.{action}"),
+            None,
+            &serde_json::json!({"name": name}).to_string(),
+            outcome,
+        )
+        .await;
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+            return Err(RpcError::Internal_with(format!(
+                "systemctl {action} {name} failed: {stderr}"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Last `lines` journal lines of a whitelisted unit. Read-only, so the
+    /// agent's own unit is allowed; capped so one request can't pull the
+    /// whole journal over the wire.
+    pub async fn service_journal(&self, name: String, lines: u32) -> Result<String, RpcError> {
+        Self::service_whitelist_for(&name, true).ok_or_else(|| RpcError::Validation {
+            message: format!("service `{name}` is not on the services whitelist"),
+        })?;
+        let n = lines.clamp(1, 500).to_string();
+        let run = tokio::process::Command::new("journalctl")
+            .args([
+                "-u",
+                name.as_str(),
+                "-n",
+                n.as_str(),
+                "--no-pager",
+                "-o",
+                "short-iso",
+            ])
+            .kill_on_drop(true)
+            .output();
+        let out = tokio::time::timeout(std::time::Duration::from_secs(10), run)
+            .await
+            .map_err(|_| RpcError::Internal_with("journalctl timed out after 10 s".into()))?
+            .map_err(|e| RpcError::Internal_with(format!("journalctl: {e}")))?;
+        if !out.status.success() {
+            return Err(RpcError::Internal_with(format!(
+                "journalctl failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            )));
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    }
+
     /// Apply per-section updates to agent.toml on disk. Operator
     /// still needs to `systemctl restart hyperion-agent` for the
     /// running daemon to pick up the new values — the UI reminds
@@ -47813,5 +47875,46 @@ mod tests {
             "uptime",
             "left out only where every report-selling plan leaves it out"
         );
+    }
+}
+
+/// Which `systemctl` verbs the Services page may send, and for which units.
+/// Stop and disable are refused for the panel's own path — nginx serves it,
+/// hyperion-web renders it, hyperion-agent carries the order — because
+/// either leaves the operator locked out with no button to undo it.
+pub(crate) fn service_control_allowed(name: &str, action: &str) -> Result<(), String> {
+    if !matches!(action, "start" | "stop" | "enable" | "disable") {
+        return Err(format!("unknown service action `{action}`"));
+    }
+    let core = matches!(name, "nginx" | "hyperion-web" | "hyperion-agent");
+    if core && matches!(action, "stop" | "disable") {
+        return Err(format!(
+            "refusing to {action} `{name}` from the panel — it would cut off access to the panel itself; use SSH"
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod service_control_tests {
+    use super::service_control_allowed;
+
+    #[test]
+    fn core_units_cannot_be_stopped_or_disabled() {
+        for unit in ["nginx", "hyperion-web", "hyperion-agent"] {
+            assert!(service_control_allowed(unit, "stop").is_err());
+            assert!(service_control_allowed(unit, "disable").is_err());
+        }
+        assert!(service_control_allowed("nginx", "start").is_ok());
+        assert!(service_control_allowed("nginx", "enable").is_ok());
+        assert!(service_control_allowed("postfix", "stop").is_ok());
+        assert!(service_control_allowed("postfix", "disable").is_ok());
+    }
+
+    #[test]
+    fn only_four_verbs() {
+        for bad in ["restart", "mask", "kill", "", "start; reboot"] {
+            assert!(service_control_allowed("postfix", bad).is_err(), "{bad}");
+        }
     }
 }

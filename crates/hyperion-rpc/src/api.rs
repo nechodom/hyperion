@@ -440,6 +440,10 @@ pub trait AgentApi: Send + Sync + 'static {
 
     /// Restart a whitelisted systemd unit.
     async fn service_restart(&self, name: String) -> Result<(), RpcError>;
+    /// start / stop / enable / disable a whitelisted unit.
+    async fn service_control(&self, name: String, action: String) -> Result<(), RpcError>;
+    /// Recent journal lines for a whitelisted unit.
+    async fn service_journal(&self, name: String, lines: u32) -> Result<String, RpcError>;
     /// apt-install + enable a whitelisted unit. Returns immediately;
     /// poll `service_install_status` for the log tail.
     async fn service_install(&self, name: String) -> Result<(), RpcError>;

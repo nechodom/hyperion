@@ -79,6 +79,12 @@ pub(crate) struct SvcRow {
     pub problem: bool,
     pub can_restart: bool,
     pub can_install: bool,
+    pub can_start: bool,
+    /// Stop / disable are never offered for core units: the agent refuses
+    /// them (it would lock the operator out of the panel).
+    pub can_stop: bool,
+    pub can_enable: bool,
+    pub can_disable: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -165,6 +171,7 @@ fn row_for(s: &hyperion_types::ServiceHealth, now: i64) -> SvcRow {
         None
     };
     let own = s.name == "hyperion-agent" || s.name == "hyperion-web";
+    let controllable = s.present && !masked && s.name != "hyperion-agent";
     SvcRow {
         name: s.name.clone(),
         label: s.label.clone(),
@@ -179,9 +186,13 @@ fn row_for(s: &hyperion_types::ServiceHealth, now: i64) -> SvcRow {
             .map(|n| format!("restarted {n}×")),
         problem,
         // Restarting the agent would cut the very RPC pipe carrying the order.
-        can_restart: s.present && s.name != "hyperion-agent",
+        can_restart: s.present && s.active && s.name != "hyperion-agent",
         // The panel's own units are this binary — nothing for apt to install.
         can_install: !s.present && !own,
+        can_start: controllable && !s.active,
+        can_stop: controllable && s.active && !core,
+        can_enable: controllable && !s.enabled,
+        can_disable: controllable && s.enabled && !core,
     }
 }
 
@@ -577,6 +588,9 @@ fn label_for_node(current: &str, nodes: &[NodeSummary]) -> String {
 #[derive(Deserialize)]
 pub struct ServiceActionForm {
     pub name: String,
+    /// "unit" to come back to the unit page, else the list.
+    #[serde(default)]
+    pub back: String,
     /// Target node ("" / "local" / node_id). Same convention as
     /// the GET handler.
     #[serde(default)]
@@ -606,6 +620,11 @@ pub async fn post_service_restart(
     )
     .await?;
     let dest = match resp {
+        RpcResponse::ServiceRestart if form.back == "unit" => format!(
+            "/services/unit?{}name={}&flash=Service+restarted",
+            query_node_prefix(target),
+            urlencode(&form.name),
+        ),
         RpcResponse::ServiceRestart => format!(
             "/services?{}flash=Service+{}+restarted",
             query_node_prefix(target),
@@ -617,6 +636,221 @@ pub async fn post_service_restart(
             urlencode(&e.to_string()),
         ),
         _ => return Err(AppError::Internal("unexpected response".into())),
+    };
+    Ok(Redirect::to(&dest).into_response())
+}
+
+#[derive(Template)]
+#[template(path = "services_unit.html")]
+struct ServiceUnitTpl<'a> {
+    username: &'a str,
+    user_initial: char,
+    active: &'static str,
+    css_version: &'static str,
+    htmx_version: &'static str,
+    row: SvcRow,
+    /// Journal tail; `Err` carries why it could not be read.
+    journal: Result<String, String>,
+    lines: u32,
+    flash: Option<String>,
+    flash_error: Option<String>,
+    is_super_admin: bool,
+    csrf_token: String,
+    current_node: String,
+    current_label: String,
+    /// Whether the cluster has workers (shows the "All nodes" crumb).
+    clustered: bool,
+}
+
+#[derive(Deserialize, Default)]
+pub struct UnitQuery {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    node: Option<String>,
+    #[serde(default)]
+    lines: Option<u32>,
+    #[serde(default)]
+    flash: Option<String>,
+    #[serde(default)]
+    flash_error: Option<String>,
+}
+
+/// Phrase an agent error for the operator; an agent from before this RPC
+/// existed rejects the method name, which reads as gibberish otherwise.
+fn agent_error_text(e: &str) -> String {
+    if e.contains("unknown variant") {
+        "This node's agent is too old for that — update the node first.".into()
+    } else {
+        e.to_string()
+    }
+}
+
+/// GET /services/unit?node=…&name=… — one unit: status, every control,
+/// and the journal tail.
+pub async fn get_service_unit(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Query(q): Query<UnitQuery>,
+) -> Result<Response, AppError> {
+    if !ctx.can(Capability::ServicesView) {
+        return Ok(Redirect::to("/?flash_error=admin+role+required").into_response());
+    }
+    let target = match q.node.as_deref() {
+        None | Some("") | Some("local") => None,
+        Some(s) => Some(s),
+    };
+    let lines = q.lines.unwrap_or(100).clamp(20, 500);
+    // Journals can carry anything a service logs; keep them to the role that
+    // can also act on the unit.
+    let want_journal = ctx.is_super_admin();
+    let journal_req = Request::ServiceJournal {
+        name: q.name.clone(),
+        lines,
+    };
+    let (health, journal, nodes) = tokio::join!(
+        crate::dispatcher::dispatch_to_node(&state, target, Request::ServicesHealth),
+        async {
+            if want_journal {
+                Some(crate::dispatcher::dispatch_to_node(&state, target, journal_req).await)
+            } else {
+                None
+            }
+        },
+        fetch_node_list(&state),
+    );
+    let nodes = nodes.unwrap_or_default();
+    let back = format!(
+        "/services?{}",
+        query_node_prefix(target).trim_end_matches('&')
+    );
+    let health = match health {
+        Ok(RpcResponse::ServicesHealth(h)) => h,
+        Ok(RpcResponse::Error(e)) => {
+            return Ok(
+                Redirect::to(&format!("{back}&flash_error={}", urlencode(&e.to_string())))
+                    .into_response(),
+            )
+        }
+        Ok(_) => return Err(AppError::Internal("unexpected response".into())),
+        Err(e) => {
+            return Ok(
+                Redirect::to(&format!("{back}&flash_error={}", urlencode(&e.to_string())))
+                    .into_response(),
+            )
+        }
+    };
+    let now = hyperion_types::now_secs();
+    let Some(row) = health
+        .services
+        .iter()
+        .find(|s| s.name == q.name)
+        .map(|s| row_for(s, now))
+    else {
+        return Ok(Redirect::to(&format!(
+            "{back}&flash_error={}",
+            urlencode(&format!("No service `{}` is tracked on that node.", q.name))
+        ))
+        .into_response());
+    };
+    let journal = match journal {
+        None => Err("Logs are visible to super-admins only.".into()),
+        Some(Ok(RpcResponse::ServiceJournal { text })) => Ok(text),
+        Some(Ok(RpcResponse::Error(e))) => Err(agent_error_text(&e.to_string())),
+        Some(Ok(_)) => Err("unexpected agent response".into()),
+        Some(Err(e)) => Err(agent_error_text(&e.to_string())),
+    };
+    let current_node = match target {
+        None => String::new(),
+        Some(s) => s.to_string(),
+    };
+    let current_label = label_for_node(&current_node, &nodes);
+    let tpl = ServiceUnitTpl {
+        username: &ctx.username,
+        user_initial: super::user_initial(&ctx.username),
+        active: "services",
+        css_version: super::css_version(),
+        htmx_version: super::htmx_version(),
+        row,
+        journal,
+        lines,
+        flash: q.flash,
+        flash_error: q.flash_error,
+        is_super_admin: ctx.is_super_admin(),
+        csrf_token: super::session_csrf_token(&state, &ctx),
+        current_node,
+        current_label,
+        clustered: !nodes.is_empty(),
+    };
+    Ok(Html(tpl.render()?).into_response())
+}
+
+#[derive(Deserialize)]
+pub struct ServiceControlForm {
+    pub name: String,
+    #[serde(default)]
+    pub node: String,
+    /// start | stop | enable | disable — the agent re-checks.
+    pub action: String,
+    /// "unit" to come back to the unit page, else the list.
+    #[serde(default)]
+    pub back: String,
+}
+
+/// POST /services/control — super_admin only.
+pub async fn post_service_control(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<ServiceControlForm>,
+) -> Result<Response, AppError> {
+    if !ctx.is_super_admin() {
+        return Ok(Redirect::to("/").into_response());
+    }
+    let target = if form.node.is_empty() || form.node == crate::dispatcher::LOCAL_NODE_SENTINEL {
+        None
+    } else {
+        Some(form.node.as_str())
+    };
+    let resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        target,
+        Request::ServiceControl {
+            name: form.name.clone(),
+            action: form.action.clone(),
+        },
+    )
+    .await;
+    let base = if form.back == "unit" {
+        format!(
+            "/services/unit?{}name={}&",
+            query_node_prefix(target),
+            urlencode(&form.name)
+        )
+    } else {
+        format!("/services?{}", query_node_prefix(target))
+    };
+    let done = match form.action.as_str() {
+        "start" => "started",
+        "stop" => "stopped",
+        "enable" => "set+to+start+at+boot",
+        "disable" => "set+not+to+start+at+boot",
+        _ => "updated",
+    };
+    let dest = match resp {
+        Ok(RpcResponse::ServiceControl) => {
+            format!("{base}flash=Service+{}+{done}", urlencode(&form.name))
+        }
+        Ok(RpcResponse::Error(e)) => format!(
+            "{base}flash_error={}",
+            urlencode(&agent_error_text(&e.to_string()))
+        ),
+        // A worker on an older agent can reject the unknown method before
+        // it reaches the dispatcher; land on the page with the reason.
+        Err(e) => format!(
+            "{base}flash_error={}",
+            urlencode(&agent_error_text(&e.to_string()))
+        ),
+        Ok(_) => return Err(AppError::Internal("unexpected response".into())),
     };
     Ok(Redirect::to(&dest).into_response())
 }
@@ -1283,5 +1517,47 @@ mod tests {
         // actions must land back on the master's detail page.
         assert_eq!(query_node_prefix(None), "node=local&");
         assert_eq!(query_node_prefix(Some("w1")), "node=w1&");
+    }
+    #[test]
+    fn control_buttons_follow_state_and_protect_core_units() {
+        let mut stopped = svc("postfix", true, false, "inactive");
+        stopped.enabled = false;
+        let running = svc("mariadb", true, true, "active");
+        let nginx = svc("nginx", true, true, "active");
+        let agent = svc("hyperion-agent", true, true, "active");
+        let mut masked = svc("redis-server", true, false, "inactive");
+        masked.sub_state = "masked".into();
+        let v = build_view(
+            &health(vec![stopped, running, nginx, agent, masked]),
+            false,
+            0,
+        );
+        let r = |n: &str| {
+            v.core
+                .iter()
+                .chain(v.optional.iter())
+                .find(|r| r.name == n)
+                .unwrap()
+                .clone()
+        };
+        let p = r("postfix");
+        assert!(p.can_start && p.can_enable && !p.can_stop && !p.can_restart);
+        let m = r("mariadb");
+        assert!(m.can_stop && m.can_restart && m.can_disable && !m.can_start);
+        let n = r("nginx");
+        assert!(n.can_restart && !n.can_stop && !n.can_disable);
+        let a = r("hyperion-agent");
+        assert!(!a.can_restart && !a.can_stop && !a.can_start && !a.can_disable);
+        let rd = r("redis-server");
+        assert!(!rd.can_start && !rd.can_enable);
+    }
+
+    #[test]
+    fn old_agent_rejection_reads_as_update_hint() {
+        assert!(
+            agent_error_text("invalid request: unknown variant `service_control`")
+                .contains("update the node")
+        );
+        assert_eq!(agent_error_text("boom"), "boom");
     }
 }
