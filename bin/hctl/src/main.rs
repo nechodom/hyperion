@@ -1312,6 +1312,14 @@ fn print_pretty(resp: &Response) {
                 );
             }
         }
+        Response::HostingWafActivity(a) => {
+            for c in &a.totals_24h {
+                println!("{:<18} {:>6} (24h)", c.rule, c.hits);
+            }
+            for h in &a.recent {
+                println!("{}  {:<15} {:<16} {} {}", h.ts, h.ip, h.rule, h.method, h.uri);
+            }
+        }
         Response::NetHistory(h) => {
             println!("net samples: {}", h.samples.len());
             if let Some(s) = h.samples.last() {

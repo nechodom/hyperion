@@ -345,8 +345,9 @@ pub struct PackageFeatures {
     /// RPC.
     #[serde(default)]
     pub monitoring: FeatureToggle,
-    /// WAF-lite + wp-admin lock — `hostings.waf_enabled`, set via the
-    /// vhost-options RPC.
+    /// The per-site WAF: Enable puts it on Standard (or keeps a stricter
+    /// level), Disable turns it off — `hostings.waf_level`, set via the
+    /// vhost-options RPC. The wp-admin lock is never a package's to set.
     #[serde(default)]
     pub hardening: FeatureToggle,
     /// Recurring backups — `hosting_kv` `backup_cadence` on the owning

@@ -259,6 +259,11 @@ pub enum Request {
     HostingKvList {
         hosting_id: String,
     },
+    /// What the WAF refused on one hosting (totals + recent refusals),
+    /// answered by the owning node from its own hit records.
+    HostingWafActivity {
+        hosting_id: String,
+    },
     UpcomingExpiries {
         within_seconds: i64,
     },
@@ -1981,6 +1986,7 @@ pub enum Response {
     HostingClearExpiry,
     HostingKvSet,
     HostingKvList(Vec<(String, String)>),
+    HostingWafActivity(hyperion_types::waf::WafActivity),
     UpcomingExpiries(Vec<ExpiringHosting>),
     SchedulerTick {
         actions_processed: i64,

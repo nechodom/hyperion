@@ -97,6 +97,7 @@ pub struct Fail2banSection {
     pub ssh_threshold: u32,
     pub ftp_threshold: u32,
     pub mail_threshold: u32,
+    pub waf_threshold: u32,
 }
 
 impl Default for Fail2banSection {
@@ -111,6 +112,7 @@ impl Default for Fail2banSection {
             ssh_threshold: 8,
             ftp_threshold: 8,
             mail_threshold: 8,
+            waf_threshold: 20,
         }
     }
 }

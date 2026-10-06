@@ -258,6 +258,22 @@ struct DetailTpl<'a> {
     /// Built server-side so the list of families lives in ONE place — the
     /// renderer that turns them into nginx patterns.
     bot_families: Vec<(&'static str, &'static str, &'static str, bool)>,
+    /// The WAF level this site runs (`off` | `standard` | `strict`).
+    waf_level: &'static str,
+    /// One row per catalogue rule that applies to this hosting's kind.
+    waf_rules: Vec<WafRuleRow>,
+    /// Any rule pinned on or off — opens the rules fold so a pin is never
+    /// hidden behind a level that seems to say otherwise.
+    waf_has_pins: bool,
+    /// What the WAF actually does here, for the pills ("WAF standard",
+    /// "WAF off", "WAF off · 2 rules pinned on").
+    waf_summary: String,
+    /// At least one rule is rendered.
+    waf_on: bool,
+    /// Whether this kind's vhost renders the Protection card at all. A
+    /// reverse proxy and a redirect have their own nginx templates with no
+    /// WAF, bot, country, admin-lock or sign-up rules in them.
+    protection_applies: bool,
     /// Whether `redis-cache` is present. Enabling Redis writes the wp-config
     /// constants and changes nothing observable until that plugin exists, so
     /// the card offers to install it rather than leaving the gap in prose.
@@ -1519,6 +1535,9 @@ pub async fn post_create(
             let staging_domain_default = format!("staging.{}", detail.domain);
             let preview_domain = compute_preview_domain(&state, target, &detail.domain).await;
             let mem_auto = PhpMemAutoView::from_kv(&[], limits.php_memory_mb);
+            let waf_level = detail.vhost_options.effective_waf_level().as_str();
+            let waf_rules = waf_rule_rows(&detail.vhost_options, detail.php_version.is_some());
+            let protection_applies = protection_applies(&detail.kind);
             let workers_full = PhpWorkersView::from_kv(&[], 0);
             let tpl = DetailTpl {
                 username: &ctx.username,
@@ -1618,6 +1637,12 @@ pub async fn post_create(
                 // so claim installed to keep the prompt off a page that
                 // cannot know either way.
                 bot_families: bot_family_rows(""),
+                waf_has_pins: waf_rules.iter().any(|r| !r.pin.is_empty()),
+                waf_summary: waf_summary(waf_level, &waf_rules),
+                waf_on: waf_rules.iter().any(|r| r.effective),
+                protection_applies,
+                waf_level,
+                waf_rules,
                 redis_plugin_installed: true,
                 email_log: vec![],
                 site_emails: vec![],
@@ -2586,6 +2611,9 @@ pub async fn get_detail(
         _ => Vec::new(),
     };
     let bot_families = bot_family_rows(&detail.vhost_options.blocked_bots);
+    let waf_level = detail.vhost_options.effective_waf_level().as_str();
+    let waf_rules = waf_rule_rows(&detail.vhost_options, detail.php_version.is_some());
+    let protection_applies = protection_applies(&detail.kind);
     // Every name nginx serves for this hosting, checked against what the
     // certificate actually carries. Wildcards are matched with the SAME rule
     // the certificate validator uses, so a `*.example.cz` cert is not reported
@@ -2729,6 +2757,12 @@ pub async fn get_detail(
         monitor_config,
         monitor_history,
         bot_families,
+        waf_has_pins: waf_rules.iter().any(|r| !r.pin.is_empty()),
+        waf_summary: waf_summary(waf_level, &waf_rules),
+        waf_on: waf_rules.iter().any(|r| r.effective),
+        protection_applies,
+        waf_level,
+        waf_rules,
         // `wp plugin list` reports the folder slug; redis-cache is the
         // wordpress.org slug and the folder name both.
         redis_plugin_installed: wp_plugins.plugins.iter().any(|p| p.slug == "redis-cache"),
@@ -4085,8 +4119,11 @@ pub struct VhostOptionsForm {
     force_https: Option<String>,
     #[serde(default)]
     hsts_max_age: i64,
+    /// Absent when the card was rendered for someone without the raw-nginx
+    /// capability (the textarea is not on the page at all) — that means
+    /// "leave it", not "set it to empty".
     #[serde(default)]
-    custom_nginx_snippet: String,
+    custom_nginx_snippet: Option<String>,
     #[serde(default)]
     maintenance_mode: Option<String>,
     #[serde(default)]
@@ -4099,12 +4136,55 @@ pub struct VhostOptionsForm {
     redirect_code: i64,
     #[serde(default)]
     redirect_preserve_path: Option<String>,
+    /// Which card posted: `protection`, `vhost`, or empty for a caller that
+    /// sends every field at once. A card's save only changes that card's
+    /// fields — the rest come from what is stored, so saving HTTPS never
+    /// resets the WAF and the reverse.
+    #[serde(default)]
+    section: String,
+    /// Legacy single switch; only read when `waf_level` is absent.
     #[serde(default)]
     waf_enabled: Option<String>,
-    signup_limit_enabled: Option<String>,
-    /// One entry per ticked family; axum's Form gives us every value.
     #[serde(default)]
-    blocked_bots: Vec<String>,
+    waf_level: String,
+    // One select per catalogue rule: "" (follow the level), "on", "off".
+    // Fixed fields, not a map: they are the whole catalogue, and a fixed
+    // field cannot smuggle an unknown rule id into the stored JSON.
+    #[serde(default)]
+    waf_rule_probe_args: String,
+    #[serde(default)]
+    waf_rule_scanner_ua: String,
+    #[serde(default)]
+    waf_rule_xmlrpc: String,
+    #[serde(default)]
+    waf_rule_sensitive_files: String,
+    #[serde(default)]
+    waf_rule_dump_files: String,
+    #[serde(default)]
+    waf_rule_php_in_uploads: String,
+    #[serde(default)]
+    waf_rule_dotfiles: String,
+    #[serde(default)]
+    waf_rule_author_enum: String,
+    #[serde(default)]
+    waf_rule_rest_user_enum: String,
+    #[serde(default)]
+    waf_rule_bad_methods: String,
+    #[serde(default)]
+    waf_rule_empty_ua: String,
+    #[serde(default)]
+    signup_limit_enabled: Option<String>,
+    // One checkbox per bot family. NOT a repeated `blocked_bots` key:
+    // axum's urlencoded Form cannot collect repeated keys into a Vec and
+    // answered every save with a ticked family with a 422.
+    #[serde(default)]
+    bot_ai: Option<String>,
+    #[serde(default)]
+    bot_social: Option<String>,
+    #[serde(default)]
+    bot_seo: Option<String>,
+    #[serde(default)]
+    bot_shopping: Option<String>,
     /// Comma-separated ISO codes from the text field.
     #[serde(default)]
     blocked_countries: Option<String>,
@@ -4112,6 +4192,87 @@ pub struct VhostOptionsForm {
     wp_admin_allowlist: String,
     #[serde(default)]
     canonical_host: String,
+}
+
+impl VhostOptionsForm {
+    /// The rule pins the form asks for, as stored JSON.
+    fn waf_overrides(&self) -> String {
+        let mut map = std::collections::BTreeMap::new();
+        for (id, v) in [
+            ("probe_args", &self.waf_rule_probe_args),
+            ("scanner_ua", &self.waf_rule_scanner_ua),
+            ("xmlrpc", &self.waf_rule_xmlrpc),
+            ("sensitive_files", &self.waf_rule_sensitive_files),
+            ("dump_files", &self.waf_rule_dump_files),
+            ("php_in_uploads", &self.waf_rule_php_in_uploads),
+            ("dotfiles", &self.waf_rule_dotfiles),
+            ("author_enum", &self.waf_rule_author_enum),
+            ("rest_user_enum", &self.waf_rule_rest_user_enum),
+            ("bad_methods", &self.waf_rule_bad_methods),
+            ("empty_ua", &self.waf_rule_empty_ua),
+        ] {
+            match v.trim() {
+                "on" => {
+                    map.insert(id.to_string(), true);
+                }
+                "off" => {
+                    map.insert(id.to_string(), false);
+                }
+                _ => {}
+            }
+        }
+        hyperion_types::waf::overrides_to_string(&map)
+    }
+
+    /// Copy the Protection card's fields onto `options`.
+    fn apply_protection(&self, options: &mut hyperion_types::VhostOptions) {
+        match hyperion_types::waf::WafLevel::parse(&self.waf_level) {
+            // Through `set_waf_level`, so the legacy bool moves with the
+            // level: a node that predates the rework reads only the bool.
+            Some(level) => {
+                options.set_waf_level(level);
+                options.waf_overrides = self.waf_overrides();
+            }
+            None if self.waf_level.trim().is_empty() => {
+                // A caller that only knows the old switch: the service keeps
+                // the stored level and pins while the switch agrees with them.
+                options.waf_level = String::new();
+                options.waf_enabled = checkbox_on(&self.waf_enabled);
+                options.waf_overrides = String::new();
+            }
+            // Unknown value: passed on for the service to refuse by name.
+            None => options.waf_level = self.waf_level.trim().to_string(),
+        }
+        options.signup_limit_enabled = checkbox_on(&self.signup_limit_enabled);
+        options.blocked_bots = self.blocked_bots();
+        // Sanitized again in the renderer, but rejecting non-codes here too
+        // means the DB never stores something the vhost would drop — the
+        // saved value and the applied value stay the same thing.
+        options.blocked_countries = self
+            .blocked_countries
+            .as_deref()
+            .unwrap_or("")
+            .split(',')
+            .map(|c| c.trim().to_ascii_uppercase())
+            .filter(|c| c.len() == 2 && c.bytes().all(|b| b.is_ascii_uppercase()))
+            .collect::<Vec<_>>()
+            .join(",");
+        options.wp_admin_allowlist = self.wp_admin_allowlist.trim().to_string();
+    }
+
+    fn blocked_bots(&self) -> String {
+        [
+            ("ai", &self.bot_ai),
+            ("social", &self.bot_social),
+            ("seo", &self.bot_seo),
+            ("shopping", &self.bot_shopping),
+        ]
+        .into_iter()
+        .filter(|(_, v)| checkbox_on(v))
+        .map(|(f, _)| f)
+        .collect::<Vec<_>>()
+        .join(",")
+    }
 }
 
 fn checkbox_on(v: &Option<String>) -> bool {
@@ -4146,14 +4307,44 @@ pub async fn post_vhost_options(
     // other vhost setting, so dropping the submitted value would let a
     // tenant WIPE an admin's snippet by saving an unrelated checkbox.
     // Only an actual attempt to CHANGE it is an error.
-    let stored_snippet = find_hosting_anywhere(&state, sel.clone())
-        .await
-        .map(|(d, _)| d.vhost_options.custom_nginx_snippet)
-        .unwrap_or_default();
-    let custom_nginx_snippet = if ctx.can(Capability::HostingEditNginxRaw) {
-        form.custom_nginx_snippet
-    } else {
-        if form.custom_nginx_snippet.trim() != stored_snippet.trim() {
+    let section = form.section.trim();
+    let (save_vhost, save_protection) = match section {
+        "vhost" => (true, false),
+        "protection" => (false, true),
+        _ => (true, true),
+    };
+    // Every save starts from what is stored, and a card's save only
+    // overwrites its own fields. A per-card save therefore NEEDS the stored
+    // options: falling back to defaults would reset the other card.
+    let stored = match find_hosting_anywhere(&state, sel.clone()).await {
+        Ok((d, _)) => d.vhost_options,
+        Err(e) if section.is_empty() => {
+            tracing::debug!(error = %e, "vhost-options: stored lookup failed; full-form save");
+            hyperion_types::VhostOptions::default()
+        }
+        Err(e) => return Err(e),
+    };
+    let mut options = stored.clone();
+    // The service decides from the password + what exists.
+    options.basic_auth_set = false;
+    if save_vhost {
+        // The raw nginx snippet is spliced verbatim into a config that root
+        // loads, so it is gated on its OWN capability rather than travelling
+        // with the rest of the hosting settings — see HostingEditNginxRaw.
+        //
+        // A caller without it keeps whatever is stored instead of being
+        // refused outright: the field ships inside the same form as every
+        // other vhost setting, so dropping the submitted value would let a
+        // tenant WIPE an admin's snippet by saving an unrelated checkbox.
+        // Only an actual attempt to CHANGE it is an error.
+        // A form without the field at all — the card hides the textarea
+        // from anyone without the capability — changes nothing either:
+        // treating the missing field as "" refused every save such a user
+        // made on a site whose admin had written a snippet.
+        let submitted_snippet = form.custom_nginx_snippet.as_deref();
+        if !ctx.can(Capability::HostingEditNginxRaw)
+            && submitted_snippet.is_some_and(|v| v.trim() != stored.custom_nginx_snippet.trim())
+        {
             return Ok((
                 axum::http::StatusCode::FORBIDDEN,
                 [("content-type", "text/html; charset=utf-8")],
@@ -4164,49 +4355,25 @@ pub async fn post_vhost_options(
             )
                 .into_response());
         }
-        stored_snippet
-    };
-    let options = hyperion_types::VhostOptions {
-        basic_auth_enabled: checkbox_on(&form.basic_auth_enabled),
-        basic_auth_user: form.basic_auth_user.trim().to_string(),
-        basic_auth_set: false, // service decides — based on pw + existing
-        force_https: checkbox_on(&form.force_https),
-        hsts_max_age: form.hsts_max_age,
-        custom_nginx_snippet,
-        maintenance_mode: checkbox_on(&form.maintenance_mode),
-        fastcgi_cache_enabled: checkbox_on(&form.fastcgi_cache_enabled),
-        fastcgi_cache_ttl: form.fastcgi_cache_ttl,
-        redirect_url: form.redirect_url.trim().to_string(),
-        redirect_code: form.redirect_code,
-        redirect_preserve_path: checkbox_on(&form.redirect_preserve_path),
-        waf_enabled: checkbox_on(&form.waf_enabled),
-        signup_limit_enabled: checkbox_on(&form.signup_limit_enabled),
-        // Only the families the renderer knows — anything else is dropped
-        // rather than persisted, so an edited form cannot smuggle a pattern
-        // of its own into an nginx regex.
-        blocked_bots: form
-            .blocked_bots
-            .iter()
-            .map(|f| f.trim())
-            .filter(|f| matches!(*f, "ai" | "social" | "seo" | "shopping"))
-            .collect::<Vec<_>>()
-            .join(","),
-        // Sanitized again in the renderer, but rejecting non-codes here too
-        // means the DB never stores something the vhost would drop — the
-        // saved value and the applied value stay the same thing.
-        blocked_countries: form
-            .blocked_countries
-            .as_deref()
-            .unwrap_or("")
-            .split(',')
-            .map(|c| c.trim().to_ascii_uppercase())
-            .filter(|c| c.len() == 2 && c.bytes().all(|b| b.is_ascii_uppercase()))
-            .collect::<Vec<_>>()
-            .join(","),
-        wp_admin_allowlist: form.wp_admin_allowlist.trim().to_string(),
-        canonical_host: form.canonical_host.trim().to_string(),
-    };
-    let pw_opt = if form.basic_auth_password.is_empty() {
+        if let (true, Some(v)) = (ctx.can(Capability::HostingEditNginxRaw), submitted_snippet) {
+            options.custom_nginx_snippet = v.to_string();
+        }
+        options.basic_auth_enabled = checkbox_on(&form.basic_auth_enabled);
+        options.basic_auth_user = form.basic_auth_user.trim().to_string();
+        options.force_https = checkbox_on(&form.force_https);
+        options.hsts_max_age = form.hsts_max_age;
+        options.maintenance_mode = checkbox_on(&form.maintenance_mode);
+        options.fastcgi_cache_enabled = checkbox_on(&form.fastcgi_cache_enabled);
+        options.fastcgi_cache_ttl = form.fastcgi_cache_ttl;
+        options.redirect_url = form.redirect_url.trim().to_string();
+        options.redirect_code = form.redirect_code;
+        options.redirect_preserve_path = checkbox_on(&form.redirect_preserve_path);
+        options.canonical_host = form.canonical_host.trim().to_string();
+    }
+    if save_protection {
+        form.apply_protection(&mut options);
+    }
+    let pw_opt = if form.basic_auth_password.is_empty() || !save_vhost {
         None
     } else {
         Some(form.basic_auth_password)
@@ -4227,7 +4394,11 @@ pub async fn post_vhost_options(
         RpcResponse::HostingSetVhostOptions(_) => Ok(save_result(
             &headers,
             true,
-            "HTTP & access settings saved.",
+            if save_vhost {
+                "HTTP & access settings saved."
+            } else {
+                "Protection settings saved."
+            },
             format!("/hostings/{sel_url}?vhost_saved=1"),
         )),
         RpcResponse::Error(e) => {
@@ -5806,6 +5977,11 @@ fn save_result(
 
 /// Minimal JSON string encoder for the toast text — quotes + the control
 /// characters a header value must not carry raw.
+///
+/// Pure ASCII out: the text travels in the `HX-Trigger` HEADER, and a
+/// browser reads header bytes as Latin-1, so a raw UTF-8 "—" arrived as
+/// "â\u{80}\u{94}". Everything past ASCII is a `\uXXXX` escape (a surrogate
+/// pair above the BMP), which the client's JSON.parse turns back.
 fn json_string(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
@@ -5816,7 +5992,12 @@ fn json_string(s: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c if (c as u32) < 0x20 || (c as u32) > 0x7e => {
+                let mut units = [0u16; 2];
+                for u in c.encode_utf16(&mut units) {
+                    out.push_str(&format!("\\u{:04x}", u));
+                }
+            }
             c => out.push(c),
         }
     }
@@ -5999,6 +6180,64 @@ fn now_secs_web() -> i64 {
 }
 
 /// The bot families offered in the UI, with whichever are currently on.
+/// One WAF rule on the Protection card.
+pub struct WafRuleRow {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub help: &'static str,
+    /// "Strict" for rules only the Strict level turns on.
+    pub strict_only: bool,
+    /// `""` (follow the level), `"on"` or `"off"`.
+    pub pin: &'static str,
+    /// What nginx actually renders for this site.
+    pub effective: bool,
+    pub counts_for_ban: bool,
+}
+
+/// Hosting kinds whose vhost carries the Protection card's rules. The
+/// reverse-proxy and redirect templates have none of them.
+fn protection_applies(kind: &str) -> bool {
+    !matches!(kind, "reverse_proxy" | "redirect")
+}
+
+/// One phrase for what the WAF does on this site. A level of Off with rules
+/// pinned on still refuses requests, and saying "off" there would hide it.
+fn waf_summary(level: &str, rows: &[WafRuleRow]) -> String {
+    let on = rows.iter().filter(|r| r.effective).count();
+    match level {
+        "off" if on > 0 => format!(
+            "WAF off · {on} rule{} pinned on",
+            if on == 1 { "" } else { "s" }
+        ),
+        "off" => "WAF off".to_string(),
+        other => format!("WAF {other}"),
+    }
+}
+
+fn waf_rule_rows(opts: &hyperion_types::VhostOptions, has_php: bool) -> Vec<WafRuleRow> {
+    use hyperion_types::waf;
+    let level = opts.effective_waf_level();
+    let pins = waf::parse_overrides(&opts.waf_overrides);
+    let eff = waf::effective_rules(level, &pins, has_php);
+    waf::RULES
+        .iter()
+        .filter(|r| has_php || !r.php_only)
+        .map(|r| WafRuleRow {
+            id: r.id,
+            label: r.label,
+            help: r.help,
+            strict_only: r.tier == waf::Tier::Strict,
+            pin: match pins.get(r.id) {
+                Some(true) => "on",
+                Some(false) => "off",
+                None => "",
+            },
+            effective: eff.get(r.id),
+            counts_for_ban: r.counts_for_ban,
+        })
+        .collect()
+}
+
 fn bot_family_rows(selected: &str) -> Vec<(&'static str, &'static str, &'static str, bool)> {
     let on: Vec<&str> = selected.split(',').map(|s| s.trim()).collect();
     [
@@ -6025,6 +6264,120 @@ fn generate_wp_admin_password() -> String {
             CHARSET[i] as char
         })
         .collect()
+}
+
+#[cfg(test)]
+mod waf_form_tests {
+    use super::{waf_rule_rows, VhostOptionsForm};
+
+    fn parse(body: &str) -> VhostOptionsForm {
+        // Through axum's own Form extractor — the thing that 422'd.
+        use axum::extract::FromRequest;
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(axum::body::Body::from(body.to_string()))
+            .expect("request");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("rt");
+        let axum::Form(f) = rt
+            .block_on(axum::Form::<VhostOptionsForm>::from_request(req, &()))
+            .expect("form parses");
+        f
+    }
+
+    /// Several bot families ticked at once used to be a repeated
+    /// `blocked_bots` key, which axum's Form answers with a 422.
+    #[test]
+    fn several_bot_families_parse() {
+        let f = parse("selector=x&section=protection&bot_ai=on&bot_seo=on&waf_level=strict");
+        assert_eq!(f.blocked_bots(), "ai,seo");
+        assert_eq!(f.section, "protection");
+    }
+
+    /// The raw snippet textarea is not on the page for users without the
+    /// capability; its absence must read as "unchanged", not as "".
+    #[test]
+    fn a_missing_snippet_field_is_not_an_empty_snippet() {
+        assert_eq!(parse("selector=x&section=vhost").custom_nginx_snippet, None);
+        assert_eq!(
+            parse("selector=x&section=vhost&custom_nginx_snippet=").custom_nginx_snippet,
+            Some(String::new())
+        );
+    }
+
+    #[test]
+    fn rule_selects_become_pins() {
+        let f = parse("selector=x&waf_level=standard&waf_rule_xmlrpc=off&waf_rule_dotfiles=on&waf_rule_probe_args=");
+        assert_eq!(f.waf_overrides(), r#"{"dotfiles":true,"xmlrpc":false}"#);
+        assert_eq!(parse("selector=x").waf_overrides(), "");
+    }
+
+    /// The legacy bool travels with the level: an older node reads only it.
+    #[test]
+    fn a_chosen_level_carries_the_legacy_bool() {
+        let mut o = hyperion_types::VhostOptions::default();
+        parse("selector=x&section=protection&waf_level=strict").apply_protection(&mut o);
+        assert_eq!(o.waf_level, "strict");
+        assert!(o.waf_enabled);
+        parse("selector=x&section=protection&waf_level=off").apply_protection(&mut o);
+        assert!(!o.waf_enabled);
+        // The old single switch: level left for the service to keep.
+        parse("selector=x&waf_enabled=on").apply_protection(&mut o);
+        assert_eq!(o.waf_level, "");
+        assert!(o.waf_enabled);
+        // An unknown level is passed through for the service to refuse.
+        parse("selector=x&waf_level=paranoid").apply_protection(&mut o);
+        assert_eq!(o.waf_level, "paranoid");
+    }
+
+    /// Toast text rides in a header that browsers decode as Latin-1: it
+    /// must be ASCII, and still decode back to the original text.
+    #[test]
+    fn toast_json_is_ascii_and_round_trips() {
+        let text = "rule 949110 cannot be excluded — “quoted” 😀\n";
+        let json = super::json_string(text);
+        assert!(json.is_ascii(), "{json}");
+        let back: String = serde_json::from_str(&json).expect("valid JSON");
+        assert_eq!(back, text);
+    }
+
+    #[test]
+    fn summary_does_not_say_off_while_pinned_rules_refuse() {
+        let mut o = hyperion_types::VhostOptions::default();
+        assert_eq!(
+            super::waf_summary("off", &waf_rule_rows(&o, true)),
+            "WAF off"
+        );
+        o.waf_overrides = r#"{"dotfiles":true}"#.into();
+        assert_eq!(
+            super::waf_summary("off", &waf_rule_rows(&o, true)),
+            "WAF off · 1 rule pinned on"
+        );
+        assert_eq!(
+            super::waf_summary("strict", &waf_rule_rows(&o, true)),
+            "WAF strict"
+        );
+        assert!(!super::protection_applies("reverse_proxy"));
+        assert!(!super::protection_applies("redirect"));
+        assert!(super::protection_applies("php"));
+    }
+
+    #[test]
+    fn rule_rows_hide_php_rules_for_static_sites_and_show_pins() {
+        let mut o = hyperion_types::VhostOptions::default();
+        o.set_waf_level(hyperion_types::waf::WafLevel::Standard);
+        o.waf_overrides = r#"{"xmlrpc":false}"#.into();
+        let php = waf_rule_rows(&o, true);
+        let x = php.iter().find(|r| r.id == "xmlrpc").expect("xmlrpc");
+        assert_eq!(x.pin, "off");
+        assert!(!x.effective);
+        assert!(php.iter().any(|r| r.id == "php_in_uploads" && r.effective));
+        assert!(!waf_rule_rows(&o, false)
+            .iter()
+            .any(|r| r.id == "php_in_uploads"));
+    }
 }
 
 #[cfg(test)]
@@ -9050,6 +9403,380 @@ pub async fn post_bruteforce_scan(
         ),
     };
     render(enabled, error)
+}
+
+/// One row of the WAF activity totals.
+pub struct WafTotalRow {
+    pub label: &'static str,
+    pub rule: String,
+    pub day: i64,
+    pub week: i64,
+}
+
+/// One refused request in the WAF activity list. Everything but the time
+/// and address is attacker-controlled; askama escapes it on render.
+pub struct WafHitRow {
+    pub ago: String,
+    pub ip: String,
+    pub rule: String,
+    pub label: &'static str,
+    /// Whether "Allow this" can pin the rule off (catalogue rules only —
+    /// a country or bot refusal is changed in its own field).
+    pub pinnable: bool,
+    pub request: String,
+    pub ua: String,
+}
+
+/// WAF activity panel under the Protection card: what was refused, by
+/// which rule, and the per-site auto-ban switch.
+///
+/// The records live on the OWNING node (it reads its own root-owned hit
+/// logs), so both the read and the auto-ban switch travel there — the
+/// master's local tables would be an empty panel on a multi-node cluster.
+#[derive(Template)]
+#[template(path = "_hosting_waf_panel.html")]
+struct WafPanelTpl {
+    selector: String,
+    csrf_token: String,
+    can_edit: bool,
+    totals: Vec<WafTotalRow>,
+    day_total: i64,
+    hits: Vec<WafHitRow>,
+    autoban_enabled: bool,
+    fail2ban_enabled: bool,
+    threshold: u32,
+    window_min: i64,
+    /// Labels of the rules whose refusals count towards a ban, from the
+    /// catalogue — so the copy cannot drift from what the ingest counts.
+    ban_rules: String,
+    error: Option<String>,
+    notice: Option<String>,
+}
+
+fn waf_ban_rule_labels() -> String {
+    hyperion_types::waf::RULES
+        .iter()
+        .filter(|r| r.counts_for_ban)
+        .map(|r| r.label.to_lowercase())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+impl WafPanelTpl {
+    fn from_activity(
+        selector: String,
+        csrf_token: String,
+        can_edit: bool,
+        a: hyperion_types::waf::WafActivity,
+    ) -> Self {
+        use hyperion_types::waf;
+        let mut totals: Vec<WafTotalRow> = a
+            .totals_7d
+            .iter()
+            .map(|w| WafTotalRow {
+                label: waf::label_for(&w.rule),
+                rule: w.rule.clone(),
+                day: a
+                    .totals_24h
+                    .iter()
+                    .find(|d| d.rule == w.rule)
+                    .map(|d| d.hits)
+                    .unwrap_or(0),
+                week: w.hits,
+            })
+            .collect();
+        totals.sort_by(|x, y| y.day.cmp(&x.day).then(y.week.cmp(&x.week)));
+        let hits = a
+            .recent
+            .into_iter()
+            .map(|h| {
+                let mut request = format!("{} {}", h.method, h.uri);
+                if request.len() > 120 {
+                    let mut end = 117;
+                    while !request.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    request.truncate(end);
+                    request.push('…');
+                }
+                WafHitRow {
+                    ago: super::stats::fmt_ago(&h.ts),
+                    label: waf::label_for(&h.rule),
+                    pinnable: waf::rule(&h.rule).is_some(),
+                    rule: h.rule,
+                    ip: h.ip,
+                    request,
+                    ua: h.ua,
+                }
+            })
+            .collect();
+        Self {
+            selector,
+            csrf_token,
+            can_edit,
+            day_total: a.totals_24h.iter().map(|c| c.hits).sum(),
+            totals,
+            hits,
+            autoban_enabled: a.autoban_enabled,
+            fail2ban_enabled: a.fail2ban_enabled,
+            threshold: a.threshold,
+            window_min: (a.window_secs / 60).max(1),
+            ban_rules: waf_ban_rule_labels(),
+            error: None,
+            notice: None,
+        }
+    }
+
+    fn failed(selector: String, csrf_token: String, error: String) -> Self {
+        Self {
+            selector,
+            csrf_token,
+            can_edit: false,
+            totals: vec![],
+            day_total: 0,
+            hits: vec![],
+            autoban_enabled: true,
+            fail2ban_enabled: true,
+            threshold: 0,
+            window_min: 0,
+            ban_rules: waf_ban_rule_labels(),
+            error: Some(error),
+            notice: None,
+        }
+    }
+}
+
+fn waf_panel_error(cause: &str) -> String {
+    format!(
+        "Could not read WAF activity from this site's node ({cause}). A node that runs an \
+         older Hyperion does not record it — update the node if that is the case."
+    )
+}
+
+/// Fetch the activity from the owning node and render the panel. An older
+/// node does not know the request; say so instead of an error page.
+async fn render_waf_panel(
+    state: &SharedState,
+    ctx: &AuthCtx,
+    selector: String,
+    hosting_id: &str,
+    owner: Option<&str>,
+    notice: Option<String>,
+) -> Result<Response, AppError> {
+    let csrf_token = super::session_csrf_token(state, ctx);
+    let can_edit = ctx.can(Capability::HostingEditConfig);
+    let resp = crate::dispatcher::dispatch_to_node(
+        state,
+        owner,
+        Request::HostingWafActivity {
+            hosting_id: hosting_id.to_string(),
+        },
+    )
+    .await;
+    let mut tpl = match resp {
+        Ok(RpcResponse::HostingWafActivity(a)) => {
+            WafPanelTpl::from_activity(selector, csrf_token, can_edit, a)
+        }
+        // An older node cannot even decode the request — it drops the
+        // connection, so there is no message to recognise. Name the likely
+        // cause next to whatever did come back.
+        Ok(RpcResponse::Error(e)) => {
+            WafPanelTpl::failed(selector, csrf_token, waf_panel_error(&e.to_string()))
+        }
+        Ok(_) => WafPanelTpl::failed(selector, csrf_token, waf_panel_error("unexpected response")),
+        Err(e) => WafPanelTpl::failed(selector, csrf_token, waf_panel_error(&e.to_string())),
+    };
+    tpl.notice = notice;
+    Ok(Html(tpl.render()?).into_response())
+}
+
+pub async fn get_waf_panel(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Path(selector): Path<String>,
+) -> Result<Response, AppError> {
+    let sel = parse_selector(&selector)?;
+    let (detail, owner_node) = find_hosting_anywhere(&state, sel).await?;
+    if let Err(r) = require_hosting_access(
+        &state,
+        &ctx,
+        detail.id.as_str(),
+        false,
+        Capability::HostingView,
+    )
+    .await
+    {
+        return Ok(r);
+    }
+    render_waf_panel(
+        &state,
+        &ctx,
+        selector,
+        detail.id.as_str(),
+        owner_node.as_deref(),
+        None,
+    )
+    .await
+}
+
+#[derive(Deserialize)]
+pub struct WafAutobanForm {
+    pub selector: String,
+    /// "on" lets WAF refusals earn a firewall ban; anything else stops it.
+    pub enabled: String,
+}
+
+/// Switch WAF auto-ban for one hosting. Writes the OWNING node's kv (that
+/// is where the ingest reads it), resolved explicitly — see
+/// `post_bruteforce_scan` for why a fallback to the master would lie.
+pub async fn post_waf_autoban(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<WafAutobanForm>,
+) -> Result<Response, AppError> {
+    let sel = match require_manage_for_selector(
+        &state,
+        &ctx,
+        &form.selector,
+        Capability::HostingEditConfig,
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
+    let (detail, owner) = find_hosting_anywhere(&state, sel).await?;
+    let value = if form.enabled.trim() == "on" {
+        "on"
+    } else {
+        "off"
+    };
+    let saved = crate::dispatcher::dispatch_to_node(
+        &state,
+        owner.as_deref(),
+        Request::HostingKvSet {
+            hosting_id: detail.id.as_str().to_string(),
+            key: "waf_autoban_enabled".into(),
+            value: value.into(),
+        },
+    )
+    .await;
+    let notice = match saved {
+        Ok(RpcResponse::HostingKvSet) => None,
+        Ok(RpcResponse::Error(e)) => Some(format!("the owning node refused the change: {e}")),
+        Ok(_) => Some("unexpected response from the owning node".into()),
+        Err(e) => Some(e.to_string()),
+    };
+    render_waf_panel(
+        &state,
+        &ctx,
+        form.selector.clone(),
+        detail.id.as_str(),
+        owner.as_deref(),
+        notice,
+    )
+    .await
+}
+
+#[derive(Deserialize)]
+pub struct WafRuleForm {
+    pub selector: String,
+    /// Catalogue rule id.
+    pub rule: String,
+    /// "on", "off", or "" to follow the level again.
+    #[serde(default)]
+    pub pin: String,
+}
+
+/// Pin one WAF rule from the activity list ("Allow this" = pin off). Goes
+/// through the normal vhost-options save, so it is validated with
+/// `nginx -t` like any other change, then re-renders the panel.
+pub async fn post_waf_rule(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<WafRuleForm>,
+) -> Result<Response, AppError> {
+    let sel = match require_manage_for_selector(
+        &state,
+        &ctx,
+        &form.selector,
+        Capability::HostingEditConfig,
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
+    if hyperion_types::waf::rule(&form.rule).is_none() {
+        return Err(AppError::BadRequest("unknown WAF rule".into()));
+    }
+    let (detail, owner) = find_hosting_anywhere(&state, sel.clone()).await?;
+    let mut options = detail.vhost_options.clone();
+    options.basic_auth_set = false;
+    let mut pins = hyperion_types::waf::parse_overrides(&options.waf_overrides);
+    match form.pin.trim() {
+        "on" => {
+            pins.insert(form.rule.clone(), true);
+        }
+        "off" => {
+            pins.insert(form.rule.clone(), false);
+        }
+        _ => {
+            pins.remove(&form.rule);
+        }
+    }
+    options.waf_overrides = hyperion_types::waf::overrides_to_string(&pins);
+    let level = options.effective_waf_level();
+    options.set_waf_level(level);
+    let resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        owner.as_deref(),
+        Request::HostingSetVhostOptions {
+            sel,
+            options,
+            basic_auth_password: None,
+        },
+    )
+    .await;
+    let label = hyperion_types::waf::label_for(&form.rule);
+    let notice = match resp {
+        // Reload the whole page, not just this panel: the Protection card's
+        // rule selects still hold the old pin, and its next save would put
+        // the rule straight back.
+        Ok(RpcResponse::HostingSetVhostOptions(_)) => {
+            let text = match form.pin.trim() {
+                "off" => format!("\u{201c}{label}\u{201d} is now off for this site."),
+                "on" => format!("\u{201c}{label}\u{201d} is now always on for this site."),
+                _ => format!("\u{201c}{label}\u{201d} follows the level again."),
+            };
+            return Ok((
+                axum::http::StatusCode::NO_CONTENT,
+                [
+                    ("HX-Refresh", "true".to_string()),
+                    (
+                        "HX-Trigger",
+                        format!(
+                            "{{\"toast\":{{\"level\":\"ok\",\"text\":{}}}}}",
+                            json_string(&text)
+                        ),
+                    ),
+                ],
+            )
+                .into_response());
+        }
+        Ok(RpcResponse::Error(e)) => Some(format!("not saved: {e}")),
+        Ok(_) => Some("unexpected response from the owning node".into()),
+        Err(e) => Some(format!("not saved: {e}")),
+    };
+    render_waf_panel(
+        &state,
+        &ctx,
+        form.selector.clone(),
+        detail.id.as_str(),
+        owner.as_deref(),
+        notice,
+    )
+    .await
 }
 
 #[derive(Deserialize)]

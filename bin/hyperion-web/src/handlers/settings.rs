@@ -742,6 +742,7 @@ fn parse_fail2ban_section(raw: &str) -> Option<Fail2banView> {
         ssh_threshold: count("ssh_threshold", d.ssh_threshold),
         ftp_threshold: count("ftp_threshold", d.ftp_threshold),
         mail_threshold: count("mail_threshold", d.mail_threshold),
+        waf_threshold: count("waf_threshold", d.waf_threshold),
     };
     Some(Fail2banView {
         in_toml: table.is_some(),

@@ -286,6 +286,10 @@ pub trait AgentApi: Send + Sync + 'static {
         value: String,
     ) -> Result<(), RpcError>;
     async fn hosting_kv_list(&self, hosting_id: String) -> Result<Vec<(String, String)>, RpcError>;
+    async fn hosting_waf_activity(
+        &self,
+        hosting_id: String,
+    ) -> Result<hyperion_types::waf::WafActivity, RpcError>;
     async fn upcoming_expiries(
         &self,
         within_seconds: i64,

@@ -262,6 +262,18 @@ pub fn build_router(state: SharedState) -> Router {
             get(handlers::hostings::get_bans_panel),
         )
         .route(
+            "/hostings/:selector/waf-panel",
+            get(handlers::hostings::get_waf_panel),
+        )
+        .route(
+            "/hostings/waf-autoban",
+            post(handlers::hostings::post_waf_autoban),
+        )
+        .route(
+            "/hostings/waf-rule",
+            post(handlers::hostings::post_waf_rule),
+        )
+        .route(
             "/hostings/restore-upload",
             post(handlers::hostings::post_restore_upload)
                 .layer(axum::extract::DefaultBodyLimit::max(2 * 1024 * 1024 * 1024)),

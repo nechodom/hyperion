@@ -96,23 +96,15 @@
     {%- endif %}
     server_tokens off;
 
-    {%- if waf_enabled %}
-    # ─── WAF-lite (operator-enabled, Settings → Security) ───
-    # `if` + `return` is one of the two officially-safe uses of `if`
-    # inside a server block. Conservative patterns only — no attempt to
-    # be a full ModSecurity ruleset, which would false-positive on
-    # legitimate WP traffic.
-    # 1. 403 obvious probe query-strings (path traversal, SQLi, RFI).
-    if ($args ~* "(\.\./|\.\.%2f|union(\s|\+|%20)+select|base64_(en|de)code\s*\(|/etc/passwd|\beval\s*\(|<script)") {
-        return 403;
-    }
-    # 2. 403 known scanner / vulnerability-probe user-agents.
-    if ($http_user_agent ~* "(nikto|sqlmap|nmap|masscan|jorgee|zgrab|wpscan|libredtail|fuzz)") {
-        return 403;
-    }
-    {%- endif %}
-
     access_log {{ logs_dir }}/access.log hyperion_timed;
+    {%- if waf_log %}
+    # Refusals only, tagged with the rule that fired, into a ROOT-OWNED log.
+    # It feeds the panel's activity view and the WAF auto-ban, which is why
+    # it is not the access log above: that file lives in the tenant's tree,
+    # so a tenant could write lines into it and get any address banned.
+    # `if=` skips every request $hyperion_waf was never set for.
+    access_log /var/log/hyperion-waf/{{ hosting_id }}.log hyperion_waf if=$hyperion_waf;
+    {%- endif %}
     error_log  {{ logs_dir }}/error.log;
 
     {%- if basic_auth_enabled %}
@@ -123,36 +115,111 @@
     auth_basic_user_file /etc/nginx/.htpasswd-{{ hosting_id }};
     {%- endif %}
 
-{%- if !blocked_countries.is_empty() || !blocked_bots.is_empty() %}
-    # Operator refusals — countries (via the GeoIP map; ZZ = unknown, never
-    # blocked) and bot families. 403 rather than 444: a clean refusal makes
-    # a crawler back off, a dropped connection reads as a timeout and gets
-    # RETRIED.
+{%- if waf_log %}
+    # ─── WAF + operator refusals (Protection card) ───
+    # Every server-level check only RECORDS a verdict — the rule's id — in
+    # $hyperion_waf; one `if` at the end acts on it. The shape is
+    # load-bearing. These are rewrite-module directives in SERVER context,
+    # which nginx evaluates BEFORE it selects a location, so the ACME
+    # exemption has to happen inside the same pass: accumulate, CLEAR the
+    # verdict for the challenge path, and only then refuse. Without that,
+    # blocking a country Let's Encrypt validates from — it checks each
+    # challenge from several countries and needs them to agree — silently
+    # breaks every issuance and renewal on the site.
     #
-    # The shape below is load-bearing. These are rewrite-module directives
-    # in SERVER context, which nginx evaluates BEFORE it selects a location
-    # — so where they sit in this file relative to the ACME location block
-    # protects nothing (an earlier version claimed it did). The exemption
-    # has to happen inside the same rewrite pass: accumulate the verdict in
-    # a variable, CLEAR it for the ACME path, and only then act on it.
-    # Without that, blocking a country Let's Encrypt validates from — it
-    # checks each challenge from several countries and needs them to agree
-    # — silently breaks every issuance and renewal on the site.
-    set $hyperion_deny "";
+    # 403 rather than 444: a clean refusal makes a crawler back off, a
+    # dropped connection reads as a timeout and gets RETRIED. The same id
+    # lands in the WAF log above, which is how the panel can say which rule
+    # turned a request away.
+    #
+    # ORDER MATTERS: every match overwrites the verdict, so the last one
+    # wins. Rules that only refuse come first; the rules whose hits earn an
+    # automatic ban come last, so a scanner that also drops its User-Agent
+    # or comes from a blocked country is still recorded as the scanner it
+    # is — otherwise Strict would be easier to slip past the ban than
+    # Standard.
+    set $hyperion_waf "";
+{%- if waf.empty_ua %}
+    if ($http_user_agent ~ "^-?$") {
+        set $hyperion_waf "empty_ua";
+    }
+{%- endif %}
+{%- if waf.bad_methods %}
+    if ($request_method !~ "^(GET|HEAD|POST|PUT|PATCH|DELETE|OPTIONS)$") {
+        set $hyperion_waf "bad_methods";
+    }
+{%- endif %}
+{%- if waf.author_enum %}
+    # ?author=N redirects to the author archive, whose URL is the login
+    # name. wp-admin's own post list filters by ?author=, so it is exempt.
+    set $hyperion_waf_author "";
+    if ($args ~* "(^|&)author=[0-9]") {
+        set $hyperion_waf_author "1";
+    }
+    if ($uri ~ "^/wp-admin/") {
+        set $hyperion_waf_author "";
+    }
+    if ($hyperion_waf_author) {
+        set $hyperion_waf "author_enum";
+    }
+{%- endif %}
+{%- if waf.rest_user_enum %}
+    # The REST user list, for visitors only: the block editor reads it with
+    # a logged-in cookie, and refusing it would break the author picker.
+    set $hyperion_waf_users "";
+    if ($uri ~ "^/wp-json/wp/v2/users") {
+        set $hyperion_waf_users "1";
+    }
+    if ($args ~* "rest_route=(/|%2f)wp(/|%2f)v2(/|%2f)users") {
+        set $hyperion_waf_users "1";
+    }
+    if ($http_cookie ~ "wordpress_logged_in_") {
+        set $hyperion_waf_users "";
+    }
+    if ($hyperion_waf_users) {
+        set $hyperion_waf "rest_user_enum";
+    }
+{%- endif %}
 {%- if !blocked_countries.is_empty() %}
+    # Countries via the GeoIP map; ZZ = unknown, never blocked.
     if ($hyperion_country ~ "^({% for c in blocked_countries %}{{ c }}{% if !loop.last %}|{% endif %}{% endfor %})$") {
-        set $hyperion_deny "1";
+        set $hyperion_waf "geo";
     }
 {%- endif %}
 {%- if !blocked_bots.is_empty() %}
     if ($http_user_agent ~* "({% for b in blocked_bots %}{{ b }}{% if !loop.last %}|{% endif %}{% endfor %})") {
-        set $hyperion_deny "1";
+        set $hyperion_waf "bot";
+    }
+{%- endif %}
+    # ── ban-counted rules, last ──
+{%- if waf.scanner_ua %}
+    if ($http_user_agent ~* "(nikto|sqlmap|nmap|masscan|jorgee|zgrab|wpscan|libredtail|fuzz)") {
+        set $hyperion_waf "scanner_ua";
+    }
+{%- endif %}
+{%- if waf.sensitive_files %}
+    # wp-config.php; readme.html and license.txt give away the version.
+    if ($uri ~ "^/(wp-config\.php|readme\.html|license\.txt)$") {
+        set $hyperion_waf "sensitive_files";
+    }
+{%- endif %}
+{%- if waf.dotfiles %}
+    # Repository and secret files. Other hidden files stay a silent 404
+    # further down.
+    if ($uri ~* "/(\.env|\.git|\.svn|\.hg|\.DS_Store)") {
+        set $hyperion_waf "dotfiles";
+    }
+{%- endif %}
+{%- if waf.probe_args %}
+    # Path traversal, SQLi, RFI and script injection in the query string.
+    if ($args ~* "(\.\./|\.\.%2f|union(\s|\+|%20)+select|base64_(en|de)code\s*\(|/etc/passwd|\beval\s*\(|<script)") {
+        set $hyperion_waf "probe_args";
     }
 {%- endif %}
     if ($uri ~ "^/\.well-known/acme-challenge/") {
-        set $hyperion_deny "";
+        set $hyperion_waf "";
     }
-    if ($hyperion_deny) {
+    if ($hyperion_waf) {
         return 403;
     }
 {%- endif %}
@@ -182,20 +249,18 @@
     limit_req zone=hyperion_signup burst=5 nodelay;
     {%- endif %}
 
-    {%- if waf_enabled %}
-    # WAF-lite: deny direct access to sensitive files + dumps. These
-    # are regex locations, so they're declared before `location ~ \.php$`
-    # to win the first-match.
-    location = /xmlrpc.php { deny all; }
-    location = /wp-config.php { deny all; }
-    location = /readme.html { deny all; }
-    location = /license.txt { deny all; }
-    location ~* \.(sql|bak|old|orig|save|swp|tar|gz|tgz|zip|log|ini|sh)$ { deny all; }
-    {%- if has_php %}
-    # WAF-lite: block PHP execution under upload + cache dirs (the most
-    # common WordPress malware-drop vector).
-    location ~* /wp-content/(uploads|cache)/.*\.php$ { deny all; }
+    {#- Location-level WAF rules. Regex locations, so they are declared
+        before `location ~ \.php$` and the hidden-file deny below to win
+        the first match. Each records its id for the WAF log, then refuses. #}
+    {%- if waf.xmlrpc %}
+    location = /xmlrpc.php { set $hyperion_waf "xmlrpc"; return 403; }
     {%- endif %}
+    {%- if waf.dump_files %}
+    location ~* \.(sql|bak|old|orig|save|swp|tar|gz|tgz|zip|log|ini|sh)$ { set $hyperion_waf "dump_files"; return 403; }
+    {%- endif %}
+    {%- if waf.php_in_uploads %}
+    # The most common WordPress malware-drop vector.
+    location ~* /wp-content/(uploads|cache)/.*\.php$ { set $hyperion_waf "php_in_uploads"; return 403; }
     {%- endif %}
 
     {%- if !wp_admin_allow.is_empty() %}

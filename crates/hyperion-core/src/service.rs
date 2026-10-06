@@ -400,6 +400,10 @@ pub struct Fail2banConfig {
     pub ssh_threshold: u32,
     pub ftp_threshold: u32,
     pub mail_threshold: u32,
+    /// Ban-counted WAF refusals inside the window before a ban (per site).
+    /// Higher than the login thresholds: one page of a vulnerability scan is
+    /// already a dozen refusals, and a single refusal proves little.
+    pub waf_threshold: u32,
 }
 
 impl Default for Fail2banConfig {
@@ -414,6 +418,7 @@ impl Default for Fail2banConfig {
             ssh_threshold: 8,
             ftp_threshold: 8,
             mail_threshold: 8,
+            waf_threshold: 20,
         }
     }
 }
@@ -437,6 +442,7 @@ impl Fail2banConfig {
         self.ssh_threshold = self.ssh_threshold.max(2);
         self.ftp_threshold = self.ftp_threshold.max(2);
         self.mail_threshold = self.mail_threshold.max(2);
+        self.waf_threshold = self.waf_threshold.clamp(3, 1000);
         self
     }
 }
@@ -4116,6 +4122,15 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // Drop generic per-hosting KV (notes/tags/etc.) so a future
         // hosting reusing this ULID doesn't inherit stale metadata.
         let _ = hyperion_state::hosting_kv::delete_all(&self.pool, detail.id.as_str()).await;
+        // WAF hit records and the root-owned hit log go with the site —
+        // rotated copies too: logrotate only ever rotates `*.log`, so once
+        // the live file is gone nothing else would remove `<id>.log.1…`.
+        let _ = hyperion_state::waf::delete_hosting(&self.pool, detail.id.as_str()).await;
+        remove_waf_logs(
+            std::path::Path::new(hyperion_adapters::nginx::WAF_LOG_DIR),
+            detail.id.as_str(),
+        )
+        .await;
         hostings::delete(&self.pool, &detail.id)
             .await
             .map_err(|e| RpcError::Internal_with(format!("delete row: {e}")))?;
@@ -5077,6 +5092,43 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 message: "custom_nginx_snippet must be ≤ 32 KiB".into(),
             });
         }
+        // WAF level. A non-empty value must be one we know — it picks which
+        // rules nginx renders. An EMPTY one comes from a caller that predates
+        // the rework (an older master, a package flipping only the bool):
+        // keep the stored level and pins when the bool still agrees with
+        // them, so a save from an old panel does not wipe a site's rule
+        // overrides; otherwise the bool decides, as it always did.
+        if options.waf_level.trim().is_empty() {
+            let stored = detail.vhost_options.effective_waf_level();
+            let level = if options.waf_enabled == (stored != hyperion_types::waf::WafLevel::Off) {
+                stored
+            } else if options.waf_enabled {
+                hyperion_types::waf::WafLevel::Standard
+            } else {
+                hyperion_types::waf::WafLevel::Off
+            };
+            if options.waf_overrides.trim().is_empty() {
+                options.waf_overrides = detail.vhost_options.waf_overrides.clone();
+            }
+            if level == hyperion_types::waf::WafLevel::Off
+                && stored != hyperion_types::waf::WafLevel::Off
+            {
+                // The old switch turned off: that is "no WAF", pins included.
+                options.waf_turn_off();
+            } else {
+                options.set_waf_level(level);
+            }
+        } else {
+            let Some(level) = hyperion_types::waf::WafLevel::parse(&options.waf_level) else {
+                return Err(RpcError::Validation {
+                    message: "waf_level must be off, standard or strict".into(),
+                });
+            };
+            options.set_waf_level(level);
+        }
+        options.waf_overrides = hyperion_types::waf::overrides_to_string(
+            &hyperion_types::waf::parse_overrides(&options.waf_overrides),
+        );
 
         // ─── htpasswd write (before persist, so a failed bcrypt is
         //     surfaced before we change DB state) ─────────────────────
@@ -13606,6 +13658,156 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         }
     }
 
+    /// Addresses no automatic ban may hit, whatever a log says: this
+    /// machine's own — a site calling itself on its public address (WP-cron,
+    /// Site Health) arrives FROM it, and a tenant's PHP can make that
+    /// address look like an attacker in any site's log — and the other
+    /// cluster members, whose loss cuts master↔node RPC. Operators can still
+    /// ban any of them by hand.
+    async fn ban_protected_ips(&self) -> std::collections::HashSet<std::net::IpAddr> {
+        let mut set: std::collections::HashSet<std::net::IpAddr> =
+            hyperion_adapters::logscan::local_interface_ips()
+                .await
+                .into_iter()
+                .collect();
+        if let Ok(nodes) = hyperion_state::nodes::list(&self.pool).await {
+            for n in nodes {
+                if let Some(ip) = n.public_ip.as_deref().and_then(|s| s.trim().parse().ok()) {
+                    set.insert(ip);
+                }
+                if let Some(url) = n.master_url.as_deref() {
+                    set.extend(resolve_url_host(url).await);
+                }
+            }
+        }
+        if let Some(url) = read_master_url(self.agent_config_path.as_deref()) {
+            set.extend(resolve_url_host(&url).await);
+        }
+        set
+    }
+
+    /// Whether WAF refusals on this site may earn an automatic ban. Default
+    /// ON (absent ⇒ on) and a read error answers "on" too, matching the
+    /// brute-force switch: a DB hiccup must not quietly stop protection.
+    async fn waf_autoban_enabled(&self, hosting_id: &str) -> bool {
+        match hyperion_state::hosting_kv::get(&self.pool, hosting_id, WAF_AUTOBAN_KV_KEY).await {
+            Ok(Some(v)) => v.trim() != "off",
+            _ => true,
+        }
+    }
+
+    /// Read every hosting's WAF hit log from where the last pass stopped,
+    /// record the refusals, and return the callers over the WAF threshold.
+    ///
+    /// The log lives in `dir` (root-owned `/var/log/hyperion/waf` in
+    /// production): unlike the tenant's own access log, nothing the site
+    /// can write ends up in it, so a ban decided from it cannot be forged
+    /// by a tenant. Ban intents are returned only for sites whose auto-ban
+    /// switch is on; the caller still checks `[fail2ban] enabled`.
+    async fn waf_ingest(&self, dir: &std::path::Path, since: i64, now: i64) -> Vec<BanIntent> {
+        let mut intents = Vec::new();
+        let Ok(summaries) = self.list().await else {
+            return intents;
+        };
+        for s in &summaries {
+            let id = s.id.as_str();
+            let path = dir.join(format!("{id}.log"));
+            if !tokio::fs::try_exists(&path).await.unwrap_or(false) {
+                continue;
+            }
+            let pos = hyperion_state::hosting_kv::get(&self.pool, id, WAF_LOG_POS_KV_KEY)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|v| hyperion_adapters::waflog::LogPos::decode(&v));
+            let read = {
+                let path = path.clone();
+                tokio::task::spawn_blocking(move || hyperion_adapters::waflog::read_new(&path, pos))
+                    .await
+            };
+            let (batch, new_pos) = match read {
+                Ok(Ok(v)) => v,
+                Ok(Err(e)) => {
+                    tracing::warn!(error = %e, domain = %s.domain, "waf: could not read the hit log");
+                    continue;
+                }
+                Err(_) => continue,
+            };
+            if batch.skipped_bytes > 0 {
+                // Kept up with a flood by skipping its oldest lines: the
+                // totals undercount, the bans (decided on recent hits) don't.
+                tracing::warn!(
+                    domain = %s.domain,
+                    skipped_bytes = batch.skipped_bytes,
+                    "waf: hit log backlog over the per-tick budget; oldest lines skipped"
+                );
+            }
+            if let Err(e) = hyperion_state::waf::record(&self.pool, id, &batch).await {
+                // Do not advance past hits that were not stored.
+                tracing::warn!(error = %e, domain = %s.domain, "waf: could not record hits");
+                continue;
+            }
+            if Some(new_pos) != pos {
+                let _ = hyperion_state::hosting_kv::set(
+                    &self.pool,
+                    id,
+                    WAF_LOG_POS_KV_KEY,
+                    &new_pos.encode(),
+                    now,
+                )
+                .await;
+            }
+            if !self.waf_autoban_enabled(id).await {
+                continue;
+            }
+            let offenders = hyperion_state::waf::ip_offenders(
+                &self.pool,
+                id,
+                since,
+                self.fail2ban.waf_threshold,
+            )
+            .await
+            .unwrap_or_default();
+            for ip in offenders {
+                intents.push(BanIntent {
+                    ip,
+                    site: Some(BanSite {
+                        id: id.to_string(),
+                        domain: s.domain.clone(),
+                    }),
+                    reason: "auto: WAF refusals",
+                });
+            }
+        }
+        let _ = hyperion_state::waf::prune(&self.pool, now, self.fail2ban.window_secs).await;
+        intents
+    }
+
+    /// What the WAF refused on one hosting, for the Protection card's
+    /// activity panel. Node-local: answered by the hosting's owning node.
+    pub async fn waf_activity(
+        &self,
+        hosting_id: &str,
+    ) -> Result<hyperion_types::waf::WafActivity, RpcError> {
+        let now = now_secs();
+        let map = |e: hyperion_state::db::StateError| RpcError::Internal_with(format!("waf: {e}"));
+        Ok(hyperion_types::waf::WafActivity {
+            totals_24h: hyperion_state::waf::totals(&self.pool, hosting_id, now - 86_400)
+                .await
+                .map_err(map)?,
+            totals_7d: hyperion_state::waf::totals(&self.pool, hosting_id, now - 7 * 86_400)
+                .await
+                .map_err(map)?,
+            recent: hyperion_state::waf::recent(&self.pool, hosting_id, WAF_RECENT_SHOWN)
+                .await
+                .map_err(map)?,
+            autoban_enabled: self.waf_autoban_enabled(hosting_id).await,
+            fail2ban_enabled: self.fail2ban.enabled,
+            threshold: self.fail2ban.waf_threshold,
+            window_secs: self.fail2ban.window_secs,
+        })
+    }
+
     /// Everything one tick would ban, in scan order: each active hosting's
     /// own access log first (gated by that site's switch), then the
     /// node-wide ssh / ftp / mail journals.
@@ -13718,13 +13920,68 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 nft_unban(ip).await;
             }
         }
+        let since = now - self.fail2ban.window_secs;
+        // The WAF hit logs are read whether or not banning is on: the
+        // activity panel is visibility, and a log left unread would only
+        // be read later in one oversized gulp.
+        let waf_intents = self
+            .waf_ingest(
+                std::path::Path::new(hyperion_adapters::nginx::WAF_LOG_DIR),
+                since,
+                now,
+            )
+            .await;
         if !self.fail2ban.enabled {
             return Ok(0);
         }
-        let since = now - self.fail2ban.window_secs;
+        let scan_intents = self.fail2ban_scan(since).await?;
+        // Looked up only when something is about to be banned.
+        let protected = if waf_intents.is_empty() && scan_intents.is_empty() {
+            std::collections::HashSet::new()
+        } else {
+            self.ban_protected_ips().await
+        };
+        let is_protected = |ip: &str| {
+            ip.parse::<std::net::IpAddr>()
+                .map(|a| protected.contains(&a))
+                .unwrap_or(false)
+        };
         let mut new_bans = 0i64;
-        for intent in self.fail2ban_scan(since).await? {
+        for intent in waf_intents {
+            let Some(site) = intent.site.as_ref() else {
+                continue;
+            };
+            let banned = if is_protected(&intent.ip) {
+                tracing::warn!(
+                    ip = %intent.ip, domain = %site.domain,
+                    "fail2ban: WAF refusals from this node's own or a cluster member's address — not banning"
+                );
+                false
+            } else {
+                self.auto_ban(&intent.ip, Some(&site.id), intent.reason, now)
+                    .await
+            };
+            // Spent either way. Banned now, or refused because the address
+            // is already banned (or never bannable): left in place, the same
+            // hits would ban it again the moment an earlier, shorter ban
+            // lapsed — a second sentence for one offence, escalated as a
+            // "repeat offender".
+            let _ = hyperion_state::waf::clear_ip(&self.pool, &site.id, &intent.ip).await;
+            if !banned {
+                continue;
+            }
+            new_bans += 1;
+            tracing::info!(ip = %intent.ip, domain = %site.domain, "fail2ban: auto-banned (waf)");
+        }
+        for intent in scan_intents {
             let hosting_id = intent.site.as_ref().map(|s| s.id.as_str());
+            if is_protected(&intent.ip) {
+                tracing::warn!(
+                    ip = %intent.ip, reason = intent.reason,
+                    "fail2ban: flood from this node's own or a cluster member's address — not banning"
+                );
+                continue;
+            }
             if !self
                 .auto_ban(&intent.ip, hosting_id, intent.reason, now)
                 .await
@@ -18724,7 +18981,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 .flatten()
                 .map(|c| c.enabled)
                 .unwrap_or(false),
-            hardening: detail.vhost_options.waf_enabled,
+            hardening: detail.vhost_options.effective_waf_level()
+                != hyperion_types::waf::WafLevel::Off,
             // A site state, never `Leave`: "no cadence configured" is `Off`.
             backup_cadence: match hyperion_state::hosting_kv::get(&self.pool, id, BACKUP_KV_CADENCE)
                 .await
@@ -18919,7 +19177,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         .await
     }
 
-    /// Flip WAF-lite through the vhost-options path, which re-renders the
+    /// Flip the WAF through the vhost-options path, which re-renders the
     /// vhost and runs `nginx -t` before the change counts. The wp-admin
     /// allowlist is deliberately untouched: it is a list of the operator's
     /// own IPs, and no package can invent one.
@@ -18929,7 +19187,16 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         enabled: bool,
     ) -> Result<(), RpcError> {
         let mut options = detail.vhost_options.clone();
-        options.waf_enabled = enabled;
+        // Enabling keeps a stricter level the operator already chose;
+        // the package's promise is "protected", and Strict is that too.
+        // Disabling is "no WAF" — rules pinned on go as well.
+        match (enabled, detail.vhost_options.effective_waf_level()) {
+            (false, _) => options.waf_turn_off(),
+            (true, hyperion_types::waf::WafLevel::Off) => {
+                options.set_waf_level(hyperion_types::waf::WafLevel::Standard)
+            }
+            (true, current) => options.set_waf_level(current),
+        }
         self.set_vhost_options(HostingSelector::Id(detail.id.clone()), options, None)
             .await?;
         Ok(())
@@ -34660,6 +34927,76 @@ const LOOPBACK: &str = "127.0.0.1";
 /// nobody needs a panel's opinion on.
 const HEAVY_ASSET_BYTES: i64 = 500_000;
 const FAIL2BAN_HTTP_KV_KEY: &str = "http_bruteforce_scan_enabled";
+/// Per-hosting WAF auto-ban switch (`hosting_kv`). Absent ⇒ on; "off" opts
+/// the site out. Hits are still recorded either way.
+const WAF_AUTOBAN_KV_KEY: &str = "waf_autoban_enabled";
+/// Where the WAF ingest stopped in the site's hit log (`hosting_kv`),
+/// `"<inode>:<offset>"`.
+const WAF_LOG_POS_KV_KEY: &str = "waf_log_pos";
+/// Refusals listed in the activity panel.
+const WAF_RECENT_SHOWN: i64 = 50;
+
+/// The host of an `https://host[:port]/…` URL, resolved to addresses. A
+/// literal IP needs no lookup; a name gets a short, bounded one.
+async fn resolve_url_host(url: &str) -> Vec<std::net::IpAddr> {
+    let rest = url.split("://").nth(1).unwrap_or(url);
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let authority = authority.rsplit('@').next().unwrap_or(authority);
+    let host = if let Some(v6) = authority.strip_prefix('[') {
+        v6.split(']').next().unwrap_or("")
+    } else {
+        authority.split(':').next().unwrap_or("")
+    };
+    if host.is_empty() {
+        return Vec::new();
+    }
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        return vec![ip];
+    }
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        tokio::net::lookup_host((host, 443)),
+    )
+    .await
+    {
+        Ok(Ok(addrs)) => addrs.map(|a| a.ip()).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// `[enrollment] master_url` from agent.toml — the master this node talks
+/// to. `None` on the master itself or when unreadable.
+fn read_master_url(cfg_path: Option<&std::path::Path>) -> Option<String> {
+    let raw = std::fs::read_to_string(cfg_path?).ok()?;
+    let doc = raw.parse::<toml_edit::DocumentMut>().ok()?;
+    let url = doc
+        .get("enrollment")?
+        .get("master_url")?
+        .as_str()?
+        .trim()
+        .to_string();
+    (!url.is_empty()).then_some(url)
+}
+
+/// Remove one hosting's WAF hit log and its rotated copies (`<id>.log`,
+/// `<id>.log.1`, `<id>.log.2.gz`, …) from `dir`. Best-effort.
+async fn remove_waf_logs(dir: &std::path::Path, hosting_id: &str) {
+    let stem = format!("{hosting_id}.log");
+    let Ok(mut rd) = tokio::fs::read_dir(dir).await else {
+        return;
+    };
+    while let Ok(Some(entry)) = rd.next_entry().await {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let ours = name == stem
+            || name
+                .strip_prefix(stem.as_str())
+                .is_some_and(|rest| rest.starts_with('.'));
+        if ours {
+            let _ = tokio::fs::remove_file(entry.path()).await;
+        }
+    }
+}
 
 /// Thin pub wrapper so `panel_import` can reuse the exact repair the
 /// panel action runs, without `repair_tree_permissions` itself going pub.
@@ -36775,6 +37112,15 @@ fn parse_agent_section_fields(
                 }
                 crate::config_persist::FieldValue::Int(n)
             }
+            ("fail2ban", "waf_threshold") => {
+                let n = parse_int(v)?;
+                // Floor 3: a WAF rule can be tripped by an honest client once
+                // (a stale bookmark to /readme.html), never as a pattern.
+                if !(3..=1000).contains(&n) {
+                    return Err(bad(format!("waf_threshold must be 3..=1000, got {n}")));
+                }
+                crate::config_persist::FieldValue::Int(n)
+            }
             // [notifications] — editable Slack + email message wording.
             ("notifications", "slack_template")
             | ("notifications", "email_subject_template")
@@ -37434,7 +37780,10 @@ fn limits_to_row(
 /// Bump when a vhost template change must reach EXISTING sites (see
 /// [`HostingService::rerender_stale_vhosts`]). 1: request time in the
 /// access log, page-cache skip for logged-in and WooCommerce visitors.
-const VHOST_GEN: u32 = 1;
+/// 2: per-rule WAF whose refusals are tagged into the root-owned WAF log —
+/// without the rewrite an existing site's activity view and WAF auto-ban
+/// stay empty until somebody re-saves it.
+const VHOST_GEN: u32 = 2;
 /// Node-local `hosting_kv` key holding the generation a vhost was last
 /// rendered at.
 const VHOST_GEN_KV: &str = "nginx.vhost_gen";
@@ -41119,6 +41468,179 @@ mod tests {
             .collect();
         v.sort();
         v
+    }
+
+    /// The WAF ingest reads the root-owned hit log, records every refusal,
+    /// and offers a ban only for ban-counted rules over the threshold —
+    /// never for xmlrpc / geo / bot refusals, however many there are.
+    #[tokio::test]
+    async fn waf_ingest_records_hits_and_bans_only_ban_counted_rules() {
+        let pool = open_memory().await.expect("open");
+        let logs = tempfile::tempdir().expect("dir");
+        let s = svc(pool.clone(), happy_mocks());
+        s.create(req("example.cz")).await.expect("create");
+        let a = s
+            .get(HostingSelector::Domain(
+                Domain::parse("example.cz").expect("parse"),
+            ))
+            .await
+            .expect("get");
+        let now = now_secs();
+        let threshold = s.fail2ban.waf_threshold as usize;
+        let mut body = String::new();
+        for i in 0..threshold {
+            body.push_str(&format!(
+                "{now}.{i:03}\t8.8.8.8\tprobe_args\tGET\t/?x=../etc\tcurl\n"
+            ));
+        }
+        for i in 0..(threshold * 2) {
+            body.push_str(&format!(
+                "{now}.{i:03}\t9.9.9.9\txmlrpc\tPOST\t/xmlrpc.php\tbot\n"
+            ));
+            body.push_str(&format!("{now}.{i:03}\t1.0.0.1\tgeo\tGET\t/\tua\n"));
+            // A crawler working through a downloads page: refused, never banned.
+            body.push_str(&format!(
+                "{now}.{i:03}\t66.249.66.1\tdump_files\tGET\t/files/{i}.zip\tGooglebot/2.1\n"
+            ));
+        }
+        let path = logs.path().join(format!("{}.log", a.id.as_str()));
+        std::fs::write(&path, &body).expect("write log");
+        let since = now - s.fail2ban.window_secs;
+
+        let intents = s.waf_ingest(logs.path(), since, now).await;
+        let ips: Vec<&str> = intents.iter().map(|i| i.ip.as_str()).collect();
+        assert_eq!(ips, vec!["8.8.8.8"]);
+        assert_eq!(intents[0].site.as_ref().expect("site").id, a.id.as_str());
+
+        let act = s.waf_activity(a.id.as_str()).await.expect("activity");
+        let count = |r: &str| act.totals_24h.iter().find(|c| c.rule == r).map(|c| c.hits);
+        assert_eq!(count("probe_args"), Some(threshold as i64));
+        assert_eq!(count("xmlrpc"), Some(threshold as i64 * 2));
+        assert_eq!(count("geo"), Some(threshold as i64 * 2));
+        assert!(act.autoban_enabled);
+
+        // A second pass over an unchanged log records nothing twice.
+        let _ = s.waf_ingest(logs.path(), since, now).await;
+        let again = s.waf_activity(a.id.as_str()).await.expect("activity");
+        assert_eq!(again.totals_24h, act.totals_24h, "position must advance");
+
+        // Opted out: hits still recorded, no ban offered.
+        s.hosting_kv_set(
+            a.id.as_str().to_string(),
+            WAF_AUTOBAN_KV_KEY.into(),
+            "off".into(),
+        )
+        .await
+        .expect("opt out");
+        assert!(s.waf_ingest(logs.path(), since, now).await.is_empty());
+    }
+
+    /// Purging a site removes its WAF log and the rotated copies logrotate
+    /// left behind — and nothing that belongs to another site.
+    #[tokio::test]
+    async fn remove_waf_logs_takes_rotated_copies_but_nothing_else() {
+        let dir = tempfile::tempdir().expect("dir");
+        let id = "01a110d5-1ee1-71c2-b98b-0e31aa826f3b";
+        for name in [
+            format!("{id}.log"),
+            format!("{id}.log.1"),
+            format!("{id}.log.2.gz"),
+            format!("{id}.logbook"),
+            "01a110d5-0000-0000-0000-000000000000.log".to_string(),
+        ] {
+            std::fs::write(dir.path().join(name), "x").expect("write");
+        }
+        remove_waf_logs(dir.path(), id).await;
+        let mut left: Vec<String> = std::fs::read_dir(dir.path())
+            .expect("ls")
+            .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        assert_eq!(
+            left,
+            vec![
+                "01a110d5-0000-0000-0000-000000000000.log".to_string(),
+                format!("{id}.logbook"),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn url_hosts_resolve_without_dns_for_literals() {
+        async fn v(u: &str) -> Vec<String> {
+            resolve_url_host(u)
+                .await
+                .iter()
+                .map(|i| i.to_string())
+                .collect()
+        }
+        assert_eq!(
+            v("https://203.0.113.9:8443/agent-rpc").await,
+            vec!["203.0.113.9"]
+        );
+        assert_eq!(v("https://[2001:db8::9]:9443/x").await, vec!["2001:db8::9"]);
+        assert_eq!(v("https://user@198.51.100.4/").await, vec!["198.51.100.4"]);
+        assert!(v("").await.is_empty());
+    }
+
+    #[test]
+    fn master_url_is_read_from_the_enrollment_section() {
+        let dir = tempfile::tempdir().expect("dir");
+        let p = dir.path().join("agent.toml");
+        std::fs::write(
+            &p,
+            "[enrollment]\nmaster_url = \"https://m.example.cz:8443\"\n",
+        )
+        .expect("w");
+        assert_eq!(
+            read_master_url(Some(&p)).as_deref(),
+            Some("https://m.example.cz:8443")
+        );
+        std::fs::write(&p, "[cluster]\nmode = \"master\"\n").expect("w");
+        assert_eq!(read_master_url(Some(&p)), None);
+        assert_eq!(read_master_url(None), None);
+    }
+
+    /// An empty level from an older caller keeps the stored level and pins
+    /// while the bool still agrees with them; flipping the bool decides.
+    #[tokio::test]
+    async fn legacy_vhost_save_keeps_waf_level_and_overrides() {
+        let pool = open_memory().await.expect("open");
+        let mut a = happy_mocks();
+        a.expect_nginx_delete_htpasswd().returning(|_| Ok(()));
+        let s = svc(pool.clone(), a);
+        s.create(req("example.cz")).await.expect("create");
+        let sel = HostingSelector::Domain(Domain::parse("example.cz").expect("parse"));
+        let mut opts = vh_defaults();
+        opts.waf_level = "strict".into();
+        opts.waf_overrides = r#"{"dotfiles":true,"xmlrpc":false}"#.into();
+        s.set_vhost_options(sel.clone(), opts, None)
+            .await
+            .expect("set");
+
+        let mut legacy = vh_defaults();
+        legacy.waf_enabled = true;
+        s.set_vhost_options(sel.clone(), legacy, None)
+            .await
+            .expect("legacy");
+        let got = s.get(sel.clone()).await.expect("get").vhost_options;
+        assert_eq!(got.waf_level, "strict");
+        assert_eq!(got.waf_overrides, r#"{"dotfiles":true,"xmlrpc":false}"#);
+
+        let legacy_off = vh_defaults();
+        s.set_vhost_options(sel.clone(), legacy_off, None)
+            .await
+            .expect("off");
+        let got = s.get(sel.clone()).await.expect("get").vhost_options;
+        assert_eq!(got.waf_level, "off");
+        assert!(!got.waf_enabled);
+        // "Off" from the old switch means no WAF: the rule pinned ON went
+        // with it; the pin that only matters once a rule is on stayed.
+        assert_eq!(got.waf_overrides, r#"{"xmlrpc":false}"#);
+
+        let mut bad = vh_defaults();
+        bad.waf_level = "paranoid".into();
+        assert!(s.set_vhost_options(sel, bad, None).await.is_err());
     }
 
     /// Two sites, both under attack. Opting one out stops its access log

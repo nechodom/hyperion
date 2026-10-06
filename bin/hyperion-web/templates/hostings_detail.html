@@ -832,10 +832,13 @@
     <div class="tile">
       <div class="tile-title">WAF &amp; wp-admin lock</div>
       <div class="cluster" style="gap:0.3rem;margin-bottom:0.45rem">
-        {% if detail.vhost_options.waf_enabled %}<span class="pill ok">WAF on</span>{% else %}<span class="pill warn">WAF off</span>{% endif %}
+        {% if !protection_applies %}<span class="pill neutral">not applied to a {% if detail.kind == "redirect" %}redirect{% else %}reverse proxy{% endif %}</span>
+        {% else %}
+        <span class="pill {% if waf_on %}ok{% else %}warn{% endif %}">{{ waf_summary }}</span>
         {% if !detail.vhost_options.wp_admin_allowlist.trim().is_empty() %}<span class="pill ok">admin IP lock</span>{% else %}<span class="pill neutral">admin open</span>{% endif %}
+        {% endif %}
       </div>
-      <div class="tile-links"><a href="#vhost-options">Configure in Settings →</a></div>
+      <div class="tile-links"><a href="#protection">Configure protection →</a><a href="#waf-activity">What was blocked →</a></div>
     </div>
     {% if detail.kind != "reverse_proxy" %}
     <div class="tile">
@@ -2464,10 +2467,9 @@
       <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
       Vhost options
     </h2>
-    <span class="text-soft small">HTTPS · access · cache · WAF · bots · geo</span>
+    <span class="text-soft small">HTTPS · basic auth · maintenance · cache</span>
     <div class="card-tools">
       {% if detail.vhost_options.maintenance_mode %}<span class="pill warn">maintenance on</span>{% endif %}
-      {% if detail.vhost_options.waf_enabled %}<span class="pill ok">WAF</span>{% endif %}
       {% if detail.vhost_options.fastcgi_cache_enabled %}<span class="pill ok">cache</span>{% endif %}
       {% if detail.vhost_options.basic_auth_enabled %}<span class="pill">basic auth</span>{% endif %}
     </div>
@@ -2475,6 +2477,7 @@
   <form method="post" action="/hostings/vhost-options" hx-post="/hostings/vhost-options" hx-swap="none">
     <input type="hidden" name="_csrf" value="{{ csrf_vhost_options }}">
     <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
+    <input type="hidden" name="section" value="vhost">
     {% if !target_node.is_empty() %}
     <input type="hidden" name="target_node" value="{{ target_node }}">
     {% endif %}
@@ -2508,15 +2511,6 @@
                      autocomplete="new-password" minlength="0" maxlength="200">
             </div>
           </div>
-        </div>
-      </div>
-      <div class="setting-row stacked">
-        <label class="s-label" for="wp_admin_allowlist">Restrict <code>/wp-admin</code> and <code>/wp-login.php</code> to these IPs</label>
-        <p class="s-help">One IP or CIDR per line; empty leaves it open. <code>admin-ajax.php</code> stays public so front-end AJAX keeps working. <strong>Double-check your own IP is listed before saving.</strong></p>
-        <div class="s-field">
-          <textarea id="wp_admin_allowlist" name="wp_admin_allowlist"
-                    rows="3" maxlength="2048" class="mono" style="font-size:13px"
-                    placeholder="203.0.113.5&#10;198.51.100.0/24&#10;2001:db8::/32">{{ detail.vhost_options.wp_admin_allowlist }}</textarea>
         </div>
       </div>
     </div>
@@ -2595,65 +2589,6 @@
       </div>
     </div>
 
-    <div class="setting-group">Security</div>
-    <div class="setting-list">
-      <div class="setting-row">
-        <label class="s-label" for="waf_enabled">WAF-lite request filtering</label>
-        <p class="s-help">Conservative nginx rules: deny direct access to <code>wp-config.php</code>, <code>xmlrpc.php</code>, dumps and backups; block PHP execution under <code>wp-content/uploads</code> and <code>cache</code>; <code>403</code> obvious probe query-strings and scanner user-agents.</p>
-        <div class="s-control"><input type="checkbox" class="switch" id="waf_enabled" name="waf_enabled" value="on"
-             {% if detail.vhost_options.waf_enabled %}checked{% endif %}></div>
-      </div>
-      <div class="setting-row">
-        <label class="s-label" for="signup_limit_enabled">Rate-limit public WordPress sign-ups</label>
-        <p class="s-help">
-          A limit for the <strong>site</strong>, not for the caller — the only kind that helps here.
-          Registration spam is a botnet signing up once or twice per address, and every request
-          succeeds, so the brute-force ban sweep never fires. This caps sign-ups at a handful a minute
-          and returns <code>429</code> past that. Blunt on purpose: during a flood it turns away genuine
-          sign-ups too. If the site does not need public registration at all, close it on the
-          WordPress tab instead.
-        </p>
-        <div class="s-control"><input type="checkbox" class="switch" id="signup_limit_enabled" name="signup_limit_enabled" value="on"
-             {% if detail.vhost_options.signup_limit_enabled %}checked{% endif %}></div>
-      </div>
-    </div>
-
-    <div class="setting-group">Bots</div>
-    <p class="note" style="margin:0 0 0.4rem">
-      Refuse whole families of crawlers with a <code>403</code>. A clean refusal is deliberate — a
-      dropped connection reads as a timeout and gets retried, so it costs more traffic than it saves.
-      <strong>Search engines are not listed here on purpose:</strong> nothing on this card can deindex the site.
-    </p>
-    <div class="setting-list">
-      {% for b in bot_families %}
-      <div class="setting-row">
-        <label class="s-label" for="bot_{{ b.0 }}">{{ b.1 }}</label>
-        <p class="s-help">{{ b.2 }}</p>
-        <div class="s-control"><input type="checkbox" class="switch" id="bot_{{ b.0 }}" name="blocked_bots" value="{{ b.0 }}"
-             {% if b.3 %}checked{% endif %}></div>
-      </div>
-      {% endfor %}
-    </div>
-
-    <div class="setting-group">Countries</div>
-    <div class="setting-list">
-      <div class="setting-row stacked">
-        <label class="s-label" for="blocked_countries_text">Blocked countries <span class="hint">ISO codes, comma-separated · e.g. RU, CN, KP</span></label>
-        <p class="s-help">
-          Needs the GeoIP database (<a href="/settings#geoip">Settings → Bans &amp; blocking → GeoIP</a>) —
-          without it every visitor resolves to <code>ZZ</code> and nothing is blocked, so turning this on
-          early cannot cut the site off by accident. <strong>Blocking a country blocks its people, not
-          just its bots</strong> — customers travelling, VPN users and mobile carriers routed abroad all
-          land on the 403.
-        </p>
-        <div class="s-field">
-          <input id="blocked_countries_text" name="blocked_countries" type="text"
-                 value="{{ detail.vhost_options.blocked_countries }}"
-                 placeholder="leave empty to allow everyone">
-        </div>
-      </div>
-    </div>
-
     {% if can_edit_nginx_raw %}
     <div class="setting-group">Custom nginx snippet</div>
     <div class="setting-list">
@@ -2709,6 +2644,169 @@
     </div>
   </form>
 </div>
+
+<div class="panel-group">Protection</div>
+
+{# Everything that refuses a request before it reaches the site: the WAF,
+   the wp-admin IP lock, the sign-up limit, bot families and countries.
+   Posts to the same handler as Vhost options with section=protection, so a
+   save here only changes these fields (and the reverse). #}
+<div class="card" id="protection">
+  <div class="card-head">
+    <h2>
+      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+      Protection
+    </h2>
+    <span class="text-soft small">WAF · admin lock · sign-ups · bots · countries</span>
+    <div class="card-tools">
+      {% if protection_applies %}
+      <span class="pill {% if waf_on %}ok{% else %}warn{% endif %}">{{ waf_summary }}</span>
+      {% if !detail.vhost_options.wp_admin_allowlist.trim().is_empty() %}<span class="pill ok">admin IP lock</span>{% endif %}
+      {% endif %}
+    </div>
+  </div>
+  {% if !protection_applies %}
+  <p class="s-help" style="margin:0">
+    {% if detail.kind == "redirect" %}This hosting only redirects{% else %}This hosting is a reverse proxy{% endif %}:
+    its nginx config forwards every request and carries none of these rules — no WAF, bot or country
+    blocking, admin IP lock or sign-up limit. Protect the {% if detail.kind == "redirect" %}target site{% else %}upstream application{% endif %} instead.
+  </p>
+  {% else %}
+  <form method="post" action="/hostings/vhost-options" hx-post="/hostings/vhost-options" hx-swap="none">
+    <input type="hidden" name="_csrf" value="{{ csrf_vhost_options }}">
+    <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
+    <input type="hidden" name="section" value="protection">
+    {% if !target_node.is_empty() %}
+    <input type="hidden" name="target_node" value="{{ target_node }}">
+    {% endif %}
+
+    <div class="setting-group">Web application firewall</div>
+    <div class="setting-list">
+      <div class="setting-row stacked">
+        <label class="s-label" for="waf_level">Level</label>
+        <p class="s-help">
+          <strong>Standard</strong> refuses attack patterns in the URL, known vulnerability scanners,
+          <code>xmlrpc.php</code>, <code>wp-config.php</code>, dumps and backups, and PHP under
+          <code>wp-content/uploads</code>. <strong>Strict</strong> adds repository and secret files,
+          user enumeration, unusual HTTP methods and requests without a User-Agent.
+          Every refusal is a <code>403</code> and shows up under <em>WAF activity</em> below, with the rule that fired.
+        </p>
+        <div class="s-field">
+          <select id="waf_level" name="waf_level" style="max-width:20rem">
+            <option value="off" {% if waf_level == "off" %}selected{% endif %}>Off</option>
+            <option value="standard" {% if waf_level == "standard" %}selected{% endif %}>Standard (recommended)</option>
+            <option value="strict" {% if waf_level == "strict" %}selected{% endif %}>Strict</option>
+          </select>
+        </div>
+      </div>
+    </div>
+    <details class="disclosure" style="margin:0.4rem 0 0.8rem"{% if waf_has_pins %} open{% endif %}>
+      <summary>Individual rules <span class="text-soft small">— pin a rule on or off regardless of the level</span></summary>
+      <div class="setting-list">
+        {% for r in waf_rules %}
+        <div class="setting-row">
+          <label class="s-label" for="waf_rule_{{ r.id }}">
+            {{ r.label }}
+            {% if r.strict_only %}<span class="hint">strict</span>{% endif %}
+            {% if r.effective %}<span class="pill ok" style="font-size:0.6rem;margin-left:0.3rem">on</span>{% else %}<span class="pill neutral" style="font-size:0.6rem;margin-left:0.3rem">off</span>{% endif %}
+          </label>
+          <p class="s-help">{{ r.help }}{% if r.counts_for_ban %} Repeat offenders are banned automatically.{% endif %}</p>
+          <div class="s-control">
+            <select id="waf_rule_{{ r.id }}" name="waf_rule_{{ r.id }}" style="width:auto">
+              <option value="" {% if r.pin.is_empty() %}selected{% endif %}>Follow the level</option>
+              <option value="on" {% if r.pin == "on" %}selected{% endif %}>Always on</option>
+              <option value="off" {% if r.pin == "off" %}selected{% endif %}>Always off</option>
+            </select>
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+    </details>
+
+    <div class="setting-group">Admin &amp; sign-ups</div>
+    <div class="setting-list">
+      <div class="setting-row stacked">
+        <label class="s-label" for="wp_admin_allowlist">Restrict <code>/wp-admin</code> and <code>/wp-login.php</code> to these IPs</label>
+        <p class="s-help">One IP or CIDR per line; empty leaves it open. <code>admin-ajax.php</code> stays public so front-end AJAX keeps working. <strong>Double-check your own IP is listed before saving.</strong></p>
+        <div class="s-field">
+          <textarea id="wp_admin_allowlist" name="wp_admin_allowlist"
+                    rows="3" maxlength="2048" class="mono" style="font-size:13px"
+                    placeholder="203.0.113.5&#10;198.51.100.0/24&#10;2001:db8::/32">{{ detail.vhost_options.wp_admin_allowlist }}</textarea>
+        </div>
+      </div>
+
+      <div class="setting-row">
+        <label class="s-label" for="signup_limit_enabled">Rate-limit public WordPress sign-ups</label>
+        <p class="s-help">
+          A limit for the <strong>site</strong>, not for the caller — the only kind that helps here.
+          Registration spam is a botnet signing up once or twice per address, and every request
+          succeeds, so the brute-force ban sweep never fires. This caps sign-ups at a handful a minute
+          and returns <code>429</code> past that. Blunt on purpose: during a flood it turns away genuine
+          sign-ups too. If the site does not need public registration at all, close it on the
+          WordPress tab instead.
+        </p>
+        <div class="s-control"><input type="checkbox" class="switch" id="signup_limit_enabled" name="signup_limit_enabled" value="on"
+             {% if detail.vhost_options.signup_limit_enabled %}checked{% endif %}></div>
+      </div>
+    </div>
+
+    <div class="setting-group">Bots</div>
+    <p class="note" style="margin:0 0 0.4rem">
+      Refuse whole families of crawlers with a <code>403</code>. A clean refusal is deliberate — a
+      dropped connection reads as a timeout and gets retried, so it costs more traffic than it saves.
+      <strong>Search engines are not listed here on purpose:</strong> nothing on this card can deindex the site.
+    </p>
+    <div class="setting-list">
+      {% for b in bot_families %}
+      <div class="setting-row">
+        <label class="s-label" for="bot_{{ b.0 }}">{{ b.1 }}</label>
+        <p class="s-help">{{ b.2 }}</p>
+        <div class="s-control"><input type="checkbox" class="switch" id="bot_{{ b.0 }}" name="bot_{{ b.0 }}" value="on"
+             {% if b.3 %}checked{% endif %}></div>
+      </div>
+      {% endfor %}
+    </div>
+
+    <div class="setting-group">Countries</div>
+    <div class="setting-list">
+      <div class="setting-row stacked">
+        <label class="s-label" for="blocked_countries_text">Blocked countries <span class="hint">ISO codes, comma-separated · e.g. RU, CN, KP</span></label>
+        <p class="s-help">
+          Needs the GeoIP database (<a href="/settings#geoip">Settings → Bans &amp; blocking → GeoIP</a>) —
+          without it every visitor resolves to <code>ZZ</code> and nothing is blocked, so turning this on
+          early cannot cut the site off by accident. <strong>Blocking a country blocks its people, not
+          just its bots</strong> — customers travelling, VPN users and mobile carriers routed abroad all
+          land on the 403.
+        </p>
+        <div class="s-field">
+          <input id="blocked_countries_text" name="blocked_countries" type="text"
+                 value="{{ detail.vhost_options.blocked_countries }}"
+                 placeholder="leave empty to allow everyone">
+        </div>
+      </div>
+    </div>
+
+    <div class="form-footer">
+      <span class="note">Validated with <code>nginx -t</code> before it is committed; on failure the previous vhost stays active.</span>
+      <button class="btn primary" type="submit">
+        <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
+        Save protection
+      </button>
+    </div>
+  </form>
+  {% endif %}
+</div>
+
+{% if protection_applies %}
+{# WAF activity — lazily loaded from the owning node's hit records. #}
+<div id="waf-activity" hx-get="/hostings/{{ detail.id.as_str() }}/waf-panel"
+     hx-trigger="intersect once"
+     hx-swap="outerHTML">
+  <div class="card">
+    <h2 style="opacity:0.6">WAF activity <span class="text-soft small">— loading…</span></h2>
+  </div>
+</div>
+{% endif %}
 
 <div class="panel-group">Bans</div>
 {# Banned IPs — lazily loaded so the page render isn't blocked on an

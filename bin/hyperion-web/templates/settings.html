@@ -2314,6 +2314,11 @@
           <input id="f2b_mail" name="mail_threshold" type="number" min="2" max="10000"
                  value="{{ f.cfg.mail_threshold }}">
         </div>
+        <div class="field" style="flex:1">
+          <label for="f2b_waf">WAF refusals <span class="hint">per site</span></label>
+          <input id="f2b_waf" name="waf_threshold" type="number" min="3" max="1000"
+                 value="{{ f.cfg.waf_threshold }}">
+        </div>
       </div>
       <p class="text-soft small" style="margin:0.4rem 0 1rem;line-height:1.55">
         <strong>Website login</strong> counts POSTs to <code>wp-login.php</code> and
@@ -2323,6 +2328,10 @@
         hosting's page, in the <em>Brute-force bans</em> tile of the Security
         card. The ssh, ftp and mail journals cover the whole machine and can't be
         attributed to one customer, so they stay on for everyone.
+        <strong>WAF refusals</strong> counts requests a site's WAF turned away for a
+        rule no honest visitor or crawler trips over and over — attack patterns in
+        the URL, vulnerability scanners, sensitive WordPress files, repository and
+        secret files. Downloads, XML-RPC, country and bot refusals never count.
       </p>
 
       <div style="display:flex;align-items:center;gap:0.5rem;margin:1.2rem 0 0.4rem">

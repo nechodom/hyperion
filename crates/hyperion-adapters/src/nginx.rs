@@ -233,7 +233,12 @@ struct VhostTpl<'a> {
     maintenance_mode: bool,
     fastcgi_cache_enabled: bool,
     fastcgi_cache_ttl: i64,
-    waf_enabled: bool,
+    /// Effective WAF rules (level + overrides + has_php), flattened.
+    waf: hyperion_types::waf::WafRules,
+    /// Something in this vhost tags refusals into `$hyperion_waf` (a WAF
+    /// rule, a country or a bot family), so the server block gets the
+    /// root-owned WAF log and the verdict pass.
+    waf_log: bool,
     signup_limit_enabled: bool,
     /// Validated IP/CIDR entries allowed to reach /wp-admin. Empty =
     /// allowlist disabled (every entry has already been checked to
@@ -736,6 +741,7 @@ fn apex_of(domain: &str) -> &str {
 }
 
 pub fn render(input: &VhostInput<'_>) -> Result<String, AdapterError> {
+    let waf = waf_rules(input);
     let tpl = VhostTpl {
         http2_directive: nginx_wants_http2_directive(),
         blocked_bots: bot_patterns(&input.options.blocked_bots),
@@ -765,7 +771,8 @@ pub fn render(input: &VhostInput<'_>) -> Result<String, AdapterError> {
             _ => String::new(),
         },
         fastcgi_cache_ttl: input.options.fastcgi_cache_ttl,
-        waf_enabled: input.options.waf_enabled,
+        waf,
+        waf_log: uses_waf_log(input),
         signup_limit_enabled: input.options.signup_limit_enabled,
         wp_admin_allow: parse_admin_allowlist(&input.options.wp_admin_allowlist),
         // The preview block needs ALL THREE of name/cert/key — a
@@ -779,6 +786,141 @@ pub fn render(input: &VhostInput<'_>) -> Result<String, AdapterError> {
         preview_cert_key_path: input.preview_cert_key_path.unwrap_or(""),
     };
     Ok(tpl.render()?)
+}
+
+/// The WAF rules this vhost renders.
+pub fn waf_rules(input: &VhostInput<'_>) -> hyperion_types::waf::WafRules {
+    hyperion_types::waf::effective_rules(
+        input.options.effective_waf_level(),
+        &hyperion_types::waf::parse_overrides(&input.options.waf_overrides),
+        input.php_version.is_some(),
+    )
+}
+
+/// Whether the rendered vhost references the WAF log (and so needs the
+/// log dir and the `hyperion_waf` log_format to exist before `nginx -t`).
+pub fn uses_waf_log(input: &VhostInput<'_>) -> bool {
+    waf_rules(input).any()
+        || !bot_patterns(&input.options.blocked_bots).is_empty()
+        || !country_codes(&input.options.blocked_countries).is_empty()
+}
+
+/// Directory of the per-hosting WAF hit logs.
+///
+/// Not the tenant's own log dir: the auto-ban trusts what is in here, and a
+/// tenant can write its own logs. Not under `/var/log/hyperion` either:
+/// that is root-only, and nginx WORKERS (not the root master) reopen their
+/// log files on USR1 — which Debian's own nginx logrotate sends daily — so
+/// a worker that cannot traverse the path keeps writing into the rotated
+/// file and the live one stays empty. root:<nginx group> 0750: the workers
+/// can reach it, site users cannot.
+pub const WAF_LOG_DIR: &str = "/var/log/hyperion-waf";
+/// http-level conf holding the `hyperion_waf` log_format.
+pub const WAF_CONF: &str = "/etc/nginx/conf.d/hyperion-waf.conf";
+/// logrotate policy for the WAF logs.
+pub const WAF_LOGROTATE: &str = "/etc/logrotate.d/hyperion-waf";
+
+/// Path of one hosting's WAF hit log.
+pub fn waf_log_file(hosting_id: &str) -> PathBuf {
+    PathBuf::from(WAF_LOG_DIR).join(format!("{hosting_id}.log"))
+}
+
+/// The log_format the WAF log lines are written in. Tab-separated so a
+/// field cannot spoof another: `escape=json` writes a control byte inside
+/// a value — tab included — as an escape (`\t`, `\u0001`…), never raw.
+/// (nginx turns the `\t` between the fields below into real tabs.)
+/// `hyperion_adapters::waflog::parse_line` is the reader; change both or
+/// neither.
+fn render_waf_conf() -> String {
+    const TEMPLATE: &str = r#"# Auto-managed by Hyperion. Do not edit — the per-site WAF lives on the
+# hosting's Protection card.
+#
+# One line per refused request, written only when a vhost tagged the
+# request with the rule that refused it ($hyperion_waf).
+#
+# The map DECLARES $hyperion_waf for every server. The log_format below
+# names it, and nginx refuses a config naming a variable nothing defines —
+# so without this, the moment no vhost on the node runs a WAF rule (the
+# last one switched off, or deleted), `nginx -t` fails for every site.
+# A vhost's own `set $hyperion_waf` still overrides it per request.
+map $host $hyperion_waf {
+    default "";
+}
+
+log_format hyperion_waf escape=json
+    '$msec\t$remote_addr\t$hyperion_waf\t$request_method\t$request_uri\t$http_user_agent\t$http_sec_fetch_site';
+"#;
+    TEMPLATE.to_string()
+}
+
+fn render_waf_logrotate() -> String {
+    // copytruncate: the live file keeps its inode, so rotation never
+    // depends on every nginx worker managing to reopen it. The reader
+    // (`waflog::read_new`) sees the truncation and finishes the copy in
+    // `<log>.1` from where it left off.
+    const TEMPLATE: &str = r#"# Auto-managed by Hyperion.
+__DIR__/*.log {
+    daily
+    rotate 7
+    missingok
+    notifempty
+    compress
+    delaycompress
+    copytruncate
+}
+"#;
+    TEMPLATE.replace("__DIR__", WAF_LOG_DIR)
+}
+
+/// Mode of [`WAF_LOG_DIR`].
+const WAF_LOG_DIR_MODE: u32 = 0o750;
+
+/// Write `path` only when its content differs — rewriting an identical file
+/// would still bump its mtime and invite a needless reload. Atomically: a
+/// half-written file in conf.d fails `nginx -t` for every site on the node.
+async fn write_if_changed(path: &str, want: &str) -> Result<(), AdapterError> {
+    if let Ok(existing) = tokio::fs::read_to_string(path).await {
+        if existing == want {
+            return Ok(());
+        }
+    }
+    atomic_write(std::path::Path::new(path), want.as_bytes(), 0o644).await
+}
+
+/// Everything a vhost that references the WAF log needs to pass `nginx -t`:
+/// the log dir (nginx opens the file while testing), the log_format, and
+/// the rotation policy.
+pub async fn ensure_waf_logging() -> Result<(), AdapterError> {
+    let dir = std::path::Path::new(WAF_LOG_DIR);
+    tokio::fs::create_dir_all(dir)
+        .await
+        .map_err(|e| AdapterError::Other(format!("create {WAF_LOG_DIR}: {e}")))?;
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        // root:<nginx group> 0750 (see WAF_LOG_DIR). Fixed only when it is
+        // not already so: finding the nginx user runs nginx, and this is
+        // called on every vhost write.
+        let needs_fix = match tokio::fs::metadata(dir).await {
+            Ok(m) => m.gid() == 0 || m.mode() & 0o7777 != WAF_LOG_DIR_MODE,
+            Err(_) => true,
+        };
+        if needs_fix {
+            let group = detect_user().await;
+            if cmd::run("/usr/bin/chown", &[&format!("root:{group}"), WAF_LOG_DIR])
+                .await
+                .is_err()
+            {
+                let _ = cmd::run("/usr/bin/chown", &["root:adm", WAF_LOG_DIR]).await;
+            }
+            let _ =
+                tokio::fs::set_permissions(dir, std::fs::Permissions::from_mode(WAF_LOG_DIR_MODE))
+                    .await;
+        }
+    }
+    write_if_changed(WAF_CONF, &render_waf_conf()).await?;
+    // Rotation is housekeeping: a box without logrotate still serves.
+    let _ = write_if_changed(WAF_LOGROTATE, &render_waf_logrotate()).await;
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -822,6 +964,11 @@ pub async fn write_vhost(paths: &Paths, input: &VhostInput<'_>) -> Result<(), Ad
     }
     // Same reason, for the access-log format the vhost names.
     ensure_logformat_conf().await?;
+    // And for the WAF log, unconditionally: `nginx -t` checks the WHOLE
+    // config, so another site's vhost naming the WAF log format or a log
+    // file in a missing directory would refuse this write too. Idempotent
+    // on content, so a node with no WAF site pays a stat or two.
+    ensure_waf_logging().await?;
     let body = render(input)?;
     let vhost = paths.vhost_file(input.domain);
     let backup = backup_existing(&vhost).await?;
@@ -1856,11 +2003,9 @@ mod tests {
             .find("if ($uri ~ \"^/\\.well-known/acme-challenge/\")")
             .expect("ACME exemption missing — blocking a country Let's Encrypt validates from would break every renewal");
         let verdict = out
-            .find("set $hyperion_deny \"1\";")
+            .rfind("set $hyperion_waf \"bot\";")
             .expect("deny verdict missing");
-        let act = out
-            .find("if ($hyperion_deny) {")
-            .expect("final act missing");
+        let act = out.find("if ($hyperion_waf) {").expect("final act missing");
         assert!(
             verdict < exempt && exempt < act,
             "exemption must sit between the deny verdicts and the final return"
@@ -2494,7 +2639,9 @@ mod tests {
         })
         .expect("render");
         // WAF rules present.
-        assert!(out.contains("location = /xmlrpc.php { deny all; }"));
+        assert!(
+            out.contains("location = /xmlrpc.php { set $hyperion_waf \"xmlrpc\"; return 403; }")
+        );
         assert!(out.contains("/wp-content/(uploads|cache)/.*\\.php$"));
         assert!(out.contains("nikto|sqlmap"));
         // admin-ajax stays public (no allow/deny in its block).
@@ -2506,6 +2653,229 @@ mod tests {
         assert!(out.contains("deny all;"));
         // The main php location still exists (general PHP still served).
         assert!(out.contains("location ~ \\.php$ {"));
+    }
+
+    fn render_with(opts: &hyperion_types::VhostOptions, php: Option<&str>) -> String {
+        let aliases: Vec<String> = vec![];
+        render(&VhostInput {
+            domain: "example.cz",
+            aliases: &aliases,
+            root_dir: "/home/example_cz/example.cz/htdocs",
+            logs_dir: "/home/example_cz/example.cz/logs",
+            system_user: "example_cz",
+            php_version: php,
+            cert_path: "/etc/lm/certs/example.cz/fullchain.pem",
+            key_path: "/etc/lm/certs/example.cz/privkey.pem",
+            acme_challenge_root: "/var/lib/lm/acme-challenges",
+            hosting_id: "01HWAF",
+            options: opts,
+            preview_server_name: Some("p.example.net"),
+            preview_cert_path: Some("/c.pem"),
+            preview_cert_key_path: Some("/k.pem"),
+        })
+        .expect("render")
+    }
+
+    /// Off renders no WAF at all — no log, no verdict pass — so a site that
+    /// never touched the WAF keeps the vhost it had.
+    #[test]
+    fn waf_off_renders_nothing() {
+        let out = render_with(&hyperion_types::VhostOptions::default(), Some("8.3"));
+        assert!(!out.contains("hyperion_waf"), "{out}");
+        assert!(!out.contains("/var/log/hyperion/waf"));
+    }
+
+    /// Each rule appears exactly when it is effective, and every refusal
+    /// records its own id for the hit log.
+    #[test]
+    fn every_rule_renders_only_when_on_and_tags_its_id() {
+        for r in hyperion_types::waf::RULES {
+            let on = hyperion_types::VhostOptions {
+                waf_overrides: format!(r#"{{"{}":true}}"#, r.id),
+                ..Default::default()
+            };
+            let out = render_with(&on, Some("8.3"));
+            assert!(
+                out.contains(&format!("set $hyperion_waf \"{}\";", r.id)),
+                "{} not tagged:\n{out}",
+                r.id
+            );
+            assert!(out.contains(
+                "access_log /var/log/hyperion-waf/01HWAF.log hyperion_waf if=$hyperion_waf;"
+            ));
+
+            let mut off = hyperion_types::VhostOptions::default();
+            off.set_waf_level(hyperion_types::waf::WafLevel::Strict);
+            off.waf_overrides = format!(r#"{{"{}":false}}"#, r.id);
+            let out = render_with(&off, Some("8.3"));
+            assert!(
+                !out.contains(&format!("set $hyperion_waf \"{}\";", r.id)),
+                "{} rendered while pinned off",
+                r.id
+            );
+        }
+    }
+
+    /// No rule — not even Strict with every country and bot family on top —
+    /// may refuse an ACME challenge: the exemption clears the verdict after
+    /// every server-level rule and before the one `return`. Location rules
+    /// cannot match the challenge path (none starts with /.well-known).
+    #[test]
+    fn strict_waf_never_blocks_acme() {
+        let mut opts = hyperion_types::VhostOptions {
+            blocked_bots: "ai,social,seo,shopping".into(),
+            blocked_countries: "RU,CN".into(),
+            ..Default::default()
+        };
+        opts.set_waf_level(hyperion_types::waf::WafLevel::Strict);
+        let out = render_with(&opts, Some("8.3"));
+        for block in out
+            .split("\nserver {")
+            .filter(|b| b.contains("listen 443 ssl"))
+        {
+            let exempt = block
+                .find("if ($uri ~ \"^/\\.well-known/acme-challenge/\") {\n        set $hyperion_waf \"\";")
+                .expect("exemption");
+            let act = block.find("if ($hyperion_waf) {").expect("act");
+            let last_server_rule = [
+                "empty_ua",
+                "bad_methods",
+                "author_enum",
+                "rest_user_enum",
+                "geo",
+                "bot",
+                "scanner_ua",
+                "sensitive_files",
+                "dotfiles",
+                "probe_args",
+            ]
+            .iter()
+            .filter_map(|t| block.find(&format!("set $hyperion_waf \"{t}\";")))
+            .max()
+            .expect("rules");
+            assert!(last_server_rule < exempt && exempt < act);
+        }
+        // Location rules never shadow the challenge location.
+        for loc in out
+            .lines()
+            .filter(|l| l.contains("set $hyperion_waf") && l.contains("location"))
+        {
+            assert!(!loc.contains("well-known"), "{loc}");
+        }
+    }
+
+    /// Standard on a legacy site (only the old bool set) renders the old
+    /// bundle, and nothing from Strict.
+    #[test]
+    fn legacy_bool_renders_standard() {
+        let opts = hyperion_types::VhostOptions {
+            waf_enabled: true,
+            ..Default::default()
+        };
+        let out = render_with(&opts, Some("8.3"));
+        for id in [
+            "probe_args",
+            "scanner_ua",
+            "xmlrpc",
+            "sensitive_files",
+            "dump_files",
+            "php_in_uploads",
+        ] {
+            assert!(out.contains(&format!("\"{id}\";")), "{id} missing");
+        }
+        for id in [
+            "dotfiles",
+            "author_enum",
+            "rest_user_enum",
+            "bad_methods",
+            "empty_ua",
+        ] {
+            assert!(
+                !out.contains(&format!("\"{id}\";")),
+                "{id} leaked into Standard"
+            );
+        }
+    }
+
+    /// Location WAF rules must precede the PHP location: regex locations
+    /// are first-match, so after it they would never fire.
+    #[test]
+    fn waf_locations_precede_the_php_handler() {
+        let mut opts = hyperion_types::VhostOptions::default();
+        opts.set_waf_level(hyperion_types::waf::WafLevel::Strict);
+        let out = render_with(&opts, Some("8.3"));
+        let first_tls = out
+            .split("\nserver {")
+            .find(|b| b.contains("listen 443 ssl"))
+            .expect("tls block");
+        let uploads = first_tls.find("\"php_in_uploads\"").expect("uploads");
+        let dumps = first_tls.find("\"dump_files\"").expect("dumps");
+        let php = first_tls.find("location ~ \\.php$ {").expect("php");
+        assert!(uploads < php && dumps < php);
+    }
+
+    /// Every match overwrites the verdict, so the last wins: the rules whose
+    /// hits earn a ban must come after the ones that only refuse, or a
+    /// scanner without a User-Agent (or from a blocked country) is recorded
+    /// as the harmless tag and never banned.
+    #[test]
+    fn ban_counted_verdicts_come_after_refuse_only_ones() {
+        let mut opts = hyperion_types::VhostOptions {
+            blocked_bots: "ai".into(),
+            blocked_countries: "RU".into(),
+            ..Default::default()
+        };
+        opts.set_waf_level(hyperion_types::waf::WafLevel::Strict);
+        let out = render_with(&opts, Some("8.3"));
+        let first_tls = out
+            .split("\nserver {")
+            .find(|b| b.contains("listen 443 ssl"))
+            .expect("tls block");
+        let pos = |tag: &str| {
+            first_tls
+                .find(&format!("set $hyperion_waf \"{tag}\";"))
+                .unwrap_or_else(|| panic!("{tag} missing"))
+        };
+        let last_refuse_only = [
+            "empty_ua",
+            "bad_methods",
+            "author_enum",
+            "rest_user_enum",
+            "geo",
+            "bot",
+        ]
+        .iter()
+        .map(|t| pos(t))
+        .max()
+        .expect("refuse-only");
+        for r in hyperion_types::waf::RULES
+            .iter()
+            .filter(|r| r.counts_for_ban)
+        {
+            assert!(pos(r.id) > last_refuse_only, "{} must come last", r.id);
+        }
+    }
+
+    #[test]
+    fn waf_conf_and_logrotate_render() {
+        let conf = render_waf_conf();
+        assert!(conf.contains("log_format hyperion_waf escape=json"));
+        // Declared at http level, BEFORE the format that names it: with no
+        // WAF vhost left on the node, an undeclared $hyperion_waf is
+        // `[emerg] unknown "hyperion_waf" variable` for every reload.
+        let map = conf
+            .find("map $host $hyperion_waf {")
+            .expect("variable declared");
+        assert!(map < conf.find("log_format hyperion_waf").expect("format"));
+        assert!(conf.contains(
+            "'$msec\\t$remote_addr\\t$hyperion_waf\\t$request_method\\t$request_uri\\t$http_user_agent\\t$http_sec_fetch_site'"
+        ));
+        let lr = render_waf_logrotate();
+        assert!(lr.starts_with("# Auto-managed"));
+        assert!(lr.contains("/var/log/hyperion-waf/*.log {"));
+        // The live file keeps its inode: no worker has to reopen anything.
+        assert!(lr.contains("copytruncate"));
+        assert!(!lr.contains("USR1"));
     }
 
     #[test]
