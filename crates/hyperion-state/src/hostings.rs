@@ -117,6 +117,19 @@ pub async fn aliases(pool: &SqlitePool, hosting_id: &HostingId) -> Result<Vec<St
     Ok(rows.into_iter().map(|(s,)| s).collect())
 }
 
+/// Active hostings with the OWASP Core Rule Set on — whether this node
+/// needs the rule set loaded at all (it costs memory in every nginx
+/// process). Trashed hostings never count.
+pub async fn count_crs_on(pool: &SqlitePool) -> Result<i64, StateError> {
+    let (n,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM hostings \
+         WHERE crs_mode IN ('detect', 'block') AND state = 'active' AND trashed_at IS NULL",
+    )
+    .fetch_one(pool)
+    .await?;
+    Ok(n)
+}
+
 pub async fn set_state(
     pool: &SqlitePool,
     id: &HostingId,
@@ -386,6 +399,11 @@ struct RawHostingVhost {
     canonical_host: String,
     waf_level: String,
     waf_overrides: String,
+    crs_mode: String,
+    crs_paranoia: i64,
+    crs_threshold: i64,
+    crs_wordpress: i64,
+    crs_exclusions: String,
 }
 
 const QUERY_BASE: &str =
@@ -402,7 +420,8 @@ const QUERY_VHOST_BY_ID: &str =
             redirect_url, redirect_code, redirect_preserve_path, waf_enabled, signup_limit_enabled, wp_admin_allowlist, \
              blocked_bots,
             blocked_countries, blocked_countries, \
-            canonical_host, waf_level, waf_overrides \
+            canonical_host, waf_level, waf_overrides, \
+            crs_mode, crs_paranoia, crs_threshold, crs_wordpress, crs_exclusions \
      FROM hostings WHERE id = ?";
 
 // Third row tuple for the WP/Redis extras (migration 021). Same PK
@@ -474,6 +493,11 @@ async fn fetch_one<'a>(
             canonical_host,
             waf_level,
             waf_overrides,
+            crs_mode,
+            crs_paranoia,
+            crs_threshold,
+            crs_wordpress,
+            crs_exclusions,
         }) => hyperion_types::VhostOptions {
             basic_auth_enabled: basic_auth_enabled != 0,
             basic_auth_user,
@@ -495,6 +519,11 @@ async fn fetch_one<'a>(
             canonical_host,
             waf_level,
             waf_overrides,
+            crs_mode,
+            crs_paranoia,
+            crs_threshold,
+            crs_wordpress: crs_wordpress != 0,
+            crs_exclusions,
         },
         None => hyperion_types::VhostOptions::default(),
     };
@@ -572,6 +601,7 @@ pub async fn set_vhost_options(
     now: i64,
 ) -> Result<(), StateError> {
     let waf = opts.effective_waf_level();
+    let crs = opts.crs_settings();
     // If hash is None, don't touch the column.
     if let Some(h) = basic_auth_hash {
         sqlx::query(
@@ -579,7 +609,8 @@ pub async fn set_vhost_options(
                 force_https=?, hsts_max_age=?, custom_nginx_snippet=?, \
                 maintenance_mode=?, fastcgi_cache_enabled=?, fastcgi_cache_ttl=?, \
                 redirect_url=?, redirect_code=?, redirect_preserve_path=?, \
-                waf_enabled=?, signup_limit_enabled=?, wp_admin_allowlist=?, blocked_bots=?, blocked_countries=?, canonical_host=?, waf_level=?, waf_overrides=?, updated_at=? \
+                waf_enabled=?, signup_limit_enabled=?, wp_admin_allowlist=?, blocked_bots=?, blocked_countries=?, canonical_host=?, waf_level=?, waf_overrides=?, \
+                crs_mode=?, crs_paranoia=?, crs_threshold=?, crs_wordpress=?, crs_exclusions=?, updated_at=? \
              WHERE id = ?",
         )
         .bind(opts.basic_auth_enabled as i64)
@@ -615,6 +646,14 @@ pub async fn set_vhost_options(
         .bind(hyperion_types::waf::overrides_to_string(
             &hyperion_types::waf::parse_overrides(&opts.waf_overrides),
         ))
+        // The CRS columns sit between waf_overrides and updated_at in both
+        // statements, in this order. Written from the RESOLVED settings, so
+        // the row never holds a value the vhost would not render.
+        .bind(crs.mode.as_str())
+        .bind(crs.paranoia)
+        .bind(crs.threshold)
+        .bind(crs.wordpress as i64)
+        .bind(hyperion_types::crs::exclusions_to_string(&crs.exclusions))
         .bind(now)
         .bind(id.as_str())
         .execute(pool)
@@ -625,7 +664,8 @@ pub async fn set_vhost_options(
                 force_https=?, hsts_max_age=?, custom_nginx_snippet=?, \
                 maintenance_mode=?, fastcgi_cache_enabled=?, fastcgi_cache_ttl=?, \
                 redirect_url=?, redirect_code=?, redirect_preserve_path=?, \
-                waf_enabled=?, signup_limit_enabled=?, wp_admin_allowlist=?, blocked_bots=?, blocked_countries=?, canonical_host=?, waf_level=?, waf_overrides=?, updated_at=? \
+                waf_enabled=?, signup_limit_enabled=?, wp_admin_allowlist=?, blocked_bots=?, blocked_countries=?, canonical_host=?, waf_level=?, waf_overrides=?, \
+                crs_mode=?, crs_paranoia=?, crs_threshold=?, crs_wordpress=?, crs_exclusions=?, updated_at=? \
              WHERE id = ?",
         )
         .bind(opts.basic_auth_enabled as i64)
@@ -660,6 +700,14 @@ pub async fn set_vhost_options(
         .bind(hyperion_types::waf::overrides_to_string(
             &hyperion_types::waf::parse_overrides(&opts.waf_overrides),
         ))
+        // The CRS columns sit between waf_overrides and updated_at in both
+        // statements, in this order. Written from the RESOLVED settings, so
+        // the row never holds a value the vhost would not render.
+        .bind(crs.mode.as_str())
+        .bind(crs.paranoia)
+        .bind(crs.threshold)
+        .bind(crs.wordpress as i64)
+        .bind(hyperion_types::crs::exclusions_to_string(&crs.exclusions))
         .bind(now)
         .bind(id.as_str())
         .execute(pool)

@@ -105,6 +105,18 @@
     # `if=` skips every request $hyperion_waf was never set for.
     access_log /var/log/hyperion-waf/{{ hosting_id }}.log hyperion_waf if=$hyperion_waf;
     {%- endif %}
+    {%- if crs_on %}
+
+    # ─── OWASP Core Rule Set (ModSecurity) — Protection card ───
+    # The rule set itself is loaded once at http level; this switches the
+    # engine on for this site and sets its mode, paranoia, threshold and
+    # exclusions — they run BEFORE the inherited rules. The transaction id
+    # is how the node-wide audit log is attributed back to this site.
+    modsecurity on;
+    modsecurity_transaction_id "{{ hosting_id }}-$msec-$request_id";
+    modsecurity_rules '
+{{ crs_rules }}';
+    {%- endif %}
     error_log  {{ logs_dir }}/error.log;
 
     {%- if basic_auth_enabled %}
@@ -228,6 +240,10 @@
     location /.well-known/acme-challenge/ {
         {%- if basic_auth_enabled %}
         auth_basic off;
+        {%- endif %}
+        {%- if crs_on %}
+        # …and past the Core Rule Set: a renewal is never worth a gamble.
+        modsecurity off;
         {%- endif %}
         alias {{ acme_challenge_root }}/;
         try_files $uri =404;

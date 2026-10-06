@@ -351,6 +351,25 @@ pub trait AdapterPort: Send + Sync {
 
     /// Delete a per-hosting Redis ACL user. Idempotent — Ok if absent.
     async fn redis_delete_acl(&self, username: &str) -> Result<(), AdapterError>;
+
+    /// What this node's ModSecurity engine looks like (files only; the
+    /// service fills in the site count). Default: no engine.
+    async fn modsec_status(&self) -> hyperion_types::crs::ModsecStatus {
+        hyperion_types::crs::ModsecStatus::default()
+    }
+
+    /// Install the ModSecurity connector and the Core Rule Set.
+    async fn modsec_install(&self) -> Result<(), AdapterError> {
+        Err(AdapterError::Other(
+            "installing ModSecurity is not supported here".into(),
+        ))
+    }
+
+    /// Load (`need`) or unload the rule set at http level, `nginx -t` +
+    /// reload included. Returns whether anything changed.
+    async fn modsec_sync_http(&self, _need: bool) -> Result<bool, AdapterError> {
+        Ok(false)
+    }
 }
 
 /// Live state of the panel-vhost ACME issuance.
@@ -1967,6 +1986,17 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 .nginx_apply_suspended(&detail.domain, detail.aliases.clone(), reason)
                 .await
                 .map_err(|e| RpcError::Internal_with(format!("suspended vhost: {e}")));
+        }
+        if detail.vhost_options.crs_settings().mode != hyperion_types::crs::CrsMode::Off {
+            // A CRS site coming back (resumed, restored from the trash) after
+            // the rule set was unloaded while it was away: load it first, or
+            // the site would run the engine with no rules in it.
+            let st = self.adapters.modsec_status().await;
+            if st.available() && !st.loaded {
+                if let Err(e) = self.adapters.modsec_sync_http(true).await {
+                    tracing::warn!(domain = %detail.domain, error = %e, "crs: could not load the rule set");
+                }
+            }
         }
         self.adapters
             .nginx_write_vhost(detail)
@@ -4134,6 +4164,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         hostings::delete(&self.pool, &detail.id)
             .await
             .map_err(|e| RpcError::Internal_with(format!("delete row: {e}")))?;
+        // The last site using the Core Rule Set gone: unload it (it costs
+        // memory in every nginx process). Best-effort — boot re-checks.
+        if detail.vhost_options.crs_settings().mode != hyperion_types::crs::CrsMode::Off {
+            let _ = self.crs_sync().await;
+        }
         self.append_audit(
             "hosting.purge",
             Some(detail.id.as_str()),
@@ -5130,6 +5165,71 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             &hyperion_types::waf::parse_overrides(&options.waf_overrides),
         );
 
+        // ─── OWASP Core Rule Set ───────────────────────────────────
+        let stored_crs = detail.vhost_options.crs_settings();
+        if options.crs_mode.trim().is_empty() {
+            // A caller that predates the CRS tier (an older master, an API
+            // client sending only the fields it knows): keep every stored
+            // CRS setting rather than reading the empty mode as "off".
+            options.crs_mode = detail.vhost_options.crs_mode.clone();
+            options.crs_paranoia = detail.vhost_options.crs_paranoia;
+            options.crs_threshold = detail.vhost_options.crs_threshold;
+            options.crs_wordpress = detail.vhost_options.crs_wordpress;
+            options.crs_exclusions = detail.vhost_options.crs_exclusions.clone();
+        } else {
+            use hyperion_types::crs;
+            let Some(mode) = crs::CrsMode::parse(&options.crs_mode) else {
+                return Err(RpcError::Validation {
+                    message: "crs_mode must be off, detect or block".into(),
+                });
+            };
+            options.crs_mode = mode.as_str().to_string();
+            if options.crs_paranoia == 0 {
+                options.crs_paranoia = crs::DEFAULT_PARANOIA;
+            }
+            if !crs::PARANOIA_CHOICES.contains(&options.crs_paranoia) {
+                return Err(RpcError::Validation {
+                    message: "crs_paranoia must be 1 or 2".into(),
+                });
+            }
+            if options.crs_threshold == 0 {
+                options.crs_threshold = crs::DEFAULT_THRESHOLD;
+            }
+            if !(2..=100).contains(&options.crs_threshold) {
+                return Err(RpcError::Validation {
+                    message: "crs_threshold must be 2..=100".into(),
+                });
+            }
+            // Strict here, lenient on read: what is STORED must be exactly
+            // what the vhost renders, so a bad entry is refused by name.
+            let list: Vec<crs::CrsExclusion> = if options.crs_exclusions.trim().is_empty() {
+                Vec::new()
+            } else {
+                serde_json::from_str(&options.crs_exclusions).map_err(|e| RpcError::Validation {
+                    message: format!("crs_exclusions is not a valid list: {e}"),
+                })?
+            };
+            crs::validate_exclusions(&list).map_err(|message| RpcError::Validation { message })?;
+            options.crs_exclusions = crs::exclusions_to_string(&list);
+            // Turning it ON needs the engine on THIS node. A site that already
+            // had it on keeps saving even if the engine has gone since — the
+            // vhost then renders without it rather than refusing every save.
+            if mode != crs::CrsMode::Off && stored_crs.mode == crs::CrsMode::Off {
+                let st = self.adapters.modsec_status().await;
+                if !st.available() {
+                    return Err(RpcError::Validation {
+                        message:
+                            "The OWASP Core Rule Set needs ModSecurity on this node — install \
+                                  it from the Protection card first."
+                                .into(),
+                    });
+                }
+            }
+        }
+        // Whether the node's need for the http-level rule set may change.
+        let crs_toggled = (options.crs_settings().mode == hyperion_types::crs::CrsMode::Off)
+            != (stored_crs.mode == hyperion_types::crs::CrsMode::Off);
+
         // ─── htpasswd write (before persist, so a failed bcrypt is
         //     surfaced before we change DB state) ─────────────────────
         let pw_nonempty = basic_auth_password.as_deref().filter(|s| !s.is_empty());
@@ -5176,6 +5276,28 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         .await
         .map_err(|e| RpcError::Internal_with(format!("persist vhost options: {e}")))?;
 
+        // ─── Rule set in or out at http level ──────────────────────
+        // Before the vhost: a site switching CRS on needs the rule set loaded
+        // first; one switching off may unload it now — its old vhost names
+        // only per-site rules, which load without the rule set.
+        if crs_toggled {
+            if let Err(e) = self.crs_sync().await {
+                let _ = hyperion_state::hostings::set_vhost_options(
+                    &self.pool,
+                    &detail.id,
+                    &detail.vhost_options,
+                    None,
+                    now_secs(),
+                )
+                .await;
+                return Err(RpcError::Validation {
+                    message: format!(
+                        "ModSecurity rule set could not be loaded: {e}. No changes applied."
+                    ),
+                });
+            }
+        }
+
         // ─── Re-render vhost (nginx -t inside write_vhost) ─────────
         let mut new_detail = detail.clone();
         new_detail.vhost_options = options.clone();
@@ -5191,6 +5313,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 now_secs(),
             )
             .await;
+            if crs_toggled {
+                let _ = self.crs_sync().await;
+            }
             // Roll back htpasswd too if we just wrote it.
             if pw_provided {
                 if detail.vhost_options.basic_auth_set {
@@ -13658,6 +13783,124 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         }
     }
 
+    /// This node's ModSecurity engine, and how many of its sites use it.
+    pub async fn modsec_status(&self) -> Result<hyperion_types::crs::ModsecStatus, RpcError> {
+        let mut st = self.adapters.modsec_status().await;
+        st.active_sites = hyperion_state::hostings::count_crs_on(&self.pool)
+            .await
+            .unwrap_or(0)
+            .max(0) as u32;
+        Ok(st)
+    }
+
+    /// Load the Core Rule Set at http level while some active site on this
+    /// node uses it, unload it otherwise — it costs memory in every nginx
+    /// process. Idempotent; reloads nginx only when something changed.
+    pub async fn crs_sync(&self) -> Result<bool, RpcError> {
+        let st = self.adapters.modsec_status().await;
+        let users = hyperion_state::hostings::count_crs_on(&self.pool)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("count CRS sites: {e}")))?;
+        self.adapters
+            .modsec_sync_http(st.available() && users > 0)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("ModSecurity: {e}")))
+    }
+
+    /// Install ModSecurity + the Core Rule Set on this node. Slow (apt):
+    /// the web side runs it as a background job.
+    pub async fn modsec_install(&self) -> Result<hyperion_types::crs::ModsecStatus, RpcError> {
+        if let Some(rw_err) = check_usr_writable().await {
+            return Err(RpcError::Conflict { message: rw_err });
+        }
+        let res = self.adapters.modsec_install().await;
+        self.append_audit(
+            "modsec.install",
+            None,
+            "{}",
+            if res.is_ok() { "ok" } else { "error" },
+        )
+        .await;
+        res.map_err(|e| RpcError::Internal_with(e.to_string()))?;
+        self.crs_sync().await?;
+        self.modsec_status().await
+    }
+
+    /// Read the node's ModSecurity audit log from where the last pass
+    /// stopped and record each CRS decision against the site it belongs to.
+    ///
+    /// One log for the whole node (ModSecurity ignores per-site audit logs);
+    /// every entry carries the site's id in its transaction id, which the
+    /// site's own server block sets — a request cannot choose it. Entries
+    /// for ids this node does not host are dropped. CRS decisions never
+    /// earn a firewall ban: their tags are not ban-counted.
+    async fn crs_ingest(&self, audit: &std::path::Path, now: i64) {
+        if !tokio::fs::try_exists(audit).await.unwrap_or(false) {
+            return;
+        }
+        let pos = hyperion_state::node_kv::get(&self.pool, MODSEC_AUDIT_POS_KEY)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|v| hyperion_adapters::waflog::LogPos::decode(&v));
+        let path = audit.to_path_buf();
+        let read = tokio::task::spawn_blocking(move || {
+            let mut by_site: std::collections::HashMap<String, hyperion_types::waf::WafBatch> =
+                std::collections::HashMap::new();
+            let r = hyperion_adapters::waflog::read_new_lines(
+                &path,
+                pos,
+                hyperion_adapters::waflog::MAX_READ_BYTES,
+                &mut |line| {
+                    if let Some((site, hit)) = hyperion_adapters::modsec::parse_audit_line(line) {
+                        if by_site.len() < 10_000 || by_site.contains_key(&site) {
+                            by_site.entry(site).or_default().push(hit);
+                        }
+                    }
+                },
+            );
+            r.map(|(p, skipped)| (by_site, p, skipped))
+        })
+        .await;
+        let (by_site, new_pos, skipped) = match read {
+            Ok(Ok(v)) => v,
+            Ok(Err(e)) => {
+                tracing::warn!(error = %e, "crs: could not read the ModSecurity audit log");
+                return;
+            }
+            Err(_) => return,
+        };
+        if skipped > 0 {
+            tracing::warn!(
+                skipped_bytes = skipped,
+                "crs: audit log backlog over the per-tick budget; oldest entries skipped"
+            );
+        }
+        let known: std::collections::HashSet<String> = match self.list().await {
+            Ok(v) => v.into_iter().map(|s| s.id.as_str().to_string()).collect(),
+            Err(_) => return,
+        };
+        for (site, batch) in &by_site {
+            if !known.contains(site) {
+                continue;
+            }
+            if let Err(e) = hyperion_state::waf::record(&self.pool, site, batch).await {
+                // Do not advance past entries that were not stored.
+                tracing::warn!(error = %e, "crs: could not record audit entries");
+                return;
+            }
+        }
+        if Some(new_pos) != pos {
+            let _ = hyperion_state::node_kv::set(
+                &self.pool,
+                MODSEC_AUDIT_POS_KEY,
+                &new_pos.encode(),
+                now,
+            )
+            .await;
+        }
+    }
+
     /// Addresses no automatic ban may hit, whatever a log says: this
     /// machine's own — a site calling itself on its public address (WP-cron,
     /// Site Health) arrives FROM it, and a tenant's PHP can make that
@@ -13931,6 +14174,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 now,
             )
             .await;
+        self.crs_ingest(
+            std::path::Path::new(hyperion_adapters::modsec::AUDIT_LOG),
+            now,
+        )
+        .await;
         if !self.fail2ban.enabled {
             return Ok(0);
         }
@@ -34903,6 +35151,9 @@ const WAF_AUTOBAN_KV_KEY: &str = "waf_autoban_enabled";
 const WAF_LOG_POS_KV_KEY: &str = "waf_log_pos";
 /// Refusals listed in the activity panel.
 const WAF_RECENT_SHOWN: i64 = 50;
+/// Where the CRS ingest stopped in the node's ModSecurity audit log
+/// (`node_kv`), `"<inode>:<offset>"`.
+const MODSEC_AUDIT_POS_KEY: &str = "modsec_audit_pos";
 
 /// The host of an `https://host[:port]/…` URL, resolved to addresses. A
 /// literal IP needs no lookup; a name gets a short, bounded one.
@@ -41499,6 +41750,150 @@ mod tests {
         .await
         .expect("opt out");
         assert!(s.waf_ingest(logs.path(), since, now).await.is_empty());
+    }
+
+    fn engine(available: bool) -> hyperion_types::crs::ModsecStatus {
+        hyperion_types::crs::ModsecStatus {
+            module: available,
+            crs: available,
+            crs_version: "3.3.4".into(),
+            ..Default::default()
+        }
+    }
+
+    /// Turning CRS on needs the engine on the node; with it, the rule set is
+    /// loaded at http level BEFORE the vhost, and unloaded again when the
+    /// last site turns it off. Bad exclusions are refused by name; a caller
+    /// that predates the tier keeps the stored settings.
+    #[tokio::test]
+    async fn crs_settings_validate_toggle_the_rule_set_and_survive_old_callers() {
+        let pool = open_memory().await.expect("open");
+        let mut a = happy_mocks();
+        a.expect_nginx_delete_htpasswd().returning(|_| Ok(()));
+        let available = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let loaded = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (av, ld) = (available.clone(), loaded.clone());
+        a.expect_modsec_status()
+            .returning(move || hyperion_types::crs::ModsecStatus {
+                loaded: ld.load(std::sync::atomic::Ordering::SeqCst),
+                ..engine(av.load(std::sync::atomic::Ordering::SeqCst))
+            });
+        let syncs = std::sync::Arc::new(std::sync::Mutex::new(Vec::<bool>::new()));
+        let (sy, ld) = (syncs.clone(), loaded.clone());
+        a.expect_modsec_sync_http().returning(move |need| {
+            sy.lock().expect("lock").push(need);
+            ld.store(need, std::sync::atomic::Ordering::SeqCst);
+            Ok(true)
+        });
+        let s = svc(pool.clone(), a);
+        s.create(req("example.cz")).await.expect("create");
+        let sel = HostingSelector::Domain(Domain::parse("example.cz").expect("parse"));
+
+        let mut on = vh_defaults();
+        on.crs_mode = "block".into();
+        let err = s.set_vhost_options(sel.clone(), on.clone(), None).await;
+        assert!(format!("{}", err.expect_err("no engine")).contains("install"));
+        assert!(syncs.lock().expect("lock").is_empty());
+
+        available.store(true, std::sync::atomic::Ordering::SeqCst);
+        on.crs_paranoia = 2;
+        on.crs_exclusions = r#"[{"rules":[942100],"path":"/x"}]"#.into();
+        s.set_vhost_options(sel.clone(), on.clone(), None)
+            .await
+            .expect("on");
+        assert_eq!(*syncs.lock().expect("lock"), vec![true], "rule set loaded");
+        let got = s.get(sel.clone()).await.expect("get").vhost_options;
+        assert_eq!(got.crs_mode, "block");
+        assert_eq!(got.crs_paranoia, 2);
+        assert_eq!(got.crs_threshold, 5, "default filled in");
+        assert_eq!(got.crs_exclusions, r#"[{"rules":[942100],"path":"/x"}]"#);
+        assert_eq!(s.modsec_status().await.expect("st").active_sites, 1);
+
+        // An older master knows nothing of CRS: everything stays.
+        s.set_vhost_options(sel.clone(), vh_defaults(), None)
+            .await
+            .expect("legacy");
+        let got = s.get(sel.clone()).await.expect("get").vhost_options;
+        assert_eq!(got.crs_mode, "block");
+        assert_eq!(got.crs_exclusions, r#"[{"rules":[942100],"path":"/x"}]"#);
+        assert_eq!(syncs.lock().expect("lock").len(), 1, "no toggle, no sync");
+
+        // Re-rendered while the rule set was unloaded (a resume after the
+        // boot sync dropped it): it is loaded again before the vhost.
+        loaded.store(false, std::sync::atomic::Ordering::SeqCst);
+        s.set_vhost_options(sel.clone(), vh_defaults(), None)
+            .await
+            .expect("re-render");
+        assert_eq!(*syncs.lock().expect("lock"), vec![true, true]);
+
+        let mut bad = on.clone();
+        bad.crs_exclusions = r#"[{"rules":[949110]}]"#.into();
+        let err = s.set_vhost_options(sel.clone(), bad, None).await;
+        assert!(format!("{}", err.expect_err("structural")).contains("949110"));
+        let mut bad = on.clone();
+        bad.crs_paranoia = 4;
+        assert!(s.set_vhost_options(sel.clone(), bad, None).await.is_err());
+
+        let mut off = on.clone();
+        off.crs_mode = "off".into();
+        s.set_vhost_options(sel.clone(), off, None)
+            .await
+            .expect("off");
+        assert_eq!(
+            *syncs.lock().expect("lock"),
+            vec![true, true, false],
+            "rule set unloaded"
+        );
+        assert_eq!(s.modsec_status().await.expect("st").active_sites, 0);
+    }
+
+    /// The node-wide audit log is attributed by transaction id: entries for
+    /// this node's site are recorded under CRS tags, entries for an id it
+    /// does not host are dropped, and nothing is offered for a ban.
+    #[tokio::test]
+    async fn crs_ingest_attributes_audit_entries_to_local_sites_only() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), happy_mocks());
+        s.create(req("example.cz")).await.expect("create");
+        let a = s
+            .get(HostingSelector::Domain(
+                Domain::parse("example.cz").expect("parse"),
+            ))
+            .await
+            .expect("get");
+        let fixture = include_str!("../../hyperion-adapters/testdata/modsec_audit.jsonl")
+            .replace("01a110d5-1ee1-71c2-b98b-0e31aa826f3b", a.id.as_str());
+        let dir = tempfile::tempdir().expect("dir");
+        let log = dir.path().join("audit.log");
+        std::fs::write(&log, &fixture).expect("write");
+        let now = now_secs();
+        s.crs_ingest(&log, now).await;
+
+        let act = s.waf_activity(a.id.as_str()).await.expect("activity");
+        let tags: Vec<&str> = act.recent.iter().map(|h| h.rule.as_str()).collect();
+        assert_eq!(
+            tags,
+            vec!["crs_body", "crs_xss", "crs_sqli"],
+            "newest first, this site only"
+        );
+        assert_eq!(act.recent[2].detail, "942100 · score 5");
+        assert!(
+            hyperion_state::waf::ip_offenders(&pool, a.id.as_str(), 0, 1)
+                .await
+                .expect("offenders")
+                .is_empty()
+        );
+
+        // Read once: a second pass over the same log records nothing new.
+        s.crs_ingest(&log, now).await;
+        assert_eq!(
+            s.waf_activity(a.id.as_str())
+                .await
+                .expect("activity")
+                .recent
+                .len(),
+            3
+        );
     }
 
     /// Purging a site removes its WAF log and the rotated copies logrotate

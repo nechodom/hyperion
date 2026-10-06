@@ -528,6 +528,12 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
     ) -> Result<hyperion_types::waf::WafActivity, RpcError> {
         self.svc.waf_activity(&hosting_id).await
     }
+    async fn modsec_status(&self) -> Result<hyperion_types::crs::ModsecStatus, RpcError> {
+        self.svc.modsec_status().await
+    }
+    async fn modsec_install(&self) -> Result<hyperion_types::crs::ModsecStatus, RpcError> {
+        self.svc.modsec_install().await
+    }
     async fn hosting_kv_list(&self, hosting_id: String) -> Result<Vec<(String, String)>, RpcError> {
         self.svc.hosting_kv_list(hosting_id).await
     }

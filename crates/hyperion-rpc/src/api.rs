@@ -290,6 +290,8 @@ pub trait AgentApi: Send + Sync + 'static {
         &self,
         hosting_id: String,
     ) -> Result<hyperion_types::waf::WafActivity, RpcError>;
+    async fn modsec_status(&self) -> Result<hyperion_types::crs::ModsecStatus, RpcError>;
+    async fn modsec_install(&self) -> Result<hyperion_types::crs::ModsecStatus, RpcError>;
     async fn upcoming_expiries(
         &self,
         within_seconds: i64,

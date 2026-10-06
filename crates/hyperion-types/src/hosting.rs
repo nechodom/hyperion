@@ -241,6 +241,23 @@ pub struct VhostOptions {
     /// none. Parsed with `crate::waf::parse_overrides`.
     #[serde(default)]
     pub waf_overrides: String,
+    /// OWASP Core Rule Set tier (migration 078): `off` | `detect` | `block`.
+    /// EMPTY on the wire from a caller that predates it — the service then
+    /// keeps every stored CRS setting rather than reading "off".
+    #[serde(default)]
+    pub crs_mode: String,
+    /// CRS paranoia level (1–2; 0 = default).
+    #[serde(default)]
+    pub crs_paranoia: i64,
+    /// CRS inbound anomaly threshold (0 = default 5).
+    #[serde(default)]
+    pub crs_threshold: i64,
+    /// Apply CRS's WordPress exclusion set.
+    #[serde(default)]
+    pub crs_wordpress: bool,
+    /// Rule exclusions, JSON (`crate::crs::parse_exclusions`).
+    #[serde(default)]
+    pub crs_exclusions: String,
 
     /// Rate-limit WordPress sign-ups for this site.
     ///
@@ -302,6 +319,27 @@ impl VhostOptions {
     pub fn set_waf_level(&mut self, level: crate::waf::WafLevel) {
         self.waf_level = level.as_str().to_string();
         self.waf_enabled = level != crate::waf::WafLevel::Off;
+    }
+
+    /// The CRS settings this site renders, defaults resolved and the stored
+    /// strings parsed leniently (a bad value never breaks a vhost).
+    pub fn crs_settings(&self) -> crate::crs::CrsSettings {
+        use crate::crs;
+        crs::CrsSettings {
+            mode: crs::CrsMode::parse(&self.crs_mode).unwrap_or_default(),
+            paranoia: if crs::PARANOIA_CHOICES.contains(&self.crs_paranoia) {
+                self.crs_paranoia
+            } else {
+                crs::DEFAULT_PARANOIA
+            },
+            threshold: if (2..=100).contains(&self.crs_threshold) {
+                self.crs_threshold
+            } else {
+                crs::DEFAULT_THRESHOLD
+            },
+            wordpress: self.crs_wordpress,
+            exclusions: crs::parse_exclusions(&self.crs_exclusions),
+        }
     }
 
     /// "WAF off" as a caller that knows only the old switch means it: the

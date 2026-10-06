@@ -270,6 +270,13 @@ struct DetailTpl<'a> {
     waf_summary: String,
     /// At least one rule is rendered.
     waf_on: bool,
+    /// This node's ModSecurity engine; `None` when the node did not answer
+    /// (an older Hyperion) — the card says so instead of guessing.
+    modsec: Option<hyperion_types::crs::ModsecStatus>,
+    /// The site's Core Rule Set settings, resolved.
+    crs: CrsView,
+    /// Installing a package on a node is an administrator's call.
+    can_install_modsec: bool,
     /// Whether this kind's vhost renders the Protection card at all. A
     /// reverse proxy and a redirect have their own nginx templates with no
     /// WAF, bot, country, admin-lock or sign-up rules in them.
@@ -1539,6 +1546,8 @@ pub async fn post_create(
             let waf_rules = waf_rule_rows(&detail.vhost_options, detail.php_version.is_some());
             let protection_applies = protection_applies(&detail.kind);
             let workers_full = PhpWorkersView::from_kv(&[], 0);
+            let modsec = fetch_modsec_status(&state, target).await;
+            let crs = crs_view(&detail.vhost_options);
             let tpl = DetailTpl {
                 username: &ctx.username,
                 user_initial: super::user_initial(&ctx.username),
@@ -1640,6 +1649,9 @@ pub async fn post_create(
                 waf_has_pins: waf_rules.iter().any(|r| !r.pin.is_empty()),
                 waf_summary: waf_summary(waf_level, &waf_rules),
                 waf_on: waf_rules.iter().any(|r| r.effective),
+                modsec,
+                crs,
+                can_install_modsec: ctx.is_admin_or_higher(),
                 protection_applies,
                 waf_level,
                 waf_rules,
@@ -2600,6 +2612,8 @@ pub async fn get_detail(
     // Extra FTP logins for this hosting. Best-effort: a node that cannot
     // answer must not take the whole detail page down, and an empty list
     // renders as "no extra logins" rather than a broken card.
+    let modsec = fetch_modsec_status(&state, owner_node.as_deref()).await;
+    let crs = crs_view(&detail.vhost_options);
     let ftp_extra = match crate::dispatcher::dispatch_to_node(
         &state,
         owner_node.as_deref(),
@@ -2760,6 +2774,9 @@ pub async fn get_detail(
         waf_has_pins: waf_rules.iter().any(|r| !r.pin.is_empty()),
         waf_summary: waf_summary(waf_level, &waf_rules),
         waf_on: waf_rules.iter().any(|r| r.effective),
+        modsec,
+        crs,
+        can_install_modsec: ctx.is_admin_or_higher(),
         protection_applies,
         waf_level,
         waf_rules,
@@ -4185,6 +4202,15 @@ pub struct VhostOptionsForm {
     bot_seo: Option<String>,
     #[serde(default)]
     bot_shopping: Option<String>,
+    // OWASP Core Rule Set sub-form (`section=crs`). The service validates.
+    #[serde(default)]
+    crs_mode: String,
+    #[serde(default)]
+    crs_paranoia: i64,
+    #[serde(default)]
+    crs_threshold: i64,
+    #[serde(default)]
+    crs_wordpress: Option<String>,
     /// Comma-separated ISO codes from the text field.
     #[serde(default)]
     blocked_countries: Option<String>,
@@ -4260,6 +4286,15 @@ impl VhostOptionsForm {
         options.wp_admin_allowlist = self.wp_admin_allowlist.trim().to_string();
     }
 
+    /// Copy the Core Rule Set sub-form onto `options`. Exclusions are not
+    /// part of it — they have their own add/remove forms.
+    fn apply_crs(&self, options: &mut hyperion_types::VhostOptions) {
+        options.crs_mode = self.crs_mode.trim().to_string();
+        options.crs_paranoia = self.crs_paranoia;
+        options.crs_threshold = self.crs_threshold;
+        options.crs_wordpress = checkbox_on(&self.crs_wordpress);
+    }
+
     fn blocked_bots(&self) -> String {
         [
             ("ai", &self.bot_ai),
@@ -4308,10 +4343,11 @@ pub async fn post_vhost_options(
     // tenant WIPE an admin's snippet by saving an unrelated checkbox.
     // Only an actual attempt to CHANGE it is an error.
     let section = form.section.trim();
-    let (save_vhost, save_protection) = match section {
-        "vhost" => (true, false),
-        "protection" => (false, true),
-        _ => (true, true),
+    let (save_vhost, save_protection, save_crs) = match section {
+        "vhost" => (true, false, false),
+        "protection" => (false, true, false),
+        "crs" => (false, false, true),
+        _ => (true, true, false),
     };
     // Every save starts from what is stored, and a card's save only
     // overwrites its own fields. A per-card save therefore NEEDS the stored
@@ -4373,6 +4409,9 @@ pub async fn post_vhost_options(
     if save_protection {
         form.apply_protection(&mut options);
     }
+    if save_crs {
+        form.apply_crs(&mut options);
+    }
     let pw_opt = if form.basic_auth_password.is_empty() || !save_vhost {
         None
     } else {
@@ -4396,6 +4435,8 @@ pub async fn post_vhost_options(
             true,
             if save_vhost {
                 "HTTP & access settings saved."
+            } else if save_crs {
+                "Core Rule Set settings saved."
             } else {
                 "Protection settings saved."
             },
@@ -6194,6 +6235,62 @@ pub struct WafRuleRow {
     pub counts_for_ban: bool,
 }
 
+/// The Core Rule Set block of the Protection card.
+pub struct CrsView {
+    pub mode: &'static str,
+    pub paranoia: i64,
+    pub threshold: i64,
+    pub wordpress: bool,
+    pub exclusions: Vec<CrsExclusionRow>,
+}
+
+pub struct CrsExclusionRow {
+    /// Position in the stored list — what the remove form names.
+    pub index: usize,
+    pub rules: String,
+    /// Empty = the whole site.
+    pub path: String,
+}
+
+fn crs_view(opts: &hyperion_types::VhostOptions) -> CrsView {
+    let s = opts.crs_settings();
+    CrsView {
+        mode: s.mode.as_str(),
+        paranoia: s.paranoia,
+        threshold: s.threshold,
+        // First switch-on: suggest the WordPress exclusions (the column
+        // defaults to on; a never-saved site reads false here).
+        wordpress: s.wordpress || s.mode == hyperion_types::crs::CrsMode::Off,
+        exclusions: s
+            .exclusions
+            .iter()
+            .enumerate()
+            .map(|(index, e)| CrsExclusionRow {
+                index,
+                rules: e
+                    .rules
+                    .iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                path: e.path.clone(),
+            })
+            .collect(),
+    }
+}
+
+/// Ask the owning node about its ModSecurity engine. `None` when it cannot
+/// say (an older node does not know the request).
+async fn fetch_modsec_status(
+    state: &SharedState,
+    node: Option<&str>,
+) -> Option<hyperion_types::crs::ModsecStatus> {
+    match crate::dispatcher::dispatch_to_node(state, node, Request::ModsecStatus).await {
+        Ok(RpcResponse::ModsecStatus(s)) => Some(s),
+        _ => None,
+    }
+}
+
 /// Hosting kinds whose vhost carries the Protection card's rules. The
 /// reverse-proxy and redirect templates have none of them.
 fn protection_applies(kind: &str) -> bool {
@@ -6305,6 +6402,42 @@ mod waf_form_tests {
             parse("selector=x&section=vhost&custom_nginx_snippet=").custom_nginx_snippet,
             Some(String::new())
         );
+    }
+
+    #[test]
+    fn crs_sub_form_carries_only_its_own_fields() {
+        let f = parse("selector=x&section=crs&crs_mode=block&crs_paranoia=2&crs_threshold=10");
+        let mut o = hyperion_types::VhostOptions {
+            crs_exclusions: r#"[{"rules":[942100]}]"#.into(),
+            waf_level: "strict".into(),
+            ..Default::default()
+        };
+        f.apply_crs(&mut o);
+        assert_eq!(o.crs_mode, "block");
+        assert_eq!(o.crs_paranoia, 2);
+        assert_eq!(o.crs_threshold, 10);
+        assert!(!o.crs_wordpress, "unticked checkbox");
+        assert_eq!(
+            o.crs_exclusions, r#"[{"rules":[942100]}]"#,
+            "exclusions untouched"
+        );
+        assert_eq!(o.waf_level, "strict", "WAF untouched");
+    }
+
+    #[test]
+    fn crs_view_suggests_wordpress_exclusions_before_first_use() {
+        let off = super::crs_view(&hyperion_types::VhostOptions::default());
+        assert_eq!(off.mode, "off");
+        assert!(off.wordpress);
+        let on = super::crs_view(&hyperion_types::VhostOptions {
+            crs_mode: "detect".into(),
+            crs_exclusions: r#"[{"rules":[942100,941160],"path":"/x"}]"#.into(),
+            ..Default::default()
+        });
+        assert!(!on.wordpress, "an explicit choice is kept");
+        assert_eq!(on.exclusions[0].rules, "941160 942100");
+        assert_eq!(on.exclusions[0].path, "/x");
+        assert_eq!(on.exclusions[0].index, 0);
     }
 
     #[test]
@@ -9425,6 +9558,14 @@ pub struct WafHitRow {
     pub pinnable: bool,
     pub request: String,
     pub ua: String,
+    /// For a Core Rule Set decision: matched rules + score.
+    pub detail: String,
+    /// Recorded in detection-only mode — not refused.
+    pub detected: bool,
+    /// "Allow this" for a CRS row: the rules to exclude ("942100 942130")
+    /// and the path prefix to exclude them on. Empty for other rows.
+    pub crs_rules: String,
+    pub crs_path: String,
 }
 
 /// WAF activity panel under the Protection card: what was refused, by
@@ -9441,6 +9582,8 @@ struct WafPanelTpl {
     can_edit: bool,
     totals: Vec<WafTotalRow>,
     day_total: i64,
+    /// Requests the Core Rule Set would have refused in detection mode.
+    day_detected: i64,
     hits: Vec<WafHitRow>,
     autoban_enabled: bool,
     fail2ban_enabled: bool,
@@ -9499,14 +9642,31 @@ impl WafPanelTpl {
                     request.truncate(end);
                     request.push('…');
                 }
+                let crs_rules = if h.rule.starts_with("crs_") {
+                    hyperion_types::crs::detail_rule_ids(&h.detail)
+                        .iter()
+                        .map(u32::to_string)
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                } else {
+                    String::new()
+                };
                 WafHitRow {
                     ago: super::stats::fmt_ago(&h.ts),
                     label: waf::label_for(&h.rule),
                     pinnable: waf::rule(&h.rule).is_some(),
+                    detected: hyperion_types::crs::tag_is_detection(&h.rule),
+                    crs_path: if crs_rules.is_empty() {
+                        String::new()
+                    } else {
+                        hyperion_types::crs::exclusion_path_for(&h.uri)
+                    },
+                    crs_rules,
                     rule: h.rule,
                     ip: h.ip,
                     request,
                     ua: h.ua,
+                    detail: h.detail,
                 }
             })
             .collect();
@@ -9514,7 +9674,18 @@ impl WafPanelTpl {
             selector,
             csrf_token,
             can_edit,
-            day_total: a.totals_24h.iter().map(|c| c.hits).sum(),
+            day_total: a
+                .totals_24h
+                .iter()
+                .filter(|c| !hyperion_types::crs::tag_is_detection(&c.rule))
+                .map(|c| c.hits)
+                .sum(),
+            day_detected: a
+                .totals_24h
+                .iter()
+                .filter(|c| hyperion_types::crs::tag_is_detection(&c.rule))
+                .map(|c| c.hits)
+                .sum(),
             totals,
             hits,
             autoban_enabled: a.autoban_enabled,
@@ -9534,6 +9705,7 @@ impl WafPanelTpl {
             can_edit: false,
             totals: vec![],
             day_total: 0,
+            day_detected: 0,
             hits: vec![],
             autoban_enabled: true,
             fail2ban_enabled: true,
@@ -9777,6 +9949,207 @@ pub async fn post_waf_rule(
         notice,
     )
     .await
+}
+
+/// After a change that alters what the page shows in several places: an
+/// HTMX caller reloads the page (with a toast), anything else is redirected.
+fn refresh_with_toast(
+    headers: &axum::http::HeaderMap,
+    text: &str,
+    redirect_to: String,
+) -> Response {
+    let is_htmx = headers
+        .get("HX-Request")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if !is_htmx {
+        return Redirect::to(&redirect_to).into_response();
+    }
+    (
+        axum::http::StatusCode::NO_CONTENT,
+        [
+            ("HX-Refresh", "true".to_string()),
+            (
+                "HX-Trigger",
+                format!(
+                    "{{\"toast\":{{\"level\":\"ok\",\"text\":{}}}}}",
+                    json_string(text)
+                ),
+            ),
+        ],
+    )
+        .into_response()
+}
+
+#[derive(Deserialize)]
+pub struct CrsExclusionForm {
+    pub selector: String,
+    /// `add` or `remove`.
+    pub op: String,
+    /// add: rule ids, separated by spaces or commas.
+    #[serde(default)]
+    pub rules: String,
+    /// add: request-path prefix; empty = the whole site.
+    #[serde(default)]
+    pub path: String,
+    /// remove: the entry's position in the list.
+    #[serde(default)]
+    pub index: Option<usize>,
+}
+
+/// Add or remove one Core Rule Set exclusion — from the Protection card, or
+/// as "Allow this" on a CRS row of the activity panel (a path-scoped
+/// exclusion of exactly the rules that request matched). Goes through the
+/// normal vhost save, so it is validated and `nginx -t`ed like any other.
+pub async fn post_crs_exclusion(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    headers: axum::http::HeaderMap,
+    Form(form): Form<CrsExclusionForm>,
+) -> Result<Response, AppError> {
+    use hyperion_types::crs;
+    let sel = match require_manage_for_selector(
+        &state,
+        &ctx,
+        &form.selector,
+        Capability::HostingEditConfig,
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
+    let back = format!("/hostings/{}#protection", urlencoding(&form.selector));
+    let (detail, owner) = find_hosting_anywhere(&state, sel.clone()).await?;
+    let mut options = detail.vhost_options.clone();
+    options.basic_auth_set = false;
+    let mut list = crs::parse_exclusions(&options.crs_exclusions);
+    let done = match form.op.trim() {
+        "add" => {
+            let mut rules = Vec::new();
+            for t in form
+                .rules
+                .split(|c: char| c == ',' || c.is_whitespace())
+                .filter(|t| !t.is_empty())
+            {
+                match t.parse::<u32>() {
+                    Ok(id) => rules.push(id),
+                    Err(_) => {
+                        return Ok(save_result(
+                            &headers,
+                            false,
+                            &format!("{t:?} is not a rule id"),
+                            back,
+                        ))
+                    }
+                }
+            }
+            list.push(crs::CrsExclusion {
+                rules,
+                path: form.path.trim().to_string(),
+            });
+            if let Err(m) = crs::validate_exclusions(&list) {
+                return Ok(save_result(&headers, false, &m, back));
+            }
+            "CRS exclusion added."
+        }
+        "remove" => {
+            let Some(i) = form.index.filter(|i| *i < list.len()) else {
+                return Err(AppError::BadRequest("no such exclusion".into()));
+            };
+            list.remove(i);
+            "CRS exclusion removed."
+        }
+        _ => return Err(AppError::BadRequest("op must be add or remove".into())),
+    };
+    options.crs_exclusions = crs::exclusions_to_string(&list);
+    let resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        owner.as_deref(),
+        Request::HostingSetVhostOptions {
+            sel,
+            options,
+            basic_auth_password: None,
+        },
+    )
+    .await;
+    match resp {
+        Ok(RpcResponse::HostingSetVhostOptions(_)) => Ok(refresh_with_toast(&headers, done, back)),
+        Ok(RpcResponse::Error(e)) => Ok(save_result(&headers, false, &e.to_string(), back)),
+        Ok(_) => Err(AppError::Internal("unexpected response".into())),
+        Err(e) => Ok(save_result(&headers, false, &e.to_string(), back)),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct ModsecInstallForm {
+    pub selector: String,
+}
+
+/// Install ModSecurity + the OWASP Core Rule Set on the node that owns this
+/// hosting. A package install on a node is an administrator's call; it is
+/// slow (apt), so it runs as a background job.
+pub async fn post_modsec_install(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<ModsecInstallForm>,
+) -> Result<Response, AppError> {
+    if !ctx.is_admin_or_higher() {
+        return Err(AppError::Forbidden);
+    }
+    let sel = parse_selector(&form.selector)?;
+    let (_detail, owner) = find_hosting_anywhere(&state, sel).await?;
+    let actor_uid = ctx.session.as_ref().map(|s| s.user_id).unwrap_or(0);
+    let actor_label = ctx.username.clone();
+    let job_state = state.clone();
+    let job_id = crate::handlers::jobs::spawn_job(
+        state.clone(),
+        "modsec_install",
+        Some(&form.selector),
+        "{}",
+        &actor_label,
+        actor_uid,
+        move |reporter| async move {
+            reporter
+                .step(
+                    "Installing ModSecurity and the OWASP Core Rule Set on the node…",
+                    10,
+                    "",
+                )
+                .await;
+            match crate::dispatcher::dispatch_to_node(
+                &job_state,
+                owner.as_deref(),
+                Request::ModsecInstall,
+            )
+            .await
+            {
+                Ok(RpcResponse::ModsecInstall(st)) => {
+                    let log = format!(
+                        "OWASP Core Rule Set {} installed. Turn it on per site on the \
+                         Protection card — start with Detection only.\n",
+                        if st.crs_version.is_empty() {
+                            "?"
+                        } else {
+                            st.crs_version.as_str()
+                        }
+                    );
+                    reporter.step("Installed.", 100, &log).await;
+                    reporter.finish(true, None).await;
+                }
+                Ok(RpcResponse::Error(e)) => reporter.finish(false, Some(e.to_string())).await,
+                Ok(_) => {
+                    reporter
+                        .finish(false, Some("unexpected agent response".into()))
+                        .await
+                }
+                Err(e) => reporter.finish(false, Some(e.to_string())).await,
+            }
+        },
+    )
+    .await?;
+    Ok(Redirect::to(&format!("/jobs/{job_id}")).into_response())
 }
 
 #[derive(Deserialize)]

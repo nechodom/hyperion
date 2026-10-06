@@ -23,6 +23,7 @@ pub mod gitsync;
 pub mod integrity;
 pub mod logscan;
 pub mod mariadb;
+pub mod modsec;
 pub mod nginx;
 pub mod node_update;
 pub mod nodejs;

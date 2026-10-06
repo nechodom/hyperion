@@ -210,6 +210,9 @@ pub fn counts_for_ban(id: &str) -> bool {
 
 /// Human name for a hit-log tag.
 pub fn label_for(id: &str) -> &'static str {
+    if let Some(l) = crate::crs::tag_label(id) {
+        return l;
+    }
     match id {
         TAG_GEO => "Blocked country",
         TAG_BOT => "Blocked bot family",
@@ -408,6 +411,10 @@ pub struct WafHit {
     /// recorded, never counted towards a ban. Not stored.
     #[serde(default)]
     pub cross_site: bool,
+    /// Extra facts for the activity list — for a CRS decision, the matched
+    /// rule ids and the anomaly score.
+    #[serde(default)]
+    pub detail: String,
 }
 
 /// What the activity panel shows for one hosting.
