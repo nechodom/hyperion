@@ -13941,6 +13941,63 @@ mod tests {
         assert!(!detail_matches(&asked, "h1", ""));
     }
 
+    /// Render the site-health row for a given probe result.
+    fn render_health(report: hyperion_types::WpFatalReport) -> String {
+        FatalCardTpl {
+            report,
+            selector: "example.com".into(),
+            csrf_token: "t".into(),
+            csrf_wp_debug: "t".into(),
+            csrf_dropin: "t".into(),
+            target_node: String::new(),
+            wp_debug_enabled: false,
+            error: None,
+        }
+        .render()
+        .expect("health row renders")
+    }
+
+    /// A probe that got nothing back (curl's `000`) used to fall through to
+    /// "answers HTTP 0, no fatal error" with a green dot — over a site no
+    /// visitor could reach. It must say so, and why.
+    #[test]
+    fn no_answer_is_not_healthy() {
+        let html = render_health(hyperion_types::WpFatalReport {
+            http_status: 0,
+            probe_error: "Couldn't connect to server".into(),
+            ..Default::default()
+        });
+        assert!(html.contains("No answer from the front page"));
+        // HTML-escaped on render, so match past the apostrophe.
+        assert!(html.contains("t connect to server"));
+        assert!(!html.contains("HTTP 0"));
+        assert!(!html.contains("no fatal error"));
+        assert!(!html.contains("chk-dot ok"));
+    }
+
+    /// A 4xx front page is not a WordPress fatal, but it is not healthy
+    /// either.
+    #[test]
+    fn error_page_is_not_healthy() {
+        let html = render_health(hyperion_types::WpFatalReport {
+            http_status: 404,
+            ..Default::default()
+        });
+        assert!(html.contains("HTTP 404"));
+        assert!(html.contains("document root"));
+        assert!(!html.contains("chk-dot ok"));
+    }
+
+    #[test]
+    fn a_200_is_healthy() {
+        let html = render_health(hyperion_types::WpFatalReport {
+            http_status: 200,
+            ..Default::default()
+        });
+        assert!(html.contains("answers HTTP 200, no fatal error"));
+        assert!(html.contains("chk-dot ok"));
+    }
+
     /// Render the integrity card for a given scan result.
     fn render_integrity(scan: hyperion_types::WpIntegrityScanResult) -> String {
         IntegrityCardTpl {

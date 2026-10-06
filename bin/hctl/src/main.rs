@@ -1000,6 +1000,14 @@ fn print_pretty(resp: &Response) {
                 if !r.error_excerpt.is_empty() {
                     println!("  {}", r.error_excerpt);
                 }
+            } else if r.verdict() == "no_answer" {
+                if r.probe_error.is_empty() {
+                    println!("✗ site did not answer");
+                } else {
+                    println!("✗ site did not answer — {}", r.probe_error);
+                }
+            } else if r.verdict() == "error_page" {
+                println!("! site answers HTTP {} — not a WordPress fatal, but an error page", r.http_status);
             } else {
                 println!("✓ site answers HTTP {} — no fatal", r.http_status);
             }

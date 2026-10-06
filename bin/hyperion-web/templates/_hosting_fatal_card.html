@@ -11,12 +11,15 @@
 <div class="chk-row{% if error.is_none() && report.fatal %} is-err{% endif %}" id="fatal-card">
   <div class="chk-head">
     {% if error.is_some() %}<span class="chk-dot warn"></span>
-    {% else if report.fatal %}<span class="chk-dot err"></span>
-    {% else %}<span class="chk-dot ok"></span>{% endif %}
+    {% else if report.verdict() == "fatal" %}<span class="chk-dot err"></span>
+    {% else if report.verdict() == "ok" %}<span class="chk-dot ok"></span>
+    {% else %}<span class="chk-dot warn"></span>{% endif %}
     <h3 class="chk-name">Site health</h3>
     <span class="chk-sum">
       {% if let Some(e) = error %}Could not check — {{ e }}
-      {% else if report.fatal %}<strong class="tone-err">HTTP {{ report.http_status }} — visitors see WordPress's “critical error” page</strong>
+      {% else if report.verdict() == "fatal" %}<strong class="tone-err">HTTP {{ report.http_status }} — visitors see WordPress's “critical error” page</strong>
+      {% else if report.verdict() == "no_answer" %}<strong class="tone-warn">No answer from the front page</strong>{% if !report.probe_error.is_empty() %} — {{ report.probe_error }}{% endif %}
+      {% else if report.verdict() == "error_page" %}<strong class="tone-warn">Front page answers HTTP {{ report.http_status }}</strong> — not a WordPress fatal, but visitors get an error page
       {% else %}Front page answers HTTP {{ report.http_status }}, no fatal error{% endif %}
     </span>
     <div class="chk-actions">
@@ -28,8 +31,22 @@
     </div>
   </div>
 
-  {% if error.is_none() && (report.fatal || report.object_cache_dropin || report.object_cache_parked || !report.parked_plugins.is_empty()) %}
+  {% if error.is_none() && (report.verdict() != "ok" || report.object_cache_dropin || report.object_cache_parked || !report.parked_plugins.is_empty()) %}
   <div class="chk-body">
+    {% if report.verdict() == "no_answer" %}
+    <p class="chk-note">
+      The probe asks nginx on this server directly, over loopback, so DNS
+      plays no part. No answer means nginx is not serving this domain on
+      port 443, or the page took longer than 15 seconds — either way
+      visitors are not getting it.
+    </p>
+    {% else if report.verdict() == "error_page" %}
+    <p class="chk-note">
+      {% if report.http_status == 404 %}A 404 on the front page usually means the document root is missing or empty — check File permissions below and the Files tab.
+      {% else if report.http_status == 401 || report.http_status == 403 %}The front page refuses visitors — an access rule, a password-protected directory, or a document root nginx cannot read.
+      {% else %}The site answers, but with an error page rather than its content.{% endif %}
+    </p>
+    {% endif %}
     {% if report.fatal %}
       {% if let Some(c) = report.culprit %}
       <div class="chk-callout err">
