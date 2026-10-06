@@ -406,6 +406,58 @@ async fn seed_demo(svc: &StubService) {
     .await
     .expect("suspension");
 
+    // Hostings-list facts: WordPress on most sites, certificates at a mix
+    // of ages (one expiring, one self-signed), backups with one failure,
+    // one site in maintenance.
+    for (n, id) in ids.iter().enumerate() {
+        if n != 5 {
+            sqlx::query(
+                "INSERT INTO wp_installs (hosting_id, site_url, wp_version, installed_at, last_pack_hash) \
+                 VALUES (?, 'https://x', ?, ?, 'demo')",
+            )
+            .bind(id)
+            .bind(if n == 3 { "6.5.5" } else { "6.6.2" })
+            .bind(now - 40 * 86_400)
+            .execute(pool)
+            .await
+            .expect("wp");
+        }
+    }
+    let cert_days = [71_i64, 54, 9, 63, 80, 30, 44];
+    for (n, (domain, _)) in sites.iter().enumerate() {
+        sqlx::query(
+            "INSERT INTO certificates (domain, issued_at, not_after, cert_path, key_path, issuer) \
+             VALUES (?, ?, ?, '/c', '/k', ?) \
+             ON CONFLICT(domain) DO UPDATE SET not_after = excluded.not_after, issuer = excluded.issuer",
+        )
+        .bind(domain)
+        .bind(now - 20 * 86_400)
+        .bind(now + cert_days[n] * 86_400)
+        .bind(if n == 6 { "self-signed" } else { "letsencrypt" })
+        .execute(pool)
+        .await
+        .expect("cert");
+    }
+    for (n, id) in ids.iter().enumerate() {
+        let started = now - (n as i64 + 1) * 5 * 3600;
+        let state = if n == 4 { "failed" } else { "ok" };
+        sqlx::query(
+            "INSERT INTO backup_runs (hosting_id, started_at, finished_at, state) VALUES (?, ?, ?, ?)",
+        )
+        .bind(id)
+        .bind(started)
+        .bind(started + 300)
+        .bind(state)
+        .execute(pool)
+        .await
+        .expect("backup");
+    }
+    sqlx::query("UPDATE hostings SET maintenance_mode = 1 WHERE id = ?")
+        .bind(&ids[2])
+        .execute(pool)
+        .await
+        .expect("maintenance");
+
     // Smooth-ish noise: a couple of sines plus a deterministic jitter.
     let wave = |i: f64, a: f64, b: f64| {
         (i / a).sin() * 0.5 + (i / b).sin() * 0.3 + ((i * 12.9898).sin() * 43_758.545).fract() * 0.4

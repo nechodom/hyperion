@@ -1,14 +1,26 @@
 {% extends "base.html" %}
 {% block title %}Hostings · Hyperion{% endblock %}
+{# Sortable column header. Re-clicking the active column flips the
+   direction; `first` is the direction a fresh click starts with (asc for
+   text, desc for "biggest / newest first"). Search + state filter ride
+   along in the URL. #}
+{% macro sort_th(key, label, first, other, cls) %}
+<th class="{{ cls }}">
+  <a class="sort-link {% if sort_key == key %}active{% endif %}"
+     href="/hostings?q={{ q|e }}&state={{ state_filter|e }}&sort={{ key }}&dir={% if sort_key == key && sort_dir == first %}{{ other }}{% else %}{{ first }}{% endif %}">
+    {{ label }}{% if sort_key == key %} <span class="sort-arrow">{% if sort_dir == "asc" %}↑{% else %}↓{% endif %}</span>{% endif %}
+  </a>
+</th>
+{% endmacro %}
 {% block main %}
 <div class="page-header">
   <div>
     <h1>Hostings</h1>
     <div class="subtitle">
       {% if rows.len() == total_count %}
-        {{ total_count }} hosting{% if total_count != 1 %}s{% endif %} across the cluster.
+        {{ total_count }} website{% if total_count != 1 %}s{% endif %}.
       {% else %}
-        Showing <strong>{{ rows.len() }}</strong> of {{ total_count }} hosting{% if total_count != 1 %}s{% endif %}.
+        Showing <strong>{{ rows.len() }}</strong> of {{ total_count }} website{% if total_count != 1 %}s{% endif %}.
       {% endif %}
     </div>
   </div>
@@ -25,15 +37,15 @@
   </div>
 </div>
 
-{# Modern toolbar — integrated search with leading icon + segmented
-   filter control underneath. No inline styles; everything lives in
-   .search-toolbar / .search-input / .search-segments in app.css. #}
+
+{# Search + state segments. Counts are over the sites this user can see
+   that match the search, so each number is what clicking it shows. #}
 <div class="search-toolbar">
   <form method="get" action="/hostings" class="search-form" role="search">
     <div class="search-input">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
       <input type="search" name="q" value="{{ q|e }}"
-             placeholder="Search hostings — domain, alias, system user…"
+             placeholder="Search by domain…"
              autocomplete="off" spellcheck="false">
       {% if !q.is_empty() %}
         <a href="/hostings{% if !state_filter.is_empty() %}?state={{ state_filter }}{% endif %}"
@@ -50,20 +62,27 @@
   <nav class="search-segments" aria-label="Filter by state">
     <a class="seg {% if state_filter.is_empty() %}active{% endif %}"
        href="/hostings{% if !q.is_empty() %}?q={{ q|e }}{% endif %}">
-      All {% if total_count > 0 %}<span class="seg-count">{{ total_count }}</span>{% endif %}
+      All <span class="seg-count">{{ counts.all }}</span>
     </a>
     <a class="seg {% if state_filter == "active" %}active{% endif %}"
        href="/hostings?state=active{% if !q.is_empty() %}&q={{ q|e }}{% endif %}">
-      <span class="seg-dot ok"></span>Active
+      <span class="seg-dot ok"></span>Active <span class="seg-count">{{ counts.active }}</span>
     </a>
     <a class="seg {% if state_filter == "suspended" %}active{% endif %}"
        href="/hostings?state=suspended{% if !q.is_empty() %}&q={{ q|e }}{% endif %}">
-      <span class="seg-dot warn"></span>Suspended
+      <span class="seg-dot warn"></span>Suspended <span class="seg-count">{{ counts.suspended }}</span>
     </a>
     <a class="seg {% if state_filter == "failed" %}active{% endif %}"
        href="/hostings?state=failed{% if !q.is_empty() %}&q={{ q|e }}{% endif %}">
-      <span class="seg-dot err"></span>Failed
+      <span class="seg-dot err"></span>Failed <span class="seg-count">{{ counts.failed }}</span>
     </a>
+    {% if counts.attention > 0 || state_filter == "attention" %}
+    <a class="seg {% if state_filter == "attention" %}active{% endif %}"
+       href="/hostings?state=attention{% if !q.is_empty() %}&q={{ q|e }}{% endif %}"
+       title="Failed sites, sites on an offline node, certificates expired or expiring within 14 days, and sites whose last backup failed">
+      <span class="seg-dot err"></span>Needs attention <span class="seg-count">{{ counts.attention }}</span>
+    </a>
+    {% endif %}
   </nav>
 </div>
 
@@ -81,7 +100,7 @@
 {% endif %}
 {% include "_node_auth_banner.html" %}
 
-{% if rows.is_empty() %}
+{% if total_count == 0 %}
 <div class="card">
   <div class="empty">
     <div class="empty-illustration">
@@ -91,6 +110,14 @@
     <p>Add your first one — a WordPress site, a static site, a PHP app, a proxy, or a redirect — and Hyperion sets it up for you.</p>
     {% include "_node_auth_empty_note.html" %}
     <a href="/hostings/new" class="btn primary" data-require-caps="hosting_create">Add your first website</a>
+  </div>
+</div>
+{% else if rows.is_empty() %}
+<div class="card">
+  <div class="empty">
+    <h3>No websites match</h3>
+    <p>Nothing matches {% if !q.is_empty() %}“{{ q }}”{% endif %}{% if !q.is_empty() && !state_filter.is_empty() %} in {% endif %}{% if !state_filter.is_empty() %}this filter{% endif %}.</p>
+    <a href="/hostings" class="btn">Show all websites</a>
   </div>
 </div>
 {% else %}
@@ -117,18 +144,22 @@
 </form>
 
 <div class="card no-pad-table">
-  <div class="bulk-bar" style="padding:0.85rem 1.5rem;display:flex;align-items:center;gap:0.5rem;border-bottom:1px solid var(--border);flex-wrap:wrap">
-    <span id="bulk-count" class="muted" style="font-size:0.88rem">0 selected</span>
+  {# Bulk bar keeps its height either way: with nothing ticked it says what
+     ticking does; with a selection the actions replace the hint. #}
+  <div class="bulk-bar">
+    <span id="bulk-count" class="bulk-count">0 selected</span>
+    <span id="bulk-hint" class="bulk-hint">Tick websites to suspend, resume, back up or delete several at once.</span>
     <span class="grow"></span>
+    <div class="bulk-actions" id="bulk-actions" hidden>
     {% if !wp_assets.is_empty() %}
-    <details class="inline-action" style="position:relative">
-      <summary class="btn small" style="list-style:none;cursor:pointer" id="bulk-install-summary" data-bulk-summary="install_asset">Install WordPress asset</summary>
-      <div style="position:absolute;right:0;z-index:10;background:var(--surface);border:1px solid var(--border-strong);border-radius:var(--radius-sm);padding:0.7rem;margin-top:0.4rem;box-shadow:var(--shadow);width:min(24rem,calc(100vw - 1.5rem))">
-        <div class="field" style="margin:0">
+    <details class="bulk-menu">
+      <summary class="btn small" id="bulk-install-summary" data-bulk-summary="install_asset">Install WordPress asset</summary>
+      <div class="bulk-popover">
+        <div class="field">
           <label for="bulk-asset-select">Asset
-            <a href="/profiles/wp-assets" class="text-soft" style="font-weight:400;font-size:0.78rem;margin-left:0.4rem">manage library →</a>
+            <a href="/profiles/wp-assets" class="bulk-popover-link">manage library →</a>
           </label>
-          <select id="bulk-asset-select" style="margin:0">
+          <select id="bulk-asset-select">
             {% for a in wp_assets %}
               {% if a.kind == "plugin" %}
               <option value="{{ a.id }}">[plugin] {{ a.original_name }} · {{ a.size_bytes / 1024 }} KB</option>
@@ -141,166 +172,129 @@
             {% endfor %}
           </select>
         </div>
-        <label class="field-checkbox" style="margin:0.6rem 0 0;font-size:0.85rem">
+        <label class="field-checkbox">
           <input type="checkbox" id="bulk-activate-cb" checked>
           Activate after install
         </label>
-        <div class="row" style="gap:0.4rem;margin-top:0.6rem;justify-content:flex-end">
+        <div class="bulk-popover-actions">
           <button type="button" class="btn small primary" id="bulk-install-go"
                   data-bulk="install_asset" disabled>Install on selected</button>
         </div>
-        <p class="text-soft small" style="margin:0.5rem 0 0;font-size:0.78rem">
+        <p class="bulk-popover-note">
           Runs <code>wp install --force</code> on every selected hosting, in parallel per node.
           Hostings without WordPress are skipped and reported in the result message.
         </p>
       </div>
     </details>
     {% endif %}
-    {# HTML5 `form` attribute lets these submit-buttons (type=button + JS-driven, see script at the bottom) and below the checkboxes belong to the bulk form even though they're outside it in the DOM. #}
     <button type="button" form="bulk-form" class="btn small" data-bulk="suspend" disabled>Suspend</button>
     <button type="button" form="bulk-form" class="btn small" data-bulk="resume" disabled>Resume</button>
     <button type="button" form="bulk-form" class="btn small" data-bulk="backup" disabled>Back up now</button>
     <button type="button" form="bulk-form" class="btn small danger" data-bulk="delete" disabled>Delete</button>
+    </div>
   </div>
   <div class="table-wrap">
-    <table>
+    <table class="hostings-table">
       <thead>
-        {# Sortable column headers. The current sort + direction
-           round-trip through the URL — re-clicking the active
-           column flips the direction. Filters (q, state) survive
-           the click via the include below. #}
         <tr>
-          <th style="width:1px;padding-right:0"><input type="checkbox" id="bulk-all" aria-label="Select all"></th>
-          <th>
-            <a class="sort-link {% if sort_key == "domain" %}active{% endif %}"
-               href="/hostings?q={{ q|e }}&state={{ state_filter|e }}&sort=domain&dir={% if sort_key == "domain" && sort_dir == "asc" %}desc{% else %}asc{% endif %}">
-              Domain {% if sort_key == "domain" %}<span class="sort-arrow">{% if sort_dir == "asc" %}↑{% else %}↓{% endif %}</span>{% endif %}
-            </a>
-          </th>
-          <th class="hide-on-phone">PHP</th>
-          <th>
-            <a class="sort-link {% if sort_key == "state" %}active{% endif %}"
-               href="/hostings?q={{ q|e }}&state={{ state_filter|e }}&sort=state&dir={% if sort_key == "state" && sort_dir == "asc" %}desc{% else %}asc{% endif %}">
-              State {% if sort_key == "state" %}<span class="sort-arrow">{% if sort_dir == "asc" %}↑{% else %}↓{% endif %}</span>{% endif %}
-            </a>
-          </th>
-          <th class="hide-on-phone">
-            <a class="sort-link {% if sort_key == "node" %}active{% endif %}"
-               href="/hostings?q={{ q|e }}&state={{ state_filter|e }}&sort=node&dir={% if sort_key == "node" && sort_dir == "asc" %}desc{% else %}asc{% endif %}">
-              Node {% if sort_key == "node" %}<span class="sort-arrow">{% if sort_dir == "asc" %}↑{% else %}↓{% endif %}</span>{% endif %}
-            </a>
-          </th>
-          <th class="hide-on-phone">
-            <a class="sort-link {% if sort_key == "created" %}active{% endif %}"
-               href="/hostings?q={{ q|e }}&state={{ state_filter|e }}&sort=created&dir={% if sort_key == "created" && sort_dir == "desc" %}asc{% else %}desc{% endif %}">
-              Created {% if sort_key == "created" %}<span class="sort-arrow">{% if sort_dir == "asc" %}↑{% else %}↓{% endif %}</span>{% endif %}
-            </a>
-          </th>
+          <th class="col-check"><input type="checkbox" id="bulk-all" aria-label="Select all"></th>
+          {% call sort_th("domain", "Website", "asc", "desc", "") %}
+          {% call sort_th("state", "State", "asc", "desc", "") %}
+          {% call sort_th("cert", "Certificate", "asc", "desc", "hide-on-phone") %}
+          {% call sort_th("disk", "Disk", "desc", "asc", "hide-on-phone right") %}
+          {% call sort_th("backup", "Last backup", "desc", "asc", "hide-on-phone") %}
+          {% call sort_th("node", "Node", "asc", "desc", "hide-on-phone") %}
+          {% call sort_th("created", "Created", "desc", "asc", "hide-on-phone hide-below-wide") %}
           <th class="right">Actions</th>
         </tr>
       </thead>
       <tbody>
-      {% for (r, is_test, is_unreachable) in rows %}
-        <tr>
-          {# Links use the hosting's ULID (`r.id`) — NOT the domain
-             — because after a cross-node migration BOTH the
-             suspended source and the active target share the same
-             domain. With domain-based links every "View" routed
-             to whichever row the master happened to have, which
-             was always the source (suspended) copy. The ULID is
-             globally unique so find_hosting_anywhere always
-             resolves it to the correct node + row.
-             Bulk action checkboxes ALSO move to the ID for the
-             same reason — bulk delete by domain would target
-             whichever copy the master sees first. #}
-          <td style="padding-right:0">
+      {% for r in rows %}
+        <tr{% if r.needs_attention() %} class="row-attention"{% endif %}>
+          {# Links + checkboxes use the hosting's ULID (`r.s.id`), never
+             the domain: after a cross-node move the suspended source and
+             the active target share a domain, and a domain link would
+             resolve to whichever copy the master saw first. #}
+          <td class="col-check">
             {# UI-only checkbox — no name/form= association. The bottom
                script collects every ticked `value` (a hosting id) into the
                bulk form's single hidden `selected` field on submit. Native
                form submission of repeated `selected` keys would 422 in
                axum's urlencoded Form ("expected a sequence"). #}
-            <input type="checkbox" class="bulk-row" value="{{ r.id.as_str() }}" aria-label="Select {{ r.domain }}">
+            <input type="checkbox" class="bulk-row" value="{{ r.s.id.as_str() }}" aria-label="Select {{ r.s.domain }}">
           </td>
-          <td>
-            <a href="/hostings/{{ r.id.as_str() }}"><strong>{{ r.domain }}</strong></a>
-          </td>
-          <td class="hide-on-phone">
-            {% if let Some(v) = r.php_version %}
-              <span class="tag">PHP {{ v }}</span>
-            {% else %}
-              <span class="text-soft">static</span>
+          <td class="site-cell">
+            <a href="/hostings/{{ r.s.id.as_str() }}" class="site-name">{{ r.s.domain }}</a>
+            <div class="site-meta">
+              {% if !r.type_label.is_empty() %}<span>{{ r.type_label }}</span>{% endif %}
+              {% if r.is_test %}
+              <span class="flag warn" title="Provisioned on a test node — staging only, not a production site">Test</span>
+              {% endif %}
+              {% if r.is_unreachable %}
+              {# Node heartbeat is stale (> 5 min). The site may still be
+                 serving traffic; the master just can't manage it until
+                 the agent comes back. #}
+              <span class="flag err" title="This node's hyperion-agent hasn't checked in for over 5 min. The site may still be serving traffic, but backups, certificate renewal and monitor probes are paused until the agent reconnects.">Node offline</span>
+              {% endif %}
+              {% if r.s.maintenance_mode %}
+              <span class="flag info" title="Maintenance mode is on — visitors get HTTP 503; ACME challenges, PHP-FPM and the database keep running. Turn it off on the website's page.">Maintenance</span>
+              {% endif %}
+            </div>
+            {% if r.needs_attention() %}
+            <div class="site-attention">{{ r.attention_text() }}</div>
             {% endif %}
           </td>
           <td>
             <span class="pill
-              {% if r.state.as_str() == "active" %}ok
-              {% else if r.state.as_str() == "suspended" %}warn
-              {% else if r.state.as_str() == "failed" %}err
-              {% else %}warn pulse{% endif %}">{{ r.state.as_str() }}</span>
+              {% if r.s.state.as_str() == "active" %}ok
+              {% else if r.s.state.as_str() == "suspended" %}warn
+              {% else if r.s.state.as_str() == "failed" %}err
+              {% else %}warn pulse{% endif %}">{{ r.s.state.as_str() }}</span>
           </td>
           <td class="hide-on-phone">
-            {% if let Some(n) = r.node_id %}
-              <span class="tag node-chip" title="Provisioned on node {{ n }}">
-                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" style="margin-right:0.25rem;vertical-align:-1px"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
-                {{ n }}
+            {% if !r.cert_label.is_empty() %}
+              <span class="cert-cell {{ r.cert_class }}"
+                    title="{% if let Some(i) = r.s.cert_issuer %}{{ i }} · {% endif %}{% if let Some(t) = r.s.cert_not_after %}expires {{ t|date }}{% endif %}">
+                {{ r.cert_label }}
               </span>
-              {# is_test is pre-computed server-side per row from
-                 the cluster.test_node_ids CSV — see ListTpl in
-                 handlers/hostings.rs. Operator sees prod vs test
-                 at a glance instead of memorising node IDs. #}
-              {% if is_test %}
-              <span class="tag" title="Provisioned on a test node — staging only, not a production site"
-                    style="background:var(--warn);color:white;border-color:transparent;font-size:0.62rem;font-weight:700;letter-spacing:0.05em;margin-left:0.2rem;padding:0.1rem 0.35rem">
-                TEST
-              </span>
-              {% endif %}
-              {% if is_unreachable %}
-              {# Node heartbeat is stale (> 5 min). Master can't run RPC on
-                 it right now — backups, monitor probes, cert renews are
-                 paused. The site itself may still be serving traffic if
-                 nginx + FPM on the worker are up; we just can't see /
-                 manage it from here until the agent comes back. #}
-              <span class="tag" title="This node's hyperion-agent hasn't checked in for over 5 min. The site may still be serving traffic, but the master can't run management tasks against it — backups, certificate renewal, and monitor probes are paused until the agent reconnects."
-                    style="background:var(--danger);color:white;border-color:transparent;font-size:0.62rem;font-weight:700;letter-spacing:0.05em;margin-left:0.2rem;padding:0.1rem 0.35rem">
-                NODE OFFLINE
-              </span>
-              {% endif %}
-              {% if r.maintenance_mode %}
-              {# Operator-toggled maintenance: nginx returns 503 for every
-                 request (ACME challenges still served). Flip off via
-                 the Vhost options card on the hosting detail page. #}
-              <span class="tag" title="Maintenance mode is on — nginx returns HTTP 503 for every request. ACME challenges and the hosting's underlying services (PHP-FPM, database) keep running. Turn it off from the hosting detail page, under Vhost options."
-                    style="background:var(--accent);color:white;border-color:transparent;font-size:0.62rem;font-weight:700;letter-spacing:0.05em;margin-left:0.2rem;padding:0.1rem 0.35rem">
-                MAINTENANCE
-              </span>
-              {% endif %}
             {% else %}
               <span class="text-soft">—</span>
             {% endif %}
           </td>
-          <td class="hide-on-phone muted numeric" title="{{ r.created_at }}">{{ crate::handlers::stats::fmt_ago(r.created_at) }}</td>
+          <td class="hide-on-phone nowrap right numeric">
+            {% if let Some(b) = r.s.disk_bytes %}{{ crate::handlers::stats::fmt_bytes(b) }}{% else %}<span class="text-soft">—</span>{% endif %}
+          </td>
+          <td class="hide-on-phone nowrap">
+            {% if let Some(t) = r.s.last_backup_at %}
+              <span class="{% if r.s.last_backup_ok == Some(false) %}text-danger{% else %}muted{% endif %}" title="{{ t|datetime }}">
+                {% if r.s.last_backup_ok == Some(false) %}failed {% endif %}{{ crate::handlers::stats::fmt_ago(t) }}
+              </span>
+            {% else %}
+              <span class="text-soft">never</span>
+            {% endif %}
+          </td>
+          <td class="hide-on-phone">
+            {% if let Some(n) = r.s.node_id %}<span class="node-name">{{ n }}</span>{% else %}<span class="text-soft">—</span>{% endif %}
+          </td>
+          <td class="hide-on-phone hide-below-wide nowrap muted numeric" title="{{ r.s.created_at|datetime }}">{{ crate::handlers::stats::fmt_ago(r.s.created_at) }}</td>
           <td class="right">
             <div class="row-actions">
-              <a class="btn small" href="/hostings/{{ r.id.as_str() }}">View</a>
-              <form method="post" action="/hostings/delete" style="display:inline"
-                    data-confirm-title="Delete {{ r.domain }}"
+              <a class="btn small" href="/hostings/{{ r.s.id.as_str() }}">Open</a>
+              <form method="post" action="/hostings/delete" class="inline-form"
+                    data-confirm-title="Delete {{ r.s.domain }}"
                     data-confirm-body="Files, database, system user, and nginx vhost will be removed. This is permanent — type the domain to confirm. External DNS records are not touched."
                     data-confirm-confirm-label="Delete permanently"
                     data-confirm-variant="danger"
-                    data-confirm-require="{{ r.domain }}">
+                    data-confirm-require="{{ r.s.domain }}">
                 <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-                {# selector value is the ULID id (not domain) — see
-                   note above the View link for the cross-node
-                   duplicate rationale. data-confirm-require still
-                   uses the domain because the operator types
-                   THAT to confirm the deletion. #}
-                <input type="hidden" name="selector" value="{{ r.id.as_str() }}">
-                {# Carry the node this hosting lives on so post_delete
-                   dispatches the RPC to the right agent. Without
-                   this, multi-node deletes silently no-op on the
-                   master while the orphan row stays on the worker. #}
+                {# selector is the ULID id (not domain) — see the note
+                   above the checkbox. data-confirm-require still uses the
+                   domain because the operator types THAT to confirm. #}
+                <input type="hidden" name="selector" value="{{ r.s.id.as_str() }}">
+                {# The node this hosting lives on, so post_delete dispatches
+                   to the right agent instead of no-oping on the master. #}
                 <input type="hidden" name="target_node"
-                       value="{% if let Some(n) = r.node_id.as_ref() %}{{ n }}{% endif %}">
+                       value="{% if let Some(n) = r.s.node_id.as_ref() %}{{ n }}{% endif %}">
                 <button class="btn small danger" type="submit">Delete</button>
               </form>
             </div>
@@ -326,11 +320,16 @@
   const actionBtns = document.querySelectorAll('[data-bulk]');
   const actionInput = document.getElementById('bulk-action');
   const selectedInput = document.getElementById('bulk-selected');
+  const bulkActions = document.getElementById('bulk-actions');
+  const bulkHint = document.getElementById('bulk-hint');
 
   function refresh() {
     const selected = document.querySelectorAll('.bulk-row:checked');
     const n = selected.length;
-    count.textContent = n === 0 ? '0 selected' : (n + ' selected');
+    count.textContent = n + ' selected';
+    count.hidden = n === 0;
+    bulkHint.hidden = n !== 0;
+    bulkActions.hidden = n === 0;
     actionBtns.forEach(b => { b.disabled = n === 0; });
     // Sync header checkbox state
     if (n === 0) { all.checked = false; all.indeterminate = false; }
