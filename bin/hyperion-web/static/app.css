@@ -816,6 +816,84 @@ a.svc-link:hover { text-decoration: underline; }
   .svc-row .svc-main { flex-basis: 100%; }
 }
 
+/* /admin/users — one grouped panel; each user is a details row whose summary
+   is the scan line and whose body holds role / sign-in / password side by
+   side, with delete split off at the bottom. */
+.users-list .user-cols,
+.users-list .user-row > summary {
+  display: grid;
+  grid-template-columns: minmax(14rem, 2.2fr) 1.3fr 1fr 0.8fr 1fr 5.5rem;
+  gap: 1rem;
+  align-items: center;
+}
+.users-list .user-cols {
+  padding: 0.55rem 1.25rem;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.7rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-weight: 600;
+  color: var(--text-dim);
+}
+.users-list .user-row { padding: 0; }
+.users-list .user-row > summary { padding: 0.85rem 1.25rem; }
+.users-list .user-row > summary:hover { background: var(--surface-2); }
+.users-list .user-row[open] > summary { background: var(--surface-2); border-bottom: 1px solid var(--border); }
+.users-list .user-row[open] .user-toggle .btn { color: var(--text); border-color: var(--text-dim); }
+.users-list .user-id { display: flex; align-items: center; gap: 0.7rem; min-width: 0; }
+.users-list .user-name { display: flex; flex-direction: column; min-width: 0; }
+.users-list .user-name > * { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.users-list .user-ava {
+  width: 30px; height: 30px; border-radius: 50%; flex: none;
+  display: grid; place-items: center;
+  background: var(--surface-2); border: 1px solid var(--border);
+  font-weight: 600; font-size: 0.8rem; color: var(--text-dim);
+}
+.users-list .user-role { font-size: 0.86rem; }
+.users-list .user-toggle { justify-self: end; }
+.users-list .user-panel {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+.users-list .user-sec {
+  padding: 1.1rem 1.25rem;
+  display: flex; flex-direction: column; gap: 0.5rem;
+}
+.users-list .user-sec + .user-sec { border-left: 1px solid var(--border); }
+.users-list .user-sec h3 { margin: 0; }
+.users-list .user-sec .help { margin: 0 0 0.2rem; font-size: 0.8rem; }
+.users-list .user-sec input:not([type=hidden]),
+.users-list .user-sec select { width: 100%; margin: 0; }
+.users-list .user-sec .item-actions { margin-top: auto; padding-top: 0.4rem; }
+.users-list .user-danger {
+  display: flex; justify-content: space-between; align-items: center; gap: 1rem;
+  padding: 0.75rem 1.25rem;
+  border-top: 1px solid var(--border);
+  background: color-mix(in oklab, var(--danger) 5%, var(--surface));
+}
+.users-add > summary.ghead { cursor: pointer; list-style: none; border-bottom: none; }
+.users-add > summary::-webkit-details-marker { display: none; }
+.users-add[open] > summary.ghead { border-bottom: 1px solid var(--border); }
+.users-add-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0.75rem; }
+.users-add .role-legend {
+  display: grid; grid-template-columns: max-content 1fr; gap: 0.25rem 1rem;
+  margin: 1rem 0 0; font-size: 0.8rem; color: var(--text-soft);
+}
+.users-add .role-legend dt { font-weight: 600; color: var(--text-dim); }
+.users-add .role-legend dd { margin: 0; }
+@media (max-width: 900px) {
+  .users-list .user-cols { display: none; }
+  .users-list .user-row > summary { display: flex; flex-wrap: wrap; align-items: center; gap: 0.45rem 0.75rem; }
+  .users-list .user-row > summary > .user-id { flex: 1 1 0; order: 0; }
+  .users-list .user-row > summary > .user-toggle { order: 1; }
+  .users-list .user-row > summary > :not(.user-id):not(.user-toggle) { order: 2; }
+  .users-list .user-row > summary > .user-role { flex-basis: 100%; padding-left: calc(30px + 0.7rem); margin-bottom: -0.2rem; }
+  .users-list .user-row > summary > :nth-child(3) { margin-left: calc(30px + 0.7rem); }
+  .users-list .user-panel { grid-template-columns: 1fr; }
+  .users-list .user-sec + .user-sec { border-left: none; border-top: 1px solid var(--border); }
+  .users-add-grid { grid-template-columns: 1fr 1fr; }
+}
+
 /* Grid of cards (e.g. dashboard stats) */
 .grid {
   display: grid;

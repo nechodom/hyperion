@@ -1047,6 +1047,12 @@ pub struct WebUserSummary {
     pub locked_reason: Option<String>,
     pub last_login_at: Option<i64>,
     pub created_at: i64,
+    /// Linked custom role, if any. A custom-role user's `role` column holds
+    /// the `operator` sentinel, so without this the users page showed them as
+    /// Operator and one "save" silently dropped the custom role. Filled by
+    /// `WebUserList` only; `serde(default)` keeps older agents decodable.
+    #[serde(default)]
+    pub custom_role_id: Option<i64>,
 }
 
 /// Wire shape of one custom role. `capabilities` is a plain bitmask (the

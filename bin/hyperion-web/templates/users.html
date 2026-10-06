@@ -24,161 +24,169 @@
   </div>
 {% endif %}
 
-<div class="card" style="margin-bottom:1rem">
-  <h2 style="margin:0 0 0.6rem">Add user</h2>
-  <form method="post" action="/admin/users" autocomplete="off"
-        style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr auto;gap:0.5rem;align-items:end">
-    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-    <div class="field" style="margin:0">
-      <label for="new_username">Username</label>
-      <input id="new_username" name="username" type="text" required
-             placeholder="alice" pattern="[a-zA-Z0-9._-]{3,32}">
+<div class="group users-list">
+  <div class="ghead">
+    <span>Users</span>
+    <span class="text-soft" style="text-transform:none;letter-spacing:0;font-weight:500">{{ users.len() }}</span>
+  </div>
+  <div class="user-cols" aria-hidden="true">
+    <span>User</span><span>Role</span><span>2FA</span><span>Status</span><span>Last sign-in</span><span></span>
+  </div>
+  {% for u in users %}
+  <details class="item user-row{% if u.locked %} is-locked{% endif %}">
+    <summary>
+      <span class="user-id">
+        <span class="user-ava">{{ crate::handlers::user_initial(u.username) }}</span>
+        <span class="user-name">
+          <strong>{{ u.username }}</strong>
+          <span class="text-soft small">{{ u.email }}</span>
+        </span>
+      </span>
+      <span class="user-role">
+        {% if u.custom_role_id.is_some() %}
+          {% for cr in custom_roles %}{% if u.custom_role_id.as_ref() == Some(cr.id) %}{{ cr.name }} <span class="text-soft small">custom</span>{% endif %}{% endfor %}
+        {% else %}
+          {{ crate::handlers::role_label(u.role) }}
+        {% endif %}
+      </span>
+      <span>
+        {% if u.totp_enrolled %}
+          <span class="pill ok small">enrolled</span>
+        {% else if u.totp_required %}
+          <span class="pill warn small">required, not set</span>
+        {% else %}
+          <span class="text-soft small">2FA off</span>
+        {% endif %}
+      </span>
+      <span>
+        {% if u.locked %}
+          <span class="pill err small">locked</span>
+        {% else %}
+          <span class="pill ok small">active</span>
+        {% endif %}
+      </span>
+      <span class="text-soft small">
+        {% if let Some(t) = u.last_login_at %}{{ crate::handlers::stats::fmt_ago(t) }}{% else %}never{% endif %}
+      </span>
+      <span class="user-toggle">
+        <span class="btn small">Manage</span>
+      </span>
+    </summary>
+
+    <div class="user-panel">
+      <form method="post" action="/admin/users/role" class="user-sec">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <input type="hidden" name="user_id" value="{{ u.id }}">
+        <h3>Role</h3>
+        <p class="help">What this user can see and change.</p>
+        <select name="role" aria-label="Role for {{ u.username }}">
+          <optgroup label="Built-in">
+            <option value="viewer" {% if u.custom_role_id.is_none() && u.role == "viewer" %}selected{% endif %}>Read-only</option>
+            <option value="customer" {% if u.custom_role_id.is_none() && u.role == "customer" %}selected{% endif %}>Customer</option>
+            <option value="operator" {% if u.custom_role_id.is_none() && u.role == "operator" %}selected{% endif %}>Operator</option>
+            <option value="admin" {% if u.custom_role_id.is_none() && u.role == "admin" %}selected{% endif %}>Administrator</option>
+            <option value="super_admin" {% if u.custom_role_id.is_none() && u.role == "super_admin" %}selected{% endif %}>Owner</option>
+          </optgroup>
+          {% if !custom_roles.is_empty() %}
+          <optgroup label="Custom">
+            {% for cr in custom_roles %}
+            <option value="custom:{{ cr.id }}" {% if u.custom_role_id.as_ref() == Some(cr.id) %}selected{% endif %}>{{ cr.name }}</option>
+            {% endfor %}
+          </optgroup>
+          {% endif %}
+        </select>
+        <div class="item-actions"><button type="submit" class="btn small">Save role</button></div>
+      </form>
+
+      <form method="post" action="/admin/users/lock" class="user-sec">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <input type="hidden" name="user_id" value="{{ u.id }}">
+        <h3>Sign-in</h3>
+        {% if u.locked %}
+          <p class="help">
+            Locked{% if let Some(r) = u.locked_reason %}: {{ r }}{% endif %}.
+            The user cannot sign in until unlocked.
+          </p>
+          <input type="hidden" name="locked" value="false">
+          <div class="item-actions"><button type="submit" class="btn small">Unlock account</button></div>
+        {% else %}
+          <p class="help">Block sign-in without deleting the account.</p>
+          <input name="reason" type="text" placeholder="Reason (optional)" aria-label="Lock reason">
+          <input type="hidden" name="locked" value="true">
+          <div class="item-actions"><button type="submit" class="btn small">Lock account</button></div>
+        {% endif %}
+      </form>
+
+      <form method="post" action="/admin/users/password" autocomplete="off" class="user-sec"
+            data-confirm-title="Reset user password"
+            data-confirm-body="The user's current password will be replaced with the value you typed. Existing browser sessions stay signed in until they expire."
+            data-confirm-confirm-label="Reset password"
+            data-confirm-variant="danger">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <input type="hidden" name="user_id" value="{{ u.id }}">
+        <h3>Password</h3>
+        <p class="help">Set a new password and send it to the user yourself.</p>
+        <input name="new_password" type="text" placeholder="New password (min. 8 chars)" minlength="8" required aria-label="New password">
+        <div class="item-actions"><button type="submit" class="btn small">Reset password</button></div>
+      </form>
     </div>
-    <div class="field" style="margin:0">
-      <label for="new_email">Email</label>
-      <input id="new_email" name="email" type="email" required placeholder="alice@example.cz">
-    </div>
-    <div class="field" style="margin:0">
-      <label for="new_password">Initial password</label>
-      <input id="new_password" name="password" type="text" required minlength="8"
-             placeholder="At least 8 characters">
-    </div>
-    <div class="field" style="margin:0">
-      <label for="new_role">Role</label>
-      <select id="new_role" name="role">
-        <option value="viewer">Read-only</option>
-        <option value="customer">Customer</option>
-        <option value="operator">Operator</option>
-        <option value="admin">Administrator</option>
-        <option value="super_admin">Owner</option>
-      </select>
-    </div>
-    <button class="btn primary" type="submit" style="height:fit-content">Create user</button>
-  </form>
-  <p class="text-soft small" style="margin-top:0.4rem">
-    <strong>Owner</strong> — full control, including user management ·
-    <strong>Administrator</strong> — full control except user management ·
-    <strong>Operator</strong> — internal staff who can manage their assigned hostings ·
-    <strong>Customer</strong> — end user with a slim nav, sees only their own hostings ·
-    <strong>Read-only</strong> — view-only on assigned hostings.
-  </p>
+
+    <form method="post" action="/admin/users/delete" class="user-danger"
+          data-confirm-title="Delete user"
+          data-confirm-body="The user loses access immediately and all their sessions are revoked. This cannot be undone. Hostings they owned are unaffected."
+          data-confirm-confirm-label="Delete user"
+          data-confirm-variant="danger">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="user_id" value="{{ u.id }}">
+      <span class="text-soft small">Removes the account and revokes every session. Hostings are not touched.</span>
+      <button type="submit" class="btn small danger">Delete user</button>
+    </form>
+  </details>
+  {% endfor %}
 </div>
 
-<div class="card no-pad-table">
-  <div class="table-wrap">
-    <table>
-      <thead>
-        <tr>
-          <th>User</th>
-          <th>Role</th>
-          <th>2FA</th>
-          <th>Status</th>
-          <th>Last sign-in</th>
-          <th class="right">Actions</th>
-        </tr>
-      </thead>
-      <tbody>
-        {% for u in users %}
-        <tr>
-          <td>
-            <strong>{{ u.username }}</strong>
-            <div class="text-soft small">{{ u.email }}</div>
-          </td>
-          <td>
-            <form method="post" action="/admin/users/role" style="display:inline-flex;gap:0.4rem;align-items:center">
-              <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-              <input type="hidden" name="user_id" value="{{ u.id }}">
-              <select name="role">
-                <optgroup label="Built-in">
-                  <option value="viewer" {% if u.role == "viewer" %}selected{% endif %}>Read-only</option>
-                  <option value="customer" {% if u.role == "customer" %}selected{% endif %}>Customer</option>
-                  <option value="operator" {% if u.role == "operator" %}selected{% endif %}>Operator</option>
-                  <option value="admin" {% if u.role == "admin" %}selected{% endif %}>Administrator</option>
-                  <option value="super_admin" {% if u.role == "super_admin" %}selected{% endif %}>Owner</option>
-                </optgroup>
-                {% if !custom_roles.is_empty() %}
-                <optgroup label="Custom">
-                  {% for cr in custom_roles %}
-                  <option value="custom:{{ cr.id }}">{{ cr.name }}</option>
-                  {% endfor %}
-                </optgroup>
-                {% endif %}
-              </select>
-              <button type="submit" class="btn small">Save role</button>
-            </form>
-          </td>
-          <td>
-            {% if u.totp_enrolled %}
-              <span class="pill ok small">enrolled</span>
-            {% else if u.totp_required %}
-              <span class="pill warn small">required, not set</span>
-            {% else %}
-              <span class="text-soft">—</span>
-            {% endif %}
-          </td>
-          <td>
-            {% if u.locked %}
-              <span class="pill err small">locked</span>
-              {% if let Some(r) = u.locked_reason %}
-                <div class="text-soft small">{{ r }}</div>
-              {% endif %}
-            {% else %}
-              <span class="pill ok small">active</span>
-            {% endif %}
-          </td>
-          <td class="text-soft small">
-            {% if let Some(t) = u.last_login_at %}
-              {{ crate::handlers::stats::fmt_ago(t) }}
-            {% else %}
-              never
-            {% endif %}
-          </td>
-          <td class="right">
-            <details>
-              <summary class="btn small ghost" style="cursor:pointer">Actions</summary>
-              <div style="display:flex;flex-direction:column;gap:0.4rem;margin-top:0.4rem;align-items:flex-end">
-                <form method="post" action="/admin/users/lock" style="display:flex;gap:0.3rem;align-items:center">
-                  <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-                  <input type="hidden" name="user_id" value="{{ u.id }}">
-                  {% if u.locked %}
-                    <input type="hidden" name="locked" value="false">
-                    <button type="submit" class="btn small">Unlock</button>
-                  {% else %}
-                    <input type="hidden" name="locked" value="true">
-                    <input name="reason" placeholder="Reason (optional)" style="width:8rem;margin:0">
-                    <button type="submit" class="btn small">Lock account</button>
-                  {% endif %}
-                </form>
-                <form method="post" action="/admin/users/password" autocomplete="off"
-                      data-confirm-title="Reset user password"
-                      data-confirm-body="The user's current password will be replaced with the value you typed. Existing browser sessions stay signed in until they expire."
-                      data-confirm-confirm-label="Reset password"
-                      data-confirm-variant="danger"
-                      style="display:flex;gap:0.3rem;align-items:center">
-                  <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-                  <input type="hidden" name="user_id" value="{{ u.id }}">
-                  <input name="new_password" type="text" placeholder="New password" minlength="8" required style="width:10rem;margin:0">
-                  <button type="submit" class="btn small">Reset</button>
-                </form>
-                <form method="post" action="/admin/users/delete"
-                      data-confirm-title="Delete user"
-                      data-confirm-body="The user loses access immediately and all their sessions are revoked. This cannot be undone. Hostings they owned are unaffected."
-                      data-confirm-confirm-label="Delete user"
-                      data-confirm-variant="danger"
-                      style="display:inline">
-                  <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-                  <input type="hidden" name="user_id" value="{{ u.id }}">
-                  <button type="submit" class="btn small danger">Delete</button>
-                </form>
-              </div>
-            </details>
-          </td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-  </div>
-</div>
+<details class="group users-add"{% if users.is_empty() %} open{% endif %}>
+  <summary class="ghead">
+    <span>+ Add user</span>
+  </summary>
+  <form method="post" action="/admin/users" autocomplete="off" class="item">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    <div class="users-add-grid">
+      <div class="field" style="margin:0">
+        <label for="new_username">Username</label>
+        <input id="new_username" name="username" type="text" required
+               placeholder="alice" pattern="[a-zA-Z0-9._-]{3,32}">
+      </div>
+      <div class="field" style="margin:0">
+        <label for="new_email">Email</label>
+        <input id="new_email" name="email" type="email" required placeholder="alice@example.cz">
+      </div>
+      <div class="field" style="margin:0">
+        <label for="new_password">Initial password</label>
+        <input id="new_password" name="password" type="text" required minlength="8"
+               placeholder="At least 8 characters">
+      </div>
+      <div class="field" style="margin:0">
+        <label for="new_role">Role</label>
+        <select id="new_role" name="role">
+          <option value="viewer">Read-only</option>
+          <option value="customer">Customer</option>
+          <option value="operator">Operator</option>
+          <option value="admin">Administrator</option>
+          <option value="super_admin">Owner</option>
+        </select>
+      </div>
+    </div>
+    <dl class="role-legend">
+      <dt>Owner</dt><dd>Full control, including user management.</dd>
+      <dt>Administrator</dt><dd>Full control except user management.</dd>
+      <dt>Operator</dt><dd>Staff who manage their assigned hostings.</dd>
+      <dt>Customer</dt><dd>End user with a slim nav, only their own hostings.</dd>
+      <dt>Read-only</dt><dd>View-only on assigned hostings.</dd>
+    </dl>
+    <div class="item-actions"><button class="btn primary" type="submit">Create user</button></div>
+  </form>
+</details>
 
 <p class="text-soft small" style="margin-top:1rem">
   Each user can enable TOTP two-factor authentication from their
