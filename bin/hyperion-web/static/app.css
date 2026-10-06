@@ -51,6 +51,14 @@
   --info:         #3b82f6;
   --info-soft:    #0f1a2e;
 
+  /* Chart series — identity colour for /stats graphs. Deliberately skips
+     the orange / yellow / red / green hues so a series never reads as a
+     state. Validated as a set (dataviz validate_palette) per mode. */
+  --viz-blue:     #3987e5;
+  --viz-magenta:  #d55181;
+  --viz-aqua:     #199e70;
+  --viz-violet:   #9085e9;
+
   /* Vercel cards have NO shadow — just borders. Keep these for
      elevated overlays (cmdk, toasts) only. */
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.5);
@@ -115,6 +123,11 @@
     --danger-soft:  #fee2e2;
     --info:         #0284c7;
     --info-soft:    #e0f2fe;
+
+    --viz-blue:     #2a78d6;
+    --viz-magenta:  #e87ba4;
+    --viz-aqua:     #1baf7a;
+    --viz-violet:   #4a3aa7;
 
     --shadow-sm: 0 1px 2px rgba(20, 21, 26, 0.05);
     --shadow:    0 4px 12px rgba(20, 21, 26, 0.05), 0 1px 3px rgba(20, 21, 26, 0.04);
@@ -1493,10 +1506,12 @@ details.pkg-new .pkg-fs:first-of-type { padding-top: 0; }
 
 /* ── /stats, grouped-flat ───────────────────────────────────────
    Figures sit in hairline-split cells inside a .group, each with its own
-   history underneath. Monochrome by default: the panel's rule is that
-   accent colour means STATE, so a cell, a table figure or a chart only
-   takes colour when it crosses a threshold (tone-warn / tone-err, set in
-   NodeView::from_stats). Network in/out are told apart by stroke. */
+   history underneath. Text stays monochrome; graphs (sparklines + meters)
+   draw in their metric's series colour (--viz, set by a .viz-* class on
+   the cell). A cell crossing a threshold (tone-warn / tone-err, set in
+   NodeView::from_stats) repaints its graph in the state colour — state
+   beats identity. Network in/out differ by hue AND stroke (solid/dashed),
+   so the pair never relies on colour alone. */
 .tone-warn { color: var(--warn); }
 .tone-err  { color: var(--danger); }
 
@@ -1539,6 +1554,13 @@ details.pkg-new .pkg-fs:first-of-type { padding-top: 0; }
 }
 .stat.tone-warn { color: var(--warn); }
 .stat.tone-err  { color: var(--danger); }
+.viz-blue    { --viz: var(--viz-blue); }
+.viz-magenta { --viz: var(--viz-magenta); }
+.viz-aqua    { --viz: var(--viz-aqua); }
+.viz-violet  { --viz: var(--viz-violet); }
+.viz-net     { --viz: var(--viz-aqua); --viz-2: var(--viz-violet); }
+.stat.tone-warn { --viz: var(--warn);   --viz-2: var(--warn); }
+.stat.tone-err  { --viz: var(--danger); --viz-2: var(--danger); }
 .stat-label {
   font-size: 0.75rem;
   font-weight: 500;
@@ -1566,9 +1588,20 @@ details.pkg-new .pkg-fs:first-of-type { padding-top: 0; }
 /* Chart / meter hug the bottom of the cell so a row of cells with
    different amounts of text still lines their graphics up. */
 .stat > .stat-meta:not(:last-child) { margin-bottom: 0.8rem; }
-.stat-chart { margin-top: auto; position: relative; }
+.stat-chart { margin-top: auto; position: relative; color: var(--viz, currentColor); }
 .stat-chart .spark-svg { height: 44px; overflow: visible; }
-.stat-chart .spark-out { stroke: var(--text-soft); }
+.stat-chart .spark-out { stroke: var(--viz-2, var(--text-soft)); }
+/* Legend key for the two-series network chart: a short stroke in the
+   series' own colour + dash, beside the text that names it. */
+.viz-key {
+  display: inline-block;
+  width: 0.9em;
+  height: 0;
+  margin-right: 0.3em;
+  vertical-align: middle;
+  border-top: 2px solid var(--viz, currentColor);
+}
+.viz-key.out { border-top: 2px dashed var(--viz-2, var(--text-soft)); }
 .stat-chart.empty {
   display: flex;
   align-items: flex-end;
@@ -1587,7 +1620,7 @@ details.pkg-new .pkg-fs:first-of-type { padding-top: 0; }
   display: block;
   height: 100%;
   max-width: 100%;
-  background: currentColor;
+  background: var(--viz, currentColor);
   border-radius: inherit;
 }
 
@@ -1632,7 +1665,7 @@ details.pkg-new .pkg-fs:first-of-type { padding-top: 0; }
   border-radius: 1px;
   overflow: hidden;
 }
-.share-bar > span { display: block; height: 100%; background: var(--text-dim); }
+.share-bar > span { display: block; height: 100%; background: var(--viz, var(--text-dim)); }
 
 /* ─────────────────────────────────────────────────────────────
    "Ready to copy" credentials panel after hosting creation
@@ -3197,6 +3230,10 @@ hr.divider {
   --danger-soft:  #fee2e2;
   --info:         #0284c7;
   --info-soft:    #e0f2fe;
+  --viz-blue:     #2a78d6;
+  --viz-magenta:  #e87ba4;
+  --viz-aqua:     #1baf7a;
+  --viz-violet:   #4a3aa7;
 }
 :root[data-theme="dark"] {
   --bg:           #000000;
@@ -3222,6 +3259,10 @@ hr.divider {
   --danger-soft:  #2d0e10;
   --info:         #3b82f6;
   --info-soft:    #0f1a2e;
+  --viz-blue:     #3987e5;
+  --viz-magenta:  #d55181;
+  --viz-aqua:     #199e70;
+  --viz-violet:   #9085e9;
 }
 
 /* ============================================================

@@ -118,8 +118,9 @@
 
   {# ── Health of one node ────────────────────────────────────────────
      Each figure sits with its own history, so "73%" and the line that got
-     it there read as one thing. Greys by default; a cell only takes colour
-     when it crosses a threshold (NodeView::from_stats). #}
+     it there read as one thing. Each graph draws in its metric's series
+     colour (.viz-*); text stays grey, and a cell crossing a threshold
+     (NodeView::from_stats) repaints in the state colour instead. #}
   {% if let Some(n) = selected_node %}
   {% if let Some(v) = selected_view %}
   <div class="group">
@@ -129,14 +130,14 @@
       <span class="ghead-note">{% if n.agent_online %}read {{ crate::handlers::stats::fmt_ago(n.sampled_at) }}{% else %}<span class="tone-err">agent offline</span>{% endif %}</span>
     </div>
     <div class="stat-cells">
-      <div class="stat tone-{{ v.cpu_tone }}">
+      <div class="stat viz-blue tone-{{ v.cpu_tone }}">
         <div class="stat-label">CPU</div>
         <div class="stat-value">{{ crate::handlers::stats::fmt_pct_x100(n.cpu_pct_x100) }}</div>
         <div class="stat-meta">busy across all cores{% if n.psi_cpu_x100 > 0 %} · <span title="PSI: share of time some task was stalled waiting for CPU (avg 10 s)">stalled {{ crate::handlers::stats::fmt_pct_x100(n.psi_cpu_x100) }}</span>{% endif %}</div>
         <div class="stat-meter"><span style="width:{{ n.cpu_pct_x100 / 100 }}%"></span></div>
       </div>
 
-      <div class="stat">
+      <div class="stat viz-blue">
         <div class="stat-label">Load · 1 min</div>
         <div class="stat-value">{{ crate::handlers::stats::fmt_load(n.loadavg_1m_x100) }}</div>
         <div class="stat-meta">{% if spark_load.has_data %}avg {{ spark_load.avg_label }} · peak {{ spark_load.peak_label }}{% else %}up {{ crate::handlers::stats::fmt_uptime(n.uptime_secs) }}{% endif %}</div>
@@ -153,7 +154,7 @@
         {% endif %}
       </div>
 
-      <div class="stat tone-{{ v.mem_tone }}">
+      <div class="stat viz-magenta tone-{{ v.mem_tone }}">
         <div class="stat-label">Memory</div>
         <div class="stat-value">{% if n.mem_total_kib > 0 %}{{ v.mem_pct }}%{% else %}—{% endif %}</div>
         <div class="stat-meta">
@@ -178,12 +179,12 @@
       </div>
 
       {# Realtime throughput — in and out on ONE chart with a shared y-scale,
-         so the lines cross where the traffic crosses. Told apart by stroke
-         (solid in, dashed out), not by colour: colour here means trouble. #}
-      <div class="stat">
+         so the lines cross where the traffic crosses. Told apart by hue AND
+         stroke (aqua solid in, violet dashed out), keyed beside the figures. #}
+      <div class="stat viz-net">
         <div class="stat-label">Network</div>
-        <div class="stat-value">{{ crate::handlers::stats::fmt_rate(net_in_now) }} <span class="stat-unit">in</span></div>
-        <div class="stat-meta">{{ crate::handlers::stats::fmt_rate(net_out_now) }} out{% if spark_net.has_data %} · peak {{ spark_net.in_peak }} / {{ spark_net.out_peak }}{% endif %}</div>
+        <div class="stat-value">{{ crate::handlers::stats::fmt_rate(net_in_now) }} <span class="stat-unit"><i class="viz-key" aria-hidden="true"></i>in</span></div>
+        <div class="stat-meta"><i class="viz-key out" aria-hidden="true"></i>{{ crate::handlers::stats::fmt_rate(net_out_now) }} out{% if spark_net.has_data %} · peak {{ spark_net.in_peak }} / {{ spark_net.out_peak }}{% endif %}</div>
         {% if spark_net.has_data %}
         <div class="stat-chart">
           <svg class="spark-svg" viewBox="0 0 600 60" preserveAspectRatio="none" aria-hidden="true">
@@ -198,7 +199,7 @@
         {% endif %}
       </div>
 
-      <div class="stat tone-{{ v.disk_tone }}">
+      <div class="stat viz-magenta tone-{{ v.disk_tone }}">
         <div class="stat-label">Disk</div>
         <div class="stat-value">{% if n.node_disk_total_bytes > 0 %}{{ v.disk_pct }}%{% else %}{{ crate::handlers::stats::fmt_bytes(n.total_disk_bytes) }}{% endif %}</div>
         <div class="stat-meta">
@@ -259,7 +260,7 @@
         </div>
       </div>
 
-      <div class="stat">
+      <div class="stat viz-violet">
         <div class="stat-label">Traffic out · 24 h</div>
         <div class="stat-value">{{ crate::handlers::stats::fmt_bytes(c.total_bw_out_24h) }}</div>
         <div class="stat-meta">from nginx access logs</div>
@@ -274,7 +275,7 @@
         {% endif %}
       </div>
 
-      <div class="stat">
+      <div class="stat viz-aqua">
         <div class="stat-label">Requests · 24 h</div>
         <div class="stat-value">{{ c.total_requests_24h }}</div>
         <div class="stat-meta">across all hostings</div>
@@ -336,31 +337,31 @@
             <td class="right numeric">
               {{ crate::handlers::stats::fmt_pct_x100(r.cpu_pct_x100) }}
               {% if sort == "cpu" %}
-                <div class="share-bar" title="{{ crate::handlers::stats::fmt_percent(r.cpu_pct_x100, sites_total_cpu_x100) }} of the CPU used by the sites listed"><span style="width:{{ r.bar_pct }}%"></span></div>
+                <div class="share-bar viz-blue" title="{{ crate::handlers::stats::fmt_percent(r.cpu_pct_x100, sites_total_cpu_x100) }} of the CPU used by the sites listed"><span style="width:{{ r.bar_pct }}%"></span></div>
               {% endif %}
             </td>
             <td class="right numeric">
               {{ crate::handlers::stats::fmt_bytes(r.mem_rss_bytes) }}
               {% if sort == "ram" %}
-                <div class="share-bar" title="{{ crate::handlers::stats::fmt_percent(r.mem_rss_bytes, sites_total_mem) }} of the RAM used by the sites listed"><span style="width:{{ r.bar_pct }}%"></span></div>
+                <div class="share-bar viz-magenta" title="{{ crate::handlers::stats::fmt_percent(r.mem_rss_bytes, sites_total_mem) }} of the RAM used by the sites listed"><span style="width:{{ r.bar_pct }}%"></span></div>
               {% endif %}
             </td>
             <td class="right numeric">
               {{ crate::handlers::stats::fmt_bytes(r.disk_bytes) }}
               {% if sort == "disk" %}
-                <div class="share-bar" title="{{ crate::handlers::stats::fmt_percent(r.disk_bytes, sites_total_disk) }} of the disk used by the sites listed"><span style="width:{{ r.bar_pct }}%"></span></div>
+                <div class="share-bar viz-magenta" title="{{ crate::handlers::stats::fmt_percent(r.disk_bytes, sites_total_disk) }} of the disk used by the sites listed"><span style="width:{{ r.bar_pct }}%"></span></div>
               {% endif %}
             </td>
             <td class="right numeric" title="in {{ crate::handlers::stats::fmt_bytes(r.bw_in_bytes_24h) }} · out {{ crate::handlers::stats::fmt_bytes(r.bw_out_bytes_24h) }}">
               {{ crate::handlers::stats::fmt_bytes(r.bw_bytes_24h) }}
               {% if sort == "traffic" %}
-                <div class="share-bar" title="{{ crate::handlers::stats::fmt_percent(r.bw_bytes_24h, sites_total_bw) }} of the traffic across the sites listed"><span style="width:{{ r.bar_pct }}%"></span></div>
+                <div class="share-bar viz-violet" title="{{ crate::handlers::stats::fmt_percent(r.bw_bytes_24h, sites_total_bw) }} of the traffic across the sites listed"><span style="width:{{ r.bar_pct }}%"></span></div>
               {% endif %}
             </td>
             <td class="right numeric hide-on-phone">
               {{ r.requests_24h }}
               {% if sort == "requests" %}
-                <div class="share-bar" title="{{ crate::handlers::stats::fmt_percent(r.requests_24h, sites_total_reqs) }} of the requests across the sites listed"><span style="width:{{ r.bar_pct }}%"></span></div>
+                <div class="share-bar viz-aqua" title="{{ crate::handlers::stats::fmt_percent(r.requests_24h, sites_total_reqs) }} of the requests across the sites listed"><span style="width:{{ r.bar_pct }}%"></span></div>
               {% endif %}
             </td>
             <td class="right hide-on-phone text-soft small">{{ crate::handlers::stats::fmt_ago(r.sampled_at) }}</td>
