@@ -1,45 +1,34 @@
-{# Registration spam guard card — lazily loaded, swaps itself on toggle.
-   Turning it on drops a must-use plugin on the OWNING node that blocks
-   automated sign-ups (a link in a name field, or a filled honeypot) across
-   native WordPress, WooCommerce and Paid Member Subscriptions. #}
-<div class="card hover" id="regguard-card">
-  <h2>
-    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M9 12l2 2 4-4"/></svg>
-    Registration spam guard
-    {% if view.enabled %}<span class="pill ok" style="font-size:0.65rem">on</span>{% endif %}
-  </h2>
-  <p class="text-soft small" style="margin:-0.3rem 0 0.8rem">
-    Blocks automated sign-ups — a link in a name field, or a filled honeypot —
-    on native WordPress, WooCommerce and Paid Member Subscriptions, and removes
-    a spam account that still slips through. Stops the crypto-spam registrations
-    that a WAF and a disabled login can't.
-  </p>
-
+{# Registration spam guard — one row of the WordPress tab's Checks group,
+   lazily loaded, swaps itself on toggle. Turning it on drops a must-use
+   plugin on the OWNING node that blocks automated sign-ups (a link in a name
+   field, or a filled honeypot) across native WordPress, WooCommerce and Paid
+   Member Subscriptions, and removes a spam account that still slips through. #}
+<div class="chk-row" id="regguard-panel">
+  <div class="chk-head">
+    {% if !view.is_wordpress %}<span class="chk-dot"></span>
+    {% else if view.enabled && !view.installed %}<span class="chk-dot warn"></span>
+    {% else if view.enabled %}<span class="chk-dot ok"></span>
+    {% else %}<span class="chk-dot"></span>{% endif %}
+    <h3 class="chk-name">Sign-up spam guard</h3>
+    <span class="chk-sum">
+      {% if !view.is_wordpress %}Not a WordPress site — nothing to guard yet
+      {% else if view.enabled && !view.installed %}On, but the plugin file is missing — re-installs on the next toggle
+      {% else if view.enabled %}On — bot sign-ups (links in names, honeypot) are blocked
+      {% else %}Off — bot sign-ups are not filtered{% endif %}
+    </span>
+    {% if view.is_wordpress %}
+    <div class="chk-actions">
+      <form hx-post="/hostings/regguard" hx-target="#regguard-panel" hx-swap="outerHTML" hx-trigger="change">
+        <input type="hidden" name="_csrf" value="{{ csrf_toggle }}">
+        <input type="hidden" name="selector" value="{{ selector }}">
+        <label class="chk-switch" title="Works on native WordPress, WooCommerce and Paid Member Subscriptions. Runs as a must-use plugin — no dashboard entry, nothing for a customer to switch off by accident.">
+          <input type="checkbox" class="switch" name="enabled" value="on" aria-label="Block automated spam sign-ups"{% if view.enabled %} checked{% endif %}{% if !can_manage %} disabled{% endif %}>
+        </label>
+      </form>
+    </div>
+    {% endif %}
+  </div>
   {% if let Some(e) = error %}
-  <div class="flash warn" style="margin:0 0 0.7rem"><div class="flash-body">{{ e }}</div></div>
-  {% endif %}
-
-  {% if !view.is_wordpress %}
-  <div class="flash warn" style="margin:0"><div class="flash-body">
-    This site isn't WordPress, so there's nothing to guard yet.
-  </div></div>
-  {% else %}
-  <form hx-post="/hostings/regguard" hx-target="#regguard-card" hx-swap="outerHTML" hx-trigger="change">
-    <input type="hidden" name="_csrf" value="{{ csrf_toggle }}">
-    <input type="hidden" name="selector" value="{{ selector }}">
-    <label class="field-checkbox" style="margin:0">
-      <input type="checkbox" name="enabled" value="on"{% if view.enabled %} checked{% endif %}{% if !can_manage %} disabled{% endif %}>
-      Block automated spam sign-ups on this site
-    </label>
-  </form>
-  {% if view.enabled && !view.installed %}
-  <p class="text-soft small" style="margin:0.6rem 0 0">
-    Turned on, but the plugin file isn't on disk yet — it re-installs on the next toggle.
-  </p>
-  {% else if view.enabled %}
-  <p class="text-soft small" style="margin:0.6rem 0 0">
-    Active as a must-use plugin — no dashboard entry, nothing for a customer to switch off by accident.
-  </p>
-  {% endif %}
+  <div class="chk-body"><p class="chk-note tone-warn">{{ e }}</p></div>
   {% endif %}
 </div>

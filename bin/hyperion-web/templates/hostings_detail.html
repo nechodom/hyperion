@@ -1533,88 +1533,24 @@
   </div>
   <p>
     {% if let Some(wp) = wp_status %}
-      WordPress {{ wp.wp_version }}, installed {{ crate::handlers::stats::fmt_ago(wp.installed_at) }} at <a href="{{ wp.site_url }}" target="_blank" rel="noopener">{{ wp.site_url }}</a>.
-      Health first, then the checks that keep it healthy, then what is installed.
+      WordPress <strong>{{ wp.wp_version }}</strong> at <a href="{{ wp.site_url }}" target="_blank" rel="noopener">{{ wp.site_url }} ↗</a>,
+      installed <span title="{{ wp.installed_at }}">{{ crate::handlers::stats::fmt_ago(wp.installed_at) }}</span>.
     {% else %}
       Nothing is installed yet. The checks below still run — file permissions and mail matter to a plain PHP site too.
     {% endif %}
   </p>
 </div>
 
-{# Site health first: when the site is down with a fatal, everything else on
-   this tab is secondary. Lazy — the probe + possible wp-cli run must not hold
-   up the page. Beside the installation card once WordPress is there; on its
-   own line (no half-empty grid) before that. #}
-<div class="{% if wp_status.is_some() %}card-grid cols-2{% else %}card-stack{% endif %}">
-  <div hx-get="/hostings/{{ detail.id.as_str() }}/health-panel"
-       hx-trigger="intersect once" hx-swap="outerHTML">
-    <div class="card hover" id="fatal-card">
-      <h2>
-        <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
-        Site health
-      </h2>
-      <p class="muted" style="margin:0;font-size:0.85rem">
-        <span class="spinner-inline"></span> Probing the site…
-      </p>
-    </div>
-  </div>
-
-  {% if let Some(wp) = wp_status %}
-  <div class="card">
-    <div class="card-head">
-      <h2>
-        <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20l9-5-9-5-9 5 9 5z"/><path d="M12 12l9-5-9-5-9 5 9 5z"/></svg>
-        Installation
-      </h2>
-      <div class="card-tools"><span class="tag">WP {{ wp.wp_version }}</span></div>
-    </div>
-    <dl class="facts">
-      <div class="fact"><dt>Site URL</dt><dd><a href="{{ wp.site_url }}" target="_blank" rel="noopener">{{ wp.site_url }} ↗</a></dd></div>
-      <div class="fact"><dt>Installed</dt><dd class="numeric" title="{{ wp.installed_at }}">{{ crate::handlers::stats::fmt_ago(wp.installed_at) }}</dd></div>
-    </dl>
-    <details class="disclosure" style="margin-top:0.9rem">
-      <summary>Reset the admin password…</summary>
-      <form method="post" action="/hostings/wp/reset-password" autocomplete="off" style="margin-top:0.6rem"
-            data-confirm-title="Reset WordPress admin password"
-            data-confirm-body="A new random password is generated for the WordPress admin account. Existing browser sessions stay signed in."
-            data-confirm-confirm-label="Reset password"
-            data-confirm-variant="danger">
-        <input type="hidden" name="_csrf" value="{{ csrf_wp_reset }}">
-        <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
-        <div class="field-row">
-          <div class="field">
-            <label for="wp_reset_user">WP user</label>
-            <input id="wp_reset_user" name="wp_user" type="text" value="admin" required>
-          </div>
-          <div class="field">
-            <label for="wp_reset_pw">New password <span class="hint">≥ 8 chars</span></label>
-            <input id="wp_reset_pw" name="new_password" type="password" required minlength="8">
-          </div>
-        </div>
-        <div class="cluster">
-          <button class="btn small" type="submit">Reset WP password</button>
-          <button type="button" class="btn small ghost" data-genpw="wp_reset_pw">Generate</button>
-        </div>
-      </form>
-    </details>
-  </div>
-  {% endif %}
-</div>
-
 {% if wp_status.is_none() %}
-<div class="card" style="margin-top:1rem">
-  <div class="card-head">
-    <h2>
-      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20l9-5-9-5-9 5 9 5z"/><path d="M12 12l9-5-9-5-9 5 9 5z"/></svg>
-      Install WordPress
-    </h2>
-  </div>
+<div class="group" id="wp-install">
+  <div class="ghead">Install WordPress</div>
+  <div class="item">
   {% if detail.database.is_none() %}
-    <p class="note">This hosting has no database. WordPress needs MariaDB — delete the hosting from the Danger zone, then create a new one with MariaDB selected in the wizard.</p>
+    <p class="text-soft small" style="margin:0">This hosting has no database. WordPress needs MariaDB — delete the hosting from the Danger zone, then create a new one with MariaDB selected in the wizard.</p>
   {% else if detail.state.as_str() != "active" %}
-    <p class="note">The hosting must be <strong>active</strong> before you can install WordPress (current state: <code>{{ detail.state.as_str() }}</code>).</p>
+    <p class="text-soft small" style="margin:0">The hosting must be <strong>active</strong> before you can install WordPress (current state: <code>{{ detail.state.as_str() }}</code>).</p>
   {% else %}
-    <p class="card-desc">Downloads the chosen WordPress release into the document root, creates <code>wp-config.php</code> against this site's database and runs the installer with the admin account below.</p>
+    <p class="text-soft small" style="margin:0 0 1rem">Downloads the chosen WordPress release into the document root, creates <code>wp-config.php</code> against this site's database and runs the installer with the admin account below.</p>
     <form method="post" action="/hostings/wp/install" autocomplete="off">
       <input type="hidden" name="_csrf" value="{{ csrf_wp_install }}">
       <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
@@ -1662,129 +1598,87 @@
                  placeholder="latest · 6.5.3">
         </div>
       </div>
-      <div class="form-footer start">
-        <button class="btn primary" type="submit">
-          <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-          Install WordPress
-        </button>
-        <span class="note">Runs as a background job; you can watch it on the Backups tab's job panel or under Background jobs.</span>
+      <div class="item-actions" style="justify-content:flex-start;align-items:center">
+        <button class="btn primary" type="submit">Install WordPress</button>
+        <span class="text-soft small">Runs as a background job — you can watch it under Background jobs.</span>
       </div>
     </form>
   {% endif %}
+  </div>
 </div>
 {% endif %}
 
-<div class="panel-group">Checks <span class="note">— each re-checks on demand; the self-repairing ones fix what they find</span></div>
-<div class="card-grid cols-2">
-  {# Permissions check. `intersect once` rather than `load`: the health card
-     above already pays a load-triggered probe, and a second one would double
-     the work on every detail render whether or not the operator ever opens
-     this tab. #}
-  <div id="perm-panel"
+{# Checks: one row each, every one lazy (`intersect once`, not `load` — a
+   hidden tab must not pay for a probe or a wp-cli run the operator never
+   looks at). Each partial renders a whole `.chk-row` carrying the same id as
+   its placeholder, and re-renders itself by that id. Site health leads:
+   when the site is down with a fatal, everything else here is secondary. #}
+<div class="group wp-checks" id="wp-checks">
+  <div class="ghead">Health &amp; checks <span class="ghead-note">each re-checks on demand</span></div>
+  <div class="chk-row" id="fatal-card"
+       hx-get="/hostings/{{ detail.id.as_str() }}/health-panel"
+       hx-trigger="intersect once" hx-swap="outerHTML">
+    <div class="chk-head"><span class="chk-dot"></span><h3 class="chk-name">Site health</h3><span class="chk-sum"><span class="spinner-inline"></span> Probing the front page…</span></div>
+  </div>
+  <div class="chk-row" id="perm-panel"
        hx-get="/hostings/{{ detail.id.as_str() }}/perm-panel"
-       hx-trigger="intersect once"
-       hx-swap="innerHTML">
-    <div class="card compact">
-      <span class="spinner-inline" style="margin-right:0.4rem"></span>
-      <span class="text-soft small">Checking file permissions…</span>
-    </div>
+       hx-trigger="intersect once" hx-swap="outerHTML">
+    <div class="chk-head"><span class="chk-dot"></span><h3 class="chk-name">File permissions</h3><span class="chk-sum"><span class="spinner-inline"></span> Checking…</span></div>
   </div>
-
-  {# WordPress mail, lazy for the same reason: it reads the owning node and
-     runs wp-cli, so it must not be paid for by an operator who never opens
-     this tab. #}
-  <div id="wpmail-panel"
+  <div class="chk-row" id="wpmail-panel"
        hx-get="/hostings/{{ detail.id.as_str() }}/wpmail-panel"
-       hx-trigger="intersect once"
-       hx-swap="innerHTML">
-    <div class="card compact">
-      <span class="spinner-inline" style="margin-right:0.4rem"></span>
-      <span class="text-soft small">Checking WordPress mail…</span>
-    </div>
+       hx-trigger="intersect once" hx-swap="outerHTML">
+    <div class="chk-head"><span class="chk-dot"></span><h3 class="chk-name">WordPress mail</h3><span class="chk-sum"><span class="spinner-inline"></span> Checking…</span></div>
   </div>
-
   {# Public sign-ups: the one control on this page that closes the door
      registration spam comes through — a ban or a firewall rule cannot. #}
-  <div id="signup-panel"
+  <div class="chk-row" id="signup-panel"
        hx-get="/hostings/{{ detail.id.as_str() }}/signup-panel"
-       hx-trigger="intersect once"
-       hx-swap="innerHTML">
-    <div class="card compact">
-      <span class="spinner-inline" style="margin-right:0.4rem"></span>
-      <span class="text-soft small">Reading registration setting…</span>
-    </div>
+       hx-trigger="intersect once" hx-swap="outerHTML">
+    <div class="chk-head"><span class="chk-dot"></span><h3 class="chk-name">Public sign-ups</h3><span class="chk-sum"><span class="spinner-inline"></span> Reading the registration setting…</span></div>
   </div>
-
-  {# Registration spam guard — lazy, reads + writes the owning node. Self-swaps
-     on toggle, so it stays a plain card rather than an accordion. #}
-  <div id="regguard-panel"
+  <div class="chk-row" id="regguard-panel"
        hx-get="/hostings/{{ detail.id.as_str() }}/regguard-panel"
-       hx-trigger="intersect once"
-       hx-swap="innerHTML">
-    <div class="card compact">
-      <span class="spinner-inline" style="margin-right:0.4rem"></span>
-      <span class="text-soft small">Reading spam-guard settings…</span>
-    </div>
+       hx-trigger="intersect once" hx-swap="outerHTML">
+    <div class="chk-head"><span class="chk-dot"></span><h3 class="chk-name">Sign-up spam guard</h3><span class="chk-sum"><span class="spinner-inline"></span> Reading…</span></div>
   </div>
 </div>
 
 {% if wp_status.is_some() %}
-<div class="panel-group">Updates &amp; integrity</div>
-<div class="card-grid cols-2">
-  {# WordPress updates ("defender") — lazily loaded so the page render isn't
-     blocked on a wp-cli plugin/theme enumeration. #}
-  <div hx-get="/hostings/{{ detail.id.as_str() }}/vuln-panel"
-       hx-trigger="intersect once"
-       hx-swap="outerHTML">
-    <div class="card">
-      <h2 style="opacity:0.6">
-        <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-        WordPress updates <span class="text-soft small">— checking…</span>
-      </h2>
-    </div>
+{# Updates ("is anything outdated?") and integrity ("has anything been
+   changed?") — lazy for the same reason, only more so: the integrity scan
+   hashes every core and plugin file against wordpress.org. #}
+<div class="group wp-checks" id="wp-updates">
+  <div class="ghead">Updates &amp; integrity</div>
+  <div class="chk-row" id="vuln-panel"
+       hx-get="/hostings/{{ detail.id.as_str() }}/vuln-panel"
+       hx-trigger="intersect once" hx-swap="outerHTML">
+    <div class="chk-head"><span class="chk-dot"></span><h3 class="chk-name">Updates</h3><span class="chk-sum"><span class="spinner-inline"></span> Checking…</span></div>
   </div>
-
-  {# File integrity & malware — one card answers "is anything outdated?", the
-     next "has anything been changed?". Lazy for the same reason, only more
-     so — it hashes every core and plugin file against wordpress.org. #}
-  <div hx-get="/hostings/{{ detail.id.as_str() }}/integrity-panel"
-       hx-trigger="intersect once"
-       hx-swap="outerHTML">
-    <div class="card">
-      <h2 style="opacity:0.6">
-        <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><circle cx="11.5" cy="15" r="2.5"/><path d="M13.4 16.9 16 19.5"/></svg>
-        File integrity &amp; malware <span class="text-soft small">— verifying…</span>
-      </h2>
-    </div>
+  <div class="chk-row" id="integrity-card"
+       hx-get="/hostings/{{ detail.id.as_str() }}/integrity-panel"
+       hx-trigger="intersect once" hx-swap="outerHTML">
+    <div class="chk-head"><span class="chk-dot"></span><h3 class="chk-name">Integrity &amp; malware</h3><span class="chk-sum"><span class="spinner-inline"></span> Verifying files…</span></div>
   </div>
 </div>
 
-<div class="panel-group">Plugins &amp; themes</div>
-
 {# Plugin manager — the server populates wp_plugins by shelling out to
    `wp plugin list --format=json`. One POST endpoint dispatches install /
-   activate / deactivate / update / delete. #}
-<div class="card">
-  <div class="card-head">
-    <h2>
-      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="9" y1="15" x2="15" y2="15"/><line x1="9" y1="11" x2="15" y2="11"/></svg>
-      Plugins
-      <span class="text-soft" style="font-weight:400;font-size:0.82rem">· {{ wp_plugins.plugins.len() }} installed</span>
-    </h2>
-    {% if wp_plugins.updates_pending > 0 %}
-      <span class="pill warn">{{ wp_plugins.updates_pending }} update{% if wp_plugins.updates_pending != 1 %}s{% endif %}</span>
-    {% endif %}
-    <div class="card-tools">
+   activate / deactivate / update / delete. `has-popover`: the install
+   popovers drop below the header and must not be clipped by the group. #}
+<div class="group has-popover" id="wp-plugins">
+  <div class="ghead">
+    Plugins
+    <span class="ghead-note">{{ wp_plugins.plugins.len() }} installed{% if wp_plugins.updates_pending > 0 %} · <span class="tone-warn">{{ wp_plugins.updates_pending }} update{% if wp_plugins.updates_pending != 1 %}s{% endif %}</span>{% endif %}</span>
+    <div class="ghead-tools">
+      {% if wp_plugins.updates_pending > 0 %}
       <form method="post" action="/hostings/wp/plugin-action">
         <input type="hidden" name="_csrf" value="{{ csrf_token }}">
         <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
         <input type="hidden" name="action" value="update_all">
-        <button class="btn small" type="submit"
-                {% if wp_plugins.updates_pending == 0 %}disabled{% endif %}>
-          <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10"/><path d="M20.49 15a9 9 0 0 1-14.85 3.36L1 14"/></svg>
-          Update all
-        </button>
+        <button class="btn small" type="submit">Update all</button>
       </form>
+      {% endif %}
 
       {# "Install from library" — a select of uploaded asset ZIPs. Visible
          whenever the library has ANYTHING in it. #}
@@ -1850,23 +1744,22 @@
   </div>
 
   {% if let Some(err) = wp_plugins.error %}
-    <div class="empty" style="padding:1.5rem 1rem">
-      <p style="color:var(--danger);font-weight:600;margin:0 0 .35rem">Couldn't list plugins</p>
-      <p class="muted" style="margin:0 0 .5rem">WordPress core is present on disk, but <code>wp plugin list</code> failed when it tried to start WordPress — usually a database-connection problem or a PHP error during bootstrap, not a missing plugin.</p>
-      <p class="muted mono" style="margin:0 0 .5rem;white-space:pre-wrap;word-break:break-word">{{ err }}</p>
-      <p class="muted" style="margin:0">Run this on the node to see the underlying cause:<br><code>sudo -u {{ detail.system_user }} /usr/local/bin/wp --path={{ detail.root_dir }} plugin list</code></p>
-    </div>
+  <div class="item">
+    <p style="color:var(--danger);font-weight:600;margin:0 0 .35rem">Couldn't list plugins</p>
+    <p class="text-soft small" style="margin:0 0 .5rem">WordPress core is present on disk, but <code>wp plugin list</code> failed when it tried to start WordPress — usually a database-connection problem or a PHP error during bootstrap, not a missing plugin.</p>
+    <pre class="chk-excerpt">{{ err }}</pre>
+    <p class="text-soft small" style="margin:0.5rem 0 0">Run this on the node to see the underlying cause:<br><code>sudo -u {{ detail.system_user }} /usr/local/bin/wp --path={{ detail.root_dir }} plugin list</code></p>
+  </div>
   {% else if wp_plugins.plugins.is_empty() %}
-    <div class="empty" style="padding:1.5rem 1rem">
-      <p class="muted">No plugins installed yet. Use <strong>Install plugin</strong> above to add one from wordpress.org or a .zip URL.</p>
-    </div>
+  <div class="item">
+    <p class="text-soft small" style="margin:0">No plugins installed yet. Use <strong>+ Install plugin</strong> to add one from wordpress.org or a .zip URL.</p>
+  </div>
   {% else %}
-  <div class="table-wrap flush-b">
-    <table>
+  <div class="table-wrap">
+    <table class="wp-table">
       <thead>
         <tr>
           <th>Plugin</th>
-          <th>Status</th>
           <th>Version</th>
           <th>Auto-update</th>
           <th class="right">Actions</th>
@@ -1874,30 +1767,26 @@
       </thead>
       <tbody>
       {% for p in wp_plugins.plugins %}
-        <tr>
+        <tr{% if !(p.status == "active" || p.status == "active-network" || p.status == "must-use" || p.status == "dropin") %} class="is-off"{% endif %}>
           <td>
-            <strong>{{ p.name }}</strong>
+            <div class="wp-name">
+              {% if p.status == "active" || p.status == "active-network" %}<span class="chk-dot ok" title="active"></span>
+              {% else if p.status == "must-use" || p.status == "dropin" %}<span class="chk-dot info" title="{{ p.status }}"></span>
+              {% else %}<span class="chk-dot" title="inactive"></span>{% endif %}
+              <strong>{{ p.name }}</strong>
+              {% if p.status == "must-use" %}<span class="pill muted">must-use</span>
+              {% else if p.status == "dropin" %}<span class="pill muted">drop-in</span>
+              {% else if !(p.status == "active" || p.status == "active-network") %}<span class="text-soft small">inactive</span>{% endif %}
+            </div>
             <span class="cell-sub mono">{{ p.slug }}</span>
-          </td>
-          <td>
-            {% if p.status == "active" || p.status == "active-network" %}
-              <span class="pill ok">active</span>
-            {% else if p.status == "must-use" %}
-              <span class="pill info">must-use</span>
-            {% else if p.status == "dropin" %}
-              <span class="pill info">drop-in</span>
-            {% else %}
-              <span class="pill neutral">inactive</span>
-            {% endif %}
           </td>
           <td>
             <span class="numeric">{{ p.version }}</span>
             {% if p.update_available %}
-              <span class="cell-sub text-warn">→ {{ p.latest_version }} available</span>
+              <span class="cell-sub tone-warn">→ {{ p.latest_version }} available</span>
             {% endif %}
             {% if p.auto_update_blocked %}
-              <span class="cell-sub" style="color:var(--warn);font-weight:600">⏸ Auto-update paused</span>
-              <span class="cell-sub">Needs a license / manual update{% if let Some(r) = p.auto_update_block_reason %} — {{ r }}{% endif %}</span>
+              <span class="cell-sub tone-warn" title="Needs a license / manual update{% if let Some(r) = p.auto_update_block_reason %} — {{ r }}{% endif %}">Auto-update paused</span>
             {% endif %}
           </td>
           <td>
@@ -1908,27 +1797,23 @@
               <input type="hidden" name="action" value="{% if p.auto_update %}auto_update_disable{% else %}auto_update_enable{% endif %}">
               <button class="btn small ghost" type="submit"
                       title="{% if p.auto_update %}Disable auto-update{% else %}Enable auto-update{% endif %}">
-                {% if p.auto_update %}
-                  <span class="tag success">on</span>
-                {% else %}
-                  <span class="tag muted">off</span>
-                {% endif %}
+                {% if p.auto_update %}<span class="tag success">on</span>{% else %}<span class="tag muted">off</span>{% endif %}
               </button>
             </form>
           </td>
           <td class="right">
-            <div class="row-actions" style="flex-wrap:wrap">
+            <div class="row-actions">
               {% if p.update_available %}
-                <form method="post" action="/hostings/wp/plugin-action" style="display:inline">
+                <form method="post" action="/hostings/wp/plugin-action">
                   <input type="hidden" name="_csrf" value="{{ csrf_token }}">
                   <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
                   <input type="hidden" name="slug" value="{{ p.slug }}">
                   <input type="hidden" name="action" value="update">
-                  <button class="btn small" type="submit" title="Update to {{ p.latest_version }}">Update</button>
+                  <button class="btn small primary" type="submit" title="Update to {{ p.latest_version }}">Update</button>
                 </form>
               {% endif %}
               {% if p.auto_update_blocked %}
-                <form method="post" action="/hostings/wp/plugin-action" style="display:inline">
+                <form method="post" action="/hostings/wp/plugin-action">
                   <input type="hidden" name="_csrf" value="{{ csrf_token }}">
                   <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
                   <input type="hidden" name="slug" value="{{ p.slug }}">
@@ -1938,22 +1823,22 @@
                 </form>
               {% endif %}
               {% if p.status == "active" || p.status == "active-network" %}
-                <form method="post" action="/hostings/wp/plugin-action" style="display:inline">
+                <form method="post" action="/hostings/wp/plugin-action">
                   <input type="hidden" name="_csrf" value="{{ csrf_token }}">
                   <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
                   <input type="hidden" name="slug" value="{{ p.slug }}">
                   <input type="hidden" name="action" value="deactivate">
                   <button class="btn small ghost" type="submit">Deactivate</button>
                 </form>
-              {% else %}
-                <form method="post" action="/hostings/wp/plugin-action" style="display:inline">
+              {% else if p.status != "must-use" && p.status != "dropin" %}
+                <form method="post" action="/hostings/wp/plugin-action">
                   <input type="hidden" name="_csrf" value="{{ csrf_token }}">
                   <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
                   <input type="hidden" name="slug" value="{{ p.slug }}">
                   <input type="hidden" name="action" value="activate">
-                  <button class="btn small primary" type="submit">Activate</button>
+                  <button class="btn small" type="submit">Activate</button>
                 </form>
-                <form method="post" action="/hostings/wp/plugin-action" style="display:inline"
+                <form method="post" action="/hostings/wp/plugin-action"
                       data-confirm-title="Delete plugin"
                       data-confirm-body="Plugin {{ p.slug }} will be deleted from disk and from the WordPress plugin registry. Plugin data in the DB (custom tables, options) is left intact."
                       data-confirm-confirm-label="Delete plugin"
@@ -1962,7 +1847,7 @@
                   <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
                   <input type="hidden" name="slug" value="{{ p.slug }}">
                   <input type="hidden" name="action" value="delete">
-                  <button class="btn small danger" type="submit">Delete</button>
+                  <button class="btn small ghost danger" type="submit">Delete</button>
                 </form>
               {% endif %}
             </div>
@@ -1975,26 +1860,19 @@
   {% endif %}
 </div>
 
-<div class="card" style="margin-top:1rem">
-  <div class="card-head">
-    <h2>
-      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19l7-7 3 3-7 7-3-3z"/><path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5z"/><path d="M2 2l7.586 7.586"/><circle cx="11" cy="11" r="2"/></svg>
-      Themes
-      <span class="text-soft" style="font-weight:400;font-size:0.82rem">· {{ wp_themes.themes.len() }} installed</span>
-    </h2>
-    {% if wp_themes.updates_pending > 0 %}
-      <span class="pill warn">{{ wp_themes.updates_pending }} update{% if wp_themes.updates_pending != 1 %}s{% endif %}</span>
-    {% endif %}
-    <div class="card-tools">
+<div class="group has-popover" id="wp-themes">
+  <div class="ghead">
+    Themes
+    <span class="ghead-note">{{ wp_themes.themes.len() }} installed{% if wp_themes.updates_pending > 0 %} · <span class="tone-warn">{{ wp_themes.updates_pending }} update{% if wp_themes.updates_pending != 1 %}s{% endif %}</span>{% endif %}</span>
+    <div class="ghead-tools">
+      {% if wp_themes.updates_pending > 0 %}
       <form method="post" action="/hostings/wp/theme-action">
         <input type="hidden" name="_csrf" value="{{ csrf_token }}">
         <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
         <input type="hidden" name="action" value="update_all">
-        <button class="btn small" type="submit" {% if wp_themes.updates_pending == 0 %}disabled{% endif %}>
-          <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10"/><path d="M20.49 15a9 9 0 0 1-14.85 3.36L1 14"/></svg>
-          Update all
-        </button>
+        <button class="btn small" type="submit">Update all</button>
       </form>
+      {% endif %}
 
       {% if !wp_assets.is_empty() %}
       <details class="inline-action">
@@ -2044,61 +1922,48 @@
   </div>
 
   {% if let Some(err) = wp_themes.error %}
-    <div class="empty" style="padding:1.5rem 1rem">
-      <p style="color:var(--danger);font-weight:600;margin:0 0 .35rem">Couldn't list themes</p>
-      <p class="muted" style="margin:0 0 .5rem">WordPress core is present on disk, but <code>wp theme list</code> failed when it tried to start WordPress — usually a database-connection problem or a PHP error during bootstrap, not a missing theme.</p>
-      <p class="muted mono" style="margin:0 0 .5rem;white-space:pre-wrap;word-break:break-word">{{ err }}</p>
-      <p class="muted" style="margin:0">Run this on the node to see the underlying cause:<br><code>sudo -u {{ detail.system_user }} /usr/local/bin/wp --path={{ detail.root_dir }} theme list</code></p>
-    </div>
+  <div class="item">
+    <p style="color:var(--danger);font-weight:600;margin:0 0 .35rem">Couldn't list themes</p>
+    <p class="text-soft small" style="margin:0 0 .5rem">WordPress core is present on disk, but <code>wp theme list</code> failed when it tried to start WordPress — usually a database-connection problem or a PHP error during bootstrap, not a missing theme.</p>
+    <pre class="chk-excerpt">{{ err }}</pre>
+    <p class="text-soft small" style="margin:0.5rem 0 0">Run this on the node to see the underlying cause:<br><code>sudo -u {{ detail.system_user }} /usr/local/bin/wp --path={{ detail.root_dir }} theme list</code></p>
+  </div>
   {% else if wp_themes.themes.is_empty() %}
-    <div class="empty" style="padding:1.5rem 1rem">
-      <p class="muted">No themes detected. Use <strong>Install theme</strong> above to add one from wordpress.org, a URL, or the asset library.</p>
-    </div>
+  <div class="item">
+    <p class="text-soft small" style="margin:0">No themes detected. Use <strong>+ Install theme</strong> to add one from wordpress.org, a URL, or the asset library.</p>
+  </div>
   {% else %}
-  <div class="table-wrap flush-b">
-    <table>
+  <div class="table-wrap">
+    <table class="wp-table">
       <thead>
         <tr>
           <th>Theme</th>
-          <th>Status</th>
           <th>Version</th>
-          <th>Update</th>
           <th class="right">Actions</th>
         </tr>
       </thead>
       <tbody>
         {% for t in wp_themes.themes %}
-        <tr>
+        <tr{% if t.status != "active" && t.status != "parent" %} class="is-off"{% endif %}>
           <td>
-            <strong>{{ t.name }}</strong>
+            <div class="wp-name">
+              {% if t.status == "active" %}<span class="chk-dot ok" title="active"></span>
+              {% else if t.status == "parent" %}<span class="chk-dot info" title="parent of the active theme"></span>
+              {% else %}<span class="chk-dot" title="{{ t.status }}"></span>{% endif %}
+              <strong>{{ t.name }}</strong>
+              {% if t.status == "active" %}<span class="pill ok">active</span>
+              {% else if t.status == "parent" %}<span class="pill muted">parent of active</span>{% endif %}
+            </div>
             <span class="cell-sub mono">{{ t.slug }}</span>
           </td>
           <td>
-            {% if t.status == "active" %}<span class="pill ok">active</span>
-            {% else if t.status == "parent" %}<span class="pill neutral">parent of active</span>
-            {% else %}<span class="pill neutral">{{ t.status }}</span>{% endif %}
-          </td>
-          <td><span class="numeric">{{ t.version }}</span></td>
-          <td>
-            {% if t.update_available %}
-              <span class="text-warn small">→ {{ t.latest_version }}</span>
-            {% else %}
-              <span class="text-soft small">up to date</span>
-            {% endif %}
+            <span class="numeric">{{ t.version }}</span>
+            {% if t.update_available %}<span class="cell-sub tone-warn">→ {{ t.latest_version }} available</span>{% endif %}
           </td>
           <td class="right">
-            <div class="row-actions" style="flex-wrap:wrap">
-              {% if t.status != "active" %}
-              <form method="post" action="/hostings/wp/theme-action" style="display:inline">
-                <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-                <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
-                <input type="hidden" name="action" value="activate">
-                <input type="hidden" name="slug" value="{{ t.slug }}">
-                <button class="btn small" type="submit">Activate</button>
-              </form>
-              {% endif %}
+            <div class="row-actions">
               {% if t.update_available %}
-              <form method="post" action="/hostings/wp/theme-action" style="display:inline">
+              <form method="post" action="/hostings/wp/theme-action">
                 <input type="hidden" name="_csrf" value="{{ csrf_token }}">
                 <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
                 <input type="hidden" name="action" value="update">
@@ -2106,8 +1971,17 @@
                 <button class="btn small primary" type="submit">Update</button>
               </form>
               {% endif %}
+              {% if t.status != "active" %}
+              <form method="post" action="/hostings/wp/theme-action">
+                <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+                <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
+                <input type="hidden" name="action" value="activate">
+                <input type="hidden" name="slug" value="{{ t.slug }}">
+                <button class="btn small" type="submit">Activate</button>
+              </form>
+              {% endif %}
               {% if t.status != "active" && t.status != "parent" %}
-              <form method="post" action="/hostings/wp/theme-action" style="display:inline"
+              <form method="post" action="/hostings/wp/theme-action"
                     data-confirm-title="Delete theme {{ t.slug }}"
                     data-confirm-body="The theme files will be removed from disk. Database options (e.g. customizer settings) are left intact."
                     data-confirm-confirm-label="Delete theme"
@@ -2116,7 +1990,7 @@
                 <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
                 <input type="hidden" name="action" value="delete">
                 <input type="hidden" name="slug" value="{{ t.slug }}">
-                <button class="btn small danger" type="submit">Delete</button>
+                <button class="btn small ghost danger" type="submit">Delete</button>
               </form>
               {% endif %}
             </div>
@@ -2129,18 +2003,19 @@
   {% endif %}
 </div>
 
-<div class="panel-group">Tools</div>
-<div class="card-stack">
+{# Tools — the things an operator reaches for now and then. Each row is a
+   disclosure whose collapsed summary still answers "is this on?". #}
+<div class="group wp-tools" id="wp-tools">
+  <div class="ghead">Tools</div>
 
 {# Staging → push-to-prod. Available once WP is installed. #}
 {% if detail.state.as_str() == "active" %}
-<details class="card">
+<details class="item wp-tool" id="wp-staging">
   <summary>
-    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 3h5v5"/><path d="M21 3l-7 7"/><path d="M8 21H3v-5"/><path d="M3 21l7-7"/></svg>
-    <h2>Staging site</h2>
-    <span class="acc-meta">{% if staging_exists %}<span class="pill ok">exists</span>{% else %}test copy{% endif %}{% call chevron() %}</span>
+    <h3>Staging site</h3>
+    <span class="acc-meta">{% if staging_exists %}<span class="pill ok">exists</span>{% else %}a test copy to try updates on{% endif %}{% call chevron() %}</span>
   </summary>
-  <p class="card-desc">
+  <p class="text-soft small" style="margin:0 0 0.9rem">
     Spin up a <code>{{ staging_domain }}</code> copy to test plugin and
     theme updates safely, then push it back over production. A push takes a
     <strong>backup of production first</strong>, so a bad push is
@@ -2161,7 +2036,7 @@
         record, or a <code>*.{{ detail.domain }}</code> wildcard. Leave it as-is for the default.</span>
     </div>
     <div class="cluster">
-      <button class="btn" type="submit">Create / refresh staging</button>
+      <button class="btn small" type="submit">{% if staging_exists %}Refresh staging{% else %}Create staging{% endif %}</button>
     </div>
   </form>
   {# Only once a staging site actually exists. Before that, "Open staging"
@@ -2177,21 +2052,20 @@
           data-confirm-variant="danger">
       <input type="hidden" name="_csrf" value="{{ csrf_token }}">
       <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
-      <button class="btn danger" type="submit">Push staging → production</button>
+      <button class="btn small danger" type="submit">Push staging → production</button>
     </form>
-    <a class="btn ghost" href="https://{{ staging_domain }}" target="_blank" rel="noopener noreferrer">Open staging ↗</a>
+    <a class="btn small ghost" href="https://{{ staging_domain }}" target="_blank" rel="noopener noreferrer">Open staging ↗</a>
   </div>
   {% endif %}
 </details>
 {% endif %}
 
-<details class="card">
+<details class="item wp-tool" id="wp-debug">
   <summary>
-    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-    <h2>Debug</h2>
+    <h3>Debug</h3>
     <span class="acc-meta">{% if detail.wp_extras.wp_debug_enabled %}<span class="pill warn">WP_DEBUG on</span>{% else %}WP_DEBUG off{% endif %}{% call chevron() %}</span>
   </summary>
-  <p class="card-desc">
+  <p class="text-soft small" style="margin:0 0 0.9rem">
     Toggles <code>WP_DEBUG</code>, <code>WP_DEBUG_LOG</code> and
     <code>WP_DEBUG_DISPLAY</code> in <code>wp-config.php</code>.
     <strong>Turn it off when you're finished</strong> — displaying errors
@@ -2220,14 +2094,14 @@
                {% if detail.wp_extras.wp_debug_display %}checked{% endif %}>
       </label>
     </div>
-    <div class="form-footer start">
-      <button class="btn primary" type="submit">Apply debug settings</button>
+    <div class="cluster" style="margin-top:0.9rem">
+      <button class="btn small primary" type="submit">Apply debug settings</button>
     </div>
   </form>
 
   {% if detail.wp_extras.wp_debug_log_size_bytes > 0 %}
   <div class="cluster" style="margin-top:1rem">
-    <span class="note"><strong>debug.log size:</strong> {{ detail.wp_extras.wp_debug_log_size_bytes }} bytes (sampled on the last scheduler tick)</span>
+    <span class="text-soft small"><strong>debug.log</strong> is {{ detail.wp_extras.wp_debug_log_size_bytes }} bytes (sampled on the last scheduler tick)</span>
     <form method="post" action="/hostings/wp/debug-log/rotate">
       <input type="hidden" name="_csrf" value="{{ csrf_wp_debug_rotate }}">
       <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
@@ -2240,44 +2114,38 @@
   {% endif %}
 </details>
 
-<details class="card">
+<details class="item wp-tool" id="wp-redis">
   <summary>
-    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
-    <h2>Redis object cache</h2>
-    <span class="acc-meta">{% if detail.wp_extras.redis_enabled %}<span class="pill ok">enabled</span>{% else %}off{% endif %}{% call chevron() %}</span>
+    <h3>Redis object cache</h3>
+    <span class="acc-meta">{% if detail.wp_extras.redis_enabled %}{% if redis_plugin_installed %}<span class="pill ok">enabled</span>{% else %}<span class="pill warn">plugin missing</span>{% endif %}{% else %}off{% endif %}{% call chevron() %}</span>
   </summary>
-  <p class="card-desc">
-    Per-hosting Redis ACL on the local <code>redis-server</code>.
-    When enabled, the agent allocates a dedicated DB slot and writes the
-    <code>WP_REDIS_*</code> constants into wp-config.php. You still
-    need the
+  <p class="text-soft small" style="margin:0 0 0.9rem">
+    A per-site Redis ACL user and DB slot on the local <code>redis-server</code>,
+    wired into <code>wp-config.php</code> as <code>WP_REDIS_*</code>. WordPress
+    only uses it once the
     <a href="https://wordpress.org/plugins/redis-cache/" target="_blank" rel="noopener">Redis Object Cache</a>
-    plugin — Hyperion wires the connection details into <code>wp-config.php</code>,
-    but WordPress will not USE Redis until that plugin is installed and active.
+    plugin is installed and active.
   </p>
   {%- if detail.wp_extras.redis_enabled %}
     {%- if !redis_plugin_installed %}
   {# Enabling Redis writes the constants and does nothing observable until the
      plugin is there. Offer the one action that finishes the job. #}
-  <div class="flash warn" style="margin:0 0 0.8rem">
-    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
-    <div class="flash-body">
-      <strong>Redis is wired up, but nothing is using it yet.</strong>
+  <div class="chk-callout warn" style="margin:0 0 0.9rem">
+    <p><strong>Redis is wired up, but nothing is using it yet.</strong>
       The <code>Redis Object Cache</code> plugin is not installed, so WordPress
-      still caches to the database. Install and activate it to finish the job.
-      <form method="post" action="/hostings/wp/plugin-action" style="margin-top:0.6rem">
-        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-        <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
-        {# `source` is the field the install branch reads — `slug` alone
-           reaches the handler as an empty source and 400s. Both are sent:
-           slug names the plugin for the audit entry, source is what wp-cli
-           installs (with --activate, so the button label is accurate). #}
-        <input type="hidden" name="slug" value="redis-cache">
-        <input type="hidden" name="source" value="redis-cache">
-        <input type="hidden" name="action" value="install">
-        <button class="btn primary small" type="submit">Install &amp; activate Redis Object Cache</button>
-      </form>
-    </div>
+      still caches to the database.</p>
+    <form method="post" action="/hostings/wp/plugin-action">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
+      {# `source` is the field the install branch reads — `slug` alone
+         reaches the handler as an empty source and 400s. Both are sent:
+         slug names the plugin for the audit entry, source is what wp-cli
+         installs (with --activate, so the button label is accurate). #}
+      <input type="hidden" name="slug" value="redis-cache">
+      <input type="hidden" name="source" value="redis-cache">
+      <input type="hidden" name="action" value="install">
+      <button class="btn primary small" type="submit">Install &amp; activate Redis Object Cache</button>
+    </form>
   </div>
     {%- endif %}
   {%- endif %}
@@ -2298,7 +2166,7 @@
       {% if !target_node.is_empty() %}
       <input type="hidden" name="target_node" value="{{ target_node }}">
       {% endif %}
-      <button class="btn" type="submit">Disable Redis</button>
+      <button class="btn small" type="submit">Disable Redis</button>
     </form>
     <form method="post" action="/hostings/wp/redis/rotate">
       <input type="hidden" name="_csrf" value="{{ csrf_wp_redis_rotate }}">
@@ -2306,7 +2174,7 @@
       {% if !target_node.is_empty() %}
       <input type="hidden" name="target_node" value="{{ target_node }}">
       {% endif %}
-      <button class="btn" type="submit">Rotate password</button>
+      <button class="btn small" type="submit">Rotate password</button>
     </form>
   </div>
   {% else %}
@@ -2317,22 +2185,50 @@
     {% if !target_node.is_empty() %}
     <input type="hidden" name="target_node" value="{{ target_node }}">
     {% endif %}
-    <button class="btn primary" type="submit">Enable Redis</button>
+    <button class="btn small primary" type="submit">Enable Redis</button>
   </form>
   {% endif %}
+</details>
+
+<details class="item wp-tool" id="wp-admin-password">
+  <summary>
+    <h3>Admin password</h3>
+    <span class="acc-meta">reset a WordPress user's password{% call chevron() %}</span>
+  </summary>
+  <form method="post" action="/hostings/wp/reset-password" autocomplete="off"
+        data-confirm-title="Reset WordPress admin password"
+        data-confirm-body="The WordPress user's password is replaced with the one entered here. Existing browser sessions stay signed in."
+        data-confirm-confirm-label="Reset password"
+        data-confirm-variant="danger">
+    <input type="hidden" name="_csrf" value="{{ csrf_wp_reset }}">
+    <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
+    <div class="field-row">
+      <div class="field">
+        <label for="wp_reset_user">WordPress user</label>
+        <input id="wp_reset_user" name="wp_user" type="text" value="admin" required>
+      </div>
+      <div class="field">
+        <label for="wp_reset_pw">New password <span class="hint">≥ 8 chars</span></label>
+        <input id="wp_reset_pw" name="new_password" type="password" required minlength="8">
+      </div>
+    </div>
+    <div class="cluster">
+      <button class="btn small" type="submit">Reset password</button>
+      <button type="button" class="btn small ghost" data-genpw="wp_reset_pw">Generate</button>
+    </div>
+  </form>
 </details>
 
 {# ───── Reinstall. Two operations, kept visibly apart because they are not
    the same risk and conflating them is how someone wipes a site meaning to
    fix one file. ───── #}
-<details class="card">
+<details class="item wp-tool" id="wp-repair">
   <summary>
-    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg>
-    <h2>Repair or reinstall</h2>
+    <h3>Repair or reinstall</h3>
     <span class="acc-meta">core files{% call chevron() %}</span>
   </summary>
 
-  <p class="card-desc">
+  <p class="text-soft small" style="margin:0 0 0.9rem">
     <strong>Repair core files</strong> is what fixes most broken sites: a core file
     deleted by a failed update, corrupted by a half-finished upload, or changed by an
     intrusion. Your content, plugins, themes, uploads, settings and database are not
@@ -2344,7 +2240,7 @@
         data-confirm-confirm-label="Replace core files">
     <input type="hidden" name="_csrf" value="{{ csrf_wp_core_repair }}">
     <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
-    <button class="btn" type="submit">Repair core files</button>
+    <button class="btn small" type="submit">Repair core files</button>
   </form>
 
   {# Collapsed, so the destructive path is never one stray click away. #}
@@ -2421,7 +2317,7 @@
   </details>
 </details>
 
-</div>{# /card-stack tools #}
+</div>{# /group tools #}
 {% endif %}{# wp_status.is_some() #}
 
 </div><!-- /tab-wordpress -->

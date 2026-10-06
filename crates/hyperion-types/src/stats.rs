@@ -2382,6 +2382,34 @@ mod tests {
         let back: ClusterStats = serde_json::from_str(&j).expect("de");
         assert_eq!(c, back);
     }
+
+    #[test]
+    fn check_report_splits_issues_from_passing_lines() {
+        let item = |label: &str, severity: &str| FtpCheckItem {
+            label: label.into(),
+            severity: severity.into(),
+            ..Default::default()
+        };
+        let r = FtpCheckReport {
+            items: vec![
+                item("owned", "ok"),
+                item("logs readable", "warn"),
+                item("note", "info"),
+                item("wp-config readable", "error"),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(r.issue_count(), 2);
+        // `info` is a note, not a problem: it folds away with the passes.
+        assert_eq!(r.passing_count(), 2);
+
+        let clean = FtpCheckReport {
+            items: vec![item("owned", "ok")],
+            ..Default::default()
+        };
+        assert_eq!(clean.issue_count(), 0);
+        assert_eq!(clean.passing_count(), 1);
+    }
 }
 
 /// One line of the FTP self-check.
@@ -2424,6 +2452,18 @@ impl FtpCheckReport {
         } else {
             "ok"
         }
+    }
+    /// Findings that want attention (`warn` or `error`) — the ones a check
+    /// row lists up front. Everything else folds away under "N pass".
+    pub fn issue_count(&self) -> usize {
+        self.items
+            .iter()
+            .filter(|i| i.severity == "error" || i.severity == "warn")
+            .count()
+    }
+    /// The rest: `ok` and `info` lines.
+    pub fn passing_count(&self) -> usize {
+        self.items.len() - self.issue_count()
     }
     /// True when at least one finding has a one-click repair.
     pub fn has_site_repair(&self) -> bool {

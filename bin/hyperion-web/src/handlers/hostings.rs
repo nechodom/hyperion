@@ -13958,9 +13958,10 @@ mod tests {
     #[test]
     fn unchecked_never_renders_as_clean() {
         let html = render_integrity(integrity_not_checked("wp-cli exited 1".into()));
-        assert!(html.contains("couldn't check"));
+        assert!(html.contains(r#"data-verdict="unchecked""#));
+        assert!(html.contains("Couldn't check"));
         assert!(html.contains("not a clean result"));
-        assert!(!html.contains(">Clean.<"));
+        assert!(!html.contains("Clean —"));
         assert!(html.contains("wp-cli exited 1"));
     }
 
@@ -13978,9 +13979,10 @@ mod tests {
             scanned_at: 1_700_000_000,
             ..Default::default()
         });
+        assert!(html.contains(r#"data-verdict="partial""#));
         assert!(html.contains("malware not scanned"));
-        assert!(html.contains("No malware scan ran"));
-        assert!(!html.contains(">Clean.<"));
+        assert!(html.contains("ClamAV isn't installed"));
+        assert!(!html.contains("Clean —"));
     }
 
     /// Both signals ran and both came back empty — the only state allowed
@@ -13996,7 +13998,8 @@ mod tests {
             scanned_at: 1_700_000_000,
             ..Default::default()
         });
-        assert!(html.contains(">Clean.<"));
+        assert!(html.contains(r#"data-verdict="clean""#));
+        assert!(html.contains("Clean —"));
         assert!(html.contains("ClamAV scanned the site"));
     }
 
@@ -14018,8 +14021,8 @@ mod tests {
         assert!(html.contains("this is normal"));
         assert!(html.contains("elementor-pro"));
         // Still clean: unknown coverage is not a finding.
-        assert!(html.contains(">Clean.<"));
-        assert!(!html.contains("finding(s)</span>"));
+        assert!(html.contains(r#"data-verdict="clean""#));
+        assert!(!html.contains("don't match what should be on disk"));
     }
 
     /// Findings outrank a half-failed probe: something we DID see is more
@@ -14046,12 +14049,13 @@ mod tests {
             scanned_at: 1_700_000_000,
             ..Default::default()
         });
-        assert!(html.contains("4 finding(s)"));
+        assert!(html.contains(r#"data-verdict="findings""#));
+        assert!(html.contains("4 file(s) don't match"));
         assert!(html.contains("wp-includes/load.php"));
         assert!(html.contains("wp-admin/x.php"));
         assert!(html.contains("akismet.php"));
         assert!(html.contains("Php.Trojan.Webshell-1"));
-        assert!(!html.contains(">Clean.<"));
+        assert!(!html.contains("Clean —"));
     }
 }
 
