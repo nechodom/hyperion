@@ -118,6 +118,10 @@ selection, non-interactive mode, private-repo and air-gapped sources). See
 - Suspend and resume, expiration with grace and auto-suspend, and reusable
   profiles that stamp limits, plugins, and DB engine onto many sites at once.
 - Kernel-enforced disk quotas, per-pool PHP memory limits, bandwidth alerts.
+- One-click phpMyAdmin for each site's database, signed in automatically. It
+  is never exposed on the network: the panel relays every request after its own
+  login and permission check, the password never leaves the node, and it runs on
+  its own port (8447) so it can't touch the panel.
 - Let's Encrypt certificates: one-click HTTP-01 with auto-renewal, plus guided
   DNS-01 wildcards. The DNS pre-check queries the domain's authoritative
   nameservers, not just the local resolver.

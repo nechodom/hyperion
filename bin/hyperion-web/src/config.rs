@@ -32,6 +32,11 @@ pub struct WebSection {
     pub tls_enabled: bool,
     pub tls_cert_file: PathBuf,
     pub tls_key_file: PathBuf,
+    /// `host:port` for the phpMyAdmin listener; empty switches it off (and
+    /// hides the button). A SEPARATE port on purpose: it gives phpMyAdmin
+    /// its own browser origin, so a script injected through phpMyAdmin can
+    /// never read a panel page. See `handlers::pma`.
+    pub pma_listen: String,
 }
 
 impl Default for WebSection {
@@ -48,6 +53,7 @@ impl Default for WebSection {
             tls_enabled: true,
             tls_cert_file: PathBuf::from("/etc/hyperion/web-tls/fullchain.pem"),
             tls_key_file: PathBuf::from("/etc/hyperion/web-tls/privkey.pem"),
+            pma_listen: "0.0.0.0:8447".into(),
         }
     }
 }

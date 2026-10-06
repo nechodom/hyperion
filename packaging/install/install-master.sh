@@ -435,6 +435,10 @@ install -m 0755 target/release/hctl           /usr/bin/hctl
 # gets reported from every new install.
 install -d -m 0755 /usr/local/bin
 install -m 0755 packaging/install/hyperion-wrapper.sh /usr/local/bin/hyperion
+# phpMyAdmin behind the panel's "Open phpMyAdmin" button — served only on a
+# root-only unix socket, see the script's header. Best-effort: a box without
+# it still hosts sites, the button just says it is not installed yet.
+bash packaging/install/phpmyadmin.sh || log "phpMyAdmin setup failed — re-run packaging/install/phpmyadmin.sh later."
 # The self-service import exporter. A fresh master used to ship WITHOUT it, so
 # /import/agent-bin answered 404 until someone happened to run update.sh — the
 # import wizard was simply broken on a new box. This is the host-glibc build;

@@ -1156,6 +1156,7 @@ fn print_pretty(resp: &Response) {
         }
         Response::WpResetPassword => println!("✓ WordPress admin password reset"),
         Response::DbResetPassword => println!("✓ DB password reset (secret updated)"),
+        Response::PmaHttp(r) => println!("phpMyAdmin answered HTTP {}", r.status),
         Response::FtpSetPassword { password } => {
             println!("✓ FTP password set");
             println!("  password (shown once): {password}");

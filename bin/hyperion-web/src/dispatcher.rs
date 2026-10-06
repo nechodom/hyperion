@@ -123,21 +123,40 @@ pub async fn dispatch_to_node(
     // Verbosity is intentionally INFO (not debug) — these are rare
     // operator actions, not hot-path requests.
     let req_kind = request_kind_label(&req);
+    // phpMyAdmin relays one RPC per asset — dozens per page. At INFO they
+    // would bury every operator action in the journal.
+    let chatty = matches!(req, Request::PmaHttp { .. });
     match target {
         None => {
-            tracing::info!(
-                target = "master (local socket)",
-                request = req_kind,
-                "dispatch"
-            );
+            if chatty {
+                tracing::debug!(
+                    target = "master (local socket)",
+                    request = req_kind,
+                    "dispatch"
+                );
+            } else {
+                tracing::info!(
+                    target = "master (local socket)",
+                    request = req_kind,
+                    "dispatch"
+                );
+            }
             Ok(call(&state.agent_socket, req).await?)
         }
         Some(node_id) => {
-            tracing::info!(
-                target = node_id,
-                request = req_kind,
-                "dispatch (remote signed RPC)"
-            );
+            if chatty {
+                tracing::debug!(
+                    target = node_id,
+                    request = req_kind,
+                    "dispatch (remote signed RPC)"
+                );
+            } else {
+                tracing::info!(
+                    target = node_id,
+                    request = req_kind,
+                    "dispatch (remote signed RPC)"
+                );
+            }
             dispatch_remote(state, node_id, req).await
         }
     }
@@ -190,6 +209,9 @@ fn timeout_for_request(req: &Request) -> u64 {
         // every couple of seconds — keep its timeout short so a slow poll
         // never stacks up behind the long backup it is reporting on.
         Request::BackupProgress { .. } => 15,
+        // Just above the agent's own phpMyAdmin deadline, so a slow query
+        // reports phpMyAdmin's timeout rather than "node unreachable".
+        Request::PmaHttp { .. } => hyperion_core::pma::REQUEST_TIMEOUT_SECS + 10,
         // A cheap read of a tiny ring table — the realtime net sparkline polls
         // it on the fast stats refresh, so keep the budget short.
         Request::NetHistory { .. } => 15,

@@ -23,6 +23,7 @@ pub mod migration;
 pub mod monitoring;
 pub mod notifications;
 pub mod packages;
+pub mod pma;
 pub mod profile;
 pub mod profiles;
 pub mod roles;
@@ -323,6 +324,12 @@ fn host_without_port(host: &str) -> &str {
     }
     // hostname / IPv4, optionally suffixed with `:port`.
     host.split(':').next().unwrap_or(host)
+}
+
+/// The port of a `host:port` listen address; `None` when it is empty
+/// (listener switched off) or unparseable.
+pub fn listen_port(listen: &str) -> Option<u16> {
+    port_from_listen(listen.trim())
 }
 
 /// Parse the port out of the listen address. Returns None for

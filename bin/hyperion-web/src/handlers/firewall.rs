@@ -182,15 +182,17 @@ fn port_templates() -> Vec<PortTemplate> {
             name: "Hyperion (panel + master RPC)",
             apply_id: "hyperion",
             applyable: true,
-            ports_summary: "8443, 9443 / tcp",
+            ports_summary: "8443, 8447, 9443 / tcp",
             description: "Open ONLY on the master node. 8443 is the panel \
-                          (operator web UI); 9443 is the master↔worker RPC. \
+                          (operator web UI); 8447 is phpMyAdmin, served on \
+                          its own port so it cannot touch the panel; 9443 is \
+                          the master↔worker RPC. \
                           On workers, 9443 should be open to the master's \
                           IP only — see the next template.",
             snippet: "# Master node — both ports open to the world:\n\
                       sudo nft -c 'add table inet hyperion { }'\n\
                       sudo nft -c 'add chain inet hyperion input { type filter hook input priority 0 \\; policy accept \\; }'\n\
-                      sudo nft add rule inet hyperion input tcp dport { 8443, 9443 } accept comment \\\"hyperion\\\"\n\
+                      sudo nft add rule inet hyperion input tcp dport { 8443, 8447, 9443 } accept comment \\\"hyperion\\\"\n\
                       sudo nft list ruleset > /etc/nftables.conf",
         },
         PortTemplate {
