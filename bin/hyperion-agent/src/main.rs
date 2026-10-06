@@ -614,6 +614,12 @@ async fn main() -> anyhow::Result<()> {
                     "boot: re-rendered FPM pools with current nginx user"
                 );
             }
+            // After the pools, so a vhost never points at a socket whose
+            // pool is still being rewritten.
+            let n = rerender_svc.rerender_stale_vhosts().await;
+            if n > 0 {
+                tracing::info!(count = n, "boot: rolled the current vhost template out");
+            }
         });
     }
     // Self-heal / upgrade: re-assert the master panel vhost so template changes

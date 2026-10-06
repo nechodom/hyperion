@@ -2874,6 +2874,57 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .map_err(|e| RpcError::Internal_with(format!("list: {e}")))
     }
 
+    /// Rewrite, once, every Active site vhost rendered before the template
+    /// last changed in a way existing sites need.
+    ///
+    /// update.sh never rewrites vhosts, so a template fix otherwise lands
+    /// only when somebody happens to re-save each site. Gated per hosting
+    /// on [`VHOST_GEN_KV`] so a boot with nothing new to roll out touches no
+    /// vhost and reloads nothing. Returns how many vhosts it rewrote.
+    pub async fn rerender_stale_vhosts(&self) -> usize {
+        let Ok(summaries) = self.list().await else {
+            return 0;
+        };
+        let want = VHOST_GEN.to_string();
+        let mut n = 0;
+        for s in summaries {
+            if s.state != HostingState::Active {
+                continue;
+            }
+            let id = s.id.as_str().to_string();
+            let have = hyperion_state::hosting_kv::get(&self.pool, &id, VHOST_GEN_KV)
+                .await
+                .ok()
+                .flatten();
+            if have.as_deref() == Some(want.as_str()) {
+                continue;
+            }
+            let Ok(detail) = self.get(HostingSelector::Id(s.id.clone())).await else {
+                continue;
+            };
+            match self.adapters.nginx_write_vhost(&detail).await {
+                Ok(()) => {
+                    let _ = hyperion_state::hosting_kv::set(
+                        &self.pool,
+                        &id,
+                        VHOST_GEN_KV,
+                        &want,
+                        now_secs(),
+                    )
+                    .await;
+                    n += 1;
+                }
+                // Not marked: the next boot tries again. write_vhost has
+                // already put the previous, working vhost back.
+                Err(e) => tracing::warn!(
+                    domain = %detail.domain, error = %e,
+                    "boot: vhost re-render failed; keeping the old one"
+                ),
+            }
+        }
+        n
+    }
+
     /// Write a hosting's FPM pool WITH its stored limits.
     ///
     /// `fpm_ensure` alone renders the template defaults (256 MB,
@@ -29233,7 +29284,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     // ================================================================
 
     /// Return the tail of a log file for the given hosting.
-    /// `log_kind` ∈ {"access", "error"}.
+    /// `log_kind` ∈ {"access", "error", "slow"}.
     pub async fn hosting_logs(
         &self,
         sel: HostingSelector,
@@ -29242,12 +29293,33 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     ) -> Result<String, RpcError> {
         let detail = self.get(sel).await?;
         let lines = lines.clamp(10, 5000);
+        if log_kind == "slow" {
+            // The PHP-FPM slow-request log: root-owned, outside the site's
+            // tree (see the pool template), one file per pool.
+            if detail.system_user.trim().is_empty() {
+                return Ok("(this hosting has no PHP pool)".into());
+            }
+            let path = hyperion_adapters::phpfpm::slowlog_path(&detail.system_user);
+            if !path.exists() {
+                return Ok(format!(
+                    "(no request has run longer than {} s since slow-request logging started)",
+                    hyperion_adapters::phpfpm::SLOWLOG_SECS
+                ));
+            }
+            return hyperion_adapters::fs::tail_lines(&path, lines as usize)
+                .await
+                .map_err(|e| RpcError::Validation {
+                    message: e.to_string(),
+                });
+        }
         let filename = match log_kind {
             "access" => "access.log",
             "error" => "error.log",
             other => {
                 return Err(RpcError::Validation {
-                    message: format!("unknown log_kind {other:?}; want \"access\" or \"error\""),
+                    message: format!(
+                        "unknown log_kind {other:?}; want \"access\", \"error\" or \"slow\""
+                    ),
                 })
             }
         };
@@ -37129,6 +37201,14 @@ fn limits_to_row(
     }
 }
 
+/// Bump when a vhost template change must reach EXISTING sites (see
+/// [`HostingService::rerender_stale_vhosts`]). 1: request time in the
+/// access log, page-cache skip for logged-in and WooCommerce visitors.
+const VHOST_GEN: u32 = 1;
+/// Node-local `hosting_kv` key holding the generation a vhost was last
+/// rendered at.
+const VHOST_GEN_KV: &str = "nginx.vhost_gen";
+
 fn row_to_limits(row: hyperion_state::limits::LimitsRow) -> hyperion_types::HostingLimits {
     let policy = match row.over_bw_policy.as_str() {
         "throttle" => hyperion_types::OverBwPolicy::Throttle,
@@ -44992,6 +45072,17 @@ mod tests {
             .await
             .expect("get");
         assert!(susp.is_none(), "suspension row removed on resume");
+    }
+
+    /// A vhost template change reaches existing sites once: the first boot
+    /// rewrites every Active vhost, the next one touches nothing.
+    #[tokio::test]
+    async fn stale_vhosts_are_rewritten_once() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool, happy_mocks());
+        s.create(req("ex.cz")).await.expect("create");
+        assert_eq!(s.rerender_stale_vhosts().await, 1);
+        assert_eq!(s.rerender_stale_vhosts().await, 0);
     }
 
     /// The boot re-render must write each pool WITH its stored limits. It
