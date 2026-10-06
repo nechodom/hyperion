@@ -5449,7 +5449,21 @@ details.disclosure.danger > summary { color: var(--danger); font-weight: 600; }
 
 /* A native file input has a fixed intrinsic width (~230px) that ignores
    its container; next to the avatar on /profile it poked out of the card. */
-input[type="file"] { max-width: 100%; min-width: 0; }
+input[type="file"] { max-width: 100%; min-width: 0; color: var(--text-dim); font-size: 0.85rem; }
+/* The browser's grey "Choose File" chip looked like a stray widget; match .btn.small. */
+input[type="file"]::file-selector-button {
+  margin-right: 0.6rem;
+  padding: 0.3rem 0.7rem;
+  font: inherit;
+  font-size: 0.78rem;
+  line-height: 1.2;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  cursor: pointer;
+}
+input[type="file"]::file-selector-button:hover { background: var(--surface-2); border-color: var(--border-strong); }
 
 /* ============================================================
  * Profiles & limits — /profiles, /profiles/new, /profiles/<id>/edit
@@ -5549,7 +5563,11 @@ details.asset-picker[open] > summary::after { transform: rotate(180deg); }
 .asset-name { flex: 1; min-width: 0; overflow-wrap: anywhere; font-weight: 500; }
 
 /* Profile (/profile): identity strip, inline form rows, 2FA enrolment. */
-.me-page { max-width: 56rem; }
+.me-cols { display: grid; grid-template-columns: 1fr; gap: var(--group-gap); align-items: start; }
+.me-col { min-width: 0; }
+@media (min-width: 1200px) {
+  .me-cols { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+}
 .me-id { display: flex; gap: 1.25rem; align-items: center; flex-wrap: wrap; }
 .me-avatar {
   position: relative;
@@ -5578,8 +5596,13 @@ details.asset-picker[open] > summary::after { transform: rotate(180deg); }
 .me-head h3 { margin: 0; }
 .me-warn { color: var(--warn); }
 .me-inline { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 0.5rem; margin: 0; }
-.me-form { max-width: 36rem; }
+.me-form { max-width: 44rem; }
 .me-form .field-row .field { margin-bottom: 0.75rem; }
+/* Wraps by available width, not viewport: a half-width column at 1200px is
+   too narrow for three fields side by side. */
+.me-form .field-row { grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr)); gap: 0 1rem; align-items: end; }
+/* 2FA enrolment is the only group outside .me-cols; keep it readable. */
+.me-page > .group { max-width: 56rem; }
 .me-page input.me-otp {
   width: 8.5rem;
   font-size: 1.05rem;

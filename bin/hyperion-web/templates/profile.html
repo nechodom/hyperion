@@ -78,6 +78,11 @@
   <span>{{ verdict.text }}</span>
 </div>
 
+{# Two columns on wide screens (who you are + how you sign in | email +
+   devices), one below — every other page fills the content width, so a
+   single capped column left most of the screen empty. #}
+<div class="me-cols">
+<div class="me-col">
 {# ───── Account ───── #}
 <div class="group">
   <div class="ghead">Account</div>
@@ -151,7 +156,7 @@
             data-confirm-confirm-label="Turn off 2FA"
             data-confirm-variant="danger">
         <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-        <button class="btn small ghost" type="submit">Turn off 2FA</button>
+        <button class="btn small" type="submit">Turn off 2FA</button>
       </form>
     {% else %}
       <p class="text-soft small" style="margin:0 0 0.75rem">
@@ -170,11 +175,11 @@
     <h3>Password</h3>
     <form method="post" action="/profile/password" autocomplete="off" class="me-form">
       <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-      <div class="field">
-        <label for="pw_current">Current password</label>
-        <input id="pw_current" type="password" name="current_password" autocomplete="current-password" required>
-      </div>
-      <div class="field-row">
+      <div class="field-row three">
+        <div class="field">
+          <label for="pw_current">Current password</label>
+          <input id="pw_current" type="password" name="current_password" autocomplete="current-password" required>
+        </div>
         <div class="field">
           <label for="pw_new">New password <span class="hint">at least 8 characters</span></label>
           <input id="pw_new" type="password" name="new_password" minlength="8" autocomplete="new-password" required>
@@ -190,6 +195,8 @@
   </div>
 </div>
 
+</div>
+<div class="me-col">
 {# ───── Email ───── #}
 <div class="group">
   <div class="ghead">Email</div>
@@ -278,6 +285,8 @@
       <span class="text-soft small" style="margin-left:0.5rem">Includes this device.</span>
     </form>
   </div>
+</div>
+</div>
 </div>
 {% endif %}
 </div>
