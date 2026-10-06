@@ -732,6 +732,113 @@ async fn seed_demo(svc: &StubService) {
             .await
             .expect("net_samples");
     }
+
+    // Audit log: sign-ins (one failed), settings and cert changes, a node
+    // event, spread over a few days. Appended through the real chain so
+    // "Verify chain" passes.
+    type DemoAudit<'a> = (i64, &'a str, &'a str, Option<&'a str>, &'a str, &'a str);
+    let entries: [DemoAudit; 10] = [
+        (
+            4 * 86_400,
+            "kevin",
+            "node.enroll",
+            Some("worker-2"),
+            r#"{"label":"worker-2","addr":"10.0.0.12"}"#,
+            "ok",
+        ),
+        (
+            3 * 86_400 + 600,
+            "kevin",
+            "web.user.create",
+            Some("petra"),
+            r#"{"role":"operator"}"#,
+            "ok",
+        ),
+        (
+            2 * 86_400 + 4000,
+            "agent",
+            "cert.renew",
+            Some("atelier-hora.com"),
+            r#"{"error":"DNS problem: NXDOMAIN looking up A for atelier-hora.com"}"#,
+            "failed",
+        ),
+        (
+            2 * 86_400,
+            "agent",
+            "cert.renew",
+            Some("studio-lumen.cz"),
+            r#"{"expires_in_days":29}"#,
+            "ok",
+        ),
+        (
+            86_400 + 900,
+            "petra",
+            "hosting.set_limits",
+            Some("kavarna-sever.cz"),
+            r#"{"domain":"kavarna-sever.cz","php_memory_mb":384,"max_children":12}"#,
+            "ok",
+        ),
+        (
+            86_400,
+            "agent",
+            "php.mem_auto.raise",
+            Some("shop.zahrada-plus.cz"),
+            r#"{"from_mb":256,"to_mb":384}"#,
+            "ok",
+        ),
+        (
+            5400,
+            "unknown",
+            "web.login.failed",
+            Some("admin"),
+            r#"{"ip":"203.0.113.7","reason":"bad password"}"#,
+            "failed",
+        ),
+        (
+            3000,
+            "kevin",
+            "web.login.2fa_ok",
+            None,
+            r#"{"ip":"198.51.100.20"}"#,
+            "ok",
+        ),
+        (
+            2400,
+            "kevin",
+            "firewall.apply_template",
+            None,
+            r#"{"template":"web","node":"master"}"#,
+            "ok",
+        ),
+        (
+            600,
+            "kevin",
+            "hosting.set_redis",
+            Some("pekarna-u-mostu.cz"),
+            r#"{"enabled":true}"#,
+            "ok",
+        ),
+    ];
+    for (ago, actor, action, target, payload, result) in entries {
+        hyperion_state::audit::append(
+            pool,
+            hyperion_state::audit::AppendReq {
+                ts: now - ago,
+                actor_uid: if actor == "agent" || actor == "unknown" {
+                    0
+                } else {
+                    1
+                },
+                actor_label: actor,
+                action,
+                target,
+                payload_json: payload,
+                result,
+            },
+        )
+        .await
+        .expect("audit");
+    }
 }
 
 #[tokio::test]

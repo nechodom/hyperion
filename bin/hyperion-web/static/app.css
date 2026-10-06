@@ -870,6 +870,100 @@ details.svc-fold .svc-row .pill.muted { display: none; }
   .jobs-filter select { max-width: none; flex: 1 1 100%; }
 }
 
+/* /audit — one expandable row per entry inside a day .group: what + where,
+   a one-line summary of what was recorded, when + who. Opening a row shows
+   the entry's facts beside everything recorded with it. */
+.audit-day + .audit-day { margin-top: var(--group-gap); }
+.group > details.audit-row { border-bottom: 1px solid var(--border); }
+.group > details.audit-row:last-child { border-bottom: none; }
+.audit-row > summary {
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
+  padding: 0.7rem 1.25rem;
+  cursor: pointer;
+  list-style: none;
+  transition: background var(--t-fast);
+}
+.audit-row > summary::-webkit-details-marker { display: none; }
+.audit-row > summary:hover,
+.audit-row[open] > summary { background: var(--surface-2); }
+.audit-row[open] > summary { border-bottom: 1px solid var(--border); }
+.audit-row .audit-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 0.2rem; }
+.audit-row .audit-title { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.5rem; }
+.audit-row .audit-target { font-family: var(--font-mono); font-size: 0.8rem; color: var(--text-dim); overflow-wrap: anywhere; }
+.audit-row .audit-sub { font-size: 0.8rem; color: var(--text-soft); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.audit-row .audit-meta {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.15rem;
+  font-size: 0.78rem;
+  color: var(--text-soft);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.audit-row .audit-meta > :first-child { color: var(--text-dim); }
+.audit-detail {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr);
+}
+.audit-detail > * { padding: 0.9rem 1.25rem; min-width: 0; }
+.audit-detail > * + * { border-left: 1px solid var(--border); }
+.audit-kv {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 0.35rem 1rem;
+  margin: 0;
+  font-size: 0.84rem;
+}
+.audit-kv dt { color: var(--text-soft); }
+.audit-kv dt::first-letter { text-transform: uppercase; }
+.audit-kv dd { margin: 0; overflow-wrap: anywhere; }
+.audit-kv code { font-size: 0.78rem; }
+.audit-raw {
+  margin: 0;
+  font-size: 0.78rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.audit-links { display: flex; flex-wrap: wrap; gap: 0.4rem 1rem; margin: 0.8rem 0 0; }
+.audit-foot {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-top: 1rem;
+}
+.audit-foot .grow { flex: 1; }
+.audit-verify-wait { display: none; margin-bottom: var(--group-gap); }
+.audit-verify-wait.htmx-request { display: block; }
+.audit-verify {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  padding: 0.8rem 1.25rem;
+  margin-bottom: var(--group-gap);
+}
+.audit-verify.err { border-color: color-mix(in oklab, var(--danger) 55%, var(--border)); }
+.audit-verify-head { font-weight: 600; margin-bottom: 0.45rem; }
+.audit-verify.err .audit-verify-head { color: var(--danger); }
+.audit-verify ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.3rem; font-size: 0.85rem; }
+.audit-verify li { display: flex; align-items: center; gap: 0.55rem; flex-wrap: wrap; }
+.audit-verify li > span:last-child { color: var(--text-soft); }
+.audit-verify li.err > span:last-child { color: var(--danger); }
+.audit-verify .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--success); }
+.audit-verify li.err .dot { background: var(--danger); }
+@media (max-width: 640px) {
+  .audit-row > summary { flex-wrap: wrap; gap: 0.3rem 0.75rem; padding: 0.7rem 1rem; }
+  .audit-row .audit-main { flex-basis: 100%; }
+  .audit-row .audit-meta { flex-direction: row; gap: 0.5rem; }
+  .audit-detail { grid-template-columns: 1fr; }
+  .audit-detail > * { padding: 0.8rem 1rem; }
+  .audit-detail > * + * { border-left: none; border-top: 1px solid var(--border); }
+}
+
 /* /emails — one folding row per email inside a day .group. The summary is
    the scan line (outcome, subject + type, recipient + site, first line of the
    error or body, when); the fold holds the full error, relay reply and body. */
@@ -1687,34 +1781,6 @@ a.btn {
   border-radius: var(--radius-xs);
 }
 
-/* Filter chips — clickable links that act like compact toggle buttons.
-   Used in audit search (time-range row + quick-filter row). */
-.chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.3rem;
-  padding: 0.22rem 0.65rem;
-  font-size: 0.76rem;
-  line-height: 1.2;
-  border-radius: 999px;
-  border: 1px solid var(--border);
-  background: var(--surface-2);
-  color: var(--text-dim);
-  text-decoration: none;
-  transition: background var(--t-fast), color var(--t-fast), border-color var(--t-fast);
-}
-.chip:hover {
-  background: var(--surface-3, var(--surface-2));
-  color: var(--text);
-  border-color: color-mix(in oklab, var(--text-dim) 30%, transparent);
-}
-.chip.chip-on,
-a.chip.chip-on {
-  background: color-mix(in oklab, var(--primary) 18%, var(--surface-2));
-  color: var(--text);
-  border-color: color-mix(in oklab, var(--primary) 55%, transparent);
-  font-weight: 600;
-}
 .text-soft.small,
 .small {
   font-size: 0.78rem;

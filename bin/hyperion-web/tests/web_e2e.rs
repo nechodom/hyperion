@@ -760,21 +760,53 @@ async fn audit_page_renders_with_entries_after_create() {
         .await
         .expect("call");
 
+    let get = |uri: &'static str| {
+        let app = app.clone();
+        let cookie = cookie.clone();
+        async move {
+            app.oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("call")
+        }
+    };
+
     // Fetch the audit page
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .uri("/audit")
-                .header(header::COOKIE, &cookie)
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .expect("call");
+    let resp = get("/audit").await;
     assert_eq!(resp.status(), StatusCode::OK);
     let body = body_string(resp).await;
     assert!(body.contains("Audit log"));
     assert!(body.contains("hosting.suspend"), "body: {body}");
+
+    // The search and the segments run on the agent (AuditSearch).
+    let body = body_string(get("/audit?q=audit-test.cz&cat=sites").await).await;
+    assert!(body.contains("hosting.suspend"), "sites segment: {body}");
+    let body = body_string(get("/audit?cat=certs").await).await;
+    assert!(
+        !body.contains("<code>hosting.suspend</code>"),
+        "certs segment: {body}"
+    );
+    assert!(
+        body.contains("No entries match these filters"),
+        "certs segment: {body}"
+    );
+
+    // CSV export carries the same entry, as an attachment.
+    let resp = get("/audit?q=audit-test.cz&export=csv").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(resp
+        .headers()
+        .get(header::CONTENT_DISPOSITION)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.starts_with("attachment;")));
+    let csv = body_string(resp).await;
+    assert!(csv.starts_with("id,node,time_utc,"), "csv: {csv}");
+    assert!(csv.contains("\"hosting.suspend\""), "csv: {csv}");
 }
 
 /// Pull the FIRST csrf token whose surrounding form action matches `path`.

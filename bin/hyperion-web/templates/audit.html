@@ -1,147 +1,173 @@
 {% extends "base.html" %}
 {% block title %}Audit log · Hyperion{% endblock %}
+{% macro audit_row(r) %}
+<details class="audit-row{% if r.failed %} is-failed{% endif %}">
+  <summary>
+    <span class="audit-main">
+      <span class="audit-title">
+        <strong>{{ r.title }}</strong>
+        {% if let Some(t) = r.target %}<span class="audit-target">{{ t }}</span>{% endif %}
+        {% if r.failed %}<span class="pill err">{{ r.result }}</span>{% endif %}
+      </span>
+      {% if !r.summary.is_empty() %}<span class="audit-sub">{{ r.summary }}</span>{% endif %}
+    </span>
+    <span class="audit-meta">
+      <span title="{{ r.when_abs }}">{{ r.when_ago }}</span>
+      <span>{{ r.actor }}{% if multi_node %} · {{ r.node }}{% endif %}</span>
+    </span>
+  </summary>
+  <div class="audit-detail">
+    <dl class="audit-kv">
+      <dt>When</dt><dd class="numeric">{{ r.when_abs }}</dd>
+      <dt>Who</dt><dd>{{ r.actor }}{% if r.actor_uid > 0 %} <span class="text-soft">· user #{{ r.actor_uid }}</span>{% endif %}</dd>
+      {% if multi_node %}<dt>Node</dt><dd>{{ r.node }}</dd>{% endif %}
+      <dt>Action</dt><dd><code>{{ r.action }}</code></dd>
+      {% if r.failed %}<dt>Result</dt><dd class="text-danger">{{ r.result }}</dd>{% endif %}
+      <dt>Entry</dt><dd><code>#{{ r.id }}</code>{% if !r.hash.is_empty() %} <code class="text-soft" title="{{ r.hash }}">{{ r.hash_short }}…</code>{% endif %}</dd>
+    </dl>
+    <div class="audit-recorded">
+      {% if !r.fields.is_empty() %}
+        <dl class="audit-kv">
+          {% for (k, v) in r.fields %}<dt>{{ k }}</dt><dd>{{ v }}</dd>{% endfor %}
+        </dl>
+      {% else if !r.payload_raw.is_empty() %}
+        <pre class="audit-raw">{{ r.payload_raw }}</pre>
+      {% else %}
+        <p class="text-soft small">Nothing else was recorded with this entry.</p>
+      {% endif %}
+      <p class="audit-links small">
+        {% if !r.target_href.is_empty() %}<a href="{{ r.target_href }}">Everything about {% if let Some(t) = r.target %}{{ t }}{% endif %} →</a>{% endif %}
+        <a href="{{ r.actor_href }}">Everything by {{ r.actor }} →</a>
+      </p>
+    </div>
+  </div>
+</details>
+{% endmacro %}
 {% block main %}
 <div class="page-header">
   <div>
     <h1>Audit log</h1>
     <div class="subtitle">
-      Tamper-evident hash chain of every administrative action ·
-      {% if filtered_count == total_count %}
-        <strong>{{ total_count }}</strong> entries
-      {% else %}
-        <strong>{{ filtered_count }}</strong> match · {{ total_count }} total
-      {% endif %}
-      <span data-require-caps="settings_manage">· retention is set in <a href="/settings#audit-retention">Settings → Access &amp; API</a></span>
+      Every change made in the panel, by the scheduler, or on a node. Each node chains its entries by hash, so an edited or removed entry shows up when you verify.
+      <span data-require-caps="settings_manage">Retention is set in <a href="/settings#audit-retention">Settings → Access &amp; API</a>.</span>
     </div>
   </div>
+  <span class="grow"></span>
+  <div class="actions">
+    <a class="btn ghost" href="{{ export_href }}" download>
+      <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+      Export CSV
+    </a>
+    {# Read-only walk of every node's chain; lands a per-node list in
+       #audit-chain-result. #}
+    <button class="btn"
+            type="button"
+            hx-post="/audit/verify"
+            hx-target="#audit-chain-result"
+            hx-swap="innerHTML"
+            hx-indicator="#audit-chain-spinner"
+            hx-vals='{"_csrf": "{{ csrf_token }}"}'>
+      <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+      Verify chain
+    </button>
+  </div>
 </div>
+
+<div id="audit-chain-spinner" class="htmx-indicator text-soft small audit-verify-wait">Checking every entry on every node…</div>
+<div id="audit-chain-result" aria-live="polite"></div>
 
 {% include "_node_auth_banner.html" %}
 
-<div class="group" style="margin-bottom:1rem">
-  <div class="ghead">Search &amp; verify</div>
-  <div class="item">
-  <form method="get" action="/audit"
-        class="audit-filter-grid m-stack" style="display:grid;grid-template-columns:1fr auto auto auto;gap:0.5rem 0.75rem;align-items:center">
-    <input type="search" name="q" value="{{ q|e }}"
-           placeholder="Search by action, target, actor, or payload…"
-           autofocus
-           style="margin:0">
-    <select name="action" style="min-width:11rem;margin:0">
-      <option value="">All actions</option>
-      {% for a in known_actions %}
-        <option value="{{ a.0|e }}" {% if a.1 %}selected{% endif %}>{{ a.0 }}</option>
+{% if total == 0 && !filtered %}
+  <div class="card empty">
+    <div class="empty-illustration">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+    </div>
+    <h3>No audit entries yet</h3>
+    <p class="text-soft">The log fills as people sign in and change sites, users, certificates and nodes.</p>
+    {% include "_node_auth_empty_note.html" %}
+  </div>
+{% else %}
+
+<div class="search-toolbar">
+  <form method="get" action="/audit" class="search-form jobs-filter" role="search">
+    <div class="search-input">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      <input type="search" name="q" value="{{ q }}"
+             placeholder="Search — domain, user, action, anything recorded…"
+             autocomplete="off" spellcheck="false">
+      {% if !q.is_empty() %}
+        <a href="{{ reset_href }}" class="search-clear" title="Clear search" aria-label="Clear search"
+           onclick="var f=this.closest('form');f.q.value='';f.submit();return false;">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </a>
+      {% endif %}
+    </div>
+    <select name="action" aria-label="Action" onchange="this.form.submit()">
+      <option value="" {% if action_filter.is_empty() %}selected{% endif %}>All actions</option>
+      {% for o in action_options %}
+        <option value="{{ o.action }}" {% if o.selected %}selected{% endif %}>{{ o.label }} ({{ o.count }})</option>
       {% endfor %}
     </select>
-    <select name="result" style="width:7.5rem;margin:0">
-      <option value="" {% if result_filter.is_empty() %}selected{% endif %}>All</option>
-      <option value="ok" {% if result_filter == "ok" %}selected{% endif %}>ok</option>
-      <option value="failed" {% if result_filter == "failed" %}selected{% endif %}>failed</option>
+    <select name="since" aria-label="Time" onchange="this.form.submit()">
+      <option value="" {% if since_filter.is_empty() %}selected{% endif %}>Any time</option>
+      {% for w in windows %}
+        <option value="{{ w.key }}" {% if w.selected %}selected{% endif %}>{{ w.label }}</option>
+      {% endfor %}
     </select>
-    <div class="m-wrap" style="display:flex;gap:0.4rem;align-items:center">
-      <button type="submit" class="btn small">Apply</button>
-      <a class="btn small ghost" href="/audit">Reset</a>
-    </div>
-
-    <!-- second row: time-range chips. Submitting any of these is a
-         plain link with the current q/action/result preserved. -->
-    <div style="grid-column:1/-1;display:flex;flex-wrap:wrap;gap:0.4rem;align-items:center;padding-top:0.15rem">
-      <span class="text-soft small" style="margin-right:0.2rem">Time</span>
-      <a class="chip {% if since_filter.is_empty() %}chip-on{% endif %}"
-         href="/audit?q={{ q|e }}&action={{ action_filter|e }}&result={{ result_filter|e }}">All time</a>
-      <a class="chip {% if since_filter == "1h" %}chip-on{% endif %}"
-         href="/audit?q={{ q|e }}&action={{ action_filter|e }}&result={{ result_filter|e }}&since=1h">Last hour</a>
-      <a class="chip {% if since_filter == "24h" %}chip-on{% endif %}"
-         href="/audit?q={{ q|e }}&action={{ action_filter|e }}&result={{ result_filter|e }}&since=24h">Last 24 h</a>
-      <a class="chip {% if since_filter == "7d" %}chip-on{% endif %}"
-         href="/audit?q={{ q|e }}&action={{ action_filter|e }}&result={{ result_filter|e }}&since=7d">Last 7 days</a>
-      <a class="chip {% if since_filter == "30d" %}chip-on{% endif %}"
-         href="/audit?q={{ q|e }}&action={{ action_filter|e }}&result={{ result_filter|e }}&since=30d">Last 30 days</a>
-
-      <span style="flex:1"></span>
-
-      <span class="text-soft small" style="margin-right:0.2rem">Quick filters</span>
-      <a class="chip" href="/audit?result=failed">Failed only</a>
-      <a class="chip" href="/audit?action=cert.issue.acme">Certificate issues</a>
-      <a class="chip" href="/audit?action=hosting.create">Hosting creates</a>
-      <a class="chip" href="/audit?action=hosting.delete">Hosting deletes</a>
-
-      <input type="hidden" name="limit" value="{{ limit }}">
-      <input type="hidden" name="since" value="{{ since_filter|e }}">
-    </div>
+    {% if !cat.is_empty() %}<input type="hidden" name="cat" value="{{ cat }}">{% endif %}
+    <noscript><button class="btn" type="submit">Filter</button></noscript>
   </form>
-  </div>
 
-  {# Tamper-evident verify button — walks every row in audit_log and
-     re-computes row_hash from prev_hash + canonical fields. Lands a
-     green/red pill into #audit-chain-result. The check is read-only,
-     no CSRF needed (admin role gate is enough). #}
-  <div class="item" style="display:flex;gap:0.6rem;align-items:center;flex-wrap:wrap">
-  <button class="btn small"
-          type="button"
-          hx-post="/audit/verify"
-          hx-target="#audit-chain-result"
-          hx-swap="innerHTML"
-          hx-indicator="#audit-chain-spinner"
-          hx-vals='{"_csrf": "{{ csrf_token }}"}'>
-    <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-    Verify chain
-  </button>
-  <span class="text-soft small">
-    Recomputes the hash of every entry and checks the chain. Flags any tampering or database corruption.
-  </span>
-  <span id="audit-chain-spinner" class="htmx-indicator text-soft small">Checking…</span>
-  <span id="audit-chain-result" style="margin-left:auto"></span>
-  </div>
+  <nav class="search-segments" aria-label="Filter by kind">
+    {% for s in segments %}
+      <a class="seg {% if s.key == cat %}active{% endif %}" href="{{ s.href }}">
+        {% if s.key == "failed" %}<span class="seg-dot err"></span>{% endif %}{{ s.label }}
+        {% if s.count > 0 || s.key.is_empty() %}<span class="seg-count">{{ s.count }}</span>{% endif %}
+      </a>
+    {% endfor %}
+  </nav>
 </div>
 
-<div class="card no-pad-table">
-  {% if rows.is_empty() %}
-    <div class="empty">
-      <div class="empty-illustration">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-      </div>
-      {% if total_count == 0 %}
-        <h3>No audit entries yet</h3>
-        <p>The log fills as you create, suspend, back up, and delete hostings.</p>
+{% if !partial_nodes.is_empty() %}
+  <div class="alert alert-warn" style="margin-bottom:var(--group-gap)">
+    <strong>{{ partial_nodes }}</strong> runs an older agent, so only its newest {{ crate::handlers::audit::fallback_window() }} entries are searched here. Update the node to search all of its log.
+  </div>
+{% endif %}
+{% if !missing_nodes.is_empty() %}
+  <div class="alert alert-warn" style="margin-bottom:var(--group-gap)">
+    <strong>{{ missing_nodes }}</strong> didn't answer — its entries are missing from this page.
+  </div>
+{% endif %}
+
+{% if days.is_empty() %}
+  <div class="group">
+    <div class="item text-soft">
+      {% if paged %}
+        No older entries match. <a href="{{ newest_href }}">Back to the newest</a>
       {% else %}
-        <h3>No entries match these filters</h3>
-        <p>{{ total_count }} {% if total_count == 1 %}entry exists{% else %}entries exist{% endif %} in the log, but none match the current filters. <a href="/audit">Reset filters</a> to see them all.</p>
+        No entries match these filters. <a href="{{ reset_href }}">Show the whole log</a>
       {% endif %}
-      {% include "_node_auth_empty_note.html" %}
     </div>
-  {% else %}
-    <div class="table-wrap">
-      <table>
-        <thead>
-          <tr>
-            <th>ID</th>
-            <th>Time</th>
-            <th>Node</th>
-            <th>Actor</th>
-            <th>Action</th>
-            <th>Target</th>
-            <th class="right">Result</th>
-          </tr>
-        </thead>
-        <tbody>
-          {% for r in rows %}
-          <tr>
-            <td><code>{{ r.id }}</code></td>
-            <td class="muted numeric" title="{{ r.ts }}">{{ crate::handlers::stats::fmt_ago(r.ts) }}</td>
-            <td>{% if let Some(node) = r.node %}<span class="pill" style="background:var(--surface-2);color:var(--text-soft)">{{ node }}</span>{% else %}<span class="text-soft">—</span>{% endif %}</td>
-            <td><strong>{{ r.actor_label }}</strong></td>
-            <td title="{{ r.action }}">{{ crate::handlers::stats::fmt_action_label(r.action) }}
-              <code class="text-soft" style="font-size:0.7rem;display:block">{{ r.action }}</code></td>
-            <td>{% if let Some(t) = r.target %}<code>{{ t }}</code>{% else %}<span class="text-soft">—</span>{% endif %}</td>
-            <td class="right">
-              <span class="pill {% if r.result == "ok" %}ok{% else %}err{% endif %}">{{ r.result }}</span>
-            </td>
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-    </div>
-  {% endif %}
+  </div>
+{% endif %}
+
+{% for d in days %}
+<div class="group audit-day">
+  <div class="ghead">{{ d.label }}</div>
+  {% for r in d.rows %}{% call audit_row(r) %}{% endfor %}
 </div>
+{% endfor %}
+
+<div class="audit-foot">
+  <span class="text-soft small">
+    {% if shown > 0 %}
+      {% if paged %}Older entries · {% endif %}{{ shown }} shown of {{ matching }} {% if filtered %}matching{% else %}in the log{% endif %}{% if filtered %} · {{ total }} in the log{% endif %}
+    {% endif %}
+  </span>
+  <span class="grow"></span>
+  {% if paged %}<a class="btn small ghost" href="{{ newest_href }}">← Newest</a>{% endif %}
+  {% if !older_href.is_empty() %}<a class="btn small" href="{{ older_href }}">Older entries →</a>{% endif %}
+</div>
+{% endif %}
 {% endblock %}
