@@ -3170,6 +3170,87 @@ hr.divider {
 .seg-dot.warn { background: var(--warn); }
 .seg-dot.err  { background: var(--danger); }
 
+/* ============================================================
+ *  Hostings list (/hostings)
+ * ============================================================ */
+
+.bulk-bar {
+  padding: 0.85rem 1.5rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+  min-height: 3.25rem;
+}
+.bulk-count { font-size: 0.88rem; font-weight: 500; }
+.bulk-hint { font-size: 0.85rem; color: var(--text-soft); }
+.bulk-actions { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+.bulk-menu { position: relative; }
+.bulk-menu > summary { list-style: none; cursor: pointer; }
+.bulk-menu > summary::-webkit-details-marker { display: none; }
+.bulk-popover {
+  position: absolute;
+  right: 0;
+  z-index: 10;
+  margin-top: 0.4rem;
+  padding: 0.7rem;
+  width: min(24rem, calc(100vw - 1.5rem));
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow);
+}
+.bulk-popover .field { margin: 0; }
+.bulk-popover select { margin: 0; }
+.bulk-popover .field-checkbox { margin: 0.6rem 0 0; font-size: 0.85rem; }
+.bulk-popover-link { color: var(--text-soft); font-weight: 400; font-size: 0.78rem; margin-left: 0.4rem; }
+.bulk-popover-actions { display: flex; justify-content: flex-end; gap: 0.4rem; margin-top: 0.6rem; }
+.bulk-popover-note { margin: 0.5rem 0 0; font-size: 0.78rem; color: var(--text-soft); }
+
+.hostings-table .col-check { width: 1px; padding-right: 0; }
+.site-name { font-weight: 600; }
+.site-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem;
+  margin-top: 0.15rem;
+  font-size: 0.78rem;
+  color: var(--text-soft);
+}
+.site-attention { margin-top: 0.15rem; font-size: 0.78rem; color: var(--danger); }
+.hostings-table tr.row-attention > td:first-child { box-shadow: inset 2px 0 0 var(--danger); }
+
+/* Small uppercase status flags under the domain (TEST / NODE OFFLINE /
+   MAINTENANCE) — formerly inline-styled tags in the Node column. */
+.flag {
+  display: inline-block;
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  padding: 0.1rem 0.35rem;
+  border-radius: var(--radius-xs);
+  color: white;
+}
+.flag.warn   { background: var(--warn); }
+.flag.err    { background: var(--danger); }
+.flag.info   { background: var(--info); }
+
+.cert-cell { font-size: 0.85rem; white-space: nowrap; }
+.cert-cell.ok   { color: var(--text-dim); }
+.cert-cell.warn { color: var(--warn); font-weight: 500; }
+.cert-cell.err  { color: var(--danger); font-weight: 600; }
+.node-name { font-family: var(--font-mono); font-size: 0.8rem; color: var(--text-dim); }
+.inline-form { display: inline; }
+.hostings-table td.nowrap { white-space: nowrap; }
+/* Created is the least-used column; give its width back to the site
+   facts before the table has to scroll sideways. */
+@media (max-width: 1200px) {
+  .hostings-table .hide-below-wide { display: none; }
+}
+
 @media (max-width: 720px) {
   .search-segments {
     width: 100%;
@@ -3323,7 +3404,7 @@ hr.divider {
   td .row-actions .btn { width: 100%; justify-content: center; }
   /* Long domains break inside the cell instead of widening the table. */
   td a:not(.btn) { overflow-wrap: anywhere; }
-  .bulk-bar { padding: 0.7rem 0.85rem !important; }
+  .bulk-bar { padding: 0.7rem 0.85rem; }
 
   /* Activity feed: simpler layout on phones. */
   .activity-target { max-width: 100%; white-space: normal; }

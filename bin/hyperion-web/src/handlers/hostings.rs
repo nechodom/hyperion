@@ -26,15 +26,12 @@ struct ListTpl<'a> {
     active: &'static str,
     css_version: &'static str,
     htmx_version: &'static str,
-    /// Each entry is `(hosting, is_on_test_node, is_on_unreachable_node)`.
-    /// Pre-tagged on the server so the askama template doesn't need
-    /// to do a closure-based set-lookup inside the loop (askama can't
-    /// parse Rust closures). `unreachable` ⇒ that node's heartbeat
-    /// is more than UNREACHABLE_HEARTBEAT_SECS stale, which usually
-    /// means the worker agent is down (the actual hosting may still
-    /// be serving traffic on the worker, but we can't operate on it
-    /// from the master while the agent is offline).
-    rows: Vec<(HostingSummary, bool, bool)>,
+    /// One pre-computed view row per hosting — see [`ListRow`].
+    rows: Vec<ListRow>,
+    /// Segment counts over the rows this user can see AND that match
+    /// the search — so the numbers on the filter strip agree with what
+    /// clicking them shows.
+    counts: ListCounts,
     total_count: usize,
     q: String,
     state_filter: String,
@@ -397,6 +394,109 @@ struct DetailTpl<'a> {
     preview_domain: PreviewInfo,
 }
 
+/// A certificate this close to expiry counts as needing attention.
+/// Auto-renew runs at 30 days, so a cert still under 14 means renewal
+/// has been failing for over two weeks.
+const CERT_ATTENTION_DAYS: i64 = 14;
+
+/// One row of the hostings list, with every label and flag worked out
+/// server-side: askama can't call closures, and keeping the rules here
+/// means the "needs attention" filter and the row badges can never
+/// disagree about what counts.
+struct ListRow {
+    s: HostingSummary,
+    /// Node is listed in `cluster.test_node_ids`.
+    is_test: bool,
+    /// Node heartbeat is older than UNREACHABLE_HEARTBEAT_SECS.
+    is_unreachable: bool,
+    /// "WordPress 6.6" / "PHP 8.3" / "Static" / "Proxy" / "Redirect";
+    /// empty when the owning node is too old to report a type.
+    type_label: String,
+    /// "54 days left" / "expired" / "self-signed"; empty = no cert.
+    cert_label: String,
+    /// "ok" | "warn" | "err" pill class for the certificate cell.
+    cert_class: &'static str,
+    /// Why this row is in "Needs attention" — empty when it isn't.
+    /// Shown as the row's tooltip-free reason line under the domain.
+    attention: Vec<&'static str>,
+}
+
+impl ListRow {
+    fn new(s: HostingSummary, is_test: bool, is_unreachable: bool, now: i64) -> Self {
+        let type_label = match s.kind.as_deref() {
+            Some("static") => "Static".to_string(),
+            Some("reverse_proxy") => "Proxy".to_string(),
+            Some("redirect") => "Redirect".to_string(),
+            Some(_) | None => match (&s.wp_version, &s.php_version) {
+                (Some(wp), _) => format!("WordPress {wp}"),
+                (None, Some(php)) => format!("PHP {php}"),
+                // An old node reports no kind; a PHP-less row there is
+                // most likely static, but don't claim it.
+                (None, None) if s.kind.is_none() => String::new(),
+                (None, None) => "Static".to_string(),
+            },
+        };
+        let cert_days = s.cert_not_after.map(|t| (t - now).div_euclid(86_400));
+        let self_signed = s.cert_issuer.as_deref() == Some("self-signed");
+        let cert_class = match cert_days {
+            Some(d) if d < 0 => "err",
+            Some(d) if d < CERT_ATTENTION_DAYS => "warn",
+            Some(_) if self_signed => "warn",
+            Some(_) => "ok",
+            None => "",
+        };
+        let cert_label = match cert_days {
+            None => String::new(),
+            Some(d) if d < 0 => "expired".to_string(),
+            Some(_) if self_signed => "self-signed".to_string(),
+            Some(1) => "1 day left".to_string(),
+            Some(d) => format!("{d} days left"),
+        };
+        let mut attention = Vec::new();
+        if s.state == hyperion_types::HostingState::Failed {
+            attention.push("provisioning failed");
+        }
+        if is_unreachable {
+            attention.push("node offline");
+        }
+        match cert_days {
+            Some(d) if d < 0 => attention.push("certificate expired"),
+            Some(d) if d < CERT_ATTENTION_DAYS => attention.push("certificate expiring"),
+            _ => {}
+        }
+        if s.last_backup_ok == Some(false) {
+            attention.push("last backup failed");
+        }
+        Self {
+            s,
+            is_test,
+            is_unreachable,
+            type_label,
+            cert_label,
+            cert_class,
+            attention,
+        }
+    }
+
+    fn needs_attention(&self) -> bool {
+        !self.attention.is_empty()
+    }
+
+    /// Joined reasons for the template ("node offline · last backup failed").
+    fn attention_text(&self) -> String {
+        self.attention.join(" · ")
+    }
+}
+
+#[derive(Default)]
+struct ListCounts {
+    all: usize,
+    active: usize,
+    suspended: usize,
+    failed: usize,
+    attention: usize,
+}
+
 #[derive(Deserialize, Default)]
 pub struct ListQuery {
     #[serde(default)]
@@ -425,49 +525,15 @@ pub async fn get_list(
         .await
         .map_err(AppError::Rpc)?;
     let node_auth_warning = super::node_auth_warning(&dropped);
-    let total_count = rows.len();
     // Role-based filter: operators + viewers only see hostings they
     // have an explicit access grant for. super_admin + admin see all.
+    // The total is taken AFTER this, so a tenant's "N hostings" counts
+    // their own sites, not the whole cluster's.
     let rows = filter_by_access(&state, &ctx, rows).await;
+    let total_count = rows.len();
     let needle = q.q.trim().to_lowercase();
     let state_filter = q.state.trim().to_lowercase();
-    let mut rows: Vec<HostingSummary> = rows
-        .into_iter()
-        .filter(|r| needle.is_empty() || r.domain.to_lowercase().contains(&needle))
-        .filter(|r| state_filter.is_empty() || r.state.as_str() == state_filter)
-        .collect();
-    // ── Server-side sort ──
-    //
-    // Operators with 50+ hostings want to find "the one I created
-    // today" in a deterministic order. The list defaults to
-    // alphabetical-by-domain (preserves the long-standing UX);
-    // explicit ?sort= overrides — created (newest first by
-    // default), state, node, with ?dir= flipping the comparator.
-    let sort_key = q.sort.trim().to_lowercase();
-    let dir_desc = match q.dir.trim().to_lowercase().as_str() {
-        "desc" => Some(true),
-        "asc" => Some(false),
-        _ => None,
-    };
-    // Default direction per column — alphabetical = asc; time =
-    // newest-first; state = active first (asc by string works
-    // because Active < Failed < Provisioning < Suspended < Trashed).
-    let desc = dir_desc.unwrap_or(matches!(sort_key.as_str(), "created" | "updated"));
-    match sort_key.as_str() {
-        "created" => rows.sort_by_key(|r| r.created_at),
-        "state" => rows.sort_by(|a, b| a.state.as_str().cmp(b.state.as_str())),
-        "node" => rows.sort_by(|a, b| {
-            a.node_id
-                .as_deref()
-                .unwrap_or("")
-                .cmp(b.node_id.as_deref().unwrap_or(""))
-        }),
-        // Default + "domain" both fall here.
-        _ => rows.sort_by_key(|a| a.domain.to_lowercase()),
-    }
-    if desc {
-        rows.reverse();
-    }
+
     // Pre-tag each row with `is_on_test_node` + `is_on_unreachable_node`
     // so the template can render the TEST chip + offline pill without
     // doing closure-based set lookups (askama can't parse Rust closures).
@@ -484,10 +550,7 @@ pub async fn get_list(
     // is gone" signal. Best-effort — if NodesList errors we just
     // tag nothing (graceful degradation).
     const UNREACHABLE_HEARTBEAT_SECS: i64 = 300;
-    let now_secs: i64 = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
+    let now_secs = hyperion_types::now_secs();
     let unreachable_set: std::collections::HashSet<String> =
         match hyperion_rpc_client::call(&state.agent_socket, Request::NodesList).await {
             Ok(RpcResponse::NodesList(ns)) => ns
@@ -499,22 +562,77 @@ pub async fn get_list(
                 .collect(),
             _ => std::collections::HashSet::new(),
         };
-    let rows: Vec<(HostingSummary, bool, bool)> = rows
+    let on = |set: &std::collections::HashSet<String>, r: &HostingSummary| {
+        r.node_id.as_ref().is_some_and(|n| set.contains(n))
+    };
+    let searched: Vec<ListRow> = rows
         .into_iter()
+        .filter(|r| needle.is_empty() || r.domain.to_lowercase().contains(&needle))
         .map(|r| {
-            let is_test = r
-                .node_id
-                .as_ref()
-                .map(|n| test_set.contains(n))
-                .unwrap_or(false);
-            let is_unreachable = r
-                .node_id
-                .as_ref()
-                .map(|n| unreachable_set.contains(n))
-                .unwrap_or(false);
-            (r, is_test, is_unreachable)
+            let (t, u) = (on(&test_set, &r), on(&unreachable_set, &r));
+            ListRow::new(r, t, u, now_secs)
         })
         .collect();
+    let mut counts = ListCounts {
+        all: searched.len(),
+        ..Default::default()
+    };
+    for r in &searched {
+        match r.s.state.as_str() {
+            "active" => counts.active += 1,
+            "suspended" => counts.suspended += 1,
+            "failed" => counts.failed += 1,
+            _ => {}
+        }
+        if r.needs_attention() {
+            counts.attention += 1;
+        }
+    }
+    let mut rows: Vec<ListRow> = searched
+        .into_iter()
+        .filter(|r| match state_filter.as_str() {
+            "" => true,
+            "attention" => r.needs_attention(),
+            s => r.s.state.as_str() == s,
+        })
+        .collect();
+
+    // ── Server-side sort ──
+    //
+    // Defaults to alphabetical-by-domain; explicit ?sort= overrides,
+    // with ?dir= flipping the comparator. Missing values (no cert, never
+    // sampled, never backed up) sort as the smallest, so "asc" on cert
+    // or backup puts the sites with nothing on record first.
+    let sort_key = q.sort.trim().to_lowercase();
+    let dir_desc = match q.dir.trim().to_lowercase().as_str() {
+        "desc" => Some(true),
+        "asc" => Some(false),
+        _ => None,
+    };
+    // Default direction per column — alphabetical = asc; time = newest
+    // first; disk = largest first; cert = soonest expiry first (asc).
+    let desc = dir_desc.unwrap_or(matches!(
+        sort_key.as_str(),
+        "created" | "updated" | "disk" | "backup"
+    ));
+    match sort_key.as_str() {
+        "created" => rows.sort_by_key(|r| r.s.created_at),
+        "state" => rows.sort_by(|a, b| a.s.state.as_str().cmp(b.s.state.as_str())),
+        "node" => rows.sort_by(|a, b| {
+            a.s.node_id
+                .as_deref()
+                .unwrap_or("")
+                .cmp(b.s.node_id.as_deref().unwrap_or(""))
+        }),
+        "disk" => rows.sort_by_key(|r| r.s.disk_bytes),
+        "cert" => rows.sort_by_key(|r| r.s.cert_not_after),
+        "backup" => rows.sort_by_key(|r| r.s.last_backup_at),
+        // Default + "domain" both fall here.
+        _ => rows.sort_by_key(|a| a.s.domain.to_lowercase()),
+    }
+    if desc {
+        rows.reverse();
+    }
     let csrf_token = csrf_token_for(&state, &ctx, "/hostings/delete");
     let csrf_bulk = csrf_token_for(&state, &ctx, "/hostings/bulk");
     let tpl = ListTpl {
@@ -524,6 +642,7 @@ pub async fn get_list(
         css_version: super::css_version(),
         htmx_version: super::htmx_version(),
         rows,
+        counts,
         total_count,
         q: q.q,
         state_filter,
@@ -15350,4 +15469,98 @@ pub async fn post_site_check(
     )
     .await?;
     Ok(Redirect::to(&format!("/jobs/{job_id}")).into_response())
+}
+
+#[cfg(test)]
+mod list_row_tests {
+    use super::*;
+    use hyperion_types::{HostingId, HostingState};
+
+    const NOW: i64 = 1_800_000_000;
+
+    fn summary() -> HostingSummary {
+        HostingSummary {
+            id: HostingId("h1".into()),
+            domain: "ex.cz".into(),
+            state: HostingState::Active,
+            php_version: Some(PhpVersion::V8_3),
+            created_at: 0,
+            node_id: Some("n1".into()),
+            maintenance_mode: false,
+            kind: Some("php".into()),
+            wp_version: None,
+            cert_not_after: Some(NOW + 60 * 86_400),
+            cert_issuer: Some("letsencrypt".into()),
+            disk_bytes: None,
+            last_backup_at: None,
+            last_backup_ok: None,
+        }
+    }
+
+    #[test]
+    fn type_label_prefers_wordpress_then_php_then_kind() {
+        let mut s = summary();
+        assert_eq!(
+            ListRow::new(s.clone(), false, false, NOW).type_label,
+            "PHP 8.3"
+        );
+        s.wp_version = Some("6.6.2".into());
+        assert_eq!(
+            ListRow::new(s.clone(), false, false, NOW).type_label,
+            "WordPress 6.6.2"
+        );
+        s.kind = Some("reverse_proxy".into());
+        assert_eq!(
+            ListRow::new(s.clone(), false, false, NOW).type_label,
+            "Proxy"
+        );
+        // An old node reports no kind: don't guess "Static".
+        let mut old = summary();
+        old.kind = None;
+        old.php_version = None;
+        assert_eq!(ListRow::new(old, false, false, NOW).type_label, "");
+    }
+
+    #[test]
+    fn healthy_row_needs_no_attention() {
+        let r = ListRow::new(summary(), false, false, NOW);
+        assert!(!r.needs_attention());
+        assert_eq!(r.cert_class, "ok");
+        assert_eq!(r.cert_label, "60 days left");
+    }
+
+    #[test]
+    fn each_problem_lands_in_attention() {
+        let mut s = summary();
+        s.state = HostingState::Failed;
+        s.cert_not_after = Some(NOW - 1);
+        s.last_backup_ok = Some(false);
+        let r = ListRow::new(s, false, true, NOW);
+        assert_eq!(
+            r.attention_text(),
+            "provisioning failed · node offline · certificate expired · last backup failed"
+        );
+        assert_eq!(r.cert_class, "err");
+        assert_eq!(r.cert_label, "expired");
+    }
+
+    #[test]
+    fn cert_inside_window_is_expiring() {
+        let mut s = summary();
+        s.cert_not_after = Some(NOW + 3 * 86_400 + 10);
+        let r = ListRow::new(s, false, false, NOW);
+        assert_eq!(r.attention, vec!["certificate expiring"]);
+        assert_eq!(r.cert_class, "warn");
+        assert_eq!(r.cert_label, "3 days left");
+    }
+
+    #[test]
+    fn self_signed_warns_but_is_not_attention() {
+        let mut s = summary();
+        s.cert_issuer = Some("self-signed".into());
+        let r = ListRow::new(s, false, false, NOW);
+        assert_eq!(r.cert_class, "warn");
+        assert_eq!(r.cert_label, "self-signed");
+        assert!(!r.needs_attention());
+    }
 }

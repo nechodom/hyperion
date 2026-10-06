@@ -245,9 +245,17 @@ pub async fn get_by_domain(
 }
 
 pub async fn list(pool: &SqlitePool) -> Result<Vec<HostingSummary>, StateError> {
-    // `maintenance_mode` joins in for the MAINTENANCE pill on the
-    // hostings list. It's a separate column from migration 020 but
-    // lives on the same row so the query stays a single SELECT.
+    // One SELECT feeds the whole hostings list: the row itself plus the
+    // per-site facts the list shows (type, WP version, cert expiry, disk,
+    // last backup). Each fact is a correlated subquery on an indexed key
+    // (certificates.domain UNIQUE, hosting_usage PK, backup_runs
+    // (hosting_id, state)), so the cost stays one lookup per row.
+    //
+    // Disk: traffic-only backfills insert hours with disk_used_bytes = 0
+    // (see limits::upsert_usage_traffic), so the newest hour with a REAL
+    // disk reading wins, not merely the newest hour.
+    // Backup: the newest FINISHED run — a running one has no outcome yet.
+    #[allow(clippy::type_complexity)]
     let rows: Vec<(
         String,
         String,
@@ -256,16 +264,52 @@ pub async fn list(pool: &SqlitePool) -> Result<Vec<HostingSummary>, StateError> 
         i64,
         Option<String>,
         i64,
+        String,
+        Option<String>,
+        Option<i64>,
+        Option<String>,
+        Option<i64>,
+        Option<i64>,
+        Option<String>,
     )> = sqlx::query_as(
-        "SELECT id, domain, state, php_version, created_at, node_id, maintenance_mode \
-             FROM hostings \
-             WHERE state != 'trashed' \
-             ORDER BY domain",
+        "SELECT h.id, h.domain, h.state, h.php_version, h.created_at, h.node_id, \
+                h.maintenance_mode, h.kind, \
+                (SELECT w.wp_version FROM wp_installs w WHERE w.hosting_id = h.id), \
+                (SELECT c.not_after FROM certificates c WHERE c.domain = h.domain), \
+                (SELECT c.issuer FROM certificates c WHERE c.domain = h.domain), \
+                (SELECT u.disk_used_bytes FROM hosting_usage u \
+                  WHERE u.hosting_id = h.id AND u.disk_used_bytes > 0 \
+                  ORDER BY u.period DESC LIMIT 1), \
+                (SELECT COALESCE(b.finished_at, b.started_at) FROM backup_runs b \
+                  WHERE b.hosting_id = h.id AND b.state IN ('ok','failed') \
+                  ORDER BY b.started_at DESC LIMIT 1), \
+                (SELECT b.state FROM backup_runs b \
+                  WHERE b.hosting_id = h.id AND b.state IN ('ok','failed') \
+                  ORDER BY b.started_at DESC LIMIT 1) \
+             FROM hostings h \
+             WHERE h.state != 'trashed' \
+             ORDER BY h.domain",
     )
     .fetch_all(pool)
     .await?;
     let mut out = Vec::with_capacity(rows.len());
-    for (id, domain, state, php_version, created_at, node_id, maintenance_mode) in rows {
+    for (
+        id,
+        domain,
+        state,
+        php_version,
+        created_at,
+        node_id,
+        maintenance_mode,
+        kind,
+        wp_version,
+        cert_not_after,
+        cert_issuer,
+        disk_bytes,
+        last_backup_at,
+        last_backup_state,
+    ) in rows
+    {
         out.push(HostingSummary {
             id: HostingId(id),
             domain,
@@ -277,6 +321,13 @@ pub async fn list(pool: &SqlitePool) -> Result<Vec<HostingSummary>, StateError> 
             created_at,
             node_id,
             maintenance_mode: maintenance_mode != 0,
+            kind: Some(kind),
+            wp_version,
+            cert_not_after,
+            cert_issuer,
+            disk_bytes,
+            last_backup_at,
+            last_backup_ok: last_backup_state.map(|s| s == "ok"),
         });
     }
     Ok(out)
@@ -827,6 +878,93 @@ mod tests {
         assert_eq!(got.domain, "example.cz");
         assert_eq!(got.state, HostingState::Provisioning);
         assert_eq!(got.php_version, Some(PhpVersion::V8_3));
+    }
+
+    /// The list carries per-site facts from four side tables. Write each
+    /// one, read the list back, and check every fact lands on the right
+    /// field — a positional tuple misread here fails silently otherwise.
+    #[tokio::test]
+    async fn list_carries_site_facts() {
+        let pool = open_memory().await.expect("open");
+        let suid = fresh_user(&pool, "ex_cz", 1042).await;
+        let id = HostingId::new_v7();
+        insert(
+            &pool,
+            &id,
+            "example.cz",
+            suid,
+            Some(PhpVersion::V8_3),
+            "/x",
+            1,
+            None,
+        )
+        .await
+        .expect("insert");
+        let bare = HostingId::new_v7();
+        insert(&pool, &bare, "bare.cz", suid, None, "/y", 2, None)
+            .await
+            .expect("insert bare");
+        sqlx::query(
+            "INSERT INTO wp_installs (hosting_id, site_url, wp_version, installed_at, last_pack_hash) \
+             VALUES (?, 'https://example.cz', '6.6.2', 1, 'h')",
+        )
+        .bind(id.as_str())
+        .execute(&pool)
+        .await
+        .expect("wp");
+        sqlx::query(
+            "INSERT INTO certificates (domain, issued_at, not_after, cert_path, key_path, issuer) \
+             VALUES ('example.cz', 1, 9000, '/c', '/k', 'letsencrypt')",
+        )
+        .execute(&pool)
+        .await
+        .expect("cert");
+        // Newest hour is a traffic-only backfill (disk 0) — must be skipped.
+        for (period, disk) in [("2026-10-06-10", 5000_i64), ("2026-10-06-11", 0)] {
+            sqlx::query(
+                "INSERT INTO hosting_usage (hosting_id, period, disk_used_bytes) VALUES (?, ?, ?)",
+            )
+            .bind(id.as_str())
+            .bind(period)
+            .bind(disk)
+            .execute(&pool)
+            .await
+            .expect("usage");
+        }
+        // ok at 100, then failed at 200, then a still-running one at 300.
+        for (started, finished, st) in [
+            (100_i64, Some(110_i64), "ok"),
+            (200, Some(210), "failed"),
+            (300, None, "running"),
+        ] {
+            sqlx::query(
+                "INSERT INTO backup_runs (hosting_id, started_at, finished_at, state) VALUES (?, ?, ?, ?)",
+            )
+            .bind(id.as_str())
+            .bind(started)
+            .bind(finished)
+            .bind(st)
+            .execute(&pool)
+            .await
+            .expect("backup");
+        }
+
+        let rows = list(&pool).await.expect("list");
+        let r = rows.iter().find(|r| r.id == id).expect("row");
+        assert_eq!(r.kind.as_deref(), Some("php"));
+        assert_eq!(r.wp_version.as_deref(), Some("6.6.2"));
+        assert_eq!(r.cert_not_after, Some(9000));
+        assert_eq!(r.cert_issuer.as_deref(), Some("letsencrypt"));
+        assert_eq!(r.disk_bytes, Some(5000));
+        assert_eq!(r.last_backup_at, Some(210));
+        assert_eq!(r.last_backup_ok, Some(false));
+
+        let b = rows.iter().find(|r| r.id == bare).expect("bare row");
+        assert_eq!(b.wp_version, None);
+        assert_eq!(b.cert_not_after, None);
+        assert_eq!(b.disk_bytes, None);
+        assert_eq!(b.last_backup_at, None);
+        assert_eq!(b.last_backup_ok, None);
     }
 
     #[tokio::test]

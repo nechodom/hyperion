@@ -75,6 +75,29 @@ pub struct HostingSummary {
     /// are deliberately gated right now".
     #[serde(default)]
     pub maintenance_mode: bool,
+    /// "php" | "static" | "reverse_proxy" | "redirect". `None` when the
+    /// row came from a node that predates this field — the list then
+    /// shows no type rather than guessing "php" for a static site.
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// WordPress core version when a `wp_installs` row exists.
+    #[serde(default)]
+    pub wp_version: Option<String>,
+    /// Certificate expiry (unix secs) for the primary domain, if any.
+    #[serde(default)]
+    pub cert_not_after: Option<i64>,
+    /// Certificate issuer ("letsencrypt" | "self-signed" | …).
+    #[serde(default)]
+    pub cert_issuer: Option<String>,
+    /// Latest measured disk use in bytes. `None` = never sampled.
+    #[serde(default)]
+    pub disk_bytes: Option<i64>,
+    /// When the most recent FINISHED backup run ended (unix secs).
+    #[serde(default)]
+    pub last_backup_at: Option<i64>,
+    /// Whether that run succeeded. `None` = no finished run on record.
+    #[serde(default)]
+    pub last_backup_ok: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -401,9 +424,27 @@ mod tests {
             created_at: 0,
             node_id: Some("n".into()),
             maintenance_mode: false,
+            kind: Some("php".into()),
+            wp_version: Some("6.6.2".into()),
+            cert_not_after: Some(1),
+            cert_issuer: Some("letsencrypt".into()),
+            disk_bytes: Some(1024),
+            last_backup_at: Some(2),
+            last_backup_ok: Some(true),
         };
         let j = serde_json::to_string(&s).expect("serialize");
         let back: HostingSummary = serde_json::from_str(&j).expect("deserialize");
         assert_eq!(s, back);
+    }
+
+    /// A summary from a node that predates the list facts must still
+    /// parse — every new field defaults to `None`.
+    #[test]
+    fn summary_from_old_node_parses() {
+        let j = r#"{"id":"01J0000000000000000000000A","domain":"ex.cz","state":"active","php_version":null,"created_at":0}"#;
+        let s: HostingSummary = serde_json::from_str(j).expect("deserialize");
+        assert_eq!(s.kind, None);
+        assert_eq!(s.cert_not_after, None);
+        assert_eq!(s.last_backup_ok, None);
     }
 }
