@@ -1717,6 +1717,14 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.db_reset_password(sel, new_password).await
     }
 
+    async fn pma_http(
+        &self,
+        sel: HostingSelector,
+        req: hyperion_types::pma::PmaHttpRequest,
+    ) -> Result<hyperion_types::pma::PmaHttpResponse, RpcError> {
+        self.svc.pma_http(sel, req).await
+    }
+
     async fn ftp_set_password(
         &self,
         sel: HostingSelector,

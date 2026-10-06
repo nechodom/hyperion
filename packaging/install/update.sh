@@ -1117,6 +1117,18 @@ on PHP ${ver} hostings may fail (apt-get install -y$want)."
   fi
 done
 
+#-------- 4a-pma. phpMyAdmin behind the panel ------------------------------
+# Every box that hosts sites gets its own phpMyAdmin, because the hosting
+# databases only accept connections from localhost. It is served on a
+# root-only unix socket and reached exclusively through the panel (the agent
+# relays authenticated requests) — see the script's header. Runs after the
+# extension heal above so mysqli/mbstring are already present.
+PMA_SCRIPT="$INSTALL_DIR/packaging/install/phpmyadmin.sh"
+if (( HAVE_AGENT )) && [[ -f "$PMA_SCRIPT" ]]; then
+  bash "$PMA_SCRIPT" || warn "phpMyAdmin setup failed — the panel's phpMyAdmin button \
+will report it as not installed on this node (re-run: bash $PMA_SCRIPT)."
+fi
+
 #-------- 4b. MTA (so PHP mail() actually delivers) -----------------------
 # PHP's mail() execs $sendmail_path → hyperion's site-mail wrapper →
 # `/usr/sbin/sendmail`. Default Debian installs ship without any MTA,

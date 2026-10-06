@@ -631,6 +631,13 @@
     WP admin
   </a>
   {% endif %}
+  {% if let Some(pma) = pma_url %}
+  <a class="btn" href="{{ pma }}" target="_blank" rel="noopener noreferrer"
+     title="Open this hosting's database in phpMyAdmin — signed in automatically">
+    <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
+    phpMyAdmin
+  </a>
+  {% endif %}
   {% if detail.kind != "reverse_proxy" %}
   <form method="post" action="/hostings/backup-now">
     <input type="hidden" name="_csrf" value="{{ csrf_backup_now }}">
@@ -1079,6 +1086,12 @@
     <div class="fact"><dt>User</dt><dd><code>{{ db.db_user }}</code></dd></div>
     <div class="fact"><dt>Password</dt><dd class="text-soft small">stored in <code>/etc/hyperion/secrets/&lt;id&gt;.json</code>, never displayed</dd></div>
   </dl>
+  {% if let Some(pma) = pma_url %}
+  <div class="cluster" style="margin-top:0.9rem">
+    <a class="btn small" href="{{ pma }}" target="_blank" rel="noopener noreferrer">Open phpMyAdmin</a>
+    <span class="note">Signed in automatically — the password never leaves the server. Opens on its own port, which must be reachable through the firewall.</span>
+  </div>
+  {% endif %}
   <details class="disclosure" style="margin-top:0.9rem">
     <summary>Reset the database password…</summary>
     <form method="post" action="/hostings/db/reset-password" autocomplete="off" style="margin-top:0.6rem"

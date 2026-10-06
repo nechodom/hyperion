@@ -23,6 +23,7 @@ pub mod letters;
 pub mod master_rpc;
 pub mod node_rpc;
 pub mod panel_import;
+pub mod pma;
 pub mod real_adapter;
 pub mod secrets;
 pub mod service;

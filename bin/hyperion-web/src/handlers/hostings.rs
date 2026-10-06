@@ -170,6 +170,9 @@ struct DetailTpl<'a> {
     cron_body: String,
     csrf_wp_reset: String,
     csrf_db_reset: String,
+    /// "Open phpMyAdmin" target — `Some` only for a MariaDB hosting whose
+    /// viewer may manage databases, while the phpMyAdmin listener is on.
+    pma_url: Option<String>,
     csrf_profile_apply: String,
     profile_apply: Option<ProfileApply>,
     applied_profile_name: Option<String>,
@@ -1438,6 +1441,7 @@ pub async fn post_create(
                 cron_body: String::new(),
                 csrf_wp_reset: csrf_token_for(&state, &ctx, "/hostings/wp/reset-password"),
                 csrf_db_reset: csrf_token_for(&state, &ctx, "/hostings/db/reset-password"),
+                pma_url: None,
                 csrf_profile_apply: csrf_token_for(&state, &ctx, "/profiles/apply"),
                 profile_apply: None,
                 applied_profile_name: None,
@@ -1932,6 +1936,18 @@ pub async fn get_detail(
     // Reachable FTP host for THIS hosting's node — a worker's own address,
     // not the master's (FTP talks straight to the owning box).
     let ftp_host = ftp_host_for(&state, &headers, target).await;
+    // phpMyAdmin is MariaDB-only; the click is re-authorised on every
+    // request, this only decides whether to offer it.
+    let pma_url = match &detail.database {
+        Some(db)
+            if db.engine == hyperion_types::DbProvision::MariaDB
+                && ctx.can(Capability::HostingDatabases) =>
+        {
+            let host = super::panel_host(&headers).await;
+            super::pma::pma_url(&state, &host, detail.id.as_str())
+        }
+        _ => None,
+    };
     // RBAC guard: operator + viewer must have an access grant.
     // super_admin + admin pass through. Unauthenticated redirects to
     // /login earlier (require_auth middleware), so unwrap to /hostings
@@ -2471,6 +2487,7 @@ pub async fn get_detail(
         cron_body,
         csrf_wp_reset: csrf_token_for(&state, &ctx, "/hostings/wp/reset-password"),
         csrf_db_reset: csrf_token_for(&state, &ctx, "/hostings/db/reset-password"),
+        pma_url,
         csrf_backup_cadence: csrf_token_for(&state, &ctx, "/hostings/backup-cadence"),
         backup_cadence,
         csrf_backup_target: csrf_token_for(&state, &ctx, "/hostings/backup-target"),
