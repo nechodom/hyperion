@@ -1,12 +1,66 @@
 {% extends "base.html" %}
 {% block title %}Email log · Hyperion{% endblock %}
+{% macro mail_row(r) %}
+<details class="mail-row">
+  <summary>
+    <span class="mail-state">
+      {% if r.ok %}<span class="pill ok">Sent</span>{% else %}<span class="pill err">Failed</span>{% endif %}
+    </span>
+    <span class="mail-main">
+      <span class="mail-title">
+        <strong>{{ r.subject }}</strong>
+        <span class="tag">{{ r.kind_label }}</span>
+      </span>
+      <span class="mail-sub">
+        <span class="mail-to">{{ r.to_address }}</span>
+        {% if let Some(s) = r.site_label %}<span>· {{ s }}</span>{% endif %}
+      </span>
+      {% if !r.error_line.is_empty() %}
+        <span class="mail-line mail-err">{{ r.error_line }}</span>
+      {% else if !r.preview.is_empty() %}
+        <span class="mail-line">{{ r.preview }}</span>
+      {% endif %}
+    </span>
+    <span class="mail-meta">
+      <span title="{{ r.sent_abs }}">{{ r.sent_ago }}</span>
+      <span>{% if let Some(n) = r.node %}{{ n }}{% endif %}{% if !r.reply_code.is_empty() %} · {{ r.reply_code }}{% endif %}</span>
+    </span>
+  </summary>
+  <dl class="mail-detail">
+    <dt>Sent</dt><dd>{{ r.sent_abs }}{% if let Some(n) = r.node %} from <strong>{{ n }}</strong>{% endif %}</dd>
+    <dt>To</dt><dd><code>{{ r.to_address }}</code></dd>
+    <dt>Site</dt>
+    <dd>
+      {% if let Some(hid) = r.hosting_id %}
+        {% if r.site_exists %}
+          <a href="/hostings/{{ hid }}">{% if let Some(s) = r.site_label %}{{ s }}{% endif %}</a>
+        {% else %}
+          <code>{{ hid }}</code> <span class="text-soft">(site no longer exists)</span>
+        {% endif %}
+        · <a href="/emails?hosting={{ hid }}">only this site's mail</a>
+      {% else %}
+        <span class="text-soft">None — a cluster-wide email, not about one site</span>
+      {% endif %}
+    </dd>
+    {% if !r.error_full.is_empty() %}
+      <dt>Error</dt><dd><pre class="mail-pre mail-err">{{ r.error_full }}</pre></dd>
+    {% endif %}
+    {% if !r.reply_full.is_empty() %}
+      <dt>Relay reply</dt><dd><code>{{ r.reply_full }}</code></dd>
+    {% endif %}
+    {% if !r.preview.is_empty() %}
+      <dt>Beginning</dt><dd><pre class="mail-pre">{{ r.preview }}</pre></dd>
+    {% endif %}
+  </dl>
+</details>
+{% endmacro %}
 {% block main %}
 
 {% if let Some(err) = rpc_error %}
 <div class="flash error" style="margin-bottom:1rem">
   <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
   <div class="flash-body">
-    <strong>Agent error:</strong> <code>{{ err }}</code>
+    <strong>Couldn't read this node's email log:</strong> <code>{{ err }}</code>
     {% if err.contains("no such table") || err.contains("email_log") %}
     <div style="margin-top:0.4rem">
       The <code>email_log</code> table doesn't exist on this node yet —
@@ -25,149 +79,114 @@
   <div>
     <h1>Email log</h1>
     <div class="subtitle">
-      Every outbound email the agent sent — test sends, monitor alerts,
-      certificate reminders, backup failures, and billing notifications.
-      Cluster-wide events with no hosting attribution appear here only.
+      Every email Hyperion sent from any node — alerts to you, letters to
+      customers, test sends — and whether the relay took it.
     </div>
   </div>
   <span class="grow"></span>
   <div class="actions">
-    <a href="/settings#smtp-relay" class="btn">
-      <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33"/></svg>
-      SMTP settings
-    </a>
+    <a href="/settings#mail-test" class="btn">Send a test email</a>
+    <a href="/settings#smtp-relay" class="btn ghost">Mail settings</a>
   </div>
-</div>
-
-<div class="search-toolbar">
-  <form method="get" action="/emails" class="search-form" role="search">
-    <div class="search-input">
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-      <input type="search" name="hosting" value="{{ filter_hosting|e }}"
-             placeholder="Filter by hosting ID, or leave blank for all"
-             autocomplete="off" spellcheck="false">
-      <kbd class="search-hint">/</kbd>
-    </div>
-    {% if !filter_kind.is_empty() %}<input type="hidden" name="kind" value="{{ filter_kind }}">{% endif %}
-    {% if !filter_state.is_empty() %}<input type="hidden" name="state" value="{{ filter_state }}">{% endif %}
-  </form>
-
-  <nav class="search-segments" aria-label="Filter by state">
-    <a class="seg {% if filter_state.is_empty() %}active{% endif %}"
-       href="/emails{% if !filter_kind.is_empty() %}?kind={{ filter_kind }}{% endif %}">
-      All <span class="seg-count">{{ total }}</span>
-    </a>
-    <a class="seg {% if filter_state == "ok" %}active{% endif %}"
-       href="/emails?state=ok{% if !filter_kind.is_empty() %}&kind={{ filter_kind }}{% endif %}">
-      <span class="seg-dot ok"></span>Sent <span class="seg-count">{{ ok_count }}</span>
-    </a>
-    <a class="seg {% if filter_state == "failed" %}active{% endif %}"
-       href="/emails?state=failed{% if !filter_kind.is_empty() %}&kind={{ filter_kind }}{% endif %}">
-      <span class="seg-dot err"></span>Failed <span class="seg-count">{{ failed_count }}</span>
-    </a>
-  </nav>
-</div>
-
-{# Kind filter row — one chip per email kind. #}
-<div class="row" style="gap:0.4rem;flex-wrap:wrap;margin-bottom:1rem;font-size:0.85rem;align-items:center">
-  <span class="muted">Kind:</span>
-  <a class="tag {% if filter_kind.is_empty() %}node-chip{% endif %}"
-     href="/emails{% if !filter_state.is_empty() %}?state={{ filter_state }}{% endif %}">all</a>
-  {% for k in ["test", "alert", "monitor", "backup", "cert", "billing", "other"] %}
-    <a class="tag {% if filter_kind == k.to_string() %}node-chip{% endif %}"
-       href="/emails?kind={{ k }}{% if !filter_state.is_empty() %}&state={{ filter_state }}{% endif %}">{{ k }}</a>
-  {% endfor %}
 </div>
 
 {% include "_node_auth_banner.html" %}
 
-{% if rows.is_empty() %}
-<div class="card">
-  <div class="empty">
+{% if window_empty && hosting_filter.is_empty() %}
+  <div class="card empty">
     <div class="empty-illustration">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
     </div>
-    {% if filter_kind.is_empty() && filter_state.is_empty() && filter_hosting.is_empty() %}
     <h3>No emails sent yet</h3>
-    <p>
-      The agent hasn't sent any email. Open
-      <a href="/settings#smtp-relay">Settings → Mail</a>, turn on the SMTP relay, then use
-      <strong>Send test email</strong> to confirm it works.
+    <p class="text-soft">
+      Alerts, certificate and billing reminders, care reports and test sends
+      all show up here once the panel can send mail. Set up the relay in
+      <a href="/settings#smtp-relay">Settings → Mail</a>, then send a test email
+      to confirm it works.
     </p>
-    {% else %}
-    <h3>No emails match these filters</h3>
-    <p>
-      Try removing the filters above, or run a fresh test send from
-      <a href="/settings#smtp-relay">Settings → Mail</a>.
-    </p>
-    {% endif %}
     {% include "_node_auth_empty_note.html" %}
   </div>
-</div>
 {% else %}
-<div class="card no-pad-table">
-  <div class="table-wrap">
-    <table>
-      <thead>
-        <tr>
-          <th>Sent</th>
-          <th>Node</th>
-          <th>Kind</th>
-          <th>State</th>
-          <th>To</th>
-          <th>Subject</th>
-          <th>Hosting</th>
-          <th>SMTP / error</th>
-        </tr>
-      </thead>
-      <tbody>
-      {% for e in rows %}
-        <tr>
-          <td class="muted numeric" title="{{ e.sent_at }}">{{ crate::handlers::stats::fmt_ago(e.sent_at) }}</td>
-          <td>{% if let Some(node) = e.node %}<span class="pill" style="background:var(--surface-2);color:var(--text-soft)">{{ node }}</span>{% else %}<span class="text-soft">—</span>{% endif %}</td>
-          <td><span class="tag">{{ e.kind }}</span></td>
-          <td>
-            {% if e.state == "ok" %}
-              <span class="pill ok">sent</span>
-            {% else %}
-              <span class="pill err">failed</span>
-            {% endif %}
-          </td>
-          <td><code style="font-size:0.78rem;word-break:break-all">{{ e.to_address }}</code></td>
-          <td>
-            <strong>{{ e.subject }}</strong>
-            {% if !e.body_preview.is_empty() %}
-              <div class="muted" style="font-size:0.76rem;margin-top:0.15rem">{{ e.body_preview }}</div>
-            {% endif %}
-          </td>
-          <td>
-            {% if let Some(hid) = e.hosting_id %}
-              <a href="/emails?hosting={{ hid }}" title="Filter to this hosting" style="font-family:var(--font-mono);font-size:0.72rem">{{ hid|truncate(12) }}…</a>
-            {% else %}
-              <span class="text-soft">cluster-wide</span>
-            {% endif %}
-          </td>
-          <td>
-            {% if let Some(err) = e.error %}
-              <code class="muted" style="font-size:0.74rem;word-break:break-word;color:var(--danger)">{{ err }}</code>
-            {% else if let Some(c) = e.smtp_code %}
-              <code class="muted" style="font-size:0.74rem">{{ c }}</code>
-            {% else %}
-              <span class="text-soft">—</span>
-            {% endif %}
-          </td>
-        </tr>
+
+<div class="svc-verdict {{ verdict_tone }}">
+  <span class="dot"></span>
+  <span>{{ verdict }}</span>
+</div>
+
+<div class="search-toolbar">
+  <form method="get" action="/emails" class="search-form jobs-filter" role="search">
+    <div class="search-input">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      <input type="search" name="q" value="{{ q }}"
+             placeholder="Search — recipient, subject, site, error, queue id…"
+             autocomplete="off" spellcheck="false">
+      {% if !q.is_empty() %}
+        <a href="{{ seg_hrefs.all }}" class="search-clear" title="Clear search" aria-label="Clear search"
+           onclick="var f=this.closest('form');f.q.value='';f.submit();return false;">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </a>
+      {% endif %}
+    </div>
+    <select name="kind" aria-label="Email type" onchange="this.form.submit()">
+      <option value="" {% if kind_filter.is_empty() %}selected{% endif %}>All email types</option>
+      {% for (k, label) in kinds %}
+        <option value="{{ k }}" {% if kind_filter == k.as_str() %}selected{% endif %}>{{ label }}</option>
       {% endfor %}
-      </tbody>
-    </table>
-  </div>
+    </select>
+    {% if !state_filter.is_empty() %}<input type="hidden" name="state" value="{{ state_filter }}">{% endif %}
+    {% if !hosting_filter.is_empty() %}<input type="hidden" name="hosting" value="{{ hosting_filter }}">{% endif %}
+    <noscript><button class="btn" type="submit">Filter</button></noscript>
+  </form>
+
+  <nav class="search-segments" aria-label="Filter by outcome">
+    <a class="seg {% if state_filter.is_empty() %}active{% endif %}" href="{{ seg_hrefs.all }}">
+      All <span class="seg-count">{{ counts.all }}</span>
+    </a>
+    <a class="seg {% if state_filter == "ok" %}active{% endif %}" href="{{ seg_hrefs.ok }}">
+      <span class="seg-dot ok"></span>Sent <span class="seg-count">{{ counts.ok }}</span>
+    </a>
+    <a class="seg {% if state_filter == "failed" %}active{% endif %}" href="{{ seg_hrefs.failed }}">
+      <span class="seg-dot err"></span>Failed{% if counts.failed > 0 %} <span class="seg-count">{{ counts.failed }}</span>{% endif %}
+    </a>
+  </nav>
+</div>
+
+{% if !hosting_filter.is_empty() %}
+<div class="mail-scope">
+  <span class="text-soft">Showing one site:</span>
+  <a class="chip chip-on" href="{{ clear_site_href }}" title="Show every site's mail">{{ hosting_label }} <span aria-hidden="true">×</span></a>
+  <a href="/hostings/{{ hosting_filter }}">Open site →</a>
 </div>
 {% endif %}
 
+{% if days.is_empty() %}
+  <div class="group">
+    <div class="item text-soft">
+      {% if window_empty %}
+        No email sent for this site yet.
+      {% else %}
+        No emails match these filters.
+      {% endif %}
+      <a href="/emails">Show every email</a>
+    </div>
+  </div>
+{% endif %}
+
+<div class="mail-days">
+{% for d in days %}
+  <div class="group">
+    <div class="ghead">{{ d.label }}</div>
+    {% for r in d.rows %}{% call mail_row(r) %}{% endfor %}
+  </div>
+{% endfor %}
+</div>
+
 <p class="text-soft small" style="margin-top:1rem">
-  Showing the last 200 email events from this node, newest first.
-  Only a 200-character preview of each body is stored. Full bodies are
-  never kept, so passwords and reset tokens that appear later in the
-  message text stay out of the log.
+  {% if truncated %}Showing the most recent matching emails only — narrow the filter to reach older ones.{% endif %}
+  Each node keeps its own log; this page merges them. Only the first 200
+  characters of a message are stored, so passwords and reset links further
+  down never reach the log. Mail a website sends itself is on that site's
+  Emails tab.
 </p>
+{% endif %}
 {% endblock %}
