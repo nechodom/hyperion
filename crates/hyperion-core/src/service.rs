@@ -2874,6 +2874,48 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .map_err(|e| RpcError::Internal_with(format!("list: {e}")))
     }
 
+    /// Write a hosting's FPM pool WITH its stored limits.
+    ///
+    /// `fpm_ensure` alone renders the template defaults (256 MB,
+    /// five workers). Every path that rewrites an existing site's pool must
+    /// come through here instead: the boot re-render used to call
+    /// `fpm_ensure`, so each agent restart — every update — silently put
+    /// every pool back on the defaults. That threw away the operator's
+    /// worker count and every step the automatic memory_limit had taken,
+    /// and the automation never noticed: it reads the limit from the DB,
+    /// so it ignored the 256 MB fatals as being "below the limit in force".
+    async fn fpm_ensure_with_limits(
+        &self,
+        detail: &HostingDetail,
+        ver: PhpVersion,
+    ) -> Result<(), AdapterError> {
+        match hyperion_state::limits::get(&self.pool, &detail.id).await {
+            Ok(Some(row)) => {
+                self.adapters
+                    .apply_php_limits(
+                        &detail.system_user,
+                        &detail.domain,
+                        Some(ver),
+                        row.php_memory_mb,
+                        row.php_max_exec_secs,
+                        row.php_max_children,
+                        row.php_max_requests,
+                    )
+                    .await
+            }
+            // No row: the site never had limits set, so the defaults ARE
+            // its limits.
+            Ok(None) => {
+                self.adapters
+                    .fpm_ensure(&detail.system_user, &detail.domain, ver)
+                    .await
+            }
+            // Never fall back to the defaults on a read error — that is the
+            // very reset this function exists to prevent.
+            Err(e) => Err(AdapterError::Other(format!("limits get: {e}"))),
+        }
+    }
+
     /// Boot-time self-heal: re-render the FPM pool config for every
     /// active hosting that has PHP. We do this because the pool
     /// template's `listen.owner` depends on the nginx user, which is
@@ -2933,15 +2975,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 );
                 continue;
             }
-            if let Err(e) = self
-                .adapters
-                .fpm_ensure(&detail.system_user, &detail.domain, ver)
-                .await
-            {
+            if let Err(e) = self.fpm_ensure_with_limits(&detail, ver).await {
                 tracing::warn!(
                     domain = %detail.domain,
                     error = %e,
-                    "rerender_fpm_pools: fpm_ensure failed"
+                    "rerender_fpm_pools: pool rewrite failed"
                 );
                 continue;
             }
@@ -3792,10 +3830,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             let _ = self.adapters.db_unlock(db.engine, &db.db_user).await;
         }
         if let Some(ver) = detail.php_version {
-            let _ = self
-                .adapters
-                .fpm_ensure(&detail.system_user, &detail.domain, ver)
-                .await;
+            let _ = self.fpm_ensure_with_limits(&detail, ver).await;
         }
         let _ = self.adapters.nginx_write_vhost(&detail).await;
         // Before un-trashing, while the scheduler is still holding them: cancel
@@ -4725,25 +4760,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             let _ = self.adapters.db_unlock(db.engine, &db.db_user).await;
         }
         if let Some(ver) = detail.php_version {
-            let _ = self
-                .adapters
-                .fpm_ensure(&detail.system_user, &detail.domain, ver)
-                .await;
-            // Re-apply persisted limits to FPM pool.
-            if let Ok(Some(row)) = hyperion_state::limits::get(&self.pool, &detail.id).await {
-                let _ = self
-                    .adapters
-                    .apply_php_limits(
-                        &detail.system_user,
-                        &detail.domain,
-                        Some(ver),
-                        row.php_memory_mb,
-                        row.php_max_exec_secs,
-                        row.php_max_children,
-                        row.php_max_requests,
-                    )
-                    .await;
-            }
+            let _ = self.fpm_ensure_with_limits(&detail, ver).await;
         }
         let _ = self.adapters.nginx_write_vhost(&detail).await;
         {
@@ -44975,6 +44992,35 @@ mod tests {
             .await
             .expect("get");
         assert!(susp.is_none(), "suspension row removed on resume");
+    }
+
+    /// The boot re-render must write each pool WITH its stored limits. It
+    /// used to render the template defaults, so every agent restart put
+    /// every site back on 256 MB / five workers and undid the automatic
+    /// memory_limit without it ever noticing.
+    #[tokio::test]
+    async fn boot_rerender_keeps_stored_pool_limits() {
+        use std::sync::{Arc, Mutex};
+        let pool = open_memory().await.expect("open");
+        let seen: Arc<Mutex<Vec<(i64, i64)>>> = Arc::default();
+        let mut a = happy_mocks();
+        let rec = seen.clone();
+        a.expect_apply_php_limits()
+            .returning(move |_, _, _, mem, _, children, _| {
+                rec.lock().unwrap().push((mem, children));
+                Ok(())
+            });
+        let s = svc(pool, a);
+        s.create(req("ex.cz")).await.expect("create");
+        let sel = HostingSelector::Domain(Domain::parse("ex.cz").unwrap());
+        let mut l = s.get_limits(sel.clone()).await.expect("limits");
+        l.php_memory_mb = 512;
+        l.php_max_children = 12;
+        s.set_limits(sel, l).await.expect("set");
+        seen.lock().unwrap().clear();
+
+        assert_eq!(s.rerender_fpm_pools().await, 1);
+        assert_eq!(*seen.lock().unwrap(), vec![(512, 12)]);
     }
 
     /// Out-of-memory in the site's error.log raises the pool one step; a hand
