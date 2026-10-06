@@ -3,7 +3,7 @@
 {% macro svc_row(r) %}
 <div class="svc-row">
   <div class="svc-main">
-    <div class="svc-title"><strong>{{ r.label }}</strong> <code class="text-soft">{{ r.name }}</code></div>
+    <div class="svc-title">{% if r.can_install %}<strong>{{ r.label }}</strong>{% else %}<a class="svc-link" href="/services/unit?node={{ current_node }}&name={{ r.name }}"><strong>{{ r.label }}</strong></a>{% endif %} <code class="text-soft">{{ r.name }}</code></div>
     {% if !r.facts.is_empty() || r.restarts.is_some() %}
     <div class="svc-facts small">
       {% for f in r.facts %}<span>{{ f }}</span>{% endfor %}
@@ -15,6 +15,19 @@
   <span class="pill {{ r.tone }}">{{ r.status }}</span>
   {% if is_super_admin %}
   <div class="svc-actions">
+    {% if r.can_start %}
+    <form method="post" action="/services/control"
+          data-confirm-title="Start {{ r.label }}"
+          data-confirm-body="Runs systemctl start {{ r.name }} on {{ current_label }}."
+          data-confirm-confirm-label="Start"
+          data-confirm-variant="primary">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="name" value="{{ r.name }}">
+      <input type="hidden" name="node" value="{{ current_node }}">
+      <input type="hidden" name="action" value="start">
+      <button type="submit" class="btn small primary">Start</button>
+    </form>
+    {% endif %}
     {% if r.can_restart %}
     <form method="post" action="/services/restart"
           data-confirm-title="Restart {{ r.label }}"

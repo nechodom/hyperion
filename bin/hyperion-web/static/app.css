@@ -794,6 +794,22 @@ a.node-row:hover { background: var(--surface-2); }
 .svc-dot.err  { background: var(--danger); }
 .svc-facts { display: flex; flex-wrap: wrap; gap: 0 0.9rem; color: var(--text-soft); margin-top: 0.15rem; font-variant-numeric: tabular-nums; }
 .svc-facts .warn { color: var(--warn); }
+a.svc-link { color: inherit; text-decoration: none; }
+a.svc-link:hover { text-decoration: underline; }
+.group > .ghead a { color: var(--text-dim); text-transform: none; letter-spacing: 0; font-weight: 500; }
+.svc-journal {
+  margin: 0;
+  max-height: 32rem;
+  overflow: auto;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.6rem 0.8rem;
+  font-size: 0.76rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
 .svc-attn { display: flex; flex-wrap: wrap; gap: 0.3rem; margin-top: 0.3rem; }
 @media (max-width: 640px) {
   .group > .svc-row { flex-wrap: wrap; }

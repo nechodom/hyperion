@@ -761,6 +761,12 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
     async fn service_restart(&self, name: String) -> Result<(), RpcError> {
         self.svc.service_restart(name).await
     }
+    async fn service_control(&self, name: String, action: String) -> Result<(), RpcError> {
+        self.svc.service_control(name, action).await
+    }
+    async fn service_journal(&self, name: String, lines: u32) -> Result<String, RpcError> {
+        self.svc.service_journal(name, lines).await
+    }
     async fn service_install(&self, name: String) -> Result<(), RpcError> {
         self.svc.service_install(name).await
     }
