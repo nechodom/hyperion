@@ -805,6 +805,8 @@ function isShortcutContext(ev) {
   mountAll();
   // Re-mount after HTMX swaps so dynamically-loaded sparklines also wire up.
   document.addEventListener('htmx:afterSettle', mountAll);
+  // The live-refresh driver swaps innerHTML without htmx; re-arm hover there too.
+  document.addEventListener('live-refresh-swapped', mountAll);
 })();
 </script>
 
@@ -1655,6 +1657,7 @@ function isShortcutContext(ev) {
         if (confirmModal && confirmModal.style.display === 'flex') return;
         if (fresh && cur && fresh.innerHTML !== cur.innerHTML) {
           cur.innerHTML = fresh.innerHTML;
+          document.dispatchEvent(new CustomEvent('live-refresh-swapped'));
         }
       } catch (_) { /* swallow — try again next tick */ }
     }
@@ -1663,13 +1666,16 @@ function isShortcutContext(ev) {
     // control on the page can retune it live — see the refresh picker on
     // /stats. One timer, restarted; never two racing each other.
     let timer = null;
+    // An explicit "0" means paused (the /stats picker's "Paused"); anything
+    // else unusable falls back to the interval the page shipped with.
+    function paused() { return node.getAttribute('data-live-refresh') === '0'; }
     function period() {
       const v = parseInt(node.getAttribute('data-live-refresh'), 10);
       return (!v || v < 2) ? secs * 1000 : v * 1000;
     }
     function arm() {
       if (timer) clearInterval(timer);
-      timer = setInterval(tick, period());
+      timer = paused() ? null : setInterval(tick, period());
     }
     arm();
     node.addEventListener('live-refresh-changed', arm);
@@ -1678,7 +1684,7 @@ function isShortcutContext(ev) {
       timer = null;
       // Nothing ticks while hidden — a background tab polling every 5 s is
       // just load on the box for a page nobody is looking at.
-      if (!document.hidden) { arm(); tick(true); }
+      if (!document.hidden) { arm(); if (!paused()) tick(true); }
     });
   });
   // Back/forward navigation restores a frozen page from the bfcache with
