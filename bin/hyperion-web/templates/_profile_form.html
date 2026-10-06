@@ -1,0 +1,295 @@
+{#- The fields of a profile, shared by /profiles/new and /profiles/<id>/edit.
+    The including page owns the <form>, its CSRF token and the submit bar.
+    Needs: profile (HostingProfile), price_major, plugin_assets, theme_assets. -#}
+<div class="group">
+  <div class="ghead">Profile</div>
+  <div class="item">
+    <div class="field-row">
+      <div class="field">
+        <label for="p_name">Name <span class="hint">unique short label, e.g. "Pro"</span></label>
+        <input id="p_name" name="name" type="text" required maxlength="64" value="{{ profile.name }}">
+      </div>
+      <div class="field">
+        <label for="p_desc">Description <span class="hint">optional</span></label>
+        <input id="p_desc" name="description" type="text" maxlength="200" value="{{ profile.description }}">
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="group">
+  <div class="ghead">PHP &amp; database <span class="grow"></span><span class="ghead-note">the site's PHP-FPM pool and database user</span></div>
+  <div class="item">
+    <div class="field-row three">
+      <div class="field">
+        <label for="p_php_memory">PHP memory <span class="hint">MB per request</span></label>
+        <input id="p_php_memory" name="php_memory_mb" type="number" min="16" max="8192" value="{{ profile.php_memory_mb }}">
+      </div>
+      <div class="field">
+        <label for="p_php_exec">Max execution time <span class="hint">seconds</span></label>
+        <input id="p_php_exec" name="php_max_exec_secs" type="number" min="1" max="3600" value="{{ profile.php_max_exec_secs }}">
+      </div>
+      <div class="field">
+        <label for="p_php_children">PHP workers <span class="hint">pm.max_children</span></label>
+        <input id="p_php_children" name="php_max_children" type="number" min="1" max="200" value="{{ profile.php_max_children }}">
+      </div>
+    </div>
+    <div class="field-row three">
+      <div class="field">
+        <label for="p_php_reqs">Recycle a worker after <span class="hint">requests · 0 = never</span></label>
+        <input id="p_php_reqs" name="php_max_requests" type="number" min="0" value="{{ profile.php_max_requests }}">
+      </div>
+      <div class="field">
+        <label for="p_db_max">Database connections <span class="hint">at most, per site</span></label>
+        <input id="p_db_max" name="db_max_connections" type="number" min="1" max="1000" value="{{ profile.db_max_connections }}">
+      </div>
+    </div>
+    {# "Memory cap" and "Monthly bandwidth" used to sit here. Both fed
+       stores with NO reader — memory went to hosting_quotas.mem_limit_mib
+       (pools build from hosting_limits, so it never took effect) and
+       bandwidth to a column nothing enforces or alerts on. A plan field
+       that does nothing is a promise to a customer that nothing keeps.
+       PHP memory is the "PHP memory" field above, which IS enforced. #}
+  </div>
+</div>
+
+<div class="group">
+  <div class="ghead">Disk</div>
+  <div class="item">
+    <div class="field-row three">
+      <div class="field">
+        <label for="p_disk_soft">Warn at <span class="hint">MB · blank = no warning</span></label>
+        <input id="p_disk_soft" name="disk_soft_mb" type="number" min="0" placeholder="1500" value="{% if let Some(m) = profile.disk_soft_mb %}{{ m }}{% endif %}">
+      </div>
+      <div class="field">
+        <label for="p_disk">Hard limit <span class="hint">MB · enforced · blank = unlimited</span></label>
+        <input id="p_disk" name="disk_hard_mb" type="number" min="0" placeholder="2048" value="{% if let Some(m) = profile.disk_hard_mb %}{{ m }}{% endif %}">
+      </div>
+      <div class="field">
+        <label for="p_quota_action">Over the hard limit <span class="hint">overridable per site</span></label>
+        <select id="p_quota_action" name="quota_exceed_action">
+          <option value="notify"{% if profile.quota_exceed_action != "suspend" %} selected{% endif %}>Send an alert</option>
+          <option value="suspend"{% if profile.quota_exceed_action == "suspend" %} selected{% endif %}>Suspend the site (+ alert)</option>
+        </select>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="group">
+  <div class="ghead">Backups <span class="grow"></span><span class="ghead-note">overridable per site</span></div>
+  <div class="item">
+    <div class="field-row">
+      <div class="field">
+        <label for="p_backup_cadence">Automatic backups</label>
+        <select id="p_backup_cadence" name="backup_cadence">
+          <option value="off"{% if profile.backup_cadence != "daily" && profile.backup_cadence != "weekly" && profile.backup_cadence != "monthly" && profile.backup_cadence != "custom" %} selected{% endif %}>Off — back up only on demand</option>
+          <option value="daily"{% if profile.backup_cadence == "daily" %} selected{% endif %}>Daily</option>
+          <option value="weekly"{% if profile.backup_cadence == "weekly" %} selected{% endif %}>Weekly</option>
+          <option value="monthly"{% if profile.backup_cadence == "monthly" %} selected{% endif %}>Monthly</option>
+          <option value="custom"{% if profile.backup_cadence == "custom" %} selected{% endif %}>Every N days</option>
+        </select>
+      </div>
+      <div class="field" id="p_backup_interval_field">
+        <label for="p_backup_interval">Every <span class="hint">days</span></label>
+        <input id="p_backup_interval" name="backup_interval_days" type="number" min="1" max="365"{% if profile.backup_interval_days > 0 %} value="{{ profile.backup_interval_days }}"{% endif %} placeholder="e.g. 3">
+      </div>
+    </div>
+    <div class="field-row">
+      <div class="field">
+        <label for="p_backup_keep_days">Keep backups for <span class="hint">days · blank = node default</span></label>
+        <input id="p_backup_keep_days" name="backup_keep_days" type="number" min="0" max="36500"{% if profile.backup_keep_days > 0 %} value="{{ profile.backup_keep_days }}"{% endif %}>
+      </div>
+      <div class="field">
+        <label for="p_backup_keep_last">Always keep the latest <span class="hint">backups per site · blank = node default</span></label>
+        <input id="p_backup_keep_last" name="backup_keep_last" type="number" min="0" max="1000"{% if profile.backup_keep_last > 0 %} value="{{ profile.backup_keep_last }}"{% endif %}>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="group">
+  <div class="ghead">Expiry &amp; price</div>
+  <div class="item">
+    <div class="field-row">
+      <div class="field">
+        <label for="p_grace">Grace period <span class="hint">days after expiry before the site is deleted</span></label>
+        <input id="p_grace" name="expiry_grace_days" type="number" min="0" max="365" value="{{ profile.expiry_grace_days }}">
+      </div>
+      <div class="field">
+        <label for="p_off">Warn before expiry <span class="hint">days, comma-separated</span></label>
+        <input id="p_off" name="expiry_warning_offsets" type="text" value="{{ profile.expiry_warning_offsets }}">
+      </div>
+    </div>
+    <div class="field-row three">
+      <div class="field">
+        <label for="p_price">Price <span class="hint">optional · e.g. 199.00</span></label>
+        <input id="p_price" name="price_major" type="text" inputmode="decimal" placeholder="199.00" value="{{ price_major }}">
+      </div>
+      <div class="field">
+        <label for="p_currency">Currency <span class="hint">ISO 4217</span></label>
+        <input id="p_currency" name="price_currency" type="text" maxlength="3" placeholder="CZK" class="upper" value="{% if let Some(c) = profile.price_currency %}{{ c }}{% endif %}">
+      </div>
+      <div class="field">
+        <label for="p_interval">Billed</label>
+        <select id="p_interval" name="price_interval">
+          <option value="">No interval</option>
+          {% for (val, label) in [("monthly", "Monthly"), ("quarterly", "Quarterly"), ("yearly", "Yearly")] %}
+          <option value="{{ val }}"{% if profile.price_interval.as_deref() == Some(val) %} selected{% endif %}>{{ label }}</option>
+          {% endfor %}
+        </select>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="group">
+  <div class="ghead">Alerts <span class="grow"></span><span class="ghead-note">optional</span></div>
+  <div class="item">
+    <div class="field">
+      <label for="p_slack">Slack incoming webhook <span class="hint">replaces the global channel for sites on this profile</span></label>
+      <input id="p_slack" name="slack_webhook" type="url" placeholder="https://hooks.slack.com/services/T.../B.../..." value="{% if let Some(w) = profile.slack_webhook %}{{ w }}{% endif %}">
+    </div>
+    {#- Operator alert addresses. ADDITIVE to the cluster-wide list rather
+        than a replacement: adding one address here must not silently stop
+        the operator receiving alerts they were already getting. The
+        addresses are snapshotted onto each apply row, so re-apply is what
+        pushes a change out — exactly how the price and Slack behave. -#}
+    <div class="field">
+      <label for="p_alert_emails">Also e-mail alerts to <span class="hint">comma-separated · a client's IT contact, a shared inbox</span></label>
+      <input id="p_alert_emails" name="alert_emails" type="text" placeholder="ops@klient.cz, admin@klient.cz" value="{{ profile.alert_emails }}">
+      <p class="help">
+        On top of the administrator addresses in
+        <a href="/settings#default_to">Settings → Mail → Administrator notifications</a>, never instead of them.
+        These are operator alerts — a failed backup, a certificate that will not renew, a site that stopped
+        answering — not the customer's care report, which goes to the site owner's e-mail.
+      </p>
+    </div>
+  </div>
+</div>
+
+{# Wizard pre-fill — when set, /hostings/new auto-selects these runtime
+   values the moment the operator picks this profile. Blank = "no
+   preference", the wizard keeps its global defaults. #}
+<div class="group">
+  <div class="ghead">New-site defaults <span class="grow"></span><span class="ghead-note">pre-filled in Add website when this profile is picked</span></div>
+  <div class="item">
+    <div class="field-row">
+      <div class="field">
+        <label for="p_default_php_version">PHP version</label>
+        <select id="p_default_php_version" name="default_php_version">
+          <option value="">No preference</option>
+          {% for v in hyperion_types::PhpVersion::all() %}
+          <option value="{{ v.as_str() }}"{% if profile.default_php_version.as_deref() == Some(v.as_str()) %} selected{% endif %}>PHP {{ v.as_str() }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="field">
+        <label for="p_default_db_engine">Database</label>
+        <select id="p_default_db_engine" name="default_db_engine">
+          <option value="">No preference</option>
+          {% for (val, label) in [("mariadb", "MariaDB"), ("postgres", "PostgreSQL"), ("none", "No database")] %}
+          <option value="{{ val }}"{% if profile.default_db_engine.as_deref() == Some(val) %} selected{% endif %}>{{ label }}</option>
+          {% endfor %}
+        </select>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="group">
+  <div class="ghead">WordPress <span class="grow"></span><span class="ghead-note">installed when the profile is applied to a WordPress site</span></div>
+  <div class="item">
+    <p class="help profile-wp-help">
+      One per line: a WordPress.org slug (<code>akismet</code>) or <code>@asset:&lt;id&gt;</code> for a ZIP from the
+      <a href="/profiles/wp-assets">asset library</a>. A trailing <code>!</code> also activates it; lines starting
+      with <code>#</code> are comments.
+    </p>
+    <div class="field-row">
+      <div class="field">
+        <label for="p_wp_plugins">Plugins</label>
+        <textarea id="p_wp_plugins" name="wp_plugins" rows="6" class="mono"
+                  placeholder="akismet!&#10;wordpress-seo&#10;@asset:7    # internal client plugin">{{ profile.wp_plugins }}</textarea>
+        {% if !plugin_assets.is_empty() %}
+        {# Ticking an entry appends `@asset:N!` to the textarea (with `!`
+           so it is also activated); entries already listed start ticked. #}
+        <details class="asset-picker">
+          <summary>Add from library <span class="text-soft small">({{ plugin_assets.len() }} uploaded plugin{% if plugin_assets.len() != 1 %}s{% endif %})</span></summary>
+          <div class="asset-picker-body">
+            {% for a in plugin_assets %}
+            <label class="asset-row">
+              <input type="checkbox" class="asset-tick" data-textarea="p_wp_plugins" data-asset-id="{{ a.id }}">
+              <span class="asset-name">{{ a.original_name }}</span>
+              <span class="text-soft small">{{ a.size_bytes / 1024 }} KB</span>
+            </label>
+            {% endfor %}
+          </div>
+        </details>
+        {% endif %}
+      </div>
+      <div class="field">
+        <label for="p_wp_themes">Themes</label>
+        <textarea id="p_wp_themes" name="wp_themes" rows="6" class="mono"
+                  placeholder="astra!&#10;@asset:3">{{ profile.wp_themes }}</textarea>
+        {% if !theme_assets.is_empty() %}
+        <details class="asset-picker">
+          <summary>Add from library <span class="text-soft small">({{ theme_assets.len() }} uploaded theme{% if theme_assets.len() != 1 %}s{% endif %})</span></summary>
+          <div class="asset-picker-body">
+            {% for a in theme_assets %}
+            <label class="asset-row">
+              <input type="checkbox" class="asset-tick" data-textarea="p_wp_themes" data-asset-id="{{ a.id }}">
+              <span class="asset-name">{{ a.original_name }}</span>
+              <span class="text-soft small">{{ a.size_bytes / 1024 }} KB</span>
+            </label>
+            {% endfor %}
+          </div>
+        </details>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+  (function () {
+    'use strict';
+    // "Every N days" only means something for the custom cadence. Hidden by
+    // script, so without one the field is simply always there.
+    const cadence = document.getElementById('p_backup_cadence');
+    const every = document.getElementById('p_backup_interval_field');
+    if (cadence && every) {
+      const sync = () => { every.hidden = cadence.value !== 'custom'; };
+      cadence.addEventListener('change', sync);
+      sync();
+    }
+
+    // Asset picker: ticking edits the textarea in place. Only the checkbox
+    // toggle writes, so free-form edits to the textarea are never overwritten.
+    function hasAssetLine(text, id) {
+      return new RegExp('(^|\\n)\\s*@asset:' + id + '\\b', 'm').test(text);
+    }
+    function appendAssetLine(textarea, id) {
+      let v = textarea.value.replace(/\s+$/, '');
+      if (v.length > 0) v += '\n';
+      textarea.value = v + '@asset:' + id + '!';
+    }
+    function removeAssetLine(textarea, id) {
+      // A line that is `@asset:<id>`, optional `!`, optional trailing comment.
+      const re = new RegExp('(?:^|\\n)\\s*@asset:' + id + '!?\\s*(?:#[^\\n]*)?(?=\\n|$)', 'g');
+      textarea.value = textarea.value.replace(re, '').replace(/\n{3,}/g, '\n\n').replace(/^\n+/, '');
+    }
+    document.querySelectorAll('.asset-tick').forEach(cb => {
+      const ta = document.getElementById(cb.dataset.textarea);
+      const id = cb.dataset.assetId;
+      if (!ta || !id) return;
+      cb.checked = hasAssetLine(ta.value, id);
+      cb.addEventListener('change', () => {
+        if (cb.checked) {
+          if (!hasAssetLine(ta.value, id)) appendAssetLine(ta, id);
+        } else {
+          removeAssetLine(ta, id);
+        }
+      });
+    });
+  })();
+</script>

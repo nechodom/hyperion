@@ -820,6 +820,8 @@ pub async fn write_vhost(paths: &Paths, input: &VhostInput<'_>) -> Result<(), Ad
     if input.options.signup_limit_enabled {
         ensure_ratelimit_conf(DEFAULT_LOGIN_RPM, DEFAULT_SIGNUP_RPM).await?;
     }
+    // Same reason, for the access-log format the vhost names.
+    ensure_logformat_conf().await?;
     let body = render(input)?;
     let vhost = paths.vhost_file(input.domain);
     let backup = backup_existing(&vhost).await?;
@@ -997,6 +999,45 @@ pub async fn ensure_ratelimit_conf(
     tokio::fs::write(RATELIMIT_CONF, want.as_bytes())
         .await
         .map_err(|e| AdapterError::Other(format!("write {RATELIMIT_CONF}: {e}")))?;
+    Ok(true)
+}
+
+/// `/etc/nginx/conf.d/hyperion-logformat.conf` — node-wide, one file.
+pub const LOGFORMAT_CONF: &str = "/etc/nginx/conf.d/hyperion-logformat.conf";
+
+/// The access-log format every site vhost names.
+pub const LOGFORMAT_NAME: &str = "hyperion_timed";
+
+/// nginx's `combined` format plus `$request_time` as the LAST field.
+///
+/// Last, and unquoted, on purpose: every parser in the panel reads the
+/// combined fields from the left (ip, `[time]`, the quoted request, status,
+/// bytes), so a field appended after the user agent changes nothing for
+/// them, and `awk '$NF > 2'` lists the slow requests on the box with no
+/// format knowledge at all. Without it the access log could say WHAT was
+/// asked for when a pool filled up, never what took the time.
+const LOGFORMAT_BODY: &str = r#"# Auto-managed by Hyperion. Do not edit.
+# nginx `combined` + request time in seconds as the last field.
+log_format hyperion_timed '$remote_addr - $remote_user [$time_local] '
+                          '"$request" $status $body_bytes_sent '
+                          '"$http_referer" "$http_user_agent" $request_time';
+"#;
+
+/// Write the node-wide access-log format. Idempotent on CONTENT, like the
+/// rate-limit zones: a vhost naming a format that does not exist is
+/// `[emerg] unknown log format` and a refused reload for every site.
+pub async fn ensure_logformat_conf() -> Result<bool, AdapterError> {
+    if let Ok(existing) = tokio::fs::read_to_string(LOGFORMAT_CONF).await {
+        if existing == LOGFORMAT_BODY {
+            return Ok(false);
+        }
+    }
+    atomic_write(
+        std::path::Path::new(LOGFORMAT_CONF),
+        LOGFORMAT_BODY.as_bytes(),
+        0o644,
+    )
+    .await?;
     Ok(true)
 }
 
@@ -2318,7 +2359,25 @@ mod tests {
         .expect("render");
         assert!(out.contains("fastcgi_cache hyperion_01HCACHE;"));
         assert!(out.contains("fastcgi_cache_valid 200 301 302 300s;"));
-        assert!(out.contains("fastcgi_no_cache $cookie_wordpress_logged_in"));
+        assert!(out.contains("access.log hyperion_timed;"));
+        assert!(LOGFORMAT_BODY.contains(&format!("log_format {LOGFORMAT_NAME} ")));
+        // Request time is the LAST field, after the quoted user agent, so
+        // every left-to-right combined parser keeps working unchanged.
+        assert!(LOGFORMAT_BODY.contains("\"$http_user_agent\" $request_time';"));
+        assert!(out.contains("fastcgi_no_cache $hyperion_skip_cache $cookie_PHPSESSID;"));
+        assert!(out.contains("fastcgi_cache_bypass $hyperion_skip_cache $cookie_PHPSESSID;"));
+        // WordPress's login cookie carries a hash suffix, so the old exact
+        // `$cookie_wordpress_logged_in` never matched; the skip must test a
+        // PREFIX, and must cover a WooCommerce cart too.
+        assert!(!out.contains("$cookie_wordpress_logged_in"));
+        assert!(out.contains("wordpress_logged_in_|"));
+        assert!(out.contains("wp_woocommerce_session_"));
+        assert!(out.contains("woocommerce_items_in_cart"));
+        let skip = out.find("set $hyperion_skip_cache 0;").expect("skip var");
+        assert!(
+            skip < out.find("fastcgi_cache hyperion_").expect("cache"),
+            "the skip flag is set at server level, before the PHP location"
+        );
         // X-Cache-Status must be emitted at SERVER level, never inside the
         // PHP location: a location-level add_header REPLACES the inherited
         // set and would silently drop HSTS/XFO/nosniff on PHP responses.

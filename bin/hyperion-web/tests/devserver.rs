@@ -406,6 +406,98 @@ async fn seed_demo(svc: &StubService) {
     .await
     .expect("suspension");
 
+    // Profiles & limits: three plan tiers, most sites on one of them.
+    {
+        use hyperion_state::profiles::{insert, upsert_apply, NewProfile};
+        let tiers = [
+            NewProfile {
+                name: "Basic".into(),
+                description: "Small business sites".into(),
+                php_memory_mb: 256,
+                php_max_exec_secs: 60,
+                php_max_children: 5,
+                php_max_requests: 500,
+                db_max_connections: 20,
+                disk_hard_mb: Some(2048),
+                disk_soft_mb: Some(1536),
+                expiry_grace_days: 30,
+                expiry_warning_offsets: "30,7,1".into(),
+                price_minor: Some(19_900),
+                price_currency: Some("CZK".into()),
+                price_interval: Some("monthly".into()),
+                quota_exceed_action: "notify".into(),
+                backup_cadence: "weekly".into(),
+                backup_keep_days: 30,
+                default_php_version: Some("8.3".into()),
+                ..NewProfile::default()
+            },
+            NewProfile {
+                name: "WordPress Pro".into(),
+                description: "WooCommerce and busier WordPress".into(),
+                php_memory_mb: 512,
+                php_max_exec_secs: 120,
+                php_max_children: 20,
+                php_max_requests: 1000,
+                db_max_connections: 60,
+                disk_hard_mb: Some(10_240),
+                disk_soft_mb: Some(8192),
+                expiry_grace_days: 30,
+                expiry_warning_offsets: "30,7,1".into(),
+                price_minor: Some(59_900),
+                price_currency: Some("CZK".into()),
+                price_interval: Some("monthly".into()),
+                quota_exceed_action: "suspend".into(),
+                backup_cadence: "daily".into(),
+                backup_keep_days: 14,
+                backup_keep_last: 3,
+                default_php_version: Some("8.3".into()),
+                default_db_engine: Some("mariadb".into()),
+                wp_plugins: "akismet!\nwordpress-seo!\nwp-mail-smtp".into(),
+                wp_themes: "astra!".into(),
+                ..NewProfile::default()
+            },
+            NewProfile {
+                name: "Static".into(),
+                php_memory_mb: 128,
+                php_max_exec_secs: 30,
+                php_max_children: 2,
+                php_max_requests: 500,
+                db_max_connections: 5,
+                expiry_grace_days: 14,
+                expiry_warning_offsets: "14,3".into(),
+                quota_exceed_action: "notify".into(),
+                backup_cadence: "off".into(),
+                default_db_engine: Some("none".into()),
+                ..NewProfile::default()
+            },
+        ];
+        let mut pids = Vec::new();
+        for t in &tiers {
+            pids.push(insert(pool, t, now - 90 * 86_400).await.expect("profile"));
+        }
+        for (n, id) in ids.iter().enumerate() {
+            let pid = match n {
+                0 | 1 | 5 => pids[0],
+                2 | 3 | 4 | 6 => pids[1],
+                _ => continue,
+            };
+            upsert_apply(
+                pool,
+                &HostingId(id.clone()),
+                Some(pid),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                now - 30 * 86_400,
+            )
+            .await
+            .expect("profile apply");
+        }
+    }
+
     // Hostings-list facts: WordPress on most sites, certificates at a mix
     // of ages (one expiring, one self-signed), backups with one failure,
     // one site in maintenance.
@@ -639,6 +731,113 @@ async fn seed_demo(svc: &StubService) {
             .execute(pool)
             .await
             .expect("net_samples");
+    }
+
+    // Audit log: sign-ins (one failed), settings and cert changes, a node
+    // event, spread over a few days. Appended through the real chain so
+    // "Verify chain" passes.
+    type DemoAudit<'a> = (i64, &'a str, &'a str, Option<&'a str>, &'a str, &'a str);
+    let entries: [DemoAudit; 10] = [
+        (
+            4 * 86_400,
+            "kevin",
+            "node.enroll",
+            Some("worker-2"),
+            r#"{"label":"worker-2","addr":"10.0.0.12"}"#,
+            "ok",
+        ),
+        (
+            3 * 86_400 + 600,
+            "kevin",
+            "web.user.create",
+            Some("petra"),
+            r#"{"role":"operator"}"#,
+            "ok",
+        ),
+        (
+            2 * 86_400 + 4000,
+            "agent",
+            "cert.renew",
+            Some("atelier-hora.com"),
+            r#"{"error":"DNS problem: NXDOMAIN looking up A for atelier-hora.com"}"#,
+            "failed",
+        ),
+        (
+            2 * 86_400,
+            "agent",
+            "cert.renew",
+            Some("studio-lumen.cz"),
+            r#"{"expires_in_days":29}"#,
+            "ok",
+        ),
+        (
+            86_400 + 900,
+            "petra",
+            "hosting.set_limits",
+            Some("kavarna-sever.cz"),
+            r#"{"domain":"kavarna-sever.cz","php_memory_mb":384,"max_children":12}"#,
+            "ok",
+        ),
+        (
+            86_400,
+            "agent",
+            "php.mem_auto.raise",
+            Some("shop.zahrada-plus.cz"),
+            r#"{"from_mb":256,"to_mb":384}"#,
+            "ok",
+        ),
+        (
+            5400,
+            "unknown",
+            "web.login.failed",
+            Some("admin"),
+            r#"{"ip":"203.0.113.7","reason":"bad password"}"#,
+            "failed",
+        ),
+        (
+            3000,
+            "kevin",
+            "web.login.2fa_ok",
+            None,
+            r#"{"ip":"198.51.100.20"}"#,
+            "ok",
+        ),
+        (
+            2400,
+            "kevin",
+            "firewall.apply_template",
+            None,
+            r#"{"template":"web","node":"master"}"#,
+            "ok",
+        ),
+        (
+            600,
+            "kevin",
+            "hosting.set_redis",
+            Some("pekarna-u-mostu.cz"),
+            r#"{"enabled":true}"#,
+            "ok",
+        ),
+    ];
+    for (ago, actor, action, target, payload, result) in entries {
+        hyperion_state::audit::append(
+            pool,
+            hyperion_state::audit::AppendReq {
+                ts: now - ago,
+                actor_uid: if actor == "agent" || actor == "unknown" {
+                    0
+                } else {
+                    1
+                },
+                actor_label: actor,
+                action,
+                target,
+                payload_json: payload,
+                result,
+            },
+        )
+        .await
+        .expect("audit");
     }
 }
 

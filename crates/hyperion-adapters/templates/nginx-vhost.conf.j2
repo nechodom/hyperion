@@ -80,6 +80,19 @@
     # nginx omits headers whose value is empty, so non-FastCGI responses
     # simply don't carry it.
     add_header X-Cache-Status $upstream_cache_status always;
+    # Who must never get (or fill) a cached page. WordPress names its login
+    # cookie `wordpress_logged_in_<hash>`, so an exact-name cookie variable
+    # never matched anything and logged-in users were served the anonymous
+    # copy. A shopper with a cart is the same story under WooCommerce's
+    # cookies, and `?add-to-cart=` / `?wc-ajax=` change state on a GET.
+    # `if` + `set` at server level is one of the safe uses of `if`.
+    set $hyperion_skip_cache 0;
+    if ($http_cookie ~* "wordpress_logged_in_|wp-postpass_|comment_author_|woocommerce_items_in_cart|woocommerce_cart_hash|wp_woocommerce_session_") {
+        set $hyperion_skip_cache 1;
+    }
+    if ($args ~* "(^|&)(add-to-cart|wc-ajax)=") {
+        set $hyperion_skip_cache 1;
+    }
     {%- endif %}
     server_tokens off;
 
@@ -99,7 +112,7 @@
     }
     {%- endif %}
 
-    access_log {{ logs_dir }}/access.log;
+    access_log {{ logs_dir }}/access.log hyperion_timed;
     error_log  {{ logs_dir }}/error.log;
 
     {%- if basic_auth_enabled %}
@@ -259,8 +272,8 @@
         fastcgi_cache hyperion_{{ hosting_id }};
         fastcgi_cache_valid 200 301 302 {{ fastcgi_cache_ttl }}s;
         fastcgi_cache_methods GET HEAD;
-        fastcgi_cache_bypass $cookie_wordpress_logged_in $cookie_PHPSESSID;
-        fastcgi_no_cache $cookie_wordpress_logged_in $cookie_PHPSESSID;
+        fastcgi_cache_bypass $hyperion_skip_cache $cookie_PHPSESSID;
+        fastcgi_no_cache $hyperion_skip_cache $cookie_PHPSESSID;
         fastcgi_cache_key "$scheme$request_method$host$request_uri";
         {#- X-Cache-Status is emitted at SERVER level (see https_body top) —
             an add_header here would drop the inherited security headers. #}

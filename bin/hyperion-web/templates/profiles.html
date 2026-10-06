@@ -1,16 +1,20 @@
 {% extends "base.html" %}
-{% block title %}Profiles · Hyperion{% endblock %}
+{% block title %}Profiles &amp; limits · Hyperion{% endblock %}
 {% block main %}
 <div class="page-header">
   <div>
-    <h1>Profiles</h1>
-    <div class="subtitle">Reusable templates of resource limits, expiry policy, pricing, notifications, and WordPress plugins and themes. Apply one to any hosting to set all of these at once.</div>
+    <h1>Profiles &amp; limits</h1>
+    <div class="subtitle">Plans you apply to websites — limits, disk, backups, expiry, price and WordPress add-ons in one place.</div>
   </div>
   <span class="grow"></span>
   <div class="actions">
     <a href="/profiles/wp-assets" class="btn ghost">
       <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
       WordPress asset library
+    </a>
+    <a href="/profiles/new" class="btn primary">
+      <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+      New profile
     </a>
   </div>
 </div>
@@ -22,74 +26,89 @@
   <div class="flash error"><div class="flash-body">{{ e }}</div></div>
 {% endif %}
 
-<div class="card no-pad-table">
-  <h2 style="padding:1.4rem 1.5rem 0">Existing profiles</h2>
-  {% if profiles.is_empty() %}
-    <div class="empty">
-      <p>No profiles yet. Create one below for each of your standard plan tiers (for example Basic, Pro, Enterprise), then apply it to hostings.</p>
+{% if rows.is_empty() %}
+  <div class="card empty">
+    <div class="empty-illustration">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 7h-9"/><path d="M14 17H5"/><circle cx="17" cy="17" r="3"/><circle cx="7" cy="7" r="3"/></svg>
     </div>
-  {% else %}
+    <h3>No profiles yet</h3>
+    <p class="text-soft">
+      Make one per plan you sell — Basic, Pro, Enterprise — then pick it when
+      you add a website, or apply it from a website's Profile tab.
+    </p>
+    <div class="empty-actions">
+      <a class="btn primary" href="/profiles/new">Create a profile</a>
+    </div>
+  </div>
+{% else %}
+<div class="group">
+  <div class="ghead">
+    Profiles
+    <span class="grow"></span>
+    <span class="ghead-note">{{ rows.len() }} profile{% if rows.len() != 1 %}s{% endif %} · {{ total_sites }} site{% if total_sites != 1 %}s{% endif %} on them</span>
+  </div>
   <div class="table-wrap">
-    <table>
+    <table class="profiles-table">
       <thead>
         <tr>
-          <th>Name</th>
-          <th>PHP memory</th>
-          <th>Disk</th>
-          <th>Price</th>
-          <th>Expiry grace</th>
-          <th>Slack</th>
-          <th>In use</th>
-          <th class="right">Actions</th>
+          <th>Profile</th>
+          <th>PHP</th>
+          <th class="hide-on-phone">Disk</th>
+          <th class="hide-on-phone">Backups</th>
+          <th class="hide-on-phone">Price</th>
+          <th class="right">Sites</th>
+          <th class="right hide-on-phone">Actions</th>
         </tr>
       </thead>
       <tbody>
-        {% for p in profiles %}
+        {% for r in rows %}
         <tr>
           <td>
-            <strong>{{ p.name }}</strong>
-            {% if !p.description.is_empty() %}
-              <div class="muted" style="font-size:0.78rem">{{ p.description }}</div>
+            <a href="/profiles/{{ r.p.id }}/edit" class="profile-name">{{ r.p.name }}</a>
+            {% if !r.p.description.is_empty() %}
+              <div class="cell-sub">{{ r.p.description }}</div>
             {% endif %}
-            {# Plan fingerprint — the differentiating fields, so tiers are
-               distinguishable without opening each edit page. #}
-            <div class="muted" style="font-size:0.74rem;margin-top:2px">
-              {% match p.default_php_version %}{% when Some with (v) %}PHP {{ v }}{% when None %}PHP —{% endmatch %}
-              · {% match p.default_db_engine %}{% when Some with (e) %}{% if e.is_empty() %}any DB{% else %}{{ e }}{% endif %}{% when None %}any DB{% endmatch %}
-              {% if p.plugin_count() > 0 %} · {{ p.plugin_count() }} plugin{% if p.plugin_count() != 1 %}s{% endif %}{% endif %}
-              {% if p.theme_count() > 0 %} · {{ p.theme_count() }} theme{% if p.theme_count() != 1 %}s{% endif %}{% endif %}
-            </div>
+            {% if !r.new_sites.is_empty() %}
+              <div class="cell-sub" title="What a new website on this profile starts with">New sites: {{ r.new_sites }}</div>
+            {% endif %}
           </td>
-          <td>{{ p.php_memory_mb }} MB</td>
-          <td>
-            {% if let Some(m) = p.disk_hard_mb %}{{ m }} MiB{% else %}<span class="text-soft">unlimited</span>{% endif %}
-            {% if p.quota_exceed_action == "suspend" %}<br><span class="pill warn" title="Sites on this profile auto-suspend when they exceed the disk hard cap">on overage: suspend</span>{% endif %}
+          <td class="nowrap">
+            {{ r.php }}
+            <div class="cell-sub">{{ r.php_sub }}</div>
           </td>
-          <td>{{ p.pretty_price() }}</td>
-          <td>{{ p.expiry_grace_days }} d</td>
-          <td>{% if p.slack_webhook.is_some() %}<span class="pill ok">configured</span>{% else %}<span class="text-soft">—</span>{% endif %}</td>
-          <td>{% if p.in_use_count > 0 %}<a href="/profiles/{{ p.id }}/edit" class="pill">{{ p.in_use_count }} site{% if p.in_use_count != 1 %}s{% endif %}</a>{% else %}<span class="text-soft">—</span>{% endif %}</td>
+          <td class="hide-on-phone nowrap">
+            {% if r.p.disk_hard_mb.is_some() %}{{ r.disk }}{% else %}<span class="text-soft">{{ r.disk }}</span>{% endif %}
+            {% if !r.disk_sub.is_empty() %}<div class="cell-sub">{{ r.disk_sub }}</div>{% endif %}
+            {% if r.p.quota_exceed_action == "suspend" %}
+              <div class="cell-sub tone-warn" title="Sites on this profile are suspended when they go over the hard limit">suspends when over</div>
+            {% endif %}
+          </td>
+          <td class="hide-on-phone">
+            {% if r.backups == "Off" %}<span class="text-soft">Off</span>{% else %}{{ r.backups }}{% endif %}
+            {% if !r.backups_sub.is_empty() %}<div class="cell-sub">{{ r.backups_sub }}</div>{% endif %}
+          </td>
+          <td class="hide-on-phone nowrap">
+            {% if r.p.price_minor.is_some() %}{{ r.p.pretty_price() }}{% else %}<span class="text-soft">—</span>{% endif %}
+          </td>
           <td class="right">
+            {% if r.p.in_use_count > 0 %}
+              <a href="/profiles/{{ r.p.id }}/edit#sites" title="Websites on this profile">{{ r.p.in_use_count }}</a>
+            {% else %}
+              <span class="text-soft">—</span>
+            {% endif %}
+          </td>
+          <td class="right hide-on-phone">
             <div class="row-actions">
-              <a class="btn small" href="/profiles/{{ p.id }}/edit">Edit</a>
-              {# Clone — duplicates this profile into a new "(copy)" row
-                 and drops the operator straight onto its edit page. #}
-              <form method="post" action="/profiles/clone" style="display:inline">
+              <a class="btn small" href="/profiles/{{ r.p.id }}/edit">Edit</a>
+              {# Duplicate — copies this profile into a new "(copy)" row and
+                 lands on its edit page. #}
+              <form method="post" action="/profiles/clone" class="inline-form">
                 <input type="hidden" name="_csrf" value="{{ csrf_clone }}">
-                <input type="hidden" name="id" value="{{ p.id }}">
+                <input type="hidden" name="id" value="{{ r.p.id }}">
                 <button class="btn small" type="submit"
                         title="Create a new profile pre-filled with these settings — useful for a variant">
                   Duplicate
                 </button>
-              </form>
-              <form method="post" action="/profiles/delete" style="display:inline"
-                    data-confirm-title="Delete profile {{ p.name }}"
-                    data-confirm-body="{% if p.in_use_count > 0 %}{{ p.in_use_count }} hosting{% if p.in_use_count != 1 %}s{% endif %} use this profile. They keep their applied limits, expiry policy and price.{% if p.slack_webhook.is_some() %} ⚠ Their per-profile Slack billing channel will be lost — expiry/billing notices fall back to email-only.{% endif %} Only the profile template is removed.{% else %}No hostings use this profile — only the template is removed.{% endif %}"
-                    data-confirm-confirm-label="Delete profile"
-                    data-confirm-variant="danger">
-                <input type="hidden" name="_csrf" value="{{ csrf_delete }}">
-                <input type="hidden" name="id" value="{{ p.id }}">
-                <button class="btn small danger" type="submit">Delete</button>
               </form>
             </div>
           </td>
@@ -98,335 +117,6 @@
       </tbody>
     </table>
   </div>
-  {% endif %}
 </div>
-
-<div class="group" style="margin-top:1.25rem">
-  <div class="ghead">New profile</div>
-  <div class="item">
-  <h3>
-    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-    New profile
-  </h3>
-  <form method="post" action="/profiles/create">
-    <input type="hidden" name="_csrf" value="{{ csrf_create }}">
-    <div class="field-row">
-      <div class="field">
-        <label for="p_name">Name <span class="hint">unique short label, e.g. "Pro"</span></label>
-        <input id="p_name" name="name" type="text" required maxlength="64">
-      </div>
-      <div class="field">
-        <label for="p_desc">Description <span class="hint">optional</span></label>
-        <input id="p_desc" name="description" type="text" maxlength="200">
-      </div>
-    </div>
-
-    <h2 style="font-size:0.95rem;margin:1.5rem 0 0.6rem">Limits</h2>
-    <div class="field-row">
-      <div class="field">
-        <label for="p_php_memory">PHP memory <span class="hint">MB</span></label>
-        <input id="p_php_memory" name="php_memory_mb" type="number" min="16" max="8192" value="256">
-      </div>
-      <div class="field">
-        <label for="p_php_exec">PHP max execution time <span class="hint">seconds</span></label>
-        <input id="p_php_exec" name="php_max_exec_secs" type="number" min="1" max="3600" value="60">
-      </div>
-    </div>
-    <div class="field-row">
-      <div class="field">
-        <label for="p_php_children">PHP-FPM max_children</label>
-        <input id="p_php_children" name="php_max_children" type="number" min="1" max="200" value="10">
-      </div>
-      <div class="field">
-        <label for="p_php_reqs">PHP-FPM max_requests</label>
-        <input id="p_php_reqs" name="php_max_requests" type="number" min="0" value="1000">
-      </div>
-    </div>
-    <div class="field-row">
-      <div class="field">
-        <label for="p_db_max">DB max connections</label>
-        <input id="p_db_max" name="db_max_connections" type="number" min="1" max="1000" value="50">
-      </div>
-      <div class="field">
-        <label for="p_disk_soft">Disk soft limit <span class="hint">MB · warning threshold · blank = none</span></label>
-        <input id="p_disk_soft" name="disk_soft_mb" type="number" min="0" placeholder="1500">
-      </div>
-      <div class="field">
-        <label for="p_disk">Disk hard limit <span class="hint">MB · enforced cap · blank = unlimited</span></label>
-        <input id="p_disk" name="disk_hard_mb" type="number" min="0" placeholder="2048">
-      </div>
-    </div>
-    {# "Memory cap" and "Monthly bandwidth" used to sit here. Both fed
-       stores with NO reader — memory went to hosting_quotas.mem_limit_mib
-       (pools build from hosting_limits, so it never took effect) and
-       bandwidth to a column nothing enforces or alerts on. A plan field
-       that does nothing is a promise to a customer that nothing keeps.
-       PHP memory is the "PHP memory" field above, which IS enforced. #}
-    </div>
-    <div class="field">
-      <label for="p_quota_action">When a site exceeds its disk limit <span class="hint">default for sites created from this profile · overridable per-site</span></label>
-      <select id="p_quota_action" name="quota_exceed_action">
-        <option value="notify" selected>Notify only (send an alert)</option>
-        <option value="suspend">Suspend the site (+ alert)</option>
-      </select>
-    </div>
-    <div class="field">
-      <label for="p_backup_cadence">Automatic backups <span class="hint">sites on this profile back up on this cadence · overridable per-site</span></label>
-      <select id="p_backup_cadence" name="backup_cadence">
-        <option value="off" selected>Off — back up only on demand</option>
-        <option value="daily">Daily</option>
-        <option value="weekly">Weekly</option>
-        <option value="monthly">Monthly</option>
-        <option value="custom">Custom — every N days</option>
-      </select>
-    </div>
-    <div class="field-row">
-      <div class="field">
-        <label for="p_backup_interval">Custom period <span class="hint">days · only when the cadence is Custom</span></label>
-        <input id="p_backup_interval" name="backup_interval_days" type="number" min="1" max="365" placeholder="e.g. 3">
-      </div>
-      <div class="field">
-        <label for="p_backup_keep_days">Keep backups for <span class="hint">days · blank/0 = node default</span></label>
-        <input id="p_backup_keep_days" name="backup_keep_days" type="number" min="0" max="36500" placeholder="0">
-      </div>
-      <div class="field">
-        <label for="p_backup_keep_last">Always keep latest <span class="hint">per site · blank/0 = node default</span></label>
-        <input id="p_backup_keep_last" name="backup_keep_last" type="number" min="0" max="1000" placeholder="0">
-      </div>
-    </div>
-
-    <h2 style="font-size:0.95rem;margin:1.5rem 0 0.6rem">Expiration policy</h2>
-    <div class="field-row">
-      <div class="field">
-        <label for="p_grace">Grace period <span class="hint">days after expiry before auto-delete</span></label>
-        <input id="p_grace" name="expiry_grace_days" type="number" min="0" max="365" value="30">
-      </div>
-      <div class="field">
-        <label for="p_off">Warning offsets <span class="hint">days before expiry, comma-separated</span></label>
-        <input id="p_off" name="expiry_warning_offsets" type="text" value="30,7,1">
-      </div>
-    </div>
-
-    <h2 style="font-size:0.95rem;margin:1.5rem 0 0.6rem">Pricing <span class="muted" style="font-weight:400;font-size:0.82rem">— optional</span></h2>
-    <div class="field-row three">
-      <div class="field">
-        <label for="p_price">Price <span class="hint">major units, e.g. 199.00</span></label>
-        <input id="p_price" name="price_major" type="text" inputmode="decimal" placeholder="199.00">
-      </div>
-      <div class="field">
-        <label for="p_currency">Currency <span class="hint">ISO 4217</span></label>
-        <input id="p_currency" name="price_currency" type="text" maxlength="3" placeholder="CZK" style="text-transform:uppercase">
-      </div>
-      <div class="field">
-        <label for="p_interval">Billing interval</label>
-        <select id="p_interval" name="price_interval">
-          <option value="">No interval</option>
-          <option value="monthly">Monthly</option>
-          <option value="quarterly">Quarterly</option>
-          <option value="yearly">Yearly</option>
-        </select>
-      </div>
-    </div>
-
-    <h2 style="font-size:0.95rem;margin:1.5rem 0 0.6rem">Notifications <span class="muted" style="font-weight:400;font-size:0.82rem">— optional</span></h2>
-    <div class="field">
-      <label for="p_slack">Slack incoming webhook URL <span class="hint">overrides the global default for hostings on this profile</span></label>
-      <input id="p_slack" name="slack_webhook" type="url" placeholder="https://hooks.slack.com/services/T.../B.../...">
-    </div>
-    {#- Operator alert addresses. ADDITIVE to the cluster-wide list rather
-        than a replacement: adding one address here must not silently stop
-        the operator receiving alerts they were already getting. -#}
-    <div class="field">
-      <label for="p_alert_emails">Alert e-mail addresses
-        <span class="hint">operator alerts for sites on this profile also go here — a client's own IT contact, a shared inbox</span>
-      </label>
-      <input id="p_alert_emails" name="alert_emails" type="text"
-             placeholder="ops@klient.cz, admin@klient.cz">
-      <span class="hint" style="display:block;margin-top:0.3rem">
-        In addition to the administrator addresses in
-        <a href="/settings#default_to">Settings → Mail → Administrator notifications (set per node)</a>, never
-        instead of them. These are OPERATOR alerts — a failed backup, a
-        certificate that will not renew, a site that stopped answering — not
-        the customer's care report, which goes to the hosting's owner e-mail.
-      </span>
-    </div>
-
-    {# Wizard pre-fill — when set, /hostings/new auto-selects
-       these runtime values in step 3 the moment the operator
-       picks this profile. Both optional; blank = "no preference,
-       wizard keeps its global defaults". Critical for
-       "WordPress Pro"–style profiles where you always want a
-       specific PHP + MariaDB. #}
-    <h2 style="font-size:0.95rem;margin:1.5rem 0 0.6rem">
-      Wizard defaults <span class="muted" style="font-weight:400;font-size:0.82rem">— pre-fill the new-hosting form when this profile is picked</span>
-    </h2>
-    <div class="field-row" style="margin-bottom:1rem">
-      <div class="field" style="flex:1">
-        <label for="p_default_php_version">Pre-fill PHP version</label>
-        <select id="p_default_php_version" name="default_php_version">
-          <option value="">No preference</option>
-          <option value="8.1">PHP 8.1</option>
-          <option value="8.2">PHP 8.2</option>
-          <option value="8.3">PHP 8.3</option>
-          <option value="8.4">PHP 8.4</option>
-        </select>
-      </div>
-      <div class="field" style="flex:1">
-        <label for="p_default_db_engine">Pre-fill database</label>
-        <select id="p_default_db_engine" name="default_db_engine">
-          <option value="">No preference</option>
-          <option value="mariadb">MariaDB</option>
-          <option value="postgres">PostgreSQL</option>
-          <option value="none">No database (static, or static with PHP)</option>
-        </select>
-      </div>
-    </div>
-
-    <h2 style="font-size:0.95rem;margin:1.5rem 0 0.6rem">
-      WordPress plugins and themes <span class="muted" style="font-weight:400;font-size:0.82rem">— installed when this profile is applied to a WordPress hosting</span>
-    </h2>
-    <p class="text-soft small" style="margin:0 0 0.7rem;line-height:1.55">
-      One item per line — a WordPress.org slug (<code>akismet</code>) or
-      <code>@asset:&lt;id&gt;</code> for an uploaded ZIP (see the <a href="/profiles/wp-assets">asset library</a>).
-      A trailing <code>!</code> also activates the item after install.
-    </p>
-    <div class="field-row">
-      <div class="field" style="flex:1">
-        <label for="p_wp_plugins">Plugins</label>
-        <textarea id="p_wp_plugins" name="wp_plugins" rows="5"
-                  style="font-family:var(--font-mono);font-size:0.85rem;width:100%"
-                  placeholder="akismet!&#10;wordpress-seo"></textarea>
-        {% if !plugin_assets.is_empty() %}
-        <details class="asset-picker" style="margin-top:0.5rem">
-          <summary>
-            Add from library <span class="text-soft small">({{ plugin_assets.len() }} uploaded plugin{% if plugin_assets.len() != 1 %}s{% endif %})</span>
-          </summary>
-          <div class="asset-picker-body">
-            {% for a in plugin_assets %}
-            <label class="asset-row">
-              <input type="checkbox" class="asset-tick"
-                     data-textarea="p_wp_plugins"
-                     data-asset-id="{{ a.id }}">
-              <span class="asset-name">{{ a.original_name }}</span>
-              <span class="text-soft small">{{ a.size_bytes / 1024 }} KB</span>
-            </label>
-            {% endfor %}
-          </div>
-        </details>
-        {% endif %}
-      </div>
-      <div class="field" style="flex:1">
-        <label for="p_wp_themes">Themes</label>
-        <textarea id="p_wp_themes" name="wp_themes" rows="5"
-                  style="font-family:var(--font-mono);font-size:0.85rem;width:100%"
-                  placeholder="astra!"></textarea>
-        {% if !theme_assets.is_empty() %}
-        <details class="asset-picker" style="margin-top:0.5rem">
-          <summary>
-            Add from library <span class="text-soft small">({{ theme_assets.len() }} uploaded theme{% if theme_assets.len() != 1 %}s{% endif %})</span>
-          </summary>
-          <div class="asset-picker-body">
-            {% for a in theme_assets %}
-            <label class="asset-row">
-              <input type="checkbox" class="asset-tick"
-                     data-textarea="p_wp_themes"
-                     data-asset-id="{{ a.id }}">
-              <span class="asset-name">{{ a.original_name }}</span>
-              <span class="text-soft small">{{ a.size_bytes / 1024 }} KB</span>
-            </label>
-            {% endfor %}
-          </div>
-        </details>
-        {% endif %}
-      </div>
-    </div>
-
-    {# Picker styles + JS — same logic as profile_edit.html. Two
-       places, identical handlers so the picker behaves the same
-       on Create and Edit forms. #}
-    <style>
-      details.asset-picker {
-        border: 1px solid var(--border);
-        border-radius: var(--radius-sm);
-        background: var(--surface-1);
-      }
-      details.asset-picker > summary {
-        cursor: pointer;
-        padding: 0.5rem 0.75rem;
-        font-size: 0.82rem;
-        font-weight: 600;
-        list-style: none;
-        user-select: none;
-      }
-      details.asset-picker > summary::-webkit-details-marker { display: none; }
-      details.asset-picker > summary::after {
-        content: "▾";
-        float: right;
-        color: var(--text-soft);
-        transition: transform 0.15s ease;
-      }
-      details.asset-picker[open] > summary::after { transform: rotate(180deg); }
-      .asset-picker-body {
-        max-height: 14rem;
-        overflow-y: auto;
-        padding: 0.3rem 0.4rem 0.5rem;
-      }
-      .asset-row {
-        display: flex;
-        align-items: center;
-        gap: 0.5rem;
-        padding: 0.35rem 0.55rem;
-        border-radius: var(--radius-xs);
-        cursor: pointer;
-        font-size: 0.85rem;
-      }
-      .asset-row:hover { background: var(--surface-2); }
-      .asset-row input { margin: 0; flex: none; }
-      .asset-name { flex: 1; min-width: 0; overflow-wrap: anywhere; font-weight: 500; }
-    </style>
-    <script>
-      (function () {
-        'use strict';
-        const taPlugins = document.getElementById('p_wp_plugins');
-        const taThemes = document.getElementById('p_wp_themes');
-        if (!taPlugins || !taThemes) return;
-        function hasAssetLine(text, id) {
-          const re = new RegExp('(^|\\n)\\s*@asset:' + id + '\\b', 'm');
-          return re.test(text);
-        }
-        function appendAssetLine(textarea, id) {
-          let v = textarea.value.replace(/\s+$/, '');
-          if (v.length > 0) v += '\n';
-          textarea.value = v + '@asset:' + id + '!';
-        }
-        function removeAssetLine(textarea, id) {
-          const re = new RegExp('(?:^|\\n)\\s*@asset:' + id + '!?\\s*(?:#[^\\n]*)?(?=\\n|$)', 'g');
-          textarea.value = textarea.value.replace(re, '').replace(/\n{3,}/g, '\n\n').replace(/^\n+/, '');
-        }
-        document.querySelectorAll('.asset-tick').forEach(cb => {
-          const taId = cb.dataset.textarea;
-          const ta = document.getElementById(taId);
-          const id = cb.dataset.assetId;
-          if (!ta || !id) return;
-          cb.checked = hasAssetLine(ta.value, id);
-          cb.addEventListener('change', () => {
-            if (cb.checked) {
-              if (!hasAssetLine(ta.value, id)) appendAssetLine(ta, id);
-            } else {
-              removeAssetLine(ta, id);
-            }
-          });
-        });
-      })();
-    </script>
-
-    <div class="item-actions">
-      <button class="btn primary" type="submit">
-        <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
-        Create profile
-      </button>
-    </div>
-  </form>
-  </div>
-</div>
+{% endif %}
 {% endblock %}

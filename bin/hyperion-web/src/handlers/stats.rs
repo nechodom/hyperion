@@ -1375,6 +1375,8 @@ fn fmt_action_label_inner(s: &str) -> String {
         "node.revoke" => "Node revoked",
         "hosting.migration.move" => "Hosting migrated",
         "hosting.rotate_wp_debug_log" => "debug.log rotated",
+        "php.mem_auto.raise" => "PHP memory limit raised",
+        "php.mem_auto.restore" => "PHP memory limit lowered",
         // Anything not named above gets a GENERATED label instead of the
         // raw kind. The hand map exists for the labels where natural
         // English beats a mechanical one; the generator exists because the
@@ -1405,6 +1407,10 @@ fn humanize_kind(kind: &str) -> String {
             "dkim" => "DKIM",
             "spf" => "SPF",
             "geoip" => "GeoIP",
+            "php" => "PHP",
+            "api" => "API",
+            "mta" => "MTA",
+            "ip" => "IP",
             "smtp" => "SMTP",
             "tls" => "TLS",
             "s3" => "S3",

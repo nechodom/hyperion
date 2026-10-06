@@ -1125,6 +1125,27 @@ pub static STRINGS: &[LetterString] = &[
         cs: "{domain} — automatická kontrola stránek našla {count} nefunkčních stránek: {urls}",
     },
     LetterString {
+        id: "ops.php_workers_full.title",
+        group: "Operator alerts — hostings",
+        note: "A site's PHP-FPM pool keeps running out of workers.",
+        en: "Site ran out of PHP workers",
+        cs: "Webu došly PHP procesy",
+    },
+    LetterString {
+        id: "ops.php_workers_full.body",
+        group: "Operator alerts — hostings",
+        note: "Tokens: {domain} {children} (max_children) {today} (times today).",
+        en: "{domain} had all {children} PHP workers busy {today}× today, so visitors waited \
+             in a queue and some got a 502 or 504. More memory does not help with this. Open \
+             \"PHP slow requests\" in the site's Logs to see what keeps the workers busy, \
+             turn on the page cache, or raise max_children on the PHP-FPM & DB limits card.",
+        cs: "{domain} měl dnes {today}× obsazeno všech {children} PHP procesů, takže \
+             návštěvníci čekali ve frontě a někteří dostali chybu 502 nebo 504. Víc paměti \
+             tady nepomůže. V Logách webu otevřete „PHP slow requests“ a uvidíte, co procesy \
+             blokuje, zapněte cache stránek, nebo zvyšte max_children v kartě limitů PHP-FPM \
+             & DB.",
+    },
+    LetterString {
         id: "ops.php_mem_raised.title",
         group: "Operator alerts — hostings",
         note: "The automatic memory_limit raised a site's PHP memory.",

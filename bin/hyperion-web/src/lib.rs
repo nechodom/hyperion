@@ -469,6 +469,7 @@ pub fn build_router(state: SharedState) -> Router {
             post(handlers::hostings::post_backup_offsite_drop),
         )
         .route("/profiles", get(handlers::profiles::get_profiles))
+        .route("/profiles/new", get(handlers::profiles::get_new))
         .route("/profiles/create", post(handlers::profiles::post_create))
         .route(
             "/profiles/wp-assets",
