@@ -780,6 +780,48 @@ details.item > summary::-webkit-details-marker { display: none; }
    Zero it when groups are direct grid children; the grid `gap` spaces them. */
 .dashboard-grid > .group + .group { margin-top: 0; }
 
+/* Services page: one row per systemd unit inside a .group — label, a single
+   status pill, actions. Replaces the old seven-column table. */
+.group > .svc-row {
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
+  padding: 0.85rem 1.25rem;
+  border-bottom: 1px solid var(--border);
+}
+.group > .svc-row:last-child { border-bottom: none; }
+.svc-row .svc-main { flex: 1; min-width: 0; }
+.svc-row .svc-title { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.5rem; }
+.svc-row .svc-title code { font-size: 0.78rem; }
+.svc-row .svc-actions { display: flex; gap: 0.3rem; flex: none; min-width: 5.5rem; justify-content: flex-end; }
+.svc-row .svc-actions form { display: inline; }
+.pill.muted { background: var(--surface-2); color: var(--text-soft); }
+.pill.muted::before { background: var(--text-soft); }
+.svc-verdict {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-bottom: var(--group-gap);
+  font-weight: 600;
+}
+.svc-verdict .dot { width: 9px; height: 9px; border-radius: 50%; flex: none; background: var(--text-soft); }
+.svc-verdict.ok .dot   { background: var(--success); }
+.svc-verdict.warn .dot { background: var(--warn); }
+.svc-verdict.err .dot  { background: var(--danger); }
+.svc-verdict.err  { color: var(--danger); }
+details.svc-fold > summary { cursor: pointer; list-style: none; }
+details.svc-fold > summary::-webkit-details-marker { display: none; }
+details.svc-fold > summary::before { content: "▸"; margin-right: 0.2rem; }
+details.svc-fold[open] > summary::before { content: "▾"; }
+details.svc-fold:not([open]) > summary { border-bottom: none; }
+details.svc-fold .svc-row .pill.muted { display: none; }
+#svc-health-live > .group + .group { margin-top: var(--group-gap); }
+#svc-health-live + .group, #svc-health-live + details.group { margin-top: var(--group-gap); }
+@media (max-width: 640px) {
+  .group > .svc-row { flex-wrap: wrap; }
+  .svc-row .svc-main { flex-basis: 100%; }
+}
+
 /* /admin/users — one grouped panel; each user is a details row whose summary
    is the scan line and whose body holds role / sign-in / password side by
    side, with delete split off at the bottom. */

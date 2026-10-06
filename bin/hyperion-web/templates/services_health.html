@@ -1,19 +1,47 @@
 {% extends "base.html" %}
 {% block title %}Service health · Hyperion{% endblock %}
+{% macro svc_row(r) %}
+<div class="svc-row">
+  <div class="svc-main">
+    <div class="svc-title"><strong>{{ r.label }}</strong> <code class="text-soft">{{ r.name }}</code></div>
+    {% if let Some(n) = r.note %}<div class="text-soft small">{{ n }}</div>{% endif %}
+  </div>
+  <span class="pill {{ r.tone }}">{{ r.status }}</span>
+  {% if is_super_admin %}
+  <div class="svc-actions">
+    {% if r.can_restart %}
+    <form method="post" action="/services/restart"
+          data-confirm-title="Restart {{ r.label }}"
+          data-confirm-body="Runs systemctl restart {{ r.name }} on {{ current_label }}. Active connections may briefly drop."
+          data-confirm-confirm-label="Restart"
+          data-confirm-variant="primary">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="name" value="{{ r.name }}">
+      <input type="hidden" name="node" value="{{ current_node }}">
+      <button type="submit" class="btn small">Restart</button>
+    </form>
+    {% endif %}
+    {% if r.can_install %}
+    <form method="post" action="/services/install"
+          data-confirm-title="Install {{ r.label }}"
+          data-confirm-body="Runs apt-get install -y {{ r.name }} and systemctl enable --now on {{ current_label }}. This can take up to 5 minutes."
+          data-confirm-confirm-label="Install"
+          data-confirm-variant="primary">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="name" value="{{ r.name }}">
+      <input type="hidden" name="node" value="{{ current_node }}">
+      <button type="submit" class="btn small primary">Install</button>
+    </form>
+    {% endif %}
+  </div>
+  {% endif %}
+</div>
+{% endmacro %}
 {% block main %}
 <div class="page-header">
   <div>
     <h1>Service health <span class="text-soft" style="font-weight:400;font-size:0.7em">· {{ current_label }}</span></h1>
-    <div class="subtitle">
-      Live status of the systemd units Hyperion depends on.
-      {% if health.critical_down > 0 %}
-        <strong style="color:var(--danger)">{{ health.critical_down }} critical service(s) down.</strong>
-      {% else if health.warn_down > 0 %}
-        <strong style="color:var(--warn)">{{ health.warn_down }} optional service(s) down.</strong>
-      {% else %}
-        All services are healthy.
-      {% endif %}
-    </div>
+    <div class="subtitle">systemd units Hyperion depends on, checked live.</div>
   </div>
   {% if !nodes.is_empty() %}
   <span class="grow"></span>
@@ -60,267 +88,112 @@
   </div>
 {% endif %}
 
-{# Summary card at top. When the agent's services_health RPC errored
-   the table is empty AND there's a flash_error / error banner above.
-   Render "Unknown" instead of falsely-green "Healthy" — the operator
-   should be able to see at a glance that the answer didn't come from
-   a successful probe. #}
-{% if error.is_some() || health.services.is_empty() %}
-<div class="kpi-grid" style="margin-bottom:1rem">
-  <div class="kpi-card" style="border-left:4px solid var(--text-soft)">
-    <div class="kpi-label">Overall</div>
-    <div class="kpi-value">Unknown</div>
-    <div class="kpi-foot" style="color:var(--text-soft)">
-      {% if let Some(e) = error %}Probe failed: {{ e }}{% else %}No probes returned{% endif %}
-    </div>
+{# Everything that changes on its own lives in this region; the shared
+   data-live-refresh driver in base.html swaps it every 15 s without a
+   reload. The "Not installed" fold sits OUTSIDE it on purpose: a swap
+   would snap an open <details> shut under the operator's cursor. #}
+<div id="svc-health-live" data-live-refresh="15">
+  <div class="svc-verdict {{ view.tone }}">
+    <span class="dot"></span>
+    <span>{{ view.verdict }}</span>
   </div>
+
+  {% if view.known %}
+  <div class="group">
+    <div class="ghead">Core · the panel needs these</div>
+    {% for r in view.core %}{% call svc_row(r) %}{% endfor %}
+  </div>
+
+  {% if !view.optional.is_empty() %}
+  <div class="group">
+    <div class="ghead">Optional · databases, PHP, mail, FTP</div>
+    {% for r in view.optional %}{% call svc_row(r) %}{% endfor %}
+  </div>
+  {% endif %}
+  {% endif %}
 </div>
-{% else %}
-<div class="kpi-grid" style="margin-bottom:1rem">
-  <div class="kpi-card" style="{% if health.critical_down > 0 %}border-left:4px solid var(--danger){% else if health.warn_down > 0 %}border-left:4px solid var(--warn){% else %}border-left:4px solid var(--success){% endif %}">
-    <div class="kpi-label">Overall</div>
-    <div class="kpi-value">
-      {% if health.critical_down > 0 %}
-        Degraded
-      {% else if health.warn_down > 0 %}
-        Limited
-      {% else %}
-        Healthy
-      {% endif %}
+
+{% if !view.not_installed.is_empty() %}
+<details class="group svc-fold">
+  <summary class="ghead">Not installed on this node ({{ view.not_installed.len() }})</summary>
+  {% for r in view.not_installed %}{% call svc_row(r) %}{% endfor %}
+</details>
+{% endif %}
+
+{% if is_super_admin %}
+{# Install progress — only while an install runs or just finished, so a
+   normal visit doesn't carry an empty panel. The status endpoint answers
+   HTTP 286 once the job is done, which retires the 2 s poll. #}
+{% if show_install %}
+<div class="group">
+  <div class="ghead">Install progress · {{ current_label }}</div>
+  <div class="item" id="install-progress">
+    <div id="install-progress-body"
+         hx-get="/services/install-status?node={{ current_node }}"
+         hx-trigger="load, every 2s"
+         hx-swap="innerHTML">
+      <span class="text-soft small">Loading status…</span>
     </div>
-    <div class="kpi-meta">{{ health.services.len() }} services tracked</div>
-  </div>
-  <div class="kpi-card">
-    <div class="kpi-label">Critical down</div>
-    <div class="kpi-value" style="{% if health.critical_down > 0 %}color:var(--danger){% endif %}">{{ health.critical_down }}</div>
-    <div class="kpi-meta">nginx, hyperion-agent, hyperion-web</div>
-  </div>
-  <div class="kpi-card">
-    <div class="kpi-label">Optional down</div>
-    <div class="kpi-value" style="{% if health.warn_down > 0 %}color:var(--warn){% endif %}">{{ health.warn_down }}</div>
-    <div class="kpi-meta">FPM, DBs, vsftpd</div>
   </div>
 </div>
 {% endif %}
 
-<div class="card no-pad-table" id="svc-health-live" data-live-refresh="15">
-  <div class="table-wrap">
-    <table>
-      <thead>
-        <tr>
-          <th>Service</th>
-          <th>Status</th>
-          <th>Active</th>
-          <th>Enabled</th>
-          <th>SubState</th>
-          <th>Severity</th>
-          {% if is_super_admin %}<th class="right">Actions</th>{% endif %}
-        </tr>
-      </thead>
-      <tbody>
-        {% for s in health.services %}
-        <tr>
-          <td>
-            <strong>{{ s.label }}</strong>
-            <div class="text-soft small"><code>{{ s.name }}</code></div>
-          </td>
-          <td>
-            {% if !s.present %}
-              <span class="pill" style="background:var(--surface-2);color:var(--text-soft)">not installed</span>
-            {% else if s.transient %}
-              <span class="pill warn" title="ActiveState = {{ s.active_state }}">restarting…</span>
-            {% else if s.active_state == "active" %}
-              <span class="pill ok">running</span>
-            {% else if s.active_state == "failed" %}
-              <span class="pill err">failed</span>
-            {% else if s.active %}
-              <span class="pill ok">{{ s.active_state }}</span>
-            {% else %}
-              <span class="pill err">{{ s.active_state }}</span>
-            {% endif %}
-          </td>
-          <td>{% if s.active %}<span class="text-soft">yes</span>{% else %}<strong style="color:var(--danger)">no</strong>{% endif %}</td>
-          <td>{% if s.enabled %}<span class="text-soft">yes</span>{% else %}<span style="color:var(--warn)">no</span>{% endif %}</td>
-          <td><code class="text-soft" title="SubState">{{ s.sub_state }}</code></td>
-          <td>
-            {% if s.severity == "error" %}<span class="pill err">CRITICAL</span>
-            {% else if s.severity == "warn" %}<span class="pill warn">WARN</span>
-            {% else if s.severity == "info" %}<span class="pill" style="background:var(--surface-2);color:var(--text-soft)">INFO</span>
-            {% else %}<span class="pill ok">OK</span>{% endif %}
-          </td>
-          {% if is_super_admin %}
-          <td class="right">
-            <div style="display:inline-flex;gap:0.3rem;justify-content:flex-end;flex-wrap:wrap">
-              {% if !s.present %}
-                {# Don't offer self-install for hyperion-agent / hyperion-web — they're already this binary. #}
-                {% if s.name != "hyperion-agent" && s.name != "hyperion-web" %}
-                  <form method="post" action="/services/install" style="display:inline"
-                        data-confirm-title="Install {{ s.label }}"
-                        data-confirm-body="Runs apt-get install -y {{ s.name }} and systemctl enable --now on {{ current_label }}. This can take up to 5 minutes."
-                        data-confirm-confirm-label="Install"
-                        data-confirm-variant="primary">
-                    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-                    <input type="hidden" name="name" value="{{ s.name }}">
-                    {# Carry the current node so the action lands on
-                       the same node the operator is viewing. #}
-                    <input type="hidden" name="node" value="{{ current_node }}">
-                    <button type="submit" class="btn small primary">Install</button>
-                  </form>
-                {% endif %}
-              {% else %}
-                {# Refuse self-restart of hyperion-agent — would terminate the RPC pipe. #}
-                {% if s.name != "hyperion-agent" %}
-                  <form method="post" action="/services/restart" style="display:inline"
-                        data-confirm-title="Restart {{ s.label }}"
-                        data-confirm-body="Runs systemctl restart {{ s.name }} on {{ current_label }}. Active connections may briefly drop."
-                        data-confirm-confirm-label="Restart"
-                        data-confirm-variant="primary">
-                    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-                    <input type="hidden" name="name" value="{{ s.name }}">
-                    <input type="hidden" name="node" value="{{ current_node }}">
-                    <button type="submit" class="btn small">Restart</button>
-                  </form>
-                {% endif %}
-              {% endif %}
-            </div>
-          </td>
-          {% endif %}
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-  </div>
-</div>
-
-{# Live install progress — auto-polls every 2 s via HTMX while a
-   job is running. The first time the page loads the panel asks
-   the agent for current state; if no install has ever run, it
-   shows a short hint instead. #}
-{% if is_super_admin %}
-<div class="group" style="margin-top:1.4rem">
-  <div class="ghead">Service maintenance</div>
-  <div class="item" id="install-progress">
-    <h3>
-      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-      Service install progress
-      <span class="text-soft" style="font-weight:400;font-size:0.75em">· {{ current_label }}</span>
-    </h3>
-  <div id="install-progress-body"
-       hx-get="/services/install-status?node={{ current_node }}"
-       hx-trigger="load, every 2s"
-       hx-swap="innerHTML">
-    <span class="text-soft small">Loading status…</span>
-  </div>
-  <p class="text-soft small" style="margin:0.6rem 0 0">
-    Click <strong>Install</strong> on any row above to run
-    <code>apt-get install</code> and <code>systemctl enable --now</code>.
-    Output streams here live, and the page does not block. apt runs with
-    <code>-q -o Dpkg::Options::=--force-confold</code> — non-interactive
-    but still verbose — so the real cause of a failure is shown rather
-    than the generic "dpkg returned 1" wrapper.
-  </p>
-  </div>
-
-  {# Rootfs read-only diagnose + auto-fix. Two HTMX-driven buttons:
-     - "Diagnose" runs the gather-only RPC and renders mount lines,
-       fstab, immutable attrs, image kind — operator can read what's
-       wrong before touching anything.
-     - "Auto-fix" runs the full sequence (remount,rw / → chattr -i
-       /usr → remount,rw /usr) and shows each step's outcome.
-   Results swap into #fs-diagnose-result; no page reload, the install
-   live-log panel above keeps streaming. #}
+{# Read-only rootfs tools. Rarely needed, so folded; opens by itself when
+   the last install failed on a read-only filesystem. #}
+<details class="group svc-fold" id="troubleshooting" {% if rofs_suspected %}open{% endif %}>
+  <summary class="ghead">Troubleshooting · read-only filesystem</summary>
   <div class="item">
-    <h3>
-      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-      Read-only rootfs — diagnose and auto-fix
-    </h3>
-  <p class="text-soft small" style="margin:0 0 0.7rem">
-    If an Install above failed with <code>/usr is not writable</code> or
-    <code>Read-only file system (os error 30)</code>, the buttons below
-    run a full diagnostic on <strong>{{ current_label }}</strong> and can
-    optionally walk a fix sequence (<code>mount -o remount,rw /</code>,
-    then <code>chattr -i /usr</code> and <code>mount -o remount,rw /usr</code>
-    when /usr is a separate mountpoint). The result appears in the panel
-    below, with no page reload.
-  </p>
-  <div style="display:flex;gap:0.5rem;flex-wrap:wrap;align-items:center">
-    <form hx-post="/services/fs-diagnose"
-          hx-target="#fs-diagnose-result"
-          hx-swap="innerHTML"
-          hx-indicator="#fs-diagnose-spinner"
-          style="display:inline">
-      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-      <input type="hidden" name="node" value="{{ current_node }}">
-      <input type="hidden" name="dry_run" value="1">
-      <button class="btn" type="submit">
-        <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-        Diagnose (read-only)
-      </button>
-    </form>
-    <form hx-post="/services/fs-diagnose"
-          hx-target="#fs-diagnose-result"
-          hx-swap="innerHTML"
-          hx-indicator="#fs-diagnose-spinner"
-          data-confirm-title="Auto-fix rootfs on {{ current_label }}"
-          data-confirm-body="Runs `mount -o remount,rw /` and, when needed, `chattr -i /usr` and `mount -o remount,rw /usr`. On snap-managed or ostree images these will fail by design — the diagnose card will tell you to switch to a non-immutable image."
-          data-confirm-confirm-label="Run auto-fix"
-          data-confirm-variant="primary"
-          style="display:inline">
-      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-      <input type="hidden" name="node" value="{{ current_node }}">
-      <input type="hidden" name="dry_run" value="0">
-      <button class="btn primary" type="submit">
-        <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><polyline points="21 3 21 9 15 9"/></svg>
-        Diagnose and auto-fix
-      </button>
-    </form>
-    <span id="fs-diagnose-spinner" class="htmx-indicator text-soft small">Running…</span>
+    <p class="text-soft small" style="margin:0 0 0.7rem">
+      For installs that fail with <code>Read-only file system</code> or
+      <code>/usr is not writable</code>. <strong>Diagnose</strong> only reads;
+      <strong>Diagnose and auto-fix</strong> also runs
+      <code>mount -o remount,rw /</code> and, when /usr is separate,
+      <code>chattr -i /usr</code> + <code>mount -o remount,rw /usr</code>.
+    </p>
+    <div style="display:flex;gap:0.5rem;flex-wrap:wrap;align-items:center">
+      <form hx-post="/services/fs-diagnose"
+            hx-target="#fs-diagnose-result"
+            hx-swap="innerHTML"
+            hx-indicator="#fs-diagnose-spinner"
+            style="display:inline">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <input type="hidden" name="node" value="{{ current_node }}">
+        <input type="hidden" name="dry_run" value="1">
+        <button class="btn" type="submit">Diagnose</button>
+      </form>
+      <form hx-post="/services/fs-diagnose"
+            hx-target="#fs-diagnose-result"
+            hx-swap="innerHTML"
+            hx-indicator="#fs-diagnose-spinner"
+            data-confirm-title="Auto-fix rootfs on {{ current_label }}"
+            data-confirm-body="Runs `mount -o remount,rw /` and, when needed, `chattr -i /usr` and `mount -o remount,rw /usr`. On snap-managed or ostree images these will fail by design — the diagnose card will tell you to switch to a non-immutable image."
+            data-confirm-confirm-label="Run auto-fix"
+            data-confirm-variant="primary"
+            style="display:inline">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <input type="hidden" name="node" value="{{ current_node }}">
+        <input type="hidden" name="dry_run" value="0">
+        <button class="btn primary" type="submit">Diagnose and auto-fix</button>
+      </form>
+      <form method="post" action="/services/remount-usr-rw"
+            style="display:inline"
+            data-confirm-title="Remount read-write on {{ current_label }}"
+            data-confirm-body="Runs `mount -o remount,rw /` on {{ current_label }} with no diagnostic. On snap-managed or ostree-style images this will fail (immutable by design) and you'll need the full diagnose. On normal Debian or Ubuntu images this is safe and routine."
+            data-confirm-confirm-label="Remount read-write"
+            data-confirm-variant="primary">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <input type="hidden" name="node" value="{{ current_node }}">
+        <button class="btn small" type="submit">Remount only</button>
+      </form>
+      <span id="fs-diagnose-spinner" class="htmx-indicator text-soft small">Running…</span>
+    </div>
+    <div id="fs-diagnose-result"></div>
   </div>
-  <div id="fs-diagnose-result"></div>
-
-  {# Quick-fire alternative for operators who know the install
-     just needs `mount -o remount,rw /` on the current node — skips
-     the diagnose flow entirely. Same RPC the auto-fix's first step
-     runs, just without the gather phase or step-by-step report.
-     Useful when an Install above clearly bailed with ROFS and
-     you'd rather not read three paragraphs of report. #}
-  <details style="margin-top:0.8rem">
-    <summary class="text-soft small" style="cursor:pointer">
-      Remount read-write only (skip diagnose)
-    </summary>
-    <form method="post" action="/services/remount-usr-rw"
-          style="display:inline-flex;gap:0.5rem;align-items:center;margin-top:0.5rem"
-          data-confirm-title="Remount read-write on {{ current_label }}"
-          data-confirm-body="Runs `mount -o remount,rw /` on {{ current_label }} with no diagnostic. On snap-managed or ostree-style images this will fail (immutable by design) and you'll need the full diagnose. On normal Debian or Ubuntu images this is safe and routine."
-          data-confirm-confirm-label="Remount read-write"
-          data-confirm-variant="primary">
-      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-      <input type="hidden" name="node" value="{{ current_node }}">
-      <button class="btn small" type="submit">
-        <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><polyline points="21 3 21 9 15 9"/></svg>
-        Remount read-write on {{ current_label }}
-      </button>
-    </form>
-  </details>
-  </div>
-</div>
+</details>
 {% endif %}
 
 <p class="text-soft small" style="margin-top:1rem">
-  Status is live, re-evaluated on every page load via
-  <code>systemctl show -p ActiveState -p SubState -p UnitFileState</code>.
-  The status table above refreshes every 15 s in the background (no full
-  reload, so it never flickers); it pauses while you are typing or clicking.
-  {% if is_super_admin %}
-    <strong>Install</strong> runs <code>apt-get install -y</code> and <code>systemctl enable --now</code>;
-    <strong>Restart</strong> runs <code>systemctl restart &lt;name&gt;</code>.
-    Self-restart of <code>hyperion-agent</code> is intentionally refused — it would kill this RPC.
-    All actions are audited.
-  {% else %}
-    To restart a down service, run <code>ssh root@&lt;node&gt; systemctl restart &lt;name&gt;</code>.
-  {% endif %}
+  Refreshes every 15 s.
+  {% if is_super_admin %}All actions are audited.{% else %}Restart and install need the super-admin role.{% endif %}
 </p>
-
-{# Live refresh of #svc-health-live is handled flicker-free by the shared
-   data-live-refresh driver in base.html — no full-page reload. #}
 {% endblock %}

@@ -25,7 +25,7 @@ struct ServicesHealthTpl<'a> {
     active: &'static str,
     css_version: &'static str,
     htmx_version: &'static str,
-    health: ServicesHealth,
+    view: ServicesView,
     error: Option<String>,
     flash: Option<String>,
     flash_error: Option<String>,
@@ -39,6 +39,175 @@ struct ServicesHealthTpl<'a> {
     current_node: String,
     /// Human label for the page header ("master" / node label).
     current_label: String,
+    /// Show the install-progress panel: an install is running on this
+    /// node or finished in the last few minutes. Otherwise it stays out
+    /// of the way — nothing to look at.
+    show_install: bool,
+    /// The last install hit a read-only filesystem, so the troubleshooting
+    /// fold opens by itself instead of waiting to be found.
+    rofs_suspected: bool,
+}
+
+/// Units the panel cannot run without. Everything else the agent probes is
+/// optional. Kept here rather than on the wire: old agents don't say which
+/// is which, and the set has not changed since the page existed.
+const CORE_UNITS: &[&str] = &["nginx", "hyperion-agent", "hyperion-web"];
+
+/// How long a finished install stays on the page before the panel hides.
+const INSTALL_PANEL_LINGER_SECS: i64 = 10 * 60;
+
+/// One service row, already reduced to what the operator reads: a single
+/// status pill instead of four overlapping columns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SvcRow {
+    pub name: String,
+    pub label: String,
+    /// Pill class: `ok` / `warn` / `err` / `muted`.
+    pub tone: &'static str,
+    pub status: String,
+    /// Extra fact shown only when it matters ("won't start at boot").
+    pub note: Option<String>,
+    /// Counts against health — sorts first and lands in the verdict.
+    pub problem: bool,
+    pub can_restart: bool,
+    pub can_install: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ServicesView {
+    pub core: Vec<SvcRow>,
+    pub optional: Vec<SvcRow>,
+    /// Optional units that are not on this node at all, behind a fold.
+    pub not_installed: Vec<SvcRow>,
+    /// `ok` / `warn` / `err` / `muted` (unknown) — colours the verdict.
+    pub tone: &'static str,
+    /// One line: "All 9 services running" / "nginx failed · postfix stopped".
+    pub verdict: String,
+    /// The probe answered with rows. False = the verdict is "Unknown".
+    pub known: bool,
+}
+
+fn row_for(s: &hyperion_types::ServiceHealth) -> SvcRow {
+    let core = CORE_UNITS.contains(&s.name.as_str());
+    let masked = s.sub_state == "masked";
+    let (tone, status, problem) = if !s.present {
+        if core {
+            ("err", "missing".to_string(), true)
+        } else {
+            ("muted", "not installed".to_string(), false)
+        }
+    } else if masked {
+        ("muted", "masked".to_string(), false)
+    } else if s.transient {
+        ("warn", "restarting…".to_string(), false)
+    } else if s.active_state == "failed" {
+        ("err", "failed".to_string(), true)
+    } else if s.active {
+        let st = if s.active_state == "active" || s.active_state.is_empty() {
+            "running".to_string()
+        } else {
+            s.active_state.clone()
+        };
+        ("ok", st, false)
+    } else if core {
+        ("err", "stopped".to_string(), true)
+    } else {
+        ("warn", "stopped".to_string(), true)
+    };
+    let note = if !s.present {
+        None
+    } else if masked {
+        Some("Masked on purpose; systemd will not start it.".to_string())
+    } else if !s.enabled {
+        Some("Won't start at boot.".to_string())
+    } else if s.active && !s.transient && !s.sub_state.is_empty() && s.sub_state != "running" {
+        // e.g. `exited` for a oneshot-style unit — worth saying, not alarming.
+        Some(format!("systemd sub-state: {}", s.sub_state))
+    } else {
+        None
+    };
+    let own = s.name == "hyperion-agent" || s.name == "hyperion-web";
+    SvcRow {
+        name: s.name.clone(),
+        label: s.label.clone(),
+        tone,
+        status,
+        note,
+        problem,
+        // Restarting the agent would cut the very RPC pipe carrying the order.
+        can_restart: s.present && s.name != "hyperion-agent",
+        // The panel's own units are this binary — nothing for apt to install.
+        can_install: !s.present && !own,
+    }
+}
+
+/// Reduce the agent's rows to the page: core vs optional, problems first,
+/// absent optional units folded away, and a verdict that names what is wrong.
+pub(crate) fn build_view(h: &ServicesHealth, probe_failed: bool) -> ServicesView {
+    if probe_failed || h.services.is_empty() {
+        return ServicesView {
+            tone: "muted",
+            verdict: "Status unknown — the node did not answer the probe.".into(),
+            ..Default::default()
+        };
+    }
+    let mut v = ServicesView {
+        known: true,
+        ..Default::default()
+    };
+    for s in &h.services {
+        let row = row_for(s);
+        if CORE_UNITS.contains(&s.name.as_str()) {
+            v.core.push(row);
+        } else if !s.present {
+            v.not_installed.push(row);
+        } else {
+            v.optional.push(row);
+        }
+    }
+    // Stable sort: problems float up, agent order kept otherwise.
+    v.core.sort_by_key(|r| !r.problem);
+    v.optional.sort_by_key(|r| !r.problem);
+    let problems: Vec<&SvcRow> = v
+        .core
+        .iter()
+        .chain(v.optional.iter())
+        .filter(|r| r.problem)
+        .collect();
+    let core_down = v.core.iter().any(|r| r.problem);
+    if problems.is_empty() {
+        let running = v.core.len() + v.optional.len();
+        v.tone = "ok";
+        v.verdict = format!(
+            "All {running} installed service{} running.",
+            if running == 1 { "" } else { "s" }
+        );
+    } else {
+        v.tone = if core_down { "err" } else { "warn" };
+        v.verdict = problems
+            .iter()
+            .map(|r| format!("{} {}", r.name, r.status))
+            .collect::<Vec<_>>()
+            .join(" · ");
+    }
+    v
+}
+
+/// Whether the install panel is worth showing, and whether the last install
+/// tripped over a read-only filesystem.
+pub(crate) fn install_flags(
+    s: Option<&hyperion_types::ServiceInstallStatus>,
+    now: i64,
+) -> (bool, bool) {
+    let Some(s) = s else { return (false, false) };
+    if s.started_at == 0 {
+        return (false, false);
+    }
+    let show = s.state == "running"
+        || (s.finished_at > 0 && now - s.finished_at < INSTALL_PANEL_LINGER_SECS);
+    let rofs = s.state == "failed"
+        && (s.log_tail.contains("Read-only file system") || s.log_tail.contains("not writable"));
+    (show, rofs)
 }
 
 #[derive(Deserialize, Default)]
@@ -64,8 +233,19 @@ pub async fn get_services_health(
         return Ok(Redirect::to("/?flash_error=admin+role+required").into_response());
     }
     let target = q.node.as_deref();
-    let dispatch =
-        crate::dispatcher::dispatch_to_node(&state, target, Request::ServicesHealth).await;
+    let (dispatch, install) = tokio::join!(
+        crate::dispatcher::dispatch_to_node(&state, target, Request::ServicesHealth),
+        crate::dispatcher::dispatch_to_node(&state, target, Request::ServiceInstallStatus),
+    );
+    let install = match install {
+        Ok(RpcResponse::ServiceInstallStatus(s)) => Some(s),
+        _ => None,
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let (show_install, rofs_suspected) = install_flags(install.as_ref(), now);
     let (health, error) = match dispatch {
         Ok(RpcResponse::ServicesHealth(h)) => (h, None),
         Ok(RpcResponse::Error(e)) => (ServicesHealth::default(), Some(e.to_string())),
@@ -88,7 +268,7 @@ pub async fn get_services_health(
         active: "services",
         css_version: super::css_version(),
         htmx_version: super::htmx_version(),
-        health,
+        view: build_view(&health, error.is_some()),
         error,
         flash: q.flash,
         flash_error: q.flash_error,
@@ -97,6 +277,8 @@ pub async fn get_services_health(
         nodes,
         current_node,
         current_label,
+        show_install,
+        rofs_suspected,
     };
     Ok(Html(tpl.render()?).into_response())
 }
@@ -565,4 +747,158 @@ pub async fn post_remount_usr_rw(
         _ => return Err(AppError::Internal("unexpected response".into())),
     };
     Ok(Redirect::to(&dest).into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hyperion_types::{ServiceHealth, ServiceInstallStatus};
+
+    fn svc(name: &str, present: bool, active: bool, active_state: &str) -> ServiceHealth {
+        ServiceHealth {
+            name: name.into(),
+            label: name.into(),
+            active,
+            enabled: true,
+            present,
+            sub_state: if active {
+                "running".into()
+            } else {
+                "dead".into()
+            },
+            severity: String::new(),
+            active_state: active_state.into(),
+            transient: false,
+        }
+    }
+
+    fn health(services: Vec<ServiceHealth>) -> ServicesHealth {
+        ServicesHealth {
+            services,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn all_running_is_ok_and_counts_installed_only() {
+        let v = build_view(
+            &health(vec![
+                svc("nginx", true, true, "active"),
+                svc("hyperion-agent", true, true, "active"),
+                svc("mariadb", true, true, "active"),
+                svc("vsftpd", false, false, "inactive"),
+            ]),
+            false,
+        );
+        assert!(v.known);
+        assert_eq!(v.tone, "ok");
+        assert_eq!(v.verdict, "All 3 installed services running.");
+        assert_eq!(v.core.len(), 2);
+        assert_eq!(v.optional.len(), 1);
+        assert_eq!(v.not_installed.len(), 1);
+        assert!(v.not_installed[0].can_install);
+    }
+
+    #[test]
+    fn verdict_names_problems_and_core_down_is_err() {
+        let v = build_view(
+            &health(vec![
+                svc("hyperion-agent", true, true, "active"),
+                svc("nginx", true, false, "failed"),
+                svc("postfix", true, false, "inactive"),
+            ]),
+            false,
+        );
+        assert_eq!(v.tone, "err");
+        assert_eq!(v.verdict, "nginx failed · postfix stopped");
+        // Problem rows float to the top of their group.
+        assert_eq!(v.core[0].name, "nginx");
+        assert_eq!(v.optional[0].tone, "warn");
+    }
+
+    #[test]
+    fn only_optional_down_is_warn() {
+        let v = build_view(
+            &health(vec![
+                svc("nginx", true, true, "active"),
+                svc("postfix", true, false, "inactive"),
+            ]),
+            false,
+        );
+        assert_eq!(v.tone, "warn");
+    }
+
+    #[test]
+    fn missing_core_unit_stays_in_main_list_as_failure() {
+        let v = build_view(&health(vec![svc("nginx", false, false, "inactive")]), false);
+        assert_eq!(v.core.len(), 1);
+        assert!(v.not_installed.is_empty());
+        assert_eq!(v.core[0].status, "missing");
+        assert!(v.core[0].problem);
+    }
+
+    #[test]
+    fn own_units_never_offer_install_and_agent_never_restart() {
+        let v = build_view(
+            &health(vec![
+                svc("hyperion-agent", true, true, "active"),
+                svc("hyperion-web", false, false, "inactive"),
+            ]),
+            false,
+        );
+        let agent = v.core.iter().find(|r| r.name == "hyperion-agent").unwrap();
+        let web = v.core.iter().find(|r| r.name == "hyperion-web").unwrap();
+        assert!(!agent.can_restart);
+        assert!(!web.can_install);
+    }
+
+    #[test]
+    fn masked_disabled_and_transient_rows() {
+        let mut masked = svc("redis-server", true, false, "inactive");
+        masked.sub_state = "masked".into();
+        let mut off_at_boot = svc("mariadb", true, true, "active");
+        off_at_boot.enabled = false;
+        let mut restarting = svc("nginx", true, true, "activating");
+        restarting.transient = true;
+        let v = build_view(&health(vec![masked, off_at_boot, restarting]), false);
+        let r = |n: &str| {
+            v.core
+                .iter()
+                .chain(v.optional.iter())
+                .find(|r| r.name == n)
+                .unwrap()
+                .clone()
+        };
+        assert_eq!(r("redis-server").tone, "muted");
+        assert!(!r("redis-server").problem);
+        assert_eq!(r("mariadb").note.as_deref(), Some("Won't start at boot."));
+        assert_eq!(r("nginx").status, "restarting…");
+        assert_eq!(v.tone, "ok");
+    }
+
+    #[test]
+    fn failed_probe_or_empty_answer_is_unknown_not_healthy() {
+        assert!(!build_view(&health(vec![]), false).known);
+        let v = build_view(&health(vec![svc("nginx", true, true, "active")]), true);
+        assert!(!v.known);
+        assert_eq!(v.tone, "muted");
+    }
+
+    #[test]
+    fn install_panel_shows_while_running_or_recent_only() {
+        let mut s = ServiceInstallStatus::default();
+        assert_eq!(install_flags(Some(&s), 1_000), (false, false));
+        s.started_at = 100;
+        s.state = "running".into();
+        assert_eq!(install_flags(Some(&s), 10_000), (true, false));
+        s.state = "failed".into();
+        s.finished_at = 9_500;
+        s.log_tail = "dpkg: error: Read-only file system".into();
+        assert_eq!(install_flags(Some(&s), 10_000), (true, true));
+        assert_eq!(
+            install_flags(Some(&s), 9_500 + INSTALL_PANEL_LINGER_SECS),
+            (false, true)
+        );
+        assert_eq!(install_flags(None, 0), (false, false));
+    }
 }
