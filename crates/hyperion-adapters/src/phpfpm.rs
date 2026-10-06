@@ -78,6 +78,61 @@ struct PoolTpl<'a> {
     /// request_terminate_timeout — the FPM backstop, kept ABOVE
     /// max_execution_time so PHP's own limit fires first.
     request_terminate_secs: u32,
+    slowlog_path: String,
+    slowlog_secs: u32,
+}
+
+/// Root-owned directory holding one slow-request log per pool.
+pub const SLOWLOG_DIR: &str = "/var/log/hyperion/php-slow";
+
+/// A request running longer than this gets its PHP stack trace logged.
+/// Long enough that an ordinary uncached page never trips it, short enough
+/// that five of them in a row are what empties a five-worker pool.
+pub const SLOWLOG_SECS: u32 = 5;
+
+/// Rotation for the slow logs. `copytruncate` because FPM keeps the file
+/// open and only reopens it on USR1, which nothing here sends.
+const SLOWLOG_LOGROTATE: &str = "/etc/logrotate.d/hyperion-php-slow";
+const SLOWLOG_LOGROTATE_BODY: &str = r#"# Auto-managed by Hyperion.
+/var/log/hyperion/php-slow/*.log {
+    daily
+    rotate 7
+    maxsize 20M
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}
+"#;
+
+/// The slow-request log of one pool.
+pub fn slowlog_path(system_user: &str) -> PathBuf {
+    PathBuf::from(SLOWLOG_DIR).join(format!("{system_user}.log"))
+}
+
+/// The slowlog directory (0750 root) and its logrotate rule. FPM refuses
+/// to start a pool whose slowlog directory is missing, so this runs before
+/// every pool write. Idempotent on content.
+async fn ensure_slowlog_dir() -> Result<(), AdapterError> {
+    let dir = std::path::Path::new(SLOWLOG_DIR);
+    tokio::fs::create_dir_all(dir).await?;
+    tokio::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o750)).await?;
+    let current = tokio::fs::read_to_string(SLOWLOG_LOGROTATE).await.ok();
+    if current.as_deref() != Some(SLOWLOG_LOGROTATE_BODY) {
+        // Best effort: a box without logrotate still gets its slow log,
+        // just unrotated.
+        if let Err(e) = atomic_write(
+            std::path::Path::new(SLOWLOG_LOGROTATE),
+            SLOWLOG_LOGROTATE_BODY.as_bytes(),
+            0o644,
+        )
+        .await
+        {
+            tracing::warn!(error = %e, "could not write the slowlog logrotate rule");
+        }
+    }
+    Ok(())
 }
 
 pub fn render(input: &PoolInput<'_>) -> Result<String, AdapterError> {
@@ -104,6 +159,8 @@ pub fn render(input: &PoolInput<'_>) -> Result<String, AdapterError> {
         min_spare_servers,
         max_spare_servers,
         request_terminate_secs,
+        slowlog_path: slowlog_path(input.system_user).display().to_string(),
+        slowlog_secs: SLOWLOG_SECS,
     };
     Ok(tpl.render()?)
 }
@@ -175,6 +232,7 @@ pub async fn ensure_pool(input: &PoolInput<'_>) -> Result<PathBuf, AdapterError>
             tokio::fs::set_permissions(&sock_parent, std::fs::Permissions::from_mode(0o755)).await;
     }
 
+    ensure_slowlog_dir().await?;
     let body = render(input)?;
     let path = pool_path(input);
     // Backup the existing pool (if any) so we can roll back when our
@@ -462,6 +520,19 @@ mod tests {
     /// When the operator's nginx is configured `user vito;`, we MUST
     /// render `listen.owner = vito` (not www-data), otherwise nginx
     /// can't open the FPM socket and every PHP request 502s.
+    /// Every pool logs its slow requests, into the ROOT-owned slowlog
+    /// directory — never the site's own logs/, which the site user can
+    /// swap for a link the root-run FPM master would then write through.
+    #[test]
+    fn render_logs_slow_requests_outside_the_tenant_tree() {
+        let input = PoolInput::defaults("alice_cz", "alice.cz", PhpVersion::V8_3);
+        let out = render(&input).expect("render");
+        assert!(out.contains("slowlog = /var/log/hyperion/php-slow/alice_cz.log\n"));
+        assert!(out.contains("request_slowlog_timeout = 5s\n"));
+        assert!(!out.contains("slowlog = /home/"));
+        assert!(SLOWLOG_LOGROTATE_BODY.contains("    copytruncate\n"));
+    }
+
     #[test]
     fn render_uses_overridden_socket_owner() {
         let input = PoolInput::defaults_with_owner(
