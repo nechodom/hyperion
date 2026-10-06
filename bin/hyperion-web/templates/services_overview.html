@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% block title %}Service health · Hyperion{% endblock %}
+{% block main %}
+<div class="page-header">
+  <div>
+    <h1>Service health <span class="text-soft" style="font-weight:400;font-size:0.7em">· all nodes</span></h1>
+    <div class="subtitle">systemd units Hyperion depends on, checked live on every node.</div>
+  </div>
+</div>
+
+{% include "_node_auth_banner.html" %}
+
+{% if let Some(m) = flash %}
+  <div class="flash success">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+    <div class="flash-body">{{ m }}</div>
+  </div>
+{% endif %}
+
+{% if let Some(e) = flash_error %}
+  <div class="flash error">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+    <div class="flash-body">{{ e }}</div>
+  </div>
+{% endif %}
+
+{# Worst nodes first. Healthy units collapse into a count; only what needs a
+   look is named. Each row opens that node's detail page, where the actions
+   live. Refreshed in place every 15 s by the shared driver in base.html. #}
+<div id="svc-overview-live" data-live-refresh="15">
+  <div class="svc-verdict {{ tone }}">
+    <span class="dot"></span>
+    <span>{{ verdict }}</span>
+  </div>
+
+  <div class="group">
+    <div class="ghead">Nodes</div>
+    {% for c in cards %}
+    <a class="svc-row node-row" href="/services?node={{ c.param }}">
+      <span class="svc-dot {{ c.tone }}"></span>
+      <div class="svc-main">
+        <div class="svc-title">
+          <strong>{{ c.label }}</strong>
+          {% if let Some(ip) = c.ip %}<code class="text-soft">{{ ip }}</code>{% endif %}
+        </div>
+        {% if c.auth_failed() %}
+          <div class="small" style="color:var(--danger)">{{ c.verdict }}</div>
+        {% else if let Some(why) = c.unreachable_reason() %}
+          <div class="text-soft small">{{ c.verdict }} {{ why }}</div>
+        {% else if c.attention.is_empty() %}
+          <div class="text-soft small">{{ c.verdict }}</div>
+        {% else %}
+          <div class="svc-attn">
+            {% for r in c.attention %}<span class="pill {{ r.tone }}">{{ r.name }} {{ r.status }}</span>{% endfor %}
+          </div>
+        {% endif %}
+      </div>
+      {% if c.fail.is_none() %}<span class="text-soft small">{{ c.healthy }} running</span>{% endif %}
+      <span class="text-soft" aria-hidden="true">›</span>
+    </a>
+    {% endfor %}
+  </div>
+</div>
+
+<p class="text-soft small" style="margin-top:1rem">
+  Refreshes every 15 s. Open a node to restart or install services there.
+</p>
+{% endblock %}
