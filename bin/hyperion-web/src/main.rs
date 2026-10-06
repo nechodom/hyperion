@@ -179,11 +179,10 @@ async fn serve(cfg: Config) -> anyhow::Result<()> {
 /// The phpMyAdmin listener: same process, separate port — so a separate
 /// browser origin that holds no panel page (see `handlers::pma`).
 ///
-/// It presents the panel domain's certificate once one exists (the one nginx
-/// serves on 443 — the browser then trusts this port too), else the panel's
-/// own self-signed one. The choice is re-made every few minutes, which both
-/// picks up the panel hostname once the agent poller has read it and keeps
-/// up with certificate renewals without a restart.
+/// The certificate is chosen per handshake by `pma_tls::PmaCertResolver`:
+/// the issued certificate for the name the browser asked for (the same file
+/// nginx serves on 443, so the browser trusts this port too), else the
+/// panel's own self-signed one.
 fn spawn_pma_listener(
     state: hyperion_web::state::SharedState,
     fallback_cert: std::path::PathBuf,
@@ -201,43 +200,22 @@ fn spawn_pma_listener(
             return;
         }
     };
-    tokio::spawn(async move {
-        let fallback = (fallback_cert, fallback_key);
-        let pick = move |host: String| pma_cert_for(&host, &fallback);
-        let (cert, key) = pick(state.panel_hostname.read().await.clone());
-        let tls = match axum_server::tls_rustls::RustlsConfig::from_pem_file(&cert, &key).await {
-            Ok(t) => t,
-            Err(e) => {
-                tracing::error!(error=%e, "phpMyAdmin listener: TLS cert load failed — not started");
-                return;
-            }
-        };
-        {
-            let tls = tls.clone();
-            let state = state.clone();
-            let pick = pick.clone();
-            tokio::spawn(async move {
-                let mut current = (cert, key);
-                // First re-check soon after boot (the panel hostname cache
-                // fills on the agent poller's first tick), then every 10 min.
-                let mut wait = std::time::Duration::from_secs(15);
-                loop {
-                    tokio::time::sleep(wait).await;
-                    wait = std::time::Duration::from_secs(600);
-                    let next = pick(state.panel_hostname.read().await.clone());
-                    // Reload even when the paths are unchanged: a renewal
-                    // rewrites the same files.
-                    match tls.reload_from_pem_file(&next.0, &next.1).await {
-                        Ok(()) => current = next,
-                        Err(e) => tracing::warn!(
-                            cert=%next.0.display(), error=%e,
-                            kept=%current.0.display(),
-                            "phpMyAdmin listener: TLS reload failed — keeping the current cert"
-                        ),
-                    }
-                }
-            });
+    let resolver = match hyperion_web::pma_tls::PmaCertResolver::new(
+        hyperion_web::pma_tls::CERTS_ROOT,
+        state.panel_hostname.clone(),
+        &fallback_cert,
+        &fallback_key,
+    ) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!(error=%e, "phpMyAdmin listener: TLS cert load failed — not started");
+            return;
         }
+    };
+    let tls = axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(
+        hyperion_web::pma_tls::server_config(resolver),
+    ));
+    tokio::spawn(async move {
         let app = hyperion_web::handlers::pma::router(state);
         tracing::info!(%addr, "phpMyAdmin listener ready (TLS)");
         if let Err(e) = axum_server::bind_rustls(addr, tls)
@@ -247,21 +225,6 @@ fn spawn_pma_listener(
             tracing::error!(%addr, error=%e, "phpMyAdmin listener exited");
         }
     });
-}
-
-/// The panel domain's certificate when it exists, else `fallback`.
-fn pma_cert_for(
-    host: &str,
-    fallback: &(std::path::PathBuf, std::path::PathBuf),
-) -> (std::path::PathBuf, std::path::PathBuf) {
-    let host = host.trim();
-    let cert = std::path::PathBuf::from(format!("/etc/hyperion/certs/{host}/fullchain.pem"));
-    let key = std::path::PathBuf::from(format!("/etc/hyperion/certs/{host}/privkey.pem"));
-    if !host.is_empty() && !host.contains('/') && cert.exists() && key.exists() {
-        (cert, key)
-    } else {
-        fallback.clone()
-    }
 }
 
 /// Materialize a self-signed cert + key pair if they don't already
