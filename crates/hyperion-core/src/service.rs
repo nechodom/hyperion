@@ -23868,7 +23868,19 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let rows = hyperion_state::web_users::list(&self.pool)
             .await
             .map_err(|e| RpcError::Internal_with(format!("list: {e}")))?;
-        Ok(rows.into_iter().map(row_to_summary).collect())
+        let custom = hyperion_state::web_users::custom_role_assignments(&self.pool)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("list custom roles: {e}")))?;
+        Ok(rows
+            .into_iter()
+            .map(|u| {
+                let custom_role_id = custom.get(&u.id).copied();
+                hyperion_types::WebUserSummary {
+                    custom_role_id,
+                    ..row_to_summary(u)
+                }
+            })
+            .collect())
     }
 
     pub async fn web_user_get(
@@ -35928,6 +35940,7 @@ fn row_to_summary(u: hyperion_state::web_users::WebUserRow) -> hyperion_types::W
         locked_reason: u.locked_reason,
         last_login_at: u.last_login_at,
         created_at: u.created_at,
+        custom_role_id: None,
     }
 }
 
