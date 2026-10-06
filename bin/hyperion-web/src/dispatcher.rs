@@ -215,6 +215,9 @@ fn timeout_for_request(req: &Request) -> u64 {
         // A cheap read of a tiny ring table — the realtime net sparkline polls
         // it on the fast stats refresh, so keep the budget short.
         Request::NetHistory { .. } => 15,
+        // apt-get update + install of the connector and the rule set, then
+        // an nginx -t and a reload.
+        Request::ModsecInstall => 900,
         // Move a bundle / install WordPress.
         Request::BackupFetchChunk { .. }
         | Request::HostingExport { .. }

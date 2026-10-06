@@ -1312,6 +1312,12 @@ fn print_pretty(resp: &Response) {
                 );
             }
         }
+        Response::ModsecStatus(s) | Response::ModsecInstall(s) => {
+            println!(
+                "module: {}  CRS: {} {}  loaded: {}  sites using it: {}",
+                s.module, s.crs, s.crs_version, s.loaded, s.active_sites
+            );
+        }
         Response::HostingWafActivity(a) => {
             for c in &a.totals_24h {
                 println!("{:<18} {:>6} (24h)", c.rule, c.hits);

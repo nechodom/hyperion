@@ -1404,6 +1404,18 @@ impl AdapterPort for RealAdapter {
         }
     }
 
+    async fn modsec_status(&self) -> hyperion_types::crs::ModsecStatus {
+        hyperion_adapters::modsec::status().await
+    }
+
+    async fn modsec_install(&self) -> Result<(), AdapterError> {
+        hyperion_adapters::modsec::ensure_installed().await
+    }
+
+    async fn modsec_sync_http(&self, need: bool) -> Result<bool, AdapterError> {
+        hyperion_adapters::modsec::sync_http(need).await
+    }
+
     async fn redis_is_available(&self) -> bool {
         // `systemctl is-active redis-server` → "active" / anything else.
         // Cheap (~10 ms), no fork-and-exec of redis-cli; uses systemd

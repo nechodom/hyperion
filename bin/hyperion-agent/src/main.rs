@@ -621,6 +621,16 @@ async fn main() -> anyhow::Result<()> {
             if n > 0 {
                 tracing::info!(count = n, "boot: rolled the current vhost template out");
             }
+            // The OWASP Core Rule Set is loaded at http level only while a
+            // site on this node uses it; re-assert that after an update (or
+            // after the package was removed by hand).
+            match rerender_svc.crs_sync().await {
+                Ok(true) => {
+                    tracing::info!("boot: ModSecurity rule set loaded/unloaded to match sites")
+                }
+                Ok(false) => {}
+                Err(e) => tracing::warn!(error = %e, "boot: ModSecurity rule set sync failed"),
+            }
         });
     }
     // Self-heal / upgrade: re-assert the master panel vhost so template changes

@@ -117,6 +117,19 @@ pub async fn aliases(pool: &SqlitePool, hosting_id: &HostingId) -> Result<Vec<St
     Ok(rows.into_iter().map(|(s,)| s).collect())
 }
 
+/// Active hostings with the OWASP Core Rule Set on — whether this node
+/// needs the rule set loaded at all (it costs memory in every nginx
+/// process). Trashed hostings never count.
+pub async fn count_crs_on(pool: &SqlitePool) -> Result<i64, StateError> {
+    let (n,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM hostings \
+         WHERE crs_mode IN ('detect', 'block') AND state = 'active' AND trashed_at IS NULL",
+    )
+    .fetch_one(pool)
+    .await?;
+    Ok(n)
+}
+
 pub async fn set_state(
     pool: &SqlitePool,
     id: &HostingId,
