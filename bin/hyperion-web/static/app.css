@@ -835,6 +835,117 @@ details.svc-fold .svc-row .pill.muted { display: none; }
   .svc-row .svc-main { flex-basis: 100%; }
 }
 
+/* Hosting → WordPress tab: one row per check inside a .group — status dot,
+   name, a one-line verdict, actions. Problems list underneath; what passes
+   folds away. Every row is a lazy partial that re-renders itself by its id,
+   so rows of very different length never leave a hole beside each other. */
+.wp-checks { --chk-name-w: 11.5rem; --chk-gap: 0.75rem; }
+.group > .chk-row { padding: 0.8rem 1.25rem; border-bottom: 1px solid var(--border); }
+.group > .chk-row:last-child { border-bottom: none; }
+.group > .chk-row.is-err { background: color-mix(in oklab, var(--danger) 5%, var(--surface)); }
+.chk-head { display: flex; align-items: center; gap: var(--chk-gap, 0.75rem); min-height: 1.85rem; }
+.chk-dot {
+  width: 8px; height: 8px; border-radius: 50%; flex: none;
+  background: color-mix(in oklab, var(--text-soft) 55%, transparent);
+}
+.chk-dot.ok   { background: var(--success); }
+.chk-dot.warn { background: var(--warn); }
+.chk-dot.err  { background: var(--danger); }
+.chk-dot.info { background: var(--info); }
+.chk-head .chk-name { margin: 0; font-size: 0.9rem; font-weight: 600; flex: none; width: var(--chk-name-w, 11.5rem); }
+.chk-sum { flex: 1; min-width: 0; font-size: 0.85rem; color: var(--text-dim); }
+.chk-sum .spinner-inline { margin-right: 0.35rem; vertical-align: -2px; }
+.chk-actions { display: flex; align-items: center; gap: 0.4rem; flex: none; margin-left: auto; }
+.chk-actions form { margin: 0; }
+.chk-body { margin: 0.4rem 0 0.15rem calc(8px + var(--chk-gap, 0.75rem)); }
+.chk-body > * + * { margin-top: 0.6rem; }
+.chk-list { list-style: none; margin: 0; padding: 0; }
+.chk-list li {
+  display: grid;
+  grid-template-columns: 6px calc(var(--chk-name-w, 11.5rem) - 6px - var(--chk-gap, 0.75rem)) minmax(0, 1fr);
+  column-gap: var(--chk-gap, 0.75rem);
+  align-items: baseline;
+  padding: 0.25rem 0;
+  font-size: 0.83rem;
+}
+.chk-list li > .chk-dot { width: 6px; height: 6px; align-self: start; margin-top: 0.45em; }
+.chk-list li > strong { font-weight: 500; }
+.chk-list.chk-files li { grid-template-columns: 6px minmax(0, max-content) minmax(0, 1fr); }
+.chk-list.chk-files code { word-break: break-all; }
+.chk-detail { color: var(--text-soft); word-break: break-word; }
+.chk-fixes { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; }
+.chk-fixes form { margin: 0; }
+.chk-fold > summary { display: inline-block; cursor: pointer; list-style: none; font-size: 0.8rem; color: var(--text-soft); }
+.chk-fold > summary::-webkit-details-marker { display: none; }
+.chk-fold > summary::before { content: "▸"; margin-right: 0.35rem; }
+.chk-fold[open] > summary::before { content: "▾"; }
+.chk-fold > summary:hover { color: var(--text-dim); }
+.chk-fold[open] > summary { margin-bottom: 0.3rem; }
+.chk-fold > .chk-note { margin-top: 0.5rem; }
+.chk-note { margin: 0; font-size: 0.8rem; color: var(--text-soft); line-height: 1.55; max-width: 82ch; }
+.chk-note.tone-warn { color: var(--warn); }
+.chk-note.tone-err  { color: var(--danger); }
+.chk-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; margin: 0; font-size: 0.78rem; color: var(--text-soft); }
+.chk-foot strong { color: var(--text-dim); font-weight: 600; }
+.chk-link {
+  background: none; border: 0; padding: 0; font: inherit; cursor: pointer;
+  color: var(--text-dim); text-decoration: underline; text-underline-offset: 2px;
+}
+.chk-link:hover { color: var(--text); }
+.chk-callout { padding: 0.7rem 0.85rem; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg-2); font-size: 0.83rem; }
+.chk-callout.err  { border-color: color-mix(in oklab, var(--danger) 45%, var(--border)); }
+.chk-callout.warn { border-color: color-mix(in oklab, var(--warn) 45%, var(--border)); }
+.chk-callout p { margin: 0 0 0.6rem; line-height: 1.55; }
+.chk-callout form { margin: 0; }
+.chk-callout > :last-child { margin-bottom: 0; }
+.chk-excerpt {
+  margin: 0 0 0.6rem; padding: 0.5rem 0.65rem; max-height: 12rem; overflow: auto;
+  font-size: 0.72rem; white-space: pre-wrap; word-break: break-all;
+  background: var(--surface-2); border-radius: var(--radius-xs);
+}
+.chk-sub { margin: 0.9rem 0 0.2rem; font-size: 0.82rem; font-weight: 600; }
+.chk-switch { display: inline-flex; margin: 0; cursor: pointer; }
+@media (max-width: 640px) {
+  .chk-head { flex-wrap: wrap; }
+  .chk-head .chk-name { width: auto; }
+  .chk-sum { order: 3; flex-basis: 100%; padding-left: calc(8px + var(--chk-gap, 0.75rem)); }
+  .chk-body { margin-left: 0; }
+  .chk-list li, .chk-list.chk-files li { grid-template-columns: 6px minmax(0, 1fr); }
+  .chk-list li > :nth-child(3) { grid-column: 2; }
+}
+
+/* A group header that carries actions on the right (WordPress plugins and
+   themes): the label stays a wayfinding label, the tools read as controls. */
+.group > .ghead .ghead-tools {
+  margin-left: auto; display: flex; align-items: center; gap: 0.4rem;
+  text-transform: none; letter-spacing: 0; font-weight: 400;
+}
+.group > .ghead .ghead-tools form { margin: 0; }
+.group > .ghead:has(.ghead-tools) { padding-top: 0.5rem; padding-bottom: 0.5rem; min-height: 2.9rem; }
+/* Its install popovers drop below the header; a clipping group would cut
+   them off over a short list. Round the edges instead of clipping. */
+.group.has-popover { overflow: visible; }
+.group.has-popover > .ghead { border-radius: var(--radius-md) var(--radius-md) 0 0; }
+.group.has-popover > :last-child { border-radius: 0 0 var(--radius-md) var(--radius-md); }
+.group .wp-table { margin: 0; }
+.group .wp-table th:first-child, .group .wp-table td:first-child { padding-left: 1.25rem; }
+.group .wp-table th:last-child,  .group .wp-table td:last-child  { padding-right: 1.25rem; }
+.wp-table .wp-name { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+.wp-table .wp-name .pill { font-size: 0.66rem; padding: 0.1rem 0.5rem; }
+.wp-table tr.is-off .wp-name strong { color: var(--text-dim); font-weight: 500; }
+.wp-table .row-actions form { display: inline; margin: 0; }
+.wp-table .btn.ghost.danger { color: var(--danger); }
+
+/* Tools: a disclosure per tool; the collapsed summary still says "is it on?". */
+.group > details.wp-tool { padding: 0.85rem 1.25rem; }
+details.wp-tool > summary { display: flex; align-items: center; gap: 0.6rem; min-height: 1.85rem; }
+details.wp-tool > summary h3 { margin: 0; }
+details.wp-tool > summary .acc-meta { margin-left: auto; display: flex; align-items: center; gap: 0.5rem; font-size: 0.82rem; color: var(--text-dim); }
+details.wp-tool > summary .acc-chevron { width: 16px; height: 16px; color: var(--text-dim); transition: transform var(--t-fast); flex: none; }
+details.wp-tool[open] > summary { margin-bottom: 0.9rem; }
+details.wp-tool[open] > summary .acc-chevron { transform: rotate(90deg); }
+details.wp-tool > summary:hover h3 { color: var(--text); }
+
 /* /jobs — one row per job inside a .group: state, what + where, when. The
    whole row is the link to the job page. Running jobs carry a bar inline. */
 .group > .job-row {

@@ -22423,6 +22423,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .parse::<i64>()
             .unwrap_or(0);
         report.fatal = report.http_status >= 500;
+        if report.http_status == 0 {
+            report.probe_error = curl_failure_reason(&String::from_utf8_lossy(&out.stderr));
+        }
 
         // Only chase a culprit when something is actually wrong — a healthy
         // site does not need a wp-cli round trip on every panel load.
@@ -39764,6 +39767,26 @@ fn generate_redis_password() -> String {
     hyperion_adapters::random_password()
 }
 
+/// Turn curl's stderr into the reason a health probe got no answer.
+///
+/// `curl -sS` prints one line such as `curl: (7) Failed to connect to
+/// example.cz port 443 after 0 ms: Couldn't connect to server`. The
+/// `curl: (N)` prefix is curl's exit code, which means nothing to an
+/// operator; the rest is the useful part. Capped, so a pathological message
+/// cannot flood the health line.
+fn curl_failure_reason(stderr: &str) -> String {
+    let line = stderr
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("");
+    let line = match line.strip_prefix("curl: (") {
+        Some(rest) => rest.split_once(") ").map(|(_, msg)| msg).unwrap_or(rest),
+        None => line,
+    };
+    line.chars().take(200).collect()
+}
+
 // ===== Rollback impls =====
 
 struct DeleteUser<A: AdapterPort> {
@@ -39936,6 +39959,25 @@ impl Rollback for CertRowDelete {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn curl_failure_reason_keeps_the_message_not_the_exit_code() {
+        use super::curl_failure_reason;
+        assert_eq!(
+            curl_failure_reason(
+                "curl: (7) Failed to connect to a.cz port 443 after 0 ms: Couldn't connect to server\n"
+            ),
+            "Failed to connect to a.cz port 443 after 0 ms: Couldn't connect to server"
+        );
+        assert_eq!(
+            curl_failure_reason("curl: (28) Operation timed out after 15001 milliseconds"),
+            "Operation timed out after 15001 milliseconds"
+        );
+        // Not curl's shape: passed through untouched, never invented.
+        assert_eq!(curl_failure_reason("\n  something odd\n"), "something odd");
+        assert_eq!(curl_failure_reason(""), "");
+        assert_eq!(curl_failure_reason(&"x".repeat(500)).len(), 200);
+    }
+
     #[test]
     fn monitor_alert_window() {
         use super::{monitor_recovered, monitor_should_alert};

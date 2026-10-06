@@ -1,71 +1,59 @@
-{# WordPress updates ("defender") panel — lazily swapped into the hosting
-   detail page via hx-get="/hostings/:sel/vuln-panel". Keyless: flags
-   outdated plugins/themes from wp-cli's own update status (no external
-   feed) and auto-applies safe minor/patch updates daily. #}
-<div class="card hover">
-  <h2>
-    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-    WordPress updates
-    {% if scan.feed_unavailable %}<span class="pill warn" style="margin-left:0.4rem;font-size:0.65rem">check failed</span>
-    {% else if scan.findings.is_empty() %}<span class="pill ok" style="margin-left:0.4rem;font-size:0.65rem">up to date</span>
-    {% else %}<span class="pill warn" style="margin-left:0.4rem;font-size:0.65rem">{{ scan.findings.len() }} outdated</span>{% endif %}
-  </h2>
-
-  {# Auto-update toggle — submits the OPPOSITE of the current state. #}
-  <form method="post" action="/hostings/wp/auto-update" style="margin:-0.2rem 0 0.7rem">
-    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-    <input type="hidden" name="selector" value="{{ selector }}">
-    <input type="hidden" name="enabled" value="{% if auto_update_enabled %}off{% else %}on{% endif %}">
-    <label style="display:flex;align-items:center;gap:0.5rem;font-size:0.85rem;cursor:pointer">
-      <input type="checkbox" {% if auto_update_enabled %}checked{% endif %} onchange="this.form.submit()">
-      Apply safe <strong>minor and patch</strong> updates daily
-      <span class="text-soft small">— major updates are left for you to review</span>
-    </label>
-  </form>
-
-  {% if scan.feed_unavailable %}
-    <p class="muted" style="margin:-0.1rem 0 0.5rem;font-size:0.85rem">
-      Couldn't read this site's plugins and themes. This usually means a broken
-      WordPress install or a file-permission problem — not a clean result. Repair
-      WordPress, then scan again.
-    </p>
-    <button class="btn small" hx-get="vuln-panel" hx-target="closest .card" hx-swap="outerHTML">Scan again</button>
-  {% else %}
-    {% if scan.auto_updated > 0 %}
-      <p class="text-soft small" style="margin:-0.1rem 0 0.5rem">✓ Updated {{ scan.auto_updated }} component(s) automatically in the last daily run.</p>
-    {% endif %}
-    {% if scan.findings.is_empty() %}
-      <p class="text-soft" style="font-size:0.9rem">
-        Everything is up to date. Checked {{ scan.checked }} plugin(s) and theme(s).
-      </p>
-    {% else %}
-      <p class="muted" style="margin:-0.1rem 0 0.6rem;font-size:0.82rem">
-        {{ scan.findings.len() }} of {{ scan.checked }} components have updates available.
-        Manage individual plugins and themes from the lists above.
-      </p>
-      <div style="display:flex;flex-direction:column;gap:0.5rem">
-        {% for f in scan.findings %}
-        <div style="border:1px solid var(--border);border-radius:var(--radius-sm);padding:0.55rem 0.7rem;background:var(--bg-2)">
-          <div style="display:flex;align-items:center;gap:0.4rem;flex-wrap:wrap">
-            {% if f.update_type == "major" %}<span class="pill warn" style="font-size:0.6rem">MAJOR</span>
-            {% else if f.update_type == "minor" %}<span class="pill" style="font-size:0.6rem">MINOR</span>
-            {% else %}<span class="pill" style="font-size:0.6rem">PATCH</span>{% endif %}
-            <strong style="font-size:0.9rem">{{ f.name }}</strong>
-            <span class="text-soft small">({{ f.kind }} <code>{{ f.slug }}</code>)</span>
-            {% if f.auto_updatable %}<span class="pill ok" style="font-size:0.58rem">auto</span>
-            {% else %}<span class="pill" style="font-size:0.58rem">manual</span>{% endif %}
-          </div>
-          <div style="font-size:0.85rem;margin-top:0.25rem">
-            <code>{{ f.installed_version }}</code> → <code>{{ f.patched_version }}</code>
-            {% if !f.auto_updatable %}<span class="text-soft small"> · major update — review before applying</span>{% endif %}
-          </div>
-        </div>
-        {% endfor %}
-      </div>
-    {% endif %}
-    <div style="margin-top:0.7rem;display:flex;gap:0.7rem;align-items:center;flex-wrap:wrap">
-      <button class="btn small" hx-get="vuln-panel" hx-target="closest .card" hx-swap="outerHTML">Scan again</button>
-      <a class="text-soft small" href="/vulns" data-role-min="admin">View all WordPress updates across the cluster →</a>
+{# WordPress updates ("defender") — one row of the WordPress tab's Updates &
+   integrity group, lazily swapped in via hx-get="/hostings/:sel/vuln-panel".
+   Keyless: flags outdated plugins/themes from wp-cli's own update status (no
+   external feed) and auto-applies safe minor/patch updates daily. #}
+<div class="chk-row" id="vuln-panel">
+  <div class="chk-head">
+    {% if scan.feed_unavailable %}<span class="chk-dot warn"></span>
+    {% else if scan.findings.is_empty() %}<span class="chk-dot ok"></span>
+    {% else %}<span class="chk-dot warn"></span>{% endif %}
+    <h3 class="chk-name">Updates</h3>
+    <span class="chk-sum">
+      {% if scan.feed_unavailable %}Couldn't read plugins and themes — not a clean result
+      {% else if scan.findings.is_empty() %}Everything up to date · {{ scan.checked }} plugins &amp; themes checked
+      {% else %}{{ scan.findings.len() }} of {{ scan.checked }} plugins &amp; themes have updates{% endif %}
+    </span>
+    <div class="chk-actions">
+      <button class="btn ghost small" type="button"
+              hx-get="/hostings/{{ selector }}/vuln-panel"
+              hx-target="#vuln-panel" hx-swap="outerHTML"
+              hx-disabled-elt="this">Scan again</button>
     </div>
-  {% endif %}
+  </div>
+
+  <div class="chk-body">
+    {% if scan.feed_unavailable %}
+    <p class="chk-note">
+      This usually means a broken WordPress install or a file-permission
+      problem. Repair WordPress (Tools → Repair or reinstall), then scan again.
+    </p>
+    {% else if !scan.findings.is_empty() %}
+    <ul class="chk-list upd-list">
+      {% for f in scan.findings %}
+      <li>
+        <span class="chk-dot {% if f.update_type == "major" %}warn{% endif %}"></span>
+        <strong>{{ f.name }} <span class="text-soft small">{{ f.kind }}</span></strong>
+        <span class="chk-detail">
+          <code>{{ f.installed_version }}</code> → <code>{{ f.patched_version }}</code>
+          · {{ f.update_type }}{% if f.auto_updatable %} · applied automatically{% else %} · review before applying{% endif %}
+        </span>
+      </li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+
+    {# Auto-update toggle — submits the OPPOSITE of the current state. #}
+    <form class="chk-foot" method="post" action="/hostings/wp/auto-update">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="selector" value="{{ selector }}">
+      <input type="hidden" name="enabled" value="{% if auto_update_enabled %}off{% else %}on{% endif %}">
+      {% if auto_update_enabled %}
+        <span><strong>Auto-update on</strong> — minor and patch updates applied daily; majors wait for you{% if scan.auto_updated > 0 %} · {{ scan.auto_updated }} applied in the last run{% endif %}</span>
+        <button class="chk-link" type="submit">Turn off</button>
+      {% else %}
+        <span><strong>Auto-update off</strong> — nothing is updated without you</span>
+        <button class="chk-link" type="submit">Apply minor &amp; patch updates daily</button>
+      {% endif %}
+    </form>
+  </div>
 </div>

@@ -161,7 +161,55 @@ impl hyperion_core::AdapterPort for StubAdapters {
         _: &str,
         _: &str,
     ) -> Result<(Vec<hyperion_types::WpPlugin>, String), AdapterError> {
-        Ok((vec![], "6.5.3".into()))
+        if std::env::var_os("DEVSERVER_DEMO").is_none() {
+            return Ok((vec![], "6.5.3".into()));
+        }
+        // (slug, name, version, status, latest — "" = up to date, auto-update)
+        let demo = [
+            (
+                "akismet",
+                "Akismet Anti-spam",
+                "5.3.1",
+                "active",
+                "5.3.3",
+                true,
+            ),
+            ("wordpress-seo", "Yoast SEO", "22.4", "active", "", true),
+            (
+                "woocommerce",
+                "WooCommerce",
+                "8.7.0",
+                "active",
+                "9.0.1",
+                false,
+            ),
+            ("hello-dolly", "Hello Dolly", "1.7.2", "inactive", "", false),
+            (
+                "hyperion-mail",
+                "Hyperion mail pin",
+                "1.0",
+                "must-use",
+                "",
+                false,
+            ),
+        ];
+        let plugins = demo
+            .iter()
+            .map(
+                |(slug, name, v, status, latest, auto)| hyperion_types::WpPlugin {
+                    slug: (*slug).into(),
+                    name: (*name).into(),
+                    version: (*v).into(),
+                    status: (*status).into(),
+                    update_available: !latest.is_empty(),
+                    latest_version: (*latest).into(),
+                    auto_update: *auto,
+                    auto_update_blocked: false,
+                    auto_update_block_reason: None,
+                },
+            )
+            .collect();
+        Ok((plugins, "6.5.3".into()))
     }
     // Note: migration export/import don't go through AdapterPort — they
     // are higher-level service methods. No stub needed here.
@@ -203,7 +251,31 @@ impl hyperion_core::AdapterPort for StubAdapters {
         _: &str,
         _: &str,
     ) -> Result<(Vec<hyperion_types::WpTheme>, String), AdapterError> {
-        Ok((vec![], "6.5.3".into()))
+        if std::env::var_os("DEVSERVER_DEMO").is_none() {
+            return Ok((vec![], "6.5.3".into()));
+        }
+        let demo = [
+            ("astra", "Astra", "4.6.8", "active", "4.7.0"),
+            (
+                "twentytwentyfour",
+                "Twenty Twenty-Four",
+                "1.1",
+                "inactive",
+                "",
+            ),
+        ];
+        let themes = demo
+            .iter()
+            .map(|(slug, name, v, status, latest)| hyperion_types::WpTheme {
+                slug: (*slug).into(),
+                name: (*name).into(),
+                version: (*v).into(),
+                status: (*status).into(),
+                update_available: !latest.is_empty(),
+                latest_version: (*latest).into(),
+            })
+            .collect();
+        Ok((themes, "6.5.3".into()))
     }
     async fn wp_theme_action(
         &self,

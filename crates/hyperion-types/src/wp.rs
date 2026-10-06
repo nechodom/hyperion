@@ -539,4 +539,30 @@ pub struct WpFatalReport {
     /// each restorable with one click once the site is back.
     #[serde(default)]
     pub parked_plugins: Vec<String>,
+    /// Why the probe got no answer at all (`http_status == 0`): curl's own
+    /// message, e.g. "Connection refused" or "Operation timed out". Empty
+    /// when the site answered — and from older nodes, which never sent it.
+    #[serde(default)]
+    pub probe_error: String,
+}
+
+impl WpFatalReport {
+    /// What the front page told a visitor, for the health line:
+    /// `fatal` (5xx), `no_answer` (nothing came back), `error_page` (4xx —
+    /// not a WordPress fatal, but still not the site) or `ok`.
+    ///
+    /// Only a 5xx is `fatal` — that is what the culprit hunt keys on. The
+    /// other two used to fall through to "no fatal error" and render green,
+    /// which over a site nobody can reach is the wrong answer.
+    pub fn verdict(&self) -> &'static str {
+        if self.fatal {
+            "fatal"
+        } else if self.http_status <= 0 {
+            "no_answer"
+        } else if self.http_status >= 400 {
+            "error_page"
+        } else {
+            "ok"
+        }
+    }
 }

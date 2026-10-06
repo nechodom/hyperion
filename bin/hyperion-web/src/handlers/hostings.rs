@@ -13941,6 +13941,63 @@ mod tests {
         assert!(!detail_matches(&asked, "h1", ""));
     }
 
+    /// Render the site-health row for a given probe result.
+    fn render_health(report: hyperion_types::WpFatalReport) -> String {
+        FatalCardTpl {
+            report,
+            selector: "example.com".into(),
+            csrf_token: "t".into(),
+            csrf_wp_debug: "t".into(),
+            csrf_dropin: "t".into(),
+            target_node: String::new(),
+            wp_debug_enabled: false,
+            error: None,
+        }
+        .render()
+        .expect("health row renders")
+    }
+
+    /// A probe that got nothing back (curl's `000`) used to fall through to
+    /// "answers HTTP 0, no fatal error" with a green dot — over a site no
+    /// visitor could reach. It must say so, and why.
+    #[test]
+    fn no_answer_is_not_healthy() {
+        let html = render_health(hyperion_types::WpFatalReport {
+            http_status: 0,
+            probe_error: "Couldn't connect to server".into(),
+            ..Default::default()
+        });
+        assert!(html.contains("No answer from the front page"));
+        // HTML-escaped on render, so match past the apostrophe.
+        assert!(html.contains("t connect to server"));
+        assert!(!html.contains("HTTP 0"));
+        assert!(!html.contains("no fatal error"));
+        assert!(!html.contains("chk-dot ok"));
+    }
+
+    /// A 4xx front page is not a WordPress fatal, but it is not healthy
+    /// either.
+    #[test]
+    fn error_page_is_not_healthy() {
+        let html = render_health(hyperion_types::WpFatalReport {
+            http_status: 404,
+            ..Default::default()
+        });
+        assert!(html.contains("HTTP 404"));
+        assert!(html.contains("document root"));
+        assert!(!html.contains("chk-dot ok"));
+    }
+
+    #[test]
+    fn a_200_is_healthy() {
+        let html = render_health(hyperion_types::WpFatalReport {
+            http_status: 200,
+            ..Default::default()
+        });
+        assert!(html.contains("answers HTTP 200, no fatal error"));
+        assert!(html.contains("chk-dot ok"));
+    }
+
     /// Render the integrity card for a given scan result.
     fn render_integrity(scan: hyperion_types::WpIntegrityScanResult) -> String {
         IntegrityCardTpl {
@@ -13958,9 +14015,10 @@ mod tests {
     #[test]
     fn unchecked_never_renders_as_clean() {
         let html = render_integrity(integrity_not_checked("wp-cli exited 1".into()));
-        assert!(html.contains("couldn't check"));
+        assert!(html.contains(r#"data-verdict="unchecked""#));
+        assert!(html.contains("Couldn't check"));
         assert!(html.contains("not a clean result"));
-        assert!(!html.contains(">Clean.<"));
+        assert!(!html.contains("Clean —"));
         assert!(html.contains("wp-cli exited 1"));
     }
 
@@ -13978,9 +14036,10 @@ mod tests {
             scanned_at: 1_700_000_000,
             ..Default::default()
         });
+        assert!(html.contains(r#"data-verdict="partial""#));
         assert!(html.contains("malware not scanned"));
-        assert!(html.contains("No malware scan ran"));
-        assert!(!html.contains(">Clean.<"));
+        assert!(html.contains("ClamAV isn't installed"));
+        assert!(!html.contains("Clean —"));
     }
 
     /// Both signals ran and both came back empty — the only state allowed
@@ -13996,7 +14055,8 @@ mod tests {
             scanned_at: 1_700_000_000,
             ..Default::default()
         });
-        assert!(html.contains(">Clean.<"));
+        assert!(html.contains(r#"data-verdict="clean""#));
+        assert!(html.contains("Clean —"));
         assert!(html.contains("ClamAV scanned the site"));
     }
 
@@ -14018,8 +14078,8 @@ mod tests {
         assert!(html.contains("this is normal"));
         assert!(html.contains("elementor-pro"));
         // Still clean: unknown coverage is not a finding.
-        assert!(html.contains(">Clean.<"));
-        assert!(!html.contains("finding(s)</span>"));
+        assert!(html.contains(r#"data-verdict="clean""#));
+        assert!(!html.contains("don't match what should be on disk"));
     }
 
     /// Findings outrank a half-failed probe: something we DID see is more
@@ -14046,12 +14106,13 @@ mod tests {
             scanned_at: 1_700_000_000,
             ..Default::default()
         });
-        assert!(html.contains("4 finding(s)"));
+        assert!(html.contains(r#"data-verdict="findings""#));
+        assert!(html.contains("4 file(s) don't match"));
         assert!(html.contains("wp-includes/load.php"));
         assert!(html.contains("wp-admin/x.php"));
         assert!(html.contains("akismet.php"));
         assert!(html.contains("Php.Trojan.Webshell-1"));
-        assert!(!html.contains(">Clean.<"));
+        assert!(!html.contains("Clean —"));
     }
 }
 
