@@ -24248,10 +24248,39 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         &self,
         id: i64,
     ) -> Result<Option<hyperion_types::WebUserSummary>, RpcError> {
-        let row = hyperion_state::web_users::get_by_id(&self.pool, id)
+        let Some(row) = hyperion_state::web_users::get_by_id(&self.pool, id)
             .await
-            .map_err(|e| RpcError::Internal_with(format!("get: {e}")))?;
-        Ok(row.map(row_to_summary))
+            .map_err(|e| RpcError::Internal_with(format!("get: {e}")))?
+        else {
+            return Ok(None);
+        };
+        // Both extras are best-effort: a failed read leaves the field empty
+        // rather than failing the whole lookup (login and the users page go
+        // through here too).
+        let now = now_secs();
+        let pending_email = hyperion_state::web_users::get_pending_email(&self.pool, id)
+            .await
+            .ok()
+            .flatten()
+            // Same bounds email_change_confirm enforces: an expired or
+            // burnt-out code can no longer be entered, so it is not pending.
+            .filter(|p| p.expires_at >= now && p.attempts < 5)
+            .map(|p| hyperion_types::PendingEmailChange {
+                new_email: p.new_email,
+                expires_at: p.expires_at,
+            });
+        let backup_codes_left = if row.totp_enrolled_at.is_some() {
+            hyperion_state::web_users::count_unused_backup_codes(&self.pool, id)
+                .await
+                .ok()
+        } else {
+            None
+        };
+        Ok(Some(hyperion_types::WebUserSummary {
+            pending_email,
+            backup_codes_left,
+            ..row_to_summary(row)
+        }))
     }
 
     pub async fn web_user_create(
@@ -24391,6 +24420,14 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 message: "current password is incorrect".into(),
             });
         }
+        // No mail transport = no way to deliver the code. Refuse before
+        // stashing anything: the profile page shows a stored pending change
+        // as "a code went to <address>", which would be a lie.
+        let Some(cfg) = self.email_config.as_ref() else {
+            return Err(RpcError::Conflict {
+                message: "no SMTP configured — configure Settings → Mail first".into(),
+            });
+        };
         // Generate a 6-digit code. We use a CSPRNG so brute-force
         // resistance comes from the limited attempt count, not from
         // the entropy of the code.
@@ -24411,35 +24448,30 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         .await
         .map_err(|e| RpcError::Internal_with(format!("stash: {e}")))?;
 
-        // Dispatch the email. Failure here doesn't roll back the
-        // pending row — the operator may have a typo'd email, in
-        // which case they should retry with a different one (which
-        // overwrites the pending row).
-        if let Some(cfg) = &self.email_config {
-            let body = format!(
-                "Hyperion email-change verification\n\n\
-                 Code: {code_str}\n\n\
-                 Enter this code on the profile page within 15 minutes to confirm \
-                 the change. If you didn't request this, ignore this email — your \
-                 current address remains in place.\n"
-            );
-            if let Err(e) = hyperion_adapters::email::send_text(
-                cfg,
-                &new_email,
-                "Hyperion: confirm your new email",
-                &body,
-            )
-            .await
-            {
-                tracing::warn!(error = %e, "email-change: send failed");
-                return Err(RpcError::Internal_with(format!(
-                    "couldn't send verification email: {e}. Check Settings → Mail."
-                )));
-            }
-        } else {
-            return Err(RpcError::Conflict {
-                message: "no SMTP configured — configure Settings → Mail first".into(),
-            });
+        // Dispatch the email. A failed send clears the pending row: the
+        // profile page would otherwise announce a code that never left.
+        // A typo'd address is fixed by requesting again (which overwrites
+        // the pending row).
+        let body = format!(
+            "Hyperion email-change verification\n\n\
+             Code: {code_str}\n\n\
+             Enter this code on the profile page within 15 minutes to confirm \
+             the change. If you didn't request this, ignore this email — your \
+             current address remains in place.\n"
+        );
+        if let Err(e) = hyperion_adapters::email::send_text(
+            cfg,
+            &new_email,
+            "Hyperion: confirm your new email",
+            &body,
+        )
+        .await
+        {
+            tracing::warn!(error = %e, "email-change: send failed");
+            let _ = hyperion_state::web_users::clear_pending_email(&self.pool, user_id).await;
+            return Err(RpcError::Internal_with(format!(
+                "couldn't send verification email: {e}. Check Settings → Mail."
+            )));
         }
 
         self.append_audit(
@@ -36847,6 +36879,8 @@ fn row_to_summary(u: hyperion_state::web_users::WebUserRow) -> hyperion_types::W
         last_login_at: u.last_login_at,
         created_at: u.created_at,
         custom_role_id: None,
+        pending_email: None,
+        backup_codes_left: None,
     }
 }
 
@@ -45944,6 +45978,67 @@ mod tests {
             after.caps != before.caps,
             "a viewer must not keep an admin's capabilities"
         );
+    }
+
+    /// The profile page shows a pending email change as "a code went to
+    /// <address>". So a pending change is reported only while its code can
+    /// still be entered, and a request that sent nothing must leave none.
+    #[tokio::test]
+    async fn web_user_get_reports_only_a_live_pending_email_change() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), happy_mocks());
+        let uid = s
+            .web_user_create(
+                "eda".into(),
+                "eda@example.cz".into(),
+                "correct horse battery".into(),
+                "operator".into(),
+            )
+            .await
+            .expect("create user");
+
+        // No SMTP in the test service: refused, and nothing stashed.
+        assert!(s
+            .email_change_request(uid, "new@example.cz".into(), "correct horse battery".into())
+            .await
+            .is_err());
+        let u = s.web_user_get(uid).await.expect("get").expect("user");
+        assert_eq!(
+            u.pending_email, None,
+            "a code that never left is not pending"
+        );
+        // 2FA off: the backup-code count is not reported at all.
+        assert_eq!(u.backup_codes_left, None);
+
+        let now = now_secs();
+        hyperion_state::web_users::set_pending_email(
+            &pool,
+            uid,
+            "new@example.cz",
+            "h",
+            now + 600,
+            now,
+        )
+        .await
+        .expect("stash");
+        let u = s.web_user_get(uid).await.expect("get").expect("user");
+        assert_eq!(
+            u.pending_email.map(|p| p.new_email).as_deref(),
+            Some("new@example.cz")
+        );
+
+        hyperion_state::web_users::set_pending_email(
+            &pool,
+            uid,
+            "new@example.cz",
+            "h",
+            now - 1,
+            now,
+        )
+        .await
+        .expect("stash");
+        let u = s.web_user_get(uid).await.expect("get").expect("user");
+        assert_eq!(u.pending_email, None, "an expired code is not pending");
     }
 
     /// Locking is how an admin stops someone NOW. It used to stop only their

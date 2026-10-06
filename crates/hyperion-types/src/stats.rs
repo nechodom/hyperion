@@ -1040,6 +1040,24 @@ pub struct WebUserSummary {
     /// `WebUserList` only; `serde(default)` keeps older agents decodable.
     #[serde(default)]
     pub custom_role_id: Option<i64>,
+    /// Self-service email change still waiting for its code: the address
+    /// the code went to and when the code stops working. Only a live one
+    /// (unexpired, attempts left) is reported, so the profile page can
+    /// show the confirm step instead of hiding it behind a fold. Filled by
+    /// `WebUserGet` only.
+    #[serde(default)]
+    pub pending_email: Option<PendingEmailChange>,
+    /// Unused 2FA backup codes. `WebUserGet` only; `None` from an agent
+    /// that predates the field.
+    #[serde(default)]
+    pub backup_codes_left: Option<i64>,
+}
+
+/// The visible half of a pending email change — never the code hash.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PendingEmailChange {
+    pub new_email: String,
+    pub expires_at: i64,
 }
 
 /// Wire shape of one custom role. `capabilities` is a plain bitmask (the

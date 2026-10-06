@@ -636,7 +636,7 @@ async fn mint_session_redirect(
         .map_err(|e| AppError::Internal(e.to_string()))?;
 
     // Track the session in the agent's `web_sessions` ledger so the
-    // /settings/sessions revoke flow can kill it later. Best-effort:
+    // profile page's device list can kill it later. Best-effort:
     // if the RPC fails (agent socket down), the user still gets
     // their cookie — they just won't show up in the active-sessions
     // list. Auth middleware treats "missing row" as anonymous, so

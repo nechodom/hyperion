@@ -1,0 +1,16 @@
+{# Email-change request form. Shared by the "no change pending" state and
+   the "send a new code" fold; a new request replaces any pending one. #}
+<form method="post" action="/profile/email/request" autocomplete="off" class="me-form">
+  <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+  <div class="field-row">
+    <div class="field">
+      <label for="email_new">New address</label>
+      <input id="email_new" type="email" name="new_email" placeholder="you@example.com" required maxlength="254">
+    </div>
+    <div class="field">
+      <label for="email_pw">Current password</label>
+      <input id="email_pw" type="password" name="current_password" autocomplete="current-password" required>
+    </div>
+  </div>
+  <button type="submit" class="btn small primary">Send code</button>
+</form>

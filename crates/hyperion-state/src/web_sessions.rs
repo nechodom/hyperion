@@ -45,7 +45,7 @@ pub async fn insert(
 /// Returns true ⇒ "this sid is acceptable, don't lock the user out".
 /// Concretely:
 ///   * row present + revoked_at IS NULL ⇒ true (alive); side-effect
-///     updates `last_seen_at` for the /settings/sessions UI
+///     updates `last_seen_at` for the profile page's device list
 ///   * row present + revoked_at IS NOT NULL ⇒ false (operator killed it)
 ///   * row absent ⇒ true (legacy cookie minted before this table
 ///     existed; signature alone is the gate). Once the planned
@@ -78,7 +78,7 @@ pub async fn touch_if_live(pool: &SqlitePool, sid: &str, now: i64) -> Result<boo
 }
 
 /// Newest-first list of sessions belonging to `user_id`. Used by
-/// the /settings/sessions page.
+/// the profile page's device list.
 pub async fn list_for_user(
     pool: &SqlitePool,
     user_id: i64,

@@ -828,7 +828,7 @@ pub enum Request {
         user_id: i64,
     },
     /// Newest-first list of `user_id`'s sessions (used by
-    /// /settings/sessions).
+    /// /profile).
     WebSessionList {
         user_id: i64,
     },
@@ -2216,7 +2216,7 @@ pub enum Response {
     /// `bool`, which is why a revoked privilege kept working for the rest of
     /// the session.
     WebSessionTouch(hyperion_types::SessionStanding),
-    /// `/settings/sessions` list payload.
+    /// `/profile` device-list payload.
     WebSessionList(Vec<hyperion_types::WebSessionView>),
     /// How many sessions "sign out everywhere" actually revoked.
     WebSessionRevokeAll(i64),

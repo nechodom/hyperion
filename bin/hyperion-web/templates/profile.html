@@ -14,13 +14,9 @@
 <div class="page-header">
   <div>
     <h1>Profile</h1>
-    <div class="subtitle">Your account, two-factor authentication, password, and email.</div>
-  </div>
-  <div>
-    <a href="/settings/sessions" class="btn ghost">
-      <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
-      Active sessions
-    </a>
+    <div class="subtitle">
+      {% if let Some(u) = user %}Signed in as <strong>{{ u.username }}</strong> · {{ crate::handlers::role_label(u.role.as_str()) }}{% else %}Your account{% endif %}
+    </div>
   </div>
 </div>
 
@@ -38,274 +34,251 @@
   </div>
 {% endif %}
 
-{% if let Some(u) = user %}
-<div class="kpi-grid" style="margin-bottom:1rem">
-  <div class="kpi-card hostings">
-    <div class="kpi-label">Account</div>
-    <div class="kpi-value" style="font-size:1.1rem">{{ u.username }}</div>
-    <div class="kpi-meta">{{ u.email }}</div>
-  </div>
-  <div class="kpi-card disk">
-    <div class="kpi-label">Role</div>
-    <div class="kpi-value" style="font-size:1.1rem">{{ crate::handlers::role_label(u.role.as_str()) }}</div>
-    <div class="kpi-meta">Your access level</div>
-  </div>
-  <div class="kpi-card bw">
-    <div class="kpi-label">2FA</div>
-    <div class="kpi-value" style="font-size:1.1rem">
-      {% if u.totp_enrolled %}
-        <span style="color:var(--success)">enabled</span>
-      {% else %}
-        <span style="color:var(--warn)">disabled</span>
-      {% endif %}
+<div class="me-page">
+{% if let Some(en) = enrollment %}
+{# ───── 2FA enrolment: a focused screen, nothing else competes ───── #}
+<div class="group">
+  <div class="ghead">Set up two-factor authentication</div>
+  <div class="item" id="twofa">
+    <ol class="me-steps">
+      <li><strong>Scan the QR code</strong> with your authenticator app (1Password, Bitwarden, Google Authenticator, Authy, …), or type the secret in by hand.</li>
+      <li><strong>Save the backup codes</strong> in your password manager. Each works once and gets you in if you lose the authenticator. They are shown only now.</li>
+      <li><strong>Enter the 6-digit code</strong> your app shows to finish.</li>
+    </ol>
+
+    <div class="me-enrol">
+      <div class="me-qr">{{ en.qr_svg|safe }}</div>
+      <div>
+        <div class="text-soft small">Secret (manual entry)</div>
+        <code class="me-secret">{{ en.secret_base32 }}</code>
+        <div class="text-soft small" style="margin-top:0.9rem">Backup codes</div>
+        <div class="me-codes">
+          {% for c in en.backup_codes %}<code>{{ c }}</code>{% endfor %}
+        </div>
+      </div>
     </div>
-    <div class="kpi-meta">
-      {% if u.totp_required %}Required for your role{% else %}Optional{% endif %}
-    </div>
+
+    <form method="post" action="/profile/2fa/confirm" class="me-inline" style="margin-top:1.25rem">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <div class="field" style="margin:0">
+        <label for="confirm_code">Code from your app</label>
+        <input id="confirm_code" name="code" type="text" inputmode="numeric" autocomplete="one-time-code"
+               pattern="[0-9]{6}" maxlength="6" required placeholder="123456" autofocus class="me-otp">
+      </div>
+      <button type="submit" class="btn primary">Turn on 2FA</button>
+      <a class="btn ghost" href="/profile">Cancel</a>
+    </form>
   </div>
 </div>
-{% endif %}
 
+{% else %}
+
+<div class="svc-verdict {{ verdict.tone }}">
+  <span class="dot"></span>
+  <span>{{ verdict.text }}</span>
+</div>
+
+{# ───── Account ───── #}
 <div class="group">
   <div class="ghead">Account</div>
-  <div class="item">
-    <h3>
-      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><circle cx="12" cy="12" r="10"/></svg>
-      Profile picture
-    </h3>
-  <div style="display:flex;gap:1.2rem;align-items:center;flex-wrap:wrap">
-    <div style="width:96px;height:96px;border-radius:50%;overflow:hidden;background:linear-gradient(135deg,var(--primary),var(--info));position:relative;display:grid;place-items:center;color:white;font-weight:700;font-size:2.2rem;flex-shrink:0">
-      {% if let Some(u) = user %}{{ crate::handlers::user_initial(u.username) }}{% else %}?{% endif %}
-      {# Cache-bust on every page load so a fresh upload shows
-         immediately. Tradeoff: extra bytes per page render, but
-         the avatar is small + the request is no-store anyway. #}
-      <img src="/avatar/me?t={{ css_version }}" alt="" onerror="this.remove()"
-           style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover">
+  <div class="item" id="account">
+    <div class="me-id">
+      <div class="me-avatar">
+        {% if let Some(u) = user %}{{ crate::handlers::user_initial(u.username) }}{% else %}?{% endif %}
+        {# Cache-bust per deploy; the request itself is no-store. #}
+        <img src="/avatar/me?t={{ css_version }}" alt="" onerror="this.remove()">
+      </div>
+      {% if let Some(u) = user %}
+      <dl class="facts me-facts">
+        <div class="fact"><dt>Email</dt><dd>{{ u.email }}</dd></div>
+        <div class="fact"><dt>Role</dt><dd>{{ crate::handlers::role_label(u.role.as_str()) }}</dd></div>
+        <div class="fact"><dt>Member since</dt><dd>{{ u.created_at|datetime }}</dd></div>
+        <div class="fact"><dt>Last sign-in</dt><dd>{% if let Some(t) = u.last_login_at %}{{ t|datetime }}{% else %}—{% endif %}</dd></div>
+      </dl>
+      {% endif %}
     </div>
-    <div style="flex:1;min-width:14rem">
-      <p class="muted" style="font-size:0.85rem;margin:0 0 0.6rem">
-        PNG, JPG, or WEBP, up to 1 MB. A square image of at least 256 px works best.
-      </p>
-      {# Multipart upload: _csrf rides in URL query (middleware
-         skips multipart body parsing). #}
+  </div>
+  <div class="item" id="picture">
+    <h3>Profile picture</h3>
+    <p class="text-soft small" style="margin:0 0 0.75rem">PNG, JPG or WEBP up to 1 MB. Square, at least 256 px, looks best. Without one, your initial is shown.</p>
+    <div class="me-inline">
+      {# Multipart: _csrf rides in the query string — the middleware does
+         not parse multipart bodies. #}
       <form method="post" action="/profile/avatar/upload?_csrf={{ csrf_token }}"
-            enctype="multipart/form-data"
-            style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap;margin:0">
-        <input type="file" name="file" accept="image/png,image/jpeg,image/webp" required
-               style="font-size:0.85rem">
-        <button class="btn primary" type="submit">Upload picture</button>
+            enctype="multipart/form-data" class="me-inline">
+        <input type="file" name="file" accept="image/png,image/jpeg,image/webp" required class="me-file">
+        <button class="btn small primary" type="submit">Upload</button>
       </form>
-      <form method="post" action="/profile/avatar/clear" style="margin:0.5rem 0 0"
+      <form method="post" action="/profile/avatar/clear" style="margin:0"
             data-confirm-title="Remove profile picture"
             data-confirm-body="Your profile picture will be removed and your initial shown instead. You can upload a new one at any time."
             data-confirm-confirm-label="Remove picture"
             data-confirm-variant="danger">
         <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-        <button class="btn small ghost" type="submit">Remove current picture</button>
+        <button class="btn small ghost" type="submit">Remove picture</button>
       </form>
     </div>
-    </div>
   </div>
 </div>
 
-{# 2FA, password, and email — kept in one readable column. The
-   signed-in-devices table below needs the full column width, so
-   everything stays stacked rather than packed into an auto-fit grid. #}
-<div style="max-width:56rem">
-  <div class="group">
-    <div class="ghead">Security</div>
-
-    {# 2FA — three states: enrollment-in-progress | enrolled | disabled. #}
-    {% if let Some(en) = enrollment %}
-    <div class="item">
-      <h3>
-        <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
-        Set up two-factor authentication
-      </h3>
-  <ol style="line-height:1.7;font-size:0.92rem">
-    <li><strong>Open your authenticator app</strong> (Google Authenticator, 1Password, Authy, Bitwarden, and similar) and <strong>scan the QR code</strong> below, or enter the secret manually.</li>
-    <li><strong>Save the backup codes</strong> in your password manager. Each code works once, and lets you sign in if you lose access to your authenticator.</li>
-    <li><strong>Enter the 6-digit code</strong> from your app to confirm enrollment.</li>
-  </ol>
-
-  <div style="display:grid;grid-template-columns:auto 1fr;gap:1.5rem;align-items:start;margin-top:1rem">
-    <div style="background:white;border-radius:var(--radius-md);padding:0.4rem">{{ en.qr_svg|safe }}</div>
-    <div>
-      <div class="text-soft small" style="margin-bottom:0.2rem">Secret (manual entry)</div>
-      <code style="display:block;font-size:0.95rem;padding:0.4rem 0.6rem;background:var(--surface-2);border-radius:var(--radius-xs);word-break:break-all;border:1px solid var(--border)">{{ en.secret_base32 }}</code>
-
-      <div class="text-soft small" style="margin-top:0.8rem;margin-bottom:0.3rem">Backup codes (save now — shown only once)</div>
-      <div style="display:grid;grid-template-columns:repeat(2, 1fr);gap:0.3rem">
-        {% for c in en.backup_codes %}
-          <code style="background:var(--surface-2);padding:0.25rem 0.5rem;border-radius:var(--radius-xs);text-align:center;font-size:0.95rem;border:1px solid var(--border)">{{ c }}</code>
-        {% endfor %}
-      </div>
-    </div>
-  </div>
-
-  <form method="post" action="/profile/2fa/confirm" style="margin-top:1rem;display:flex;gap:0.5rem;align-items:flex-end;flex-wrap:wrap">
-    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-    <div class="field" style="margin:0">
-      <label for="confirm_code">Verification code (from your app)</label>
-      <input id="confirm_code" name="code" type="text" inputmode="numeric"
-             pattern="[0-9]{6}" maxlength="6" required placeholder="123456" autofocus
-             style="font-size:1.1rem;letter-spacing:0.2em;width:8rem">
-    </div>
-    <button type="submit" class="btn primary">Confirm enrollment</button>
-    <a class="btn ghost" href="/profile">Cancel</a>
-  </form>
-</div>
-
-{# Steady states. #}
-{% else %}
-    <div class="item">
-      <h3>Two-factor authentication</h3>
+{# ───── Sign-in ───── #}
+<div class="group">
+  <div class="ghead">Sign-in</div>
   {% if let Some(u) = user %}
+  <div class="item" id="twofa">
+    <div class="me-head">
+      <h3>Two-factor authentication</h3>
+      {% if u.totp_enrolled %}<span class="pill ok">on</span>{% else if u.totp_required || require_2fa %}<span class="pill err">required</span>{% else %}<span class="pill warn">off</span>{% endif %}
+    </div>
     {% if u.totp_enrolled %}
-      <p>Two-factor authentication is on. Each time you sign in, you'll be asked for a code from your authenticator app or a one-time backup code.</p>
+      <p class="text-soft small" style="margin:0 0 0.75rem">Every sign-in asks for a code from your authenticator app, or one of your backup codes.</p>
+      {% if codes_left >= 0 %}
+      <p class="small" style="margin:0 0 0.75rem">
+        {% if codes_left == 0 %}
+          <strong class="me-warn">No backup codes left.</strong>
+          If you lose your authenticator you cannot sign in. To get a fresh set, turn 2FA off and set it up again.
+        {% else if codes_left <= 2 %}
+          <strong class="me-warn">{{ codes_left }} backup code{% if codes_left != 1 %}s{% endif %} left.</strong>
+          To get a fresh set, turn 2FA off and set it up again.
+        {% else %}
+          <span class="text-soft">{{ codes_left }} unused backup codes.</span>
+        {% endif %}
+      </p>
+      {% endif %}
       <form method="post" action="/profile/2fa/disable"
-            data-confirm-title="Disable two-factor authentication"
-            data-confirm-body="Sign-in will require only a password again, which is less secure. You can turn it back on at any time."
-            data-confirm-confirm-label="Disable 2FA"
+            data-confirm-title="Turn off two-factor authentication"
+            data-confirm-body="Sign-in will need only your password, which is less secure. Your remaining backup codes stop working. You can turn it back on at any time."
+            data-confirm-confirm-label="Turn off 2FA"
             data-confirm-variant="danger">
         <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-        <button class="btn danger small" type="submit">Disable 2FA</button>
+        <button class="btn small ghost" type="submit">Turn off 2FA</button>
       </form>
     {% else %}
-      <p>Two-factor authentication is off. Turn it on to protect your account with a 6-digit code from an authenticator app.</p>
+      <p class="text-soft small" style="margin:0 0 0.75rem">
+        {% if u.totp_required || require_2fa %}Your role requires it.{% endif %}
+        Protect the account with a 6-digit code from an authenticator app, asked at every sign-in. Takes about a minute.
+      </p>
       <form method="post" action="/profile/2fa/start">
         <input type="hidden" name="_csrf" value="{{ csrf_token }}">
         <button class="btn small primary" type="submit">Set up 2FA</button>
       </form>
     {% endif %}
+  </div>
   {% endif %}
+
+  <div class="item" id="password">
+    <h3>Password</h3>
+    <form method="post" action="/profile/password" autocomplete="off" class="me-form">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <div class="field">
+        <label for="pw_current">Current password</label>
+        <input id="pw_current" type="password" name="current_password" autocomplete="current-password" required>
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label for="pw_new">New password <span class="hint">at least 8 characters</span></label>
+          <input id="pw_new" type="password" name="new_password" minlength="8" autocomplete="new-password" required>
+        </div>
+        <div class="field">
+          <label for="pw_repeat">Repeat new password</label>
+          <input id="pw_repeat" type="password" name="new_password_confirm" minlength="8" autocomplete="new-password" required>
+        </div>
+      </div>
+      <p class="text-soft small" style="margin:0 0 0.75rem">Your other devices are signed out when the password changes. This one stays signed in.</p>
+      <button type="submit" class="btn small primary">Change password</button>
+    </form>
+  </div>
+</div>
+
+{# ───── Email ───── #}
+<div class="group">
+  <div class="ghead">Email</div>
+  <div class="item" id="email">
+    {% if let Some(u) = user %}
+    <h3>{{ u.email }}</h3>
+    {% if let Some(p) = u.pending_email %}
+      <p class="small" style="margin:0 0 0.75rem">
+        <strong>Change pending.</strong>
+        A code went to <code>{{ p.new_email }}</code>; it expires {{ pending_expires_in }}.
+        Your current address stays until you enter it.
+      </p>
+      <div class="me-inline">
+        <form method="post" action="/profile/email/confirm" autocomplete="off" class="me-inline">
+          <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+          <input id="email_code" aria-label="Code from the email" type="text" name="code" placeholder="123456"
+                 inputmode="numeric" pattern="[0-9]{6}" maxlength="6" required autocomplete="one-time-code" class="me-otp">
+          <button type="submit" class="btn small primary">Confirm new email</button>
+        </form>
+        <form method="post" action="/profile/email/cancel" style="margin:0">
+          <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+          <button type="submit" class="btn small ghost">Cancel change</button>
+        </form>
+      </div>
+      <details class="me-fold">
+        <summary>Wrong address, or no email arrived? Send a new code</summary>
+        {% include "_profile_email_request.html" %}
+      </details>
+    {% else %}
+      <p class="text-soft small" style="margin:0 0 0.75rem">To change it, we send a 6-digit code to the new address. The change happens once you enter that code here.</p>
+      {% include "_profile_email_request.html" %}
+    {% endif %}
+    {% endif %}
+  </div>
+</div>
+
+{# ───── Devices ───── #}
+<div class="group" id="devices">
+  <div class="ghead">Signed-in devices <span class="grow"></span><span class="ghead-note">{{ devices.len() }} active</span></div>
+  <div class="item muted">
+    <p class="text-soft small" style="margin:0">Every browser that can use this account right now. If one is not you, sign it out, then change your password.</p>
+  </div>
+  {% for d in devices %}
+  <div class="svc-row">
+    <div class="svc-main">
+      <div class="svc-title">
+        <strong title="{{ d.user_agent }}">{{ d.label }}</strong>
+        {% if d.is_current %}<span class="pill ok small">this device</span>{% endif %}
+      </div>
+      <div class="text-soft small">
+        <code>{{ d.ip }}</code> · signed in {{ d.created_at|datetime }} · last active {{ d.last_seen_ago }}
+      </div>
+    </div>
+    <div class="svc-actions">
+      {% if !d.is_current %}
+      <form method="post" action="/profile/sessions/revoke">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <input type="hidden" name="sid" value="{{ d.sid }}">
+        <button class="btn small" type="submit">Sign out</button>
+      </form>
+      {% endif %}
+    </div>
+  </div>
+  {% endfor %}
+  {% if !ended.is_empty() %}
+  <details class="item me-ended">
+    <summary class="text-soft small">Ended sessions ({{ ended.len() }})</summary>
+    <ul class="me-ended-list">
+      {% for d in ended %}
+      <li>
+        <span title="{{ d.user_agent }}">{{ d.label }}</span>
+        <span class="text-soft small"><code>{{ d.ip }}</code> · signed in {{ d.created_at|datetime }} · last active {{ d.last_seen_ago }}{% if let Some(why) = d.ended %} · {{ why }}{% endif %}</span>
+      </li>
+      {% endfor %}
+    </ul>
+  </details>
+  {% endif %}
+  <div class="item">
+    <form method="post" action="/profile/sessions/revoke-all"
+          data-confirm-title="Sign out everywhere"
+          data-confirm-body="Every session including this one is ended and you will be asked to sign in again. Do this if you think someone else has access to your account — sparing the browser you are holding would be exactly wrong if that browser is theirs."
+          data-confirm-confirm-label="Sign out everywhere"
+          data-confirm-variant="danger">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <button class="btn small danger" type="submit">Sign out everywhere</button>
+      <span class="text-soft small" style="margin-left:0.5rem">Includes this device.</span>
+    </form>
+  </div>
 </div>
 {% endif %}
-
-    <div class="item">
-      <h3>Change password</h3>
-  <form method="post" action="/profile/password" autocomplete="off" style="display:flex;flex-direction:column;gap:0.4rem">
-    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-    <input type="password" name="current_password" placeholder="current password" autocomplete="current-password" required>
-    <input type="password" name="new_password" placeholder="new password" minlength="8" autocomplete="new-password" required>
-    <input type="password" name="new_password_confirm" placeholder="repeat new password" minlength="8" autocomplete="new-password" required>
-    <button type="submit" class="btn small primary" style="align-self:flex-start">Change password</button>
-  </form>
-  <p class="text-soft small" style="margin-top:0.4rem">At least 8 characters. Enter your current password to confirm. Your other signed-in devices will be signed out.</p>
-    </div>
-  </div>
-
-  <div class="group">
-    <div class="ghead">Email</div>
-    <div class="item">
-      <h3>
-        <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
-        Change email
-      </h3>
-  {% if let Some(u) = user %}
-  <p class="text-soft small" style="margin:0 0 0.6rem">
-    Current address: <code>{{ u.email }}</code>. We'll send a 6-digit
-    code to the new address. Enter it below to confirm the change.
-  </p>
-  {% endif %}
-
-  {# Request step — always rendered. A pending request just shows
-     the confirm form below alongside this one (operator can cancel
-     + start over by submitting a new email). #}
-  <form method="post" action="/profile/email/request" autocomplete="off"
-        style="display:flex;flex-direction:column;gap:0.4rem">
-    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-    <input type="email" name="new_email" placeholder="new@example.com" required maxlength="254">
-    <input type="password" name="current_password" placeholder="current password" required>
-    <button type="submit" class="btn small primary" style="align-self:flex-start">Send verification code</button>
-  </form>
-
-  <details style="margin-top:0.8rem">
-    <summary style="cursor:pointer;font-size:0.88rem;color:var(--text-dim)">Already requested? Enter the code</summary>
-    {# Two SIBLING forms — nested <form> tags are invalid HTML and
-       caused the Cancel button to mis-route through the outer
-       form's action. Wrap both in a flex row so the layout looks
-       like one composite form. #}
-    <div class="m-wrap" style="display:flex;gap:0.4rem;align-items:center;margin-top:0.5rem">
-      <form method="post" action="/profile/email/confirm" autocomplete="off"
-            class="m-wrap" style="display:flex;gap:0.4rem;align-items:center;margin:0">
-        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-        <input type="text" name="code" placeholder="123456"
-               inputmode="numeric" pattern="[0-9]{6}" maxlength="6" required autocomplete="off"
-               style="font-size:1.1rem;letter-spacing:0.2em;width:8rem">
-        <button type="submit" class="btn small primary">Confirm new email</button>
-      </form>
-      <form method="post" action="/profile/email/cancel" style="display:inline;margin:0">
-        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-        <button type="submit" class="btn small ghost">Cancel request</button>
-      </form>
-    </div>
-  </details>
-    </div>
-  </div>
-
-  {# ───── Signed-in devices ─────
-     Stays a .card: the table-wrap uses negative margins (-1.5rem) tuned
-     to the .card padding (1.5rem), not .item's narrower 1.25rem. #}
-  <div class="card" style="margin-top:1.5rem">
-  <h2>
-    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
-    Signed-in devices
-    <span class="text-soft small" style="font-weight:400;margin-left:0.5rem">{{ sessions.len() }}</span>
-  </h2>
-  <p class="text-soft small" style="margin:0 0 0.9rem;line-height:1.55">
-    Every browser currently signed in to this account. A stolen session cookie
-    is invisible until you can see the list it is in — if anything here is not
-    you, sign out everywhere and change your password.
-  </p>
-  {% if sessions.is_empty() %}
-    <p class="muted small" style="margin:0">No other sessions.</p>
-  {% else %}
-  <div class="table-wrap flush" style="margin-top:0;margin-bottom:0.9rem">
-    <table>
-      <thead>
-        <tr><th>Device</th><th>IP</th><th>Signed in</th><th>Last seen</th><th class="right">Action</th></tr>
-      </thead>
-      <tbody>
-      {% for s in sessions %}
-        <tr>
-          <td style="max-width:26rem">
-            {% if s.sid == current_sid %}<span class="pill ok" style="margin-right:0.4rem">this device</span>{% endif %}
-            <span class="text-soft small"
-                  {% if let Some(ua) = s.user_agent %}title="{{ ua }}"{% endif %}
-                  style="display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
-              {%- if let Some(ua) = s.user_agent %}{{ ua }}{% else %}unknown{% endif -%}
-            </span>
-          </td>
-          <td><code style="font-size:0.8rem">{% if let Some(ip) = s.ip %}{{ ip }}{% else %}—{% endif %}</code></td>
-          <td class="muted small">{{ s.created_at|datetime }}</td>
-          <td class="muted small">{{ s.last_seen_at|datetime }}</td>
-          <td class="right">
-            {% if s.sid != current_sid %}
-            <form method="post" action="/profile/sessions/revoke" style="display:inline">
-              <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-              <input type="hidden" name="sid" value="{{ s.sid }}">
-              <button class="btn small" type="submit">Sign out</button>
-            </form>
-            {% else %}
-            <span class="text-soft small">—</span>
-            {% endif %}
-          </td>
-        </tr>
-      {% endfor %}
-      </tbody>
-    </table>
-  </div>
-  {% endif %}
-  <form method="post" action="/profile/sessions/revoke-all"
-        data-confirm-title="Sign out everywhere"
-        data-confirm-body="Every session including this one is ended and you will be asked to sign in again. Do this if you think someone else has access to your account — sparing the browser you are holding would be exactly wrong if that browser is theirs."
-        data-confirm-confirm-label="Sign out everywhere"
-        data-confirm-variant="danger">
-    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-    <button class="btn danger" type="submit">Sign out of all devices</button>
-  </form>
-</div>
-
 </div>
 {% endblock %}

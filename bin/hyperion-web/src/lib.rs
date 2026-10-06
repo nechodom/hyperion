@@ -605,10 +605,6 @@ pub fn build_router(state: SharedState) -> Router {
         )
         .route("/audit/verify", post(handlers::audit::post_verify_chain))
         .route("/settings/sessions", get(handlers::sessions::get_sessions))
-        .route(
-            "/settings/sessions/revoke",
-            post(handlers::sessions::post_revoke),
-        )
         .route("/jobs", get(handlers::jobs::get_jobs))
         .route("/jobs/:id", get(handlers::jobs::get_job_detail))
         .route("/jobs/:id/progress", get(handlers::jobs::get_job_progress))

@@ -89,7 +89,7 @@ impl JobView {
 /// One row from `web_sessions`. The signed-cookie Session in
 /// `hyperion-auth` is the wire-format the COOKIE carries; this is
 /// the projection the agent stores + the panel renders into
-/// /settings/sessions.
+/// /profile (signed-in devices).
 /// What a session's owner is allowed to do RIGHT NOW.
 ///
 /// Authorization used to come entirely from the signed cookie, which stamps
