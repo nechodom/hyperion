@@ -21,7 +21,7 @@
     {# Node switcher — navigate to /services?node=<id>. JS-free
        fallback uses a tiny form; with JS the change handler fires
        immediately so the operator doesn't have to click "Go". #}
-    <form method="get" action="/services" style="display:flex;gap:0.4rem;align-items:center">
+    <form method="get" action="/services" class="m-wrap" style="display:flex;gap:0.4rem;align-items:center">
       <label for="node-switcher" class="text-soft small">View on node:</label>
       <select id="node-switcher" name="node"
               onchange="this.form.submit()"

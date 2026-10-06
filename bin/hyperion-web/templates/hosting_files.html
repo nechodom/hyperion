@@ -35,15 +35,15 @@
 
 {% if can_write %}
 <div class="card" style="margin-bottom:1rem;padding:0.9rem 1rem;display:flex;gap:0.7rem;flex-wrap:wrap;align-items:center">
-  <form method="post" action="/hostings/files/mkdir" style="display:flex;gap:0.4rem;align-items:center;margin:0">
+  <form method="post" action="/hostings/files/mkdir" class="m-wrap" style="display:flex;gap:0.4rem;align-items:center;margin:0">
     <input type="hidden" name="_csrf" value="{{ csrf_token }}">
     <input type="hidden" name="selector" value="{{ selector }}">
     <input type="hidden" name="dir" value="{{ rel_path }}">
-    <input type="text" name="name" placeholder="New folder name" pattern="[^/\\\\\0]+" required style="width:14rem;font-size:0.85rem">
+    <input type="text" name="name" placeholder="New folder name" pattern="[^/\\\\\0]+" required style="width:14rem;max-width:100%;font-size:0.85rem">
     <button class="btn small" type="submit">Create folder</button>
   </form>
   <form method="post" action="/hostings/{{ selector }}/files/upload?_csrf={{ csrf_token }}"
-        enctype="multipart/form-data" style="display:flex;gap:0.4rem;align-items:center;margin:0">
+        enctype="multipart/form-data" class="m-wrap" style="display:flex;gap:0.4rem;align-items:center;margin:0">
     <input type="hidden" name="dir" value="{{ rel_path }}">
     <input type="file" name="file" required style="font-size:0.85rem">
     <button class="btn small primary" type="submit">Upload file</button>

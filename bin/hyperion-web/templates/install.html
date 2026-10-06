@@ -464,7 +464,7 @@
                 data-confirm-body="The system-package upgrade and/or the Hyperion update will run on {{ n.label }} ({% if let Some(ip) = n.public_ip.as_ref() %}{{ ip }}{% else %}{{ n.node_id }}{% endif %}). The node's services may briefly restart. This can take several minutes. With Safe update ticked, the previous binaries are restored automatically if the node does not come back healthy — note that this restores BINARIES, not data."
                 data-confirm-confirm-label="Start update"
                 data-confirm-variant="primary"
-                class="node-card__inline-form" style="grid-template-columns:1fr 1fr 1fr auto auto">
+                class="node-card__inline-form m-stack" style="grid-template-columns:1fr 1fr 1fr auto auto">
             <input type="hidden" name="_csrf" value="{{ csrf_update }}">
             <input type="hidden" name="node_id" value="{{ n.node_id }}">
             <label class="field-checkbox" style="margin:0">

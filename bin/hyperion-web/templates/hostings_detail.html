@@ -4415,7 +4415,7 @@
   </div>
 
   <form method="post" action="/hostings/access/grant" autocomplete="off"
-        style="display:grid;grid-template-columns:1fr 1fr auto;gap:0.5rem;align-items:end;margin-bottom:1rem">
+        class="m-stack" style="display:grid;grid-template-columns:1fr 1fr auto;gap:0.5rem;align-items:end;margin-bottom:1rem">
     <input type="hidden" name="_csrf" value="{{ csrf_token }}">
     <input type="hidden" name="hosting_id" value="{{ detail.id }}">
     <div class="field" style="margin:0">

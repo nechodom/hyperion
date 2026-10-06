@@ -22,7 +22,7 @@
   <div class="ghead">Search &amp; verify</div>
   <div class="item">
   <form method="get" action="/audit"
-        class="audit-filter-grid" style="display:grid;grid-template-columns:1fr auto auto auto;gap:0.5rem 0.75rem;align-items:center">
+        class="audit-filter-grid m-stack" style="display:grid;grid-template-columns:1fr auto auto auto;gap:0.5rem 0.75rem;align-items:center">
     <input type="search" name="q" value="{{ q|e }}"
            placeholder="Search by action, target, actor, or payload…"
            autofocus
@@ -38,7 +38,7 @@
       <option value="ok" {% if result_filter == "ok" %}selected{% endif %}>ok</option>
       <option value="failed" {% if result_filter == "failed" %}selected{% endif %}>failed</option>
     </select>
-    <div style="display:flex;gap:0.4rem;align-items:center">
+    <div class="m-wrap" style="display:flex;gap:0.4rem;align-items:center">
       <button type="submit" class="btn small">Apply</button>
       <a class="btn small ghost" href="/audit">Reset</a>
     </div>

@@ -511,7 +511,10 @@ async fn devserver() {
     }
     let (router, _signer) =
         build_app_with_signer(sock, admin, Arc::new(SessionSigner::new_random()));
-    let port = std::env::var("DEVSERVER_PORT").unwrap_or_else(|_| "8190".into());
+    // PORT too: the desktop preview hands an auto-assigned port that way.
+    let port = std::env::var("DEVSERVER_PORT")
+        .or_else(|_| std::env::var("PORT"))
+        .unwrap_or_else(|_| "8190".into());
     let addr = format!("127.0.0.1:{port}");
     let listener = tokio::net::TcpListener::bind(&addr)
         .await

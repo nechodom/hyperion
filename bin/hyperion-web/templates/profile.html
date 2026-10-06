@@ -226,9 +226,9 @@
        caused the Cancel button to mis-route through the outer
        form's action. Wrap both in a flex row so the layout looks
        like one composite form. #}
-    <div style="display:flex;gap:0.4rem;align-items:center;margin-top:0.5rem">
+    <div class="m-wrap" style="display:flex;gap:0.4rem;align-items:center;margin-top:0.5rem">
       <form method="post" action="/profile/email/confirm" autocomplete="off"
-            style="display:flex;gap:0.4rem;align-items:center;margin:0">
+            class="m-wrap" style="display:flex;gap:0.4rem;align-items:center;margin:0">
         <input type="hidden" name="_csrf" value="{{ csrf_token }}">
         <input type="text" name="code" placeholder="123456"
                inputmode="numeric" pattern="[0-9]{6}" maxlength="6" required autocomplete="off"
@@ -261,7 +261,7 @@
   {% if sessions.is_empty() %}
     <p class="muted small" style="margin:0">No other sessions.</p>
   {% else %}
-  <div class="table-wrap" style="margin:0 -1.5rem 0.9rem">
+  <div class="table-wrap flush" style="margin-top:0;margin-bottom:0.9rem">
     <table>
       <thead>
         <tr><th>Device</th><th>IP</th><th>Signed in</th><th>Last seen</th><th class="right">Action</th></tr>
