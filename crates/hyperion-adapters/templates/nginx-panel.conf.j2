@@ -162,11 +162,34 @@ server {
     # upstream is down. The agent plants/refreshes it at
     # /var/lib/hyperion/maintenance/panel-maintenance.html whenever it writes
     # this vhost; the =503 above keeps the status a real Service Unavailable.
+    #
+    # An `add_header` here drops every server-level one, so the security
+    # headers are repeated. X-Hyperion-Maintenance is how the page's own probe
+    # tells "still this page" from "the panel is back".
     location @hyperion_maintenance {
         root /var/lib/hyperion/maintenance;
         try_files /panel-maintenance.html =503;
         add_header Retry-After 15 always;
         add_header Cache-Control "no-store" always;
+        add_header X-Hyperion-Maintenance 1 always;
+        add_header Strict-Transport-Security "max-age=63072000; includeSubDomains" always;
+        add_header X-Frame-Options "SAMEORIGIN" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header Referrer-Policy "strict-origin-when-cross-origin" always;
         default_type text/html;
+    }
+
+    # What update.sh is doing right now — one small JSON file it rewrites at
+    # each phase and removes when the panel is serving again (404 = no update
+    # running). Served from disk, never proxied, because the page that polls it
+    # is only ever shown while hyperion-web is down. Holds a step name and
+    # timestamps, nothing else.
+    location = /_hyperion/update-status {
+        root /var/lib/hyperion/maintenance;
+        try_files /panel-update.json =404;
+        default_type application/json;
+        add_header Cache-Control "no-store" always;
+        add_header Strict-Transport-Security "max-age=63072000; includeSubDomains" always;
+        add_header X-Content-Type-Options "nosniff" always;
     }
 }

@@ -32,8 +32,10 @@ pub struct EmailLogRow {
     /// "ok" | "failed".
     pub state: String,
     pub error: Option<String>,
-    /// SMTP server's numeric response code (e.g. "Code(250)"). None
-    /// when the send didn't even reach the server (DNS, TLS, etc.).
+    /// The relay's reply line, e.g. "250 2.0.0 Ok: queued as 4ZQ1x". Rows
+    /// written before that hold lettre's `Debug` form of the bare code
+    /// (`Code { severity: … }`); the web decodes those. None when the send
+    /// didn't even reach the server (DNS, TLS, etc.).
     pub smtp_code: Option<String>,
     pub sent_at: i64,
 }
