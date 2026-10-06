@@ -2606,8 +2606,10 @@ mod tests {
     #[test]
     fn every_rule_renders_only_when_on_and_tags_its_id() {
         for r in hyperion_types::waf::RULES {
-            let mut on = hyperion_types::VhostOptions::default();
-            on.waf_overrides = format!(r#"{{"{}":true}}"#, r.id);
+            let on = hyperion_types::VhostOptions {
+                waf_overrides: format!(r#"{{"{}":true}}"#, r.id),
+                ..Default::default()
+            };
             let out = render_with(&on, Some("8.3"));
             assert!(
                 out.contains(&format!("set $hyperion_waf \"{}\";", r.id)),

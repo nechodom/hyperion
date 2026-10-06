@@ -2692,15 +2692,15 @@
       <summary>Individual rules <span class="text-soft small">— pin a rule on or off regardless of the level</span></summary>
       <div class="setting-list">
         {% for r in waf_rules %}
-        <div class="setting-row stacked">
+        <div class="setting-row">
           <label class="s-label" for="waf_rule_{{ r.id }}">
             {{ r.label }}
             {% if r.strict_only %}<span class="hint">strict</span>{% endif %}
             {% if r.effective %}<span class="pill ok" style="font-size:0.6rem;margin-left:0.3rem">on</span>{% else %}<span class="pill neutral" style="font-size:0.6rem;margin-left:0.3rem">off</span>{% endif %}
           </label>
           <p class="s-help">{{ r.help }}{% if r.counts_for_ban %} Repeat offenders are banned automatically.{% endif %}</p>
-          <div class="s-field">
-            <select id="waf_rule_{{ r.id }}" name="waf_rule_{{ r.id }}" style="max-width:14rem">
+          <div class="s-control">
+            <select id="waf_rule_{{ r.id }}" name="waf_rule_{{ r.id }}" style="width:auto">
               <option value="" {% if r.pin.is_empty() %}selected{% endif %}>Follow the level</option>
               <option value="on" {% if r.pin == "on" %}selected{% endif %}>Always on</option>
               <option value="off" {% if r.pin == "off" %}selected{% endif %}>Always off</option>

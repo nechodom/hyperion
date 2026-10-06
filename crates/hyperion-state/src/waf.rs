@@ -347,8 +347,10 @@ mod tests {
         );
 
         // A legacy writer: empty level, bool on ⇒ stored as standard.
-        let mut legacy = hyperion_types::VhostOptions::default();
-        legacy.waf_enabled = true;
+        let legacy = hyperion_types::VhostOptions {
+            waf_enabled: true,
+            ..Default::default()
+        };
         crate::hostings::set_vhost_options(&pool, &hid, &legacy, Some("hash"), 3)
             .await
             .expect("set");
