@@ -792,6 +792,8 @@ a.node-row:hover { background: var(--surface-2); }
 .svc-dot.ok   { background: var(--success); }
 .svc-dot.warn { background: var(--warn); }
 .svc-dot.err  { background: var(--danger); }
+.svc-facts { display: flex; flex-wrap: wrap; gap: 0 0.9rem; color: var(--text-soft); margin-top: 0.15rem; font-variant-numeric: tabular-nums; }
+.svc-facts .warn { color: var(--warn); }
 .svc-attn { display: flex; flex-wrap: wrap; gap: 0.3rem; margin-top: 0.3rem; }
 @media (max-width: 640px) {
   .group > .svc-row { flex-wrap: wrap; }

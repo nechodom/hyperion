@@ -29010,6 +29010,16 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 (unit, label, false, status, present)
             }));
         }
+        // One dpkg-query for every package we know the unit of, and one read
+        // of /proc/uptime to turn systemd's monotonic stamps into wall time.
+        let pkgs: Vec<&str> = critical
+            .iter()
+            .chain(optional.iter())
+            .filter_map(|(u, _)| hyperion_adapters::unit_package(u))
+            .collect();
+        let versions = hyperion_adapters::dpkg_versions(&pkgs).await;
+        let uptime = hyperion_adapters::uptime_secs();
+        let now = hyperion_types::now_secs();
         let mut services: Vec<hyperion_types::ServiceHealth> = Vec::new();
         let mut critical_down = 0usize;
         let mut warn_down = 0usize;
@@ -29065,6 +29075,25 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 present,
                 sub_state: sub,
                 severity,
+                since: {
+                    let mono = if status.active {
+                        status.active_enter_mono_us
+                    } else {
+                        status.inactive_enter_mono_us
+                    };
+                    match (mono, uptime) {
+                        (Some(m), Some(up)) if present => {
+                            Some(hyperion_adapters::boot_relative_to_unix(m, now, up))
+                        }
+                        _ => None,
+                    }
+                },
+                memory_bytes: status.memory_bytes.filter(|_| status.active),
+                main_pid: status.main_pid,
+                restarts: status.restarts.filter(|_| present),
+                result: status.result.clone().filter(|_| present),
+                version: hyperion_adapters::unit_package(unit)
+                    .and_then(|p| versions.get(p).cloned()),
                 active_state: status.active_state,
                 transient,
             });

@@ -67,6 +67,14 @@ pub(crate) struct SvcRow {
     pub status: String,
     /// Extra fact shown only when it matters ("won't start at boot").
     pub note: Option<String>,
+    /// Detail facts in reading order: "up 3d 4h", "142.0 MiB", "PID 1234",
+    /// "1.26.3" — or "down 12m", "oom-kill". Empty from an older agent.
+    pub facts: Vec<String>,
+    /// Why systemd says it stopped (`oom-kill`, `exit-code`…) — the overview
+    /// shows it next to the problem pill.
+    pub cause: Option<String>,
+    /// systemd restarted it on its own — "restarted 4×". Shown in warn colour.
+    pub restarts: Option<String>,
     /// Counts against health — sorts first and lands in the verdict.
     pub problem: bool,
     pub can_restart: bool,
@@ -87,7 +95,37 @@ pub(crate) struct ServicesView {
     pub known: bool,
 }
 
-fn row_for(s: &hyperion_types::ServiceHealth) -> SvcRow {
+fn facts_for(s: &hyperion_types::ServiceHealth, now: i64) -> Vec<String> {
+    let mut f = Vec::new();
+    if !s.present {
+        return f;
+    }
+    let age = s
+        .since
+        .map(|t| super::stats::fmt_uptime(&(now - t).max(60)));
+    if s.active {
+        if let Some(a) = age {
+            f.push(format!("up {a}"));
+        }
+        if let Some(m) = s.memory_bytes {
+            f.push(super::stats::fmt_bytes(&(m.min(i64::MAX as u64) as i64)));
+        }
+        if let Some(p) = s.main_pid {
+            f.push(format!("PID {p}"));
+        }
+    } else if let Some(a) = age {
+        f.push(format!("down {a}"));
+    }
+    if let Some(r) = &s.result {
+        f.push(r.clone());
+    }
+    if let Some(v) = &s.version {
+        f.push(v.clone());
+    }
+    f
+}
+
+fn row_for(s: &hyperion_types::ServiceHealth, now: i64) -> SvcRow {
     let core = CORE_UNITS.contains(&s.name.as_str());
     let masked = s.sub_state == "masked";
     let (tone, status, problem) = if !s.present {
@@ -133,6 +171,12 @@ fn row_for(s: &hyperion_types::ServiceHealth) -> SvcRow {
         tone,
         status,
         note,
+        facts: facts_for(s, now),
+        cause: s.result.clone().filter(|_| s.present),
+        restarts: s
+            .restarts
+            .filter(|n| *n > 0 && s.present)
+            .map(|n| format!("restarted {n}×")),
         problem,
         // Restarting the agent would cut the very RPC pipe carrying the order.
         can_restart: s.present && s.name != "hyperion-agent",
@@ -143,7 +187,7 @@ fn row_for(s: &hyperion_types::ServiceHealth) -> SvcRow {
 
 /// Reduce the agent's rows to the page: core vs optional, problems first,
 /// absent optional units folded away, and a verdict that names what is wrong.
-pub(crate) fn build_view(h: &ServicesHealth, probe_failed: bool) -> ServicesView {
+pub(crate) fn build_view(h: &ServicesHealth, probe_failed: bool, now: i64) -> ServicesView {
     if probe_failed || h.services.is_empty() {
         return ServicesView {
             tone: "muted",
@@ -156,7 +200,7 @@ pub(crate) fn build_view(h: &ServicesHealth, probe_failed: bool) -> ServicesView
         ..Default::default()
     };
     for s in &h.services {
-        let row = row_for(s);
+        let row = row_for(s, now);
         if CORE_UNITS.contains(&s.name.as_str()) {
             v.core.push(row);
         } else if !s.present {
@@ -297,7 +341,7 @@ pub(crate) fn node_card(
             fail: Some(fail),
         },
         Ok(h) => {
-            let v = build_view(h, false);
+            let v = build_view(h, false, hyperion_types::now_secs());
             let (attention, healthy): (Vec<SvcRow>, Vec<SvcRow>) = v
                 .core
                 .into_iter()
@@ -400,7 +444,7 @@ pub async fn get_services_health(
         active: "services",
         css_version: super::css_version(),
         htmx_version: super::htmx_version(),
-        view: build_view(&health, error.is_some()),
+        view: build_view(&health, error.is_some(), now),
         error,
         flash: q.flash,
         flash_error: q.flash_error,
@@ -992,6 +1036,12 @@ mod tests {
             severity: String::new(),
             active_state: active_state.into(),
             transient: false,
+            since: None,
+            memory_bytes: None,
+            main_pid: None,
+            restarts: None,
+            result: None,
+            version: None,
         }
     }
 
@@ -1012,6 +1062,7 @@ mod tests {
                 svc("vsftpd", false, false, "inactive"),
             ]),
             false,
+            0,
         );
         assert!(v.known);
         assert_eq!(v.tone, "ok");
@@ -1031,6 +1082,7 @@ mod tests {
                 svc("postfix", true, false, "inactive"),
             ]),
             false,
+            0,
         );
         assert_eq!(v.tone, "err");
         assert_eq!(v.verdict, "nginx failed · postfix stopped");
@@ -1047,13 +1099,18 @@ mod tests {
                 svc("postfix", true, false, "inactive"),
             ]),
             false,
+            0,
         );
         assert_eq!(v.tone, "warn");
     }
 
     #[test]
     fn missing_core_unit_stays_in_main_list_as_failure() {
-        let v = build_view(&health(vec![svc("nginx", false, false, "inactive")]), false);
+        let v = build_view(
+            &health(vec![svc("nginx", false, false, "inactive")]),
+            false,
+            0,
+        );
         assert_eq!(v.core.len(), 1);
         assert!(v.not_installed.is_empty());
         assert_eq!(v.core[0].status, "missing");
@@ -1068,6 +1125,7 @@ mod tests {
                 svc("hyperion-web", false, false, "inactive"),
             ]),
             false,
+            0,
         );
         let agent = v.core.iter().find(|r| r.name == "hyperion-agent").unwrap();
         let web = v.core.iter().find(|r| r.name == "hyperion-web").unwrap();
@@ -1083,7 +1141,7 @@ mod tests {
         off_at_boot.enabled = false;
         let mut restarting = svc("nginx", true, true, "activating");
         restarting.transient = true;
-        let v = build_view(&health(vec![masked, off_at_boot, restarting]), false);
+        let v = build_view(&health(vec![masked, off_at_boot, restarting]), false, 0);
         let r = |n: &str| {
             v.core
                 .iter()
@@ -1101,8 +1159,8 @@ mod tests {
 
     #[test]
     fn failed_probe_or_empty_answer_is_unknown_not_healthy() {
-        assert!(!build_view(&health(vec![]), false).known);
-        let v = build_view(&health(vec![svc("nginx", true, true, "active")]), true);
+        assert!(!build_view(&health(vec![]), false, 0).known);
+        let v = build_view(&health(vec![svc("nginx", true, true, "active")]), true, 0);
         assert!(!v.known);
         assert_eq!(v.tone, "muted");
     }
@@ -1124,6 +1182,45 @@ mod tests {
         );
         assert_eq!(install_flags(None, 0), (false, false));
     }
+    #[test]
+    fn detail_facts_running_and_failed() {
+        let mut up = svc("nginx", true, true, "active");
+        up.since = Some(10_000 - 3 * 86_400 - 4 * 3600);
+        up.memory_bytes = Some(148_897_792);
+        up.main_pid = Some(1234);
+        up.restarts = Some(4);
+        up.version = Some("1.26.3".into());
+        let mut down = svc("postfix", true, false, "failed");
+        down.since = Some(10_000 - 720);
+        down.result = Some("oom-kill".into());
+        down.memory_bytes = Some(1);
+        let v = build_view(&health(vec![up, down]), false, 10_000);
+        assert_eq!(
+            v.core[0].facts,
+            ["up 3d 4h", "142.0 MiB", "PID 1234", "1.26.3"]
+        );
+        assert_eq!(v.core[0].restarts.as_deref(), Some("restarted 4×"));
+        // Memory/PID are running-only facts.
+        assert_eq!(v.optional[0].facts, ["down 12m", "oom-kill"]);
+    }
+
+    #[test]
+    fn old_agent_rows_have_no_detail_line() {
+        let v = build_view(
+            &health(vec![svc("nginx", true, true, "active")]),
+            false,
+            10_000,
+        );
+        assert!(v.core[0].facts.is_empty());
+        assert!(v.core[0].restarts.is_none());
+        // And an old agent's JSON (no detail keys) still deserializes.
+        let json = r#"{"name":"nginx","label":"nginx","active":true,"enabled":true,
+            "present":true,"sub_state":"running","severity":"ok"}"#;
+        let h: ServiceHealth = serde_json::from_str(json).unwrap();
+        assert_eq!(h.since, None);
+        assert_eq!(h.version, None);
+    }
+
     fn card(label: &str, probe: Result<&ServicesHealth, NodeProbeFail>) -> NodeCard {
         node_card(label.into(), label.into(), None, probe)
     }
