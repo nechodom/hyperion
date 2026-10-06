@@ -30,17 +30,39 @@ use std::sync::Arc;
 
 struct StubAdapters {
     uid_seq: AtomicU32,
+    /// A pretend ModSecurity engine, so the Core Rule Set screens can be
+    /// walked: absent until "Install" runs.
+    modsec_installed: std::sync::atomic::AtomicBool,
 }
 impl StubAdapters {
     fn new() -> Self {
         Self {
             uid_seq: AtomicU32::new(3000),
+            // Present from the start: the real install's /usr-writable
+            // preflight cannot pass on a dev machine.
+            modsec_installed: std::sync::atomic::AtomicBool::new(true),
         }
     }
 }
 
 #[async_trait]
 impl hyperion_core::AdapterPort for StubAdapters {
+    async fn modsec_status(&self) -> hyperion_types::crs::ModsecStatus {
+        let on = self.modsec_installed.load(Ordering::SeqCst);
+        hyperion_types::crs::ModsecStatus {
+            module: on,
+            crs: on,
+            crs_version: if on { "3.3.4".into() } else { String::new() },
+            ..Default::default()
+        }
+    }
+    async fn modsec_install(&self) -> Result<(), AdapterError> {
+        self.modsec_installed.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+    async fn modsec_sync_http(&self, _need: bool) -> Result<bool, AdapterError> {
+        Ok(true)
+    }
     async fn ensure_user(&self, _: &str, _: &str) -> Result<u32, AdapterError> {
         Ok(self.uid_seq.fetch_add(1, Ordering::SeqCst))
     }
