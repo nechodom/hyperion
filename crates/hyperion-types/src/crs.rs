@@ -212,24 +212,96 @@ struct Category {
 }
 
 const CATEGORIES: &[Category] = &[
-    Category { key: "method", label: "OWASP CRS · HTTP method", label_detected: "OWASP CRS · HTTP method (detection only)" },
-    Category { key: "dos", label: "OWASP CRS · DoS protection", label_detected: "OWASP CRS · DoS protection (detection only)" },
-    Category { key: "scanner", label: "OWASP CRS · Scanner", label_detected: "OWASP CRS · Scanner (detection only)" },
-    Category { key: "protocol", label: "OWASP CRS · Protocol violation", label_detected: "OWASP CRS · Protocol violation (detection only)" },
-    Category { key: "protocol_attack", label: "OWASP CRS · Protocol attack", label_detected: "OWASP CRS · Protocol attack (detection only)" },
-    Category { key: "multipart", label: "OWASP CRS · Multipart attack", label_detected: "OWASP CRS · Multipart attack (detection only)" },
-    Category { key: "lfi", label: "OWASP CRS · Local file inclusion", label_detected: "OWASP CRS · Local file inclusion (detection only)" },
-    Category { key: "rfi", label: "OWASP CRS · Remote file inclusion", label_detected: "OWASP CRS · Remote file inclusion (detection only)" },
-    Category { key: "rce", label: "OWASP CRS · Command injection", label_detected: "OWASP CRS · Command injection (detection only)" },
-    Category { key: "php", label: "OWASP CRS · PHP injection", label_detected: "OWASP CRS · PHP injection (detection only)" },
-    Category { key: "nodejs", label: "OWASP CRS · JavaScript injection", label_detected: "OWASP CRS · JavaScript injection (detection only)" },
-    Category { key: "xss", label: "OWASP CRS · Cross-site scripting", label_detected: "OWASP CRS · Cross-site scripting (detection only)" },
-    Category { key: "sqli", label: "OWASP CRS · SQL injection", label_detected: "OWASP CRS · SQL injection (detection only)" },
-    Category { key: "session", label: "OWASP CRS · Session fixation", label_detected: "OWASP CRS · Session fixation (detection only)" },
-    Category { key: "java", label: "OWASP CRS · Java attack", label_detected: "OWASP CRS · Java attack (detection only)" },
-    Category { key: "leakage", label: "OWASP CRS · Data leakage", label_detected: "OWASP CRS · Data leakage (detection only)" },
-    Category { key: "body", label: "Unparseable request body", label_detected: "Unparseable request body (detection only)" },
-    Category { key: "other", label: "OWASP CRS · Other", label_detected: "OWASP CRS · Other (detection only)" },
+    Category {
+        key: "method",
+        label: "OWASP CRS · HTTP method",
+        label_detected: "OWASP CRS · HTTP method (detection only)",
+    },
+    Category {
+        key: "dos",
+        label: "OWASP CRS · DoS protection",
+        label_detected: "OWASP CRS · DoS protection (detection only)",
+    },
+    Category {
+        key: "scanner",
+        label: "OWASP CRS · Scanner",
+        label_detected: "OWASP CRS · Scanner (detection only)",
+    },
+    Category {
+        key: "protocol",
+        label: "OWASP CRS · Protocol violation",
+        label_detected: "OWASP CRS · Protocol violation (detection only)",
+    },
+    Category {
+        key: "protocol_attack",
+        label: "OWASP CRS · Protocol attack",
+        label_detected: "OWASP CRS · Protocol attack (detection only)",
+    },
+    Category {
+        key: "multipart",
+        label: "OWASP CRS · Multipart attack",
+        label_detected: "OWASP CRS · Multipart attack (detection only)",
+    },
+    Category {
+        key: "lfi",
+        label: "OWASP CRS · Local file inclusion",
+        label_detected: "OWASP CRS · Local file inclusion (detection only)",
+    },
+    Category {
+        key: "rfi",
+        label: "OWASP CRS · Remote file inclusion",
+        label_detected: "OWASP CRS · Remote file inclusion (detection only)",
+    },
+    Category {
+        key: "rce",
+        label: "OWASP CRS · Command injection",
+        label_detected: "OWASP CRS · Command injection (detection only)",
+    },
+    Category {
+        key: "php",
+        label: "OWASP CRS · PHP injection",
+        label_detected: "OWASP CRS · PHP injection (detection only)",
+    },
+    Category {
+        key: "nodejs",
+        label: "OWASP CRS · JavaScript injection",
+        label_detected: "OWASP CRS · JavaScript injection (detection only)",
+    },
+    Category {
+        key: "xss",
+        label: "OWASP CRS · Cross-site scripting",
+        label_detected: "OWASP CRS · Cross-site scripting (detection only)",
+    },
+    Category {
+        key: "sqli",
+        label: "OWASP CRS · SQL injection",
+        label_detected: "OWASP CRS · SQL injection (detection only)",
+    },
+    Category {
+        key: "session",
+        label: "OWASP CRS · Session fixation",
+        label_detected: "OWASP CRS · Session fixation (detection only)",
+    },
+    Category {
+        key: "java",
+        label: "OWASP CRS · Java attack",
+        label_detected: "OWASP CRS · Java attack (detection only)",
+    },
+    Category {
+        key: "leakage",
+        label: "OWASP CRS · Data leakage",
+        label_detected: "OWASP CRS · Data leakage (detection only)",
+    },
+    Category {
+        key: "body",
+        label: "Unparseable request body",
+        label_detected: "Unparseable request body (detection only)",
+    },
+    Category {
+        key: "other",
+        label: "OWASP CRS · Other",
+        label_detected: "OWASP CRS · Other (detection only)",
+    },
 ];
 
 /// The attack family of a rule id, or `None` for the rules that only run
@@ -336,7 +408,9 @@ mod tests {
     fn paths_are_a_closed_alphabet() {
         assert!(valid_path(""));
         assert!(valid_path("/wp-admin/admin-ajax.php"));
-        for bad in ["wp-admin", "/a b", "/a\"b", "/a'b", "/a%20", "/a\\b", "/a;b", "/a\nb"] {
+        for bad in [
+            "wp-admin", "/a b", "/a\"b", "/a'b", "/a%20", "/a\\b", "/a;b", "/a\nb",
+        ] {
             assert!(!valid_path(bad), "{bad:?}");
         }
         assert!(!valid_path(&format!("/{}", "a".repeat(MAX_PATH_LEN))));
@@ -344,7 +418,10 @@ mod tests {
 
     #[test]
     fn exclusion_path_is_the_safe_prefix() {
-        assert_eq!(exclusion_path_for("/wp-admin/post.php?action=edit"), "/wp-admin/post.php");
+        assert_eq!(
+            exclusion_path_for("/wp-admin/post.php?action=edit"),
+            "/wp-admin/post.php"
+        );
         assert_eq!(exclusion_path_for("/shop/caf%C3%A9/x"), "/shop/caf");
         assert_eq!(exclusion_path_for("/?q=1"), "/");
         assert_eq!(exclusion_path_for("*"), "/");
@@ -360,14 +437,26 @@ mod tests {
         assert_eq!(
             list,
             vec![
-                CrsExclusion { rules: vec![941160, 942100], path: "/x".into() },
-                CrsExclusion { rules: vec![920350], path: String::new() },
+                CrsExclusion {
+                    rules: vec![941160, 942100],
+                    path: "/x".into()
+                },
+                CrsExclusion {
+                    rules: vec![920350],
+                    path: String::new()
+                },
             ]
         );
         assert!(parse_exclusions("nope").is_empty());
         let merged = exclusions_to_string(&[
-            CrsExclusion { rules: vec![942100], path: "/x".into() },
-            CrsExclusion { rules: vec![941100, 942100], path: "/x".into() },
+            CrsExclusion {
+                rules: vec![942100],
+                path: "/x".into(),
+            },
+            CrsExclusion {
+                rules: vec![941100, 942100],
+                path: "/x".into(),
+            },
         ]);
         assert_eq!(merged, r#"[{"rules":[941100,942100],"path":"/x"}]"#);
         assert_eq!(exclusions_to_string(&[]), "");
@@ -375,13 +464,27 @@ mod tests {
 
     #[test]
     fn validation_names_the_problem() {
-        let ok = vec![CrsExclusion { rules: vec![942100], path: "/x".into() }];
+        let ok = vec![CrsExclusion {
+            rules: vec![942100],
+            path: "/x".into(),
+        }];
         assert!(validate_exclusions(&ok).is_ok());
-        let structural = vec![CrsExclusion { rules: vec![949110], path: String::new() }];
-        assert!(validate_exclusions(&structural).expect_err("949").contains("949110"));
-        let path = vec![CrsExclusion { rules: vec![942100], path: "/a'".into() }];
+        let structural = vec![CrsExclusion {
+            rules: vec![949110],
+            path: String::new(),
+        }];
+        assert!(validate_exclusions(&structural)
+            .expect_err("949")
+            .contains("949110"));
+        let path = vec![CrsExclusion {
+            rules: vec![942100],
+            path: "/a'".into(),
+        }];
         assert!(validate_exclusions(&path).is_err());
-        let empty = vec![CrsExclusion { rules: vec![], path: String::new() }];
+        let empty = vec![CrsExclusion {
+            rules: vec![],
+            path: String::new(),
+        }];
         assert!(validate_exclusions(&empty).is_err());
     }
 
