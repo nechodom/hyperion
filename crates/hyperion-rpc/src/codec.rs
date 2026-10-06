@@ -1443,6 +1443,14 @@ pub enum Request {
         sel: HostingSelector,
         new_password: String,
     },
+    /// One browser request for this hosting's phpMyAdmin, run on the OWNING
+    /// node: the agent attaches the database credentials from its own secrets
+    /// store and hands the request to nginx's root-only phpMyAdmin socket.
+    /// See `hyperion_types::pma`.
+    PmaHttp {
+        sel: HostingSelector,
+        req: hyperion_types::pma::PmaHttpRequest,
+    },
     FtpSetPassword {
         sel: HostingSelector,
         new_password: String,
@@ -2367,6 +2375,7 @@ pub enum Response {
     },
     WpResetPassword,
     DbResetPassword,
+    PmaHttp(hyperion_types::pma::PmaHttpResponse),
     FtpSetPassword {
         password: String,
     },

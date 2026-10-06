@@ -291,6 +291,23 @@ fn build_app_with_signer(
     admin: AdminUser,
     signer: Arc<SessionSigner>,
 ) -> (axum::Router, Arc<SessionSigner>) {
+    let state = test_state(agent_socket, admin, signer.clone());
+    // The login/2FA + enroll handlers extract `ConnectInfo<SocketAddr>` (real
+    // peer IP for the rate-limit bucket). `.oneshot()` doesn't go through
+    // `into_make_service_with_connect_info`, so inject a mock peer addr the same
+    // way axum's own tests do — otherwise those handlers 500 on extraction.
+    let router =
+        hyperion_web::build_router(state).layer(axum::extract::connect_info::MockConnectInfo(
+            "127.0.0.1:34567".parse::<std::net::SocketAddr>().unwrap(),
+        ));
+    (router, signer)
+}
+
+fn test_state(
+    agent_socket: PathBuf,
+    admin: AdminUser,
+    signer: Arc<SessionSigner>,
+) -> hyperion_web::state::SharedState {
     let cfg = Config::default();
     let csrf_key: [u8; 32] = {
         let mut k = [0u8; 32];
@@ -298,7 +315,7 @@ fn build_app_with_signer(
         rand::thread_rng().fill_bytes(&mut k);
         k
     };
-    let state = Arc::new(AppState {
+    Arc::new(AppState {
         cfg: Config {
             web: hyperion_web::config::WebSection {
                 secure_cookies: false, // test over plain HTTP
@@ -326,16 +343,7 @@ fn build_app_with_signer(
         deployment_mode: Arc::new(tokio::sync::RwLock::new("master".to_string())),
         ftp_password_handoff: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         error_handoff: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
-    });
-    // The login/2FA + enroll handlers extract `ConnectInfo<SocketAddr>` (real
-    // peer IP for the rate-limit bucket). `.oneshot()` doesn't go through
-    // `into_make_service_with_connect_info`, so inject a mock peer addr the same
-    // way axum's own tests do — otherwise those handlers 500 on extraction.
-    let router =
-        hyperion_web::build_router(state).layer(axum::extract::connect_info::MockConnectInfo(
-            "127.0.0.1:34567".parse::<std::net::SocketAddr>().unwrap(),
-        ));
-    (router, signer)
+    })
 }
 
 async fn body_string(resp: axum::response::Response) -> String {
@@ -3427,4 +3435,215 @@ async fn bulk_action_multi_select_does_not_422() {
         loc.starts_with("/jobs/"),
         "expected a job redirect, got {loc}"
     );
+}
+
+/// "Open phpMyAdmin": the Database card links to the separate phpMyAdmin
+/// origin, and that origin re-checks the panel session and the hosting grant
+/// on every request before anything is relayed to the owning node.
+#[tokio::test]
+async fn phpmyadmin_relay_is_gated_and_isolated() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d) = start_agent().await;
+    let state = test_state(sock.clone(), admin, Arc::new(SessionSigner::new_random()));
+    let app = hyperion_web::build_router(state.clone()).layer(
+        axum::extract::connect_info::MockConnectInfo(
+            "127.0.0.1:34567".parse::<std::net::SocketAddr>().unwrap(),
+        ),
+    );
+    let pma = hyperion_web::handlers::pma::router(state);
+
+    let login = |body: &'static [u8]| {
+        Request::builder()
+            .method(Method::POST)
+            .uri("/login")
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(Body::from(body.to_vec()))
+            .unwrap()
+    };
+    let admin_cookie = extract_cookie(
+        &app.clone()
+            .oneshot(login(b"username=kevin&password=good-pw&next=/"))
+            .await
+            .unwrap(),
+    );
+
+    // A MariaDB hosting.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/hostings/new")
+                .header(header::COOKIE, &admin_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let csrf = extract_csrf(&body_string(resp).await);
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/hostings")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header(header::COOKIE, &admin_cookie)
+                .body(Body::from(format!(
+                    "_csrf={csrf}&domain=pma-e2e.cz&aliases=&php=8.3&db=mariadb&system_user="
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let id = match hyperion_rpc_client::call(
+        &sock,
+        hyperion_rpc::codec::Request::HostingGet(hyperion_rpc::wire::HostingSelector::Domain(
+            hyperion_validate::Domain::parse("pma-e2e.cz").unwrap(),
+        )),
+    )
+    .await
+    .unwrap()
+    {
+        hyperion_rpc::codec::Response::HostingGet(d) => d.id.as_str().to_string(),
+        other => panic!("unexpected: {other:?}"),
+    };
+
+    // The detail page offers phpMyAdmin on the same host, its own port.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/hostings/{id}"))
+                .header(header::HOST, "panel.test:8443")
+                .header(header::COOKIE, &admin_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let html = body_string(resp).await;
+    assert!(
+        html.contains(&format!("https://panel.test:8447/pma/{id}/")),
+        "Database card must link to the phpMyAdmin origin"
+    );
+
+    // The panel origin never serves phpMyAdmin...
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/pma/{id}/"))
+                .header(header::COOKIE, &admin_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    // ...and the phpMyAdmin origin never serves the panel.
+    let resp = pma
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/hostings")
+                .header(header::COOKIE, &admin_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    let pma_get = |cookie: Option<&str>, method: Method, path: String| {
+        let mut b = Request::builder()
+            .method(method)
+            .uri(path)
+            .header(header::HOST, "panel.test:8447");
+        if let Some(c) = cookie {
+            b = b.header(header::COOKIE, c);
+        }
+        b.body(Body::empty()).unwrap()
+    };
+
+    // No session → 401, with phpMyAdmin's CSP on the error page too.
+    let resp = pma
+        .clone()
+        .oneshot(pma_get(None, Method::GET, format!("/pma/{id}/")))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    let csp = resp.headers()["content-security-policy"].to_str().unwrap();
+    assert!(csp.contains("frame-ancestors 'none'"));
+
+    // Malformed id → 404 before any lookup.
+    let resp = pma
+        .clone()
+        .oneshot(pma_get(
+            Some(&admin_cookie),
+            Method::GET,
+            "/pma/pma-e2e.cz/".into(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    // Methods phpMyAdmin never uses are refused.
+    let resp = pma
+        .clone()
+        .oneshot(pma_get(
+            Some(&admin_cookie),
+            Method::PUT,
+            format!("/pma/{id}/"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
+
+    // Admin → relayed to the owning node (the local agent here). The test box
+    // has no phpMyAdmin socket, so the node's own answer comes back as a 502
+    // that says so — proof the request made it through every gate.
+    let resp = pma
+        .clone()
+        .oneshot(pma_get(
+            Some(&admin_cookie),
+            Method::GET,
+            format!("/pma/{id}/"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+    assert!(body_string(resp)
+        .await
+        .contains("not installed on this node"));
+
+    // A viewer with no grant on this hosting is stopped at the panel.
+    hyperion_rpc_client::call(
+        &sock,
+        hyperion_rpc::codec::Request::WebUserCreate {
+            username: "pma-viewer".into(),
+            email: "pma-viewer@example.invalid".into(),
+            password: "viewer-pw-1".into(),
+            role: "viewer".into(),
+        },
+    )
+    .await
+    .unwrap();
+    let viewer_cookie = extract_cookie(
+        &app.clone()
+            .oneshot(login(b"username=pma-viewer&password=viewer-pw-1&next=/"))
+            .await
+            .unwrap(),
+    );
+    let resp = pma
+        .clone()
+        .oneshot(pma_get(
+            Some(&viewer_cookie),
+            Method::GET,
+            format!("/pma/{id}/"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 }

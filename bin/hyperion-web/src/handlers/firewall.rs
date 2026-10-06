@@ -225,13 +225,13 @@ fn port_templates() -> Vec<PortTemplate> {
             apply_id: "hyperion",
             applyable: true,
             tags: &["hyperion"],
-            ports_summary: "8443, 9443 tcp",
-            description: "Panel and master↔node RPC, open to everyone. Default-drop \
+            ports_summary: "8443, 8447, 9443 tcp",
+            description: "Panel, phpMyAdmin (8447) and master↔node RPC, open to everyone. Default-drop \
                           already keeps the ports the panel listens on, so this is \
                           only needed when another firewall drops them.",
             snippet: concat!(
                 snippet_header!(),
-                "sudo nft add rule inet hyperion input tcp dport '{ 8443, 9443 }' accept comment '\"hyperion:hyperion\"'"
+                "sudo nft add rule inet hyperion input tcp dport '{ 8443, 8447, 9443 }' accept comment '\"hyperion:hyperion\"'"
             ),
         },
         PortTemplate {

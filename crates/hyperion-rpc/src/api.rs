@@ -1438,6 +1438,14 @@ pub trait AgentApi: Send + Sync + 'static {
         new_password: String,
     ) -> Result<(), RpcError>;
 
+    /// Relay one browser request to this hosting's phpMyAdmin, with the
+    /// hosting's database credentials attached on this node.
+    async fn pma_http(
+        &self,
+        sel: HostingSelector,
+        req: hyperion_types::pma::PmaHttpRequest,
+    ) -> Result<hyperion_types::pma::PmaHttpResponse, RpcError>;
+
     /// Set / generate the FTP password for the hosting's system user.
     /// Empty `new_password` → server generates one. Returns the
     /// password that was set (caller shows it once).

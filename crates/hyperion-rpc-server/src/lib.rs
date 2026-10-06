@@ -1453,6 +1453,10 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
                 Err(e) => Response::Error(e),
             }
         }
+        Request::PmaHttp { sel, req } => match api.pma_http(sel, req).await {
+            Ok(r) => Response::PmaHttp(r),
+            Err(e) => Response::Error(e),
+        },
         Request::FtpSetPassword { sel, new_password } => {
             match api.ftp_set_password(sel, new_password).await {
                 Ok(password) => Response::FtpSetPassword { password },
@@ -3129,6 +3133,15 @@ mod tests {
         }
         async fn db_reset_password(&self, _: HostingSelector, _: String) -> Result<(), RpcError> {
             Ok(())
+        }
+        async fn pma_http(
+            &self,
+            _: HostingSelector,
+            _: hyperion_types::pma::PmaHttpRequest,
+        ) -> Result<hyperion_types::pma::PmaHttpResponse, RpcError> {
+            Err(RpcError::Internal {
+                message: "not in stub".into(),
+            })
         }
         async fn ftp_set_password(
             &self,

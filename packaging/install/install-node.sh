@@ -421,6 +421,10 @@ install -m 0755 target/release/hctl           /usr/bin/hctl
 # gets reported from every new install.
 install -d -m 0755 /usr/local/bin
 install -m 0755 packaging/install/hyperion-wrapper.sh /usr/local/bin/hyperion
+# phpMyAdmin behind the panel's "Open phpMyAdmin" button — served only on a
+# root-only unix socket, see the script's header. Best-effort: a box without
+# it still hosts sites, the button just says it is not installed yet.
+bash packaging/install/phpmyadmin.sh || log "phpMyAdmin setup failed — re-run packaging/install/phpmyadmin.sh later."
 
 
 #-------- 5. Users + dirs --------------------------------------------------
