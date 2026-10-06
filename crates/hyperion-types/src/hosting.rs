@@ -229,8 +229,21 @@ pub struct VhostOptions {
     /// sensitive files, block PHP execution under wp-content/uploads
     /// + cache, and 403 obvious probe query-strings / scanner
     /// user-agents. Lighter than ModSecurity to avoid false positives.
+    ///
+    /// Since the WAF rework this is DERIVED: written as `waf_level != off`
+    /// and kept on the wire so an older master or node reading it still
+    /// sees a sensible value. New code reads [`VhostOptions::effective_waf_level`].
     #[serde(default)]
     pub waf_enabled: bool,
+    /// WAF preset: `off` | `standard` | `strict` (see `crate::waf`). Empty
+    /// on the wire from an older master; `effective_waf_level` then falls
+    /// back to `waf_enabled`.
+    #[serde(default)]
+    pub waf_level: String,
+    /// Per-rule pins over the level, as JSON (`{"xmlrpc":false}`). Empty =
+    /// none. Parsed with `crate::waf::parse_overrides`.
+    #[serde(default)]
+    pub waf_overrides: String,
 
     /// Rate-limit WordPress sign-ups for this site.
     ///
@@ -273,6 +286,26 @@ pub struct VhostOptions {
     /// enabling this before the data is there.
     #[serde(default)]
     pub blocked_countries: String,
+}
+
+impl VhostOptions {
+    /// The WAF level this site actually runs. An empty or unreadable
+    /// `waf_level` means the options came from something that predates the
+    /// rework, where the bool was the whole story: on meant today's
+    /// Standard set.
+    pub fn effective_waf_level(&self) -> crate::waf::WafLevel {
+        match crate::waf::WafLevel::parse(&self.waf_level) {
+            Some(l) => l,
+            None if self.waf_enabled => crate::waf::WafLevel::Standard,
+            None => crate::waf::WafLevel::Off,
+        }
+    }
+
+    /// Set the level and keep the legacy bool in step with it.
+    pub fn set_waf_level(&mut self, level: crate::waf::WafLevel) {
+        self.waf_level = level.as_str().to_string();
+        self.waf_enabled = level != crate::waf::WafLevel::Off;
+    }
 }
 
 fn default_kind() -> String {

@@ -384,6 +384,8 @@ struct RawHostingVhost {
     blocked_bots: String,
     blocked_countries: String,
     canonical_host: String,
+    waf_level: String,
+    waf_overrides: String,
 }
 
 const QUERY_BASE: &str =
@@ -400,7 +402,7 @@ const QUERY_VHOST_BY_ID: &str =
             redirect_url, redirect_code, redirect_preserve_path, waf_enabled, signup_limit_enabled, wp_admin_allowlist, \
              blocked_bots,
             blocked_countries, blocked_countries, \
-            canonical_host \
+            canonical_host, waf_level, waf_overrides \
      FROM hostings WHERE id = ?";
 
 // Third row tuple for the WP/Redis extras (migration 021). Same PK
@@ -470,6 +472,8 @@ async fn fetch_one<'a>(
             blocked_bots,
             blocked_countries,
             canonical_host,
+            waf_level,
+            waf_overrides,
         }) => hyperion_types::VhostOptions {
             basic_auth_enabled: basic_auth_enabled != 0,
             basic_auth_user,
@@ -489,6 +493,8 @@ async fn fetch_one<'a>(
             blocked_bots,
             blocked_countries,
             canonical_host,
+            waf_level,
+            waf_overrides,
         },
         None => hyperion_types::VhostOptions::default(),
     };
@@ -565,6 +571,7 @@ pub async fn set_vhost_options(
     basic_auth_hash: Option<&str>,
     now: i64,
 ) -> Result<(), StateError> {
+    let waf = opts.effective_waf_level();
     // If hash is None, don't touch the column.
     if let Some(h) = basic_auth_hash {
         sqlx::query(
@@ -572,7 +579,7 @@ pub async fn set_vhost_options(
                 force_https=?, hsts_max_age=?, custom_nginx_snippet=?, \
                 maintenance_mode=?, fastcgi_cache_enabled=?, fastcgi_cache_ttl=?, \
                 redirect_url=?, redirect_code=?, redirect_preserve_path=?, \
-                waf_enabled=?, signup_limit_enabled=?, wp_admin_allowlist=?, blocked_bots=?, blocked_countries=?, canonical_host=?, updated_at=? \
+                waf_enabled=?, signup_limit_enabled=?, wp_admin_allowlist=?, blocked_bots=?, blocked_countries=?, canonical_host=?, waf_level=?, waf_overrides=?, updated_at=? \
              WHERE id = ?",
         )
         .bind(opts.basic_auth_enabled as i64)
@@ -587,7 +594,7 @@ pub async fn set_vhost_options(
         .bind(&opts.redirect_url)
         .bind(opts.redirect_code)
         .bind(opts.redirect_preserve_path as i64)
-        .bind(opts.waf_enabled as i64)
+        .bind((waf != hyperion_types::waf::WafLevel::Off) as i64)
         // Immediately after waf_enabled in BOTH statements, matching the SQL
         // above. The trap this codebase has hit: a bind in the wrong position
         // shifts every later placeholder, so the statement still runs and
@@ -601,6 +608,13 @@ pub async fn set_vhost_options(
         // order here silently writes the wrong column (the sqlx
         // bind/placeholder trap this codebase has hit before).
         .bind(&opts.canonical_host)
+        // waf_level / waf_overrides sit between canonical_host and
+        // updated_at in both statements. The bool above is written from the
+        // level, never independently, so the two cannot disagree on disk.
+        .bind(waf.as_str())
+        .bind(hyperion_types::waf::overrides_to_string(
+            &hyperion_types::waf::parse_overrides(&opts.waf_overrides),
+        ))
         .bind(now)
         .bind(id.as_str())
         .execute(pool)
@@ -611,7 +625,7 @@ pub async fn set_vhost_options(
                 force_https=?, hsts_max_age=?, custom_nginx_snippet=?, \
                 maintenance_mode=?, fastcgi_cache_enabled=?, fastcgi_cache_ttl=?, \
                 redirect_url=?, redirect_code=?, redirect_preserve_path=?, \
-                waf_enabled=?, signup_limit_enabled=?, wp_admin_allowlist=?, blocked_bots=?, blocked_countries=?, canonical_host=?, updated_at=? \
+                waf_enabled=?, signup_limit_enabled=?, wp_admin_allowlist=?, blocked_bots=?, blocked_countries=?, canonical_host=?, waf_level=?, waf_overrides=?, updated_at=? \
              WHERE id = ?",
         )
         .bind(opts.basic_auth_enabled as i64)
@@ -625,7 +639,7 @@ pub async fn set_vhost_options(
         .bind(&opts.redirect_url)
         .bind(opts.redirect_code)
         .bind(opts.redirect_preserve_path as i64)
-        .bind(opts.waf_enabled as i64)
+        .bind((waf != hyperion_types::waf::WafLevel::Off) as i64)
         // Immediately after waf_enabled in BOTH statements, matching the SQL
         // above. The trap this codebase has hit: a bind in the wrong position
         // shifts every later placeholder, so the statement still runs and
@@ -639,6 +653,13 @@ pub async fn set_vhost_options(
         // order here silently writes the wrong column (the sqlx
         // bind/placeholder trap this codebase has hit before).
         .bind(&opts.canonical_host)
+        // waf_level / waf_overrides sit between canonical_host and
+        // updated_at in both statements. The bool above is written from the
+        // level, never independently, so the two cannot disagree on disk.
+        .bind(waf.as_str())
+        .bind(hyperion_types::waf::overrides_to_string(
+            &hyperion_types::waf::parse_overrides(&opts.waf_overrides),
+        ))
         .bind(now)
         .bind(id.as_str())
         .execute(pool)
