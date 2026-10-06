@@ -1,134 +1,147 @@
 {% extends "base.html" %}
 {% block title %}Background jobs · Hyperion{% endblock %}
+{% macro job_row(r) %}
+<a class="job-row" href="/jobs/{{ r.id }}">
+  <span class="job-state">
+    {% if r.state == "running" %}
+      <span class="spinner-inline" aria-label="Running"></span>
+    {% else %}
+      <span class="pill {{ r.tone }}">{{ r.state_label }}</span>
+    {% endif %}
+  </span>
+  <span class="job-main">
+    <span class="job-title">
+      <strong>{{ r.title }}</strong>
+      {% if let Some(t) = r.target %}<span class="job-target">{{ t }}</span>{% endif %}
+    </span>
+    {% if r.state == "running" %}
+      <span class="job-progress">
+        <span class="progress-bar"><span class="progress-bar-fill" style="width:{{ r.pct }}%"></span></span>
+        <span class="job-pct">{{ r.pct }}%</span>
+      </span>
+      {% if !r.step_label.is_empty() %}<span class="job-sub">{{ r.step_label }}</span>{% endif %}
+    {% else if !r.error_line.is_empty() %}
+      <span class="job-sub job-err">{{ r.error_line }}</span>
+    {% else if !r.step_label.is_empty() %}
+      <span class="job-sub">{{ r.step_label }}</span>
+    {% endif %}
+  </span>
+  <span class="job-meta">
+    <span title="{{ r.started_abs }}">{{ r.started_ago }}</span>
+    <span>{% if r.state == "running" %}running {% endif %}{{ r.duration }} · {{ r.actor }}</span>
+  </span>
+</a>
+{% endmacro %}
 {% block main %}
 <div class="page-header">
   <div>
     <h1>Background jobs</h1>
     <div class="subtitle">
-      Live progress for transfers, installs, backups, certificate renewals, and other long-running operations.
+      Transfers, installs, backups, certificates and other long-running work — live while it runs, kept afterwards for the log.
     </div>
   </div>
 </div>
 
-{# Compact filter row — same shape as /audit so the eye doesn't have
-   to relearn. Filters are server-side via query string (no JS). #}
-<div class="card" style="margin-bottom:1rem;padding:0.85rem 1rem">
-  <form method="get" action="/jobs"
-        class="m-stack" style="display:grid;grid-template-columns:auto auto 1fr;gap:0.5rem 0.75rem;align-items:center">
-    <label style="display:flex;gap:0.4rem;align-items:center">
-      <span class="text-soft small">Kind</span>
-      <select name="kind" class="input">
-        <option value="" {% if kind_filter.is_empty() %}selected{% endif %}>(all)</option>
-        <option value="migration" {% if kind_filter == "migration" %}selected{% endif %}>migration</option>
-        <option value="install" {% if kind_filter == "install" %}selected{% endif %}>install</option>
-        <option value="backup" {% if kind_filter == "backup" %}selected{% endif %}>backup</option>
-        <option value="acme_issue" {% if kind_filter == "acme_issue" %}selected{% endif %}>acme_issue</option>
-        <option value="cert_renew" {% if kind_filter == "cert_renew" %}selected{% endif %}>cert_renew</option>
-        <option value="node_update" {% if kind_filter == "node_update" %}selected{% endif %}>node_update</option>
-        <option value="hosting_clone" {% if kind_filter == "hosting_clone" %}selected{% endif %}>hosting_clone</option>
-        <option value="hosting_delete" {% if kind_filter == "hosting_delete" %}selected{% endif %}>hosting_delete</option>
-        <option value="post_create_setup" {% if kind_filter == "post_create_setup" %}selected{% endif %}>post_create_setup</option>
-        <option value="wp_install" {% if kind_filter == "wp_install" %}selected{% endif %}>wp_install</option>
-        <option value="profile_apply" {% if kind_filter == "profile_apply" %}selected{% endif %}>profile_apply</option>
-        <option value="wp_reinstall_all" {% if kind_filter == "wp_reinstall_all" %}selected{% endif %}>wp_reinstall_all</option>
-        <option value="rofs_fix" {% if kind_filter == "rofs_fix" %}selected{% endif %}>rofs_fix</option>
-        <option value="db_reset" {% if kind_filter == "db_reset" %}selected{% endif %}>db_reset</option>
-      </select>
-    </label>
-    <label style="display:flex;gap:0.4rem;align-items:center">
-      <span class="text-soft small">State</span>
-      <select name="state" class="input">
-        <option value="" {% if state_filter.is_empty() %}selected{% endif %}>(all)</option>
-        <option value="running" {% if state_filter == "running" %}selected{% endif %}>running</option>
-        <option value="done" {% if state_filter == "done" %}selected{% endif %}>done</option>
-        <option value="failed" {% if state_filter == "failed" %}selected{% endif %}>failed</option>
-        <option value="cancelled" {% if state_filter == "cancelled" %}selected{% endif %}>cancelled</option>
-      </select>
-    </label>
-    <div class="m-wrap" style="display:flex;gap:0.5rem;justify-content:flex-end">
-      <button type="submit" class="btn">Apply filters</button>
-      <a href="/jobs" class="btn ghost">Clear filters</a>
-    </div>
-  </form>
-</div>
-
-{% if jobs.is_empty() %}
+{% if window_empty %}
   <div class="card empty">
     <div class="empty-illustration">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7l9-4 9 4-9 4-9-4z"/><path d="M3 12l9 4 9-4"/><path d="M3 17l9 4 9-4"/></svg>
     </div>
-    {% if !kind_filter.is_empty() || !state_filter.is_empty() %}
-      <h3>No jobs match these filters</h3>
-      <p class="text-soft">
-        Try widening the filter, or
-        <a href="/jobs">clear all filters</a>
-        to see every recent job.
-      </p>
-    {% else %}
-      <h3>No background jobs yet</h3>
-      <p class="text-soft">
-        Jobs appear here when you start a transfer, install a service,
-        run a backup, renew a certificate, or trigger anything else that
-        takes more than a few seconds. Each row shows a live progress bar.
-      </p>
-      <div style="margin-top:0.9rem;display:flex;gap:0.5rem;justify-content:center;flex-wrap:wrap">
-        <a class="btn" href="/hostings/new">Add a website</a>
-        <a class="btn ghost" href="/install">Enrol a worker node</a>
-        <a class="btn ghost" href="/settings/backups">Configure backups</a>
-      </div>
-    {% endif %}
+    <h3>No background jobs yet</h3>
+    <p class="text-soft">
+      Jobs appear here when you start a transfer, install a service,
+      run a backup, renew a certificate, or trigger anything else that
+      takes more than a few seconds.
+    </p>
+    <div style="margin-top:0.9rem;display:flex;gap:0.5rem;justify-content:center;flex-wrap:wrap">
+      <a class="btn" href="/hostings/new">Add a website</a>
+      <a class="btn ghost" href="/settings/backups">Configure backups</a>
+    </div>
   </div>
 {% else %}
-  <div class="card" style="padding:0">
-    <div class="scroll-x">
-<table class="data-table data-table--cards">
-      <thead>
-        <tr>
-          <th>Kind</th>
-          <th>Target</th>
-          <th style="width:min(18rem,40vw)">Progress</th>
-          <th>State</th>
-          <th>Started by</th>
-          <th>Started</th>
-          <th></th>
-        </tr>
-      </thead>
-      <tbody>
-        {% for j in jobs %}
-          <tr>
-            <td><code>{{ j.kind }}</code></td>
-            <td>{% if let Some(t) = j.target %}<code>{{ t }}</code>{% else %}<span class="text-soft">—</span>{% endif %}</td>
-            <td>
-              <div style="display:flex;align-items:center;gap:0.4rem">
-                <div class="progress-bar" style="flex:1">
-                  <div class="progress-bar-fill {% if j.state == "failed" %}failed{% else if j.state == "done" %}done{% endif %}"
-                       style="width:{{ j.progress_pct }}%"></div>
-                </div>
-                <span class="text-soft small" style="width:3.5rem;text-align:right">{{ j.progress_pct }}%</span>
-              </div>
-              {% if !j.step_label.is_empty() %}
-                <div class="text-soft small" style="margin-top:0.15rem">{{ j.step_label }}</div>
-              {% endif %}
-            </td>
-            <td>
-              {% if j.state == "running" %}
-                <span class="pill warn">RUNNING</span>
-              {% else if j.state == "done" %}
-                <span class="pill ok">DONE</span>
-              {% else if j.state == "failed" %}
-                <span class="pill err">FAILED</span>
-              {% else %}
-                <span class="pill">{{ j.state }}</span>
-              {% endif %}
-            </td>
-            <td>{{ j.actor_label }}</td>
-            <td><span class="text-soft small">{{ j.started_at }}</span></td>
-            <td><a href="/jobs/{{ j.id }}" class="btn small">View job</a></td>
-          </tr>
-        {% endfor %}
-      </tbody>
-    </table>
+
+{# Filters sit OUTSIDE the live region: a swap mid-typing would eat the
+   search box. Kind + search narrow the list; the segments then count
+   within that narrowed set. #}
+<div class="search-toolbar">
+  <form method="get" action="/jobs" class="search-form jobs-filter" role="search">
+    <div class="search-input">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      <input type="search" name="q" value="{{ q }}"
+             placeholder="Search — domain, job type, who started it…"
+             autocomplete="off" spellcheck="false">
+      {% if !q.is_empty() %}
+        <a href="{{ seg_hrefs.all }}" class="search-clear" title="Clear search" aria-label="Clear search"
+           onclick="var f=this.closest('form');f.q.value='';f.submit();return false;">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </a>
+      {% endif %}
+    </div>
+    <select name="kind" aria-label="Job type" onchange="this.form.submit()">
+      <option value="" {% if kind_filter.is_empty() %}selected{% endif %}>All job types</option>
+      {% for (k, label) in kinds %}
+        <option value="{{ k }}" {% if kind_filter == k.as_str() %}selected{% endif %}>{{ label }}</option>
+      {% endfor %}
+    </select>
+    {% if !state_filter.is_empty() %}<input type="hidden" name="state" value="{{ state_filter }}">{% endif %}
+    <noscript><button class="btn" type="submit">Filter</button></noscript>
+  </form>
+
+  <nav class="search-segments" aria-label="Filter by state">
+    <a class="seg {% if state_filter.is_empty() %}active{% endif %}" href="{{ seg_hrefs.all }}">
+      All <span class="seg-count">{{ counts.all }}</span>
+    </a>
+    <a class="seg {% if state_filter == "running" %}active{% endif %}" href="{{ seg_hrefs.running }}">
+      <span class="seg-dot warn"></span>Running{% if counts.running > 0 %} <span class="seg-count">{{ counts.running }}</span>{% endif %}
+    </a>
+    <a class="seg {% if state_filter == "failed" %}active{% endif %}" href="{{ seg_hrefs.failed }}">
+      <span class="seg-dot err"></span>Failed{% if counts.failed > 0 %} <span class="seg-count">{{ counts.failed }}</span>{% endif %}
+    </a>
+    <a class="seg {% if state_filter == "done" %}active{% endif %}" href="{{ seg_hrefs.done }}">
+      <span class="seg-dot ok"></span>Done
+    </a>
+    {% if counts.cancelled > 0 || state_filter == "cancelled" %}
+    <a class="seg {% if state_filter == "cancelled" %}active{% endif %}" href="{{ seg_hrefs.cancelled }}">
+      Cancelled <span class="seg-count">{{ counts.cancelled }}</span>
+    </a>
+    {% endif %}
+  </nav>
 </div>
+
+{# Everything that moves on its own: verdict, running jobs, history. Swapped
+   every 5 s while anything runs, every 30 s otherwise. #}
+<div id="jobs-live" data-live-refresh="{{ refresh_secs }}">
+  <div class="svc-verdict {{ verdict_tone }}">
+    <span class="dot"></span>
+    <span>{{ verdict }}</span>
   </div>
+
+  {% if running.is_empty() && days.is_empty() %}
+    <div class="group">
+      <div class="item text-soft">
+        No jobs match these filters. <a href="/jobs">Show every job</a>
+      </div>
+    </div>
+  {% endif %}
+
+  {% if !running.is_empty() %}
+  <div class="group">
+    <div class="ghead">Running now</div>
+    {% for r in running %}{% call job_row(r) %}{% endfor %}
+  </div>
+  {% endif %}
+
+  {% for d in days %}
+  <div class="group">
+    <div class="ghead">{{ d.label }}</div>
+    {% for r in d.rows %}{% call job_row(r) %}{% endfor %}
+  </div>
+  {% endfor %}
+</div>
+
+<p class="text-soft small" style="margin-top:1rem">
+  {% if truncated %}Showing the most recent matching jobs only — narrow the filter to reach older ones.{% endif %}
+  Updates on its own.
+</p>
 {% endif %}
 {% endblock %}

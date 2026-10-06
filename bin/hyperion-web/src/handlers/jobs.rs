@@ -30,9 +30,259 @@ struct JobsListTpl<'a> {
     active: &'static str,
     css_version: &'static str,
     htmx_version: &'static str,
-    jobs: Vec<hyperion_types::JobView>,
+    /// Jobs still running, in the filtered view — their own group on top.
+    running: Vec<JobRow>,
+    /// Finished jobs in the filtered view, bucketed by local calendar day.
+    days: Vec<DayGroup>,
+    /// One line answering "is anything wrong / in flight right now?" —
+    /// computed over the whole window, not the filtered view.
+    verdict: String,
+    verdict_tone: &'static str,
+    /// Per-state counts for the segment strip (after kind + search filters).
+    counts: StateCounts,
+    /// `(kind, label)` for every kind present in the window, for the select.
+    kinds: Vec<(String, String)>,
     kind_filter: String,
     state_filter: String,
+    q: String,
+    /// Pre-built segment hrefs, so the template never hand-assembles a query
+    /// string out of user input.
+    seg_hrefs: SegHrefs,
+    /// True when the window filled up — older jobs exist but aren't listed.
+    truncated: bool,
+    /// The live region polls fast while something runs, slowly otherwise.
+    refresh_secs: u32,
+    /// Nothing in the window at all (as opposed to nothing matching).
+    window_empty: bool,
+}
+
+/// One job as the list renders it — everything pre-formatted so the template
+/// carries no arithmetic.
+pub struct JobRow {
+    pub id: String,
+    pub title: String,
+    pub target: Option<String>,
+    pub state: String,
+    pub tone: &'static str,
+    pub state_label: &'static str,
+    pub step_label: String,
+    /// First line of the error, trimmed — the whole thing is on the job page.
+    pub error_line: String,
+    pub pct: i64,
+    pub started_ago: String,
+    pub started_abs: String,
+    pub duration: String,
+    pub actor: String,
+}
+
+pub struct DayGroup {
+    pub label: String,
+    pub rows: Vec<JobRow>,
+}
+
+#[derive(Default)]
+pub struct StateCounts {
+    pub all: usize,
+    pub running: usize,
+    pub failed: usize,
+    pub done: usize,
+    pub cancelled: usize,
+}
+
+pub struct SegHrefs {
+    pub all: String,
+    pub running: String,
+    pub failed: String,
+    pub done: String,
+    pub cancelled: String,
+}
+
+/// How many jobs the list pulls before filtering. Filtering happens here
+/// rather than in SQL so the segment counts and the kind list describe the
+/// same window the rows come from.
+const LIST_WINDOW: i64 = 500;
+/// How many rows the list renders at most.
+const LIST_SHOWN: usize = 200;
+
+/// Kinds `/jobs/<id>/retry` knows how to replay. Keep in step with the match
+/// in [`post_job_retry`].
+pub const RETRYABLE_KINDS: &[&str] = &["migration", "hosting_clone", "profile_apply"];
+
+/// What the operator calls a job kind. The stored kind is an identifier
+/// (`acme_issue`, `post_create_setup`) and used to be shown raw; the page
+/// now leads with this and keeps the identifier for the filter only.
+pub fn job_kind_label(kind: &str) -> String {
+    match kind {
+        "migration" => "Move hosting",
+        "hosting_clone" => "Copy hosting",
+        "hosting_delete" => "Delete hosting",
+        "hosting_restore" | "restore" => "Restore backup",
+        "backup" | "hosting_backup" => "Backup",
+        "install" => "Install service",
+        "acme_issue" => "Issue certificate",
+        "cert_renew" => "Renew certificate",
+        "cert_renew_all" => "Renew all certificates",
+        "node_update" => "Update node",
+        "post_create_setup" => "Set up new hosting",
+        "wp_install" => "Install WordPress",
+        "wp_reinstall" => "Reinstall WordPress core",
+        "wp_reinstall_all" => "Reinstall WordPress core everywhere",
+        "profile_apply" => "Apply profile",
+        "profile_reapply_all" => "Re-apply profile to all hostings",
+        "rofs_fix" => "Fix read-only filesystem",
+        "db_reset" => "Reset database",
+        "panel_import" => "Import from another panel",
+        "staging_push" => "Push staging to live",
+        "snapshot_now" => "Take snapshot",
+        "snapshot_delete" => "Delete snapshot",
+        "site_check" => "Site check",
+        "gitsync_deploy" => "Git deploy",
+        "cwv_measure" => "Measure Core Web Vitals",
+        "normalize_www" => "Normalize www redirect",
+        "bulk" => "Bulk action",
+        other => return crate::handlers::stats::fmt_action_label(other),
+    }
+    .to_string()
+}
+
+fn state_tone(state: &str) -> (&'static str, &'static str) {
+    match state {
+        "running" => ("warn", "Running"),
+        "done" => ("ok", "Done"),
+        "failed" => ("err", "Failed"),
+        "cancelled" => ("muted", "Cancelled"),
+        _ => ("muted", "Unknown"),
+    }
+}
+
+fn fmt_local(ts: i64, fmt: &str) -> String {
+    use chrono::{Local, TimeZone};
+    Local
+        .timestamp_opt(ts, 0)
+        .single()
+        .map(|d| d.format(fmt).to_string())
+        .unwrap_or_default()
+}
+
+/// "Today" / "Yesterday" / "Mon 5 Oct" for the day a job started, in the
+/// panel host's local time.
+fn day_label(ts: i64, now: i64) -> String {
+    use chrono::{Local, TimeZone};
+    let day = |t: i64| Local.timestamp_opt(t, 0).single().map(|d| d.date_naive());
+    match (day(ts), day(now)) {
+        (Some(d), Some(today)) if d == today => "Today".into(),
+        (Some(d), Some(today)) if today.pred_opt() == Some(d) => "Yesterday".into(),
+        _ => fmt_local(ts, "%a %-d %b %Y"),
+    }
+}
+
+fn job_row(j: hyperion_types::JobView) -> JobRow {
+    let (tone, state_label) = state_tone(&j.state);
+    let duration = format_elapsed(&j);
+    let error_line = j
+        .error
+        .as_deref()
+        .and_then(|e| e.lines().map(str::trim).find(|l| !l.is_empty()))
+        .map(|l| {
+            if l.chars().count() > 160 {
+                format!("{}…", l.chars().take(160).collect::<String>())
+            } else {
+                l.to_string()
+            }
+        })
+        .unwrap_or_default();
+    JobRow {
+        title: job_kind_label(&j.kind),
+        target: j.target,
+        tone,
+        state_label,
+        // A finished job's last step is usually just "Done" — the pill says
+        // that already.
+        step_label: if j.state == "done" && j.step_label.trim().eq_ignore_ascii_case("done") {
+            String::new()
+        } else {
+            j.step_label
+        },
+        error_line,
+        pct: j.progress_pct.clamp(0, 100),
+        started_ago: crate::handlers::stats::fmt_ago(&j.started_at),
+        started_abs: fmt_local(j.started_at, "%Y-%m-%d %H:%M:%S"),
+        duration,
+        actor: j.actor_label,
+        id: j.id,
+        state: j.state,
+    }
+}
+
+fn jobs_href(state: &str, kind: &str, q: &str) -> String {
+    let mut parts = Vec::new();
+    if !state.is_empty() {
+        parts.push(format!("state={}", urlencode(state)));
+    }
+    if !kind.is_empty() {
+        parts.push(format!("kind={}", urlencode(kind)));
+    }
+    if !q.is_empty() {
+        parts.push(format!("q={}", urlencode(q)));
+    }
+    if parts.is_empty() {
+        "/jobs".into()
+    } else {
+        format!("/jobs?{}", parts.join("&"))
+    }
+}
+
+fn urlencode(s: &str) -> String {
+    s.bytes()
+        .map(|b| match b {
+            b' ' => "+".to_string(),
+            b'-' | b'.' | b'_' | b'~' => (b as char).to_string(),
+            b if b.is_ascii_alphanumeric() => (b as char).to_string(),
+            b => format!("%{:02X}", b),
+        })
+        .collect()
+}
+
+/// Headline for the list. Failures in the last day outrank anything running:
+/// a running job needs nothing from the operator, a failed one might.
+fn verdict(jobs: &[hyperion_types::JobView], now: i64) -> (String, &'static str) {
+    let running = jobs.iter().filter(|j| j.state == "running").count();
+    let failed_24h = jobs
+        .iter()
+        .filter(|j| j.state == "failed" && now - j.finished_at.unwrap_or(j.updated_at) < 86_400)
+        .count();
+    let plural = |n: usize, one: &str, many: &str| {
+        if n == 1 {
+            format!("1 {one}")
+        } else {
+            format!("{n} {many}")
+        }
+    };
+    if failed_24h > 0 {
+        let mut s = format!(
+            "{} in the last 24 hours",
+            plural(failed_24h, "job failed", "jobs failed")
+        );
+        if running > 0 {
+            s.push_str(&format!(" · {} running", running));
+        }
+        (s, "err")
+    } else if running > 0 {
+        (
+            format!("{} now", plural(running, "job running", "jobs running")),
+            "warn",
+        )
+    } else if let Some(last) = jobs.iter().filter_map(|j| j.finished_at).max() {
+        (
+            format!(
+                "Nothing running · last job finished {}",
+                crate::handlers::stats::fmt_ago(&last)
+            ),
+            "ok",
+        )
+    } else {
+        ("Nothing running".into(), "ok")
+    }
 }
 
 #[derive(Template)]
@@ -53,6 +303,12 @@ struct JobDetailTpl<'a> {
     /// scope so a single token works for /jobs/<id>/retry without
     /// having to mint one token per id.
     csrf_token: String,
+    /// Human name of the job kind ("Move hosting").
+    title: String,
+    /// Whether `/jobs/<id>/retry` can replay this kind.
+    retryable: bool,
+    started_ago: String,
+    started_abs: String,
 }
 
 #[derive(Template)]
@@ -61,6 +317,8 @@ struct JobProgressFragment {
     job: hyperion_types::JobView,
     elapsed: String,
     is_running: bool,
+    title: String,
+    retryable: bool,
 }
 
 #[derive(Deserialize, Default)]
@@ -69,6 +327,8 @@ pub struct JobsListQuery {
     pub kind: String,
     #[serde(default)]
     pub state: String,
+    #[serde(default)]
+    pub q: String,
 }
 
 /// Sidebar-badge endpoint. Returns `{"count": N}` for jobs in
@@ -176,6 +436,7 @@ pub async fn get_active_jobs(
         .map(|j| {
             serde_json::json!({
                 "id": j.id,
+                "label": job_kind_label(&j.kind),
                 "kind": j.kind,
                 "target": j.target,
                 "step": j.step_label,
@@ -324,22 +585,18 @@ pub async fn get_jobs(
             axum::response::Redirect::to("/?flash_error=admin+role+required").into_response(),
         );
     }
-    let kind = if q.kind.trim().is_empty() {
-        None
-    } else {
-        Some(q.kind.trim().to_string())
+    let kind_filter = q.kind.trim().to_string();
+    let state_filter = match q.state.trim() {
+        s @ ("running" | "done" | "failed" | "cancelled") => s.to_string(),
+        _ => String::new(),
     };
-    let st = if q.state.trim().is_empty() {
-        None
-    } else {
-        Some(q.state.trim().to_string())
-    };
+    let search = q.q.trim().to_string();
     let resp = hyperion_rpc_client::call(
         &state.agent_socket,
         Request::JobList {
-            kind: kind.clone(),
-            state: st.clone(),
-            limit: 200,
+            kind: None,
+            state: None,
+            limit: LIST_WINDOW,
         },
     )
     .await?;
@@ -349,15 +606,107 @@ pub async fn get_jobs(
         _ => return Err(AppError::Internal("unexpected response".into())),
     };
     humanize_targets(&state, &mut jobs).await;
+    let now = hyperion_types::now_secs();
+    let mut truncated = jobs.len() as i64 >= LIST_WINDOW;
+    let window_empty = jobs.is_empty();
+    let (verdict, verdict_tone) = verdict(&jobs, now);
+
+    let mut kinds: Vec<(String, String)> = jobs
+        .iter()
+        .map(|j| j.kind.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .map(|k| {
+            let label = job_kind_label(&k);
+            (k, label)
+        })
+        .collect();
+    // A bookmarked filter for a kind that has rotated out keeps its option,
+    // or the select would silently show "(all kinds)" while filtering.
+    if !kind_filter.is_empty() && !kinds.iter().any(|(k, _)| *k == kind_filter) {
+        kinds.push((kind_filter.clone(), job_kind_label(&kind_filter)));
+    }
+    kinds.sort_by(|a, b| a.1.cmp(&b.1));
+
+    // Kind + search narrow everything; the state segments then count within
+    // that, so "Failed 3" means three failed jobs of what you're looking at.
+    let needle = search.to_lowercase();
+    jobs.retain(|j| {
+        (kind_filter.is_empty() || j.kind == kind_filter)
+            && (needle.is_empty()
+                || j.target
+                    .as_deref()
+                    .is_some_and(|t| t.to_lowercase().contains(&needle))
+                || job_kind_label(&j.kind).to_lowercase().contains(&needle)
+                || j.actor_label.to_lowercase().contains(&needle)
+                || j.id.starts_with(&needle))
+    });
+    let mut counts = StateCounts {
+        all: jobs.len(),
+        ..Default::default()
+    };
+    for j in &jobs {
+        match j.state.as_str() {
+            "running" => counts.running += 1,
+            "failed" => counts.failed += 1,
+            "done" => counts.done += 1,
+            "cancelled" => counts.cancelled += 1,
+            _ => {}
+        }
+    }
+    if !state_filter.is_empty() {
+        jobs.retain(|j| j.state == state_filter);
+    }
+    truncated |= jobs.len() > LIST_SHOWN;
+    jobs.truncate(LIST_SHOWN);
+
+    let mut running = Vec::new();
+    let mut days: Vec<DayGroup> = Vec::new();
+    for j in jobs {
+        if j.state == "running" {
+            running.push(job_row(j));
+            continue;
+        }
+        let label = day_label(j.started_at, now);
+        let row = job_row(j);
+        match days.last_mut() {
+            Some(d) if d.label == label => d.rows.push(row),
+            _ => days.push(DayGroup {
+                label,
+                rows: vec![row],
+            }),
+        }
+    }
+    let seg_hrefs = SegHrefs {
+        all: jobs_href("", &kind_filter, &search),
+        running: jobs_href("running", &kind_filter, &search),
+        failed: jobs_href("failed", &kind_filter, &search),
+        done: jobs_href("done", &kind_filter, &search),
+        cancelled: jobs_href("cancelled", &kind_filter, &search),
+    };
     let tpl = JobsListTpl {
         username: &ctx.username,
         user_initial: super::user_initial(&ctx.username),
         active: "jobs",
         css_version: super::css_version(),
         htmx_version: super::htmx_version(),
-        jobs,
-        kind_filter: kind.unwrap_or_default(),
-        state_filter: st.unwrap_or_default(),
+        refresh_secs: if counts.running > 0 || verdict_tone == "warn" {
+            5
+        } else {
+            30
+        },
+        running,
+        days,
+        verdict,
+        verdict_tone,
+        counts,
+        kinds,
+        kind_filter,
+        state_filter,
+        q: search,
+        seg_hrefs,
+        truncated,
+        window_empty,
     };
     Ok(Html(tpl.render()?).into_response())
 }
@@ -385,6 +734,10 @@ pub async fn get_job_detail(
     let is_running = !job.is_terminal();
     let elapsed = format_elapsed(&job);
     let csrf_token = super::session_csrf_token(&state, &ctx);
+    let title = job_kind_label(&job.kind);
+    let retryable = RETRYABLE_KINDS.contains(&job.kind.as_str());
+    let started_ago = crate::handlers::stats::fmt_ago(&job.started_at);
+    let started_abs = fmt_local(job.started_at, "%Y-%m-%d %H:%M:%S");
     let tpl = JobDetailTpl {
         username: &ctx.username,
         user_initial: super::user_initial(&ctx.username),
@@ -395,6 +748,10 @@ pub async fn get_job_detail(
         elapsed,
         is_running,
         csrf_token,
+        title,
+        retryable,
+        started_ago,
+        started_abs,
     };
     Ok(Html(tpl.render()?).into_response())
 }
@@ -423,6 +780,8 @@ pub async fn get_job_progress(
     let terminal = job.is_terminal();
     let elapsed = format_elapsed(&job);
     let frag = JobProgressFragment {
+        title: job_kind_label(&job.kind),
+        retryable: RETRYABLE_KINDS.contains(&job.kind.as_str()),
         job,
         elapsed,
         is_running,
@@ -504,7 +863,13 @@ async fn humanize_targets(state: &SharedState, jobs: &mut [hyperion_types::JobVi
 /// Render "1m 47s" or similar. Caps at hours since no current job
 /// is expected to take days; if it does, "h m s" is still readable.
 fn format_elapsed(j: &hyperion_types::JobView) -> String {
-    let end = j.finished_at.unwrap_or(j.updated_at);
+    // A running job's clock is "now", not its last progress tick — a step
+    // that sits quiet for a minute must not freeze the elapsed counter.
+    let end = match j.finished_at {
+        Some(t) => t,
+        None if j.state == "running" => hyperion_types::now_secs(),
+        None => j.updated_at,
+    };
     let secs = (end - j.started_at).max(0);
     if secs < 60 {
         format!("{secs}s")

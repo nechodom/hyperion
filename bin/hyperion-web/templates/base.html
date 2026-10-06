@@ -1557,7 +1557,7 @@ function isShortcutContext(ev) {
         const a = el('a', 'display:block;text-decoration:none;color:inherit;background:var(--surface-1,#1c1c20);border:1px solid var(--border,#333);border-radius:8px;padding:.5rem .6rem;box-shadow:0 4px 14px rgba(0,0,0,.3)');
         a.href = '/jobs/' + encodeURIComponent(j.id);
         const t = el('div', 'font-size:.82rem;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis');
-        t.textContent = human(j.kind) + (j.target ? (' · ' + j.target) : '');
+        t.textContent = (j.label || human(j.kind)) + (j.target ? (' · ' + j.target) : '');
         const s = el('div', 'font-size:.72rem;opacity:.7;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin:.15rem 0 .35rem');
         s.textContent = (j.step ? j.step + ' · ' : '') + pct + '%';
         const bar = el('div', 'height:5px;background:var(--border,#333);border-radius:3px;overflow:hidden');
