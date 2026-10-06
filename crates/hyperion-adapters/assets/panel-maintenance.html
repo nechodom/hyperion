@@ -167,6 +167,9 @@
     var POLL_MS = 4000;
     // A status file this old is a leftover, not an update in progress.
     var STALE_SECS = 2 * 3600;
+    // Still here this long after the panel answered = its page is slow to
+    // load; say so instead of looking stuck.
+    var SLOW_BACK_SECS = 15;
     var ORDER = ["stop", "fetch", "install", "configure", "migrate", "start"];
     var ROW_OF = { download: "install", build: "install" };
     var VERB = {
@@ -259,13 +262,26 @@
     function setTextIn(li, sel, t) { var el = li.querySelector(sel); if (el.textContent !== t) el.textContent = t; }
 
     // mode: "update" (live status), "failed", "unknown" (can't read status —
-    // an older vhost), "down" (no update running: crash or restart).
-    var mode = "unknown", last = null;
+    // an older vhost), "down" (no update running: crash or restart), "back"
+    // (the panel answers; we're navigating to it). "back" is terminal: nothing
+    // may redraw the old step list over it.
+    var mode = "unknown", last = null, backAt = null;
     function render() {
-      var n = nowServer();
+      var n = backAt !== null ? backAt : nowServer();
       $("facts").hidden = since === null;
       if (since !== null) setText("since", dur(n - since));
-      if (mode === "update") {
+      if (mode === "back") {
+        document.title = "Hyperion is back";
+        setText("eyebrow", "Back online");
+        setText("headline", "Hyperion is back");
+        setText("lede", "Taking you back to the panel…");
+        setText("since-label", "Was offline for");
+        $("steps").hidden = true;
+        hint(nowServer() - backAt > SLOW_BACK_SECS
+          ? "<p>The panel is answering but this page is taking a while to load. " +
+            "Use <strong>Open the panel</strong> to try again.</p>"
+          : "");
+      } else if (mode === "update") {
         document.title = "Hyperion is updating…";
         setText("eyebrow", "Updating");
         setText("headline", "Hyperion is updating");
@@ -334,21 +350,36 @@
       }, function () { return { kind: "unknown" }; });
     }
 
+    // replace(), not reload(): never re-POST whatever form brought us here.
+    function openPanel() { location.replace(location.href); }
+
+    // Called once, the first time the probe sees the panel. Polling stops
+    // here: every further tick would call replace() again, and a new
+    // navigation CANCELS the one in flight — so a panel whose first page
+    // takes longer than a poll interval to render was never reached, and
+    // the page flipped between "back" and the stale step list for good.
+    function comeBack() {
+      mode = "back";
+      backAt = nowServer();
+      forgetSeen();
+      clearInterval(pollTimer);
+      setText("retry", "Open the panel");
+      setText("checked", "Back at " + clock());
+      render();
+      setTimeout(openPanel, 600);
+    }
+
+    function clock() {
+      return new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    }
+
     function tick() {
-      if (busy) return;
+      if (busy || mode === "back") return;
       busy = true;
       Promise.all([probe(), readStatus()]).then(function (res) {
         busy = false;
-        if (res[0]) {
-          forgetSeen();
-          setText("eyebrow", "Back online");
-          setText("headline", "Hyperion is back");
-          setText("lede", "Taking you back to the panel…");
-          $("steps").hidden = true; hint("");
-          // replace(), not reload(): never re-POST whatever form brought us here.
-          setTimeout(function () { location.replace(location.href); }, 600);
-          return;
-        }
+        if (mode === "back") return;
+        if (res[0]) { comeBack(); return; }
         var s = res[1], st = s.st, n = nowServer();
         if (s.kind === "status" && st && typeof st.started === "number" && n - (st.updated || st.started) < STALE_SECS) {
           last = st;
@@ -360,16 +391,19 @@
           since = firstSeen();
         }
         render();
-        setText("checked", "Checked " + new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }));
+        setText("checked", "Checked " + clock());
       });
     }
 
-    $("retry").addEventListener("click", function (e) { e.preventDefault(); tick(); });
+    $("retry").addEventListener("click", function (e) {
+      e.preventDefault();
+      if (mode === "back") openPanel(); else tick();
+    });
     document.addEventListener("visibilitychange", function () { if (!document.hidden) tick(); });
     since = firstSeen();
     render();
     tick();
-    setInterval(tick, POLL_MS);
+    var pollTimer = setInterval(tick, POLL_MS);
     // The clocks tick every second between polls.
     setInterval(function () { if (!busy) render(); }, 1000);
   })();
