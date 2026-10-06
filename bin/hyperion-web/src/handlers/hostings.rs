@@ -6018,6 +6018,11 @@ fn save_result(
 
 /// Minimal JSON string encoder for the toast text — quotes + the control
 /// characters a header value must not carry raw.
+///
+/// Pure ASCII out: the text travels in the `HX-Trigger` HEADER, and a
+/// browser reads header bytes as Latin-1, so a raw UTF-8 "—" arrived as
+/// "â\u{80}\u{94}". Everything past ASCII is a `\uXXXX` escape (a surrogate
+/// pair above the BMP), which the client's JSON.parse turns back.
 fn json_string(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
@@ -6028,7 +6033,12 @@ fn json_string(s: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c if (c as u32) < 0x20 || (c as u32) > 0x7e => {
+                let mut units = [0u16; 2];
+                for u in c.encode_utf16(&mut units) {
+                    out.push_str(&format!("\\u{:04x}", u));
+                }
+            }
             c => out.push(c),
         }
     }
@@ -6453,6 +6463,17 @@ mod waf_form_tests {
         // An unknown level is passed through for the service to refuse.
         parse("selector=x&waf_level=paranoid").apply_protection(&mut o);
         assert_eq!(o.waf_level, "paranoid");
+    }
+
+    /// Toast text rides in a header that browsers decode as Latin-1: it
+    /// must be ASCII, and still decode back to the original text.
+    #[test]
+    fn toast_json_is_ascii_and_round_trips() {
+        let text = "rule 949110 cannot be excluded — “quoted” 😀\n";
+        let json = super::json_string(text);
+        assert!(json.is_ascii(), "{json}");
+        let back: String = serde_json::from_str(&json).expect("valid JSON");
+        assert_eq!(back, text);
     }
 
     #[test]
@@ -9906,7 +9927,10 @@ pub async fn post_waf_rule(
                     ("HX-Refresh", "true".to_string()),
                     (
                         "HX-Trigger",
-                        serde_json::json!({"toast": {"level": "ok", "text": text}}).to_string(),
+                        format!(
+                            "{{\"toast\":{{\"level\":\"ok\",\"text\":{}}}}}",
+                            json_string(&text)
+                        ),
                     ),
                 ],
             )
