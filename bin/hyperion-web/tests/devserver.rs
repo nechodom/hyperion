@@ -487,6 +487,54 @@ async fn seed_demo(svc: &StubService) {
         .expect("node_metrics");
     }
 
+    // Background jobs: two running, a fresh failure, and a few days of history.
+    // (id, kind, target, state, step, pct, error, started N secs ago, took N secs)
+    type DemoJob<'a> = (
+        &'a str,
+        &'a str,
+        Option<&'a str>,
+        &'a str,
+        &'a str,
+        i64,
+        Option<&'a str>,
+        i64,
+        i64,
+    );
+    let jobs: [DemoJob; 9] = [
+        ("j-run-1", "hosting_backup", Some("studio-lumen.cz"), "running", "Packing files", 42, None, 95, 0),
+        ("j-run-2", "acme_issue", Some("kavarna-sever.cz"), "running", "Waiting for HTTP-01 validation", 70, None, 20, 0),
+        ("j-fail-1", "migration", Some("atelier-hora.com"), "failed", "Copying database", 55, Some("rsync: connection unexpectedly closed (0 bytes received so far) [sender]\nrsync error: error in rsync protocol data stream (code 12)"), 3 * 3600, 240),
+        ("j-done-1", "wp_install", Some("pekarna-u-mostu.cz"), "done", "Done", 100, None, 5 * 3600, 48),
+        ("j-done-2", "post_create_setup", Some("pekarna-u-mostu.cz"), "done", "Done", 100, None, 5 * 3600 + 120, 12),
+        ("j-done-3", "cert_renew_all", Some("7 certificates"), "done", "Renewed 7, skipped 0", 100, None, 30 * 3600, 95),
+        ("j-done-4", "hosting_clone", Some("shop.zahrada-plus.cz"), "done", "Done", 100, None, 31 * 3600, 410),
+        ("j-canc-1", "panel_import", Some("CloudPanel @ 10.0.0.4"), "cancelled", "Cancelled by operator", 30, None, 50 * 3600, 60),
+        ("j-done-5", "profile_apply", Some("fit-centrum-brno.cz"), "done", "Applied", 100, None, 4 * 86_400, 7),
+    ];
+    for (id, kind, target, state, step, pct, err, ago, took) in jobs {
+        let started = now - ago;
+        let finished = (state != "running").then_some(started + took);
+        sqlx::query(
+            "INSERT INTO jobs (id, kind, target, state, step_label, progress_pct, substeps_json, \
+             log_tail, error, payload_json, actor_uid, actor_label, started_at, updated_at, finished_at) \
+             VALUES (?,?,?,?,?,?,'[]',?,?,'{}',1,'kevin',?,?,?)",
+        )
+        .bind(id)
+        .bind(kind)
+        .bind(target)
+        .bind(state)
+        .bind(step)
+        .bind(pct)
+        .bind(format!("[{kind}] started\n[{kind}] {step}\n"))
+        .bind(err)
+        .bind(started)
+        .bind(finished.unwrap_or(now))
+        .bind(finished)
+        .execute(pool)
+        .await
+        .expect("jobs");
+    }
+
     // The 15 s network sampler, last hour.
     for k in 0..240i64 {
         let i = (240 - k) as f64;

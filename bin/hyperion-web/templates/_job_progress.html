@@ -18,9 +18,7 @@
         {{ job.step_label }}
       </h2>
       <div class="text-soft small" style="margin-top:0.15rem">
-        Elapsed {{ elapsed }} ·
-        {% if let Some(t) = job.target %} target <code>{{ t }}</code> ·{% endif %}
-        kind <code>{{ job.kind }}</code>
+        {% if is_running %}Running for {{ elapsed }}{% else %}Took {{ elapsed }}{% endif %}
       </div>
     </div>
     <div style="text-align:right">
@@ -79,13 +77,13 @@
     </details>
   {% endif %}
 
-  {% if job.state == "done" %}
+  {% if job.state == "failed" %}
     <p class="text-soft small" style="margin-top:0.7rem">
-      ✓ Finished in {{ elapsed }}.
-    </p>
-  {% else if job.state == "failed" %}
-    <p class="text-soft small" style="margin-top:0.7rem">
-      ✗ Failed after {{ elapsed }}. Check the log tail above, then re-run the operation from the source page to retry.
+      {% if retryable %}
+        Check the log above, then use <strong>Retry job</strong> to run the same {{ title|lower }} again.
+      {% else %}
+        Check the log above, then start the {{ title|lower }} again from the page you ran it on.
+      {% endif %}
     </p>
   {% endif %}
 </div>

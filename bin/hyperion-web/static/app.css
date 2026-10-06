@@ -822,6 +822,54 @@ details.svc-fold .svc-row .pill.muted { display: none; }
   .svc-row .svc-main { flex-basis: 100%; }
 }
 
+/* /jobs — one row per job inside a .group: state, what + where, when. The
+   whole row is the link to the job page. Running jobs carry a bar inline. */
+.group > .job-row {
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
+  padding: 0.75rem 1.25rem;
+  border-bottom: 1px solid var(--border);
+  color: inherit;
+  text-decoration: none;
+  transition: background var(--t-fast);
+}
+.group > .job-row:last-child { border-bottom: none; }
+.group > .job-row:hover { background: var(--surface-2); }
+.job-row .job-state { flex: none; width: 5.5rem; display: flex; }
+.job-row .job-state .spinner-inline { margin-left: 0.35rem; }
+.job-row .job-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 0.2rem; }
+.job-row .job-title { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.5rem; }
+.job-row .job-target { font-family: var(--font-mono); font-size: 0.8rem; color: var(--text-dim); overflow-wrap: anywhere; }
+.job-row .job-sub { font-size: 0.8rem; color: var(--text-soft); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.job-row .job-sub.job-err { color: var(--danger); }
+.job-row .job-progress { display: flex; align-items: center; gap: 0.5rem; max-width: 26rem; }
+.job-row .job-progress .progress-bar { height: 6px; }
+.job-row .job-pct { font-size: 0.78rem; font-variant-numeric: tabular-nums; color: var(--text-soft); min-width: 2.6rem; text-align: right; }
+.job-row .job-meta {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.15rem;
+  font-size: 0.78rem;
+  color: var(--text-soft);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.job-row .job-meta > :first-child { color: var(--text-dim); }
+#jobs-live > .group + .group { margin-top: var(--group-gap); }
+.jobs-filter { display: flex; gap: 0.5rem; align-items: stretch; }
+.jobs-filter .search-input { flex: 1; min-width: 0; }
+.jobs-filter select { height: 40px; max-width: 16rem; }
+@media (max-width: 640px) {
+  .group > .job-row { flex-wrap: wrap; gap: 0.4rem 0.75rem; padding: 0.75rem 1rem; }
+  .job-row .job-main { flex-basis: 100%; order: 2; }
+  .job-row .job-meta { flex-direction: row; gap: 0.5rem; margin-left: auto; }
+  .jobs-filter { flex-wrap: wrap; }
+  .jobs-filter select { max-width: none; flex: 1 1 100%; }
+}
+
 /* /admin/users — one grouped panel; each user is a details row whose summary
    is the scan line and whose body holds role / sign-in / password side by
    side, with delete split off at the bottom. */
