@@ -5007,3 +5007,100 @@ details.disclosure.danger > summary { color: var(--danger); font-weight: 600; }
 /* A native file input has a fixed intrinsic width (~230px) that ignores
    its container; next to the avatar on /profile it poked out of the card. */
 input[type="file"] { max-width: 100%; min-width: 0; }
+
+/* ============================================================
+ * Profiles & limits — /profiles, /profiles/new, /profiles/<id>/edit
+ * ============================================================ */
+.group .profiles-table th:first-child, .group .profiles-table td:first-child { padding-left: 1.25rem; }
+.group .profiles-table th:last-child,  .group .profiles-table td:last-child  { padding-right: 1.25rem; }
+.profiles-table th { background: transparent; }
+.profiles-table td { vertical-align: top; font-variant-numeric: tabular-nums; }
+.profiles-table td:first-child { min-width: 12rem; }
+@media (max-width: 640px) { .profiles-table td:first-child { min-width: 9rem; } }
+.profiles-table .profile-name { font-weight: 600; color: var(--text); }
+.profiles-table .cell-sub { font-size: 0.76rem; color: var(--text-soft); margin-top: 2px; line-height: 1.45; }
+.profiles-table .cell-sub.tone-warn { color: var(--warn); }
+.empty .empty-actions { display: flex; gap: 0.5rem; justify-content: center; flex-wrap: wrap; }
+
+/* The profile form: one group per topic, then a save bar that stays in
+   reach on a form this long. Buttons on the left: the running-jobs toast
+   sits over the bottom-right corner. */
+.profile-form { margin-top: var(--group-gap); }
+.profile-form .field-row + .field-row { margin-top: 0.25rem; }
+.profile-form .item .field-row:last-child .field,
+.profile-form .item > .field:last-child { margin-bottom: 0; }
+.profile-form textarea.mono { font-family: var(--font-mono); font-size: 0.85rem; width: 100%; }
+.profile-form input.upper { text-transform: uppercase; }
+.profile-form .profile-wp-help { margin: 0 0 0.9rem; }
+/* The group notes are asides; on a phone they only crowd the heading. */
+@media (max-width: 640px) { .profile-form .ghead-note { display: none; } }
+.form-bar {
+  position: sticky;
+  bottom: 0;
+  z-index: 5;
+  display: flex;
+  gap: 0.5rem;
+  margin-top: var(--group-gap);
+  padding: 0.75rem 1.25rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+
+/* Websites on a profile (edit page). */
+.profile-sites-head { display: flex; align-items: flex-start; gap: 1rem; justify-content: space-between; }
+.profile-sites-head .help { margin: 0; max-width: 46rem; }
+.profile-sites-head form { flex: none; }
+@media (max-width: 640px) {
+  .profile-sites-head { flex-direction: column; }
+}
+.profile-sites {
+  list-style: none;
+  margin: 0.9rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 1.25rem;
+  font-size: 0.85rem;
+}
+.profile-sites a { color: var(--text); }
+.profile-sites a:hover { color: var(--primary-h); }
+.profile-sites + .help { margin-top: 0.6rem; }
+
+/* WordPress asset library picker under each plugins/themes textarea — tick
+   uploaded ZIPs by name instead of looking up `@asset:N` ids by hand. */
+details.asset-picker {
+  margin-top: 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+details.asset-picker > summary {
+  cursor: pointer;
+  padding: 0.5rem 0.75rem;
+  font-size: 0.82rem;
+  font-weight: 600;
+  list-style: none;
+  user-select: none;
+}
+details.asset-picker > summary::-webkit-details-marker { display: none; }
+details.asset-picker > summary::after {
+  content: "▾";
+  float: right;
+  color: var(--text-soft);
+  transition: transform 0.15s ease;
+}
+details.asset-picker[open] > summary::after { transform: rotate(180deg); }
+.asset-picker-body { max-height: 14rem; overflow-y: auto; padding: 0.3rem 0.4rem 0.5rem; }
+.asset-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.35rem 0.55rem;
+  border-radius: var(--radius-xs);
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+.asset-row:hover { background: var(--surface-2); }
+.asset-row input { margin: 0; flex: none; }
+.asset-name { flex: 1; min-width: 0; overflow-wrap: anywhere; font-weight: 500; }

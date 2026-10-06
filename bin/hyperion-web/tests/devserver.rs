@@ -406,6 +406,98 @@ async fn seed_demo(svc: &StubService) {
     .await
     .expect("suspension");
 
+    // Profiles & limits: three plan tiers, most sites on one of them.
+    {
+        use hyperion_state::profiles::{insert, upsert_apply, NewProfile};
+        let tiers = [
+            NewProfile {
+                name: "Basic".into(),
+                description: "Small business sites".into(),
+                php_memory_mb: 256,
+                php_max_exec_secs: 60,
+                php_max_children: 5,
+                php_max_requests: 500,
+                db_max_connections: 20,
+                disk_hard_mb: Some(2048),
+                disk_soft_mb: Some(1536),
+                expiry_grace_days: 30,
+                expiry_warning_offsets: "30,7,1".into(),
+                price_minor: Some(19_900),
+                price_currency: Some("CZK".into()),
+                price_interval: Some("monthly".into()),
+                quota_exceed_action: "notify".into(),
+                backup_cadence: "weekly".into(),
+                backup_keep_days: 30,
+                default_php_version: Some("8.3".into()),
+                ..NewProfile::default()
+            },
+            NewProfile {
+                name: "WordPress Pro".into(),
+                description: "WooCommerce and busier WordPress".into(),
+                php_memory_mb: 512,
+                php_max_exec_secs: 120,
+                php_max_children: 20,
+                php_max_requests: 1000,
+                db_max_connections: 60,
+                disk_hard_mb: Some(10_240),
+                disk_soft_mb: Some(8192),
+                expiry_grace_days: 30,
+                expiry_warning_offsets: "30,7,1".into(),
+                price_minor: Some(59_900),
+                price_currency: Some("CZK".into()),
+                price_interval: Some("monthly".into()),
+                quota_exceed_action: "suspend".into(),
+                backup_cadence: "daily".into(),
+                backup_keep_days: 14,
+                backup_keep_last: 3,
+                default_php_version: Some("8.3".into()),
+                default_db_engine: Some("mariadb".into()),
+                wp_plugins: "akismet!\nwordpress-seo!\nwp-mail-smtp".into(),
+                wp_themes: "astra!".into(),
+                ..NewProfile::default()
+            },
+            NewProfile {
+                name: "Static".into(),
+                php_memory_mb: 128,
+                php_max_exec_secs: 30,
+                php_max_children: 2,
+                php_max_requests: 500,
+                db_max_connections: 5,
+                expiry_grace_days: 14,
+                expiry_warning_offsets: "14,3".into(),
+                quota_exceed_action: "notify".into(),
+                backup_cadence: "off".into(),
+                default_db_engine: Some("none".into()),
+                ..NewProfile::default()
+            },
+        ];
+        let mut pids = Vec::new();
+        for t in &tiers {
+            pids.push(insert(pool, t, now - 90 * 86_400).await.expect("profile"));
+        }
+        for (n, id) in ids.iter().enumerate() {
+            let pid = match n {
+                0 | 1 | 5 => pids[0],
+                2 | 3 | 4 | 6 => pids[1],
+                _ => continue,
+            };
+            upsert_apply(
+                pool,
+                &HostingId(id.clone()),
+                Some(pid),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                now - 30 * 86_400,
+            )
+            .await
+            .expect("profile apply");
+        }
+    }
+
     // Hostings-list facts: WordPress on most sites, certificates at a mix
     // of ages (one expiring, one self-signed), backups with one failure,
     // one site in maintenance.
