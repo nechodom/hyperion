@@ -352,14 +352,22 @@ pub struct WafBatch {
 impl WafBatch {
     /// How many refusals a batch keeps verbatim.
     pub const RECENT_KEEP: usize = 200;
+    /// How many (address, minute) ban counters one batch may carry.
+    pub const MAX_BAN_KEYS: usize = 10_000;
 
     pub fn push(&mut self, hit: WafHit) {
         self.lines += 1;
         let hour = hit.ts - hit.ts.rem_euclid(3600);
         *self.hourly.entry((hour, hit.rule.clone())).or_insert(0) += 1;
-        if counts_for_ban(&hit.rule) {
+        if counts_for_ban(&hit.rule) && !hit.cross_site {
             let minute = hit.ts - hit.ts.rem_euclid(60);
-            *self.ip_minute.entry((hit.ip.clone(), minute)).or_insert(0) += 1;
+            let key = (hit.ip.clone(), minute);
+            // Bounded: a flood from a fresh address per request (IPv6 makes
+            // that free) would otherwise be a row per request. Banning one
+            // address of such a flood achieves nothing anyway.
+            if self.ip_minute.len() < Self::MAX_BAN_KEYS || self.ip_minute.contains_key(&key) {
+                *self.ip_minute.entry(key).or_insert(0) += 1;
+            }
         }
         if self.recent.len() == Self::RECENT_KEEP {
             self.recent.pop_front();
@@ -396,6 +404,10 @@ pub struct WafHit {
     pub method: String,
     pub uri: String,
     pub ua: String,
+    /// Made by another page (`Sec-Fetch-Site: cross-site`/`same-site`):
+    /// recorded, never counted towards a ban. Not stored.
+    #[serde(default)]
+    pub cross_site: bool,
 }
 
 /// What the activity panel shows for one hosting.
@@ -526,6 +538,23 @@ mod tests {
             Some(7200 + WafBatch::RECENT_KEEP as i64 - 1)
         );
         assert_eq!(b.lines, 3 + WafBatch::RECENT_KEEP as u64);
+    }
+
+    #[test]
+    fn ban_counters_are_bounded_per_batch() {
+        let hits = (0..(WafBatch::MAX_BAN_KEYS + 50)).map(|i| WafHit {
+            ts: 60,
+            ip: format!("2001:db8::{i:x}"),
+            rule: "probe_args".into(),
+            ..Default::default()
+        });
+        let b = WafBatch::from_hits(hits);
+        assert_eq!(b.ip_minute.len(), WafBatch::MAX_BAN_KEYS);
+        assert_eq!(
+            b.lines as usize,
+            WafBatch::MAX_BAN_KEYS + 50,
+            "every hit still counted"
+        );
     }
 
     #[test]
