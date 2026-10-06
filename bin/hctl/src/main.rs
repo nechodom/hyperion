@@ -855,7 +855,7 @@ fn print_pretty(resp: &Response) {
                 println!("audit chain BROKEN — {rows_checked} rows checked, error: {message}");
             }
         }
-        Response::AuditList(rows) => {
+        Response::AuditList(rows) | Response::AuditSearch { rows, .. } => {
             println!(
                 "{:>5} {:<19} {:<14} {:<22} {:<10}",
                 "ID", "TS", "ACTOR", "ACTION", "RESULT"

@@ -21,15 +21,32 @@ struct ProfilesTpl<'a> {
     active: &'static str,
     css_version: &'static str,
     htmx_version: &'static str,
-    profiles: Vec<HostingProfile>,
-    csrf_create: String,
-    csrf_delete: String,
+    rows: Vec<ProfileRow>,
+    /// Sites on any profile, cluster-wide — the header note.
+    total_sites: i64,
     csrf_clone: String,
     flash: Option<String>,
     error: Option<String>,
-    /// Pre-split asset library — feeds the "Add from library"
-    /// picker on the New profile form. Empty list ⇒ picker hides
-    /// itself; operator falls back to typing `@asset:N` by hand.
+}
+
+/// `/profiles/new` — the create form on a page of its own. It used to sit
+/// under the list, so the list page was mostly an empty form.
+#[derive(Template)]
+#[template(path = "profile_new.html")]
+struct ProfileNewTpl<'a> {
+    username: &'a str,
+    user_initial: char,
+    active: &'static str,
+    css_version: &'static str,
+    htmx_version: &'static str,
+    /// Defaults on a fresh form; what was typed when a create is refused.
+    profile: HostingProfile,
+    price_major: String,
+    csrf_create: String,
+    error: Option<String>,
+    /// Pre-split asset library — feeds the "Add from library" picker.
+    /// Empty list ⇒ picker hides itself; operator falls back to typing
+    /// `@asset:N` by hand.
     plugin_assets: Vec<WpAssetSummary>,
     theme_assets: Vec<WpAssetSummary>,
 }
@@ -46,9 +63,18 @@ struct ProfileEditTpl<'a> {
     /// Pre-computed "price in major units" string so the form has a
     /// clean default like "199.00" instead of "19900".
     price_major: String,
+    /// Sites on this profile the viewer may see, A→Z by domain.
+    sites: Vec<SiteLink>,
+    /// Sites counted on the profile but not in `sites` (a node that did not
+    /// answer the list, or outside the viewer's access).
+    unlisted: i64,
     csrf_update: String,
     /// CSRF for the "re-apply to all sites on this profile" action.
     csrf_reapply: String,
+    csrf_clone: String,
+    csrf_delete: String,
+    /// Just saved: remind that sites on the profile still run the old values.
+    saved: bool,
     error: Option<String>,
     flash: Option<String>,
     /// Uploaded plugin assets — drives the "Add from library" picker
@@ -57,6 +83,134 @@ struct ProfileEditTpl<'a> {
     plugin_assets: Vec<WpAssetSummary>,
     /// Uploaded theme assets — same purpose, separate list.
     theme_assets: Vec<WpAssetSummary>,
+}
+
+/// One site on a profile, for the edit page's list.
+pub(crate) struct SiteLink {
+    pub id: String,
+    pub domain: String,
+}
+
+/// A profile as one table row: the plan read out in words, so tiers can be
+/// told apart without opening each one.
+pub(crate) struct ProfileRow {
+    pub p: HostingProfile,
+    /// "256 MB · 60 s"
+    pub php: String,
+    /// "10 workers · 50 DB connections"
+    pub php_sub: String,
+    /// "2 GB" | "Unlimited"
+    pub disk: String,
+    /// "warns at 1.5 GB" | ""
+    pub disk_sub: String,
+    /// "Daily" | "Every 3 days" | "Off"
+    pub backups: String,
+    /// "kept 30 days · latest 5" | ""
+    pub backups_sub: String,
+    /// "PHP 8.3 · MariaDB · 3 plugins · 1 theme" | ""
+    pub new_sites: String,
+}
+
+impl ProfileRow {
+    pub(crate) fn new(p: HostingProfile) -> Self {
+        let php = format!("{} MB · {} s", p.php_memory_mb, p.php_max_exec_secs);
+        let php_sub = format!(
+            "{} worker{} · {} DB connection{}",
+            p.php_max_children,
+            plural(p.php_max_children),
+            p.db_max_connections,
+            plural(p.db_max_connections)
+        );
+        let disk = match p.disk_hard_mb {
+            Some(mb) => fmt_mb(mb),
+            None => "Unlimited".into(),
+        };
+        let disk_sub = match p.disk_soft_mb {
+            Some(mb) => format!("warns at {}", fmt_mb(mb)),
+            None => String::new(),
+        };
+        let backups = cadence_label(&p.backup_cadence, p.backup_interval_days);
+        let mut keep = Vec::new();
+        if backups != "Off" {
+            if p.backup_keep_days > 0 {
+                keep.push(format!(
+                    "kept {} day{}",
+                    p.backup_keep_days,
+                    plural(p.backup_keep_days)
+                ));
+            }
+            if p.backup_keep_last > 0 {
+                keep.push(format!("latest {} always", p.backup_keep_last));
+            }
+        }
+        let mut new_sites = Vec::new();
+        if let Some(v) = p.default_php_version.as_deref().filter(|v| !v.is_empty()) {
+            new_sites.push(format!("PHP {v}"));
+        }
+        if let Some(e) = p.default_db_engine.as_deref().filter(|e| !e.is_empty()) {
+            new_sites.push(
+                match e {
+                    "mariadb" => "MariaDB",
+                    "postgres" => "PostgreSQL",
+                    "none" => "no database",
+                    other => other,
+                }
+                .to_string(),
+            );
+        }
+        let (np, nt) = (p.plugin_count(), p.theme_count());
+        if np > 0 {
+            new_sites.push(format!("{np} plugin{}", plural(np as i64)));
+        }
+        if nt > 0 {
+            new_sites.push(format!("{nt} theme{}", plural(nt as i64)));
+        }
+        Self {
+            php,
+            php_sub,
+            disk,
+            disk_sub,
+            backups,
+            backups_sub: keep.join(" · "),
+            new_sites: new_sites.join(" · "),
+            p,
+        }
+    }
+}
+
+fn plural(n: i64) -> &'static str {
+    if n == 1 {
+        ""
+    } else {
+        "s"
+    }
+}
+
+/// Megabytes as the form takes them, shown in GB from 1024 up.
+fn fmt_mb(mb: i64) -> String {
+    if mb >= 1024 {
+        let gb = mb as f64 / 1024.0;
+        if mb % 1024 == 0 {
+            format!("{} GB", mb / 1024)
+        } else {
+            format!("{gb:.1} GB")
+        }
+    } else {
+        format!("{mb} MB")
+    }
+}
+
+/// The backup cadence as the list shows it. Anything unrecognised is what
+/// the backup scheduler treats it as: off.
+fn cadence_label(cadence: &str, interval_days: i64) -> String {
+    match cadence {
+        "daily" => "Daily".into(),
+        "weekly" => "Weekly".into(),
+        "monthly" => "Monthly".into(),
+        "custom" if interval_days == 1 => "Daily".into(),
+        "custom" if interval_days > 1 => format!("Every {interval_days} days"),
+        _ => "Off".into(),
+    }
 }
 
 #[derive(Deserialize, Default)]
@@ -84,30 +238,121 @@ pub async fn get_profiles(
             p.in_use_count += extra;
         }
     }
-    // Asset library — best-effort. An empty list hides the picker.
-    let assets: Vec<WpAssetSummary> =
-        match hyperion_rpc_client::call(&state.agent_socket, Request::WpAssetList).await {
-            Ok(RpcResponse::WpAssetList(v)) => v,
-            _ => Vec::new(),
-        };
-    let (plugin_assets, theme_assets): (Vec<_>, Vec<_>) =
-        assets.into_iter().partition(|a| a.kind == "plugin");
+    let total_sites = profiles.iter().map(|p| p.in_use_count).sum();
     let tpl = ProfilesTpl {
         username: &ctx.username,
         user_initial: super::user_initial(&ctx.username),
         active: "profiles",
         css_version: super::css_version(),
         htmx_version: super::htmx_version(),
-        profiles,
-        csrf_create: csrf_token(&state, &ctx, "/profiles/create"),
-        csrf_delete: csrf_token(&state, &ctx, "/profiles/delete"),
+        rows: profiles.into_iter().map(ProfileRow::new).collect(),
+        total_sites,
         csrf_clone: csrf_token(&state, &ctx, "/profiles/clone"),
         flash: q.flash,
         error: q.error,
+    };
+    Ok(Html(tpl.render()?).into_response())
+}
+
+/// GET /profiles/new — the create form.
+pub async fn get_new(State(state): State<SharedState>, ctx: AuthCtx) -> Result<Response, AppError> {
+    if !ctx.can(Capability::ProfilesManage) {
+        return Ok(Redirect::to("/?flash_error=admin+role+required").into_response());
+    }
+    render_new(&state, &ctx, blank_profile(), String::new(), None).await
+}
+
+async fn render_new(
+    state: &SharedState,
+    ctx: &AuthCtx,
+    profile: HostingProfile,
+    price_major: String,
+    error: Option<String>,
+) -> Result<Response, AppError> {
+    let (plugin_assets, theme_assets) = fetch_assets(state).await;
+    let tpl = ProfileNewTpl {
+        username: &ctx.username,
+        user_initial: super::user_initial(&ctx.username),
+        active: "profiles",
+        css_version: super::css_version(),
+        htmx_version: super::htmx_version(),
+        profile,
+        price_major,
+        csrf_create: csrf_token(state, ctx, "/profiles/create"),
+        error,
         plugin_assets,
         theme_assets,
     };
     Ok(Html(tpl.render()?).into_response())
+}
+
+/// Asset library split into plugins and themes — best-effort. An empty
+/// list hides the picker; the operator can still type `@asset:N`.
+async fn fetch_assets(state: &SharedState) -> (Vec<WpAssetSummary>, Vec<WpAssetSummary>) {
+    let assets: Vec<WpAssetSummary> =
+        match hyperion_rpc_client::call(&state.agent_socket, Request::WpAssetList).await {
+            Ok(RpcResponse::WpAssetList(v)) => v,
+            _ => Vec::new(),
+        };
+    assets.into_iter().partition(|a| a.kind == "plugin")
+}
+
+/// A new profile's starting values — the same defaults `CreateForm` falls
+/// back to when a field is missing.
+fn blank_profile() -> HostingProfile {
+    profile_from_input(
+        0,
+        &ProfileInput {
+            php_memory_mb: default_256(),
+            php_max_exec_secs: default_60(),
+            php_max_children: default_10(),
+            php_max_requests: default_1000(),
+            db_max_connections: default_50(),
+            expiry_grace_days: default_30(),
+            expiry_warning_offsets: default_offsets(),
+            quota_exceed_action: "notify".into(),
+            backup_cadence: "off".into(),
+            ..ProfileInput::default()
+        },
+    )
+}
+
+/// What a form submission would make, as a profile — re-renders a refused
+/// form with what was typed instead of a blank one.
+fn profile_from_input(id: i64, i: &ProfileInput) -> HostingProfile {
+    HostingProfile {
+        id,
+        name: i.name.clone(),
+        description: i.description.clone(),
+        php_memory_mb: i.php_memory_mb,
+        php_max_exec_secs: i.php_max_exec_secs,
+        php_max_children: i.php_max_children,
+        php_max_requests: i.php_max_requests,
+        db_max_connections: i.db_max_connections,
+        disk_hard_mb: i.disk_hard_mb,
+        bw_monthly_mb: i.bw_monthly_mb,
+        expiry_grace_days: i.expiry_grace_days,
+        expiry_warning_offsets: i.expiry_warning_offsets.clone(),
+        price_minor: i.price_minor,
+        price_currency: i.price_currency.clone(),
+        price_interval: i.price_interval.clone(),
+        slack_webhook: i.slack_webhook.clone(),
+        alert_emails: i.alert_emails.clone(),
+        wp_plugins: i.wp_plugins.clone(),
+        wp_themes: i.wp_themes.clone(),
+        default_php_version: i.default_php_version.clone(),
+        default_db_engine: i.default_db_engine.clone(),
+        quota_exceed_action: i.quota_exceed_action.clone(),
+        disk_soft_mb: i.disk_soft_mb,
+        mem_limit_mib: i.mem_limit_mib,
+        backup_cadence: i.backup_cadence.clone(),
+        backup_interval_days: i.backup_interval_days,
+        backup_keep_days: i.backup_keep_days,
+        backup_keep_last: i.backup_keep_last,
+        in_use_count: 0,
+        created_at: 0,
+        updated_at: 0,
+    }
 }
 
 async fn fetch_profiles(state: &SharedState) -> Result<Vec<HostingProfile>, AppError> {
@@ -119,7 +364,7 @@ async fn fetch_profiles(state: &SharedState) -> Result<Vec<HostingProfile>, AppE
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 pub struct CreateForm {
     pub name: String,
     #[serde(default)]
@@ -217,6 +462,58 @@ fn default_offsets() -> String {
     "30,7,1".into()
 }
 
+/// The form as a profile input. Errors are worded for the form banner.
+fn input_from_form(form: CreateForm) -> Result<ProfileInput, String> {
+    let price_minor = parse_price_major(&form.price_major).map_err(|e| match e {
+        AppError::BadRequest(m) => m,
+        other => other.to_string(),
+    })?;
+    let opt = |s: &str| {
+        let t = s.trim();
+        (!t.is_empty()).then(|| t.to_string())
+    };
+    Ok(ProfileInput {
+        description: form.description,
+        php_memory_mb: form.php_memory_mb,
+        php_max_exec_secs: form.php_max_exec_secs,
+        php_max_children: form.php_max_children,
+        php_max_requests: form.php_max_requests,
+        db_max_connections: form.db_max_connections,
+        disk_hard_mb: parse_opt_i64(&form.disk_hard_mb),
+        // Dead stores — see the form template note; a plan must not carry
+        // a number nothing keeps.
+        bw_monthly_mb: None,
+        mem_limit_mib: None,
+        expiry_grace_days: form.expiry_grace_days,
+        expiry_warning_offsets: form.expiry_warning_offsets,
+        price_minor,
+        // The field only LOOKS uppercase (CSS); the agent refuses "czk".
+        price_currency: opt(&form.price_currency).map(|c| c.to_ascii_uppercase()),
+        price_interval: opt(&form.price_interval),
+        alert_emails: form.alert_emails.trim().to_string(),
+        slack_webhook: opt(&form.slack_webhook),
+        wp_plugins: form.wp_plugins,
+        wp_themes: form.wp_themes,
+        default_php_version: opt(&form.default_php_version),
+        default_db_engine: opt(&form.default_db_engine),
+        quota_exceed_action: form.quota_exceed_action,
+        disk_soft_mb: parse_opt_i64(&form.disk_soft_mb),
+        backup_cadence: form.backup_cadence,
+        backup_interval_days: parse_opt_i64(&form.backup_interval_days).unwrap_or(0),
+        backup_keep_days: parse_opt_i64(&form.backup_keep_days).unwrap_or(0),
+        backup_keep_last: parse_opt_i64(&form.backup_keep_last).unwrap_or(0),
+        name: form.name,
+    })
+}
+
+/// The best-effort typed-back profile for a form the parser refused (bad
+/// price): every other field as entered, the price left out.
+fn input_lossy(form: &CreateForm) -> ProfileInput {
+    let mut f = form.clone();
+    f.price_major = String::new();
+    input_from_form(f).unwrap_or_default()
+}
+
 pub async fn post_create(
     State(state): State<SharedState>,
     ctx: AuthCtx,
@@ -229,60 +526,15 @@ pub async fn post_create(
     if !ctx.can(Capability::ProfilesManage) {
         return Err(AppError::Forbidden);
     }
-    let price_minor = parse_price_major(&form.price_major)?;
-    let currency = form.price_currency.trim().to_string();
-    let interval = form.price_interval.trim().to_string();
-    let input = ProfileInput {
-        name: form.name,
-        description: form.description,
-        php_memory_mb: form.php_memory_mb,
-        php_max_exec_secs: form.php_max_exec_secs,
-        php_max_children: form.php_max_children,
-        php_max_requests: form.php_max_requests,
-        db_max_connections: form.db_max_connections,
-        disk_hard_mb: parse_opt_i64(&form.disk_hard_mb),
-        // Dead stores — see the template note; a plan must not carry
-        // a number nothing keeps.
-        bw_monthly_mb: None,
-        expiry_grace_days: form.expiry_grace_days,
-        expiry_warning_offsets: form.expiry_warning_offsets,
-        price_minor,
-        price_currency: if currency.is_empty() {
-            None
-        } else {
-            Some(currency)
-        },
-        price_interval: if interval.is_empty() {
-            None
-        } else {
-            Some(interval)
-        },
-        alert_emails: form.alert_emails.trim().to_string(),
-        slack_webhook: if form.slack_webhook.trim().is_empty() {
-            None
-        } else {
-            Some(form.slack_webhook.trim().to_string())
-        },
-        wp_plugins: form.wp_plugins.clone(),
-        wp_themes: form.wp_themes.clone(),
-        default_php_version: if form.default_php_version.trim().is_empty() {
-            None
-        } else {
-            Some(form.default_php_version.trim().to_string())
-        },
-        default_db_engine: if form.default_db_engine.trim().is_empty() {
-            None
-        } else {
-            Some(form.default_db_engine.trim().to_string())
-        },
-        quota_exceed_action: form.quota_exceed_action.clone(),
-        disk_soft_mb: parse_opt_i64(&form.disk_soft_mb),
-        mem_limit_mib: None,
-        backup_cadence: form.backup_cadence.clone(),
-        backup_interval_days: parse_opt_i64(&form.backup_interval_days).unwrap_or(0),
-        backup_keep_days: parse_opt_i64(&form.backup_keep_days).unwrap_or(0),
-        backup_keep_last: parse_opt_i64(&form.backup_keep_last).unwrap_or(0),
+    let price_typed = form.price_major.clone();
+    let input = match input_from_form(form.clone()) {
+        Ok(i) => i,
+        Err(msg) => {
+            let typed = profile_from_input(0, &input_lossy(&form));
+            return render_new(&state, &ctx, typed, price_typed, Some(msg)).await;
+        }
     };
+    let typed = profile_from_input(0, &input);
     let resp =
         hyperion_rpc_client::call(&state.agent_socket, Request::ProfileCreate(input)).await?;
     match resp {
@@ -291,11 +543,10 @@ pub async fn post_create(
             urlencoding(&format!("Profile \"{}\" created.", p.name))
         ))
         .into_response()),
-        RpcResponse::Error(e) => Ok(Redirect::to(&format!(
-            "/profiles?error={}",
-            urlencoding(&e.to_string())
-        ))
-        .into_response()),
+        // Refused (duplicate name, bad value): the form comes back as typed.
+        RpcResponse::Error(e) => {
+            render_new(&state, &ctx, typed, price_typed, Some(e.to_string())).await
+        }
         _ => Err(AppError::Internal("unexpected response".into())),
     }
 }
@@ -412,7 +663,7 @@ pub async fn get_edit(
         return Ok(Redirect::to("/?flash_error=admin+role+required").into_response());
     }
     let resp = hyperion_rpc_client::call(&state.agent_socket, Request::ProfileGet { id }).await?;
-    let mut profile = match resp {
+    let profile = match resp {
         RpcResponse::ProfileGet(p) => p,
         RpcResponse::Error(hyperion_rpc::RpcError::NotFound { .. }) => {
             return Err(AppError::NotFound)
@@ -420,24 +671,40 @@ pub async fn get_edit(
         RpcResponse::Error(e) => return Err(AppError::Rpc(e.to_string())),
         _ => return Err(AppError::Internal("unexpected response".into())),
     };
-    // ProfileGet's in_use_count is master-local; add the worker sites so the
-    // "living plan" card + re-apply button count the whole cluster.
-    profile.in_use_count += remote_usage_ids(&state, id).await.len() as i64;
     let price_major = match profile.price_minor {
         Some(m) => format!("{:.2}", m as f64 / 100.0),
         None => String::new(),
     };
-    // Asset library — feeds the "Add from library" picker. Failure
-    // here shouldn't 500 the edit page; an empty Vec just hides
-    // the picker entirely and the operator falls back to typing
-    // `@asset:N` by hand.
-    let assets: Vec<WpAssetSummary> =
-        match hyperion_rpc_client::call(&state.agent_socket, Request::WpAssetList).await {
-            Ok(RpcResponse::WpAssetList(v)) => v,
-            _ => Vec::new(),
-        };
-    let (plugin_assets, theme_assets): (Vec<_>, Vec<_>) =
-        assets.into_iter().partition(|a| a.kind == "plugin");
+    render_edit(
+        &state,
+        &ctx,
+        profile,
+        price_major,
+        q.saved,
+        q.error,
+        q.flash,
+    )
+    .await
+}
+
+async fn render_edit(
+    state: &SharedState,
+    ctx: &AuthCtx,
+    mut profile: HostingProfile,
+    price_major: String,
+    saved: bool,
+    error: Option<String>,
+    flash: Option<String>,
+) -> Result<Response, AppError> {
+    let id = profile.id;
+    let (count, sites) = profile_sites(state, ctx, id).await;
+    // ProfileGet's in_use_count is master-local; the union of every node's
+    // apply rows is the cluster-wide figure the re-apply button acts on.
+    if let Some(n) = count {
+        profile.in_use_count = n;
+    }
+    let unlisted = (profile.in_use_count - sites.len() as i64).max(0);
+    let (plugin_assets, theme_assets) = fetch_assets(state).await;
     let tpl = ProfileEditTpl {
         username: &ctx.username,
         user_initial: super::user_initial(&ctx.username),
@@ -446,14 +713,63 @@ pub async fn get_edit(
         htmx_version: super::htmx_version(),
         profile,
         price_major,
-        csrf_update: csrf_token(&state, &ctx, &format!("/profiles/{}/update", id)),
-        csrf_reapply: csrf_token(&state, &ctx, "/profiles/reapply"),
-        error: q.error,
-        flash: q.flash,
+        unlisted,
+        sites,
+        csrf_update: csrf_token(state, ctx, &format!("/profiles/{}/update", id)),
+        csrf_reapply: csrf_token(state, ctx, "/profiles/reapply"),
+        csrf_clone: csrf_token(state, ctx, "/profiles/clone"),
+        csrf_delete: csrf_token(state, ctx, "/profiles/delete"),
+        saved,
+        error,
+        flash,
         plugin_assets,
         theme_assets,
     };
     Ok(Html(tpl.render()?).into_response())
+}
+
+/// Sites on a profile, cluster-wide: the count (None when the master's own
+/// list could not be read) and the ones the viewer may see, by domain.
+async fn profile_sites(
+    state: &SharedState,
+    ctx: &AuthCtx,
+    profile_id: i64,
+) -> (Option<i64>, Vec<SiteLink>) {
+    let mut ids: Vec<String> = match hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::ProfileUsage { id: profile_id },
+    )
+    .await
+    {
+        Ok(RpcResponse::ProfileUsage(v)) => v,
+        _ => return (None, Vec::new()),
+    };
+    ids.extend(remote_usage_ids(state, profile_id).await);
+    ids.sort();
+    ids.dedup();
+    if ids.is_empty() {
+        return (Some(0), Vec::new());
+    }
+    let count = ids.len() as i64;
+    let rows = super::hostings::list_hostings(state)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|h| {
+            ids.binary_search_by(|i| i.as_str().cmp(h.id.as_str()))
+                .is_ok()
+        })
+        .collect();
+    let mut sites: Vec<SiteLink> = super::hostings::filter_by_access(state, ctx, rows)
+        .await
+        .into_iter()
+        .map(|h| SiteLink {
+            id: h.id.as_str().to_string(),
+            domain: h.domain,
+        })
+        .collect();
+    sites.sort_by(|a, b| a.domain.cmp(&b.domain));
+    (Some(count), sites)
 }
 
 #[derive(Deserialize, Default)]
@@ -462,6 +778,9 @@ pub struct EditQuery {
     pub error: Option<String>,
     #[serde(default)]
     pub flash: Option<String>,
+    /// Set by the save redirect.
+    #[serde(default)]
+    pub saved: bool,
 }
 
 pub async fn post_update(
@@ -473,74 +792,36 @@ pub async fn post_update(
     if !ctx.can(Capability::ProfilesManage) {
         return Err(AppError::Forbidden);
     }
-    let price_minor = parse_price_major(&form.price_major)?;
-    let currency = form.price_currency.trim().to_string();
-    let interval = form.price_interval.trim().to_string();
-    let input = ProfileInput {
-        name: form.name,
-        description: form.description,
-        php_memory_mb: form.php_memory_mb,
-        php_max_exec_secs: form.php_max_exec_secs,
-        php_max_children: form.php_max_children,
-        php_max_requests: form.php_max_requests,
-        db_max_connections: form.db_max_connections,
-        disk_hard_mb: parse_opt_i64(&form.disk_hard_mb),
-        // Dead stores — see the template note; a plan must not carry
-        // a number nothing keeps.
-        bw_monthly_mb: None,
-        expiry_grace_days: form.expiry_grace_days,
-        expiry_warning_offsets: form.expiry_warning_offsets,
-        price_minor,
-        price_currency: if currency.is_empty() {
-            None
-        } else {
-            Some(currency)
-        },
-        price_interval: if interval.is_empty() {
-            None
-        } else {
-            Some(interval)
-        },
-        alert_emails: form.alert_emails.trim().to_string(),
-        slack_webhook: if form.slack_webhook.trim().is_empty() {
-            None
-        } else {
-            Some(form.slack_webhook.trim().to_string())
-        },
-        wp_plugins: form.wp_plugins.clone(),
-        wp_themes: form.wp_themes.clone(),
-        default_php_version: if form.default_php_version.trim().is_empty() {
-            None
-        } else {
-            Some(form.default_php_version.trim().to_string())
-        },
-        default_db_engine: if form.default_db_engine.trim().is_empty() {
-            None
-        } else {
-            Some(form.default_db_engine.trim().to_string())
-        },
-        quota_exceed_action: form.quota_exceed_action.clone(),
-        disk_soft_mb: parse_opt_i64(&form.disk_soft_mb),
-        mem_limit_mib: None,
-        backup_cadence: form.backup_cadence.clone(),
-        backup_interval_days: parse_opt_i64(&form.backup_interval_days).unwrap_or(0),
-        backup_keep_days: parse_opt_i64(&form.backup_keep_days).unwrap_or(0),
-        backup_keep_last: parse_opt_i64(&form.backup_keep_last).unwrap_or(0),
+    let price_typed = form.price_major.clone();
+    let input = match input_from_form(form.clone()) {
+        Ok(i) => i,
+        Err(msg) => {
+            let typed = profile_from_input(id, &input_lossy(&form));
+            return render_edit(&state, &ctx, typed, price_typed, false, Some(msg), None).await;
+        }
     };
+    let typed = profile_from_input(id, &input);
     let resp = hyperion_rpc_client::call(&state.agent_socket, Request::ProfileUpdate { id, input })
         .await?;
     match resp {
-        RpcResponse::ProfileUpdate(p) => Ok(Redirect::to(&format!(
-            "/profiles?flash={}",
-            urlencoding(&format!("Profile \"{}\" updated.", p.name))
-        ))
-        .into_response()),
-        RpcResponse::Error(e) => Ok(Redirect::to(&format!(
-            "/profiles/{}/edit?error={}",
-            id,
-            urlencoding(&e.to_string())
-        ))
-        .into_response()),
+        // Back to the profile, not the list: the sites still on the old
+        // values and the button that updates them are on this page.
+        RpcResponse::ProfileUpdate(_) => {
+            Ok(Redirect::to(&format!("/profiles/{id}/edit?saved=true")).into_response())
+        }
+        RpcResponse::Error(hyperion_rpc::RpcError::NotFound { .. }) => Err(AppError::NotFound),
+        RpcResponse::Error(e) => {
+            render_edit(
+                &state,
+                &ctx,
+                typed,
+                price_typed,
+                false,
+                Some(e.to_string()),
+                None,
+            )
+            .await
+        }
         _ => Err(AppError::Internal("unexpected response".into())),
     }
 }
@@ -1315,5 +1596,110 @@ pub async fn post_wp_asset_delete(
         ))
         .into_response()),
         _ => Err(AppError::Internal("unexpected response".into())),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn form() -> CreateForm {
+        serde_json::from_value(serde_json::json!({"name": "Pro", "php_memory_mb": 512}))
+            .expect("form")
+    }
+
+    #[test]
+    fn row_reads_the_plan_out() {
+        let mut p = blank_profile();
+        p.disk_hard_mb = Some(2048);
+        p.disk_soft_mb = Some(1536);
+        p.backup_cadence = "custom".into();
+        p.backup_interval_days = 3;
+        p.backup_keep_days = 30;
+        p.default_php_version = Some("8.3".into());
+        p.default_db_engine = Some("mariadb".into());
+        p.wp_plugins = "akismet!\n# note\n\nwordpress-seo".into();
+        let r = ProfileRow::new(p);
+        assert_eq!(r.php, "256 MB · 60 s");
+        assert_eq!(r.php_sub, "10 workers · 50 DB connections");
+        assert_eq!(r.disk, "2 GB");
+        assert_eq!(r.disk_sub, "warns at 1.5 GB");
+        assert_eq!(r.backups, "Every 3 days");
+        assert_eq!(r.backups_sub, "kept 30 days");
+        assert_eq!(r.new_sites, "PHP 8.3 · MariaDB · 2 plugins");
+    }
+
+    #[test]
+    fn row_for_an_unlimited_profile_without_backups() {
+        let mut p = blank_profile();
+        // Retention without a cadence keeps nothing — the list must not
+        // claim it does.
+        p.backup_keep_days = 30;
+        let r = ProfileRow::new(p);
+        assert_eq!(r.disk, "Unlimited");
+        assert_eq!(r.disk_sub, "");
+        assert_eq!(r.backups, "Off");
+        assert_eq!(r.backups_sub, "");
+        assert_eq!(r.new_sites, "");
+    }
+
+    #[test]
+    fn cadence_labels() {
+        assert_eq!(cadence_label("daily", 0), "Daily");
+        assert_eq!(cadence_label("custom", 1), "Daily");
+        assert_eq!(cadence_label("custom", 0), "Off");
+        assert_eq!(cadence_label("", 0), "Off");
+        assert_eq!(cadence_label("hourly", 0), "Off");
+    }
+
+    #[test]
+    fn mb_formatting() {
+        assert_eq!(fmt_mb(512), "512 MB");
+        assert_eq!(fmt_mb(1024), "1 GB");
+        assert_eq!(fmt_mb(10_240), "10 GB");
+        assert_eq!(fmt_mb(1500), "1.5 GB");
+    }
+
+    #[test]
+    fn blank_profile_matches_the_form_defaults() {
+        // A field the browser did not send falls back to the same value a
+        // fresh form shows.
+        let typed = profile_from_input(0, &input_from_form(form()).expect("input"));
+        let blank = blank_profile();
+        assert_eq!(typed.php_max_exec_secs, blank.php_max_exec_secs);
+        assert_eq!(typed.php_max_children, blank.php_max_children);
+        assert_eq!(typed.php_max_requests, blank.php_max_requests);
+        assert_eq!(typed.db_max_connections, blank.db_max_connections);
+        assert_eq!(typed.expiry_grace_days, blank.expiry_grace_days);
+        assert_eq!(typed.expiry_warning_offsets, blank.expiry_warning_offsets);
+        assert_eq!(typed.php_memory_mb, 512);
+    }
+
+    #[test]
+    fn a_bad_price_keeps_the_rest_of_the_form() {
+        let mut f = form();
+        f.price_major = "lots".into();
+        f.price_currency = " czk ".into();
+        f.description = "the big one".into();
+        let err = input_from_form(f.clone()).expect_err("non-numeric price");
+        assert!(err.contains("lots"), "{err}");
+        let typed = input_lossy(&f);
+        assert_eq!(typed.name, "Pro");
+        assert_eq!(typed.description, "the big one");
+        assert_eq!(typed.price_minor, None);
+        assert_eq!(typed.price_currency.as_deref(), Some("CZK"));
+    }
+
+    #[test]
+    fn blank_optionals_are_none() {
+        let mut f = form();
+        f.slack_webhook = "  ".into();
+        f.default_php_version = String::new();
+        f.disk_hard_mb = "0".into();
+        let i = input_from_form(f).expect("input");
+        assert_eq!(i.slack_webhook, None);
+        assert_eq!(i.default_php_version, None);
+        assert_eq!(i.disk_hard_mb, None);
+        assert_eq!(i.price_minor, None);
     }
 }

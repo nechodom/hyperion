@@ -297,6 +297,13 @@ pub enum Request {
     AuditList {
         limit: i64,
     },
+    /// Filtered, paged read of this node's audit log — the filters run in
+    /// SQL over the whole table, not over a newest-N window. Nodes older
+    /// than this request reject it as an undecodable body; the panel then
+    /// falls back to `AuditList`.
+    AuditSearch {
+        filter: AuditSearchFilter,
+    },
     CertIssue {
         domain: Domain,
     },
@@ -1990,6 +1997,14 @@ pub enum Response {
     InviteList(Vec<NodeInviteSummary>),
     InviteRevoke,
     AuditList(Vec<AuditEntryWire>),
+    /// `rows` = newest-first page of matches; `actions` = per-kind counts
+    /// over the search box + time window only (they feed the segments and
+    /// the action pick-list); `total` = every row on the node.
+    AuditSearch {
+        rows: Vec<AuditEntryWire>,
+        actions: Vec<AuditActionCount>,
+        total: i64,
+    },
     CertIssue(CertInfo),
     CertRenewAll(Vec<CertRenewResult>),
     WpInstall(WpInstallStatus),
@@ -2539,6 +2554,39 @@ pub struct AuditEntryWire {
     /// column. `#[serde(default)]` keeps older agents' entries parseable.
     #[serde(default)]
     pub node: Option<String>,
+    /// This row's link in the node's hash chain, shown in the entry's
+    /// details. Empty from an older agent.
+    #[serde(default)]
+    pub row_hash: String,
+}
+
+/// See `Request::AuditSearch`. Mirrors `hyperion_state::audit::AuditFilter`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AuditSearchFilter {
+    #[serde(default)]
+    pub q: String,
+    #[serde(default)]
+    pub q_alt: Vec<String>,
+    #[serde(default)]
+    pub action: String,
+    #[serde(default)]
+    pub prefixes: Vec<String>,
+    #[serde(default)]
+    pub not_prefixes: Vec<String>,
+    #[serde(default)]
+    pub failed_only: bool,
+    #[serde(default)]
+    pub since: Option<i64>,
+    #[serde(default)]
+    pub before: Option<i64>,
+    pub limit: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AuditActionCount {
+    pub action: String,
+    pub total: i64,
+    pub failed: i64,
 }
 
 pub async fn write_frame<W, T>(w: &mut W, value: &T) -> std::io::Result<()>

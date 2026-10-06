@@ -310,6 +310,20 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.audit_list(limit).await
     }
 
+    async fn audit_search(
+        &self,
+        filter: hyperion_rpc::AuditSearchFilter,
+    ) -> Result<
+        (
+            Vec<AuditEntryWire>,
+            Vec<hyperion_rpc::AuditActionCount>,
+            i64,
+        ),
+        RpcError,
+    > {
+        self.svc.audit_search(filter).await
+    }
+
     async fn audit_verify_chain(&self) -> Result<(bool, i64, String), RpcError> {
         self.svc.audit_verify_chain().await
     }

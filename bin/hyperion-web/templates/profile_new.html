@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}New profile · Hyperion{% endblock %}
+{% block main %}
+<div class="breadcrumbs">
+  <a href="/profiles">Profiles &amp; limits</a>
+  <span class="sep">›</span>
+  <span>New profile</span>
+</div>
+<div class="page-header">
+  <div>
+    <h1>New profile</h1>
+    <div class="subtitle">One plan tier. Pick it when you add a website, or apply it from a website's Profile tab.</div>
+  </div>
+</div>
+
+{% if let Some(e) = error %}
+  <div class="flash error">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+    <div class="flash-body">{{ e }}</div>
+  </div>
+{% endif %}
+
+<form method="post" action="/profiles/create" class="profile-form">
+  <input type="hidden" name="_csrf" value="{{ csrf_create }}">
+  {% include "_profile_form.html" %}
+  <div class="form-bar">
+    <button class="btn primary" type="submit">
+      <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
+      Create profile
+    </button>
+    <a class="btn ghost" href="/profiles">Cancel</a>
+  </div>
+</form>
+{% endblock %}

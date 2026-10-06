@@ -194,6 +194,79 @@ done
 log()  { printf '\033[36m[hyperion]\033[0m %s\n' "$*"; }
 warn() { printf '\033[33m[warn]\033[0m %s\n' "$*"; }
 
+# --- Live status for the panel's "updating" page --------------------------
+# From the moment hyperion-web is stopped, anyone with the panel open is looking
+# at the static page nginx serves in its place. That page polls this file (the
+# panel vhost serves it at /_hyperion/update-status), so it can say which step
+# we're on — and, crucially, tell "building from source, 10 more minutes" and
+# "the update died" apart from "back in a moment". Only a step name and epoch
+# timestamps go in: the URL needs no login.
+#
+# Written only on a box that runs the panel, only once the services are down,
+# and removed again as soon as the panel is serving (404 = nothing running).
+# Every write is best-effort — a status file must never fail an update.
+# >>> update-status
+STATUS_FILE="${HYPERION_UPDATE_STATUS_FILE:-/var/lib/hyperion/maintenance/panel-update.json}"
+STATUS_ON="${HYPERION_UPDATE_STATUS:-0}"   # inherited across the re-exec
+STATUS_STARTED="${HYPERION_UPDATE_STARTED:-0}"
+STATUS_STEP=""
+STATUS_STEP_STARTED=0
+
+status_begin() {
+  (( STATUS_ON )) && return 0
+  install -d -m 0755 "$(dirname "$STATUS_FILE")" 2>/dev/null || return 0
+  STATUS_ON=1
+  STATUS_STARTED="$(date +%s)"
+  export HYPERION_UPDATE_STATUS=1 HYPERION_UPDATE_STARTED="$STATUS_STARTED"
+}
+
+# status <running|failed> <step> [build-percent]
+status() {
+  (( STATUS_ON )) || return 0
+  local state="$1" step="$2" pct="${3:-}" now tmp
+  now="$(date +%s)"
+  if [[ "$step" != "$STATUS_STEP" ]]; then
+    STATUS_STEP="$step"
+    STATUS_STEP_STARTED="$now"
+  fi
+  tmp="$STATUS_FILE.tmp.$$"
+  {
+    printf '{"v":1,"state":"%s","step":"%s","started":%s,"step_started":%s,"updated":%s' \
+      "$state" "$step" "$STATUS_STARTED" "$STATUS_STEP_STARTED" "$now"
+    [[ "$pct" =~ ^[0-9]+$ ]] && printf ',"progress":%s' "$pct"
+    printf '}\n'
+  } > "$tmp" 2>/dev/null && chmod 0644 "$tmp" 2>/dev/null && mv -f "$tmp" "$STATUS_FILE" 2>/dev/null \
+    || rm -f "$tmp" 2>/dev/null
+  return 0
+}
+
+# Called on EXIT with the script's exit code. A panel that is serving again —
+# success, a rollback, or a skew warning on a healthy box — needs no status, and
+# a stale "failed" left behind would mislabel some later, unrelated outage.
+# Anything else stopped the update with the panel down: say so, and where.
+status_finish() {
+  (( STATUS_ON )) || return 0
+  if [[ "$1" == 0 ]] || systemctl --quiet is-active hyperion-web 2>/dev/null; then
+    rm -f "$STATUS_FILE" 2>/dev/null
+  else
+    status failed "${STATUS_STEP:-stop}"
+  fi
+  return 0
+}
+# <<< update-status
+
+# One EXIT trap for the whole script: a second `trap … EXIT` REPLACES the
+# first, which is how the askpass helper used to outlive a pre-built install.
+CLEANUP_PATHS=()
+on_exit() {
+  local rc=$?
+  status_finish "$rc"
+  local p
+  for p in ${CLEANUP_PATHS[@]+"${CLEANUP_PATHS[@]}"}; do rm -rf -- "$p"; done
+  return "$rc"
+}
+trap on_exit EXIT
+
 # --- Safe update: snapshot / restore -------------------------------------
 # What gets snapshotted is deliberately ONLY the binaries. Restoring those
 # undoes a bad build; it does not undo a migration, and pretending otherwise
@@ -263,6 +336,8 @@ build_with_progress() {
         local n; n=$(( $(cat "$count_file") + 1 )); printf '%s' "$n" > "$count_file"
         if (( total > 0 )); then
           local pct=$(( n * 100 / total )); (( pct > 100 )) && pct=100
+          # The panel's "updating" page shows this; one write per percent.
+          if [[ "$pct" != "${last_pct:-}" ]]; then status running build "$pct"; last_pct="$pct"; fi
           local fill=$(( pct * width / 100 ))
           local bar="$(printf '%*s' "$fill" '' | tr ' ' '=')$(printf '%*s' $(( width - fill )) '')"
           if (( tty )); then
@@ -404,10 +479,15 @@ wait_for_running_work
 
 #-------- 1. Stop services ------------------------------------------------
 snapshot_binaries
+if (( HAVE_WEB )); then
+  status_begin
+  status running stop
+fi
 (( HAVE_WEB ))   && { log "Stopping hyperion-web ...";   systemctl stop hyperion-web   || true; }
 (( HAVE_AGENT )) && { log "Stopping hyperion-agent ..."; systemctl stop hyperion-agent || true; }
 
 #-------- 2. Pull ---------------------------------------------------------
+status running fetch
 cd "$INSTALL_DIR"
 PREV=$(git rev-parse --short HEAD)
 # A from-source build can legitimately rewrite Cargo.lock in place (cargo
@@ -433,7 +513,7 @@ case "$1" in
 esac
 AP
   chmod 0700 "$GIT_ASKPASS"
-  trap "rm -f $GIT_ASKPASS" EXIT
+  CLEANUP_PATHS+=("$GIT_ASKPASS")
   # Prune stale refs + fetch the BRANCH ref explicitly (CI publishes a
   # release tag also called "main", and a plain `git fetch origin main`
   # picks the tag over the branch — leaving you stuck on whatever
@@ -468,6 +548,29 @@ if [[ "$PREV" != "$NEW" && -z "${HYPERION_REEXEC:-}" ]]; then
   fi
 fi
 unset HYPERION_REEXEC
+# A copy of this script older than the status file re-execs into this one with
+# the panel already down: start reporting from here.
+if (( HAVE_WEB )); then
+  status_begin
+  status running fetch
+fi
+
+#-------- 2a. Refresh the panel's "updating" page --------------------------
+# The agent re-plants this page when it next writes the panel vhost, which is
+# AFTER the update. Copying it now means the page people are watching during
+# this update is already the new one (the old one reloads itself onto it).
+# Same rule as the agent: replace only a missing file or one still carrying our
+# marker; an operator's own page is never touched.
+PANEL_MAINT_SRC="$INSTALL_DIR/crates/hyperion-adapters/assets/panel-maintenance.html"
+PANEL_MAINT_DST="/var/lib/hyperion/maintenance/panel-maintenance.html"
+if (( HAVE_WEB )) && [[ -f "$PANEL_MAINT_SRC" ]] \
+   && { [[ ! -f "$PANEL_MAINT_DST" ]] || grep -q "x-hyperion-maintenance" "$PANEL_MAINT_DST" 2>/dev/null; } \
+   && ! cmp -s "$PANEL_MAINT_SRC" "$PANEL_MAINT_DST"; then
+  install -d -m 0755 /var/lib/hyperion/maintenance
+  install -m 0644 "$PANEL_MAINT_SRC" "$PANEL_MAINT_DST" \
+    && log "Refreshed the panel's \"updating\" page." \
+    || warn "Couldn't refresh $PANEL_MAINT_DST — the old page stays up during this update."
+fi
 
 HEAD_FULL=$(git rev-parse HEAD)
 
@@ -501,9 +604,10 @@ fi
 #-------- 3. Install binaries — prefer GitHub release, fall back to local build
 PREBUILT_OK=0
 if (( DO_BUILD && PREFER_PREBUILT )); then
+  status running download
   log "Attempting pre-built binaries from github.com/$RELEASE_REPO@$RELEASE_TAG ..."
   TMP=$(mktemp -d /tmp/hyperion-update.XXXXXX)
-  trap "rm -rf '$TMP'" EXIT
+  CLEANUP_PATHS+=("$TMP")
   REL_BASE="https://github.com/$RELEASE_REPO/releases/download/$RELEASE_TAG"
   fetch_ok=1
   for f in hyperion-agent hctl SHA256SUMS $((( HAVE_WEB )) && echo hyperion-web) $((( HAVE_WEB )) && echo hyperion-export); do
@@ -607,6 +711,7 @@ if (( DO_BUILD && PREBUILT_OK == 0 )); then
     fail "cargo not found and no usable pre-built release. Re-run install-master.sh."
   fi
   log "Building release binaries from source ..."
+  status running build
 
   # On small (1–2 GB) master nodes the from-source build can be OOM-killed
   # (rustc/linker peak during codegen). If RAM is tight and there's no swap,
@@ -694,6 +799,7 @@ elif (( ! DO_BUILD )); then
 fi
 
 #-------- 3b. site-mail-wrapper -------------------------------------------
+status running configure
 # Tiny bash shim that PHP-FPM execs as `sendmail_path` for every
 # pool. Logs metadata of outgoing site mail to /var/lib/hyperion/
 # site-mail/<user>.jsonl, then forwards to the real sendmail. Idempotent
@@ -1388,6 +1494,7 @@ if (( REPAIR )); then
 fi
 
 #-------- 6b. Migration dry-run (pre-restart safety gate) ------------------
+status running migrate
 # The new agent binary is installed but not yet running. Validate that the
 # embedded migrations apply cleanly to a COPY of the live DB *before* we
 # restart — otherwise a migration that fails on the production schema sends
@@ -1406,6 +1513,7 @@ if (( HAVE_AGENT )) && [[ -x /usr/sbin/hyperion-agent ]]; then
 fi
 
 #-------- 7. Start + health check -----------------------------------------
+status running start
 (( HAVE_AGENT )) && { log "Starting hyperion-agent ..."; systemctl start hyperion-agent || true; }
 (( HAVE_WEB   )) && { log "Starting hyperion-web ...";   systemctl start hyperion-web   || true; }
 sleep 1
@@ -1446,6 +1554,7 @@ check_agent_serving() {
 # back and re-check — and be explicit that this restored BINARIES, not data.
 if (( SAFE )) && (( ! HEALTHY )); then
   warn "Health check FAILED after update — restoring the previous binaries."
+  status running rollback
   if restore_snapshot; then
     HEALTHY=1
     (( HAVE_AGENT )) && check_active hyperion-agent

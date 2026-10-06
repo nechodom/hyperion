@@ -1,0 +1,378 @@
+<!-- x-hyperion-maintenance: panel v2 - operator may replace this file freely -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Hyperion is updating…</title>
+  <meta name="color-scheme" content="light dark">
+  <meta name="robots" content="noindex,nofollow">
+  <!-- Without JS the page can only reload itself; with JS it polls instead, so
+       the elapsed clock and the step list don't reset every few seconds. -->
+  <noscript><meta http-equiv="refresh" content="15"></noscript>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23000000'/%3E%3Cpath d='M9 9 L9 23 M9 16 L17 16 M17 9 L17 23 M21 14 L24 14 L24 23 M21 11 L21 14' stroke='white' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round' fill='none'/%3E%3C/svg%3E">
+  <style>
+    /* Standalone: nginx serves this while hyperion-web is down, so there is no
+       app.css. Tokens mirror app.css / templates/error.html so the panel's
+       503 looks like every other Hyperion error page. */
+    :root {
+      --bg:#000000; --surface:#0a0a0a; --surface-1:#161616; --border:#1f1f1f;
+      --text:#fafafa; --text-soft:#a1a1aa; --text-faint:#52525b;
+      --accent:#fafafa; --accent-fg:#000000; --danger:#ff4d4f;
+      color-scheme: dark light;
+    }
+    @media (prefers-color-scheme: light) {
+      :root {
+        --bg:#fafafa; --surface:#ffffff; --surface-1:#f4f4f5; --border:#eaeaea;
+        --text:#0a0a0a; --text-soft:#52525b; --text-faint:#a1a1aa;
+        --accent:#0a0a0a; --accent-fg:#ffffff; --danger:#dc2626;
+      }
+    }
+    * { box-sizing:border-box; }
+    body {
+      margin:0; min-height:100vh; display:grid; place-items:center; padding:2rem 1rem;
+      background:var(--bg); color:var(--text);
+      font:15px/1.55 "Geist","Inter",-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+      -webkit-font-smoothing:antialiased;
+    }
+    .card {
+      background:var(--surface); border:1px solid var(--border); border-radius:14px;
+      max-width:34rem; width:100%; padding:2rem 2.2rem; box-shadow:0 20px 50px rgba(0,0,0,.30);
+    }
+    @media (max-width:480px) { .card { padding:1.5rem 1.25rem; } }
+    .eyebrow {
+      display:flex; align-items:center; gap:.4rem; font-size:.78rem; font-weight:600;
+      letter-spacing:.05em; text-transform:uppercase; color:var(--text-soft); margin-bottom:.6rem;
+    }
+    .eyebrow .code {
+      background:var(--surface-1); border:1px solid var(--border); padding:.15rem .45rem;
+      border-radius:6px; color:var(--text); font-feature-settings:"tnum";
+    }
+    h1 { font-size:1.45rem; font-weight:700; margin:0 0 .5rem; letter-spacing:-.01em; }
+    .lede { color:var(--text-soft); margin:0 0 1.3rem; }
+
+    /* Step list — one row per update.sh phase. Tone is state, not colour:
+       done = check, current = spinner + timer, pending = faint. */
+    .steps {
+      list-style:none; margin:0 0 1.2rem; padding:0;
+      border:1px solid var(--border); border-radius:10px; overflow:hidden;
+    }
+    .steps li {
+      display:grid; grid-template-columns:1.25rem 1fr auto; align-items:center; gap:.7rem;
+      padding:.62rem .9rem; font-size:.92rem; color:var(--text-faint);
+    }
+    .steps li + li { border-top:1px solid var(--border); }
+    .steps li.done { color:var(--text-soft); }
+    .steps li.current { color:var(--text); background:var(--surface-1); font-weight:600; }
+    .steps li.failed { color:var(--danger); background:var(--surface-1); font-weight:600; }
+    .steps .meta { font-size:.82rem; font-weight:500; color:var(--text-soft); font-feature-settings:"tnum"; }
+    .mark { width:1.1rem; height:1.1rem; display:grid; place-items:center; }
+    .mark::before {
+      content:""; width:.42rem; height:.42rem; border-radius:50%;
+      border:1.5px solid currentColor; opacity:.7;
+    }
+    .done .mark::before {
+      width:.6rem; height:.32rem; border-radius:0; opacity:1;
+      border:0; border-left:2px solid currentColor; border-bottom:2px solid currentColor;
+      transform:translateY(-.08rem) rotate(-45deg);
+    }
+    .current .mark::before {
+      width:.85rem; height:.85rem; opacity:1;
+      border:2px solid var(--border); border-top-color:currentColor;
+      animation:spin .9s linear infinite;
+    }
+    .failed .mark::before {
+      content:"×"; width:auto; height:auto; border:0; opacity:1;
+      font-size:1.1rem; line-height:1; font-weight:700;
+    }
+    @keyframes spin { to { transform:rotate(360deg); } }
+    .bar {
+      grid-column:2 / -1; height:3px; border-radius:2px; background:var(--border); overflow:hidden;
+      margin-top:.15rem;
+    }
+    .bar > span { display:block; height:100%; width:0; background:currentColor; transition:width .4s ease; }
+
+    .facts { display:flex; flex-wrap:wrap; gap:.35rem 1.4rem; margin:0 0 1.2rem; font-size:.85rem; }
+    .facts div { display:flex; gap:.4rem; }
+    .facts .k { color:var(--text-soft); }
+    .facts .v { font-feature-settings:"tnum"; font-weight:600; }
+
+    .hint {
+      background:var(--surface-1); border:1px solid var(--border); border-radius:10px;
+      padding:.8rem 1rem; margin:0 0 1.3rem; color:var(--text-soft); font-size:.88rem;
+    }
+    .hint p { margin:0; }
+    .hint p + p { margin-top:.45rem; }
+    code {
+      font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:.84em;
+      background:var(--bg); border:1px solid var(--border); border-radius:5px; padding:.05rem .35rem;
+      color:var(--text); white-space:nowrap;
+    }
+    .actions { display:flex; gap:.55rem; flex-wrap:wrap; align-items:center; }
+    .btn {
+      display:inline-block; padding:.55rem 1.05rem; border-radius:8px;
+      border:1px solid var(--border); background:var(--surface-1); color:var(--text);
+      text-decoration:none; font-weight:600; font-size:.92rem; cursor:pointer; font-family:inherit;
+    }
+    .btn:hover { filter:brightness(1.08); }
+    .btn:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+    .checked { font-size:.8rem; color:var(--text-soft); font-feature-settings:"tnum"; }
+    .brand {
+      margin-top:1.5rem; font-size:.78rem; color:var(--text-soft);
+      letter-spacing:.05em; text-align:center;
+    }
+    .brand strong { color:var(--accent); letter-spacing:.08em; }
+    [hidden] { display:none !important; }
+    @media (prefers-reduced-motion: reduce) {
+      .current .mark::before { animation:none; border-color:currentColor; }
+      .bar > span { transition:none; }
+    }
+  </style>
+</head>
+<body>
+  <main class="card">
+    <div class="eyebrow"><span class="code">503</span><span id="eyebrow">Updating</span></div>
+    <h1 id="headline">Hyperion is updating</h1>
+    <p class="lede" id="lede">The control panel is offline while a new version is installed. This page reconnects by itself as soon as it's back — nothing you need to do.</p>
+
+    <ol class="steps" id="steps" hidden aria-label="Update progress">
+      <li data-step="stop"><span class="mark"></span><span class="label">Stop the panel</span><span class="meta"></span></li>
+      <li data-step="fetch"><span class="mark"></span><span class="label">Fetch the new version</span><span class="meta"></span></li>
+      <li data-step="install"><span class="mark"></span><span class="label">Install the new version</span><span class="meta"></span></li>
+      <li data-step="configure"><span class="mark"></span><span class="label">Refresh configuration</span><span class="meta"></span></li>
+      <li data-step="migrate"><span class="mark"></span><span class="label">Check database migrations</span><span class="meta"></span></li>
+      <li data-step="start"><span class="mark"></span><span class="label">Start the panel</span><span class="meta"></span></li>
+      <li data-step="rollback" hidden><span class="mark"></span><span class="label">Restore the previous version</span><span class="meta"></span></li>
+    </ol>
+
+    <div class="facts" id="facts" hidden>
+      <div><span class="k" id="since-label">Offline for</span><span class="v" id="since">—</span></div>
+    </div>
+
+    <div class="hint" id="hint" hidden></div>
+
+    <div class="actions">
+      <a class="btn" href="" id="retry">Check now</a>
+      <span class="checked" id="checked" role="status" aria-live="polite"></span>
+    </div>
+    <div class="brand"><strong>HY · PERION</strong></div>
+  </main>
+
+  <script>
+  (function () {
+    "use strict";
+    // update.sh writes this file at each phase; the panel vhost serves it from
+    // disk, so it answers while hyperion-web is down. 404 = no update running.
+    var STATUS_URL = "/_hyperion/update-status";
+    var POLL_MS = 4000;
+    // A status file this old is a leftover, not an update in progress.
+    var STALE_SECS = 2 * 3600;
+    var ORDER = ["stop", "fetch", "install", "configure", "migrate", "start"];
+    var ROW_OF = { download: "install", build: "install" };
+    var VERB = {
+      stop: "stopping the panel", fetch: "fetching the new version",
+      download: "downloading the new version", build: "building from source",
+      install: "installing the new version", configure: "refreshing configuration",
+      migrate: "checking database migrations", start: "starting the panel",
+      rollback: "restoring the previous version"
+    };
+
+    var $ = function (id) { return document.getElementById(id); };
+    var skew = 0;          // server clock minus ours, from the Date header
+    var since = null;      // epoch secs the outage (or update) started
+    var stepSince = null;
+    var busy = false;
+
+    // Remember when this tab first saw the outage, so a reload (or the no-JS
+    // refresh of the previous visit) doesn't restart the clock.
+    function firstSeen() {
+      var key = "hyperion-offline-since", now = Math.floor(Date.now() / 1000), v = null;
+      try { v = parseInt(sessionStorage.getItem(key), 10); } catch (e) {}
+      if (!v || now - v > 6 * 3600) {
+        v = now;
+        try { sessionStorage.setItem(key, String(v)); } catch (e) {}
+      }
+      return v;
+    }
+    function forgetSeen() { try { sessionStorage.removeItem("hyperion-offline-since"); } catch (e) {} }
+
+    function nowServer() { return Math.floor(Date.now() / 1000) + skew; }
+    function dur(s) {
+      s = Math.max(0, Math.floor(s));
+      var h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), r = s % 60;
+      if (h) return h + "h " + m + "m";
+      if (m) return m + "m " + (r < 10 ? "0" : "") + r + "s";
+      return r + "s";
+    }
+    function setText(id, t) { var el = $(id); if (el.textContent !== t) el.textContent = t; }
+    function hint(html) {
+      var el = $("hint");
+      if (!html) { el.hidden = true; el.innerHTML = ""; return; }
+      if (el.innerHTML !== html) el.innerHTML = html;
+      el.hidden = false;
+    }
+    var LOGS = "<p>On the server: <code>journalctl -u hyperion-web -n 50</code> " +
+               "and <code>systemctl status hyperion-web</code></p>";
+
+    function renderSteps(st) {
+      var list = $("steps"), cur = ROW_OF[st.step] || st.step;
+      var idx = ORDER.indexOf(cur), failed = st.state === "failed";
+      var rows = list.querySelectorAll("li");
+      for (var i = 0; i < rows.length; i++) {
+        var li = rows[i], key = li.getAttribute("data-step"), pos = ORDER.indexOf(key);
+        var cls = "", meta = "";
+        if (key === "rollback") {
+          li.hidden = cur !== "rollback";
+          if (!li.hidden) cls = failed ? "failed" : "current";
+        } else if (cur === "rollback") {
+          cls = "done";
+        } else if (idx < 0) {
+          cls = "";
+        } else if (pos < idx) {
+          cls = "done";
+        } else if (pos === idx) {
+          cls = failed ? "failed" : "current";
+        }
+        if (key === "install") {
+          setTextIn(li, ".label", st.step === "build" ? "Build from source"
+                                : st.step === "download" ? "Download the new version"
+                                : "Install the new version");
+        }
+        if (cls === "current" && stepSince) meta = dur(nowServer() - stepSince);
+        if (cls === "current" && st.step === "build" && typeof st.progress === "number") {
+          meta = st.progress + "% · " + meta;
+        }
+        if (li.className !== cls) li.className = cls;
+        setTextIn(li, ".meta", meta);
+        if (cls === "current") li.setAttribute("aria-current", "step"); else li.removeAttribute("aria-current");
+        var bar = li.querySelector(".bar");
+        var wantBar = cls === "current" && st.step === "build" && typeof st.progress === "number";
+        if (wantBar && !bar) {
+          bar = document.createElement("span"); bar.className = "bar";
+          bar.appendChild(document.createElement("span")); li.appendChild(bar);
+        }
+        if (bar && !wantBar) { li.removeChild(bar); bar = null; }
+        if (bar) bar.firstChild.style.width = Math.min(100, Math.max(0, st.progress)) + "%";
+      }
+      list.hidden = false;
+    }
+    function setTextIn(li, sel, t) { var el = li.querySelector(sel); if (el.textContent !== t) el.textContent = t; }
+
+    // mode: "update" (live status), "failed", "unknown" (can't read status —
+    // an older vhost), "down" (no update running: crash or restart).
+    var mode = "unknown", last = null;
+    function render() {
+      var n = nowServer();
+      $("facts").hidden = since === null;
+      if (since !== null) setText("since", dur(n - since));
+      if (mode === "update") {
+        document.title = "Hyperion is updating…";
+        setText("eyebrow", "Updating");
+        setText("headline", "Hyperion is updating");
+        setText("lede", "The control panel is offline while a new version is installed. " +
+                        "This page reconnects by itself as soon as it's back — nothing you need to do.");
+        setText("since-label", "Offline for");
+        renderSteps(last);
+        if (last.step === "build") {
+          hint("<p>The server is compiling Hyperion from source. " +
+               "That usually takes 5–20 minutes on a small server.</p>");
+        } else if (last.step === "configure" && n - stepSince > 180) {
+          hint("<p>This step can install system packages, which may take a few minutes.</p>");
+        } else if (stepSince && n - stepSince > 900) {
+          hint("<p>This step is taking longer than usual.</p>" + LOGS);
+        } else {
+          hint("");
+        }
+      } else if (mode === "failed") {
+        document.title = "Hyperion update failed";
+        setText("eyebrow", "Update stopped");
+        setText("headline", "The update didn't finish");
+        setText("lede", "It stopped while " + (VERB[last.step] || "updating") + ", so the control panel " +
+                        "is still offline. It won't come back on its own — someone needs to look at the server.");
+        setText("since-label", "Offline for");
+        renderSteps(last);
+        hint("<p>The full log is in the terminal that ran the update. " +
+             "To try again, on the server: <code>sudo hyperion update</code></p>");
+      } else {
+        $("steps").hidden = true;
+        var down = mode === "down";
+        document.title = down ? "Hyperion panel offline" : "Hyperion is updating…";
+        setText("eyebrow", down ? "Offline" : "Updating");
+        setText("headline", down ? "The control panel isn't answering" : "Hyperion is updating");
+        setText("lede", down
+          ? "Hyperion's web service isn't responding. If it was just restarted it'll be back in a moment — this page reconnects by itself."
+          : "The control panel is offline, most likely while a new version is installed. This page reconnects by itself as soon as it's back.");
+        setText("since-label", "Offline for");
+        hint(since !== null && n - since > (down ? 120 : 1200)
+          ? "<p>Still offline after a few minutes? Something may need a hand.</p>" + LOGS
+          : "");
+      }
+    }
+
+    // The panel is back once a request no longer lands on this page. nginx
+    // tags the maintenance response with X-Hyperion-Maintenance; a redirect
+    // (to /login) can't be read but can't be us either. A 5xx without the tag
+    // is hyperion-web up but unhappy — keep waiting rather than bounce into it.
+    function probe() {
+      return fetch("/", { method: "HEAD", cache: "no-store", redirect: "manual", credentials: "same-origin" })
+        .then(function (r) {
+          if (r.type === "opaqueredirect") return true;
+          if (r.headers.get("X-Hyperion-Maintenance")) return false;
+          return r.status > 0 && r.status < 500;
+        }, function () { return false; });
+    }
+
+    function readStatus() {
+      return fetch(STATUS_URL, { cache: "no-store", credentials: "same-origin" }).then(function (r) {
+        var d = Date.parse(r.headers.get("Date") || "");
+        if (!isNaN(d)) skew = Math.floor(d / 1000) - Math.floor(Date.now() / 1000);
+        if (r.status === 404) return { kind: "none" };
+        var ct = r.headers.get("Content-Type") || "";
+        if (!r.ok || ct.indexOf("json") < 0) return { kind: "unknown" };
+        return r.json().then(function (j) { return { kind: "status", st: j }; },
+                             function () { return { kind: "unknown" }; });
+      }, function () { return { kind: "unknown" }; });
+    }
+
+    function tick() {
+      if (busy) return;
+      busy = true;
+      Promise.all([probe(), readStatus()]).then(function (res) {
+        busy = false;
+        if (res[0]) {
+          forgetSeen();
+          setText("eyebrow", "Back online");
+          setText("headline", "Hyperion is back");
+          setText("lede", "Taking you back to the panel…");
+          $("steps").hidden = true; hint("");
+          // replace(), not reload(): never re-POST whatever form brought us here.
+          setTimeout(function () { location.replace(location.href); }, 600);
+          return;
+        }
+        var s = res[1], st = s.st, n = nowServer();
+        if (s.kind === "status" && st && typeof st.started === "number" && n - (st.updated || st.started) < STALE_SECS) {
+          last = st;
+          since = st.started;
+          stepSince = typeof st.step_started === "number" ? st.step_started : st.started;
+          mode = st.state === "failed" ? "failed" : "update";
+        } else {
+          mode = s.kind === "unknown" ? "unknown" : "down";
+          since = firstSeen();
+        }
+        render();
+        setText("checked", "Checked " + new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }));
+      });
+    }
+
+    $("retry").addEventListener("click", function (e) { e.preventDefault(); tick(); });
+    document.addEventListener("visibilitychange", function () { if (!document.hidden) tick(); });
+    since = firstSeen();
+    render();
+    tick();
+    setInterval(tick, POLL_MS);
+    // The clocks tick every second between polls.
+    setInterval(function () { if (!busy) render(); }, 1000);
+  })();
+  </script>
+</body>
+</html>

@@ -2880,6 +2880,99 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .map_err(|e| RpcError::Internal_with(format!("list: {e}")))
     }
 
+    /// Rewrite, once, every Active site vhost rendered before the template
+    /// last changed in a way existing sites need.
+    ///
+    /// update.sh never rewrites vhosts, so a template fix otherwise lands
+    /// only when somebody happens to re-save each site. Gated per hosting
+    /// on [`VHOST_GEN_KV`] so a boot with nothing new to roll out touches no
+    /// vhost and reloads nothing. Returns how many vhosts it rewrote.
+    pub async fn rerender_stale_vhosts(&self) -> usize {
+        let Ok(summaries) = self.list().await else {
+            return 0;
+        };
+        let want = VHOST_GEN.to_string();
+        let mut n = 0;
+        for s in summaries {
+            if s.state != HostingState::Active {
+                continue;
+            }
+            let id = s.id.as_str().to_string();
+            let have = hyperion_state::hosting_kv::get(&self.pool, &id, VHOST_GEN_KV)
+                .await
+                .ok()
+                .flatten();
+            if have.as_deref() == Some(want.as_str()) {
+                continue;
+            }
+            let Ok(detail) = self.get(HostingSelector::Id(s.id.clone())).await else {
+                continue;
+            };
+            match self.adapters.nginx_write_vhost(&detail).await {
+                Ok(()) => {
+                    let _ = hyperion_state::hosting_kv::set(
+                        &self.pool,
+                        &id,
+                        VHOST_GEN_KV,
+                        &want,
+                        now_secs(),
+                    )
+                    .await;
+                    n += 1;
+                }
+                // Not marked: the next boot tries again. write_vhost has
+                // already put the previous, working vhost back.
+                Err(e) => tracing::warn!(
+                    domain = %detail.domain, error = %e,
+                    "boot: vhost re-render failed; keeping the old one"
+                ),
+            }
+        }
+        n
+    }
+
+    /// Write a hosting's FPM pool WITH its stored limits.
+    ///
+    /// `fpm_ensure` alone renders the template defaults (256 MB,
+    /// five workers). Every path that rewrites an existing site's pool must
+    /// come through here instead: the boot re-render used to call
+    /// `fpm_ensure`, so each agent restart — every update — silently put
+    /// every pool back on the defaults. That threw away the operator's
+    /// worker count and every step the automatic memory_limit had taken,
+    /// and the automation never noticed: it reads the limit from the DB,
+    /// so it ignored the 256 MB fatals as being "below the limit in force".
+    async fn fpm_ensure_with_limits(
+        &self,
+        detail: &HostingDetail,
+        ver: PhpVersion,
+    ) -> Result<(), AdapterError> {
+        match hyperion_state::limits::get(&self.pool, &detail.id).await {
+            Ok(Some(row)) => {
+                self.adapters
+                    .apply_php_limits(
+                        &detail.system_user,
+                        &detail.domain,
+                        Some(ver),
+                        row.php_memory_mb,
+                        row.php_max_exec_secs,
+                        row.php_max_children,
+                        row.php_max_requests,
+                    )
+                    .await
+            }
+            // No row: the site never had limits set, so the defaults ARE
+            // its limits.
+            Ok(None) => {
+                self.adapters
+                    .fpm_ensure(&detail.system_user, &detail.domain, ver)
+                    .await
+            }
+            // Never fall back to the defaults on a read error — that is the
+            // very reset this function exists to prevent.
+            Err(e) => Err(AdapterError::Other(format!("limits get: {e}"))),
+        }
+    }
+
     /// Boot-time self-heal: re-render the FPM pool config for every
     /// active hosting that has PHP. We do this because the pool
     /// template's `listen.owner` depends on the nginx user, which is
@@ -2939,15 +3032,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 );
                 continue;
             }
-            if let Err(e) = self
-                .adapters
-                .fpm_ensure(&detail.system_user, &detail.domain, ver)
-                .await
-            {
+            if let Err(e) = self.fpm_ensure_with_limits(&detail, ver).await {
                 tracing::warn!(
                     domain = %detail.domain,
                     error = %e,
-                    "rerender_fpm_pools: fpm_ensure failed"
+                    "rerender_fpm_pools: pool rewrite failed"
                 );
                 continue;
             }
@@ -3798,10 +3887,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             let _ = self.adapters.db_unlock(db.engine, &db.db_user).await;
         }
         if let Some(ver) = detail.php_version {
-            let _ = self
-                .adapters
-                .fpm_ensure(&detail.system_user, &detail.domain, ver)
-                .await;
+            let _ = self.fpm_ensure_with_limits(&detail, ver).await;
         }
         let _ = self.adapters.nginx_write_vhost(&detail).await;
         // Before un-trashing, while the scheduler is still holding them: cancel
@@ -4357,6 +4443,107 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(acted)
     }
 
+    /// Notice pools that ran out of PHP workers.
+    ///
+    /// Reads what each PHP version's FPM log (`<log_dir>/php<ver>-fpm.log`)
+    /// gained since the last tick — `cursors` carries the position between
+    /// ticks and starts every log at its end, so history is not news —
+    /// counts `server reached pm.max_children` per pool, records it in the
+    /// owning hosting's `hosting_kv` for the limits card, and warns the
+    /// admins at most every [`phpworkers::ALERT_EVERY_SECS`] per site.
+    ///
+    /// Returns how many sites hit their limit this tick.
+    pub async fn php_workers_tick(
+        &self,
+        log_dir: &std::path::Path,
+        cursors: &mut std::collections::HashMap<PhpVersion, (u64, u64)>,
+    ) -> Result<i64, RpcError> {
+        use hyperion_types::phpworkers;
+        let mut hits: std::collections::BTreeMap<String, i64> = Default::default();
+        for ver in PhpVersion::all() {
+            let path = log_dir.join(format!("{}.log", ver.service_name()));
+            if !path.exists() {
+                continue;
+            }
+            let (ino, off) = cursors.get(ver).copied().unwrap_or((0, 0));
+            let read = tokio::task::spawn_blocking(move || {
+                hyperion_adapters::fs::read_appended(&path, ino, off, phpworkers::MAX_SCAN_BYTES)
+            })
+            .await;
+            match read {
+                Ok(Ok(a)) => {
+                    for (pool, n) in phpworkers::count_by_pool(&a.text) {
+                        *hits.entry(pool).or_insert(0) += n;
+                    }
+                    cursors.insert(*ver, (a.ino, a.offset));
+                }
+                Ok(Err(e)) => {
+                    tracing::debug!(version = %ver.as_str(), error = %e, "php workers: FPM log not read")
+                }
+                Err(e) => tracing::warn!(error = %e, "php workers: log reader panicked"),
+            }
+        }
+        if hits.is_empty() {
+            return Ok(0);
+        }
+        let now = now_secs();
+        let mut sites = 0i64;
+        for s in self.list().await? {
+            if s.state != HostingState::Active || s.php_version.is_none() {
+                continue;
+            }
+            let Ok(detail) = self.get(HostingSelector::Id(s.id.clone())).await else {
+                continue;
+            };
+            let Some(&n) = hits.get(detail.system_user.as_str()) else {
+                continue;
+            };
+            sites += 1;
+            let id = detail.id.as_str().to_string();
+            let mut st = hyperion_state::hosting_kv::get(&self.pool, &id, phpworkers::KV_STATE)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|v| phpworkers::State::parse(&v))
+                .unwrap_or_default();
+            st.record(now, n);
+            if st.should_alert(now) {
+                st.alerted_at = now;
+                let children = hyperion_state::limits::get(&self.pool, &detail.id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|r| r.php_max_children)
+                    .unwrap_or_else(|| hyperion_types::HostingLimits::defaults().php_max_children)
+                    .to_string();
+                let today = st.hits_today(now).to_string();
+                // warn, not error: the site still serves, queued — see the
+                // severity rule on `notify_admins`.
+                self.notify_admins_say(
+                    "warn",
+                    "ops.php_workers_full",
+                    &[
+                        ("domain", detail.domain.as_str()),
+                        ("children", children.as_str()),
+                        ("today", today.as_str()),
+                    ],
+                    &format!("/hostings/{}#limits", detail.domain),
+                    "php_workers",
+                )
+                .await;
+            }
+            let _ = hyperion_state::hosting_kv::set(
+                &self.pool,
+                &id,
+                phpworkers::KV_STATE,
+                &st.to_json(),
+                now,
+            )
+            .await;
+        }
+        Ok(sites)
+    }
+
     pub async fn get_limits(
         &self,
         sel: HostingSelector,
@@ -4735,25 +4922,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             let _ = self.adapters.db_unlock(db.engine, &db.db_user).await;
         }
         if let Some(ver) = detail.php_version {
-            let _ = self
-                .adapters
-                .fpm_ensure(&detail.system_user, &detail.domain, ver)
-                .await;
-            // Re-apply persisted limits to FPM pool.
-            if let Ok(Some(row)) = hyperion_state::limits::get(&self.pool, &detail.id).await {
-                let _ = self
-                    .adapters
-                    .apply_php_limits(
-                        &detail.system_user,
-                        &detail.domain,
-                        Some(ver),
-                        row.php_memory_mb,
-                        row.php_max_exec_secs,
-                        row.php_max_children,
-                        row.php_max_requests,
-                    )
-                    .await;
-            }
+            let _ = self.fpm_ensure_with_limits(&detail, ver).await;
         }
         let _ = self.adapters.nginx_write_vhost(&detail).await;
         {
@@ -17931,10 +18100,40 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // already in hand rather than re-queried per site: this runs on the
         // dashboard, on every load, for every site on the node.
         let mut lists: HashMap<String, Vec<String>> = HashMap::new();
+        // Billing facts, folded per site the same way: earliest start, soonest
+        // reminder, and every priced plan's snapshot.
+        let mut since: HashMap<String, i64> = HashMap::new();
+        let mut next_bill: HashMap<String, i64> = HashMap::new();
+        let mut charges: HashMap<String, Vec<hyperion_types::care_check::CareCharge>> =
+            HashMap::new();
         for r in rows {
             let key = r.hosting_id.as_str().to_string();
             if !names.contains_key(&key) {
                 order.push(r.hosting_id.clone());
+            }
+            let start = r.valid_from.unwrap_or(r.activated_at);
+            since
+                .entry(key.clone())
+                .and_modify(|t| *t = (*t).min(start))
+                .or_insert(start);
+            if let Some(nb) = r.next_billing_at {
+                next_bill
+                    .entry(key.clone())
+                    .and_modify(|t| *t = (*t).min(nb))
+                    .or_insert(nb);
+            }
+            if let (Some(m), Some(c), Some(iv)) = (
+                r.price_minor,
+                r.price_currency.as_ref(),
+                r.price_interval.as_ref(),
+            ) {
+                charges.entry(key.clone()).or_default().push(
+                    hyperion_types::care_check::CareCharge {
+                        price_minor: m,
+                        currency: c.clone(),
+                        interval: iv.clone(),
+                    },
+                );
             }
             let entry = names.entry(key.clone()).or_default();
             // The activation SNAPSHOTS the name, so a deleted definition
@@ -17987,6 +18186,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 checks_total: total,
                 outstanding,
                 prev_outstanding,
+                since: since.remove(id.as_str()),
+                next_billing_at: next_bill.remove(id.as_str()),
+                charges: charges.remove(id.as_str()).unwrap_or_default(),
             });
         }
         // Sites needing attention first, then alphabetically — the card is
@@ -21810,8 +22012,70 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 // Master tags this after a cross-node fan-in; the agent
                 // can't know its own cluster label.
                 node: None,
+                row_hash: e.row_hash,
             })
             .collect())
+    }
+
+    pub async fn audit_search(
+        &self,
+        filter: hyperion_rpc::AuditSearchFilter,
+    ) -> Result<
+        (
+            Vec<hyperion_rpc::AuditEntryWire>,
+            Vec<hyperion_rpc::AuditActionCount>,
+            i64,
+        ),
+        RpcError,
+    > {
+        let limit = filter.limit.clamp(1, 1000);
+        let f = hyperion_state::audit::AuditFilter {
+            q: filter.q,
+            q_alt: filter.q_alt,
+            action: filter.action,
+            prefixes: filter.prefixes,
+            not_prefixes: filter.not_prefixes,
+            failed_only: filter.failed_only,
+            since: filter.since,
+            before: filter.before,
+        };
+        let err = |e: hyperion_state::db::StateError| {
+            RpcError::Internal_with(format!("audit search: {e}"))
+        };
+        let rows = hyperion_state::audit::search(&self.pool, &f, limit)
+            .await
+            .map_err(err)?;
+        let actions = hyperion_state::audit::action_counts(&self.pool, &f)
+            .await
+            .map_err(err)?;
+        let total = hyperion_state::audit::count(&self.pool)
+            .await
+            .map_err(err)?;
+        Ok((
+            rows.into_iter()
+                .map(|e| hyperion_rpc::AuditEntryWire {
+                    id: e.id,
+                    ts: e.ts,
+                    actor_uid: e.actor_uid,
+                    actor_label: e.actor_label,
+                    action: e.action,
+                    target: e.target,
+                    payload_json: e.payload_json,
+                    result: e.result,
+                    node: None,
+                    row_hash: e.row_hash,
+                })
+                .collect(),
+            actions
+                .into_iter()
+                .map(|c| hyperion_rpc::AuditActionCount {
+                    action: c.action,
+                    total: c.total,
+                    failed: c.failed,
+                })
+                .collect(),
+            total,
+        ))
     }
 
     pub(crate) async fn append_audit(
@@ -29402,7 +29666,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     // ================================================================
 
     /// Return the tail of a log file for the given hosting.
-    /// `log_kind` ∈ {"access", "error"}.
+    /// `log_kind` ∈ {"access", "error", "slow"}.
     pub async fn hosting_logs(
         &self,
         sel: HostingSelector,
@@ -29411,12 +29675,33 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     ) -> Result<String, RpcError> {
         let detail = self.get(sel).await?;
         let lines = lines.clamp(10, 5000);
+        if log_kind == "slow" {
+            // The PHP-FPM slow-request log: root-owned, outside the site's
+            // tree (see the pool template), one file per pool.
+            if detail.system_user.trim().is_empty() {
+                return Ok("(this hosting has no PHP pool)".into());
+            }
+            let path = hyperion_adapters::phpfpm::slowlog_path(&detail.system_user);
+            if !path.exists() {
+                return Ok(format!(
+                    "(no request has run longer than {} s since slow-request logging started)",
+                    hyperion_adapters::phpfpm::SLOWLOG_SECS
+                ));
+            }
+            return hyperion_adapters::fs::tail_lines(&path, lines as usize)
+                .await
+                .map_err(|e| RpcError::Validation {
+                    message: e.to_string(),
+                });
+        }
         let filename = match log_kind {
             "access" => "access.log",
             "error" => "error.log",
             other => {
                 return Err(RpcError::Validation {
-                    message: format!("unknown log_kind {other:?}; want \"access\" or \"error\""),
+                    message: format!(
+                        "unknown log_kind {other:?}; want \"access\", \"error\" or \"slow\""
+                    ),
                 })
             }
         };
@@ -37314,6 +37599,14 @@ fn limits_to_row(
         updated_at: now,
     }
 }
+
+/// Bump when a vhost template change must reach EXISTING sites (see
+/// [`HostingService::rerender_stale_vhosts`]). 1: request time in the
+/// access log, page-cache skip for logged-in and WooCommerce visitors.
+const VHOST_GEN: u32 = 1;
+/// Node-local `hosting_kv` key holding the generation a vhost was last
+/// rendered at.
+const VHOST_GEN_KV: &str = "nginx.vhost_gen";
 
 fn row_to_limits(row: hyperion_state::limits::LimitsRow) -> hyperion_types::HostingLimits {
     let policy = match row.over_bw_policy.as_str() {
@@ -45280,6 +45573,111 @@ mod tests {
         assert!(susp.is_none(), "suspension row removed on resume");
     }
 
+    /// `server reached pm.max_children` in an FPM log is counted for the
+    /// site whose pool it names, and only for lines written after the first
+    /// look.
+    #[tokio::test]
+    async fn php_workers_tick_records_pool_saturation() {
+        use hyperion_types::phpworkers;
+        use std::io::Write;
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), happy_mocks());
+        s.create(req("ex.cz")).await.expect("create");
+        let d = s
+            .get(HostingSelector::Domain(Domain::parse("ex.cz").unwrap()))
+            .await
+            .expect("get");
+        let dir = tempfile::tempdir().expect("dir");
+        let log = dir.path().join("php8.3-fpm.log");
+        let line = |user: &str| {
+            format!("[06-Oct-2026 06:56:45] WARNING: [pool {user}] server reached pm.max_children setting (5), consider raising it\n")
+        };
+        std::fs::write(&log, line(&d.system_user)).expect("write");
+        let mut cursors = std::collections::HashMap::new();
+
+        // First look: history is not news.
+        assert_eq!(
+            s.php_workers_tick(dir.path(), &mut cursors)
+                .await
+                .expect("tick"),
+            0
+        );
+
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&log)
+            .expect("open");
+        f.write_all(line(&d.system_user).as_bytes())
+            .expect("append");
+        f.write_all(line(&d.system_user).as_bytes())
+            .expect("append");
+        f.write_all(line("someone_else").as_bytes())
+            .expect("append");
+        assert_eq!(
+            s.php_workers_tick(dir.path(), &mut cursors)
+                .await
+                .expect("tick"),
+            1
+        );
+        let st = phpworkers::State::parse(
+            &hyperion_state::hosting_kv::get(&pool, d.id.as_str(), phpworkers::KV_STATE)
+                .await
+                .expect("kv")
+                .expect("state"),
+        )
+        .expect("parse");
+        assert_eq!(st.hits_today(st.last_at), 2);
+        assert_eq!(st.alerted_at, st.last_at, "first hit alerts");
+
+        // Nothing new: nothing recorded.
+        assert_eq!(
+            s.php_workers_tick(dir.path(), &mut cursors)
+                .await
+                .expect("tick"),
+            0
+        );
+    }
+
+    /// A vhost template change reaches existing sites once: the first boot
+    /// rewrites every Active vhost, the next one touches nothing.
+    #[tokio::test]
+    async fn stale_vhosts_are_rewritten_once() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool, happy_mocks());
+        s.create(req("ex.cz")).await.expect("create");
+        assert_eq!(s.rerender_stale_vhosts().await, 1);
+        assert_eq!(s.rerender_stale_vhosts().await, 0);
+    }
+
+    /// The boot re-render must write each pool WITH its stored limits. It
+    /// used to render the template defaults, so every agent restart put
+    /// every site back on 256 MB / five workers and undid the automatic
+    /// memory_limit without it ever noticing.
+    #[tokio::test]
+    async fn boot_rerender_keeps_stored_pool_limits() {
+        use std::sync::{Arc, Mutex};
+        let pool = open_memory().await.expect("open");
+        let seen: Arc<Mutex<Vec<(i64, i64)>>> = Arc::default();
+        let mut a = happy_mocks();
+        let rec = seen.clone();
+        a.expect_apply_php_limits()
+            .returning(move |_, _, _, mem, _, children, _| {
+                rec.lock().unwrap().push((mem, children));
+                Ok(())
+            });
+        let s = svc(pool, a);
+        s.create(req("ex.cz")).await.expect("create");
+        let sel = HostingSelector::Domain(Domain::parse("ex.cz").unwrap());
+        let mut l = s.get_limits(sel.clone()).await.expect("limits");
+        l.php_memory_mb = 512;
+        l.php_max_children = 12;
+        s.set_limits(sel, l).await.expect("set");
+        seen.lock().unwrap().clear();
+
+        assert_eq!(s.rerender_fpm_pools().await, 1);
+        assert_eq!(*seen.lock().unwrap(), vec![(512, 12)]);
+    }
+
     /// Out-of-memory in the site's error.log raises the pool one step; a hand
     /// save of the UNCHANGED card keeps the operator's floor, a changed value
     /// becomes the new floor; turning the automation off restores the floor.
@@ -47435,6 +47833,65 @@ mod tests {
         input.check_items = String::new();
         s.package_update(pkg.id, input).await.expect("clear");
         assert_eq!(s.care_check_items(&detail.id).await.len(), 4);
+    }
+
+    /// The care packages page reads a site's billing from the overview: the
+    /// earliest start, the soonest reminder, and EVERY priced plan at the
+    /// price the site agreed to — a later re-price of the definition must not
+    /// move what the roster says the customer owes.
+    #[tokio::test]
+    async fn care_overview_carries_each_sites_agreed_price_and_dates() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), package_mocks());
+        let detail = hosting_for_packages(&s, "billing.cz").await;
+        let now = now_secs();
+
+        let care = s
+            .package_create(care_input("Care", PackageFeatures::default()))
+            .await
+            .expect("care");
+        let mut yearly = care_input("Backups", PackageFeatures::default());
+        yearly.price_minor = Some(120_000);
+        yearly.price_interval = Some("yearly".into());
+        let yearly = s.package_create(yearly).await.expect("yearly");
+
+        let sel = HostingSelector::Id(detail.id.clone());
+        s.package_activate(sel.clone(), care.id, None, Some(now - 90 * 86_400))
+            .await
+            .expect("care on");
+        s.package_activate(sel, yearly.id, None, None)
+            .await
+            .expect("yearly on");
+
+        // Re-pricing the definition afterwards changes nothing already sold.
+        let mut repriced = care_input("Care", PackageFeatures::default());
+        repriced.price_minor = Some(99_900);
+        s.package_update(care.id, repriced).await.expect("reprice");
+
+        let period = hyperion_types::care_check::period_key(now);
+        let rows = s.care_overview(period).await.expect("overview");
+        let row = rows
+            .iter()
+            .find(|r| r.hosting_id == detail.id.as_str())
+            .expect("row");
+        let since = row.since.expect("since");
+        assert!(
+            (since - (now - 90 * 86_400)).abs() < 86_400,
+            "the backdated plan is the earliest start"
+        );
+        assert!(
+            row.next_billing_at.is_some(),
+            "both plans carry an interval"
+        );
+        let mut prices: Vec<(i64, &str)> = row
+            .charges
+            .iter()
+            .map(|c| (c.price_minor, c.interval.as_str()))
+            .collect();
+        prices.sort();
+        assert_eq!(prices, vec![(49_000, "monthly"), (120_000, "yearly")]);
+        let monthly: i64 = row.charges.iter().filter_map(|c| c.monthly_minor()).sum();
+        assert_eq!(monthly, 49_000 + 10_000);
     }
 
     /// The half of a package edit that does not happen on the master.

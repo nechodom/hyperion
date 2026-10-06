@@ -286,6 +286,14 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(v) => Response::AuditList(v),
             Err(e) => Response::Error(e),
         },
+        Request::AuditSearch { filter } => match api.audit_search(filter).await {
+            Ok((rows, actions, total)) => Response::AuditSearch {
+                rows,
+                actions,
+                total,
+            },
+            Err(e) => Response::Error(e),
+        },
         Request::WebSessionInsert {
             sid,
             user_id,
@@ -2180,6 +2188,19 @@ mod tests {
         }
         async fn audit_list(&self, _: i64) -> Result<Vec<AuditEntryWire>, RpcError> {
             Ok(vec![])
+        }
+        async fn audit_search(
+            &self,
+            _: hyperion_rpc::AuditSearchFilter,
+        ) -> Result<
+            (
+                Vec<AuditEntryWire>,
+                Vec<hyperion_rpc::AuditActionCount>,
+                i64,
+            ),
+            RpcError,
+        > {
+            Ok((vec![], vec![], 0))
         }
         async fn hosting_set_expiry(
             &self,

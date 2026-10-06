@@ -286,6 +286,214 @@ pub async fn list(pool: &SqlitePool, limit: i64) -> Result<Vec<AuditEntry>, Stat
         .collect())
 }
 
+/// What `/audit` narrows the log by. Runs on the node that owns the rows, so
+/// a search reaches the whole log instead of the newest window the panel
+/// happened to fetch. Empty / `None` fields don't constrain.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AuditFilter {
+    /// Substring of action, target, actor or payload (ASCII case-insensitive).
+    pub q: String,
+    /// More needles for the same columns, OR'd with `q` — the panel adds a
+    /// hosting's id when `q` names its domain, since many entries target
+    /// the id.
+    pub q_alt: Vec<String>,
+    /// Exact action kind.
+    pub action: String,
+    /// Keep actions starting with any of these (a category, e.g. `"cert."`).
+    pub prefixes: Vec<String>,
+    /// Drop actions starting with any of these.
+    pub not_prefixes: Vec<String>,
+    /// Only entries whose result is not `ok`.
+    pub failed_only: bool,
+    /// `ts >= since`.
+    pub since: Option<i64>,
+    /// `ts < before` — the paging cursor.
+    pub before: Option<i64>,
+}
+
+/// One action kind's share of a search scope.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuditActionCount {
+    pub action: String,
+    pub total: i64,
+    pub failed: i64,
+}
+
+enum Arg {
+    Int(i64),
+    Text(String),
+}
+
+/// Escape `\`, `%` and `_` for `LIKE … ESCAPE '\'`. Category prefixes such
+/// as `web_session.` contain `_`, which LIKE would otherwise read as "any
+/// character".
+fn like_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if matches!(c, '\\' | '%' | '_') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// WHERE clause for `f`. `scope_only` keeps just the search box and the
+/// time window: the counts behind the category segments and the action
+/// pick-list are taken over that scope, so picking one segment doesn't zero
+/// the others.
+fn where_clause(f: &AuditFilter, scope_only: bool) -> (String, Vec<Arg>) {
+    let mut conds: Vec<String> = Vec::new();
+    let mut args: Vec<Arg> = Vec::new();
+    let q = f.q.trim();
+    if !q.is_empty() {
+        let needles: Vec<&str> = std::iter::once(q)
+            .chain(f.q_alt.iter().map(|s| s.trim()).filter(|s| !s.is_empty()))
+            .collect();
+        let one = "action LIKE ? ESCAPE '\\' OR IFNULL(target, '') LIKE ? ESCAPE '\\' \
+                   OR actor_label LIKE ? ESCAPE '\\' OR payload_json LIKE ? ESCAPE '\\'";
+        conds.push(format!("({})", vec![one; needles.len()].join(" OR ")));
+        for n in needles {
+            let pat = format!("%{}%", like_escape(n));
+            for _ in 0..4 {
+                args.push(Arg::Text(pat.clone()));
+            }
+        }
+    }
+    if let Some(since) = f.since {
+        conds.push("ts >= ?".into());
+        args.push(Arg::Int(since));
+    }
+    if !scope_only {
+        if !f.action.is_empty() {
+            conds.push("action = ?".into());
+            args.push(Arg::Text(f.action.clone()));
+        }
+        if !f.prefixes.is_empty() {
+            let ors = vec!["action LIKE ? ESCAPE '\\'"; f.prefixes.len()].join(" OR ");
+            conds.push(format!("({ors})"));
+            for p in &f.prefixes {
+                args.push(Arg::Text(format!("{}%", like_escape(p))));
+            }
+        }
+        for p in &f.not_prefixes {
+            conds.push("action NOT LIKE ? ESCAPE '\\'".into());
+            args.push(Arg::Text(format!("{}%", like_escape(p))));
+        }
+        if f.failed_only {
+            conds.push("result != 'ok'".into());
+        }
+        if let Some(before) = f.before {
+            conds.push("ts < ?".into());
+            args.push(Arg::Int(before));
+        }
+    }
+    if conds.is_empty() {
+        (String::new(), args)
+    } else {
+        (format!(" WHERE {}", conds.join(" AND ")), args)
+    }
+}
+
+type AuditRow = (
+    i64,
+    i64,
+    i64,
+    String,
+    String,
+    Option<String>,
+    String,
+    String,
+    String,
+    String,
+);
+
+/// Newest-first entries matching `f`, at most `limit`.
+pub async fn search(
+    pool: &SqlitePool,
+    f: &AuditFilter,
+    limit: i64,
+) -> Result<Vec<AuditEntry>, StateError> {
+    let (wh, args) = where_clause(f, false);
+    let sql = format!(
+        "SELECT id, ts, actor_uid, actor_label, action, target, payload_json, result, prev_hash, row_hash
+         FROM audit_log{wh} ORDER BY ts DESC, id DESC LIMIT ?"
+    );
+    let mut query = sqlx::query_as::<_, AuditRow>(&sql);
+    for a in args {
+        query = match a {
+            Arg::Int(v) => query.bind(v),
+            Arg::Text(v) => query.bind(v),
+        };
+    }
+    let rows = query.bind(limit).fetch_all(pool).await?;
+    Ok(rows
+        .into_iter()
+        .map(
+            |(
+                id,
+                ts,
+                actor_uid,
+                actor_label,
+                action,
+                target,
+                payload_json,
+                result,
+                prev_hash,
+                row_hash,
+            )| AuditEntry {
+                id,
+                ts,
+                actor_uid,
+                actor_label,
+                action,
+                target,
+                payload_json,
+                result,
+                prev_hash,
+                row_hash,
+            },
+        )
+        .collect())
+}
+
+/// Per-action totals over `f`'s scope (search box + time window only).
+pub async fn action_counts(
+    pool: &SqlitePool,
+    f: &AuditFilter,
+) -> Result<Vec<AuditActionCount>, StateError> {
+    let (wh, args) = where_clause(f, true);
+    let sql = format!(
+        "SELECT action, COUNT(*), SUM(CASE WHEN result != 'ok' THEN 1 ELSE 0 END)
+         FROM audit_log{wh} GROUP BY action ORDER BY action"
+    );
+    let mut query = sqlx::query_as::<_, (String, i64, i64)>(&sql);
+    for a in args {
+        query = match a {
+            Arg::Int(v) => query.bind(v),
+            Arg::Text(v) => query.bind(v),
+        };
+    }
+    Ok(query
+        .fetch_all(pool)
+        .await?
+        .into_iter()
+        .map(|(action, total, failed)| AuditActionCount {
+            action,
+            total,
+            failed,
+        })
+        .collect())
+}
+
+/// Every row in the log, filters ignored.
+pub async fn count(pool: &SqlitePool) -> Result<i64, StateError> {
+    let (n,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM audit_log")
+        .fetch_one(pool)
+        .await?;
+    Ok(n)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn compute_row_hash(
     prev_hash: &str,
@@ -396,6 +604,142 @@ mod tests {
         let rows = list(&pool, 10).await.expect("list");
         let actions: Vec<&str> = rows.iter().map(|e| e.action.as_str()).collect();
         assert_eq!(actions, vec!["c", "b", "a"]);
+    }
+
+    async fn seed(pool: &SqlitePool, ts: i64, action: &str, target: Option<&str>, result: &str) {
+        append(
+            pool,
+            AppendReq {
+                ts,
+                actor_uid: 1,
+                actor_label: "kevin",
+                action,
+                target,
+                payload_json: r#"{"note":"100% done"}"#,
+                result,
+            },
+        )
+        .await
+        .expect("append");
+    }
+
+    #[tokio::test]
+    async fn search_filters_run_in_sql_over_the_whole_log() {
+        let pool = open_memory().await.expect("open");
+        seed(&pool, 10, "web.login.ok", None, "ok").await;
+        seed(&pool, 20, "web_session.revoke", None, "ok").await;
+        seed(&pool, 30, "webXsession.fake", None, "ok").await;
+        seed(&pool, 40, "cert.renew", Some("a.example"), "failed").await;
+        seed(&pool, 50, "hosting.create", Some("b.example"), "ok").await;
+
+        let acts = |rows: Vec<AuditEntry>| rows.into_iter().map(|e| e.action).collect::<Vec<_>>();
+        let all = search(&pool, &AuditFilter::default(), 100)
+            .await
+            .expect("all");
+        assert_eq!(all.len(), 5);
+        assert_eq!(all[0].action, "hosting.create", "newest first");
+
+        // `_` in a prefix is literal, not "any character".
+        let f = AuditFilter {
+            prefixes: vec!["web.".into(), "web_session.".into()],
+            ..Default::default()
+        };
+        assert_eq!(
+            acts(search(&pool, &f, 100).await.expect("prefix")),
+            vec!["web_session.revoke", "web.login.ok"]
+        );
+
+        let f = AuditFilter {
+            not_prefixes: vec!["web.".into(), "web_session.".into(), "cert.".into()],
+            ..Default::default()
+        };
+        assert_eq!(
+            acts(search(&pool, &f, 100).await.expect("not")),
+            vec!["hosting.create", "webXsession.fake"]
+        );
+
+        let f = AuditFilter {
+            failed_only: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            acts(search(&pool, &f, 100).await.expect("failed")),
+            vec!["cert.renew"]
+        );
+
+        // Search box: target, case-insensitive; `%` is literal.
+        let f = AuditFilter {
+            q: "A.EXAMPLE".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            acts(search(&pool, &f, 100).await.expect("q")),
+            vec!["cert.renew"]
+        );
+        let f = AuditFilter {
+            q: "100%".into(),
+            ..Default::default()
+        };
+        assert_eq!(search(&pool, &f, 100).await.expect("pct").len(), 5);
+        let f = AuditFilter {
+            q: "1%0".into(),
+            ..Default::default()
+        };
+        assert!(search(&pool, &f, 100).await.expect("pct2").is_empty());
+        // Alternate needles widen the search box, never narrow it.
+        let f = AuditFilter {
+            q: "a.example".into(),
+            q_alt: vec!["b.example".into()],
+            ..Default::default()
+        };
+        assert_eq!(
+            acts(search(&pool, &f, 100).await.expect("alt")),
+            vec!["hosting.create", "cert.renew"]
+        );
+
+        // Window + cursor.
+        let f = AuditFilter {
+            since: Some(20),
+            before: Some(50),
+            ..Default::default()
+        };
+        assert_eq!(
+            acts(search(&pool, &f, 100).await.expect("window")),
+            vec!["cert.renew", "webXsession.fake", "web_session.revoke"]
+        );
+        assert_eq!(search(&pool, &f, 2).await.expect("limit").len(), 2);
+    }
+
+    #[tokio::test]
+    async fn action_counts_ignore_everything_but_the_scope() {
+        let pool = open_memory().await.expect("open");
+        seed(&pool, 10, "cert.renew", Some("a.example"), "ok").await;
+        seed(&pool, 20, "cert.renew", Some("a.example"), "failed").await;
+        seed(&pool, 30, "hosting.create", Some("b.example"), "ok").await;
+        let f = AuditFilter {
+            action: "hosting.create".into(),
+            failed_only: true,
+            before: Some(15),
+            since: Some(15),
+            ..Default::default()
+        };
+        let counts = action_counts(&pool, &f).await.expect("counts");
+        assert_eq!(
+            counts,
+            vec![
+                AuditActionCount {
+                    action: "cert.renew".into(),
+                    total: 1,
+                    failed: 1
+                },
+                AuditActionCount {
+                    action: "hosting.create".into(),
+                    total: 1,
+                    failed: 0
+                },
+            ]
+        );
+        assert_eq!(count(&pool).await.expect("count"), 3);
     }
 
     #[tokio::test]

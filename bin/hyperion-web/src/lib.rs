@@ -481,6 +481,7 @@ pub fn build_router(state: SharedState) -> Router {
             post(handlers::hostings::post_backup_offsite_drop),
         )
         .route("/profiles", get(handlers::profiles::get_profiles))
+        .route("/profiles/new", get(handlers::profiles::get_new))
         .route("/profiles/create", post(handlers::profiles::post_create))
         .route(
             "/profiles/wp-assets",
@@ -531,6 +532,10 @@ pub fn build_router(state: SharedState) -> Router {
         // local socket; the per-hosting actions further down dispatch to
         // the owning node instead.
         .route("/packages", get(handlers::packages::get_packages))
+        .route(
+            "/packages/sites-panel",
+            get(handlers::packages::get_sites_panel),
+        )
         .route("/packages/create", post(handlers::packages::post_create))
         .route(
             "/packages/:id/update",

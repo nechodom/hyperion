@@ -1,7 +1,7 @@
 //! The single trait every transport speaks to.
 
 use crate::{
-    codec::AuditEntryWire,
+    codec::{AuditActionCount, AuditEntryWire, AuditSearchFilter},
     error::RpcError,
     wire::{AgentInfo, DeleteOpts, HostingCreateReq, HostingCreated, HostingSelector},
 };
@@ -139,6 +139,13 @@ pub trait AgentApi: Send + Sync + 'static {
     ) -> Result<Vec<HostingUsageBucket>, RpcError>;
 
     async fn audit_list(&self, limit: i64) -> Result<Vec<AuditEntryWire>, RpcError>;
+
+    /// Filtered page of the audit log plus per-action counts over the
+    /// filter's scope and the node's total row count.
+    async fn audit_search(
+        &self,
+        filter: AuditSearchFilter,
+    ) -> Result<(Vec<AuditEntryWire>, Vec<AuditActionCount>, i64), RpcError>;
 
     /// Walk the audit chain and verify each row_hash. Returns
     /// (ok, rows_checked, message) — message is empty on success,

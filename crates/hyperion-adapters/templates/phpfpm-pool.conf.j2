@@ -51,6 +51,16 @@ php_admin_value[session.save_path] = /home/{{ system_user }}/{{ domain }}/tmp
 ; so the requirement is visible where the value is set.
 php_admin_value[sendmail_path] = /usr/local/lib/hyperion/site-mail-wrapper -u {{ system_user }} -t -i
 
+; Which PHP code is holding a worker. A request still running after
+; request_slowlog_timeout gets its PHP stack trace written here, so "the
+; pool reached pm.max_children" can be answered with the plugin and
+; function that were slow, not guessed at from the access log. The file
+; lives in a ROOT-owned directory, not the site's logs/: the FPM master
+; opens it as root, and logs/ belongs to the site user, who could swap the
+; file for a link to anything on the box.
+slowlog = {{ slowlog_path }}
+request_slowlog_timeout = {{ slowlog_secs }}s
+
 catch_workers_output = yes
 chdir = /
 ; Hard backstop for hung/IO-blocked requests: kill a worker still running

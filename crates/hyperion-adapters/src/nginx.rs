@@ -476,60 +476,15 @@ pub fn render_panel(input: &PanelVhostInput<'_>) -> Result<String, AdapterError>
 
 /// The "Hyperion is updating" page nginx serves from `@hyperion_maintenance`
 /// when the panel upstream (hyperion-web) is unreachable — i.e. while
-/// `update.sh` has it stopped to swap the binary. Self-contained (inline CSS,
-/// no upstream needed) and auto-refreshes so it returns to the panel the moment
-/// the service is back. The `x-hyperion-maintenance` marker lets us refresh our
-/// own copy on upgrade while never clobbering a page an operator customised.
-const PANEL_MAINTENANCE_HTML: &str = r##"<!-- x-hyperion-maintenance: panel v1 - operator may replace this file freely -->
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta http-equiv="refresh" content="10">
-  <title>Hyperion is updating…</title>
-  <style>
-    :root { color-scheme: light dark; }
-    body {
-      margin: 0; min-height: 100vh;
-      display: flex; align-items: center; justify-content: center;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
-      color: #e2e8f0; padding: 1.5rem;
-    }
-    .card {
-      max-width: 480px; padding: 2.5rem 2rem;
-      background: rgba(255,255,255,0.04);
-      border: 1px solid rgba(255,255,255,0.08);
-      border-radius: 12px; text-align: center; backdrop-filter: blur(8px);
-    }
-    .icon {
-      width: 56px; height: 56px; margin: 0 auto 1.4rem;
-      border-radius: 14px; background: rgba(99,102,241,0.18);
-      display: flex; align-items: center; justify-content: center;
-    }
-    .icon svg { animation: spin 1.6s linear infinite; }
-    @keyframes spin { to { transform: rotate(360deg); } }
-    @media (prefers-reduced-motion: reduce) { .icon svg { animation: none; } }
-    h1 { margin: 0 0 0.6rem; font-size: 1.5rem; font-weight: 700; }
-    p { margin: 0 0 1rem; font-size: 0.95rem; line-height: 1.55; opacity: 0.85; }
-    .foot { margin-top: 1.4rem; font-size: 0.78rem; opacity: 0.5; }
-  </style>
-</head>
-<body>
-  <main class="card">
-    <div class="icon">
-      <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#a5b4fc" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M21 12a9 9 0 1 1-6.219-8.56"/>
-      </svg>
-    </div>
-    <h1>Hyperion is updating…</h1>
-    <p>The control panel is briefly offline while it installs a new version. This page refreshes itself — you'll be back in a few seconds. No action needed.</p>
-    <div class="foot">HTTP 503 · Service Temporarily Unavailable</div>
-  </main>
-</body>
-</html>
-"##;
+/// `update.sh` has it stopped to swap the binary, or after a crash.
+/// Self-contained (inline CSS/JS, no upstream needed). It polls the step
+/// `update.sh` writes (served by the vhost at `/_hyperion/update-status`) and
+/// probes the panel, returning on its own the moment the service is back. The
+/// `x-hyperion-maintenance` marker lets us refresh our own copy on upgrade
+/// while never clobbering a page an operator customised. `update.sh` plants the
+/// same asset straight after `git pull`, so a new page shows during the very
+/// update that ships it.
+const PANEL_MAINTENANCE_HTML: &str = include_str!("../assets/panel-maintenance.html");
 
 /// Plant the panel "updating" page so nginx's `@hyperion_maintenance` fallback
 /// always has a body. Writes when the file is missing OR still carries our
@@ -976,8 +931,10 @@ pub async fn write_vhost(paths: &Paths, input: &VhostInput<'_>) -> Result<(), Ad
     if input.options.signup_limit_enabled {
         ensure_ratelimit_conf(DEFAULT_LOGIN_RPM, DEFAULT_SIGNUP_RPM).await?;
     }
-    // Same reasoning for the WAF log: a vhost naming a log_format that does
-    // not exist, or a log file in a directory that does not, fails `nginx -t`.
+    // Same reason, for the access-log format the vhost names.
+    ensure_logformat_conf().await?;
+    // And for the WAF log: a vhost naming a log_format that does not exist,
+    // or a log file in a directory that does not, fails `nginx -t`.
     if uses_waf_log(input) {
         ensure_waf_logging().await?;
     }
@@ -1158,6 +1115,45 @@ pub async fn ensure_ratelimit_conf(
     tokio::fs::write(RATELIMIT_CONF, want.as_bytes())
         .await
         .map_err(|e| AdapterError::Other(format!("write {RATELIMIT_CONF}: {e}")))?;
+    Ok(true)
+}
+
+/// `/etc/nginx/conf.d/hyperion-logformat.conf` — node-wide, one file.
+pub const LOGFORMAT_CONF: &str = "/etc/nginx/conf.d/hyperion-logformat.conf";
+
+/// The access-log format every site vhost names.
+pub const LOGFORMAT_NAME: &str = "hyperion_timed";
+
+/// nginx's `combined` format plus `$request_time` as the LAST field.
+///
+/// Last, and unquoted, on purpose: every parser in the panel reads the
+/// combined fields from the left (ip, `[time]`, the quoted request, status,
+/// bytes), so a field appended after the user agent changes nothing for
+/// them, and `awk '$NF > 2'` lists the slow requests on the box with no
+/// format knowledge at all. Without it the access log could say WHAT was
+/// asked for when a pool filled up, never what took the time.
+const LOGFORMAT_BODY: &str = r#"# Auto-managed by Hyperion. Do not edit.
+# nginx `combined` + request time in seconds as the last field.
+log_format hyperion_timed '$remote_addr - $remote_user [$time_local] '
+                          '"$request" $status $body_bytes_sent '
+                          '"$http_referer" "$http_user_agent" $request_time';
+"#;
+
+/// Write the node-wide access-log format. Idempotent on CONTENT, like the
+/// rate-limit zones: a vhost naming a format that does not exist is
+/// `[emerg] unknown log format` and a refused reload for every site.
+pub async fn ensure_logformat_conf() -> Result<bool, AdapterError> {
+    if let Ok(existing) = tokio::fs::read_to_string(LOGFORMAT_CONF).await {
+        if existing == LOGFORMAT_BODY {
+            return Ok(false);
+        }
+    }
+    atomic_write(
+        std::path::Path::new(LOGFORMAT_CONF),
+        LOGFORMAT_BODY.as_bytes(),
+        0o644,
+    )
+    .await?;
     Ok(true)
 }
 
@@ -1593,9 +1589,48 @@ mod tests {
         );
         assert!(out.contains("location @hyperion_maintenance"));
         assert!(out.contains("try_files /panel-maintenance.html =503;"));
+        // The page's probe keys on this header to know it's still looking at
+        // itself; without it the page would "reconnect" straight back to a 503.
+        assert!(out.contains("add_header X-Hyperion-Maintenance 1 always;"));
+        // The live step update.sh writes is served from disk, not proxied —
+        // it is only ever polled while the upstream is down.
+        let status_block = out
+            .split("location = /_hyperion/update-status {")
+            .nth(1)
+            .and_then(|rest| rest.split('}').next())
+            .expect("panel vhost lost the update-status location");
+        assert!(status_block.contains("try_files /panel-update.json =404;"));
+        assert!(!status_block.contains("proxy_pass"));
         // ACME challenge must use alias (not root) so renewals work mid-update.
         assert!(out.contains("location /.well-known/acme-challenge/ {"));
         assert!(out.contains("alias /var/lib/hyperion/acme-challenges/;"));
+    }
+
+    /// The panel "updating" page and the vhost meet at two strings: the status
+    /// URL it polls and the header it uses to recognise itself. Pin both, plus
+    /// the marker that lets an upgrade refresh our copy (but never an
+    /// operator's), and keep the page fully self-contained — it is served while
+    /// the thing that would serve its assets is down.
+    #[test]
+    fn panel_maintenance_page_matches_the_vhost() {
+        let page = PANEL_MAINTENANCE_HTML;
+        assert!(page.starts_with("<!-- x-hyperion-maintenance: panel v2"));
+        assert!(page.contains("\"/_hyperion/update-status\""));
+        assert!(page.contains("X-Hyperion-Maintenance"));
+        for external in [
+            "<script src",
+            "<link rel=\"stylesheet\"",
+            "@import",
+            "url(http",
+        ] {
+            assert!(
+                !page.contains(external),
+                "page loads an external asset: {external}"
+            );
+        }
+        // Reconnecting must never re-POST whatever form landed on the 503.
+        assert!(page.contains("location.replace(location.href)"));
+        assert!(!page.contains("location.reload("));
     }
 
     /// The self-service import upload needs its own body rules, and their
@@ -2438,7 +2473,25 @@ mod tests {
         .expect("render");
         assert!(out.contains("fastcgi_cache hyperion_01HCACHE;"));
         assert!(out.contains("fastcgi_cache_valid 200 301 302 300s;"));
-        assert!(out.contains("fastcgi_no_cache $cookie_wordpress_logged_in"));
+        assert!(out.contains("access.log hyperion_timed;"));
+        assert!(LOGFORMAT_BODY.contains(&format!("log_format {LOGFORMAT_NAME} ")));
+        // Request time is the LAST field, after the quoted user agent, so
+        // every left-to-right combined parser keeps working unchanged.
+        assert!(LOGFORMAT_BODY.contains("\"$http_user_agent\" $request_time';"));
+        assert!(out.contains("fastcgi_no_cache $hyperion_skip_cache $cookie_PHPSESSID;"));
+        assert!(out.contains("fastcgi_cache_bypass $hyperion_skip_cache $cookie_PHPSESSID;"));
+        // WordPress's login cookie carries a hash suffix, so the old exact
+        // `$cookie_wordpress_logged_in` never matched; the skip must test a
+        // PREFIX, and must cover a WooCommerce cart too.
+        assert!(!out.contains("$cookie_wordpress_logged_in"));
+        assert!(out.contains("wordpress_logged_in_|"));
+        assert!(out.contains("wp_woocommerce_session_"));
+        assert!(out.contains("woocommerce_items_in_cart"));
+        let skip = out.find("set $hyperion_skip_cache 0;").expect("skip var");
+        assert!(
+            skip < out.find("fastcgi_cache hyperion_").expect("cache"),
+            "the skip flag is set at server level, before the PHP location"
+        );
         // X-Cache-Status must be emitted at SERVER level, never inside the
         // PHP location: a location-level add_header REPLACES the inherited
         // set and would silently drop HSTS/XFO/nosniff on PHP responses.
