@@ -713,6 +713,10 @@ pub fn build_router(state: SharedState) -> Router {
             get(handlers::install::get_os_updates),
         )
         .route(
+            "/install/node-facts",
+            get(handlers::install::get_node_facts),
+        )
+        .route(
             "/install/os-updates-check",
             post(handlers::install::post_os_updates_check),
         )
