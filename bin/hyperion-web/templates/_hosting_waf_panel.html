@@ -1,0 +1,114 @@
+{# WAF activity — lazily swapped in via hx-get="/hostings/:sel/waf-panel"
+   and re-rendered in place by its own forms (hx-target="#waf-activity").
+   Data comes from the OWNING node: it reads its own root-owned hit logs, so
+   the read and the auto-ban switch both travel there. Every field of a hit
+   but the time and address is attacker-controlled — askama escapes it. #}
+<div class="card" id="waf-activity">
+  <div class="card-head">
+    <h2>
+      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+      WAF activity
+    </h2>
+    <span class="text-soft small">Requests the Protection card turned away, and why.</span>
+    <div class="card-tools">
+      {% if error.is_none() %}<span class="pill {% if day_total > 0 %}ok{% else %}neutral{% endif %}">{{ day_total }} blocked · 24 h</span>{% endif %}
+    </div>
+  </div>
+
+  {% if let Some(e) = error %}
+  <p class="s-help" style="color:var(--danger)">{{ e }}</p>
+  {% else %}
+
+  {% if let Some(n) = notice %}
+  <p class="note" style="margin:0 0 0.6rem">{{ n }}</p>
+  {% endif %}
+
+  <div class="setting-list">
+    <div class="setting-row">
+      <div class="s-label">Automatic bans
+        {% if autoban_enabled && fail2ban_enabled %}<span class="pill ok" style="font-size:0.6rem;margin-left:0.3rem">on</span>
+        {% else %}<span class="pill warn" style="font-size:0.6rem;margin-left:0.3rem">off</span>{% endif %}
+      </div>
+      <p class="s-help">
+        {% if !fail2ban_enabled %}
+          Automatic banning is switched off for this whole node (<a href="/settings#bruteforce">Settings → Bans &amp; blocking</a>). Refusals are still recorded.
+        {% else if autoban_enabled %}
+          An address refused {{ threshold }} times within {{ window_min }} min — by a rule an honest visitor cannot trip — is banned at the firewall.
+          XML-RPC, user-enumeration, empty User-Agent, country and bot refusals never count.
+        {% else %}
+          Refusals are recorded but never lead to a firewall ban for this site.
+        {% endif %}
+      </p>
+      {% if can_edit && fail2ban_enabled %}
+      <div class="s-control">
+        <form hx-post="/hostings/waf-autoban" hx-target="#waf-activity" hx-swap="outerHTML" style="margin:0">
+          <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+          <input type="hidden" name="selector" value="{{ selector }}">
+          {% if autoban_enabled %}
+          <input type="hidden" name="enabled" value="off">
+          <button class="btn ghost small" type="submit">Stop for this site</button>
+          {% else %}
+          <input type="hidden" name="enabled" value="on">
+          <button class="btn primary small" type="submit">Turn on</button>
+          {% endif %}
+        </form>
+      </div>
+      {% endif %}
+    </div>
+  </div>
+
+  {% if totals.is_empty() %}
+  <p class="text-soft small" style="margin:0.8rem 0 0">Nothing refused in the last 7 days.</p>
+  {% else %}
+  <div class="setting-group">By rule</div>
+  <table class="table small" style="margin:0">
+    <thead><tr><th>Rule</th><th style="text-align:right">24 h</th><th style="text-align:right">7 days</th></tr></thead>
+    <tbody>
+      {% for t in totals %}
+      <tr>
+        <td>{{ t.label }} <span class="text-soft mono" style="font-size:0.72rem">{{ t.rule }}</span></td>
+        <td style="text-align:right;font-variant-numeric:tabular-nums">{{ t.day }}</td>
+        <td style="text-align:right;font-variant-numeric:tabular-nums">{{ t.week }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+
+  {% if !hits.is_empty() %}
+  <div class="setting-group">Latest refusals</div>
+  <div style="overflow-x:auto">
+  <table class="table small" style="margin:0">
+    <thead><tr><th>When</th><th>Address</th><th>Rule</th><th>Request</th>{% if can_edit %}<th></th>{% endif %}</tr></thead>
+    <tbody>
+      {% for h in hits %}
+      <tr>
+        <td style="white-space:nowrap">{{ h.ago }}</td>
+        <td class="mono" style="font-size:0.78rem">{{ h.ip }}</td>
+        <td>{{ h.label }}</td>
+        <td class="mono" style="font-size:0.78rem;word-break:break-all">{{ h.request }}{% if !h.ua.is_empty() %}<div class="text-soft" style="font-family:inherit">{{ h.ua }}</div>{% endif %}</td>
+        {% if can_edit %}
+        <td style="white-space:nowrap">
+          {% if h.pinnable %}
+          <form hx-post="/hostings/waf-rule" hx-target="#waf-activity" hx-swap="outerHTML" style="margin:0"
+                data-confirm-title="Turn off &ldquo;{{ h.label }}&rdquo; for this site?"
+                data-confirm-body="Use this when a legitimate request was refused. The rule stops applying to every request on this site, not just this one — you can turn it back on under Protection → Individual rules. The vhost is re-validated with nginx -t first."
+                data-confirm-confirm-label="Turn the rule off">
+            <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+            <input type="hidden" name="selector" value="{{ selector }}">
+            <input type="hidden" name="rule" value="{{ h.rule }}">
+            <input type="hidden" name="pin" value="off">
+            <button class="btn ghost small" type="submit">Allow this</button>
+          </form>
+          {% endif %}
+        </td>
+        {% endif %}
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% endif %}
+
+  {% endif %}
+</div>

@@ -819,7 +819,8 @@ pub struct VhostBody {
 }
 
 /// `PATCH /api/v1/hostings/:id/vhost` — vhost knobs (force-https, basic-auth,
-/// maintenance, redirect, fastcgi cache). Cap manage.
+/// maintenance, redirect, fastcgi cache, WAF `waf_level` + `waf_overrides`).
+/// Cap manage.
 #[utoipa::path(
     patch, path = "/api/v1/hostings/{id}/vhost", tag = "hostings",
     params(("id" = String, Path, description = "Hosting id or domain")),
