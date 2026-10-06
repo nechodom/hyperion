@@ -1,0 +1,111 @@
+{% extends "base.html" %}
+{% block title %}{{ row.label }} · Service health · Hyperion{% endblock %}
+
+{% macro control(action, label, extra, variant) %}
+<form method="post" action="/services/control"
+      data-confirm-title="{{ label }}: {{ row.label }}"
+      data-confirm-body="Runs systemctl {{ action }} {{ row.name }} on {{ current_label }}.{{ extra }}"
+      data-confirm-confirm-label="{{ label }}"
+      data-confirm-variant="{{ variant }}">
+  <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+  <input type="hidden" name="name" value="{{ row.name }}">
+  <input type="hidden" name="node" value="{{ current_node }}">
+  <input type="hidden" name="action" value="{{ action }}">
+  <input type="hidden" name="back" value="unit">
+  <button type="submit" class="btn small{% if variant == "danger" %} danger{% endif %}">{{ label }}</button>
+</form>
+{% endmacro %}
+
+{% block main %}
+<div class="page-header">
+  <div>
+    <h1>{{ row.label }} <span class="text-soft" style="font-weight:400;font-size:0.7em">· {{ current_label }}</span></h1>
+    <div class="subtitle"><code>{{ row.name }}</code></div>
+  </div>
+</div>
+
+<nav class="node-chips" aria-label="Back">
+  {% if clustered %}<a href="/services">All nodes</a>{% endif %}
+  <a href="/services?node={% if current_node.is_empty() %}local{% else %}{{ current_node }}{% endif %}">← Services on {{ current_label }}</a>
+</nav>
+
+{% if let Some(m) = flash %}
+  <div class="flash success">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+    <div class="flash-body">{{ m }}</div>
+  </div>
+{% endif %}
+{% if let Some(e) = flash_error %}
+  <div class="flash error">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+    <div class="flash-body">{{ e }}</div>
+  </div>
+{% endif %}
+
+<div class="group">
+  <div class="ghead">Status</div>
+  <div class="svc-row">
+    <div class="svc-main">
+      {% if !row.facts.is_empty() || row.restarts.is_some() %}
+      <div class="svc-facts">
+        {% for f in row.facts %}<span>{{ f }}</span>{% endfor %}
+        {% if let Some(rs) = row.restarts %}<span class="warn" title="systemd restarted it on its own (NRestarts)">{{ rs }}</span>{% endif %}
+      </div>
+      {% endif %}
+      {% if let Some(n) = row.note %}<div class="text-soft small">{{ n }}</div>{% endif %}
+      {% if row.facts.is_empty() && row.restarts.is_none() && row.note.is_none() %}
+      <div class="text-soft small">No further detail from this node{% if row.status == "missing" %} — the unit is not installed{% endif %}.</div>
+      {% endif %}
+    </div>
+    <span class="pill {{ row.tone }}">{{ row.status }}</span>
+  </div>
+  {% if is_super_admin && (row.can_start || row.can_restart || row.can_stop || row.can_enable || row.can_disable) %}
+  <div class="svc-row">
+    <div class="svc-main text-soft small">
+      Runs <code>systemctl</code> on {{ current_label }}. Stopping or disabling nginx, hyperion-web or
+      hyperion-agent is not offered — it would cut off the panel itself.
+    </div>
+    <div class="svc-actions">
+      {% if row.can_start %}{% call control("start", "Start", "", "primary") %}{% endif %}
+      {% if row.can_restart %}
+      <form method="post" action="/services/restart"
+            data-confirm-title="Restart {{ row.label }}"
+            data-confirm-body="Runs systemctl restart {{ row.name }} on {{ current_label }}. Active connections may briefly drop."
+            data-confirm-confirm-label="Restart"
+            data-confirm-variant="primary">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <input type="hidden" name="name" value="{{ row.name }}">
+        <input type="hidden" name="node" value="{{ current_node }}">
+        <input type="hidden" name="back" value="unit">
+        <button type="submit" class="btn small">Restart</button>
+      </form>
+      {% endif %}
+      {% if row.can_stop %}{% call control("stop", "Stop", " Sites that rely on it stop working until it is started again.", "danger") %}{% endif %}
+      {% if row.can_enable %}{% call control("enable", "Start at boot", " It does not start it now.", "primary") %}{% endif %}
+      {% if row.can_disable %}{% call control("disable", "Don't start at boot", " It keeps running until stopped or the node reboots.", "danger") %}{% endif %}
+    </div>
+  </div>
+  {% endif %}
+</div>
+
+<div class="group">
+  <div class="ghead">
+    Recent log · last {{ lines }} lines
+    <span class="grow"></span>
+    <a href="/services/unit?node={{ current_node }}&name={{ row.name }}&lines={{ lines }}">Refresh</a>
+    {% if lines < 500 %}· <a href="/services/unit?node={{ current_node }}&name={{ row.name }}&lines=500">Show 500</a>{% endif %}
+  </div>
+  <div class="item">
+    {% match journal %}
+    {% when Ok with (text) %}
+      {% if text.is_empty() %}
+        <p class="text-soft small" style="margin:0">No journal entries for this unit.</p>
+      {% else %}
+        <pre class="svc-journal">{{ text }}</pre>
+      {% endif %}
+    {% when Err with (why) %}
+      <p class="text-soft small" style="margin:0">{{ why }}</p>
+    {% endmatch %}
+  </div>
+</div>
+{% endblock %}

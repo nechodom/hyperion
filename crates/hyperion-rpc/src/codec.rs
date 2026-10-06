@@ -490,6 +490,21 @@ pub enum Request {
     /// Read the state of the most-recent / in-progress
     /// service-install job. Empty when no install has ever run.
     ServiceInstallStatus,
+    /// `systemctl <action> <name>` for `action` in start | stop | enable |
+    /// disable, on the same whitelist as restart. Stop and disable are
+    /// refused for the panel's core units (nginx, hyperion-web,
+    /// hyperion-agent): either one cuts the operator off from the panel
+    /// with no way back short of SSH.
+    ServiceControl {
+        name: String,
+        action: String,
+    },
+    /// Last `lines` journal lines of a whitelisted unit (capped at 500).
+    /// Read-only, so the agent's own unit is allowed.
+    ServiceJournal {
+        name: String,
+        lines: u32,
+    },
     /// Every PHP branch installed on this node: its build, whether FPM is
     /// there, the sites set to it and whether phpMyAdmin runs on it. Raw
     /// facts — the master judges them against its advisory table.
@@ -2313,6 +2328,10 @@ pub enum Response {
     SlackSendTest,
     ServiceRestart,
     ServiceInstall,
+    ServiceControl,
+    ServiceJournal {
+        text: String,
+    },
     /// Current state of the most-recent / in-progress
     /// service-install job + log tail.
     ServiceInstallStatus(hyperion_types::ServiceInstallStatus),
