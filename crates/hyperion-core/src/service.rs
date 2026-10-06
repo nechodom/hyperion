@@ -1987,6 +1987,17 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 .await
                 .map_err(|e| RpcError::Internal_with(format!("suspended vhost: {e}")));
         }
+        if detail.vhost_options.crs_settings().mode != hyperion_types::crs::CrsMode::Off {
+            // A CRS site coming back (resumed, restored from the trash) after
+            // the rule set was unloaded while it was away: load it first, or
+            // the site would run the engine with no rules in it.
+            let st = self.adapters.modsec_status().await;
+            if st.available() && !st.loaded {
+                if let Err(e) = self.adapters.modsec_sync_http(true).await {
+                    tracing::warn!(domain = %detail.domain, error = %e, "crs: could not load the rule set");
+                }
+            }
+        }
         self.adapters
             .nginx_write_vhost(detail)
             .await
@@ -4153,6 +4164,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         hostings::delete(&self.pool, &detail.id)
             .await
             .map_err(|e| RpcError::Internal_with(format!("delete row: {e}")))?;
+        // The last site using the Core Rule Set gone: unload it (it costs
+        // memory in every nginx process). Best-effort — boot re-checks.
+        if detail.vhost_options.crs_settings().mode != hyperion_types::crs::CrsMode::Off {
+            let _ = self.crs_sync().await;
+        }
         self.append_audit(
             "hosting.purge",
             Some(detail.id.as_str()),
@@ -41755,13 +41771,18 @@ mod tests {
         let mut a = happy_mocks();
         a.expect_nginx_delete_htpasswd().returning(|_| Ok(()));
         let available = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let av = available.clone();
+        let loaded = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (av, ld) = (available.clone(), loaded.clone());
         a.expect_modsec_status()
-            .returning(move || engine(av.load(std::sync::atomic::Ordering::SeqCst)));
+            .returning(move || hyperion_types::crs::ModsecStatus {
+                loaded: ld.load(std::sync::atomic::Ordering::SeqCst),
+                ..engine(av.load(std::sync::atomic::Ordering::SeqCst))
+            });
         let syncs = std::sync::Arc::new(std::sync::Mutex::new(Vec::<bool>::new()));
-        let sy = syncs.clone();
+        let (sy, ld) = (syncs.clone(), loaded.clone());
         a.expect_modsec_sync_http().returning(move |need| {
             sy.lock().expect("lock").push(need);
+            ld.store(need, std::sync::atomic::Ordering::SeqCst);
             Ok(true)
         });
         let s = svc(pool.clone(), a);
@@ -41797,6 +41818,14 @@ mod tests {
         assert_eq!(got.crs_exclusions, r#"[{"rules":[942100],"path":"/x"}]"#);
         assert_eq!(syncs.lock().expect("lock").len(), 1, "no toggle, no sync");
 
+        // Re-rendered while the rule set was unloaded (a resume after the
+        // boot sync dropped it): it is loaded again before the vhost.
+        loaded.store(false, std::sync::atomic::Ordering::SeqCst);
+        s.set_vhost_options(sel.clone(), vh_defaults(), None)
+            .await
+            .expect("re-render");
+        assert_eq!(*syncs.lock().expect("lock"), vec![true, true]);
+
         let mut bad = on.clone();
         bad.crs_exclusions = r#"[{"rules":[949110]}]"#.into();
         let err = s.set_vhost_options(sel.clone(), bad, None).await;
@@ -41812,7 +41841,7 @@ mod tests {
             .expect("off");
         assert_eq!(
             *syncs.lock().expect("lock"),
-            vec![true, false],
+            vec![true, true, false],
             "rule set unloaded"
         );
         assert_eq!(s.modsec_status().await.expect("st").active_sites, 0);

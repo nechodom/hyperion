@@ -152,7 +152,9 @@ selection, non-interactive mode, private-repo and air-gapped sources). See
 - TOTP two-factor auth (enforced for admins), native brute-force protection via
   an `nftables` ban set, a per-hosting nginx WAF (Standard/Strict levels with
   per-rule pins, a root-owned hit log, an activity view and auto-ban of repeat
-  offenders), wp-admin IP allowlists, and key-only chrooted SFTP.
+  offenders) with an opt-in OWASP Core Rule Set tier (ModSecurity v3 from
+  Debian's packages; detection-only first, per-site paranoia, threshold and
+  path-scoped exclusions), wp-admin IP allowlists, and key-only chrooted SFTP.
 - Tamper-evident audit log (BLAKE3 hash chain with a verify button), per-form
   CSRF tokens, and a strict security-header set on every response.
 - Each tenant is a real Linux user, so isolation rests on uids and file modes;
@@ -296,7 +298,7 @@ DB + TLS · multi-version PHP + MariaDB/PostgreSQL · suspend/resume, limits,
 kernel quotas · profiles, clone, expiration · local + off-site backups with
 granular restore · Let's Encrypt HTTP-01 + DNS-01 wildcard · WordPress
 management, keyless updates, staging, Redis cache · site-health and permission
-self-checks + repair · FTP + chrooted SFTP · per-site WAF, allowlists, nftables
+self-checks + repair · FTP + chrooted SFTP · per-site WAF + OWASP CRS, allowlists, nftables
 fail2ban · audit chain, 2FA, session revocation · panel import (HestiaCP +
 CloudPanel) · remote API with keys, OpenAPI, IP allowlist, rate limit ·
 per-hosting DKIM/SPF and mail checks · care packages and customer reports ·

@@ -680,6 +680,59 @@ mod tests {
         assert!(render_http_include().contains(&format!("modsecurity_rules_file {MAIN_CONF};")));
     }
 
+    /// The real thing, on a disposable Debian box with nginx running as
+    /// root: install, load the rule set, unload it. Never runs by accident —
+    /// ignored AND gated on HYPERION_LIVE_MODSEC=1, because it installs
+    /// packages and rewrites nginx config.
+    #[tokio::test]
+    #[ignore]
+    async fn live_install_and_sync_on_debian() {
+        if std::env::var_os("HYPERION_LIVE_MODSEC").is_none() {
+            return;
+        }
+        ensure_installed().await.expect("install");
+        assert!(module_available() && crs_available());
+        assert!(!crs_version().await.is_empty());
+        // Idempotent: a second call is a no-op.
+        ensure_installed().await.expect("install again");
+
+        assert!(
+            sync_http(true).await.expect("load"),
+            "first load changes things"
+        );
+        assert!(http_include_present());
+        assert!(Path::new(MAIN_CONF).exists());
+        assert!(Path::new(LOGROTATE).exists());
+        cmd::run("/usr/sbin/nginx", &["-t"])
+            .await
+            .expect("nginx -t with CRS");
+        assert!(!sync_http(true).await.expect("load again"), "idempotent");
+
+        // A broken base config must be rolled back, not left for the next
+        // reload to trip over.
+        tokio::fs::write(MAIN_CONF, "SecRuleEngine Bogus\n")
+            .await
+            .expect("break");
+        tokio::fs::remove_file(HTTP_INCLUDE)
+            .await
+            .expect("rm include");
+        let restored = sync_http(true).await;
+        assert!(
+            restored.is_ok(),
+            "re-rendered over the broken file: {restored:?}"
+        );
+        cmd::run("/usr/sbin/nginx", &["-t"])
+            .await
+            .expect("nginx -t after repair");
+
+        assert!(sync_http(false).await.expect("unload"));
+        assert!(!http_include_present());
+        cmd::run("/usr/sbin/nginx", &["-t"])
+            .await
+            .expect("nginx -t without CRS");
+        assert!(!sync_http(false).await.expect("unload again"), "idempotent");
+    }
+
     #[test]
     fn debian_versions_reduce_to_upstream() {
         assert_eq!(upstream_version("3.3.4-1+deb12u3"), "3.3.4");
