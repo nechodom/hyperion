@@ -51,7 +51,7 @@
           <div class="text-soft small">{{ c.verdict }}</div>
         {% else %}
           <div class="svc-attn">
-            {% for r in c.attention %}<span class="pill {{ r.tone }}">{{ r.name }} {{ r.status }}</span>{% endfor %}
+            {% for r in c.attention %}<span class="pill {{ r.tone }}">{{ r.name }} {{ r.status }}{% if let Some(cause) = r.cause %} · {{ cause }}{% endif %}{% if let Some(rs) = r.restarts %} · {{ rs }}{% endif %}</span>{% endfor %}
           </div>
         {% endif %}
       </div>
