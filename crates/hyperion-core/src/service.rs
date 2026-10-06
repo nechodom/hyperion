@@ -4433,6 +4433,107 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(acted)
     }
 
+    /// Notice pools that ran out of PHP workers.
+    ///
+    /// Reads what each PHP version's FPM log (`<log_dir>/php<ver>-fpm.log`)
+    /// gained since the last tick — `cursors` carries the position between
+    /// ticks and starts every log at its end, so history is not news —
+    /// counts `server reached pm.max_children` per pool, records it in the
+    /// owning hosting's `hosting_kv` for the limits card, and warns the
+    /// admins at most every [`phpworkers::ALERT_EVERY_SECS`] per site.
+    ///
+    /// Returns how many sites hit their limit this tick.
+    pub async fn php_workers_tick(
+        &self,
+        log_dir: &std::path::Path,
+        cursors: &mut std::collections::HashMap<PhpVersion, (u64, u64)>,
+    ) -> Result<i64, RpcError> {
+        use hyperion_types::phpworkers;
+        let mut hits: std::collections::BTreeMap<String, i64> = Default::default();
+        for ver in PhpVersion::all() {
+            let path = log_dir.join(format!("{}.log", ver.service_name()));
+            if !path.exists() {
+                continue;
+            }
+            let (ino, off) = cursors.get(ver).copied().unwrap_or((0, 0));
+            let read = tokio::task::spawn_blocking(move || {
+                hyperion_adapters::fs::read_appended(&path, ino, off, phpworkers::MAX_SCAN_BYTES)
+            })
+            .await;
+            match read {
+                Ok(Ok(a)) => {
+                    for (pool, n) in phpworkers::count_by_pool(&a.text) {
+                        *hits.entry(pool).or_insert(0) += n;
+                    }
+                    cursors.insert(*ver, (a.ino, a.offset));
+                }
+                Ok(Err(e)) => {
+                    tracing::debug!(version = %ver.as_str(), error = %e, "php workers: FPM log not read")
+                }
+                Err(e) => tracing::warn!(error = %e, "php workers: log reader panicked"),
+            }
+        }
+        if hits.is_empty() {
+            return Ok(0);
+        }
+        let now = now_secs();
+        let mut sites = 0i64;
+        for s in self.list().await? {
+            if s.state != HostingState::Active || s.php_version.is_none() {
+                continue;
+            }
+            let Ok(detail) = self.get(HostingSelector::Id(s.id.clone())).await else {
+                continue;
+            };
+            let Some(&n) = hits.get(detail.system_user.as_str()) else {
+                continue;
+            };
+            sites += 1;
+            let id = detail.id.as_str().to_string();
+            let mut st = hyperion_state::hosting_kv::get(&self.pool, &id, phpworkers::KV_STATE)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|v| phpworkers::State::parse(&v))
+                .unwrap_or_default();
+            st.record(now, n);
+            if st.should_alert(now) {
+                st.alerted_at = now;
+                let children = hyperion_state::limits::get(&self.pool, &detail.id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|r| r.php_max_children)
+                    .unwrap_or_else(|| hyperion_types::HostingLimits::defaults().php_max_children)
+                    .to_string();
+                let today = st.hits_today(now).to_string();
+                // warn, not error: the site still serves, queued — see the
+                // severity rule on `notify_admins`.
+                self.notify_admins_say(
+                    "warn",
+                    "ops.php_workers_full",
+                    &[
+                        ("domain", detail.domain.as_str()),
+                        ("children", children.as_str()),
+                        ("today", today.as_str()),
+                    ],
+                    &format!("/hostings/{}#limits", detail.domain),
+                    "php_workers",
+                )
+                .await;
+            }
+            let _ = hyperion_state::hosting_kv::set(
+                &self.pool,
+                &id,
+                phpworkers::KV_STATE,
+                &st.to_json(),
+                now,
+            )
+            .await;
+        }
+        Ok(sites)
+    }
+
     pub async fn get_limits(
         &self,
         sel: HostingSelector,
@@ -45072,6 +45173,71 @@ mod tests {
             .await
             .expect("get");
         assert!(susp.is_none(), "suspension row removed on resume");
+    }
+
+    /// `server reached pm.max_children` in an FPM log is counted for the
+    /// site whose pool it names, and only for lines written after the first
+    /// look.
+    #[tokio::test]
+    async fn php_workers_tick_records_pool_saturation() {
+        use hyperion_types::phpworkers;
+        use std::io::Write;
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), happy_mocks());
+        s.create(req("ex.cz")).await.expect("create");
+        let d = s
+            .get(HostingSelector::Domain(Domain::parse("ex.cz").unwrap()))
+            .await
+            .expect("get");
+        let dir = tempfile::tempdir().expect("dir");
+        let log = dir.path().join("php8.3-fpm.log");
+        let line = |user: &str| {
+            format!("[06-Oct-2026 06:56:45] WARNING: [pool {user}] server reached pm.max_children setting (5), consider raising it\n")
+        };
+        std::fs::write(&log, line(&d.system_user)).expect("write");
+        let mut cursors = std::collections::HashMap::new();
+
+        // First look: history is not news.
+        assert_eq!(
+            s.php_workers_tick(dir.path(), &mut cursors)
+                .await
+                .expect("tick"),
+            0
+        );
+
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&log)
+            .expect("open");
+        f.write_all(line(&d.system_user).as_bytes())
+            .expect("append");
+        f.write_all(line(&d.system_user).as_bytes())
+            .expect("append");
+        f.write_all(line("someone_else").as_bytes())
+            .expect("append");
+        assert_eq!(
+            s.php_workers_tick(dir.path(), &mut cursors)
+                .await
+                .expect("tick"),
+            1
+        );
+        let st = phpworkers::State::parse(
+            &hyperion_state::hosting_kv::get(&pool, d.id.as_str(), phpworkers::KV_STATE)
+                .await
+                .expect("kv")
+                .expect("state"),
+        )
+        .expect("parse");
+        assert_eq!(st.hits_today(st.last_at), 2);
+        assert_eq!(st.alerted_at, st.last_at, "first hit alerts");
+
+        // Nothing new: nothing recorded.
+        assert_eq!(
+            s.php_workers_tick(dir.path(), &mut cursors)
+                .await
+                .expect("tick"),
+            0
+        );
     }
 
     /// A vhost template change reaches existing sites once: the first boot

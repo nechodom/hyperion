@@ -1077,7 +1077,12 @@ pub async fn ensure_logformat_conf() -> Result<bool, AdapterError> {
             return Ok(false);
         }
     }
-    atomic_write(std::path::Path::new(LOGFORMAT_CONF), LOGFORMAT_BODY.as_bytes(), 0o644).await?;
+    atomic_write(
+        std::path::Path::new(LOGFORMAT_CONF),
+        LOGFORMAT_BODY.as_bytes(),
+        0o644,
+    )
+    .await?;
     Ok(true)
 }
 

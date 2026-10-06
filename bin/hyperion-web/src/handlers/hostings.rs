@@ -124,6 +124,7 @@ struct DetailTpl<'a> {
     detail: HostingDetail,
     limits: hyperion_types::HostingLimits,
     mem_auto: PhpMemAutoView,
+    workers_full: PhpWorkersView,
     wp_status: Option<WpInstallStatus>,
     expiry: hyperion_types::HostingExpiry,
     backups: Vec<hyperion_types::BackupRunWire>,
@@ -1518,6 +1519,7 @@ pub async fn post_create(
             let staging_domain_default = format!("staging.{}", detail.domain);
             let preview_domain = compute_preview_domain(&state, target, &detail.domain).await;
             let mem_auto = PhpMemAutoView::from_kv(&[], limits.php_memory_mb);
+            let workers_full = PhpWorkersView::from_kv(&[], 0);
             let tpl = DetailTpl {
                 username: &ctx.username,
                 user_initial: super::user_initial(&ctx.username),
@@ -1527,6 +1529,7 @@ pub async fn post_create(
                 detail,
                 limits,
                 mem_auto,
+                workers_full,
                 wp_status: None,
                 expiry: hyperion_types::HostingExpiry::defaults(),
                 backups: vec![],
@@ -1957,6 +1960,30 @@ impl PhpMemAutoView {
     /// Switched on with a ceiling that leaves nothing to raise to.
     pub fn no_room(&self) -> bool {
         self.enabled && hyperion_types::phpmem::ceiling_leaves_no_room(self.max_mb, self.floor_mb)
+    }
+}
+
+/// "The pool ran out of PHP workers", as the OWNING node records it
+/// (`hyperion_types::phpworkers`).
+pub struct PhpWorkersView {
+    /// Times today (UTC) every worker was busy.
+    pub today: i64,
+    /// Last time; 0 = never seen.
+    pub last_at: i64,
+}
+
+impl PhpWorkersView {
+    fn from_kv(pairs: &[(String, String)], now: i64) -> Self {
+        use hyperion_types::phpworkers;
+        let st = pairs
+            .iter()
+            .find(|(k, _)| k == phpworkers::KV_STATE)
+            .and_then(|(_, v)| phpworkers::State::parse(v))
+            .unwrap_or_default();
+        PhpWorkersView {
+            today: st.hits_today(now),
+            last_at: st.last_at,
+        }
     }
 }
 
@@ -2398,6 +2425,7 @@ pub async fn get_detail(
         _ => vec![],
     };
     let mem_auto = PhpMemAutoView::from_kv(&owner_kv, limits.php_memory_mb);
+    let workers_full = PhpWorkersView::from_kv(&owner_kv, hyperion_types::now_secs());
     let backup_cadence = owner_kv
         .iter()
         .find(|(k, _)| k == "backup_cadence")
@@ -2584,6 +2612,7 @@ pub async fn get_detail(
         detail,
         limits,
         mem_auto,
+        workers_full,
         wp_status,
         expiry,
         backups,

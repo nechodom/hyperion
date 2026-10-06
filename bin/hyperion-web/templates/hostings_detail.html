@@ -2769,6 +2769,18 @@
                value="{{ limits.php_max_requests }}">
       </div>
     </div>
+    {# Read by the owning node from PHP-FPM's own log ("server reached
+       pm.max_children"). Memory is not what ran out here, so the automatic
+       memory_limit below cannot help; the slow-request log says what holds
+       the workers. #}
+    {% if workers_full.last_at > 0 %}
+    <p class="note{% if workers_full.today > 0 %} text-warn{% endif %}" style="margin:0 0 0.8rem">
+      {% if workers_full.today > 0 %}All PHP workers were busy {{ workers_full.today }}× today{% else %}All PHP workers were last busy{% endif %}
+      — most recently {{ crate::handlers::stats::fmt_ago(workers_full.last_at) }}. Visitors queue while that lasts and
+      may get a 502 or 504. <a href="#logs">PHP slow requests</a> shows what keeps the workers busy; the page cache
+      or a higher max_children gives more headroom.
+    </p>
+    {% endif %}
     <div class="field-row">
       <div class="field">
         <label for="db_max_connections">DB max connections</label>
@@ -4299,7 +4311,7 @@
 </div>
 
 {# ── Logs ── #}
-<div class="card" style="margin-top:1rem">
+<div class="card" id="logs" style="margin-top:1rem">
   <div class="card-head">
     <h2>
       <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>

@@ -1102,6 +1102,32 @@ async fn main() -> anyhow::Result<()> {
             }
         });
     }
+    // PHP-FPM pools that ran out of workers ("server reached
+    // pm.max_children"): read from each version's FPM log, recorded per site
+    // for its limits card, and reported. Own one-minute task for the same
+    // reason as the memory automation above; the read positions live here,
+    // so a restart starts at the end of each log rather than re-reporting.
+    {
+        let workers_svc = svc.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            let mut cursors = std::collections::HashMap::new();
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                interval.tick().await;
+                match workers_svc
+                    .php_workers_tick(std::path::Path::new("/var/log"), &mut cursors)
+                    .await
+                {
+                    Ok(n) if n > 0 => {
+                        tracing::info!(sites = n, "php workers: pools at their limit")
+                    }
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!(error=%e, "php workers tick failed"),
+                }
+            }
+        });
+    }
     // The weekly page walk. On its OWN task, not in the five-minute loop:
     // one pass fetches up to eight pages plus forty links PER SITE, each
     // with a 20-second ceiling, so on a node with a few dozen care-plan
