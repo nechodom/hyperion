@@ -1768,7 +1768,7 @@ fn print_pretty(resp: &Response) {
             error,
         } => {
             if *applied {
-                println!("✓ template applied + persisted to /etc/nftables.conf");
+                println!("✓ template applied (re-applied by the agent after a reboot)");
             } else {
                 eprintln!("✗ template apply failed");
             }

@@ -1,19 +1,16 @@
-//! `/firewall` — cluster-wide firewall ruleset overview.
+//! `/firewall` — every node's firewall, one panel per node.
 //!
-//! Fans out `FirewallList` RPC to the master + every enrolled
-//! worker. Per node we show:
+//! Fans out `FirewallList`, `BanList` and `FirewallArmStatus` to the master
+//! and every enrolled worker. Per node the page answers, in this order:
 //!
-//!   - which backend answered (nft / iptables / unknown)
-//!   - the parsed "open ports" pill row (best-effort)
-//!   - the full raw ruleset inside a collapsed `<details>`
+//!   1. is this box actually filtering? (hyperion's chain policy — `accept`
+//!      means every rule hyperion adds changes nothing)
+//!   2. what is open, to whom, and who opened it
+//!   3. which presets are applied — apply or remove them here
+//!   4. who is banned right now
 //!
-//! Read-only by design. The operator inspects via this page,
-//! mutates via SSH + nft / firewalld / ufw — we don't ship a
-//! rule editor because the risk of bricking remote access by
-//! accidentally locking yourself out is too high to justify a
-//! GUI button for. The "View" gives 80% of the value of a
-//! full editor (catching unexpected open ports, drift between
-//! nodes) at 0% of the risk.
+//! The policy is read from the raw ruleset rather than a new RPC field, so a
+//! node running an older agent still reports it.
 
 use crate::auth::AuthCtx;
 use crate::error::AppError;
@@ -37,44 +34,72 @@ struct FirewallTpl<'a> {
     /// One entry per node — master first, then workers in node_id
     /// order so the page is deterministic.
     nodes: Vec<NodeFirewall>,
-    /// Hardcoded "open these together" port sets. Rendered as
-    /// collapsible cards under the per-node section so an operator
-    /// who needs to "open mail on this box" copies one snippet
-    /// instead of looking up port numbers.
+    /// Every preset, for the "commands" reference at the bottom.
     templates: Vec<PortTemplate>,
-    /// Slim list `(node_id, label, applyable)` for the per-template
-    /// "Apply on…" button row. `applyable=false` for nodes that
-    /// can't be reached or that are drained — operator sees the
-    /// button greyed out so they know the option exists but isn't
-    /// runnable right now.
-    apply_targets: Vec<ApplyTarget>,
-    /// Cluster-wide posture roll-up rendered at the top of the page.
     summary: FwSummary,
     csrf_token: String,
 }
 
-pub struct ApplyTarget {
-    pub node_id: String,
-    pub label: String,
-    pub applyable: bool,
-}
-
-/// One recent ban shown inline on a node card.
+/// One recent ban shown inline on a node panel.
 pub struct BanLine {
     pub ip: String,
     pub reason: String,
     pub source: String,
-    pub expires_at: i64,
 }
 
-/// Cluster-wide firewall posture summary (top-of-page KPIs).
+/// Cluster-wide headline numbers.
 pub struct FwSummary {
     pub nodes_total: usize,
     pub nodes_reachable: usize,
+    /// Nodes whose hyperion chain drops by default (confirmed or not).
+    pub nodes_filtering: usize,
     pub ban_total: usize,
     pub ban_auto: usize,
     pub ban_manual: usize,
-    pub open_ports_total: usize,
+}
+
+/// A preset as it stands on one node.
+pub struct NodePreset {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub ports_summary: &'static str,
+    pub applied: bool,
+}
+
+/// A port opened from the panel's "Open a port" form, read back from its
+/// rule tag (`hyperion:custom-<proto>-<port>[-from-<source>]`).
+pub struct CustomRule {
+    /// The preset id the agent knows it by: `custom:<proto>:<port>[:<source>]`.
+    pub id: String,
+    pub label: String,
+}
+
+/// Every custom rule in a raw ruleset. Mirrors `CustomPort::from_tag` in
+/// hyperion-core; the agent re-validates whatever id comes back.
+fn custom_rules(raw: &str) -> Vec<CustomRule> {
+    let mut out: Vec<CustomRule> = Vec::new();
+    for chunk in raw.split("comment \"hyperion:custom-").skip(1) {
+        let Some(end) = chunk.find('"') else { continue };
+        let tag = &chunk[..end];
+        let Some((proto, rest)) = tag.split_once('-') else {
+            continue;
+        };
+        let (port, source) = match rest.split_once("-from-") {
+            Some((p, s)) => (p, Some(s)),
+            None => (rest, None),
+        };
+        let (id, label) = match source {
+            Some(s) => (
+                format!("custom:{proto}:{port}:{s}"),
+                format!("{port} {proto} from {s}"),
+            ),
+            None => (format!("custom:{proto}:{port}"), format!("{port} {proto}")),
+        };
+        if !out.iter().any(|c| c.id == id) {
+            out.push(CustomRule { id, label });
+        }
+    }
+    out
 }
 
 pub struct NodeFirewall {
@@ -82,11 +107,20 @@ pub struct NodeFirewall {
     pub label: String,
     pub view: hyperion_types::FirewallView,
     /// True when the RPC failed entirely — render a "node
-    /// unreachable" notice instead of an empty card.
+    /// unreachable" notice instead of an empty panel.
     pub unreachable: bool,
     /// Drained nodes are intentionally quiet, not broken.
     pub drained: bool,
     pub drain_reason: String,
+    /// `"accept"`, `"drop"`, or empty when hyperion's chain does not exist.
+    pub policy: String,
+    /// Input-hook chains of OTHER firewalls on the box (ufw, firewalld, a
+    /// hand-written ruleset), e.g. `ip filter / INPUT · policy drop`. A port
+    /// has to be allowed by every one of them, not just hyperion's.
+    pub other_chains: Vec<String>,
+    pub presets: Vec<NodePreset>,
+    /// Ports opened from the panel outside the presets.
+    pub custom: Vec<CustomRule>,
     /// Active nftables bans on this node (from BanList).
     pub ban_total: usize,
     pub ban_auto: usize,
@@ -97,10 +131,17 @@ pub struct NodeFirewall {
     pub recent_bans: Vec<BanLine>,
     /// Seconds left to confirm a default-drop switch before it reverts on its
     /// own. `None` when nothing is waiting — which is the normal state.
-    ///
-    /// While this is `Some`, the node's firewall is DROPPING and nobody has
-    /// yet said they can still reach it, so the page has to shout.
     pub armed_seconds_left: Option<i64>,
+}
+
+impl NodeFirewall {
+    pub fn open_to_world(&self) -> usize {
+        self.view
+            .ports
+            .iter()
+            .filter(|p| !p.source_restricted)
+            .count()
+    }
 }
 
 /// Fold a node's ban list into counts + the newest 3 for display.
@@ -118,7 +159,6 @@ fn summarize_bans(
             ip: b.ip,
             reason: b.reason,
             source: b.source,
-            expires_at: b.expires_at,
         })
         .collect();
     (total, auto, total - auto, total - v6, v6, recent)
@@ -129,120 +169,245 @@ pub struct PortTemplate {
     pub ports_summary: &'static str,
     pub description: &'static str,
     pub snippet: &'static str,
-    /// Stable id used by the Apply RPC. Must match a branch of
-    /// `firewall_template_commands()` in hyperion-core/src/service.rs
-    /// — except for templates marked `applyable=false`, which still
-    /// only show the snippet (e.g. worker_rpc needs <MASTER_IP>
-    /// substitution we don't have at apply-time).
+    /// Id sent to the agent. Must match `firewall_template_commands()` in
+    /// hyperion-core/src/service.rs, except for snippet-only presets.
     pub apply_id: &'static str,
-    /// `false` ⇒ no Apply button, snippet-only. Keeps the worker_rpc
-    /// template visible without offering a non-functional Apply.
+    /// `false` ⇒ snippet only (worker_rpc needs the master's IP).
     pub applyable: bool,
+    /// The `hyperion:<tag>` comments its rules carry — the preset counts as
+    /// applied on a node when all of them are in the ruleset. Same lock-step
+    /// as `apply_id`.
+    pub tags: &'static [&'static str],
 }
 
-/// Hardcoded "open these together" port sets. Listed in the order
-/// most operators reach for them: web first (every site needs it),
-/// then mail (only sites that handle email), then hyperion (only
-/// the master), then SSH lockdown patterns.
+/// Common header of every snippet: create hyperion's table and chain if they
+/// are missing. No `policy` on purpose — on an existing chain that would SET
+/// it, and switch a default-drop node back to accepting everything. (The
+/// snippets used `nft -c` here, which only checks syntax, so the table was
+/// never created and the next line failed.)
+macro_rules! snippet_header {
+    () => {
+        "sudo nft add table inet hyperion\n\
+         sudo nft add chain inet hyperion input '{ type filter hook input priority 0 ; }'\n"
+    };
+}
+
 fn port_templates() -> Vec<PortTemplate> {
     vec![
         PortTemplate {
-            name: "Web (HTTP + HTTPS)",
+            name: "Web",
             apply_id: "web",
             applyable: true,
-            ports_summary: "80/tcp, 443/tcp+udp",
-            description: "What nginx needs to serve every hosting. \
-                          UDP/443 covers HTTP/3 (QUIC); skip it if you don't \
-                          run HTTP/3.",
-            snippet: "# Apply via SSH on the target node:\n\
-                      sudo nft -c 'add table inet hyperion { }'\n\
-                      sudo nft -c 'add chain inet hyperion input { type filter hook input priority 0 \\; policy accept \\; }'\n\
-                      sudo nft add rule inet hyperion input tcp dport { 80, 443 } accept comment \\\"web\\\"\n\
-                      sudo nft add rule inet hyperion input udp dport 443 accept comment \\\"http3-quic\\\"\n\
-                      sudo nft list ruleset > /etc/nftables.conf",
+            tags: &["web", "web-quic"],
+            ports_summary: "80, 443 tcp · 443 udp",
+            description: "What nginx needs to serve every site. UDP 443 is HTTP/3.",
+            snippet: concat!(
+                snippet_header!(),
+                "sudo nft add rule inet hyperion input tcp dport '{ 80, 443 }' accept comment '\"hyperion:web\"'\n",
+                "sudo nft add rule inet hyperion input udp dport 443 accept comment '\"hyperion:web-quic\"'"
+            ),
         },
         PortTemplate {
-            name: "Mail (SMTP + IMAP + POP3 + submission)",
+            name: "Mail",
             apply_id: "mail",
             applyable: true,
-            ports_summary: "25, 110, 143, 465, 587, 993, 995 / tcp",
-            description: "Open postfix + dovecot. 25 is mandatory for any \
-                          mail-receiving box; 465+587 for submission; \
-                          993+995 are IMAPS/POP3S for clients. Skip 110/143 \
-                          (cleartext) on production setups.",
-            snippet: "# Apply via SSH:\n\
-                      sudo nft -c 'add table inet hyperion { }'\n\
-                      sudo nft -c 'add chain inet hyperion input { type filter hook input priority 0 \\; policy accept \\; }'\n\
-                      sudo nft add rule inet hyperion input tcp dport { 25, 465, 587, 993, 995 } accept comment \\\"mail-secure\\\"\n\
-                      sudo nft list ruleset > /etc/nftables.conf\n\
-                      # Add cleartext if you really need them:\n\
-                      # sudo nft add rule inet hyperion input tcp dport { 110, 143 } accept comment \\\"mail-cleartext\\\"",
+            tags: &["mail"],
+            ports_summary: "25, 465, 587, 993, 995 tcp",
+            description: "SMTP, submission, IMAPS and POP3S. Cleartext IMAP/POP3 \
+                          (143/110) are left closed.",
+            snippet: concat!(
+                snippet_header!(),
+                "sudo nft add rule inet hyperion input tcp dport '{ 25, 465, 587, 993, 995 }' accept comment '\"hyperion:mail\"'"
+            ),
         },
         PortTemplate {
-            name: "Hyperion (panel + master RPC)",
+            name: "Hyperion panel + RPC",
             apply_id: "hyperion",
             applyable: true,
-            ports_summary: "8443, 8447, 9443 / tcp",
-            description: "Open ONLY on the master node. 8443 is the panel \
-                          (operator web UI); 8447 is phpMyAdmin, served on \
-                          its own port so it cannot touch the panel; 9443 is \
-                          the master↔worker RPC. \
-                          On workers, 9443 should be open to the master's \
-                          IP only — see the next template.",
-            snippet: "# Master node — both ports open to the world:\n\
-                      sudo nft -c 'add table inet hyperion { }'\n\
-                      sudo nft -c 'add chain inet hyperion input { type filter hook input priority 0 \\; policy accept \\; }'\n\
-                      sudo nft add rule inet hyperion input tcp dport { 8443, 8447, 9443 } accept comment \\\"hyperion\\\"\n\
-                      sudo nft list ruleset > /etc/nftables.conf",
+            tags: &["hyperion"],
+            ports_summary: "8443, 8447, 9443 tcp",
+            description: "Panel, phpMyAdmin (8447) and master↔node RPC, open to everyone. Default-drop \
+                          already keeps the ports the panel listens on, so this is \
+                          only needed when another firewall drops them.",
+            snippet: concat!(
+                snippet_header!(),
+                "sudo nft add rule inet hyperion input tcp dport '{ 8443, 8447, 9443 }' accept comment '\"hyperion:hyperion\"'"
+            ),
         },
         PortTemplate {
-            name: "Worker RPC (master-only access)",
-            apply_id: "worker_rpc",
-            // No Apply — the rule needs <MASTER_IP> substitution that
-            // we don't have at apply-time without an extra arg.
-            // Operator copies the snippet, substitutes, runs by hand.
-            applyable: false,
-            ports_summary: "9443 / tcp, source-restricted",
-            description: "On a worker node, restrict 9443 to the master's \
-                          public IP. Replace <MASTER_IP> with your master's \
-                          IP. Everyone else gets dropped — the public-facing \
-                          surface is just nginx (80/443).",
-            snippet: "# Replace <MASTER_IP> with your master node's public IP:\n\
-                      sudo nft -c 'add table inet hyperion { }'\n\
-                      sudo nft -c 'add chain inet hyperion input { type filter hook input priority 0 \\; policy accept \\; }'\n\
-                      sudo nft add rule inet hyperion input ip saddr <MASTER_IP> tcp dport 9443 accept comment \\\"hyperion-rpc-from-master\\\"\n\
-                      sudo nft list ruleset > /etc/nftables.conf",
-        },
-        PortTemplate {
-            name: "SSH (open)",
+            name: "SSH",
             apply_id: "ssh",
             applyable: true,
-            ports_summary: "22 / tcp",
-            description: "Standard SSH — open to the world. Pair with \
-                          fail2ban or sshd's PermitRootLogin no + key-only \
-                          auth.",
-            snippet: "sudo nft -c 'add table inet hyperion { }'\n\
-                      sudo nft -c 'add chain inet hyperion input { type filter hook input priority 0 \\; policy accept \\; }'\n\
-                      sudo nft add rule inet hyperion input tcp dport 22 accept comment \\\"ssh\\\"\n\
-                      sudo nft list ruleset > /etc/nftables.conf",
+            tags: &["ssh"],
+            ports_summary: "22 tcp",
+            description: "Port 22 open to everyone. Default-drop already keeps \
+                          every port sshd listens on.",
+            snippet: concat!(
+                snippet_header!(),
+                "sudo nft add rule inet hyperion input tcp dport 22 accept comment '\"hyperion:ssh\"'"
+            ),
         },
         PortTemplate {
-            name: "FTP (vsftpd, passive)",
+            name: "FTP",
             apply_id: "ftp",
             applyable: true,
-            ports_summary: "21/tcp + 40000-50000/tcp",
-            description: "Open vsftpd's control port + the passive data \
-                          port range (configured in vsftpd.conf as \
-                          pasv_min_port / pasv_max_port). Keep the data \
-                          range tight to avoid leaving 30k ports open if \
-                          you can.",
-            snippet: "sudo nft -c 'add table inet hyperion { }'\n\
-                      sudo nft -c 'add chain inet hyperion input { type filter hook input priority 0 \\; policy accept \\; }'\n\
-                      sudo nft add rule inet hyperion input tcp dport 21 accept comment \\\"ftp-control\\\"\n\
-                      sudo nft add rule inet hyperion input tcp dport 40000-50000 accept comment \\\"ftp-passive\\\"\n\
-                      sudo nft list ruleset > /etc/nftables.conf",
+            tags: &["ftp-control", "ftp-passive"],
+            ports_summary: "21 + 40000–50000 tcp",
+            description: "vsftpd control port (the configured one, if not 21) and \
+                          the passive data range. Both are needed — the control \
+                          port alone hangs on the first listing.",
+            snippet: concat!(
+                snippet_header!(),
+                "sudo nft add rule inet hyperion input tcp dport 21 accept comment '\"hyperion:ftp-control\"'\n",
+                "sudo nft add rule inet hyperion input tcp dport 40000-50000 accept comment '\"hyperion:ftp-passive\"'"
+            ),
+        },
+        PortTemplate {
+            name: "Worker RPC from the master only",
+            apply_id: "worker_rpc",
+            applyable: false,
+            tags: &[],
+            ports_summary: "9443 tcp, one source",
+            description: "On a worker, admit the RPC port from the master's IP \
+                          only. Replace <MASTER_IP> first.",
+            snippet: concat!(
+                snippet_header!(),
+                "sudo nft add rule inet hyperion input ip saddr <MASTER_IP> tcp dport 9443 accept comment '\"hyperion-rpc-from-master\"'"
+            ),
         },
     ]
+}
+
+/// What a node's raw ruleset says about its input filtering: hyperion's own
+/// chain policy, and every OTHER base chain on the input hook.
+///
+/// Only nft output is understood; for iptables the policy is unknown.
+fn input_chains(raw: &str) -> (String, Vec<String>) {
+    let mut policy = String::new();
+    let mut others = Vec::new();
+    let mut table = String::new();
+    let mut chain = String::new();
+    for line in raw.lines() {
+        let l = line.trim();
+        if let Some(rest) = l.strip_prefix("table ") {
+            table = rest.trim_end_matches('{').trim().to_string();
+        } else if let Some(rest) = l.strip_prefix("chain ") {
+            chain = rest
+                .split(|c: char| c == '{' || c.is_whitespace())
+                .next()
+                .unwrap_or("")
+                .to_string();
+        } else if l.contains("hook input") {
+            let p = l
+                .split_once("policy ")
+                .map(|(_, r)| r.trim_end_matches(';').trim().to_string())
+                .unwrap_or_else(|| "accept".to_string());
+            if table == "inet hyperion" && chain == "input" {
+                policy = p;
+            } else {
+                others.push(format!("{table} / {chain} · policy {p}"));
+            }
+        }
+    }
+    (policy, others)
+}
+
+fn node_presets(raw: &str) -> Vec<NodePreset> {
+    port_templates()
+        .into_iter()
+        .filter(|t| t.applyable)
+        .map(|t| NodePreset {
+            id: t.apply_id,
+            name: t.name,
+            ports_summary: t.ports_summary,
+            applied: t
+                .tags
+                .iter()
+                .all(|tag| raw.contains(&format!("comment \"hyperion:{tag}\""))),
+        })
+        .collect()
+}
+
+/// Query one node (`None` = the master's local agent).
+async fn load_node(
+    state: &SharedState,
+    target: Option<&str>,
+) -> (
+    Option<hyperion_types::FirewallView>,
+    Vec<hyperion_types::IpBanWire>,
+    Option<i64>,
+) {
+    let view = match crate::dispatcher::dispatch_to_node(state, target, Request::FirewallList).await
+    {
+        Ok(RpcResponse::FirewallList(v)) => Some(v),
+        _ => None,
+    };
+    let bans = match crate::dispatcher::dispatch_to_node(
+        state,
+        target,
+        Request::BanList { hosting_id: None },
+    )
+    .await
+    {
+        Ok(RpcResponse::BanList(b)) => b,
+        _ => Vec::new(),
+    };
+    let armed = match crate::dispatcher::dispatch_to_node(state, target, Request::FirewallArmStatus)
+        .await
+    {
+        Ok(RpcResponse::FirewallDefaultDrop {
+            armed_seconds_left, ..
+        }) => armed_seconds_left,
+        _ => None,
+    };
+    (view, bans, armed)
+}
+
+fn build_node(
+    node_id: String,
+    label: String,
+    loaded: (
+        Option<hyperion_types::FirewallView>,
+        Vec<hyperion_types::IpBanWire>,
+        Option<i64>,
+    ),
+    drained: bool,
+    drain_reason: String,
+) -> NodeFirewall {
+    let (view, bans, armed_seconds_left) = loaded;
+    let unreachable = view.is_none();
+    let view = view.unwrap_or_default();
+    let (policy, other_chains) = if view.backend == "nft" {
+        input_chains(&view.raw)
+    } else {
+        (String::new(), Vec::new())
+    };
+    let presets = node_presets(&view.raw);
+    let custom = custom_rules(&view.raw);
+    let (ban_total, ban_auto, ban_manual, ban_v4, ban_v6, recent_bans) = summarize_bans(bans);
+    NodeFirewall {
+        node_id,
+        label,
+        view,
+        unreachable,
+        drained,
+        drain_reason,
+        policy,
+        other_chains,
+        presets,
+        custom,
+        ban_total,
+        ban_auto,
+        ban_manual,
+        ban_v4,
+        ban_v6,
+        recent_bans,
+        armed_seconds_left,
+    }
+}
+
+fn allowed(ctx: &AuthCtx) -> bool {
+    ctx.can(Capability::SecurityManage) && ctx.scope_all()
 }
 
 pub async fn get_firewall(
@@ -251,134 +416,40 @@ pub async fn get_firewall(
 ) -> Result<Response, AppError> {
     // Only admins should see the ruleset — it reveals service
     // topology that an operator role doesn't need.
-    if !(ctx.can(Capability::SecurityManage) && ctx.scope_all()) {
+    if !allowed(&ctx) {
         return Ok(
             Redirect::to("/?flash_error=admin+role+required+to+view+firewall").into_response(),
         );
     }
-    let mut nodes: Vec<NodeFirewall> = Vec::new();
-    // Master — firewall ruleset + active bans from the local agent.
-    {
-        let (view, unreachable) =
-            match hyperion_rpc_client::call(&state.agent_socket, Request::FirewallList).await {
-                Ok(RpcResponse::FirewallList(v)) => (v, false),
-                _ => (hyperion_types::FirewallView::default(), true),
-            };
-        let bans = match hyperion_rpc_client::call(
-            &state.agent_socket,
-            Request::BanList { hosting_id: None },
-        )
-        .await
-        {
-            Ok(RpcResponse::BanList(b)) => b,
-            _ => Vec::new(),
-        };
-        let (ban_total, ban_auto, ban_manual, ban_v4, ban_v6, recent_bans) = summarize_bans(bans);
-        let armed_seconds_left = match hyperion_rpc_client::call(
-            &state.agent_socket,
-            Request::FirewallArmStatus,
-        )
-        .await
-        {
-            Ok(RpcResponse::FirewallDefaultDrop {
-                armed_seconds_left, ..
-            }) => armed_seconds_left,
-            _ => None,
-        };
-        nodes.push(NodeFirewall {
-            armed_seconds_left,
-            node_id: "master".to_string(),
-            label: "master".to_string(),
-            view,
-            unreachable,
-            drained: false,
-            drain_reason: String::new(),
-            ban_total,
-            ban_auto,
-            ban_manual,
-            ban_v4,
-            ban_v6,
-            recent_bans,
-        });
-    }
-    // Workers — fan out firewall + bans via dispatcher.
+    let mut nodes: Vec<NodeFirewall> = vec![build_node(
+        "master".to_string(),
+        "master".to_string(),
+        load_node(&state, None).await,
+        false,
+        String::new(),
+    )];
     if let Ok(RpcResponse::NodesList(workers)) =
         hyperion_rpc_client::call(&state.agent_socket, Request::NodesList).await
     {
         for w in workers {
-            let view = match crate::dispatcher::dispatch_to_node(
-                &state,
-                Some(w.node_id.as_str()),
-                Request::FirewallList,
-            )
-            .await
-            {
-                Ok(RpcResponse::FirewallList(v)) => Some(v),
-                _ => None,
-            };
-            let unreachable = view.is_none();
-            let bans = match crate::dispatcher::dispatch_to_node(
-                &state,
-                Some(w.node_id.as_str()),
-                Request::BanList { hosting_id: None },
-            )
-            .await
-            {
-                Ok(RpcResponse::BanList(b)) => b,
-                _ => Vec::new(),
-            };
-            let (ban_total, ban_auto, ban_manual, ban_v4, ban_v6, recent_bans) =
-                summarize_bans(bans);
-            let armed_seconds_left = match crate::dispatcher::dispatch_to_node(
-                &state,
-                Some(&w.node_id),
-                Request::FirewallArmStatus,
-            )
-            .await
-            {
-                Ok(RpcResponse::FirewallDefaultDrop {
-                    armed_seconds_left, ..
-                }) => armed_seconds_left,
-                _ => None,
-            };
-            nodes.push(NodeFirewall {
-                armed_seconds_left,
-                node_id: w.node_id.clone(),
-                label: w.label.clone(),
-                view: view.unwrap_or_default(),
-                unreachable,
-                drained: w.is_drained,
-                drain_reason: w.drain_reason.clone(),
-                ban_total,
-                ban_auto,
-                ban_manual,
-                ban_v4,
-                ban_v6,
-                recent_bans,
-            });
+            let loaded = load_node(&state, Some(w.node_id.as_str())).await;
+            nodes.push(build_node(
+                w.node_id.clone(),
+                w.label.clone(),
+                loaded,
+                w.is_drained,
+                w.drain_reason.clone(),
+            ));
         }
     }
-    // Cluster posture roll-up for the top-of-page summary.
     let summary = FwSummary {
         nodes_total: nodes.len(),
         nodes_reachable: nodes.iter().filter(|n| !n.unreachable).count(),
+        nodes_filtering: nodes.iter().filter(|n| n.policy == "drop").count(),
         ban_total: nodes.iter().map(|n| n.ban_total).sum(),
         ban_auto: nodes.iter().map(|n| n.ban_auto).sum(),
         ban_manual: nodes.iter().map(|n| n.ban_manual).sum(),
-        open_ports_total: nodes.iter().map(|n| n.view.ports.len()).sum(),
     };
-    // Apply-target list mirrors `nodes` but with each entry tagged
-    // by reachability so the template can grey-out Apply buttons on
-    // unreachable nodes. "master" is a sentinel; the post_apply
-    // handler maps it to the local agent socket.
-    let apply_targets: Vec<ApplyTarget> = nodes
-        .iter()
-        .map(|n| ApplyTarget {
-            node_id: n.node_id.clone(),
-            label: n.label.clone(),
-            applyable: !n.unreachable,
-        })
-        .collect();
     let tpl = FirewallTpl {
         username: &ctx.username,
         user_initial: super::user_initial(&ctx.username),
@@ -387,56 +458,62 @@ pub async fn get_firewall(
         htmx_version: super::htmx_version(),
         nodes,
         templates: port_templates(),
-        apply_targets,
         summary,
         csrf_token: super::session_csrf_token(&state, &ctx),
     };
     Ok(Html(tpl.render()?).into_response())
 }
 
-#[derive(Deserialize)]
-pub struct ApplyTemplateForm {
-    pub template_id: String,
-    /// "master" (sentinel) or a worker node_id. Dispatcher's
-    /// LOCAL_NODE_SENTINEL covers the local-socket path.
-    pub target_node: String,
-    pub _csrf: String,
+/// `"master"` / empty / the local sentinel ⇒ the local agent.
+fn target_of(node: &str) -> Option<&str> {
+    let n = node.trim();
+    if n == "master" || n.is_empty() || n == crate::dispatcher::LOCAL_NODE_SENTINEL {
+        None
+    } else {
+        Some(n)
+    }
 }
 
-/// POST /firewall/apply — runs the requested template on the
-/// requested node. Returns a small inline HTML fragment so the
-/// /firewall page can swap it next to the Apply button via HTMX.
-///
-/// We don't redirect on success — the page would lose the
-/// expanded snippet pane the operator likely had open. The
-/// fragment carries the result inline + a hint to refresh the
-/// per-node port table at the top if they want to see the new
-/// rules light up.
+/// Back to the page, at the node's panel, with a toast.
+fn back(node: &str, ok: Result<String, String>) -> Response {
+    let (key, msg) = match ok {
+        Ok(m) => ("flash", m),
+        Err(e) => ("flash_error", e),
+    };
+    let anchor: String = node
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .collect();
+    Redirect::to(&format!(
+        "/firewall?{key}={}#node-{anchor}",
+        crate::handlers::hostings::urlencoding(&msg)
+    ))
+    .into_response()
+}
+
+#[derive(Deserialize)]
+pub struct DefaultDropForm {
+    pub target_node: String,
+    /// "enable" | "confirm" | "disable"
+    pub action: String,
+}
+
 /// POST /firewall/default-drop — switch a node's chain to `policy drop`,
 /// confirm that the operator still has access, or switch it back.
 ///
 /// Three actions behind one route because they are one conversation: turning
 /// it on ARMS a deadline, and the only two ways out are confirming or letting
-/// it expire. Splitting them across routes would let the panel show a confirm
-/// button for a node that is not armed.
+/// it expire.
 pub async fn post_default_drop(
     State(state): State<SharedState>,
     ctx: AuthCtx,
     Form(form): Form<DefaultDropForm>,
 ) -> Result<Response, AppError> {
-    // Same gate as applying a template: this can take the node off the
-    // network, so it is admin-only and never available to a tenant role.
-    if !(ctx.can(Capability::SecurityManage) && ctx.scope_all()) {
-        return Ok(Redirect::to("/firewall?error=admin+role+required").into_response());
+    // This can take the node off the network, so it is admin-only and never
+    // available to a tenant role.
+    if !allowed(&ctx) {
+        return Ok(back(&form.target_node, Err("admin role required".into())));
     }
-    let target = if form.target_node.trim() == "master"
-        || form.target_node.trim().is_empty()
-        || form.target_node == crate::dispatcher::LOCAL_NODE_SENTINEL
-    {
-        None
-    } else {
-        Some(form.target_node.as_str())
-    };
     let req = match form.action.as_str() {
         // Five minutes: long enough to open a second terminal and try, short
         // enough that a locked-out operator is not staring at a dead box.
@@ -446,94 +523,158 @@ pub async fn post_default_drop(
         "confirm" => Request::FirewallConfirmDefaultDrop,
         "disable" => Request::FirewallDisableDefaultDrop,
         other => {
-            return Ok(Redirect::to(&format!(
-                "/firewall?error={}",
-                crate::handlers::hostings::urlencoding(&format!("unknown action: {other}"))
+            return Ok(back(
+                &form.target_node,
+                Err(format!("unknown action: {other}")),
             ))
-            .into_response())
         }
     };
-    let msg = match crate::dispatcher::dispatch_to_node(&state, target, req).await? {
-        RpcResponse::FirewallDefaultDrop { message, .. } => message,
-        RpcResponse::Error(e) => {
-            return Ok(Redirect::to(&format!(
-                "/firewall?error={}",
-                crate::handlers::hostings::urlencoding(&e.to_string())
-            ))
-            .into_response())
-        }
-        _ => "unexpected response".to_string(),
+    // Errors used to go to `?error=`, which nothing reads — a refused switch
+    // looked exactly like a page reload.
+    let res = match crate::dispatcher::dispatch_to_node(&state, target_of(&form.target_node), req)
+        .await
+    {
+        Ok(RpcResponse::FirewallDefaultDrop { message, .. }) => Ok(message),
+        Ok(RpcResponse::Error(e)) => Err(e.to_string()),
+        Ok(_) => Err("unexpected response from the node".into()),
+        Err(e) => Err(e.to_string()),
     };
-    Ok(Redirect::to(&format!(
-        "/firewall?flash={}",
-        crate::handlers::hostings::urlencoding(&msg)
-    ))
-    .into_response())
+    Ok(back(&form.target_node, res))
 }
 
-#[derive(serde::Deserialize)]
-pub struct DefaultDropForm {
+#[derive(Deserialize)]
+pub struct PresetForm {
+    /// A preset id, or `custom:…` to remove a custom port, or empty with
+    /// `port`/`proto`/`source` to open one.
+    #[serde(default)]
+    pub template_id: String,
+    #[serde(default)]
+    pub port: String,
+    #[serde(default)]
+    pub proto: String,
+    #[serde(default)]
+    pub source: String,
+    /// "master" (sentinel) or a worker node_id.
     pub target_node: String,
-    /// "enable" | "confirm" | "disable"
+    /// "apply" (default) | "remove"
+    #[serde(default)]
     pub action: String,
 }
 
+/// POST /firewall/apply — apply or remove a preset on one node, then back to
+/// the page so the panel shows the new state.
 pub async fn post_apply(
     State(state): State<SharedState>,
     ctx: AuthCtx,
-    Form(form): Form<ApplyTemplateForm>,
+    Form(form): Form<PresetForm>,
 ) -> Result<Response, AppError> {
-    if !(ctx.can(Capability::SecurityManage) && ctx.scope_all()) {
-        return Ok((
-            axum::http::StatusCode::FORBIDDEN,
-            [("content-type", "text/html; charset=utf-8")],
-            "<span class=\"pill err\">admin role required</span>",
-        )
-            .into_response());
+    if !allowed(&ctx) {
+        return Ok(back(&form.target_node, Err("admin role required".into())));
     }
-    let target = if form.target_node.trim() == "master"
-        || form.target_node.trim().is_empty()
-        || form.target_node == crate::dispatcher::LOCAL_NODE_SENTINEL
-    {
-        None
+    // (id sent to the agent, name for the message)
+    let (id, name) = if form.template_id.is_empty() {
+        // "Open a port". The agent validates every field again; this only
+        // turns an obviously wrong entry into a readable message.
+        let port = form.port.trim();
+        let proto = form.proto.trim();
+        let source = form.source.trim();
+        if !matches!(proto, "tcp" | "udp") || !port.parse::<u16>().is_ok_and(|p| p > 0) {
+            return Ok(back(
+                &form.target_node,
+                Err("port must be 1–65535 and protocol tcp or udp".into()),
+            ));
+        }
+        let id = if source.is_empty() {
+            format!("custom:{proto}:{port}")
+        } else {
+            format!("custom:{proto}:{port}:{source}")
+        };
+        (id, format!("Port {port}/{proto}"))
+    } else if form.template_id.starts_with("custom:") {
+        (form.template_id.clone(), "Custom port".to_string())
     } else {
-        Some(form.target_node.as_str())
+        match port_templates()
+            .into_iter()
+            .find(|t| t.applyable && t.apply_id == form.template_id)
+        {
+            Some(t) => (t.apply_id.to_string(), t.name.to_string()),
+            None => return Ok(back(&form.target_node, Err("unknown preset".into()))),
+        }
     };
-    let resp = crate::dispatcher::dispatch_to_node(
-        &state,
-        target,
-        Request::FirewallApplyTemplate {
-            template_id: form.template_id.clone(),
-        },
-    )
-    .await?;
-    let body = match resp {
-        RpcResponse::FirewallTemplateApplied {
-            applied: true, ..
-        } => format!(
-            "<span class=\"pill ok\" title=\"Rules added to inet hyperion table + persisted to /etc/nftables.conf\">✓ applied on {}</span>",
-            html_escape(&form.target_node)
-        ),
-        RpcResponse::FirewallTemplateApplied {
-            applied: false,
-            error,
+    let remove = form.action == "remove";
+    let req = if remove {
+        Request::FirewallRemoveTemplate { template_id: id }
+    } else {
+        Request::FirewallApplyTemplate { template_id: id }
+    };
+    let verb = if remove { "removed from" } else { "applied on" };
+    let res = match crate::dispatcher::dispatch_to_node(&state, target_of(&form.target_node), req)
+        .await
+    {
+        Ok(RpcResponse::FirewallTemplateApplied {
+            applied: true,
+            output,
             ..
-        } => format!(
-            "<span class=\"pill err\" title=\"{}\">✗ failed</span>",
-            html_escape(&error)
-        ),
-        RpcResponse::Error(e) => format!(
-            "<span class=\"pill err\" title=\"{}\">✗ RPC error</span>",
-            html_escape(&e.to_string())
-        ),
-        _ => "<span class=\"pill err\">✗ unexpected response</span>".to_string(),
+        }) => Ok(format!("{name} {verb} {} — {output}", form.target_node)),
+        Ok(RpcResponse::FirewallTemplateApplied { error, .. }) => Err(format!("{name}: {error}")),
+        Ok(RpcResponse::Error(e)) => Err(format!("{name}: {e}")),
+        Ok(_) => Err("unexpected response from the node".into()),
+        Err(e) => Err(e.to_string()),
     };
-    Ok(([("content-type", "text/html; charset=utf-8")], body).into_response())
+    Ok(back(&form.target_node, res))
 }
 
-fn html_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const RAW: &str = "table inet hyperion {\n\tchain input {\n\t\ttype filter hook input priority filter; policy drop;\n\t\ttcp dport { 80, 443 } accept comment \"hyperion:web\"\n\t\tudp dport 443 accept comment \"hyperion:web-quic\"\n\t\ttcp dport 21 accept comment \"hyperion:ftp-control\"\n\t}\n}\ntable ip filter {\n\tchain INPUT {\n\t\ttype filter hook input priority filter; policy drop;\n\t}\n\tchain FORWARD {\n\t\ttype filter hook forward priority filter; policy drop;\n\t}\n}\n";
+
+    #[test]
+    fn policy_and_other_firewalls_are_read() {
+        let (policy, others) = input_chains(RAW);
+        assert_eq!(policy, "drop");
+        assert_eq!(others, vec!["ip filter / INPUT · policy drop"]);
+        assert_eq!(input_chains("").0, "");
+    }
+
+    #[test]
+    fn a_preset_is_applied_only_with_all_its_rules() {
+        let p = node_presets(RAW);
+        let get = |id| p.iter().find(|x| x.id == id).unwrap().applied;
+        assert!(get("web"));
+        // ftp-control alone: the passive range is missing.
+        assert!(!get("ftp"));
+        assert!(!get("mail"));
+        assert!(!p.iter().any(|x| x.id == "worker_rpc"));
+    }
+
+    #[test]
+    fn custom_rules_are_listed_with_their_ids() {
+        let raw = "tcp dport 8080 accept comment \"hyperion:custom-tcp-8080\"\n\
+                   ip saddr 10.0.0.0/8 udp dport 53 accept comment \"hyperion:custom-udp-53-from-10.0.0.0/8\"\n";
+        let c = custom_rules(raw);
+        assert_eq!(c.len(), 2);
+        assert_eq!(c[0].id, "custom:tcp:8080");
+        assert_eq!(c[1].id, "custom:udp:53:10.0.0.0/8");
+        assert_eq!(c[1].label, "53 udp from 10.0.0.0/8");
+    }
+
+    /// Every snippet must actually create the table, and never set a policy
+    /// (that would switch default-drop off).
+    #[test]
+    fn snippets_create_the_table_and_leave_the_policy_alone() {
+        for t in port_templates() {
+            assert!(!t.snippet.contains("nft -c"), "{}", t.apply_id);
+            assert!(t.snippet.contains("nft add table inet hyperion"));
+            assert!(!t.snippet.contains("policy"), "{}", t.apply_id);
+            for tag in t.tags {
+                assert!(
+                    t.snippet.contains(&format!("\"hyperion:{tag}\"")),
+                    "{} snippet lacks tag {tag}",
+                    t.apply_id
+                );
+            }
+        }
+    }
 }

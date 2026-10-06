@@ -405,9 +405,15 @@ pub enum Request {
     /// on this node. Rules go into our own `inet hyperion` table —
     /// any pre-existing operator nft rules in other tables/chains
     /// stay untouched. Each rule carries a `hyperion:<template_id>`
-    /// comment so the operator can grep them later. Persists to
-    /// `/etc/nftables.conf` so the rules survive reboot.
+    /// comment so the operator can grep them later. Recorded in the
+    /// node's firewall state and re-applied by the agent at startup.
     FirewallApplyTemplate {
+        template_id: String,
+    },
+    /// Remove a preset's rules (by their `hyperion:<tag>` comments) from
+    /// this node. Answered with `FirewallTemplateApplied` (`applied` =
+    /// removed). Refuses the SSH preset while default-drop depends on it.
+    FirewallRemoveTemplate {
         template_id: String,
     },
     /// Turn hyperion's input chain into a real firewall: `policy drop`, with
