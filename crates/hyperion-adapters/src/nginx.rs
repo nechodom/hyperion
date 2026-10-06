@@ -772,9 +772,7 @@ pub fn render(input: &VhostInput<'_>) -> Result<String, AdapterError> {
         },
         fastcgi_cache_ttl: input.options.fastcgi_cache_ttl,
         waf,
-        waf_log: waf.any()
-            || !bot_patterns(&input.options.blocked_bots).is_empty()
-            || !country_codes(&input.options.blocked_countries).is_empty(),
+        waf_log: uses_waf_log(input),
         signup_limit_enabled: input.options.signup_limit_enabled,
         wp_admin_allow: parse_admin_allowlist(&input.options.wp_admin_allowlist),
         // The preview block needs ALL THREE of name/cert/key — a
@@ -833,6 +831,16 @@ fn render_waf_conf() -> String {
 #
 # One line per refused request, written only when a vhost tagged the
 # request with the rule that refused it ($hyperion_waf).
+#
+# The map DECLARES $hyperion_waf for every server. The log_format below
+# names it, and nginx refuses a config naming a variable nothing defines —
+# so without this, the moment no vhost on the node runs a WAF rule (the
+# last one switched off, or deleted), `nginx -t` fails for every site.
+# A vhost's own `set $hyperion_waf` still overrides it per request.
+map $host $hyperion_waf {
+    default "";
+}
+
 log_format hyperion_waf escape=json
     '$msec\t$remote_addr\t$hyperion_waf\t$request_method\t$request_uri\t$http_user_agent';
 "#;
@@ -932,11 +940,11 @@ pub async fn write_vhost(paths: &Paths, input: &VhostInput<'_>) -> Result<(), Ad
     }
     // Same reason, for the access-log format the vhost names.
     ensure_logformat_conf().await?;
-    // And for the WAF log: a vhost naming a log_format that does not exist,
-    // or a log file in a directory that does not, fails `nginx -t`.
-    if uses_waf_log(input) {
-        ensure_waf_logging().await?;
-    }
+    // And for the WAF log, unconditionally: `nginx -t` checks the WHOLE
+    // config, so another site's vhost naming the WAF log format or a log
+    // file in a missing directory would refuse this write too. Idempotent
+    // on content, so a node with no WAF site pays a stat or two.
+    ensure_waf_logging().await?;
     let body = render(input)?;
     let vhost = paths.vhost_file(input.domain);
     let backup = backup_existing(&vhost).await?;
@@ -2778,6 +2786,13 @@ mod tests {
     fn waf_conf_and_logrotate_render() {
         let conf = render_waf_conf();
         assert!(conf.contains("log_format hyperion_waf escape=json"));
+        // Declared at http level, BEFORE the format that names it: with no
+        // WAF vhost left on the node, an undeclared $hyperion_waf is
+        // `[emerg] unknown "hyperion_waf" variable` for every reload.
+        let map = conf
+            .find("map $host $hyperion_waf {")
+            .expect("variable declared");
+        assert!(map < conf.find("log_format hyperion_waf").expect("format"));
         assert!(conf.contains("'$msec\\t$remote_addr\\t$hyperion_waf\\t$request_method\\t$request_uri\\t$http_user_agent'"));
         let lr = render_waf_logrotate();
         assert!(lr.starts_with("# Auto-managed"));
