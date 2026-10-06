@@ -682,6 +682,47 @@ async fn seed_demo(svc: &StubService) {
         }
     }
 
+    // Email log: alerts, customer letters and a test send, with one relay
+    // outage and one row in the old `Debug` SMTP-code format.
+    // (hosting index, kind, state, to, subject, error, reply, secs ago)
+    type DemoMail<'a> = (
+        Option<usize>,
+        &'a str,
+        &'a str,
+        &'a str,
+        &'a str,
+        Option<&'a str>,
+        Option<&'a str>,
+        i64,
+    );
+    let mails: [DemoMail; 9] = [
+        (Some(4), "monitor", "failed", "ops@digitalka.cz", "DOWN: fit-centrum-brno.cz is not responding", Some("smtp send: Connection error: Connection refused (os error 111)"), None, 25 * 60),
+        (Some(4), "monitor", "ok", "ops@digitalka.cz", "UP: fit-centrum-brno.cz is back", None, Some("250 2.0.0 Ok: queued as 4ZQ1xK3mPz"), 15 * 60),
+        (None, "test", "ok", "kevin@digitalka.cz", "Hyperion test email", None, Some("250 2.0.0 Ok: queued as 4ZQ0aB9cDe"), 2 * 3600),
+        (Some(0), "care_report", "ok", "majitel@studio-lumen.cz", "Měsíční report péče o web — studio-lumen.cz", None, Some("250 2.0.0 Ok: queued as 4ZPz7Yt1Qa"), 26 * 3600),
+        (Some(1), "care_report", "ok", "info@pekarna-u-mostu.cz", "Měsíční report péče o web — pekarna-u-mostu.cz", None, Some("250 2.0.0 Ok: queued as 4ZPz7Yt2Rb"), 26 * 3600 + 40),
+        (Some(6), "billing", "failed", "objednavky@zahrada-plus.cz", "Faktura za hosting — shop.zahrada-plus.cz", Some("smtp send: permanent error (550): 5.1.1 <objednavky@zahrada-plus.cz>: Recipient address rejected: User unknown in virtual mailbox table"), None, 30 * 3600),
+        (Some(3), "quota", "ok", "ops@digitalka.cz", "atelier-hora.com is over its disk quota", None, Some("250 2.0.0 Ok: queued as 4ZPy2Hn8Lw"), 3 * 86_400),
+        (Some(2), "expiry", "ok", "kavarna@kavarna-sever.cz", "Váš hosting kavarna-sever.cz brzy vyprší", None, Some("Code { severity: PositiveCompletion, category: MailSystem, detail: Zero }"), 5 * 86_400),
+        (None, "test", "failed", "kevin@digitalka.cz", "Hyperion test email", Some("smtp send: Connection error: invalid peer certificate: UnknownIssuer"), None, 6 * 86_400),
+    ];
+    for (site, kind, state, to, subject, err, reply, ago) in mails {
+        hyperion_state::email_log::append(
+            pool,
+            site.map(|n| ids[n].as_str()),
+            to,
+            subject,
+            "Dobrý den,\n\nposíláme přehled za uplynulý měsíc: zálohy proběhly, certifikát je platný, aktualizace jsou nainstalované.",
+            kind,
+            state,
+            err,
+            reply,
+            now - ago,
+        )
+        .await
+        .expect("email_log");
+    }
+
     // The 15 s network sampler, last hour.
     for k in 0..240i64 {
         let i = (240 - k) as f64;

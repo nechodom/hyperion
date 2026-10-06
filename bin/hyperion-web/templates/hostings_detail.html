@@ -4586,7 +4586,7 @@
       {% for e in email_log %}
         <tr>
           <td class="muted numeric" title="{{ e.sent_at }}">{{ crate::handlers::stats::fmt_ago(e.sent_at) }}</td>
-          <td><span class="tag">{{ e.kind }}</span></td>
+          <td><span class="tag">{{ crate::handlers::emails::kind_label(e.kind) }}</span></td>
           <td><code style="font-size:0.78rem">{{ e.to_address }}</code></td>
           <td>
             <strong>{{ e.subject }}</strong>
@@ -4605,7 +4605,7 @@
             {% if let Some(err) = e.error %}
               <code class="muted" style="font-size:0.74rem;word-break:break-word">{{ err }}</code>
             {% else if let Some(c) = e.smtp_code %}
-              <code class="muted" style="font-size:0.74rem">{{ c }}</code>
+              <code class="muted" style="font-size:0.74rem">{{ crate::handlers::emails::smtp_reply(c).1 }}</code>
             {% else %}
               <span class="text-soft">—</span>
             {% endif %}
