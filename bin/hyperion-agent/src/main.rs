@@ -556,6 +556,7 @@ async fn main() -> anyhow::Result<()> {
                 ssh_threshold: cfg.fail2ban.ssh_threshold,
                 ftp_threshold: cfg.fail2ban.ftp_threshold,
                 mail_threshold: cfg.fail2ban.mail_threshold,
+                waf_threshold: cfg.fail2ban.waf_threshold,
             }
             .sanitized(),
         )

@@ -94,6 +94,7 @@ http_threshold = 12   # POST /wp-login.php | /xmlrpc.php floods (per site)
 ssh_threshold  = 8    # sshd auth failures
 ftp_threshold  = 8    # vsftpd FAIL LOGIN
 mail_threshold = 8    # postfix/dovecot SASL auth failures
+waf_threshold  = 20   # ban-counted WAF refusals (per site; 3..=1000)
 
 # NB: the panel (web UI) login has its own protection — a per-real-peer rate
 # limit + firewall ban and a per-account hard-lock — so it is deliberately NOT
