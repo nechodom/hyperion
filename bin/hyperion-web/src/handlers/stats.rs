@@ -138,6 +138,17 @@ struct StatsTpl<'a> {
     sites_total_disk: i64,
     sites_total_bw: i64,
     sites_total_reqs: i64,
+    /// Every node in view, with its state tones — the Nodes table (cluster
+    /// view, more than one node) and the verdict line read these.
+    node_views: Vec<NodeView>,
+    /// `node_views` entry for `selected_node`, for the health cells' tones.
+    selected_view: Option<NodeView>,
+    verdict: Verdict,
+    /// True when the history charts describe the same thing as the totals
+    /// next to them. In the multi-node cluster view the history is the
+    /// master's alone, so a chart beside a cluster-wide total would mislead
+    /// — the Sites charts are dropped there instead of explained away.
+    history_matches_totals: bool,
 }
 
 #[derive(Deserialize, Default)]
@@ -366,6 +377,14 @@ pub async fn get_stats(
             .unwrap_or((0, 0)),
     };
 
+    let node_views: Vec<NodeView> = cluster
+        .as_ref()
+        .map(|c| c.nodes.iter().map(NodeView::from_stats).collect())
+        .unwrap_or_default();
+    let selected_view = selected_node.as_ref().map(NodeView::from_stats);
+    let verdict = build_verdict(&node_views);
+    let history_matches_totals = !is_cluster_view || node_views.len() <= 1;
+
     let tpl = StatsTpl {
         username: &ctx.username,
         user_initial: super::user_initial(&ctx.username),
@@ -436,6 +455,10 @@ pub async fn get_stats(
         sites_total_disk,
         sites_total_bw,
         sites_total_reqs,
+        node_views,
+        selected_view,
+        verdict,
+        history_matches_totals,
     };
     Ok(Html(tpl.render()?).into_response())
 }
@@ -569,6 +592,171 @@ pub fn sort_site_rows(rows: &mut [SiteRow], sort: &str) {
             0
         };
     }
+}
+
+/// State tone for a percentage against two thresholds: `""` (fine),
+/// `"warn"`, `"err"`. Drives the only colour on the page — the stats
+/// page follows the panel rule that accent colour means state, never
+/// decoration, so a calm node renders entirely in greys.
+pub fn tone_for(pct: i64, warn_at: i64, err_at: i64) -> &'static str {
+    if pct >= err_at {
+        "err"
+    } else if pct >= warn_at {
+        "warn"
+    } else {
+        ""
+    }
+}
+
+/// Integer percent `used / total`, 0 when the total is unknown.
+fn pct_of(used: i64, total: i64) -> i64 {
+    if total > 0 {
+        (used.saturating_mul(100) / total).clamp(0, 100)
+    } else {
+        0
+    }
+}
+
+/// One node, reduced to what the page colours and the verdict line read.
+/// Thresholds live here, once, so the node table, the health cells and
+/// the verdict can never disagree about whether something is hot.
+#[derive(Debug, Clone)]
+pub struct NodeView {
+    pub node_id: String,
+    pub label: String,
+    pub online: bool,
+    pub cpu_pct_x100: i64,
+    pub cpu_tone: &'static str,
+    pub mem_pct: i64,
+    pub mem_tone: &'static str,
+    pub disk_pct: i64,
+    pub disk_tone: &'static str,
+    pub swap_tone: &'static str,
+    pub net_rx_bps: i64,
+    pub net_tx_bps: i64,
+    pub hostings_count: i64,
+    pub agent_version: String,
+    /// Plain-language problems, worst first: `(tone, text)`.
+    pub issues: Vec<(&'static str, String)>,
+}
+
+impl NodeView {
+    pub fn from_stats(n: &NodeStats) -> Self {
+        let mem_pct = pct_of(n.mem_used_kib, n.mem_total_kib);
+        let disk_pct = pct_of(n.total_disk_bytes, n.node_disk_total_bytes);
+        let cpu_pct = n.cpu_pct_x100 / 100;
+        let cpu_tone = tone_for(cpu_pct, 75, 90);
+        let mem_tone = tone_for(mem_pct, 80, 90);
+        let disk_tone = tone_for(disk_pct, 80, 90);
+        // Swap in use is normal on a small box; a fifth of it in use is
+        // where page-ins start to show up as slow requests.
+        let swap_tone = if n.swap_total_kib > 0 && n.swap_used_kib * 100 > n.swap_total_kib * 20 {
+            "warn"
+        } else {
+            ""
+        };
+        let mut issues: Vec<(&'static str, String)> = Vec::new();
+        if !n.agent_online {
+            issues.push(("err", "not answering".into()));
+        } else {
+            if !mem_tone.is_empty() {
+                issues.push((mem_tone, format!("memory {mem_pct}% used")));
+            }
+            if !disk_tone.is_empty() {
+                issues.push((disk_tone, format!("disk {disk_pct}% full")));
+            }
+            if !cpu_tone.is_empty() {
+                issues.push((cpu_tone, format!("CPU {cpu_pct}% busy")));
+            }
+            if !swap_tone.is_empty() {
+                issues.push((
+                    swap_tone,
+                    format!(
+                        "swapping ({} in swap)",
+                        fmt_bytes(&(n.swap_used_kib * 1024))
+                    ),
+                ));
+            }
+            if n.oom_kills_24h > 0 {
+                issues.push((
+                    "warn",
+                    format!(
+                        "{} out-of-memory kill{} in 24 h",
+                        n.oom_kills_24h,
+                        if n.oom_kills_24h == 1 { "" } else { "s" }
+                    ),
+                ));
+            }
+        }
+        // Stable: errors before warnings, original order within each.
+        issues.sort_by_key(|(t, _)| if *t == "err" { 0 } else { 1 });
+        NodeView {
+            node_id: n.node_id.clone(),
+            label: n.label.clone(),
+            online: n.agent_online,
+            cpu_pct_x100: n.cpu_pct_x100,
+            cpu_tone,
+            mem_pct,
+            mem_tone,
+            disk_pct,
+            disk_tone,
+            swap_tone,
+            net_rx_bps: n.net_rx_bps,
+            net_tx_bps: n.net_tx_bps,
+            hostings_count: n.hostings_count,
+            agent_version: n.agent_version.clone(),
+            issues,
+        }
+    }
+
+    /// The worst tone among this node's issues, `""` when there are none.
+    pub fn tone(&self) -> &'static str {
+        self.issues.first().map(|(t, _)| *t).unwrap_or("")
+    }
+}
+
+/// The one-line answer at the top of the page: is anything hot, and
+/// where. Names the node only when there is more than one to tell apart.
+#[derive(Debug, Clone)]
+pub struct Verdict {
+    pub tone: &'static str,
+    pub text: String,
+}
+
+pub fn build_verdict(nodes: &[NodeView]) -> Verdict {
+    let multi = nodes.len() > 1;
+    let mut parts: Vec<(&'static str, String)> = Vec::new();
+    for n in nodes {
+        for (t, msg) in &n.issues {
+            let text = if multi {
+                format!("{}: {msg}", n.label)
+            } else {
+                msg.clone()
+            };
+            parts.push((t, text));
+        }
+    }
+    if parts.is_empty() {
+        let text = match nodes.len() {
+            0 => "No node has reported yet".to_string(),
+            1 => "Healthy — nothing running hot".to_string(),
+            n => format!("All {n} nodes healthy — nothing running hot"),
+        };
+        return Verdict {
+            tone: if nodes.is_empty() { "" } else { "ok" },
+            text,
+        };
+    }
+    parts.sort_by_key(|(t, _)| if *t == "err" { 0 } else { 1 });
+    let tone = parts[0].0;
+    // Three is what fits on one line; the rest is a count, and the node
+    // table below shows every one of them in colour anyway.
+    let shown: Vec<String> = parts.iter().take(3).map(|(_, s)| s.clone()).collect();
+    let mut text = shown.join(" · ");
+    if parts.len() > 3 {
+        text.push_str(&format!(" · +{} more", parts.len() - 3));
+    }
+    Verdict { tone, text }
 }
 
 /// Build a synthetic cluster-wide ClusterStats by fan-out:
@@ -1521,5 +1709,73 @@ mod tests {
         assert_eq!(s.peak_label, "1.0");
         // Avg = (-1 + 0 + 1)/3 = 0
         assert_eq!(s.avg_label, "0.0");
+    }
+
+    fn node(label: &str) -> NodeStats {
+        let mut n = offline_placeholder(label);
+        n.agent_online = true;
+        n.mem_total_kib = 1000;
+        n.mem_used_kib = 400;
+        n.node_disk_total_bytes = 1000;
+        n.total_disk_bytes = 300;
+        n.cpu_pct_x100 = 1_000;
+        n
+    }
+
+    #[test]
+    fn tone_for_thresholds_are_inclusive() {
+        assert_eq!(tone_for(79, 80, 90), "");
+        assert_eq!(tone_for(80, 80, 90), "warn");
+        assert_eq!(tone_for(90, 80, 90), "err");
+    }
+
+    #[test]
+    fn calm_node_has_no_tone_and_a_healthy_verdict() {
+        let v = NodeView::from_stats(&node("s4"));
+        assert_eq!(v.tone(), "");
+        assert_eq!(v.mem_pct, 40);
+        assert_eq!(v.disk_pct, 30);
+        let verdict = build_verdict(&[v]);
+        assert_eq!(verdict.tone, "ok");
+        assert!(verdict.text.starts_with("Healthy"));
+    }
+
+    #[test]
+    fn verdict_names_nodes_only_when_there_are_several_and_puts_errors_first() {
+        let mut hot = node("web1");
+        hot.mem_used_kib = 950; // 95% → err
+        hot.oom_kills_24h = 2; // warn
+        let single = build_verdict(&[NodeView::from_stats(&hot)]);
+        assert_eq!(single.tone, "err");
+        assert_eq!(
+            single.text,
+            "memory 95% used · 2 out-of-memory kills in 24 h"
+        );
+
+        let mut warm = node("web2");
+        warm.total_disk_bytes = 850; // 85% → warn
+        let mut down = node("web3");
+        down.agent_online = false;
+        let multi = build_verdict(&[NodeView::from_stats(&warm), NodeView::from_stats(&down)]);
+        assert_eq!(multi.tone, "err");
+        assert_eq!(multi.text, "web3: not answering · web2: disk 85% full");
+    }
+
+    #[test]
+    fn verdict_caps_at_three_issues() {
+        let mut n = node("a");
+        n.mem_used_kib = 999;
+        n.total_disk_bytes = 999;
+        n.cpu_pct_x100 = 9_900;
+        n.oom_kills_24h = 1;
+        let v = build_verdict(&[NodeView::from_stats(&n)]);
+        assert!(v.text.ends_with(" · +1 more"), "{}", v.text);
+    }
+
+    #[test]
+    fn offline_node_reports_only_that_it_is_down() {
+        let v = NodeView::from_stats(&offline_placeholder("x"));
+        assert_eq!(v.issues.len(), 1);
+        assert_eq!(v.tone(), "err");
     }
 }
