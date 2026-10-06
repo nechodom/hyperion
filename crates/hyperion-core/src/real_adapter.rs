@@ -1052,6 +1052,7 @@ impl AdapterPort for RealAdapter {
             preview_server_name: preview.as_ref().map(|p| p.server_name.as_str()),
             preview_cert_path: preview.as_ref().map(|p| p.cert_path.as_str()),
             preview_cert_key_path: preview.as_ref().map(|p| p.key_path.as_str()),
+            modsec_available: hyperion_adapters::modsec::module_available(),
         };
         hyperion_adapters::nginx::write_vhost(&self.nginx_paths, &input).await?;
 
