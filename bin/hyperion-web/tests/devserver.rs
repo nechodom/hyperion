@@ -587,6 +587,101 @@ async fn seed_demo(svc: &StubService) {
         .expect("jobs");
     }
 
+    // Care packages: two plans on sale, one retired, held by most sites;
+    // part of this month's checks ticked so the roster has both states.
+    {
+        use hyperion_types::package::{
+            BackupCadence, FeatureToggle, PackageFeatures, ReportCadence,
+        };
+        use hyperion_types::PackageInput;
+        let care = svc
+            .package_create(PackageInput {
+                name: "Care plan".into(),
+                description:
+                    "WordPress updates, daily backups, uptime monitoring and a monthly report."
+                        .into(),
+                price_minor: Some(49_000),
+                price_currency: Some("Kč".into()),
+                price_interval: Some("monthly".into()),
+                letters_lang: "cs".into(),
+                features: PackageFeatures {
+                    wp_auto_update: FeatureToggle::On,
+                    monitoring: FeatureToggle::On,
+                    integrity_scan: FeatureToggle::On,
+                    backup_cadence: BackupCadence::Daily,
+                    backup_keep_days: 30,
+                    report_cadence: ReportCadence::Monthly,
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .await
+            .expect("care plan");
+        let basic = svc
+            .package_create(PackageInput {
+                name: "Backup only".into(),
+                description: "Weekly off-site backups.".into(),
+                price_minor: Some(150_000),
+                price_currency: Some("Kč".into()),
+                price_interval: Some("yearly".into()),
+                report_omit: "attacks,traffic,performance,uptime".into(),
+                features: PackageFeatures {
+                    backup_cadence: BackupCadence::Weekly,
+                    report_cadence: ReportCadence::Quarterly,
+                    hardening: FeatureToggle::Off,
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .await
+            .expect("backup plan");
+        svc.package_create(PackageInput {
+            name: "Legacy support".into(),
+            enabled: false,
+            features: PackageFeatures {
+                monitoring: FeatureToggle::On,
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .await
+        .expect("legacy plan");
+        let holders = [
+            (0, &care),
+            (1, &care),
+            (2, &basic),
+            (3, &care),
+            (4, &care),
+            (6, &basic),
+        ];
+        for (n, pkg) in holders {
+            let sel = hyperion_rpc::wire::HostingSelector::Id(HostingId(ids[n].clone()));
+            let _ = svc
+                .package_activate(
+                    sel,
+                    pkg.id,
+                    Some(pkg.clone()),
+                    Some(now - (n as i64 + 2) * 40 * 86_400),
+                )
+                .await;
+        }
+        let period = hyperion_types::care_check::period_key(now);
+        let live = hyperion_types::care_check::builtin_check_items();
+        for (n, ticks) in [(0usize, 4usize), (1, 4), (3, 2)] {
+            let mut checks = hyperion_types::care_check::CareServiceChecks::parse("");
+            for item in live.iter().take(ticks) {
+                checks.record(&period, &item.id, true, "kevin", "", now, &live);
+            }
+            sqlx::query("INSERT INTO hosting_kv (hosting_id, key, value, updated_at) VALUES (?, 'care_service_checks', ?, ?)")
+                .bind(&ids[n])
+                .bind(checks.to_json())
+                .bind(now)
+                .execute(pool)
+                .await
+                .expect("care checks");
+        }
+    }
+
     // The 15 s network sampler, last hour.
     for k in 0..240i64 {
         let i = (240 - k) as f64;

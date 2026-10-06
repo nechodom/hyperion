@@ -603,6 +603,19 @@ pub fn previous_period(period: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_charge_spreads_over_a_month_by_its_interval() {
+        let c = |m: i64, iv: &str| super::CareCharge {
+            price_minor: m,
+            currency: "Kč".into(),
+            interval: iv.into(),
+        };
+        assert_eq!(c(49_000, "monthly").monthly_minor(), Some(49_000));
+        assert_eq!(c(30_000, "quarterly").monthly_minor(), Some(10_000));
+        assert_eq!(c(120_000, "yearly").monthly_minor(), Some(10_000));
+        assert_eq!(c(1, "fortnightly").monthly_minor(), None);
+    }
+
     /// A blob written by any version since v0.54 must survive the shape change.
     ///
     /// `parse` was `from_str(raw).unwrap_or_default()` — right for corruption,
@@ -1165,10 +1178,47 @@ pub struct CareOverviewRow {
     /// Whether the previous month closed with work left — the state worth
     /// surfacing, because it can no longer be fixed.
     pub prev_outstanding: usize,
+    /// When the earliest plan this site holds came into force (its operator-
+    /// set start date, else the activation). `None` from a node that predates
+    /// the field — the panel shows "—" rather than guessing.
+    #[serde(default)]
+    pub since: Option<i64>,
+    /// The soonest billing reminder across the site's plans. `None` = no plan
+    /// carries an interval, or an older node.
+    #[serde(default)]
+    pub next_billing_at: Option<i64>,
+    /// What the site pays, one entry per priced plan, as SNAPSHOTTED at
+    /// activation — the customer's agreed price, not today's list price.
+    /// Empty from an older node, and for plans sold without a price.
+    #[serde(default)]
+    pub charges: Vec<CareCharge>,
 }
 
 impl CareOverviewRow {
     pub fn is_complete(&self) -> bool {
         self.outstanding.is_empty()
+    }
+}
+
+/// One priced plan on one site: the snapshot an activation carries.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CareCharge {
+    pub price_minor: i64,
+    pub currency: String,
+    /// `monthly` / `quarterly` / `yearly`.
+    pub interval: String,
+}
+
+impl CareCharge {
+    /// The price spread over one month, in minor units. `None` for an interval
+    /// this does not know how to divide — better left out of a total than
+    /// counted as monthly.
+    pub fn monthly_minor(&self) -> Option<i64> {
+        match self.interval.as_str() {
+            "monthly" => Some(self.price_minor),
+            "quarterly" => Some(self.price_minor / 3),
+            "yearly" => Some(self.price_minor / 12),
+            _ => None,
+        }
     }
 }
