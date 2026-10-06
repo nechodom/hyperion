@@ -274,7 +274,31 @@ async fn send_inner(
         .await
         .map_err(|e| AdapterError::Other(format!("smtp send: {e}")))?;
 
-    Ok(format!("{:?}", response.code()))
+    Ok(smtp_reply_line(
+        &response.code().to_string(),
+        response.first_line(),
+    ))
+}
+
+/// The relay's reply as one readable line: "250 2.0.0 Ok: queued as 4ZQ1x".
+///
+/// This used to be `format!("{:?}", code)`, which stored
+/// `Code { severity: PositiveCompletion, … }` — no digits, and none of the
+/// text after them. That text is the useful half: the queue id is what you
+/// grep the relay's own log for when a "sent" mail never arrived.
+fn smtp_reply_line(code: &str, first_line: Option<&str>) -> String {
+    const MAX: usize = 160;
+    let text = first_line.map(str::trim).unwrap_or_default();
+    let line = if text.is_empty() {
+        code.to_string()
+    } else {
+        format!("{code} {text}")
+    };
+    if line.chars().count() > MAX {
+        format!("{}…", line.chars().take(MAX).collect::<String>())
+    } else {
+        line
+    }
 }
 
 #[cfg(test)]
@@ -282,6 +306,7 @@ mod tests {
     use super::build_message;
     use super::is_loopback_host;
     use super::normalize_smtp_host;
+    use super::smtp_reply_line;
     use super::LOGO_CID;
 
     #[test]
@@ -407,6 +432,22 @@ mod tests {
         assert_eq!(
             normalize_smtp_host("host:notaport"),
             ("host:notaport".into(), None)
+        );
+    }
+
+    #[test]
+    fn smtp_reply_keeps_the_code_and_the_queue_id() {
+        assert_eq!(
+            smtp_reply_line("250", Some("2.0.0 Ok: queued as 4ZQ1x")),
+            "250 2.0.0 Ok: queued as 4ZQ1x"
+        );
+        assert_eq!(smtp_reply_line("250", None), "250");
+        assert_eq!(smtp_reply_line("250", Some("   ")), "250");
+        let long = "x".repeat(400);
+        assert_eq!(
+            smtp_reply_line("250", Some(&long)).chars().count(),
+            161,
+            "capped at 160 chars plus the ellipsis"
         );
     }
 }

@@ -239,8 +239,16 @@ impl hyperion_core::AdapterPort for StubAdapters {
 /// Start a stub hyperion-agent on a temp Unix socket. Returns the socket path
 /// and the temp dir guard (drop it last).
 async fn start_agent() -> (PathBuf, tempfile::TempDir) {
+    let (path, dir, _pool) = start_agent_with_pool().await;
+    (path, dir)
+}
+
+/// [`start_agent`] that also hands back the agent's database, for tests that
+/// seed rows no RPC writes directly (the email log).
+async fn start_agent_with_pool() -> (PathBuf, tempfile::TempDir, sqlx::SqlitePool) {
     let dir = tempfile::tempdir().expect("dir");
     let pool = open_memory().await.expect("memory db");
+    let db = pool.clone();
     let secrets = Arc::new(SecretsStore::new(dir.path().join("secrets")));
     let svc = Arc::new(HostingService::<StubAdapters> {
         pool,
@@ -276,7 +284,7 @@ async fn start_agent() -> (PathBuf, tempfile::TempDir) {
         .expect("bind");
     tokio::spawn(srv.run());
     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    (path, dir)
+    (path, dir, db)
 }
 
 fn build_app(agent_socket: PathBuf, admin: AdminUser) -> axum::Router {
@@ -1331,14 +1339,13 @@ async fn viewer_cannot_delete_hosting_via_direct_post() {
     );
 }
 
-/// /emails renders the global email log table — even when the
-/// agent has zero rows, the page is reachable + shows the empty
-/// state with a pointer to /settings. Locks in the route + the
-/// "show migration error hint" path.
+/// /emails: empty state first, then a seeded log — kind labels instead of
+/// raw ids, the failure verdict, the outcome/search filters, and an old
+/// row's `Debug`-formatted SMTP code decoded back to "250".
 #[tokio::test]
 async fn emails_page_renders_with_filters() {
     let admin = admin_user::create("kevin", "good-pw").expect("create");
-    let (sock, _d) = start_agent().await;
+    let (sock, _d, pool) = start_agent_with_pool().await;
     let app = build_app(sock, admin);
     let login_body = b"username=kevin&password=good-pw&next=/";
     let resp = app
@@ -1354,28 +1361,106 @@ async fn emails_page_renders_with_filters() {
         .await
         .expect("login");
     let cookie = extract_cookie(&resp);
-    let resp = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri("/emails")
-                .header(header::COOKIE, &cookie)
-                .body(Body::empty())
-                .unwrap(),
+    let get = |uri: &'static str| {
+        let app = app.clone();
+        let cookie = cookie.clone();
+        async move {
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .uri(uri)
+                        .header(header::COOKIE, &cookie)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .expect("call");
+            assert_eq!(resp.status(), StatusCode::OK, "{uri}");
+            body_string(resp).await
+        }
+    };
+
+    let body = get("/emails").await;
+    assert!(body.contains("Email log"), "missing page title");
+    assert!(body.contains("No emails sent yet"), "missing empty state");
+
+    let now = hyperion_types::now_secs();
+    let seed = [
+        (
+            "test",
+            "ok",
+            "Hyperion test email",
+            None,
+            Some("Code { severity: PositiveCompletion, category: MailSystem, detail: Zero }"),
+            now - 300,
+        ),
+        (
+            "monitor",
+            "failed",
+            "Site down: shop.example.cz",
+            Some("smtp send: Connection refused (os error 111)"),
+            None,
+            now - 120,
+        ),
+        (
+            "care_report",
+            "ok",
+            "Monthly care report",
+            None,
+            Some("250 2.0.0 Ok: queued as 4ZQ1x"),
+            now - 60,
+        ),
+    ];
+    for (kind, st, subject, err, code, at) in seed {
+        hyperion_state::email_log::append(
+            &pool,
+            None,
+            "ops@example.cz",
+            subject,
+            "body",
+            kind,
+            st,
+            err,
+            code,
+            at,
         )
         .await
-        .expect("call");
-    assert_eq!(resp.status(), StatusCode::OK);
-    let body = body_string(resp).await;
-    assert!(body.contains("Email log"), "missing page title");
+        .expect("seed email");
+    }
+
+    let body = get("/emails").await;
+    for label in ["Test email", "Uptime alert", "Care report"] {
+        assert!(body.contains(label), "kind label {label} missing");
+    }
     assert!(
-        body.contains("/emails?kind=test"),
-        "kind=test filter missing"
+        body.contains("1 email failed out of 3 in the last 24 hours"),
+        "failure verdict missing"
     );
+    assert!(
+        !body.contains("PositiveCompletion"),
+        "legacy SMTP code must be decoded, not printed"
+    );
+    assert!(body.contains("queued as 4ZQ1x"), "relay reply missing");
     assert!(
         body.contains("/emails?state=failed"),
-        "state=failed filter missing"
+        "failed segment missing"
     );
+
+    let body = get("/emails?state=failed").await;
+    assert!(body.contains("Site down: shop.example.cz"));
+    assert!(!body.contains("Monthly care report"), "state filter leaked");
+    // Segment counts are taken before the outcome filter: Sent still says 2.
+    assert!(body.contains("Sent <span class=\"seg-count\">2</span>"));
+
+    let body = get("/emails?q=queued+as").await;
+    assert!(
+        body.contains("Monthly care report"),
+        "search on reply missing"
+    );
+
+    let body = get("/emails?q=refused").await;
+    assert!(body.contains("Site down: shop.example.cz"));
+    assert!(!body.contains("Hyperion test email"), "search leaked");
 }
 
 /// Migration bundle download endpoint refuses requests without a

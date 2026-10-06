@@ -870,6 +870,71 @@ details.svc-fold .svc-row .pill.muted { display: none; }
   .jobs-filter select { max-width: none; flex: 1 1 100%; }
 }
 
+/* /emails — one folding row per email inside a day .group. The summary is
+   the scan line (outcome, subject + type, recipient + site, first line of the
+   error or body, when); the fold holds the full error, relay reply and body. */
+.group > .mail-row { border-bottom: 1px solid var(--border); }
+.group > .mail-row:last-child { border-bottom: none; }
+.mail-row > summary {
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
+  padding: 0.75rem 1.25rem;
+  list-style: none;
+  cursor: pointer;
+  transition: background var(--t-fast);
+}
+.mail-row > summary::-webkit-details-marker { display: none; }
+.mail-row > summary:hover,
+.mail-row[open] > summary { background: var(--surface-2); }
+.mail-row .mail-state { flex: none; width: 4.5rem; display: flex; }
+.mail-row .mail-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 0.2rem; }
+.mail-row .mail-title { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.5rem; overflow-wrap: anywhere; }
+.mail-row .mail-sub { display: flex; flex-wrap: wrap; gap: 0.35rem; font-size: 0.8rem; color: var(--text-dim); }
+.mail-row .mail-to { font-family: var(--font-mono); font-size: 0.78rem; overflow-wrap: anywhere; }
+.mail-row .mail-line { font-size: 0.8rem; color: var(--text-soft); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mail-row .mail-err { color: var(--danger); }
+.mail-row .mail-meta {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.15rem;
+  font-size: 0.78rem;
+  color: var(--text-soft);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.mail-row .mail-meta > :first-child { color: var(--text-dim); }
+.mail-detail {
+  display: grid;
+  grid-template-columns: 7rem 1fr;
+  gap: 0.45rem 1rem;
+  margin: 0;
+  padding: 0.9rem 1.25rem 1rem calc(1.25rem + 4.5rem + 0.9rem);
+  font-size: 0.85rem;
+  border-top: 1px solid var(--border);
+}
+.mail-detail dt { color: var(--text-soft); }
+.mail-detail dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.mail-detail code { font-size: 0.8rem; }
+.mail-pre {
+  margin: 0;
+  font: 0.8rem/1.5 var(--font-mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.mail-pre.mail-err { color: var(--danger); }
+.mail-days > .group + .group { margin-top: var(--group-gap); }
+.mail-scope { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; margin: -0.25rem 0 1rem; font-size: 0.85rem; }
+@media (max-width: 640px) {
+  .mail-row > summary { flex-wrap: wrap; gap: 0.4rem 0.75rem; padding: 0.75rem 1rem; }
+  .mail-row .mail-main { flex-basis: 100%; order: 2; }
+  .mail-row .mail-meta { flex-direction: row; gap: 0.5rem; margin-left: auto; }
+  .mail-detail { grid-template-columns: 1fr; gap: 0.15rem; padding: 0.75rem 1rem; }
+  .mail-detail dd + dt { margin-top: 0.4rem; }
+}
+
 /* /admin/users — one grouped panel; each user is a details row whose summary
    is the scan line and whose body holds role / sign-in / password side by
    side, with delete split off at the bottom. */
