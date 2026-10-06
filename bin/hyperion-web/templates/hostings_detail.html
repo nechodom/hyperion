@@ -835,6 +835,7 @@
         {% if !protection_applies %}<span class="pill neutral">not applied to a {% if detail.kind == "redirect" %}redirect{% else %}reverse proxy{% endif %}</span>
         {% else %}
         <span class="pill {% if waf_on %}ok{% else %}warn{% endif %}">{{ waf_summary }}</span>
+        {% if crs.mode == "block" %}<span class="pill ok">OWASP CRS blocking</span>{% else if crs.mode == "detect" %}<span class="pill neutral">OWASP CRS detecting</span>{% endif %}
         {% if !detail.vhost_options.wp_admin_allowlist.trim().is_empty() %}<span class="pill ok">admin IP lock</span>{% else %}<span class="pill neutral">admin open</span>{% endif %}
         {% endif %}
       </div>
@@ -2794,6 +2795,141 @@
       </button>
     </div>
   </form>
+
+  {# OWASP Core Rule Set — its own forms (a form cannot nest inside the one
+     above): the sub-form saves with section=crs, exclusions and the engine
+     install post to their own routes. #}
+  <div id="crs" style="margin-top:1.2rem;padding-top:1rem;border-top:1px solid var(--border)">
+    <div class="setting-group">OWASP Core Rule Set (ModSecurity)</div>
+    {% if let Some(m) = modsec %}
+    {% if !m.available() %}
+    <p class="s-help">
+      The full rule set: ModSecurity checks every request — bodies, headers and encodings
+      included — against the OWASP Core Rule Set's attack signatures, which catches what the rules
+      above cannot. It costs memory on this node (roughly 20–50 MB per nginx worker while any site
+      uses it) and a few milliseconds per request. Sites start in <em>Detection only</em>: nothing
+      is refused until you switch a site to blocking.
+    </p>
+    {% if can_install_modsec %}
+    <form method="post" action="/hostings/modsec-install" style="margin:0.4rem 0 0"
+          data-confirm-title="Install ModSecurity on this site's node?"
+          data-confirm-body="Installs the Debian packages libnginx-mod-http-modsecurity and modsecurity-crs on the node that serves this site, then checks that nginx still loads its configuration. No site changes until you turn the rule set on for it."
+          data-confirm-confirm-label="Install">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
+      <button class="btn primary small" type="submit">Install ModSecurity + OWASP CRS on this node</button>
+    </form>
+    {% else %}
+    <p class="note">ModSecurity is not installed on this site's node. Ask an administrator to install it.</p>
+    {% endif %}
+    {% else %}
+    <form method="post" action="/hostings/vhost-options" hx-post="/hostings/vhost-options" hx-swap="none">
+      <input type="hidden" name="_csrf" value="{{ csrf_vhost_options }}">
+      <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
+      <input type="hidden" name="section" value="crs">
+      {% if !target_node.is_empty() %}
+      <input type="hidden" name="target_node" value="{{ target_node }}">
+      {% endif %}
+      <div class="setting-list">
+        <div class="setting-row stacked">
+          <label class="s-label" for="crs_mode">Mode</label>
+          <p class="s-help">
+            <strong>Detection only</strong> runs every rule and records what it <em>would</em> refuse under
+            <em>WAF activity</em>, refusing nothing — run it for a few days of real traffic first.
+            <strong>Blocking</strong> refuses a request once its anomaly score reaches the threshold.
+            Never counts towards a firewall ban.
+          </p>
+          <div class="s-field">
+            <select id="crs_mode" name="crs_mode" style="max-width:20rem">
+              <option value="off" {% if crs.mode == "off" %}selected{% endif %}>Off</option>
+              <option value="detect" {% if crs.mode == "detect" %}selected{% endif %}>Detection only</option>
+              <option value="block" {% if crs.mode == "block" %}selected{% endif %}>Blocking</option>
+            </select>
+          </div>
+        </div>
+        <div class="setting-row">
+          <label class="s-label" for="crs_paranoia">Paranoia level</label>
+          <p class="s-help">1 is CRS's default and right for almost every site. 2 catches more and refuses more legitimate requests — expect to add exclusions.</p>
+          <div class="s-control">
+            <select id="crs_paranoia" name="crs_paranoia" style="width:auto">
+              <option value="1" {% if crs.paranoia == 1 %}selected{% endif %}>1 — standard</option>
+              <option value="2" {% if crs.paranoia == 2 %}selected{% endif %}>2 — stricter</option>
+            </select>
+          </div>
+        </div>
+        <div class="setting-row">
+          <label class="s-label" for="crs_threshold">Anomaly threshold</label>
+          <p class="s-help">How much suspicion refuses a request. 5 refuses on a single critical match; a higher value needs several rules to agree.</p>
+          <div class="s-control">
+            <select id="crs_threshold" name="crs_threshold" style="width:auto">
+              <option value="5" {% if crs.threshold == 5 %}selected{% endif %}>5 — standard</option>
+              <option value="10" {% if crs.threshold == 10 %}selected{% endif %}>10 — relaxed</option>
+              <option value="20" {% if crs.threshold == 20 %}selected{% endif %}>20 — lenient</option>
+            </select>
+          </div>
+        </div>
+        <div class="setting-row">
+          <label class="s-label" for="crs_wordpress">WordPress exclusions</label>
+          <p class="s-help">CRS's own exclusion set for WordPress: editing posts, the customizer, comments and the REST API stop tripping rules. Leave on for WordPress sites.</p>
+          <div class="s-control"><input type="checkbox" class="switch" id="crs_wordpress" name="crs_wordpress" value="on"
+               {% if crs.wordpress %}checked{% endif %}></div>
+        </div>
+      </div>
+      <div class="form-footer">
+        <span class="note">OWASP CRS {{ m.crs_version }} · in use by {{ m.active_sites }} site{% if m.active_sites != 1 %}s{% endif %} on this node.</span>
+        <button class="btn primary" type="submit">Save rule set</button>
+      </div>
+    </form>
+
+    <div class="setting-group">Rule exclusions</div>
+    {% if crs.exclusions.is_empty() %}
+    <p class="text-soft small" style="margin:0 0 0.6rem">
+      None. When a legitimate request is refused, "Allow this" on its WAF activity entry turns off
+      exactly the rules it matched, for its path only.
+    </p>
+    {% else %}
+    <table class="table small" style="margin:0 0 0.6rem">
+      <thead><tr><th>Rules</th><th>Where</th><th></th></tr></thead>
+      <tbody>
+        {% for e in crs.exclusions %}
+        <tr>
+          <td class="mono" style="font-size:0.78rem">{{ e.rules }}</td>
+          <td class="mono" style="font-size:0.78rem">{% if e.path.is_empty() %}<span class="text-soft">the whole site</span>{% else %}{{ e.path }}…{% endif %}</td>
+          <td style="text-align:right">
+            <form method="post" action="/hostings/crs-exclusion" hx-post="/hostings/crs-exclusion" hx-swap="none" style="margin:0">
+              <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+              <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
+              <input type="hidden" name="op" value="remove">
+              <input type="hidden" name="index" value="{{ e.index }}">
+              <button class="btn ghost small" type="submit">Remove</button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+    <form method="post" action="/hostings/crs-exclusion" hx-post="/hostings/crs-exclusion" hx-swap="none">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
+      <input type="hidden" name="op" value="add">
+      <div class="field-row">
+        <div class="field" style="flex:1">
+          <label for="crs_add_rules">Rule ids <span class="hint">e.g. 942100 941160</span></label>
+          <input type="text" id="crs_add_rules" name="rules" class="mono" inputmode="numeric" maxlength="200" required>
+        </div>
+        <div class="field" style="flex:2">
+          <label for="crs_add_path">Only for paths starting with <span class="hint">empty = the whole site</span></label>
+          <input type="text" id="crs_add_path" name="path" class="mono" maxlength="200" placeholder="/wp-admin/admin-ajax.php">
+        </div>
+      </div>
+      <button class="btn small" type="submit" style="margin-top:0.4rem">Add exclusion</button>
+    </form>
+    {% endif %}
+    {% else %}
+    <p class="s-help">This site's node did not report a ModSecurity engine — it probably runs an older Hyperion. Update the node to use the Core Rule Set.</p>
+    {% endif %}
+  </div>
   {% endif %}
 </div>
 

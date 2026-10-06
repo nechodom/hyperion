@@ -363,6 +363,19 @@ pub fn tag_is_detection(tag: &str) -> bool {
     tag.starts_with("crs_") && tag.ends_with("_detected")
 }
 
+/// The rule ids in a CRS hit's `detail` ("942100 942130 · score 10"),
+/// limited to the ones an exclusion may name — what "Allow this" excludes.
+pub fn detail_rule_ids(detail: &str) -> Vec<u32> {
+    detail
+        .split('·')
+        .next()
+        .unwrap_or("")
+        .split_whitespace()
+        .filter_map(|t| t.parse().ok())
+        .filter(|id| excludable_rule(*id))
+        .collect()
+}
+
 /// What a node reports about its ModSecurity engine.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct ModsecStatus {
@@ -486,6 +499,16 @@ mod tests {
             path: String::new(),
         }];
         assert!(validate_exclusions(&empty).is_err());
+    }
+
+    #[test]
+    fn detail_ids_are_the_excludable_ones() {
+        assert_eq!(
+            detail_rule_ids("942100 942130 · score 10"),
+            vec![942100, 942130]
+        );
+        assert_eq!(detail_rule_ids("949110 901100"), Vec::<u32>::new());
+        assert!(detail_rule_ids("").is_empty());
     }
 
     #[test]

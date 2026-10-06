@@ -274,6 +274,14 @@ pub fn build_router(state: SharedState) -> Router {
             post(handlers::hostings::post_waf_rule),
         )
         .route(
+            "/hostings/crs-exclusion",
+            post(handlers::hostings::post_crs_exclusion),
+        )
+        .route(
+            "/hostings/modsec-install",
+            post(handlers::hostings::post_modsec_install),
+        )
+        .route(
             "/hostings/restore-upload",
             post(handlers::hostings::post_restore_upload)
                 .layer(axum::extract::DefaultBodyLimit::max(2 * 1024 * 1024 * 1024)),

@@ -556,18 +556,6 @@ pub fn parse_audit_line(line: &str) -> Option<(String, WafHit)> {
     ))
 }
 
-/// The rule ids in a hit's `detail` ("942100 942130 · score 10").
-pub fn detail_rule_ids(detail: &str) -> Vec<u32> {
-    detail
-        .split('·')
-        .next()
-        .unwrap_or("")
-        .split_whitespace()
-        .filter_map(|t| t.parse().ok())
-        .filter(|id| crs::excludable_rule(*id))
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -622,12 +610,11 @@ mod tests {
 
     #[test]
     fn detail_ids_round_trip_for_allow_this() {
+        let (_, hit) = parse_audit_line(FIXTURE.lines().nth(1).expect("xss")).expect("hit");
         assert_eq!(
-            detail_rule_ids("942100 942130 · score 10"),
-            vec![942100, 942130]
+            crs::detail_rule_ids(&hit.detail),
+            vec![941100, 941110, 941160]
         );
-        assert_eq!(detail_rule_ids("949110 901100"), Vec::<u32>::new());
-        assert!(detail_rule_ids("").is_empty());
     }
 
     #[test]
