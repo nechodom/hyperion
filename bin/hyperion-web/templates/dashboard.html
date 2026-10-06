@@ -4,11 +4,22 @@
 <div class="page-header">
   <div>
     <h1>Welcome back, {{ username }}.</h1>
+    {#- Which box this is: name, public IPv4 (click-to-copy — it is what goes
+        into an A record, a firewall allow-list or a migration ticket; the
+        global data-copy driver in base.html does the copying) and the agent
+        version. Tenant roles see the plain line: the node is not theirs. -#}
     <div class="subtitle">
-      {% if let Some(c) = cluster %}
-        {{ c.total_active }} active · {{ c.total_hostings }} total hostings · {{ c.nodes.len() }} node{% if c.nodes.len() != 1 %}s{% endif %}
+      {% if is_tenant %}
+        Your websites at a glance.
+      {% else if let Some(info) = agent_info %}
+        {{ info.hostname }}
+        {% if let Some(ip) = info.public_ipv4 %}
+          · <code data-copy="{{ ip }}" title="Click to copy the server's public IPv4" style="cursor:pointer;font-size:0.82rem">{{ ip }}</code>
+        {% endif %}
+        · Agent {{ info.version }}
+        {% if let Some(c) = cluster %}{% if c.nodes.len() > 1 %} · {{ c.nodes.len() }} nodes{% endif %}{% endif %}
       {% else %}
-        Your cluster at a glance.
+        <span style="color:var(--danger)">Agent offline</span> · socket unreachable
       {% endif %}
     </div>
   </div>
@@ -21,45 +32,6 @@
   </div>
 </div>
 
-{# Quick actions row — the dashboard's job is to get the operator
-   to the next click as fast as possible. These short-cuts cover
-   ~80% of routine work. Hidden on the customer role since they
-   only care about their own hostings. #}
-<div class="quick-actions" data-hide-roles="customer" style="display:flex;flex-wrap:wrap;gap:0.5rem;margin-bottom:1rem">
-  <a href="/hostings" class="btn small">
-    <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
-    All hostings
-  </a>
-  <a href="/monitoring" class="btn small" data-require-caps="monitoring_view" data-require-scope-all>
-    <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
-    Monitoring
-  </a>
-  <a href="/stats" class="btn small" data-require-caps="monitoring_view" data-require-scope-all>
-    <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
-    Stats
-  </a>
-  <a href="/services" class="btn small" data-require-caps="services_view">
-    <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-    Services
-  </a>
-  <a href="/audit" class="btn small" data-require-caps="audit_view">
-    <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-    Audit log
-  </a>
-  <a href="/install" class="btn small" data-role-min="super_admin">
-    <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>
-    Nodes
-  </a>
-  <a href="/profiles" class="btn small" data-require-caps="profiles_manage">
-    <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 7h-9"/><path d="M14 17H5"/><circle cx="17" cy="17" r="3"/><circle cx="7" cy="7" r="3"/></svg>
-    Profiles &amp; limits
-  </a>
-  <a href="/trash" class="btn small" data-require-caps="trash_manage">
-    <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
-    Trash
-  </a>
-</div>
-
 {% if let Some(e) = error %}
   <div class="flash error">
     <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
@@ -68,19 +40,25 @@
 {% endif %}
 {% include "_node_auth_banner.html" %}
 
-{% if update_status.update_available %}
-  <div class="flash warn" style="margin-bottom:1rem">
-    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-    <div class="flash-body">
-      <strong>Update available.</strong>
-      This node runs <code>{{ update_current_short }}</code>;
-      the latest release is <code>{{ update_latest_short }}</code>
-      (tag <code>{{ update_status.latest_tag }}</code>).
-      To upgrade, run <code>sudo /opt/hyperion/packaging/install/update.sh</code> on this node.
-    </div>
-  </div>
-{% endif %}
 
+{# Needs-attention strip, most urgent first: services down (the sites are
+   affected now), then node alerts (errors sorted ahead of warnings by the
+   handler), then the release notice. #}
+{# Service health summary banner — only when something is down. Links to the full /services page. #}
+{% if services_health.critical_down > 0 || services_health.warn_down > 0 %}
+<div class="flash {% if services_health.critical_down > 0 %}error{% else %}warn{% endif %}" style="margin-bottom:1rem">
+  <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+  <div class="flash-body">
+    {% if services_health.critical_down > 0 %}
+      <strong>{{ services_health.critical_down }} critical service(s) down.</strong>
+    {% endif %}
+    {% if services_health.warn_down > 0 %}
+      {{ services_health.warn_down }} optional service(s) degraded.
+    {% endif %}
+    <a href="/services" style="color:inherit;text-decoration:underline;margin-left:0.4rem">Review services →</a>
+  </div>
+</div>
+{% endif %}
 {% for a in alerts %}
   {# Keep the dashboard tidy: show the first 3 notifications, fold the rest into
      an expander so a cluster full of (e.g.) self-signed-cert warnings doesn't
@@ -103,74 +81,64 @@
   </div>
   {% if loop.last && alerts.len() > 3 %}</details>{% endif %}
 {% endfor %}
-
-{# Service health summary banner — only when something is down. Links to the full /services page. #}
-{% if services_health.critical_down > 0 || services_health.warn_down > 0 %}
-<div class="flash {% if services_health.critical_down > 0 %}error{% else %}warn{% endif %}" style="margin-bottom:1rem">
-  <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-  <div class="flash-body">
-    {% if services_health.critical_down > 0 %}
-      <strong>{{ services_health.critical_down }} critical service(s) down.</strong>
-    {% endif %}
-    {% if services_health.warn_down > 0 %}
-      {{ services_health.warn_down }} optional service(s) degraded.
-    {% endif %}
-    <a href="/services" style="color:inherit;text-decoration:underline;margin-left:0.4rem">Review services →</a>
+{% if update_status.update_available %}
+  <div class="flash warn" style="margin-bottom:1rem">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+    <div class="flash-body">
+      <strong>Update available.</strong>
+      This node runs <code>{{ update_current_short }}</code>;
+      the latest release is <code>{{ update_latest_short }}</code>
+      (tag <code>{{ update_status.latest_tag }}</code>).
+      To upgrade, run <code>sudo /opt/hyperion/packaging/install/update.sh</code> on this node.
+    </div>
   </div>
-</div>
 {% endif %}
 
+
+{% if let Some(c) = cluster %}
 <div class="kpi-grid">
-  <div class="kpi-card hostings">
-    <div class="kpi-label">Hostings</div>
-    <div class="kpi-value">{% if let Some(c) = cluster %}{{ c.total_hostings }}{% else %}—{% endif %}</div>
+  <a class="kpi-card hostings" href="/hostings" style="color:inherit;text-decoration:none">
+    <div class="kpi-label">Websites</div>
+    <div class="kpi-value">{{ c.total_hostings }}</div>
     <div class="kpi-meta">
-      {% if let Some(c) = cluster %}
-        <span class="dot ok"></span>{{ c.total_active }} ·
-        <span class="dot warn"></span>{{ c.total_suspended }} ·
-        <span class="dot err"></span>{{ c.total_failed }}
-      {% else %}
-        no hostings yet
-      {% endif %}
+      <span class="dot ok"></span>{{ c.total_active }} active
+      {% if c.total_suspended > 0 %} · <span class="dot warn"></span>{{ c.total_suspended }} suspended{% endif %}
+      {% if c.total_failed > 0 %} · <span class="dot err"></span>{{ c.total_failed }} failed{% endif %}
+    </div>
+  </a>
+
+  {#- One disk tile: the volume is what fills up; the sites' share of it is
+      the detail. Two tiles ("Disk used" vs "Node disk") read as the same
+      question with two different answers. -#}
+  <div class="kpi-card disk">
+    <div class="kpi-label">Server disk</div>
+    <div class="kpi-value">{% if c.total_node_disk_total_bytes > 0 %}{{ crate::handlers::stats::disk_used_pct(c.total_disk_bytes, c.total_node_disk_total_bytes) }}%{% else %}{{ crate::handlers::stats::fmt_bytes(c.total_disk_bytes) }}{% endif %}</div>
+    <div class="kpi-meta">
+      {% if c.total_node_disk_total_bytes > 0 %}{{ crate::handlers::stats::fmt_bytes(c.total_disk_bytes) }} of {{ crate::handlers::stats::fmt_bytes(c.total_node_disk_total_bytes) }} · {% endif %}sites {{ crate::handlers::stats::fmt_bytes(c.total_hostings_disk_bytes) }}
     </div>
   </div>
 
-  <div class="kpi-card disk">
-    <div class="kpi-label">Disk used</div>
-    <div class="kpi-value">{% if let Some(c) = cluster %}{{ crate::handlers::stats::fmt_bytes(c.total_hostings_disk_bytes) }}{% else %}—{% endif %}</div>
-    <div class="kpi-meta">across all sites</div>
-  </div>
-
-  <div class="kpi-card disk">
-    <div class="kpi-label">Node disk</div>
-    <div class="kpi-value">{% if let Some(c) = cluster %}{{ crate::handlers::stats::fmt_bytes(c.total_disk_bytes) }}{% else %}—{% endif %}</div>
-    <div class="kpi-meta">{% if let Some(c) = cluster %}{% if c.total_node_disk_total_bytes > 0 %}{{ crate::handlers::stats::disk_used_pct(c.total_disk_bytes, c.total_node_disk_total_bytes) }}% of {{ crate::handlers::stats::fmt_bytes(c.total_node_disk_total_bytes) }} · OS + data{% else %}whole volume · OS + data{% endif %}{% else %}—{% endif %}</div>
-  </div>
-
-  <div class="kpi-card bw">
-    <div class="kpi-label">Bandwidth out · 24h</div>
-    <div class="kpi-value">{% if let Some(c) = cluster %}{{ crate::handlers::stats::fmt_bytes(c.total_bw_out_24h) }}{% else %}—{% endif %}</div>
-    <div class="kpi-meta">{% if let Some(c) = cluster %}{{ c.total_requests_24h }} requests · 24h{% else %}—{% endif %}</div>
-  </div>
-
-  {# Backups: what is still on node disk vs what is recorded off-site. Surfaces
-     the backup-storage feature so the operator sees, at a glance, whether a
-     box filling up is backups and how much is safely off-site. #}
-  <div class="kpi-card disk">
+  {# Backups: what is still on node disk vs what is recorded off-site, so a
+     box filling up with backups is visible at a glance. #}
+  <a class="kpi-card disk" href="/stats" style="color:inherit;text-decoration:none">
     <div class="kpi-label">Backups on disk</div>
     <div class="kpi-value">{{ crate::handlers::stats::fmt_bytes(backup_on_disk) }}</div>
-    <div class="kpi-meta">
-      {% if backup_offsite > 0 %}{{ crate::handlers::stats::fmt_bytes(backup_offsite) }} off-site · {% endif %}<a href="/stats" style="color:inherit">by site →</a>
-    </div>
+    <div class="kpi-meta">{% if backup_offsite > 0 %}{{ crate::handlers::stats::fmt_bytes(backup_offsite) }} off-site{% else %}none off-site yet{% endif %} · by site →</div>
+  </a>
+
+  <div class="kpi-card bw">
+    <div class="kpi-label">Traffic · 24h</div>
+    <div class="kpi-value">{{ crate::handlers::stats::fmt_bytes(c.total_bw_out_24h) }}</div>
+    <div class="kpi-meta">{{ c.total_requests_24h }} requests</div>
   </div>
 
-  <div class="kpi-card {% if services_health.critical_down > 0 %}kpi-bad{% else if services_health.warn_down > 0 %}kpi-warn{% else %}kpi-ok{% endif %}">
+  <a class="kpi-card {% if services_health.critical_down > 0 %}kpi-bad{% else if services_health.warn_down > 0 %}kpi-warn{% else %}kpi-ok{% endif %}" href="/services" style="color:inherit;text-decoration:none">
     <div class="kpi-label">Services</div>
     <div class="kpi-value" style="{% if services_health.critical_down > 0 %}color:var(--danger){% else if services_health.warn_down > 0 %}color:var(--warn){% else %}color:var(--success){% endif %}">
       {% if services_health.critical_down > 0 %}
-        {{ services_health.critical_down }}↓
+        {{ services_health.critical_down }} down
       {% else if services_health.warn_down > 0 %}
-        {{ services_health.warn_down }}!
+        {{ services_health.warn_down }} degraded
       {% else if services_health.services.is_empty() %}
         —
       {% else %}
@@ -178,45 +146,18 @@
       {% endif %}
     </div>
     <div class="kpi-meta">
-      {% if !services_health.services.is_empty() %}
-        {{ services_health.services.len() }} tracked · <a href="/services" style="color:inherit">View details →</a>
-      {% else %}
-        not yet probed
-      {% endif %}
+      {% if !services_health.services.is_empty() %}{{ services_health.services.len() }} tracked · details →{% else %}not yet probed{% endif %}
     </div>
-  </div>
-
-  <div class="kpi-card load">
-    <div class="kpi-label">Agent</div>
-    <div class="kpi-value" style="font-size:1.15rem">
-      {% if let Some(info) = agent_info %}{{ info.hostname }}{% else %}offline{% endif %}
-    </div>
-    <div class="kpi-meta">
-      {% if let Some(info) = agent_info %}{{ info.version }}{% else %}socket unreachable{% endif %}
-    </div>
-    {#- The server's public IPv4, click-to-copy. It is what goes into an A
-        record, a firewall allow-list or a migration ticket, and getting it
-        used to mean SSHing into the box. The global data-copy driver in
-        base.html does the copying. None = the probe has not succeeded (no
-        egress, or an IPv6-only host), in which case nothing is shown rather
-        than a misleading blank. -#}
-    {% if let Some(info) = agent_info %}
-      {% if let Some(ip) = info.public_ipv4 %}
-      <div class="kpi-meta" style="margin-top:0.3rem">
-        <code data-copy="{{ ip }}" title="Click to copy the server's public IPv4"
-              style="cursor:pointer;font-size:0.82rem">{{ ip }}</code>
-      </div>
-      {% endif %}
-    {% endif %}
-  </div>
+  </a>
 </div>
+{% endif %}
 
 {# Sparklines: load + bandwidth from node_metrics history. Mirrors stats page mini-charts. #}
-{% if samples_in_window >= 2 %}
+{% if !is_tenant && samples_in_window >= 2 %}
 <div class="spark-grid" style="margin-top:1.25rem;grid-template-columns:repeat(auto-fit, minmax(min(18rem, 100%), 1fr))">
   <div class="spark-card spark-{{ spark_load.kind }}">
     <div class="spark-head">
-      <span class="spark-title">Load avg · 1m (last {{ samples_in_window }} samples)</span>
+      <span class="spark-title">Load average · last {{ spark_window }}</span>
       <span class="spark-now">{{ spark_load.latest_label }}</span>
     </div>
     <svg class="spark-svg" viewBox="0 0 600 60" preserveAspectRatio="none" aria-hidden="true">
@@ -231,7 +172,7 @@
   </div>
   <div class="spark-card spark-{{ spark_bw.kind }}">
     <div class="spark-head">
-      <span class="spark-title">Bandwidth out (last {{ samples_in_window }} samples)</span>
+      <span class="spark-title">Bandwidth out · 24h total, last {{ spark_window }}</span>
       <span class="spark-now">{{ spark_bw.latest_label }}</span>
     </div>
     <svg class="spark-svg" viewBox="0 0 600 60" preserveAspectRatio="none" aria-hidden="true">
@@ -280,13 +221,16 @@
    an install that sells no care package. #}
 <div hx-get="/dashboard/care-panel" hx-trigger="load" hx-swap="outerHTML"></div>
 
-<div class="dashboard-grid">
+{#- Tenant roles have no activity column (the audit feed is cluster-wide),
+    so their website list takes the full width instead of sitting beside an
+    empty "No activity yet". -#}
+<div class="dashboard-grid"{% if is_tenant %} style="grid-template-columns:1fr"{% endif %}>
 <div class="group">
-  <div class="ghead">Overview</div>
+  <div class="ghead">Websites</div>
   <div class="item">
     <h3>
-      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
-      Recent hostings
+      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+      Newest websites
       <span class="grow"></span>
       <a href="/hostings" class="btn small ghost">
         View all
@@ -329,19 +273,18 @@
   </div>
 </div>
 
+{% if !is_tenant %}
 <div class="group">
   <div class="ghead">Activity</div>
   <div class="item">
     <h3>
       <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
       Recent activity
-      {% if !activity.is_empty() %}
-        <span class="grow"></span>
-        <a href="/audit" class="btn small ghost">View audit log →</a>
-      {% endif %}
+      <span class="grow"></span>
+      <a href="/audit" class="btn small ghost" data-require-caps="audit_view">View audit log →</a>
     </h3>
   {% if activity.is_empty() %}
-    <p class="muted" style="font-size:0.88rem;margin:0">No activity yet. Actions across the cluster will show up here.</p>
+    <p class="muted" style="font-size:0.88rem;margin:0">No changes yet. Actions across the cluster will show up here.</p>
   {% else %}
     <ul class="activity-feed">
       {% for a in activity %}
@@ -367,8 +310,10 @@
         </li>
       {% endfor %}
     </ul>
+    <p class="muted" style="font-size:0.8rem;margin:0.6rem 0 0">Sign-ins are left out here; the <a href="/audit" style="color:inherit">audit log</a> has the full trail.</p>
   {% endif %}
   </div>
 </div>
+{% endif %}
 </div>
 {% endblock %}

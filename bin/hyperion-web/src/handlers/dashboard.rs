@@ -48,6 +48,12 @@ struct DashboardTpl<'a> {
     backup_on_disk: i64,
     backup_offsite: i64,
     samples_in_window: usize,
+    /// Wall-clock span the load/bandwidth sparklines cover ("3h 55m"),
+    /// so the graph titles say a time instead of a sample count.
+    spark_window: String,
+    /// Tenant-scoped roles get no cluster tiles, node graphs or audit feed —
+    /// the template drops those blocks instead of rendering empty "—" tiles.
+    is_tenant: bool,
     update_status: UpdateStatus,
     update_current_short: String,
     update_latest_short: String,
@@ -77,7 +83,9 @@ pub async fn get_dashboard(
     // and the page renders against whatever survives.
     let (cluster_res, activity_res, alerts_res, health_res, history_res, net_res, update_res) = tokio::join!(
         hyperion_rpc_client::call(&state.agent_socket, Request::ClusterStats),
-        hyperion_rpc_client::call(&state.agent_socket, Request::AuditList { limit: 10 }),
+        // Over-fetch: sign-ins are filtered out below and would otherwise
+        // crowd every real change off the feed.
+        hyperion_rpc_client::call(&state.agent_socket, Request::AuditList { limit: 60 }),
         hyperion_rpc_client::call(&state.agent_socket, Request::DashboardAlerts),
         hyperion_rpc_client::call(&state.agent_socket, Request::ServicesHealth),
         hyperion_rpc_client::call(
@@ -97,14 +105,21 @@ pub async fn get_dashboard(
         Ok(RpcResponse::ClusterStats(c)) => Some(c),
         _ => None,
     };
-    let activity = match activity_res {
-        Ok(RpcResponse::AuditList(v)) => v,
+    let activity: Vec<AuditEntryWire> = match activity_res {
+        Ok(RpcResponse::AuditList(v)) => v
+            .into_iter()
+            .filter(|a| !is_session_noise(&a.action))
+            .take(ACTIVITY_ROWS)
+            .collect(),
         _ => vec![],
     };
-    let alerts = match alerts_res {
+    let mut alerts = match alerts_res {
         Ok(RpcResponse::DashboardAlerts(v)) => v,
         _ => vec![],
     };
+    // Errors first: only three alerts show before the fold, and those three
+    // should be the ones that are broken now, not the oldest warnings.
+    alerts.sort_by_key(|a| severity_rank(&a.severity));
     let services_health = match health_res {
         Ok(RpcResponse::ServicesHealth(h)) => h,
         _ => ServicesHealth::default(),
@@ -127,6 +142,10 @@ pub async fn get_dashboard(
     let update_current_short = short_sha(&update_status.current_sha);
     let update_latest_short = short_sha(&update_status.latest_sha);
     let samples_in_window = history.samples.len();
+    let spark_window = match (history.samples.first(), history.samples.last()) {
+        (Some(a), Some(b)) => fmt_window((a.at - b.at).abs()),
+        _ => String::new(),
+    };
     let spark_load = build_sparkline(
         history
             .samples
@@ -218,6 +237,8 @@ pub async fn get_dashboard(
         backup_on_disk,
         backup_offsite,
         samples_in_window,
+        spark_window,
+        is_tenant,
         update_status,
         update_current_short,
         update_latest_short,
@@ -226,6 +247,34 @@ pub async fn get_dashboard(
         node_auth_warning,
     };
     Ok(Html(tpl.render()?).into_response())
+}
+
+/// Rows the Recent activity feed shows after filtering.
+const ACTIVITY_ROWS: usize = 10;
+
+/// Successful sign-ins and session bookkeeping: on a panel one person uses
+/// all day they are most of the audit log, and they push every real change
+/// off the dashboard feed. Failed sign-ins stay — those are worth a look.
+/// The full trail is one click away in /audit.
+fn is_session_noise(action: &str) -> bool {
+    matches!(action, "web.login.ok" | "web.login.2fa_ok") || action.starts_with("web_session.")
+}
+
+/// Graph-title span, rounded the way a person says it: "4h", "45m", "2d".
+fn fmt_window(secs: i64) -> String {
+    match secs {
+        s if s >= 2 * 86400 => format!("{}d", (s + 43200) / 86400),
+        s if s >= 3600 => format!("{}h", (s + 1800) / 3600),
+        s => format!("{}m", (s + 30) / 60),
+    }
+}
+
+fn severity_rank(s: &str) -> u8 {
+    match s {
+        "error" => 0,
+        "warn" => 1,
+        _ => 2,
+    }
 }
 
 /// Returns `(agent info, recent hostings, page error, node-auth warning)`.
@@ -252,11 +301,14 @@ async fn fetch(
     // worker so a hosting created on `s4` shows up on the master's
     // dashboard. Previously only master-local was probed which
     // matched what /hostings did pre-fanout, but now the operator
-    // expects parity. Bumped to 15 (was 8) with "View all →" on
+    // expects parity. RECENT_ROWS of them, with "View all →" on
     // the card linking to /hostings for the full table.
     let (recent, node_auth_warning) = fetch_recent_multi_node(state).await;
     (info, recent, None, node_auth_warning)
 }
+
+/// Newest websites shown on the dashboard; "View all" links to /hostings.
+const RECENT_ROWS: usize = 10;
 
 async fn fetch_recent_multi_node(state: &SharedState) -> (Vec<HostingSummary>, Option<String>) {
     // Master's own hostings — tag with the LOCAL sentinel so the
@@ -291,7 +343,39 @@ async fn fetch_recent_multi_node(state: &SharedState) -> (Vec<HostingSummary>, O
     }
     all.sort_by(|a, b| b.created_at.cmp(&a.created_at));
     (
-        all.into_iter().take(15).collect(),
+        all.into_iter().take(RECENT_ROWS).collect(),
         crate::handlers::node_auth_warning(&failed),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_noise_hides_successful_sign_ins_only() {
+        assert!(is_session_noise("web.login.ok"));
+        assert!(is_session_noise("web.login.2fa_ok"));
+        assert!(is_session_noise("web_session.revoke"));
+        assert!(is_session_noise("web_session.revoke_all"));
+        // Failures and account changes are signal, not noise.
+        assert!(!is_session_noise("web.login.failed"));
+        assert!(!is_session_noise("web.login.2fa_failed"));
+        assert!(!is_session_noise("web.user.create"));
+        assert!(!is_session_noise("backup.now"));
+    }
+
+    #[test]
+    fn window_label_rounds() {
+        assert_eq!(fmt_window(3 * 3600 + 55 * 60), "4h");
+        assert_eq!(fmt_window(45 * 60), "45m");
+        assert_eq!(fmt_window(3 * 86400), "3d");
+    }
+
+    #[test]
+    fn alerts_sort_errors_first() {
+        let mut v = vec!["info", "warn", "error", "warn"];
+        v.sort_by_key(|s| severity_rank(s));
+        assert_eq!(v, ["error", "warn", "warn", "info"]);
+    }
 }
