@@ -859,6 +859,130 @@ details.svc-fold .svc-row .pill.muted { display: none; }
 }
 .job-row .job-meta > :first-child { color: var(--text-dim); }
 #jobs-live > .group + .group { margin-top: var(--group-gap); }
+/* /packages — one plan per .item: name + price, what it includes as a
+   tick list, quiet facts, and the editor folded underneath. The editor is
+   split into labelled sections so a long form reads as a few short ones. */
+.pkg-head { display: flex; align-items: baseline; gap: 0.75rem; flex-wrap: wrap; }
+.pkg-title { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; flex: 1; min-width: 0; }
+.pkg-title h3 { margin: 0; font-size: 1rem; }
+.pkg-price { font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.pkg-desc { margin: 0.35rem 0 0; color: var(--text-dim); max-width: 72ch; line-height: 1.55; font-size: 0.88rem; }
+.pkg-includes {
+  list-style: none;
+  margin: 0.85rem 0 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(17rem, 100%), 1fr));
+  gap: 0.35rem 1.25rem;
+  font-size: 0.86rem;
+}
+.pkg-includes li { display: flex; align-items: baseline; gap: 0.45rem; min-width: 0; }
+.pkg-includes svg { width: 13px; height: 13px; flex: none; color: var(--success); transform: translateY(2px); }
+.pkg-includes li.off { color: var(--text-soft); }
+.pkg-includes li.off svg { color: var(--text-soft); }
+.pkg-detail { color: var(--text-soft); }
+.pkg-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 1rem;
+  margin-top: 0.85rem;
+  font-size: 0.8rem;
+  color: var(--text-soft);
+}
+.pkg-meta code { font-size: 0.74rem; }
+.pkg-edit { margin-top: 0.85rem; }
+.pkg-edit > summary { list-style: none; display: inline-flex; align-items: center; gap: 0.35rem; cursor: pointer; }
+.pkg-edit > summary::-webkit-details-marker { display: none; }
+.pkg-edit[open] > summary { margin-bottom: 0.25rem; }
+.pkg-form { margin: 0; }
+.pkg-fs { padding: 1rem 0; border-bottom: 1px solid var(--border); }
+.pkg-fs:first-of-type { padding-top: 0.6rem; }
+.pkg-fs-head {
+  font-size: 0.73rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-weight: 600;
+  color: var(--text-dim);
+  margin-bottom: 0.7rem;
+}
+.pkg-fs-note { text-transform: none; letter-spacing: 0; font-weight: 400; font-size: 0.78rem; color: var(--text-soft); margin-left: 0.35rem; }
+.pkg-fs-help { margin: 0 0 0.7rem; font-size: 0.8rem; line-height: 1.55; color: var(--text-soft); max-width: 78ch; }
+.pkg-fs .field:last-child, .pkg-fs .field-row:last-child { margin-bottom: 0; }
+.pkg-sections { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(14rem, 100%), 1fr)); gap: 0.4rem 1.2rem; margin-top: 0.2rem; }
+.pkg-check { display: flex; align-items: center; gap: 0.5rem; font-weight: 400; cursor: pointer; margin: 0; }
+.pkg-check input { margin: 0; width: auto; }
+.pkg-checks { font-family: var(--font-mono); font-size: 0.78rem; line-height: 1.6; }
+.pkg-more > summary { cursor: pointer; font-size: 0.8rem; color: var(--text-dim); }
+.pkg-more[open] > summary { margin-bottom: 0.4rem; }
+.pkg-form-foot { display: flex; align-items: center; flex-wrap: wrap; gap: 0.6rem 1rem; padding-top: 1rem; }
+.pkg-form-foot .pkg-check { max-width: 56ch; font-size: 0.86rem; }
+.pkg-delete {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin-top: 1.1rem;
+  padding: 0.8rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  background: var(--bg-2);
+}
+.pkg-delete > div { flex: 1; min-width: 0; }
+.pkg-delete strong { font-size: 0.86rem; }
+.pkg-delete form { margin: 0; }
+/* Fields that only apply to some answers: still posted (an edit must never
+   silently clear them), just not shown. Custom period only for "custom";
+   retention only while the package sets a cadence; report sections only
+   while it sends a report. */
+.pkg-backup:not(:has(option[value="custom"]:checked)) .pkg-when-custom { display: none; }
+.pkg-backup:has(select[name="feat_backup_cadence"] option[value="leave"]:checked) .pkg-when-backup,
+.pkg-backup:has(select[name="feat_backup_cadence"] option[value="off"]:checked) .pkg-when-backup,
+.pkg-report:has(select[name="feat_report_cadence"] option[value="leave"]:checked) .pkg-when-report,
+.pkg-report:has(select[name="feat_report_cadence"] option[value="off"]:checked) .pkg-when-report { display: none; }
+details.pkg-new > summary.ghead { cursor: pointer; list-style: none; border-bottom: none; }
+details.pkg-new > summary.ghead::-webkit-details-marker { display: none; }
+details.pkg-new[open] > summary.ghead { border-bottom: 1px solid var(--border); }
+.pkg-new-icon { width: 14px; height: 14px; }
+details.pkg-new .pkg-fs:first-of-type { padding-top: 0; }
+
+/* Sites on care: one row per site, the whole row links to the site. */
+.group > .care-row {
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
+  padding: 0.75rem 1.25rem;
+  border-bottom: 1px solid var(--border);
+  color: inherit;
+  text-decoration: none;
+  transition: background var(--t-fast);
+}
+.group > .care-row:last-child { border-bottom: none; }
+.group > .care-row:hover { background: var(--surface-2); }
+.care-row .care-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 0.2rem; }
+.care-row .care-title { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.5rem; }
+.care-row .care-title strong { overflow-wrap: anywhere; }
+.care-row .care-sub { font-size: 0.8rem; color: var(--text-soft); }
+.care-row .care-checks { flex: none; display: flex; gap: 0.3rem; }
+.care-row .care-meta {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.15rem;
+  min-width: 11rem;
+  font-size: 0.78rem;
+  color: var(--text-soft);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.care-row .care-meta > :first-child { color: var(--text); font-weight: 500; }
+#care-sites > .flash { margin-top: var(--group-gap); }
+#care-sites > .group, #care-sites + .group { margin-top: var(--group-gap); }
+@media (max-width: 640px) {
+  .group > .care-row { flex-wrap: wrap; gap: 0.4rem 0.75rem; padding: 0.75rem 1rem; }
+  .care-row .care-main { flex-basis: 100%; }
+  .care-row .care-meta { flex-direction: row; flex-wrap: wrap; gap: 0.15rem 0.5rem; flex-basis: 100%; min-width: 0; white-space: normal; }
+  .pkg-delete { flex-wrap: wrap; }
+}
 .jobs-filter { display: flex; gap: 0.5rem; align-items: stretch; }
 .jobs-filter .search-input { flex: 1; min-width: 0; }
 .jobs-filter select { height: 40px; max-width: 16rem; }

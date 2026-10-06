@@ -17922,10 +17922,40 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // already in hand rather than re-queried per site: this runs on the
         // dashboard, on every load, for every site on the node.
         let mut lists: HashMap<String, Vec<String>> = HashMap::new();
+        // Billing facts, folded per site the same way: earliest start, soonest
+        // reminder, and every priced plan's snapshot.
+        let mut since: HashMap<String, i64> = HashMap::new();
+        let mut next_bill: HashMap<String, i64> = HashMap::new();
+        let mut charges: HashMap<String, Vec<hyperion_types::care_check::CareCharge>> =
+            HashMap::new();
         for r in rows {
             let key = r.hosting_id.as_str().to_string();
             if !names.contains_key(&key) {
                 order.push(r.hosting_id.clone());
+            }
+            let start = r.valid_from.unwrap_or(r.activated_at);
+            since
+                .entry(key.clone())
+                .and_modify(|t| *t = (*t).min(start))
+                .or_insert(start);
+            if let Some(nb) = r.next_billing_at {
+                next_bill
+                    .entry(key.clone())
+                    .and_modify(|t| *t = (*t).min(nb))
+                    .or_insert(nb);
+            }
+            if let (Some(m), Some(c), Some(iv)) = (
+                r.price_minor,
+                r.price_currency.as_ref(),
+                r.price_interval.as_ref(),
+            ) {
+                charges.entry(key.clone()).or_default().push(
+                    hyperion_types::care_check::CareCharge {
+                        price_minor: m,
+                        currency: c.clone(),
+                        interval: iv.clone(),
+                    },
+                );
             }
             let entry = names.entry(key.clone()).or_default();
             // The activation SNAPSHOTS the name, so a deleted definition
@@ -17978,6 +18008,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 checks_total: total,
                 outstanding,
                 prev_outstanding,
+                since: since.remove(id.as_str()),
+                next_billing_at: next_bill.remove(id.as_str()),
+                charges: charges.remove(id.as_str()).unwrap_or_default(),
             });
         }
         // Sites needing attention first, then alphabetically — the card is
@@ -47497,6 +47530,65 @@ mod tests {
         input.check_items = String::new();
         s.package_update(pkg.id, input).await.expect("clear");
         assert_eq!(s.care_check_items(&detail.id).await.len(), 4);
+    }
+
+    /// The care packages page reads a site's billing from the overview: the
+    /// earliest start, the soonest reminder, and EVERY priced plan at the
+    /// price the site agreed to — a later re-price of the definition must not
+    /// move what the roster says the customer owes.
+    #[tokio::test]
+    async fn care_overview_carries_each_sites_agreed_price_and_dates() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), package_mocks());
+        let detail = hosting_for_packages(&s, "billing.cz").await;
+        let now = now_secs();
+
+        let care = s
+            .package_create(care_input("Care", PackageFeatures::default()))
+            .await
+            .expect("care");
+        let mut yearly = care_input("Backups", PackageFeatures::default());
+        yearly.price_minor = Some(120_000);
+        yearly.price_interval = Some("yearly".into());
+        let yearly = s.package_create(yearly).await.expect("yearly");
+
+        let sel = HostingSelector::Id(detail.id.clone());
+        s.package_activate(sel.clone(), care.id, None, Some(now - 90 * 86_400))
+            .await
+            .expect("care on");
+        s.package_activate(sel, yearly.id, None, None)
+            .await
+            .expect("yearly on");
+
+        // Re-pricing the definition afterwards changes nothing already sold.
+        let mut repriced = care_input("Care", PackageFeatures::default());
+        repriced.price_minor = Some(99_900);
+        s.package_update(care.id, repriced).await.expect("reprice");
+
+        let period = hyperion_types::care_check::period_key(now);
+        let rows = s.care_overview(period).await.expect("overview");
+        let row = rows
+            .iter()
+            .find(|r| r.hosting_id == detail.id.as_str())
+            .expect("row");
+        let since = row.since.expect("since");
+        assert!(
+            (since - (now - 90 * 86_400)).abs() < 86_400,
+            "the backdated plan is the earliest start"
+        );
+        assert!(
+            row.next_billing_at.is_some(),
+            "both plans carry an interval"
+        );
+        let mut prices: Vec<(i64, &str)> = row
+            .charges
+            .iter()
+            .map(|c| (c.price_minor, c.interval.as_str()))
+            .collect();
+        prices.sort();
+        assert_eq!(prices, vec![(49_000, "monthly"), (120_000, "yearly")]);
+        let monthly: i64 = row.charges.iter().filter_map(|c| c.monthly_minor()).sum();
+        assert_eq!(monthly, 49_000 + 10_000);
     }
 
     /// The half of a package edit that does not happen on the master.

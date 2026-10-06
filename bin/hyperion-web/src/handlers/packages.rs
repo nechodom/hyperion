@@ -53,35 +53,227 @@ struct PackagesTpl<'a> {
     css_version: &'static str,
     htmx_version: &'static str,
     packages: Vec<PackageView>,
-    /// The four built-ins as textarea lines, for the "new package" form.
-    builtin_check_text: String,
-    /// Every report section ticked, for the "new package" form: a new plan
-    /// sends the whole letter until the operator unticks something.
-    new_sections: Vec<SectionChoice>,
+    /// Plans still in the activate picker / retired ones, for the group head.
+    offered: usize,
+    retired: usize,
+    /// The blank "new package" editor.
+    new_editor: Editor,
+    /// Whether the new-package form starts open: always on an empty page
+    /// (it is the only thing to do there), and when the header button asked.
+    new_open: bool,
     csrf_token: String,
     flash: Option<String>,
     error: Option<String>,
 }
 
-/// A definition plus the one thing the form needs that the wire type
-/// doesn't carry: the price in MAJOR units, so the edit field shows
-/// "490.00" rather than "49000".
+/// One definition as the plan list shows it.
 struct PackageView {
     pkg: ServicePackage,
+    /// What the plan actually sells, in words. Only what it FORCES — a plan
+    /// that says nothing about monitoring must not look like it sells it.
+    includes: Vec<Included>,
+    /// How many monthly checks the plan promises, and whether they are the
+    /// built-in list. Shown on every plan: "4 checks" and "7 checks" are two
+    /// different products.
+    check_count: usize,
+    custom_checks: bool,
+    /// "1 500.00 Kč/year", or empty for a plan sold without a price.
+    price: String,
+    /// The plan's own editor, pre-filled.
+    editor: Editor,
+}
+
+/// One line of a plan's "includes" list.
+struct Included {
+    label: &'static str,
+    /// The specifics: cadence, retention, sections. Empty when the label says
+    /// it all.
+    detail: String,
+    /// The plan pins this feature OFF rather than selling it. Listed anyway —
+    /// it changes the site — but drawn as an exclusion.
+    off: bool,
+}
+
+/// Every field of the package editor. One shape for the New form and every
+/// Edit form, so the two cannot drift: the values differ, the vocabulary must
+/// not.
+pub struct Editor {
+    /// Prefix for element ids, unique on the page.
+    prefix: String,
+    action: String,
+    is_new: bool,
+    name: String,
+    slug: String,
+    description: String,
     price_major: String,
+    currency: String,
+    interval: String,
+    enabled: bool,
+    active_count: i64,
+    wp: &'static str,
+    integrity: &'static str,
+    monitoring: &'static str,
+    hardening: &'static str,
+    backup: &'static str,
+    report: &'static str,
+    lang: String,
     /// The plan's checklist as the textarea shows it. Resolved, not raw: a
     /// plan storing "" promises the built-in four, and the form has to say so
     /// in words rather than as an empty box the operator reads as "none".
-    check_text: String,
-    /// How many items that resolves to — the row badge. Derived here rather
-    /// than counted in the template, which cannot tell an empty definition
-    /// (the built-in four) from a plan that lists four of its own.
-    check_count: usize,
+    checks: String,
+    interval_days: i64,
+    keep_days: i64,
+    keep_last: i64,
     /// One checkbox per care-report section, ticked where the plan SENDS it.
     sections: Vec<SectionChoice>,
-    /// How many sections the plan sends, of how many there are — the row badge.
-    sections_sent: usize,
-    sections_total: usize,
+}
+
+impl Editor {
+    /// The blank form: every feature left alone, the built-in checks spelled
+    /// out (an operator has to see what they are selling before they can
+    /// decide it is wrong — saved unedited, it collapses back to "the
+    /// built-ins"), every report section ticked, billed monthly.
+    fn blank() -> Self {
+        Self {
+            prefix: "n".into(),
+            action: "/packages/create".into(),
+            is_new: true,
+            name: String::new(),
+            slug: String::new(),
+            description: String::new(),
+            price_major: String::new(),
+            currency: String::new(),
+            interval: "monthly".into(),
+            enabled: true,
+            active_count: 0,
+            wp: "leave",
+            integrity: "leave",
+            monitoring: "leave",
+            hardening: "leave",
+            backup: "leave",
+            report: "leave",
+            lang: String::new(),
+            checks: check_items_to_text(&hyperion_types::care_check::builtin_check_items()),
+            interval_days: 0,
+            keep_days: 0,
+            keep_last: 0,
+            sections: section_choices(ReportOmit::NONE),
+        }
+    }
+
+    fn for_package(pkg: &ServicePackage) -> Self {
+        let f = &pkg.features;
+        Self {
+            prefix: format!("e{}", pkg.id),
+            action: format!("/packages/{}/update", pkg.id),
+            is_new: false,
+            name: pkg.name.clone(),
+            slug: pkg.slug.clone(),
+            description: pkg.description.clone(),
+            price_major: price_major(pkg.price_minor),
+            currency: pkg.price_currency.clone().unwrap_or_default(),
+            interval: pkg.price_interval.clone().unwrap_or_default(),
+            enabled: pkg.enabled,
+            active_count: pkg.active_count,
+            wp: f.wp_auto_update.as_str(),
+            integrity: f.integrity_scan.as_str(),
+            monitoring: f.monitoring.as_str(),
+            hardening: f.hardening.as_str(),
+            backup: f.backup_cadence.as_str(),
+            report: f.report_cadence.as_str(),
+            lang: pkg.letters_lang.clone(),
+            checks: check_items_to_text(&hyperion_types::care_check::parse_check_items(
+                &pkg.check_items,
+            )),
+            interval_days: f.backup_interval_days,
+            keep_days: f.backup_keep_days,
+            keep_last: f.backup_keep_last,
+            sections: section_choices(ReportOmit::parse(&pkg.report_omit)),
+        }
+    }
+}
+
+/// A plan's forced features as the plan list words them.
+fn includes(pkg: &ServicePackage) -> Vec<Included> {
+    let f = &pkg.features;
+    let mut out = Vec::new();
+    let toggles = [
+        (f.wp_auto_update, "WordPress updates"),
+        (f.integrity_scan, "Integrity & malware scan"),
+        (f.monitoring, "Uptime monitoring"),
+        (f.hardening, "Firewall & hardening"),
+    ];
+    for (t, label) in toggles {
+        match t {
+            FeatureToggle::Leave => {}
+            FeatureToggle::On => out.push(Included {
+                label,
+                detail: String::new(),
+                off: false,
+            }),
+            FeatureToggle::Off => out.push(Included {
+                label,
+                detail: "kept off".into(),
+                off: true,
+            }),
+        }
+    }
+    match f.backup_cadence {
+        BackupCadence::Leave => {}
+        BackupCadence::Off => out.push(Included {
+            label: "Scheduled backups",
+            detail: "kept off".into(),
+            off: true,
+        }),
+        c => {
+            let mut parts = vec![if c == BackupCadence::Custom {
+                if f.backup_interval_days > 0 {
+                    format!("every {} days", f.backup_interval_days)
+                } else {
+                    "custom period".into()
+                }
+            } else {
+                c.as_str().to_string()
+            }];
+            if f.backup_keep_days > 0 {
+                parts.push(format!("kept {} days", f.backup_keep_days));
+            }
+            if f.backup_keep_last > 0 {
+                parts.push(format!("latest {} always kept", f.backup_keep_last));
+            }
+            out.push(Included {
+                label: "Backups",
+                detail: parts.join(" · "),
+                off: false,
+            });
+        }
+    }
+    match f.report_cadence {
+        ReportCadence::Leave => {}
+        ReportCadence::Off => out.push(Included {
+            label: "Care report",
+            detail: "none sent".into(),
+            off: true,
+        }),
+        c => {
+            let omit = ReportOmit::parse(&pkg.report_omit);
+            let sent = omit.sent_count();
+            let total = ReportSection::ALL.len();
+            // "8 of 8" on every plan would be noise; say it only when the
+            // plan actually trims the letter.
+            let detail = if sent < total {
+                format!("{} · {sent} of {total} sections", c.as_str())
+            } else {
+                c.as_str().to_string()
+            };
+            out.push(Included {
+                label: "Care report",
+                detail,
+                off: false,
+            });
+        }
+    }
+    out
 }
 
 /// One checkbox in the "report sections" group of the plan editor.
@@ -111,6 +303,9 @@ pub struct PackagesQuery {
     pub flash: Option<String>,
     #[serde(default)]
     pub error: Option<String>,
+    /// `?new=1` — the header's "New package" button: open the form.
+    #[serde(default)]
+    pub new: Option<String>,
 }
 
 /// GET /packages — define what you sell.
@@ -125,36 +320,212 @@ pub async fn get_packages(
     // Best-effort: an agent that can't answer yields an empty list, which
     // renders as the "no packages yet" explainer rather than a 500 on a
     // page whose whole job is to let you create the first one.
-    let packages = fetch_packages(&state)
+    let mut packages: Vec<PackageView> = fetch_packages(&state)
         .await
         .unwrap_or_default()
         .into_iter()
-        .map(|pkg| PackageView {
-            price_major: price_major(pkg.price_minor),
-            sections: section_choices(ReportOmit::parse(&pkg.report_omit)),
-            sections_sent: ReportOmit::parse(&pkg.report_omit).sent_count(),
-            sections_total: ReportSection::ALL.len(),
-            check_count: hyperion_types::care_check::parse_check_items(&pkg.check_items).len(),
-            check_text: check_items_to_text(&hyperion_types::care_check::parse_check_items(
-                &pkg.check_items,
-            )),
-            pkg,
+        .map(|pkg| {
+            let items = hyperion_types::care_check::parse_check_items(&pkg.check_items);
+            PackageView {
+                includes: includes(&pkg),
+                check_count: items.len(),
+                custom_checks: !pkg.check_items.trim().is_empty(),
+                price: match (pkg.price_minor, &pkg.price_currency) {
+                    (Some(m), Some(c)) => format!(
+                        "{} {c}{}",
+                        fmt_money(m),
+                        interval_suffix(pkg.price_interval.as_deref().unwrap_or(""))
+                    ),
+                    _ => String::new(),
+                },
+                editor: Editor::for_package(&pkg),
+                pkg,
+            }
         })
         .collect();
+    // What is on sale first, then by how many sites hold it: the plans an
+    // operator touches most sit at the top.
+    packages.sort_by(|a, b| {
+        b.pkg
+            .enabled
+            .cmp(&a.pkg.enabled)
+            .then_with(|| b.pkg.active_count.cmp(&a.pkg.active_count))
+            .then_with(|| a.pkg.name.cmp(&b.pkg.name))
+    });
+    let offered = packages.iter().filter(|v| v.pkg.enabled).count();
     let tpl = PackagesTpl {
         username: &ctx.username,
         user_initial: super::user_initial(&ctx.username),
         active: "packages",
         css_version: super::css_version(),
         htmx_version: super::htmx_version(),
+        new_open: packages.is_empty() || q.new.is_some(),
+        retired: packages.len() - offered,
+        offered,
         packages,
-        builtin_check_text: check_items_to_text(&hyperion_types::care_check::builtin_check_items()),
-        new_sections: section_choices(ReportOmit::NONE),
+        new_editor: Editor::blank(),
         csrf_token: super::session_csrf_token(&state, &ctx),
         flash: q.flash,
         error: q.error,
     };
     Ok(Html(tpl.render()?).into_response())
+}
+
+// ============================================================
+//  /packages/sites-panel — who is on care, lazily
+// ============================================================
+
+#[derive(Template)]
+#[template(path = "_packages_sites.html")]
+struct SitesPanelTpl {
+    /// `"October 2026"` — the month the checklist counts belong to.
+    period_label: String,
+    rows: Vec<SiteRow>,
+    complete: usize,
+    /// Recurring income per currency, spread over a month, from the prices
+    /// each site agreed to (the activation snapshot — not today's list price).
+    recurring: Vec<String>,
+    /// Sites on care with no priced plan, so the total above is not read as
+    /// covering them.
+    unpriced: usize,
+    /// The soonest billing reminder anywhere: `(domain, when)`.
+    next_bill: Option<(String, String)>,
+    /// Nodes whose sites are missing from the list.
+    unreachable: Vec<String>,
+}
+
+struct SiteRow {
+    hosting_id: String,
+    domain: String,
+    packages: String,
+    price: String,
+    since: String,
+    next_bill: String,
+    /// Reminder due within a week, or already past.
+    bill_due: bool,
+    done: usize,
+    total: usize,
+    complete: bool,
+    outstanding: String,
+    prev_outstanding: usize,
+}
+
+/// GET /packages/sites-panel — every site on a plan across the cluster.
+///
+/// Lazy for the same reason as the dashboard's care card: it asks every
+/// node, and the plan list above must not wait for the slowest one.
+pub async fn get_sites_panel(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+) -> Result<Response, AppError> {
+    if !ctx.can(Capability::ProfilesManage) {
+        return Err(AppError::Forbidden);
+    }
+    let now = hyperion_types::now_secs();
+    let period = hyperion_types::care_check::period_key(now);
+    let (mut rows, unreachable) = super::care::collect_overview(&state, &ctx, &period).await;
+    // A roster, not a work list: alphabetical. The dashboard keeps the
+    // work-first order.
+    rows.sort_by(|a, b| a.domain.cmp(&b.domain));
+
+    let mut recurring: std::collections::BTreeMap<String, i64> = Default::default();
+    let mut unpriced = 0;
+    let mut next_bill: Option<(i64, String)> = None;
+    for r in &rows {
+        if r.charges.is_empty() {
+            unpriced += 1;
+        }
+        for c in &r.charges {
+            if let Some(m) = c.monthly_minor() {
+                *recurring.entry(c.currency.clone()).or_default() += m;
+            }
+        }
+        if let Some(nb) = r.next_billing_at {
+            if next_bill.as_ref().map_or(true, |(t, _)| nb < *t) {
+                next_bill = Some((nb, r.domain.clone()));
+            }
+        }
+    }
+
+    let tpl = SitesPanelTpl {
+        period_label: super::care::month_label(&period),
+        complete: rows.iter().filter(|r| r.is_complete()).count(),
+        recurring: recurring
+            .into_iter()
+            .map(|(cur, minor)| format!("{} {cur}", fmt_money(minor)))
+            .collect(),
+        unpriced,
+        next_bill: next_bill.map(|(t, d)| (d, super::stats::fmt_future(&t))),
+        unreachable,
+        rows: rows
+            .into_iter()
+            .map(|r| SiteRow {
+                complete: r.is_complete(),
+                price: if r.charges.is_empty() {
+                    "—".into()
+                } else {
+                    r.charges
+                        .iter()
+                        .map(|c| {
+                            format!(
+                                "{} {}{}",
+                                fmt_money(c.price_minor),
+                                c.currency,
+                                interval_suffix(&c.interval)
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" + ")
+                },
+                since: r.since.map(month_year).unwrap_or_else(|| "—".into()),
+                bill_due: r.next_billing_at.is_some_and(|t| t - now < 7 * 86_400),
+                next_bill: r
+                    .next_billing_at
+                    .map(|t| super::stats::fmt_future(&t))
+                    .unwrap_or_else(|| "—".into()),
+                outstanding: r.outstanding.join(", "),
+                packages: r.packages.join(", "),
+                done: r.checks_done,
+                total: r.checks_total,
+                prev_outstanding: r.prev_outstanding,
+                hosting_id: r.hosting_id,
+                domain: r.domain,
+            })
+            .collect(),
+    };
+    Ok(Html(tpl.render()?).into_response())
+}
+
+/// 490000 → "4 900.00" — a thin space between thousands so a monthly total
+/// reads at a glance in either language.
+fn fmt_money(minor: i64) -> String {
+    let neg = minor < 0;
+    let minor = minor.abs();
+    let whole = (minor / 100).to_string();
+    let mut grouped = String::new();
+    for (i, ch) in whole.chars().enumerate() {
+        if i > 0 && (whole.len() - i) % 3 == 0 {
+            grouped.push('\u{202f}');
+        }
+        grouped.push(ch);
+    }
+    format!("{}{grouped}.{:02}", if neg { "-" } else { "" }, minor % 100)
+}
+
+fn interval_suffix(iv: &str) -> &'static str {
+    match iv {
+        "monthly" => "/month",
+        "quarterly" => "/quarter",
+        "yearly" => "/year",
+        _ => "",
+    }
+}
+
+/// Unix seconds → "Mar 2026".
+fn month_year(ts: i64) -> String {
+    chrono::DateTime::<chrono::Utc>::from_timestamp(ts, 0)
+        .map(|d| d.format("%b %Y").to_string())
+        .unwrap_or_else(|| "—".into())
 }
 
 /// Definitions from the master. `service_packages` is master-only — a
@@ -2244,6 +2615,71 @@ fn urlencoding(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn money_groups_thousands_and_keeps_the_cents() {
+        assert_eq!(fmt_money(49_000), "490.00");
+        assert_eq!(fmt_money(150_000), "1\u{202f}500.00");
+        assert_eq!(fmt_money(123_456_789), "1\u{202f}234\u{202f}567.89");
+        assert_eq!(fmt_money(5), "0.05");
+    }
+
+    fn pkg_with(features: PackageFeatures, report_omit: &str) -> ServicePackage {
+        ServicePackage {
+            id: 1,
+            name: "Care".into(),
+            slug: "care".into(),
+            description: String::new(),
+            enabled: true,
+            price_minor: None,
+            price_currency: None,
+            price_interval: None,
+            letters_lang: String::new(),
+            check_items: String::new(),
+            report_omit: report_omit.into(),
+            features,
+            active_count: 0,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    /// The plan list must never show a feature the plan leaves alone — that
+    /// would read as selling it — and must show a pinned-off one as an
+    /// exclusion, not as included.
+    #[test]
+    fn includes_lists_only_what_the_plan_forces() {
+        let p = pkg_with(
+            PackageFeatures {
+                wp_auto_update: FeatureToggle::On,
+                hardening: FeatureToggle::Off,
+                backup_cadence: BackupCadence::Custom,
+                backup_interval_days: 3,
+                backup_keep_days: 30,
+                report_cadence: ReportCadence::Monthly,
+                ..Default::default()
+            },
+            "attacks,traffic",
+        );
+        let got: Vec<(&str, String, bool)> = includes(&p)
+            .into_iter()
+            .map(|i| (i.label, i.detail, i.off))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("WordPress updates", String::new(), false),
+                ("Firewall & hardening", "kept off".to_string(), true),
+                ("Backups", "every 3 days · kept 30 days".to_string(), false),
+                (
+                    "Care report",
+                    "monthly · 6 of 8 sections".to_string(),
+                    false
+                ),
+            ]
+        );
+        assert!(includes(&pkg_with(PackageFeatures::default(), "")).is_empty());
+    }
 
     fn range(from: &str, to: &str) -> Result<(i64, i64), String> {
         report_range(&ReportRangeForm {

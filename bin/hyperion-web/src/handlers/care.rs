@@ -63,10 +63,46 @@ pub async fn get_care_panel(
 ) -> Result<Response, AppError> {
     let now = hyperion_types::now_secs();
     let period = hyperion_types::care_check::period_key(now);
-    let req = Request::CareOverview {
-        period: period.clone(),
-    };
+    let (rows, unreachable) = collect_overview(&state, &ctx, &period).await;
+    let total = rows.len();
+    let complete = rows.iter().filter(|r| r.is_complete()).count();
 
+    let tpl = CarePanelTpl {
+        period_label: month_label(&period),
+        total,
+        complete,
+        unreachable,
+        rows: rows
+            .into_iter()
+            .map(|r| CareRow {
+                complete: r.is_complete(),
+                outstanding: r.outstanding.join(", "),
+                packages: r.packages.join(", "),
+                done: r.checks_done,
+                total: r.checks_total,
+                prev_outstanding: r.prev_outstanding,
+                hosting_id: r.hosting_id,
+                domain: r.domain,
+            })
+            .collect(),
+    };
+    Ok(Html(tpl.render()?).into_response())
+}
+
+/// Every site on a care plan across the cluster, for `period`, plus the
+/// names of nodes that did not answer. Shared by the dashboard work list and
+/// the care packages page, so the two cannot count differently.
+///
+/// Rows come back work-first, then alphabetical; tenant-scoped sessions see
+/// only their own sites and never a node name.
+pub(crate) async fn collect_overview(
+    state: &SharedState,
+    ctx: &AuthCtx,
+    period: &str,
+) -> (Vec<CareOverviewRow>, Vec<String>) {
+    let req = Request::CareOverview {
+        period: period.to_string(),
+    };
     let mut rows: Vec<CareOverviewRow> = Vec::new();
     let mut unreachable: Vec<String> = Vec::new();
 
@@ -85,7 +121,7 @@ pub async fn get_care_panel(
             _ => Vec::new(),
         };
     if !nodes.is_empty() {
-        let (answered, failed) = crate::dispatcher::fan_out_reporting(&state, nodes, req).await;
+        let (answered, failed) = crate::dispatcher::fan_out_reporting(state, nodes, req).await;
         for (node, resp) in answered {
             match resp {
                 RpcResponse::CareOverview(v) => rows.extend(v),
@@ -104,8 +140,8 @@ pub async fn get_care_panel(
         let mut kept: Vec<CareOverviewRow> = Vec::new();
         for r in rows {
             if crate::handlers::hostings::require_hosting_access(
-                &state,
-                &ctx,
+                state,
+                ctx,
                 &r.hosting_id,
                 false,
                 Capability::HostingView,
@@ -135,31 +171,9 @@ pub async fn get_care_panel(
             .cmp(&a.outstanding.len())
             .then_with(|| a.domain.cmp(&b.domain))
     });
-    let total = rows.len();
-    let complete = rows.iter().filter(|r| r.is_complete()).count();
     unreachable.sort();
     unreachable.dedup();
-
-    let tpl = CarePanelTpl {
-        period_label: month_label(&period),
-        total,
-        complete,
-        unreachable,
-        rows: rows
-            .into_iter()
-            .map(|r| CareRow {
-                complete: r.is_complete(),
-                outstanding: r.outstanding.join(", "),
-                packages: r.packages.join(", "),
-                done: r.checks_done,
-                total: r.checks_total,
-                prev_outstanding: r.prev_outstanding,
-                hosting_id: r.hosting_id,
-                domain: r.domain,
-            })
-            .collect(),
-    };
-    Ok(Html(tpl.render()?).into_response())
+    (rows, unreachable)
 }
 
 pub(crate) fn node_label(n: &hyperion_types::NodeSummary) -> String {
@@ -171,7 +185,7 @@ pub(crate) fn node_label(n: &hyperion_types::NodeSummary) -> String {
 }
 
 /// `"2026-09"` → `"September 2026"`.
-fn month_label(period: &str) -> String {
+pub(crate) fn month_label(period: &str) -> String {
     const MONTHS: [&str; 12] = [
         "January",
         "February",
