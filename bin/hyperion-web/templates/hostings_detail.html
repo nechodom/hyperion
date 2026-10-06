@@ -832,8 +832,11 @@
     <div class="tile">
       <div class="tile-title">WAF &amp; wp-admin lock</div>
       <div class="cluster" style="gap:0.3rem;margin-bottom:0.45rem">
-        {% if waf_level == "off" %}<span class="pill warn">WAF off</span>{% else if waf_level == "strict" %}<span class="pill ok">WAF strict</span>{% else %}<span class="pill ok">WAF standard</span>{% endif %}
+        {% if !protection_applies %}<span class="pill neutral">not applied to a {% if detail.kind == "redirect" %}redirect{% else %}reverse proxy{% endif %}</span>
+        {% else %}
+        <span class="pill {% if waf_on %}ok{% else %}warn{% endif %}">{{ waf_summary }}</span>
         {% if !detail.vhost_options.wp_admin_allowlist.trim().is_empty() %}<span class="pill ok">admin IP lock</span>{% else %}<span class="pill neutral">admin open</span>{% endif %}
+        {% endif %}
       </div>
       <div class="tile-links"><a href="#protection">Configure protection →</a><a href="#waf-activity">What was blocked →</a></div>
     </div>
@@ -2656,10 +2659,19 @@
     </h2>
     <span class="text-soft small">WAF · admin lock · sign-ups · bots · countries</span>
     <div class="card-tools">
-      {% if waf_level == "off" %}<span class="pill warn">WAF off</span>{% else if waf_level == "strict" %}<span class="pill ok">WAF strict</span>{% else %}<span class="pill ok">WAF standard</span>{% endif %}
+      {% if protection_applies %}
+      <span class="pill {% if waf_on %}ok{% else %}warn{% endif %}">{{ waf_summary }}</span>
       {% if !detail.vhost_options.wp_admin_allowlist.trim().is_empty() %}<span class="pill ok">admin IP lock</span>{% endif %}
+      {% endif %}
     </div>
   </div>
+  {% if !protection_applies %}
+  <p class="s-help" style="margin:0">
+    {% if detail.kind == "redirect" %}This hosting only redirects{% else %}This hosting is a reverse proxy{% endif %}:
+    its nginx config forwards every request and carries none of these rules — no WAF, bot or country
+    blocking, admin IP lock or sign-up limit. Protect the {% if detail.kind == "redirect" %}target site{% else %}upstream application{% endif %} instead.
+  </p>
+  {% else %}
   <form method="post" action="/hostings/vhost-options" hx-post="/hostings/vhost-options" hx-swap="none">
     <input type="hidden" name="_csrf" value="{{ csrf_vhost_options }}">
     <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
@@ -2782,8 +2794,10 @@
       </button>
     </div>
   </form>
+  {% endif %}
 </div>
 
+{% if protection_applies %}
 {# WAF activity — lazily loaded from the owning node's hit records. #}
 <div id="waf-activity" hx-get="/hostings/{{ detail.id.as_str() }}/waf-panel"
      hx-trigger="intersect once"
@@ -2792,6 +2806,7 @@
     <h2 style="opacity:0.6">WAF activity <span class="text-soft small">— loading…</span></h2>
   </div>
 </div>
+{% endif %}
 
 <div class="panel-group">Bans</div>
 {# Banned IPs — lazily loaded so the page render isn't blocked on an

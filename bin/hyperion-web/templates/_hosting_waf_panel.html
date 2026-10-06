@@ -33,8 +33,8 @@
         {% if !fail2ban_enabled %}
           Automatic banning is switched off for this whole node (<a href="/settings#bruteforce">Settings → Bans &amp; blocking</a>). Refusals are still recorded.
         {% else if autoban_enabled %}
-          An address refused {{ threshold }} times within {{ window_min }} min — by a rule an honest visitor cannot trip — is banned at the firewall.
-          XML-RPC, user-enumeration, empty User-Agent, country and bot refusals never count.
+          An address refused {{ threshold }} times within {{ window_min }} min is banned at the firewall — on the whole node, SSH included.
+          Only rules no honest visitor or crawler trips over and over count: {{ ban_rules }}. Everything else is refused but never leads to a ban.
         {% else %}
           Refusals are recorded but never lead to a firewall ban for this site.
         {% endif %}

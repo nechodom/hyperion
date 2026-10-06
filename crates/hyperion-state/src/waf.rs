@@ -10,7 +10,7 @@
 //!   (`xmlrpc`, `geo`, `bot`…) cannot reach the threshold at all.
 
 use crate::db::StateError;
-use hyperion_types::waf::{WafHit, WafRuleCount};
+use hyperion_types::waf::{WafBatch, WafHit, WafRuleCount};
 use sqlx::SqlitePool;
 
 /// Refusals kept per hosting in `waf_recent`.
@@ -34,44 +34,43 @@ fn truncate(s: &str) -> String {
     s[..end].to_string()
 }
 
-/// Record a batch of hits for one hosting, in one transaction.
+/// Record one aggregated batch for one hosting, in one transaction: an
+/// upsert per (hour, rule) and per (address, minute), plus the newest
+/// refusals verbatim. A flood of a million refusals is a few hundred rows.
 pub async fn record(
     pool: &SqlitePool,
     hosting_id: &str,
-    hits: &[WafHit],
+    batch: &WafBatch,
 ) -> Result<(), StateError> {
-    if hits.is_empty() {
+    if batch.is_empty() {
         return Ok(());
     }
     let mut tx = pool.begin().await?;
-    for h in hits {
-        let hour = h.ts - h.ts.rem_euclid(3600);
+    for ((hour, rule), hits) in &batch.hourly {
         sqlx::query(
-            "INSERT INTO waf_hits_hourly (hosting_id, hour, rule, hits) VALUES (?, ?, ?, 1) \
-             ON CONFLICT(hosting_id, hour, rule) DO UPDATE SET hits = hits + 1",
+            "INSERT INTO waf_hits_hourly (hosting_id, hour, rule, hits) VALUES (?, ?, ?, ?) \
+             ON CONFLICT(hosting_id, hour, rule) DO UPDATE SET hits = hits + excluded.hits",
         )
         .bind(hosting_id)
         .bind(hour)
-        .bind(&h.rule)
+        .bind(truncate(rule))
+        .bind(hits)
         .execute(&mut *tx)
         .await?;
-        if hyperion_types::waf::counts_for_ban(&h.rule) {
-            let minute = h.ts - h.ts.rem_euclid(60);
-            sqlx::query(
-                "INSERT INTO waf_ip_minute (hosting_id, ip, minute, hits) VALUES (?, ?, ?, 1) \
-                 ON CONFLICT(hosting_id, ip, minute) DO UPDATE SET hits = hits + 1",
-            )
-            .bind(hosting_id)
-            .bind(&h.ip)
-            .bind(minute)
-            .execute(&mut *tx)
-            .await?;
-        }
     }
-    // Only the newest RECENT_CAP can survive the cap, so skip inserting the
-    // rest of a flood rather than writing and deleting it.
-    let skip = hits.len().saturating_sub(RECENT_CAP as usize);
-    for h in &hits[skip..] {
+    for ((ip, minute), hits) in &batch.ip_minute {
+        sqlx::query(
+            "INSERT INTO waf_ip_minute (hosting_id, ip, minute, hits) VALUES (?, ?, ?, ?) \
+             ON CONFLICT(hosting_id, ip, minute) DO UPDATE SET hits = hits + excluded.hits",
+        )
+        .bind(hosting_id)
+        .bind(ip)
+        .bind(minute)
+        .bind(hits)
+        .execute(&mut *tx)
+        .await?;
+    }
+    for h in &batch.recent {
         sqlx::query(
             "INSERT INTO waf_recent (hosting_id, ts, ip, rule, method, uri, ua) \
              VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -227,11 +226,11 @@ mod tests {
         record(
             &pool,
             "h1",
-            &[
+            &WafBatch::from_hits([
                 hit(t, "1.1.1.1", "probe_args"),
                 hit(t + 1, "1.1.1.1", "probe_args"),
                 hit(t + 2, "2.2.2.2", "xmlrpc"),
-            ],
+            ]),
         )
         .await
         .expect("record");
@@ -249,9 +248,29 @@ mod tests {
                 },
             ]
         );
+        // A second batch adds to the same rows rather than replacing them.
+        record(
+            &pool,
+            "h1",
+            &WafBatch::from_hits([hit(t + 3, "1.1.1.1", "probe_args")]),
+        )
+        .await
+        .expect("record");
+        let tot = totals(&pool, "h1", t - 10).await.expect("totals");
+        assert_eq!(
+            tot[0],
+            WafRuleCount {
+                rule: "probe_args".into(),
+                hits: 3
+            }
+        );
+        assert_eq!(
+            ip_offenders(&pool, "h1", t - 10, 3).await.expect("off"),
+            vec!["1.1.1.1".to_string()]
+        );
         let rec = recent(&pool, "h1", 10).await.expect("recent");
-        assert_eq!(rec.len(), 3);
-        assert_eq!(rec[0].rule, "xmlrpc", "newest first");
+        assert_eq!(rec.len(), 4);
+        assert_eq!(rec[0].ts, t + 3, "newest first");
         assert!(totals(&pool, "h2", 0).await.expect("other").is_empty());
     }
 
@@ -263,10 +282,16 @@ mod tests {
             .map(|i| hit(1_800_000_000 + i, "1.1.1.1", "probe_args"))
             .collect();
         hits.last_mut().expect("last").uri = long;
-        record(&pool, "h1", &hits).await.expect("record");
-        record(&pool, "h1", &[hit(1_800_001_000, "1.1.1.1", "dotfiles")])
+        record(&pool, "h1", &WafBatch::from_hits(hits))
             .await
             .expect("record");
+        record(
+            &pool,
+            "h1",
+            &WafBatch::from_hits([hit(1_800_001_000, "1.1.1.1", "dotfiles")]),
+        )
+        .await
+        .expect("record");
         let rec = recent(&pool, "h1", 1000).await.expect("recent");
         assert_eq!(rec.len() as i64, RECENT_CAP);
         assert_eq!(rec[1].uri.len(), FIELD_MAX);
@@ -286,7 +311,9 @@ mod tests {
             hits.push(hit(t + i, "3.3.3.3", "geo"));
             hits.push(hit(t - 7200 + i, "4.4.4.4", "probe_args"));
         }
-        record(&pool, "h1", &hits).await.expect("record");
+        record(&pool, "h1", &WafBatch::from_hits(hits))
+            .await
+            .expect("record");
         let off = ip_offenders(&pool, "h1", t - 600, 5).await.expect("off");
         assert_eq!(off, vec!["1.1.1.1".to_string()]);
         clear_ip(&pool, "h1", "1.1.1.1").await.expect("clear");
@@ -300,9 +327,13 @@ mod tests {
     async fn prune_and_delete_hosting() {
         let pool = open_memory().await.expect("open");
         let t = 1_800_000_000;
-        record(&pool, "h1", &[hit(t, "1.1.1.1", "probe_args")])
-            .await
-            .expect("r");
+        record(
+            &pool,
+            "h1",
+            &WafBatch::from_hits([hit(t, "1.1.1.1", "probe_args")]),
+        )
+        .await
+        .expect("r");
         prune(&pool, t + HOURLY_KEEP_SECS + 7200)
             .await
             .expect("prune");

@@ -4122,10 +4122,15 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // Drop generic per-hosting KV (notes/tags/etc.) so a future
         // hosting reusing this ULID doesn't inherit stale metadata.
         let _ = hyperion_state::hosting_kv::delete_all(&self.pool, detail.id.as_str()).await;
-        // WAF hit records and the root-owned hit log go with the site.
+        // WAF hit records and the root-owned hit log go with the site —
+        // rotated copies too: logrotate only ever rotates `*.log`, so once
+        // the live file is gone nothing else would remove `<id>.log.1…`.
         let _ = hyperion_state::waf::delete_hosting(&self.pool, detail.id.as_str()).await;
-        let _ = tokio::fs::remove_file(hyperion_adapters::nginx::waf_log_file(detail.id.as_str()))
-            .await;
+        remove_waf_logs(
+            std::path::Path::new(hyperion_adapters::nginx::WAF_LOG_DIR),
+            detail.id.as_str(),
+        )
+        .await;
         hostings::delete(&self.pool, &detail.id)
             .await
             .map_err(|e| RpcError::Internal_with(format!("delete row: {e}")))?;
@@ -13685,7 +13690,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 tokio::task::spawn_blocking(move || hyperion_adapters::waflog::read_new(&path, pos))
                     .await
             };
-            let (hits, new_pos) = match read {
+            let (batch, new_pos) = match read {
                 Ok(Ok(v)) => v,
                 Ok(Err(e)) => {
                     tracing::warn!(error = %e, domain = %s.domain, "waf: could not read the hit log");
@@ -13693,7 +13698,16 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 }
                 Err(_) => continue,
             };
-            if let Err(e) = hyperion_state::waf::record(&self.pool, id, &hits).await {
+            if batch.skipped_bytes > 0 {
+                // Kept up with a flood by skipping its oldest lines: the
+                // totals undercount, the bans (decided on recent hits) don't.
+                tracing::warn!(
+                    domain = %s.domain,
+                    skipped_bytes = batch.skipped_bytes,
+                    "waf: hit log backlog over the per-tick budget; oldest lines skipped"
+                );
+            }
+            if let Err(e) = hyperion_state::waf::record(&self.pool, id, &batch).await {
                 // Do not advance past hits that were not stored.
                 tracing::warn!(error = %e, domain = %s.domain, "waf: could not record hits");
                 continue;
@@ -13890,14 +13904,18 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             let Some(site) = intent.site.as_ref() else {
                 continue;
             };
-            if !self
+            let banned = self
                 .auto_ban(&intent.ip, Some(&site.id), intent.reason, now)
-                .await
-            {
+                .await;
+            // Spent either way. Banned now, or refused because the address
+            // is already banned (or never bannable): left in place, the same
+            // hits would ban it again the moment an earlier, shorter ban
+            // lapsed — a second sentence for one offence, escalated as a
+            // "repeat offender".
+            let _ = hyperion_state::waf::clear_ip(&self.pool, &site.id, &intent.ip).await;
+            if !banned {
                 continue;
             }
-            // Spent: the same hits must not ban again when this one lapses.
-            let _ = hyperion_state::waf::clear_ip(&self.pool, &site.id, &intent.ip).await;
             new_bans += 1;
             tracing::info!(ip = %intent.ip, domain = %site.domain, "fail2ban: auto-banned (waf)");
         }
@@ -19098,7 +19116,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         .await
     }
 
-    /// Flip WAF-lite through the vhost-options path, which re-renders the
+    /// Flip the WAF through the vhost-options path, which re-renders the
     /// vhost and runs `nginx -t` before the change counts. The wp-admin
     /// allowlist is deliberately untouched: it is a list of the operator's
     /// own IPs, and no package can invent one.
@@ -34823,6 +34841,26 @@ const WAF_LOG_POS_KV_KEY: &str = "waf_log_pos";
 /// Refusals listed in the activity panel.
 const WAF_RECENT_SHOWN: i64 = 50;
 
+/// Remove one hosting's WAF hit log and its rotated copies (`<id>.log`,
+/// `<id>.log.1`, `<id>.log.2.gz`, …) from `dir`. Best-effort.
+async fn remove_waf_logs(dir: &std::path::Path, hosting_id: &str) {
+    let stem = format!("{hosting_id}.log");
+    let Ok(mut rd) = tokio::fs::read_dir(dir).await else {
+        return;
+    };
+    while let Ok(Some(entry)) = rd.next_entry().await {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let ours = name == stem
+            || name
+                .strip_prefix(stem.as_str())
+                .is_some_and(|rest| rest.starts_with('.'));
+        if ours {
+            let _ = tokio::fs::remove_file(entry.path()).await;
+        }
+    }
+}
+
 /// Thin pub wrapper so `panel_import` can reuse the exact repair the
 /// panel action runs, without `repair_tree_permissions` itself going pub.
 pub async fn repair_tree_permissions_for_import(
@@ -37603,7 +37641,10 @@ fn limits_to_row(
 /// Bump when a vhost template change must reach EXISTING sites (see
 /// [`HostingService::rerender_stale_vhosts`]). 1: request time in the
 /// access log, page-cache skip for logged-in and WooCommerce visitors.
-const VHOST_GEN: u32 = 1;
+/// 2: per-rule WAF whose refusals are tagged into the root-owned WAF log —
+/// without the rewrite an existing site's activity view and WAF auto-ban
+/// stay empty until somebody re-saves it.
+const VHOST_GEN: u32 = 2;
 /// Node-local `hosting_kv` key holding the generation a vhost was last
 /// rendered at.
 const VHOST_GEN_KV: &str = "nginx.vhost_gen";
@@ -41318,6 +41359,10 @@ mod tests {
                 "{now}.{i:03}\t9.9.9.9\txmlrpc\tPOST\t/xmlrpc.php\tbot\n"
             ));
             body.push_str(&format!("{now}.{i:03}\t1.0.0.1\tgeo\tGET\t/\tua\n"));
+            // A crawler working through a downloads page: refused, never banned.
+            body.push_str(&format!(
+                "{now}.{i:03}\t66.249.66.1\tdump_files\tGET\t/files/{i}.zip\tGooglebot/2.1\n"
+            ));
         }
         let path = logs.path().join(format!("{}.log", a.id.as_str()));
         std::fs::write(&path, &body).expect("write log");
@@ -41349,6 +41394,36 @@ mod tests {
         .await
         .expect("opt out");
         assert!(s.waf_ingest(logs.path(), since, now).await.is_empty());
+    }
+
+    /// Purging a site removes its WAF log and the rotated copies logrotate
+    /// left behind — and nothing that belongs to another site.
+    #[tokio::test]
+    async fn remove_waf_logs_takes_rotated_copies_but_nothing_else() {
+        let dir = tempfile::tempdir().expect("dir");
+        let id = "01a110d5-1ee1-71c2-b98b-0e31aa826f3b";
+        for name in [
+            format!("{id}.log"),
+            format!("{id}.log.1"),
+            format!("{id}.log.2.gz"),
+            format!("{id}.logbook"),
+            "01a110d5-0000-0000-0000-000000000000.log".to_string(),
+        ] {
+            std::fs::write(dir.path().join(name), "x").expect("write");
+        }
+        remove_waf_logs(dir.path(), id).await;
+        let mut left: Vec<String> = std::fs::read_dir(dir.path())
+            .expect("ls")
+            .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        assert_eq!(
+            left,
+            vec![
+                "01a110d5-0000-0000-0000-000000000000.log".to_string(),
+                format!("{id}.logbook"),
+            ]
+        );
     }
 
     /// An empty level from an older caller keeps the stored level and pins

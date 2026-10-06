@@ -83,9 +83,20 @@ pub struct WafRuleDef {
     pub label: &'static str,
     pub help: &'static str,
     pub tier: Tier,
-    /// Whether a hit counts towards an automatic firewall ban. Only rules
-    /// that an honest client cannot trip are ban-counted: Jetpack calls
-    /// `xmlrpc.php`, and an uptime monitor may send no User-Agent.
+    /// Whether a hit counts towards an automatic firewall ban.
+    ///
+    /// Only rules that no honest client — browser, crawler, download
+    /// manager, plugin — trips over and over. A ban is node-wide (every
+    /// site on the box, and SSH), so a false positive here costs far more
+    /// than the 403 itself:
+    /// - `dump_files` also refuses `.zip`/`.tar.gz`, and a site that links
+    ///   downloads gets them crawled — counting it would ban Googlebot.
+    /// - `php_in_uploads` fires on every page view of a site whose cache
+    ///   plugin runs PHP from `wp-content/cache`.
+    /// - `bad_methods` fires for Office and Windows WebDAV clients
+    ///   (`PROPFIND`) opening a linked document.
+    /// - `xmlrpc` is Jetpack and the mobile app; `empty_ua` is home-made
+    ///   monitors; the enumeration rules are plain page views.
     pub counts_for_ban: bool,
     /// Rendered only for hostings that run PHP.
     pub php_only: bool,
@@ -129,7 +140,7 @@ pub const RULES: &[WafRuleDef] = &[
         label: "Backups, dumps and logs",
         help: "Files ending in .sql, .bak, .old, .orig, .save, .swp, .tar, .gz, .tgz, .zip, .log, .ini or .sh.",
         tier: Tier::Standard,
-        counts_for_ban: true,
+        counts_for_ban: false,
         php_only: false,
     },
     WafRuleDef {
@@ -137,7 +148,7 @@ pub const RULES: &[WafRuleDef] = &[
         label: "PHP in uploads and cache",
         help: "Running a .php file from wp-content/uploads or wp-content/cache — the usual malware drop.",
         tier: Tier::Standard,
-        counts_for_ban: true,
+        counts_for_ban: false,
         php_only: true,
     },
     WafRuleDef {
@@ -159,7 +170,7 @@ pub const RULES: &[WafRuleDef] = &[
     WafRuleDef {
         id: "rest_user_enum",
         label: "REST API user list",
-        help: "/wp-json/wp/v2/users for visitors who are not logged in. The block editor keeps working.",
+        help: "/wp-json/wp/v2/users for visitors who are not logged in. The block editor keeps working. Stops scanners, not a determined attacker: nginx cannot tell a real login cookie from a forged one.",
         tier: Tier::Strict,
         counts_for_ban: false,
         php_only: false,
@@ -169,7 +180,7 @@ pub const RULES: &[WafRuleDef] = &[
         label: "Unusual HTTP methods",
         help: "Anything other than GET, HEAD, POST, PUT, PATCH, DELETE and OPTIONS (TRACE, TRACK, CONNECT, WebDAV verbs).",
         tier: Tier::Strict,
-        counts_for_ban: true,
+        counts_for_ban: false,
         php_only: false,
     },
     WafRuleDef {
@@ -321,6 +332,54 @@ pub fn level_default(level: WafLevel, id: &str) -> bool {
     rule(id).map(|r| level.includes(r.tier)).unwrap_or(false)
 }
 
+/// Refusals read from one hit log in one pass, already aggregated, so a
+/// flood costs a handful of row writes instead of one per request.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WafBatch {
+    /// `(hour start, rule tag)` → refusals.
+    pub hourly: BTreeMap<(i64, String), i64>,
+    /// `(address, minute start)` → refusals by ban-counted rules only, so
+    /// a tag that must never ban cannot reach the threshold at all.
+    pub ip_minute: BTreeMap<(String, i64), i64>,
+    /// The newest refusals, oldest first, at most [`WafBatch::RECENT_KEEP`].
+    pub recent: std::collections::VecDeque<WafHit>,
+    /// Lines that parsed.
+    pub lines: u64,
+    /// Bytes of backlog skipped, unread, to keep up with a flood.
+    pub skipped_bytes: u64,
+}
+
+impl WafBatch {
+    /// How many refusals a batch keeps verbatim.
+    pub const RECENT_KEEP: usize = 200;
+
+    pub fn push(&mut self, hit: WafHit) {
+        self.lines += 1;
+        let hour = hit.ts - hit.ts.rem_euclid(3600);
+        *self.hourly.entry((hour, hit.rule.clone())).or_insert(0) += 1;
+        if counts_for_ban(&hit.rule) {
+            let minute = hit.ts - hit.ts.rem_euclid(60);
+            *self.ip_minute.entry((hit.ip.clone(), minute)).or_insert(0) += 1;
+        }
+        if self.recent.len() == Self::RECENT_KEEP {
+            self.recent.pop_front();
+        }
+        self.recent.push_back(hit);
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.lines == 0
+    }
+
+    pub fn from_hits(hits: impl IntoIterator<Item = WafHit>) -> Self {
+        let mut b = Self::default();
+        for h in hits {
+            b.push(h);
+        }
+        b
+    }
+}
+
 /// Hits for one rule tag over a period.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct WafRuleCount {
@@ -416,11 +475,57 @@ mod tests {
 
     #[test]
     fn only_listed_rules_count_for_bans() {
+        let ban: Vec<&str> = RULES
+            .iter()
+            .filter(|r| r.counts_for_ban)
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(
+            ban,
+            vec!["probe_args", "scanner_ua", "sensitive_files", "dotfiles"]
+        );
         assert!(counts_for_ban("probe_args"));
         assert!(!counts_for_ban("xmlrpc"));
+        assert!(
+            !counts_for_ban("dump_files"),
+            "archives are legitimate downloads"
+        );
         assert!(!counts_for_ban(TAG_GEO));
         assert!(!counts_for_ban(TAG_BOT));
         assert!(!counts_for_ban("made_up"));
+    }
+
+    #[test]
+    fn batch_aggregates_and_keeps_only_the_newest() {
+        let hit = |ts: i64, ip: &str, rule: &str| WafHit {
+            ts,
+            ip: ip.into(),
+            rule: rule.into(),
+            ..Default::default()
+        };
+        let mut hits = vec![
+            hit(3600, "1.1.1.1", "probe_args"),
+            hit(3601, "1.1.1.1", "probe_args"),
+        ];
+        hits.push(hit(3659, "2.2.2.2", "dump_files"));
+        for i in 0..(WafBatch::RECENT_KEEP as i64) {
+            hits.push(hit(7200 + i, "3.3.3.3", "xmlrpc"));
+        }
+        let b = WafBatch::from_hits(hits);
+        assert_eq!(b.hourly.get(&(3600, "probe_args".into())), Some(&2));
+        assert_eq!(b.hourly.get(&(3600, "dump_files".into())), Some(&1));
+        assert_eq!(b.ip_minute.get(&("1.1.1.1".into(), 3600)), Some(&2));
+        assert_eq!(
+            b.ip_minute.len(),
+            1,
+            "only ban-counted rules reach the ban counts"
+        );
+        assert_eq!(b.recent.len(), WafBatch::RECENT_KEEP);
+        assert_eq!(
+            b.recent.back().map(|h| h.ts),
+            Some(7200 + WafBatch::RECENT_KEEP as i64 - 1)
+        );
+        assert_eq!(b.lines, 3 + WafBatch::RECENT_KEEP as u64);
     }
 
     #[test]

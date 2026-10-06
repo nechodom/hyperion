@@ -18,6 +18,8 @@ CREATE TABLE waf_hits_hourly (
     hits       INTEGER NOT NULL,
     PRIMARY KEY (hosting_id, hour, rule)
 );
+-- The retention prune runs every tick; without this it scans the table.
+CREATE INDEX idx_waf_hits_hourly_hour ON waf_hits_hourly (hour);
 
 -- The last refusals per hosting (capped by the ingest), for the panel.
 -- uri / ua are attacker-controlled and stored truncated.

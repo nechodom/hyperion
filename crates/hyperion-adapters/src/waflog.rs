@@ -10,13 +10,18 @@
 //! strict about the fields a ban decision rests on (time, address, rule
 //! tag) and only unescapes + bounds the rest.
 
-use hyperion_types::waf::WafHit;
-use std::io::{Read, Seek, SeekFrom};
-use std::path::Path;
+use hyperion_types::waf::{WafBatch, WafHit};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
 
-/// Upper bound on what one ingest pass reads from one log, so a flood
-/// cannot stall the tick. The rest is picked up next time.
-pub const MAX_READ_BYTES: u64 = 8 * 1024 * 1024;
+/// What one ingest pass reads from one log at most.
+///
+/// The ingest runs on the 5-minute fail2ban tick, and a ban needs hits
+/// from inside the ban window. A reader that falls behind would decide
+/// bans on stale lines and never catch an ongoing flood, so a backlog past
+/// this budget is SKIPPED from its oldest end (see [`read_new`]) rather
+/// than queued. 64 MiB per tick is ~1,800 refusals a second sustained.
+pub const MAX_READ_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Where the last pass stopped in one log: the file's inode (a rotation
 /// replaces the file) and the byte offset of the first unread line.
@@ -119,49 +124,112 @@ pub fn parse_line(line: &str) -> Option<WafHit> {
     })
 }
 
-/// Read the whole lines appended since `pos`. Returns the parsed hits and
-/// the position to store for next time.
+/// Where logrotate (`create`, `delaycompress`) leaves yesterday's file.
+fn rotated_sibling(path: &Path) -> Option<PathBuf> {
+    let name = path.file_name()?.to_str()?;
+    Some(path.with_file_name(format!("{name}.1")))
+}
+
+/// Feed every complete line of `reader` (at most `budget` bytes) into
+/// `batch`. Returns the bytes consumed: a trailing line without its newline
+/// is still being written and is left for the next pass.
+fn read_lines<R: Read>(reader: R, budget: u64, batch: &mut WafBatch) -> std::io::Result<u64> {
+    let mut r = BufReader::new(reader.take(budget));
+    let mut line = Vec::with_capacity(512);
+    let mut consumed = 0u64;
+    loop {
+        line.clear();
+        let n = r.read_until(b'\n', &mut line)?;
+        if n == 0 || line.last() != Some(&b'\n') {
+            break;
+        }
+        consumed += n as u64;
+        if let Some(hit) = parse_line(&String::from_utf8_lossy(&line)) {
+            batch.push(hit);
+        }
+    }
+    Ok(consumed)
+}
+
+/// Read the whole lines appended since `pos`, aggregated. Returns the batch
+/// and the position to store for next time.
 ///
-/// A different inode (rotated) or a file shorter than the offset
-/// (truncated) restarts at 0. A partial last line is left for the next
-/// pass. A single line longer than [`MAX_READ_BYTES`] is skipped rather
-/// than wedging the reader forever.
-pub fn read_new(path: &Path, pos: Option<LogPos>) -> std::io::Result<(Vec<WafHit>, LogPos)> {
+/// - Rotated (the inode changed): the rest of the previous file is read
+///   from `<log>.1` first, so the lines written between the last pass and
+///   the rotation are not lost, then the new file from the start.
+/// - Truncated (shorter than the offset): restart at 0.
+/// - More than [`MAX_READ_BYTES`] unread: skip to the newest
+///   `MAX_READ_BYTES`, starting at a line boundary, and say how much was
+///   skipped. Bans are decided on recent hits; old ones only feed totals.
+pub fn read_new(path: &Path, pos: Option<LogPos>) -> std::io::Result<(WafBatch, LogPos)> {
+    read_new_with_budget(path, pos, MAX_READ_BYTES)
+}
+
+fn read_new_with_budget(
+    path: &Path,
+    pos: Option<LogPos>,
+    budget: u64,
+) -> std::io::Result<(WafBatch, LogPos)> {
     use std::os::unix::fs::MetadataExt;
+    let mut batch = WafBatch::default();
     let mut file = std::fs::File::open(path)?;
     let meta = file.metadata()?;
     let inode = meta.ino();
     let len = meta.len();
+
     let mut offset = match pos {
         Some(p) if p.inode == inode && p.offset <= len => p.offset,
+        Some(p) if p.inode != inode => {
+            // Finish the file we were reading before it was rotated away.
+            if let Some(rot) = rotated_sibling(path) {
+                if let Ok(old) = std::fs::File::open(&rot) {
+                    if let Ok(m) = old.metadata() {
+                        if m.ino() == p.inode && p.offset < m.len() {
+                            let mut old = old;
+                            old.seek(SeekFrom::Start(p.offset))?;
+                            read_lines(old, (m.len() - p.offset).min(budget), &mut batch)?;
+                        }
+                    }
+                }
+            }
+            0
+        }
         _ => 0,
     };
-    if offset == len {
-        return Ok((Vec::new(), LogPos { inode, offset }));
+
+    if len - offset > budget {
+        let start = len - budget;
+        batch.skipped_bytes += start - offset;
+        // Land on a line boundary: unless `start` already is one, drop the
+        // rest of the line it falls inside.
+        file.seek(SeekFrom::Start(start - 1))?;
+        let mut prev = [0u8; 1];
+        file.read_exact(&mut prev)?;
+        let mut n = 0;
+        if prev[0] != b'\n' {
+            let mut partial = Vec::new();
+            n = BufReader::new((&mut file).take(budget)).read_until(b'\n', &mut partial)? as u64;
+        }
+        batch.skipped_bytes += n;
+        offset = start + n;
     }
     file.seek(SeekFrom::Start(offset))?;
-    let want = (len - offset).min(MAX_READ_BYTES);
-    let mut buf = Vec::with_capacity(want as usize);
-    file.take(want).read_to_end(&mut buf)?;
-    let consumed = match buf.iter().rposition(|&b| b == b'\n') {
-        Some(i) => i + 1,
-        // No newline in a full window: one absurd line. Skip it.
-        None if want == MAX_READ_BYTES => buf.len(),
-        // A line still being written — leave it for next time.
-        None => 0,
-    };
-    let hits = String::from_utf8_lossy(&buf[..consumed])
-        .lines()
-        .filter_map(parse_line)
-        .collect();
-    offset += consumed as u64;
-    Ok((hits, LogPos { inode, offset }))
+    offset += read_lines(&mut file, len - offset, &mut batch)?;
+    Ok((batch, LogPos { inode, offset }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Write;
+
+    fn line(ts: i64, ip: &str, rule: &str) -> String {
+        format!("{ts}.000\t{ip}\t{rule}\tGET\t/\tua\n")
+    }
+
+    fn ts_of(b: &WafBatch) -> Vec<i64> {
+        b.recent.iter().map(|h| h.ts).collect()
+    }
 
     #[test]
     fn parses_a_real_nginx_line() {
@@ -205,17 +273,20 @@ mod tests {
     }
 
     #[test]
-    fn reads_incrementally_and_survives_rotation_and_partial_lines() {
+    fn reads_incrementally_and_waits_for_partial_lines() {
         let dir = tempfile::tempdir().expect("tmp");
         let path = dir.path().join("h.log");
-        let line = |n: i64| format!("{n}.000\t1.1.1.1\tprobe_args\tGET\t/\tua\n");
-        std::fs::write(&path, line(1) + &line(2)).expect("w");
-        let (hits, pos) = read_new(&path, None).expect("read");
-        assert_eq!(hits.len(), 2);
+        std::fs::write(
+            &path,
+            line(1, "1.1.1.1", "probe_args") + &line(2, "1.1.1.1", "probe_args"),
+        )
+        .expect("w");
+        let (b, pos) = read_new(&path, None).expect("read");
+        assert_eq!(ts_of(&b), vec![1, 2]);
 
         // Nothing new: nothing read, position unchanged.
-        let (hits, pos2) = read_new(&path, Some(pos)).expect("read");
-        assert!(hits.is_empty());
+        let (b, pos2) = read_new(&path, Some(pos)).expect("read");
+        assert!(b.is_empty());
         assert_eq!(pos, pos2);
 
         // A half-written line waits for its newline.
@@ -224,30 +295,66 @@ mod tests {
             .open(&path)
             .expect("open");
         f.write_all(b"3.000\t1.1.1.1\tprobe_args\tGET").expect("w");
-        let (hits, pos3) = read_new(&path, Some(pos2)).expect("read");
-        assert!(hits.is_empty());
+        let (b, pos3) = read_new(&path, Some(pos2)).expect("read");
+        assert!(b.is_empty());
+        assert_eq!(pos3, pos2);
         f.write_all(b"\t/\tua\n").expect("w");
-        let (hits, pos4) = read_new(&path, Some(pos3)).expect("read");
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].ts, 3);
+        let (b, _) = read_new(&path, Some(pos3)).expect("read");
+        assert_eq!(ts_of(&b), vec![3]);
+    }
 
-        // Rotation: a new file at the same path starts from 0.
+    /// The lines written between the last pass and a logrotate are read
+    /// from `<log>.1`, then the new file from its start.
+    #[test]
+    fn rotation_keeps_the_lines_written_just_before_it() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let path = dir.path().join("h.log");
+        std::fs::write(&path, line(1, "1.1.1.1", "probe_args")).expect("w");
+        let (_, pos) = read_new(&path, None).expect("read");
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("open");
+        f.write_all(line(2, "1.1.1.1", "probe_args").as_bytes())
+            .expect("w");
         std::fs::rename(&path, dir.path().join("h.log.1")).expect("mv");
-        std::fs::write(&path, line(9)).expect("w");
-        let (hits, _) = read_new(&path, Some(pos4)).expect("read");
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].ts, 9);
+        std::fs::write(&path, line(9, "1.1.1.1", "probe_args")).expect("w");
+        let (b, pos2) = read_new(&path, Some(pos)).expect("read");
+        assert_eq!(ts_of(&b), vec![2, 9]);
+        // And the new file is tracked from here on.
+        let (b, _) = read_new(&path, Some(pos2)).expect("read");
+        assert!(b.is_empty());
     }
 
     #[test]
     fn truncation_restarts_from_zero() {
         let dir = tempfile::tempdir().expect("tmp");
         let path = dir.path().join("h.log");
-        std::fs::write(&path, "1.0\t1.1.1.1\tr\tGET\t/\tua\n".repeat(3)).expect("w");
+        std::fs::write(&path, line(1, "1.1.1.1", "r").repeat(3)).expect("w");
         let (_, pos) = read_new(&path, None).expect("read");
-        std::fs::write(&path, "5.0\t1.1.1.1\tr\tGET\t/\tua\n").expect("w");
-        let (hits, _) = read_new(&path, Some(pos)).expect("read");
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].ts, 5);
+        std::fs::write(&path, line(5, "1.1.1.1", "r")).expect("w");
+        let (b, _) = read_new(&path, Some(pos)).expect("read");
+        assert_eq!(ts_of(&b), vec![5]);
+    }
+
+    /// A backlog over the budget is skipped from its OLDEST end, starting at
+    /// a line boundary, so the newest hits — the ones a ban needs — are read.
+    #[test]
+    fn a_backlog_over_budget_reads_the_newest_lines() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let path = dir.path().join("h.log");
+        let body: String = (100..200)
+            .map(|t| line(t, "1.1.1.1", "probe_args"))
+            .collect();
+        std::fs::write(&path, &body).expect("w");
+        let one = line(100, "1.1.1.1", "probe_args").len() as u64;
+        // Budget for ten and a half lines: the half line is dropped.
+        let (b, pos) = read_new_with_budget(&path, None, one * 10 + one / 2).expect("read");
+        assert_eq!(ts_of(&b), (190..200).collect::<Vec<_>>());
+        assert_eq!(b.skipped_bytes, one * 90);
+        assert_eq!(pos.offset, body.len() as u64);
+        // A budget that ends exactly on a line boundary loses no whole line.
+        let (b, _) = read_new_with_budget(&path, None, one * 10).expect("read");
+        assert_eq!(ts_of(&b), (190..200).collect::<Vec<_>>());
     }
 }

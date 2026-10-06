@@ -2512,7 +2512,7 @@ async fn live_feature_state(
         wp_auto_update,
         integrity_scan,
         monitoring,
-        hardening: detail.vhost_options.waf_enabled,
+        hardening: detail.vhost_options.effective_waf_level() != hyperion_types::waf::WafLevel::Off,
         backup_cadence,
         backup_interval_days,
         backup_keep_days,

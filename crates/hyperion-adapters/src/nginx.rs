@@ -859,16 +859,15 @@ __DIR__/*.log {
 }
 
 /// Write `path` only when its content differs — rewriting an identical file
-/// would still bump its mtime and invite a needless reload.
+/// would still bump its mtime and invite a needless reload. Atomically: a
+/// half-written file in conf.d fails `nginx -t` for every site on the node.
 async fn write_if_changed(path: &str, want: &str) -> Result<(), AdapterError> {
     if let Ok(existing) = tokio::fs::read_to_string(path).await {
         if existing == want {
             return Ok(());
         }
     }
-    tokio::fs::write(path, want.as_bytes())
-        .await
-        .map_err(|e| AdapterError::Other(format!("write {path}: {e}")))
+    atomic_write(std::path::Path::new(path), want.as_bytes(), 0o644).await
 }
 
 /// Everything a vhost that references the WAF log needs to pass `nginx -t`:

@@ -859,6 +859,11 @@ pub async fn patch_vhost(
     // saving an unrelated field doesn't trip the gate, and a whitespace-only
     // diff can't slip an edit past the trim() compare.
     let mut options = body.options;
+    // A named level carries the legacy bool with it: a node that predates
+    // the WAF rework reads only `waf_enabled`.
+    if let Some(level) = hyperion_types::waf::WafLevel::parse(&options.waf_level) {
+        options.set_waf_level(level);
+    }
     if !ctx.can(Capability::HostingEditNginxRaw) {
         let snippet_changed =
             options.custom_nginx_snippet.trim() != detail.vhost_options.custom_nginx_snippet.trim();

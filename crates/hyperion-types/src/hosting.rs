@@ -224,11 +224,8 @@ pub struct VhostOptions {
     #[serde(default)]
     pub canonical_host: String,
 
-    /// WAF-lite (migration 036). When true the vhost gets a
-    /// conservative set of nginx rules: deny direct access to
-    /// sensitive files, block PHP execution under wp-content/uploads
-    /// + cache, and 403 obvious probe query-strings / scanner
-    /// user-agents. Lighter than ModSecurity to avoid false positives.
+    /// The original single WAF switch (migration 036): on meant the rule
+    /// set that is now the Standard level (`crate::waf`).
     ///
     /// Since the WAF rework this is DERIVED: written as `waf_level != off`
     /// and kept on the wire so an older master or node reading it still

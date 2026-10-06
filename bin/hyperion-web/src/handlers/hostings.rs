@@ -265,6 +265,15 @@ struct DetailTpl<'a> {
     /// Any rule pinned on or off — opens the rules fold so a pin is never
     /// hidden behind a level that seems to say otherwise.
     waf_has_pins: bool,
+    /// What the WAF actually does here, for the pills ("WAF standard",
+    /// "WAF off", "WAF off · 2 rules pinned on").
+    waf_summary: String,
+    /// At least one rule is rendered.
+    waf_on: bool,
+    /// Whether this kind's vhost renders the Protection card at all. A
+    /// reverse proxy and a redirect have their own nginx templates with no
+    /// WAF, bot, country, admin-lock or sign-up rules in them.
+    protection_applies: bool,
     /// Whether `redis-cache` is present. Enabling Redis writes the wp-config
     /// constants and changes nothing observable until that plugin exists, so
     /// the card offers to install it rather than leaving the gap in prose.
@@ -1528,6 +1537,7 @@ pub async fn post_create(
             let mem_auto = PhpMemAutoView::from_kv(&[], limits.php_memory_mb);
             let waf_level = detail.vhost_options.effective_waf_level().as_str();
             let waf_rules = waf_rule_rows(&detail.vhost_options, detail.php_version.is_some());
+            let protection_applies = protection_applies(&detail.kind);
             let workers_full = PhpWorkersView::from_kv(&[], 0);
             let tpl = DetailTpl {
                 username: &ctx.username,
@@ -1628,6 +1638,9 @@ pub async fn post_create(
                 // cannot know either way.
                 bot_families: bot_family_rows(""),
                 waf_has_pins: waf_rules.iter().any(|r| !r.pin.is_empty()),
+                waf_summary: waf_summary(waf_level, &waf_rules),
+                waf_on: waf_rules.iter().any(|r| r.effective),
+                protection_applies,
                 waf_level,
                 waf_rules,
                 redis_plugin_installed: true,
@@ -2600,6 +2613,7 @@ pub async fn get_detail(
     let bot_families = bot_family_rows(&detail.vhost_options.blocked_bots);
     let waf_level = detail.vhost_options.effective_waf_level().as_str();
     let waf_rules = waf_rule_rows(&detail.vhost_options, detail.php_version.is_some());
+    let protection_applies = protection_applies(&detail.kind);
     // Every name nginx serves for this hosting, checked against what the
     // certificate actually carries. Wildcards are matched with the SAME rule
     // the certificate validator uses, so a `*.example.cz` cert is not reported
@@ -2744,6 +2758,9 @@ pub async fn get_detail(
         monitor_history,
         bot_families,
         waf_has_pins: waf_rules.iter().any(|r| !r.pin.is_empty()),
+        waf_summary: waf_summary(waf_level, &waf_rules),
+        waf_on: waf_rules.iter().any(|r| r.effective),
+        protection_applies,
         waf_level,
         waf_rules,
         // `wp plugin list` reports the folder slug; redis-cache is the
@@ -4204,6 +4221,42 @@ impl VhostOptionsForm {
         hyperion_types::waf::overrides_to_string(&map)
     }
 
+    /// Copy the Protection card's fields onto `options`.
+    fn apply_protection(&self, options: &mut hyperion_types::VhostOptions) {
+        match hyperion_types::waf::WafLevel::parse(&self.waf_level) {
+            // Through `set_waf_level`, so the legacy bool moves with the
+            // level: a node that predates the rework reads only the bool.
+            Some(level) => {
+                options.set_waf_level(level);
+                options.waf_overrides = self.waf_overrides();
+            }
+            None if self.waf_level.trim().is_empty() => {
+                // A caller that only knows the old switch: the service keeps
+                // the stored level and pins while the switch agrees with them.
+                options.waf_level = String::new();
+                options.waf_enabled = checkbox_on(&self.waf_enabled);
+                options.waf_overrides = String::new();
+            }
+            // Unknown value: passed on for the service to refuse by name.
+            None => options.waf_level = self.waf_level.trim().to_string(),
+        }
+        options.signup_limit_enabled = checkbox_on(&self.signup_limit_enabled);
+        options.blocked_bots = self.blocked_bots();
+        // Sanitized again in the renderer, but rejecting non-codes here too
+        // means the DB never stores something the vhost would drop — the
+        // saved value and the applied value stay the same thing.
+        options.blocked_countries = self
+            .blocked_countries
+            .as_deref()
+            .unwrap_or("")
+            .split(',')
+            .map(|c| c.trim().to_ascii_uppercase())
+            .filter(|c| c.len() == 2 && c.bytes().all(|b| b.is_ascii_uppercase()))
+            .collect::<Vec<_>>()
+            .join(",");
+        options.wp_admin_allowlist = self.wp_admin_allowlist.trim().to_string();
+    }
+
     fn blocked_bots(&self) -> String {
         [
             ("ai", &self.bot_ai),
@@ -4310,31 +4363,7 @@ pub async fn post_vhost_options(
         options.canonical_host = form.canonical_host.trim().to_string();
     }
     if save_protection {
-        if form.waf_level.trim().is_empty() {
-            // A caller that only knows the old switch: the service keeps the
-            // stored level and pins while the switch agrees with them.
-            options.waf_level = String::new();
-            options.waf_enabled = checkbox_on(&form.waf_enabled);
-            options.waf_overrides = String::new();
-        } else {
-            options.waf_level = form.waf_level.trim().to_string();
-            options.waf_overrides = form.waf_overrides();
-        }
-        options.signup_limit_enabled = checkbox_on(&form.signup_limit_enabled);
-        options.blocked_bots = form.blocked_bots();
-        // Sanitized again in the renderer, but rejecting non-codes here too
-        // means the DB never stores something the vhost would drop — the
-        // saved value and the applied value stay the same thing.
-        options.blocked_countries = form
-            .blocked_countries
-            .as_deref()
-            .unwrap_or("")
-            .split(',')
-            .map(|c| c.trim().to_ascii_uppercase())
-            .filter(|c| c.len() == 2 && c.bytes().all(|b| b.is_ascii_uppercase()))
-            .collect::<Vec<_>>()
-            .join(",");
-        options.wp_admin_allowlist = form.wp_admin_allowlist.trim().to_string();
+        form.apply_protection(&mut options);
     }
     let pw_opt = if form.basic_auth_password.is_empty() || !save_vhost {
         None
@@ -6147,6 +6176,26 @@ pub struct WafRuleRow {
     pub counts_for_ban: bool,
 }
 
+/// Hosting kinds whose vhost carries the Protection card's rules. The
+/// reverse-proxy and redirect templates have none of them.
+fn protection_applies(kind: &str) -> bool {
+    !matches!(kind, "reverse_proxy" | "redirect")
+}
+
+/// One phrase for what the WAF does on this site. A level of Off with rules
+/// pinned on still refuses requests, and saying "off" there would hide it.
+fn waf_summary(level: &str, rows: &[WafRuleRow]) -> String {
+    let on = rows.iter().filter(|r| r.effective).count();
+    match level {
+        "off" if on > 0 => format!(
+            "WAF off · {on} rule{} pinned on",
+            if on == 1 { "" } else { "s" }
+        ),
+        "off" => "WAF off".to_string(),
+        other => format!("WAF {other}"),
+    }
+}
+
 fn waf_rule_rows(opts: &hyperion_types::VhostOptions, has_php: bool) -> Vec<WafRuleRow> {
     use hyperion_types::waf;
     let level = opts.effective_waf_level();
@@ -6234,6 +6283,45 @@ mod waf_form_tests {
         let f = parse("selector=x&waf_level=standard&waf_rule_xmlrpc=off&waf_rule_dotfiles=on&waf_rule_probe_args=");
         assert_eq!(f.waf_overrides(), r#"{"dotfiles":true,"xmlrpc":false}"#);
         assert_eq!(parse("selector=x").waf_overrides(), "");
+    }
+
+    /// The legacy bool travels with the level: an older node reads only it.
+    #[test]
+    fn a_chosen_level_carries_the_legacy_bool() {
+        let mut o = hyperion_types::VhostOptions::default();
+        parse("selector=x&section=protection&waf_level=strict").apply_protection(&mut o);
+        assert_eq!(o.waf_level, "strict");
+        assert!(o.waf_enabled);
+        parse("selector=x&section=protection&waf_level=off").apply_protection(&mut o);
+        assert!(!o.waf_enabled);
+        // The old single switch: level left for the service to keep.
+        parse("selector=x&waf_enabled=on").apply_protection(&mut o);
+        assert_eq!(o.waf_level, "");
+        assert!(o.waf_enabled);
+        // An unknown level is passed through for the service to refuse.
+        parse("selector=x&waf_level=paranoid").apply_protection(&mut o);
+        assert_eq!(o.waf_level, "paranoid");
+    }
+
+    #[test]
+    fn summary_does_not_say_off_while_pinned_rules_refuse() {
+        let mut o = hyperion_types::VhostOptions::default();
+        assert_eq!(
+            super::waf_summary("off", &waf_rule_rows(&o, true)),
+            "WAF off"
+        );
+        o.waf_overrides = r#"{"dotfiles":true}"#.into();
+        assert_eq!(
+            super::waf_summary("off", &waf_rule_rows(&o, true)),
+            "WAF off · 1 rule pinned on"
+        );
+        assert_eq!(
+            super::waf_summary("strict", &waf_rule_rows(&o, true)),
+            "WAF strict"
+        );
+        assert!(!super::protection_applies("reverse_proxy"));
+        assert!(!super::protection_applies("redirect"));
+        assert!(super::protection_applies("php"));
     }
 
     #[test]
@@ -9318,8 +9406,20 @@ struct WafPanelTpl {
     fail2ban_enabled: bool,
     threshold: u32,
     window_min: i64,
+    /// Labels of the rules whose refusals count towards a ban, from the
+    /// catalogue — so the copy cannot drift from what the ingest counts.
+    ban_rules: String,
     error: Option<String>,
     notice: Option<String>,
+}
+
+fn waf_ban_rule_labels() -> String {
+    hyperion_types::waf::RULES
+        .iter()
+        .filter(|r| r.counts_for_ban)
+        .map(|r| r.label.to_lowercase())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 impl WafPanelTpl {
@@ -9381,6 +9481,7 @@ impl WafPanelTpl {
             fail2ban_enabled: a.fail2ban_enabled,
             threshold: a.threshold,
             window_min: (a.window_secs / 60).max(1),
+            ban_rules: waf_ban_rule_labels(),
             error: None,
             notice: None,
         }
@@ -9398,10 +9499,18 @@ impl WafPanelTpl {
             fail2ban_enabled: true,
             threshold: 0,
             window_min: 0,
+            ban_rules: waf_ban_rule_labels(),
             error: Some(error),
             notice: None,
         }
     }
+}
+
+fn waf_panel_error(cause: &str) -> String {
+    format!(
+        "Could not read WAF activity from this site's node ({cause}). A node that runs an \
+         older Hyperion does not record it — update the node if that is the case."
+    )
 }
 
 /// Fetch the activity from the owning node and render the panel. An older
@@ -9428,21 +9537,14 @@ async fn render_waf_panel(
         Ok(RpcResponse::HostingWafActivity(a)) => {
             WafPanelTpl::from_activity(selector, csrf_token, can_edit, a)
         }
+        // An older node cannot even decode the request — it drops the
+        // connection, so there is no message to recognise. Name the likely
+        // cause next to whatever did come back.
         Ok(RpcResponse::Error(e)) => {
-            let msg = e.to_string();
-            let msg = if msg.contains("unknown variant") {
-                "This site's node runs an older Hyperion that does not record WAF activity yet — update the node.".to_string()
-            } else {
-                msg
-            };
-            WafPanelTpl::failed(selector, csrf_token, msg)
+            WafPanelTpl::failed(selector, csrf_token, waf_panel_error(&e.to_string()))
         }
-        Ok(_) => WafPanelTpl::failed(
-            selector,
-            csrf_token,
-            "unexpected response from the owning node".into(),
-        ),
-        Err(e) => WafPanelTpl::failed(selector, csrf_token, e.to_string()),
+        Ok(_) => WafPanelTpl::failed(selector, csrf_token, waf_panel_error("unexpected response")),
+        Err(e) => WafPanelTpl::failed(selector, csrf_token, waf_panel_error(&e.to_string())),
     };
     tpl.notice = notice;
     Ok(Html(tpl.render()?).into_response())
@@ -9584,7 +9686,8 @@ pub async fn post_waf_rule(
         }
     }
     options.waf_overrides = hyperion_types::waf::overrides_to_string(&pins);
-    options.waf_level = options.effective_waf_level().as_str().to_string();
+    let level = options.effective_waf_level();
+    options.set_waf_level(level);
     let resp = crate::dispatcher::dispatch_to_node(
         &state,
         owner.as_deref(),
