@@ -1,22 +1,26 @@
 {% extends "base.html" %}
-{% block title %}Edit profile · {{ profile.name }} · Hyperion{% endblock %}
+{% block title %}{{ profile.name }} · Profiles · Hyperion{% endblock %}
 {% block main %}
 <div class="breadcrumbs">
-  <a href="/profiles">Profiles</a>
+  <a href="/profiles">Profiles &amp; limits</a>
   <span class="sep">›</span>
   <span>{{ profile.name }}</span>
 </div>
 <div class="page-header">
   <div>
-    <h1>Edit profile: {{ profile.name }}</h1>
-    <div class="subtitle">Changes apply only to hostings you apply this profile to from now on. Hostings that already use it keep their current values until you re-apply.</div>
+    <h1>{{ profile.name }}</h1>
+    {% if !profile.description.is_empty() %}<div class="subtitle">{{ profile.description }}</div>{% endif %}
   </div>
   <span class="grow"></span>
   <div class="actions">
-    <a href="/profiles" class="btn ghost">
-      <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
-      Back to profiles
-    </a>
+    <form method="post" action="/profiles/clone" class="inline-form">
+      <input type="hidden" name="_csrf" value="{{ csrf_clone }}">
+      <input type="hidden" name="id" value="{{ profile.id }}">
+      <button class="btn ghost" type="submit" title="Create a new profile pre-filled with these settings">
+        <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+        Duplicate
+      </button>
+    </form>
   </div>
 </div>
 
@@ -26,6 +30,19 @@
     <div class="flash-body">{{ e }}</div>
   </div>
 {% endif %}
+{% if saved %}
+  {% if profile.in_use_count > 0 %}
+  <div class="flash warn">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+    <div class="flash-body">Profile saved. The {{ profile.in_use_count }} website{% if profile.in_use_count != 1 %}s{% endif %} on it still run the previous values — <a href="#sites">re-apply</a> to update them.</div>
+  </div>
+  {% else %}
+  <div class="flash success">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+    <div class="flash-body">Profile saved.</div>
+  </div>
+  {% endif %}
+{% endif %}
 {% if let Some(f) = flash %}
   <div class="flash success">
     <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
@@ -33,379 +50,82 @@
   </div>
 {% endif %}
 
-<div class="group">
-  <div class="ghead">Profile settings</div>
-  <div class="item">
-  <form method="post" action="/profiles/{{ profile.id }}/update">
-    <input type="hidden" name="_csrf" value="{{ csrf_update }}">
-    <div class="field-row">
-      <div class="field">
-        <label for="p_name">Name <span class="hint">unique short label</span></label>
-        <input id="p_name" name="name" type="text" required maxlength="64" value="{{ profile.name }}">
-      </div>
-      <div class="field">
-        <label for="p_desc">Description <span class="hint">optional</span></label>
-        <input id="p_desc" name="description" type="text" maxlength="200" value="{{ profile.description }}">
-      </div>
-    </div>
-
-    <h2 style="font-size:0.95rem;margin:1.5rem 0 0.6rem">Limits</h2>
-    <div class="field-row">
-      <div class="field">
-        <label for="p_php_memory">PHP memory <span class="hint">MB</span></label>
-        <input id="p_php_memory" name="php_memory_mb" type="number" min="16" max="8192" value="{{ profile.php_memory_mb }}">
-      </div>
-      <div class="field">
-        <label for="p_php_exec">PHP max execution time <span class="hint">seconds</span></label>
-        <input id="p_php_exec" name="php_max_exec_secs" type="number" min="1" max="3600" value="{{ profile.php_max_exec_secs }}">
-      </div>
-    </div>
-    <div class="field-row">
-      <div class="field">
-        <label for="p_php_children">PHP-FPM max_children</label>
-        <input id="p_php_children" name="php_max_children" type="number" min="1" max="200" value="{{ profile.php_max_children }}">
-      </div>
-      <div class="field">
-        <label for="p_php_reqs">PHP-FPM max_requests</label>
-        <input id="p_php_reqs" name="php_max_requests" type="number" min="0" value="{{ profile.php_max_requests }}">
-      </div>
-    </div>
-    <div class="field-row">
-      <div class="field">
-        <label for="p_db_max">DB max connections</label>
-        <input id="p_db_max" name="db_max_connections" type="number" min="1" max="1000" value="{{ profile.db_max_connections }}">
-      </div>
-      <div class="field">
-        <label for="p_disk_soft">Disk soft limit <span class="hint">MB · warning threshold · blank = none</span></label>
-        <input id="p_disk_soft" name="disk_soft_mb" type="number" min="0" value="{% if let Some(m) = profile.disk_soft_mb %}{{ m }}{% endif %}">
-      </div>
-      <div class="field">
-        <label for="p_disk">Disk hard limit <span class="hint">MB · enforced cap · blank = unlimited</span></label>
-        <input id="p_disk" name="disk_hard_mb" type="number" min="0" value="{% if let Some(m) = profile.disk_hard_mb %}{{ m }}{% endif %}">
-      </div>
-    </div>
-    {# "Memory cap" and "Monthly bandwidth" used to sit here. Both fed
-       stores with NO reader — memory went to hosting_quotas.mem_limit_mib
-       (pools build from hosting_limits, so it never took effect) and
-       bandwidth to a column nothing enforces or alerts on. A plan field
-       that does nothing is a promise to a customer that nothing keeps.
-       PHP memory is the "PHP memory" field above, which IS enforced. #}
-    </div>
-    <div class="field">
-      <label for="p_quota_action">When a site exceeds its disk limit <span class="hint">default for sites created from this profile · overridable per-site</span></label>
-      <select id="p_quota_action" name="quota_exceed_action">
-        <option value="notify"{% if profile.quota_exceed_action != "suspend" %} selected{% endif %}>Notify only (send an alert)</option>
-        <option value="suspend"{% if profile.quota_exceed_action == "suspend" %} selected{% endif %}>Suspend the site (+ alert)</option>
-      </select>
-    </div>
-    <div class="field">
-      <label for="p_backup_cadence">Automatic backups <span class="hint">sites on this profile back up on this cadence · overridable per-site</span></label>
-      <select id="p_backup_cadence" name="backup_cadence">
-        <option value="off"{% if profile.backup_cadence != "daily" && profile.backup_cadence != "weekly" && profile.backup_cadence != "monthly" && profile.backup_cadence != "custom" %} selected{% endif %}>Off — back up only on demand</option>
-        <option value="daily"{% if profile.backup_cadence == "daily" %} selected{% endif %}>Daily</option>
-        <option value="weekly"{% if profile.backup_cadence == "weekly" %} selected{% endif %}>Weekly</option>
-        <option value="monthly"{% if profile.backup_cadence == "monthly" %} selected{% endif %}>Monthly</option>
-        <option value="custom"{% if profile.backup_cadence == "custom" %} selected{% endif %}>Custom — every N days</option>
-      </select>
-    </div>
-    <div class="field-row">
-      <div class="field">
-        <label for="p_backup_interval">Custom period <span class="hint">days · only when the cadence is Custom</span></label>
-        <input id="p_backup_interval" name="backup_interval_days" type="number" min="1" max="365"{% if profile.backup_interval_days > 0 %} value="{{ profile.backup_interval_days }}"{% endif %} placeholder="e.g. 3">
-      </div>
-      <div class="field">
-        <label for="p_backup_keep_days">Keep backups for <span class="hint">days · blank/0 = node default</span></label>
-        <input id="p_backup_keep_days" name="backup_keep_days" type="number" min="0" max="36500"{% if profile.backup_keep_days > 0 %} value="{{ profile.backup_keep_days }}"{% endif %} placeholder="0">
-      </div>
-      <div class="field">
-        <label for="p_backup_keep_last">Always keep latest <span class="hint">per site · blank/0 = node default</span></label>
-        <input id="p_backup_keep_last" name="backup_keep_last" type="number" min="0" max="1000"{% if profile.backup_keep_last > 0 %} value="{{ profile.backup_keep_last }}"{% endif %} placeholder="0">
-      </div>
-    </div>
-
-    <h2 style="font-size:0.95rem;margin:1.5rem 0 0.6rem">Expiration policy</h2>
-    <div class="field-row">
-      <div class="field">
-        <label for="p_grace">Grace period <span class="hint">days after expiry before auto-delete</span></label>
-        <input id="p_grace" name="expiry_grace_days" type="number" min="0" max="365" value="{{ profile.expiry_grace_days }}">
-      </div>
-      <div class="field">
-        <label for="p_off">Warning offsets <span class="hint">days before expiry, comma-separated</span></label>
-        <input id="p_off" name="expiry_warning_offsets" type="text" value="{{ profile.expiry_warning_offsets }}">
-      </div>
-    </div>
-
-    <h2 style="font-size:0.95rem;margin:1.5rem 0 0.6rem">Pricing <span class="muted" style="font-weight:400;font-size:0.82rem">— blank to remove</span></h2>
-    <div class="field-row three">
-      <div class="field">
-        <label for="p_price">Price <span class="hint">major units, e.g. 199.00</span></label>
-        <input id="p_price" name="price_major" type="text" inputmode="decimal" value="{{ price_major }}">
-      </div>
-      <div class="field">
-        <label for="p_currency">Currency <span class="hint">ISO 4217</span></label>
-        <input id="p_currency" name="price_currency" type="text" maxlength="3" value="{% if let Some(c) = profile.price_currency %}{{ c }}{% endif %}" style="text-transform:uppercase">
-      </div>
-      <div class="field">
-        <label for="p_interval">Billing interval</label>
-        <select id="p_interval" name="price_interval">
-          <option value="">No interval</option>
-          <option value="monthly"   {% if let Some(iv) = profile.price_interval %}{% if iv == "monthly"   %}selected{% endif %}{% endif %}>Monthly</option>
-          <option value="quarterly" {% if let Some(iv) = profile.price_interval %}{% if iv == "quarterly" %}selected{% endif %}{% endif %}>Quarterly</option>
-          <option value="yearly"    {% if let Some(iv) = profile.price_interval %}{% if iv == "yearly"    %}selected{% endif %}{% endif %}>Yearly</option>
-        </select>
-      </div>
-    </div>
-
-    <h2 style="font-size:0.95rem;margin:1.5rem 0 0.6rem">Notifications <span class="muted" style="font-weight:400;font-size:0.82rem">— optional</span></h2>
-    <div class="field">
-      <label for="p_slack">Slack incoming webhook URL <span class="hint">overrides the global default for hostings on this profile</span></label>
-      <input id="p_slack" name="slack_webhook" type="url" value="{% if let Some(w) = profile.slack_webhook %}{{ w }}{% endif %}" placeholder="https://hooks.slack.com/services/T.../B.../...">
-    </div>
-    {#- Same field as the create form. Editing this does NOT reach sites
-        already on the profile: the addresses are snapshotted onto each
-        apply row, so re-apply is what pushes a change out — exactly how
-        the price and the Slack channel already behave. -#}
-    <div class="field">
-      <label for="p_alert_emails">Alert e-mail addresses
-        <span class="hint">operator alerts for sites on this profile also go here — a client's own IT contact, a shared inbox</span>
-      </label>
-      <input id="p_alert_emails" name="alert_emails" type="text"
-             value="{{ profile.alert_emails }}"
-             placeholder="ops@klient.cz, admin@klient.cz">
-      <span class="hint" style="display:block;margin-top:0.3rem">
-        In addition to the administrator addresses in
-        <a href="/settings#default_to">Settings → Mail → Administrator notifications (set per node)</a>, never
-        instead of them. Sites already on this profile keep the addresses
-        they were applied with until you re-apply.
-      </span>
-    </div>
-
-    {# Wizard pre-fill — when set, /hostings/new auto-selects
-       these runtime values in step 3 the moment the operator
-       picks this profile. Both optional; blank = "no preference,
-       wizard keeps its global defaults". #}
-    <h2 style="font-size:0.95rem;margin:1.5rem 0 0.6rem">
-      Wizard defaults <span class="muted" style="font-weight:400;font-size:0.82rem">— pre-fill the new-hosting form when this profile is picked</span>
-    </h2>
-    <div class="field-row" style="margin-bottom:1rem">
-      <div class="field" style="flex:1">
-        <label for="p_default_php_version">Pre-fill PHP version</label>
-        <select id="p_default_php_version" name="default_php_version">
-          <option value=""{% if profile.default_php_version.is_none() %} selected{% endif %}>No preference</option>
-          {% for v in ["8.1", "8.2", "8.3", "8.4"] %}
-          <option value="{{ v }}"
-                  {% if let Some(cur) = profile.default_php_version.as_ref() %}{% if cur == v %} selected{% endif %}{% endif %}>
-            PHP {{ v }}
-          </option>
-          {% endfor %}
-        </select>
-      </div>
-      <div class="field" style="flex:1">
-        <label for="p_default_db_engine">Pre-fill database</label>
-        <select id="p_default_db_engine" name="default_db_engine">
-          <option value=""{% if profile.default_db_engine.is_none() %} selected{% endif %}>No preference</option>
-          {% for (val, label) in [("mariadb", "MariaDB"), ("postgres", "PostgreSQL"), ("none", "No database (static)")] %}
-          <option value="{{ val }}"
-                  {% if let Some(cur) = profile.default_db_engine.as_ref() %}{% if cur == val %} selected{% endif %}{% endif %}>
-            {{ label }}
-          </option>
-          {% endfor %}
-        </select>
-      </div>
-    </div>
-
-    <h2 style="font-size:0.95rem;margin:1.5rem 0 0.6rem">
-      WordPress plugins and themes <span class="muted" style="font-weight:400;font-size:0.82rem">— installed when this profile is applied to a WordPress hosting</span>
-    </h2>
-    <p class="text-soft small" style="margin:0 0 0.7rem;line-height:1.55">
-      One item per line. Each line is either
-      a WordPress.org <strong>slug</strong> (<code>akismet</code>, <code>yoast-seo</code>)
-      or <code>@asset:&lt;id&gt;</code> to install from an uploaded ZIP —
-      see the <a href="/profiles/wp-assets">asset library</a> for IDs.
-      A trailing <code>!</code> also activates the item after install.
-      Lines starting with <code>#</code> are comments.
-    </p>
-    <div class="field-row">
-      {# ─── PLUGINS column ─── #}
-      <div class="field" style="flex:1">
-        <label for="p_wp_plugins">Plugins</label>
-        <textarea id="p_wp_plugins" name="wp_plugins" rows="6"
-                  style="font-family:var(--font-mono);font-size:0.85rem;width:100%"
-                  placeholder="akismet!&#10;wordpress-seo&#10;@asset:7    # internal client plugin">{{ profile.wp_plugins }}</textarea>
-        {% if !plugin_assets.is_empty() %}
-        {# Asset library picker — ticking an entry appends
-           `@asset:N!` to the textarea above (with `!` so the asset
-           also gets activated). Pre-checks any entry whose
-           `@asset:N` is already present in the textarea. #}
-        <details class="asset-picker" style="margin-top:0.5rem">
-          <summary>
-            Add from library <span class="text-soft small">({{ plugin_assets.len() }} uploaded plugin{% if plugin_assets.len() != 1 %}s{% endif %})</span>
-          </summary>
-          <div class="asset-picker-body">
-            {% for a in plugin_assets %}
-            <label class="asset-row">
-              <input type="checkbox" class="asset-tick"
-                     data-textarea="p_wp_plugins"
-                     data-asset-id="{{ a.id }}">
-              <span class="asset-name">{{ a.original_name }}</span>
-              <span class="text-soft small">{{ a.size_bytes / 1024 }} KB · ref: {{ a.profile_refs }}</span>
-            </label>
-            {% endfor %}
-          </div>
-        </details>
-        {% endif %}
-      </div>
-
-      {# ─── THEMES column ─── #}
-      <div class="field" style="flex:1">
-        <label for="p_wp_themes">Themes</label>
-        <textarea id="p_wp_themes" name="wp_themes" rows="6"
-                  style="font-family:var(--font-mono);font-size:0.85rem;width:100%"
-                  placeholder="astra!&#10;@asset:3">{{ profile.wp_themes }}</textarea>
-        {% if !theme_assets.is_empty() %}
-        <details class="asset-picker" style="margin-top:0.5rem">
-          <summary>
-            Add from library <span class="text-soft small">({{ theme_assets.len() }} uploaded theme{% if theme_assets.len() != 1 %}s{% endif %})</span>
-          </summary>
-          <div class="asset-picker-body">
-            {% for a in theme_assets %}
-            <label class="asset-row">
-              <input type="checkbox" class="asset-tick"
-                     data-textarea="p_wp_themes"
-                     data-asset-id="{{ a.id }}">
-              <span class="asset-name">{{ a.original_name }}</span>
-              <span class="text-soft small">{{ a.size_bytes / 1024 }} KB · ref: {{ a.profile_refs }}</span>
-            </label>
-            {% endfor %}
-          </div>
-        </details>
-        {% endif %}
-      </div>
-    </div>
-
-    <style>
-      /* Library picker — collapsible card under each WP textarea
-         so the operator can tick uploaded plugins/themes by name
-         instead of looking up `@asset:N` IDs by hand. Hidden by
-         default to keep the form short when the library is empty
-         or the operator only types public slugs. */
-      details.asset-picker {
-        border: 1px solid var(--border);
-        border-radius: var(--radius-sm);
-        background: var(--surface-1);
-      }
-      details.asset-picker > summary {
-        cursor: pointer;
-        padding: 0.5rem 0.75rem;
-        font-size: 0.82rem;
-        font-weight: 600;
-        list-style: none;
-        user-select: none;
-      }
-      details.asset-picker > summary::-webkit-details-marker { display: none; }
-      details.asset-picker > summary::after {
-        content: "▾";
-        float: right;
-        color: var(--text-soft);
-        transition: transform 0.15s ease;
-      }
-      details.asset-picker[open] > summary::after { transform: rotate(180deg); }
-      .asset-picker-body {
-        max-height: 14rem;
-        overflow-y: auto;
-        padding: 0.3rem 0.4rem 0.5rem;
-      }
-      .asset-row {
-        display: flex;
-        align-items: center;
-        gap: 0.5rem;
-        padding: 0.35rem 0.55rem;
-        border-radius: var(--radius-xs);
-        cursor: pointer;
-        font-size: 0.85rem;
-      }
-      .asset-row:hover { background: var(--surface-2); }
-      .asset-row input { margin: 0; flex: none; }
-      .asset-name { flex: 1; min-width: 0; overflow-wrap: anywhere; font-weight: 500; }
-    </style>
-    <script>
-      (function () {
-        'use strict';
-        // Pre-check rows whose @asset:N already appears in the
-        // textarea; toggling a checkbox edits the textarea in
-        // place. We DON'T scrape the textarea on every input — only
-        // sync on checkbox toggle, so the operator's free-form
-        // edits to the textarea aren't overwritten.
-        const taPlugins = document.getElementById('p_wp_plugins');
-        const taThemes = document.getElementById('p_wp_themes');
-        if (!taPlugins || !taThemes) return;
-
-        function hasAssetLine(text, id) {
-          const re = new RegExp('(^|\\n)\\s*@asset:' + id + '\\b', 'm');
-          return re.test(text);
-        }
-        function appendAssetLine(textarea, id) {
-          let v = textarea.value.replace(/\s+$/, '');
-          if (v.length > 0) v += '\n';
-          textarea.value = v + '@asset:' + id + '!';
-        }
-        function removeAssetLine(textarea, id) {
-          // Strip any line that consists of `@asset:<id>` (with
-          // optional `!` + optional trailing comment). Preserve
-          // surrounding lines exactly.
-          const re = new RegExp('(?:^|\\n)\\s*@asset:' + id + '!?\\s*(?:#[^\\n]*)?(?=\\n|$)', 'g');
-          textarea.value = textarea.value.replace(re, '').replace(/\n{3,}/g, '\n\n').replace(/^\n+/, '');
-        }
-
-        // Initialise checkbox state from the existing textarea
-        // content + wire change handlers.
-        document.querySelectorAll('.asset-tick').forEach(cb => {
-          const taId = cb.dataset.textarea;
-          const ta = document.getElementById(taId);
-          const id = cb.dataset.assetId;
-          if (!ta || !id) return;
-          cb.checked = hasAssetLine(ta.value, id);
-          cb.addEventListener('change', () => {
-            if (cb.checked) {
-              if (!hasAssetLine(ta.value, id)) appendAssetLine(ta, id);
-            } else {
-              removeAssetLine(ta, id);
-            }
-          });
-        });
-      })();
-    </script>
-
-    <div class="item-actions">
-      <button class="btn primary" type="submit">
-        <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
-        Save changes
-      </button>
-      <a class="btn ghost" href="/profiles">Cancel</a>
-    </div>
-  </form>
+{# Profile as a living plan: saving changes the template only; the sites on
+   it keep what they were applied with until re-applied. That is the one
+   thing an operator editing a profile must not miss, so it leads. #}
+<div class="group" id="sites">
+  <div class="ghead">
+    Websites on this profile
+    <span class="grow"></span>
+    <span class="ghead-note">{{ profile.in_use_count }}</span>
   </div>
-
   <div class="item">
-    <h3>Living plan</h3>
   {% if profile.in_use_count > 0 %}
-    <p class="text-soft" style="margin:0 0 0.8rem">
-      <strong>{{ profile.in_use_count }}</strong> hosting{% if profile.in_use_count != 1 %}s{% endif %}
-      currently use this profile. Saving above only changes <em>future</em> applies — use the button
-      below to push the current limits, quota, expiry, pricing &amp; plugins to all of them now.
+    <div class="profile-sites-head">
+      <p class="help">
+        Saving below changes the profile only. These websites keep the limits, disk quota, backups, expiry,
+        price and alerts they were applied with until you re-apply — which also re-runs the WordPress installs.
+      </p>
+      <form method="post" action="/profiles/reapply"
+            data-confirm-title="Re-apply {{ profile.name }}"
+            data-confirm-body="Push this profile to all {{ profile.in_use_count }} website{% if profile.in_use_count != 1 %}s{% endif %} on it now. Their PHP limits, disk quota, backups, expiry policy, price and alerts are overwritten with the profile's, and its WordPress plugins and themes are installed again."
+            data-confirm-confirm-label="Re-apply to {{ profile.in_use_count }}">
+        <input type="hidden" name="_csrf" value="{{ csrf_reapply }}">
+        <input type="hidden" name="profile_id" value="{{ profile.id }}">
+        <button class="btn" type="submit">
+          <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+          Re-apply to {{ profile.in_use_count }} website{% if profile.in_use_count != 1 %}s{% endif %}
+        </button>
+      </form>
+    </div>
+    {% if !sites.is_empty() %}
+    <ul class="profile-sites">
+      {% for s in sites %}
+      <li><a href="/hostings/{{ s.id }}">{{ s.domain }}</a></li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+    {% if unlisted > 0 %}
+    <p class="help">
+      {% if sites.is_empty() %}None of them are{% else %}{{ unlisted }} more {% if unlisted == 1 %}is{% else %}are{% endif %} not{% endif %}
+      listed — on a node that did not answer, or not visible to your account.
     </p>
-    <form method="post" action="/profiles/reapply"
-          onsubmit="return confirm('Re-apply this profile to all {{ profile.in_use_count }} hosting(s) now? This overwrites their limits, disk/memory quota, expiry policy, pricing and re-runs the profile\'s plugin/theme installs.');">
-      <input type="hidden" name="_csrf" value="{{ csrf_reapply }}">
-      <input type="hidden" name="profile_id" value="{{ profile.id }}">
-      <button class="btn" type="submit">
-        <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
-        Re-apply to all {{ profile.in_use_count }} site{% if profile.in_use_count != 1 %}s{% endif %}
-      </button>
-    </form>
+    {% endif %}
   {% else %}
-    <p class="text-soft" style="margin:0">No hostings use this profile yet. Apply it from a hosting's Profile tab, or pick it in the create wizard.</p>
+    <p class="help">No websites use this profile yet. Pick it when you <a href="/hostings/new">add a website</a>, or apply it from a website's Profile tab.</p>
   {% endif %}
+  </div>
+</div>
+
+<form method="post" action="/profiles/{{ profile.id }}/update" class="profile-form">
+  <input type="hidden" name="_csrf" value="{{ csrf_update }}">
+  {% include "_profile_form.html" %}
+  <div class="form-bar">
+    <button class="btn primary" type="submit">
+      <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
+      Save changes
+    </button>
+    <a class="btn ghost" href="/profiles">Cancel</a>
+  </div>
+</form>
+
+<div class="group">
+  <div class="ghead">Delete</div>
+  <div class="item danger">
+    <div class="profile-sites-head">
+      <p class="help">
+        Removes the profile only.{% if profile.in_use_count > 0 %} Its {{ profile.in_use_count }} website{% if profile.in_use_count != 1 %}s{% endif %} keep the limits, expiry policy and price they were applied with.{% endif %}
+      </p>
+      <form method="post" action="/profiles/delete"
+            data-confirm-title="Delete profile {{ profile.name }}"
+            data-confirm-body="{% if profile.in_use_count > 0 %}{{ profile.in_use_count }} website{% if profile.in_use_count != 1 %}s{% endif %} use this profile. They keep their applied limits, expiry policy and price.{% if profile.slack_webhook.is_some() %} ⚠ Their per-profile Slack billing channel will be lost — expiry/billing notices fall back to email-only.{% endif %} Only the profile template is removed.{% else %}No websites use this profile — only the template is removed.{% endif %}"
+            data-confirm-confirm-label="Delete profile"
+            data-confirm-variant="danger">
+        <input type="hidden" name="_csrf" value="{{ csrf_delete }}">
+        <input type="hidden" name="id" value="{{ profile.id }}">
+        <button class="btn danger" type="submit">Delete profile</button>
+      </form>
+    </div>
   </div>
 </div>
 {% endblock %}
