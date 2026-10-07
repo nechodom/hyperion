@@ -76,7 +76,11 @@ fn throttle_key(peer: SocketAddr) -> String {
     peer.ip().to_string()
 }
 
-fn check_throttle(ip: &str) -> bool {
+/// `None` when this peer may try again, else the seconds until its window
+/// rolls over. The window opens at the FIRST failure, so the wait is what is
+/// left of it — not a fixed figure (the old page said "5 minutes" against a
+/// 15-minute window, so people who obeyed it got refused again).
+fn throttle_wait(ip: &str) -> Option<i64> {
     let now = hyperion_types::now_secs();
     let mut s = THROTTLE.lock().unwrap_or_else(|p| p.into_inner());
     // Garbage-collect stale entries opportunistically.
@@ -86,7 +90,17 @@ fn check_throttle(ip: &str) -> bool {
     if now - entry.1 >= THROTTLE_WINDOW_SECS {
         *entry = (0, now);
     }
-    entry.0 < THROTTLE_LIMIT
+    if entry.0 < THROTTLE_LIMIT {
+        None
+    } else {
+        Some((entry.1 + THROTTLE_WINDOW_SECS - now).max(1))
+    }
+}
+
+/// Whole minutes for "try again in N minutes", rounded up so the page never
+/// promises a moment that is still inside the window.
+fn wait_minutes(secs: i64) -> i64 {
+    (secs + 59) / 60
 }
 
 fn record_failure(ip: &str) {
@@ -125,14 +139,59 @@ fn register_block(ip: &str) -> u32 {
 #[derive(Template)]
 #[template(path = "login.html")]
 struct LoginTpl<'a> {
-    /// Error code from `?error=…` query param — `"invalid"`, `"expired"`,
-    /// `"locked"`, `"csrf"`, or any custom message. Template branches
-    /// on the known codes and falls through to literal rendering for
-    /// anything else. Owned because askama's `==` comparison on `&str`
-    /// vs string literal trips up its derive macro.
+    /// A KNOWN error code (see [`LOGIN_ERRORS`]); anything else in the query
+    /// becomes `"other"`. The page used to print an unknown `?error=` value
+    /// verbatim, which let any link put words of its choosing on the real
+    /// sign-in page ("your account is compromised, call …"). Owned because
+    /// askama's `==` on `&str` vs a literal trips its derive macro.
     error: Option<String>,
+    /// A known non-error note (`signed_out`, `signed_out_all`).
+    notice: Option<String>,
     next: &'a str,
+    /// Where the person lands after signing in, when that is not simply the
+    /// dashboard — shown so a bounced deep link doesn't look like a reset.
+    return_to: Option<&'a str>,
+    /// Minutes left on the rate limit; only read when `error == "throttled"`.
+    wait_minutes: i64,
     css_version: &'static str,
+}
+
+const LOGIN_ERRORS: &[&str] = &["invalid", "expired", "locked", "csrf", "throttled"];
+const LOGIN_NOTICES: &[&str] = &["signed_out", "signed_out_all"];
+
+/// Keep only codes the template knows how to word; an unknown one is still
+/// reported as a failure, just never in the caller's words.
+fn known_code(raw: Option<&str>, known: &[&str]) -> Option<String> {
+    let raw = raw.filter(|s| !s.is_empty())?;
+    Some(if known.contains(&raw) { raw } else { "other" }.to_string())
+}
+
+fn return_to(next: &str) -> Option<&str> {
+    let t = redirect_target(next);
+    (t != "/").then_some(t)
+}
+
+fn render_login(
+    next: &str,
+    error: Option<String>,
+    notice: Option<String>,
+    wait: i64,
+) -> Result<String, AppError> {
+    Ok(LoginTpl {
+        error,
+        notice,
+        next,
+        return_to: return_to(next),
+        wait_minutes: wait,
+        css_version: crate::handlers::css_version(),
+    }
+    .render()?)
+}
+
+/// `/login?error=<code>&next=<next>` (or `/login/2fa…`), `next` encoded.
+fn with_next(path_and_query: &str, next: &str) -> String {
+    let enc: String = url::form_urlencoded::byte_serialize(next.as_bytes()).collect();
+    format!("{path_and_query}&next={enc}")
 }
 
 #[derive(Deserialize, Default)]
@@ -141,6 +200,8 @@ pub struct LoginQuery {
     next: String,
     #[serde(default)]
     error: Option<String>,
+    #[serde(default)]
+    notice: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -159,13 +220,17 @@ pub async fn get_login(
     if ctx.is_authenticated() {
         return Ok(Redirect::to(redirect_target(&q.next)).into_response());
     }
-    let tpl = LoginTpl {
-        error: q.error.clone(),
-        next: &q.next,
-        css_version: crate::handlers::css_version(),
-    };
     let _ = state;
-    Ok(Html(tpl.render()?).into_response())
+    let error = known_code(q.error.as_deref(), LOGIN_ERRORS);
+    // A notice is only worth showing when nothing went wrong.
+    let notice = error
+        .is_none()
+        .then(|| known_code(q.notice.as_deref(), LOGIN_NOTICES))
+        .flatten()
+        .filter(|n| n != "other");
+    // `?error=throttled` arriving by URL has no live window to quote.
+    let wait = wait_minutes(THROTTLE_WINDOW_SECS);
+    Ok(Html(render_login(&q.next, error, notice, wait)?).into_response())
 }
 
 pub async fn post_login(
@@ -178,7 +243,7 @@ pub async fn post_login(
     // bucket keyed on the real TCP peer (sec-findings #7).
     let ip = caller_ip(&headers);
     let tkey = throttle_key(peer);
-    if !check_throttle(&tkey) {
+    if let Some(wait) = throttle_wait(&tkey) {
         tracing::warn!(ip = %ip, peer = %tkey, "login throttled");
         // Defense in depth: an IP that keeps hammering AFTER the 429 is a
         // bot, not a human — drop it at the firewall (nftables) so it
@@ -199,10 +264,18 @@ pub async fn post_login(
             .await;
             tracing::warn!(peer = %tkey, "fail2ban: firewall-banned persistent panel attacker");
         }
+        // The sign-in page itself, not a bare text body: the person keeps
+        // the panel's frame, the form, and an honest wait.
+        let page = render_login(
+            &form.next,
+            Some("throttled".into()),
+            None,
+            wait_minutes(wait),
+        )?;
         return Ok((
             StatusCode::TOO_MANY_REQUESTS,
-            [("retry-after", "300")],
-            "Too many failed login attempts. Wait 5 minutes and try again.",
+            [(header::RETRY_AFTER, wait.to_string())],
+            Html(page),
         )
             .into_response());
     }
@@ -299,7 +372,7 @@ async fn post_login_via_rpc(
                 mint_pending_2fa_cookie(&state, user_id, &form.next)
             }
             hyperion_types::WebLoginResult::Locked { reason: _ } => {
-                Ok(Redirect::to("/login?error=locked").into_response())
+                Ok(Redirect::to(&with_next("/login?error=locked", &form.next)).into_response())
             }
             hyperion_types::WebLoginResult::Invalid => {
                 record_failure(tkey);
@@ -432,6 +505,10 @@ pub struct Login2faQuery {
     pub next: String,
     #[serde(default)]
     pub error: Option<String>,
+    /// `backup` reopens the page on the backup-code form — a wrong backup
+    /// code used to come back to the authenticator boxes.
+    #[serde(default)]
+    pub mode: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -439,6 +516,9 @@ pub struct Login2faForm {
     code: String,
     #[serde(default)]
     next: String,
+    /// `backup` when the code came from the backup-code form.
+    #[serde(default)]
+    mode: Option<String>,
     /// "on" when the user ticked "remember this device for 30 days".
     #[serde(default)]
     remember: Option<String>,
@@ -447,14 +527,30 @@ pub struct Login2faForm {
 #[derive(askama::Template)]
 #[template(path = "login_2fa.html")]
 struct Login2faTpl<'a> {
-    /// Raw error code from `?error=…`. Template branches on the known
-    /// codes ("invalid" / "expired") and falls through to literal
-    /// rendering for anything custom — same pattern as login.html.
-    /// Owned (not &str) because askama's `==` comparison on &str vs
-    /// string literal trips the derive macro.
+    /// A known code (`invalid`, `throttled`) or `"other"` — never the raw
+    /// query value, same rule as [`LoginTpl::error`].
     error: Option<String>,
     next: &'a str,
+    /// Open on the backup-code form rather than the authenticator boxes.
+    backup: bool,
+    wait_minutes: i64,
     css_version: &'static str,
+}
+
+fn render_login_2fa(
+    next: &str,
+    error: Option<String>,
+    backup: bool,
+    wait: i64,
+) -> Result<String, AppError> {
+    Ok(Login2faTpl {
+        error,
+        next,
+        backup,
+        wait_minutes: wait,
+        css_version: crate::handlers::css_version(),
+    }
+    .render()?)
 }
 
 pub async fn get_login_2fa(
@@ -462,12 +558,10 @@ pub async fn get_login_2fa(
     Query(q): Query<Login2faQuery>,
 ) -> Result<Response, AppError> {
     let _ = state;
-    let tpl = Login2faTpl {
-        error: q.error.clone(),
-        next: &q.next,
-        css_version: crate::handlers::css_version(),
-    };
-    Ok(Html(tpl.render()?).into_response())
+    let error = known_code(q.error.as_deref(), &["invalid", "throttled"]);
+    let backup = q.mode.as_deref() == Some("backup");
+    let page = render_login_2fa(&q.next, error, backup, wait_minutes(THROTTLE_WINDOW_SECS))?;
+    Ok(Html(page).into_response())
 }
 
 pub async fn post_login_2fa(
@@ -487,12 +581,19 @@ pub async fn post_login_2fa(
     // per-account counter in `web_verify_2fa` is the topology-independent
     // backstop.
     let tkey = throttle_key(peer);
-    if !check_throttle(&tkey) {
+    let backup = form.mode.as_deref() == Some("backup");
+    if let Some(wait) = throttle_wait(&tkey) {
         tracing::warn!(peer = %tkey, "2fa verify throttled");
+        let page = render_login_2fa(
+            &form.next,
+            Some("throttled".into()),
+            backup,
+            wait_minutes(wait),
+        )?;
         return Ok((
             StatusCode::TOO_MANY_REQUESTS,
-            [("retry-after", "900")],
-            "Too many failed login attempts. Wait 15 minutes and try again.",
+            [(header::RETRY_AFTER, wait.to_string())],
+            Html(page),
         )
             .into_response());
     }
@@ -514,7 +615,7 @@ pub async fn post_login_2fa(
             }
         });
     let Some(t) = token else {
-        return Ok(Redirect::to("/login?error=expired").into_response());
+        return Ok(Redirect::to(&with_next("/login?error=expired", &form.next)).into_response());
     };
     let now = hyperion_types::now_secs();
     let pending = match state.session.verify(&t, now) {
@@ -523,7 +624,9 @@ pub async fn post_login_2fa(
         // would otherwise let a stolen full session masquerade as a
         // half-authenticated one.
         Ok(s) if s.is_pending_2fa() => s,
-        _ => return Ok(Redirect::to("/login?error=expired").into_response()),
+        _ => {
+            return Ok(Redirect::to(&with_next("/login?error=expired", &form.next)).into_response())
+        }
     };
     let resp = hyperion_rpc_client::call(
         &state.agent_socket,
@@ -582,7 +685,12 @@ pub async fn post_login_2fa(
             // Without this, an attacker could try unlimited 6-digit
             // codes per session-cookie issuance.
             record_failure(&tkey);
-            Ok(Redirect::to("/login/2fa?error=invalid").into_response())
+            let base = if backup {
+                "/login/2fa?error=invalid&mode=backup"
+            } else {
+                "/login/2fa?error=invalid"
+            };
+            Ok(Redirect::to(&with_next(base, &form.next)).into_response())
         }
         hyperion_rpc::codec::Response::Error(e) => Err(AppError::Rpc(e.to_string())),
         _ => Err(AppError::Internal("unexpected response".into())),
@@ -753,15 +861,13 @@ pub async fn post_logout(State(state): State<SharedState>, ctx: crate::auth::Aut
     }
     let mut headers = HeaderMap::new();
     headers.insert(header::SET_COOKIE, clear_cookie(&state));
-    let mut resp = Redirect::to("/login").into_response();
+    let mut resp = Redirect::to("/login?notice=signed_out").into_response();
     resp.headers_mut().extend(headers);
     resp
 }
 
 fn login_failed(next: &str) -> Response {
-    let encoded_next: String = url::form_urlencoded::byte_serialize(next.as_bytes()).collect();
-    let dest = format!("/login?error=invalid&next={encoded_next}");
-    Redirect::to(&dest).into_response()
+    Redirect::to(&with_next("/login?error=invalid", next)).into_response()
 }
 
 /// Clamp a caller-supplied `?next=` to a path on THIS panel.

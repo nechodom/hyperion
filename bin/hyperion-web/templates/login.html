@@ -1,20 +1,7 @@
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Sign in · Hyperion</title>
-  <link rel="stylesheet" href="/static/app.css?v={{ css_version }}">
-  <meta name="color-scheme" content="light dark">
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%236366f1'/%3E%3Cpath d='M9 9 L9 23 M9 16 L17 16 M17 9 L17 23 M21 14 L24 14 L24 23 M21 11 L21 14' stroke='white' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round' fill='none'/%3E%3C/svg%3E">
-</head>
-<body>
-  <div class="login-shell">
-    <aside class="login-aside">
-      <div class="brand-block">
-        <div style="font-family:var(--font-mono);font-weight:800;font-size:1.4rem;letter-spacing:0.04em;margin-bottom:2.5rem;text-transform:uppercase">
-          <span style="color:#34d399;text-shadow:0 0 22px rgba(52,211,153,0.6)">HY</span><span style="opacity:0.7;font-weight:500">·</span>PERION
-        </div>
+{% extends "_login_layout.html" %}
+{% block title %}Sign in{% endblock %}
+
+{% block aside %}
         <h1>Hosting control,<br>without the bloat.</h1>
         <p class="lede">
           One control panel for every hosting across all your nodes.
@@ -25,53 +12,129 @@
           <li>Cluster-aware — manage the master and every node from one place</li>
           <li>Open source · AGPL-3.0</li>
         </ul>
-      </div>
-      <div class="footer">
-        Built in Rust — axum · askama · sqlx · Ed25519 signed RPC.
-      </div>
-    </aside>
-    <main class="login-form">
-      <div class="login-card">
-        <div class="login-brand" style="font-family:var(--font-mono);text-transform:uppercase;letter-spacing:0.04em">
-          <span style="color:var(--brand-accent);text-shadow:0 0 18px color-mix(in oklab,var(--brand-accent) 60%,transparent)">HY</span><span style="color:var(--text-soft);font-weight:500">·</span>PERION
-        </div>
-        <h2>Welcome back</h2>
-        <div class="subtitle">Sign in to manage your hostings and nodes.</div>
+{% endblock %}
+
+{% block card %}
+        <h2>Sign in</h2>
+        <p class="subtitle">Manage your hostings and nodes.</p>
+
+        {# One message at most. Errors say what happened AND what to do; the
+           wording is chosen server-side from a fixed list — an unknown
+           ?error= arrives here as "other", never as the caller's text. #}
         {% if let Some(e) = error %}
-          <div class="flash error">
+          {% if e == "expired" %}
+          <div class="flash info" role="status">
+            <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+            <div class="flash-body">Your session ended. Sign in again to pick up where you left off.</div>
+          </div>
+          {% else %}
+          <div class="flash error" role="alert">
             <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
             <div class="flash-body">
               {% if e == "invalid" %}
                 Incorrect username or password. Check both and try again.
-              {% else if e == "expired" %}
-                Your sign-in session expired. Sign in again to continue.
               {% else if e == "locked" %}
-                This account is locked. Contact an administrator to unlock it.
+                This account is locked. Ask an administrator to unlock it.
               {% else if e == "csrf" %}
-                This form expired before it was submitted. Sign in again and retry.
+                This form expired before it was sent. Sign in again.
+              {% else if e == "throttled" %}
+                Too many failed attempts from this address. Try again in {{ wait_minutes }} minute{% if wait_minutes != 1 %}s{% endif %}.
               {% else %}
-                {{ e }}
+                Sign-in didn't go through. Try again.
+              {% endif %}
+            </div>
+          </div>
+          {% endif %}
+        {% else if let Some(n) = notice %}
+          <div class="flash success" role="status">
+            <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+            <div class="flash-body">
+              {% if n == "signed_out_all" %}
+                Signed out on every device, including this one.
+              {% else %}
+                You're signed out.
               {% endif %}
             </div>
           </div>
         {% endif %}
-        <form method="post" action="/login">
+
+        <form method="post" action="/login" id="login-form">
           <input type="hidden" name="next" value="{{ next|e }}">
           <div class="field">
             <label for="username">Username</label>
-            <input id="username" name="username" type="text" autocomplete="username" required autofocus placeholder="admin">
+            <input id="username" name="username" type="text" autocomplete="username"
+                   autocapitalize="off" spellcheck="false" required autofocus>
           </div>
           <div class="field">
             <label for="password">Password</label>
-            <input id="password" name="password" type="password" autocomplete="current-password" required placeholder="••••••••">
+            <div class="login-pw">
+              <input id="password" name="password" type="password" autocomplete="current-password"
+                     required aria-describedby="caps-hint">
+              <button type="button" class="login-pw-toggle" id="pw-toggle"
+                      aria-controls="password" aria-pressed="false" hidden>Show</button>
+            </div>
+            <div class="login-hint" id="caps-hint" hidden>Caps Lock is on.</div>
           </div>
-          <button class="btn primary lg" type="submit">
-            Sign in
+          {% if let Some(path) = return_to %}
+          <p class="login-return">Afterwards you'll go back to <code title="{{ path }}">{{ path }}</code></p>
+          {% endif %}
+          <button class="btn primary lg" type="submit" id="login-submit">
+            <span data-label>Sign in</span>
             <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
           </button>
         </form>
-      </div>
-    </main>
-  </div>
-</body>
-</html>
+
+        <p class="login-foot">
+          Forgot your password, or locked out? An administrator can set a new
+          password or unlock your account under <strong>Users</strong>.
+          If two-factor authentication is on, you'll be asked for a code next.
+        </p>
+{% endblock %}
+
+{% block scripts %}
+  <script>
+  (function () {
+    'use strict';
+    var pw = document.getElementById('password');
+    var toggle = document.getElementById('pw-toggle');
+    var caps = document.getElementById('caps-hint');
+    var form = document.getElementById('login-form');
+    var submit = document.getElementById('login-submit');
+
+    // Show/hide — only offered once JS can run it.
+    toggle.hidden = false;
+    toggle.addEventListener('click', function () {
+      var show = pw.type === 'password';
+      pw.type = show ? 'text' : 'password';
+      toggle.textContent = show ? 'Hide' : 'Show';
+      toggle.setAttribute('aria-pressed', String(show));
+      pw.focus();
+    });
+
+    // Caps Lock is the usual reason a known-good password "stops working".
+    function capsCheck(ev) {
+      if (ev.getModifierState) caps.hidden = !ev.getModifierState('CapsLock');
+    }
+    pw.addEventListener('keydown', capsCheck);
+    pw.addEventListener('keyup', capsCheck);
+    pw.addEventListener('blur', function () { caps.hidden = true; });
+
+    // One submit only — a double click would spend two of the five tries.
+    form.addEventListener('submit', function () {
+      submit.disabled = true;
+      submit.querySelector('[data-label]').textContent = 'Signing in…';
+      // Never pin the button off: a back/forward cache restore shows this
+      // same page again with the button still disabled.
+      window.addEventListener('pageshow', function () {
+        submit.disabled = false;
+        submit.querySelector('[data-label]').textContent = 'Sign in';
+      }, { once: true });
+      // A page restored from the back/forward cache must not reopen with
+      // the password on screen.
+      pw.type = 'password';
+      toggle.textContent = 'Show';
+      toggle.setAttribute('aria-pressed', 'false');
+    });
+  })();
+  </script>
+{% endblock %}

@@ -2822,11 +2822,109 @@ select {
   padding: 0.05rem 0.35rem;
   border-radius: var(--radius-xs);
 }
+.login-foot strong { color: var(--text-dim); font-weight: 600; }
+
+/* ---- Wordmark (was inline styles, copied into both pages) ---- */
+.login-wordmark {
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.login-wordmark .hy {
+  color: var(--brand-accent);
+  text-shadow: 0 0 18px color-mix(in oklab, var(--brand-accent) 60%, transparent);
+}
+.login-wordmark .dot { color: var(--text-soft); font-weight: 500; }
+.login-card .login-brand.login-wordmark { gap: 0; }
+.login-wordmark-aside {
+  font-weight: 800;
+  font-size: 1.4rem;
+  margin-bottom: 2.5rem;
+}
+.login-wordmark-aside .hy {
+  color: #34d399;
+  text-shadow: 0 0 22px rgba(52, 211, 153, 0.6);
+}
+.login-wordmark-aside .dot { color: inherit; opacity: 0.6; }
+.login-aside .brand-block h1.login-aside-h1-step { margin-top: 2rem; }
+
+/* ---- Password field: show/hide toggle sits inside the input ---- */
+.login-pw { position: relative; }
+.login-pw input { padding-right: 4.2rem; }
+.login-pw-toggle {
+  position: absolute;
+  top: 50%;
+  right: 0.35rem;
+  transform: translateY(-50%);
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-xs);
+  padding: 0.3rem 0.55rem;
+  color: var(--text-dim);
+  font: 500 0.78rem/1 var(--font-ui);
+  cursor: pointer;
+}
+.login-pw-toggle:hover { color: var(--text); background: var(--surface-2); }
+.login-pw-toggle:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
+.login-hint {
+  font-size: 0.78rem;
+  color: var(--warn);
+  font-weight: 500;
+}
+
+/* "Afterwards you'll go back to /hostings/…" — the deep link survives. */
+.login-return {
+  margin: -0.2rem 0 1rem;
+  font-size: 0.82rem;
+  color: var(--text-dim);
+  display: flex;
+  gap: 0.35rem;
+  align-items: baseline;
+  min-width: 0;
+}
+.login-return code {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.login-check {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  margin: 0 0 0.9rem;
+  font-size: 0.85rem;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+.login-card .login-submit { margin-top: 0.9rem; }
+.login-backup-input {
+  font-family: var(--font-mono) !important;
+  font-size: 1rem !important;
+  letter-spacing: 0.1em;
+  text-align: center;
+  text-transform: uppercase;
+}
+/* The aside's step trail is hidden on narrow screens; this line stands in. */
+.login-step-inline {
+  display: none;
+  margin: 0 0 0.35rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--success);
+}
 
 @media (max-width: 880px) {
   .login-shell { grid-template-columns: 1fr; }
   .login-aside { display: none; }
   .login-card .login-brand { display: flex; }
+  .login-step-inline { display: block; }
   .otp-box { height: 2.9rem; font-size: 1.35rem; }
 }
 @media (max-width: 420px) {

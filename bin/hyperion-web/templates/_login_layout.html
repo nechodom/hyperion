@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}{% endblock %} · Hyperion</title>
+  <link rel="stylesheet" href="/static/app.css?v={{ css_version }}">
+  <meta name="color-scheme" content="light dark">
+  <meta name="robots" content="noindex">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%236366f1'/%3E%3Cpath d='M9 9 L9 23 M9 16 L17 16 M17 9 L17 23 M21 14 L24 14 L24 23 M21 11 L21 14' stroke='white' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round' fill='none'/%3E%3C/svg%3E">
+</head>
+<body>
+  {# Shared frame for /login and /login/2fa: the dark brand column on the
+     left (hidden under 880px) and the form column. Each page fills the
+     aside copy and the card; the wordmark and footer live here once. #}
+  <div class="login-shell">
+    <aside class="login-aside">
+      <div class="brand-block">
+        <div class="login-wordmark login-wordmark-aside" aria-hidden="true"><span class="hy">HY</span><span class="dot">·</span>PERION</div>
+        {% block aside %}{% endblock %}
+      </div>
+      <div class="footer">Hyperion · hosting control panel</div>
+    </aside>
+    <main class="login-form">
+      <div class="login-card">
+        <div class="login-brand login-wordmark" aria-hidden="true"><span class="hy">HY</span><span class="dot">·</span>PERION</div>
+        {% block card %}{% endblock %}
+      </div>
+    </main>
+  </div>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

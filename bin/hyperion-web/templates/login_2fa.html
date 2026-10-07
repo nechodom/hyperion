@@ -1,21 +1,7 @@
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Two-factor authentication · Hyperion</title>
-  <link rel="stylesheet" href="/static/app.css?v={{ css_version }}">
-  <meta name="color-scheme" content="light dark">
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%236366f1'/%3E%3Cpath d='M9 9 L9 23 M9 16 L17 16 M17 9 L17 23 M21 14 L24 14 L24 23 M21 11 L21 14' stroke='white' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round' fill='none'/%3E%3C/svg%3E">
-</head>
-<body>
-  <div class="login-shell">
-    <aside class="login-aside">
-      <div class="brand-block">
-        <div style="font-family:var(--font-mono);font-weight:800;font-size:1.4rem;letter-spacing:0.04em;margin-bottom:2.5rem;text-transform:uppercase">
-          <span style="color:#34d399;text-shadow:0 0 22px rgba(52,211,153,0.6)">HY</span><span style="opacity:0.5;font-weight:500">·</span>PERION
-        </div>
+{% extends "_login_layout.html" %}
+{% block title %}Two-factor authentication{% endblock %}
 
+{% block aside %}
         <div class="login-step-trail" aria-label="Sign-in progress">
           <div class="login-step done">
             <span class="login-step-dot">
@@ -35,18 +21,11 @@
           </div>
         </div>
 
-        <h1 style="margin-top:2rem">One more step.</h1>
-        <p>Open your authenticator app and enter the 6-digit code. No app on hand? Use one of your backup codes instead.</p>
-      </div>
-      <div class="footer">© Hyperion · Debian 12+ · Rust + axum + askama</div>
-    </aside>
+        <h1 class="login-aside-h1-step">One more step.</h1>
+        <p class="lede">Open your authenticator app and enter the 6-digit code. No app on hand? Use one of your backup codes instead.</p>
+{% endblock %}
 
-    <main class="login-form">
-      <div class="login-card">
-        <div class="login-brand" style="font-family:var(--font-mono);text-transform:uppercase;letter-spacing:0.04em">
-          <span style="color:var(--brand-accent);text-shadow:0 0 18px color-mix(in oklab,var(--brand-accent) 60%,transparent)">HY</span><span style="color:var(--text-soft);font-weight:500">·</span>PERION
-        </div>
-
+{% block card %}
         <div class="login-icon-puck" aria-hidden="true">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
             <rect x="3" y="11" width="18" height="11" rx="2"/>
@@ -54,34 +33,51 @@
           </svg>
         </div>
 
+        {# Small-screen stand-in for the aside's step trail, which is hidden
+           under 880px — otherwise a phone never learns the password worked. #}
+        <p class="login-step-inline">Step 2 of 2 · Password verified</p>
         <h2>Two-factor authentication</h2>
-        <p class="subtitle" id="totp-subtitle">Enter the 6-digit code from your authenticator app.</p>
-        <p class="subtitle" id="backup-subtitle" hidden>Enter one of the single-use backup codes you saved when you set up two-factor authentication.</p>
+        <p class="subtitle" id="totp-subtitle"{% if backup %} hidden{% endif %}>Enter the 6-digit code from your authenticator app.</p>
+        <p class="subtitle" id="backup-subtitle"{% if !backup %} hidden{% endif %}>Enter one of the single-use backup codes you saved when you set up two-factor authentication.</p>
 
         {% if let Some(e) = error %}
           <div class="flash error" role="alert">
             <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
             <div class="flash-body">
               {% if e == "invalid" %}
-                That code didn't match. Check the digits, or use a backup code instead.
-              {% else if e == "expired" %}
-                Your two-factor window expired. Sign in again to get a fresh code.
+                {% if backup %}
+                That backup code didn't match, or it was already used. Check it, or use your authenticator instead.
+                {% else %}
+                That code didn't match. Check the digits — codes change every 30 seconds — or use a backup code.
+                {% endif %}
+              {% else if e == "throttled" %}
+                Too many failed attempts from this address. Try again in {{ wait_minutes }} minute{% if wait_minutes != 1 %}s{% endif %}.
               {% else %}
-                {{ e }}
+                That didn't go through. Try again.
               {% endif %}
             </div>
           </div>
         {% endif %}
 
+        {# One "trust this device" box for both forms, ABOVE the code: the
+           six boxes submit themselves on the last digit, so a box placed
+           after them could never be ticked in time. Copied into the
+           submitting form's hidden `remember` field. #}
+        <label class="login-check">
+          <input type="checkbox" id="remember-device">
+          Trust this device for 30 days
+        </label>
+
         {# TOTP form — 6 individual boxes that auto-advance + accept paste. #}
-        <form method="post" action="/login/2fa" autocomplete="off" id="totp-form">
+        <form method="post" action="/login/2fa" autocomplete="off" id="totp-form"{% if backup %} hidden{% endif %}>
           <input type="hidden" name="next" value="{{ next|e }}">
+          <input type="hidden" name="remember" value="">
           {# A hidden mirror field carries the concatenated 6-digit code
              to the server so the existing handler doesn't change. #}
           <input type="hidden" name="code" id="code-mirror">
           <div class="otp-row" role="group" aria-label="6-digit code">
             <input class="otp-box" data-otp-idx="0" type="text" inputmode="numeric" autocomplete="one-time-code"
-                   pattern="[0-9]" maxlength="1" required autofocus aria-label="Digit 1">
+                   pattern="[0-9]" maxlength="1" required{% if !backup %} autofocus{% endif %} aria-label="Digit 1">
             <input class="otp-box" data-otp-idx="1" type="text" inputmode="numeric"
                    pattern="[0-9]" maxlength="1" required aria-label="Digit 2">
             <input class="otp-box" data-otp-idx="2" type="text" inputmode="numeric"
@@ -94,40 +90,33 @@
             <input class="otp-box" data-otp-idx="5" type="text" inputmode="numeric"
                    pattern="[0-9]" maxlength="1" required aria-label="Digit 6">
           </div>
-          <label class="login-field-label" style="display:flex;align-items:center;gap:0.45rem;margin-top:0.9rem;cursor:pointer;font-weight:400">
-            <input type="checkbox" name="remember" value="on" id="totp-remember">
-            Trust this device for 30 days
-          </label>
-          <button class="btn primary lg" type="submit" id="totp-submit" style="width:100%;margin-top:0.8rem">
+          <button class="btn primary lg login-submit" type="submit" id="totp-submit">
             Verify code
             <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
           </button>
         </form>
 
         {# Backup code form — single wide input, toggled on by the link. #}
-        <form method="post" action="/login/2fa" autocomplete="off" id="backup-form" hidden>
+        <form method="post" action="/login/2fa" autocomplete="off" id="backup-form"{% if !backup %} hidden{% endif %}>
           <input type="hidden" name="next" value="{{ next|e }}">
+          <input type="hidden" name="mode" value="backup">
+          <input type="hidden" name="remember" value="">
           <div class="field" style="margin-bottom:0">
             <label for="backup-code" class="login-field-label">Backup code</label>
-            <input id="backup-code" name="code" type="text"
+            <input id="backup-code" name="code" type="text" class="login-backup-input"
                    pattern="[0-9A-Za-z\-]{6,32}"
-                   maxlength="32" required
+                   maxlength="32" required{% if backup %} autofocus{% endif %}
                    placeholder="xxxx-xxxx"
-                   spellcheck="false" autocapitalize="off" autocomplete="off"
-                   style="font-family:var(--font-mono);font-size:1rem;letter-spacing:0.1em;text-align:center;text-transform:uppercase">
+                   spellcheck="false" autocapitalize="off" autocomplete="off">
           </div>
-          <label class="login-field-label" style="display:flex;align-items:center;gap:0.45rem;margin-top:0.9rem;cursor:pointer;font-weight:400">
-            <input type="checkbox" name="remember" value="on">
-            Trust this device for 30 days
-          </label>
-          <button class="btn primary lg" type="submit" style="width:100%;margin-top:0.8rem">
+          <button class="btn primary lg login-submit" type="submit">
             Verify backup code
           </button>
         </form>
 
         <div class="login-actions">
           <button type="button" class="login-link" id="toggle-mode" aria-controls="totp-form backup-form">
-            Use a backup code instead
+            {% if backup %}Use authenticator code instead{% else %}Use a backup code instead{% endif %}
           </button>
           <a href="/login?next={{ next|e }}" class="login-link login-link-muted">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
@@ -136,13 +125,14 @@
         </div>
 
         <p class="login-foot">
-          Lost your authenticator and out of backup codes? An administrator can
-          reset two-factor authentication on your account from <code>/admin/users</code>.
+          This step stays open for 5 minutes after your password is accepted;
+          after that, sign in again. Lost your authenticator and out of backup
+          codes? An administrator can reset two-factor authentication on your
+          account under <strong>Users</strong>.
         </p>
-      </div>
-    </main>
-  </div>
+{% endblock %}
 
+{% block scripts %}
   <script>
   (function () {
     'use strict';
@@ -170,10 +160,10 @@
 
     // Mark wrong-code submissions visually + clear inputs so the
     // operator can retry without manually deleting six characters.
-    {% if let Some(_) = error %}
+    {% if !backup %}{% if let Some(_) = error %}
       boxes.forEach((b) => b.classList.add('otp-error'));
       requestAnimationFrame(clearAll);
-    {% endif %}
+    {% endif %}{% endif %}
 
     boxes.forEach((box, idx) => {
       box.addEventListener('input', (ev) => {
@@ -258,7 +248,7 @@
     const totpSub = document.getElementById('totp-subtitle');
     const backupSub = document.getElementById('backup-subtitle');
     const toggle = document.getElementById('toggle-mode');
-    let backupMode = false;
+    let backupMode = {{ backup }};
     toggle.addEventListener('click', () => {
       backupMode = !backupMode;
       totpForm.hidden = backupMode;
@@ -274,7 +264,16 @@
         boxes[0].focus();
       }
     });
+
+    // ============================================================
+    //  "Trust this device" → the submitting form's hidden field
+    // ============================================================
+    const remember = document.getElementById('remember-device');
+    [totpForm, backupForm].forEach((f) => {
+      f.addEventListener('submit', () => {
+        f.querySelector('input[name="remember"]').value = remember.checked ? 'on' : '';
+      });
+    });
   })();
   </script>
-</body>
-</html>
+{% endblock %}

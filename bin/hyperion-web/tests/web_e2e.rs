@@ -386,6 +386,116 @@ async fn login_page_renders_without_auth() {
     assert!(body.contains("name=\"password\""));
 }
 
+async fn get_body(app: axum::Router, uri: &str) -> (StatusCode, String) {
+    let resp = app
+        .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+        .await
+        .expect("call");
+    let status = resp.status();
+    (status, body_string(resp).await)
+}
+
+/// The sign-in page words its own messages. An unknown `?error=` used to be
+/// printed verbatim, so any link could put text of its choosing on the real
+/// panel's sign-in page.
+#[tokio::test]
+async fn login_page_never_echoes_an_unknown_error() {
+    let admin = admin_user::create("kevin", "secret-pw-1").expect("create");
+    let (sock, _d) = start_agent().await;
+    let app = build_app(sock, admin);
+    let (status, body) = get_body(
+        app.clone(),
+        "/login?error=Your+account+is+compromised+call+555",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!body.contains("compromised"), "query text echoed: {body}");
+    assert!(
+        body.contains("Sign-in didn&#x27;t go through")
+            || body.contains("Sign-in didn't go through")
+    );
+
+    // Known codes still get their wording; notices only without an error.
+    let (_, body) = get_body(app.clone(), "/login?notice=signed_out").await;
+    assert!(
+        body.contains("You&#x27;re signed out") || body.contains("You're signed out"),
+        "{body}"
+    );
+    let (_, body) = get_body(app.clone(), "/login?notice=whatever").await;
+    assert!(
+        !body.contains("flash success"),
+        "unknown notice rendered: {body}"
+    );
+    let (_, body) = get_body(app, "/login?error=locked&notice=signed_out").await;
+    assert!(body.contains("account is locked"));
+    assert!(!body.contains("flash success"));
+}
+
+/// A bounced deep link tells the person where they'll land; the dashboard
+/// and anything `redirect_target` would clamp say nothing.
+#[tokio::test]
+async fn login_page_names_the_return_path() {
+    let admin = admin_user::create("kevin", "secret-pw-1").expect("create");
+    let (sock, _d) = start_agent().await;
+    let app = build_app(sock, admin);
+    let (_, body) = get_body(app.clone(), "/login?next=%2Fhostings%2Fexample.com").await;
+    assert!(body.contains("login-return"), "{body}");
+    assert!(
+        body.contains("<code title=\"/hostings/example.com\">"),
+        "{body}"
+    );
+    for next in ["%2F", "%2F%2Fevil.com", ""] {
+        let (_, body) = get_body(app.clone(), &format!("/login?next={next}")).await;
+        assert!(!body.contains("login-return"), "next={next}: {body}");
+    }
+}
+
+/// Past the limit the panel answers with its own sign-in page (429 +
+/// Retry-After), quoting what is left of the 15-minute window — it used to
+/// return bare text promising "5 minutes".
+#[tokio::test]
+async fn throttled_login_renders_the_page_with_the_real_wait() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d) = start_agent().await;
+    let state = test_state(sock, admin, Arc::new(SessionSigner::new_random()));
+    // Own peer address: the throttle is process-wide, keyed by peer IP, and
+    // every other test logs in from 127.0.0.1.
+    let app =
+        hyperion_web::build_router(state).layer(axum::extract::connect_info::MockConnectInfo(
+            "10.98.76.54:4000".parse::<std::net::SocketAddr>().unwrap(),
+        ));
+    let attempt = || {
+        Request::builder()
+            .method(Method::POST)
+            .uri("/login")
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(Body::from(
+                &b"username=kevin&password=wrong&next=%2Fbans"[..],
+            ))
+            .unwrap()
+    };
+    for _ in 0..5 {
+        let r = app.clone().oneshot(attempt()).await.expect("call");
+        assert_eq!(r.status(), StatusCode::SEE_OTHER);
+    }
+    let r = app.oneshot(attempt()).await.expect("call");
+    assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS);
+    let retry: i64 = r.headers()[header::RETRY_AFTER]
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(retry > 14 * 60 && retry <= 15 * 60, "retry-after {retry}");
+    let body = body_string(r).await;
+    assert!(
+        body.contains("name=\"password\""),
+        "not the sign-in page: {body}"
+    );
+    assert!(body.contains("Try again in 15 minutes"), "{body}");
+    // The deep link survives the refusal too.
+    assert!(body.contains("value=\"/bans\""), "{body}");
+}
+
 #[tokio::test]
 async fn unauthenticated_dashboard_redirects_to_login() {
     let admin = admin_user::create("kevin", "secret-pw-1").expect("create");
@@ -1158,10 +1268,10 @@ async fn logout_post_is_exempt_from_csrf() {
         )
         .await
         .expect("call");
-    // Logout redirects to /login on success.
+    // Logout redirects to /login on success, which then says so.
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
     let loc = resp.headers().get(header::LOCATION).expect("loc");
-    assert_eq!(loc.to_str().unwrap(), "/login");
+    assert_eq!(loc.to_str().unwrap(), "/login?notice=signed_out");
 }
 
 /// Security regression: the pending-2FA cookie and the full-session

@@ -400,7 +400,7 @@ pub async fn post_revoke_all_sessions(
         },
     )
     .await?;
-    Ok(Redirect::to("/login?error=expired").into_response())
+    Ok(Redirect::to("/login?notice=signed_out_all").into_response())
 }
 
 /// POST /profile/2fa/start — generate a fresh TOTP secret + 10 backup
