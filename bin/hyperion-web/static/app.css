@@ -1369,6 +1369,66 @@ details.pkg-new .pkg-fs:first-of-type { padding-top: 0; }
 }
 .mail-pre.mail-err { color: var(--danger); }
 .mail-days > .group + .group { margin-top: var(--group-gap); }
+
+/* /notifications — one row per notification inside a day .group: severity,
+   title + topic (+ node), message, when + mark read. Unread rows carry a
+   primary edge so they read as new without colouring the whole row. */
+.group > .notif-row { border-bottom: 1px solid var(--border); }
+.group > .notif-row:last-child { border-bottom: none; }
+.notif-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.9rem;
+  padding: 0.75rem 1.25rem;
+}
+.notif-row.unread { box-shadow: inset 3px 0 0 var(--primary); background: color-mix(in oklab, var(--primary-soft) 25%, transparent); }
+.notif-row .notif-sev {
+  flex: none;
+  width: 5.25rem;
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.8rem;
+  color: var(--text-soft);
+  padding-top: 0.15rem;
+}
+.notif-row .notif-sev.err { color: var(--danger); }
+.notif-row .notif-sev.warn { color: var(--warn); }
+.seg-dot.info { background: var(--text-soft); }
+.notif-row .notif-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 0.2rem; }
+.notif-row .notif-title { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.5rem; overflow-wrap: anywhere; }
+.notif-row .notif-title a { color: inherit; }
+.notif-row .notif-title a:hover { color: var(--primary-h); }
+.notif-row:not(.unread) .notif-title strong { font-weight: 500; }
+.notif-row .notif-body { font-size: 0.85rem; color: var(--text-dim); overflow-wrap: anywhere; }
+.notif-row .notif-meta {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.2rem;
+  font-size: 0.78rem;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.notif-row .notif-meta form { margin: 0; }
+.linklike {
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  color: var(--primary-h);
+  cursor: pointer;
+}
+.linklike:hover { text-decoration: underline; }
+.notif-pager { display: flex; justify-content: space-between; gap: 1rem; margin-top: var(--group-gap); font-size: 0.9rem; }
+.notif-pager .notif-older { margin-left: auto; }
+@media (max-width: 640px) {
+  .notif-row { flex-wrap: wrap; gap: 0.35rem 0.75rem; padding: 0.75rem 1rem; }
+  .notif-row .notif-main { flex-basis: 100%; order: 2; }
+  .notif-row .notif-meta { flex-direction: row; gap: 0.75rem; margin-left: auto; }
+}
 .mail-scope { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; margin: -0.25rem 0 1rem; font-size: 0.85rem; }
 @media (max-width: 640px) {
   .mail-row > summary { flex-wrap: wrap; gap: 0.4rem 0.75rem; padding: 0.75rem 1rem; }

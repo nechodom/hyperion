@@ -1620,6 +1620,50 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.notifications_mark_all_read(user_id).await
     }
 
+    async fn notifications_search(
+        &self,
+        user_id: i64,
+        filter: hyperion_types::NotificationSearchFilter,
+    ) -> Result<hyperion_types::NotificationSearchResult, RpcError> {
+        self.svc.notifications_search(user_id, filter).await
+    }
+
+    async fn notifications_get(
+        &self,
+        user_id: i64,
+        id: i64,
+    ) -> Result<Option<hyperion_types::NotificationView>, RpcError> {
+        self.svc.notifications_get(user_id, id).await
+    }
+
+    async fn notifications_mark_matching(
+        &self,
+        user_id: i64,
+        filter: hyperion_types::NotificationSearchFilter,
+    ) -> Result<i64, RpcError> {
+        self.svc.notifications_mark_matching(user_id, filter).await
+    }
+
+    async fn notifications_outbox(
+        &self,
+        after_id: i64,
+        limit: i64,
+    ) -> Result<Vec<hyperion_types::NotificationOutboxItem>, RpcError> {
+        self.svc.notifications_outbox(after_id, limit).await
+    }
+
+    async fn notifications_node_cursor(&self, node_id: String) -> Result<i64, RpcError> {
+        self.svc.notifications_node_cursor(&node_id).await
+    }
+
+    async fn notifications_ingest(
+        &self,
+        node_id: String,
+        items: Vec<hyperion_types::NotificationOutboxItem>,
+    ) -> Result<i64, RpcError> {
+        self.svc.notifications_ingest(&node_id, items).await
+    }
+
     async fn hosting_logs(
         &self,
         sel: HostingSelector,

@@ -1227,7 +1227,10 @@ function isShortcutContext(ev) {
       const li = document.createElement('li');
       li.className = 'bell-item' + (n.read_at ? '' : ' unread') + ' sev-' + escape(n.severity);
       const a = document.createElement('a');
-      a.href = n.href || '/';
+      // Through the panel's open route: it marks the row read, THEN
+      // redirects. A fetch fired on click raced the navigation and was
+      // often cancelled, leaving the alert unread.
+      a.href = '/notifications/' + encodeURIComponent(n.id) + '/open';
       a.className = 'bell-link';
       a.dataset.id = String(n.id);
       a.innerHTML =
@@ -1237,10 +1240,6 @@ function isShortcutContext(ev) {
           (n.body ? `<br><span class="bell-body">${escape(n.body)}</span>` : '') +
           `<span class="bell-meta">${fmtAgo(n.created_at)}</span>` +
         `</span>`;
-      a.addEventListener('click', (ev) => {
-        // Mark as read on click (best-effort, ignore failures).
-        markRead(n.id);
-      });
       li.appendChild(a);
       list.appendChild(li);
     }
@@ -1248,17 +1247,6 @@ function isShortcutContext(ev) {
     // dropdown is open, re-anchor so an upward flip stays pinned
     // above the bell instead of overflowing once content settles.
     if (!dropdown.hidden) position();
-  }
-
-  async function markRead(id) {
-    try {
-      await fetch('/api/notifications/mark-read', {
-        method: 'POST',
-        credentials: 'same-origin',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ id }),
-      });
-    } catch (_) { /* swallow */ }
   }
 
   async function markAll() {

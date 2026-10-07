@@ -1344,6 +1344,41 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
                 Err(e) => Response::Error(e),
             }
         }
+        Request::NotificationsSearch { user_id, filter } => {
+            match api.notifications_search(user_id, filter).await {
+                Ok(r) => Response::NotificationsSearch(r),
+                Err(e) => Response::Error(e),
+            }
+        }
+        Request::NotificationsGet { user_id, id } => match api.notifications_get(user_id, id).await
+        {
+            Ok(r) => Response::NotificationsGet(r),
+            Err(e) => Response::Error(e),
+        },
+        Request::NotificationsMarkMatching { user_id, filter } => {
+            match api.notifications_mark_matching(user_id, filter).await {
+                Ok(n) => Response::NotificationsMarkAllRead { marked: n },
+                Err(e) => Response::Error(e),
+            }
+        }
+        Request::NotificationsOutbox { after_id, limit } => {
+            match api.notifications_outbox(after_id, limit).await {
+                Ok(r) => Response::NotificationsOutbox(r),
+                Err(e) => Response::Error(e),
+            }
+        }
+        Request::NotificationsNodeCursor { node_id } => {
+            match api.notifications_node_cursor(node_id).await {
+                Ok(n) => Response::NotificationsNodeCursor(n),
+                Err(e) => Response::Error(e),
+            }
+        }
+        Request::NotificationsIngest { node_id, items } => {
+            match api.notifications_ingest(node_id, items).await {
+                Ok(n) => Response::NotificationsIngest { written: n },
+                Err(e) => Response::Error(e),
+            }
+        }
         Request::HostingLogs {
             sel,
             log_kind,
@@ -3089,6 +3124,44 @@ mod tests {
             Ok(())
         }
         async fn notifications_mark_all_read(&self, _: i64) -> Result<i64, RpcError> {
+            Ok(0)
+        }
+        async fn notifications_search(
+            &self,
+            _: i64,
+            _: hyperion_types::NotificationSearchFilter,
+        ) -> Result<hyperion_types::NotificationSearchResult, RpcError> {
+            Ok(Default::default())
+        }
+        async fn notifications_get(
+            &self,
+            _: i64,
+            _: i64,
+        ) -> Result<Option<hyperion_types::NotificationView>, RpcError> {
+            Ok(None)
+        }
+        async fn notifications_mark_matching(
+            &self,
+            _: i64,
+            _: hyperion_types::NotificationSearchFilter,
+        ) -> Result<i64, RpcError> {
+            Ok(0)
+        }
+        async fn notifications_outbox(
+            &self,
+            _: i64,
+            _: i64,
+        ) -> Result<Vec<hyperion_types::NotificationOutboxItem>, RpcError> {
+            Ok(Vec::new())
+        }
+        async fn notifications_node_cursor(&self, _: String) -> Result<i64, RpcError> {
+            Ok(0)
+        }
+        async fn notifications_ingest(
+            &self,
+            _: String,
+            _: Vec<hyperion_types::NotificationOutboxItem>,
+        ) -> Result<i64, RpcError> {
             Ok(0)
         }
         async fn hosting_logs(

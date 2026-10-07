@@ -577,6 +577,64 @@ impl DeploymentRole {
 /// hitting their unauthenticated rate limit (60 req/hour/IP).
 pub const UPDATE_CHECK_TTL_SECS: i64 = 3600;
 
+/// How long the bell's archive (and a worker's outbox) keeps a row.
+const NOTIFICATION_RETENTION_SECS: i64 = 90 * 86_400;
+/// Archive page size when the caller does not ask for one.
+const NOTIFICATION_PAGE: i64 = 100;
+
+fn notification_view(
+    r: hyperion_state::notifications::NotificationRow,
+) -> hyperion_types::NotificationView {
+    hyperion_types::NotificationView {
+        id: r.id,
+        severity: r.severity,
+        title: r.title,
+        body: r.body,
+        href: r.href,
+        kind: r.kind,
+        created_at: r.created_at,
+        read_at: r.read_at,
+        node_id: r.node_id,
+    }
+}
+
+/// The storage filter for a wire filter. A topic becomes the exact list of
+/// this user's kinds in it (`kind_counts` = every kind they have), because
+/// kinds carry site ids and cannot be matched by prefix alone.
+fn notification_filter(
+    f: hyperion_types::NotificationSearchFilter,
+    kind_counts: &[(String, i64, i64)],
+) -> hyperion_state::notifications::SearchFilter {
+    let topic = f.topic.trim();
+    hyperion_state::notifications::SearchFilter {
+        kinds: (!topic.is_empty()).then(|| {
+            kind_counts
+                .iter()
+                .filter(|(k, _, _)| hyperion_types::notification_topic(k).0 == topic)
+                .map(|(k, _, _)| k.clone())
+                .collect()
+        }),
+        q: f.q,
+        severity: f.severity,
+        unread_only: f.unread_only,
+        before: f.before,
+    }
+}
+
+/// A notification link must stay inside the panel: a path, not a scheme or
+/// a protocol-relative `//host` (which a browser reads as another site).
+pub fn is_internal_href(href: &str) -> bool {
+    href.starts_with('/') && !href.starts_with("//") && !href.contains('\\')
+}
+
+fn truncate_chars(s: &str, max: usize) -> String {
+    if s.chars().count() > max {
+        format!("{}…", s.chars().take(max).collect::<String>())
+    } else {
+        s.to_string()
+    }
+}
+
 /// Outcome of `check_spf_authorizes` — how (or whether) the SPF
 /// record authorizes our public IP.
 #[derive(Debug, Clone)]
@@ -6244,6 +6302,18 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         if let Err(e) = self.audit_retention_tick().await {
             tracing::warn!(error=%e, "audit retention failed");
         }
+        // The bell's archive (and a worker's outbox) keep 90 days. This
+        // existed from the start but was never called, so the table grew
+        // for as long as the box ran.
+        if let Err(e) = hyperion_state::notifications::gc_older_than(
+            &self.pool,
+            NOTIFICATION_RETENTION_SECS,
+            now_secs(),
+        )
+        .await
+        {
+            tracing::warn!(error=%e, "notification retention failed");
+        }
         Ok(processed)
     }
 
@@ -11747,6 +11817,19 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                  If the site does not need public registration, switch it off on its                  Security card — that closes the door. If it does, the same card can                  rate-limit sign-ups, and the registration form needs a CAPTCHA.",
                 s.domain, count, shape
             ),
+        )
+        .await;
+        // Nothing is down — accounts are being created — so a warning.
+        self.notify_admins_say(
+            "warn",
+            "ops.signup_flood",
+            &[
+                ("domain", s.domain.as_str()),
+                ("count", count.to_string().as_str()),
+                ("ips", ips.to_string().as_str()),
+            ],
+            &format!("/hostings/{}#wordpress", s.domain),
+            &format!("wp.signup_flood:{}", s.domain),
         )
         .await;
     }
@@ -21691,6 +21774,23 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let body = cat.render("quota.over.body", &args_cust);
         self.notify_quota_event(hosting_id, &subj, &slack, &body)
             .await;
+        // The bell speaks the operator's language, like every ops.* alert —
+        // so the {action} fragment comes from that catalogue too. Suspended
+        // means the site no longer serves: an error. Over but serving: warn.
+        let what_bell = self.operator_catalog().get(key).to_string();
+        self.notify_admins_say(
+            if suspended { "error" } else { "warn" },
+            "ops.quota_over",
+            &[
+                ("domain", domain),
+                ("used", used.as_str()),
+                ("cap", cap.as_str()),
+                ("action", what_bell.as_str()),
+            ],
+            &format!("/hostings/{domain}"),
+            &format!("quota.over:{domain}"),
+        )
+        .await;
     }
 
     /// Slack + email when a quota-suspended site drops back under the cap and is
@@ -21723,6 +21823,14 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let body = cat.render("quota.resolved.body", &args);
         self.notify_quota_event(hosting_id, &subj, &slack, &body)
             .await;
+        self.notify_admins_say(
+            "info",
+            "ops.quota_resolved",
+            &args,
+            &format!("/hostings/{domain}"),
+            &format!("quota.resolved:{domain}"),
+        )
+        .await;
     }
 
     /// Send a quota notification over Slack (default webhook) + email (the
@@ -25794,6 +25902,34 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         resolved: bool,
     ) {
         let kind = if resolved { "RESOLVED" } else { "DOWN" };
+        // The bell, always: email/Slack/webhook below are per-monitor opt-ins,
+        // so a monitor with none of them set used to change state in silence.
+        // Down is an error (the site does not serve); recovery is info.
+        let href = format!("/hostings/{}", cfg.domain);
+        if resolved {
+            self.notify_admins_say(
+                "info",
+                "ops.site_up",
+                &[("domain", cfg.domain.as_str())],
+                &href,
+                &format!("monitor.up:{}", cfg.domain),
+            )
+            .await;
+        } else {
+            let error = sample
+                .error_message
+                .clone()
+                .or_else(|| sample.http_status.map(|c| format!("HTTP {c}")))
+                .unwrap_or_else(|| "no response".into());
+            self.notify_admins_say(
+                "error",
+                "ops.site_down",
+                &[("domain", cfg.domain.as_str()), ("error", error.as_str())],
+                &href,
+                &format!("monitor.down:{}", cfg.domain),
+            )
+            .await;
+        }
         let subject = format!("[Hyperion] {kind} — {}", cfg.domain);
         let body = if resolved {
             format!(
@@ -29906,16 +30042,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .await
             .map_err(|e| RpcError::Internal_with(format!("notifications list: {e}")))?
             .into_iter()
-            .map(|r| hyperion_types::NotificationView {
-                id: r.id,
-                severity: r.severity,
-                title: r.title,
-                body: r.body,
-                href: r.href,
-                kind: r.kind,
-                created_at: r.created_at,
-                read_at: r.read_at,
-            })
+            .map(notification_view)
             .collect();
         let unread_total = hyperion_state::notifications::unread_count(&self.pool, user_id)
             .await
@@ -29942,6 +30069,192 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .await
             .map_err(|e| RpcError::Internal_with(format!("notifications mark_all_read: {e}")))?;
         Ok(n)
+    }
+
+    pub async fn notifications_search(
+        &self,
+        user_id: i64,
+        filter: hyperion_types::NotificationSearchFilter,
+    ) -> Result<hyperion_types::NotificationSearchResult, RpcError> {
+        let err = |e| RpcError::Internal_with(format!("notifications search: {e}"));
+        let limit = if filter.limit <= 0 {
+            NOTIFICATION_PAGE
+        } else {
+            filter.limit.min(500)
+        };
+        // Topics are folded from the raw kinds here: the kinds carry site ids,
+        // so the topic filter becomes an exact-kind list for the query.
+        let kind_counts = hyperion_state::notifications::kind_counts(&self.pool, user_id)
+            .await
+            .map_err(err)?;
+        let f = notification_filter(filter, &kind_counts);
+        // One extra row says whether an "Older" link is needed.
+        let mut rows = hyperion_state::notifications::search(&self.pool, user_id, &f, limit + 1)
+            .await
+            .map_err(err)?;
+        let more = rows.len() as i64 > limit;
+        rows.truncate(limit as usize);
+        let c = hyperion_state::notifications::search_counts(&self.pool, user_id, &f)
+            .await
+            .map_err(err)?;
+        let topics = hyperion_types::NOTIFICATION_TOPICS
+            .iter()
+            .filter_map(|(key, label)| {
+                let (total, unread) = kind_counts
+                    .iter()
+                    .filter(|(k, _, _)| hyperion_types::notification_topic(k).0 == *key)
+                    .fold((0, 0), |(t, u), (_, n, r)| (t + n, u + r));
+                (total > 0).then(|| hyperion_types::NotificationTopicCount {
+                    topic: key.to_string(),
+                    label: label.to_string(),
+                    total,
+                    unread,
+                })
+            })
+            .collect();
+        let unread_total = hyperion_state::notifications::unread_count(&self.pool, user_id)
+            .await
+            .map_err(err)?;
+        Ok(hyperion_types::NotificationSearchResult {
+            items: rows.into_iter().map(notification_view).collect(),
+            counts: hyperion_types::NotificationCounts {
+                all: c.all,
+                unread: c.unread,
+                error: c.error,
+                warn: c.warn,
+                info: c.info,
+                unread_error: c.unread_error,
+            },
+            topics,
+            unread_total,
+            more,
+        })
+    }
+
+    pub async fn notifications_get(
+        &self,
+        user_id: i64,
+        id: i64,
+    ) -> Result<Option<hyperion_types::NotificationView>, RpcError> {
+        Ok(hyperion_state::notifications::get(&self.pool, user_id, id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("notifications get: {e}")))?
+            .map(notification_view))
+    }
+
+    pub async fn notifications_mark_matching(
+        &self,
+        user_id: i64,
+        filter: hyperion_types::NotificationSearchFilter,
+    ) -> Result<i64, RpcError> {
+        let err = |e| RpcError::Internal_with(format!("notifications mark_matching: {e}"));
+        let kind_counts = hyperion_state::notifications::kind_counts(&self.pool, user_id)
+            .await
+            .map_err(err)?;
+        hyperion_state::notifications::mark_read_matching(
+            &self.pool,
+            user_id,
+            &notification_filter(filter, &kind_counts),
+            now_secs(),
+        )
+        .await
+        .map_err(err)
+    }
+
+    /// Worker side of the collection: what this node parked for the master.
+    pub async fn notifications_outbox(
+        &self,
+        after_id: i64,
+        limit: i64,
+    ) -> Result<Vec<hyperion_types::NotificationOutboxItem>, RpcError> {
+        Ok(
+            hyperion_state::notifications::outbox_after(&self.pool, after_id, limit)
+                .await
+                .map_err(|e| RpcError::Internal_with(format!("notifications outbox: {e}")))?
+                .into_iter()
+                .map(|r| hyperion_types::NotificationOutboxItem {
+                    id: r.id,
+                    severity: r.severity,
+                    title: r.title,
+                    body: r.body,
+                    href: r.href,
+                    kind: r.kind,
+                    created_at: r.created_at,
+                })
+                .collect(),
+        )
+    }
+
+    pub async fn notifications_node_cursor(&self, node_id: &str) -> Result<i64, RpcError> {
+        hyperion_state::notifications::node_cursor(&self.pool, node_id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("notifications cursor: {e}")))
+    }
+
+    /// Master side of the collection: give a worker's alerts to every admin
+    /// here, as `notify_admins` would have had they been raised on this box.
+    ///
+    /// The node's answer is signed, but it is still text a worker wrote, and
+    /// it ends up as a link in the master's panel: the link is kept only when
+    /// it is an internal path, and the severity is pinned to the known three.
+    pub async fn notifications_ingest(
+        &self,
+        node_id: &str,
+        items: Vec<hyperion_types::NotificationOutboxItem>,
+    ) -> Result<i64, RpcError> {
+        if node_id.trim().is_empty() {
+            return Err(RpcError::Validation {
+                message: "node_id is required".into(),
+            });
+        }
+        let admins: Vec<i64> = hyperion_state::web_users::list(&self.pool)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("notifications ingest: {e}")))?
+            .into_iter()
+            .filter(|u| {
+                matches!(
+                    u.role,
+                    hyperion_state::web_users::WebRole::SuperAdmin
+                        | hyperion_state::web_users::WebRole::Admin
+                )
+            })
+            .map(|u| u.id)
+            .collect();
+        let mut written = 0;
+        for it in items {
+            let row = hyperion_state::notifications::OutboxRow {
+                id: it.id,
+                severity: match it.severity.as_str() {
+                    s @ ("error" | "warn") => s.to_string(),
+                    _ => "info".to_string(),
+                },
+                title: truncate_chars(&it.title, 200),
+                body: truncate_chars(&it.body, 1000),
+                href: if is_internal_href(&it.href) {
+                    it.href
+                } else {
+                    "/".to_string()
+                },
+                kind: truncate_chars(&it.kind, 200),
+                created_at: it.created_at,
+            };
+            for &uid in &admins {
+                match hyperion_state::notifications::insert_from_node(
+                    &self.pool, uid, node_id, &row,
+                )
+                .await
+                {
+                    Ok(true) => written += 1,
+                    Ok(false) => {}
+                    Err(e) => {
+                        return Err(RpcError::Internal_with(format!(
+                            "notifications ingest: {e}"
+                        )))
+                    }
+                }
+            }
+        }
+        Ok(written)
     }
 
     /// An operator alert, in the OPERATOR's language (`[letters] operator_lang`,
@@ -29996,6 +30309,20 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         href: &str,
         kind: &str,
     ) {
+        let now = now_secs();
+        // A worker has no web users: the panel and its accounts live on the
+        // master. Fanning out here reached nobody, so every alert a worker's
+        // own ticks raised was dropped. Park it; the master collects it.
+        if self.is_worker_node() {
+            if let Err(e) = hyperion_state::notifications::outbox_insert(
+                &self.pool, severity, title, body, href, kind, now,
+            )
+            .await
+            {
+                tracing::warn!(error = %e, kind, "notify_admins: outbox insert failed");
+            }
+            return;
+        }
         let users = match hyperion_state::web_users::list(&self.pool).await {
             Ok(u) => u,
             Err(e) => {
@@ -30003,7 +30330,6 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 return;
             }
         };
-        let now = now_secs();
         for u in users {
             if !matches!(
                 u.role,
@@ -42857,6 +43183,141 @@ mod tests {
         let p = tmp.path().join("node-id.json");
         let s = svc_with_state_file(Some(p)).await;
         assert!(!s.is_worker_node(), "path set but file absent → master");
+    }
+
+    async fn seed_web_user(
+        s: &HostingService<MockAdapterPort>,
+        name: &str,
+        role: hyperion_state::web_users::WebRole,
+    ) -> i64 {
+        hyperion_state::web_users::insert(
+            &s.pool,
+            &hyperion_state::web_users::NewWebUser {
+                username: name,
+                email: &format!("{name}@x.cz"),
+                password_hash: "$argon2id$x",
+                role,
+            },
+            1,
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn worker_parks_admin_alerts_in_the_outbox() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("node-id.json");
+        tokio::fs::write(&p, b"{}").await.unwrap();
+        let s = svc_with_state_file(Some(p)).await;
+        s.notify_admins("error", "RO fs", "body", "/services", "system.rofs")
+            .await;
+        let out = s.notifications_outbox(0, 10).await.unwrap();
+        assert_eq!(
+            out.len(),
+            1,
+            "a worker has no admins — the alert must be parked"
+        );
+        assert_eq!(out[0].title, "RO fs");
+    }
+
+    #[tokio::test]
+    async fn master_ingests_node_alerts_once_and_sanitises_them() {
+        use hyperion_state::web_users::WebRole;
+        let s = svc_with_state_file(None).await;
+        let admin = seed_web_user(&s, "boss", WebRole::Admin).await;
+        let op = seed_web_user(&s, "op", WebRole::Operator).await;
+        let item = |id: i64, href: &str, sev: &str| hyperion_types::NotificationOutboxItem {
+            id,
+            severity: sev.into(),
+            title: "t".into(),
+            body: "b".into(),
+            href: href.into(),
+            kind: "system.rofs".into(),
+            created_at: 5,
+        };
+        let items = vec![
+            item(1, "/hostings/a.cz", "error"),
+            item(2, "//evil.example/x", "bogus"),
+            item(3, "https://evil.example", "warn"),
+        ];
+        assert_eq!(
+            s.notifications_ingest("w1", items.clone()).await.unwrap(),
+            3
+        );
+        // Collected again (lost reply, panel restart): nothing new.
+        assert_eq!(s.notifications_ingest("w1", items).await.unwrap(), 0);
+        assert_eq!(s.notifications_node_cursor("w1").await.unwrap(), 3);
+
+        let feed = s.notifications_feed(admin, 10).await.unwrap();
+        assert_eq!(feed.unread_total, 3);
+        let by_id = |oid: &str| feed.items.iter().find(|n| n.href == oid).cloned();
+        assert!(by_id("/hostings/a.cz").is_some());
+        assert_eq!(
+            feed.items.iter().filter(|n| n.href == "/").count(),
+            2,
+            "off-panel links are replaced, never shown"
+        );
+        assert!(feed.items.iter().all(|n| n.node_id == "w1"));
+        assert!(feed
+            .items
+            .iter()
+            .all(|n| ["error", "warn", "info"].contains(&n.severity.as_str())));
+        assert_eq!(s.notifications_feed(op, 10).await.unwrap().items.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn search_and_mark_by_topic_fold_per_site_kinds() {
+        use hyperion_state::web_users::WebRole;
+        let s = svc_with_state_file(None).await;
+        let me = seed_web_user(&s, "boss", WebRole::Admin).await;
+        s.notify_admins("error", "a", "", "/", "cert.renew_failed:a.cz")
+            .await;
+        s.notify_admins("warn", "b", "", "/", "cert.renewed_late:b.cz")
+            .await;
+        s.notify_admins("error", "c", "", "/", "monitor.down:c.cz")
+            .await;
+        s.notify_admins("info", "d", "", "/", "something.new").await;
+        let f = |topic: &str| hyperion_types::NotificationSearchFilter {
+            topic: topic.into(),
+            ..Default::default()
+        };
+        let r = s.notifications_search(me, f("certs")).await.unwrap();
+        assert_eq!(r.items.len(), 2);
+        assert_eq!(r.counts.all, 2);
+        let topics: Vec<_> = r
+            .topics
+            .iter()
+            .map(|t| (t.topic.as_str(), t.total))
+            .collect();
+        assert_eq!(topics, [("uptime", 1), ("certs", 2), ("other", 1)]);
+        assert!(s
+            .notifications_search(me, f("trash"))
+            .await
+            .unwrap()
+            .items
+            .is_empty());
+
+        // "Mark these read" under a topic must not touch the other topics.
+        assert_eq!(
+            s.notifications_mark_matching(me, f("certs")).await.unwrap(),
+            2
+        );
+        assert_eq!(s.notifications_feed(me, 10).await.unwrap().unread_total, 2);
+    }
+
+    #[tokio::test]
+    async fn is_internal_href_refuses_other_sites() {
+        assert!(is_internal_href("/hostings/a.cz#ssl"));
+        for bad in [
+            "//evil.cz",
+            "https://evil.cz",
+            "/\\evil.cz",
+            "javascript:alert(1)",
+            "",
+        ] {
+            assert!(!is_internal_href(bad), "{bad}");
+        }
     }
 
     #[tokio::test]

@@ -21,6 +21,7 @@ pub mod dispatcher;
 pub mod error;
 pub mod filters;
 pub mod handlers;
+pub mod notify_collector;
 pub mod pma_tls;
 pub mod ratelimit;
 pub mod state;
@@ -949,6 +950,18 @@ pub fn build_router(state: SharedState) -> Router {
         // Bell-icon notification feed. mark-read + mark-all-read are
         // CSRF-exempt at the middleware (see check_csrf comment).
         .route("/notifications", get(handlers::notifications::get_archive))
+        .route(
+            "/notifications/read",
+            post(handlers::notifications::post_read_matching),
+        )
+        .route(
+            "/notifications/:id/read",
+            post(handlers::notifications::post_read_one),
+        )
+        .route(
+            "/notifications/:id/open",
+            get(handlers::notifications::get_open),
+        )
         .route(
             "/api/notifications/feed",
             get(handlers::notifications::get_feed),

@@ -1566,4 +1566,36 @@ pub trait AgentApi: Send + Sync + 'static {
     /// Mark every unread notification for the user as read.
     /// Returns the count of rows marked.
     async fn notifications_mark_all_read(&self, user_id: i64) -> Result<i64, RpcError>;
+    /// One archive page for the user, filtered server-side.
+    async fn notifications_search(
+        &self,
+        user_id: i64,
+        filter: hyperion_types::NotificationSearchFilter,
+    ) -> Result<hyperion_types::NotificationSearchResult, RpcError>;
+    /// One notification, `None` unless it belongs to `user_id`.
+    async fn notifications_get(
+        &self,
+        user_id: i64,
+        id: i64,
+    ) -> Result<Option<hyperion_types::NotificationView>, RpcError>;
+    /// Mark the unread rows matching `filter` read; returns how many.
+    async fn notifications_mark_matching(
+        &self,
+        user_id: i64,
+        filter: hyperion_types::NotificationSearchFilter,
+    ) -> Result<i64, RpcError>;
+    /// Alerts this (worker) node parked for the master, after `after_id`.
+    async fn notifications_outbox(
+        &self,
+        after_id: i64,
+        limit: i64,
+    ) -> Result<Vec<hyperion_types::NotificationOutboxItem>, RpcError>;
+    /// Highest outbox id already collected from `node_id`.
+    async fn notifications_node_cursor(&self, node_id: String) -> Result<i64, RpcError>;
+    /// Fan a node's collected alerts out to this box's admins.
+    async fn notifications_ingest(
+        &self,
+        node_id: String,
+        items: Vec<hyperion_types::NotificationOutboxItem>,
+    ) -> Result<i64, RpcError>;
 }

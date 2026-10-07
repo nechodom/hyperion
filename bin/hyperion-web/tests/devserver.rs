@@ -1068,6 +1068,80 @@ async fn seed_demo_nodes(svc: &StubService) {
     .expect("drain");
 }
 
+/// `DEVSERVER_DEMO=1`: a bell's worth of notifications. They belong to a web
+/// user, and the first login is what creates that row — so this waits for an
+/// admin to exist, then writes the set once (two of them as if collected from
+/// a worker).
+fn seed_demo_notifications(pool: sqlx::SqlitePool) {
+    tokio::spawn(async move {
+        let uid = loop {
+            let row: Option<(i64,)> = sqlx::query_as(
+                "SELECT id FROM web_users WHERE role IN ('super_admin','admin') ORDER BY id LIMIT 1",
+            )
+            .fetch_optional(&pool)
+            .await
+            .ok()
+            .flatten();
+            if let Some((id,)) = row {
+                break id;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        };
+        let now = hyperion_types::now_secs();
+        // (severity, title, body, href, kind, seconds ago, read)
+        let demo: [(&str, &str, &str, &str, &str, i64, bool); 11] = [
+            ("error", "Site is down", "fit-centrum-brno.cz failed its uptime checks — last error: connection refused", "/hostings/fit-centrum-brno.cz", "monitor.down:fit-centrum-brno.cz", 25 * 60, false),
+            ("warn", "A WordPress update was paused", "studio-lumen.cz — woocommerce 9.4 broke the home page in the test run and was rolled back.", "/hostings/studio-lumen.cz#wordpress", "wp.update.paused:x:woocommerce", 2 * 3600, false),
+            ("info", "PHP memory raised", "pekarna-u-mostu.cz ran out of PHP memory; the limit went from 256 MB to 384 MB (ceiling 512 MB).", "/hostings/pekarna-u-mostu.cz", "php_mem_auto", 5 * 3600, true),
+            ("warn", "Site over its disk quota", "atelier-hora.com uses 10420 MiB of 10240 MiB — over its disk quota.", "/hostings/atelier-hora.com", "quota.over:atelier-hora.com", 26 * 3600, false),
+            ("error", "Certificate renewal failed", "kavarna-sever.cz — the certificate expires in 6 days and renewal failed: DNS problem: NXDOMAIN looking up A for www.kavarna-sever.cz", "/hostings/kavarna-sever.cz#ssl", "cert.renew_failed:kavarna-sever.cz", 30 * 3600, true),
+            ("info", "Site is back up", "fit-centrum-brno.cz passes its uptime checks again.", "/hostings/fit-centrum-brno.cz", "monitor.up:fit-centrum-brno.cz", 50 * 3600, true),
+            ("warn", "Hosting moved to trash", "old-promo.cz will be deleted for good after the trash retention window.", "/trash", "hosting.trash", 3 * 86_400, true),
+            ("warn", "Sign-up flood on a WordPress site", "pekarna-u-mostu.cz — 212 WordPress sign-ups in the last scan window from 87 address(es).", "/hostings/pekarna-u-mostu.cz#wordpress", "wp.signup_flood:pekarna-u-mostu.cz", 4 * 86_400, true),
+            ("error", "Pages on this site are broken", "shop.zahrada-plus.cz — the automatic page check found 3 page(s) that do not work: /kosik, /pokladna, /ucet", "/hostings/shop.zahrada-plus.cz", "site_check_broken", 6 * 86_400, true),
+            ("info", "Certificate renewed late", "atelier-hora.com renewed 3 days before expiry after earlier failures.", "/hostings/atelier-hora.com#ssl", "cert.renewed_late:atelier-hora.com", 8 * 86_400, true),
+            ("warn", "Site mail is failing", "studio-lumen.cz — 4 contact-form emails failed to send in the last hour.", "/hostings/studio-lumen.cz", "wp_mail_failing", 9 * 86_400, true),
+        ];
+        for (sev, title, body, href, kind, ago, read) in demo {
+            let id = hyperion_state::notifications::insert(
+                &pool,
+                uid,
+                sev,
+                title,
+                body,
+                href,
+                kind,
+                now - ago,
+            )
+            .await
+            .expect("notification");
+            if read {
+                hyperion_state::notifications::mark_read(&pool, uid, id, now)
+                    .await
+                    .expect("read");
+            }
+        }
+        // As if collected from a worker's outbox.
+        for (id, sev, title, body, kind, ago) in [
+            (1, "error", "Root filesystem is read-only", "web-2: the root filesystem went read-only. Writes fail until it is repaired — see Services → Read-only rootfs.", "system.rofs", 40 * 60),
+            (2, "warn", "PHP workers are all busy", "eshop-velo.cz hit pm.max_children (12) 9 times in the last hour.", "php_workers", 7 * 3600),
+        ] {
+            let row = hyperion_state::notifications::OutboxRow {
+                id,
+                severity: sev.into(),
+                title: title.into(),
+                body: body.into(),
+                href: "/services".into(),
+                kind: kind.into(),
+                created_at: now - ago,
+            };
+            hyperion_state::notifications::insert_from_node(&pool, uid, "web-2", &row)
+                .await
+                .expect("node notification");
+        }
+    });
+}
+
 #[tokio::test]
 #[ignore]
 async fn devserver() {
@@ -1078,6 +1152,9 @@ async fn devserver() {
     }
     if std::env::var_os("DEVSERVER_DEMO_NODES").is_some() {
         seed_demo_nodes(&svc).await;
+    }
+    if std::env::var_os("DEVSERVER_DEMO").is_some() {
+        seed_demo_notifications(svc.pool.clone());
     }
     let (router, _signer) =
         build_app_with_signer(sock, admin, Arc::new(SessionSigner::new_random()));
