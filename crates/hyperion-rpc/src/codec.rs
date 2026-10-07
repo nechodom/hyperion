@@ -1333,6 +1333,35 @@ pub enum Request {
     NotificationsMarkAllRead {
         user_id: i64,
     },
+    /// The archive page: filtered, cursor-paged, with segment counts.
+    NotificationsSearch {
+        user_id: i64,
+        filter: hyperion_types::NotificationSearchFilter,
+    },
+    /// One notification, owner-scoped — the "open" redirect reads its href.
+    NotificationsGet {
+        user_id: i64,
+        id: i64,
+    },
+    /// Mark every unread row matching the filter read ("mark these read").
+    NotificationsMarkMatching {
+        user_id: i64,
+        filter: hyperion_types::NotificationSearchFilter,
+    },
+    /// Worker side: alerts parked for the master, after `after_id`.
+    NotificationsOutbox {
+        after_id: i64,
+        limit: i64,
+    },
+    /// Master side: the highest outbox id already collected from a node.
+    NotificationsNodeCursor {
+        node_id: String,
+    },
+    /// Master side: fan collected worker alerts out to the admins.
+    NotificationsIngest {
+        node_id: String,
+        items: Vec<hyperion_types::NotificationOutboxItem>,
+    },
     HostingLogs {
         sel: HostingSelector,
         log_kind: String,
@@ -2340,6 +2369,13 @@ pub enum Response {
     NotificationsMarkRead,
     NotificationsMarkAllRead {
         marked: i64,
+    },
+    NotificationsSearch(hyperion_types::NotificationSearchResult),
+    NotificationsGet(Option<hyperion_types::NotificationView>),
+    NotificationsOutbox(Vec<hyperion_types::NotificationOutboxItem>),
+    NotificationsNodeCursor(i64),
+    NotificationsIngest {
+        written: i64,
     },
     HostingLogs(String),
     CronList(String),

@@ -76,19 +76,21 @@ pub use sitecheck::{SiteCheckFinding, SiteCheckPage, SiteCheckReport};
 pub use spf::SpfCheckResult;
 pub use stats::{decode_mime_header, render_html_shell, CountryTraffic};
 pub use stats::{
-    AcmeConfigView, AgentConfigView, BackupConfigView, BackupRemoteConfigView,
+    notification_topic, AcmeConfigView, AgentConfigView, BackupConfigView, BackupRemoteConfigView,
     BackupRetentionConfigView, BackupStorageRow, ClusterConfigView, ClusterStats,
     CustomRoleSummary, DashboardAlert, EffectiveRoleWire, EmailConfigView, EmailLogEntry,
     FirewallPort, FirewallView, FsDiagnostics, FsFixStep, FtpAccountSummary, FtpCheckItem,
     FtpCheckReport, FtpExtraAccount, HostingFileContent, HostingFileEntry, HostingStats,
     MonitorConfigView, MonitorHistory, MonitorOverviewItem, MonitorSamplePoint, MtaDiagnostics,
     MtaPortProbe, NetHistory, NetSamplePoint, NodeMetricPoint, NodeMetricsHistory, NodeStats,
-    NodeSummary, NodeUpdateStatus, NotificationFeed, NotificationTemplatesView, NotificationView,
-    OsPendingPackage, OsUpdateStatus, PendingEmailChange, ServiceHealth, ServiceInstallStatus,
-    ServicesHealth, SiteEmailLogEntry, SlackConfigView, SmtpAutodetect, SnapshotDiff,
-    SnapshotOverview, SnapshotRestoreOutcome, SnapshotRetention, SnapshotSummary, TrashEntry,
-    UpdateStatus, Web2faEnrollment, WebHostingAccess, WebLoginResult, WebUserSummary,
-    WebVerify2faResult, WpRegistrationView, SNAPSHOT_TAG_WITH_DB,
+    NodeSummary, NodeUpdateStatus, NotificationCounts, NotificationFeed, NotificationOutboxItem,
+    NotificationSearchFilter, NotificationSearchResult, NotificationTemplatesView,
+    NotificationTopicCount, NotificationView, OsPendingPackage, OsUpdateStatus, PendingEmailChange,
+    ServiceHealth, ServiceInstallStatus, ServicesHealth, SiteEmailLogEntry, SlackConfigView,
+    SmtpAutodetect, SnapshotDiff, SnapshotOverview, SnapshotRestoreOutcome, SnapshotRetention,
+    SnapshotSummary, TrashEntry, UpdateStatus, Web2faEnrollment, WebHostingAccess, WebLoginResult,
+    WebUserSummary, WebVerify2faResult, WpRegistrationView, NOTIFICATION_TOPICS,
+    SNAPSHOT_TAG_WITH_DB,
 };
 pub use stats::{CARE_REPORT_DEFAULT_BODY_TEMPLATE, EXPIRY_WARNING_DEFAULT_BODY_TEMPLATE};
 pub use wp::{

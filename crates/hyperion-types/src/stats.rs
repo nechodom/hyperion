@@ -1878,6 +1878,118 @@ pub struct NotificationView {
     pub created_at: i64,
     /// None = unread, Some(unix) = read at that time.
     pub read_at: Option<i64>,
+    /// Node that raised it; empty = the master itself. Absent from an older
+    /// agent's answer.
+    #[serde(default)]
+    pub node_id: String,
+}
+
+/// What the notification archive asks for. Empty strings mean "any".
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NotificationSearchFilter {
+    #[serde(default)]
+    pub q: String,
+    /// `error` | `warn` | `info`.
+    #[serde(default)]
+    pub severity: String,
+    #[serde(default)]
+    pub unread_only: bool,
+    /// A [`notification_topic`] key.
+    #[serde(default)]
+    pub topic: String,
+    /// Keyset cursor `(created_at, id)`: rows strictly older.
+    #[serde(default)]
+    pub before: Option<(i64, i64)>,
+    #[serde(default)]
+    pub limit: i64,
+}
+
+/// Segment totals over the search box + family.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NotificationCounts {
+    pub all: i64,
+    pub unread: i64,
+    pub error: i64,
+    pub warn: i64,
+    pub info: i64,
+    pub unread_error: i64,
+}
+
+/// One entry of the topic pick-list.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NotificationTopicCount {
+    pub topic: String,
+    pub label: String,
+    pub total: i64,
+    pub unread: i64,
+}
+
+/// Topics, in pick-list order: `(key, label)`.
+pub const NOTIFICATION_TOPICS: &[(&str, &str)] = &[
+    ("uptime", "Uptime"),
+    ("certs", "Certificates"),
+    ("pages", "Broken pages"),
+    ("wordpress", "WordPress"),
+    ("mail", "Site mail"),
+    ("php", "PHP"),
+    ("quota", "Disk quota"),
+    ("server", "Server"),
+    ("trash", "Trash"),
+    ("other", "Other"),
+];
+
+/// The topic a notification kind belongs to, as `(key, label)`.
+///
+/// Emitters put the subject into the kind so they can tell one alert from
+/// the next (`cert.renew_failed:example.cz`, `wp.update.paused:<id>:<slug>`),
+/// so a raw kind names one site's one event. What an operator filters on is
+/// what the alert is ABOUT; anything not listed here is `other`, so a new
+/// emitter is never unfilterable.
+pub fn notification_topic(kind: &str) -> (&'static str, &'static str) {
+    let family = kind.split(':').next().unwrap_or(kind);
+    let first = family.split('.').next().unwrap_or(family);
+    let key = match first {
+        "monitor" => "uptime",
+        "cert" => "certs",
+        "site_check_broken" => "pages",
+        "wp" => "wordpress",
+        "wp_mail_override" | "wp_mail_failing" => "mail",
+        "php_mem_auto" | "php_workers" => "php",
+        "quota" => "quota",
+        "system" => "server",
+        "hosting" if family == "hosting.trash" => "trash",
+        _ => "other",
+    };
+    NOTIFICATION_TOPICS
+        .iter()
+        .copied()
+        .find(|(k, _)| *k == key)
+        .unwrap_or(("other", "Other"))
+}
+
+/// One archive page plus everything the toolbar needs.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NotificationSearchResult {
+    pub items: Vec<NotificationView>,
+    pub counts: NotificationCounts,
+    /// Topics that have rows, in [`NOTIFICATION_TOPICS`] order.
+    pub topics: Vec<NotificationTopicCount>,
+    /// Unread over the whole archive, whatever the filter.
+    pub unread_total: i64,
+    /// More rows match beyond this page.
+    pub more: bool,
+}
+
+/// An alert a worker raised, as the master collects it from the outbox.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NotificationOutboxItem {
+    pub id: i64,
+    pub severity: String,
+    pub title: String,
+    pub body: String,
+    pub href: String,
+    pub kind: String,
+    pub created_at: i64,
 }
 
 /// Bell-dropdown payload: a recent slice + an unread total. The
@@ -2790,5 +2902,41 @@ mod snapshot_retention_tests {
             keep_last: 3,
         };
         assert_eq!(r.describe(), "kept until deleted by hand");
+    }
+}
+
+#[cfg(test)]
+mod notification_topic_tests {
+    use super::notification_topic;
+
+    #[test]
+    fn every_emitted_kind_lands_in_its_topic() {
+        // The kinds the agent emits today (service.rs `notify_admins*`).
+        for (kind, topic) in [
+            ("monitor.down:a.cz", "uptime"),
+            ("monitor.up:a.cz", "uptime"),
+            ("cert.renew_failed:a.cz", "certs"),
+            ("cert.renewed_late:a.cz", "certs"),
+            ("cert.wildcard_manual:a.cz", "certs"),
+            ("site_check_broken", "pages"),
+            ("wp.update.paused:id:akismet", "wordpress"),
+            ("wp.core.failed:id", "wordpress"),
+            ("wp.update.major:id:x", "wordpress"),
+            ("wp.integrity:id", "wordpress"),
+            ("wp.signup_flood:a.cz", "wordpress"),
+            ("wp_mail_override", "mail"),
+            ("wp_mail_failing", "mail"),
+            ("php_mem_auto", "php"),
+            ("php_workers", "php"),
+            ("quota.over:a.cz", "quota"),
+            ("quota.resolved:a.cz", "quota"),
+            ("system.rofs", "server"),
+            ("hosting.trash", "trash"),
+            ("hosting.something_else", "other"),
+            ("brand_new", "other"),
+            ("", "other"),
+        ] {
+            assert_eq!(notification_topic(kind).0, topic, "{kind}");
+        }
     }
 }

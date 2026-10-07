@@ -1,135 +1,163 @@
 {% extends "base.html" %}
 {% block title %}Notifications · Hyperion{% endblock %}
+{% macro notif_row(r) %}
+<div class="notif-row{% if r.unread %} unread{% endif %}" id="n-{{ r.id }}">
+  <span class="notif-sev {{ r.tone }}" title="{{ r.severity_label }}">
+    <span class="seg-dot {{ r.tone }}"></span><span class="notif-sev-label">{{ r.severity_label }}</span>
+  </span>
+  <span class="notif-main">
+    <span class="notif-title">
+      {% if let Some(h) = r.open_href %}
+        <a href="{{ h }}"><strong>{{ r.title }}</strong></a>
+      {% else %}
+        <strong>{{ r.title }}</strong>
+      {% endif %}
+      <span class="tag">{{ r.topic_label }}</span>
+      {% if let Some(n) = r.node %}<span class="tag muted" title="Raised on this node">{{ n }}</span>{% endif %}
+    </span>
+    {% if !r.body.is_empty() %}<span class="notif-body">{{ r.body }}</span>{% endif %}
+  </span>
+  <span class="notif-meta">
+    <span title="{{ r.abs }}">{{ r.ago }}</span>
+    {% if r.unread %}
+      <form method="post" action="/notifications/{{ r.id }}/read">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <input type="hidden" name="back" value="{{ here }}">
+        <button type="submit" class="linklike" title="Mark this notification read">Mark read</button>
+      </form>
+    {% else %}
+      <span class="text-soft">Read</span>
+    {% endif %}
+  </span>
+</div>
+{% endmacro %}
 {% block main %}
 <div class="page-header">
   <div>
     <h1>Notifications</h1>
     <div class="subtitle">
-      Full archive — the bell menu shows only the last 10. Certificate
-      renewals, backup status, hosting failures, and transfer results
-      all flow here.
+      What Hyperion flagged for you, from every node — what is broken now,
+      what will break, and what changed. Kept for 90 days.
     </div>
   </div>
-  <div>
-    <form method="post" action="/api/notifications/mark-all-read" style="display:inline">
+  <span class="grow"></span>
+  <div class="actions">
+    {% if counts.unread > 0 %}
+    <form method="post" action="/notifications/read">
       <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-      <button class="btn ghost" type="submit">Mark all read</button>
+      {% if !show.is_empty() %}<input type="hidden" name="show" value="{{ show }}">{% endif %}
+      {% if !topic.is_empty() %}<input type="hidden" name="topic" value="{{ topic }}">{% endif %}
+      {% if !q.is_empty() %}<input type="hidden" name="q" value="{{ q }}">{% endif %}
+      <button class="btn" type="submit">{% if filtered %}Mark these read{% else %}Mark all read{% endif %}</button>
     </form>
+    {% endif %}
+    <a href="/settings#notifications" class="btn ghost" title="Slack, who else receives alerts, and how they are worded">Alert channels</a>
   </div>
 </div>
 
-<div class="group" style="margin-bottom:1rem">
-  <div class="ghead">Filter</div>
-  <div class="item">
-  <form method="get" action="/notifications"
-        style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap">
-    <label style="display:flex;gap:0.4rem;align-items:center">
-      <span class="text-soft small">Kind</span>
-      <select name="kind" class="input" style="min-width:14rem">
-        <option value="" {% if kind_filter.is_empty() %}selected{% endif %}>All kinds</option>
-        {% for k in known_kinds %}
-          <option value="{{ k.0|e }}" {% if k.1 %}selected{% endif %}>{{ k.0 }}</option>
-        {% endfor %}
-      </select>
-    </label>
-    <button type="submit" class="btn">Apply</button>
-    <a href="/notifications" class="btn ghost">Reset</a>
-    <span style="margin-left:auto" class="text-soft small">
-      {{ items.len() }} notification{% if items.len() != 1 %}s{% endif %}
-    </span>
-  </form>
-  </div>
-</div>
-
-{% if items.is_empty() %}
+{% if archive_empty %}
   <div class="card empty">
     <div class="empty-illustration">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
     </div>
-    {% if !kind_filter.is_empty() %}
-      <h3>No notifications match this kind</h3>
-      <p class="text-soft">
-        Try a different kind, or
-        <a href="/notifications">reset the filter</a>
-        to see all notifications.
-      </p>
-    {% else %}
-      <h3>No notifications yet</h3>
-      <p class="text-soft">
-        Hyperion posts here when a certificate renews or expires soon, a
-        backup succeeds or fails, monitoring trips an alert, a hosting
-        changes state, or a cluster event occurs.
-      </p>
-      <p class="text-soft small" style="margin-top:0.6rem">
-        To also receive these by email or Slack, set up the channels in
-        <a href="/settings#notifications">Settings → Alerts</a>.
-      </p>
-    {% endif %}
+    <h3>No notifications yet</h3>
+    <p class="text-soft">
+      Hyperion posts here when a site goes down, a certificate fails to renew,
+      pages break, a WordPress update needs a hand, a site runs out of PHP
+      memory or disk quota, or a server's filesystem turns read-only.
+    </p>
+    <p class="text-soft small" style="margin-top:0.6rem">
+      Only administrators receive them. To also get alerts in Slack, set up
+      <a href="/settings#notifications">Settings → Alerts</a>.
+    </p>
   </div>
 {% else %}
-  <div class="card" style="padding:0">
-    <div class="scroll-x">
-<table class="data-table data-table--cards">
-      {# The colours have one meaning, and it is worth stating: a panel where
-         everything is red tells you nothing, because the one site that is
-         actually down no longer stands out. #}
-      <caption class="text-soft small" style="caption-side:top;text-align:left;padding:0 0 0.5rem">
-        <span class="pill err">error</span> something is broken right now —
-        the site does not serve, a certificate has expired, malware is on
-        disk. <span class="pill warn">warn</span> something will break or a
-        promise is unmet — a certificate expiring next week, backups that
-        have never succeeded. <span class="pill ok">info</span> worth
-        recording.
-      </caption>
-      <thead>
-        <tr>
-          <th style="width:5rem">Severity</th>
-          <th>Title / body</th>
-          <th style="width:12rem">Kind</th>
-          <th style="width:9rem">When</th>
-          <th style="width:5rem">State</th>
-          <th></th>
-        </tr>
-      </thead>
-      <tbody>
-        {% for n in items %}
-          <tr {% if n.read_at.is_none() %}style="background:color-mix(in oklab, var(--accent) 4%, transparent)"{% endif %}>
-            <td>
-              {% if n.severity == "error" %}
-                <span class="pill err">error</span>
-              {% else if n.severity == "warn" %}
-                <span class="pill warn">warn</span>
-              {% else %}
-                <span class="pill ok">info</span>
-              {% endif %}
-            </td>
-            <td>
-              <div><strong>{{ n.title }}</strong></div>
-              <div class="text-soft small">{{ n.body }}</div>
-            </td>
-            {# Readable label; the raw kind stays in the tooltip for grepping
-               journald/audit by exact string. #}
-            <td title="{{ n.kind }}">{{ crate::handlers::stats::fmt_action_label(n.kind) }}</td>
-            <td class="text-soft small" title="{{ n.created_at }}">
-              {{ crate::handlers::stats::fmt_ago(n.created_at) }}
-            </td>
-            <td>
-              {% if n.read_at.is_some() %}
-                <span class="text-soft small">read</span>
-              {% else %}
-                <span class="pill" style="background:var(--accent);color:white">new</span>
-              {% endif %}
-            </td>
-            <td>
-              {% if !n.href.is_empty() %}
-                <a href="{{ n.href }}" class="btn small">Open</a>
-              {% endif %}
-            </td>
-          </tr>
-        {% endfor %}
-      </tbody>
-    </table>
+
+<div class="svc-verdict {{ verdict_tone }}">
+  <span class="dot"></span>
+  <span>{{ verdict }}</span>
+  {% if let Some(h) = verdict_href %}<a href="{{ h }}" class="small">Open →</a>{% endif %}
 </div>
+
+<div class="search-toolbar">
+  <form method="get" action="/notifications" class="search-form jobs-filter" role="search">
+    <div class="search-input">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      <input type="search" name="q" value="{{ q }}"
+             placeholder="Search — site, title, message…"
+             autocomplete="off" spellcheck="false">
+      {% if !q.is_empty() %}
+        <a href="/notifications" class="search-clear" title="Clear search" aria-label="Clear search"
+           onclick="var f=this.closest('form');f.q.value='';f.submit();return false;">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </a>
+      {% endif %}
+    </div>
+    <select name="topic" aria-label="Topic" onchange="this.form.submit()">
+      <option value="" {% if topic.is_empty() %}selected{% endif %}>Every topic</option>
+      {% for (k, label, sel) in topics %}
+        <option value="{{ k }}" {% if sel.clone() %}selected{% endif %}>{{ label }}</option>
+      {% endfor %}
+    </select>
+    {% if !show.is_empty() %}<input type="hidden" name="show" value="{{ show }}">{% endif %}
+    <noscript><button class="btn" type="submit">Filter</button></noscript>
+  </form>
+
+  <nav class="search-segments" aria-label="Filter by state">
+    <a class="seg {% if show.is_empty() %}active{% endif %}" href="{{ seg_hrefs.all }}">
+      All <span class="seg-count">{{ counts.all }}</span>
+    </a>
+    <a class="seg {% if show == "unread" %}active{% endif %}" href="{{ seg_hrefs.unread }}">
+      Unread{% if counts.unread > 0 %} <span class="seg-count">{{ counts.unread }}</span>{% endif %}
+    </a>
+    <a class="seg {% if show == "error" %}active{% endif %}" href="{{ seg_hrefs.error }}">
+      <span class="seg-dot err"></span>Errors{% if counts.error > 0 %} <span class="seg-count">{{ counts.error }}</span>{% endif %}
+    </a>
+    <a class="seg {% if show == "warn" %}active{% endif %}" href="{{ seg_hrefs.warn }}">
+      <span class="seg-dot warn"></span>Warnings{% if counts.warn > 0 %} <span class="seg-count">{{ counts.warn }}</span>{% endif %}
+    </a>
+    <a class="seg {% if show == "info" %}active{% endif %}" href="{{ seg_hrefs.info }}">
+      Info{% if counts.info > 0 %} <span class="seg-count">{{ counts.info }}</span>{% endif %}
+    </a>
+  </nav>
+</div>
+
+{% if days.is_empty() %}
+  <div class="group">
+    <div class="item text-soft">
+      {% if show == "unread" && q.is_empty() && topic.is_empty() %}
+        Nothing unread — you are caught up.
+      {% else %}
+        No notifications match these filters.
+      {% endif %}
+      <a href="/notifications">Show every notification</a>
+    </div>
   </div>
+{% endif %}
+
+<div class="mail-days">
+{% for d in days %}
+  <div class="group">
+    <div class="ghead">{{ d.label }}</div>
+    {% for r in d.rows %}{% call notif_row(r) %}{% endfor %}
+  </div>
+{% endfor %}
+</div>
+
+{% if older_href.is_some() || paged %}
+<nav class="notif-pager" aria-label="Pages">
+  {% if paged %}<a href="{{ first_href }}">← Newest</a>{% endif %}
+  {% if let Some(h) = older_href %}<a href="{{ h }}" class="notif-older">Older notifications →</a>{% endif %}
+</nav>
+{% endif %}
+
+<p class="text-soft small" style="margin-top:1rem">
+  <span class="seg-dot err"></span> <strong>Error</strong> — something is broken
+  right now: the site does not serve, a certificate has expired, malware is on
+  disk. <span class="seg-dot warn"></span> <strong>Warning</strong> — something
+  will break or a promise is unmet: a certificate expiring next week, a plugin
+  that needs a hand. <strong>Info</strong> — worth recording. Opening a
+  notification marks it read.
+</p>
 {% endif %}
 {% endblock %}

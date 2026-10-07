@@ -788,6 +788,27 @@ fn print_pretty(resp: &Response) {
         Response::NotificationsMarkAllRead { marked } => {
             println!("✓ marked {marked} notifications read");
         }
+        Response::NotificationsSearch(r) => {
+            println!("unread total: {}", r.unread_total);
+            for n in &r.items {
+                let mark = if n.read_at.is_some() { " " } else { "•" };
+                println!(
+                    "  [{}] {:>5} {} {:<8} {}",
+                    mark, n.id, n.created_at, n.severity, n.title
+                );
+            }
+        }
+        Response::NotificationsGet(n) => match n {
+            Some(n) => println!("{} {} {} → {}", n.id, n.severity, n.title, n.href),
+            None => println!("(no such notification)"),
+        },
+        Response::NotificationsOutbox(items) => {
+            for n in items {
+                println!("  {:>5} {} {:<8} {}", n.id, n.created_at, n.severity, n.title);
+            }
+        }
+        Response::NotificationsNodeCursor(n) => println!("cursor: {n}"),
+        Response::NotificationsIngest { written } => println!("✓ wrote {written} notifications"),
         Response::HostingFileDownload {
             rel_path,
             bytes_b64,

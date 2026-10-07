@@ -125,7 +125,12 @@ pub async fn dispatch_to_node(
     let req_kind = request_kind_label(&req);
     // phpMyAdmin relays one RPC per asset — dozens per page. At INFO they
     // would bury every operator action in the journal.
-    let chatty = matches!(req, Request::PmaHttp { .. });
+    // Same for the notification collector, which reads every worker's
+    // outbox twice a minute.
+    let chatty = matches!(
+        req,
+        Request::PmaHttp { .. } | Request::NotificationsOutbox { .. }
+    );
     match target {
         None => {
             if chatty {

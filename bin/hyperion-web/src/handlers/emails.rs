@@ -215,7 +215,7 @@ fn first_line(s: &str, max: usize) -> String {
     }
 }
 
-fn fmt_local(ts: i64, fmt: &str) -> String {
+pub(crate) fn fmt_local(ts: i64, fmt: &str) -> String {
     use chrono::{Local, TimeZone};
     Local
         .timestamp_opt(ts, 0)
@@ -225,7 +225,7 @@ fn fmt_local(ts: i64, fmt: &str) -> String {
 }
 
 /// "Today" / "Yesterday" / "Mon 5 Oct 2026", in the panel host's local time.
-fn day_label(ts: i64, now: i64) -> String {
+pub(crate) fn day_label(ts: i64, now: i64) -> String {
     use chrono::{Local, TimeZone};
     let day = |t: i64| Local.timestamp_opt(t, 0).single().map(|d| d.date_naive());
     match (day(ts), day(now)) {
