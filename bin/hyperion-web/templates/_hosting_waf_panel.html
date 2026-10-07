@@ -83,7 +83,7 @@
     <thead><tr><th>When</th><th>Address</th><th>Rule</th><th>Request</th>{% if can_edit %}<th></th>{% endif %}</tr></thead>
     <tbody>
       {% for h in hits %}
-      <tr>
+      <tr{% if loop.index > 8 %} class="waf-extra"{% endif %}>
         <td style="white-space:nowrap">{{ h.ago }}</td>
         <td class="mono" style="font-size:0.78rem">{{ h.ip }}</td>
         <td>{{ h.label }}</td>
@@ -109,6 +109,13 @@
     </tbody>
   </table>
   </div>
+  {#- Only the newest few show; the rest unfold in place. One table (rows hidden
+     by CSS via :has() on the open <details>) so the columns stay aligned. #}
+  {% if hits.len() > 8 %}
+  <details class="chk-fold waf-more">
+    <summary><span class="waf-more-closed">Show {{ hits.len() - 8 }} more</span><span class="waf-more-open">Show fewer</span></summary>
+  </details>
+  {% endif %}
   {% endif %}
 
   {% endif %}
