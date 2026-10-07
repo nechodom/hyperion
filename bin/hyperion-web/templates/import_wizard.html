@@ -1,74 +1,82 @@
 {% extends "base.html" %}
-{% block title %}Self-service import · Hyperion{% endblock %}
+{% block title %}Import · Hyperion{% endblock %}
 {% block main %}
+{% let import_tab = "command" %}
+{% include "_import_header.html" %}
 
-<div class="page-header">
-  <div>
-    <h1>Self-service import</h1>
-    <div class="subtitle">Import a <strong>CloudPanel</strong> / <strong>HestiaCP</strong> server with one command — no SSH key handed over, no browser upload, nothing routed through your laptop. You run a one-liner on the source; it streams the bundle straight here and imports in the background. Mail &amp; DNS are out of scope (reported, never imported).</div>
+{% if let Some(m) = flash %}
+  <div class="flash success">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+    <div class="flash-body">{{ m }}</div>
   </div>
-  <span class="grow"></span>
-  <div class="actions">
-    <a class="btn small ghost" href="/import/ssh">SSH / in-place import →</a>
+{% endif %}
+{% if let Some(m) = flash_error %}
+  <div class="flash error">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+    <div class="flash-body">{{ m }}</div>
   </div>
-</div>
+{% endif %}
 
-{% if let Some(m) = flash %}<div class="flash success"><div class="flash-body">{{ m }}</div></div>{% endif %}
-{% if let Some(m) = flash_error %}<div class="flash error"><div class="flash-body">{{ m }}</div></div>{% endif %}
-
-{% if let Some(m) = minted %}
 {% if let Some(w) = stale_vhost %}
 {# The fix for the 2 GiB upload cliff ships in a template the AGENT re-renders
    at boot. That only happens once a panel hostname and a certificate exist, so
    an operator can upgrade and still be running the old vhost — and would then
    hit the identical failure on a panel whose UI promises otherwise. #}
-<div class="card" style="margin-bottom:1rem;border-color:var(--warn)">
-  <h3 style="margin-top:0">Large imports will still fail on this box</h3>
-  <p class="text-soft" style="margin:0">{{ w }}</p>
-</div>
-{% endif %}
-<div class="card" style="margin-bottom:1rem;border-color:var(--accent)">
-  <h3>Run on your {{ m.kind }} server, as root</h3>
-  <p class="text-soft">Token valid for 4 hours, and extended automatically while an upload is running. Everything runs server-to-server — your laptop is never in the middle. Needs <code>sudo</code>/root on the source (to read the panel DB).</p>
-  <pre class="code-block" style="white-space:pre-wrap;word-break:break-all;user-select:all"><code>{{ m.one_liner }}</code></pre>
-  <button class="btn small" type="button"
-          onclick="navigator.clipboard.writeText(this.previousElementSibling.innerText.trim());this.textContent='Copied ✓';">Copy command</button>
-  <p class="text-soft" style="margin-top:.6rem">It scans the server, reports the sites here, then <strong>waits</strong>. Below under <em>Transfers</em> a <strong>Choose sites</strong> button appears — tick the ones you want and click Import. The script then exports just those and uploads them back. You can close this page; it keeps running.</p>
-  <p class="text-soft" style="margin-top:.6rem"><strong>The export runs in the background on the source server</strong>, so closing your SSH session does not cancel it — and if the connection drops mid-upload, it continues from where it stopped rather than starting over. Under 3&nbsp;GB of site files you also get a live progress bar in your terminal; above that it just detaches. Either way you can check on it at any time by running <code>sudo /var/lib/hyperion-export/status</code> on the source server.</p>
-</div>
+  <div class="flash warn">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+    <div class="flash-body"><strong>Large imports will still fail on this box.</strong> {{ w }}</div>
+  </div>
 {% endif %}
 
-<div class="card" style="margin-bottom:1rem">
-  <h3>Generate a command</h3>
-  <form method="post" action="/import/wizard/mint">
-    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-    <div class="field-row">
-      <div class="field">
-        <label>Source panel</label>
-        <select name="source_kind">
+<div class="group">
+  <div class="ghead">Run one command on the source server</div>
+  {% if let Some(m) = minted %}
+  <div class="item" id="import-command">
+    <h3>Paste this on your {{ m.kind }} server, as root</h3>
+    <pre class="code-block import-oneliner"><code>{{ m.one_liner }}</code></pre>
+    <div class="item-actions" style="justify-content:flex-start;margin-top:0.6rem">
+      <button class="btn small" type="button" data-copy="{{ m.one_liner }}">Copy command</button>
+      <span class="text-soft small">Valid for 4 hours, extended automatically while an upload runs.</span>
+    </div>
+    <ol class="import-steps">
+      <li><strong>It scans the server</strong> and reports the sites it found here, under <em>Transfers</em>. Then it waits.</li>
+      <li><strong>Choose sites</strong> appears on the transfer. Tick the ones you want and click Import.</li>
+      <li><strong>The source exports just those</strong> and uploads them straight to this panel; the import then runs as a background job.</li>
+    </ol>
+    <p class="text-soft small" style="margin:0.75rem 0 0">The export runs detached on the source, so closing your SSH session does not cancel it, and a dropped upload resumes where it stopped. Under 3&nbsp;GB of site files your terminal also shows a live progress bar. Check on it any time with <code>sudo /var/lib/hyperion-export/status</code> on the source.</p>
+  </div>
+  {% endif %}
+  <div class="item{% if minted.is_some() %} muted{% endif %}">
+    {% if minted.is_none() %}
+    <p class="text-soft small" style="margin:0 0 1rem">No SSH key handed over, no browser upload, nothing routed through your laptop: the source streams straight to this panel. Needs <code>sudo</code> on the source to read the panel database. Mail and DNS are reported, never imported.</p>
+    {% endif %}
+    <form method="post" action="/import/wizard/mint" class="import-mint">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <div class="field" style="margin:0">
+        <label for="source_kind">Source panel</label>
+        <select id="source_kind" name="source_kind">
           <option value="cloudpanel">CloudPanel</option>
           <option value="hestiacp">HestiaCP</option>
         </select>
       </div>
-      <div class="field" style="align-self:flex-end">
-        <button class="btn primary" type="submit">Generate command</button>
-      </div>
-    </div>
-  </form>
+      <button class="btn {% if minted.is_none() %}primary{% endif %}" type="submit">
+        {% if minted.is_some() %}Generate another command{% else %}Generate command{% endif %}
+      </button>
+    </form>
+  </div>
 </div>
 
-<div class="card">
-  <h3>Transfers</h3>
-  {# Single source of truth = the /import/wizard/transfers fragment (transfers_html),
-     polled so the "Choose sites" button appears as soon as the source reports. #}
-  {# `data-poll-visible` rather than htmx's own `every 3s`: htmx polls a hidden
-     element just as eagerly as a visible one, and this page is often left open
-     in a background browser tab for the length of a multi-hour transfer. The
-     tick in base.html skips a hidden tab. #}
-  <div hx-get="/import/wizard/transfers" hx-trigger="load, poll-tick" hx-swap="innerHTML"
-       id="import-transfers" data-poll-visible data-poll-ms="3000">
-    <p class="text-soft">Loading…</p>
-  </div>
+{# Single source of truth = the /import/wizard/transfers fragment (transfers_html),
+   which renders this group's head and rows, polled so the "Choose sites" button
+   appears as soon as the source reports. `data-poll-visible` rather than htmx's
+   own `every 3s`: htmx polls a hidden element just as eagerly as a visible one,
+   and this page is often left open in a background browser tab for the length
+   of a multi-hour transfer. The tick in base.html skips a hidden tab. #}
+<div class="group" id="import-transfers"
+     hx-get="/import/wizard/transfers" hx-trigger="load, poll-tick" hx-swap="innerHTML"
+     data-poll-visible data-poll-ms="3000">
+  <div class="ghead">Transfers</div>
+  <div class="item text-soft small">Loading…</div>
 </div>
 
 {% endblock %}

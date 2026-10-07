@@ -1647,7 +1647,8 @@ async fn migration_bundle_download_refuses_bad_filename() {
     assert_ne!(resp.status(), StatusCode::OK);
 }
 
-/// /hostings/import page renders with the URL + token form.
+/// The node-to-node import is a tab of /import; its old address
+/// /hostings/import redirects there with the query kept.
 #[tokio::test]
 async fn migration_import_page_renders() {
     let admin = admin_user::create("kevin", "good-pw").expect("create");
@@ -1668,9 +1669,25 @@ async fn migration_import_page_renders() {
         .expect("call");
     let cookie = extract_cookie(&resp);
     let resp = app
+        .clone()
         .oneshot(
             Request::builder()
-                .uri("/hostings/import")
+                .uri("/hostings/import?error=nope")
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    assert_eq!(resp.status(), StatusCode::PERMANENT_REDIRECT);
+    assert_eq!(
+        resp.headers().get(header::LOCATION).unwrap(),
+        "/import/hyperion?error=nope"
+    );
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/import/hyperion")
                 .header(header::COOKIE, &cookie)
                 .body(Body::empty())
                 .unwrap(),
@@ -1680,6 +1697,9 @@ async fn migration_import_page_renders() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body = body_string(resp).await;
     assert!(body.contains("Import hosting from another node"));
+    // One Import page: all three sources are offered from this tab.
+    assert!(body.contains("href=\"/import/ssh\""));
+    assert!(body.contains("aria-current=\"page\""));
     assert!(body.contains("name=\"base_url\""));
     assert!(body.contains("name=\"token\""));
 }

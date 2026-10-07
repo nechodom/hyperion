@@ -118,7 +118,11 @@ pub fn build_router(state: SharedState) -> Router {
             "/hostings/quota/enable-kernel",
             post(handlers::hostings::post_quota_enable_kernel),
         )
-        .route("/hostings/import", get(handlers::migration::get_import))
+        // Old address of the node-to-node import; it is now a tab of /import.
+        .route(
+            "/hostings/import",
+            get(handlers::migration::get_import_legacy),
+        )
         .route(
             "/hostings/transfer/:selector",
             get(handlers::hostings::get_transfer),
@@ -660,10 +664,13 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/emails", get(handlers::emails::get_emails))
         .route("/install", get(handlers::install::get_install))
         .route("/install/invite", post(handlers::install::post_invite))
-        // /import lands on the self-service wizard (the common case: no SSH key).
-        // The SSH / in-place importer moved to /import/ssh, linked from the wizard.
+        // /import is the single Import page. Its default tab is the self-service
+        // one-command wizard (the common case: no SSH key); /import/ssh (SSH or
+        // in-place) and /import/hyperion (transfer file from another Hyperion
+        // node) are the other two tabs of the same page.
         .route("/import", get(handlers::import_wizard::get_wizard))
         .route("/import/ssh", get(handlers::import_panel::get_import))
+        .route("/import/hyperion", get(handlers::migration::get_import))
         .route("/import/plan", post(handlers::import_panel::post_plan))
         .route("/import/apply", post(handlers::import_panel::post_apply))
         .route("/import/wizard", get(handlers::import_wizard::get_wizard))

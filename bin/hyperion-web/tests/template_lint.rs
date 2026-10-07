@@ -300,7 +300,6 @@ fn every_page_is_reachable_from_the_nav() {
         "/login",
         "/login/2fa",
         "/avatar",
-        "/import/ssh",
         "/import/agent",
         "/import/agent-bin",
         "/import/select",
@@ -319,6 +318,9 @@ fn every_page_is_reachable_from_the_nav() {
         // Retired page; a redirect to the profile's device list so old
         // bookmarks still land.
         "/settings/sessions",
+        // Old address of the node-to-node import, now /import/hyperion;
+        // a redirect kept for export result pages and bookmarks.
+        "/hostings/import",
     ];
 
     let router = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs"))
@@ -351,6 +353,9 @@ fn every_page_is_reachable_from_the_nav() {
         "monitors.html",
         "firewall.html",
         "bans.html",
+        // The Import page's source switcher (one tab per source), shared by
+        // every Import tab and reached from the nav's Import entry.
+        "_import_header.html",
     ];
     let mut all_templates = String::new();
     for entry in std::fs::read_dir(templates_dir()).expect("read templates dir") {
