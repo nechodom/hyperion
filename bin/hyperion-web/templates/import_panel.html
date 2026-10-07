@@ -1,44 +1,40 @@
 {% extends "base.html" %}
-{% block title %}Import from another panel · Hyperion{% endblock %}
+{% block title %}Import over SSH · Hyperion{% endblock %}
 {% block main %}
-
-<div class="page-header">
-  <div>
-    <h1>Import from another panel</h1>
-    <div class="subtitle">Migrate existing sites &amp; databases from <strong>HestiaCP</strong> or <strong>CloudPanel</strong> into Hyperion. The import runs on the chosen node; preview a dry-run first, then apply. Email and DNS are out of scope — they are reported, never imported.</div>
-  </div>
-</div>
-
-<div class="card" style="margin-bottom:1rem;border-color:var(--accent)">
-  <strong>No SSH access (or don't want to hand over a key)?</strong>
-  Use <a href="/import/wizard">self-service import</a> — run one command on the source server; it streams the data straight here. No SSH key, no browser upload, nothing through your laptop.
-</div>
+{% let import_tab = "ssh" %}
+{% include "_import_header.html" %}
 
 {% if let Some(e) = error %}
-<div class="flash error"><div class="flash-body">{{ e }}</div></div>
+  <div class="flash error">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+    <div class="flash-body">{{ e }}</div>
+  </div>
 {% endif %}
 
-<div class="card" style="margin-bottom:1rem">
+<div class="group">
+  <div class="ghead">1 · Source</div>
+  <div class="item{% if stage != "form" %} muted{% endif %}" id="import-source">
+  <p class="text-soft small" style="margin:0 0 1rem">Read a <strong>CloudPanel</strong> or <strong>HestiaCP</strong> server directly: either the panel runs on a Hyperion node, or a Hyperion node reaches it over SSH with a key you paste. Preview a dry-run first, then apply. Mail and DNS are reported, never imported. No key to hand over? Use <a href="/import">one command</a> instead.</p>
   <form method="post" action="/import/plan">
     <input type="hidden" name="_csrf" value="{{ csrf_token }}">
     <div class="field-row">
       <div class="field">
-        <label>Source panel</label>
-        <select name="source_kind">
+        <label for="ssh_source_kind">Source panel</label>
+        <select id="ssh_source_kind" name="source_kind">
           <option value="cloudpanel" {% if source_kind == "cloudpanel" %}selected{% endif %}>CloudPanel</option>
           <option value="hestiacp" {% if source_kind == "hestiacp" %}selected{% endif %}>HestiaCP</option>
         </select>
       </div>
       <div class="field">
-        <label>Mode</label>
+        <label for="import-mode">Mode</label>
         <select name="mode" id="import-mode" onchange="document.getElementById('ssh-fields').style.display = this.value === 'remote' ? '' : 'none';">
           <option value="inplace" {% if mode == "inplace" %}selected{% endif %}>In-place — panel is on this node</option>
           <option value="remote" {% if mode == "remote" %}selected{% endif %}>Remote — connect over SSH</option>
         </select>
       </div>
       <div class="field">
-        <label>Run on node</label>
-        <select name="node_id">
+        <label for="import-node">Run on node</label>
+        <select id="import-node" name="node_id">
           {% for n in nodes %}
           <option value="{{ n.id }}" {% if node_id == n.id %}selected{% endif %}>{{ n.label }}</option>
           {% endfor %}
@@ -49,58 +45,50 @@
     <div id="ssh-fields" {% if mode != "remote" %}style="display:none"{% endif %}>
       <div class="field-row">
         <div class="field">
-          <label>SSH host</label>
-          <input name="ssh_host" value="{{ ssh_host }}" placeholder="203.0.113.10">
+          <label for="ssh_host">SSH host</label>
+          <input id="ssh_host" name="ssh_host" value="{{ ssh_host }}" placeholder="203.0.113.10">
         </div>
         <div class="field">
-          <label>SSH user</label>
-          <input name="ssh_user" value="{{ ssh_user }}" placeholder="root">
+          <label for="ssh_user">SSH user</label>
+          <input id="ssh_user" name="ssh_user" value="{{ ssh_user }}" placeholder="root">
         </div>
         <div class="field">
-          <label>SSH port</label>
-          <input name="ssh_port" value="{{ ssh_port }}" placeholder="22">
+          <label for="ssh_port">SSH port</label>
+          <input id="ssh_port" name="ssh_port" value="{{ ssh_port }}" placeholder="22">
         </div>
       </div>
       <div class="field">
-        <label>Private key</label>
-        <textarea name="ssh_key" rows="4" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----&#10;…">{{ ssh_key }}</textarea>
+        <label for="ssh_key">Private key</label>
+        <textarea id="ssh_key" name="ssh_key" rows="4" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----&#10;…">{{ ssh_key }}</textarea>
         <div class="hint">Key to reach the source box (a root or sudo user). Used only for this import, written to a 0600 file on the node and deleted afterwards — never stored.</div>
       </div>
     </div>
-    <button type="submit" class="btn">Preview (dry-run)</button>
+    <button type="submit" class="btn {% if stage == "form" %}primary{% endif %}">{% if stage == "form" %}Preview (dry-run){% else %}Preview again{% endif %}</button>
   </form>
+  </div>
 </div>
 
-{% if stage == "plan" || stage == "result" %}
-<div class="card" style="margin-bottom:1rem">
-  <h3 style="margin-top:0">Plan — {{ source_label }} {{ source_version }}</h3>
-  {% if plan_rows.is_empty() && stage == "plan" %}
-    <p class="muted">No importable sites found on this node.</p>
-  {% else if stage == "plan" %}
-  {#- The table lives INSIDE the apply form below so the per-site PHP picker
-      submits with it. Rendered here as a placeholder comment only. -#}
-  {% endif %}
-
-  {% if !notes.is_empty() %}
-  <div class="text-soft small" style="margin-top:0.75rem">
-    {% for n in notes %}
-    <div>· <strong>{{ n.a }}</strong> not imported — {{ n.b }}</div>
-    {% endfor %}
-  </div>
-  {% endif %}
-
-  {% if stage == "plan" %}
-  <form method="post" action="/import/apply" style="margin-top:1rem"
-        onsubmit="return confirm('Create the planned hostings on this node?');">
-    <div class="no-pad-table">
-      <div class="scroll-x">
-<table>
+{% if stage == "plan" %}
+<div class="group">
+  <div class="ghead">2 · Plan <span class="text-soft">· {{ source_label }} {{ source_version }}</span></div>
+  {% if plan_rows.is_empty() %}
+  <div class="item text-soft small">No importable sites found on the source.</div>
+  {% else %}
+  {#- The table lives INSIDE the apply form so the per-site PHP picker
+      submits with it. -#}
+  <form method="post" action="/import/apply" id="import-plan"
+        data-confirm-title="Apply import"
+        data-confirm-body="The planned hostings are created on the chosen node and the sites copied into them. The source is not changed."
+        data-confirm-confirm-label="Apply import"
+        data-confirm-variant="primary">
+    <div class="table-wrap">
+    <table class="wp-table">
       <thead><tr><th>Action</th><th>Domain</th><th>PHP now</th><th>Import on</th><th>DBs</th><th>Notes</th></tr></thead>
       <tbody>
       {% for r in plan_rows %}
         <tr>
           <td><span class="pill {% if r.action == "create" %}ok{% else if r.action == "conflict" %}warn{% else %}{% endif %}">{{ r.action }}</span></td>
-          <td>{{ r.domain }}</td>
+          <td><strong>{{ r.domain }}</strong></td>
           {#- What the SOURCE runs, verbatim. Frequently a version Hyperion
               does not carry — 7.4 and 8.0 are exactly what people migrate
               off — which is the whole reason the picker beside it exists. -#}
@@ -111,8 +99,7 @@
                 worked out by the same function the import uses. The operator
                 is the only one who knows whether this site's code survives
                 the jump, so it is a choice and not an announcement. -#}
-            <select name="php__{{ r.domain }}" aria-label="PHP version for {{ r.domain }}"
-                    style="padding:0.15rem 0.35rem;font-size:0.82rem">
+            <select name="php__{{ r.domain }}" aria-label="PHP version for {{ r.domain }}" class="import-php">
               {%- for opt in php_options %}
               <option value="{{ opt }}"{% if opt.as_str() == r.php_target.as_str() %} selected{% endif %}>{{ opt }}</option>
               {%- endfor %}
@@ -130,7 +117,6 @@
       {% endfor %}
       </tbody>
     </table>
-</div>
     </div>
     <input type="hidden" name="_csrf" value="{{ csrf_token }}">
     <input type="hidden" name="source_kind" value="{{ source_kind }}">
@@ -140,28 +126,48 @@
     <input type="hidden" name="ssh_user" value="{{ ssh_user }}">
     <input type="hidden" name="ssh_port" value="{{ ssh_port }}">
     <input type="hidden" name="ssh_key" value="{{ ssh_key }}">
-    <button type="submit" class="btn btn-primary">Apply import</button>
-    <span class="text-soft small" style="margin-left:0.5rem">Runs in the background — you'll be taken to a live progress page. Safe to close the tab; the import keeps running.</span>
+    <div class="item">
+      <div class="item-actions" style="justify-content:flex-start;align-items:center;margin-top:0">
+        <button type="submit" class="btn primary">Apply import</button>
+        <span class="text-soft small">Runs in the background; you are taken to a live progress page. Safe to close the tab.</span>
+      </div>
+    </div>
   </form>
+  {% endif %}
+  {% if !notes.is_empty() %}
+  <div class="item muted text-soft small">
+    {% for n in notes %}
+    <div>· <strong>{{ n.a }}</strong> not imported — {{ n.b }}</div>
+    {% endfor %}
+  </div>
   {% endif %}
 </div>
 {% endif %}
 
 {% if stage == "result" %}
-<div class="card">
-  <h3 style="margin-top:0">Result</h3>
-  <p>{{ result_msg }}</p>
-  {% if !created.is_empty() %}
-  <div style="margin-bottom:0.5rem"><strong>Imported</strong></div>
-  {% for c in created %}<div class="small">✓ {{ c.a }} <span class="text-soft">({{ c.b }})</span></div>{% endfor %}
-  {% endif %}
-  {% if !skipped.is_empty() %}
-  <div style="margin:0.75rem 0 0.5rem"><strong>Skipped</strong></div>
-  {% for s in skipped %}<div class="small text-soft">· {{ s.a }} — {{ s.b }}</div>{% endfor %}
-  {% endif %}
-  <div style="margin-top:1rem">
-    <a class="btn" href="/hostings">View hostings</a>
-    <a class="btn" href="/import">Import another</a>
+<div class="group">
+  <div class="ghead">Result <span class="text-soft">· {{ source_label }} {{ source_version }}</span></div>
+  <div class="item">
+    <p style="margin-top:0">{{ result_msg }}</p>
+    {% if !created.is_empty() %}
+    <div style="margin-bottom:0.5rem"><strong>Imported</strong></div>
+    {% for c in created %}<div class="small">✓ {{ c.a }} <span class="text-soft">({{ c.b }})</span></div>{% endfor %}
+    {% endif %}
+    {% if !skipped.is_empty() %}
+    <div style="margin:0.75rem 0 0.5rem"><strong>Skipped</strong></div>
+    {% for s in skipped %}<div class="small text-soft">· {{ s.a }} — {{ s.b }}</div>{% endfor %}
+    {% endif %}
+    {% if !notes.is_empty() %}
+    <div class="text-soft small" style="margin-top:0.75rem">
+      {% for n in notes %}
+      <div>· <strong>{{ n.a }}</strong> not imported — {{ n.b }}</div>
+      {% endfor %}
+    </div>
+    {% endif %}
+    <div class="item-actions" style="justify-content:flex-start">
+      <a class="btn primary" href="/hostings">View hostings</a>
+      <a class="btn" href="/import/ssh">Import another</a>
+    </div>
   </div>
 </div>
 {% endif %}

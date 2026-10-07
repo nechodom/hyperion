@@ -3832,6 +3832,18 @@ hr.divider {
 .search-segments .seg.active .seg-count {
   background: color-mix(in oklab, var(--primary-fg) 18%, transparent);
 }
+
+/* Import page: the three sources as one switcher under the title. It stands
+   alone (no toolbar around it), so the segments need their own height, and it
+   wraps on a phone instead of scrolling the page sideways. */
+.import-sources { display: flex; flex-wrap: wrap; width: fit-content; max-width: 100%; margin-bottom: var(--group-gap); }
+.import-sources .seg { min-height: 2.1rem; }
+.import-mint { display: flex; align-items: flex-end; gap: 0.75rem; flex-wrap: wrap; }
+.import-mint select { min-width: 12rem; }
+.import-oneliner { white-space: pre-wrap; word-break: break-all; user-select: all; margin: 0.5rem 0 0; }
+.import-steps { margin: 1rem 0 0; padding-left: 1.25rem; font-size: 0.9rem; line-height: 1.7; }
+.import-steps li + li { margin-top: 0.15rem; }
+.import-php { padding: 0.15rem 0.35rem; font-size: 0.82rem; }
 .seg-dot {
   width: 7px;
   height: 7px;

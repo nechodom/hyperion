@@ -14,8 +14,9 @@
 //!   delegates to `HostingService::hosting_import_from_url` which
 //!   downloads + verifies + provisions. Target-side endpoint.
 //!
-//! - `GET /hostings/import` — AUTHENTICATED. Renders the form for
-//!   the import-from-URL flow.
+//! - `GET /import/hyperion` — AUTHENTICATED. Renders the form for
+//!   the import-from-URL flow as one tab of the Import page. The old
+//!   `/hostings/import` address redirects here (`get_import_legacy`).
 
 use crate::auth::AuthCtx;
 use crate::error::AppError;
@@ -159,10 +160,20 @@ pub async fn get_import(
     ctx: AuthCtx,
     Query(q): Query<ImportQuery>,
 ) -> Result<Response, AppError> {
+    if !ctx.can(Capability::HostingMigrateClone) {
+        // Same rule the POST enforces; offer the Import tabs they can use
+        // rather than a form that can only refuse them.
+        let to = if ctx.can(Capability::PanelImport) {
+            "/import"
+        } else {
+            "/?flash_error=admin+role+required"
+        };
+        return Ok(Redirect::to(to).into_response());
+    }
     let tpl = MigrationImportTpl {
         username: &ctx.username,
         user_initial: super::user_initial(&ctx.username),
-        active: "hostings",
+        active: "import",
         css_version: super::css_version(),
         htmx_version: super::htmx_version(),
         csrf_token: super::session_csrf_token(&state, &ctx),
@@ -170,6 +181,16 @@ pub async fn get_import(
         flash: q.flash.clone(),
     };
     Ok(Html(tpl.render()?).into_response())
+}
+
+/// `GET /hostings/import` — the page's old address. Export result pages and
+/// bookmarks still point here, so keep the query (`?error=`/`?flash=`) and land
+/// on the Import page's "Another Hyperion node" tab.
+pub async fn get_import_legacy(uri: axum::http::Uri) -> Redirect {
+    match uri.query() {
+        Some(q) if !q.is_empty() => Redirect::permanent(&format!("/import/hyperion?{q}")),
+        _ => Redirect::permanent("/import/hyperion"),
+    }
 }
 
 #[derive(Deserialize)]
@@ -186,13 +207,13 @@ pub async fn post_import_from_url(
     // Admin-or-higher: creating a hosting is admin-level, importing
     // is the same operation under the hood.
     if !ctx.can(Capability::HostingMigrateClone) {
-        return Ok(Redirect::to("/hostings/import?error=admin+role+required").into_response());
+        return Ok(Redirect::to("/import/hyperion?error=admin+role+required").into_response());
     }
     let base = form.base_url.trim().to_string();
     let token = form.token.trim().to_string();
     if base.is_empty() || token.is_empty() {
         return Ok(
-            Redirect::to("/hostings/import?error=both+URL+and+token+are+required").into_response(),
+            Redirect::to("/import/hyperion?error=both+URL+and+token+are+required").into_response(),
         );
     }
     let resp = hyperion_rpc_client::call(
@@ -216,7 +237,7 @@ pub async fn post_import_from_url(
             Ok(Redirect::to(&url).into_response())
         }
         RpcResponse::Error(e) => Ok(Redirect::to(&format!(
-            "/hostings/import?error={}",
+            "/import/hyperion?error={}",
             urlencode(&e.to_string())
         ))
         .into_response()),
