@@ -5291,6 +5291,9 @@ a.site-kpi:hover { border-color: var(--border-strong); background: var(--surface
 .setting-row > .s-field .field + .field { margin-top: 0.75rem; }
 .setting-row > .s-field .field-row { margin-top: 0; }
 .setting-row > .s-field .field-row .field { margin-bottom: 0; }
+/* Side-by-side fields share a top edge: the stacking gap above is for
+   fields one under another, not for the second column of a row. */
+.setting-row > .s-field .field-row .field + .field { margin-top: 0; }
 .setting-row > .s-field .help,
 .setting-row > .s-field .muted.small,
 .setting-row > .s-field p.small { font-size: 0.78rem; color: var(--text-dim); margin: 0.35rem 0 0; line-height: 1.5; }
