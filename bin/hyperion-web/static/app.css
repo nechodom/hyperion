@@ -882,6 +882,13 @@ details.svc-fold .svc-row .pill.muted { display: none; }
 .chk-fold > summary:hover { color: var(--text-dim); }
 .chk-fold[open] > summary { margin-bottom: 0.3rem; }
 .chk-fold > .chk-note { margin-top: 0.5rem; }
+/* WAF panel: newest refusals only; the rest unfold via the details below the table. */
+#waf-activity tr.waf-extra { display: none; }
+#waf-activity:has(.waf-more[open]) tr.waf-extra { display: table-row; }
+.waf-more { margin-top: 0.5rem; }
+.waf-more[open] > summary { margin-bottom: 0; }
+.waf-more .waf-more-open, .waf-more[open] .waf-more-closed { display: none; }
+.waf-more[open] .waf-more-open { display: inline; }
 .chk-note { margin: 0; font-size: 0.8rem; color: var(--text-soft); line-height: 1.55; max-width: 82ch; }
 .chk-note.tone-warn { color: var(--warn); }
 .chk-note.tone-err  { color: var(--danger); }
@@ -3825,6 +3832,18 @@ hr.divider {
 .search-segments .seg.active .seg-count {
   background: color-mix(in oklab, var(--primary-fg) 18%, transparent);
 }
+
+/* Import page: the three sources as one switcher under the title. It stands
+   alone (no toolbar around it), so the segments need their own height, and it
+   wraps on a phone instead of scrolling the page sideways. */
+.import-sources { display: flex; flex-wrap: wrap; width: fit-content; max-width: 100%; margin-bottom: var(--group-gap); }
+.import-sources .seg { min-height: 2.1rem; }
+.import-mint { display: flex; align-items: flex-end; gap: 0.75rem; flex-wrap: wrap; }
+.import-mint select { min-width: 12rem; }
+.import-oneliner { white-space: pre-wrap; word-break: break-all; user-select: all; margin: 0.5rem 0 0; }
+.import-steps { margin: 1rem 0 0; padding-left: 1.25rem; font-size: 0.9rem; line-height: 1.7; }
+.import-steps li + li { margin-top: 0.15rem; }
+.import-php { padding: 0.15rem 0.35rem; font-size: 0.82rem; }
 .seg-dot {
   width: 7px;
   height: 7px;
@@ -5291,6 +5310,9 @@ a.site-kpi:hover { border-color: var(--border-strong); background: var(--surface
 .setting-row > .s-field .field + .field { margin-top: 0.75rem; }
 .setting-row > .s-field .field-row { margin-top: 0; }
 .setting-row > .s-field .field-row .field { margin-bottom: 0; }
+/* Side-by-side fields share a top edge: the stacking gap above is for
+   fields one under another, not for the second column of a row. */
+.setting-row > .s-field .field-row .field + .field { margin-top: 0; }
 .setting-row > .s-field .help,
 .setting-row > .s-field .muted.small,
 .setting-row > .s-field p.small { font-size: 0.78rem; color: var(--text-dim); margin: 0.35rem 0 0; line-height: 1.5; }

@@ -277,6 +277,11 @@ pub async fn get_wizard(
     Query(q): Query<WizardQuery>,
 ) -> Result<Response, AppError> {
     if !ctx.can(Capability::PanelImport) {
+        // /import is the one Import entry; someone who may only move sites
+        // between Hyperion nodes lands on the tab they can use.
+        if ctx.can(Capability::HostingMigrateClone) {
+            return Ok(Redirect::to("/import/hyperion").into_response());
+        }
         return Ok(Redirect::to("/?flash_error=admin+role+required").into_response());
     }
     render(&state, &ctx, None, q.flash, q.flash_error).await
@@ -1755,12 +1760,19 @@ fn summarise_source_progress(json: &str) -> String {
     }
 }
 
+/// The whole body of the Transfers group: its head plus either the empty note
+/// or the table. The group element itself carries the poll, so the fragment
+/// owns everything inside it and the `.group > .item` rules still apply.
 fn transfers_html(rows: &[TransferRow], csrf: &str) -> String {
     if rows.is_empty() {
-        return "<p class=\"text-soft\">No transfers in flight. Generate a command above and run it on your source server.</p>".to_string();
+        return "<div class=\"ghead\">Transfers</div>\
+                <div class=\"item text-soft small\">No transfers in flight. Generate a command above and run it on your source server.</div>"
+            .to_string();
     }
-    let mut h = String::from(
-        "<div class=\"table-wrap\"><table class=\"table\"><thead><tr><th>Source</th><th>By</th><th>Stage</th><th>Progress</th><th></th></tr></thead><tbody>",
+    let mut h = format!(
+        "<div class=\"ghead\">Transfers <span class=\"text-soft\">· {}</span></div>\
+         <div class=\"table-wrap\"><table class=\"wp-table\"><thead><tr><th>Source</th><th>By</th><th>Stage</th><th>Progress</th><th></th></tr></thead><tbody>",
+        rows.len()
     );
     for r in rows {
         // Stage label + the primary action cell.

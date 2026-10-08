@@ -1,0 +1,28 @@
+{#- Shared head of every Import page: one title, one question ("where are the
+    sites now?"), and the three ways in as segments. `import_tab` names the
+    active one. Each segment is gated by the capability its page checks, so the
+    switcher never offers a tab that would bounce the operator home. -#}
+<div class="page-header">
+  <div>
+    <h1>Import</h1>
+    <div class="subtitle">Bring sites and their databases into Hyperion. <strong>CloudPanel</strong> and <strong>HestiaCP</strong> servers: run one command on the source (no SSH key handed over), or let a node read them over SSH. Another Hyperion node: paste its transfer file link.</div>
+  </div>
+</div>
+
+<nav class="search-segments import-sources" aria-label="Import source">
+  <a class="seg {% if import_tab == "command" %}active{% endif %}" href="/import"
+     data-require-caps="panel_import"
+     {% if import_tab == "command" %}aria-current="page"{% endif %}>
+    One command on the source
+  </a>
+  <a class="seg {% if import_tab == "ssh" %}active{% endif %}" href="/import/ssh"
+     data-require-caps="panel_import"
+     {% if import_tab == "ssh" %}aria-current="page"{% endif %}>
+    Over SSH or in place
+  </a>
+  <a class="seg {% if import_tab == "hyperion" %}active{% endif %}" href="/import/hyperion"
+     data-require-caps="hosting_migrate_clone"
+     {% if import_tab == "hyperion" %}aria-current="page"{% endif %}>
+    From another Hyperion node
+  </a>
+</nav>
