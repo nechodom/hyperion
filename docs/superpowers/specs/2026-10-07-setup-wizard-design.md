@@ -71,7 +71,7 @@ Re-running on a box that already has an admin prints "already installed, use
 | 4 | Server software | yes | PHP version (one of 8.1–8.4), MariaDB, PostgreSQL, FTP, phpMyAdmin, Redis; installed by a background job with live per-component progress |
 | 5 | Server identity | yes | hostname, time zone, contact email (ACME + alerts); the agent restarts to pick them up |
 | 6 | Panel address | skippable | existing `PanelProvision` + cert status poll; then a one-time hand-off to the new domain |
-| 7 | Outgoing mail | skippable | existing `[email]` config + test send |
+| 7 | Outgoing mail | skippable | existing `[email]` config (SMTP relay) + test send to the admin |
 | 8 | Backups | skippable | existing `BackupTargetUpsert` + `BackupTargetProbe` |
 | 9 | Review | yes | live checks; "Open the panel" marks setup completed |
 
@@ -125,7 +125,8 @@ is healed too.
 ## Out of scope
 
 - Worker install (`install-node.sh`) is unchanged.
-- No firewall changes; the review step only reports the firewall state.
+- No firewall changes, and the review does not report on the firewall (there is
+  no cheap "is default-drop on" query yet).
 - No external reachability probe for port 80; the certificate result is the
   proof.
 

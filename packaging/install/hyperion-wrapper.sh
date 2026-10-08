@@ -28,6 +28,8 @@ Usage:
                                 hyperion update --from-source
                                 hyperion update --no-wait          (don't wait)
                                 hyperion update --wait-timeout=900 (give up after 15 min)
+  hyperion setup-link         Print a new one-time link for the setup wizard
+                              (only while setup is unfinished; runs as root).
   hyperion version            Show the running agent's version.
   hyperion status             systemd status for the Hyperion services.
   hyperion logs [-f]          Tail the agent + web logs.
@@ -55,6 +57,40 @@ case "$cmd" in
       exec sudo -- "$UPDATE_SH" "$@"
     fi
     exec "$UPDATE_SH" "$@"
+    ;;
+  setup-link)
+    # The setup code is a credential for a panel that has no administrator
+    # yet, so minting one needs root on the box — the same proof as having
+    # run the installer.
+    if [[ $EUID -ne 0 ]]; then
+      exec sudo -- "$0" setup-link "$@"
+    fi
+    WEB_CONFIG="${HYPERION_WEB_CONFIG:-/etc/hyperion/web.toml}"
+    rc=0
+    out="$(RUST_LOG=warn hyperion-web --config "$WEB_CONFIG" setup-link "$@" 2>&1)" || rc=$?
+    if [[ $rc -eq 3 ]]; then
+      echo "Setup is already finished — sign in to the panel normally."
+      exit 0
+    fi
+    if [[ $rc -ne 0 ]]; then
+      printf '%s\n' "$out" >&2
+      exit "$rc"
+    fi
+    url=""; fp=""; hours="24"
+    while IFS= read -r line; do
+      case "$line" in
+        SETUP_URL=*)     url="${line#*=}" ;;
+        CERT_SHA256=*)   fp="${line#*=}" ;;
+        EXPIRES_HOURS=*) hours="${line#*=}" ;;
+      esac
+    done <<<"$out"
+    echo "Open this link to finish setup (the previous one no longer works):"
+    echo
+    echo "  $url"
+    echo
+    [[ -n "$fp" ]] && echo "Certificate SHA-256: $fp"
+    echo "The link works once and expires in $hours hours."
+    echo "Use the server's public address if the one above is private: --host <address>"
     ;;
   version|--version|-V)
     exec hyperion-agent --version

@@ -71,6 +71,9 @@ pub struct AppState {
     /// In memory and single-use: a diagnostic that outlives the page that
     /// showed it is just another place for it to leak from.
     pub error_handoff: Arc<tokio::sync::Mutex<std::collections::HashMap<String, (String, i64)>>>,
+    /// First-run wizard: whether setup is pending, its one-time code, and
+    /// the domain hand-off tokens. See [`crate::setup`].
+    pub setup: Arc<crate::setup::SetupCtl>,
 }
 
 impl AppState {

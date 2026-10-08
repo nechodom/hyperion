@@ -909,6 +909,26 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
     async fn node_update_status(&self) -> Result<hyperion_types::NodeUpdateStatus, RpcError> {
         self.svc.node_update_status().await
     }
+    async fn setup_stack_start(
+        &self,
+        components: Vec<String>,
+        ftp_port: u16,
+    ) -> Result<i64, RpcError> {
+        self.svc.setup_stack_start(components, ftp_port).await
+    }
+    async fn setup_stack_status(&self) -> Result<hyperion_types::SetupStackStatus, RpcError> {
+        self.svc.setup_stack_status().await
+    }
+    async fn setup_system_apply(
+        &self,
+        hostname: String,
+        timezone: String,
+        contact_email: String,
+    ) -> Result<bool, RpcError> {
+        self.svc
+            .setup_system_apply(hostname, timezone, contact_email)
+            .await
+    }
     async fn os_updates_status(&self) -> Result<hyperion_types::OsUpdateStatus, RpcError> {
         self.svc.os_updates_status().await
     }

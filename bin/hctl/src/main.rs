@@ -2392,6 +2392,28 @@ fn print_pretty(resp: &Response) {
                 }
             }
         }
+        Response::SetupStackStart { started_at } => {
+            println!("setup software install started: unix:{started_at}");
+        }
+        Response::SetupStackStatus(s) => {
+            println!("setup software install: {}", s.state);
+            for c in &s.components {
+                println!("  {:<12} {}", c.name, c.state);
+            }
+            if !s.log_tail.is_empty() {
+                println!("  --- log tail ---");
+                print!("{}", s.log_tail);
+                if !s.log_tail.ends_with('\n') {
+                    println!();
+                }
+            }
+        }
+        Response::SetupSystemApply { restarting } => {
+            println!(
+                "server identity saved{}",
+                if *restarting { " — agent restarting" } else { "" }
+            );
+        }
         Response::NodeUpdateRun { started_at } => {
             println!("node update started: unix:{started_at}");
             println!("poll with: hctl node-update-status");

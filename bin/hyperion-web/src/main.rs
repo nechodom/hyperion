@@ -42,7 +42,33 @@ enum Cmd {
         #[arg(long)]
         password: Option<String>,
     },
+    /// Put a fresh install into setup mode: make sure the self-signed
+    /// certificate exists (with these addresses in it), issue a one-time
+    /// setup code and print the link. Run by install-master.sh before
+    /// hyperion-web starts. Prints KEY=VALUE lines; exit 3 = already set up.
+    SetupInit {
+        /// Panel port for the printed link (default: the `listen` port).
+        #[arg(long)]
+        port: Option<u16>,
+        /// Address for the printed link (default: this server's main IP).
+        #[arg(long)]
+        host: Option<String>,
+        /// Extra names / IP addresses for the self-signed certificate.
+        #[arg(long = "san")]
+        sans: Vec<String>,
+    },
+    /// Issue a new setup code while setup is still pending (the old one is
+    /// replaced). Same output as setup-init; exit 3 = setup already finished.
+    SetupLink {
+        #[arg(long)]
+        port: Option<u16>,
+        #[arg(long)]
+        host: Option<String>,
+    },
 }
+
+/// `setup-init` / `setup-link` exit code for "already set up — sign in".
+const EXIT_ALREADY_SET_UP: i32 = 3;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -57,12 +83,33 @@ async fn main() -> anyhow::Result<()> {
     match cli.cmd.unwrap_or(Cmd::Serve) {
         Cmd::Serve => serve(cfg).await,
         Cmd::Bootstrap { username, password } => bootstrap(cfg, username, password),
+        Cmd::SetupInit { port, host, sans } => setup_init(cfg, port, host, sans).await,
+        Cmd::SetupLink { port, host } => setup_link(cfg, port, host),
     }
 }
 
 async fn serve(cfg: Config) -> anyhow::Result<()> {
-    let admin = hyperion_web::admin_user::load(&cfg.web.admin_user_file)
-        .context("loading admin user (run `hyperion-web bootstrap` first)")?;
+    // The bootstrap admin file is optional now: a wizard install has none —
+    // its administrator lives only in `web_users`.
+    let admin = match hyperion_web::admin_user::load(&cfg.web.admin_user_file) {
+        Ok(a) => a,
+        Err(hyperion_web::admin_user::UserError::NotFound) => {
+            tracing::info!(
+                path=%cfg.web.admin_user_file.display(),
+                "no bootstrap admin file — sign-in goes through web_users only"
+            );
+            hyperion_web::admin_user::AdminUser::disabled()
+        }
+        Err(e) => {
+            return Err(anyhow::anyhow!(e)).context("loading the bootstrap admin user");
+        }
+    };
+    let setup = Arc::new(hyperion_web::setup::SetupCtl::load(
+        cfg.web.setup_state_file.clone(),
+    ));
+    if setup.is_active() {
+        tracing::info!("setup is pending — the panel serves the setup wizard until it is finished");
+    }
     let session_secret = keys::load_or_init(&cfg.web.session_key_file)?;
     let signer = SessionSigner::from_secret_bytes(&session_secret)
         .map_err(|e| anyhow::anyhow!("session signer: {e}"))?;
@@ -103,6 +150,7 @@ async fn serve(cfg: Config) -> anyhow::Result<()> {
         deployment_mode: Arc::new(tokio::sync::RwLock::new("master".to_string())),
         ftp_password_handoff: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         error_handoff: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        setup,
     });
     // Spawn a background refresher that polls the agent for the
     // current `cluster.panel_hostname` every 30 s. The host-enforce
@@ -147,7 +195,7 @@ async fn serve(cfg: Config) -> anyhow::Result<()> {
         // Set the `ring` provider once at startup; subsequent calls
         // (e.g. in tests) are harmless no-ops.
         let _ = rustls::crypto::ring::default_provider().install_default();
-        ensure_self_signed(&tls_cert, &tls_key).context("TLS cert/key auto-provision")?;
+        ensure_self_signed(&tls_cert, &tls_key, &[]).context("TLS cert/key auto-provision")?;
         let rustls_config =
             axum_server::tls_rustls::RustlsConfig::from_pem_file(&tls_cert, &tls_key)
                 .await
@@ -234,6 +282,7 @@ fn spawn_pma_listener(
 fn ensure_self_signed(
     cert_path: &std::path::Path,
     key_path: &std::path::Path,
+    extra_sans: &[String],
 ) -> anyhow::Result<()> {
     if cert_path.exists() && key_path.exists() {
         return Ok(());
@@ -266,6 +315,11 @@ fn ensure_self_signed(
             names.push(s.to_string());
         }
     }
+    // The server's own addresses too: the setup link is an IP address, and a
+    // certificate that names it leaves the browser one warning (self-signed)
+    // instead of two (self-signed AND wrong name).
+    names.extend(extra_sans.iter().cloned());
+    let names = usable_sans(names);
     let params = rcgen::CertificateParams::new(names.clone())
         .map_err(|e| anyhow::anyhow!("rcgen params: {e}"))?;
     let kp = rcgen::KeyPair::generate().map_err(|e| anyhow::anyhow!("rcgen kp: {e}"))?;
@@ -277,6 +331,181 @@ fn ensure_self_signed(
     use std::os::unix::fs::PermissionsExt;
     let _ = std::fs::set_permissions(cert_path, std::fs::Permissions::from_mode(0o644));
     let _ = std::fs::set_permissions(key_path, std::fs::Permissions::from_mode(0o600));
+    Ok(())
+}
+
+/// Drop SANs rcgen would reject (it refuses the whole certificate over one
+/// bad name) and duplicates. IP addresses are kept as IP SANs.
+fn usable_sans(names: Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for n in names {
+        let n = n.trim().trim_end_matches('.').to_ascii_lowercase();
+        let ok = n.parse::<std::net::IpAddr>().is_ok()
+            || (!n.is_empty()
+                && n.len() <= 253
+                && n.split('.').all(|l| {
+                    !l.is_empty()
+                        && l.len() <= 63
+                        && !l.starts_with('-')
+                        && !l.ends_with('-')
+                        && l.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+                }));
+        if ok && !out.contains(&n) {
+            out.push(n);
+        }
+    }
+    out
+}
+
+/// SHA-256 of the certificate, the way browsers print it (`AB:CD:…`).
+fn cert_fingerprint(cert_path: &std::path::Path) -> anyhow::Result<String> {
+    use base64::Engine;
+    use sha2::{Digest, Sha256};
+    let pem = std::fs::read_to_string(cert_path)
+        .with_context(|| format!("read {}", cert_path.display()))?;
+    let b64: String = pem
+        .lines()
+        .skip_while(|l| !l.starts_with("-----BEGIN CERTIFICATE-----"))
+        .skip(1)
+        .take_while(|l| !l.starts_with("-----END CERTIFICATE-----"))
+        .collect();
+    let der = base64::engine::general_purpose::STANDARD
+        .decode(b64.trim())
+        .context("certificate PEM is not valid base64")?;
+    if der.is_empty() {
+        anyhow::bail!("no certificate in {}", cert_path.display());
+    }
+    Ok(Sha256::digest(&der)
+        .iter()
+        .map(|b| format!("{b:02X}"))
+        .collect::<Vec<_>>()
+        .join(":"))
+}
+
+/// The address other machines most likely reach this one on: the source
+/// address of the default route. A guess — the installer passes `--host`.
+fn primary_address() -> Option<String> {
+    let out = std::process::Command::new("ip")
+        .args(["-4", "route", "get", "1.1.1.1"])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut it = text.split_whitespace();
+    while let Some(w) = it.next() {
+        if w == "src" {
+            return it.next().map(str::to_string);
+        }
+    }
+    None
+}
+
+fn listen_port(cfg: &Config) -> u16 {
+    cfg.web
+        .listen
+        .rsplit_once(':')
+        .and_then(|(_, p)| p.parse().ok())
+        .unwrap_or(8443)
+}
+
+fn host_for_url(host: &str) -> String {
+    match host.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V6(_)) => format!("[{host}]"),
+        _ => host.to_string(),
+    }
+}
+
+fn print_setup_link(cfg: &Config, port: Option<u16>, host: Option<String>, code: &str) {
+    let host = host
+        .filter(|h| !h.trim().is_empty())
+        .or_else(primary_address)
+        .unwrap_or_else(|| "<this-server's-address>".to_string());
+    let port = port.unwrap_or_else(|| listen_port(cfg));
+    let scheme = if cfg.web.tls_enabled { "https" } else { "http" };
+    println!(
+        "SETUP_URL={scheme}://{}:{port}/setup?t={code}",
+        host_for_url(host.trim())
+    );
+    println!("SETUP_CODE={code}");
+    if cfg.web.tls_enabled {
+        match cert_fingerprint(&cfg.web.tls_cert_file) {
+            Ok(fp) => println!("CERT_SHA256={fp}"),
+            Err(e) => {
+                eprintln!("could not read the certificate fingerprint: {e:#}");
+                println!("CERT_SHA256=");
+            }
+        }
+    } else {
+        println!("CERT_SHA256=");
+    }
+    println!(
+        "EXPIRES_HOURS={}",
+        hyperion_web::setup::CODE_TTL_SECS / 3600
+    );
+}
+
+async fn setup_init(
+    cfg: Config,
+    port: Option<u16>,
+    host: Option<String>,
+    sans: Vec<String>,
+) -> anyhow::Result<()> {
+    // Already has an administrator → nothing to set up. Two places to look:
+    // the legacy bootstrap file, and the agent's user table.
+    if cfg.web.admin_user_file.exists() {
+        eprintln!(
+            "an administrator already exists ({}) — sign in instead",
+            cfg.web.admin_user_file.display()
+        );
+        std::process::exit(EXIT_ALREADY_SET_UP);
+    }
+    if let Ok(hyperion_rpc::codec::Response::WebUserList(users)) = hyperion_rpc_client::call(
+        &cfg.web.agent_socket,
+        hyperion_rpc::codec::Request::WebUserList,
+    )
+    .await
+    {
+        if !users.is_empty() {
+            eprintln!("the panel already has users — sign in instead");
+            std::process::exit(EXIT_ALREADY_SET_UP);
+        }
+    }
+    if cfg.web.tls_enabled {
+        ensure_self_signed(&cfg.web.tls_cert_file, &cfg.web.tls_key_file, &sans)
+            .context("TLS cert/key auto-provision")?;
+    }
+    let now = hyperion_types::now_secs();
+    match hyperion_web::setup::issue_code(&cfg.web.setup_state_file, now)
+        .with_context(|| format!("write {}", cfg.web.setup_state_file.display()))?
+    {
+        Ok(code) => print_setup_link(&cfg, port, host, &code),
+        Err(why) => {
+            eprintln!("{why} — sign in instead");
+            std::process::exit(EXIT_ALREADY_SET_UP);
+        }
+    }
+    Ok(())
+}
+
+fn setup_link(cfg: Config, port: Option<u16>, host: Option<String>) -> anyhow::Result<()> {
+    let path = &cfg.web.setup_state_file;
+    let pending = hyperion_web::setup::load_file(path)
+        .with_context(|| format!("read {}", path.display()))?
+        .map(|f| f.is_pending())
+        .unwrap_or(false);
+    if !pending {
+        eprintln!("setup is already finished (or was never started) — sign in instead");
+        std::process::exit(EXIT_ALREADY_SET_UP);
+    }
+    let now = hyperion_types::now_secs();
+    match hyperion_web::setup::issue_code(path, now)
+        .with_context(|| format!("write {}", path.display()))?
+    {
+        Ok(code) => print_setup_link(&cfg, port, host, &code),
+        Err(why) => {
+            eprintln!("{why} — sign in instead");
+            std::process::exit(EXIT_ALREADY_SET_UP);
+        }
+    }
     Ok(())
 }
 

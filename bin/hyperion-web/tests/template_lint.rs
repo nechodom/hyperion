@@ -319,6 +319,9 @@ fn every_page_is_reachable_from_the_nav() {
         // Retired page; a redirect to the profile's device list so old
         // bookmarks still land.
         "/settings/sessions",
+        // The first-run wizard: reached through the link the installer
+        // prints, walked by its own step rail, and gone once finished.
+        "/setup",
     ];
 
     let router = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs"))

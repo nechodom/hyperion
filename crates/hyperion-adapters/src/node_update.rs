@@ -95,7 +95,7 @@ pub async fn is_running() -> bool {
     unit_state_is_running(String::from_utf8_lossy(&out.stdout).trim())
 }
 
-fn unit_state_is_running(active_state: &str) -> bool {
+pub(crate) fn unit_state_is_running(active_state: &str) -> bool {
     matches!(
         active_state,
         "active" | "activating" | "deactivating" | "reloading"
@@ -211,7 +211,7 @@ pub async fn status() -> JobStatus {
     }
 }
 
-async fn create_private_dir(dir: &Path) -> Result<(), AdapterError> {
+pub(crate) async fn create_private_dir(dir: &Path) -> Result<(), AdapterError> {
     use std::os::unix::fs::PermissionsExt;
     tokio::fs::create_dir_all(dir).await?;
     tokio::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).await?;
@@ -220,7 +220,7 @@ async fn create_private_dir(dir: &Path) -> Result<(), AdapterError> {
 
 /// Write a root-only file via a temp name + rename, so systemd never execs a
 /// half-written runner.
-async fn write_private(path: &Path, bytes: &[u8]) -> Result<(), AdapterError> {
+pub(crate) async fn write_private(path: &Path, bytes: &[u8]) -> Result<(), AdapterError> {
     use std::os::unix::fs::PermissionsExt;
     let tmp = path.with_extension("tmp");
     tokio::fs::write(&tmp, bytes).await?;
@@ -231,7 +231,7 @@ async fn write_private(path: &Path, bytes: &[u8]) -> Result<(), AdapterError> {
 
 /// The last `max` bytes of a file, cut forward to a line start so the panel
 /// never shows half a line (or half a UTF-8 character).
-async fn read_tail(path: &Path, max: u64) -> std::io::Result<String> {
+pub(crate) async fn read_tail(path: &Path, max: u64) -> std::io::Result<String> {
     use tokio::io::{AsyncReadExt, AsyncSeekExt};
     let mut f = tokio::fs::File::open(path).await?;
     let len = f.metadata().await?.len();

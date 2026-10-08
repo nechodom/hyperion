@@ -1840,6 +1840,33 @@ pub struct ServiceInstallStatus {
     pub exit_code: i32,
 }
 
+/// One component of the setup wizard's software install and where it stands.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SetupComponentProgress {
+    /// Allow-listed component name: `php8.3`, `mariadb`, `postgresql`,
+    /// `redis`, `vsftpd`, `phpmyadmin`.
+    pub name: String,
+    /// "pending" | "running" | "done" | "failed".
+    pub state: String,
+}
+
+/// The setup wizard's "Server software" job — `components.sh` run as the
+/// transient unit `hyperion-setup-stack.service`. Read back from disk, so it
+/// survives an agent restart in the middle of an install.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SetupStackStatus {
+    /// "idle" (never started) | "running" | "succeeded" | "failed" |
+    /// "interrupted" (killed before it recorded a result — a reboot).
+    pub state: String,
+    pub started_at: i64,
+    pub finished_at: i64,
+    pub exit_code: i32,
+    /// What the operator asked for, in the order the job runs it.
+    pub components: Vec<SetupComponentProgress>,
+    /// The last few kB of the job's log.
+    pub log_tail: String,
+}
+
 /// State of the most-recent (or in-progress) node update job
 /// triggered via Request::NodeUpdateRun. Returned by
 /// NodeUpdateStatus so the UI can poll progress.

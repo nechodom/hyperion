@@ -351,6 +351,47 @@ pub trait AdapterPort: Send + Sync {
 
     /// Delete a per-hosting Redis ACL user. Idempotent — Ok if absent.
     async fn redis_delete_acl(&self, username: &str) -> Result<(), AdapterError>;
+
+    // ─── Setup wizard: machine-level changes ─────────────────────────
+    // The defaults touch nothing, so test and dev-panel adapters do not have
+    // to: installs "start" and never progress, hostname and time zone
+    // "apply" without effect. The real adapter overrides every one.
+
+    /// Start `components.sh` as `hyperion-setup-stack.service`.
+    async fn setup_stack_start(
+        &self,
+        _spec: &hyperion_adapters::setup_stack::JobSpec,
+    ) -> Result<(), AdapterError> {
+        Ok(())
+    }
+    /// Read the setup install job back from disk + systemd.
+    async fn setup_stack_status(&self) -> hyperion_adapters::setup_stack::JobStatus {
+        hyperion_adapters::setup_stack::JobStatus {
+            spec: None,
+            state: hyperion_adapters::setup_stack::JobState::Never,
+            progress: Vec::new(),
+            log_tail: String::new(),
+        }
+    }
+    /// Is the setup install or a node update holding the package manager?
+    async fn package_job_running(&self) -> bool {
+        false
+    }
+    async fn current_hostname(&self) -> String {
+        String::new()
+    }
+    async fn current_timezone(&self) -> String {
+        String::new()
+    }
+    async fn apply_hostname(&self, _fqdn: &str) -> Result<(), AdapterError> {
+        Ok(())
+    }
+    async fn apply_timezone(&self, _tz: &str) -> Result<(), AdapterError> {
+        Ok(())
+    }
+    /// Restart hyperion-agent a few seconds from now, after the current
+    /// reply has gone out.
+    fn schedule_self_restart(&self) {}
 }
 
 /// Live state of the panel-vhost ACME issuance.
@@ -1186,6 +1227,13 @@ async fn run_service_install(
     } else {
         "failed"
     };
+    if final_code == 0 {
+        if let Some(c) = hyperion_adapters::setup_stack::component_for_service(&service_name) {
+            if let Err(e) = hyperion_adapters::setup_stack::record_component(c).await {
+                tracing::warn!(error = %e, component = c, "could not record installed component");
+            }
+        }
+    }
     let mut g = slot.lock().await;
     g.state = final_state.to_string();
     g.finished_at = now_secs();
@@ -29101,6 +29149,187 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             exit_code,
         })
     }
+    /// Setup wizard: start installing the chosen server software.
+    pub async fn setup_stack_start(
+        &self,
+        components: Vec<String>,
+        ftp_port: u16,
+    ) -> Result<i64, RpcError> {
+        use hyperion_adapters::setup_stack;
+        let components = setup_stack::normalize_components(&components)
+            .map_err(|message| RpcError::Validation { message })?;
+        // apt inside an install and apt inside an update would fight over the
+        // dpkg lock; the second just waits, and the operator sees nothing move.
+        if self.adapters.package_job_running().await {
+            return Err(RpcError::Conflict {
+                message: "the software install or a server update is already running — \
+                          wait for it to finish"
+                    .into(),
+            });
+        }
+        let started_at = now_secs();
+        let spec = setup_stack::JobSpec {
+            started_at,
+            components: components.clone(),
+            ftp_port: if ftp_port == 0 { 21 } else { ftp_port },
+        };
+        self.adapters
+            .setup_stack_start(&spec)
+            .await
+            .map_err(RpcError::from)?;
+        self.append_audit(
+            "setup.stack.start",
+            None,
+            &serde_json::json!({"components": components, "ftp_port": spec.ftp_port}).to_string(),
+            "ok",
+        )
+        .await;
+        Ok(started_at)
+    }
+
+    /// Setup wizard: where the software install stands.
+    pub async fn setup_stack_status(&self) -> Result<hyperion_types::SetupStackStatus, RpcError> {
+        use hyperion_adapters::setup_stack::JobState;
+        let st = self.adapters.setup_stack_status().await;
+        let spec = st.spec.unwrap_or_default();
+        let (state, finished_at, exit_code) = match st.state {
+            JobState::Never => ("idle", 0, 0),
+            JobState::Running => ("running", 0, 0),
+            JobState::Finished {
+                exit_code: 0,
+                finished_at,
+            } => ("succeeded", finished_at, 0),
+            JobState::Finished {
+                exit_code,
+                finished_at,
+            } => ("failed", finished_at, exit_code),
+            JobState::Interrupted => ("interrupted", 0, -1),
+        };
+        Ok(hyperion_types::SetupStackStatus {
+            state: state.into(),
+            started_at: spec.started_at,
+            finished_at,
+            exit_code,
+            components: st
+                .progress
+                .into_iter()
+                .map(|(name, state)| hyperion_types::SetupComponentProgress { name, state })
+                .collect(),
+            log_tail: st.log_tail,
+        })
+    }
+
+    /// Setup wizard: hostname, time zone and ACME contact. Everything is
+    /// validated before anything is changed, so a refusal leaves the box as
+    /// it was. Returns whether the agent is about to restart.
+    pub async fn setup_system_apply(
+        &self,
+        hostname: String,
+        timezone: String,
+        contact_email: String,
+    ) -> Result<bool, RpcError> {
+        use hyperion_adapters::system_identity as ident;
+        let hostname = hostname.trim().to_string();
+        let timezone = timezone.trim().to_string();
+        let contact_email = contact_email.trim().to_string();
+
+        let new_host = if hostname.is_empty() {
+            None
+        } else {
+            let h = ident::validate_hostname(&hostname)
+                .map_err(|message| RpcError::Validation { message })?;
+            (h != self.adapters.current_hostname().await).then_some(h)
+        };
+        if new_host.is_some() {
+            let n = hostings::count_all(&self.pool)
+                .await
+                .map_err(|e| RpcError::Internal_with(format!("count hostings: {e}")))?;
+            if n > 0 {
+                return Err(RpcError::Conflict {
+                    message: format!(
+                        "this server already hosts {n} site(s) — its hostname is the node id \
+                         they are filed under, so it can no longer be changed here"
+                    ),
+                });
+            }
+        }
+        let new_tz = if timezone.is_empty() {
+            None
+        } else {
+            let tz = ident::validate_timezone(&timezone)
+                .map_err(|message| RpcError::Validation { message })?;
+            (tz != self.adapters.current_timezone().await).then_some(tz)
+        };
+        let new_email = if contact_email.is_empty() {
+            None
+        } else {
+            let lc = contact_email.to_lowercase();
+            let (local, domain) = contact_email.split_once('@').unwrap_or(("", ""));
+            if local.is_empty()
+                || !domain.contains('.')
+                || contact_email.len() > 254
+                || contact_email.chars().any(|c| c.is_whitespace() || c == '"')
+                || lc.ends_with("@example.com")
+                || lc.ends_with("@example.org")
+                || lc.ends_with("@example.net")
+                || lc.ends_with("@hyperion.invalid")
+            {
+                return Err(RpcError::Validation {
+                    message: format!(
+                        "\"{contact_email}\" is not an address Let's Encrypt will accept — use a real mailbox"
+                    ),
+                });
+            }
+            Some(contact_email)
+        };
+
+        if let Some(h) = &new_host {
+            self.adapters
+                .apply_hostname(h)
+                .await
+                .map_err(RpcError::from)?;
+        }
+        if let Some(tz) = &new_tz {
+            self.adapters
+                .apply_timezone(tz)
+                .await
+                .map_err(RpcError::from)?;
+        }
+        if let Some(email) = &new_email {
+            let path = self
+                .agent_config_path
+                .as_ref()
+                .ok_or_else(|| RpcError::Validation {
+                    message: "agent_config_path not wired — cannot save the contact email".into(),
+                })?;
+            crate::config_persist::set_string(path, "acme", "contact_email", email)
+                .map_err(|e| RpcError::Internal_with(format!("config write failed: {e}")))?;
+        }
+        self.append_audit(
+            "setup.system.apply",
+            None,
+            &serde_json::json!({
+                "hostname": new_host,
+                "timezone": new_tz,
+                "contact_email_changed": new_email.is_some(),
+            })
+            .to_string(),
+            "ok",
+        )
+        .await;
+
+        // The ACME contact is read once at boot, and so is the local time
+        // zone for everything scheduled. Restart so the next certificate
+        // (usually the panel's own, one step later) and the next backup run
+        // use what was just set. Delayed so this reply gets out first — the
+        // same approach as `email_config_set`.
+        let restart = new_email.is_some() || new_tz.is_some() || new_host.is_some();
+        if restart {
+            self.adapters.schedule_self_restart();
+        }
+        Ok(restart)
+    }
+
     /// Where the pending default-drop rollback deadline lives.
     ///
     /// A FILE, not memory: if the agent is restarted or crashes while the

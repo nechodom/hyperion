@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}{% endblock %} · Hyperion setup</title>
+  <link rel="stylesheet" href="/static/app.css?v={{ f.css_version }}">
+  <meta name="color-scheme" content="light dark">
+  <meta name="robots" content="noindex">
+  <meta name="referrer" content="strict-origin">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%236366f1'/%3E%3Cpath d='M9 9 L9 23 M9 16 L17 16 M17 9 L17 23 M21 14 L24 14 L24 23 M21 11 L21 14' stroke='white' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round' fill='none'/%3E%3C/svg%3E">
+</head>
+<body class="setup-body">
+  {# The first-run wizard's frame: the step list on the left (on top under
+     760px), the current step on the right. No sidebar, no nav — until the
+     wizard is finished there is nothing else to go to. #}
+  <div class="setup-shell">
+    <aside class="setup-rail" aria-label="Setup steps">
+      <div class="setup-brand"><span class="hy">HY</span><span class="dot">·</span>PERION <small>setup</small></div>
+      <ol class="setup-steps">
+        {% for r in f.rail %}
+        <li class="{% if r.done %}is-done{% endif %}{% if r.skipped %} is-skipped{% endif %}{% if r.current %} is-current{% endif %}">
+          {% if let Some(h) = r.href %}<a href="{{ h }}"{% if r.current %} aria-current="step"{% endif %}>{% else %}<span{% if r.current %} aria-current="step"{% endif %}>{% endif %}
+            <span class="setup-dot" aria-hidden="true">{% if r.skipped %}–{% else if r.done %}✓{% else %}{{ r.number }}{% endif %}</span>
+            <span class="setup-step-name">{{ r.name }}</span>
+            {% if r.optional %}<span class="setup-opt">optional</span>{% endif %}
+          {% if r.href.is_some() %}</a>{% else %}</span>{% endif %}
+        </li>
+        {% endfor %}
+      </ol>
+      <p class="setup-foot">Progress is saved on the server. Closing this tab is safe.</p>
+    </aside>
+    <main class="setup-pane">
+      <header class="setup-head">
+        <div class="setup-eyebrow">Step {{ f.step_no }} of {{ f.step_total }}{% if f.optional %} · optional{% endif %}</div>
+        <h1>{% block heading %}{% endblock %}</h1>
+        <p class="setup-lead">{% block lead %}{% endblock %}</p>
+      </header>
+      {% if let Some(e) = f.error %}
+      <div class="flash error" role="alert">
+        <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+        <div class="flash-body">{{ e }}</div>
+      </div>
+      {% endif %}
+      {% if let Some(n) = f.notice %}
+      <div class="flash info" role="status">
+        <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+        <div class="flash-body">{{ n }}</div>
+      </div>
+      {% endif %}
+      {% block pane %}{% endblock %}
+    </main>
+  </div>
+  <script src="/static/htmx.min.js?v={{ f.htmx_version }}" defer></script>
+  {% block scripts %}{% endblock %}
+</body>
+</html>
