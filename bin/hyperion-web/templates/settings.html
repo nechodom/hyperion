@@ -2220,7 +2220,7 @@
    and the GeoIP database behind per-site country blocking.
    ========================================================== #}
 <div class="tab-panel" id="tab-bruteforce">
-  <p class="text-soft small" style="margin:0 0 0.9rem;line-height:1.55">Keeping hostile traffic out. This tab sets how many failed SSH, FTP, mail and WordPress logins earn an IP a firewall ban and for how long, and holds the GeoIP database behind per-site country blocking. Live bans are on <a href="/bans">Banned IPs</a>; ports and the default policy are on <a href="/firewall">Firewall</a>.</p>
+  <p class="text-soft small" style="margin:0 0 0.9rem;line-height:1.55">Keeping hostile traffic out. This tab sets how many failed SSH, FTP, mail and WordPress logins earn an IP a firewall ban and for how long, and holds the GeoIP database behind per-site country blocking. Live bans and what the WAF refused are on <a href="/protection">Protection</a>; ports and the default policy are on <a href="/firewall">Firewall</a>.</p>
 
   <div class="flash info" style="margin-bottom:1rem">
     <div class="flash-body">
@@ -2228,7 +2228,7 @@
       firewall: each site's own <code>access.log</code> (POSTs to
       <code>wp-login.php</code> / <code>xmlrpc.php</code>) and the node-wide
       <strong>ssh</strong>, <strong>ftp</strong> and <strong>mail</strong> journals.
-      Bans in force are listed on <a href="/bans">Banned IPs</a>.
+      Bans in force and this week's ban history are on <a href="/protection#bans">Protection</a>.
     </div>
   </div>
 
@@ -2367,7 +2367,7 @@
         loopback, CGNAT and link-local addresses are skipped, because a node-wide
         firewall drop on those is an outage — webmail talking to dovecot, the
         master↔node link, a NAT gateway in front of the whole office. You can
-        still block any address by hand from <a href="/bans">Bans</a>.
+        still block any address by hand from a site's Settings tab; bans in force are on <a href="/protection#bans">Protection</a>.
       </p>
       {% if !nodes.is_empty() %}
       <p class="text-soft small" style="margin:0 0 1rem;line-height:1.55">

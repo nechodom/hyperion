@@ -5820,3 +5820,21 @@ details.asset-picker[open] > summary::after { transform: rotate(180deg); }
 @media (max-width: 640px) {
   .me-enrol { grid-template-columns: 1fr; }
 }
+
+/* /protection — refusals per hour, stacked: the part that counts toward a
+   ban (magenta) under the part that is only refused (blue). Same series
+   hues as /stats; labels under the bars at each UTC midnight. */
+.prot-chart { padding-bottom: 1.6rem; position: relative; }
+.prot-chart svg { display: block; width: 100%; height: 96px; }
+.prot-chart .prot-ban   { fill: var(--viz-magenta); }
+.prot-chart .prot-other { fill: var(--viz-blue); opacity: 0.55; }
+.prot-chart g:hover rect { opacity: 1; filter: brightness(1.15); }
+.prot-days { position: relative; height: 1rem; margin-top: 0.35rem; font-size: 0.7rem; color: var(--text-soft); }
+.prot-days > span { position: absolute; top: 0; transform: translateX(-50%); white-space: nowrap; }
+.prot-key-ban   { --viz: var(--viz-magenta); }
+.prot-key-other { --viz: var(--viz-blue); }
+.prot-table th { white-space: nowrap; }
+.prot-req { word-break: break-all; max-width: 28rem; }
+@media (max-width: 640px) {
+  .prot-days > span:nth-child(even) { display: none; }
+}

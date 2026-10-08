@@ -1,8 +1,10 @@
-//! Reader for the per-hosting WAF hit log (`/var/log/hyperion/waf/<id>.log`).
+//! Reader for the per-hosting WAF hit log (`/var/log/hyperion-waf/<id>.log`,
+//! `nginx::WAF_LOG_DIR`).
 //!
 //! The writer is the `hyperion_waf` log_format in `nginx::render_waf_conf`:
-//! six tab-separated fields — `$msec`, `$remote_addr`, `$hyperion_waf`,
-//! `$request_method`, `$request_uri`, `$http_user_agent` — with
+//! seven tab-separated fields — `$msec`, `$remote_addr`, `$hyperion_waf`,
+//! `$request_method`, `$request_uri`, `$http_user_agent`,
+//! `$http_sec_fetch_site` — with
 //! `escape=json`, so a value can never contain a raw tab or newline and a
 //! client cannot forge a field boundary. Change both or neither.
 //!
@@ -128,6 +130,10 @@ pub fn parse_line(line: &str) -> Option<WafHit> {
         uri: unescape(uri),
         ua: unescape(ua),
         cross_site: matches!(fetch_site, "cross-site" | "same-site"),
+        browser: matches!(
+            fetch_site,
+            "same-origin" | "same-site" | "cross-site" | "none"
+        ),
     })
 }
 
@@ -389,6 +395,20 @@ mod tests {
         let b = WafBatch::from_hits([ok("\tcross-site"), ok("\tnone")]);
         assert_eq!(b.ip_minute.values().sum::<i64>(), 1);
         assert_eq!(b.hourly.values().sum::<i64>(), 2, "still shown");
+    }
+
+    #[test]
+    fn a_browser_is_whoever_sent_sec_fetch_site() {
+        let hit = |tail: &str| {
+            parse_line(&format!("1.0\t8.8.8.8\tprobe_args\tGET\t/?x\tua{tail}")).expect("parse")
+        };
+        for v in ["same-origin", "same-site", "cross-site", "none"] {
+            assert!(hit(&format!("\t{v}")).browser, "{v}");
+        }
+        // Absent (old lines, scripts), nginx's empty marker, or junk.
+        for tail in ["", "\t", "\t-", "\tsure-why-not"] {
+            assert!(!hit(tail).browser, "{tail:?}");
+        }
     }
 
     #[test]

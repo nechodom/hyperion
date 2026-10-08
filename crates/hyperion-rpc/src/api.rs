@@ -290,6 +290,7 @@ pub trait AgentApi: Send + Sync + 'static {
         &self,
         hosting_id: String,
     ) -> Result<hyperion_types::waf::WafActivity, RpcError>;
+    async fn waf_overview(&self, days: u32) -> Result<hyperion_types::waf::WafOverview, RpcError>;
     async fn upcoming_expiries(
         &self,
         within_seconds: i64,
