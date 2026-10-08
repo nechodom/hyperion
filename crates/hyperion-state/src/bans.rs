@@ -16,9 +16,33 @@ pub struct IpBan {
     pub banned_at: i64,
     /// 0 = permanent.
     pub expires_at: i64,
+    pub active: bool,
+    /// When it stopped being active. `None` while active, and on rows that
+    /// ended before migration 080 recorded it.
+    pub ended_at: Option<i64>,
+    /// `END_EXPIRED` | `END_LIFTED` | `END_REPLACED`; `None` as above.
+    pub end_reason: Option<String>,
 }
 
-type RawBan = (i64, String, Option<String>, String, String, i64, i64);
+/// The ban ran its course.
+pub const END_EXPIRED: &str = "expired";
+/// Someone removed it before it ran out.
+pub const END_LIFTED: &str = "lifted";
+/// A new ban on the same address took its place.
+pub const END_REPLACED: &str = "replaced";
+
+type RawBan = (
+    i64,
+    String,
+    Option<String>,
+    String,
+    String,
+    i64,
+    i64,
+    i64,
+    Option<i64>,
+    Option<String>,
+);
 
 fn to_ban(r: RawBan) -> IpBan {
     IpBan {
@@ -29,10 +53,14 @@ fn to_ban(r: RawBan) -> IpBan {
         source: r.4,
         banned_at: r.5,
         expires_at: r.6,
+        active: r.7 != 0,
+        ended_at: r.8,
+        end_reason: r.9,
     }
 }
 
-const COLS: &str = "id, ip, hosting_id, reason, source, banned_at, expires_at";
+const COLS: &str =
+    "id, ip, hosting_id, reason, source, banned_at, expires_at, active, ended_at, end_reason";
 
 /// Add a ban, refreshing any existing active ban for the same IP (the
 /// partial unique index permits only one active row per IP). Returns the
@@ -46,10 +74,14 @@ pub async fn add_or_refresh(
     banned_at: i64,
     expires_at: i64,
 ) -> Result<i64, StateError> {
-    sqlx::query("UPDATE ip_bans SET active = 0 WHERE ip = ? AND active = 1")
-        .bind(ip)
-        .execute(pool)
-        .await?;
+    sqlx::query(
+        "UPDATE ip_bans SET active = 0, ended_at = ?, end_reason = ? WHERE ip = ? AND active = 1",
+    )
+    .bind(banned_at)
+    .bind(END_REPLACED)
+    .bind(ip)
+    .execute(pool)
+    .await?;
     let r = sqlx::query(
         "INSERT INTO ip_bans (ip, hosting_id, reason, source, banned_at, expires_at, active) \
          VALUES (?, ?, ?, ?, ?, ?, 1)",
@@ -65,7 +97,6 @@ pub async fn add_or_refresh(
     Ok(r.last_insert_rowid())
 }
 
-/// Deactivate the active ban for an IP. Returns true if one was removed.
 /// Which hostings an active ban on `ip` belongs to.
 ///
 /// `None` in the result means a NODE-WIDE ban — what the fail2ban scanner
@@ -84,11 +115,16 @@ pub async fn owners_of_active(
     Ok(rows.into_iter().map(|r| r.0).collect())
 }
 
-pub async fn deactivate(pool: &SqlitePool, ip: &str) -> Result<bool, StateError> {
-    let r = sqlx::query("UPDATE ip_bans SET active = 0 WHERE ip = ? AND active = 1")
-        .bind(ip)
-        .execute(pool)
-        .await?;
+/// Lift the active ban on `ip` at `now`. Returns true if one was removed.
+pub async fn deactivate(pool: &SqlitePool, ip: &str, now: i64) -> Result<bool, StateError> {
+    let r = sqlx::query(
+        "UPDATE ip_bans SET active = 0, ended_at = ?, end_reason = ? WHERE ip = ? AND active = 1",
+    )
+    .bind(now)
+    .bind(END_LIFTED)
+    .bind(ip)
+    .execute(pool)
+    .await?;
     Ok(r.rows_affected() > 0)
 }
 
@@ -102,9 +138,12 @@ pub async fn reap_expired(pool: &SqlitePool, now: i64) -> Result<Vec<String>, St
     .fetch_all(pool)
     .await?;
     if !ips.is_empty() {
+        // Ended when it ran out, not when the sweep noticed.
         sqlx::query(
-            "UPDATE ip_bans SET active = 0 WHERE active = 1 AND expires_at > 0 AND expires_at <= ?",
+            "UPDATE ip_bans SET active = 0, ended_at = expires_at, end_reason = ? \
+             WHERE active = 1 AND expires_at > 0 AND expires_at <= ?",
         )
+        .bind(END_EXPIRED)
         .bind(now)
         .execute(pool)
         .await?;
@@ -158,6 +197,26 @@ pub async fn list_for_hosting(
     Ok(rows.into_iter().map(to_ban).collect())
 }
 
+/// Every ban raised since `since` — still active, expired, lifted or
+/// replaced — plus any ban still active that was raised earlier (a
+/// permanent one keeps protecting long after its week is up). Newest
+/// first, at most `limit`.
+pub async fn list_since(
+    pool: &SqlitePool,
+    since: i64,
+    limit: i64,
+) -> Result<Vec<IpBan>, StateError> {
+    let rows: Vec<RawBan> = sqlx::query_as(&format!(
+        "SELECT {COLS} FROM ip_bans WHERE banned_at >= ? OR active = 1 \
+         ORDER BY banned_at DESC, id DESC LIMIT ?"
+    ))
+    .bind(since)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(to_ban).collect())
+}
+
 /// True when this IP has *any* ban row (active or already lifted/expired)
 /// with `banned_at >= since`. Backs ban-escalation: a repeat offender inside
 /// the look-back window earns a longer ban than a first-timer.
@@ -183,7 +242,7 @@ mod tests {
         add_or_refresh(&pool, "4.4.4.4", None, "auto", "auto", 1000, 2000)
             .await
             .expect("add");
-        deactivate(&pool, "4.4.4.4").await.unwrap();
+        deactivate(&pool, "4.4.4.4", 1500).await.unwrap();
         // Look-back that includes t=1000 → repeat offender, even though the
         // ban is no longer active.
         assert!(was_banned_since(&pool, "4.4.4.4", 500).await.unwrap());
@@ -236,7 +295,52 @@ mod tests {
         assert!(is_active(&pool, "9.9.9.9", 99_999).await.unwrap());
         let for_h = list_for_hosting(&pool, "h1", 700).await.unwrap();
         assert_eq!(for_h.len(), 1); // the node-wide manual ban shows up
-        assert!(deactivate(&pool, "9.9.9.9").await.unwrap());
-        assert!(!deactivate(&pool, "9.9.9.9").await.unwrap());
+        assert!(deactivate(&pool, "9.9.9.9", 800).await.unwrap());
+        assert!(!deactivate(&pool, "9.9.9.9", 900).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn history_records_how_each_ban_ended() {
+        let pool = open_memory().await.expect("open");
+        // Replaced by a re-ban, which then expires.
+        add_or_refresh(&pool, "1.1.1.1", Some("h1"), "waf", "auto", 100, 3700)
+            .await
+            .expect("add");
+        add_or_refresh(&pool, "1.1.1.1", Some("h1"), "waf", "auto", 200, 3800)
+            .await
+            .expect("refresh");
+        reap_expired(&pool, 5000).await.expect("reap");
+        // Lifted by hand.
+        add_or_refresh(&pool, "2.2.2.2", None, "manual", "manual", 300, 0)
+            .await
+            .expect("add");
+        deactivate(&pool, "2.2.2.2", 400).await.expect("lift");
+        // Still active, and old: a permanent ban raised long ago.
+        add_or_refresh(&pool, "3.3.3.3", None, "manual", "manual", 10, 0)
+            .await
+            .expect("add");
+
+        let h = list_since(&pool, 50, 100).await.expect("history");
+        let by = |ip: &str, at: i64| {
+            h.iter()
+                .find(|b| b.ip == ip && b.banned_at == at)
+                .cloned()
+                .unwrap_or_else(|| panic!("{ip}@{at} missing"))
+        };
+        let replaced = by("1.1.1.1", 100);
+        assert!(!replaced.active);
+        assert_eq!(replaced.end_reason.as_deref(), Some(END_REPLACED));
+        assert_eq!(replaced.ended_at, Some(200));
+        let expired = by("1.1.1.1", 200);
+        assert_eq!(expired.end_reason.as_deref(), Some(END_EXPIRED));
+        assert_eq!(expired.ended_at, Some(3800), "ended when it ran out");
+        let lifted = by("2.2.2.2", 300);
+        assert_eq!(lifted.end_reason.as_deref(), Some(END_LIFTED));
+        assert_eq!(lifted.ended_at, Some(400));
+        let old = by("3.3.3.3", 10);
+        assert!(old.active, "an active ban shows however old it is");
+        assert_eq!(old.end_reason, None);
+        assert_eq!(h[0].banned_at, 300, "newest first");
+        assert_eq!(list_since(&pool, 50, 2).await.expect("cap").len(), 2);
     }
 }

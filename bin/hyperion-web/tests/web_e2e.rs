@@ -194,6 +194,13 @@ impl hyperion_core::AdapterPort for StubAdapters {
     ) -> Result<(Vec<hyperion_types::WpTheme>, String), AdapterError> {
         Ok((vec![], "6.5.3".into()))
     }
+    async fn wp_core_check_update(
+        &self,
+        _: &str,
+        _: &str,
+    ) -> Result<Vec<hyperion_types::WpCoreUpdate>, AdapterError> {
+        Ok(vec![])
+    }
     async fn wp_theme_action(
         &self,
         _: &str,
@@ -4211,4 +4218,147 @@ async fn setup_finish_needs_php_and_then_the_wizard_is_gone() {
     );
     let r = get_with(&app, "/", &session).await;
     assert_eq!(r.status(), StatusCode::OK);
+}
+
+/// /vulns: empty state, then three WordPress sites — one with a major
+/// update, one the sweep has not reached, one up to date — sorted into the
+/// buckets the page promises, with the segment filter narrowing the list.
+#[tokio::test]
+async fn wordpress_updates_page_sorts_sites_by_what_they_need() {
+    use hyperion_rpc::codec::{Request as RpcReq, Response as RpcResp};
+    use hyperion_rpc::wire::HostingCreateReq;
+
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d, pool) = start_agent_with_pool().await;
+    let app = build_app(sock.clone(), admin);
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/login")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(
+                    b"username=kevin&password=good-pw&next=/".to_vec(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .expect("login");
+    let cookie = extract_cookie(&resp);
+    let get = |uri: &'static str| {
+        let app = app.clone();
+        let cookie = cookie.clone();
+        async move {
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .uri(uri)
+                        .header(header::COOKIE, &cookie)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .expect("call");
+            assert_eq!(resp.status(), StatusCode::OK, "{uri}");
+            body_string(resp).await
+        }
+    };
+
+    let body = get("/vulns").await;
+    assert!(
+        body.contains("No WordPress sites yet"),
+        "missing empty state"
+    );
+
+    let now = hyperion_types::now_secs();
+    let mut ids = Vec::new();
+    for d in ["major.example.cz", "fresh.example.cz", "clean.example.cz"] {
+        match hyperion_rpc_client::call(
+            &sock,
+            RpcReq::HostingCreate(HostingCreateReq {
+                domain: hyperion_validate::Domain::parse(d).expect("domain"),
+                aliases: vec![],
+                php_version: None,
+                database: None,
+                system_user: None,
+                kind: "php".into(),
+                proxy_upstream_url: None,
+            }),
+        )
+        .await
+        .expect("seed hosting")
+        {
+            RpcResp::HostingCreate(_) => {}
+            other => panic!("unexpected create: {other:?}"),
+        }
+        let (id,): (String,) = sqlx::query_as("SELECT id FROM hostings WHERE domain = ?")
+            .bind(d)
+            .fetch_one(&pool)
+            .await
+            .expect("id");
+        sqlx::query(
+            "INSERT INTO wp_installs (hosting_id, site_url, wp_version, installed_at, last_pack_hash) \
+             VALUES (?, 'https://x', '6.6.2', ?, 'h')",
+        )
+        .bind(&id)
+        .bind(now)
+        .execute(&pool)
+        .await
+        .expect("wp row");
+        ids.push(id);
+    }
+    let stored = |findings: Vec<hyperion_types::WpVulnFinding>| {
+        serde_json::json!({
+            "scanned_at": now - 3600,
+            "result": hyperion_types::WpVulnScanResult {
+                findings,
+                checked: 7,
+                core_version: "6.6.2".into(),
+                core_checked: true,
+                ..Default::default()
+            },
+        })
+        .to_string()
+    };
+    let major = hyperion_core::wp_updates::outdated_finding(
+        "woocommerce",
+        "WooCommerce",
+        "plugin",
+        "8.7.0",
+        "9.0.1",
+    );
+    for (id, json) in [(&ids[0], stored(vec![major])), (&ids[2], stored(vec![]))] {
+        hyperion_state::hosting_kv::set(&pool, id, "vuln_scan", &json, now)
+            .await
+            .expect("store scan");
+    }
+
+    let body = get("/vulns").await;
+    assert!(
+        body.contains("1 site needs you — 1 major update"),
+        "verdict"
+    );
+    for bucket in ["needs", "unchecked", "ok"] {
+        assert!(
+            body.contains(&format!("data-bucket=\"{bucket}\"")),
+            "bucket {bucket} missing"
+        );
+    }
+    assert!(body.contains("WooCommerce 8.7.0 → 9.0.1"), "headline");
+    assert!(
+        body.contains("Not checked yet"),
+        "never-scanned site must be a row"
+    );
+    assert!(body.contains("7 plugins &amp; themes current · core current"));
+
+    let body = get("/vulns?show=needs").await;
+    assert!(body.contains("major.example.cz"));
+    assert!(!body.contains("clean.example.cz"), "segment filter leaked");
+    // Counts are taken before the segment: Up to date still says 1.
+    assert!(body.contains("Up to date <span class=\"seg-count\">1</span>"));
+
+    let body = get("/vulns?q=woocommerce").await;
+    assert!(body.contains("major.example.cz"));
+    assert!(!body.contains("fresh.example.cz"), "search leaked");
 }

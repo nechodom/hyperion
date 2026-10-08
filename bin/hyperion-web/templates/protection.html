@@ -1,0 +1,302 @@
+{% extends "base.html" %}
+{% block title %}Protection · Hyperion{% endblock %}
+{% macro ban_table(rows, history) %}
+<div class="table-wrap">
+  <table class="stats-table prot-table">
+    <thead><tr>
+      <th>Address</th><th>For</th><th class="hide-on-phone">Site</th><th class="hide-on-phone">Node</th>
+      <th>Banned</th><th>{% if history %}Ended{% else %}Lifts{% endif %}</th>
+      {% if !history %}<th class="right"></th>{% endif %}
+    </tr></thead>
+    <tbody>
+    {% for r in rows %}
+      <tr>
+        <td><code>{{ r.ip }}</code></td>
+        <td><span class="tag" title="{{ r.reason }}">{{ r.kind }}</span></td>
+        <td class="hide-on-phone">{% if let Some((hid, d)) = r.site %}<a href="/hostings/{{ hid }}">{{ d }}</a>{% else %}<span class="text-soft">whole node</span>{% endif %}</td>
+        <td class="hide-on-phone text-soft">{{ r.node_label }}</td>
+        <td class="numeric small">{{ r.banned_ago }}</td>
+        <td class="numeric small text-soft">{% if history %}{{ r.ended }}{% else %}{{ r.expires }}{% endif %}</td>
+        {% if !history %}
+        <td class="right">
+          <form method="post" action="/bans/unban" style="display:inline"
+                data-confirm-title="Lift the ban on {{ r.ip }}?"
+                data-confirm-body="The address can reach every site on {{ r.node_label }} again — and SSH, FTP and mail. If it keeps attacking it is banned again on the next scan."
+                data-confirm-confirm-label="Lift the ban">
+            <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+            <input type="hidden" name="ip" value="{{ r.ip }}">
+            <input type="hidden" name="node_id" value="{{ r.node_id }}">
+            <button class="btn small ghost" type="submit">Unban</button>
+          </form>
+        </td>
+        {% endif %}
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endmacro %}
+{% block main %}
+
+<div class="page-header">
+  <div>
+    <h1>Protection</h1>
+    <div class="subtitle">
+      What the WAF turned away over the last 7 days, whether it hit the right
+      people, and who ended up banned at the firewall.
+      Per-node firewall posture is on <a href="/firewall">Firewall</a>.
+    </div>
+  </div>
+  <span class="grow"></span>
+  <div class="actions" data-require-caps="settings_manage">
+    <a href="/settings#bruteforce" class="btn ghost">Ban thresholds</a>
+  </div>
+</div>
+
+{% if let Some(f) = flash %}
+<div class="flash success"><svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg><div class="flash-body">{{ f }}</div></div>
+{% endif %}
+{% if let Some(e) = flash_error %}
+<div class="flash error"><svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg><div class="flash-body">{{ e }}</div></div>
+{% endif %}
+{% include "_node_auth_banner.html" %}
+{% if !unreachable.is_empty() %}
+<div class="flash error"><svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+  <div class="flash-body"><strong>Incomplete view.</strong> No answer from {{ unreachable.join(", ") }} — its sites, refusals and bans are missing below.</div>
+</div>
+{% endif %}
+{% if !p.old_nodes.is_empty() %}
+<p class="note">{{ p.old_nodes.join(", ") }} {% if p.old_nodes.len() == 1 %}runs{% else %}run{% endif %} an older version: only {% if p.old_nodes.len() == 1 %}its{% else %}their{% endif %} active bans are shown. Update to see {% if p.old_nodes.len() == 1 %}its{% else %}their{% endif %} WAF activity.</p>
+{% endif %}
+
+<div class="svc-verdict {{ p.verdict_tone }}">
+  <span class="dot"></span>
+  <span>{{ p.verdict }}</span>
+</div>
+
+{# ── At a glance ──────────────────────────────────────────────────── #}
+<div class="group">
+  <div class="ghead">At a glance</div>
+  <div class="stat-cells">
+    <div class="stat viz-blue">
+      <div class="stat-label">Refused · 24 h</div>
+      <div class="stat-value">{{ p.blocked_24h }}</div>
+      <div class="stat-meta">{{ p.blocked_7d }} over 7 days</div>
+    </div>
+    <div class="stat viz-magenta">
+      <div class="stat-label">Banned now</div>
+      <div class="stat-value">{{ p.banned_now }}</div>
+      <div class="stat-meta">{% if p.bans_7d > 0 %}{{ p.bans_7d }} ban{% if p.bans_7d != 1 %}s{% endif %} this week · {{ p.bans_7d_by_kind }}{% else %}no bans this week{% endif %}</div>
+    </div>
+    <div class="stat {% if p.sites_total > 0 && p.sites_on == 0 %}tone-warn{% endif %}">
+      <div class="stat-label">Sites with the WAF on</div>
+      <div class="stat-value">{{ p.sites_on }}<span class="stat-unit"> of {{ p.sites_total }}</span></div>
+      <div class="stat-meta">{{ p.sites_strict }} strict · {{ p.sites_on - p.sites_strict }} standard or custom</div>
+      {% if p.sites_total > 0 %}<div class="stat-meter"><span style="width:{{ p.sites_on * 100 / p.sites_total }}%"></span></div>{% endif %}
+    </div>
+    <div class="stat {% if p.suspects > 0 %}tone-warn{% endif %}">
+      <div class="stat-label">Possible false positives</div>
+      <div class="stat-value">{{ p.suspects }}</div>
+      <div class="stat-meta">rules refusing mostly real browsers</div>
+    </div>
+  </div>
+  {% if !p.fail2ban_off.is_empty() %}
+  <dl class="stat-facts">
+    <div><dt>Automatic bans off on</dt><dd class="tone-warn">{{ p.fail2ban_off.join(", ") }}</dd></div>
+  </dl>
+  {% endif %}
+</div>
+
+{# ── Over time + by rule ──────────────────────────────────────────── #}
+<div class="group">
+  <div class="ghead">
+    Refusals · 7 days
+    <span class="grow"></span>
+    {% if p.chart.has_data %}<span class="ghead-note"><i class="viz-key prot-key-ban" aria-hidden="true"></i>count toward a ban · <i class="viz-key prot-key-other" aria-hidden="true"></i>refused only · peak {{ p.chart.peak }}/h</span>{% endif %}
+  </div>
+  {% if p.chart.has_data %}
+  <div class="item prot-chart">
+    <svg viewBox="0 0 600 80" preserveAspectRatio="none" role="img" aria-label="Refusals per hour over the last 7 days">
+      {% for b in p.chart.bars %}
+      <g><title>{{ b.title }}</title>
+        <rect class="prot-other" x="{{ b.x }}" y="{{ b.other_y }}" width="{{ b.w }}" height="{{ b.other_h }}"/>
+        <rect class="prot-ban" x="{{ b.x }}" y="{{ b.ban_y }}" width="{{ b.w }}" height="{{ b.ban_h }}"/>
+      </g>
+      {% endfor %}
+    </svg>
+    <div class="prot-days">{% for (x, d) in p.chart.days %}<span style="left:{{ x }}%">{{ d }}</span>{% endfor %}</div>
+  </div>
+  {% endif %}
+  {% if p.rules.is_empty() %}
+  <div class="item">
+    <p class="text-soft small" style="margin:0">
+      {% if p.sites_on == 0 %}Nothing refused — the WAF is not on for any site yet. Turn it on per site under <em>Protection</em> on the site's Settings tab.
+      {% else %}Nothing refused in the last 7 days.{% endif %}
+    </p>
+  </div>
+  {% else %}
+  <div class="table-wrap">
+    <table class="stats-table prot-table">
+      <thead><tr><th>Rule</th><th class="right">24 h</th><th class="right">7 days</th><th class="hide-on-phone">Leads to a ban</th></tr></thead>
+      <tbody>
+      {% for r in p.rules %}
+        <tr>
+          <td>{{ r.label }} <span class="text-soft mono small">{{ r.rule }}</span></td>
+          <td class="right numeric">{{ r.day }}</td>
+          <td class="right numeric">{{ r.week }}</td>
+          <td class="hide-on-phone">{% if r.bans %}<span class="pill warn">yes, when repeated</span>{% else %}<span class="pill muted">never</span>{% endif %}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+</div>
+
+{# ── Tuning ───────────────────────────────────────────────────────── #}
+{% if !p.tuning.is_empty() %}
+<div class="group">
+  <div class="ghead">
+    Tuning · rules per site
+    <span class="grow"></span>
+    <span class="ghead-note">from each site's last 200 refusals</span>
+  </div>
+  <div class="item muted">
+    <p class="small text-soft" style="margin:0">
+      Scanners and scripts don't send the headers a browser does. A rule whose
+      refusals come mostly from <strong>real browsers</strong> is probably
+      stopping visitors, not attackers — check the request and turn the rule
+      off for that site if it is legitimate.
+    </p>
+  </div>
+  <div class="table-wrap">
+    <table class="stats-table prot-table">
+      <thead><tr>
+        <th>Site · rule</th><th class="right">7 days</th><th class="right">Browsers</th><th class="right hide-on-phone">Addresses</th>
+        <th class="hide-on-phone">Latest request</th>{% if can_tune %}<th class="right"></th>{% endif %}
+      </tr></thead>
+      <tbody>
+      {% for t in p.tuning %}
+        <tr>
+          <td>
+            <a href="/hostings/{{ t.hosting_id }}#waf-activity">{{ t.domain }}</a>
+            <div class="small">{{ t.label }}{% if t.suspect %} <span class="pill warn">possible false positive</span>{% else if t.now_off %} <span class="pill muted">turned off since</span>{% endif %}</div>
+          </td>
+          <td class="right numeric">{{ t.week }}</td>
+          <td class="right numeric {% if t.suspect %}tone-warn{% endif %}" title="{{ t.sample }} sampled refusals">{{ t.browser_pct }}%</td>
+          <td class="right numeric hide-on-phone">{{ t.ips }}</td>
+          <td class="hide-on-phone mono small prot-req">{{ t.request }}<div class="text-soft" style="font-family:inherit">{{ t.last_ago }}</div></td>
+          {% if can_tune %}
+          <td class="right">
+            {% if t.pinnable && !t.now_off %}
+            <form method="post" action="/hostings/waf-rule" style="margin:0"
+                  data-confirm-title="Turn off &ldquo;{{ t.label }}&rdquo; on {{ t.domain }}?"
+                  data-confirm-body="The rule stops applying to every request on this site, not just this one. You can turn it back on under Protection → Individual rules on the site's Settings tab. The vhost is re-validated with nginx -t first."
+                  data-confirm-confirm-label="Turn the rule off">
+              <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+              <input type="hidden" name="selector" value="{{ t.hosting_id }}">
+              <input type="hidden" name="rule" value="{{ t.rule }}">
+              <input type="hidden" name="pin" value="off">
+              <input type="hidden" name="from" value="protection">
+              <button class="btn ghost small" type="submit">Allow</button>
+            </form>
+            {% endif %}
+          </td>
+          {% endif %}
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
+
+{# ── Addresses ────────────────────────────────────────────────────── #}
+{% if !p.ips.is_empty() %}
+<div class="group">
+  <div class="ghead">
+    Busiest addresses
+    <span class="grow"></span>
+    <span class="ghead-note">among the recent refusals</span>
+  </div>
+  <div class="table-wrap">
+    <table class="stats-table prot-table">
+      <thead><tr><th>Address</th><th class="right">Refused</th><th class="hide-on-phone">Sites</th><th class="hide-on-phone">Rules</th><th>Status</th></tr></thead>
+      <tbody>
+      {% for i in p.ips %}
+        <tr>
+          <td><code>{{ i.ip }}</code>{% if i.browser %} <span class="tag" title="Most of its refused requests came from a real browser">browser</span>{% endif %}<div class="small text-soft">{{ i.last_ago }}</div></td>
+          <td class="right numeric">{{ i.hits }}</td>
+          <td class="hide-on-phone small">{{ i.sites }}</td>
+          <td class="hide-on-phone small text-soft">{{ i.rules }}</td>
+          <td>{% if let Some(b) = i.ban %}<span class="pill err">{{ b }}</span>{% else %}<span class="pill muted">refused only</span>{% endif %}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
+
+{# ── Bans ─────────────────────────────────────────────────────────── #}
+<div class="group" id="bans">
+  <div class="ghead">
+    Banned now
+    <span class="grow"></span>
+    <span class="ghead-note">dropped at the firewall — every site, SSH, FTP and mail on that node</span>
+  </div>
+  {% if p.active_bans.is_empty() %}
+  <div class="item">
+    <p class="text-soft small" style="margin:0">
+      No address is banned right now. Bans last an hour by default (longer for
+      repeat offenders), so this list is often empty — the history below shows
+      what happened this week. Add a manual ban from a site's Settings tab.
+    </p>
+  </div>
+  {% else %}
+  {% call ban_table(p.active_bans, false) %}
+  {% endif %}
+</div>
+
+{% if !p.history.is_empty() %}
+<details class="group svc-fold" {% if p.active_bans.is_empty() %}open{% endif %}>
+  <summary class="ghead">
+    Ban history · 7 days
+    <span class="grow"></span>
+    <span class="ghead-note">{{ p.history.len() }} ended</span>
+  </summary>
+  {% call ban_table(p.history, true) %}
+</details>
+{% endif %}
+
+{# ── Sites without the WAF ────────────────────────────────────────── #}
+{% if !p.unprotected.is_empty() %}
+<details class="group svc-fold" {% if p.sites_on == 0 %}open{% endif %}>
+  <summary class="ghead">
+    Sites without the WAF
+    <span class="grow"></span>
+    <span class="ghead-note">{{ p.unprotected.len() }}</span>
+  </summary>
+  <div class="item muted">
+    <p class="small text-soft" style="margin:0">
+      These sites refuse nothing. <strong>Standard</strong> is safe for almost
+      every site; set it under <em>Protection</em> on the site's Settings tab.
+    </p>
+  </div>
+  <div class="table-wrap">
+    <table class="stats-table prot-table">
+      <tbody>
+      {% for s in p.unprotected %}
+        <tr>
+          <td><a href="/hostings/{{ s.hosting_id }}#protection">{{ s.domain }}</a></td>
+          <td class="text-soft hide-on-phone">{{ s.node_label }}</td>
+          <td class="right"><a class="btn ghost small" href="/hostings/{{ s.hosting_id }}#protection">Turn on</a></td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</details>
+{% endif %}
+
+{% endblock %}

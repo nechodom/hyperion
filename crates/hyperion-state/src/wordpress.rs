@@ -208,6 +208,15 @@ pub async fn record_install(
     Ok(())
 }
 
+/// Hosting ids of every recorded WordPress install on this node.
+pub async fn list_install_ids(pool: &SqlitePool) -> Result<Vec<String>, StateError> {
+    let rows: Vec<(String,)> =
+        sqlx::query_as("SELECT hosting_id FROM wp_installs ORDER BY hosting_id")
+            .fetch_all(pool)
+            .await?;
+    Ok(rows.into_iter().map(|(id,)| id).collect())
+}
+
 pub async fn get_install(
     pool: &SqlitePool,
     id: &HostingId,
@@ -354,5 +363,21 @@ mod tests {
             .expect("present");
         assert_eq!(got.wp_version, "6.5.3");
         assert_eq!(got.last_pack_hash, "hash2");
+    }
+
+    /// The WordPress-updates page lists every install, including ones the
+    /// nightly sweep has not reached yet — this is where it learns of them.
+    #[tokio::test]
+    async fn install_ids_lists_every_recorded_install() {
+        let pool = open_memory().await.expect("open");
+        assert!(list_install_ids(&pool).await.expect("empty").is_empty());
+        let id = fixture(&pool).await;
+        record_install(&pool, &id, "https://example.cz", "6.5.2", "h", 100)
+            .await
+            .expect("install");
+        assert_eq!(
+            list_install_ids(&pool).await.expect("list"),
+            vec![id.as_str().to_string()]
+        );
     }
 }

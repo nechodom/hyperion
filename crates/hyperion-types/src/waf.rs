@@ -408,6 +408,12 @@ pub struct WafHit {
     /// recorded, never counted towards a ban. Not stored.
     #[serde(default)]
     pub cross_site: bool,
+    /// Sent by a real browser: the request carried `Sec-Fetch-Site`,
+    /// which browsers attach to every request and scanners and scripts
+    /// do not. A rule refusing mostly these is the shape of a false
+    /// positive. Stored (migration 080); older rows read false.
+    #[serde(default)]
+    pub browser: bool,
 }
 
 /// What the activity panel shows for one hosting.
@@ -424,6 +430,91 @@ pub struct WafActivity {
     pub threshold: u32,
     /// `[fail2ban] window_secs` on the owning node.
     pub window_secs: i64,
+}
+
+/// One node's answer to `WafOverview`: what the cluster Protection page
+/// (`/protection`) needs from it. Everything is node-local — the master
+/// merges one of these per node.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct WafOverview {
+    /// `[fail2ban] enabled`: whether anything here may ban at all.
+    pub fail2ban_enabled: bool,
+    /// `[fail2ban] waf_threshold` / `window_secs` / `ban_ttl_secs`.
+    pub threshold: u32,
+    pub window_secs: i64,
+    pub ban_ttl_secs: i64,
+    /// Every hosting on the node that is not in the trash.
+    pub sites: Vec<WafSiteFacts>,
+    /// Refusals per UTC hour and rule, all sites together, over the
+    /// requested days.
+    pub hourly: Vec<WafHourCount>,
+    /// Per (site, rule): what the kept recent refusals look like.
+    pub samples: Vec<WafRuleSample>,
+    /// The busiest addresses among the kept recent refusals.
+    pub top_ips: Vec<WafIpActivity>,
+    /// Bans raised over the requested days, plus every one still active.
+    pub bans: Vec<crate::IpBanWire>,
+}
+
+/// One site's WAF setup and refusal totals.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct WafSiteFacts {
+    pub hosting_id: String,
+    pub domain: String,
+    /// `WafLevel::as_str` of the effective level.
+    pub level: String,
+    /// Rules actually refusing on this site (level + pins).
+    pub rules_on: u32,
+    /// Their ids, so a rule turned off since its refusals were recorded
+    /// is not offered for turning off again.
+    #[serde(default)]
+    pub active_rules: Vec<String>,
+    /// Rules pinned on or off against the level.
+    pub pins: u32,
+    /// Per-site auto-ban switch.
+    pub autoban: bool,
+    pub totals_24h: Vec<WafRuleCount>,
+    pub totals_7d: Vec<WafRuleCount>,
+}
+
+/// Refusals in one UTC hour by one rule.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct WafHourCount {
+    pub hour: i64,
+    pub rule: String,
+    pub hits: i64,
+}
+
+/// What one rule's refusals on one site look like, read from the kept
+/// recent refusals (at most `waf_recent`'s cap per site — a sample, not
+/// the totals).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct WafRuleSample {
+    pub hosting_id: String,
+    pub rule: String,
+    /// Refusals in the sample.
+    pub hits: i64,
+    /// Of those, sent by a real browser.
+    pub browser: i64,
+    /// Distinct addresses.
+    pub ips: i64,
+    /// The newest one.
+    pub last_ts: i64,
+    pub method: String,
+    pub uri: String,
+}
+
+/// One address among the kept recent refusals.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct WafIpActivity {
+    pub ip: String,
+    pub hits: i64,
+    pub browser: i64,
+    /// Hosting ids it was refused on.
+    pub sites: Vec<String>,
+    /// Rule tags it tripped.
+    pub rules: Vec<String>,
+    pub last_ts: i64,
 }
 
 #[cfg(test)]

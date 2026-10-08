@@ -528,6 +528,10 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
     ) -> Result<hyperion_types::waf::WafActivity, RpcError> {
         self.svc.waf_activity(&hosting_id).await
     }
+
+    async fn waf_overview(&self, days: u32) -> Result<hyperion_types::waf::WafOverview, RpcError> {
+        self.svc.waf_overview(days).await
+    }
     async fn hosting_kv_list(&self, hosting_id: String) -> Result<Vec<(String, String)>, RpcError> {
         self.svc.hosting_kv_list(hosting_id).await
     }

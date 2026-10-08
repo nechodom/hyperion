@@ -10,7 +10,9 @@
 //!   (`xmlrpc`, `geo`, `bot`…) cannot reach the threshold at all.
 
 use crate::db::StateError;
-use hyperion_types::waf::{WafBatch, WafHit, WafRuleCount};
+use hyperion_types::waf::{
+    WafBatch, WafHit, WafHourCount, WafIpActivity, WafRuleCount, WafRuleSample,
+};
 use sqlx::SqlitePool;
 
 /// Refusals kept per hosting in `waf_recent`.
@@ -72,8 +74,8 @@ pub async fn record(
     }
     for h in &batch.recent {
         sqlx::query(
-            "INSERT INTO waf_recent (hosting_id, ts, ip, rule, method, uri, ua) \
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO waf_recent (hosting_id, ts, ip, rule, method, uri, ua, browser) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(hosting_id)
         .bind(h.ts)
@@ -82,6 +84,7 @@ pub async fn record(
         .bind(truncate(&h.method))
         .bind(truncate(&h.uri))
         .bind(truncate(&h.ua))
+        .bind(h.browser)
         .execute(&mut *tx)
         .await?;
     }
@@ -126,8 +129,9 @@ pub async fn recent(
     hosting_id: &str,
     limit: i64,
 ) -> Result<Vec<WafHit>, StateError> {
-    let rows: Vec<(i64, String, String, String, String, String)> = sqlx::query_as(
-        "SELECT ts, ip, rule, method, uri, ua FROM waf_recent \
+    #[allow(clippy::type_complexity)]
+    let rows: Vec<(i64, String, String, String, String, String, bool)> = sqlx::query_as(
+        "SELECT ts, ip, rule, method, uri, ua, browser FROM waf_recent \
          WHERE hosting_id = ? ORDER BY id DESC LIMIT ?",
     )
     .bind(hosting_id)
@@ -136,14 +140,118 @@ pub async fn recent(
     .await?;
     Ok(rows
         .into_iter()
-        .map(|(ts, ip, rule, method, uri, ua)| WafHit {
+        .map(|(ts, ip, rule, method, uri, ua, browser)| WafHit {
             ts,
             ip,
             rule,
             method,
             uri,
             ua,
+            browser,
             ..Default::default()
+        })
+        .collect())
+}
+
+/// Hits per (hosting, rule) since `since`, every hosting on the node at
+/// once (hour-granular like [`totals`]).
+pub async fn totals_by_site(
+    pool: &SqlitePool,
+    since: i64,
+) -> Result<Vec<(String, WafRuleCount)>, StateError> {
+    let hour = since - since.rem_euclid(3600);
+    let rows: Vec<(String, String, i64)> = sqlx::query_as(
+        "SELECT hosting_id, rule, SUM(hits) AS n FROM waf_hits_hourly \
+         WHERE hour >= ? GROUP BY hosting_id, rule ORDER BY hosting_id, n DESC, rule",
+    )
+    .bind(hour)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(h, rule, hits)| (h, WafRuleCount { rule, hits }))
+        .collect())
+}
+
+/// Hits per UTC hour and rule since `since`, every hosting together,
+/// oldest first.
+pub async fn hourly_all(pool: &SqlitePool, since: i64) -> Result<Vec<WafHourCount>, StateError> {
+    let hour = since - since.rem_euclid(3600);
+    let rows: Vec<(i64, String, i64)> = sqlx::query_as(
+        "SELECT hour, rule, SUM(hits) FROM waf_hits_hourly \
+         WHERE hour >= ? GROUP BY hour, rule ORDER BY hour, rule",
+    )
+    .bind(hour)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(hour, rule, hits)| WafHourCount { hour, rule, hits })
+        .collect())
+}
+
+/// Per (hosting, rule), what the kept recent refusals look like: how many,
+/// how many from a real browser, from how many addresses, and the newest
+/// one's request line.
+pub async fn rule_samples(pool: &SqlitePool) -> Result<Vec<WafRuleSample>, StateError> {
+    // `MAX(id)` makes SQLite take the bare columns (ts, method, uri) from
+    // the row holding that maximum — the newest refusal of the group.
+    #[allow(clippy::type_complexity)]
+    let rows: Vec<(String, String, i64, i64, i64, i64, i64, String, String)> = sqlx::query_as(
+        "SELECT hosting_id, rule, COUNT(*), SUM(browser), COUNT(DISTINCT ip), MAX(id), \
+                ts, method, uri \
+         FROM waf_recent GROUP BY hosting_id, rule",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(
+            |(hosting_id, rule, hits, browser, ips, _, last_ts, method, uri)| WafRuleSample {
+                hosting_id,
+                rule,
+                hits,
+                browser,
+                ips,
+                last_ts,
+                method,
+                uri,
+            },
+        )
+        .collect())
+}
+
+/// The `limit` addresses with the most kept recent refusals, busiest first.
+pub async fn top_ips(pool: &SqlitePool, limit: i64) -> Result<Vec<WafIpActivity>, StateError> {
+    // GROUP_CONCAT(DISTINCT …) joins with ','; neither a hosting id (a
+    // UUID) nor a rule tag (cleaned to [a-z0-9_]) can contain one.
+    #[allow(clippy::type_complexity)]
+    let rows: Vec<(String, i64, i64, String, String, i64)> = sqlx::query_as(
+        "SELECT ip, COUNT(*) AS n, SUM(browser), GROUP_CONCAT(DISTINCT hosting_id), \
+                GROUP_CONCAT(DISTINCT rule), MAX(ts) \
+         FROM waf_recent GROUP BY ip ORDER BY n DESC, ip LIMIT ?",
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    let split = |s: String| -> Vec<String> {
+        let mut v: Vec<String> = s
+            .split(',')
+            .filter(|p| !p.is_empty())
+            .map(str::to_string)
+            .collect();
+        v.sort();
+        v
+    };
+    Ok(rows
+        .into_iter()
+        .map(|(ip, hits, browser, sites, rules, last_ts)| WafIpActivity {
+            ip,
+            hits,
+            browser,
+            sites: split(sites),
+            rules: split(rules),
+            last_ts,
         })
         .collect())
 }
@@ -328,6 +436,75 @@ mod tests {
             .await
             .expect("off")
             .is_empty());
+    }
+
+    #[tokio::test]
+    async fn overview_queries_read_back_across_sites() {
+        let pool = open_memory().await.expect("open");
+        let t = 1_800_000_000; // on an hour boundary
+        let b = |ts, ip: &str, rule: &str, uri: &str, browser| WafHit {
+            uri: uri.into(),
+            browser,
+            ..hit(ts, ip, rule)
+        };
+        record(
+            &pool,
+            "h1",
+            &WafBatch::from_hits([
+                b(t, "1.1.1.1", "probe_args", "/old", false),
+                b(t + 10, "2.2.2.2", "probe_args", "/new", true),
+                b(t + 3600, "2.2.2.2", "xmlrpc", "/xmlrpc.php", true),
+            ]),
+        )
+        .await
+        .expect("h1");
+        record(
+            &pool,
+            "h2",
+            &WafBatch::from_hits([b(t + 20, "1.1.1.1", "dotfiles", "/.env", false)]),
+        )
+        .await
+        .expect("h2");
+
+        let by_site = totals_by_site(&pool, t).await.expect("by site");
+        assert_eq!(by_site.len(), 3);
+        assert_eq!(by_site[0].0, "h1");
+        assert_eq!(by_site[0].1.rule, "probe_args");
+        assert_eq!(by_site[0].1.hits, 2);
+
+        let hourly = hourly_all(&pool, t).await.expect("hourly");
+        assert_eq!(
+            hourly
+                .iter()
+                .map(|h| (h.hour - t, h.rule.as_str(), h.hits))
+                .collect::<Vec<_>>(),
+            vec![
+                (0, "dotfiles", 1),
+                (0, "probe_args", 2),
+                (3600, "xmlrpc", 1)
+            ]
+        );
+        assert!(hourly_all(&pool, t + 7200).await.expect("later").is_empty());
+
+        let samples = rule_samples(&pool).await.expect("samples");
+        let probe = samples
+            .iter()
+            .find(|s| s.hosting_id == "h1" && s.rule == "probe_args")
+            .expect("probe sample");
+        assert_eq!((probe.hits, probe.browser, probe.ips), (2, 1, 2));
+        assert_eq!(probe.uri, "/new", "the newest refusal's request");
+        assert_eq!(probe.last_ts, t + 10);
+
+        let ips = top_ips(&pool, 10).await.expect("ips");
+        assert_eq!(ips[0].ip, "1.1.1.1", "ties break by address");
+        assert_eq!(ips[0].sites, vec!["h1".to_string(), "h2".to_string()]);
+        assert_eq!(
+            ips[0].rules,
+            vec!["dotfiles".to_string(), "probe_args".to_string()]
+        );
+        assert_eq!(ips[1].ip, "2.2.2.2");
+        assert_eq!((ips[1].hits, ips[1].browser), (2, 2));
+        assert_eq!(top_ips(&pool, 1).await.expect("cap").len(), 1);
     }
 
     #[tokio::test]

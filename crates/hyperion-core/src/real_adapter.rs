@@ -1259,6 +1259,23 @@ impl AdapterPort for RealAdapter {
         hyperion_adapters::wpcli::theme_list(system_user, htdocs).await
     }
 
+    async fn wp_core_check_update(
+        &self,
+        system_user: &str,
+        htdocs: &str,
+    ) -> Result<Vec<hyperion_types::WpCoreUpdate>, AdapterError> {
+        Ok(
+            hyperion_adapters::wpcli::core_check_update(system_user, htdocs)
+                .await?
+                .into_iter()
+                .map(|u| hyperion_types::WpCoreUpdate {
+                    version: u.version,
+                    update_type: u.update_type,
+                })
+                .collect(),
+        )
+    }
+
     async fn wp_theme_action(
         &self,
         system_user: &str,

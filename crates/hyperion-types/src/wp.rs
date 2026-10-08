@@ -149,6 +149,35 @@ pub struct WpVulnFinding {
     /// auto-apply it (minor/patch policy). Majors are left to the operator.
     #[serde(default)]
     pub auto_updatable: bool,
+    /// Consecutive failed auto-update attempts for this plugin, from the
+    /// node's pause map at the time the finding was read (not stored with
+    /// the scan, so a Resume shows at once). 0 = none.
+    #[serde(default)]
+    pub auto_update_failures: u32,
+    /// Unix seconds the auto-update is paused until; later than now means
+    /// the sweep will not try it (a licence-gated plugin, usually). 0 = not
+    /// paused.
+    #[serde(default)]
+    pub auto_update_paused_until: i64,
+    /// The last auto-update error for this plugin, trimmed. Empty = none.
+    #[serde(default)]
+    pub auto_update_error: String,
+}
+
+/// One WordPress core release `wp core check-update` offers.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct WpCoreUpdate {
+    pub version: String,
+    /// wp-cli's own classification: "minor" (a point/security release the
+    /// sweep applies by itself when auto-update is on) or "major".
+    pub update_type: String,
+}
+
+impl WpCoreUpdate {
+    /// Safe to apply unattended — same rule the sweep uses.
+    pub fn is_minor(&self) -> bool {
+        self.update_type.eq_ignore_ascii_case("minor")
+    }
 }
 
 /// Result of a WordPress update/outdated scan (keyless — via wp-cli's own
@@ -168,6 +197,20 @@ pub struct WpVulnScanResult {
     /// How many components the defender auto-updated on this run (tick only).
     #[serde(default)]
     pub auto_updated: i64,
+    /// WordPress core version on disk, as wp-cli reported it. Empty when the
+    /// scan could not read it (or came from an older agent).
+    #[serde(default)]
+    pub core_version: String,
+    /// True when `wp core check-update` answered. False means "core was not
+    /// checked" — never read it as "core is current".
+    #[serde(default)]
+    pub core_checked: bool,
+    /// Core releases on offer, newest first. Empty + `core_checked` = current.
+    #[serde(default)]
+    pub core_updates: Vec<WpCoreUpdate>,
+    /// Why the scan could not read the install, when `feed_unavailable`.
+    #[serde(default)]
+    pub error: String,
 }
 
 /// One hosting's last stored vuln-scan result, for the cluster-wide
@@ -182,6 +225,31 @@ pub struct HostingVulnSummary {
     /// Unix seconds of the scan. 0 = never scanned.
     pub scanned_at: i64,
     pub findings: Vec<WpVulnFinding>,
+    /// The site's daily minor/patch auto-update switch, read when the list
+    /// was built. `None` = the node's agent is too old to say — the page
+    /// must not assume either way.
+    #[serde(default)]
+    pub auto_update: Option<bool>,
+    /// Components the last sweep updated by itself.
+    #[serde(default)]
+    pub auto_updated: i64,
+    /// Plugins + themes the last good scan checked.
+    #[serde(default)]
+    pub checked: i64,
+    #[serde(default)]
+    pub core_version: String,
+    #[serde(default)]
+    pub core_checked: bool,
+    #[serde(default)]
+    pub core_updates: Vec<WpCoreUpdate>,
+    /// Unix seconds of the last attempt that could NOT read the site, when it
+    /// is newer than `scanned_at`; the findings are then from the last good
+    /// scan. 0 = the last attempt worked.
+    #[serde(default)]
+    pub failed_at: i64,
+    /// Why that attempt failed.
+    #[serde(default)]
+    pub error: String,
 }
 
 impl HostingVulnSummary {

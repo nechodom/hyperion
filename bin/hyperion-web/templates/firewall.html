@@ -26,7 +26,7 @@
   <div class="kpi-card">
     <div class="kpi-label">IPs banned</div>
     <div class="kpi-value">{{ summary.ban_total }}</div>
-    <div class="kpi-foot text-soft">{{ summary.ban_auto }} auto · {{ summary.ban_manual }} manual · <a href="/bans">All bans →</a></div>
+    <div class="kpi-foot text-soft">{{ summary.ban_auto }} auto · {{ summary.ban_manual }} manual · <a href="/protection#bans">All bans →</a></div>
   </div>
 </div>
 
@@ -284,7 +284,7 @@
         <span class="text-soft small">newest:
           {% for b in n.recent_bans %}<code title="{{ b.reason }} ({{ b.source }})">{{ b.ip }}</code>{% if !loop.last %} {% endif %}{% endfor %}</span>
       {% endif %}
-      <a class="small" href="/bans" style="margin-left:auto">All bans →</a>
+      <a class="small" href="/protection#bans" style="margin-left:auto">All bans →</a>
     </div>
   </div>
 

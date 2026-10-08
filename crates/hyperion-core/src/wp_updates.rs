@@ -92,6 +92,7 @@ pub fn outdated_finding(
         kind: kind.to_string(),
         update_type: ut.to_string(),
         auto_updatable: is_same_major(current, latest),
+        ..WpVulnFinding::default()
     }
 }
 
@@ -166,9 +167,57 @@ pub fn record_failure(map: &mut SkipMap, slug: &str, now: i64, err: &str) -> boo
     !was_paused && e.paused_until > now
 }
 
+/// Write the pause map's current state onto each plugin finding. Every plugin
+/// finding is reset first, so one resumed since the scan was stored reads as
+/// not paused. Themes have no pause model and are left at zero.
+pub fn overlay_skips(findings: &mut [WpVulnFinding], map: &SkipMap) {
+    for f in findings.iter_mut() {
+        let entry = if f.kind == "plugin" {
+            map.get(&f.slug)
+        } else {
+            None
+        };
+        f.auto_update_failures = entry.map_or(0, |e| e.fail_count);
+        f.auto_update_paused_until = entry.map_or(0, |e| e.paused_until);
+        f.auto_update_error = entry.map(|e| e.last_error.clone()).unwrap_or_default();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every plugin finding gets the CURRENT pause state — including "none"
+    /// for one that was paused when the scan was stored and resumed since.
+    #[test]
+    fn overlay_writes_current_pause_state_onto_plugin_findings() {
+        let mut stale = outdated_finding("acf-pro", "ACF Pro", "plugin", "6.2.0", "6.3.1");
+        stale.auto_update_failures = 2;
+        stale.auto_update_paused_until = 99;
+        stale.auto_update_error = "old".into();
+        let mut findings = vec![
+            outdated_finding("wpml", "WPML", "plugin", "4.6.0", "4.6.9"),
+            stale,
+            outdated_finding("wpml", "WPML theme", "theme", "1.0", "1.1"),
+        ];
+        let mut map = SkipMap::new();
+        record_failure(&mut map, "wpml", 1_000, "Unauthorized");
+        overlay_skips(&mut findings, &map);
+
+        assert_eq!(findings[0].auto_update_failures, 1);
+        assert_eq!(
+            findings[0].auto_update_paused_until, 0,
+            "one failure is not a pause"
+        );
+        assert_eq!(findings[0].auto_update_error, "Unauthorized");
+        assert_eq!(findings[1].auto_update_failures, 0, "resumed since");
+        assert_eq!(findings[1].auto_update_paused_until, 0);
+        assert!(findings[1].auto_update_error.is_empty());
+        assert_eq!(
+            findings[2].auto_update_failures, 0,
+            "themes are never paused, even with a same-named plugin"
+        );
+    }
 
     #[test]
     fn classifies_major_minor_patch() {

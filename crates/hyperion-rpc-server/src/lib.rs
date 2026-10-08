@@ -232,6 +232,10 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
                 Err(e) => Response::Error(e),
             }
         }
+        Request::WafOverview { days } => match api.waf_overview(days).await {
+            Ok(v) => Response::WafOverview(v),
+            Err(e) => Response::Error(e),
+        },
         Request::HostingKvList { hosting_id } => match api.hosting_kv_list(hosting_id).await {
             Ok(v) => Response::HostingKvList(v),
             Err(e) => Response::Error(e),
@@ -2277,6 +2281,9 @@ mod tests {
             _: String,
         ) -> Result<hyperion_types::waf::WafActivity, RpcError> {
             Ok(hyperion_types::waf::WafActivity::default())
+        }
+        async fn waf_overview(&self, _: u32) -> Result<hyperion_types::waf::WafOverview, RpcError> {
+            Ok(hyperion_types::waf::WafOverview::default())
         }
         async fn hosting_kv_list(&self, _: String) -> Result<Vec<(String, String)>, RpcError> {
             Ok(vec![])

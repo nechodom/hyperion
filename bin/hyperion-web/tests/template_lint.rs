@@ -318,6 +318,9 @@ fn every_page_is_reachable_from_the_nav() {
         // Retired page; a redirect to the profile's device list so old
         // bookmarks still land.
         "/settings/sessions",
+        // Retired page; folded into /protection, a redirect to its bans
+        // section so old bookmarks still land.
+        "/bans",
         // Old address of the node-to-node import, now /import/hyperion;
         // a redirect kept for export result pages and bookmarks.
         "/hostings/import",

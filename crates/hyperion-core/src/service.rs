@@ -304,6 +304,14 @@ pub trait AdapterPort: Send + Sync {
         htdocs: &str,
     ) -> Result<(Vec<hyperion_types::WpTheme>, String), AdapterError>;
 
+    /// `wp core check-update` — core releases on offer, newest first. An
+    /// error means "not checked", which callers must never read as current.
+    async fn wp_core_check_update(
+        &self,
+        system_user: &str,
+        htdocs: &str,
+    ) -> Result<Vec<hyperion_types::WpCoreUpdate>, AdapterError>;
+
     /// One whitelisted theme action via wp-cli. Same shape as
     /// wp_plugin_action.
     async fn wp_theme_action(
@@ -13591,7 +13599,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             }
         }
         nft_unban(&ip).await;
-        hyperion_state::bans::deactivate(&self.pool, &ip)
+        hyperion_state::bans::deactivate(&self.pool, &ip, now_secs())
             .await
             .map_err(|e| RpcError::Internal_with(format!("ban remove: {e}")))?;
         self.append_audit(
@@ -13622,18 +13630,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             None => hyperion_state::bans::list_active(&self.pool, now).await,
         }
         .map_err(|e| RpcError::Internal_with(format!("ban list: {e}")))?;
-        Ok(bans
-            .into_iter()
-            .map(|b| hyperion_types::IpBanWire {
-                id: b.id,
-                ip: b.ip,
-                hosting_id: b.hosting_id,
-                reason: b.reason,
-                source: b.source,
-                banned_at: b.banned_at,
-                expires_at: b.expires_at,
-            })
-            .collect())
+        Ok(bans.into_iter().map(ban_to_wire).collect())
     }
 
     /// Re-apply persisted, unexpired bans to nftables (whose sets are
@@ -13830,7 +13827,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// Read every hosting's WAF hit log from where the last pass stopped,
     /// record the refusals, and return the callers over the WAF threshold.
     ///
-    /// The log lives in `dir` (root-owned `/var/log/hyperion/waf` in
+    /// The log lives in `dir` (root-owned `/var/log/hyperion-waf` in
     /// production): unlike the tenant's own access log, nothing the site
     /// can write ends up in it, so a ban decided from it cannot be forged
     /// by a tenant. Ban intents are returned only for sites whose auto-ban
@@ -13936,6 +13933,94 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             fail2ban_enabled: self.fail2ban.enabled,
             threshold: self.fail2ban.waf_threshold,
             window_secs: self.fail2ban.window_secs,
+        })
+    }
+
+    /// What the cluster Protection page needs from this node: every site's
+    /// WAF setup and refusal totals, the hourly refusals over `days`, what
+    /// the kept recent refusals look like per rule and per address, and the
+    /// ban history over `days`.
+    pub async fn waf_overview(
+        &self,
+        days: u32,
+    ) -> Result<hyperion_types::waf::WafOverview, RpcError> {
+        use hyperion_types::waf::{WafSiteFacts, RULES};
+        let days = days.clamp(1, 30) as i64;
+        let now = now_secs();
+        let map = |e: hyperion_state::db::StateError| RpcError::Internal_with(format!("waf: {e}"));
+        // The same sweep `ban_list` runs, so an active ban on the page is
+        // really still in force.
+        if let Ok(expired) = hyperion_state::bans::reap_expired(&self.pool, now).await {
+            for ip in &expired {
+                nft_unban(ip).await;
+            }
+        }
+        let t24 = hyperion_state::waf::totals_by_site(&self.pool, now - 86_400)
+            .await
+            .map_err(map)?;
+        let t7 = hyperion_state::waf::totals_by_site(&self.pool, now - 7 * 86_400)
+            .await
+            .map_err(map)?;
+        let totals_for = |rows: &[(String, hyperion_types::waf::WafRuleCount)], id: &str| {
+            rows.iter()
+                .filter(|(h, _)| h == id)
+                .map(|(_, c)| c.clone())
+                .collect::<Vec<_>>()
+        };
+        let mut sites = Vec::new();
+        for s in self.list().await? {
+            if s.state == HostingState::Trashed {
+                continue;
+            }
+            let Ok(Some(row)) = hyperion_state::hostings::get_by_id(&self.pool, &s.id).await else {
+                continue;
+            };
+            let opts = &row.vhost_options;
+            let level = opts.effective_waf_level();
+            let pins = hyperion_types::waf::parse_overrides(&opts.waf_overrides);
+            // A site without PHP never renders the PHP-only rules.
+            let has_php = s.kind.as_deref().map_or(true, |k| k == "php");
+            let rules = hyperion_types::waf::effective_rules(level, &pins, has_php);
+            let id = s.id.as_str();
+            let active_rules: Vec<String> = RULES
+                .iter()
+                .filter(|r| rules.get(r.id))
+                .map(|r| r.id.to_string())
+                .collect();
+            sites.push(WafSiteFacts {
+                hosting_id: id.to_string(),
+                domain: s.domain.clone(),
+                level: level.as_str().to_string(),
+                rules_on: active_rules.len() as u32,
+                active_rules,
+                pins: pins.len() as u32,
+                autoban: self.waf_autoban_enabled(id).await,
+                totals_24h: totals_for(&t24, id),
+                totals_7d: totals_for(&t7, id),
+            });
+        }
+        let since = now - days * 86_400;
+        Ok(hyperion_types::waf::WafOverview {
+            fail2ban_enabled: self.fail2ban.enabled,
+            threshold: self.fail2ban.waf_threshold,
+            window_secs: self.fail2ban.window_secs,
+            ban_ttl_secs: self.fail2ban.ban_ttl_secs,
+            sites,
+            hourly: hyperion_state::waf::hourly_all(&self.pool, since)
+                .await
+                .map_err(map)?,
+            samples: hyperion_state::waf::rule_samples(&self.pool)
+                .await
+                .map_err(map)?,
+            top_ips: hyperion_state::waf::top_ips(&self.pool, WAF_OVERVIEW_TOP_IPS)
+                .await
+                .map_err(map)?,
+            bans: hyperion_state::bans::list_since(&self.pool, since, WAF_OVERVIEW_BANS)
+                .await
+                .map_err(|e| RpcError::Internal_with(format!("ban history: {e}")))?
+                .into_iter()
+                .map(ban_to_wire)
+                .collect(),
         })
     }
 
@@ -14605,11 +14690,17 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(out)
     }
 
-    /// Scan a hosting's installed plugins + themes against the Wordfence
-    /// Intelligence feed (cached daily on the owning node) and return
-    /// the matched vulnerabilities. Best-effort: when the feed can't be
-    /// fetched the result carries `feed_unavailable = true` rather than
-    /// a misleading "all clear".
+    /// Scan a hosting's installed plugins, themes and core for available
+    /// updates (keyless — wp-cli's own update status, which asks
+    /// WordPress.org) and save the result for the cluster page.
+    ///
+    /// A scan that cannot read the install carries `feed_unavailable` and the
+    /// reason rather than a misleading "all clear", and the saved record keeps
+    /// the last good findings with the failure stamped beside them.
+    ///
+    /// Saving every scan — not only the nightly sweep's — keeps the cluster
+    /// page from listing an update somebody already applied by hand from the
+    /// site's WordPress tab until tomorrow night.
     pub async fn wp_vuln_scan(
         &self,
         sel: HostingSelector,
@@ -14620,59 +14711,94 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 message: "hosting must be active to scan".into(),
             });
         }
-        // Keyless: flag components with an available update. wp-cli's
-        // own update status (which queries WordPress.org) is the source —
-        // no external CVE feed.
         let mut findings = Vec::new();
         let mut checked = 0i64;
         let mut enumerated = false;
+        let mut core_version = String::new();
+        let mut errors: Vec<String> = Vec::new();
         // Plugins.
-        if let Ok((plugins, _v)) = self
+        match self
             .adapters
             .wp_plugin_list(&detail.system_user, &detail.root_dir)
             .await
         {
-            enumerated = true;
-            for p in plugins {
-                checked += 1;
-                if p.update_available && !p.latest_version.is_empty() {
-                    findings.push(crate::wp_updates::outdated_finding(
-                        &p.slug,
-                        &p.name,
-                        "plugin",
-                        &p.version,
-                        &p.latest_version,
-                    ));
+            Ok((plugins, v)) => {
+                enumerated = true;
+                core_version = v;
+                for p in plugins {
+                    checked += 1;
+                    if p.update_available && !p.latest_version.is_empty() {
+                        findings.push(crate::wp_updates::outdated_finding(
+                            &p.slug,
+                            &p.name,
+                            "plugin",
+                            &p.version,
+                            &p.latest_version,
+                        ));
+                    }
                 }
             }
+            Err(e) => errors.push(format!("plugins: {e}")),
         }
         // Themes.
-        if let Ok((themes, _v)) = self
+        match self
             .adapters
             .wp_theme_list(&detail.system_user, &detail.root_dir)
             .await
         {
-            enumerated = true;
-            for t in themes {
-                checked += 1;
-                if t.update_available && !t.latest_version.is_empty() {
-                    findings.push(crate::wp_updates::outdated_finding(
-                        &t.slug,
-                        &t.name,
-                        "theme",
-                        &t.version,
-                        &t.latest_version,
-                    ));
+            Ok((themes, v)) => {
+                enumerated = true;
+                if core_version.trim().is_empty() {
+                    core_version = v;
+                }
+                for t in themes {
+                    checked += 1;
+                    if t.update_available && !t.latest_version.is_empty() {
+                        findings.push(crate::wp_updates::outdated_finding(
+                            &t.slug,
+                            &t.name,
+                            "theme",
+                            &t.version,
+                            &t.latest_version,
+                        ));
+                    }
                 }
             }
+            Err(e) => errors.push(format!("themes: {e}")),
         }
+        // Core. Only asked of an install that answered at all — a site whose
+        // plugin list cannot load will not answer this either. An error is
+        // "core not checked", which the page must never show as current.
+        let (core_checked, core_updates) = if enumerated {
+            match self
+                .adapters
+                .wp_core_check_update(&detail.system_user, &detail.root_dir)
+                .await
+            {
+                Ok(v) => (true, v),
+                Err(_) => (false, Vec::new()),
+            }
+        } else {
+            (false, Vec::new())
+        };
         findings.sort_by_key(|f| crate::wp_updates::severity_rank(&f.severity));
+        let skips = self.wp_update_skips(detail.id.as_str()).await;
+        crate::wp_updates::overlay_skips(&mut findings, &skips);
+        let error = if enumerated {
+            String::new()
+        } else {
+            errors.join("; ").chars().take(300).collect()
+        };
         let result = hyperion_types::WpVulnScanResult {
             findings,
             feed_unavailable: !enumerated,
             feed_age_secs: 0,
             checked,
             auto_updated: 0,
+            core_version: core_version.trim().to_string(),
+            core_checked,
+            core_updates,
+            error,
         };
         self.append_audit(
             "wp.vuln.scan",
@@ -14690,7 +14816,57 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             },
         )
         .await;
+        self.record_vuln_scan(detail.id.as_str(), &result).await;
         Ok(result)
+    }
+
+    /// The last saved scan for a hosting, if any.
+    async fn stored_vuln_scan(&self, hosting_id: &str) -> Option<StoredVulnScan> {
+        hyperion_state::hosting_kv::get(&self.pool, hosting_id, "vuln_scan")
+            .await
+            .ok()
+            .flatten()
+            .and_then(|j| serde_json::from_str::<StoredVulnScan>(&j).ok())
+    }
+
+    /// Persist a saved scan as-is. Best-effort: a write that fails leaves the
+    /// previous record, which the page shows with its own (older) time.
+    async fn write_vuln_scan(&self, hosting_id: &str, stored: &StoredVulnScan) {
+        if let Ok(json) = serde_json::to_string(stored) {
+            let _ = hyperion_state::hosting_kv::set(
+                &self.pool,
+                hosting_id,
+                "vuln_scan",
+                &json,
+                now_secs(),
+            )
+            .await;
+        }
+    }
+
+    /// Save one scan's result. A good scan replaces the record (keeping the
+    /// last sweep's auto-update count, which a scan from the site's tab does
+    /// not know); a failed one keeps the last good findings and stamps the
+    /// failure beside them.
+    async fn record_vuln_scan(&self, hosting_id: &str, result: &hyperion_types::WpVulnScanResult) {
+        let now = now_secs();
+        let prior = self.stored_vuln_scan(hosting_id).await;
+        let stored = if result.feed_unavailable {
+            let mut st = prior.unwrap_or_default();
+            st.failed_at = now;
+            st.error = result.error.clone();
+            st
+        } else {
+            let mut result = result.clone();
+            result.auto_updated = prior.map_or(0, |p| p.result.auto_updated);
+            StoredVulnScan {
+                scanned_at: now,
+                result,
+                failed_at: 0,
+                error: String::new(),
+            }
+        };
+        self.write_vuln_scan(hosting_id, &stored).await;
     }
 
     /// Whether the keyless defender may auto-apply minor/patch updates for
@@ -14771,10 +14947,29 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             if !has_wp {
                 continue;
             }
+            // Major-update keys from the prior stored scan (diff so a
+            // standing major doesn't re-alert daily). Read BEFORE scanning:
+            // the scan saves itself, so read after it every major would
+            // already look known and none would ever alert.
+            let prior: std::collections::HashSet<String> = self
+                .stored_vuln_scan(s.id.as_str())
+                .await
+                .map(|st| {
+                    st.result
+                        .findings
+                        .iter()
+                        .filter(|f| f.update_type == "major")
+                        .map(|f| format!("{}:{}", f.slug, f.patched_version))
+                        .collect()
+                })
+                .unwrap_or_default();
+            // Couldn't enumerate: the scan has already stamped the failure
+            // beside the last good findings.
             let mut scan = match self.wp_vuln_scan(HostingSelector::Id(s.id.clone())).await {
                 Ok(r) if !r.feed_unavailable => r,
-                _ => continue, // couldn't enumerate — leave prior data
+                _ => continue,
             };
+            let mut rescan_error: Option<String> = None;
 
             // Auto-apply minor/patch (same-major) updates when enabled.
             let mut auto_updated = 0i64;
@@ -14874,12 +15069,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     let user = detail.system_user.trim().to_string();
                     let root = detail.root_dir.trim().to_string();
                     if !user.is_empty() && !root.is_empty() {
-                        // An error reading the answer means "we do not
-                        // know", which must not become "update anyway".
-                        let available = hyperion_adapters::wpcli::core_check_update(&user, &root)
-                            .await
-                            .unwrap_or_default();
-                        if let Some(rel) = available.iter().find(|u| u.is_minor()) {
+                        // The scan above asked `wp core check-update`; an
+                        // error there left the list empty — "we do not know"
+                        // must not become "update anyway".
+                        if let Some(rel) = scan.core_updates.iter().find(|u| u.is_minor()).cloned()
+                        {
                             // A snapshot before core specifically, even
                             // though the batch already took one: a site
                             // whose plugins updated cleanly and whose CORE
@@ -14936,32 +15130,19 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     }
                 }
                 // Re-scan so the stored result reflects what's LEFT
-                // (typically only major updates needing manual review).
+                // (typically only major updates needing manual review). A
+                // re-scan that cannot read the site keeps the pre-update
+                // findings — an empty list here would read as "up to date".
                 if auto_updated > 0 {
-                    if let Ok(r) = self.wp_vuln_scan(HostingSelector::Id(s.id.clone())).await {
-                        scan = r;
+                    match self.wp_vuln_scan(HostingSelector::Id(s.id.clone())).await {
+                        Ok(r) if !r.feed_unavailable => scan = r,
+                        Ok(r) => rescan_error = Some(r.error),
+                        Err(e) => rescan_error = Some(e.to_string()),
                     }
                 }
             }
             scan.auto_updated = auto_updated;
 
-            // Major-update keys from the prior stored scan (diff so a
-            // standing major doesn't re-alert daily).
-            let prior: std::collections::HashSet<String> =
-                hyperion_state::hosting_kv::get(&self.pool, s.id.as_str(), "vuln_scan")
-                    .await
-                    .ok()
-                    .flatten()
-                    .and_then(|j| serde_json::from_str::<StoredVulnScan>(&j).ok())
-                    .map(|st| {
-                        st.result
-                            .findings
-                            .iter()
-                            .filter(|f| f.update_type == "major")
-                            .map(|f| format!("{}:{}", f.slug, f.patched_version))
-                            .collect()
-                    })
-                    .unwrap_or_default();
             for f in scan.findings.iter().filter(|f| f.update_type == "major") {
                 let key = format!("{}:{}", f.slug, f.patched_version);
                 if prior.contains(&key) {
@@ -14984,54 +15165,83 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 .await;
             }
 
-            let stored = StoredVulnScan {
-                scanned_at: now,
-                result: scan,
+            let (failed_at, error) = match rescan_error {
+                Some(e) => (now_secs(), e),
+                None => (0, String::new()),
             };
-            if let Ok(json) = serde_json::to_string(&stored) {
-                let _ = hyperion_state::hosting_kv::set(
-                    &self.pool,
-                    s.id.as_str(),
-                    "vuln_scan",
-                    &json,
-                    now,
-                )
-                .await;
-            }
+            self.write_vuln_scan(
+                s.id.as_str(),
+                &StoredVulnScan {
+                    scanned_at: now,
+                    result: scan,
+                    failed_at,
+                    error,
+                },
+            )
+            .await;
         }
         Ok(new_majors)
     }
 
-    /// Read every hosting's last stored vuln scan (this node only) for the
-    /// cluster dashboard. Only hostings WITH findings are returned.
+    /// Every WordPress hosting on this node with its last saved update scan,
+    /// for the cluster WordPress-updates page.
+    ///
+    /// Up-to-date sites stay in: dropping them made "up to date" and "never
+    /// scanned" look identical — both simply absent. Installs the sweep has
+    /// not reached yet are listed too, with `scanned_at` 0, for the same
+    /// reason.
+    ///
+    /// The auto-update switch and the pause map are read NOW, not taken from
+    /// the saved scan, so a flipped switch or a Resume shows at once.
     pub async fn vuln_findings_list(
         &self,
     ) -> Result<Vec<hyperion_types::HostingVulnSummary>, RpcError> {
         let pairs = hyperion_state::hosting_kv::list_by_key(&self.pool, "vuln_scan")
             .await
             .map_err(|e| RpcError::Internal_with(format!("vuln list: {e}")))?;
+        let kv_map = |key: &'static str| async move {
+            hyperion_state::hosting_kv::list_by_key(&self.pool, key)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .collect::<std::collections::HashMap<String, String>>()
+        };
+        let switches = kv_map("wp_auto_update").await;
+        let skips = kv_map("wp_update_skips").await;
+        let installs = wordpress::list_install_ids(&self.pool)
+            .await
+            .unwrap_or_default();
         let summaries = self.list().await.unwrap_or_default();
-        let mut out = Vec::new();
+
+        let mut stored: Vec<(String, StoredVulnScan)> = Vec::new();
         for (hid, json) in pairs {
-            let Ok(st) = serde_json::from_str::<StoredVulnScan>(&json) else {
+            if let Ok(st) = serde_json::from_str::<StoredVulnScan>(&json) {
+                stored.push((hid, st));
+            }
+        }
+        // Installs with no saved scan yet. Active ones only: the sweep skips
+        // a suspended site, so "not checked yet" would never clear for it.
+        for hid in installs {
+            if stored.iter().any(|(h, _)| *h == hid) {
                 continue;
-            };
-            // A site with nothing outdated STAYS in the list. Dropping it
-            // made the page unable to distinguish "up to date" from "never
-            // scanned" — both rendered as absent — so a WordPress site the
-            // operator knows they have simply was not there, with no way to
-            // tell whether that was good news or a broken sweep. The page
-            // sorts by severity anyway, so clean sites settle at the bottom.
-            //
+            }
+            let active = summaries
+                .iter()
+                .any(|s| s.id.as_str() == hid && s.state == HostingState::Active);
+            if active {
+                stored.push((hid, StoredVulnScan::default()));
+            }
+        }
+
+        let mut out = Vec::new();
+        for (hid, st) in stored {
             // A hosting that does not resolve is TRASHED or gone — `list()`
             // is `WHERE state != 'trashed'` — and its stored scan outlives it
             // in `hosting_kv` so that un-trashing restores the history.
             //
-            // It must not become a row. `unwrap_or_default()` here put a
-            // nameless line on the cluster dashboard with a node, a count and
-            // a timestamp but no site: nothing an operator can click, act on,
-            // or match to anything they own. And the finding is not actionable
-            // either way, because a trashed site is deliberately not running.
+            // It must not become a row: a nameless line with a node, a count
+            // and a timestamp but no site is nothing an operator can click or
+            // act on, and a trashed site is deliberately not running anyway.
             let Some(domain) = summaries
                 .iter()
                 .find(|s| s.id.as_str() == hid)
@@ -15039,18 +15249,33 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             else {
                 continue;
             };
+            let auto_update = switches.get(&hid).map_or(true, |v| v.trim() != "off");
+            let skip_map = skips
+                .get(&hid)
+                .map(|j| crate::wp_updates::parse_skip_map(j))
+                .unwrap_or_default();
+            let mut findings = st.result.findings;
+            crate::wp_updates::overlay_skips(&mut findings, &skip_map);
             out.push(hyperion_types::HostingVulnSummary {
                 hosting_id: hid,
                 domain,
                 node_id: String::new(),
                 scanned_at: st.scanned_at,
-                findings: st.result.findings,
+                findings,
+                auto_update: Some(auto_update),
+                auto_updated: st.result.auto_updated,
+                checked: st.result.checked,
+                core_version: st.result.core_version,
+                core_checked: st.result.core_checked,
+                core_updates: st.result.core_updates,
+                failed_at: st.failed_at,
+                error: st.error,
             });
         }
-        // Most criticals first.
+        // Most major updates first; the page re-sorts by what each needs.
         out.sort_by(|a, b| {
-            b.count_severity("critical")
-                .cmp(&a.count_severity("critical"))
+            b.count_severity("high")
+                .cmp(&a.count_severity("high"))
                 .then(b.findings.len().cmp(&a.findings.len()))
         });
         Ok(out)
@@ -34932,10 +35157,18 @@ async fn nft_unban(ip: &str) {
 /// What we persist per hosting under the `vuln_scan` KV key: the last
 /// scan result plus when it ran (the KV layer's own updated_at isn't
 /// read back by `list_by_key`, so the timestamp rides inside the value).
-#[derive(serde::Serialize, serde::Deserialize)]
+///
+/// `failed_at`/`error` stamp the latest attempt that could not read the site;
+/// the findings beside them are then from the last good scan (or empty, with
+/// `scanned_at` 0, when there never was one).
+#[derive(serde::Serialize, serde::Deserialize, Default)]
 struct StoredVulnScan {
     scanned_at: i64,
     result: hyperion_types::WpVulnScanResult,
+    #[serde(default)]
+    failed_at: i64,
+    #[serde(default)]
+    error: String,
 }
 
 /// `hosting_kv` key holding the last integrity scan, sibling to
@@ -35493,6 +35726,25 @@ const WAF_AUTOBAN_KV_KEY: &str = "waf_autoban_enabled";
 const WAF_LOG_POS_KV_KEY: &str = "waf_log_pos";
 /// Refusals listed in the activity panel.
 const WAF_RECENT_SHOWN: i64 = 50;
+/// Addresses one node reports to the Protection page.
+const WAF_OVERVIEW_TOP_IPS: i64 = 25;
+/// Bans one node reports to the Protection page's history.
+const WAF_OVERVIEW_BANS: i64 = 500;
+
+fn ban_to_wire(b: hyperion_state::bans::IpBan) -> hyperion_types::IpBanWire {
+    hyperion_types::IpBanWire {
+        id: b.id,
+        ip: b.ip,
+        hosting_id: b.hosting_id,
+        reason: b.reason,
+        source: b.source,
+        banned_at: b.banned_at,
+        expires_at: b.expires_at,
+        active: b.active,
+        ended_at: b.ended_at,
+        end_reason: b.end_reason,
+    }
+}
 
 /// The host of an `https://host[:port]/…` URL, resolved to addresses. A
 /// literal IP needs no lookup; a name gets a short, bounded one.
@@ -48314,7 +48566,7 @@ mod tests {
         // A stored scan of each kind, as the nightly sweep leaves behind.
         let vuln = serde_json::to_string(&StoredVulnScan {
             scanned_at: 1,
-            result: hyperion_types::WpVulnScanResult::default(),
+            ..Default::default()
         })
         .expect("encode vuln");
         let integrity = serde_json::to_string(&StoredIntegrityScan {
@@ -48362,6 +48614,212 @@ mod tests {
                 .is_some(),
             "the stored scan must not be deleted, only hidden"
         );
+    }
+
+    // ============================================================
+    //  WordPress updates — what the cluster page is told.
+    //
+    //  The page sorts sites into "needs you", "updating itself",
+    //  "couldn't check" and "up to date". Each of these guards one
+    //  way the node used to leave it guessing.
+    // ============================================================
+
+    fn wp_plugin(slug: &str, version: &str, latest: &str) -> hyperion_types::WpPlugin {
+        hyperion_types::WpPlugin {
+            slug: slug.into(),
+            name: slug.into(),
+            version: version.into(),
+            status: "active".into(),
+            update_available: !latest.is_empty(),
+            latest_version: latest.into(),
+            auto_update: false,
+            auto_update_blocked: false,
+            auto_update_block_reason: None,
+        }
+    }
+
+    /// Mocks for a site whose plugin list is `plugins` on every scan, no
+    /// themes, and whose core is offered `core`.
+    fn wp_scan_mocks(
+        plugins: Vec<hyperion_types::WpPlugin>,
+        core: Vec<hyperion_types::WpCoreUpdate>,
+    ) -> MockAdapterPort {
+        let mut a = package_mocks();
+        a.expect_wp_plugin_list()
+            .returning(move |_, _| Ok((plugins.clone(), "6.5.3".into())));
+        a.expect_wp_theme_list()
+            .returning(|_, _| Ok((vec![], "6.5.3".into())));
+        a.expect_wp_core_check_update()
+            .returning(move |_, _| Ok(core.clone()));
+        a
+    }
+
+    /// A WordPress site the sweep has not reached yet used to be absent —
+    /// indistinguishable from a site that is not WordPress at all.
+    #[tokio::test]
+    async fn the_updates_list_shows_wordpress_sites_the_sweep_has_not_reached() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), package_mocks());
+        let site = hosting_for_packages(&s, "kos.cz").await;
+        wordpress::record_install(&pool, &site.id, "https://kos.cz", "6.6.2", "h", 1)
+            .await
+            .expect("wp row");
+
+        let list = s.vuln_findings_list().await.expect("list");
+        assert_eq!(
+            list.len(),
+            1,
+            "an install with no scan is still a row: {list:?}"
+        );
+        assert_eq!(list[0].domain, "kos.cz");
+        assert_eq!(list[0].scanned_at, 0, "never scanned");
+        assert_eq!(list[0].auto_update, Some(true), "an absent switch means on");
+    }
+
+    /// A sweep that cannot read the site must not wipe what was known, and
+    /// must not pass for a fresh result either.
+    #[tokio::test]
+    async fn a_scan_that_cannot_read_the_site_keeps_the_last_findings_and_says_why() {
+        let pool = open_memory().await.expect("open");
+        let mut a = package_mocks();
+        let calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let c = calls.clone();
+        a.expect_wp_plugin_list().returning(move |_, _| {
+            if c.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                Ok((
+                    vec![wp_plugin("woocommerce", "8.7.0", "9.0.1")],
+                    "6.5.3".into(),
+                ))
+            } else {
+                Err(AdapterError::Other(
+                    "Error establishing a database connection".into(),
+                ))
+            }
+        });
+        let t = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        a.expect_wp_theme_list().returning(move |_, _| {
+            if t.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                Ok((vec![], "6.5.3".into()))
+            } else {
+                Err(AdapterError::Other("theme list failed".into()))
+            }
+        });
+        a.expect_wp_core_check_update().returning(|_, _| {
+            Ok(vec![hyperion_types::WpCoreUpdate {
+                version: "6.6.2".into(),
+                update_type: "major".into(),
+            }])
+        });
+        let s = svc(pool.clone(), a);
+        let site = hosting_for_packages(&s, "kos.cz").await;
+
+        let good = s
+            .wp_vuln_scan(HostingSelector::Id(site.id.clone()))
+            .await
+            .expect("scan");
+        assert!(!good.feed_unavailable);
+        assert!(good.core_checked, "core was asked");
+        assert_eq!(good.core_version, "6.5.3");
+        assert_eq!(good.core_updates.len(), 1);
+
+        let bad = s
+            .wp_vuln_scan(HostingSelector::Id(site.id.clone()))
+            .await
+            .expect("scan");
+        assert!(bad.feed_unavailable);
+        assert!(bad.error.contains("database connection"), "{}", bad.error);
+
+        let list = s.vuln_findings_list().await.expect("list");
+        assert_eq!(list.len(), 1);
+        let row = &list[0];
+        assert_eq!(
+            row.findings.len(),
+            1,
+            "the last good findings stay: {row:?}"
+        );
+        assert!(row.scanned_at > 0, "the good scan's time stays");
+        assert!(row.failed_at >= row.scanned_at, "the failure is newer");
+        assert!(row.error.contains("database connection"), "{}", row.error);
+        assert_eq!(row.core_updates.len(), 1, "core from the good scan stays");
+    }
+
+    /// Whether an update applies itself depends on the site's switch and on
+    /// the pause map — both read when the list is built, so Resume or a
+    /// flipped switch shows at once rather than after the next sweep.
+    #[tokio::test]
+    async fn the_updates_list_carries_the_auto_update_switch_and_paused_plugins() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(
+            pool.clone(),
+            wp_scan_mocks(vec![wp_plugin("acf-pro", "6.2.0", "6.3.1")], vec![]),
+        );
+        let site = hosting_for_packages(&s, "kos.cz").await;
+        s.wp_vuln_scan(HostingSelector::Id(site.id.clone()))
+            .await
+            .expect("scan");
+
+        let now = now_secs();
+        let mut skips = crate::wp_updates::SkipMap::new();
+        skips.insert(
+            "acf-pro".into(),
+            crate::wp_updates::AutoUpdateSkip {
+                fail_count: 2,
+                first_failed_at: now - 86_400,
+                last_failed_at: now - 60,
+                paused_until: now + 1_000,
+                last_error: "Download failed. Unauthorized".into(),
+            },
+        );
+        for (key, value) in [
+            ("wp_auto_update", "off".to_string()),
+            (
+                "wp_update_skips",
+                serde_json::to_string(&skips).expect("skips"),
+            ),
+        ] {
+            hyperion_state::hosting_kv::set(&pool, site.id.as_str(), key, &value, now)
+                .await
+                .expect("kv");
+        }
+
+        let list = s.vuln_findings_list().await.expect("list");
+        let row = &list[0];
+        assert_eq!(row.auto_update, Some(false));
+        let f = &row.findings[0];
+        assert!(f.auto_updatable, "same-major");
+        assert_eq!(f.auto_update_failures, 2);
+        assert!(f.auto_update_paused_until > now, "paused");
+        assert!(f.auto_update_error.contains("Unauthorized"));
+    }
+
+    /// The scan now saves itself, so the sweep must read yesterday's majors
+    /// BEFORE scanning — read after, every major looks already known and no
+    /// alert ever goes out.
+    #[tokio::test]
+    async fn the_sweep_alerts_a_new_major_once_even_though_the_scan_saves_itself() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(
+            pool.clone(),
+            wp_scan_mocks(vec![wp_plugin("woocommerce", "8.7.0", "9.0.1")], vec![]),
+        );
+        let site = hosting_for_packages(&s, "kos.cz").await;
+        wordpress::record_install(&pool, &site.id, "https://kos.cz", "6.5.3", "h", 1)
+            .await
+            .expect("wp row");
+
+        assert_eq!(
+            s.wp_vuln_scan_tick().await.expect("tick"),
+            1,
+            "first sight of a major alerts"
+        );
+        assert_eq!(
+            s.wp_vuln_scan_tick().await.expect("tick"),
+            0,
+            "a standing major does not alert again"
+        );
+        let list = s.vuln_findings_list().await.expect("list");
+        assert_eq!(list[0].findings.len(), 1);
+        assert_eq!(list[0].failed_at, 0, "the sweep worked");
     }
 
     /// A restore must not be undone by the expiry actions that fell due while
