@@ -324,6 +324,9 @@ fn every_page_is_reachable_from_the_nav() {
         // Old address of the node-to-node import, now /import/hyperion;
         // a redirect kept for export result pages and bookmarks.
         "/hostings/import",
+        // The first-run wizard: reached through the link the installer
+        // prints, walked by its own step rail, and gone once finished.
+        "/setup",
     ];
 
     let router = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs"))

@@ -24,6 +24,7 @@ pub mod handlers;
 pub mod notify_collector;
 pub mod pma_tls;
 pub mod ratelimit;
+pub mod setup;
 pub mod state;
 pub mod wp_list_cache;
 
@@ -1078,6 +1079,50 @@ pub fn build_router(state: SharedState) -> Router {
         )
         .route("/login/2fa", get(handlers::login::get_login_2fa))
         .route("/login/2fa", post(handlers::login::post_login_2fa))
+        // First-run setup wizard. Outside require_auth/check_csrf on purpose:
+        // the first two steps run before any account exists. Each handler
+        // checks who is asking and verifies its own CSRF token; everything
+        // 404s once setup is finished. See handlers/setup.rs.
+        .route("/setup", get(handlers::setup::get_root))
+        .route("/setup/access", get(handlers::setup::get_access))
+        .route("/setup/access", post(handlers::setup::post_access))
+        .route("/setup/admin", get(handlers::setup::get_admin))
+        .route("/setup/admin", post(handlers::setup::post_admin))
+        .route("/setup/2fa", get(handlers::setup::get_2fa))
+        .route("/setup/2fa", post(handlers::setup::post_2fa))
+        .route("/setup/skip/:step", post(handlers::setup::post_skip))
+        .route("/setup/stack", get(handlers::setup::get_stack))
+        .route("/setup/stack", post(handlers::setup::post_stack))
+        .route(
+            "/setup/stack/status",
+            get(handlers::setup::get_stack_status),
+        )
+        .route("/setup/stack/done", post(handlers::setup::post_stack_done))
+        .route("/setup/system", get(handlers::setup::get_system))
+        .route("/setup/system", post(handlers::setup::post_system))
+        .route("/setup/domain", get(handlers::setup::get_domain))
+        .route("/setup/domain", post(handlers::setup::post_domain))
+        .route(
+            "/setup/domain/status",
+            get(handlers::setup::get_domain_status),
+        )
+        .route(
+            "/setup/domain/continue",
+            post(handlers::setup::post_domain_continue),
+        )
+        .route("/setup/handoff", get(handlers::setup::get_handoff))
+        .route("/setup/mail", get(handlers::setup::get_mail))
+        .route("/setup/mail", post(handlers::setup::post_mail))
+        .route("/setup/mail/test", post(handlers::setup::post_mail_test))
+        .route("/setup/mail/done", post(handlers::setup::post_mail_done))
+        .route("/setup/backups", get(handlers::setup::get_backups))
+        .route("/setup/backups", post(handlers::setup::post_backups))
+        .route(
+            "/setup/backups/done",
+            post(handlers::setup::post_backups_done),
+        )
+        .route("/setup/review", get(handlers::setup::get_review))
+        .route("/setup/finish", post(handlers::setup::post_finish))
         .route("/static/app.css", get(handlers::statics::app_css))
         .route("/static/htmx.min.js", get(handlers::statics::htmx_js))
         // Node enrollment — no session auth (the token IS the credential).
@@ -1163,6 +1208,7 @@ pub fn build_router(state: SharedState) -> Router {
         // Unmatched URLs get the themed 404 page (axum's default is a bare empty
         // body). Still flows through the layers below (security headers etc.).
         .fallback(crate::error::not_found_fallback)
+        .layer(from_fn_with_state(state.clone(), setup::setup_gate))
         .layer(axum::middleware::from_fn(security_headers))
         .layer(from_fn_with_state(state.clone(), drop_wp_lists_on_write))
         .layer(from_fn_with_state(state.clone(), enforce_panel_hostname))
@@ -1238,6 +1284,13 @@ async fn enforce_panel_hostname(
         let path = req.uri().path();
         if path.starts_with("/healthz") || path.starts_with("/readyz") || path.starts_with("/api/")
         {
+            return next.run(req).await;
+        }
+        // The setup wizard sets the panel domain half-way through and then
+        // hands the session over to it itself. Until it is finished, its own
+        // pages — including the progress polls on the old address — must
+        // not be bounced to an origin that holds no session yet.
+        if state.setup.is_active() && (path == "/setup" || path.starts_with("/setup/")) {
             return next.run(req).await;
         }
     }

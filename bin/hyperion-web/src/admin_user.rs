@@ -25,6 +25,25 @@ pub enum UserError {
     NotFound,
 }
 
+impl AdminUser {
+    /// Stand-in for a box with no `web-admin.json` — every install made by
+    /// the setup wizard, whose administrator lives only in `web_users`. The
+    /// bootstrap sign-in path refuses it, and no session can match it (id 0
+    /// is never a `web_users` row).
+    pub fn disabled() -> Self {
+        Self {
+            id: 0,
+            username: "admin".into(),
+            password_hash: String::new(),
+            created_at: 0,
+        }
+    }
+
+    pub fn is_disabled(&self) -> bool {
+        self.password_hash.is_empty()
+    }
+}
+
 /// Load the admin user, or return NotFound if the file is absent.
 pub fn load(path: &Path) -> Result<AdminUser, UserError> {
     let bytes = match std::fs::read(path) {

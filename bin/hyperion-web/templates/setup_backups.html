@@ -1,0 +1,66 @@
+{% extends "_setup_layout.html" %}
+{% block title %}Backups{% endblock %}
+{% block heading %}Keep a copy somewhere else{% endblock %}
+{% block lead %}Site backups are kept on this server. An off-site copy is what survives if the server itself is lost.{% endblock %}
+{% block pane %}
+{% if !targets.is_empty() %}
+<div class="group">
+  <div class="ghead">Off-site destinations</div>
+  {% for t in targets %}
+  <div class="setup-prog">
+    <span class="setup-prog-name">{{ t.name }} · <code>{{ t.bucket }}</code> <span class="text-soft small">{{ t.endpoint }}</span></span>
+    {% if t.enabled %}<span class="pill ok">on</span>{% else %}<span class="pill muted">off</span>{% endif %}
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+<form method="post" action="/setup/backups" class="group" autocomplete="off">
+  <input type="hidden" name="_csrf" value="{{ f.csrf }}">
+  <div class="ghead">Add an S3-compatible bucket</div>
+  <div class="item">
+    <p class="text-soft small">Amazon S3, Backblaze B2, Wasabi, Cloudflare R2, MinIO…</p>
+    <div class="field-row">
+      <div class="field">
+        <label for="endpoint">Endpoint</label>
+        <input id="endpoint" name="endpoint" type="url" class="mono" value="{{ endpoint }}" placeholder="https://s3.eu-central-003.backblazeb2.com" spellcheck="false" required>
+      </div>
+      <div class="field">
+        <label for="bucket">Bucket</label>
+        <input id="bucket" name="bucket" type="text" class="mono" value="{{ bucket }}" spellcheck="false" required>
+      </div>
+    </div>
+    <div class="field-row three">
+      <div class="field">
+        <label for="region">Region</label>
+        <input id="region" name="region" type="text" class="mono" value="{{ region }}" spellcheck="false">
+      </div>
+      <div class="field">
+        <label for="access_key">Access key</label>
+        <input id="access_key" name="access_key" type="text" class="mono" value="{{ access_key }}" spellcheck="false" required>
+      </div>
+      <div class="field">
+        <label for="secret_key">Secret key</label>
+        <input id="secret_key" name="secret_key" type="password" autocomplete="new-password" required>
+      </div>
+    </div>
+  </div>
+  <div class="item setup-actions">
+    {% if let Some((ok, msg)) = probe %}
+      {% if ok %}<span class="pill ok">write + delete ok</span>{% else %}<span class="pill err">check failed</span>{% endif %}
+      <span class="small setup-wrap">{{ msg }}</span>
+    {% endif %}
+    <span class="setup-spacer"></span>
+    <button class="btn{% if probe.is_none() %} primary{% endif %}" type="submit">Save and check bucket</button>
+  </div>
+</form>
+{% if !targets.is_empty() %}
+<form method="post" action="/setup/backups/done" class="setup-skip">
+  <input type="hidden" name="_csrf" value="{{ f.csrf }}">
+  <button class="btn primary" type="submit">Continue</button>
+</form>
+{% endif %}
+<form method="post" action="/setup/skip/backups" class="setup-skip">
+  <input type="hidden" name="_csrf" value="{{ f.csrf }}">
+  <button class="btn ghost" type="submit">Skip for now</button>
+</form>
+{% endblock %}

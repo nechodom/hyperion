@@ -1,0 +1,43 @@
+{% extends "_setup_layout.html" %}
+{% block title %}Two-factor sign-in{% endblock %}
+{% block heading %}Turn on two-factor sign-in{% endblock %}
+{% block lead %}Administrator accounts sign in with a password and a code from an authenticator app. Scan the code below with the app on your phone.{% endblock %}
+{% block pane %}
+<form method="post" action="/setup/2fa" class="group" autocomplete="off">
+  <input type="hidden" name="_csrf" value="{{ f.csrf }}">
+  <input type="hidden" name="secret" value="{{ secret }}">
+  <input type="hidden" name="otpauth" value="{{ otpauth }}">
+  <input type="hidden" name="codes" value="{{ codes_joined }}">
+  <div class="item setup-qr">
+    <div class="setup-qr-img">{{ qr_svg|safe }}</div>
+    <div class="setup-qr-side">
+      <h3>1 · Scan</h3>
+      <p class="text-soft small">Can't scan? Type this key into the app instead:</p>
+      <code class="setup-secret">{{ secret }}</code>
+      <h3>2 · Enter the 6-digit code</h3>
+      <div class="field">
+        <label for="code" class="sr-only">Code from the app</label>
+        <input id="code" name="code" type="text" inputmode="numeric" autocomplete="one-time-code"
+               class="mono setup-otp" placeholder="123 456" required maxlength="9">
+      </div>
+    </div>
+  </div>
+  <div class="item">
+    <h3>Backup codes</h3>
+    <p class="text-soft small">Each one signs you in once if the phone is lost. Save them somewhere other than this server now — they are not shown again.</p>
+    <ul class="setup-codes">
+      {% for c in codes %}<li><code>{{ c }}</code></li>{% endfor %}
+    </ul>
+  </div>
+  <div class="item setup-actions">
+    <span class="setup-spacer"></span>
+    <button class="btn primary" type="submit">Turn on and continue</button>
+  </div>
+</form>
+{% if can_skip %}
+<form method="post" action="/setup/skip/2fa" class="setup-skip">
+  <input type="hidden" name="_csrf" value="{{ f.csrf }}">
+  <button class="btn ghost" type="submit">Skip for now</button>
+</form>
+{% endif %}
+{% endblock %}

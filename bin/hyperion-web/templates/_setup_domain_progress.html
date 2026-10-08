@@ -1,0 +1,38 @@
+{# Polled every 2 s until the certificate is issued or refused (286 stops
+   the poll). Rendered from DomainProgress. #}
+<div class="group"{% if !progress.done && !progress.failed %} hx-get="/setup/domain/status" hx-trigger="every 2s" hx-target="#domain-progress" hx-swap="innerHTML"{% endif %}>
+  <div class="ghead">Certificate{% if !progress.hostname.is_empty() %} · {{ progress.hostname }}{% endif %}</div>
+  <div class="setup-prog is-{% if progress.done %}done{% else if progress.failed %}failed{% else %}running{% endif %}">
+    <span class="setup-prog-name">
+      {% if progress.done %}Let's Encrypt certificate issued
+      {% else if progress.failed %}Let's Encrypt refused the certificate
+      {% else %}Asking Let's Encrypt for a certificate…{% endif %}
+    </span>
+    {% if progress.done %}<span class="pill ok">ready</span>
+    {% else if progress.failed %}<span class="pill err">failed</span>
+    {% else %}<span class="pill info">{{ progress.stage }}</span>{% endif %}
+  </div>
+  {% if !progress.message.is_empty() %}
+  <div class="item"><p class="text-soft small">{{ progress.message }}</p></div>
+  {% endif %}
+  {% if progress.done %}
+  <div class="item setup-actions">
+    <span class="text-soft small">The wizard continues on the new address. You stay signed in.</span>
+    <span class="setup-spacer"></span>
+    <form method="post" action="/setup/domain/continue">
+      <input type="hidden" name="_csrf" value="{{ progress.csrf }}">
+      <button class="btn primary" type="submit">Continue on https://{{ progress.hostname }}</button>
+    </form>
+  </div>
+  {% else if progress.failed %}
+  <div class="item setup-actions">
+    <span class="text-soft small">Usually DNS that doesn't point here yet, or port 80 blocked by a firewall.</span>
+    <span class="setup-spacer"></span>
+    <a class="btn" href="/setup/domain">Try again</a>
+    <form method="post" action="/setup/skip/domain">
+      <input type="hidden" name="_csrf" value="{{ progress.csrf }}">
+      <button class="btn ghost" type="submit">Skip for now</button>
+    </form>
+  </div>
+  {% endif %}
+</div>

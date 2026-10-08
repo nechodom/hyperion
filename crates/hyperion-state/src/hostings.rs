@@ -829,6 +829,16 @@ pub async fn backfill_node_id(pool: &SqlitePool, node_id: &str) -> Result<u64, S
     Ok(r.rows_affected())
 }
 
+/// Every hostings row, trashed ones included. The setup wizard refuses a
+/// hostname change while this is non-zero: the master's node id is its
+/// hostname, and these rows carry it.
+pub async fn count_all(pool: &SqlitePool) -> Result<i64, StateError> {
+    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM hostings")
+        .fetch_one(pool)
+        .await?;
+    Ok(n)
+}
+
 /// Update (or clear) the per-hosting ACME contact email. `None` means
 /// "use agent-wide default". Returns the row count touched (0 if the
 /// hosting wasn't found).

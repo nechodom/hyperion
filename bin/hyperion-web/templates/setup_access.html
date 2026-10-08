@@ -1,0 +1,21 @@
+{% extends "_setup_layout.html" %}
+{% block title %}Confirm this is your server{% endblock %}
+{% block heading %}Confirm this is your server{% endblock %}
+{% block lead %}Enter the setup code the installer printed. It came with the link, so it is usually filled in already.{% endblock %}
+{% block pane %}
+<form method="post" action="/setup/access" class="group" autocomplete="off">
+  <div class="item">
+    <div class="field">
+      <label for="code">Setup code</label>
+      <input id="code" name="code" type="text" class="mono setup-code" value="{{ code }}"
+             placeholder="XXXX-XXXX-XXXX-XXXX" required autofocus
+             autocapitalize="characters" spellcheck="false" maxlength="40">
+    </div>
+    <p class="text-soft small">Lost it? Run <code>hyperion setup-link</code> on the server for a new one. A code works once and expires after 24 hours.</p>
+  </div>
+  <div class="item setup-actions">
+    <span class="setup-spacer"></span>
+    <button class="btn primary" type="submit">Start setup</button>
+  </div>
+</form>
+{% endblock %}

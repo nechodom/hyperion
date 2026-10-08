@@ -555,6 +555,22 @@ pub trait AgentApi: Send + Sync + 'static {
     ) -> Result<i64, RpcError>;
     /// Read the state of the most-recent / in-progress update job.
     async fn node_update_status(&self) -> Result<hyperion_types::NodeUpdateStatus, RpcError>;
+    /// Setup wizard: start installing server software. Returns the start time.
+    async fn setup_stack_start(
+        &self,
+        components: Vec<String>,
+        ftp_port: u16,
+    ) -> Result<i64, RpcError>;
+    /// Setup wizard: the software install's state.
+    async fn setup_stack_status(&self) -> Result<hyperion_types::SetupStackStatus, RpcError>;
+    /// Setup wizard: hostname, time zone, ACME contact. Returns whether the
+    /// agent is about to restart.
+    async fn setup_system_apply(
+        &self,
+        hostname: String,
+        timezone: String,
+        contact_email: String,
+    ) -> Result<bool, RpcError>;
     /// The last recorded OS update check. Runs nothing.
     async fn os_updates_status(&self) -> Result<hyperion_types::OsUpdateStatus, RpcError>;
     /// Run an OS update check now; `refresh` runs `apt-get update` first.

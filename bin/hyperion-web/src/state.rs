@@ -75,6 +75,9 @@ pub struct AppState {
     /// not bootstrap WordPress twice on every render. See
     /// [`crate::wp_list_cache`].
     pub wp_lists: Arc<crate::wp_list_cache::WpListCache>,
+    /// First-run wizard: whether setup is pending, its one-time code, and
+    /// the domain hand-off tokens. See [`crate::setup`].
+    pub setup: Arc<crate::setup::SetupCtl>,
 }
 
 impl AppState {

@@ -1,0 +1,38 @@
+{% extends "_setup_layout.html" %}
+{% block title %}Create the administrator{% endblock %}
+{% block heading %}Create the administrator{% endblock %}
+{% block lead %}This account has full control of every server in the cluster. You can add more people later under Users.{% endblock %}
+{% block pane %}
+<form method="post" action="/setup/admin" class="group">
+  <input type="hidden" name="_csrf" value="{{ f.csrf }}">
+  <div class="item">
+    <div class="field-row">
+      <div class="field">
+        <label for="username">Username</label>
+        <input id="username" name="username" type="text" value="{{ username }}" autocomplete="username"
+               autocapitalize="off" spellcheck="false" required maxlength="64">
+      </div>
+      <div class="field">
+        <label for="email">Email</label>
+        <input id="email" name="email" type="email" value="{{ email }}" autocomplete="email" required>
+        <p class="text-soft small field-note">Password resets and alerts go here.</p>
+      </div>
+    </div>
+    <div class="field-row">
+      <div class="field">
+        <label for="password">Password</label>
+        <input id="password" name="password" type="password" autocomplete="new-password" required minlength="{{ min_len }}">
+        <p class="text-soft small field-note">At least {{ min_len }} characters.</p>
+      </div>
+      <div class="field">
+        <label for="password2">Repeat password</label>
+        <input id="password2" name="password2" type="password" autocomplete="new-password" required minlength="{{ min_len }}">
+      </div>
+    </div>
+  </div>
+  <div class="item setup-actions">
+    <span class="setup-spacer"></span>
+    <button class="btn primary" type="submit">Create account</button>
+  </div>
+</form>
+{% endblock %}

@@ -781,6 +781,28 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(s) => Response::NodeUpdateStatus(s),
             Err(e) => Response::Error(e),
         },
+        Request::SetupStackStart {
+            components,
+            ftp_port,
+        } => match api.setup_stack_start(components, ftp_port).await {
+            Ok(started_at) => Response::SetupStackStart { started_at },
+            Err(e) => Response::Error(e),
+        },
+        Request::SetupStackStatus => match api.setup_stack_status().await {
+            Ok(s) => Response::SetupStackStatus(s),
+            Err(e) => Response::Error(e),
+        },
+        Request::SetupSystemApply {
+            hostname,
+            timezone,
+            contact_email,
+        } => match api
+            .setup_system_apply(hostname, timezone, contact_email)
+            .await
+        {
+            Ok(restarting) => Response::SetupSystemApply { restarting },
+            Err(e) => Response::Error(e),
+        },
         Request::OsUpdatesStatus => match api.os_updates_status().await {
             Ok(s) => Response::OsUpdates(s),
             Err(e) => Response::Error(e),
@@ -2508,6 +2530,20 @@ mod tests {
         }
         async fn node_update_status(&self) -> Result<hyperion_types::NodeUpdateStatus, RpcError> {
             Ok(hyperion_types::NodeUpdateStatus::default())
+        }
+        async fn setup_stack_start(&self, _: Vec<String>, _: u16) -> Result<i64, RpcError> {
+            Ok(0)
+        }
+        async fn setup_stack_status(&self) -> Result<hyperion_types::SetupStackStatus, RpcError> {
+            Ok(Default::default())
+        }
+        async fn setup_system_apply(
+            &self,
+            _: String,
+            _: String,
+            _: String,
+        ) -> Result<bool, RpcError> {
+            Ok(false)
         }
         async fn os_updates_status(&self) -> Result<hyperion_types::OsUpdateStatus, RpcError> {
             Ok(Default::default())

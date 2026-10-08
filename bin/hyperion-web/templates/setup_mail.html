@@ -1,0 +1,76 @@
+{% extends "_setup_layout.html" %}
+{% block title %}Outgoing mail{% endblock %}
+{% block heading %}How should the panel send email?{% endblock %}
+{% block lead %}Used for alerts, password resets and customer letters. Sites on this server send their own mail separately.{% endblock %}
+{% block pane %}
+<form method="post" action="/setup/mail" class="group" autocomplete="off">
+  <input type="hidden" name="_csrf" value="{{ f.csrf }}">
+  <div class="ghead">SMTP relay</div>
+  <div class="item">
+    <p class="text-soft small">Send through your mail provider (Seznam, Google Workspace, Mailgun, Postmark…). Mail sent straight from a VPS usually lands in spam.</p>
+    <div class="field-row three">
+      <div class="field">
+        <label for="host">SMTP server</label>
+        <input id="host" name="host" type="text" class="mono" value="{{ host }}" placeholder="smtp.example.com" spellcheck="false" required>
+      </div>
+      <div class="field">
+        <label for="port">Port</label>
+        <input id="port" name="port" type="number" class="mono" value="{{ port }}" min="1" max="65535" required>
+      </div>
+      <div class="field">
+        <label for="security">Encryption</label>
+        <select id="security" name="security">
+          <option value="starttls"{% if security == "starttls" %} selected{% endif %}>STARTTLS (587)</option>
+          <option value="tls"{% if security == "tls" %} selected{% endif %}>TLS (465)</option>
+          <option value="plain"{% if security == "plain" %} selected{% endif %}>None (testing only)</option>
+        </select>
+      </div>
+    </div>
+    <div class="field-row">
+      <div class="field">
+        <label for="user">Username</label>
+        <input id="user" name="user" type="text" value="{{ user }}" autocomplete="off" spellcheck="false">
+      </div>
+      <div class="field">
+        <label for="password">Password</label>
+        <input id="password" name="password" type="password" autocomplete="new-password"{% if password_set %} placeholder="unchanged"{% endif %}>
+      </div>
+    </div>
+    <div class="field">
+      <label for="from_address">From address</label>
+      <input id="from_address" name="from_address" type="email" value="{{ from_address }}" required>
+    </div>
+  </div>
+  <div class="item setup-actions">
+    {% if saved %}<span class="pill ok">saved</span>{% endif %}
+    <span class="setup-spacer"></span>
+    <button class="btn{% if !saved %} primary{% endif %}" type="submit">Save</button>
+  </div>
+</form>
+{% if saved %}
+<div class="group">
+  <div class="ghead">Test</div>
+  <div class="item setup-actions">
+    {% if let Some((ok, msg)) = test_result %}
+      {% if ok %}<span class="pill ok">delivered</span> <code class="setup-wrap">{{ msg }}</code>
+      {% else %}<span class="pill err">failed</span> <span class="small setup-wrap">{{ msg }}</span>{% endif %}
+    {% else %}
+      <span class="text-soft small">Sends a short message to <strong>{{ admin_email }}</strong>.</span>
+    {% endif %}
+    <span class="setup-spacer"></span>
+    <form method="post" action="/setup/mail/test">
+      <input type="hidden" name="_csrf" value="{{ f.csrf }}">
+      <button class="btn" type="submit">Send test email</button>
+    </form>
+    <form method="post" action="/setup/mail/done">
+      <input type="hidden" name="_csrf" value="{{ f.csrf }}">
+      <button class="btn primary" type="submit">Continue</button>
+    </form>
+  </div>
+</div>
+{% endif %}
+<form method="post" action="/setup/skip/mail" class="setup-skip">
+  <input type="hidden" name="_csrf" value="{{ f.csrf }}">
+  <button class="btn ghost" type="submit">Skip for now</button>
+</form>
+{% endblock %}

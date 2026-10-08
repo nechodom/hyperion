@@ -1,0 +1,38 @@
+{# Polled every 2 s while the install runs; the handler answers 286 once it
+   has finished, which stops htmx polling. Rendered from StackProgress. #}
+<div class="group"{% if progress.running %} hx-get="/setup/stack/status" hx-trigger="every 2s" hx-target="#stack-progress" hx-swap="innerHTML"{% endif %}>
+  <div class="ghead">
+    {% if progress.running %}Installing…{% else if progress.failed %}Finished with problems{% else %}Installed{% endif %}
+    <span class="ghead-note">{{ progress.elapsed }}</span>
+  </div>
+  {% for r in progress.rows %}
+  <div class="setup-prog is-{{ r.state }}">
+    <span class="setup-prog-name">{{ r.label }}</span>
+    {% if r.state == "done" %}<span class="pill ok">done</span>
+    {% else if r.state == "failed" %}<span class="pill err">failed</span>
+    {% else if r.state == "running" %}<span class="pill info">installing</span>
+    {% else %}<span class="pill muted">waiting</span>{% endif %}
+  </div>
+  {% endfor %}
+  {% if !progress.log_tail.is_empty() %}
+  <details class="setup-log"{% if progress.failed %} open{% endif %}>
+    <summary>Installer output</summary>
+    <pre>{{ progress.log_tail }}</pre>
+  </details>
+  {% endif %}
+  {% if progress.finished %}
+  <div class="item setup-actions">
+    {% if progress.failed %}
+    <span class="text-soft small">What failed can be installed later on the Services page, or tried again now.</span>
+    <span class="setup-spacer"></span>
+    <a class="btn" href="/setup/stack?retry=1">Try again</a>
+    {% else %}
+    <span class="setup-spacer"></span>
+    {% endif %}
+    <form method="post" action="/setup/stack/done">
+      <input type="hidden" name="_csrf" value="{{ progress.csrf }}">
+      <button class="btn primary" type="submit">Continue</button>
+    </form>
+  </div>
+  {% endif %}
+</div>

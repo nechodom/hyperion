@@ -1,0 +1,40 @@
+{% extends "_setup_layout.html" %}
+{% block title %}Panel address{% endblock %}
+{% block heading %}Give the panel a proper address{% endblock %}
+{% block lead %}With a domain the panel gets a free Let's Encrypt certificate and the browser warning goes away.{% endblock %}
+{% block pane %}
+{% if waiting %}
+<div id="domain-progress">{% include "_setup_domain_progress.html" %}</div>
+{% else %}
+<form method="post" action="/setup/domain" class="group">
+  <input type="hidden" name="_csrf" value="{{ f.csrf }}">
+  <div class="item">
+    <div class="field">
+      <label for="domain">Panel domain</label>
+      <input id="domain" name="domain" type="text" class="mono" value="{{ domain }}"
+             placeholder="panel.example.com" autocapitalize="off" spellcheck="false" required maxlength="253">
+    </div>
+    {% if !addresses.is_empty() %}
+    <p class="text-soft small">First create a DNS <strong>A</strong> (or AAAA) record for it pointing to
+      {% for a in addresses %}<code>{{ a }}</code>{% if !loop.last %}, {% endif %}{% endfor %}.
+      The check below fails until that record is live.</p>
+    {% endif %}
+    {% if show_skip_dns %}
+    <label class="field-checkbox" for="skip_dns_check">
+      <input type="checkbox" id="skip_dns_check" name="skip_dns_check">
+      The record is correct — my resolver just hasn't caught up. Skip the DNS check.
+    </label>
+    {% endif %}
+  </div>
+  <div class="item setup-actions">
+    <span class="text-soft small">Port 80 must be reachable from the internet for the certificate.</span>
+    <span class="setup-spacer"></span>
+    <button class="btn primary" type="submit">Check DNS and issue certificate</button>
+  </div>
+</form>
+<form method="post" action="/setup/skip/domain" class="setup-skip">
+  <input type="hidden" name="_csrf" value="{{ f.csrf }}">
+  <button class="btn ghost" type="submit">Skip for now — keep using the IP address</button>
+</form>
+{% endif %}
+{% endblock %}

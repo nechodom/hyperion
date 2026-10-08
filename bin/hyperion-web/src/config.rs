@@ -37,6 +37,8 @@ pub struct WebSection {
     /// its own browser origin, so a script injected through phpMyAdmin can
     /// never read a panel page. See `handlers::pma`.
     pub pma_listen: String,
+    /// First-run wizard state (see `setup.rs`). Absent file = no setup mode.
+    pub setup_state_file: PathBuf,
 }
 
 impl Default for WebSection {
@@ -54,6 +56,7 @@ impl Default for WebSection {
             tls_cert_file: PathBuf::from("/etc/hyperion/web-tls/fullchain.pem"),
             tls_key_file: PathBuf::from("/etc/hyperion/web-tls/privkey.pem"),
             pma_listen: "0.0.0.0:8447".into(),
+            setup_state_file: PathBuf::from("/var/lib/hyperion/setup.json"),
         }
     }
 }

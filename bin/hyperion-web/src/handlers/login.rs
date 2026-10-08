@@ -49,7 +49,7 @@ const THROTTLE_LIMIT: u32 = 5;
 /// Display / audit IP — best-effort, honours `X-Forwarded-For` so the audit
 /// trail shows the client's apparent address behind a proxy. NOT used for the
 /// rate-limit bucket (that would be spoofable); see [`throttle_key`].
-fn caller_ip(headers: &HeaderMap) -> String {
+pub(crate) fn caller_ip(headers: &HeaderMap) -> String {
     headers
         .get("x-forwarded-for")
         .and_then(|v| v.to_str().ok())
@@ -72,7 +72,7 @@ fn caller_ip(headers: &HeaderMap) -> String {
 /// XFF for the bucket; behind a reverse proxy this collapses all clients onto
 /// the proxy's IP — the safe (over-limit) failure mode, and the per-account 2FA
 /// counter in `web_verify_2fa` is the real backstop regardless of topology.
-fn throttle_key(peer: SocketAddr) -> String {
+pub(crate) fn throttle_key(peer: SocketAddr) -> String {
     peer.ip().to_string()
 }
 
@@ -80,7 +80,7 @@ fn throttle_key(peer: SocketAddr) -> String {
 /// rolls over. The window opens at the FIRST failure, so the wait is what is
 /// left of it — not a fixed figure (the old page said "5 minutes" against a
 /// 15-minute window, so people who obeyed it got refused again).
-fn throttle_wait(ip: &str) -> Option<i64> {
+pub(crate) fn throttle_wait(ip: &str) -> Option<i64> {
     let now = hyperion_types::now_secs();
     let mut s = THROTTLE.lock().unwrap_or_else(|p| p.into_inner());
     // Garbage-collect stale entries opportunistically.
@@ -99,11 +99,11 @@ fn throttle_wait(ip: &str) -> Option<i64> {
 
 /// Whole minutes for "try again in N minutes", rounded up so the page never
 /// promises a moment that is still inside the window.
-fn wait_minutes(secs: i64) -> i64 {
+pub(crate) fn wait_minutes(secs: i64) -> i64 {
     (secs + 59) / 60
 }
 
-fn record_failure(ip: &str) {
+pub(crate) fn record_failure(ip: &str) {
     let now = hyperion_types::now_secs();
     let mut s = THROTTLE.lock().unwrap_or_else(|p| p.into_inner());
     let entry = s.by_ip.entry(ip.to_string()).or_insert((0, now));
@@ -114,7 +114,7 @@ fn record_failure(ip: &str) {
     }
 }
 
-fn clear_throttle(ip: &str) {
+pub(crate) fn clear_throttle(ip: &str) {
     let mut s = THROTTLE.lock().unwrap_or_else(|p| p.into_inner());
     s.by_ip.remove(ip);
     s.blocked.remove(ip);
@@ -392,6 +392,15 @@ async fn post_login_bootstrap(
 ) -> Result<Response, AppError> {
     // Verify against the on-disk single-admin JSON file.
     let user = state.admin_user.clone();
+    // No file (a wizard install): there is no bootstrap account to sign in
+    // as. While setup is still pending the wizard is the way in.
+    if user.is_disabled() {
+        if state.setup.is_active() {
+            return Ok(Redirect::to("/setup").into_response());
+        }
+        record_failure(tkey);
+        return Ok(login_failed(&form.next));
+    }
     if !subtle_eq(&form.username, &user.username) {
         record_failure(tkey);
         return Ok(login_failed(&form.next));
@@ -703,7 +712,7 @@ fn enforce_2fa_for(role: &str) -> bool {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn mint_session_redirect(
+pub(crate) async fn mint_session_redirect(
     state: &SharedState,
     user_id: i64,
     username: String,

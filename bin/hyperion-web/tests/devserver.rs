@@ -30,11 +30,16 @@ use std::sync::Arc;
 
 struct StubAdapters {
     uid_seq: AtomicU32,
+    /// `DEVSERVER_SETUP=1`: the setup wizard's software install, faked on a
+    /// clock — each component "takes" three seconds — so its progress page
+    /// can be watched without touching the machine.
+    stack: std::sync::Mutex<Option<(std::time::Instant, hyperion_adapters::setup_stack::JobSpec)>>,
 }
 impl StubAdapters {
     fn new() -> Self {
         Self {
             uid_seq: AtomicU32::new(3000),
+            stack: std::sync::Mutex::new(None),
         }
     }
 }
@@ -330,6 +335,65 @@ impl hyperion_core::AdapterPort for StubAdapters {
     async fn redis_delete_acl(&self, _: &str) -> Result<(), AdapterError> {
         Ok(())
     }
+    async fn setup_stack_start(
+        &self,
+        spec: &hyperion_adapters::setup_stack::JobSpec,
+    ) -> Result<(), AdapterError> {
+        *self.stack.lock().unwrap() = Some((std::time::Instant::now(), spec.clone()));
+        Ok(())
+    }
+    async fn setup_stack_status(&self) -> hyperion_adapters::setup_stack::JobStatus {
+        use hyperion_adapters::setup_stack::{JobState, JobStatus};
+        let Some((t0, spec)) = self.stack.lock().unwrap().clone() else {
+            return JobStatus {
+                spec: None,
+                state: JobState::Never,
+                progress: Vec::new(),
+                log_tail: String::new(),
+            };
+        };
+        let step = (t0.elapsed().as_secs() / 3) as usize;
+        let n = spec.components.len();
+        let progress: Vec<(String, String)> = spec
+            .components
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let st = if i < step {
+                    "done"
+                } else if i == step {
+                    "running"
+                } else {
+                    "pending"
+                };
+                (c.clone(), st.to_string())
+            })
+            .collect();
+        let log_tail = spec.components[..step.min(n)]
+            .iter()
+            .map(|c| format!("==> {c}: installed (devserver stub)\n"))
+            .collect();
+        let state = if step >= n {
+            JobState::Finished {
+                exit_code: 0,
+                finished_at: spec.started_at + (n as i64) * 3,
+            }
+        } else {
+            JobState::Running
+        };
+        JobStatus {
+            spec: Some(spec),
+            state,
+            progress,
+            log_tail,
+        }
+    }
+    async fn current_hostname(&self) -> String {
+        "vps-3f91a2".into()
+    }
+    async fn current_timezone(&self) -> String {
+        "UTC".into()
+    }
 }
 
 /// Start a stub hyperion-agent on a temp Unix socket. Returns the socket path
@@ -343,6 +407,12 @@ type StubService = HostingService<StubAdapters>;
 
 async fn start_agent_with_service() -> (PathBuf, tempfile::TempDir, Arc<StubService>) {
     let dir = tempfile::tempdir().expect("dir");
+    // Setup mode saves the ACME contact into agent.toml; give it a scratch one.
+    let agent_toml = std::env::var_os("DEVSERVER_SETUP").map(|_| {
+        let p = dir.path().join("agent.toml");
+        std::fs::write(&p, "[acme]\ncontact_email = \"\"\n").expect("agent.toml");
+        p
+    });
     let pool = open_memory().await.expect("memory db");
     let secrets = Arc::new(SecretsStore::new(dir.path().join("secrets")));
     let svc = Arc::new(HostingService::<StubAdapters> {
@@ -360,7 +430,7 @@ async fn start_agent_with_service() -> (PathBuf, tempfile::TempDir, Arc<StubServ
         email_config: None,
         email_default_to: None,
         fail2ban: hyperion_core::Fail2banConfig::default(),
-        agent_config_path: None,
+        agent_config_path: agent_toml,
         update_cache: Arc::new(tokio::sync::RwLock::new(None)),
         current_git_sha: "dev-unknown".into(),
         cert_issue_locks: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
@@ -383,7 +453,19 @@ async fn start_agent_with_service() -> (PathBuf, tempfile::TempDir, Arc<StubServ
 }
 
 fn build_app(agent_socket: PathBuf, admin: AdminUser) -> axum::Router {
-    build_app_with_signer(agent_socket, admin, Arc::new(SessionSigner::new_random())).0
+    build_app_with_signer(
+        agent_socket,
+        admin,
+        Arc::new(SessionSigner::new_random()),
+        inactive_setup(),
+    )
+    .0
+}
+
+fn inactive_setup() -> Arc<hyperion_web::setup::SetupCtl> {
+    Arc::new(hyperion_web::setup::SetupCtl::inactive(PathBuf::from(
+        "/nonexistent/setup.json",
+    )))
 }
 
 /// Same as [`build_app`] but lets the test keep a handle on the signer
@@ -393,7 +475,10 @@ fn build_app_with_signer(
     agent_socket: PathBuf,
     admin: AdminUser,
     signer: Arc<SessionSigner>,
+    setup: Arc<hyperion_web::setup::SetupCtl>,
 ) -> (axum::Router, Arc<SessionSigner>) {
+    // The wizard's two-factor step is mandatory for real; show it that way.
+    let enforce_2fa = setup.is_active();
     let cfg = Config::default();
     let csrf_key: [u8; 32] = {
         let mut k = [0u8; 32];
@@ -422,7 +507,7 @@ fn build_app_with_signer(
         panel_hostname: Arc::new(tokio::sync::RwLock::new(String::new())),
         // Fixtures log in as admins without enrolling 2FA — keep the
         // enforcement gate off so the existing flows render as before.
-        enforce_admin_2fa: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        enforce_admin_2fa: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(enforce_2fa)),
         // "master" = draw everything, matching how these fixtures were
         // written. Standalone only ever HIDES chrome, so this keeps the
         // existing assertions honest.
@@ -430,6 +515,7 @@ fn build_app_with_signer(
         ftp_password_handoff: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         error_handoff: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         wp_lists: Default::default(),
+        setup,
     });
     // The login/2FA + enroll handlers extract `ConnectInfo<SocketAddr>` (real
     // peer IP for the rate-limit bucket). `.oneshot()` doesn't go through
@@ -1529,7 +1615,27 @@ fn seed_demo_notifications(pool: sqlx::SqlitePool) {
 #[tokio::test]
 #[ignore]
 async fn devserver() {
-    let admin = admin_user::create("kevin", "secret-pw-1").expect("create");
+    // `DEVSERVER_SETUP=1`: a fresh install — no admin, setup pending — so the
+    // first-run wizard can be walked. The setup link is printed below.
+    let setup_mode = std::env::var_os("DEVSERVER_SETUP").is_some();
+    let setup_dir = tempfile::tempdir().expect("setup dir");
+    let (admin, setup, setup_code) = if setup_mode {
+        let path = setup_dir.path().join("setup.json");
+        let code = hyperion_web::setup::issue_code(&path, hyperion_types::now_secs())
+            .expect("write setup state")
+            .expect("issue code");
+        (
+            AdminUser::disabled(),
+            Arc::new(hyperion_web::setup::SetupCtl::load(path)),
+            Some(code),
+        )
+    } else {
+        (
+            admin_user::create("kevin", "secret-pw-1").expect("create"),
+            inactive_setup(),
+            None,
+        )
+    };
     let (sock, _dir, svc) = start_agent_with_service().await;
     if std::env::var_os("DEVSERVER_DEMO").is_some() {
         seed_demo(&svc).await;
@@ -1541,7 +1647,7 @@ async fn devserver() {
         seed_demo_notifications(svc.pool.clone());
     }
     let (router, _signer) =
-        build_app_with_signer(sock, admin, Arc::new(SessionSigner::new_random()));
+        build_app_with_signer(sock, admin, Arc::new(SessionSigner::new_random()), setup);
     // PORT too: the desktop preview hands an auto-assigned port that way.
     let port = std::env::var("DEVSERVER_PORT")
         .or_else(|_| std::env::var("PORT"))
@@ -1550,7 +1656,10 @@ async fn devserver() {
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .unwrap_or_else(|e| panic!("bind {addr}: {e}"));
-    eprintln!("devserver: http://{addr}  (kevin / secret-pw-1)");
+    match &setup_code {
+        Some(code) => eprintln!("devserver: setup wizard at http://{addr}/setup?t={code}"),
+        None => eprintln!("devserver: http://{addr}  (kevin / secret-pw-1)"),
+    }
     axum::serve(
         listener,
         router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
