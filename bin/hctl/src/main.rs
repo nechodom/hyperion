@@ -1341,6 +1341,13 @@ fn print_pretty(resp: &Response) {
                 );
             }
         }
+        Response::WafOverview(o) => {
+            for s in &o.sites {
+                let n: i64 = s.totals_24h.iter().map(|c| c.hits).sum();
+                println!("{:<40} {:<9} {:>6} (24h)", s.domain, s.level, n);
+            }
+            println!("{} ban(s) in the history", o.bans.len());
+        }
         Response::HostingWafActivity(a) => {
             for c in &a.totals_24h {
                 println!("{:<18} {:>6} (24h)", c.rule, c.hits);

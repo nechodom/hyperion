@@ -13543,7 +13543,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             }
         }
         nft_unban(&ip).await;
-        hyperion_state::bans::deactivate(&self.pool, &ip)
+        hyperion_state::bans::deactivate(&self.pool, &ip, now_secs())
             .await
             .map_err(|e| RpcError::Internal_with(format!("ban remove: {e}")))?;
         self.append_audit(
@@ -13574,18 +13574,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             None => hyperion_state::bans::list_active(&self.pool, now).await,
         }
         .map_err(|e| RpcError::Internal_with(format!("ban list: {e}")))?;
-        Ok(bans
-            .into_iter()
-            .map(|b| hyperion_types::IpBanWire {
-                id: b.id,
-                ip: b.ip,
-                hosting_id: b.hosting_id,
-                reason: b.reason,
-                source: b.source,
-                banned_at: b.banned_at,
-                expires_at: b.expires_at,
-            })
-            .collect())
+        Ok(bans.into_iter().map(ban_to_wire).collect())
     }
 
     /// Re-apply persisted, unexpired bans to nftables (whose sets are
@@ -13782,7 +13771,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// Read every hosting's WAF hit log from where the last pass stopped,
     /// record the refusals, and return the callers over the WAF threshold.
     ///
-    /// The log lives in `dir` (root-owned `/var/log/hyperion/waf` in
+    /// The log lives in `dir` (root-owned `/var/log/hyperion-waf` in
     /// production): unlike the tenant's own access log, nothing the site
     /// can write ends up in it, so a ban decided from it cannot be forged
     /// by a tenant. Ban intents are returned only for sites whose auto-ban
@@ -13888,6 +13877,94 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             fail2ban_enabled: self.fail2ban.enabled,
             threshold: self.fail2ban.waf_threshold,
             window_secs: self.fail2ban.window_secs,
+        })
+    }
+
+    /// What the cluster Protection page needs from this node: every site's
+    /// WAF setup and refusal totals, the hourly refusals over `days`, what
+    /// the kept recent refusals look like per rule and per address, and the
+    /// ban history over `days`.
+    pub async fn waf_overview(
+        &self,
+        days: u32,
+    ) -> Result<hyperion_types::waf::WafOverview, RpcError> {
+        use hyperion_types::waf::{WafSiteFacts, RULES};
+        let days = days.clamp(1, 30) as i64;
+        let now = now_secs();
+        let map = |e: hyperion_state::db::StateError| RpcError::Internal_with(format!("waf: {e}"));
+        // The same sweep `ban_list` runs, so an active ban on the page is
+        // really still in force.
+        if let Ok(expired) = hyperion_state::bans::reap_expired(&self.pool, now).await {
+            for ip in &expired {
+                nft_unban(ip).await;
+            }
+        }
+        let t24 = hyperion_state::waf::totals_by_site(&self.pool, now - 86_400)
+            .await
+            .map_err(map)?;
+        let t7 = hyperion_state::waf::totals_by_site(&self.pool, now - 7 * 86_400)
+            .await
+            .map_err(map)?;
+        let totals_for = |rows: &[(String, hyperion_types::waf::WafRuleCount)], id: &str| {
+            rows.iter()
+                .filter(|(h, _)| h == id)
+                .map(|(_, c)| c.clone())
+                .collect::<Vec<_>>()
+        };
+        let mut sites = Vec::new();
+        for s in self.list().await? {
+            if s.state == HostingState::Trashed {
+                continue;
+            }
+            let Ok(Some(row)) = hyperion_state::hostings::get_by_id(&self.pool, &s.id).await else {
+                continue;
+            };
+            let opts = &row.vhost_options;
+            let level = opts.effective_waf_level();
+            let pins = hyperion_types::waf::parse_overrides(&opts.waf_overrides);
+            // A site without PHP never renders the PHP-only rules.
+            let has_php = s.kind.as_deref().map_or(true, |k| k == "php");
+            let rules = hyperion_types::waf::effective_rules(level, &pins, has_php);
+            let id = s.id.as_str();
+            let active_rules: Vec<String> = RULES
+                .iter()
+                .filter(|r| rules.get(r.id))
+                .map(|r| r.id.to_string())
+                .collect();
+            sites.push(WafSiteFacts {
+                hosting_id: id.to_string(),
+                domain: s.domain.clone(),
+                level: level.as_str().to_string(),
+                rules_on: active_rules.len() as u32,
+                active_rules,
+                pins: pins.len() as u32,
+                autoban: self.waf_autoban_enabled(id).await,
+                totals_24h: totals_for(&t24, id),
+                totals_7d: totals_for(&t7, id),
+            });
+        }
+        let since = now - days * 86_400;
+        Ok(hyperion_types::waf::WafOverview {
+            fail2ban_enabled: self.fail2ban.enabled,
+            threshold: self.fail2ban.waf_threshold,
+            window_secs: self.fail2ban.window_secs,
+            ban_ttl_secs: self.fail2ban.ban_ttl_secs,
+            sites,
+            hourly: hyperion_state::waf::hourly_all(&self.pool, since)
+                .await
+                .map_err(map)?,
+            samples: hyperion_state::waf::rule_samples(&self.pool)
+                .await
+                .map_err(map)?,
+            top_ips: hyperion_state::waf::top_ips(&self.pool, WAF_OVERVIEW_TOP_IPS)
+                .await
+                .map_err(map)?,
+            bans: hyperion_state::bans::list_since(&self.pool, since, WAF_OVERVIEW_BANS)
+                .await
+                .map_err(|e| RpcError::Internal_with(format!("ban history: {e}")))?
+                .into_iter()
+                .map(ban_to_wire)
+                .collect(),
         })
     }
 
@@ -35264,6 +35341,25 @@ const WAF_AUTOBAN_KV_KEY: &str = "waf_autoban_enabled";
 const WAF_LOG_POS_KV_KEY: &str = "waf_log_pos";
 /// Refusals listed in the activity panel.
 const WAF_RECENT_SHOWN: i64 = 50;
+/// Addresses one node reports to the Protection page.
+const WAF_OVERVIEW_TOP_IPS: i64 = 25;
+/// Bans one node reports to the Protection page's history.
+const WAF_OVERVIEW_BANS: i64 = 500;
+
+fn ban_to_wire(b: hyperion_state::bans::IpBan) -> hyperion_types::IpBanWire {
+    hyperion_types::IpBanWire {
+        id: b.id,
+        ip: b.ip,
+        hosting_id: b.hosting_id,
+        reason: b.reason,
+        source: b.source,
+        banned_at: b.banned_at,
+        expires_at: b.expires_at,
+        active: b.active,
+        ended_at: b.ended_at,
+        end_reason: b.end_reason,
+    }
+}
 
 /// The host of an `https://host[:port]/…` URL, resolved to addresses. A
 /// literal IP needs no lookup; a name gets a short, bounded one.

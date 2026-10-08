@@ -1006,6 +1006,180 @@ async fn seed_demo(svc: &StubService) {
         .await
         .expect("audit");
     }
+    seed_demo_waf(svc, &ids, now).await;
+}
+
+/// WAF levels, a week of refusals and a few bans, so /protection has a
+/// chart, a false-positive suspect, busy addresses and a ban history.
+async fn seed_demo_waf(svc: &StubService, ids: &[String], now: i64) {
+    use hyperion_types::waf::{WafBatch, WafHit};
+    let pool = &svc.pool;
+    for (i, level) in [
+        (0, "strict"),
+        (1, "standard"),
+        (2, "standard"),
+        (6, "standard"),
+    ] {
+        sqlx::query("UPDATE hostings SET waf_level = ?, waf_enabled = 1 WHERE id = ?")
+            .bind(level)
+            .bind(&ids[i])
+            .execute(pool)
+            .await
+            .expect("waf level");
+    }
+    let hit = |ts: i64, ip: &str, rule: &str, uri: &str, browser: bool| WafHit {
+        ts,
+        ip: ip.into(),
+        rule: rule.into(),
+        method: "GET".into(),
+        uri: uri.into(),
+        ua: if browser {
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/605.1.15 Safari/605.1.15"
+                .into()
+        } else {
+            "python-requests/2.31".into()
+        },
+        browser,
+        ..Default::default()
+    };
+    // (site, rule, address, request, browser, hits per busy hour)
+    let streams: [(usize, &str, &str, &str, bool, i64); 7] = [
+        (
+            0,
+            "probe_args",
+            "185.220.101.34",
+            "/?id=1%27%20OR%201=1--",
+            false,
+            7,
+        ),
+        (
+            0,
+            "scanner_ua",
+            "45.148.10.92",
+            "/wp-content/plugins/",
+            false,
+            3,
+        ),
+        (0, "author_enum", "89.24.17.150", "/?author=2", true, 2),
+        (1, "sensitive_files", "194.26.192.77", "/.env", false, 4),
+        (1, "dotfiles", "194.26.192.77", "/.git/config", false, 2),
+        (
+            2,
+            "probe_args",
+            "185.220.101.34",
+            "/index.php?page=../../etc/passwd",
+            false,
+            3,
+        ),
+        (6, "xmlrpc", "103.152.220.11", "/xmlrpc.php", false, 5),
+    ];
+    for (si, (site, rule, ip, uri, browser, per_hour)) in streams.iter().enumerate() {
+        let mut hits = Vec::new();
+        for h in 0..(7 * 24) {
+            // Bursty, not flat: a few busy stretches a day.
+            let wave = (h as i64 * 7 + si as i64 * 13) % 24;
+            if wave > 9 {
+                continue;
+            }
+            let n = per_hour * (1 + (wave % 3));
+            let base = now - (7 * 24 - h as i64) * 3600;
+            for k in 0..n {
+                // Real browsers come from many addresses, scanners from one.
+                let ip = if *browser {
+                    format!("89.24.{}.{}", 17 + k % 5, 100 + (h as i64 % 50))
+                } else {
+                    ip.to_string()
+                };
+                hits.push(hit(base + k * 37 % 3600, &ip, rule, uri, *browser));
+            }
+        }
+        hyperion_state::waf::record(pool, &ids[*site], &WafBatch::from_hits(hits))
+            .await
+            .expect("waf hits");
+    }
+    use hyperion_state::bans;
+    let ban = |ip: &'static str, site: Option<usize>, reason: &'static str, ago: i64, ttl: i64| {
+        let hosting = site.map(|i| ids[i].clone());
+        async move {
+            bans::add_or_refresh(
+                pool,
+                ip,
+                hosting.as_deref(),
+                reason,
+                if reason.starts_with("auto") {
+                    "auto"
+                } else {
+                    "manual"
+                },
+                now - ago,
+                if ttl == 0 { 0 } else { now - ago + ttl },
+            )
+            .await
+            .expect("ban");
+        }
+    };
+    ban(
+        "185.220.101.34",
+        Some(0),
+        "auto: WAF refusals",
+        3 * 86_400,
+        3600,
+    )
+    .await;
+    ban(
+        "194.26.192.77",
+        Some(1),
+        "auto: WAF refusals",
+        2 * 86_400,
+        3600,
+    )
+    .await;
+    ban(
+        "61.177.172.140",
+        None,
+        "auto: ssh brute force",
+        86_400,
+        3600,
+    )
+    .await;
+    ban(
+        "103.152.220.11",
+        Some(6),
+        "auto: wp-login / xmlrpc brute force",
+        20 * 3600,
+        3600,
+    )
+    .await;
+    ban(
+        "80.94.95.15",
+        None,
+        "manual: spam relay attempts",
+        5 * 86_400,
+        0,
+    )
+    .await;
+    bans::deactivate(pool, "80.94.95.15", now - 4 * 86_400)
+        .await
+        .expect("lift");
+    bans::reap_expired(pool, now).await.expect("reap");
+    // In force right now.
+    ban(
+        "185.220.101.34",
+        Some(0),
+        "auto: WAF refusals",
+        900,
+        24 * 3600,
+    )
+    .await;
+    ban("61.177.172.140", None, "auto: ssh brute force", 300, 3600).await;
+    ban(
+        "5.188.62.214",
+        None,
+        "manual: credential stuffing",
+        2 * 86_400,
+        0,
+    )
+    .await;
 }
 
 /// `DEVSERVER_DEMO_NODES=1`: enroll three fake worker nodes so the Nodes

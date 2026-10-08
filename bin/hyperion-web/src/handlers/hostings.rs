@@ -9686,6 +9686,11 @@ pub struct WafRuleForm {
     /// "on", "off", or "" to follow the level again.
     #[serde(default)]
     pub pin: String,
+    /// "protection" when posted from the cluster Protection page: a plain
+    /// form there, so the outcome is a redirect back with a flash rather
+    /// than a re-rendered panel.
+    #[serde(default)]
+    pub from: String,
 }
 
 /// Pin one WAF rule from the activity list ("Allow this" = pin off). Goes
@@ -9739,6 +9744,30 @@ pub async fn post_waf_rule(
     )
     .await;
     let label = hyperion_types::waf::label_for(&form.rule);
+    if form.from == "protection" {
+        let q = match &resp {
+            Ok(RpcResponse::HostingSetVhostOptions(_)) => {
+                let text = match form.pin.trim() {
+                    "off" => format!("\u{201c}{label}\u{201d} is now off for {}.", detail.domain),
+                    "on" => format!(
+                        "\u{201c}{label}\u{201d} is now always on for {}.",
+                        detail.domain
+                    ),
+                    _ => format!(
+                        "\u{201c}{label}\u{201d} follows the level again on {}.",
+                        detail.domain
+                    ),
+                };
+                format!("flash={}", urlencoding(&text))
+            }
+            Ok(RpcResponse::Error(e)) => {
+                format!("flash_error={}", urlencoding(&format!("not saved: {e}")))
+            }
+            Ok(_) => "flash_error=unexpected+response+from+the+owning+node".to_string(),
+            Err(e) => format!("flash_error={}", urlencoding(&format!("not saved: {e}"))),
+        };
+        return Ok(Redirect::to(&format!("/protection?{q}")).into_response());
+    }
     let notice = match resp {
         // Reload the whole page, not just this panel: the Protection card's
         // rule selects still hold the old pin, and its next save would put

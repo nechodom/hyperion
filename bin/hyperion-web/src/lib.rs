@@ -588,6 +588,7 @@ pub fn build_router(state: SharedState) -> Router {
         )
         .route("/certs", get(handlers::certs::get_certs))
         .route("/vulns", get(handlers::vulns::get_vulns))
+        .route("/protection", get(handlers::protection::get_protection))
         .route("/bans", get(handlers::bans::get_bans))
         .route("/bans/unban", post(handlers::bans::post_unban))
         .route("/certs/renew-all", post(handlers::certs::post_renew_all))
