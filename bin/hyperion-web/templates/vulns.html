@@ -1,75 +1,147 @@
 {% extends "base.html" %}
 {% block title %}WordPress updates · Hyperion{% endblock %}
+{# One folding row per WordPress site. The summary is the scan line (what it
+   needs, site + node, the first component that matters, when it was checked
+   and whether auto-update is on); the fold lists every component with what
+   happens to it. The bucket and every sentence come from handlers::vulns —
+   the template only lays them out. #}
+{% macro site_row(r) %}
+<details class="upd-row" id="upd-{{ r.hosting_id }}" data-bucket="{{ r.bucket.key() }}">
+  <summary>
+    <span class="upd-state"><span class="pill {{ r.bucket.tone() }}">{{ r.bucket.label() }}</span></span>
+    <span class="upd-main">
+      <span class="upd-title">
+        <strong>{{ r.domain }}</strong>
+        <span class="tag">{{ r.node }}</span>
+      </span>
+      <span class="upd-line">{{ r.headline }}{% if r.more > 0 %} <span class="text-soft">· +{{ r.more }} more</span>{% endif %}</span>
+    </span>
+    <span class="upd-meta">
+      <span {% if !r.checked_abs.is_empty() %}title="{{ r.checked_abs }}"{% endif %}>{{ r.checked_ago }}</span>
+      <span>{{ r.auto_label }}</span>
+    </span>
+  </summary>
+  <div class="upd-detail">
+    {% if !r.problem.is_empty() %}<p class="upd-problem">{{ r.problem }}</p>{% endif %}
+    {% if !r.comps.is_empty() %}
+    <ul class="upd-comps">
+      {% for c in r.comps %}
+      <li>
+        <span class="chk-dot {{ c.state.tone() }}"></span>
+        <span class="upd-comp-name"><strong>{{ c.name }}</strong> <span class="text-soft small">{{ c.kind }}</span></span>
+        <span class="upd-comp-ver"><code>{{ c.from }}</code> → <code>{{ c.to }}</code> <span class="text-soft">{{ c.update_type }}</span></span>
+        <span class="upd-comp-what">{{ c.what }}{% if !c.error.is_empty() %}<span class="upd-comp-err">{{ c.error }}</span>{% endif %}</span>
+      </li>
+      {% endfor %}
+    </ul>
+    {% else if r.problem.is_empty() %}
+    <p class="text-soft upd-none">Nothing to update.</p>
+    {% endif %}
+    <div class="upd-foot">
+      {% if !r.core_line.is_empty() %}<span>{{ r.core_line }}</span>{% endif %}
+      {% if !r.facts.is_empty() %}<span>{{ r.facts }}</span>{% endif %}
+      {% if r.auto_update == Some(false) %}<span>auto-update is off — switch it on in the WordPress tab</span>{% endif %}
+      <a class="upd-open" href="/hostings/{{ r.domain }}#wordpress">Open WordPress tab →</a>
+    </div>
+  </div>
+</details>
+{% endmacro %}
 {% block main %}
 
 <div class="page-header">
   <div>
     <h1>WordPress updates</h1>
-    <div class="subtitle">Every site across the cluster with outdated plugins or themes, from the last daily defender sweep. Safe minor and patch updates are applied automatically; major updates are listed here for review.</div>
+    <div class="subtitle">
+      Every WordPress site in the cluster and what its plugins, themes and
+      core need. Minor and patch updates apply themselves overnight on sites
+      with auto-update on; majors, and anything auto-update can't do, wait
+      here for you.
+    </div>
   </div>
 </div>
 
 {% include "_node_auth_banner.html" %}
+{% if !unreachable.is_empty() %}
+  <div class="flash warn">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+    <div class="flash-body"><strong>Incomplete view.</strong> {% for n in unreachable %}{{ n }}{% if !loop.last %}, {% endif %}{% endfor %} didn't answer — {% if unreachable.len() == 1 %}its{% else %}their{% endif %} sites are not listed.</div>
+  </div>
+{% endif %}
 
-<div class="grid cols-3" style="margin-bottom:1rem">
-  <div class="kpi-card">
-    <div class="kpi-label">Major updates (review)</div>
-    <div class="kpi-value">{{ major }}</div>
+{% if fleet_empty %}
+  <div class="card empty">
+    <div class="empty-illustration">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+    </div>
+    <h3>No WordPress sites yet</h3>
+    <p class="text-soft">
+      Sites running WordPress show up here — installed by Hyperion, imported,
+      or uploaded by the customer. Each node checks them nightly.
+    </p>
+    {% include "_node_auth_empty_note.html" %}
   </div>
-  <div class="kpi-card">
-    <div class="kpi-label">Outdated components</div>
-    <div class="kpi-value">{{ outdated }}</div>
-  </div>
-  <div class="kpi-card">
-    <div class="kpi-label">Affected sites</div>
-    <div class="kpi-value">{{ sites }}</div>
-  </div>
+{% else %}
+
+<div class="svc-verdict {{ verdict_tone }}">
+  <span class="dot"></span>
+  <span>{{ verdict }}</span>
 </div>
 
-<div class="card no-pad-table">
-  {% if rows.is_empty() %}
-    <div class="empty" style="padding:2.5rem">
-      <p class="muted">Every WordPress site across the cluster is up to date.</p>
-      <p class="text-soft small">Sites are swept daily. Safe minor and patch updates apply automatically; major updates appear here and notify administrators.</p>
-      {% include "_node_auth_empty_note.html" %}
+<div class="search-toolbar">
+  <form method="get" action="/vulns" class="search-form jobs-filter" role="search">
+    <div class="search-input">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      <input type="search" name="q" value="{{ q }}"
+             placeholder="Search — site, plugin or theme…"
+             autocomplete="off" spellcheck="false">
     </div>
-  {% else %}
-    <div class="table-wrap">
-      <table>
-        <thead><tr>
-          <th>Site</th><th>Node</th><th>Updates</th><th>Components</th><th class="right">Scanned</th>
-        </tr></thead>
-        <tbody>
-        {% for r in rows %}
-          <tr>
-            <td><a href="/hostings/{{ r.domain }}#wordpress">{{ r.domain }}</a></td>
-            <td><span class="tag">{{ r.node_id }}</span></td>
-            <td>
-              {% if r.findings.is_empty() %}
-                {# A scanned site with nothing outdated. It used to be dropped
-                   from the list entirely, which made "up to date" and "never
-                   scanned" look identical — both simply absent. #}
-                <span class="pill ok">up to date</span>
-              {% else %}
-                {% if r.count_severity("high") > 0 %}<span class="pill warn">{{ r.count_severity("high") }} major</span> {% endif %}
-                {% if r.count_severity("medium") > 0 %}<span class="pill">{{ r.count_severity("medium") }} minor</span> {% endif %}
-                {% if r.count_severity("low") > 0 %}<span class="pill">{{ r.count_severity("low") }} patch</span>{% endif %}
-              {% endif %}
-            </td>
-            <td class="muted small" style="max-width:28rem">
-              {% if r.findings.is_empty() %}
-                <span class="text-soft">core, plugins and themes all current</span>
-              {% else %}
-              {% for f in r.findings %}<code style="font-size:0.74rem">{{ f.kind }}:{{ f.slug }}</code> <span class="text-soft">{{ f.installed_version }}→{{ f.patched_version }}</span>{% if !loop.last %} · {% endif %}{% endfor %}
-              {% endif %}
-            </td>
-            <td class="right muted numeric" title="{{ r.scanned_at }}">{{ crate::handlers::stats::fmt_ago(r.scanned_at) }}</td>
-          </tr>
-        {% endfor %}
-        </tbody>
-      </table>
-    </div>
-  {% endif %}
+    {% if nodes.len() > 1 %}
+    <select name="node" aria-label="Node" onchange="this.form.submit()">
+      <option value="" {% if node_filter.is_empty() %}selected{% endif %}>All nodes</option>
+      {% for n in nodes %}
+        <option value="{{ n }}" {% if node_filter == n.as_str() %}selected{% endif %}>{{ n }}</option>
+      {% endfor %}
+    </select>
+    {% else if !node_filter.is_empty() %}
+    <input type="hidden" name="node" value="{{ node_filter }}">
+    {% endif %}
+    {% if !show.is_empty() %}<input type="hidden" name="show" value="{{ show }}">{% endif %}
+    <noscript><button class="btn" type="submit">Filter</button></noscript>
+  </form>
+  <nav class="search-segments" aria-label="Filter by what a site needs">
+    <a class="seg {% if show.is_empty() %}active{% endif %}" href="{{ all_href }}">
+      All <span class="seg-count">{{ all_count }}</span>
+    </a>
+    {% for s in segments %}
+    <a class="seg {% if s.active %}active{% endif %}" href="{{ s.href }}" data-seg="{{ s.key }}">
+      <span class="seg-dot {{ s.tone }}"></span>{{ s.label }} <span class="seg-count">{{ s.count }}</span>
+    </a>
+    {% endfor %}
+  </nav>
 </div>
 
+{% if groups.is_empty() %}
+  <div class="group">
+    <div class="item text-soft">No sites match these filters. <a href="/vulns">Show every site</a></div>
+  </div>
+{% endif %}
+
+<div class="upd-groups">
+{% for g in groups %}
+  <div class="group">
+    <div class="ghead">{{ g.bucket.label() }} · {{ g.rows.len() }}</div>
+    {% for r in g.rows %}{% call site_row(r) %}{% endfor %}
+  </div>
+{% endfor %}
+</div>
+
+<p class="text-soft small" style="margin-top:1rem">
+  Every node sweeps its own sites each night, and a few minutes after its
+  agent starts: it takes a snapshot, applies minor and patch updates where
+  auto-update is on, and alerts you once about each new major. A plugin whose
+  update keeps failing — usually one that needs a licence key — is paused for
+  30 days. Opening a site's WordPress tab checks it again on the spot, and
+  that is also where auto-update is switched.
+</p>
+{% endif %}
 {% endblock %}

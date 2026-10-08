@@ -5,13 +5,14 @@
 <div class="chk-row" id="vuln-panel">
   <div class="chk-head">
     {% if scan.feed_unavailable %}<span class="chk-dot warn"></span>
-    {% else if scan.findings.is_empty() %}<span class="chk-dot ok"></span>
-    {% else %}<span class="chk-dot warn"></span>{% endif %}
+    {% else if waiting > 0 %}<span class="chk-dot warn"></span>
+    {% else if !comps.is_empty() %}<span class="chk-dot info"></span>
+    {% else %}<span class="chk-dot ok"></span>{% endif %}
     <h3 class="chk-name">Updates</h3>
     <span class="chk-sum">
       {% if scan.feed_unavailable %}Couldn't read plugins and themes — not a clean result
-      {% else if scan.findings.is_empty() %}Everything up to date · {{ scan.checked }} plugins &amp; themes checked
-      {% else %}{{ scan.findings.len() }} of {{ scan.checked }} plugins &amp; themes have updates{% endif %}
+      {% else if comps.is_empty() %}Everything up to date · {{ scan.checked }} plugins &amp; themes checked{% if !scan.core_checked %} · core not checked{% endif %}
+      {% else %}{{ comps.len() }} update{% if comps.len() != 1 %}s{% endif %} available{% if waiting > 0 %} · {{ waiting }} wait{% if waiting == 1 %}s{% endif %} for you{% else %} · all applied by the next sweep{% endif %}{% endif %}
     </span>
     <div class="chk-actions">
       <button class="btn ghost small" type="button"
@@ -26,16 +27,17 @@
     <p class="chk-note">
       This usually means a broken WordPress install or a file-permission
       problem. Repair WordPress (Tools → Repair or reinstall), then scan again.
+      {% if !scan.error.is_empty() %}<br><code>{{ scan.error }}</code>{% endif %}
     </p>
-    {% else if !scan.findings.is_empty() %}
+    {% else if !comps.is_empty() %}
     <ul class="chk-list upd-list">
-      {% for f in scan.findings %}
+      {% for c in comps %}
       <li>
-        <span class="chk-dot {% if f.update_type == "major" %}warn{% endif %}"></span>
-        <strong>{{ f.name }} <span class="text-soft small">{{ f.kind }}</span></strong>
+        <span class="chk-dot {{ c.state.tone() }}"></span>
+        <strong>{{ c.name }} <span class="text-soft small">{{ c.kind }}</span></strong>
         <span class="chk-detail">
-          <code>{{ f.installed_version }}</code> → <code>{{ f.patched_version }}</code>
-          · {{ f.update_type }}{% if f.auto_updatable %} · applied automatically{% else %} · review before applying{% endif %}
+          <code>{{ c.from }}</code> → <code>{{ c.to }}</code>
+          · {{ c.update_type }} · {{ c.what }}{% if !c.error.is_empty() %} · <span class="text-soft">{{ c.error }}</span>{% endif %}
         </span>
       </li>
       {% endfor %}

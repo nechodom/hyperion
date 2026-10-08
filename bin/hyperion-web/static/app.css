@@ -1377,6 +1377,81 @@ details.pkg-new .pkg-fs:first-of-type { padding-top: 0; }
 .mail-pre.mail-err { color: var(--danger); }
 .mail-days > .group + .group { margin-top: var(--group-gap); }
 
+/* /vulns — one folding row per WordPress site inside a bucket .group. The
+   summary is the scan line (what it needs, site + node, the component that
+   matters, when checked + auto-update); the fold lists every component and
+   what happens to it. Same rhythm as .mail-row. */
+.group > .upd-row { border-bottom: 1px solid var(--border); }
+.group > .upd-row:last-child { border-bottom: none; }
+.upd-row > summary {
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
+  padding: 0.75rem 1.25rem;
+  list-style: none;
+  cursor: pointer;
+  transition: background var(--t-fast);
+}
+.upd-row > summary::-webkit-details-marker { display: none; }
+.upd-row > summary:hover,
+.upd-row[open] > summary { background: var(--surface-2); }
+.upd-row .upd-state { flex: none; width: 8rem; display: flex; }
+.upd-row .upd-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 0.2rem; }
+.upd-row .upd-title { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.5rem; overflow-wrap: anywhere; }
+.upd-row .upd-line { font-size: 0.8rem; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.upd-row .upd-meta {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.15rem;
+  font-size: 0.78rem;
+  color: var(--text-soft);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.upd-row .upd-meta > :first-child { color: var(--text-dim); }
+.upd-detail {
+  padding: 0.75rem 1.25rem 0.9rem calc(1.25rem + 8rem + 0.9rem);
+  font-size: 0.85rem;
+  border-top: 1px solid var(--border);
+}
+.upd-problem { margin: 0 0 0.6rem; color: var(--warn); overflow-wrap: anywhere; }
+.upd-none { margin: 0 0 0.6rem; }
+.upd-comps { list-style: none; margin: 0 0 0.6rem; padding: 0; display: flex; flex-direction: column; gap: 0.45rem; }
+.upd-comps li {
+  display: grid;
+  grid-template-columns: 8px minmax(10rem, 1.2fr) minmax(9rem, 1fr) 2fr;
+  align-items: baseline;
+  gap: 0.75rem;
+}
+.upd-comps .chk-dot { align-self: start; margin-top: 0.4em; }
+.upd-comp-name, .upd-comp-ver, .upd-comp-what { min-width: 0; overflow-wrap: anywhere; }
+.upd-comp-ver code { font-size: 0.78rem; }
+.upd-comp-what { color: var(--text-dim); }
+.upd-comp-err { display: block; margin-top: 0.15rem; font: 0.76rem/1.4 var(--font-mono); color: var(--danger); }
+.upd-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.35rem 1.1rem;
+  font-size: 0.8rem;
+  color: var(--text-soft);
+}
+.upd-foot .upd-open { margin-left: auto; }
+.upd-groups > .group + .group { margin-top: var(--group-gap); }
+@media (max-width: 640px) {
+  .upd-row > summary { flex-wrap: wrap; gap: 0.4rem 0.75rem; padding: 0.75rem 1rem; }
+  .upd-row .upd-state { width: auto; }
+  .upd-row .upd-main { flex-basis: 100%; order: 2; }
+  .upd-row .upd-meta { flex-direction: row; gap: 0.5rem; margin-left: auto; }
+  .upd-row .upd-line { white-space: normal; }
+  .upd-detail { padding: 0.75rem 1rem; }
+  .upd-comps li { grid-template-columns: 8px 1fr; gap: 0.1rem 0.6rem; }
+  .upd-comps li > :nth-child(n+3) { grid-column: 2; }
+  .upd-foot .upd-open { margin-left: 0; }
+}
+
 /* /notifications — one row per notification inside a day .group: severity,
    title + topic (+ node), message, when + mark read. Unread rows carry a
    primary edge so they read as new without colouring the whole row. */
