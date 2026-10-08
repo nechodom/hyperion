@@ -264,6 +264,13 @@ pub enum Request {
     HostingWafActivity {
         hosting_id: String,
     },
+    /// What the cluster Protection page needs from one node: every site's
+    /// WAF setup and refusals, the busiest addresses, and the bans of the
+    /// last `days` (plus every one still active). An older node cannot
+    /// decode it and drops the connection; the page says so.
+    WafOverview {
+        days: u32,
+    },
     UpcomingExpiries {
         within_seconds: i64,
     },
@@ -2016,6 +2023,7 @@ pub enum Response {
     HostingKvSet,
     HostingKvList(Vec<(String, String)>),
     HostingWafActivity(hyperion_types::waf::WafActivity),
+    WafOverview(hyperion_types::waf::WafOverview),
     UpcomingExpiries(Vec<ExpiringHosting>),
     SchedulerTick {
         actions_processed: i64,

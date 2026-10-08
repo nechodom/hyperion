@@ -94,10 +94,10 @@ pub use stats::{
 };
 pub use stats::{CARE_REPORT_DEFAULT_BODY_TEMPLATE, EXPIRY_WARNING_DEFAULT_BODY_TEMPLATE};
 pub use wp::{
-    HostingIntegritySummary, HostingVulnSummary, WpFatalReport, WpInstallRequest, WpInstallStatus,
-    WpIntegrityFileIssue, WpIntegrityPluginResult, WpIntegrityScanResult, WpMalwareHit, WpPlugin,
-    WpPluginAction, WpPluginActionResult, WpPluginListResponse, WpTheme, WpThemeAction,
-    WpThemeActionResult, WpThemeListResponse, WpVulnFinding, WpVulnScanResult,
+    HostingIntegritySummary, HostingVulnSummary, WpCoreUpdate, WpFatalReport, WpInstallRequest,
+    WpInstallStatus, WpIntegrityFileIssue, WpIntegrityPluginResult, WpIntegrityScanResult,
+    WpMalwareHit, WpPlugin, WpPluginAction, WpPluginActionResult, WpPluginListResponse, WpTheme,
+    WpThemeAction, WpThemeActionResult, WpThemeListResponse, WpVulnFinding, WpVulnScanResult,
 };
 
 /// Current Unix epoch seconds. Centralized so tests can replace it if needed.

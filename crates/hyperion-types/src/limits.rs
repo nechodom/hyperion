@@ -488,6 +488,10 @@ pub struct OffsiteBackfillResult {
     pub note: String,
 }
 
+fn default_true() -> bool {
+    true
+}
+
 /// One IP ban as shown in the UI / returned over the wire.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct IpBanWire {
@@ -500,6 +504,16 @@ pub struct IpBanWire {
     pub banned_at: i64,
     /// 0 = permanent.
     pub expires_at: i64,
+    /// Still in force. Older nodes only ever sent active bans, so an
+    /// absent field means true.
+    #[serde(default = "default_true")]
+    pub active: bool,
+    /// When it stopped being active; `None` while active or unknown.
+    #[serde(default)]
+    pub ended_at: Option<i64>,
+    /// "expired" | "lifted" | "replaced"; `None` while active or unknown.
+    #[serde(default)]
+    pub end_reason: Option<String>,
 }
 
 #[cfg(test)]

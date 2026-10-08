@@ -9772,6 +9772,11 @@ pub struct WafRuleForm {
     /// "on", "off", or "" to follow the level again.
     #[serde(default)]
     pub pin: String,
+    /// "protection" when posted from the cluster Protection page: a plain
+    /// form there, so the outcome is a redirect back with a flash rather
+    /// than a re-rendered panel.
+    #[serde(default)]
+    pub from: String,
 }
 
 /// Pin one WAF rule from the activity list ("Allow this" = pin off). Goes
@@ -9825,6 +9830,30 @@ pub async fn post_waf_rule(
     )
     .await;
     let label = hyperion_types::waf::label_for(&form.rule);
+    if form.from == "protection" {
+        let q = match &resp {
+            Ok(RpcResponse::HostingSetVhostOptions(_)) => {
+                let text = match form.pin.trim() {
+                    "off" => format!("\u{201c}{label}\u{201d} is now off for {}.", detail.domain),
+                    "on" => format!(
+                        "\u{201c}{label}\u{201d} is now always on for {}.",
+                        detail.domain
+                    ),
+                    _ => format!(
+                        "\u{201c}{label}\u{201d} follows the level again on {}.",
+                        detail.domain
+                    ),
+                };
+                format!("flash={}", urlencoding(&text))
+            }
+            Ok(RpcResponse::Error(e)) => {
+                format!("flash_error={}", urlencoding(&format!("not saved: {e}")))
+            }
+            Ok(_) => "flash_error=unexpected+response+from+the+owning+node".to_string(),
+            Err(e) => format!("flash_error={}", urlencoding(&format!("not saved: {e}"))),
+        };
+        return Ok(Redirect::to(&format!("/protection?{q}")).into_response());
+    }
     let notice = match resp {
         // Reload the whole page, not just this panel: the Protection card's
         // rule selects still hold the old pin, and its next save would put
@@ -9930,9 +9959,35 @@ pub async fn post_repair_permissions(
 #[template(path = "_hosting_vuln_panel.html")]
 struct VulnPanelTpl {
     scan: hyperion_types::WpVulnScanResult,
+    /// Every outdated plugin, theme and core release with what happens to
+    /// it — built by the cluster page's classifier so both say the same.
+    comps: Vec<super::vulns::CompRow>,
+    /// Of `comps`, how many wait for a person.
+    waiting: usize,
     selector: String,
     auto_update_enabled: bool,
     csrf_token: String,
+}
+
+impl VulnPanelTpl {
+    fn new(
+        scan: hyperion_types::WpVulnScanResult,
+        selector: String,
+        auto_update_enabled: bool,
+        csrf_token: String,
+    ) -> Self {
+        let comps =
+            super::vulns::scan_comp_rows(&scan, auto_update_enabled, hyperion_types::now_secs());
+        let waiting = comps.iter().filter(|c| c.state.needs_you()).count();
+        Self {
+            scan,
+            comps,
+            waiting,
+            selector,
+            auto_update_enabled,
+            csrf_token,
+        }
+    }
 }
 
 pub async fn get_vuln_panel(
@@ -9979,24 +10034,20 @@ pub async fn get_vuln_panel(
     )
     .await;
     let html = match resp {
-        Ok(RpcResponse::WpVulnScan(scan)) => VulnPanelTpl {
-            scan,
-            selector: selector.clone(),
-            auto_update_enabled,
-            csrf_token,
+        Ok(RpcResponse::WpVulnScan(scan)) => {
+            VulnPanelTpl::new(scan, selector.clone(), auto_update_enabled, csrf_token).render()?
         }
-        .render()?,
         // On any failure render the "couldn't check" state rather than
         // a blank corner — the operator should know the scan didn't run.
-        _ => VulnPanelTpl {
-            scan: hyperion_types::WpVulnScanResult {
+        _ => VulnPanelTpl::new(
+            hyperion_types::WpVulnScanResult {
                 feed_unavailable: true,
                 ..Default::default()
             },
-            selector: selector.clone(),
+            selector.clone(),
             auto_update_enabled,
             csrf_token,
-        }
+        )
         .render()?,
     };
     Ok(Html(html).into_response())

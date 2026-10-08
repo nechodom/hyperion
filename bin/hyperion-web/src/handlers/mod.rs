@@ -26,6 +26,7 @@ pub mod packages;
 pub mod pma;
 pub mod profile;
 pub mod profiles;
+pub mod protection;
 pub mod roles;
 pub mod search;
 pub mod services_health;
