@@ -26131,18 +26131,25 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             // counter: a site that fails every other sample used to reset the
             // streak on each success and never alerted at all.
             let window = (cfg.alert_after_fails * 2).max(4);
-            let recent: Vec<bool> =
+            let recent: Vec<(i64, bool)> =
                 hyperion_state::monitors::history(&self.pool, &cfg.hosting_id, window)
                     .await
-                    .map(|v| v.iter().map(|s| s.success).collect())
-                    .unwrap_or_else(|_| vec![result.success]);
+                    .map(|v| v.iter().map(|s| (s.sampled_at, s.success)).collect())
+                    .unwrap_or_else(|_| vec![(now, result.success)]);
             if result.success {
                 let _ = hyperion_state::monitors::reset_streak(&self.pool, &cfg.hosting_id).await;
             } else {
                 let _ = hyperion_state::monitors::record_fail(&self.pool, &cfg.hosting_id).await;
             }
-            if cfg.alert_state == "alerting" {
-                if monitor_recovered(&recent, cfg.alert_after_fails) {
+            let alerting = cfg.alert_state == "alerting";
+            match monitor_transition(
+                alerting,
+                cfg.last_alert_at,
+                &recent,
+                cfg.alert_after_fails,
+                result.hard_failure,
+            ) {
+                Some(MonitorTransition::Up) => {
                     self.dispatch_monitor_alert(&cfg, &result, true).await;
                     let _ = hyperion_state::monitors::set_alert_state(
                         &self.pool,
@@ -26152,15 +26159,17 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     )
                     .await;
                 }
-            } else if monitor_should_alert(&recent, cfg.alert_after_fails, result.hard_failure) {
-                self.dispatch_monitor_alert(&cfg, &result, false).await;
-                let _ = hyperion_state::monitors::set_alert_state(
-                    &self.pool,
-                    &cfg.hosting_id,
-                    "alerting",
-                    Some(now),
-                )
-                .await;
+                Some(MonitorTransition::Down) => {
+                    self.dispatch_monitor_alert(&cfg, &result, false).await;
+                    let _ = hyperion_state::monitors::set_alert_state(
+                        &self.pool,
+                        &cfg.hosting_id,
+                        "alerting",
+                        Some(now),
+                    )
+                    .await;
+                }
+                None => {}
             }
         }
         Ok(sampled)
@@ -36839,6 +36848,45 @@ fn monitor_recovered(recent: &[bool], threshold: i64) -> bool {
     recent.len() >= need && recent.iter().rev().take(need).all(|ok| *ok)
 }
 
+/// A change of a monitor's alert state, announced to the operator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MonitorTransition {
+    Down,
+    Up,
+}
+
+/// What the newest sample does to a monitor's alert state. `recent` is
+/// `(sampled_at, success)` newest-last, the current sample included;
+/// `last_change_at` is when the state last flipped (`monitor_last_alert_at`).
+///
+/// While the site is up, only samples taken AFTER the last flip count: the
+/// failures an incident was made of stay inside the 2×threshold window for a
+/// few samples after it resolved, and counting them again re-fired "down" on
+/// the very next clean probe — then "up", then "down" on the next blip, for
+/// every site. And "down" is only ever announced on a failing probe.
+fn monitor_transition(
+    alerting: bool,
+    last_change_at: Option<i64>,
+    recent: &[(i64, bool)],
+    threshold: i64,
+    hard: bool,
+) -> Option<MonitorTransition> {
+    if alerting {
+        let flags: Vec<bool> = recent.iter().map(|(_, ok)| *ok).collect();
+        return monitor_recovered(&flags, threshold).then_some(MonitorTransition::Up);
+    }
+    if !matches!(recent.last(), Some((_, false))) {
+        return None;
+    }
+    let since = last_change_at.unwrap_or(i64::MIN);
+    let flags: Vec<bool> = recent
+        .iter()
+        .filter(|(at, _)| *at > since)
+        .map(|(_, ok)| *ok)
+        .collect();
+    monitor_should_alert(&flags, threshold, hard).then_some(MonitorTransition::Down)
+}
+
 /// Probe the configured path and, when that is the homepage, a second page
 /// that renders through a different template. The homepage is often cached or
 /// near-static while the rest of a WordPress site is broken (a plugin fatal on
@@ -36913,7 +36961,25 @@ fn classify_probe(code: i64, body: &str) -> Option<(String, bool)> {
     None
 }
 
-/// 5-second timeout, follow up to 3 redirects, ignore TLS hostname
+/// curl did not deliver a page to judge: no status at all, or it gave up
+/// (timeout, reset, TLS) before a single body byte. The status line alone is
+/// no verdict — an empty 200 there would read as a white screen, a HARD
+/// failure, when the site was only slow. Part of a page that did arrive is
+/// still judged.
+fn probe_gave_up(code: i64, curl_ok: bool, head: &str) -> bool {
+    code == 0 || (!curl_ok && head.trim().is_empty())
+}
+
+/// Seconds one probe request may take, end to end. The probe is an UNCACHED
+/// render (see [`probe_http`]), so this is a budget for PHP building the page
+/// on a box that may be mid-backup — the 5 s that suited the old cached HEAD
+/// timed out healthy sites and reported them down.
+const PROBE_MAX_TIME_SECS: &str = "15";
+/// Seconds to establish the connection; a box that does not answer at all
+/// still fails fast.
+const PROBE_CONNECT_TIMEOUT_SECS: &str = "5";
+
+/// Follow up to 3 redirects, ignore TLS hostname
 /// verification (operator picks the URL — they're targeting their own
 /// host). A full GET (not HEAD: HEAD is cached separately from GET and some
 /// plugins/themes only break while rendering), with a unique query string so
@@ -36929,9 +36995,13 @@ async fn probe_http(url: &str) -> HttpProbeResult {
     // reqwest+tls stack and the rustls CryptoProvider dance.
     let res = tokio::process::Command::new("/usr/bin/curl")
         .args([
-            "-skL", // silent + insecure + follow redirects
+            // silent but keep curl's error line (the alert's "last error") +
+            // insecure + follow redirects
+            "-sSkL",
+            "--connect-timeout",
+            PROBE_CONNECT_TIMEOUT_SECS,
             "--max-time",
-            "5",
+            PROBE_MAX_TIME_SECS,
             "--max-redirs",
             "3",
             "-H",
@@ -36951,12 +37021,17 @@ async fn probe_http(url: &str) -> HttpProbeResult {
                 .unwrap_or((raw.as_ref(), "0"));
             let code: i64 = code_str.trim().parse().unwrap_or(0);
             let head: String = body.chars().take(PROBE_BODY_CAP).collect();
-            if code == 0 {
+            if probe_gave_up(code, out.status.success(), &head) {
+                let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
                 return HttpProbeResult {
                     success: false,
-                    http_status: None,
+                    http_status: (code > 0).then_some(code),
                     response_ms: elapsed,
-                    error_message: Some(String::from_utf8_lossy(&out.stderr).to_string()),
+                    error_message: Some(if err.is_empty() {
+                        "no response".into()
+                    } else {
+                        err
+                    }),
                     hard_failure: false,
                 };
             }
@@ -40808,6 +40883,192 @@ mod tests {
         assert!(monitor_recovered(&[false, true], 1));
     }
 
+    /// Replay probe results through the decision `monitor_tick` makes each
+    /// sample — same history window, same state bookkeeping — and return the
+    /// (sample index, transition) pairs an operator would have been sent.
+    fn replay_monitor(
+        results: &[bool],
+        threshold: i64,
+        hard: bool,
+    ) -> Vec<(usize, super::MonitorTransition)> {
+        let probes: Vec<Probe> = results
+            .iter()
+            .map(|ok| match (ok, hard) {
+                (true, _) => Probe::Ok,
+                (false, false) => Probe::Soft,
+                (false, true) => Probe::Hard,
+            })
+            .collect();
+        replay_probes(&probes, threshold)
+    }
+
+    /// One probe outcome, as `monitor_tick` sees it.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Probe {
+        Ok,
+        /// No answer / timeout / 4xx.
+        Soft,
+        /// 5xx or an error page.
+        Hard,
+    }
+
+    fn replay_probes(probes: &[Probe], threshold: i64) -> Vec<(usize, super::MonitorTransition)> {
+        let window = (threshold * 2).max(4) as usize;
+        let mut samples: Vec<(i64, bool)> = Vec::new();
+        let mut alerting = false;
+        let mut last_change_at = None;
+        let mut sent = Vec::new();
+        for (i, p) in probes.iter().enumerate() {
+            let at = 1_000 + 60 * i as i64;
+            samples.push((at, *p == Probe::Ok));
+            let recent = &samples[samples.len().saturating_sub(window)..];
+            if let Some(t) = super::monitor_transition(
+                alerting,
+                last_change_at,
+                recent,
+                threshold,
+                *p == Probe::Hard,
+            ) {
+                alerting = t == super::MonitorTransition::Down;
+                last_change_at = Some(at);
+                sent.push((i, t));
+            }
+        }
+        sent
+    }
+
+    /// Every sequence of 10 probes (ok / soft fail / hard fail, 3^10 of them)
+    /// at every threshold an operator can realistically pick, checked against
+    /// what an operator must be able to rely on — not against the algorithm.
+    #[test]
+    fn monitor_alerts_keep_their_promises_for_every_probe_sequence() {
+        use super::MonitorTransition::{Down, Up};
+        const LEN: u32 = 10;
+        for threshold in 1..=5i64 {
+            let th = threshold as usize;
+            for n in 0..3usize.pow(LEN) {
+                let probes: Vec<Probe> = (0..LEN)
+                    .map(|k| match (n / 3usize.pow(k)) % 3 {
+                        0 => Probe::Ok,
+                        1 => Probe::Soft,
+                        _ => Probe::Hard,
+                    })
+                    .collect();
+                let sent = replay_probes(&probes, threshold);
+                let ctx = || format!("threshold {threshold}, {probes:?} → {sent:?}");
+                let mut alerting = false;
+                let mut last_up: Option<usize> = None;
+                let mut next = sent.iter().peekable();
+                for (i, p) in probes.iter().enumerate() {
+                    let fired = next.next_if(|(at, _)| *at == i).map(|(_, t)| *t);
+                    match fired {
+                        Some(Down) => {
+                            assert!(!alerting, "down while already down: {}", ctx());
+                            assert_ne!(*p, Probe::Ok, "down on a passing probe: {}", ctx());
+                            // Enough failures of THIS incident — never ones an
+                            // earlier "up" already closed.
+                            let since = last_up.map_or(0, |u| u + 1);
+                            let fails = probes[since..=i].iter().filter(|q| **q != Probe::Ok);
+                            let need = if *p == Probe::Hard { th.min(2) } else { th };
+                            assert!(fails.count() >= need, "down too early: {}", ctx());
+                            alerting = true;
+                        }
+                        Some(Up) => {
+                            assert!(alerting, "up while not down: {}", ctx());
+                            let need = th.min(2);
+                            assert!(
+                                i + 1 >= need
+                                    && probes[i + 1 - need..=i].iter().all(|q| *q == Probe::Ok),
+                                "up without {need} clean probes in a row: {}",
+                                ctx()
+                            );
+                            alerting = false;
+                            last_up = Some(i);
+                        }
+                        None => {}
+                    }
+                    // Never miss an outage: `threshold` failures in a row (two
+                    // error pages in a row) leave the monitor alerting.
+                    let streak = probes[..=i].iter().rev().take_while(|q| **q != Probe::Ok);
+                    let streak: Vec<_> = streak.collect();
+                    let hard_pair =
+                        streak.len() >= 2 && streak[..2].iter().all(|q| **q == Probe::Hard);
+                    if streak.len() >= th || hard_pair && th >= 2 {
+                        assert!(alerting, "outage at {i} not reported: {}", ctx());
+                    }
+                }
+                assert!(next.next().is_none(), "unconsumed transitions: {}", ctx());
+            }
+        }
+    }
+
+    /// A site that fails every other probe forever is broken even though no
+    /// streak ever builds — the reason the window exists. It must alert, and
+    /// stay alerting rather than resolve on each lucky request.
+    #[test]
+    fn monitor_still_catches_a_flapping_site() {
+        use super::MonitorTransition::Down;
+        for threshold in 1..=5i64 {
+            let probes: Vec<Probe> = (0..40)
+                .map(|i| if i % 2 == 0 { Probe::Soft } else { Probe::Ok })
+                .collect();
+            let sent = replay_probes(&probes, threshold);
+            assert_eq!(
+                sent.first().map(|s| s.1),
+                Some(Down),
+                "threshold {threshold}"
+            );
+            assert!(
+                sent[0].0 < 2 * threshold as usize,
+                "threshold {threshold}: {sent:?}"
+            );
+            if threshold >= 2 {
+                assert_eq!(sent.len(), 1, "threshold {threshold} re-fired: {sent:?}");
+            }
+        }
+    }
+
+    /// One outage, then a site that is fine again, must produce exactly one
+    /// "down" and one "up". The failures from before the recovery stayed in
+    /// the 2×threshold window, so the very next clean probe re-fired "down"
+    /// (with "HTTP 200" as its error), the one after that "up" again — every
+    /// short blip on every site turned into a down/up/down/up storm.
+    #[test]
+    fn monitor_does_not_realert_on_failures_it_already_resolved() {
+        use super::MonitorTransition::{Down, Up};
+        let (f, t) = (false, true);
+        let sent = replay_monitor(&[t, t, f, f, f, t, t, t, t, t, t, t], 3, false);
+        assert_eq!(sent, vec![(4, Down), (6, Up)]);
+        // Same with an error page (hard failure: alert after 2).
+        let sent = replay_monitor(&[t, f, f, t, t, t, t, t, t], 3, true);
+        assert_eq!(sent, vec![(2, Down), (4, Up)]);
+    }
+
+    /// After a recovery, a single fresh failure is a single failure: the ones
+    /// the resolved incident was made of must not be counted again.
+    #[test]
+    fn monitor_counts_only_failures_since_the_last_recovery() {
+        use super::MonitorTransition::{Down, Up};
+        let (f, t) = (false, true);
+        let sent = replay_monitor(&[f, f, f, t, t, t, f, t, t, t], 3, false);
+        assert_eq!(sent, vec![(2, Down), (4, Up)]);
+    }
+
+    /// A probe that succeeded is never the moment to announce "site is down".
+    #[test]
+    fn monitor_never_reports_down_on_a_passing_probe() {
+        let (f, t) = (false, true);
+        // Flapping still alerts — on the failure that makes it 3 of 6.
+        let sent = replay_monitor(&[f, t, f, t, f, t, t, t], 3, false);
+        assert_eq!(sent.first(), Some(&(4, super::MonitorTransition::Down)));
+        // 3 failures in the window, but the newest probe passed: not now.
+        let window = [(1, f), (2, t), (3, f), (4, t), (5, f), (6, t)];
+        assert_eq!(
+            super::monitor_transition(false, None, &window, 3, false),
+            None
+        );
+    }
+
     #[test]
     fn probe_classifies_wordpress_failures() {
         use super::classify_probe;
@@ -40823,6 +41084,359 @@ mod tests {
         assert!(classify_probe(200, "<b>Fatal error</b>: Uncaught Error").is_some());
         // A post that merely mentions the phrase is not a failure.
         assert!(classify_probe(200, "<p>how to debug a fatal error</p>").is_none());
+    }
+
+    /// curl timing out after the status line but before any body is a slow
+    /// site, not a white screen: it must not reach `classify_probe` as an
+    /// empty 200, which is a HARD failure (alerts after two samples).
+    #[test]
+    fn probe_timeout_after_headers_is_not_a_white_screen() {
+        use super::probe_gave_up;
+        // No answer at all.
+        assert!(probe_gave_up(0, false, ""));
+        // 200 arrived, curl exited 28 before the body: gave up, soft.
+        assert!(probe_gave_up(200, false, ""));
+        // A real empty 200 (curl finished cleanly) is still judged.
+        assert!(!probe_gave_up(200, true, ""));
+        // Part of the page arrived before the timeout: judge what came.
+        assert!(!probe_gave_up(200, false, "<html><head>"));
+        // A clean 500 is a verdict, not a give-up.
+        assert!(!probe_gave_up(500, true, "x"));
+    }
+
+    /// What the local test site does with each request.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum SiteMode {
+        /// 200 with a normal page.
+        Up,
+        /// TLS handshake, then hang up without a byte of HTTP: curl gets no
+        /// status at all — the production failures (no status, no error text).
+        Silent,
+        /// Status line and headers, then the connection drops before the
+        /// body: curl exits non-zero holding an empty 200.
+        HeadersThenDrop,
+        /// A real 500.
+        ServerError,
+        /// A clean, complete 200 with nothing in it (white screen).
+        Empty,
+        /// A 200 carrying the WordPress critical-error page.
+        WpCritical,
+        /// A normal page after this many seconds.
+        Slow(u64),
+    }
+
+    /// A local HTTPS site on 127.0.0.1 whose behaviour the test switches.
+    struct TestSite {
+        port: u16,
+        mode: std::sync::Arc<std::sync::Mutex<SiteMode>>,
+    }
+
+    impl TestSite {
+        fn set(&self, m: SiteMode) {
+            *self.mode.lock().expect("mode") = m;
+        }
+        /// What goes where the domain goes: the probe builds `https://{host}/`.
+        fn host(&self) -> String {
+            format!("127.0.0.1:{}", self.port)
+        }
+    }
+
+    /// The probe shells out to the real curl; without it there is nothing
+    /// to test (CI and every node have it).
+    fn curl_missing() -> bool {
+        let missing = !std::path::Path::new("/usr/bin/curl").exists();
+        if missing {
+            eprintln!("skipped: /usr/bin/curl not installed");
+        }
+        missing
+    }
+
+    async fn spawn_test_site() -> TestSite {
+        use std::sync::{Arc, Mutex};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let key = rcgen::KeyPair::generate().expect("keypair");
+        let mut params =
+            rcgen::CertificateParams::new(vec!["localhost".to_string()]).expect("cert params");
+        params.distinguished_name = rcgen::DistinguishedName::new();
+        let cert = params.self_signed(&key).expect("self-signed");
+        let config = rustls::ServerConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .expect("tls versions")
+        .with_no_client_auth()
+        .with_single_cert(
+            vec![cert.der().clone()],
+            rustls::pki_types::PrivateKeyDer::Pkcs8(key.serialize_der().into()),
+        )
+        .expect("tls config");
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let mode = Arc::new(Mutex::new(SiteMode::Up));
+        let shared = mode.clone();
+        tokio::spawn(async move {
+            while let Ok((tcp, _)) = listener.accept().await {
+                let acceptor = acceptor.clone();
+                let mode = shared.clone();
+                tokio::spawn(async move {
+                    let Ok(mut tls) = acceptor.accept(tcp).await else {
+                        return;
+                    };
+                    let mut head = Vec::new();
+                    let mut chunk = [0u8; 2048];
+                    while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match tls.read(&mut chunk).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => head.extend_from_slice(&chunk[..n]),
+                        }
+                    }
+                    let page = |status: &str, body: &str| {
+                        format!(
+                            "HTTP/1.1 {status}\r\nContent-Type: text/html\r\n\
+                             Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        )
+                    };
+                    let ok = "<html><body><h1>Shop</h1></body></html>";
+                    let m = *mode.lock().expect("mode");
+                    let reply = match m {
+                        SiteMode::Silent => return,
+                        SiteMode::HeadersThenDrop => {
+                            let _ = tls
+                                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 5000\r\n\r\n")
+                                .await;
+                            let _ = tls.flush().await;
+                            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                            return;
+                        }
+                        SiteMode::Up => page("200 OK", ok),
+                        SiteMode::ServerError => page("500 Internal Server Error", "oops"),
+                        SiteMode::Empty => page("200 OK", ""),
+                        SiteMode::WpCritical => page(
+                            "200 OK",
+                            "<p>There has been a critical error on this website.</p>",
+                        ),
+                        SiteMode::Slow(secs) => {
+                            tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
+                            page("200 OK", ok)
+                        }
+                    };
+                    let _ = tls.write_all(reply.as_bytes()).await;
+                    let _ = tls.shutdown().await;
+                });
+            }
+        });
+        TestSite { port, mode }
+    }
+
+    /// The real probe — curl and all — against each way a site answers.
+    #[tokio::test]
+    async fn probe_http_reads_a_real_site_right() {
+        if curl_missing() {
+            return;
+        }
+        let site = spawn_test_site().await;
+        let url = format!("https://{}/", site.host());
+
+        site.set(SiteMode::Up);
+        let r = super::probe_http(&url).await;
+        assert!(r.success, "{r:?}");
+        assert_eq!(r.http_status, Some(200));
+        assert_eq!(r.error_message, None);
+
+        // No answer at all — what production recorded 142× with an EMPTY
+        // error: `-s` without `-S` threw curl's reason away.
+        site.set(SiteMode::Silent);
+        let r = super::probe_http(&url).await;
+        assert!(!r.success && !r.hard_failure, "{r:?}");
+        assert_eq!(r.http_status, None);
+        let err = r.error_message.clone().unwrap_or_default();
+        assert!(
+            err.starts_with("curl: ("),
+            "curl's reason must reach the alert: {r:?}"
+        );
+
+        // Dropped after the headers: a soft failure with curl's reason, NOT a
+        // white screen (hard, alerts after two).
+        site.set(SiteMode::HeadersThenDrop);
+        let r = super::probe_http(&url).await;
+        assert!(!r.success && !r.hard_failure, "{r:?}");
+        assert_eq!(r.http_status, Some(200));
+        let err = r.error_message.clone().unwrap_or_default();
+        assert!(err.starts_with("curl: ("), "{r:?}");
+
+        // The genuinely broken answers stay hard failures.
+        for (mode, what) in [
+            (SiteMode::ServerError, "HTTP 500"),
+            (SiteMode::Empty, "white screen"),
+            (SiteMode::WpCritical, "critical error"),
+        ] {
+            site.set(mode);
+            let r = super::probe_http(&url).await;
+            assert!(!r.success && r.hard_failure, "{mode:?}: {r:?}");
+            let err = r.error_message.clone().unwrap_or_default();
+            assert!(err.contains(what), "{mode:?}: {r:?}");
+        }
+    }
+
+    /// An uncached WordPress render on a busy box takes seconds. The 5 s the
+    /// probe allowed called such a site down; it is slow, and it is up.
+    #[tokio::test]
+    async fn probe_http_waits_for_a_slow_page() {
+        if curl_missing() {
+            return;
+        }
+        let site = spawn_test_site().await;
+        site.set(SiteMode::Slow(7));
+        let r = super::probe_http(&format!("https://{}/", site.host())).await;
+        assert!(r.success, "{r:?}");
+        assert!(r.response_ms >= 7_000, "{r:?}");
+    }
+
+    /// A hosting monitored against `site`, plus an admin to receive the bell.
+    async fn monitored_site(
+        site: &TestSite,
+    ) -> (HostingService<MockAdapterPort>, SqlitePool, String) {
+        use hyperion_state::web_users::WebRole;
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), package_mocks());
+        seed_web_user(&s, "boss", WebRole::Admin).await;
+        let h = hosting_for_packages(&s, "mon.cz").await;
+        // `create` switched monitoring on (every 60 s, alert after 3); point
+        // the probe at the local site.
+        sqlx::query("UPDATE hostings SET domain = ? WHERE id = ?")
+            .bind(site.host())
+            .bind(h.id.as_str())
+            .execute(&pool)
+            .await
+            .expect("repoint");
+        (s, pool, site.host())
+    }
+
+    /// Run one `monitor_tick` with the site in `mode`, first moving every
+    /// timestamp ten minutes back so the 60 s interval has elapsed.
+    async fn tick_as(
+        s: &HostingService<MockAdapterPort>,
+        pool: &SqlitePool,
+        site: &TestSite,
+        mode: SiteMode,
+    ) {
+        for sql in [
+            "UPDATE monitor_samples SET sampled_at = sampled_at - 600",
+            "UPDATE hostings SET monitor_last_alert_at = monitor_last_alert_at - 600 \
+             WHERE monitor_last_alert_at IS NOT NULL",
+        ] {
+            sqlx::query(sql).execute(pool).await.expect("age");
+        }
+        site.set(mode);
+        assert_eq!(s.monitor_tick().await.expect("tick"), 1, "{mode:?} sampled");
+    }
+
+    /// (kind, body) of every bell notification, oldest first.
+    async fn bells(pool: &SqlitePool) -> Vec<(String, String)> {
+        sqlx::query_as("SELECT kind, body FROM notifications ORDER BY id")
+            .fetch_all(pool)
+            .await
+            .expect("notifications")
+    }
+
+    /// The reported incident, end to end — real curl, real HTTPS, real
+    /// SQLite, the real `monitor_tick`: a site that does not answer three
+    /// probes and then is fine sends ONE "down" and ONE "up". Before, the
+    /// same run sent down/up/down/up, the second "down" on a probe that
+    /// passed, and a later single blip re-fired it all again.
+    #[tokio::test]
+    async fn monitor_tick_one_outage_one_down_one_up() {
+        use SiteMode::{Silent, Up};
+        if curl_missing() {
+            return;
+        }
+        let site = spawn_test_site().await;
+        let (s, pool, host) = monitored_site(&site).await;
+        for mode in [
+            Up, Up, Silent, Silent, Silent, Up, Up, Up, Up, Silent, Up, Up, Up, Up,
+        ] {
+            tick_as(&s, &pool, &site, mode).await;
+        }
+        let sent = bells(&pool).await;
+        let kinds: Vec<&str> = sent.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(
+            kinds,
+            [format!("monitor.down:{host}"), format!("monitor.up:{host}")],
+            "{sent:?}"
+        );
+        // The "down" says why: curl's reason, not an empty "last error:".
+        assert!(sent[0].1.contains("curl: ("), "{sent:?}");
+        let cfg = hyperion_state::monitors::list_enabled(&pool)
+            .await
+            .expect("list")
+            .pop()
+            .expect("monitor");
+        assert_eq!(cfg.alert_state, "ok");
+    }
+
+    /// Sporadic blips (one probe in five gets no answer) are not an outage:
+    /// no bell at all.
+    #[tokio::test]
+    async fn monitor_tick_ignores_sporadic_blips() {
+        use SiteMode::{Silent, Up};
+        if curl_missing() {
+            return;
+        }
+        let site = spawn_test_site().await;
+        let (s, pool, _) = monitored_site(&site).await;
+        for i in 0..15 {
+            tick_as(&s, &pool, &site, if i % 5 == 1 { Silent } else { Up }).await;
+        }
+        assert_eq!(bells(&pool).await, Vec::<(String, String)>::new());
+    }
+
+    /// A connection dropped twice after the headers is two soft failures —
+    /// under the threshold of three — not two "white screens", which alerted.
+    #[tokio::test]
+    async fn monitor_tick_dropped_connections_are_not_a_white_screen() {
+        use SiteMode::{HeadersThenDrop, Up};
+        if curl_missing() {
+            return;
+        }
+        let site = spawn_test_site().await;
+        let (s, pool, _) = monitored_site(&site).await;
+        for mode in [Up, HeadersThenDrop, HeadersThenDrop, Up, Up, Up] {
+            tick_as(&s, &pool, &site, mode).await;
+        }
+        assert_eq!(bells(&pool).await, Vec::<(String, String)>::new());
+        // ...and each is on record with its status and curl's reason.
+        let rows: Vec<(i64, Option<i64>, Option<String>)> = sqlx::query_as(
+            "SELECT success, http_status, error_message FROM monitor_samples \
+             WHERE success = 0",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("samples");
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        for (_, status, err) in rows {
+            assert_eq!(status, Some(200));
+            assert!(err.unwrap_or_default().starts_with("curl: ("));
+        }
+    }
+
+    /// A real outage that answers with an error page still alerts after two.
+    #[tokio::test]
+    async fn monitor_tick_still_alerts_fast_on_a_server_error() {
+        use SiteMode::{ServerError, Up};
+        if curl_missing() {
+            return;
+        }
+        let site = spawn_test_site().await;
+        let (s, pool, host) = monitored_site(&site).await;
+        for mode in [Up, ServerError, ServerError] {
+            tick_as(&s, &pool, &site, mode).await;
+        }
+        let kinds: Vec<String> = bells(&pool).await.into_iter().map(|b| b.0).collect();
+        assert_eq!(kinds, [format!("monitor.down:{host}")]);
     }
 
     use super::*;
