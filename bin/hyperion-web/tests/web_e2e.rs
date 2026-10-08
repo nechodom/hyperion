@@ -374,6 +374,7 @@ fn test_state_with_setup(
         deployment_mode: Arc::new(tokio::sync::RwLock::new("master".to_string())),
         ftp_password_handoff: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         error_handoff: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        wp_lists: Default::default(),
         setup,
     })
 }

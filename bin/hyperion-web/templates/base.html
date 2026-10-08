@@ -869,6 +869,9 @@ function isShortcutContext(ev) {
       apply();
     })
     .catch(() => apply());
+  // Content swapped in without a page load (the hosting detail's in-place
+  // saves) has not been through the gates above yet.
+  document.addEventListener('live-refresh-swapped', () => apply());
 
   function apply() {
     const role = document.body.dataset.role || 'viewer';
