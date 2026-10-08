@@ -2193,84 +2193,39 @@ pub async fn get_detail(
     let profile_apply = profile_apply_res.unwrap_or(None);
     let profiles = profiles_res.unwrap_or_default();
 
-    // Wave 2 — independent of wp_status, and WP plugins/themes
-    // only when WP is installed. Wave 1 already finished so we
-    // know wp_status now.
-    let wp_plugins_fut = async {
-        if wp_status.is_some() {
-            match crate::dispatcher::dispatch_to_node(
-                &state,
-                target,
-                Request::WpPluginList {
-                    hosting: sel_id.clone(),
-                },
-            )
-            .await
-            {
-                Ok(RpcResponse::WpPluginList(r)) => r,
-                // Surface the real failure instead of swallowing it into an
-                // empty list (which the panel renders as "no plugins
-                // installed"). WP core files exist on disk (wp_status is
-                // Some), but the live `wp plugin list` couldn't run — almost
-                // always a DB connection / PHP error during WordPress
-                // bootstrap, or a permissions problem.
-                Ok(RpcResponse::Error(e)) => {
-                    tracing::warn!(hosting=?sel_id, error=%e, "wp plugin list failed");
-                    hyperion_types::WpPluginListResponse {
-                        error: Some(e.to_string()),
-                        ..Default::default()
-                    }
-                }
-                Ok(_) => hyperion_types::WpPluginListResponse {
-                    error: Some("unexpected response from the agent".into()),
-                    ..Default::default()
-                },
-                Err(e) => {
-                    tracing::warn!(hosting=?sel_id, error=%e, "wp plugin list dispatch failed");
-                    hyperion_types::WpPluginListResponse {
-                        error: Some(e.to_string()),
-                        ..Default::default()
-                    }
-                }
-            }
-        } else {
-            hyperion_types::WpPluginListResponse::default()
+    // Wave 2 — WP plugins/themes only when WP is installed (wave 1
+    // already told us), plus every other independent read.
+    // Plugin + theme lists: two wp-cli runs, each a full WordPress bootstrap
+    // on the owning node — the slowest thing on this page by far. Served from
+    // the stale-while-revalidate cache (see crate::wp_list_cache): fresh
+    // answers as is, older ones immediately with a refresh in the background,
+    // missing ones inline.
+    let wp_lists_fut = async {
+        if wp_status.is_none() {
+            return crate::wp_list_cache::WpLists::default();
         }
-    };
-    let wp_themes_fut = async {
-        if wp_status.is_some() {
-            match crate::dispatcher::dispatch_to_node(
-                &state,
-                target,
-                Request::WpThemeList {
-                    hosting: sel_id.clone(),
-                },
-            )
-            .await
-            {
-                Ok(RpcResponse::WpThemeList(r)) => r,
-                // Same as plugins: surface the failure instead of an empty list.
-                Ok(RpcResponse::Error(e)) => {
-                    tracing::warn!(hosting=?sel_id, error=%e, "wp theme list failed");
-                    hyperion_types::WpThemeListResponse {
-                        error: Some(e.to_string()),
-                        ..Default::default()
-                    }
+        let hid = detail.id.as_str().to_string();
+        match state.wp_lists.lookup(&hid) {
+            crate::wp_list_cache::Lookup::Fresh(l) => (*l).clone(),
+            crate::wp_list_cache::Lookup::Stale(l) => {
+                if state.wp_lists.begin_refresh(&hid) {
+                    let state2 = state.clone();
+                    let target2 = target.map(str::to_string);
+                    let sel2 = sel_id.clone();
+                    tokio::spawn(async move {
+                        let gen = state2.wp_lists.generation();
+                        let fresh = fetch_wp_lists(&state2, target2.as_deref(), &sel2).await;
+                        state2.wp_lists.store(&hid, fresh, gen);
+                    });
                 }
-                Ok(_) => hyperion_types::WpThemeListResponse {
-                    error: Some("unexpected response from the agent".into()),
-                    ..Default::default()
-                },
-                Err(e) => {
-                    tracing::warn!(hosting=?sel_id, error=%e, "wp theme list dispatch failed");
-                    hyperion_types::WpThemeListResponse {
-                        error: Some(e.to_string()),
-                        ..Default::default()
-                    }
-                }
+                (*l).clone()
             }
-        } else {
-            hyperion_types::WpThemeListResponse::default()
+            crate::wp_list_cache::Lookup::Miss => {
+                let gen = state.wp_lists.generation();
+                let fresh = fetch_wp_lists(&state, target, &sel_id).await;
+                state.wp_lists.store(&hid, fresh.clone(), gen);
+                fresh
+            }
         }
     };
     let monitor_fut = async {
@@ -2375,15 +2330,137 @@ pub async fn get_detail(
             }
         }
     };
-    let (wp_plugins, wp_themes, monitor_pair, email_log, site_emails, ftp_accounts, quota) = tokio::join!(
-        wp_plugins_fut,
-        wp_themes_fut,
-        monitor_fut,
-        email_log_fut,
-        site_emails_fut,
-        ftp_accounts_fut,
-        quota_fut,
+    // Everything below is independent of the wave-1 answers, so it rides
+    // in the same join instead of costing a round-trip each afterwards.
+    // Access tab data — fetched only for super_admin since they're the
+    // only ones who see the tab. Empty vec for everyone else is cheap
+    // and keeps the template happy.
+    let access_fut = async {
+        if ctx.is_super_admin() {
+            let grants = match hyperion_rpc_client::call(
+                &state.agent_socket,
+                Request::WebListHostingAccess {
+                    hosting_id: detail.id.as_str().to_string(),
+                },
+            )
+            .await
+            {
+                Ok(RpcResponse::WebListHostingAccess(g)) => g,
+                _ => vec![],
+            };
+            let users =
+                match hyperion_rpc_client::call(&state.agent_socket, Request::WebUserList).await {
+                    Ok(RpcResponse::WebUserList(u)) => u
+                        .into_iter()
+                        // Only operators + viewers can be granted per-web access;
+                        // super_admin and admin already see everything.
+                        .filter(|u| u.role == "operator" || u.role == "viewer")
+                        .collect(),
+                    _ => vec![],
+                };
+            (grants, users)
+        } else {
+            (vec![], vec![])
+        }
+    };
+    let owner_kv_fut = async {
+        match crate::dispatcher::dispatch_to_node(
+            &state,
+            target,
+            Request::HostingKvList {
+                hosting_id: detail.id.as_str().to_string(),
+            },
+        )
+        .await
+        {
+            Ok(RpcResponse::HostingKvList(v)) => v,
+            _ => vec![],
+        }
+    };
+    // Operator notes + tags (panel-side metadata on the master's
+    // hosting_kv, keyed by ULID — same regardless of which node hosts
+    // the site).
+    let kv_pairs_fut = async {
+        match hyperion_rpc_client::call(
+            &state.agent_socket,
+            Request::HostingKvList {
+                hosting_id: detail.id.as_str().to_string(),
+            },
+        )
+        .await
+        {
+            Ok(RpcResponse::HostingKvList(v)) => v,
+            _ => vec![],
+        }
+    };
+    // Off-site target list: admin-only (see the picker below).
+    let targets_fut = async {
+        if ctx.is_admin_or_higher() {
+            configured_backup_targets(&state).await
+        } else {
+            None
+        }
+    };
+    // Internal preview URL on the owner node's wildcard cert (shown only
+    // when the node actually has one + the domain isn't already under it).
+    let preview_fut = compute_preview_domain(&state, target, &detail.domain);
+    // Extra FTP logins for this hosting. Best-effort: a node that cannot
+    // answer must not take the whole detail page down, and an empty list
+    // renders as "no extra logins" rather than a broken card.
+    let ftp_extra_fut = async {
+        match crate::dispatcher::dispatch_to_node(
+            &state,
+            owner_node.as_deref(),
+            Request::FtpAccountList { sel: sel.clone() },
+        )
+        .await
+        {
+            Ok(RpcResponse::FtpAccountList(v)) => v,
+            _ => Vec::new(),
+        }
+    };
+    let cluster_cfg_fut = fetch_cluster_config(&state);
+    let wp_assets_fut = fetch_wp_assets(&state);
+    let (
+        (wp_lists, monitor_pair, email_log, site_emails, ftp_accounts, quota),
+        (
+            (access_grants_for_detail, users_for_access_for_detail),
+            owner_kv,
+            kv_pairs,
+            targets,
+            preview_domain,
+            ftp_extra,
+            cluster_cfg,
+            wp_assets,
+        ),
+    ) = tokio::join!(
+        async {
+            tokio::join!(
+                wp_lists_fut,
+                monitor_fut,
+                email_log_fut,
+                site_emails_fut,
+                ftp_accounts_fut,
+                quota_fut,
+            )
+        },
+        async {
+            tokio::join!(
+                access_fut,
+                owner_kv_fut,
+                kv_pairs_fut,
+                targets_fut,
+                preview_fut,
+                ftp_extra_fut,
+                cluster_cfg_fut,
+                wp_assets_fut,
+            )
+        },
     );
+    let crate::wp_list_cache::WpLists {
+        plugins: wp_plugins,
+        themes: wp_themes,
+    } = wp_lists;
     // If THIS hosting's user has a password, probe vsftpd to
     // verify it actually accepts the credential. We don't know
     // the password (it's only ever shown once), so we can only
@@ -2408,47 +2485,6 @@ pub async fn get_detail(
                 .find(|p| p.id == pid)
                 .map(|p| p.name.clone())
         });
-    // Access tab data — fetched only for super_admin since they're the
-    // only ones who see the tab. Empty vec for everyone else is cheap
-    // and keeps the template happy.
-    let (access_grants_for_detail, users_for_access_for_detail) = if ctx.is_super_admin() {
-        let grants = match hyperion_rpc_client::call(
-            &state.agent_socket,
-            Request::WebListHostingAccess {
-                hosting_id: detail.id.as_str().to_string(),
-            },
-        )
-        .await
-        {
-            Ok(RpcResponse::WebListHostingAccess(g)) => g,
-            _ => vec![],
-        };
-        let users = match hyperion_rpc_client::call(&state.agent_socket, Request::WebUserList).await
-        {
-            Ok(RpcResponse::WebUserList(u)) => u
-                .into_iter()
-                // Only operators + viewers can be granted per-web access;
-                // super_admin and admin already see everything.
-                .filter(|u| u.role == "operator" || u.role == "viewer")
-                .collect(),
-            _ => vec![],
-        };
-        (grants, users)
-    } else {
-        (vec![], vec![])
-    };
-    let owner_kv = match crate::dispatcher::dispatch_to_node(
-        &state,
-        target,
-        Request::HostingKvList {
-            hosting_id: detail.id.as_str().to_string(),
-        },
-    )
-    .await
-    {
-        Ok(RpcResponse::HostingKvList(v)) => v,
-        _ => vec![],
-    };
     let mem_auto = PhpMemAutoView::from_kv(&owner_kv, limits.php_memory_mb);
     let workers_full = PhpWorkersView::from_kv(&owner_kv, hyperion_types::now_secs());
     let backup_cadence = owner_kv
@@ -2483,17 +2519,6 @@ pub async fn get_detail(
     // Operator notes + tags (panel-side metadata on the master's
     // hosting_kv, keyed by ULID — same regardless of which node hosts
     // the site).
-    let kv_pairs = match hyperion_rpc_client::call(
-        &state.agent_socket,
-        Request::HostingKvList {
-            hosting_id: detail.id.as_str().to_string(),
-        },
-    )
-    .await
-    {
-        Ok(RpcResponse::HostingKvList(v)) => v,
-        _ => vec![],
-    };
     let notes = kv_pairs
         .iter()
         .find(|(k, _)| k == "notes")
@@ -2524,11 +2549,6 @@ pub async fn get_detail(
     // only for admins — a non-admin render would otherwise pair a live pin
     // with an empty list and report a working target as unconfigured. Same
     // reason the picker disappears entirely when the list can't be read.
-    let targets = if ctx.is_admin_or_higher() {
-        configured_backup_targets(&state).await
-    } else {
-        None
-    };
     let (backup_target, backup_target_options, backup_target_default_label, backup_target_warning) =
         match targets {
             Some(mut options) => {
@@ -2558,9 +2578,6 @@ pub async fn get_detail(
             }
             None => (String::new(), Vec::new(), String::new(), String::new()),
         };
-    // Internal preview URL on the owner node's wildcard cert (shown only
-    // when the node actually has one + the domain isn't already under it).
-    let preview_domain = compute_preview_domain(&state, target, &detail.domain).await;
     // TAKE the one-shot FTP password, so a reload, a shared link or a
     // back-button press cannot show it a second time. Removing it here is
     // the whole point of the hand-off: the credential exists in memory for
@@ -2597,19 +2614,6 @@ pub async fn get_detail(
         .filter(|a| a.user == detail.system_user)
         .collect();
 
-    // Extra FTP logins for this hosting. Best-effort: a node that cannot
-    // answer must not take the whole detail page down, and an empty list
-    // renders as "no extra logins" rather than a broken card.
-    let ftp_extra = match crate::dispatcher::dispatch_to_node(
-        &state,
-        owner_node.as_deref(),
-        Request::FtpAccountList { sel: sel.clone() },
-    )
-    .await
-    {
-        Ok(RpcResponse::FtpAccountList(v)) => v,
-        _ => Vec::new(),
-    };
     let bot_families = bot_family_rows(&detail.vhost_options.blocked_bots);
     let waf_level = detail.vhost_options.effective_waf_level().as_str();
     let waf_rules = waf_rule_rows(&detail.vhost_options, detail.php_version.is_some());
@@ -2671,7 +2675,7 @@ pub async fn get_detail(
         backup_target_options,
         backup_target_default_label,
         backup_target_warning,
-        backups_paused_by_mode: fetch_cluster_config(&state).await.protection_mode == "snapshots",
+        backups_paused_by_mode: cluster_cfg.protection_mode == "snapshots",
         csrf_profile_apply: csrf_token_for(&state, &ctx, "/profiles/apply"),
         profile_apply,
         applied_profile_name,
@@ -2777,7 +2781,7 @@ pub async fn get_detail(
         ftp_login_ok,
         csrf_token: super::session_csrf_token(&state, &ctx),
         target_node: owner_node.clone().unwrap_or_default(),
-        wp_assets: fetch_wp_assets(&state).await.unwrap_or_default(),
+        wp_assets: wp_assets.unwrap_or_default(),
         wp_themes,
         csrf_vhost_options: csrf_token_for(&state, &ctx, "/hostings/vhost-options"),
         csrf_proxy_upstream: csrf_token_for(&state, &ctx, "/hostings/proxy-upstream"),
@@ -2812,6 +2816,88 @@ pub async fn get_detail(
         preview_domain,
     };
     Ok(Html(tpl.render()?).into_response())
+}
+
+/// `wp plugin list` + `wp theme list` on the owning node, concurrently.
+/// Failures come back as `error: Some(..)` rather than empty lists — an
+/// empty table reads as "no plugins installed", which is a lie when wp-cli
+/// could not bootstrap WordPress at all (DB down, PHP fatal, permissions).
+async fn fetch_wp_lists(
+    state: &SharedState,
+    target: Option<&str>,
+    sel_id: &HostingSelector,
+) -> crate::wp_list_cache::WpLists {
+    let plugins = async {
+        match crate::dispatcher::dispatch_to_node(
+            state,
+            target,
+            Request::WpPluginList {
+                hosting: sel_id.clone(),
+            },
+        )
+        .await
+        {
+            Ok(RpcResponse::WpPluginList(r)) => r,
+            // Surface the real failure instead of swallowing it into an
+            // empty list (which the panel renders as "no plugins
+            // installed"). WP core files exist on disk (wp_status is
+            // Some), but the live `wp plugin list` couldn't run — almost
+            // always a DB connection / PHP error during WordPress
+            // bootstrap, or a permissions problem.
+            Ok(RpcResponse::Error(e)) => {
+                tracing::warn!(hosting=?sel_id, error=%e, "wp plugin list failed");
+                hyperion_types::WpPluginListResponse {
+                    error: Some(e.to_string()),
+                    ..Default::default()
+                }
+            }
+            Ok(_) => hyperion_types::WpPluginListResponse {
+                error: Some("unexpected response from the agent".into()),
+                ..Default::default()
+            },
+            Err(e) => {
+                tracing::warn!(hosting=?sel_id, error=%e, "wp plugin list dispatch failed");
+                hyperion_types::WpPluginListResponse {
+                    error: Some(e.to_string()),
+                    ..Default::default()
+                }
+            }
+        }
+    };
+    let themes = async {
+        match crate::dispatcher::dispatch_to_node(
+            state,
+            target,
+            Request::WpThemeList {
+                hosting: sel_id.clone(),
+            },
+        )
+        .await
+        {
+            Ok(RpcResponse::WpThemeList(r)) => r,
+            // Same as plugins: surface the failure instead of an empty list.
+            Ok(RpcResponse::Error(e)) => {
+                tracing::warn!(hosting=?sel_id, error=%e, "wp theme list failed");
+                hyperion_types::WpThemeListResponse {
+                    error: Some(e.to_string()),
+                    ..Default::default()
+                }
+            }
+            Ok(_) => hyperion_types::WpThemeListResponse {
+                error: Some("unexpected response from the agent".into()),
+                ..Default::default()
+            },
+            Err(e) => {
+                tracing::warn!(hosting=?sel_id, error=%e, "wp theme list dispatch failed");
+                hyperion_types::WpThemeListResponse {
+                    error: Some(e.to_string()),
+                    ..Default::default()
+                }
+            }
+        }
+    };
+    let (plugins, themes) = tokio::join!(plugins, themes);
+    crate::wp_list_cache::WpLists { plugins, themes }
 }
 
 async fn fetch_profile_apply(

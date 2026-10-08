@@ -71,6 +71,10 @@ pub struct AppState {
     /// In memory and single-use: a diagnostic that outlives the page that
     /// showed it is just another place for it to leak from.
     pub error_handoff: Arc<tokio::sync::Mutex<std::collections::HashMap<String, (String, i64)>>>,
+    /// WordPress plugin + theme lists per hosting, so the detail page does
+    /// not bootstrap WordPress twice on every render. See
+    /// [`crate::wp_list_cache`].
+    pub wp_lists: Arc<crate::wp_list_cache::WpListCache>,
 }
 
 impl AppState {

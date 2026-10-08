@@ -25,6 +25,7 @@ pub mod notify_collector;
 pub mod pma_tls;
 pub mod ratelimit;
 pub mod state;
+pub mod wp_list_cache;
 
 use crate::state::SharedState;
 use axum::extract::State;
@@ -1162,8 +1163,30 @@ pub fn build_router(state: SharedState) -> Router {
         // body). Still flows through the layers below (security headers etc.).
         .fallback(crate::error::not_found_fallback)
         .layer(axum::middleware::from_fn(security_headers))
+        .layer(from_fn_with_state(state.clone(), drop_wp_lists_on_write))
         .layer(from_fn_with_state(state.clone(), enforce_panel_hostname))
         .with_state(state)
+}
+
+/// Clears the cached WordPress plugin/theme lists around any request that
+/// can change them (see [`wp_list_cache::invalidates`]). Both sides of the
+/// handler: before, so a render racing the action cannot be served the old
+/// list; after, so a render that STARTED while the action ran (and fetched
+/// the half-way state) is not kept either.
+async fn drop_wp_lists_on_write(
+    axum::extract::State(state): axum::extract::State<SharedState>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let hit = wp_list_cache::invalidates(req.method(), req.uri().path());
+    if hit {
+        state.wp_lists.invalidate_all();
+    }
+    let resp = next.run(req).await;
+    if hit {
+        state.wp_lists.invalidate_all();
+    }
+    resp
 }
 
 /// Once the operator's set up `cluster.panel_hostname` (via Panel

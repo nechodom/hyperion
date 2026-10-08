@@ -5820,3 +5820,7 @@ details.asset-picker[open] > summary::after { transform: rotate(180deg); }
 @media (max-width: 640px) {
   .me-enrol { grid-template-columns: 1fr; }
 }
+
+/* A form whose POST is in flight (hosting detail in-place saves). */
+form[aria-busy="true"] { opacity: 0.6; cursor: progress; }
+form[aria-busy="true"] * { pointer-events: none; }

@@ -8,7 +8,7 @@
    bold lead-in naming the operation that failed, so the operator looks in the
    right place. #}
 {% macro flash(kind, prefix, body) %}
-<div class="flash {{ kind }}" role="{% if kind == "error" %}alert{% else %}status{% endif %}">
+<div class="flash {{ kind }}" data-flash role="{% if kind == "error" %}alert{% else %}status{% endif %}">
   {% if kind == "success" %}
   <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
   {% else if kind == "warn" %}
@@ -468,7 +468,7 @@
       list, which is what made the SSL card cheerfully show an alias as
       covered. -#}
   {% if !cert_uncovered_names.is_empty() %}
-  <div class="flash error" role="alert">
+  <div class="flash error" data-standing="cert" role="alert">
     <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
     <div class="flash-body">
       <strong>The certificate does not cover
@@ -512,7 +512,7 @@
   {% if let Some(e) = ftp_error %}{% call flash("error", "FTP:", e) %}{% endif %}
   {% if vhost_saved %}{% call flash("success", "", "Vhost options saved. The new configuration is live.") %}{% endif %}
   {% if let Some(e) = vhost_error %}
-  <div class="flash error" role="alert">
+  <div class="flash error" data-flash role="alert">
     <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
     <div class="flash-body">
       <strong>nginx refused the new config:</strong><br>
@@ -4797,7 +4797,6 @@
     if (!id) return;
     ev.preventDefault();
     activate(id);
-    remember(id);
     if (history.replaceState) history.replaceState(null, '', '#' + id);
     // Switching sections from deep in a long one would otherwise leave the
     // viewport scrolled past the top of the new one.
@@ -4813,13 +4812,12 @@
   // reads as "nothing happened" even when it worked.
   function resolve(id) {
     if (!id) return false;
-    if (activate(id)) { remember(id); return true; }
+    if (activate(id)) return true;
     const el = document.getElementById(id);
     const panel = el && el.closest('.tab-panel');
     if (panel && panel.id.indexOf('tab-') === 0) {
       const tab = panel.id.slice(4);
       if (activate(tab)) {
-        remember(tab);
         // Scroll after the panel is visible — the browser's native anchor
         // jump happened while it was display:none and went nowhere.
         setTimeout(() => {
@@ -4831,18 +4829,15 @@
     }
     return false;
   }
-  // Plain reloads with no hash come back to the tab you were on, not to
-  // the first one. Keyed per path, so /settings and each hosting keep
-  // separate memories.
-  const memKey = 'hyperionTab:' + location.pathname;
-  function remember(id) {
-    try { localStorage.setItem(memKey, id); } catch (_) {}
-  }
-  function remembered() {
-    try { return localStorage.getItem(memKey); } catch (_) { return null; }
-  }
+  // Opening a hosting always lands on Overview. This used to restore the
+  // last tab from localStorage, so the page opened wherever the operator
+  // last left that site — usually not where they meant to go, and often a
+  // tab that renders (and polls) more than Overview does. An explicit hash
+  // (#ssl, or an element inside a tab) still wins: that is a deep link.
+  // Clear the key the old code left behind.
+  try { localStorage.removeItem('hyperionTab:' + location.pathname); } catch (_) {}
   const hashId = (location.hash || '').replace(/^#/, '');
-  if (!resolve(hashId) && !activate(remembered() || '')) activate('overview');
+  if (!resolve(hashId)) activate('overview');
   // In-page deep links (e.g. the Overview "Security" card → Settings tab)
   // change the hash; activate the matching tab when they do.
   window.addEventListener('hashchange', () => {
@@ -4883,6 +4878,295 @@
 })();
 </script>
 
+{# Saves without a page reload.
+   Every form on this page is a plain POST that answers with a redirect back
+   here carrying a flash (`?vhost_saved=1`, `?ftp=…`). Submitting it
+   natively reloaded the whole page — a re-render of every tab, a jump back
+   to the top, and every lazy panel fetched again — to show one changed card
+   and one banner.
+
+   Here the same POST goes over fetch(); the redirect is followed as before
+   and the page it lands on is parsed, not shown. From it we take:
+     · the card the form lives in (nearest `.group/.item/.card/details/
+       section` with an id — card ids are stable across renders), swapped in
+       place, its inline scripts re-run and htmx re-armed;
+     · the identity bar, the facts row and the section-nav badges;
+     · the flash banners, as toasts — and an error one also inline above the
+       card, where the operator is looking.
+   Anything that does not land back on THIS hosting (a job page, the list
+   after a delete) is navigated to exactly as a native submit would. No-JS,
+   multipart, `target=`, htmx-driven and `data-no-ajax` forms are left
+   alone. The server contract is unchanged: this is progressive. #}
+<script>
+(function () {
+  'use strict';
+  const header = document.querySelector('.page-header[data-hosting-id]');
+  const HID = header && header.getAttribute('data-hosting-id');
+  if (!HID || !window.fetch || !window.DOMParser) return;
+  const REGION = '.group[id], .item[id], .card[id], details[id], section[id]';
+
+  function eligible(form, submitter) {
+    if (form.hasAttribute('data-no-ajax')) return false;
+    if (form.hasAttribute('hx-post') || form.hasAttribute('hx-get')) return false;
+    if (form.getAttribute('target') || (submitter && submitter.getAttribute('formtarget'))) return false;
+    const method = ((submitter && submitter.getAttribute('formmethod')) || form.getAttribute('method') || 'get').toLowerCase();
+    if (method !== 'post') return false;
+    if ((form.getAttribute('enctype') || '').toLowerCase().indexOf('multipart') !== -1) return false;
+    const action = (submitter && submitter.getAttribute('formaction')) || form.getAttribute('action') || '';
+    // Same-origin paths only.
+    return action.charAt(0) === '/' && action.charAt(1) !== '/';
+  }
+
+  // The card a form lives in, and its counterpart in the fresh render.
+  // Preferred: an ancestor with an id (card ids are stable across renders).
+  // Otherwise the nearest card-shaped ancestor, found in the new page
+  // through the form itself: the same action, at the same position among
+  // that panel's forms with that action, then up to the same kind of card.
+  const CARD = '.item, .card, details, .group';
+  function cardOf(form) {
+    let el = form.parentElement;
+    while (el && !el.classList.contains('tab-panel') && el !== document.body) {
+      if (el.matches(CARD)) return el;
+      el = el.parentElement;
+    }
+    return null;
+  }
+  function counterpart(form, doc) {
+    let el = form.parentElement;
+    while (el && !el.classList.contains('tab-panel') && el !== document.body) {
+      if (el.matches(REGION)) {
+        const fresh = doc.getElementById(el.id);
+        if (fresh) return [el, fresh];
+      }
+      el = el.parentElement;
+    }
+    const card = cardOf(form);
+    const panel = form.closest('.tab-panel');
+    const freshPanel = panel && doc.getElementById(panel.id);
+    if (!card || !freshPanel) return null;
+    const action = form.getAttribute('action');
+    const sel = 'form[action="' + CSS.escape(action) + '"]';
+    const i = Array.from(panel.querySelectorAll(sel)).indexOf(form);
+    const freshForm = freshPanel.querySelectorAll(sel)[i];
+    if (!freshForm) return null;
+    let f = freshForm.parentElement;
+    while (f && f !== freshPanel) {
+      if (f.matches(CARD)) break;
+      f = f.parentElement;
+    }
+    if (!f || f === freshPanel || f.tagName !== card.tagName || f.className !== card.className) return null;
+    return [card, f];
+  }
+
+  // `data-flash` marks the banners that answer ONE request (the macro at
+  // the top of this template); the rest of `.site-alerts` is standing state.
+  function flashes(root) {
+    return Array.from(root.querySelectorAll('.site-alerts > [data-flash]')).map(f => ({
+      kind: f.classList.contains('error') ? 'error' : (f.classList.contains('warn') ? 'warn' : 'success'),
+      text: (f.querySelector('.flash-body') || f).textContent.replace(/\s+/g, ' ').trim(),
+      node: f,
+    }));
+  }
+
+  // Scripts set through innerHTML / importNode never run; re-create them.
+  function wake(root) {
+    root.querySelectorAll('script').forEach(old => {
+      const s = document.createElement('script');
+      s.textContent = old.textContent;
+      old.replaceWith(s);
+    });
+    if (window.htmx) window.htmx.process(root);
+  }
+
+  // Keep accordions the operator had open (by id, else by position). The
+  // swapped card may itself be a <details>.
+  function allDetails(root) {
+    const list = Array.from(root.querySelectorAll('details'));
+    if (root.tagName === 'DETAILS') list.unshift(root);
+    return list;
+  }
+  function openState(root) {
+    return allDetails(root).map(d => ({ id: d.id, open: d.open }));
+  }
+  function restoreOpen(root, state) {
+    const now = allDetails(root);
+    state.forEach((st, i) => {
+      if (!st.open) return;
+      const d = st.id ? now.find(x => x.id === st.id)
+        : (now.length === state.length ? now[i] : null);
+      if (d) d.open = true;
+    });
+  }
+
+  function swapChrome(doc) {
+    ['.site-bar', '.site-meta'].forEach(sel => {
+      const cur = document.querySelector(sel), fresh = doc.querySelector(sel);
+      if (cur && fresh && cur.innerHTML !== fresh.innerHTML) {
+        cur.innerHTML = fresh.innerHTML;
+        wake(cur);
+      }
+    });
+    // Tab items keep their element (the click handler is bound to it);
+    // only the label + badge inside is refreshed.
+    doc.querySelectorAll('.site-nav .tab[data-tab]').forEach(t => {
+      const cur = document.querySelector('.site-nav .tab[data-tab="' + t.dataset.tab + '"]');
+      if (cur && cur.innerHTML !== t.innerHTML) cur.innerHTML = t.innerHTML;
+    });
+  }
+
+  function swapRegion(form, doc) {
+    const pair = counterpart(form, doc);
+    let target = null;
+    if (pair) {
+      const [region, fresh] = pair;
+      const st = openState(region);
+      const node = document.importNode(fresh, true);
+      region.replaceWith(node);
+      restoreOpen(node, st);
+      wake(node);
+      target = node;
+    }
+    if (!target) {
+      // No stable card around the form (or it is gone from the new render):
+      // refresh the whole open section. The panel ELEMENT stays — the tab
+      // switcher holds references to it — only its content changes.
+      const panel = form.closest('.tab-panel') || document.querySelector('.tab-panel.active');
+      const fresh = panel && doc.getElementById(panel.id);
+      if (panel && fresh) {
+        const st = openState(panel);
+        panel.innerHTML = fresh.innerHTML;
+        restoreOpen(panel, st);
+        wake(panel);
+        target = panel;
+      }
+    }
+    return target;
+  }
+
+  function busy(form, submitter, on) {
+    if (on) form.setAttribute('aria-busy', 'true');
+    else form.removeAttribute('aria-busy');
+    if (submitter && submitter.isConnected) submitter.disabled = on;
+  }
+
+  function showFlashes(doc, near) {
+    // The previous answer — a banner from the page load, or an inline error
+    // from the last save — is not about this request any more.
+    document.querySelectorAll('.site-alerts > [data-flash], [data-ajax-flash]').forEach(n => n.remove());
+    // Standing alerts can change with a save (an alias the certificate does
+    // not cover yet): take the fresh set.
+    const alerts = document.querySelector('.site-alerts');
+    if (alerts) {
+      alerts.querySelectorAll(':scope > [data-standing]').forEach(n => n.remove());
+      doc.querySelectorAll('.site-alerts > [data-standing]').forEach(n => alerts.appendChild(document.importNode(n, true)));
+    }
+    flashes(doc).forEach(f => {
+      if (window.toast) window.toast(f.text, f.kind === 'warn' ? 'info' : f.kind, f.kind === 'error' ? 12000 : 5000);
+      // An error also stays on the page, above the card the operator just
+      // used — a toast alone is too easy to miss for something that failed.
+      if (f.kind === 'error' && near && near.parentElement) {
+        const n = document.importNode(f.node, true);
+        n.removeAttribute('data-flash');
+        n.setAttribute('data-ajax-flash', '');
+        if (near.classList.contains('tab-panel')) near.insertBefore(n, near.firstChild);
+        else near.parentElement.insertBefore(n, near);
+      }
+    });
+  }
+
+  function download(res, blob) {
+    const cd = res.headers.get('content-disposition') || '';
+    const m = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(cd);
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = m ? decodeURIComponent(m[1]) : 'download';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+  }
+
+  // Bubble phase on purpose: the confirm dialog and native validation run
+  // first (capture) and cancel the event when the operator has not
+  // confirmed yet — a cancelled submit is not ours to send.
+  document.addEventListener('submit', async ev => {
+    const form = ev.target;
+    if (ev.defaultPrevented || !form || form.tagName !== 'FORM') return;
+    const submitter = ev.submitter || null;
+    if (!eligible(form, submitter)) return;
+    ev.preventDefault();
+    if (form.getAttribute('aria-busy') === 'true') return; // double click
+
+    const action = (submitter && submitter.getAttribute('formaction')) || form.getAttribute('action');
+    let data;
+    try { data = new FormData(form, submitter); }
+    catch (_) {
+      data = new FormData(form);
+      if (submitter && submitter.name) data.append(submitter.name, submitter.value);
+    }
+    busy(form, submitter, true);
+    let res;
+    try {
+      res = await fetch(action, {
+        method: 'POST',
+        body: new URLSearchParams(data),
+        credentials: 'same-origin',
+        redirect: 'follow',
+      });
+    } catch (_) {
+      busy(form, submitter, false);
+      if (window.toast) window.toast('Could not reach the panel — nothing was sent. Check the connection and try again.', 'error', 10000);
+      return;
+    }
+
+    const type = res.headers.get('content-type') || '';
+    if (/attachment/i.test(res.headers.get('content-disposition') || '')) {
+      busy(form, submitter, false);
+      download(res, await res.blob());
+      return;
+    }
+    if (type.indexOf('text/html') === -1) {
+      // Not a page (JSON, empty 204…): the action happened; show its
+      // effect the plain way.
+      location.replace(location.pathname + location.hash);
+      return;
+    }
+    const html = await res.text();
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+    const landed = doc.querySelector('.page-header[data-hosting-id]');
+
+    if (!landed || landed.getAttribute('data-hosting-id') !== HID) {
+      if (res.ok && res.redirected) {
+        // Somewhere else on purpose — a job's live log, the hostings list
+        // after a delete. Go there, as the native submit would have.
+        location.assign(res.url);
+        return;
+      }
+      busy(form, submitter, false);
+      if (!res.ok) {
+        const why = doc.querySelector('.flash-body, main h1, h1, title');
+        if (window.toast) window.toast((why ? why.textContent.replace(/\s+/g, ' ').trim() + ' — ' : '') + 'HTTP ' + res.status, 'error', 12000);
+        return;
+      }
+      // A page rendered straight from the POST: show it as is.
+      document.open(); document.write(html); document.close();
+      return;
+    }
+
+    swapChrome(doc);
+    const near = swapRegion(form, doc);
+    showFlashes(doc, near);
+    // Flash parameters from the redirect must not come back on a reload.
+    if (history.replaceState) history.replaceState(null, '', location.pathname + location.hash);
+    document.dispatchEvent(new CustomEvent('live-refresh-swapped'));
+    // The old form is gone if its card was swapped; if it was not, let it
+    // be used again.
+    if (form.isConnected) busy(form, submitter, false);
+  });
+})();
+</script>
+
 {# Per-hosting actions must dispatch to the node where this hosting
    actually lives — without this, suspend/resume/set-limits/backup/
    etc. on a worker hosting silently no-op on the master.
@@ -4902,7 +5186,10 @@
 (function () {
   'use strict';
   const TARGET_NODE = "{{ target_node|e }}";
-  document.querySelectorAll('form').forEach(f => {
+  // Run at load AND again on every submit: cards are re-rendered in place
+  // after a save (see the in-place submit script below), and the fresh
+  // forms from that render never went through the load-time pass.
+  function ensure(f) {
     const action = (f.getAttribute('action') || '').trim();
     if (!action.startsWith('/hostings/')) return;
     // Skip if form already carries target_node. The selector
@@ -4918,7 +5205,11 @@
     i.name = 'target_node';
     i.value = TARGET_NODE;
     f.appendChild(i);
-  });
+  }
+  document.querySelectorAll('form').forEach(ensure);
+  document.addEventListener('submit', ev => {
+    if (ev.target && ev.target.tagName === 'FORM') ensure(ev.target);
+  }, true);
 })();
 </script>
 <script>

@@ -416,6 +416,7 @@ fn build_app_with_signer(
         deployment_mode: Arc::new(tokio::sync::RwLock::new("master".to_string())),
         ftp_password_handoff: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         error_handoff: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        wp_lists: Default::default(),
     });
     // The login/2FA + enroll handlers extract `ConnectInfo<SocketAddr>` (real
     // peer IP for the rate-limit bucket). `.oneshot()` doesn't go through
