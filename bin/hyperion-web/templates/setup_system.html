@@ -1,0 +1,40 @@
+{% extends "_setup_layout.html" %}
+{% block title %}Server identity{% endblock %}
+{% block heading %}Name the server{% endblock %}
+{% block lead %}These show up in alerts, emails and the Nodes list.{% endblock %}
+{% block pane %}
+<form method="post" action="/setup/system" class="group">
+  <input type="hidden" name="_csrf" value="{{ f.csrf }}">
+  <div class="item">
+    <div class="field-row">
+      <div class="field">
+        <label for="hostname">Hostname</label>
+        <input id="hostname" name="hostname" type="text" class="mono" value="{{ hostname }}"
+               autocapitalize="off" spellcheck="false" maxlength="253">
+        <p class="text-soft small field-note">{% if !current_hostname.is_empty() %}Currently <code>{{ current_hostname }}</code>. {% endif %}A full name such as <code>s1.example.com</code> works best. It can't be changed here once sites exist.</p>
+      </div>
+      <div class="field">
+        <label for="timezone">Time zone</label>
+        {% if timezones.is_empty() %}
+        <input id="timezone" name="timezone" type="text" class="mono" value="{{ timezone }}" spellcheck="false">
+        {% else %}
+        <select id="timezone" name="timezone">
+          {% for z in timezones %}<option value="{{ z }}"{% if z.as_str() == timezone.as_str() %} selected{% endif %}>{{ z }}</option>{% endfor %}
+        </select>
+        {% endif %}
+        <p class="text-soft small field-note">Backups and reports run on this clock.</p>
+      </div>
+    </div>
+    <div class="field">
+      <label for="contact_email">Contact email</label>
+      <input id="contact_email" name="contact_email" type="email" value="{{ contact_email }}" required>
+      <p class="text-soft small field-note">Let's Encrypt sends certificate expiry notices here.</p>
+    </div>
+  </div>
+  <div class="item setup-actions">
+    <span class="text-soft small">Saving restarts the agent for a few seconds.</span>
+    <span class="setup-spacer"></span>
+    <button class="btn primary" type="submit">Save and continue</button>
+  </div>
+</form>
+{% endblock %}

@@ -1,0 +1,22 @@
+{% extends "_setup_layout.html" %}
+{% block title %}Review{% endblock %}
+{% block heading %}{% if blocking %}Something still needs doing{% else if warnings > 0 %}Ready, with {{ warnings }} thing{% if warnings != 1 %}s{% endif %} left for later{% else %}Everything is in place{% endif %}{% endblock %}
+{% block lead %}Each line below was checked just now on the server.{% endblock %}
+{% block pane %}
+<div class="group">
+  {% for c in checks %}
+  <div class="setup-prog is-{{ c.tone }}">
+    <span class="setup-prog-name"><strong>{{ c.label }}</strong> <span class="text-soft small setup-wrap">{{ c.detail }}</span></span>
+    {% if let Some(h) = c.href %}<a class="small" href="{{ h }}">Fix</a>{% endif %}
+    <span class="pill {{ c.tone }}">{{ c.pill }}</span>
+  </div>
+  {% endfor %}
+</div>
+{% if warnings > 0 && !blocking %}
+<p class="text-soft small setup-note">Skipped items can be set up any time in Settings. The panel works without them.</p>
+{% endif %}
+<form method="post" action="/setup/finish" class="setup-skip">
+  <input type="hidden" name="_csrf" value="{{ f.csrf }}">
+  <button class="btn primary" type="submit"{% if blocking %} disabled{% endif %}>Open the panel</button>
+</form>
+{% endblock %}

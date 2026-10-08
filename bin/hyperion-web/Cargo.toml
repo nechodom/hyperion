@@ -61,6 +61,9 @@ qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 base64 = { workspace = true }
 regex.workspace = true
 rand.workspace = true
+# SHA-256 for the setup code's stored hash and the self-signed certificate
+# fingerprint the installer prints (browsers show SHA-256, so it must be that).
+sha2.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }

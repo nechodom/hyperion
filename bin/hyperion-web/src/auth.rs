@@ -386,8 +386,9 @@ async fn extract_auth(parts: &mut Parts, state: &SharedState) -> AuthCtx {
                     // bootstrap id AND its username can only have been minted
                     // by the bootstrap login, which verified the password
                     // against the file.
-                    let is_bootstrap_admin =
-                        s.user_id == state.admin_user.id && s.username == state.admin_user.username;
+                    let is_bootstrap_admin = !state.admin_user.is_disabled()
+                        && s.user_id == state.admin_user.id
+                        && s.username == state.admin_user.username;
                     let live = match &standing {
                         // Privilege stays what the cookie carries — the only
                         // place this account's role has ever been recorded.

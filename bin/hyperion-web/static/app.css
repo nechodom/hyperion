@@ -5896,6 +5896,178 @@ details.asset-picker[open] > summary::after { transform: rotate(180deg); }
   .me-enrol { grid-template-columns: 1fr; }
 }
 
+/* ============================================================
+ *  First-run setup wizard (/setup/*)
+ *  Its own frame — no sidebar, nothing to navigate to until it is done —
+ *  built from the same tokens, groups and pills as every other page.
+ * ============================================================ */
+.setup-body { background: var(--bg); min-height: 100vh; }
+.setup-shell {
+  display: grid;
+  grid-template-columns: 15rem minmax(0, 1fr);
+  min-height: 100vh;
+}
+.setup-rail {
+  border-right: 1px solid var(--border);
+  background: var(--bg-2);
+  padding: 1.5rem 0.9rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+.setup-brand {
+  font: 800 0.95rem/1 var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 0 0.5rem;
+}
+.setup-brand .hy { color: var(--brand-accent); }
+.setup-brand .dot { color: var(--text-soft); font-weight: 500; }
+.setup-brand small {
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  color: var(--text-soft);
+  margin-left: 0.35rem;
+  text-transform: lowercase;
+}
+.setup-steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.setup-steps li > a,
+.setup-steps li > span {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  padding: 0.45rem 0.5rem;
+  border-radius: var(--radius-sm);
+  color: var(--text-dim);
+  font-size: 0.88rem;
+  text-decoration: none;
+}
+.setup-steps li > a:hover { background: var(--surface-3); color: var(--text); text-decoration: none; }
+.setup-steps li.is-current > a,
+.setup-steps li.is-current > span { background: var(--surface-3); color: var(--text); font-weight: 500; }
+.setup-dot {
+  width: 1.2rem;
+  height: 1.2rem;
+  flex: none;
+  border-radius: 50%;
+  border: 1px solid var(--border-strong);
+  display: grid;
+  place-items: center;
+  font-size: 0.68rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-soft);
+}
+.setup-steps li.is-done .setup-dot { background: var(--success); border-color: var(--success); color: var(--primary-fg); }
+.setup-steps li.is-skipped .setup-dot { background: var(--surface-3); border-color: var(--border-strong); color: var(--text-soft); }
+.setup-step-name { min-width: 0; }
+.setup-opt { margin-left: auto; font-size: 0.68rem; color: var(--text-soft); }
+.setup-foot { margin: auto 0 0; padding: 0 0.5rem; font-size: 0.78rem; color: var(--text-soft); line-height: 1.5; }
+
+.setup-pane {
+  padding: 2.25rem 2.5rem 3rem;
+  max-width: 52rem;
+  width: 100%;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--group-gap);
+}
+.setup-pane > .group + .group { margin-top: 0; }
+.setup-head h1 { font-size: 1.45rem; font-weight: 600; letter-spacing: -0.01em; margin: 0.2rem 0 0; text-wrap: balance; }
+.setup-eyebrow {
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-soft);
+  font-weight: 600;
+}
+.setup-lead { color: var(--text-dim); margin: 0.4rem 0 0; max-width: 62ch; line-height: 1.55; }
+.setup-pane > .flash { margin: 0; }
+
+.setup-actions { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
+.setup-actions form { margin: 0; }
+.setup-spacer { flex: 1; }
+.setup-skip { margin: -0.5rem 0 0; display: flex; justify-content: flex-end; }
+.setup-note { margin: -0.5rem 0 0; }
+.setup-wrap { overflow-wrap: anywhere; min-width: 0; }
+
+.setup-code { font-size: 1.15rem; letter-spacing: 0.12em; text-transform: uppercase; max-width: 22rem; }
+.setup-otp { font-size: 1.1rem; letter-spacing: 0.2em; max-width: 10rem; }
+
+/* Picker rows: one checkbox + title + one line of help. */
+.group > .setup-choice {
+  display: flex;
+  gap: 0.85rem;
+  align-items: flex-start;
+  padding: 0.9rem 1.25rem;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+}
+.setup-choice input[type="checkbox"] { width: auto; margin-top: 0.2rem; accent-color: var(--primary); }
+.setup-choice-body { min-width: 0; display: flex; flex-direction: column; gap: 0.2rem; }
+.setup-choice-title { font-weight: 500; display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+.setup-inline-select { width: auto; padding: 0.2rem 2rem 0.2rem 0.6rem; font-size: 0.85rem; }
+.setup-inline-field { display: flex; align-items: center; gap: 0.5rem; margin-top: 0.35rem; font-size: 0.82rem; color: var(--text-dim); }
+.setup-inline-field input { width: 6rem; padding: 0.3rem 0.5rem; }
+
+/* One line per component / check: name, then its pill. */
+.group > .setup-prog {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.8rem 1.25rem;
+  border-bottom: 1px solid var(--border);
+}
+.group > .setup-prog:last-child { border-bottom: none; }
+.setup-prog-name { flex: 1; min-width: 0; }
+.group > .setup-prog.is-err { background: color-mix(in oklab, var(--danger) 5%, var(--surface)); }
+.group > .setup-prog.is-failed { background: color-mix(in oklab, var(--danger) 5%, var(--surface)); }
+.group > details.setup-log { padding: 0.7rem 1.25rem; border-bottom: 1px solid var(--border); }
+.setup-log summary { cursor: pointer; font-size: 0.82rem; color: var(--text-dim); }
+.setup-log pre {
+  margin: 0.6rem 0 0;
+  max-height: 16rem;
+  overflow: auto;
+  font-size: 0.75rem;
+  line-height: 1.5;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0.6rem 0.75rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Two-factor: QR beside the steps, backup codes in a grid. */
+.setup-qr { display: flex; gap: 1.5rem; align-items: flex-start; flex-wrap: wrap; }
+.setup-qr-img svg { display: block; width: 11rem; height: 11rem; border-radius: var(--radius-sm); border: 1px solid var(--border); background: #fff; }
+.setup-qr-side { flex: 1 1 16rem; min-width: 0; display: flex; flex-direction: column; gap: 0.5rem; }
+.setup-qr-side h3 { margin-top: 0.4rem; }
+.setup-secret { overflow-wrap: anywhere; font-size: 0.85rem; }
+.setup-codes {
+  list-style: none;
+  margin: 0.75rem 0 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(8.5rem, 1fr));
+  gap: 0.4rem;
+}
+.setup-codes code { display: block; text-align: center; padding: 0.35rem; font-size: 0.85rem; }
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+}
+
+@media (max-width: 760px) {
+  .setup-shell { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto 1fr; }
+  .setup-rail { border-right: 0; border-bottom: 1px solid var(--border); padding: 1rem; }
+  .setup-steps { flex-direction: row; overflow-x: auto; gap: 0.25rem; }
+  .setup-steps .setup-step-name, .setup-steps .setup-opt { display: none; }
+  .setup-steps li.is-current .setup-step-name { display: inline; }
+  .setup-foot { display: none; }
+  .setup-pane { padding: 1.25rem 1rem 2rem; }
+}
+
 /* /protection — refusals per hour, stacked: the part that counts toward a
    ban (magenta) under the part that is only refused (blue). Same series
    hues as /stats; labels under the bars at each UTC midnight. */

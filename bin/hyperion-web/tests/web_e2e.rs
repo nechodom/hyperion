@@ -323,6 +323,22 @@ fn test_state(
     admin: AdminUser,
     signer: Arc<SessionSigner>,
 ) -> hyperion_web::state::SharedState {
+    test_state_with_setup(
+        agent_socket,
+        admin,
+        signer,
+        Arc::new(hyperion_web::setup::SetupCtl::inactive(PathBuf::from(
+            "/nonexistent/setup.json",
+        ))),
+    )
+}
+
+fn test_state_with_setup(
+    agent_socket: PathBuf,
+    admin: AdminUser,
+    signer: Arc<SessionSigner>,
+    setup: Arc<hyperion_web::setup::SetupCtl>,
+) -> hyperion_web::state::SharedState {
     let cfg = Config::default();
     let csrf_key: [u8; 32] = {
         let mut k = [0u8; 32];
@@ -358,6 +374,7 @@ fn test_state(
         deployment_mode: Arc::new(tokio::sync::RwLock::new("master".to_string())),
         ftp_password_handoff: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         error_handoff: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        setup,
     })
 }
 
@@ -3900,6 +3917,307 @@ async fn phpmyadmin_relay_is_gated_and_isolated() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+// ───────────────────────── first-run setup wizard ─────────────────────────
+
+/// A fresh install: no bootstrap admin, setup pending with a known code.
+async fn setup_app() -> (
+    axum::Router,
+    Arc<hyperion_web::setup::SetupCtl>,
+    String,
+    tempfile::TempDir,
+    tempfile::TempDir,
+) {
+    let (sock, agent_dir) = start_agent().await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("setup.json");
+    let code = hyperion_web::setup::issue_code(&path, hyperion_types::now_secs())
+        .expect("write")
+        .expect("code");
+    let ctl = Arc::new(hyperion_web::setup::SetupCtl::load(path));
+    let state = test_state_with_setup(
+        sock,
+        AdminUser::disabled(),
+        Arc::new(SessionSigner::new_random()),
+        ctl.clone(),
+    );
+    let router =
+        hyperion_web::build_router(state).layer(axum::extract::connect_info::MockConnectInfo(
+            // Own peer address: the setup code shares the login throttle.
+            "127.0.0.9:34567".parse::<std::net::SocketAddr>().unwrap(),
+        ));
+    (router, ctl, code, dir, agent_dir)
+}
+
+/// `name=value` of the Set-Cookie header for `name`, among several.
+fn cookie_named(resp: &axum::response::Response, name: &str) -> Option<String> {
+    resp.headers()
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .map(|raw| raw.split(';').next().unwrap_or("").to_string())
+        .find(|kv| kv.split_once('=').map(|(k, v)| k == name && !v.is_empty()) == Some(true))
+}
+
+fn location(resp: &axum::response::Response) -> String {
+    resp.headers()
+        .get(header::LOCATION)
+        .map(|v| v.to_str().unwrap().to_string())
+        .unwrap_or_default()
+}
+
+async fn get_with(app: &axum::Router, uri: &str, cookie: &str) -> axum::response::Response {
+    let mut b = Request::builder().uri(uri);
+    if !cookie.is_empty() {
+        b = b.header(header::COOKIE, cookie);
+    }
+    app.clone()
+        .oneshot(b.body(Body::empty()).unwrap())
+        .await
+        .expect("call")
+}
+
+async fn post_form(
+    app: &axum::Router,
+    uri: &str,
+    cookie: &str,
+    form: &str,
+) -> axum::response::Response {
+    let mut b = Request::builder()
+        .method(Method::POST)
+        .uri(uri)
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded");
+    if !cookie.is_empty() {
+        b = b.header(header::COOKIE, cookie);
+    }
+    app.clone()
+        .oneshot(b.body(Body::from(form.to_string())).unwrap())
+        .await
+        .expect("call")
+}
+
+fn enc(s: &str) -> String {
+    url::form_urlencoded::byte_serialize(s.as_bytes()).collect()
+}
+
+/// While nobody owns the panel, everything leads to the wizard — and the
+/// probes keep answering.
+#[tokio::test]
+async fn setup_gate_sends_everything_to_the_wizard() {
+    let (app, _ctl, code, _d, _a) = setup_app().await;
+    for path in ["/", "/login", "/hostings", "/settings", "/install"] {
+        let r = get_with(&app, path, "").await;
+        assert!(r.status().is_redirection(), "{path}: {}", r.status());
+        assert_eq!(location(&r), "/setup", "{path}");
+    }
+    assert_eq!(
+        get_with(&app, "/healthz", "").await.status(),
+        StatusCode::OK
+    );
+    // The installer's link carries the code on to the access step.
+    let r = get_with(&app, &format!("/setup?t={code}"), "").await;
+    let compact = hyperion_web::setup::normalize_code(&code);
+    assert_eq!(location(&r), format!("/setup/access?t={compact}"));
+    let (status, body) = get_body(app.clone(), &format!("/setup/access?t={compact}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains(&code), "code not prefilled: {body}");
+}
+
+/// The setup code opens the admin step once; a wrong or used code does not.
+#[tokio::test]
+async fn setup_code_is_checked_and_single_use() {
+    let (app, _ctl, code, _d, _a) = setup_app().await;
+    let r = post_form(&app, "/setup/access", "", "code=AAAA-BBBB-CCCC-DDDD").await;
+    assert_eq!(r.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(cookie_named(&r, "hyperion_session_setup").is_none());
+    let body = body_string(r).await;
+    assert!(body.contains("match"), "{body}");
+
+    // No setup cookie → the admin step is not reachable.
+    let r = get_with(&app, "/setup/admin", "").await;
+    assert_eq!(location(&r), "/setup/access");
+
+    let r = post_form(
+        &app,
+        "/setup/access",
+        "",
+        &format!("code={}", enc(&code.to_lowercase())),
+    )
+    .await;
+    assert!(r.status().is_redirection(), "{}", r.status());
+    assert_eq!(location(&r), "/setup/admin");
+    let setup_cookie = cookie_named(&r, "hyperion_session_setup").expect("setup cookie");
+
+    let r = post_form(&app, "/setup/access", "", &format!("code={}", enc(&code))).await;
+    assert_eq!(r.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(body_string(r).await.contains("already been used"));
+
+    let r = get_with(&app, "/setup/admin", &setup_cookie).await;
+    assert_eq!(r.status(), StatusCode::OK);
+    // The setup cookie is not a session: the rest of the panel still bounces.
+    let r = get_with(&app, "/hostings", &setup_cookie).await;
+    assert_eq!(location(&r), "/setup");
+}
+
+/// The admin step creates a real super_admin, signs it in, and from then on
+/// the panel behaves normally except that `/` leads back to the wizard.
+#[tokio::test]
+async fn setup_admin_step_creates_the_owner_and_signs_in() {
+    let (app, ctl, code, _d, _a) = setup_app().await;
+    let r = post_form(&app, "/setup/access", "", &format!("code={}", enc(&code))).await;
+    let setup_cookie = cookie_named(&r, "hyperion_session_setup").expect("setup cookie");
+    let page = body_string(get_with(&app, "/setup/admin", &setup_cookie).await).await;
+    let csrf = extract_csrf(&page);
+
+    // No CSRF token → refused.
+    let r = post_form(
+        &app,
+        "/setup/admin",
+        &setup_cookie,
+        "username=kevin&email=k%40example.cz&password=correct-horse-battery&password2=correct-horse-battery",
+    )
+    .await;
+    assert_eq!(r.status(), StatusCode::FORBIDDEN);
+
+    // Too short a password → the form again, with the reason.
+    let r = post_form(
+        &app,
+        "/setup/admin",
+        &setup_cookie,
+        &format!(
+            "username=kevin&email=k%40example.cz&password=short&password2=short&_csrf={}",
+            enc(&csrf)
+        ),
+    )
+    .await;
+    assert_eq!(r.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(body_string(r).await.contains("at least 12"));
+
+    let r = post_form(
+        &app,
+        "/setup/admin",
+        &setup_cookie,
+        &format!(
+            "username=kevin&email=k%40example.cz&password=correct-horse-battery&password2=correct-horse-battery&_csrf={}",
+            enc(&csrf)
+        ),
+    )
+    .await;
+    assert!(r.status().is_redirection(), "{}", r.status());
+    assert_eq!(location(&r), "/setup/2fa");
+    let session = cookie_named(&r, "hyperion_session").expect("session cookie");
+    assert!(ctl.admin_created());
+
+    // Signed in: the dashboard leads back to the wizard, other pages open.
+    let r = get_with(&app, "/", &session).await;
+    assert_eq!(location(&r), "/setup");
+    let r = get_with(&app, "/hostings", &session).await;
+    assert_eq!(r.status(), StatusCode::OK);
+    // The wizard resumes at the first unfinished step.
+    let r = get_with(&app, "/setup", &session).await;
+    assert_eq!(location(&r), "/setup/2fa");
+    // The two-factor step shows a QR code and backup codes.
+    let r = get_with(&app, "/setup/2fa", &session).await;
+    assert_eq!(r.status(), StatusCode::OK);
+    let body = body_string(r).await;
+    assert!(body.contains("<svg"), "no QR: {body}");
+    assert!(body.contains("setup-codes"));
+
+    // The admin step cannot run twice.
+    let r = post_form(
+        &app,
+        "/setup/admin",
+        &setup_cookie,
+        &format!(
+            "username=mallory&email=m%40example.cz&password=correct-horse-battery&password2=correct-horse-battery&_csrf={}",
+            enc(&csrf)
+        ),
+    )
+    .await;
+    assert_eq!(location(&r), "/setup");
+
+    // There is no bootstrap account to sign in as, and saying so is not a 500.
+    let r = post_form(
+        &app,
+        "/login",
+        "",
+        "username=admin&password=whatever&next=%2F",
+    )
+    .await;
+    assert!(
+        r.status().is_redirection() || r.status().is_success(),
+        "{}",
+        r.status()
+    );
+    // ... while the real owner signs in normally.
+    let r = post_form(
+        &app,
+        "/login",
+        "",
+        "username=kevin&password=correct-horse-battery&next=%2F",
+    )
+    .await;
+    assert!(cookie_named(&r, "hyperion_session").is_some());
+}
+
+/// Nothing to install yet → the wizard will not finish; a finished setup
+/// leaves no trace of the wizard.
+#[tokio::test]
+async fn setup_finish_needs_php_and_then_the_wizard_is_gone() {
+    let (app, ctl, code, _d, _a) = setup_app().await;
+    let r = post_form(&app, "/setup/access", "", &format!("code={}", enc(&code))).await;
+    let setup_cookie = cookie_named(&r, "hyperion_session_setup").unwrap();
+    let csrf =
+        extract_csrf(&body_string(get_with(&app, "/setup/admin", &setup_cookie).await).await);
+    let r = post_form(
+        &app,
+        "/setup/admin",
+        &setup_cookie,
+        &format!(
+            "username=kevin&email=k%40example.cz&password=correct-horse-battery&password2=correct-horse-battery&_csrf={}",
+            enc(&csrf)
+        ),
+    )
+    .await;
+    let session = cookie_named(&r, "hyperion_session").unwrap();
+
+    // An unknown component never reaches the agent's unit.
+    let page = body_string(get_with(&app, "/setup/stack", &session).await).await;
+    let csrf = extract_csrf(&page);
+    let r = post_form(
+        &app,
+        "/setup/stack",
+        &session,
+        &format!("php=php7.4&_csrf={}", enc(&csrf)),
+    )
+    .await;
+    assert_eq!(r.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(body_string(r).await.contains("unknown component"));
+
+    let r = post_form(
+        &app,
+        "/setup/finish",
+        &session,
+        &format!("_csrf={}", enc(&csrf)),
+    )
+    .await;
+    assert_eq!(r.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(body_string(r).await.contains("Install PHP first"));
+    assert!(ctl.is_active());
+
+    ctl.update(|f| f.state = hyperion_web::setup::STATE_COMPLETED.into())
+        .unwrap();
+    assert_eq!(
+        get_with(&app, "/setup", &session).await.status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        get_with(&app, "/setup/access", "").await.status(),
+        StatusCode::NOT_FOUND
+    );
+    let r = get_with(&app, "/", &session).await;
+    assert_eq!(r.status(), StatusCode::OK);
 }
 
 /// /vulns: empty state, then three WordPress sites — one with a major

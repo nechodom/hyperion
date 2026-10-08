@@ -1420,6 +1420,58 @@ impl AdapterPort for RealAdapter {
         }
     }
 
+    async fn setup_stack_start(
+        &self,
+        spec: &hyperion_adapters::setup_stack::JobSpec,
+    ) -> Result<(), AdapterError> {
+        hyperion_adapters::setup_stack::start(spec).await
+    }
+
+    async fn setup_stack_status(&self) -> hyperion_adapters::setup_stack::JobStatus {
+        hyperion_adapters::setup_stack::status().await
+    }
+
+    async fn package_job_running(&self) -> bool {
+        hyperion_adapters::setup_stack::is_running().await
+            || hyperion_adapters::node_update::is_running().await
+    }
+
+    async fn current_hostname(&self) -> String {
+        hyperion_adapters::system_identity::current_hostname().await
+    }
+
+    async fn current_timezone(&self) -> String {
+        hyperion_adapters::system_identity::current_timezone().await
+    }
+
+    async fn apply_hostname(&self, fqdn: &str) -> Result<(), AdapterError> {
+        hyperion_adapters::system_identity::apply_hostname(fqdn).await
+    }
+
+    async fn apply_timezone(&self, tz: &str) -> Result<(), AdapterError> {
+        hyperion_adapters::system_identity::apply_timezone(tz).await
+    }
+
+    fn schedule_self_restart(&self) {
+        // Same approach as `email_config_set`: detached and delayed, so the
+        // RPC reply that triggered it gets out before the agent goes down.
+        tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            match tokio::process::Command::new("/usr/bin/systemctl")
+                .args(["restart", "hyperion-agent"])
+                .output()
+                .await
+            {
+                Ok(o) if o.status.success() => tracing::info!("self-restart: ok"),
+                Ok(o) => tracing::error!(
+                    stderr = %String::from_utf8_lossy(&o.stderr).trim(),
+                    "self-restart failed — restart hyperion-agent manually"
+                ),
+                Err(e) => tracing::error!(error = %e, "self-restart spawn failed"),
+            }
+        });
+    }
+
     async fn redis_is_available(&self) -> bool {
         // `systemctl is-active redis-server` → "active" / anything else.
         // Cheap (~10 ms), no fork-and-exec of redis-cli; uses systemd

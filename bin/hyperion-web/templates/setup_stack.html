@@ -1,0 +1,76 @@
+{% extends "_setup_layout.html" %}
+{% block title %}Server software{% endblock %}
+{% block heading %}Choose server software{% endblock %}
+{% block lead %}Pick what your sites need. Anything left out can be added later on the Services page.{% endblock %}
+{% block pane %}
+{% if picking %}
+<form method="post" action="/setup/stack" class="group">
+  <input type="hidden" name="_csrf" value="{{ f.csrf }}">
+  <div class="ghead">Always installed</div>
+  <div class="setup-choice">
+    <input type="checkbox" checked disabled aria-label="PHP is always installed">
+    <div class="setup-choice-body">
+      <div class="setup-choice-title">
+        PHP-FPM
+        <label for="php" class="sr-only">PHP version</label>
+        <select id="php" name="php" class="setup-inline-select">
+          <option value="php8.3" selected>8.3</option>
+          <option value="php8.4">8.4</option>
+          <option value="php8.2">8.2</option>
+          <option value="php8.1">8.1</option>
+        </select>
+      </div>
+      <div class="text-soft small">Runs WordPress and other PHP sites. Includes wp-cli. More versions can be added per site later.</div>
+    </div>
+  </div>
+  <div class="ghead">Databases</div>
+  <label class="setup-choice" for="c-mariadb">
+    <input type="checkbox" id="c-mariadb" name="mariadb" checked>
+    <div class="setup-choice-body">
+      <div class="setup-choice-title">MariaDB <span class="pill ok small">recommended</span></div>
+      <div class="text-soft small">Databases for WordPress. Secured as it installs: no anonymous users, no remote root, no test database.</div>
+    </div>
+  </label>
+  <label class="setup-choice" for="c-postgresql">
+    <input type="checkbox" id="c-postgresql" name="postgresql">
+    <div class="setup-choice-body">
+      <div class="setup-choice-title">PostgreSQL</div>
+      <div class="text-soft small">Only if your applications need it.</div>
+    </div>
+  </label>
+  <label class="setup-choice" for="c-phpmyadmin">
+    <input type="checkbox" id="c-phpmyadmin" name="phpmyadmin" checked>
+    <div class="setup-choice-body">
+      <div class="setup-choice-title">phpMyAdmin</div>
+      <div class="text-soft small">Database browser, opened from inside the panel. Not reachable from the internet.</div>
+    </div>
+  </label>
+  <div class="ghead">Extras</div>
+  <label class="setup-choice" for="c-vsftpd">
+    <input type="checkbox" id="c-vsftpd" name="vsftpd" checked>
+    <div class="setup-choice-body">
+      <div class="setup-choice-title">FTP (vsftpd)</div>
+      <div class="text-soft small">For clients who upload files over FTP. SFTP works without it.</div>
+      <div class="setup-inline-field">
+        <label for="ftp_port">FTP port</label>
+        <input id="ftp_port" name="ftp_port" type="number" min="1" max="65535" value="21" class="mono">
+      </div>
+    </div>
+  </label>
+  <label class="setup-choice" for="c-redis">
+    <input type="checkbox" id="c-redis" name="redis">
+    <div class="setup-choice-body">
+      <div class="setup-choice-title">Redis</div>
+      <div class="text-soft small">Object cache for busy WordPress sites.</div>
+    </div>
+  </label>
+  <div class="item setup-actions">
+    <span class="text-soft small">Takes 2–5 minutes. Closing the tab does not stop it.</span>
+    <span class="setup-spacer"></span>
+    <button class="btn primary" type="submit">Install selected</button>
+  </div>
+</form>
+{% else %}
+<div id="stack-progress">{% include "_setup_stack_progress.html" %}</div>
+{% endif %}
+{% endblock %}

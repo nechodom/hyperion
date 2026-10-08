@@ -86,11 +86,11 @@ pub use stats::{
     NodeSummary, NodeUpdateStatus, NotificationCounts, NotificationFeed, NotificationOutboxItem,
     NotificationSearchFilter, NotificationSearchResult, NotificationTemplatesView,
     NotificationTopicCount, NotificationView, OsPendingPackage, OsUpdateStatus, PendingEmailChange,
-    ServiceHealth, ServiceInstallStatus, ServicesHealth, SiteEmailLogEntry, SlackConfigView,
-    SmtpAutodetect, SnapshotDiff, SnapshotOverview, SnapshotRestoreOutcome, SnapshotRetention,
-    SnapshotSummary, TrashEntry, UpdateStatus, Web2faEnrollment, WebHostingAccess, WebLoginResult,
-    WebUserSummary, WebVerify2faResult, WpRegistrationView, NOTIFICATION_TOPICS,
-    SNAPSHOT_TAG_WITH_DB,
+    ServiceHealth, ServiceInstallStatus, ServicesHealth, SetupComponentProgress, SetupStackStatus,
+    SiteEmailLogEntry, SlackConfigView, SmtpAutodetect, SnapshotDiff, SnapshotOverview,
+    SnapshotRestoreOutcome, SnapshotRetention, SnapshotSummary, TrashEntry, UpdateStatus,
+    Web2faEnrollment, WebHostingAccess, WebLoginResult, WebUserSummary, WebVerify2faResult,
+    WpRegistrationView, NOTIFICATION_TOPICS, SNAPSHOT_TAG_WITH_DB,
 };
 pub use stats::{CARE_REPORT_DEFAULT_BODY_TEMPLATE, EXPIRY_WARNING_DEFAULT_BODY_TEMPLATE};
 pub use wp::{

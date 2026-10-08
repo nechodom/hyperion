@@ -1134,6 +1134,64 @@ if ! command -v restic >/dev/null 2>&1; then
     || warn "could not install restic — this node will not take snapshots before updates"
 fi
 
+#-------- 4a-sel. Which optional software this box is meant to have -------
+# The heals below re-install MariaDB, PostgreSQL, vsftpd, PHP and phpMyAdmin
+# whenever they are missing. That was right while every install got all of
+# them, but the setup wizard lets the operator CHOOSE — and an update that
+# quietly installs the database server they said no to undoes that choice.
+#
+# /etc/hyperion/components is the record of the choice: one component per
+# line (php8.1..php8.4, mariadb, postgresql, redis, vsftpd, phpmyadmin),
+# written by components.sh as each one installs and by the Services page's
+# install action. When the file exists, only what it lists is healed; an
+# EMPTY file means "nothing optional chosen yet" (a box still in its setup
+# wizard). nginx is always healed — nothing works without it.
+#
+# When the file does NOT exist — every box installed before the wizard, and
+# every worker node — the heals behave exactly as they always have.
+# >>> component-selection
+COMPONENTS_FILE="${HYPERION_COMPONENTS_FILE:-/etc/hyperion/components}"
+SELECTION_MODE=0
+SELECTED_COMPONENTS=" "
+load_component_selection() {
+  SELECTION_MODE=0
+  SELECTED_COMPONENTS=" "
+  [[ -f "$COMPONENTS_FILE" ]] || return 0
+  SELECTION_MODE=1
+  local line
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%%#*}"
+    line="${line//[[:space:]]/}"
+    [[ -n "$line" ]] && SELECTED_COMPONENTS+="$line "
+  done < "$COMPONENTS_FILE"
+  return 0
+}
+# component_selected <name> — is it listed? (Only meaningful in selection mode.)
+component_selected() {
+  [[ "$SELECTED_COMPONENTS" == *" $1 "* ]]
+}
+# heal_allowed <unit> — may the heal (re)install the package behind this unit?
+heal_allowed() {
+  (( SELECTION_MODE )) || return 0
+  local ver
+  case "$1" in
+    nginx.service)        return 0 ;;
+    mariadb.service)      component_selected mariadb ;;
+    postgresql.service)   component_selected postgresql ;;
+    vsftpd.service)       component_selected vsftpd ;;
+    redis-server.service) component_selected redis ;;
+    php*-fpm.service)
+      ver="${1#php}"; ver="${ver%-fpm.service}"
+      component_selected "php$ver" ;;
+    *)                    return 1 ;;
+  esac
+}
+# <<< component-selection
+load_component_selection
+if (( SELECTION_MODE )); then
+  log "Healing only the software chosen for this box ($COMPONENTS_FILE):${SELECTED_COMPONENTS% }"
+fi
+
 declare -A NEEDED_PKGS=(
   [nginx.service]="nginx"
   [vsftpd.service]="vsftpd"
@@ -1164,8 +1222,12 @@ for unit in "${!NEEDED_PKGS[@]}"; do
   if unit_installed "$unit"; then
     continue
   fi
+  if (( SELECTION_MODE )); then
+    # Exactly what the operator chose: every listed PHP version, each
+    # listed service, nothing else (nginx always — see heal_allowed).
+    heal_allowed "$unit" || continue
   # Skip optional PHP versions when at least one is already there.
-  if [[ "$unit" == php*-fpm.service ]]; then
+  elif [[ "$unit" == php*-fpm.service ]]; then
     if unit_installed php8.1-fpm.service \
        || unit_installed php8.2-fpm.service \
        || unit_installed php8.3-fpm.service \
@@ -1184,6 +1246,21 @@ for unit in "${!NEEDED_PKGS[@]}"; do
 until this is fixed manually (apt-get install -y $pkgs)."
   fi
 done
+# Redis exists only as a wizard choice, so it is healed only when chosen —
+# never on a box without the components file.
+if (( SELECTION_MODE )) && heal_allowed redis-server.service \
+   && ! unit_installed redis-server.service; then
+  log "redis-server.service missing — installing redis-server ..."
+  if (( APT_UPDATED == 0 )); then
+    DEBIAN_FRONTEND=noninteractive apt-get update -qq || true
+    APT_UPDATED=1
+  fi
+  if DEBIAN_FRONTEND=noninteractive apt-get install -y -qq redis-server; then
+    systemctl enable --now redis-server >/dev/null 2>&1 || true
+  else
+    warn "redis-server install failed (apt-get install -y redis-server)."
+  fi
+fi
 
 #-------- 4a-ext. PHP extensions required by WordPress / wp-cli -----------
 # The NEEDED_PKGS loop above only fires when the -fpm unit is MISSING, so
@@ -1228,9 +1305,11 @@ done
 # databases only accept connections from localhost. It is served on a
 # root-only unix socket and reached exclusively through the panel (the agent
 # relays authenticated requests) — see the script's header. Runs after the
-# extension heal above so mysqli/mbstring are already present.
+# extension heal above so mysqli/mbstring are already present. With a
+# components file, only on a box where phpMyAdmin was chosen.
 PMA_SCRIPT="$INSTALL_DIR/packaging/install/phpmyadmin.sh"
-if (( HAVE_AGENT )) && [[ -f "$PMA_SCRIPT" ]]; then
+if (( HAVE_AGENT )) && [[ -f "$PMA_SCRIPT" ]] \
+   && { (( ! SELECTION_MODE )) || component_selected phpmyadmin; }; then
   bash "$PMA_SCRIPT" || warn "phpMyAdmin setup failed — the panel's phpMyAdmin button \
 will report it as not installed on this node (re-run: bash $PMA_SCRIPT)."
 fi

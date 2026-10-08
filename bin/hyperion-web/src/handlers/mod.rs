@@ -32,6 +32,7 @@ pub mod search;
 pub mod services_health;
 pub mod sessions;
 pub mod settings;
+pub mod setup;
 pub mod statics;
 pub mod stats;
 pub mod trash;

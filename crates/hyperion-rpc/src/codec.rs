@@ -481,6 +481,28 @@ pub enum Request {
     /// Read the state of the most-recent / in-progress
     /// service-install job. Empty when no install has ever run.
     ServiceInstallStatus,
+    /// Setup wizard: install the chosen server software (PHP, databases,
+    /// FTP, phpMyAdmin, Redis) as the transient unit
+    /// `hyperion-setup-stack.service`. `components` is checked against an
+    /// allow-list and needs at least one PHP version. Returns once started;
+    /// poll `SetupStackStatus`.
+    SetupStackStart {
+        components: Vec<String>,
+        /// vsftpd control port; 0 = the default 21.
+        #[serde(default)]
+        ftp_port: u16,
+    },
+    /// Where the setup wizard's software install stands.
+    SetupStackStatus,
+    /// Setup wizard: set this server's hostname and time zone and the ACME
+    /// contact email, then restart the agent so it reads them. An empty
+    /// field leaves that value alone. A hostname change is refused once any
+    /// hosting exists — the master's node id is its hostname.
+    SetupSystemApply {
+        hostname: String,
+        timezone: String,
+        contact_email: String,
+    },
     /// Upload bytes for a new WordPress asset (plugin or theme ZIP).
     /// The kind + filename + bytes already arrived on the web handler;
     /// this RPC asks the agent to write the file under
@@ -2115,6 +2137,15 @@ pub enum Response {
     /// Current state of the most-recent / in-progress
     /// service-install job + log tail.
     ServiceInstallStatus(hyperion_types::ServiceInstallStatus),
+    SetupStackStart {
+        started_at: i64,
+    },
+    SetupStackStatus(hyperion_types::SetupStackStatus),
+    /// `restarting`: the agent will restart in a few seconds to pick the
+    /// new values up.
+    SetupSystemApply {
+        restarting: bool,
+    },
     /// Upload accepted. `id` is the newly-inserted row id (or the
     /// existing one if dedupe matched on SHA-256).
     WpAssetUpload {
