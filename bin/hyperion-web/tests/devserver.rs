@@ -277,6 +277,19 @@ impl hyperion_core::AdapterPort for StubAdapters {
             .collect();
         Ok((themes, "6.5.3".into()))
     }
+    async fn wp_core_check_update(
+        &self,
+        _: &str,
+        _: &str,
+    ) -> Result<Vec<hyperion_types::WpCoreUpdate>, AdapterError> {
+        if std::env::var_os("DEVSERVER_DEMO").is_none() {
+            return Ok(vec![]);
+        }
+        Ok(vec![hyperion_types::WpCoreUpdate {
+            version: "6.6.2".into(),
+            update_type: "major".into(),
+        }])
+    }
     async fn wp_theme_action(
         &self,
         _: &str,
@@ -586,6 +599,202 @@ async fn seed_demo(svc: &StubService) {
             .await
             .expect("wp");
         }
+    }
+    // WordPress updates page: one site in every state the page sorts by.
+    {
+        use hyperion_core::wp_updates::{outdated_finding, AutoUpdateSkip, SkipMap};
+        use hyperion_types::{WpCoreUpdate, WpVulnScanResult};
+        let core = |v: &str, t: &str| WpCoreUpdate {
+            version: v.into(),
+            update_type: t.into(),
+        };
+        let scan =
+            |findings, checked, core_version: &str, core_updates, auto_updated| WpVulnScanResult {
+                findings,
+                checked,
+                core_version: core_version.into(),
+                core_checked: true,
+                core_updates,
+                auto_updated,
+                ..Default::default()
+            };
+        let kv = |id: &str, key: &str, value: String| {
+            let id = id.to_string();
+            let key = key.to_string();
+            async move {
+                hyperion_state::hosting_kv::set(pool, &id, &key, &value, now)
+                    .await
+                    .expect("demo kv");
+            }
+        };
+        let stored = |scanned_at: i64, result: WpVulnScanResult, failed_at: i64, error: &str| {
+            serde_json::json!({
+                "scanned_at": scanned_at,
+                "result": result,
+                "failed_at": failed_at,
+                "error": error,
+            })
+            .to_string()
+        };
+        // studio-lumen.cz — up to date.
+        kv(
+            &ids[0],
+            "vuln_scan",
+            stored(now - 5 * 3600, scan(vec![], 14, "6.6.2", vec![], 1), 0, ""),
+        )
+        .await;
+        // kavarna-sever.cz — a minor held back: auto-update is off. (A site
+        // on the Backup-only plan: the Care plan forces auto-update on, and
+        // its drift tick would put the switch straight back.)
+        kv(
+            &ids[2],
+            "vuln_scan",
+            stored(
+                now - 5 * 3600,
+                scan(
+                    vec![outdated_finding(
+                        "wordpress-seo",
+                        "Yoast SEO",
+                        "plugin",
+                        "22.4",
+                        "22.6",
+                    )],
+                    9,
+                    "6.6.2",
+                    vec![],
+                    0,
+                ),
+                0,
+                "",
+            ),
+        )
+        .await;
+        kv(&ids[2], "wp_auto_update", "off".into()).await;
+        // pekarna-u-mostu.cz — applies itself; one plugin failed once.
+        kv(
+            &ids[1],
+            "vuln_scan",
+            stored(
+                now - 5 * 3600,
+                scan(
+                    vec![
+                        outdated_finding("astra", "Astra", "theme", "4.6.8", "4.7.0"),
+                        outdated_finding(
+                            "wpforms-lite",
+                            "WPForms Lite",
+                            "plugin",
+                            "1.8.7",
+                            "1.8.8",
+                        ),
+                    ],
+                    11,
+                    "6.6.2",
+                    vec![],
+                    3,
+                ),
+                0,
+                "",
+            ),
+        )
+        .await;
+        let mut skips = SkipMap::new();
+        skips.insert(
+            "wpforms-lite".into(),
+            AutoUpdateSkip {
+                fail_count: 1,
+                first_failed_at: now - 5 * 3600,
+                last_failed_at: now - 5 * 3600,
+                paused_until: 0,
+                last_error: "Download failed. cURL error 28: Operation timed out".into(),
+            },
+        );
+        kv(
+            &ids[1],
+            "wp_update_skips",
+            serde_json::to_string(&skips).unwrap(),
+        )
+        .await;
+        // atelier-hora.com — a paused commercial plugin + core behind.
+        kv(
+            &ids[3],
+            "vuln_scan",
+            stored(
+                now - 6 * 3600,
+                scan(
+                    vec![outdated_finding(
+                        "advanced-custom-fields-pro",
+                        "ACF Pro",
+                        "plugin",
+                        "6.2.0",
+                        "6.3.1",
+                    )],
+                    17,
+                    "6.5.5",
+                    vec![core("6.6.2", "major"), core("6.5.6", "minor")],
+                    0,
+                ),
+                0,
+                "",
+            ),
+        )
+        .await;
+        let mut skips = SkipMap::new();
+        skips.insert(
+            "advanced-custom-fields-pro".into(),
+            AutoUpdateSkip {
+                fail_count: 2,
+                first_failed_at: now - 2 * 86_400,
+                last_failed_at: now - 86_400,
+                paused_until: now + 29 * 86_400,
+                last_error: "Download failed. Unauthorized".into(),
+            },
+        );
+        kv(
+            &ids[3],
+            "wp_update_skips",
+            serde_json::to_string(&skips).unwrap(),
+        )
+        .await;
+        // fit-centrum-brno.cz — the last check could not read the site.
+        kv(
+            &ids[4],
+            "vuln_scan",
+            stored(
+                now - 29 * 3600,
+                scan(vec![], 8, "6.6.2", vec![], 0),
+                now - 5 * 3600,
+                "plugins: Error establishing a database connection",
+            ),
+        )
+        .await;
+        // shop.zahrada-plus.cz — majors waiting, a minor for tonight.
+        kv(
+            &ids[6],
+            "vuln_scan",
+            stored(
+                now - 5 * 3600,
+                scan(
+                    vec![
+                        outdated_finding("woocommerce", "WooCommerce", "plugin", "8.7.0", "9.0.1"),
+                        outdated_finding("elementor", "Elementor", "plugin", "3.24.7", "4.0.2"),
+                        outdated_finding(
+                            "akismet",
+                            "Akismet Anti-spam",
+                            "plugin",
+                            "5.3.1",
+                            "5.3.3",
+                        ),
+                    ],
+                    23,
+                    "6.6.2",
+                    vec![],
+                    2,
+                ),
+                0,
+                "",
+            ),
+        )
+        .await;
     }
     let cert_days = [71_i64, 54, 9, 63, 80, 30, 44];
     for (n, (domain, _)) in sites.iter().enumerate() {

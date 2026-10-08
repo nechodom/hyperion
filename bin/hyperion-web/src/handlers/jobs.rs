@@ -352,22 +352,18 @@ pub async fn get_nav_status(
     if !ctx.is_admin_or_higher() {
         return Ok(axum::Json(zero).into_response());
     }
-    let (mon, vuln, certs) = tokio::join!(
+    let (mon, wp_outdated, certs) = tokio::join!(
         hyperion_rpc_client::call(&state.agent_socket, Request::MonitorOverview),
-        hyperion_rpc_client::call(&state.agent_socket, Request::VulnFindingsList),
+        // Sites across the cluster that need a person — not every site with
+        // an update: a minor the next sweep applies is not "needs me", and a
+        // badge that is always red says nothing. Cached; see the helper.
+        super::vulns::needs_you_count_cached(&state),
         hyperion_rpc_client::call(&state.agent_socket, Request::CertOverview),
     );
     let monitors_down = match mon {
         Ok(RpcResponse::MonitorOverview(v)) => {
             v.iter().filter(|m| m.alert_state == "alerting").count()
         }
-        _ => 0,
-    };
-    // Sites with at least one outdated component — not the total number of
-    // findings. The badge answers "how many sites need me", and one site with
-    // nine old plugins is still one site to open.
-    let wp_outdated = match vuln {
-        Ok(RpcResponse::VulnFindingsList(v)) => v.iter().filter(|s| !s.findings.is_empty()).count(),
         _ => 0,
     };
     let certs_expiring = match certs {
