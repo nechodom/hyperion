@@ -51,6 +51,7 @@ ulid.workspace = true
 thiserror.workspace = true
 blake3.workspace = true
 hex.workspace = true
+flate2.workspace = true
 askama_escape = "0.10"
 # CIDR parse/match for per-API-key IP allowlists (/api/v1 hardening).
 ipnet = "2"

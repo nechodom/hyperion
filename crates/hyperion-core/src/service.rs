@@ -28678,6 +28678,30 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             }
         }
 
+        // One probe at a time. Every caller that found the cache stale used
+        // to run its own `git ls-remote` + download, so the hourly expiry
+        // with a few dashboards open was a burst of identical probes. Who
+        // waited here re-reads the cache: the probe that held the gate has
+        // usually just stored an answer. A forced refresh (the operator's
+        // "check now") takes it too when that probe started within a few
+        // seconds of the click — re-asking GitHub would say the same.
+        const FORCED_FRESH_SECS: i64 = 10;
+        static PROBE_GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+        let _probe = PROBE_GATE.lock().await;
+        {
+            let cache = self.update_cache.read().await;
+            if let Some(s) = cache.as_ref() {
+                let fresh = if force_refresh {
+                    s.last_checked_at >= now - FORCED_FRESH_SECS
+                } else {
+                    now - s.last_checked_at < UPDATE_CHECK_TTL_SECS
+                };
+                if fresh {
+                    return Ok(s.clone());
+                }
+            }
+        }
+
         // Re-probe upstream. We don't read /etc/hyperion/agent.toml for
         // a configurable repo URL because the install scripts hard-code
         // nechodom/hyperion too — if the operator forks, they patch the

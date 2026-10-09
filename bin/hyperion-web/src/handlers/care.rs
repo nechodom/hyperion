@@ -115,11 +115,13 @@ pub(crate) async fn collect_overview(
         _ => unreachable.push("this server".to_string()),
     }
 
-    let nodes: Vec<hyperion_types::NodeSummary> =
-        match hyperion_rpc_client::call(&state.agent_socket, Request::NodesList).await {
-            Ok(RpcResponse::NodesList(v)) => v,
-            _ => Vec::new(),
-        };
+    let nodes: Vec<hyperion_types::NodeSummary> = match crate::dispatcher::cached_nodes(state)
+        .await
+        .map(hyperion_rpc::codec::Response::NodesList)
+    {
+        Ok(RpcResponse::NodesList(v)) => v,
+        _ => Vec::new(),
+    };
     if !nodes.is_empty() {
         let (answered, failed) = crate::dispatcher::fan_out_reporting(state, nodes, req).await;
         for (node, resp) in answered {

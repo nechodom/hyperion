@@ -220,27 +220,36 @@ pub async fn get_trash_count(
     if !ctx.can(Capability::TrashManage) {
         return axum::Json(serde_json::json!({"count": 0})).into_response();
     }
+    // One cluster fan-out per minute for every open tab used to be the
+    // price of this badge. Cached and single-flight, dropped on any write
+    // (trashing, restoring, purging all are POSTs), so a change the
+    // operator just made still shows on the next poll.
+    let total = state
+        .caches
+        .trash_count
+        .get_or_load(|| async { Ok::<_, ()>(count_trash(&state).await) })
+        .await
+        .unwrap_or(0);
+    axum::Json(serde_json::json!({"count": total})).into_response()
+}
+
+async fn count_trash(state: &SharedState) -> usize {
     let mut total = 0usize;
     if let Ok(RpcResponse::TrashList(rows)) =
-        crate::dispatcher::dispatch_to_node(&state, None, Request::TrashList).await
+        crate::dispatcher::dispatch_to_node(state, None, Request::TrashList).await
     {
         total += rows.len();
     }
     // Also poll every remote node (same fan-out as get_trash). Best
     // effort — a flaky worker shouldn't make the badge go to 0.
-    if let Ok(RpcResponse::NodesList(nodes)) =
-        hyperion_rpc_client::call(&state.agent_socket, hyperion_rpc::codec::Request::NodesList)
-            .await
-    {
-        for (_, resp) in
-            crate::dispatcher::fan_out(&state, nodes, hyperion_rpc::codec::Request::TrashList).await
-        {
+    if let Ok(nodes) = crate::dispatcher::cached_nodes(state).await {
+        for (_, resp) in crate::dispatcher::fan_out(state, nodes, Request::TrashList).await {
             if let RpcResponse::TrashList(rows) = resp {
                 total += rows.len();
             }
         }
     }
-    axum::Json(serde_json::json!({"count": total})).into_response()
+    total
 }
 
 /// Helper for templates: turn `seconds_remaining` into a friendly

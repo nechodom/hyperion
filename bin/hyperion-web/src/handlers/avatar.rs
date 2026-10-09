@@ -15,7 +15,7 @@ use crate::auth::AuthCtx;
 use crate::error::AppError;
 use crate::state::SharedState;
 use axum::extract::{Multipart, Path, State};
-use axum::http::{header, StatusCode};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
 use hyperion_rpc::codec::{Request, Response as RpcResponse};
 
@@ -55,25 +55,59 @@ fn detect_ext(bytes: &[u8]) -> Option<&'static str> {
 pub async fn get_my_avatar(
     State(state): State<SharedState>,
     ctx: AuthCtx,
+    headers: HeaderMap,
 ) -> Result<Response, AppError> {
     let Some(sess) = ctx.session.as_ref() else {
         return Ok(StatusCode::UNAUTHORIZED.into_response());
     };
-    serve_avatar(&state, sess.user_id).await
+    serve_avatar(&state, sess.user_id, &headers).await
 }
 
 pub async fn get_user_avatar(
     State(state): State<SharedState>,
     ctx: AuthCtx,
     Path(user_id): Path<i64>,
+    headers: HeaderMap,
 ) -> Result<Response, AppError> {
     if !ctx.is_authenticated() {
         return Ok(StatusCode::UNAUTHORIZED.into_response());
     }
-    serve_avatar(&state, user_id).await
+    serve_avatar(&state, user_id, &headers).await
 }
 
-async fn serve_avatar(state: &SharedState, user_id: i64) -> Result<Response, AppError> {
+/// Avatars are revalidated on every use (`no-cache`) against an ETag built
+/// from the file's mtime and size. The URL never changes (`/avatar/me` sits
+/// in the sidebar of every page), so a time-based cache — this used to be
+/// an hour — kept showing the OLD picture after an upload, on the very
+/// /profile page the upload redirects to. A revalidation is a 304 with no
+/// body: one stat and one local RPC, the same cost the no-avatar case
+/// already paid on every page.
+const AVATAR_CACHE: &str = "private, no-cache";
+
+fn avatar_etag(meta: &std::fs::Metadata) -> String {
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("\"{mtime:x}-{:x}\"", meta.len())
+}
+
+fn etag_matches(headers: &HeaderMap, etag: &str) -> bool {
+    headers
+        .get_all(header::IF_NONE_MATCH)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(','))
+        .any(|t| t.trim().trim_start_matches("W/") == etag)
+}
+
+async fn serve_avatar(
+    state: &SharedState,
+    user_id: i64,
+    headers: &HeaderMap,
+) -> Result<Response, AppError> {
     // RPC to the agent for the filename column. Avatars themselves
     // live on the master web's filesystem (one upload point); the
     // agent only knows the basename.
@@ -103,6 +137,20 @@ async fn serve_avatar(state: &SharedState, user_id: i64) -> Result<Response, App
         return Ok(StatusCode::NOT_FOUND.into_response());
     }
     let path = std::path::PathBuf::from(AVATAR_ROOT).join(&filename);
+    let Ok(meta) = tokio::fs::metadata(&path).await else {
+        return Ok(StatusCode::NOT_FOUND.into_response());
+    };
+    let etag = avatar_etag(&meta);
+    if etag_matches(headers, &etag) {
+        return Ok((
+            StatusCode::NOT_MODIFIED,
+            [
+                (header::CACHE_CONTROL, AVATAR_CACHE.to_string()),
+                (header::ETAG, etag),
+            ],
+        )
+            .into_response());
+    }
     let bytes = match tokio::fs::read(&path).await {
         Ok(b) => b,
         Err(_) => return Ok(StatusCode::NOT_FOUND.into_response()),
@@ -111,9 +159,8 @@ async fn serve_avatar(state: &SharedState, user_id: i64) -> Result<Response, App
     Ok((
         [
             (header::CONTENT_TYPE, mime.to_string()),
-            // Cache for an hour — most pages render the avatar
-            // multiple times. Operator can hard-refresh after upload.
-            (header::CACHE_CONTROL, "private, max-age=3600".to_string()),
+            (header::CACHE_CONTROL, AVATAR_CACHE.to_string()),
+            (header::ETAG, etag),
         ],
         bytes,
     )

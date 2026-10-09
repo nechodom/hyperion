@@ -1345,7 +1345,10 @@ async fn render_with_error(
 /// Returns the raw CSV string ("stav,worker2") or empty on RPC
 /// failure / config absence.
 async fn fetch_cluster_test_node_ids(state: &SharedState) -> String {
-    match hyperion_rpc_client::call(&state.agent_socket, Request::AgentConfigView).await {
+    match crate::dispatcher::cached_agent_config(state)
+        .await
+        .map(|c| hyperion_rpc::codec::Response::AgentConfigView((*c).clone()))
+    {
         Ok(RpcResponse::AgentConfigView(c)) => c.cluster.test_node_ids,
         _ => String::new(),
     }

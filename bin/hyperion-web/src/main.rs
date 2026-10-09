@@ -151,6 +151,7 @@ async fn serve(cfg: Config) -> anyhow::Result<()> {
         ftp_password_handoff: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         error_handoff: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         wp_lists: Default::default(),
+        caches: Default::default(),
         setup,
     });
     // Spawn a background refresher that polls the agent for the

@@ -2032,17 +2032,19 @@ async fn relist_on_every_node(
     check_items: &str,
     report_omit: &str,
 ) -> Vec<String> {
-    let nodes: Vec<hyperion_types::NodeSummary> =
-        match hyperion_rpc_client::call(&state.agent_socket, Request::NodesList).await {
-            // A standalone install answers with an EMPTY list, not an error, so
-            // an error here is not "there are no nodes" — it is "nobody could
-            // say". Reporting that as a clean save is the same failure this
-            // whole function exists to fix, one level up: the operator would
-            // be told the edit landed everywhere when it may have landed
-            // nowhere but here.
-            Ok(RpcResponse::NodesList(v)) => v,
-            _ => return vec!["this server (could not list its nodes)".to_string()],
-        };
+    let nodes: Vec<hyperion_types::NodeSummary> = match crate::dispatcher::cached_nodes(state)
+        .await
+        .map(hyperion_rpc::codec::Response::NodesList)
+    {
+        // A standalone install answers with an EMPTY list, not an error, so
+        // an error here is not "there are no nodes" — it is "nobody could
+        // say". Reporting that as a clean save is the same failure this
+        // whole function exists to fix, one level up: the operator would
+        // be told the edit landed everywhere when it may have landed
+        // nowhere but here.
+        Ok(RpcResponse::NodesList(v)) => v,
+        _ => return vec!["this server (could not list its nodes)".to_string()],
+    };
     if nodes.is_empty() {
         return Vec::new();
     }

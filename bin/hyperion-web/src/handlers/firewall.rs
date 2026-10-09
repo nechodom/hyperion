@@ -428,8 +428,9 @@ pub async fn get_firewall(
         false,
         String::new(),
     )];
-    if let Ok(RpcResponse::NodesList(workers)) =
-        hyperion_rpc_client::call(&state.agent_socket, Request::NodesList).await
+    if let Ok(RpcResponse::NodesList(workers)) = crate::dispatcher::cached_nodes(&state)
+        .await
+        .map(hyperion_rpc::codec::Response::NodesList)
     {
         for w in workers {
             let loaded = load_node(&state, Some(w.node_id.as_str())).await;

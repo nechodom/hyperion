@@ -190,7 +190,10 @@ pub async fn get_stats(
     };
 
     // Always fetch the list of enrolled nodes from the master.
-    let all_nodes = match hyperion_rpc_client::call(&state.agent_socket, Request::NodesList).await {
+    let all_nodes = match crate::dispatcher::cached_nodes(&state)
+        .await
+        .map(hyperion_rpc::codec::Response::NodesList)
+    {
         Ok(RpcResponse::NodesList(v)) => v,
         _ => Vec::new(),
     };

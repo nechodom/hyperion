@@ -515,6 +515,7 @@ fn build_app_with_signer(
         ftp_password_handoff: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         error_handoff: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         wp_lists: Default::default(),
+        caches: Default::default(),
         setup,
     });
     // The login/2FA + enroll handlers extract `ConnectInfo<SocketAddr>` (real
