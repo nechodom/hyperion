@@ -785,7 +785,7 @@ fn render_update_status(s: &hyperion_types::NodeUpdateStatus) -> String {
     out.push_str("</div>");
     if !s.log_tail.is_empty() {
         out.push_str(&format!(
-            "<pre style=\"max-height:14rem;overflow:auto;background:var(--surface-1);padding:0.5rem 0.7rem;border-radius:6px;margin:0.5rem 0 0;font-size:0.78rem;line-height:1.45\">{}</pre>",
+            "<pre class=\"upd-log\" style=\"max-height:14rem;overflow:auto;background:var(--surface-1);padding:0.5rem 0.7rem;border-radius:6px;margin:0.5rem 0 0;font-size:0.78rem;line-height:1.45\">{}</pre>",
             html_escape(&s.log_tail)
         ));
     }
