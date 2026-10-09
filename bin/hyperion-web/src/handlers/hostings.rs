@@ -136,9 +136,16 @@ struct DetailTpl<'a> {
     csrf_wp_install: String,
     csrf_backup_now: String,
     csrf_backup_cadence: String,
-    /// Per-hosting recurring-backup cadence ("off"|"daily"|"weekly"|"monthly"),
-    /// read from the owning node's hosting_kv; drives the Backups-card select.
+    /// Per-hosting recurring-backup cadence ("off"|"daily"|"weekly"|"monthly"
+    /// |"custom"), read from the owning node's hosting_kv; drives the
+    /// Backups-card select.
     backup_cadence: String,
+    /// The custom period in days (only meaningful for "custom"), 0 = unset.
+    backup_interval_days: i64,
+    /// Local time of day the scheduled backup runs at ("HH:MM"), "" = any time.
+    backup_at: String,
+    /// "Daily at 03:00", "Every 3 days", "Off — only when you click".
+    backup_schedule_label: String,
     csrf_backup_target: String,
     /// The off-site target this hosting is pinned to (`backup_targets.name`),
     /// or "" for the node default. Owning node's hosting_kv, like the cadence.
@@ -1561,6 +1568,9 @@ pub async fn post_create(
                 csrf_backup_now: csrf_token_for(&state, &ctx, "/hostings/backup-now"),
                 csrf_backup_cadence: csrf_token_for(&state, &ctx, "/hostings/backup-cadence"),
                 backup_cadence: "off".into(),
+                backup_interval_days: 0,
+                backup_at: String::new(),
+                backup_schedule_label: BackupSchedule::default().label(),
                 csrf_backup_target: csrf_token_for(&state, &ctx, "/hostings/backup-target"),
                 // A just-created hosting has no pin yet, and the create
                 // response renders in place — the picker shows up on the next
@@ -1754,6 +1764,86 @@ fn fmt_in(secs: i64) -> String {
     format!("in {} days", hours / 24)
 }
 
+/// A hosting's recurring-backup schedule as the OWNING node's hosting_kv
+/// holds it — the same three keys `scheduled_backups_tick` reads.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct BackupSchedule {
+    /// "off" | "daily" | "weekly" | "monthly" | "custom".
+    pub cadence: String,
+    /// Days between backups for "custom" (1..=365), 0 = unset.
+    pub interval_days: i64,
+    /// "HH:MM" local time on the owning node, "" = any time.
+    pub at: String,
+}
+
+impl BackupSchedule {
+    pub(crate) fn from_kv(kv: &[(String, String)]) -> Self {
+        let get = |key: &str| {
+            kv.iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v.trim().to_string())
+                .unwrap_or_default()
+        };
+        let cadence = get("backup_cadence");
+        Self {
+            cadence: match cadence.as_str() {
+                "daily" | "weekly" | "monthly" | "custom" => cadence,
+                _ => "off".into(),
+            },
+            interval_days: get("backup_interval_days")
+                .parse::<i64>()
+                .ok()
+                .filter(|d| (1..=BACKUP_INTERVAL_MAX_DAYS).contains(d))
+                .unwrap_or(0),
+            at: parse_backup_at(&get("backup_at")).unwrap_or_default(),
+        }
+    }
+
+    /// Seconds between scheduled backups, `None` when nothing schedules one —
+    /// including "custom" without a valid period, which the tick skips too.
+    pub(crate) fn period_secs(&self) -> Option<i64> {
+        match self.cadence.as_str() {
+            "daily" => Some(86_400),
+            "weekly" => Some(7 * 86_400),
+            "monthly" => Some(30 * 86_400),
+            "custom" if self.interval_days > 0 => Some(self.interval_days * 86_400),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn label(&self) -> String {
+        let base = match self.cadence.as_str() {
+            "daily" => "Daily".to_string(),
+            "weekly" => "Weekly".to_string(),
+            "monthly" => "Monthly".to_string(),
+            "custom" if self.interval_days == 1 => "Every day".to_string(),
+            "custom" if self.interval_days > 0 => format!("Every {} days", self.interval_days),
+            "custom" => return "Every N days — no period set, so not running".into(),
+            _ => return "Off — only when you click".into(),
+        };
+        if self.at.is_empty() {
+            base
+        } else {
+            format!("{base} at {}", self.at)
+        }
+    }
+}
+
+/// Longest custom backup period the scheduler accepts (it skips anything else).
+const BACKUP_INTERVAL_MAX_DAYS: i64 = 365;
+
+/// Normalise a time-of-day field to "HH:MM" (24-hour), or `None` when it is
+/// not one. Mirrors the agent's `parse_backup_at`; the browser's `type=time`
+/// sends "HH:MM", a hand-typed "3:05" is accepted too.
+fn parse_backup_at(s: &str) -> Option<String> {
+    let (h, m) = s.trim().split_once(':')?;
+    if h.is_empty() || h.len() > 2 || m.len() != 2 {
+        return None;
+    }
+    let (h, m) = (h.parse::<u32>().ok()?, m.parse::<u32>().ok()?);
+    (h < 24 && m < 60).then(|| format!("{h:02}:{m:02}"))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn compute_hosting_health(
     detail: &HostingDetail,
@@ -1762,9 +1852,8 @@ pub(crate) fn compute_hosting_health(
     wp_installed: bool,
     wp_updates_pending: i64,
     quota: &hyperion_types::HostingQuotaReport,
-    // "daily" | "weekly" | "monthly", or anything else for "off". From the
-    // OWNING node's hosting_kv.
-    backup_cadence: &str,
+    // From the OWNING node's hosting_kv.
+    backup: &BackupSchedule,
     // Unix seconds of the last scheduled run, 0 for never. Reserved for the
     // overdue calculation once the tick stamps it on every path.
     _backup_last_run_at: i64,
@@ -1827,12 +1916,8 @@ pub(crate) fn compute_hosting_health(
     // operator to go and fix something that was already arranged, and docked
     // the score for it on every freshly created site. What matters is whether
     // a cadence is set; the absence of one is the real problem, at any age.
-    let cadence_secs = match backup_cadence {
-        "daily" => Some(86_400),
-        "weekly" => Some(7 * 86_400),
-        "monthly" => Some(30 * 86_400),
-        _ => None,
-    };
+    let cadence_secs = backup.period_secs();
+    let backup_cadence = backup.label();
     let backup_ok = match (cadence_secs, last_ok) {
         // Scheduled and recent enough: fine.
         (Some(c), Some(t)) => now - t < c + 86_400,
@@ -1850,16 +1935,27 @@ pub(crate) fn compute_hosting_health(
         ok: backup_ok,
         label: "Recent backup".into(),
         detail: match (cadence_secs, last_ok, next_due) {
-            (Some(_), None, _) => {
-                format!("{backup_cadence} backups are on — the first one runs at the next tick.")
-            }
+            (Some(_), None, _) if backup.at.is_empty() => format!(
+                "Automatic backups are on ({backup_cadence}) — the first one runs at the next check."
+            ),
+            (Some(_), None, _) => format!(
+                "Automatic backups are on ({backup_cadence}) — the first one runs at {}.",
+                backup.at
+            ),
+            // With a set time the next run lands on that time, not exactly
+            // one period after the last — say the time rather than a
+            // countdown that would be off by hours.
+            (Some(_), Some(t), Some(_)) if backup_ok && !backup.at.is_empty() => format!(
+                "Automatic backups are on ({backup_cadence}). Last {}.",
+                crate::handlers::stats::fmt_ago(&t)
+            ),
             (Some(_), Some(t), Some(next)) if backup_ok => format!(
-                "{backup_cadence} backups are on. Last {}, next {}.",
+                "Automatic backups are on ({backup_cadence}). Last {}, next {}.",
                 crate::handlers::stats::fmt_ago(&t),
                 fmt_in(next - now)
             ),
             (Some(_), Some(t), _) => format!(
-                "{backup_cadence} backups are on, but the last one was {} — overdue.",
+                "Automatic backups are on ({backup_cadence}), but the last one was {} — overdue.",
                 crate::handlers::stats::fmt_ago(&t)
             ),
             (None, Some(t), _) if backup_ok => format!(
@@ -2487,12 +2583,7 @@ pub async fn get_detail(
         });
     let mem_auto = PhpMemAutoView::from_kv(&owner_kv, limits.php_memory_mb);
     let workers_full = PhpWorkersView::from_kv(&owner_kv, hyperion_types::now_secs());
-    let backup_cadence = owner_kv
-        .iter()
-        .find(|(k, _)| k == "backup_cadence")
-        .map(|(_, v)| v.clone())
-        .filter(|v| matches!(v.as_str(), "daily" | "weekly" | "monthly"))
-        .unwrap_or_else(|| "off".into());
+    let backup_schedule = BackupSchedule::from_kv(&owner_kv);
     // Last successful backup, as the OWNING node recorded it. Needed by the
     // health check below, which is why this is fetched here and not with the
     // rest of the backup UI further down.
@@ -2512,7 +2603,7 @@ pub async fn get_detail(
         wp_status.is_some(),
         wp_plugins.updates_pending,
         &quota,
-        &backup_cadence,
+        &backup_schedule,
         backup_last_run_at,
         hyperion_types::now_secs(),
     );
@@ -2669,7 +2760,10 @@ pub async fn get_detail(
         csrf_db_reset: csrf_token_for(&state, &ctx, "/hostings/db/reset-password"),
         pma_url,
         csrf_backup_cadence: csrf_token_for(&state, &ctx, "/hostings/backup-cadence"),
-        backup_cadence,
+        backup_schedule_label: backup_schedule.label(),
+        backup_cadence: backup_schedule.cadence,
+        backup_interval_days: backup_schedule.interval_days,
+        backup_at: backup_schedule.at,
         csrf_backup_target: csrf_token_for(&state, &ctx, "/hostings/backup-target"),
         backup_target,
         backup_target_options,
@@ -10251,11 +10345,19 @@ pub async fn post_integrity_scan(
 pub struct BackupCadenceForm {
     pub selector: String,
     pub cadence: String,
+    /// Days between backups, read only for `cadence = "custom"`.
+    #[serde(default)]
+    pub interval_days: String,
+    /// "HH:MM" local time on the owning node, empty = any time.
+    #[serde(default)]
+    pub at: String,
 }
 
-/// Override a hosting's recurring-backup cadence. Stored in the OWNING node's
-/// hosting_kv ("backup_cadence", keyed by ULID) where scheduled_backups_tick
-/// reads it. Canonicalised to off|daily|weekly|monthly.
+/// Override a hosting's recurring-backup schedule: cadence, the custom period
+/// in days and the time of day. Stored in the OWNING node's hosting_kv
+/// ("backup_cadence" / "backup_interval_days" / "backup_at", keyed by ULID)
+/// where scheduled_backups_tick reads them. Cadence canonicalised to
+/// off|daily|weekly|monthly|custom.
 pub async fn post_set_backup_cadence(
     State(state): State<SharedState>,
     ctx: AuthCtx,
@@ -10268,6 +10370,14 @@ pub async fn post_set_backup_cadence(
         Err(r) => return Ok(r),
     };
     let sel_url = urlencoding(&form.selector);
+    let back = |key: &str, msg: &str| {
+        Ok(Redirect::to(&format!(
+            "/hostings/{}?{key}={}#backups",
+            sel_url,
+            urlencoding(msg)
+        ))
+        .into_response())
+    };
     let (detail, target) = match find_hosting_anywhere(&state, sel).await {
         Ok(v) => v,
         Err(_) => {
@@ -10278,48 +10388,86 @@ pub async fn post_set_backup_cadence(
         "daily" => "daily",
         "weekly" => "weekly",
         "monthly" => "monthly",
+        "custom" => "custom",
         _ => "off",
     };
-    // The result is read: a schedule that did not reach the owning node must
-    // not come back as "saved" — nobody would find out until a backup was
-    // needed and was not there.
-    let saved = crate::dispatcher::dispatch_to_node(
-        &state,
-        target.as_deref(),
-        Request::HostingKvSet {
-            hosting_id: detail.id.as_str().to_string(),
-            key: "backup_cadence".into(),
-            value: value.into(),
-        },
-    )
-    .await;
-    let (key, msg) = match saved {
-        Ok(RpcResponse::HostingKvSet) => (
-            "flash",
-            match value {
-                "off" => "Automatic backups switched off — only when you click.".to_string(),
-                v => format!("Automatic backups saved: {v}."),
-            },
-        ),
-        Ok(RpcResponse::Error(e)) => (
-            "flash_error",
-            format!("The schedule was not saved — the owning node refused it: {e}"),
-        ),
-        Ok(_) => (
-            "flash_error",
-            "The schedule was not saved — unexpected response.".into(),
-        ),
-        Err(e) => (
-            "flash_error",
-            format!("The schedule was not saved — the owning node could not be reached: {e}"),
-        ),
+    // A refused field refuses the whole save: half a schedule (custom with no
+    // period) is a schedule the tick silently skips.
+    let interval_days = if value == "custom" {
+        match form.interval_days.trim().parse::<i64>() {
+            Ok(d) if (1..=BACKUP_INTERVAL_MAX_DAYS).contains(&d) => Some(d),
+            _ => {
+                return back(
+                    "flash_error",
+                    &format!(
+                        "The schedule was not saved — \"every N days\" needs a whole number of \
+                         days from 1 to {BACKUP_INTERVAL_MAX_DAYS}."
+                    ),
+                );
+            }
+        }
+    } else {
+        None
     };
-    Ok(Redirect::to(&format!(
-        "/hostings/{}?{key}={}#backups",
-        sel_url,
-        urlencoding(&msg)
-    ))
-    .into_response())
+    let at = if form.at.trim().is_empty() {
+        String::new()
+    } else {
+        match parse_backup_at(&form.at) {
+            Some(t) => t,
+            None => {
+                return back(
+                    "flash_error",
+                    "The schedule was not saved — the time must be HH:MM (24-hour), or empty \
+                     for any time.",
+                );
+            }
+        }
+    };
+    let schedule = BackupSchedule {
+        cadence: value.into(),
+        interval_days: interval_days.unwrap_or(0),
+        at: at.clone(),
+    };
+    // Period and time first, cadence last: a node that takes the first
+    // writes and then becomes unreachable is left on its OLD cadence with the
+    // new details, never on "custom" without a period.
+    let mut writes: Vec<(&str, String)> = Vec::new();
+    if let Some(d) = interval_days {
+        writes.push(("backup_interval_days", d.to_string()));
+    }
+    writes.push(("backup_at", at));
+    writes.push(("backup_cadence", value.to_string()));
+    // Every result is read: a schedule that did not reach the owning node
+    // must not come back as "saved" — nobody would find out until a backup
+    // was needed and was not there.
+    for (key, val) in writes {
+        let saved = crate::dispatcher::dispatch_to_node(
+            &state,
+            target.as_deref(),
+            Request::HostingKvSet {
+                hosting_id: detail.id.as_str().to_string(),
+                key: key.into(),
+                value: val,
+            },
+        )
+        .await;
+        let err = match saved {
+            Ok(RpcResponse::HostingKvSet) => continue,
+            Ok(RpcResponse::Error(e)) => {
+                format!("The schedule was not saved — the owning node refused it: {e}")
+            }
+            Ok(_) => "The schedule was not saved — unexpected response.".into(),
+            Err(e) => {
+                format!("The schedule was not saved — the owning node could not be reached: {e}")
+            }
+        };
+        return back("flash_error", &err);
+    }
+    let msg = match value {
+        "off" => "Automatic backups switched off — only when you click.".to_string(),
+        _ => format!("Automatic backups saved: {}.", schedule.label()),
+    };
+    back("flash", &msg)
 }
 
 #[derive(serde::Deserialize)]
@@ -13969,6 +14117,39 @@ async fn run_wp_staging_push_job(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn backup_schedule_reads_custom_period_and_time() {
+        let kv = |pairs: &[(&str, &str)]| -> Vec<(String, String)> {
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect()
+        };
+        let s = BackupSchedule::from_kv(&kv(&[
+            ("backup_cadence", "custom"),
+            ("backup_interval_days", "3"),
+            ("backup_at", "3:05"),
+        ]));
+        assert_eq!(s.period_secs(), Some(3 * 86_400));
+        assert_eq!(s.at, "03:05");
+        assert_eq!(s.label(), "Every 3 days at 03:05");
+        // Custom with no valid period schedules nothing — same as the tick.
+        let s = BackupSchedule::from_kv(&kv(&[
+            ("backup_cadence", "custom"),
+            ("backup_interval_days", "400"),
+        ]));
+        assert_eq!(s.period_secs(), None);
+        // Unknown cadence and junk time fall back to off / any time.
+        let s =
+            BackupSchedule::from_kv(&kv(&[("backup_cadence", "hourly"), ("backup_at", "25:00")]));
+        assert_eq!(s.cadence, "off");
+        assert_eq!(s.at, "");
+        assert_eq!(
+            BackupSchedule::from_kv(&kv(&[("backup_cadence", "daily")])).label(),
+            "Daily"
+        );
+    }
 
     #[test]
     fn bare_name_drops_one_www_and_keeps_two_labels() {

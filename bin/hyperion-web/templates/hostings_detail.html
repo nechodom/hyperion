@@ -694,10 +694,10 @@
     <span class="k-label">Last backup</span>
     {% if backups.is_empty() %}
       <span class="k-value"><span>None yet</span></span>
-      <span class="k-meta">schedule: {% if backup_cadence == "off" || backup_cadence.is_empty() %}off{% else %}{{ backup_cadence }}{% endif %}</span>
+      <span class="k-meta">schedule {% if backup_cadence == "off" || backup_cadence.is_empty() %}off{% else %}{{ backup_schedule_label|lower }}{% endif %}</span>
     {% else %}
       <span class="k-value"><span>{{ crate::handlers::stats::fmt_ago(backups[0].started_at) }}</span></span>
-      <span class="k-meta">{{ backups[0].state }} · schedule {% if backup_cadence == "off" || backup_cadence.is_empty() %}off{% else %}{{ backup_cadence }}{% endif %}</span>
+      <span class="k-meta">{{ backups[0].state }} · schedule {% if backup_cadence == "off" || backup_cadence.is_empty() %}off{% else %}{{ backup_schedule_label|lower }}{% endif %}</span>
     {% endif %}
   </a>
   {% endif %}
@@ -3268,7 +3268,9 @@
   </p>
 </div>
 
-<div class="card">
+{# The id makes an in-place save of the schedule swap the whole card, so
+   the "Automatic archives" fact above the form updates with it. #}
+<div class="card" id="backup-plan">
   <div class="card-head">
     <h2>
       <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
@@ -3289,7 +3291,7 @@
     <div class="fact">
       <dt>Automatic archives</dt>
       <dd>
-        <strong>{% if backup_cadence == "daily" %}Daily{% else if backup_cadence == "weekly" %}Weekly{% else if backup_cadence == "monthly" %}Monthly{% else %}Off — only when you click{% endif %}</strong>
+        <strong>{{ backup_schedule_label }}</strong>
         {% if backups_paused_by_mode && backup_cadence != "off" %}<span class="pill warn" style="font-size:0.6rem;margin-left:0.3rem" title="Settings → Backups &amp; trash → What this panel keeps is set to snapshots only. Scheduled archives run only for sites whose care package sells backups.">paused — snapshots-only mode</span>{% endif %}
       </dd>
     </div>
@@ -3317,17 +3319,30 @@
   <details class="disclosure" style="margin-top:0.9rem" data-role-min="admin">
     <summary>Schedule and off-site destination…</summary>
     <div class="card-grid cols-2" style="margin-top:0.7rem">
-      <form method="post" action="/hostings/backup-cadence">
+      {# Period and time only show for the answers they apply to, but are
+         always posted — switching to Daily must not wipe a saved period. #}
+      <form method="post" action="/hostings/backup-cadence" class="backup-sched">
         <input type="hidden" name="_csrf" value="{{ csrf_backup_cadence }}">
         <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
         <div class="field">
-          <label for="backup_cadence">Automatic backups <span class="hint">checked every hour on this site's node</span></label>
+          <label for="backup_cadence">Automatic backups <span class="hint">checked every 5 minutes on this site's node</span></label>
           <select id="backup_cadence" name="cadence">
             <option value="off"{% if backup_cadence == "off" %} selected{% endif %}>Off — only when I click</option>
             <option value="daily"{% if backup_cadence == "daily" %} selected{% endif %}>Daily</option>
             <option value="weekly"{% if backup_cadence == "weekly" %} selected{% endif %}>Weekly</option>
             <option value="monthly"{% if backup_cadence == "monthly" %} selected{% endif %}>Monthly</option>
+            <option value="custom"{% if backup_cadence == "custom" %} selected{% endif %}>Custom — every N days</option>
           </select>
+        </div>
+        <div class="field-row">
+          <div class="field backup-when-custom">
+            <label for="backup_interval_days">Every <span class="hint">days, 1–365</span></label>
+            <input id="backup_interval_days" name="interval_days" type="number" min="1" max="365" step="1" inputmode="numeric"{% if backup_interval_days > 0 %} value="{{ backup_interval_days }}"{% endif %} placeholder="e.g. 3">
+          </div>
+          <div class="field backup-when-on">
+            <label for="backup_at">At <span class="hint">server time · empty = any time</span></label>
+            <input id="backup_at" name="at" type="time" step="60" value="{{ backup_at }}">
+          </div>
         </div>
         <button class="btn small" type="submit">Save schedule</button>
       </form>

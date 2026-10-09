@@ -1065,6 +1065,10 @@ details.wp-tool > summary:hover h3 { color: var(--text); }
    retention only while the package sets a cadence; report sections only
    while it sends a report. */
 .pkg-backup:not(:has(option[value="custom"]:checked)) .pkg-when-custom { display: none; }
+/* Hosting Backups card: same rule — the period only for "custom", the time
+   only while something is scheduled. Hidden, still posted. */
+.backup-sched:not(:has(option[value="custom"]:checked)) .backup-when-custom,
+.backup-sched:has(select[name="cadence"] option[value="off"]:checked) .backup-when-on { display: none; }
 .pkg-backup:has(select[name="feat_backup_cadence"] option[value="leave"]:checked) .pkg-when-backup,
 .pkg-backup:has(select[name="feat_backup_cadence"] option[value="off"]:checked) .pkg-when-backup,
 .pkg-report:has(select[name="feat_report_cadence"] option[value="leave"]:checked) .pkg-when-report,
