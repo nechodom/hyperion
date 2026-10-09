@@ -1,20 +1,21 @@
 #!/usr/bin/env bash
 # Hyperion in-place update.
 #
-# What it does:
-#   0. Wait for running jobs (backups, migrations, installs, ...) to finish,
-#      so stopping the services never kills one half-way — see --no-wait
-#   1. Stop hyperion-* services (if present)
-#   2. git fetch + reset --hard to origin/$HYPERION_REF (refuses if local
-#      changes — commit/stash first)
-#   3. cargo build --release for hyperion-agent / hyperion-web / hctl
+# What it does — steps 1–2 run while the panel and agent keep serving:
+#   1. git fetch + reset --hard to origin/$HYPERION_REF (refuses if local
+#      changes — commit/stash first); re-exec if update.sh itself changed
+#   2. Download + verify the pre-built release, or cargo build from source
+#   3. Wait for running jobs (backups, migrations, installs, ...) to finish,
+#      so stopping the services never kills one half-way — see --no-wait;
+#      snapshot the current binaries, then stop hyperion-* services
 #   4. install -m 0755 the new binaries
-#   5. Refresh systemd unit files (only rewrites if content differs)
-#   6. Materialize missing web-session.key / web-csrf.key (works around
-#      ProtectSystem=full sandbox preventing first-start key creation)
-#   7. (--repair) wipe orphan hostings.state IN
-#      ('provisioning','failed','deleting') rows
-#   8. Start services back up + health-check via `systemctl is-active`
+#   5. Refresh pages, nginx defaults, systemd units, heal missing packages,
+#      materialize web-session.key / web-csrf.key
+#   6. (--repair) wipe orphan hostings rows; dry-run the DB migrations
+#   7. Start services back up + health-check
+# If anything fails after the stop and before the start, the EXIT trap puts
+# the previous binaries back and starts them — a failed update never leaves
+# the box down.
 #
 # Usage (as root):
 #   sudo /opt/hyperion/packaging/install/update.sh
@@ -46,14 +47,17 @@
 #                  touch on-disk artefacts (vhost, db, system user) — use
 #                  the diagnostic snippet printed on screen if those linger.
 #   --no-build     Skip binary install (useful for unit/config-only refreshes).
-#   --safe         Snapshot the running binaries first and RESTORE them
-#                  automatically if the post-update health check fails.
+#   --safe         Also RESTORE the previous binaries automatically if the
+#                  post-update health check fails (a failure BEFORE the start
+#                  is always rolled back, with or without this flag).
 #                  Turns "the update broke the panel" into a bad minute
 #                  instead of an SSH session — the operator is usually
 #                  clicking Update from the very UI an update can take down.
 #   --from-source  Skip the pre-built release; cargo build locally.
 #                  Useful for testing local commits before they're pushed.
-#   --release=TAG  Pull a specific release tag instead of "main" (rolling).
+#   --release=TAG  Install a specific release: checks out the git tag TAG and
+#                  uses that release's pre-built binaries (unless --ref is also
+#                  given, which keeps the source on that branch).
 #   --ref=REF      Override $HYPERION_REF for git fetch.
 #
 # Default behaviour:
@@ -171,7 +175,13 @@ STATE_DB="${HYPERION_STATE_DB:-/var/lib/hyperion/state.db}"
 WAIT_FOR_JOBS=1
 WAIT_TIMEOUT=0                            # seconds; 0 = no limit
 WAIT_POLL="${HYPERION_WAIT_POLL:-10}"     # seconds between job-list checks
+REF_EXPLICIT=0
+RELEASE_PINNED=0
 
+# The parse loop below shifts every argument away, so keep the originals for
+# the self-update re-exec — without this the fresh copy silently ran with no
+# flags at all (a panel-started `--safe` update lost its rollback).
+ORIG_ARGS=("$@")
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --repair)        REPAIR=1; shift;;
@@ -184,8 +194,8 @@ while [[ $# -gt 0 ]]; do
       [[ "$WAIT_TIMEOUT" =~ ^[0-9]+$ ]] \
         || { printf -- '--wait-timeout wants a whole number of seconds, got: %s\n' "$WAIT_TIMEOUT" >&2; exit 2; }
       shift;;
-    --release=*)     RELEASE_TAG="${1#*=}"; shift;;
-    --ref=*)         REF="${1#*=}"; shift;;
+    --release=*)     RELEASE_TAG="${1#*=}"; RELEASE_PINNED=1; shift;;
+    --ref=*)         REF="${1#*=}"; REF_EXPLICIT=1; shift;;
     -h|--help)       sed -n '2,/^#=====/p' "$0" | sed '$d'; exit 0;;
     *) printf 'unknown arg: %s\n' "$1" >&2; exit 2;;
   esac
@@ -258,8 +268,14 @@ status_finish() {
 # One EXIT trap for the whole script: a second `trap … EXIT` REPLACES the
 # first, which is how the askpass helper used to outlive a pre-built install.
 CLEANUP_PATHS=()
+# Where the update is, for the EXIT trap: did WE stop the services, did new
+# binaries land, did we get as far as starting them again.
+SERVICES_STOPPED=0
+BIN_INSTALLED=0
+REACHED_START=0
 on_exit() {
   local rc=$?
+  (( rc == 0 )) || recover_after_failure
   status_finish "$rc"
   local p
   for p in ${CLEANUP_PATHS[@]+"${CLEANUP_PATHS[@]}"}; do rm -rf -- "$p"; done
@@ -267,15 +283,19 @@ on_exit() {
 }
 trap on_exit EXIT
 
-# --- Safe update: snapshot / restore -------------------------------------
+# --- Snapshot / restore ----------------------------------------------------
 # What gets snapshotted is deliberately ONLY the binaries. Restoring those
 # undoes a bad build; it does not undo a migration, and pretending otherwise
 # would be the dangerous kind of reassuring. Migrations in this project are
 # additive, so an older binary against a newer schema starts — which is the
 # case this exists to survive.
+#
+# The snapshot is taken on EVERY update (three binaries, cheap): an update that
+# dies after installing — a failed migration dry-run, a configure step that
+# errors — puts these back and starts them, instead of leaving the box down.
+# --safe additionally rolls back when the post-start health check fails.
 SNAP_DIR=/var/lib/hyperion/update-snapshot
 snapshot_binaries() {
-  (( SAFE )) || return 0
   rm -rf "$SNAP_DIR"
   install -d -m 0700 "$SNAP_DIR"
   local f
@@ -285,7 +305,7 @@ snapshot_binaries() {
   # Record what we snapshotted so the log says what a restore would give back.
   if [[ -x "$SNAP_DIR/hyperion-agent" ]]; then
     "$SNAP_DIR/hyperion-agent" --version > "$SNAP_DIR/VERSION" 2>/dev/null || true
-    log "Safe update: snapshotted $(tr -d '\n' < "$SNAP_DIR/VERSION" 2>/dev/null || echo 'current binaries')"
+    log "Snapshotted $(tr -d '\n' < "$SNAP_DIR/VERSION" 2>/dev/null || echo 'current binaries')"
   fi
 }
 
@@ -301,12 +321,48 @@ restore_snapshot() {
     restored=1
   done
   (( restored )) || { warn "Snapshot directory held no binaries."; return 1; }
-  systemctl restart hyperion-agent 2>/dev/null || true
-  systemctl restart hyperion-web 2>/dev/null || true
+  (( HAVE_AGENT )) && { systemctl restart hyperion-agent 2>/dev/null || true; }
+  (( HAVE_WEB ))   && { systemctl restart hyperion-web   2>/dev/null || true; }
   sleep 2
   return 0
 }
+
+# EXIT-trap half of the update: the script died (an error under `set -e`, a
+# failed check, Ctrl-C) after it stopped the services and before it started
+# them again. Before this, every such failure — a git fetch on a flaky network,
+# a cargo build, a migration dry-run — left the panel and the agent DOWN until
+# someone SSH'd in. Now: put the previous binaries back if new ones landed, and
+# start the services, so a failed update costs a minute, not an outage.
+recover_after_failure() {
+  (( SERVICES_STOPPED && ! REACHED_START )) || return 0
+  if (( BIN_INSTALLED )); then
+    warn "Update failed after the new binaries were installed — restoring the previous ones ..."
+    if restore_snapshot; then
+      warn "Previous version restored and started. Nothing from this update is running."
+    else
+      warn "Could NOT restore the previous binaries — services left stopped. Look at:"
+      warn "    journalctl -u hyperion-agent -n 50"
+    fi
+  else
+    warn "Update failed before anything was installed — starting the services again ..."
+    (( HAVE_AGENT )) && { systemctl start hyperion-agent 2>/dev/null || true; }
+    (( HAVE_WEB ))   && { systemctl start hyperion-web   2>/dev/null || true; }
+  fi
+  return 0
+}
 fail() { printf '\033[31m[error]\033[0m %s\n' "$*" >&2; exit 1; }
+
+# One `apt-get update` per run, and only when something actually needs
+# installing. Every heal goes through here: installing from stale package
+# lists is how a heal "fails" on a box nobody has touched in months.
+APT_UPDATED=0
+apt_install() {
+  if (( APT_UPDATED == 0 )); then
+    DEBIAN_FRONTEND=noninteractive apt-get update -qq || true
+    APT_UPDATED=1
+  fi
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "$@"
+}
 
 # Run `cargo "$@"` with a live progress bar driven by the number of compiled
 # crates vs a total remembered from the previous successful build (so a from-
@@ -339,7 +395,7 @@ build_with_progress() {
           # The panel's "updating" page shows this; one write per percent.
           if [[ "$pct" != "${last_pct:-}" ]]; then status running build "$pct"; last_pct="$pct"; fi
           local fill=$(( pct * width / 100 ))
-          local bar="$(printf '%*s' "$fill" '' | tr ' ' '=')$(printf '%*s' $(( width - fill )) '')"
+          local bar; bar="$(printf '%*s' "$fill" '' | tr ' ' '=')$(printf '%*s' $(( width - fill )) '')"
           if (( tty )); then
             printf '\r\033[36m[hyperion]\033[0m building [%s] %3d%% (%d/%d)' "$bar" "$pct" "$n" "$total" >&2
           elif (( n % 25 == 0 )); then
@@ -375,13 +431,21 @@ if (( HAVE_AGENT == 0 && HAVE_WEB == 0 )); then
   warn "No hyperion-* systemd units found — will build+install but won't restart anything."
 fi
 
+# cargo is only needed if we end up building — checked there, not here: a box
+# installed from pre-built binaries has no toolchain and must still update.
 export PATH="$HOME/.cargo/bin:/root/.cargo/bin:$PATH"
-if (( DO_BUILD )); then
-  command -v cargo >/dev/null 2>&1 || fail "cargo not found. Re-run install-master.sh."
+
+# An update.sh from before the reorder below stops the services FIRST and then
+# re-execs into this copy. Those services are ours to bring back if this copy
+# fails, exactly as if we had stopped them ourselves.
+if [[ -n "${HYPERION_REEXEC:-}" ]] \
+   && ! { (( HAVE_AGENT )) && systemctl --quiet is-active hyperion-agent 2>/dev/null; } \
+   && ! { (( HAVE_WEB ))   && systemctl --quiet is-active hyperion-web   2>/dev/null; }; then
+  (( HAVE_AGENT || HAVE_WEB )) && SERVICES_STOPPED=1
 fi
 
-#-------- 0b. Wait for running jobs ---------------------------------------
-# Stopping the services below kills whatever they are doing: a backup is cut
+#-------- 0b. Wait for running jobs (called right before step 3's stop) ---
+# Stopping the services kills whatever they are doing: a backup is cut
 # off mid-archive, a migration or WordPress job dies half-way, and on restart
 # the agent marks the orphaned rows "failed". An operator who types
 # `hyperion update` the moment a release lands has no way to know a job is
@@ -423,8 +487,8 @@ wait_for_running_work() {
     log "--no-wait: not waiting for running jobs — anything in flight will be interrupted."
     return 0
   fi
-  # The re-exec below hands us to a fresh copy of this script AFTER the services
-  # were stopped. Rows left "running" by the stopped agent can never finish, so
+  # An update.sh older than this one stops the services BEFORE re-exec'ing into
+  # this copy. Rows left "running" by the stopped agent can never finish, so
   # waiting for them would just burn an hour.
   [[ -z "${HYPERION_JOBS_CHECKED:-}" ]] || return 0
   [[ -f "$STATE_DB" ]] || return 0
@@ -466,7 +530,7 @@ wait_for_running_work() {
       beat=0
     fi
     if (( WAIT_TIMEOUT > 0 && waited >= WAIT_TIMEOUT )); then
-      fail "Jobs were still running after ${WAIT_TIMEOUT}s — nothing was changed.
+      fail "Jobs were still running after ${WAIT_TIMEOUT}s — nothing was stopped or installed.
        Re-run later, or pass --no-wait to update now and interrupt them."
     fi
     sleep "$WAIT_POLL"
@@ -475,21 +539,19 @@ wait_for_running_work() {
   done
 }
 # <<< wait-for-jobs
-wait_for_running_work
 
-#-------- 1. Stop services ------------------------------------------------
-snapshot_binaries
-if (( HAVE_WEB )); then
-  status_begin
-  status running stop
-fi
-(( HAVE_WEB ))   && { log "Stopping hyperion-web ...";   systemctl stop hyperion-web   || true; }
-(( HAVE_AGENT )) && { log "Stopping hyperion-agent ..."; systemctl stop hyperion-agent || true; }
-
-#-------- 2. Pull ---------------------------------------------------------
+#-------- 1. Fetch the new source (services still running) ----------------
+# Everything up to step 3 — fetch, download, a from-source build — happens
+# while the panel and the agent keep serving. None of it touches what they
+# run, so a failure here (no network, a GitHub hiccup, a build error) costs
+# nothing, and the downtime shrinks to install + configure + restart instead
+# of including a multi-minute cargo build.
 status running fetch
 cd "$INSTALL_DIR"
-PREV=$(git rev-parse --short HEAD)
+PREV_LOCAL=$(git rev-parse --short HEAD)
+# A re-exec'd copy already sits on the new commit; the summary should still
+# say where this update started.
+PREV="${HYPERION_PREV_SHA:-$PREV_LOCAL}"
 # A from-source build can legitimately rewrite Cargo.lock in place (cargo
 # refreshes it during the build). That's a generated, committed file the
 # `git reset --hard` below overwrites anyway, so don't let it block the NEXT
@@ -499,12 +561,22 @@ git checkout -- Cargo.lock 2>/dev/null || true
 if [[ -n "$(git status --porcelain)" ]]; then
   fail "Working tree at $INSTALL_DIR has local changes:
 $(git status --short | sed 's/^/    /')
-       Commit/stash/remove them, then re-run."
+       Commit/stash/remove them, then re-run. Nothing was stopped or changed."
 fi
 
+# Prune stale refs + fetch the BRANCH ref explicitly (CI publishes a release
+# tag that can share the branch's name, and a plain `git fetch origin main`
+# picks the tag over the branch — leaving you stuck on whatever commit the
+# last release was built from). --tags --force keeps the moving release tags
+# current, which --release=<tag> below checks out.
+FETCH_SPEC="refs/heads/$REF:refs/remotes/origin/$REF"
 if [[ -n "$GIT_TOKEN" ]]; then
   log "Fetching origin via HTTPS PAT ..."
-  export GIT_ASKPASS="/tmp/hyp-askpass.$$"
+  # mktemp, not a fixed /tmp/name.$$: this runs as root on a box whose site
+  # users can write /tmp, and a predictable path is a file they can pre-plant.
+  GIT_ASKPASS="$(mktemp /tmp/hyp-askpass.XXXXXX)"
+  export GIT_ASKPASS HYPERION_GIT_TOKEN="$GIT_TOKEN"
+  CLEANUP_PATHS+=("$GIT_ASKPASS")
   cat > "$GIT_ASKPASS" <<'AP'
 #!/bin/sh
 case "$1" in
@@ -513,49 +585,49 @@ case "$1" in
 esac
 AP
   chmod 0700 "$GIT_ASKPASS"
-  CLEANUP_PATHS+=("$GIT_ASKPASS")
-  # Prune stale refs + fetch the BRANCH ref explicitly (CI publishes a
-  # release tag also called "main", and a plain `git fetch origin main`
-  # picks the tag over the branch — leaving you stuck on whatever
-  # commit the last release was built from).
-  git -c core.askPass="$GIT_ASKPASS" fetch --prune --tags --force origin \
-      "refs/heads/$REF:refs/remotes/origin/$REF"
+  git -c core.askPass="$GIT_ASKPASS" fetch --prune --tags --force origin "$FETCH_SPEC" \
+    || fail "git fetch failed — nothing was stopped or changed. Check the network / token and re-run."
 else
   log "Fetching origin ..."
-  git fetch --prune --tags --force origin \
-      "refs/heads/$REF:refs/remotes/origin/$REF"
+  git fetch --prune --tags --force origin "$FETCH_SPEC" \
+    || fail "git fetch failed — nothing was stopped or changed. Check the network and re-run."
 fi
-# Reset to the BRANCH tip (origin/$REF is now unambiguously the remote
-# tracking branch, not the rolling release tag of the same name).
-git reset --hard "origin/$REF"
+
+# --release=<tag> means "install that release": its source AND its pre-built
+# binaries. It used to reset to the branch tip anyway, so the staleness guard
+# saw a mismatch and quietly built main from source instead.
+if (( RELEASE_PINNED && ! REF_EXPLICIT )) && [[ "$RELEASE_TAG" != rolling ]]; then
+  TARGET="refs/tags/$RELEASE_TAG"
+  git rev-parse -q --verify "$TARGET^{commit}" >/dev/null \
+    || fail "No tag '$RELEASE_TAG' in the repository — nothing was stopped or changed."
+  TARGET="$TARGET^{commit}"
+else
+  TARGET="origin/$REF"
+fi
+git reset --hard -q "$TARGET"
 NEW=$(git rev-parse --short HEAD)
 log "Source: $PREV → $NEW"
 
-# Self-update guard. Bash already loaded the running copy of this
-# script into memory; any changes in this very file that landed
-# in the new commits would only take effect on the NEXT run. To
-# avoid operators having to "run update.sh twice for the message
-# to be right", re-exec the freshly checked-out copy when this
-# file itself changed between PREV and NEW.
+# Self-update guard. Bash already loaded the running copy of this script into
+# memory; changes to this very file in the new commits would only take effect
+# on the NEXT run. Re-exec the freshly checked-out copy when it changed — by
+# its real path (under `curl | bash` $0 is just "bash") and with the ORIGINAL
+# arguments (the parse loop shifted them all away).
 #
-# The HYPERION_REEXEC env-var marker stops infinite loops: the
-# re-exec'd process sees the flag and skips this block.
-if [[ "$PREV" != "$NEW" && -z "${HYPERION_REEXEC:-}" ]]; then
-  if ! git diff --quiet "$PREV" "$NEW" -- packaging/install/update.sh 2>/dev/null; then
-    log "update.sh itself changed between $PREV and $NEW — re-exec'ing the fresh copy"
-    export HYPERION_REEXEC=1
-    exec "$0" "$@"
+# The HYPERION_REEXEC env-var marker stops infinite loops: the re-exec'd
+# process sees the flag and skips this block.
+if [[ "$PREV_LOCAL" != "$NEW" && -z "${HYPERION_REEXEC:-}" ]]; then
+  if ! git diff --quiet "$PREV_LOCAL" "$NEW" -- packaging/install/update.sh 2>/dev/null; then
+    log "update.sh itself changed between $PREV_LOCAL and $NEW — re-exec'ing the fresh copy"
+    export HYPERION_REEXEC=1 HYPERION_PREV_SHA="$PREV"
+    trap - EXIT
+    for p in ${CLEANUP_PATHS[@]+"${CLEANUP_PATHS[@]}"}; do rm -rf -- "$p"; done
+    exec bash "$INSTALL_DIR/packaging/install/update.sh" ${ORIG_ARGS[@]+"${ORIG_ARGS[@]}"}
   fi
 fi
-unset HYPERION_REEXEC
-# A copy of this script older than the status file re-execs into this one with
-# the panel already down: start reporting from here.
-if (( HAVE_WEB )); then
-  status_begin
-  status running fetch
-fi
+unset HYPERION_REEXEC HYPERION_PREV_SHA
 
-#-------- 2a. Refresh the panel's "updating" page --------------------------
+#-------- 1a. Refresh the panel's "updating" page --------------------------
 # The agent re-plants this page when it next writes the panel vhost, which is
 # AFTER the update. Copying it now means the page people are watching during
 # this update is already the new one (the old one reloads itself onto it).
@@ -574,7 +646,7 @@ fi
 
 HEAD_FULL=$(git rev-parse HEAD)
 
-#-------- 2b. Staleness guard: does the rolling release match our source? --
+#-------- 1b. Staleness guard: does the release match our source? ----------
 # CI rebuilds the pre-built release on every push to main, but that build
 # takes a few minutes. Update during that window (or before CI runs) and the
 # release is a commit BEHIND the source you just checked out — installing it
@@ -592,17 +664,22 @@ if (( DO_BUILD && PREFER_PREBUILT )); then
     warn "  Can't confirm the pre-built binaries match your source — proceeding with them."
     warn "  Re-run once CI has republished, or pass --from-source to build locally instead."
   elif [[ "$REL_VERSION" != "$HEAD_FULL" ]]; then
-    log "Rolling release is at ${REL_VERSION:0:12}; your source is at ${HEAD_FULL:0:12}."
+    log "Release @$RELEASE_TAG is at ${REL_VERSION:0:12}; your source is at ${HEAD_FULL:0:12}."
     log "  Pre-built binaries aren't built from your checkout (CI still building, or the"
     log "  release lagged) — building from source so the install matches your HEAD."
     PREFER_PREBUILT=0
   else
-    log "Rolling release matches your source (${HEAD_FULL:0:12}) — using pre-built binaries."
+    log "Release @$RELEASE_TAG matches your source (${HEAD_FULL:0:12}) — using pre-built binaries."
   fi
 fi
 
-#-------- 3. Install binaries — prefer GitHub release, fall back to local build
+#-------- 2. Get the new binaries — prefer GitHub release, else build -------
+# Only PREPARES them (download + verify, or compile); nothing is installed
+# until the services are stopped in step 4.
 PREBUILT_OK=0
+BIN_SRC=""            # directory holding hyperion-agent / hctl / hyperion-web
+EXPORT_SRC=""         # static hyperion-export to install, if any
+EXPORT_ARCHES=()      # per-architecture exporters verified in $BIN_SRC
 if (( DO_BUILD && PREFER_PREBUILT )); then
   status running download
   log "Attempting pre-built binaries from github.com/$RELEASE_REPO@$RELEASE_TAG ..."
@@ -610,16 +687,18 @@ if (( DO_BUILD && PREFER_PREBUILT )); then
   CLEANUP_PATHS+=("$TMP")
   REL_BASE="https://github.com/$RELEASE_REPO/releases/download/$RELEASE_TAG"
   fetch_ok=1
-  for f in hyperion-agent hctl SHA256SUMS $((( HAVE_WEB )) && echo hyperion-web) $((( HAVE_WEB )) && echo hyperion-export); do
-    [[ -z "$f" ]] && continue
+  WANT_FILES=(hyperion-agent hctl SHA256SUMS)
+  (( HAVE_WEB )) && WANT_FILES+=(hyperion-web hyperion-export)
+  for f in "${WANT_FILES[@]}"; do
     # Capture both curl's exit code and the HTTP status separately
     # so the fall-back message can name the real cause. The OLD
     # message ("no <file> in release") attributed every transient
     # GitHub 5xx as if the file were missing — operators saw
     # "no hyperion-web in release" on a healthy install after a
     # GitHub CDN hiccup and assumed the release was broken.
-    code=$(curl -sSL --max-time 60 -w '%{http_code}' \
-              -o "$TMP/$f" "$REL_BASE/$f" 2>"$TMP/$f.curlerr") || true
+    curl_rc=0
+    code=$(curl -sSL --max-time 120 -w '%{http_code}' \
+              -o "$TMP/$f" "$REL_BASE/$f" 2>"$TMP/$f.curlerr") || curl_rc=$?
     if [[ "$code" != "200" ]]; then
       case "$code" in
         404)
@@ -631,7 +710,7 @@ if (( DO_BUILD && PREFER_PREBUILT )); then
         000|"")
           # curl couldn't even open a connection; show its own error.
           err=$(head -c 200 "$TMP/$f.curlerr" 2>/dev/null | tr -d '\n')
-          log "  network failure fetching '$f': ${err:-curl exit $?} — falling back to cargo build"
+          log "  network failure fetching '$f': ${err:-curl exit $curl_rc} — falling back to cargo build"
           ;;
         *)
           log "  unexpected HTTP $code fetching '$f' — falling back to cargo build"
@@ -663,23 +742,18 @@ if (( DO_BUILD && PREFER_PREBUILT )); then
           }
         done | sha256sum --quiet --check - 2>/dev/null
     ); then
-      log "Pre-built binaries verified by SHA256SUMS — installing"
-      install -m 0755 "$TMP/hyperion-agent" /usr/sbin/hyperion-agent
-      install -m 0755 "$TMP/hctl"           /usr/bin/hctl
+      log "Pre-built binaries verified by SHA256SUMS."
+      BIN_SRC="$TMP"
+      (( HAVE_WEB )) && EXPORT_SRC="$TMP/hyperion-export"
       if (( HAVE_WEB )); then
-        install -m 0755 "$TMP/hyperion-web" /usr/sbin/hyperion-web
-        # Portable (static musl) exporter the self-service import wizard serves.
-        install -d -m 0755 /usr/local/bin
-        install -m 0755 "$TMP/hyperion-export" /usr/local/bin/hyperion-export
         # Per-architecture exporters for the import wizard. The source box in
         # an import is somebody else's server and may not share this one's CPU,
         # so the wizard serves whichever matches what that box reports.
-        # Optional: a release built before these existed simply has neither.
         # Fetched separately and tolerantly: a release cut before these
         # existed returns 404, and putting them in the REQUIRED list would
         # send every such update down the full cargo-build path.
         for a in x86_64 aarch64; do
-          acode=$(curl -sSL --max-time 60 -w '%{http_code}' \
+          acode=$(curl -sSL --max-time 120 -w '%{http_code}' \
                     -o "$TMP/hyperion-export-$a" "$REL_BASE/hyperion-export-$a" 2>/dev/null) || true
           if [[ "$acode" == "200" && -s "$TMP/hyperion-export-$a" ]]; then
             # Verified against the same SHA256SUMS as everything else. The two
@@ -692,7 +766,7 @@ if (( DO_BUILD && PREFER_PREBUILT )); then
             elif ( cd "$TMP" \
                    && grep -E "[[:space:]]hyperion-export-$a\$" SHA256SUMS \
                       | sha256sum --quiet --check - >/dev/null 2>&1 ); then
-              install -m 0755 "$TMP/hyperion-export-$a" "/usr/local/bin/hyperion-export-$a"
+              EXPORT_ARCHES+=("$a")
             else
               warn "hyperion-export-$a did not match its checksum — not installed"
             fi
@@ -708,9 +782,10 @@ fi
 
 if (( DO_BUILD && PREBUILT_OK == 0 )); then
   if ! command -v cargo >/dev/null 2>&1; then
-    fail "cargo not found and no usable pre-built release. Re-run install-master.sh."
+    fail "cargo not found and no usable pre-built release — nothing was stopped or changed.
+       Re-run once the release is published, or install Rust (re-run install-master.sh)."
   fi
-  log "Building release binaries from source ..."
+  log "Building release binaries from source (the panel keeps running meanwhile) ..."
   status running build
 
   # On small (1–2 GB) master nodes the from-source build can be OOM-killed
@@ -766,19 +841,7 @@ if (( DO_BUILD && PREBUILT_OK == 0 )); then
   build_rc=0
   HYPERION_GIT_SHA="$HEAD_FULL" build_with_progress build --release \
     --bin hyperion-agent --bin hyperion-web --bin hctl || build_rc=$?
-  if [ -n "$SWAPFILE" ]; then
-    swapoff "$SWAPFILE" 2>/dev/null || true
-    rm -f "$SWAPFILE"
-  fi
-  if (( build_rc != 0 )); then
-    fail "cargo build failed (exit $build_rc). On a low-RAM box, ensure some swap is available and re-run."
-  fi
-
-  log "Installing binaries ..."
-  install -m 0755 target/release/hyperion-agent /usr/sbin/hyperion-agent
-  install -m 0755 target/release/hctl           /usr/bin/hctl
-  if (( HAVE_WEB )); then
-    install -m 0755 target/release/hyperion-web /usr/sbin/hyperion-web
+  if (( build_rc == 0 && HAVE_WEB )); then
     # The self-service import wizard serves hyperion-export to SOURCE boxes that
     # may run an OLDER glibc than this build host. A host-glibc build would fail
     # there, so build it as a static musl binary (hyperion-export is pure Rust —
@@ -788,17 +851,64 @@ if (( DO_BUILD && PREBUILT_OK == 0 )); then
     if rustup target add "$musl_target" >/dev/null 2>&1 \
        && HYPERION_GIT_SHA="$HEAD_FULL" cargo build --release --target "$musl_target" \
             -p hyperion-export --quiet; then
-      install -d -m 0755 /usr/local/bin
-      install -m 0755 "target/$musl_target/release/hyperion-export" /usr/local/bin/hyperion-export
+      EXPORT_SRC="$INSTALL_DIR/target/$musl_target/release/hyperion-export"
     else
       warn "  couldn't build static hyperion-export ($musl_target) — the self-service import wizard may not run on older-glibc sources (rolling release ships a prebuilt one)"
     fi
   fi
+  if [ -n "$SWAPFILE" ]; then
+    swapoff "$SWAPFILE" 2>/dev/null || true
+    rm -f "$SWAPFILE"
+  fi
+  if (( build_rc != 0 )); then
+    fail "cargo build failed (exit $build_rc) — nothing was stopped or installed.
+       On a low-RAM box, ensure some swap is available and re-run."
+  fi
+  BIN_SRC="$INSTALL_DIR/target/release"
 elif (( ! DO_BUILD )); then
   log "--no-build: skipping binary install."
 fi
 
-#-------- 3b. site-mail-wrapper -------------------------------------------
+#-------- 3. Wait for running jobs, then stop ------------------------------
+# Checked as late as possible — right before the stop — so work that started
+# during a long build is seen too.
+wait_for_running_work
+
+# Snapshot the binaries that are running now, before anything replaces them:
+# a failed update restores these (see recover_after_failure), and --safe also
+# rolls back to them when the new version fails its health check.
+if (( DO_BUILD )); then
+  snapshot_binaries
+fi
+if (( HAVE_WEB )); then
+  status_begin
+  status running stop
+fi
+(( HAVE_AGENT || HAVE_WEB )) && SERVICES_STOPPED=1
+(( HAVE_WEB ))   && { log "Stopping hyperion-web ...";   systemctl stop hyperion-web   || true; }
+(( HAVE_AGENT )) && { log "Stopping hyperion-agent ..."; systemctl stop hyperion-agent || true; }
+
+#-------- 4. Install the new binaries ---------------------------------------
+if [[ -n "$BIN_SRC" ]]; then
+  status running install
+  log "Installing binaries ..."
+  BIN_INSTALLED=1
+  install -m 0755 "$BIN_SRC/hyperion-agent" /usr/sbin/hyperion-agent
+  install -m 0755 "$BIN_SRC/hctl"           /usr/bin/hctl
+  if (( HAVE_WEB )); then
+    install -m 0755 "$BIN_SRC/hyperion-web" /usr/sbin/hyperion-web
+    install -d -m 0755 /usr/local/bin
+    # Portable (static musl) exporter the self-service import wizard serves.
+    if [[ -n "$EXPORT_SRC" && -f "$EXPORT_SRC" ]]; then
+      install -m 0755 "$EXPORT_SRC" /usr/local/bin/hyperion-export
+    fi
+    for a in ${EXPORT_ARCHES[@]+"${EXPORT_ARCHES[@]}"}; do
+      install -m 0755 "$BIN_SRC/hyperion-export-$a" "/usr/local/bin/hyperion-export-$a"
+    done
+  fi
+fi
+
+#-------- 5a. site-mail-wrapper -------------------------------------------
 status running configure
 # Tiny bash shim that PHP-FPM execs as `sendmail_path` for every
 # pool. Logs metadata of outgoing site mail to /var/lib/hyperion/
@@ -836,7 +946,7 @@ if [[ -f "$SITE_MAIL_SRC" ]]; then
   chmod 1777 /var/lib/hyperion/site-mail
 fi
 
-#-------- 3c. maintenance landing page ------------------------------------
+#-------- 5b. maintenance landing page ------------------------------------
 # When a hosting toggles `maintenance_mode`, its nginx vhost falls
 # through `try_files /maintenance.html =503` and tries to serve
 # /var/lib/hyperion/maintenance/maintenance.html. Without that file
@@ -845,10 +955,27 @@ fi
 # only overwrite when the file is missing OR was a previous version
 # we ourselves wrote, identified by the "x-hyperion-maintenance"
 # marker comment).
+#
+# plant_page <dest> <marker> <what> — page body on stdin. Writes only when the
+# content differs, so an update that changes nothing says nothing (it used to
+# rewrite and announce both pages on every single run).
+plant_page() {
+  local dst="$1" marker="$2" what="$3" tmp
+  tmp="$(mktemp)"
+  cat > "$tmp"
+  if [[ -f "$dst" ]] && ! grep -q "$marker" "$dst" 2>/dev/null; then
+    rm -f "$tmp"; return 0            # the operator's own page — never touched
+  fi
+  if cmp -s "$tmp" "$dst"; then
+    rm -f "$tmp"; return 0
+  fi
+  install -m 0644 "$tmp" "$dst"
+  rm -f "$tmp"
+  log "Installed $what at $dst"
+}
 install -d -m 0755 /var/lib/hyperion/maintenance
 MAINT_HTML="/var/lib/hyperion/maintenance/maintenance.html"
-if [[ ! -f "$MAINT_HTML" ]] || grep -q "x-hyperion-maintenance" "$MAINT_HTML" 2>/dev/null; then
-  cat > "$MAINT_HTML" <<'HTML'
+plant_page "$MAINT_HTML" x-hyperion-maintenance "default maintenance page" <<'HTML'
 <!-- x-hyperion-maintenance: v3 - operator may replace this file freely -->
 <!DOCTYPE html>
 <html lang="en">
@@ -928,11 +1055,8 @@ if [[ ! -f "$MAINT_HTML" ]] || grep -q "x-hyperion-maintenance" "$MAINT_HTML" 2>
 </body>
 </html>
 HTML
-  chmod 0644 "$MAINT_HTML"
-  log "Installed default maintenance page at $MAINT_HTML"
-fi
 
-#-------- 3c2. Default landing page (replaces "Welcome to nginx") ---------
+#-------- 5c. Default landing page (replaces "Welcome to nginx") ----------
 # nginx's default_server answers any request whose Host matches no
 # configured site. On a fresh Debian box that is the stock "Welcome to
 # nginx" page — which is what a visitor (or the operator's own preview
@@ -942,8 +1066,7 @@ fi
 # default_server per port.
 install -d -m 0755 /var/lib/hyperion/default
 DEFAULT_HTML="/var/lib/hyperion/default/index.html"
-if [[ ! -f "$DEFAULT_HTML" ]] || grep -q "x-hyperion-default" "$DEFAULT_HTML" 2>/dev/null; then
-  cat > "$DEFAULT_HTML" <<'HTML'
+plant_page "$DEFAULT_HTML" x-hyperion-default "Hyperion default landing page" <<'HTML'
 <!-- x-hyperion-default: v1 - operator may replace this file freely -->
 <!DOCTYPE html>
 <html lang="en">
@@ -997,90 +1120,179 @@ if [[ ! -f "$DEFAULT_HTML" ]] || grep -q "x-hyperion-default" "$DEFAULT_HTML" 2>
 </body>
 </html>
 HTML
-  chmod 0644 "$DEFAULT_HTML"
-  log "Installed Hyperion default landing page at $DEFAULT_HTML"
-fi
 
 # Disable the stock Debian default site (its default_server would clash
-# with ours) and install Hyperion's catch-all default_server.
-if [[ -e /etc/nginx/sites-enabled/default ]]; then
-  rm -f /etc/nginx/sites-enabled/default
-  log "Disabled stock nginx default site."
-fi
-DEFAULT_CONF="/etc/nginx/conf.d/zzz-hyperion-default.conf"
-# Use Debian's ssl-cert-snakeoil for the :443 default (any real site has
-# its own cert; this only answers unmatched hosts, where a cert mismatch
-# is expected). Skip the :443 block if the snakeoil cert is absent.
-SNAKE_CRT="/etc/ssl/certs/ssl-cert-snakeoil.pem"
-SNAKE_KEY="/etc/ssl/private/ssl-cert-snakeoil.key"
-{
-  echo "# Managed by hyperion — catch-all default server. DO NOT EDIT."
-  echo "server {"
-  echo "    listen 80 default_server;"
-  echo "    listen [::]:80 default_server;"
-  echo "    server_name _;"
-  echo "    root /var/lib/hyperion/default;"
-  echo "    location / { try_files /index.html =404; }"
-  echo "}"
-  if [[ -f "$SNAKE_CRT" && -f "$SNAKE_KEY" ]]; then
+# with ours) and install Hyperion's catch-all default_server. Only touched
+# when something actually changes, and only on an nginx config that passes
+# `nginx -t` to begin with — otherwise our change would be blamed (and rolled
+# back) for somebody else's breakage. A failed test puts BOTH files back.
+if command -v nginx >/dev/null 2>&1; then
+  DEFAULT_CONF="/etc/nginx/conf.d/zzz-hyperion-default.conf"
+  STOCK_DEFAULT="/etc/nginx/sites-enabled/default"
+  # Use Debian's ssl-cert-snakeoil for the :443 default (any real site has
+  # its own cert; this only answers unmatched hosts, where a cert mismatch
+  # is expected). Skip the :443 block if the snakeoil cert is absent.
+  SNAKE_CRT="/etc/ssl/certs/ssl-cert-snakeoil.pem"
+  SNAKE_KEY="/etc/ssl/private/ssl-cert-snakeoil.key"
+  DEFAULT_NEW="$(mktemp)"
+  CLEANUP_PATHS+=("$DEFAULT_NEW")
+  {
+    echo "# Managed by hyperion — catch-all default server. DO NOT EDIT."
     echo "server {"
-    echo "    listen 443 ssl default_server;"
-    echo "    listen [::]:443 ssl default_server;"
+    echo "    listen 80 default_server;"
+    echo "    listen [::]:80 default_server;"
     echo "    server_name _;"
-    echo "    ssl_certificate     $SNAKE_CRT;"
-    echo "    ssl_certificate_key $SNAKE_KEY;"
     echo "    root /var/lib/hyperion/default;"
     echo "    location / { try_files /index.html =404; }"
     echo "}"
-  fi
-} > "$DEFAULT_CONF"
-if nginx -t >/dev/null 2>&1; then
-  systemctl reload nginx 2>/dev/null || true
-  log "Installed Hyperion catch-all default server."
-else
-  # Never let our default server wedge nginx — back it out if it fails to validate.
-  rm -f "$DEFAULT_CONF"
-  warn "Hyperion default server failed nginx -t; removed it (kept nginx healthy)."
-fi
-
-#-------- 3d. Heal vhosts written by an older Hyperion --------------------
-# Releases before commit 1609e75 emitted a standalone `http2 on;`
-# directive in every TLS server block. That syntax requires nginx
-# 1.25.1+ but Debian 12 ships nginx 1.22, so every reload after
-# upgrade fails with:
-#   [emerg] unknown directive "http2"
-# Fix the existing files in place — strip the bare `http2 on;`
-# line and add `http2` as a parameter on the matching listen
-# directive. Idempotent; safe to re-run.
-if command -v nginx >/dev/null 2>&1; then
-  shopt -s nullglob
-  HEALED_ANY=0
-  for f in /etc/nginx/sites-enabled/*.conf /etc/nginx/sites-available/*.conf; do
-    [[ -f "$f" ]] || continue
-    if grep -qE "^\s*http2\s+on\s*;" "$f"; then
-      log "Healing legacy http2 directive in $f ..."
-      # Add `http2` to any `listen ... ssl;` (or `ssl` not yet
-      # followed by http2) on a non-comment line. Then nuke the
-      # standalone http2 on; line.
-      sed -i -E \
-        -e 's/^(\s*listen\s+[^#]*\bssl)(\s*;)/\1 http2\2/g' \
-        -e '/^\s*http2\s+on\s*;\s*$/d' \
-        "$f"
-      HEALED_ANY=1
+    if [[ -f "$SNAKE_CRT" && -f "$SNAKE_KEY" ]]; then
+      echo "server {"
+      echo "    listen 443 ssl default_server;"
+      echo "    listen [::]:443 ssl default_server;"
+      echo "    server_name _;"
+      echo "    ssl_certificate     $SNAKE_CRT;"
+      echo "    ssl_certificate_key $SNAKE_KEY;"
+      echo "    root /var/lib/hyperion/default;"
+      echo "    location / { try_files /index.html =404; }"
+      echo "}"
     fi
-  done
-  if (( HEALED_ANY )); then
+  } > "$DEFAULT_NEW"
+  if cmp -s "$DEFAULT_NEW" "$DEFAULT_CONF" && [[ ! -e "$STOCK_DEFAULT" && ! -L "$STOCK_DEFAULT" ]]; then
+    :   # already in place
+  elif ! nginx -t >/dev/null 2>&1; then
+    warn "nginx -t already fails on this box — left the catch-all default server alone (see: nginx -t)."
+  else
+    DEFAULT_BK="$(mktemp -d)"
+    CLEANUP_PATHS+=("$DEFAULT_BK")
+    [[ -f "$DEFAULT_CONF" ]] && cp -p "$DEFAULT_CONF" "$DEFAULT_BK/conf"
+    if [[ -e "$STOCK_DEFAULT" || -L "$STOCK_DEFAULT" ]]; then
+      mv "$STOCK_DEFAULT" "$DEFAULT_BK/stock"
+    fi
+    install -m 0644 "$DEFAULT_NEW" "$DEFAULT_CONF"
     if nginx -t >/dev/null 2>&1; then
       systemctl reload nginx 2>/dev/null || true
-      log "Healed vhosts + reloaded nginx."
+      [[ -e "$DEFAULT_BK/stock" || -L "$DEFAULT_BK/stock" ]] && log "Disabled stock nginx default site."
+      log "Installed Hyperion catch-all default server."
     else
-      log "WARNING: nginx -t still fails after healing — inspect manually."
+      # Never let our default server wedge nginx — put back what was there.
+      if [[ -f "$DEFAULT_BK/conf" ]]; then cp -p "$DEFAULT_BK/conf" "$DEFAULT_CONF"; else rm -f "$DEFAULT_CONF"; fi
+      if [[ -e "$DEFAULT_BK/stock" || -L "$DEFAULT_BK/stock" ]]; then mv "$DEFAULT_BK/stock" "$STOCK_DEFAULT"; fi
+      warn "Hyperion default server failed nginx -t; put the previous config back (kept nginx healthy)."
     fi
   fi
-  shopt -u nullglob
 fi
 
-#-------- 4. Refresh systemd units ----------------------------------------
+#-------- 5d. HTTP/2 spelling in vhosts vs this nginx ---------------------
+# nginx has two spellings for HTTP/2 and each one is wrong somewhere:
+#   * `http2 on;` (a directive) exists only from nginx 1.25.1. Debian 12
+#     ships 1.22, where it is `[emerg] unknown directive "http2"` and every
+#     reload fails.
+#   * `listen 443 ssl http2;` (a listen parameter) works everywhere, but from
+#     1.25.1 on it is deprecated and every `nginx -t` warns about it.
+# The agent picks the right one for the nginx it runs next to
+# (crates/hyperion-adapters/src/nginx.rs, http2_uses_directive) — but only
+# when it re-renders a vhost. This heals files written for the OTHER kind of
+# nginx: ones from releases before that check, and ones from a box whose nginx
+# was upgraded (Debian 12 → 13) since they were written.
+#
+# The version rule here MUST stay the same as the agent's. This used to strip
+# `http2 on;` unconditionally — on a modern nginx that undid every freshly
+# rendered vhost on each update (deprecation warnings until the next render,
+# which this then undid again).
+#
+# Only real files are edited: a sites-enabled entry that is a symlink is healed
+# through its sites-available target (editing the link with `sed -i` replaced
+# it with a stale copy). Backed up first; if `nginx -t` passed before and fails
+# after, every file is put back.
+# >>> http2-heal
+NGINX_DIR="${HYPERION_NGINX_DIR:-/etc/nginx}"
+if command -v nginx >/dev/null 2>&1; then
+  NGINX_VERSION="$(nginx -v 2>&1 | sed -n 's|.*nginx/\([0-9][0-9.]*\).*|\1|p' | head -n1)"
+  # Same as the agent: an unknown version gets the form every nginx accepts.
+  HTTP2_DIRECTIVE=0
+  if [[ -n "$NGINX_VERSION" ]] \
+     && [[ "$(printf '%s\n' 1.25.1 "$NGINX_VERSION" | sort -V | head -n1)" == 1.25.1 ]]; then
+    HTTP2_DIRECTIVE=1
+  fi
+
+  HTTP2_FILES=()
+  shopt -s nullglob
+  for f in "$NGINX_DIR"/sites-available/*.conf "$NGINX_DIR"/sites-enabled/*.conf; do
+    [[ -f "$f" && ! -L "$f" ]] || continue
+    if (( HTTP2_DIRECTIVE )); then
+      # Legacy listen parameter, and no directive anywhere in the file (a file
+      # that already mixes both is somebody's hand edit — leave it).
+      grep -qE '^[[:space:]]*listen[[:space:]][^#]*[[:space:]]http2([[:space:]]|;)' "$f" \
+        && ! grep -qE '^[[:space:]]*http2[[:space:]]+on[[:space:]]*;' "$f" \
+        && HTTP2_FILES+=("$f")
+    else
+      grep -qE '^[[:space:]]*http2[[:space:]]+on[[:space:]]*;' "$f" && HTTP2_FILES+=("$f")
+    fi
+  done
+  shopt -u nullglob
+
+  if (( ${#HTTP2_FILES[@]} )); then
+    HTTP2_OK_BEFORE=0
+    nginx -t >/dev/null 2>&1 && HTTP2_OK_BEFORE=1
+    HTTP2_BK="$(mktemp -d)"
+    CLEANUP_PATHS+=("$HTTP2_BK")
+    i=0
+    for f in "${HTTP2_FILES[@]}"; do
+      cp -p "$f" "$HTTP2_BK/$i"
+      tmp="$HTTP2_BK/$i.new"
+      if (( HTTP2_DIRECTIVE )); then
+        # `listen … ssl http2;` → `listen … ssl;` + one `http2 on;` per server
+        # block, right after its run of listen lines.
+        awk '
+          function flush() {
+            if (pending && !done) { print indent "http2 on;"; done = 1 }
+            pending = 0
+          }
+          /^[[:space:]]*server[[:space:]]*\{/ { flush(); done = 0; print; next }
+          /^[[:space:]]*listen[[:space:]]/ && /[[:space:]]http2([[:space:]]|;)/ {
+            line = $0
+            match(line, /^[[:space:]]*/); indent = substr(line, 1, RLENGTH)
+            gsub(/[[:space:]]+http2[[:space:]]*;/, ";", line)
+            gsub(/[[:space:]]+http2[[:space:]]+/, " ", line)
+            print line; pending = 1; next
+          }
+          /^[[:space:]]*listen[[:space:]]/ { print; next }
+          { flush(); print }
+          END { flush() }
+        ' "$f" > "$tmp"
+      else
+        # `http2 on;` → `http2` on each `listen … ssl` line, directive dropped.
+        sed -E \
+          -e '/[[:space:]]http2[[:space:];]/!s/^([[:space:]]*listen[[:space:]]+[^#;]*[[:space:]]ssl)([[:space:]]*[;[:space:]])/\1 http2\2/' \
+          -e '/^[[:space:]]*http2[[:space:]]+on[[:space:]]*;[[:space:]]*$/d' \
+          "$f" > "$tmp"
+      fi
+      # Write in place (cat >) so owner, mode and inode stay the file's own.
+      cat "$tmp" > "$f"
+      i=$(( i + 1 ))
+    done
+    if (( HTTP2_DIRECTIVE )); then
+      HTTP2_WHAT="\`listen … http2\` → \`http2 on;\` (nginx $NGINX_VERSION deprecates the listen form)"
+    else
+      HTTP2_WHAT="\`http2 on;\` → \`listen … ssl http2\` (nginx ${NGINX_VERSION:-of unknown version} has no http2 directive)"
+    fi
+    if nginx -t >/dev/null 2>&1; then
+      systemctl reload nginx 2>/dev/null || true
+      log "HTTP/2 spelling fixed in ${#HTTP2_FILES[@]} vhost(s): $HTTP2_WHAT"
+      for f in "${HTTP2_FILES[@]}"; do log "    $f"; done
+    elif (( HTTP2_OK_BEFORE )); then
+      i=0
+      for f in "${HTTP2_FILES[@]}"; do cat "$HTTP2_BK/$i" > "$f"; i=$(( i + 1 )); done
+      warn "Switching the HTTP/2 spelling made nginx -t fail — put every vhost back unchanged."
+      warn "  Wanted: $HTTP2_WHAT. Inspect with: nginx -t"
+    else
+      warn "Fixed the HTTP/2 spelling in ${#HTTP2_FILES[@]} vhost(s), but nginx -t still fails (it failed before too) — inspect: nginx -t"
+    fi
+  fi
+fi
+# <<< http2-heal
+
+#-------- 5e. Refresh systemd units ---------------------------------------
 refresh_unit() {
   local svc="$1"
   local src="$INSTALL_DIR/packaging/systemd/${svc}.service"
@@ -1110,7 +1322,7 @@ refresh_unit() {
 # unconditionally — a few hundred kilobytes.
 if ! command -v dig >/dev/null 2>&1; then
   log "Installing bind9-dnsutils (dig) — DNS checks need it ..."
-  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq bind9-dnsutils 2>/dev/null     || DEBIAN_FRONTEND=noninteractive apt-get install -y -qq dnsutils     || warn "could not install dig — SPF/DKIM verification will report unknown on this node"
+  apt_install bind9-dnsutils 2>/dev/null || apt_install dnsutils || warn "could not install dig — SPF/DKIM verification will report unknown on this node"
 fi
 
 # sudo is how the root agent drops to a site's uid for EVERY wp-cli call
@@ -1120,7 +1332,7 @@ fi
 # reads like a problem with the site rather than a missing package.
 if ! command -v sudo >/dev/null 2>&1; then
   log "Installing sudo — wp-cli runs as the site user through it ..."
-  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq sudo \
+  apt_install sudo \
     || warn "could not install sudo — every WordPress action will fail on this node"
 fi
 
@@ -1130,11 +1342,11 @@ fi
 # getting archive backups, so this is a heal rather than a hard requirement.
 if ! command -v restic >/dev/null 2>&1; then
   log "Installing restic — snapshots before updates need it ..."
-  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq restic \
+  apt_install restic \
     || warn "could not install restic — this node will not take snapshots before updates"
 fi
 
-#-------- 4a-sel. Which optional software this box is meant to have -------
+#-------- 5f. Which optional software this box is meant to have -------
 # The heals below re-install MariaDB, PostgreSQL, vsftpd, PHP and phpMyAdmin
 # whenever they are missing. That was right while every install got all of
 # them, but the setup wizard lets the operator CHOOSE — and an update that
@@ -1213,7 +1425,6 @@ unit_installed() {
   systemctl cat "$1" >/dev/null 2>&1
 }
 
-APT_UPDATED=0
 for unit in "${!NEEDED_PKGS[@]}"; do
   # Skip PHP versions that aren't critical — only install if the
   # unit is missing AND no other PHP-FPM unit is already installed
@@ -1237,11 +1448,8 @@ for unit in "${!NEEDED_PKGS[@]}"; do
   fi
   pkgs="${NEEDED_PKGS[$unit]}"
   log "$unit missing — installing $pkgs ..."
-  if (( APT_UPDATED == 0 )); then
-    DEBIAN_FRONTEND=noninteractive apt-get update -qq || true
-    APT_UPDATED=1
-  fi
-  if ! DEBIAN_FRONTEND=noninteractive apt-get install -y -qq $pkgs; then
+  # shellcheck disable=SC2086  # $pkgs is a space-separated package list
+  if ! apt_install $pkgs; then
     warn "$pkgs install failed — features that depend on $unit will not work \
 until this is fixed manually (apt-get install -y $pkgs)."
   fi
@@ -1251,18 +1459,14 @@ done
 if (( SELECTION_MODE )) && heal_allowed redis-server.service \
    && ! unit_installed redis-server.service; then
   log "redis-server.service missing — installing redis-server ..."
-  if (( APT_UPDATED == 0 )); then
-    DEBIAN_FRONTEND=noninteractive apt-get update -qq || true
-    APT_UPDATED=1
-  fi
-  if DEBIAN_FRONTEND=noninteractive apt-get install -y -qq redis-server; then
+  if apt_install redis-server; then
     systemctl enable --now redis-server >/dev/null 2>&1 || true
   else
     warn "redis-server install failed (apt-get install -y redis-server)."
   fi
 fi
 
-#-------- 4a-ext. PHP extensions required by WordPress / wp-cli -----------
+#-------- 5g. PHP extensions required by WordPress / wp-cli -----------
 # The NEEDED_PKGS loop above only fires when the -fpm unit is MISSING, so
 # a server that already has php8.3-fpm but predates the extension bundle
 # (or had it trimmed) never gets the extras. wp-cli `core download` needs
@@ -1287,11 +1491,8 @@ for ver in 8.1 8.2 8.3 8.4; do
   done
   (( missing )) || continue
   log "PHP ${ver}: ensuring WordPress/wp-cli extensions ($want ) ..."
-  if (( APT_UPDATED == 0 )); then
-    DEBIAN_FRONTEND=noninteractive apt-get update -qq || true
-    APT_UPDATED=1
-  fi
-  if DEBIAN_FRONTEND=noninteractive apt-get install -y -qq $want; then
+  # shellcheck disable=SC2086  # $want is a space-separated package list
+  if apt_install $want; then
     # Newly-added modules only load after the fpm worker reloads.
     systemctl try-restart "php${ver}-fpm.service" 2>/dev/null || true
   else
@@ -1300,7 +1501,7 @@ on PHP ${ver} hostings may fail (apt-get install -y$want)."
   fi
 done
 
-#-------- 4a-pma. phpMyAdmin behind the panel ------------------------------
+#-------- 5h. phpMyAdmin behind the panel ------------------------------
 # Every box that hosts sites gets its own phpMyAdmin, because the hosting
 # databases only accept connections from localhost. It is served on a
 # root-only unix socket and reached exclusively through the panel (the agent
@@ -1314,7 +1515,7 @@ if (( HAVE_AGENT )) && [[ -f "$PMA_SCRIPT" ]] \
 will report it as not installed on this node (re-run: bash $PMA_SCRIPT)."
 fi
 
-#-------- 4b. MTA (so PHP mail() actually delivers) -----------------------
+#-------- 5i. MTA (so PHP mail() actually delivers) -----------------------
 # PHP's mail() execs $sendmail_path → hyperion's site-mail wrapper →
 # `/usr/sbin/sendmail`. Default Debian installs ship without any MTA,
 # so /usr/sbin/sendmail doesn't exist and every mail() call returns
@@ -1337,11 +1538,7 @@ if [[ ! -x /usr/sbin/sendmail ]]; then
   log "No MTA installed — installing postfix as Internet Site so PHP mail() works ..."
   echo "postfix postfix/main_mailer_type select Internet Site" | debconf-set-selections
   echo "postfix postfix/mailname string $(hostname -f 2>/dev/null || hostname)" | debconf-set-selections
-  if (( APT_UPDATED == 0 )); then
-    DEBIAN_FRONTEND=noninteractive apt-get update -qq || true
-    APT_UPDATED=1
-  fi
-  if DEBIAN_FRONTEND=noninteractive apt-get install -y -qq postfix; then
+  if apt_install postfix; then
     systemctl reset-failed postfix >/dev/null 2>&1 || true
     systemctl enable --now postfix >/dev/null 2>&1 || true
     if [[ -x /usr/sbin/sendmail ]]; then
@@ -1371,7 +1568,7 @@ if [[ -f "$tmpfiles_src" ]]; then
   systemd-tmpfiles --create /etc/tmpfiles.d/hyperion-php-fpm-runtime.conf >/dev/null 2>&1 || true
 fi
 
-#-------- 4-aux. Make sure PHP-FPM + web/db daemons are enabled -----------
+#-------- 5j. Make sure PHP-FPM + web/db daemons are enabled -----------
 # Older install-master.sh installed the packages but never enabled the
 # services; first hosting create then failed with
 #   "php8.3-fpm.service is not active, cannot reload"
@@ -1387,13 +1584,13 @@ for svc in nginx mariadb postgresql vsftpd postfix \
   fi
 done
 
-#-------- 4a. TLS cert dir (idempotent) -----------------------------------
+#-------- 5k. TLS cert dir (idempotent) -----------------------------------
 # hyperion-web auto-generates a self-signed cert on first start; we just
 # need to make sure the directory exists and the agent service can write
 # into it (covered by ReadWritePaths=/etc/hyperion in the systemd unit).
 install -d -m 0700 /etc/hyperion/web-tls
 
-#-------- 4a-0. retire the Cloudflare DNS-01 token ------------------------
+#-------- 5l. retire the Cloudflare DNS-01 token ------------------------
 # The Cloudflare API integration is gone: certificates now issue over
 # HTTP-01, which works through the proxy, and wildcards are published by
 # hand. Nothing reads this file any more.
@@ -1414,7 +1611,7 @@ if [[ -f /etc/hyperion/cloudflare.token ]]; then
   warn "delete that file."
 fi
 
-#-------- 4a-bis. master→node remote RPC — WORKERS ONLY -------------------
+#-------- 5m. master→node remote RPC — WORKERS ONLY -------------------
 # The inbound RPC listener exists so a MASTER can dispatch to a WORKER.
 # Nothing ever dials a master or a single-server box on this port: the
 # panel routes a local request (target_node_id None/"local") straight to
@@ -1517,18 +1714,27 @@ if (( IS_WORKER )) \
   fi
 fi
 
-#-------- 4b. wp-cli (best-effort install/update) -------------------------
+#-------- 5n. wp-cli (best-effort install/update) -------------------------
 # WordPress install adapter shells out to /usr/local/bin/wp. Older Hyperion
 # installs predate wp-cli being installed by install-master.sh, so make
 # update.sh fix that too.
+# Best-effort for real: a failed download used to abort the whole update under
+# `set -e` (with the services already stopped), and `-o` straight onto the
+# target could leave a truncated, executable `wp` behind.
 if [[ ! -x /usr/local/bin/wp ]]; then
   log "Installing wp-cli ..."
-  curl -fsSL https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar \
-    -o /usr/local/bin/wp
-  chmod 0755 /usr/local/bin/wp
+  WP_TMP="$(mktemp)"
+  CLEANUP_PATHS+=("$WP_TMP")
+  if curl -fsSL --max-time 120 https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar \
+       -o "$WP_TMP" && [[ -s "$WP_TMP" ]]; then
+    install -d -m 0755 /usr/local/bin
+    install -m 0755 "$WP_TMP" /usr/local/bin/wp
+  else
+    warn "Couldn't download wp-cli — WordPress actions will fail until it is installed (re-run the update)."
+  fi
 fi
 
-#-------- 5. Materialize web keys (idempotent) ----------------------------
+#-------- 5o. Materialize web keys (idempotent) ----------------------------
 # hyperion-web's systemd unit runs with ProtectSystem=full, which makes
 # /etc read-only. keys::load_or_init would happily create these on a
 # writable system but the sandbox blocks the write — pre-generate so the
@@ -1584,15 +1790,18 @@ if (( HAVE_AGENT )) && [[ -x /usr/sbin/hyperion-agent ]]; then
   if /usr/sbin/hyperion-agent --dry-run-migrations; then
     log "Migrations validate cleanly."
   else
-    warn "DB migration dry-run FAILED — refusing to restart the agent into a crash-loop."
-    warn "The new binary is installed but services were NOT started; your data is untouched."
-    warn "Fix the migration (or roll back the binary) and re-run this script."
-    exit 1
+    # The dry run works on a COPY of the database, so the live one is
+    # untouched — the previous binaries run against it exactly as before.
+    # Exiting here hands over to recover_after_failure, which puts them back
+    # and starts them (it used to leave the panel down until someone SSH'd in).
+    warn "DB migration dry-run FAILED — the new version would crash-loop on this database."
+    fail "Not starting the new version; your data is untouched."
   fi
 fi
 
 #-------- 7. Start + health check -----------------------------------------
 status running start
+REACHED_START=1
 (( HAVE_AGENT )) && { log "Starting hyperion-agent ..."; systemctl start hyperion-agent || true; }
 (( HAVE_WEB   )) && { log "Starting hyperion-web ...";   systemctl start hyperion-web   || true; }
 sleep 1
@@ -1676,7 +1885,7 @@ if (( DO_BUILD )) && (( ! ROLLED_BACK )); then
   fi
   if (( skew )); then
     warn "Installed binaries don't match your checkout — rebuild locally with:"
-    warn "    sudo $0 --from-source"
+    warn "    sudo $INSTALL_DIR/packaging/install/update.sh --from-source"
     HEALTHY=0
   elif [[ -n "$AGENT_SHA" ]]; then
     log "Verified: installed binaries match source ${HEAD_FULL:0:12}."

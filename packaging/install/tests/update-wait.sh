@@ -81,7 +81,7 @@ else bad "idle box proceeds immediately" "$out"; fi
 new_db "$DB"; insert_job running -5
 out="$(run_block 1 WAIT_TIMEOUT=2)"
 if grep -q '^rc=1$' <<<"$out" && grep -q 'migration | example.cz | copying files 40%' <<<"$out" \
-   && grep -q 'nothing was changed' <<<"$out"; then
+   && grep -q 'nothing was stopped or installed' <<<"$out"; then
   ok "running job blocks, is listed, and --wait-timeout gives up"
 else bad "running job blocks, is listed, and --wait-timeout gives up" "$out"; fi
 
