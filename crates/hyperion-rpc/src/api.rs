@@ -864,7 +864,15 @@ pub trait AgentApi: Send + Sync + 'static {
         &self,
         sel: HostingSelector,
         trigger: String,
+        actor: String,
     ) -> Result<hyperion_types::gitsync::GitSyncLast, RpcError>;
+    /// Can the node read the configured branch?
+    async fn git_sync_check(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<hyperion_types::gitsync::GitSyncCheck, RpcError>;
+    /// Stop deploying this site from GitHub.
+    async fn git_sync_disconnect(&self, sel: HostingSelector) -> Result<(), RpcError>;
     /// Snapshots this site has, newest last.
     async fn snapshot_list(
         &self,

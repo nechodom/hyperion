@@ -828,6 +828,14 @@ pub fn build_router(state: SharedState) -> Router {
             post(handlers::hostings::post_gitsync_now),
         )
         .route(
+            "/hostings/gitsync/check",
+            post(handlers::hostings::post_gitsync_check),
+        )
+        .route(
+            "/hostings/gitsync/disconnect",
+            post(handlers::hostings::post_gitsync_disconnect),
+        )
+        .route(
             "/hostings/site-check",
             post(handlers::hostings::post_site_check),
         )

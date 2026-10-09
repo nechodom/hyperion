@@ -1535,6 +1535,13 @@ fn print_pretty(resp: &Response) {
         }
         Response::GitSyncPubkey(k) => println!("{k}"),
         Response::GitSyncAck => println!("ok"),
+        Response::GitSyncCheck(c) => {
+            if c.ok {
+                println!("ok: {} (branch at {})", c.message, c.commit);
+            } else {
+                println!("refused: {}", c.message);
+            }
+        }
         Response::SnapshotList(rows) => {
             if rows.is_empty() {
                 println!("(no snapshots — the snapshot engine may not be installed)");

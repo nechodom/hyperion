@@ -1593,8 +1593,20 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(k) => Response::GitSyncPubkey(k),
             Err(e) => Response::Error(e),
         },
-        Request::GitSyncNow { sel, trigger } => match api.git_sync_now(sel, trigger).await {
+        Request::GitSyncNow {
+            sel,
+            trigger,
+            actor,
+        } => match api.git_sync_now(sel, trigger, actor).await {
             Ok(v) => Response::GitSyncLast(v),
+            Err(e) => Response::Error(e),
+        },
+        Request::GitSyncCheck { sel } => match api.git_sync_check(sel).await {
+            Ok(v) => Response::GitSyncCheck(v),
+            Err(e) => Response::Error(e),
+        },
+        Request::GitSyncDisconnect { sel } => match api.git_sync_disconnect(sel).await {
+            Ok(()) => Response::GitSyncAck,
             Err(e) => Response::Error(e),
         },
         Request::SiteCheckLast { sel } => match api.site_check_last(sel).await {
@@ -3634,8 +3646,18 @@ mod tests {
             &self,
             _: HostingSelector,
             _: String,
+            _: String,
         ) -> Result<hyperion_types::gitsync::GitSyncLast, RpcError> {
             Ok(Default::default())
+        }
+        async fn git_sync_check(
+            &self,
+            _: HostingSelector,
+        ) -> Result<hyperion_types::gitsync::GitSyncCheck, RpcError> {
+            Ok(Default::default())
+        }
+        async fn git_sync_disconnect(&self, _: HostingSelector) -> Result<(), RpcError> {
+            Ok(())
         }
         async fn snapshot_list(
             &self,

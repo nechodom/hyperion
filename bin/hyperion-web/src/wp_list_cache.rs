@@ -193,6 +193,8 @@ const KEEPS_WP_LISTS: &[&str] = &[
     "/hostings/packages/service-check",
     "/hostings/gitsync/config",
     "/hostings/gitsync/genkey",
+    "/hostings/gitsync/check",
+    "/hostings/gitsync/disconnect",
     "/hostings/suspend",
     "/hostings/resume",
 ];

@@ -1566,10 +1566,24 @@ pub enum Request {
     GitSyncGenerateKey {
         sel: HostingSelector,
     },
-    /// Deploy the configured repo now. `trigger` is "manual" or "webhook".
+    /// Deploy the configured repo now. `trigger` is "manual" or "webhook";
+    /// `actor` the panel user who asked (empty for a webhook, and from an
+    /// older master).
     GitSyncNow {
         sel: HostingSelector,
         trigger: String,
+        #[serde(default)]
+        actor: String,
+    },
+    /// Can the node read the configured branch? A `git ls-remote`; touches
+    /// neither the checkout nor the webroot.
+    GitSyncCheck {
+        sel: HostingSelector,
+    },
+    /// Stop deploying from GitHub: forget settings, key, token, webhook
+    /// secret and history; remove the checkout. The webroot is kept.
+    GitSyncDisconnect {
+        sel: HostingSelector,
     },
     /// Snapshots this site has, newest last. Empty when the node has no
     /// snapshot engine — which is not an error, it is "none".
@@ -2488,6 +2502,7 @@ pub enum Response {
     GitSyncLast(hyperion_types::gitsync::GitSyncLast),
     GitSyncPubkey(String),
     GitSyncAck,
+    GitSyncCheck(hyperion_types::gitsync::GitSyncCheck),
     SnapshotList(Vec<hyperion_types::SnapshotSummary>),
     SnapshotOverview(hyperion_types::SnapshotOverview),
     /// How many snapshots were deleted.

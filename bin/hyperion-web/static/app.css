@@ -892,6 +892,24 @@ details.svc-fold .svc-row .pill.muted { display: none; }
 .chk-note { margin: 0; font-size: 0.8rem; color: var(--text-soft); line-height: 1.55; max-width: 82ch; }
 .chk-note.tone-warn { color: var(--warn); }
 .chk-note.tone-err  { color: var(--danger); }
+.chk-note.tone-ok   { color: var(--success); }
+
+/* Deploy from GitHub — the access picker reveals its own field from the
+   checked radio, so the token box shows the moment "Access token" is picked. */
+.gs-form .hint { font-size: 0.78rem; font-weight: 400; color: var(--text-dim); line-height: 1.5; }
+.gs-auth { border: 0; padding: 0; margin: 0 0 0.8rem; min-width: 0; }
+.gs-auth > legend { padding: 0; margin-bottom: 0.4rem; font-size: 0.8rem; font-weight: 500; color: var(--text-dim); }
+.gs-auth-opts { display: grid; grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr)); gap: 0.5rem; }
+.gs-auth-opt { display: flex; gap: 0.55rem; align-items: flex-start; padding: 0.6rem 0.7rem; border: 1px solid var(--border); border-radius: var(--radius-sm); cursor: pointer; font-size: 0.85rem; }
+.gs-auth-opt:hover { border-color: var(--border-strong); }
+.gs-auth-opt:has(input:checked) { border-color: var(--text); background: var(--surface-2); }
+.gs-auth-opt input { margin-top: 0.2rem; }
+.gs-auth-opt .hint { display: block; margin-top: 0.15rem; }
+.gs-auth .gs-when-deploykey, .gs-auth .gs-when-pat { display: none; }
+.gs-auth:has(input[value="deploykey"]:checked) .gs-when-deploykey,
+.gs-auth:has(input[value="pat"]:checked) .gs-when-pat { display: block; }
+.gs-history li { grid-template-columns: 6px 5.5rem minmax(0, 1fr); }
+.gs-history .gs-when { color: var(--text-soft); white-space: nowrap; }
 .chk-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; margin: 0; font-size: 0.78rem; color: var(--text-soft); }
 .chk-foot strong { color: var(--text-dim); font-weight: 600; }
 .chk-link {
