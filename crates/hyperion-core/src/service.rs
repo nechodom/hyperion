@@ -2994,6 +2994,22 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .map_err(|e| RpcError::Internal_with(format!("list: {e}")))
     }
 
+    /// Cap the local redis-server and make it evict like a cache (see
+    /// `hyperion_adapters::redis`). Run when a site turns its object cache
+    /// on and once at boot, so nodes that already use Redis get it too.
+    /// Best-effort: Redis without the cap still serves.
+    pub async fn ensure_redis_memory_policy(&self) {
+        if !self.adapters.redis_is_available().await {
+            return;
+        }
+        let ram = hyperion_adapters::redis::mem_total_kib().await;
+        match hyperion_adapters::redis::ensure_cache_memory_policy(ram).await {
+            Ok(true) => tracing::info!("redis: object-cache memory cap + LRU eviction applied"),
+            Ok(false) => {}
+            Err(e) => tracing::warn!(error = %e, "redis: memory policy not applied"),
+        }
+    }
+
     /// Rewrite, once, every Active site vhost rendered before the template
     /// last changed in a way existing sites need.
     ///
@@ -5630,6 +5646,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .redis_ensure_acl(&username, &password, db_number)
             .await
             .map_err(|e| RpcError::Internal_with(format!("redis ACL: {e}")))?;
+        self.ensure_redis_memory_policy().await;
 
         // Persist secret BEFORE writing wp-config — so a partial
         // failure doesn't leave wp-config pointing at a password we
@@ -6422,6 +6439,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 message: last.message.clone(),
             });
         }
+        self.purge_page_cache_after(id, "hosting.gitsync.deploy")
+            .await;
         Ok(last)
     }
 
@@ -14734,6 +14753,44 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// delete/auto-update toggle) via wp-cli. Every action is
     /// audit-logged with the action kind + slug (never the source URL
     /// when it carries auth).
+    /// Empty this hosting's FastCGI page cache (the panel's "Purge cache"
+    /// button). Returns how many cached pages were dropped; 0 when the site
+    /// has no page cache. Allowed in any state — a suspended site's stale
+    /// pages are exactly what someone may want gone.
+    pub async fn page_cache_purge(&self, sel: HostingSelector) -> Result<u64, RpcError> {
+        let detail = self.get(sel).await?;
+        let pages = hyperion_adapters::nginx::purge_fastcgi_cache(detail.id.as_str())
+            .await
+            .map_err(|e| RpcError::ProvisioningFailed {
+                stage: "page_cache_purge".into(),
+                reason: e.to_string(),
+            })?;
+        self.append_audit(
+            "hosting.page_cache.purge",
+            Some(detail.id.as_str()),
+            &serde_json::json!({ "domain": detail.domain, "pages": pages }).to_string(),
+            "ok",
+        )
+        .await;
+        Ok(pages)
+    }
+
+    /// Best-effort purge after something changed what the site renders
+    /// (a plugin/theme change, a restore, a deploy, an auto-update). Without
+    /// it a page-cached site kept serving the old HTML — the old theme, a
+    /// plugin's markup that no longer exists — for up to its whole TTL,
+    /// which reads to the operator as "the update did not work". A failure
+    /// is logged, never surfaced: the change itself succeeded.
+    async fn purge_page_cache_after(&self, hosting_id: &str, why: &str) {
+        match hyperion_adapters::nginx::purge_fastcgi_cache(hosting_id).await {
+            Ok(0) => {}
+            Ok(pages) => tracing::info!(hosting = hosting_id, why, pages, "page cache purged"),
+            Err(e) => {
+                tracing::warn!(hosting = hosting_id, why, error = %e, "page cache purge failed")
+            }
+        }
+    }
+
     pub async fn wp_plugin_action(
         &self,
         sel: HostingSelector,
@@ -14821,6 +14878,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             &out.state,
         )
         .await;
+        if !matches!(action, hyperion_types::WpPluginAction::SetAutoUpdate { .. }) {
+            self.purge_page_cache_after(detail.id.as_str(), "wp.plugin.action")
+                .await;
+        }
         Ok(out)
     }
 
@@ -14894,6 +14955,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             &out.state,
         )
         .await;
+        self.purge_page_cache_after(detail.id.as_str(), "wp.theme.action")
+            .await;
         Ok(out)
     }
 
@@ -15341,6 +15404,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 // re-scan that cannot read the site keeps the pre-update
                 // findings — an empty list here would read as "up to date".
                 if auto_updated > 0 {
+                    self.purge_page_cache_after(s.id.as_str(), "wp.auto_update")
+                        .await;
                     match self.wp_vuln_scan(HostingSelector::Id(s.id.clone())).await {
                         Ok(r) if !r.feed_unavailable => scan = r,
                         Ok(r) => rescan_error = Some(r.error),
@@ -31177,6 +31242,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             "ok",
         )
         .await;
+        self.purge_page_cache_after(detail.id.as_str(), "hosting.restore")
+            .await;
 
         Ok(())
     }
@@ -38919,7 +38986,9 @@ fn limits_to_row(
 /// without the rewrite an existing site's activity view and WAF auto-ban
 /// stay empty until somebody re-saves it. 3: page cache serves the last good
 /// copy (and refills one request at a time) while the PHP pool is full.
-const VHOST_GEN: u32 = 3;
+/// 4: browser-cache lifetimes for static assets, gzip for text assets,
+/// `open_file_cache`.
+const VHOST_GEN: u32 = 4;
 /// Node-local `hosting_kv` key holding the generation a vhost was last
 /// rendered at.
 const VHOST_GEN_KV: &str = "nginx.vhost_gen";

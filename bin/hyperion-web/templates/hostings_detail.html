@@ -2481,6 +2481,16 @@
                    min="0" max="86400" step="60"
                    value="{% if detail.vhost_options.fastcgi_cache_ttl > 0 %}{{ detail.vhost_options.fastcgi_cache_ttl }}{% else %}300{% endif %}">
           </div>
+          {% if detail.vhost_options.fastcgi_cache_enabled %}
+          {# Belongs to the standalone form under this card (a form cannot
+             nest inside the options form). Plugin/theme changes, restores,
+             deploys and auto-updates purge on their own; this is for edits
+             made inside WordPress. #}
+          <div style="display:flex;align-items:center;gap:0.6rem;margin-top:0.5rem">
+            <button class="btn small" type="submit" form="page-cache-purge">Purge cached pages</button>
+            <span id="page-cache-purge-result" class="note">Clears on plugin/theme changes, restores and deploys by itself; purge after editing content in WordPress.</span>
+          </div>
+          {% endif %}
         </div>
       </div>
     </div>
@@ -2539,6 +2549,13 @@
       </button>
     </div>
   </form>
+  {% if detail.vhost_options.fastcgi_cache_enabled %}
+  <form id="page-cache-purge" method="post" action="/hostings/page-cache/purge"
+        hx-post="/hostings/page-cache/purge" hx-target="#page-cache-purge-result" hx-swap="innerHTML" hidden>
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
+  </form>
+  {% endif %}
 </div>
 
 <div class="panel-group">Protection</div>

@@ -178,6 +178,7 @@ const KEEPS_WP_LISTS: &[&str] = &[
     "/hostings/bruteforce-scan",
     "/hostings/letter-language",
     "/hostings/perm-autoheal",
+    "/hostings/page-cache/",
     "/hostings/integrity/scan",
     "/hostings/ban",
     "/hostings/waf-",

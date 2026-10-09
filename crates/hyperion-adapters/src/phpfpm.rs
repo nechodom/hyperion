@@ -233,6 +233,11 @@ pub async fn ensure_pool(input: &PoolInput<'_>) -> Result<PathBuf, AdapterError>
     }
 
     ensure_slowlog_dir().await?;
+    // Node-wide OPcache sizing for this PHP version. Best-effort: a node
+    // that cannot write it keeps the distro defaults, which still work.
+    if let Err(e) = ensure_opcache_ini(input.php_version).await {
+        tracing::warn!(error = %e, version = input.php_version.as_str(), "opcache ini not written");
+    }
     let body = render(input)?;
     let path = pool_path(input);
     // Backup the existing pool (if any) so we can roll back when our
@@ -263,6 +268,65 @@ pub async fn ensure_pool(input: &PoolInput<'_>) -> Result<PathBuf, AdapterError>
     }
     reload(input.php_version).await?;
     Ok(path)
+}
+
+/// `/etc/php/<ver>/fpm/conf.d/90-hyperion-opcache.ini`. Loaded after the
+/// distro's `10-opcache.ini` (which loads the extension), so these win.
+pub fn opcache_ini_path(php_version: PhpVersion) -> PathBuf {
+    PathBuf::from(format!(
+        "/etc/php/{}/fpm/conf.d/90-hyperion-opcache.ini",
+        php_version.as_str()
+    ))
+}
+
+/// OPcache for a box that hosts many sites under ONE FPM master per PHP
+/// version — every pool of that version shares one OPcache.
+///
+/// * Size: Debian's defaults (128 MB, 10 000 scripts) are sized for one
+///   application. A single WordPress with a page builder and a shop is
+///   several thousand scripts; a dozen of them overflow it, and a full
+///   OPcache stops caching new scripts (or restarts, dropping everything)
+///   — every request then compiles PHP again. Memory scales with the box.
+/// * `validate_permission`: with one cache shared by many tenants, a script
+///   is only served from it to a pool that can read the file itself, so a
+///   site can never run another site's cached code it could not open.
+/// * Timestamps stay validated (every 2 s): tenants edit their own files
+///   over SFTP and must see the change without a reload.
+pub fn render_opcache_ini(mem_total_kib: u64) -> String {
+    let memory_mb = if mem_total_kib >= 3 * 1024 * 1024 {
+        256
+    } else {
+        128
+    };
+    format!(
+        "; Auto-managed by Hyperion. Do not edit — rewritten on every pool write.\n\
+         opcache.enable=1\n\
+         opcache.memory_consumption={memory_mb}\n\
+         opcache.interned_strings_buffer=16\n\
+         opcache.max_accelerated_files=50000\n\
+         opcache.validate_timestamps=1\n\
+         opcache.revalidate_freq=2\n\
+         opcache.validate_permission=1\n"
+    )
+}
+
+/// Write [`render_opcache_ini`] for this version. Idempotent on content;
+/// returns whether it changed (the caller's FPM reload applies it). Skipped
+/// when the version's FPM is not installed (no conf.d to write into).
+pub async fn ensure_opcache_ini(php_version: PhpVersion) -> Result<bool, AdapterError> {
+    let path = opcache_ini_path(php_version);
+    let Some(dir) = path.parent() else {
+        return Ok(false);
+    };
+    if !tokio::fs::try_exists(dir).await.unwrap_or(false) {
+        return Ok(false);
+    }
+    let want = render_opcache_ini(crate::redis::mem_total_kib().await);
+    if tokio::fs::read_to_string(&path).await.ok().as_deref() == Some(want.as_str()) {
+        return Ok(false);
+    }
+    atomic_write(&path, want.as_bytes(), 0o644).await?;
+    Ok(true)
 }
 
 /// Run `php-fpm<ver> -t` and return an error with the exact
@@ -467,6 +531,23 @@ async fn is_failed(svc: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn opcache_ini_scales_with_the_box_and_isolates_tenants() {
+        let small = render_opcache_ini(2 * 1024 * 1024);
+        let big = render_opcache_ini(8 * 1024 * 1024);
+        assert!(small.contains("opcache.memory_consumption=128\n"));
+        assert!(big.contains("opcache.memory_consumption=256\n"));
+        for ini in [&small, &big] {
+            assert!(ini.contains("opcache.validate_permission=1\n"));
+            assert!(ini.contains("opcache.validate_timestamps=1\n"));
+            assert!(ini.contains("opcache.max_accelerated_files=50000\n"));
+        }
+        assert_eq!(
+            opcache_ini_path(PhpVersion::V8_3).to_string_lossy(),
+            "/etc/php/8.3/fpm/conf.d/90-hyperion-opcache.ini"
+        );
+    }
     use super::*;
 
     #[test]

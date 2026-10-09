@@ -588,6 +588,10 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(v) => Response::HostingAnnounceCreated(v),
             Err(e) => Response::Error(e),
         },
+        Request::HostingPageCachePurge { sel } => match api.hosting_page_cache_purge(sel).await {
+            Ok(n) => Response::HostingPageCachePurged(n),
+            Err(e) => Response::Error(e),
+        },
         Request::HostingPermAutohealSet { sel, enabled } => {
             match api.hosting_perm_autoheal_set(sel, enabled).await {
                 Ok(v) => Response::HostingPermAutohealSet(v),
@@ -2509,6 +2513,9 @@ mod tests {
             enabled: bool,
         ) -> Result<bool, RpcError> {
             Ok(enabled)
+        }
+        async fn hosting_page_cache_purge(&self, _: HostingSelector) -> Result<u64, RpcError> {
+            Ok(0)
         }
         async fn firewall_enable_default_drop(&self, _: i64) -> Result<String, RpcError> {
             Ok(String::new())

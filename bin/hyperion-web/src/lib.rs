@@ -227,6 +227,10 @@ pub fn build_router(state: SharedState) -> Router {
             post(handlers::hostings::post_perm_autoheal),
         )
         .route(
+            "/hostings/page-cache/purge",
+            post(handlers::hostings::post_page_cache_purge),
+        )
+        .route(
             "/hostings/dkim/enable",
             post(handlers::hostings::post_dkim_enable),
         )

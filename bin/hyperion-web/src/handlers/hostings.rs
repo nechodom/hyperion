@@ -8111,6 +8111,60 @@ pub async fn post_perm_autoheal(
     get_perm_panel(State(state), ctx, Path(form.selector)).await
 }
 
+/// POST /hostings/page-cache/purge — empty the site's FastCGI page cache on
+/// its owning node. htmx-driven: answers with the one-line result that
+/// replaces the note next to the button.
+pub async fn post_page_cache_purge(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<PageCachePurgeForm>,
+) -> Result<Response, AppError> {
+    let sel = match require_manage_for_selector(
+        &state,
+        &ctx,
+        &form.selector,
+        Capability::HostingEditConfig,
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
+    let (_, owner) = find_hosting_anywhere(&state, sel.clone()).await?;
+    let html = match crate::dispatcher::dispatch_to_node(
+        &state,
+        owner.as_deref(),
+        Request::HostingPageCachePurge { sel },
+    )
+    .await
+    {
+        Ok(RpcResponse::HostingPageCachePurged(0)) => {
+            "<span class=\"note\">Nothing was cached.</span>".to_string()
+        }
+        Ok(RpcResponse::HostingPageCachePurged(n)) => format!(
+            "<span class=\"pill ok\">Purged {n} cached page{}</span>",
+            if n == 1 { "" } else { "s" }
+        ),
+        Ok(RpcResponse::Error(e)) => format!(
+            "<span class=\"pill err\">Purge failed: {}</span>",
+            askama_escape::escape(&e.to_string(), askama_escape::Html)
+        ),
+        Ok(_) => {
+            "<span class=\"pill err\">Purge failed: unexpected agent response</span>".to_string()
+        }
+        Err(e) => format!(
+            "<span class=\"pill err\">Purge failed: {}</span>",
+            askama_escape::escape(&e.to_string(), askama_escape::Html)
+        ),
+    };
+    Ok(Html(html).into_response())
+}
+
+#[derive(serde::Deserialize)]
+pub struct PageCachePurgeForm {
+    pub selector: String,
+}
+
 #[derive(serde::Deserialize)]
 pub struct PermAutohealForm {
     pub selector: String,
