@@ -61,7 +61,7 @@ several servers from the start.
 | Memory-safe language | PHP + bash | Rust, `#![forbid(unsafe_code)]` |
 | Multi-node cluster | single node | master + N workers, signed RPC |
 | Atomic provisioning | partial | rollback on every step |
-| Scriptable HTTP API (OpenAPI) + CLI | partial / unofficial | `/api/v1` + `hctl remote` |
+| Scriptable HTTP API (OpenAPI) + CLI | partial / unofficial | `/api/v1` + [`hctl`](docs/cli.md) |
 | Live progress for long operations | — | background job page with sub-steps |
 | Tamper-evident audit log | — | BLAKE3 hash chain |
 | Off-site backups | FTP | S3 (age-encrypted) + FTP/FTPS/SFTP, restic snapshots |
@@ -277,13 +277,15 @@ CI, cron or your own tools.
 ```bash
 hctl remote --url https://panel.example.com --key hyp_… login
 hctl remote list --state active | jq '.items[].domain'
-hctl remote create --domain new.example.com --php v8_3
+hctl remote create --domain new.example.com --php 8.3
 hctl remote backup new.example.com --wait
 ```
 
-When a node is too broken for the web UI, `hctl` also talks to the local agent
-over its Unix socket (`hctl info`, `hctl hosting create`, `hctl audit`,
-`hctl ftp …`).
+On the node itself, `hctl` talks to the local agent over its Unix socket, so
+it keeps working when the panel is down or you are locked out of it: hostings,
+backups, certificates, WordPress, users (`hctl user unlock`,
+`hctl user disable-2fa`), bans, the firewall escape hatch and node updates.
+Every command is listed with examples in the [CLI reference](docs/cli.md).
 
 ---
 

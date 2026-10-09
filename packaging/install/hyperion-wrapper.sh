@@ -36,7 +36,7 @@ Usage:
   hyperion help               This text.
 
 Anything else is handed to hctl, so `hyperion info` == `hctl info`.
-Full CLI: hctl --help
+Full CLI: hctl --help, or docs/cli.md in the Hyperion repository.
 EOF
 }
 

@@ -17,7 +17,12 @@ hyperion-types = { path = "../../crates/hyperion-types" }
 hyperion-validate = { path = "../../crates/hyperion-validate" }
 tokio = { workspace = true }
 anyhow.workspace = true
-clap.workspace = true
+clap = { workspace = true, features = ["env"] }
+# `hctl completions <shell>`.
+clap_complete = "4"
+# Generated passwords for `user create`, `db reset-password`, … — secrets
+# never come from argv.
+rand.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 # `hctl remote` — HTTP client for the /api/v1 Bearer API. rustls (no OpenSSL)
@@ -27,3 +32,4 @@ toml.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }
+tempfile.workspace = true
