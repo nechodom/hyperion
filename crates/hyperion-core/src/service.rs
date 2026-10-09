@@ -17592,7 +17592,12 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     .flatten()
                     .and_then(|s| s.parse::<i64>().ok())
                     .unwrap_or(0);
-            if !backup_due(cadence_secs, last_run, now) {
+            let at_min = hyperion_state::hosting_kv::get(&self.pool, h.id.as_str(), BACKUP_KV_AT)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|v| parse_backup_at(&v));
+            if !backup_due_at(&chrono::Local, cadence_secs, last_run, now, at_min) {
                 continue;
             }
             // Stamp the attempt BEFORE running so a slow/looping backup can't be
@@ -38882,6 +38887,10 @@ const BACKUP_KV_CADENCE: &str = "backup_cadence";
 /// [`BACKUP_KV_CADENCE`] is "custom" (1..=365). Seeded by a profile
 /// (migration 070) or a care package (071); 0/absent = not due.
 const BACKUP_KV_INTERVAL_DAYS: &str = "backup_interval_days";
+/// `hosting_kv` key: local time of day ("HH:MM", the node's timezone) the
+/// scheduled backup runs at. Absent/blank = any time — due as soon as the
+/// cadence has elapsed, which is what every site did before this key existed.
+const BACKUP_KV_AT: &str = "backup_at";
 /// `hosting_kv` keys: per-hosting retention overrides read at prune time —
 /// keep archives this many days / keep at least this many. > 0 overrides the
 /// node-wide `[backup_retention]` rule; 0/absent = fall back to it.
@@ -39415,6 +39424,73 @@ fn backup_cadence_secs(c: &str) -> Option<i64> {
 /// prompt first backup.
 fn backup_due(cadence_secs: i64, last_run: i64, now: i64) -> bool {
     now.saturating_sub(last_run) >= cadence_secs
+}
+
+/// How long after its set time a never-run site still takes its first
+/// backup. Past it, the first one waits for the same time tomorrow, so turning
+/// a schedule on at noon does not start a backup at noon when the operator
+/// asked for 03:00.
+const BACKUP_AT_FIRST_RUN_GRACE_SECS: i64 = 2 * 3600;
+
+/// Parse a [`BACKUP_KV_AT`] value ("HH:MM", 24-hour) into minutes after local
+/// midnight. Anything else is `None` — "any time", the behaviour before the
+/// key existed.
+fn parse_backup_at(s: &str) -> Option<u32> {
+    let (h, m) = s.trim().split_once(':')?;
+    if h.is_empty() || h.len() > 2 || m.len() != 2 {
+        return None;
+    }
+    let (h, m) = (h.parse::<u32>().ok()?, m.parse::<u32>().ok()?);
+    (h < 24 && m < 60).then_some(h * 60 + m)
+}
+
+/// Unix seconds of `at_min` minutes past midnight, `days` after the local
+/// calendar day that `ts` falls on. A time skipped by a DST jump resolves to
+/// the hour after it.
+fn local_slot<Tz: chrono::TimeZone>(tz: &Tz, ts: i64, days: i64, at_min: u32) -> Option<i64> {
+    use chrono::{Duration, NaiveTime};
+    let day = tz.timestamp_opt(ts, 0).earliest()?.date_naive() + Duration::days(days);
+    let at = NaiveTime::from_hms_opt(at_min / 60, at_min % 60, 0)?;
+    let naive = day.and_time(at);
+    tz.from_local_datetime(&naive)
+        .earliest()
+        .or_else(|| {
+            tz.from_local_datetime(&(naive + Duration::hours(1)))
+                .earliest()
+        })
+        .map(|d| d.timestamp())
+}
+
+/// [`backup_due`] with an optional time of day. Without one it IS
+/// `backup_due`. With one, the next backup is due at that local time on the
+/// day the cadence lands on, counted in calendar days from the day of the last
+/// run — so "daily at 03:00" stays at 03:00 even when a run starts late, and a
+/// late catch-up run (node was down) snaps the next one back onto the set time.
+/// A site that never ran takes its first backup at the next occurrence of the
+/// time, not immediately.
+fn backup_due_at<Tz: chrono::TimeZone>(
+    tz: &Tz,
+    cadence_secs: i64,
+    last_run: i64,
+    now: i64,
+    at_min: Option<u32>,
+) -> bool {
+    let Some(at_min) = at_min else {
+        return backup_due(cadence_secs, last_run, now);
+    };
+    if last_run <= 0 {
+        return match local_slot(tz, now, 0, at_min) {
+            Some(slot) => now >= slot && now < slot + BACKUP_AT_FIRST_RUN_GRACE_SECS,
+            None => false,
+        };
+    }
+    let days = (cadence_secs / 86_400).max(1);
+    match local_slot(tz, last_run, days, at_min) {
+        Some(slot) => now >= slot,
+        // Unrepresentable local time: fall back to the plain elapsed rule
+        // rather than never backing up.
+        None => backup_due(cadence_secs, last_run, now),
+    }
 }
 
 /// Per-hosting policy for when disk usage crosses the hard cap. Stored in
@@ -41781,6 +41857,81 @@ mod tests {
         assert!(backup_due(86_400, 0, 1_700_000_000));
         assert!(!backup_due(86_400, 1_700_000_000, 1_700_000_000 + 100));
         assert!(backup_due(86_400, 1_700_000_000, 1_700_000_000 + 86_400));
+    }
+
+    #[test]
+    fn backup_at_parses_hh_mm_only() {
+        use super::parse_backup_at;
+        assert_eq!(parse_backup_at("03:00"), Some(180));
+        assert_eq!(parse_backup_at(" 3:05 "), Some(185));
+        assert_eq!(parse_backup_at("23:59"), Some(23 * 60 + 59));
+        assert_eq!(parse_backup_at("24:00"), None);
+        assert_eq!(parse_backup_at("12:60"), None);
+        assert_eq!(parse_backup_at("12:5"), None);
+        assert_eq!(parse_backup_at(""), None);
+        assert_eq!(parse_backup_at("noon"), None);
+    }
+
+    #[test]
+    fn backup_due_at_holds_the_time_of_day() {
+        use super::backup_due_at;
+        use chrono::{FixedOffset, TimeZone};
+        // Prague summer time, so a UTC-only implementation would be 2h off.
+        let tz = FixedOffset::east_opt(2 * 3600).unwrap();
+        let at = |d: u32, h: u32, m: u32| {
+            tz.with_ymd_and_hms(2026, 10, d, h, m, 0)
+                .unwrap()
+                .timestamp()
+        };
+        let three = Some(3 * 60);
+        // No time set: plain elapsed rule, never-run is due at once.
+        assert!(backup_due_at(&tz, 86_400, 0, at(8, 12, 0), None));
+        // Never ran: only from 03:00 for the grace window, not at noon.
+        assert!(!backup_due_at(&tz, 86_400, 0, at(8, 2, 55), three));
+        assert!(backup_due_at(&tz, 86_400, 0, at(8, 3, 0), three));
+        assert!(backup_due_at(&tz, 86_400, 0, at(8, 4, 30), three));
+        assert!(!backup_due_at(&tz, 86_400, 0, at(8, 12, 0), three));
+        // Daily, ran 03:04 on the 8th: next is 03:00 on the 9th, not 03:04.
+        assert!(!backup_due_at(
+            &tz,
+            86_400,
+            at(8, 3, 4),
+            at(9, 2, 59),
+            three
+        ));
+        assert!(backup_due_at(&tz, 86_400, at(8, 3, 4), at(9, 3, 0), three));
+        // A late catch-up (ran 17:00) snaps back to 03:00 the next day.
+        assert!(!backup_due_at(
+            &tz,
+            86_400,
+            at(8, 17, 0),
+            at(8, 23, 0),
+            three
+        ));
+        assert!(backup_due_at(&tz, 86_400, at(8, 17, 0), at(9, 3, 0), three));
+        // Every 3 days counts calendar days from the last run.
+        assert!(!backup_due_at(
+            &tz,
+            3 * 86_400,
+            at(8, 3, 0),
+            at(10, 3, 0),
+            three
+        ));
+        assert!(backup_due_at(
+            &tz,
+            3 * 86_400,
+            at(8, 3, 0),
+            at(11, 3, 0),
+            three
+        ));
+        // Node down past the slot: due on the next tick, whenever that is.
+        assert!(backup_due_at(
+            &tz,
+            86_400,
+            at(8, 3, 0),
+            at(10, 14, 0),
+            three
+        ));
     }
 
     fn s3_target(name: &str) -> hyperion_types::S3BackupTarget {

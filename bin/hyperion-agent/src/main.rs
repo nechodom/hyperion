@@ -1323,14 +1323,19 @@ async fn main() -> anyhow::Result<()> {
             }
         });
     }
-    // Scheduled backups — checks hourly which LOCAL hostings are due per their
-    // backup_cadence (off by default) and runs backup_now for each. Runs on
-    // every node since backups are node-local.
+    // Scheduled backups — checks every 5 minutes which LOCAL hostings are due
+    // per their backup_cadence (off by default) and optional time of day, and
+    // runs backup_now for each. Five minutes, not an hour, so "at 03:00" starts
+    // close to 03:00; the check itself is a few hosting_kv reads per site.
+    // Runs on every node since backups are node-local.
     {
         let bk = svc.clone();
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_secs(300)).await;
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+            // A sweep that ran long backups must not be followed by a burst of
+            // catch-up ticks.
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             interval.tick().await;
             loop {
                 match bk.scheduled_backups_tick().await {
