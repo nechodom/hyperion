@@ -1,0 +1,72 @@
+{# The connect / change-settings form of the deploy card (included twice:
+   open when not connected, folded under the checklist when connected).
+   The access choice reveals its own field with CSS `:has()` — the token box
+   and the deploy-key note follow the radio at once, no save in between, and
+   every field still posts whatever is chosen (hidden is not disabled). #}
+<form class="gs-form" hx-post="/hostings/gitsync/config" hx-target="#gitsync-card" hx-swap="outerHTML"
+      hx-disabled-elt="find button[type=submit]">
+  <input type="hidden" name="_csrf" value="{{ gs_csrf_config }}">
+  <input type="hidden" name="selector" value="{{ selector }}">
+  <div class="field">
+    <label for="gs_repo">GitHub repository</label>
+    <input id="gs_repo" name="repo" type="text" value="{{ form.repo }}" required
+           placeholder="https://github.com/owner/repo" autocomplete="off" spellcheck="false">
+    <p class="hint" style="margin:0.3rem 0 0">Paste it from the browser's address bar — <code>owner/repo</code> pages, <code>.git</code> and ssh addresses all work.</p>
+  </div>
+  <div class="row" style="gap:0.6rem;flex-wrap:wrap">
+    <div class="field" style="flex:1;min-width:9rem">
+      <label for="gs_branch">Branch</label>
+      <input id="gs_branch" name="branch" type="text" value="{{ form.branch }}" placeholder="main" autocomplete="off" spellcheck="false">
+    </div>
+    <div class="field" style="flex:1;min-width:9rem">
+      <label for="gs_subdir">Folder to publish <span class="hint">optional</span></label>
+      <input id="gs_subdir" name="subdir" type="text" value="{{ form.subdir }}" placeholder="whole repository" autocomplete="off" spellcheck="false">
+    </div>
+  </div>
+  <p class="hint" style="margin:-0.2rem 0 0.8rem">The folder's contents become the webroot — e.g. <code>public</code> or <code>dist</code> when the site is built into one. Empty publishes the whole repository.</p>
+
+  <fieldset class="field gs-auth">
+    <legend>Access</legend>
+    <div class="gs-auth-opts">
+      <label class="gs-auth-opt">
+        <input type="radio" name="auth" value="public"{% if form.auth != "deploykey" && form.auth != "pat" %} checked{% endif %}>
+        <span><strong>Public repository</strong><span class="hint">Anyone can read it — nothing to set up.</span></span>
+      </label>
+      <label class="gs-auth-opt">
+        <input type="radio" name="auth" value="deploykey"{% if form.auth == "deploykey" %} checked{% endif %}>
+        <span><strong>Deploy key</strong> <span class="pill" style="font-size:0.6rem">recommended for private</span><span class="hint">Hyperion makes a key; you add it to this one repository, read-only.</span></span>
+      </label>
+      <label class="gs-auth-opt">
+        <input type="radio" name="auth" value="pat"{% if form.auth == "pat" %} checked{% endif %}>
+        <span><strong>Access token</strong><span class="hint">A fine-grained GitHub token you create.</span></span>
+      </label>
+    </div>
+    <div class="gs-when-deploykey">
+      <p class="hint" style="margin:0.5rem 0 0">
+        {% if view.deploy_pubkey.is_empty() %}Saving generates the key and shows it here, with a link to the page on GitHub where it goes.
+        {% else %}This site already has a deploy key; it is shown above and kept.{% endif %}
+      </p>
+    </div>
+    <div class="gs-when-pat">
+      <label for="gs_pat" style="margin-top:0.6rem;display:block">Personal access token
+        {% if view.pat_set %}<span class="hint">— one is stored; leave empty to keep it</span>{% endif %}</label>
+      <input id="gs_pat" name="pat" type="password" autocomplete="new-password" value=""
+             placeholder="{% if view.pat_set %}(unchanged){% else %}github_pat_…{% endif %}">
+      <p class="hint" style="margin:0.3rem 0 0">
+        Create a <a href="https://github.com/settings/personal-access-tokens/new" target="_blank" rel="noopener">fine-grained token</a>
+        for this one repository with <em>Contents: Read-only</em>. It is stored on the site's node only, and the site's own user can read it during a deploy.
+      </p>
+    </div>
+  </fieldset>
+
+  <label class="field-checkbox" style="margin-top:0.2rem">
+    <input type="checkbox" name="webhook_enabled" value="on"{% if form.webhook_enabled %} checked{% endif %}>
+    <span>Deploy automatically on every push to this branch</span>
+  </label>
+  <p class="hint" style="margin:0.2rem 0 0 1.6rem">Needs a webhook on GitHub — its address and secret appear here after saving.</p>
+
+  <div class="row" style="margin-top:0.9rem;gap:0.5rem;align-items:center">
+    <button class="btn primary" type="submit">{% if repo.is_none() %}Connect repository{% else %}Save changes{% endif %}</button>
+    <span class="hint">Nothing is deployed until you press <strong>Deploy now</strong>.</span>
+  </div>
+</form>

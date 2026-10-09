@@ -2053,8 +2053,18 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         &self,
         sel: HostingSelector,
         trigger: String,
+        actor: String,
     ) -> Result<hyperion_types::gitsync::GitSyncLast, RpcError> {
-        self.svc.git_sync_now(sel, trigger).await
+        self.svc.git_sync_now(sel, trigger, actor).await
+    }
+    async fn git_sync_check(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<hyperion_types::gitsync::GitSyncCheck, RpcError> {
+        self.svc.git_sync_check(sel).await
+    }
+    async fn git_sync_disconnect(&self, sel: HostingSelector) -> Result<(), RpcError> {
+        self.svc.git_sync_disconnect(sel).await
     }
     async fn snapshot_list(
         &self,

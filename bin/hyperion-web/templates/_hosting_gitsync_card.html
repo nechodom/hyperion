@@ -1,134 +1,252 @@
-{# Git deploy card — lazily loaded. Sets the webroot to match a GitHub branch.
-   Every mutating form dispatches to the OWNING node; the webhook secret is
-   generated and stored there. #}
-<div class="card hover" id="gitsync-card">
-  <h2>
-    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M6 21V9a9 9 0 0 0 9 9"/></svg>
+{# Deploy from GitHub — lazily swapped in via hx-get="/hostings/:sel/gitsync-panel",
+   and re-rendered in place by its own forms (they hx-target="#gitsync-card").
+   Every action runs on the OWNING node: the settings, the deploy key, the
+   token, the checkout and the deploy lock live where the site's files do.
+
+   Two shapes. Not connected: one row explaining the feature and the connect
+   form. Connected: a checklist — Source · Access · Auto-deploy · Deploys —
+   where each row says whether that part is done and carries its own fix
+   (the key to paste, the webhook to add, the error from the last deploy),
+   then the settings and Disconnect folded away at the bottom. "Deploy now"
+   is a plain form: a deploy is a background job and the page goes there. #}
+<div class="group" id="gitsync-card"{% if view.running %}
+     hx-get="/hostings/{{ selector }}/gitsync-panel" hx-trigger="poll-tick" hx-swap="outerHTML" data-poll-visible data-poll-ms="4000"{% endif %}>
+  <div class="ghead">
     Deploy from GitHub
-    {% if view.last.at > 0 %}
-      {% if view.last.status == "ok" %}<span class="pill ok" style="font-size:0.65rem">deployed</span>
-      {% else %}<span class="pill err" style="font-size:0.65rem">last deploy failed</span>{% endif %}
-    {% endif %}
-  </h2>
-  <p class="text-soft small" style="margin:-0.3rem 0 0.8rem">
-    Make this site's webroot match a branch of a GitHub repository — public or
-    private. A deploy is a clean mirror (<code>git reset --hard</code>), so any
-    local edit in the webroot is replaced.
-  </p>
-
-  {% if let Some(e) = error %}
-  <div class="flash warn" style="margin:0 0 0.7rem"><div class="flash-body">{{ e }}</div></div>
-  {% endif %}
-
-  {% if !view.git_available %}
-  <div class="flash warn" style="margin:0 0 0.7rem"><div class="flash-body">
-    <code>git</code> is not installed on this site's node, so deploys cannot run there yet.
-  </div></div>
-  {% endif %}
-
-  <form method="post" action="/hostings/gitsync/config">
-    <input type="hidden" name="_csrf" value="{{ csrf_config }}">
-    <input type="hidden" name="selector" value="{{ selector }}">
-    <div class="field">
-      <label for="gs_repo">Repository</label>
-      <input id="gs_repo" name="repo" type="text" value="{{ view.config.repo }}"
-             placeholder="https://github.com/owner/repo"{% if !can_manage %} disabled{% endif %}>
-    </div>
-    <div class="row" style="gap:0.6rem;flex-wrap:wrap">
-      <div class="field" style="flex:1;min-width:9rem">
-        <label for="gs_branch">Branch</label>
-        <input id="gs_branch" name="branch" type="text" value="{{ view.config.branch }}"
-               placeholder="main"{% if !can_manage %} disabled{% endif %}>
-      </div>
-      <div class="field" style="flex:1;min-width:9rem">
-        <label for="gs_subdir">Webroot sub-directory <span class="hint">optional</span></label>
-        <input id="gs_subdir" name="subdir" type="text" value="{{ view.config.subdir }}"
-               placeholder="(repo root)"{% if !can_manage %} disabled{% endif %}>
-      </div>
-    </div>
-
-    <div class="field">
-      <label>Authentication</label>
-      <div class="row" style="gap:1rem;flex-wrap:wrap">
-        <label class="field-checkbox"><input type="radio" name="auth" value="public"{% if view.config.auth == "public" %} checked{% endif %}{% if !can_manage %} disabled{% endif %}> Public repo</label>
-        <label class="field-checkbox"><input type="radio" name="auth" value="deploykey"{% if view.config.auth == "deploykey" %} checked{% endif %}{% if !can_manage %} disabled{% endif %}> Deploy key</label>
-        <label class="field-checkbox"><input type="radio" name="auth" value="pat"{% if view.config.auth == "pat" %} checked{% endif %}{% if !can_manage %} disabled{% endif %}> Access token</label>
-      </div>
-    </div>
-
-    {% if view.config.auth == "pat" %}
-    <div class="field">
-      <label for="gs_pat">Personal access token
-        {% if view.pat_set %}<span class="text-soft small">— stored; leave blank to keep</span>{% endif %}</label>
-      <input id="gs_pat" name="pat" type="password" autocomplete="new-password" value=""
-             placeholder="{% if view.pat_set %}(unchanged){% else %}github_pat_… (fine-grained, read-only, this repo){% endif %}"{% if !can_manage %} disabled{% endif %}>
-      <p class="text-soft small" style="margin:0.3rem 0 0">Use a fine-grained, read-only token scoped to this one repository — during a deploy it is readable by the site's own user.</p>
-    </div>
-    {% endif %}
-
-    <label class="field-checkbox" style="margin-top:0.4rem">
-      <input type="checkbox" name="webhook_enabled" value="on"{% if view.config.webhook_enabled %} checked{% endif %}{% if !can_manage %} disabled{% endif %}>
-      Auto-deploy when GitHub reports a push to this branch
-    </label>
-
-    {% if can_manage %}
-    <div class="row" style="margin-top:0.7rem">
-      <button class="btn primary" type="submit">Save deploy settings</button>
-    </div>
-    {% endif %}
-  </form>
-
-  {% if view.config.auth == "deploykey" %}
-  <div class="card-section">
-    <h2 style="font-size:0.95rem;margin:0 0 0.5rem">Deploy key</h2>
-    {% if view.deploy_pubkey.is_empty() %}
-      <p class="text-soft small" style="margin:0 0 0.6rem">Generate a key, then add its public half to the repository under <strong>Settings → Deploy keys</strong> (read-only).</p>
-    {% else %}
-      <p class="text-soft small" style="margin:0 0 0.4rem">Add this as a read-only <strong>Deploy key</strong> on the repository:</p>
-      <textarea readonly rows="2" style="width:100%;font-family:var(--mono,monospace);font-size:0.72rem;word-break:break-all">{{ view.deploy_pubkey }}</textarea>
-    {% endif %}
-    {% if can_manage %}
-    <form method="post" action="/hostings/gitsync/genkey" style="margin-top:0.5rem">
-      <input type="hidden" name="_csrf" value="{{ csrf_genkey }}">
-      <input type="hidden" name="selector" value="{{ selector }}">
-      <button class="btn small" type="submit">{% if view.deploy_pubkey.is_empty() %}Generate deploy key{% else %}Regenerate{% endif %}</button>
-    </form>
-    {% endif %}
-  </div>
-  {% endif %}
-
-  {% if view.config.webhook_enabled && !view.webhook_secret.is_empty() %}
-  <div class="card-section">
-    <h2 style="font-size:0.95rem;margin:0 0 0.5rem">Webhook</h2>
-    <p class="text-soft small" style="margin:0 0 0.4rem">In the repository, <strong>Settings → Webhooks → Add webhook</strong> — content type <code>application/json</code>, event <em>Just the push event</em>:</p>
-    <dl class="kv">
-      <dt>Payload URL</dt><dd><code style="font-size:0.78rem;word-break:break-all">{{ webhook_url }}</code></dd>
-      <dt>Secret</dt><dd><code style="font-size:0.78rem;word-break:break-all">{{ view.webhook_secret }}</code></dd>
-    </dl>
-  </div>
-  {% endif %}
-
-  <div class="card-section">
-    <div class="row" style="align-items:center;gap:0.7rem;flex-wrap:wrap">
-      {% if can_manage %}
-      <form method="post" action="/hostings/gitsync/sync">
-        <input type="hidden" name="_csrf" value="{{ csrf_sync }}">
+    <span class="ghead-note">
+      {% if view.running %}<span class="spinner-inline"></span> deploying…
+      {% else if repo.is_none() %}not connected
+      {% else if view.last.at == 0 %}connected · not deployed yet
+      {% else if view.last.status == "ok" %}deployed <code>{{ view.last.commit }}</code> · {{ last_ago }}
+      {% else %}<span class="tone-err">last deploy failed</span> · {{ last_ago }}{% endif %}
+    </span>
+    {% if can_manage && repo.is_some() %}
+    <div class="ghead-tools">
+      <form method="post" action="/hostings/gitsync/sync"
+            {% if view.last.at == 0 %}data-confirm-title="Replace this site's files?"
+            data-confirm-body="The first deploy makes the webroot an exact copy of the branch: every file there that is not in the repository is deleted."
+            data-confirm-confirm-label="Deploy and replace" data-confirm-variant="danger"{% endif %}>
+        <input type="hidden" name="_csrf" value="{{ gs_csrf_sync }}">
         <input type="hidden" name="selector" value="{{ selector }}">
-        <button class="btn" type="submit"{% if !view.config.repo.is_empty() %}{% else %} disabled{% endif %}>
+        <button class="btn primary small" type="submit"{% if view.running || !view.missing_tools.is_empty() %} disabled{% endif %}>
           <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
           Deploy now
         </button>
       </form>
-      {% endif %}
-      {% if view.last.at > 0 %}
-        <span class="text-soft small">
-          Last: {% if view.last.status == "ok" %}<span class="pill ok" style="font-size:0.62rem">ok</span>{% else %}<span class="pill err" style="font-size:0.62rem">failed</span>{% endif %}
-          {% if !view.last.commit.is_empty() %}<code>{{ view.last.commit }}</code>{% endif %}
-          {{ last_ago }}{% if !view.last.message.is_empty() %} — {{ view.last.message }}{% endif %}
-        </span>
-      {% else %}
-        <span class="text-soft small">Not deployed yet.</span>
-      {% endif %}
+    </div>
+    {% endif %}
+  </div>
+
+  {% if let Some(n) = notice %}
+  <div class="chk-row"><p class="chk-note" style="color:var(--success)" role="status">{{ n }}</p></div>
+  {% endif %}
+  {% if let Some(e) = error %}
+  <div class="chk-row is-err"><p class="chk-note tone-err" role="alert">{{ e }}</p></div>
+  {% endif %}
+
+  {% if !view.missing_tools.is_empty() %}
+  <div class="chk-row">
+    <div class="chk-head">
+      <span class="chk-dot warn"></span>
+      <h3 class="chk-name">This node</h3>
+      <span class="chk-sum"><strong class="tone-warn">Missing {{ view.missing_tools.join(", ") }}</strong> — deploys cannot run here yet. Run <code>update.sh</code> on the node; it installs them.</span>
     </div>
   </div>
+  {% endif %}
+
+  {% match repo %}
+  {% when None %}
+  {# ── Not connected ─────────────────────────────────────────────── #}
+  <div class="chk-row">
+    <p class="chk-note" style="margin-bottom:0.8rem">
+      Keep this site's files in a GitHub repository and deploy them here — by
+      button, or automatically on every push. A deploy makes the webroot an
+      exact copy of one branch (or of one folder in it); files that are not in
+      the repository are removed. Works with public and private repositories.
+    </p>
+    {% if can_manage %}
+    {% include "_hosting_gitsync_form.html" %}
+    {% else %}
+    <p class="chk-note">Not connected. Only someone who can change this site's settings can connect it.</p>
+    {% endif %}
+  </div>
+
+  {% when Some with (r) %}
+  {# ── Source ────────────────────────────────────────────────────── #}
+  <div class="chk-row">
+    <div class="chk-head">
+      <span class="chk-dot ok"></span>
+      <h3 class="chk-name">Source</h3>
+      <span class="chk-sum">
+        <a href="{{ r.tree_url }}" target="_blank" rel="noopener">{{ r.slug }}</a>
+        · branch <code>{{ view.config.effective_branch() }}</code>
+        {% if !view.config.subdir.is_empty() %}· folder <code>{{ view.config.subdir }}/</code>{% else %}· whole repository{% endif %}
+        → webroot
+      </span>
+    </div>
+  </div>
+
+  {# ── Access ────────────────────────────────────────────────────── #}
+  <div class="chk-row" id="gitsync-access">
+    <div class="chk-head">
+      {% if let Some(c) = check %}{% if c.ok %}<span class="chk-dot ok"></span>{% else %}<span class="chk-dot err"></span>{% endif %}
+      {% else if view.config.auth == "deploykey" && view.deploy_pubkey.is_empty() %}<span class="chk-dot warn"></span>
+      {% else if view.config.auth == "pat" && !view.pat_set %}<span class="chk-dot warn"></span>
+      {% else if view.last.status == "ok" %}<span class="chk-dot ok"></span>
+      {% else %}<span class="chk-dot"></span>{% endif %}
+      <h3 class="chk-name">Access</h3>
+      <span class="chk-sum">
+        {% if view.config.auth == "deploykey" %}Deploy key{% if view.last.status != "ok" %} — must be added to the repository on GitHub{% endif %}
+        {% else if view.config.auth == "pat" %}{% if view.pat_set %}Access token (stored on the node){% else %}<strong class="tone-warn">Access token — none stored</strong>{% endif %}
+        {% else %}Public repository — no credential needed{% endif %}
+      </span>
+      {% if can_manage %}
+      <div class="chk-actions">
+        <span id="gitsync-check-spin" class="htmx-indicator"><span class="spinner-inline"></span></span>
+        <form hx-post="/hostings/gitsync/check" hx-target="#gitsync-card" hx-swap="outerHTML"
+              hx-indicator="#gitsync-check-spin" hx-disabled-elt="find button">
+          <input type="hidden" name="_csrf" value="{{ gs_csrf_check }}">
+          <input type="hidden" name="selector" value="{{ selector }}">
+          <button class="btn ghost small" type="submit" title="Asks GitHub for the branch with this credential — changes nothing on the site">Test access</button>
+        </form>
+      </div>
+      {% endif %}
+    </div>
+    {% if check.is_some() || view.config.auth == "deploykey" %}
+    <div class="chk-body">
+      {% if let Some(c) = check %}
+      <p class="chk-note {% if c.ok %}tone-ok{% else %}tone-err{% endif %}" role="status">
+        {% if c.ok %}✓ {{ c.message }} The branch is at <a href="{{ r.web_url }}/commit/{{ c.commit }}" target="_blank" rel="noopener"><code>{{ c.commit }}</code></a>.{% else %}{{ c.message }}{% endif %}
+      </p>
+      {% if !c.detail.is_empty() %}
+      <details class="chk-fold"><summary>What git said</summary><pre class="chk-excerpt">{{ c.detail }}</pre></details>
+      {% endif %}
+      {% endif %}
+      {% if view.config.auth == "deploykey" %}
+        {% if view.deploy_pubkey.is_empty() %}
+        <p class="chk-note tone-warn">No deploy key yet — generate one, then add it on GitHub.</p>
+        {% else %}
+        <p class="chk-note">
+          On GitHub open <a href="{{ r.deploy_keys_url }}" target="_blank" rel="noopener">{{ r.slug }} → Settings → Deploy keys → Add deploy key</a>,
+          paste this key and leave <em>Allow write access</em> unticked. Then <strong>Test access</strong>.
+        </p>
+        <div class="copy-field" data-copy="{{ view.deploy_pubkey }}" title="Copy the public key">
+          <span class="copy-label">Public key</span>
+          <span class="copy-value">{{ view.deploy_pubkey }}</span>
+          <span class="copy-hint">click to copy</span>
+        </div>
+        {% endif %}
+        {% if can_manage %}
+        <form hx-post="/hostings/gitsync/genkey" hx-target="#gitsync-card" hx-swap="outerHTML"
+              {% if !view.deploy_pubkey.is_empty() %}data-confirm-title="Replace the deploy key?"
+              data-confirm-body="The current key stops working at once. Deploys fail until the new public key is added to the repository on GitHub."
+              data-confirm-confirm-label="Replace key" data-confirm-variant="danger"{% endif %}>
+          <input type="hidden" name="_csrf" value="{{ gs_csrf_genkey }}">
+          <input type="hidden" name="selector" value="{{ selector }}">
+          <p class="chk-foot"><button class="chk-link" type="submit">{% if view.deploy_pubkey.is_empty() %}Generate a deploy key{% else %}Replace this key with a new one{% endif %}</button></p>
+        </form>
+        {% endif %}
+      {% endif %}
+    </div>
+    {% endif %}
+  </div>
+
+  {# ── Auto-deploy ───────────────────────────────────────────────── #}
+  <div class="chk-row">
+    <div class="chk-head">
+      {% if view.config.webhook_enabled %}<span class="chk-dot ok"></span>{% else %}<span class="chk-dot"></span>{% endif %}
+      <h3 class="chk-name">Auto-deploy</h3>
+      <span class="chk-sum">
+        {% if view.config.webhook_enabled %}On — a push to <code>{{ view.config.effective_branch() }}</code> deploys, once GitHub has the webhook below
+        {% else %}Off — deploys run only from <strong>Deploy now</strong>{% endif %}
+      </span>
+    </div>
+    {% if view.config.webhook_enabled && can_manage && !view.webhook_secret.is_empty() %}
+    <div class="chk-body">
+      <p class="chk-note">
+        On GitHub open <a href="{{ r.webhooks_url }}" target="_blank" rel="noopener">{{ r.slug }} → Settings → Webhooks → Add webhook</a>
+        and fill in these two, with content type <code>application/json</code> and <em>Just the push event</em>.
+        GitHub has to be able to reach this panel at that address.
+      </p>
+      <div class="copy-grid">
+        <div class="copy-field" data-copy="{{ webhook_url }}" title="Copy the payload URL">
+          <span class="copy-label">Payload URL</span>
+          <span class="copy-value">{{ webhook_url }}</span>
+          <span class="copy-hint">click to copy</span>
+        </div>
+        <div class="copy-field" data-copy="{{ view.webhook_secret }}" title="Copy the secret">
+          <span class="copy-label">Secret</span>
+          <span class="copy-value">{{ view.webhook_secret }}</span>
+          <span class="copy-hint">click to copy</span>
+        </div>
+      </div>
+    </div>
+    {% endif %}
+  </div>
+
+  {# ── Deploys ───────────────────────────────────────────────────── #}
+  <div class="chk-row{% if !view.running && view.last.status == "error" %} is-err{% endif %}">
+    <div class="chk-head">
+      {% if view.running %}<span class="chk-dot info"></span>
+      {% else if view.last.at == 0 %}<span class="chk-dot"></span>
+      {% else if view.last.status == "ok" %}<span class="chk-dot ok"></span>
+      {% else %}<span class="chk-dot err"></span>{% endif %}
+      <h3 class="chk-name">Deploys</h3>
+      <span class="chk-sum">
+        {% if view.running %}<span class="spinner-inline"></span> A deploy is running now…
+        {% else if view.last.at == 0 %}Not deployed yet — the first deploy replaces what is in the webroot now
+        {% else if view.last.status == "ok" %}Live: <a href="{{ r.web_url }}/commit/{{ view.last.commit }}" target="_blank" rel="noopener"><code>{{ view.last.commit }}</code></a> {{ view.last.message }}
+        {% else %}<strong class="tone-err">Last deploy failed</strong> {{ last_ago }}{% endif %}
+      </span>
+    </div>
+    {% if !view.running && view.last.status == "error" || !rows.is_empty() %}
+    <div class="chk-body">
+      {% if !view.running && view.last.status == "error" %}
+      <p class="chk-note tone-err">{{ view.last.message }}</p>
+      {% if !view.last.detail.is_empty() %}
+      <details class="chk-fold"><summary>What git said</summary><pre class="chk-excerpt">{{ view.last.detail }}</pre></details>
+      {% endif %}
+      {% endif %}
+      {% if !rows.is_empty() %}
+      <details class="chk-fold"{% if view.last.status == "error" %} open{% endif %}>
+        <summary>Recent deploys ({{ rows.len() }})</summary>
+        <ul class="chk-list gs-history">
+          {% for h in rows %}
+          <li>
+            {% if h.ok %}<span class="chk-dot ok"></span>{% else %}<span class="chk-dot err"></span>{% endif %}
+            <span class="gs-when" title="{{ h.at_full }}">{{ h.ago }}</span>
+            <span class="chk-detail">
+              {% if h.ok %}<a href="{{ r.web_url }}/commit/{{ h.commit }}" target="_blank" rel="noopener"><code>{{ h.commit }}</code></a> {{ h.message }}
+              {% else %}<span class="tone-err">failed</span> — {{ h.message }}{% endif %}
+              <span class="text-soft">· {{ h.trigger }}{% if !h.actor.is_empty() %} by {{ h.actor }}{% endif %}</span>
+            </span>
+          </li>
+          {% endfor %}
+        </ul>
+      </details>
+      {% endif %}
+    </div>
+    {% endif %}
+  </div>
+
+  {# ── Settings + disconnect ─────────────────────────────────────── #}
+  {% if can_manage %}
+  <div class="chk-row">
+    <details class="chk-fold"{% if editing %} open{% endif %}>
+      <summary>Change repository, branch, access or auto-deploy</summary>
+      <div style="margin-top:0.75rem">
+        {% include "_hosting_gitsync_form.html" %}
+      </div>
+      <form hx-post="/hostings/gitsync/disconnect" hx-target="#gitsync-card" hx-swap="outerHTML"
+            data-confirm-title="Disconnect from GitHub?"
+            data-confirm-body="Hyperion forgets the repository, the deploy key, the token, the webhook secret and the deploy history, and removes its copy of the repository. The site keeps the files it has now. Remove the deploy key and the webhook on GitHub too."
+            data-confirm-confirm-label="Disconnect" data-confirm-variant="danger" style="margin-top:0.9rem">
+        <input type="hidden" name="_csrf" value="{{ gs_csrf_disconnect }}">
+        <input type="hidden" name="selector" value="{{ selector }}">
+        <p class="chk-foot">Stop deploying from GitHub — the files stay as they are. <button class="chk-link tone-err" type="submit">Disconnect</button></p>
+      </form>
+    </details>
+  </div>
+  {% endif %}
+  {% endmatch %}
 </div>

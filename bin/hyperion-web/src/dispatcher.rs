@@ -270,6 +270,12 @@ fn timeout_for_request(req: &Request) -> u64 {
         // A browser load (local Lighthouse) or a round trip to Google, either
         // capped at 120 s on the node; give the dispatch headroom over that.
         Request::CwvMeasure { .. } => 180,
+        // A deploy is a clone/fetch (each network step capped at 10 min on
+        // the node) plus an rsync of the tree. On the default 30s any real
+        // repository was reported as the NODE being unreachable while the
+        // deploy kept running.
+        Request::GitSyncNow { .. } => 1500,
+        Request::GitSyncCheck { .. } => 660,
         // A repair writes the mu-plugin and may run wp-cli to enumerate
         // plugins, which on a cold site is seconds, not milliseconds.
         Request::WpMailSelfCheck { .. } | Request::WpMailRepair { .. } => 300,

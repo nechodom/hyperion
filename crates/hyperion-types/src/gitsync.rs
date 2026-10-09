@@ -51,22 +51,33 @@ impl GitSyncConfig {
     }
 }
 
-/// The outcome of the last sync, kept so the card can show state without
+/// The outcome of one deploy, kept so the card can show state without
 /// re-running anything.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GitSyncLast {
     /// Unix seconds, 0 = never synced.
     pub at: i64,
-    /// Short commit the webroot was last set to.
+    /// Short commit the webroot was set to (empty on failure).
     pub commit: String,
     /// "ok" | "error" | "".
     pub status: String,
-    /// One line for the operator (the commit subject on success, the error on
-    /// failure). Never carries a credential.
+    /// One line for the operator: the commit subject on success, a plain
+    /// explanation of what went wrong on failure. Never carries a credential.
     pub message: String,
-    /// How the sync started: "manual" | "webhook" | "".
+    /// How the deploy started: "manual" | "webhook" | "".
     pub trigger: String,
+    /// On failure, the last lines git itself printed — the raw evidence
+    /// behind `message`. Empty on success. Never carries a credential (git
+    /// never echoes one, and the token is never in a URL).
+    #[serde(default)]
+    pub detail: String,
+    /// Who started it: the panel user for "manual", empty for a webhook.
+    #[serde(default)]
+    pub actor: String,
 }
+
+/// How many deploys a site remembers for its history list.
+pub const HISTORY_KEEP: usize = 10;
 
 /// Everything the card renders. Secrets are represented only as "is it set".
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -88,6 +99,116 @@ pub struct GitSyncView {
     /// `git` is installed on the owning node.
     pub git_available: bool,
     pub last: GitSyncLast,
+    /// Recent deploys, newest first (`last` is the first entry). Capped at
+    /// [`HISTORY_KEEP`]. Empty from a node that predates the history.
+    #[serde(default)]
+    pub history: Vec<GitSyncLast>,
+    /// A deploy is running on the node right now.
+    #[serde(default)]
+    pub running: bool,
+    /// Programs a deploy needs that the owning node lacks (`git`, `rsync`,
+    /// `ssh`, `sudo`). Empty = ready.
+    #[serde(default)]
+    pub missing_tools: Vec<String>,
+}
+
+/// The answer to "can this node read the configured branch?" — a
+/// `git ls-remote` with the configured credential, which touches nothing.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitSyncCheck {
+    pub ok: bool,
+    /// The branch's current commit on GitHub (short), when `ok`.
+    pub commit: String,
+    /// One line for the operator.
+    pub message: String,
+    /// What git printed, on failure.
+    pub detail: String,
+}
+
+/// A GitHub repository, parsed out of whatever form the operator pasted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoRef {
+    pub owner: String,
+    pub name: String,
+}
+
+impl RepoRef {
+    /// `owner/name`.
+    pub fn slug(&self) -> String {
+        format!("{}/{}", self.owner, self.name)
+    }
+    /// The canonical form Hyperion stores: `https://github.com/owner/name`.
+    pub fn https_url(&self) -> String {
+        format!("https://github.com/{}/{}", self.owner, self.name)
+    }
+    /// The ssh form a deploy key authenticates over.
+    pub fn ssh_url(&self) -> String {
+        format!("git@github.com:{}/{}.git", self.owner, self.name)
+    }
+    pub fn commit_url(&self, sha: &str) -> String {
+        format!("{}/commit/{}", self.https_url(), sha)
+    }
+    pub fn tree_url(&self, branch: &str) -> String {
+        format!("{}/tree/{}", self.https_url(), branch)
+    }
+    /// Where the operator adds a deploy key.
+    pub fn deploy_keys_url(&self) -> String {
+        format!("{}/settings/keys/new", self.https_url())
+    }
+    /// Where the operator adds a webhook.
+    pub fn webhooks_url(&self) -> String {
+        format!("{}/settings/hooks/new", self.https_url())
+    }
+}
+
+/// Parse a GitHub repository out of what an operator is likely to paste:
+/// `https://github.com/o/r`, with or without `.git`, a trailing slash, a
+/// `/tree/<branch>…` tail copied from the browser, or no scheme at all;
+/// `git@github.com:o/r.git`; `ssh://git@github.com/o/r.git`. Anything that
+/// is not github.com, or whose owner/name is not a plain GitHub name, is
+/// `None` — the value later reaches git as an argument, so it must never
+/// start with `-` or carry anything but a name.
+pub fn parse_repo(input: &str) -> Option<RepoRef> {
+    let u = input.trim();
+    if u.is_empty() || u.len() > 400 || u.contains(char::is_whitespace) || u.starts_with('-') {
+        return None;
+    }
+    let path = [
+        "https://github.com/",
+        "http://github.com/",
+        "https://www.github.com/",
+        "github.com/",
+        "www.github.com/",
+        "git@github.com:",
+        "ssh://git@github.com/",
+    ]
+    .iter()
+    .find_map(|p| u.strip_prefix(p))?;
+    let mut parts = path.split('/');
+    let owner = parts.next()?;
+    let mut name = parts.next()?;
+    // Whatever follows owner/name must be a browser tail (`/`, `/tree/…`,
+    // `/blob/…`) — never a third path segment we would silently drop.
+    match parts.next() {
+        None | Some("") | Some("tree") | Some("blob") | Some("commits") => {}
+        Some(_) => return None,
+    }
+    name = name.strip_suffix(".git").unwrap_or(name);
+    let seg_ok = |s: &str| {
+        !s.is_empty()
+            && s.len() <= 100
+            && !s.starts_with('-')
+            && !s.starts_with('.')
+            && s.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+    };
+    if !seg_ok(owner) || !seg_ok(name) {
+        return None;
+    }
+    Some(RepoRef {
+        owner: owner.to_string(),
+        name: name.to_string(),
+    })
 }
 
 /// Verify a GitHub webhook signature: `X-Hub-Signature-256: sha256=<hex>` is
@@ -145,5 +266,56 @@ mod tests {
         assert!(!verify_webhook(secret, b"tampered", &sig));
         assert!(!verify_webhook(secret, body, "sha256=00"));
         assert!(!verify_webhook(secret, body, "garbage"));
+    }
+
+    #[test]
+    fn repo_forms_operators_paste() {
+        let want = Some(RepoRef {
+            owner: "acme".into(),
+            name: "site".into(),
+        });
+        for ok in [
+            "https://github.com/acme/site",
+            "https://github.com/acme/site.git",
+            "https://github.com/acme/site/",
+            "https://github.com/acme/site/tree/main/public",
+            "github.com/acme/site",
+            "git@github.com:acme/site.git",
+            "ssh://git@github.com/acme/site.git",
+            "  https://github.com/acme/site  ",
+        ] {
+            assert_eq!(parse_repo(ok), want, "{ok}");
+        }
+        for bad in [
+            "",
+            "https://gitlab.com/acme/site",
+            "https://github.com/acme",
+            "https://github.com/acme/site/extra",
+            "https://github.com.evil.io/acme/site",
+            "-oProxyCommand=evil",
+            "https://github.com/-acme/site",
+            "https://github.com/acme/site world",
+            "https://github.com/acme/..",
+        ] {
+            assert_eq!(parse_repo(bad), None, "{bad}");
+        }
+        let r = parse_repo("git@github.com:acme/site.git").unwrap();
+        assert_eq!(r.https_url(), "https://github.com/acme/site");
+        assert_eq!(r.ssh_url(), "git@github.com:acme/site.git");
+        assert_eq!(
+            r.deploy_keys_url(),
+            "https://github.com/acme/site/settings/keys/new"
+        );
+    }
+
+    #[test]
+    fn a_view_from_an_older_node_still_decodes() {
+        // A node built before history/running/missing_tools answers without
+        // them; the panel must not fail to render its card.
+        let old = r#"{"config":{"repo":"","branch":"","subdir":"","auth":"public","webhook_enabled":false},
+            "deploy_pubkey":"","pat_set":false,"webhook_secret":"","webhook_path":"/webhooks/git/x",
+            "git_available":true,"last":{"at":0,"commit":"","status":"","message":"","trigger":""}}"#;
+        let v: GitSyncView = serde_json::from_str(old).unwrap();
+        assert!(v.history.is_empty() && !v.running && v.missing_tools.is_empty());
     }
 }
