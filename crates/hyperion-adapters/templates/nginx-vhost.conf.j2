@@ -95,6 +95,29 @@
     }
     {%- endif %}
     server_tokens off;
+    {%- if perf_gzip %}
+
+    # Compress text assets, not only HTML. Debian's nginx.conf turns gzip on
+    # but leaves gzip_types commented out, so stylesheets, scripts, SVGs and
+    # fonts went out at full size. JSON is deliberately absent: REST answers
+    # can carry nonces next to reflected input (the BREACH setup).
+    gzip on;
+    gzip_vary on;
+    gzip_proxied any;
+    gzip_comp_level 5;
+    gzip_min_length 1024;
+    gzip_types text/plain text/css text/xml text/javascript application/javascript application/x-javascript application/xml application/rss+xml application/atom+xml image/svg+xml image/x-icon font/ttf font/otf application/vnd.ms-fontobject application/manifest+json;
+    {%- endif %}
+    {%- if perf_open_file_cache %}
+
+    # Keep descriptors and stat() results of hot static files instead of
+    # opening every theme asset from scratch on every request. 30 s keeps a
+    # deploy or a plugin update visible quickly.
+    open_file_cache max=2000 inactive=60s;
+    open_file_cache_valid 30s;
+    open_file_cache_min_uses 2;
+    open_file_cache_errors off;
+    {%- endif %}
 
     access_log {{ logs_dir }}/access.log hyperion_timed;
     {%- if waf_log %}
@@ -384,6 +407,35 @@
     # ─── Custom snippet from operator (Settings → Custom config) ───
     {{ custom_nginx_snippet }}
     # ─── end custom snippet ───
+    {%- endif %}
+    {%- if static_expires %}
+
+    # ─── Browser cache for static assets ───
+    # AFTER the hidden-file deny and the WAF locations above (regex
+    # locations match in order, so `/.git/x.js` is still refused), and after
+    # the operator's snippet, so a location of their own for the same files
+    # wins. `expires` rather than add_header: an add_header here would
+    # REPLACE the inherited set and drop HSTS/nosniff on every asset.
+    # WordPress versions enqueued CSS/JS with `?ver=`, so a week is safe;
+    # media and fonts change name when they change.
+    # A miss still goes to WordPress, which some plugins use to generate
+    # assets on first request.
+    location ~* \.(?:css|js|mjs)$ {
+        expires 7d;
+        {%- if has_php %}
+        try_files $uri /index.php?$args;
+        {%- else %}
+        try_files $uri =404;
+        {%- endif %}
+    }
+    location ~* \.(?:png|jpe?g|gif|webp|avif|svg|ico|bmp|woff2?|ttf|otf|eot|mp4|webm|ogg|mp3|wav)$ {
+        expires 30d;
+        {%- if has_php %}
+        try_files $uri /index.php?$args;
+        {%- else %}
+        try_files $uri =404;
+        {%- endif %}
+    }
     {%- endif %}
 {%- endmacro %}
 {%- if maintenance_mode %}

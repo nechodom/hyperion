@@ -448,6 +448,10 @@ pub enum Request {
     HostingAnnounceCreated {
         sel: HostingSelector,
     },
+    /// Empty the hosting's FastCGI page cache on its owning node.
+    HostingPageCachePurge {
+        sel: HostingSelector,
+    },
     /// Turn the per-hosting permission self-repair on or off. Absent key ⇒ on.
     HostingPermAutohealSet {
         sel: HostingSelector,
@@ -2119,6 +2123,8 @@ pub enum Response {
     /// got persisted. `applied=false` ⇒ the operator should read
     /// `error` and decide whether to retry / fix manually.
     HostingPermAutohealSet(bool),
+    /// Cached pages dropped by HostingPageCachePurge (0 = none cached).
+    HostingPageCachePurged(u64),
     /// True when this call sent the announcement; false when it had already
     /// been sent.
     HostingAnnounceCreated(bool),
