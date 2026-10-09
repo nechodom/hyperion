@@ -324,11 +324,13 @@ async fn fetch_recent_multi_node(state: &SharedState) -> (Vec<HostingSummary>, O
             _ => Vec::new(),
         };
     // Each enrolled remote node, best-effort.
-    let nodes: Vec<hyperion_types::NodeSummary> =
-        match hyperion_rpc_client::call(&state.agent_socket, Request::NodesList).await {
-            Ok(RpcResponse::NodesList(v)) => v,
-            _ => Vec::new(),
-        };
+    let nodes: Vec<hyperion_types::NodeSummary> = match crate::dispatcher::cached_nodes(state)
+        .await
+        .map(hyperion_rpc::codec::Response::NodesList)
+    {
+        Ok(RpcResponse::NodesList(v)) => v,
+        _ => Vec::new(),
+    };
     // Concurrent fan-out (see dispatcher::fan_out): the landing page must not
     // block on the slowest worker.
     let (answered, failed) =

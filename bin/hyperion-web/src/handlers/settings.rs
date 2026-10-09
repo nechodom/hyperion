@@ -538,7 +538,9 @@ pub async fn get_email_logo_img(
         Ok(RpcResponse::EmailLogoGet(Some(u))) => u,
         _ => return Err(AppError::NotFound),
     };
-    // Re-serve the data URI as real bytes so the browser caches it normally.
+    // Re-serve the data URI as real bytes for the <img>. `no-store`: the URL
+    // never changes when a new logo is uploaded, and this is one admin-only
+    // preview, so a cached copy would only ever show the previous logo.
     let (meta, b64) = match uri.split_once(";base64,") {
         Some(v) => v,
         None => return Err(AppError::NotFound),
@@ -858,11 +860,13 @@ pub async fn get_settings(
     // Enrolled nodes — for the "send test from <node>" dropdown.
     // Best-effort: NodesList failure → empty Vec → dropdown shows
     // only the master option.
-    let nodes: Vec<hyperion_types::NodeSummary> =
-        match hyperion_rpc_client::call(&state.agent_socket, Request::NodesList).await {
-            Ok(RpcResponse::NodesList(v)) => v,
-            _ => Vec::new(),
-        };
+    let nodes: Vec<hyperion_types::NodeSummary> = match crate::dispatcher::cached_nodes(&state)
+        .await
+        .map(hyperion_rpc::codec::Response::NodesList)
+    {
+        Ok(RpcResponse::NodesList(v)) => v,
+        _ => Vec::new(),
+    };
     // Read agent.toml once — for the Raw TOML tab (masked: anything that
     // looks like a password / token line; token values are single-line
     // strings so a regex on `password = "..."` / `token = "..."` /
@@ -1802,18 +1806,20 @@ async fn propagate_notifications(
     section: &str,
     fields: std::collections::BTreeMap<String, String>,
 ) -> Result<usize, Vec<String>> {
-    let nodes: Vec<hyperion_types::NodeSummary> =
-        match hyperion_rpc_client::call(&state.agent_socket, Request::NodesList).await {
-            Ok(RpcResponse::NodesList(v)) => v,
-            // The node list itself is unreadable. Saying "pushed to 0 nodes"
-            // here would claim a single-node install; say what happened.
-            _ => {
-                return Err(vec![
-                    "the enrolled-node list could not be read, so no other node was updated"
-                        .to_string(),
-                ])
-            }
-        };
+    let nodes: Vec<hyperion_types::NodeSummary> = match crate::dispatcher::cached_nodes(state)
+        .await
+        .map(hyperion_rpc::codec::Response::NodesList)
+    {
+        Ok(RpcResponse::NodesList(v)) => v,
+        // The node list itself is unreadable. Saying "pushed to 0 nodes"
+        // here would claim a single-node install; say what happened.
+        _ => {
+            return Err(vec![
+                "the enrolled-node list could not be read, so no other node was updated"
+                    .to_string(),
+            ])
+        }
+    };
     if nodes.is_empty() {
         return Ok(0);
     }
@@ -2810,18 +2816,23 @@ async fn resolve_node_wildcard_base(
     state: &SharedState,
     node_id: &str,
 ) -> Option<(String, String)> {
-    let config =
-        match hyperion_rpc_client::call(&state.agent_socket, Request::AgentConfigView).await {
-            Ok(RpcResponse::AgentConfigView(c)) => c,
-            _ => return None,
-        };
+    let config = match crate::dispatcher::cached_agent_config(state)
+        .await
+        .map(|c| hyperion_rpc::codec::Response::AgentConfigView((*c).clone()))
+    {
+        Ok(RpcResponse::AgentConfigView(c)) => c,
+        _ => return None,
+    };
     let is_local = node_id.trim().is_empty()
         || node_id == crate::dispatcher::LOCAL_NODE_SENTINEL
         || node_id == config.hostname;
     let label = if is_local {
         config.hostname.clone()
     } else {
-        match hyperion_rpc_client::call(&state.agent_socket, Request::NodesList).await {
+        match crate::dispatcher::cached_nodes(state)
+            .await
+            .map(hyperion_rpc::codec::Response::NodesList)
+        {
             Ok(RpcResponse::NodesList(ns)) => ns
                 .into_iter()
                 .find(|n| n.node_id == node_id)

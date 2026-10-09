@@ -345,22 +345,39 @@ fn port_from_listen(listen: &str) -> Option<u16> {
     after_colon.parse().ok()
 }
 
-/// 1-hour cached public-IP fetch. Per-process. Single shot, no
-/// retries — failure returns None and the caller handles it.
+/// 1-hour cached public-IP fetch. Per-process, single-flight (concurrent
+/// renders share one curl). Single shot, no retries — failure returns None
+/// and the caller handles it. A failure is remembered for a minute, so a
+/// box that cannot reach ipify does not stall every /install render on a
+/// fresh 4-second curl.
 async fn cached_public_ip() -> Option<String> {
-    use once_cell::sync::Lazy;
-    use std::sync::Mutex;
-    static CACHE: Lazy<Mutex<Option<(String, std::time::Instant)>>> =
-        Lazy::new(|| Mutex::new(None));
-    const TTL: std::time::Duration = std::time::Duration::from_secs(3600);
-    {
-        let g = CACHE.lock().ok()?;
-        if let Some((ip, ts)) = g.as_ref() {
-            if ts.elapsed() < TTL {
-                return Some(ip.clone());
+    use crate::ttl_cache::TtlCell;
+    use std::time::{Duration, Instant};
+    static IP: TtlCell<String> = TtlCell::new(Duration::from_secs(3600));
+    static LAST_FAILURE: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+    const RETRY_AFTER: Duration = Duration::from_secs(60);
+    IP.get_or_load(|| async {
+        let recently_failed = LAST_FAILURE
+            .lock()
+            .ok()
+            .and_then(|g| *g)
+            .is_some_and(|at| at.elapsed() < RETRY_AFTER);
+        if recently_failed {
+            return Err(());
+        }
+        let ip = fetch_public_ip().await;
+        if ip.is_none() {
+            if let Ok(mut g) = LAST_FAILURE.lock() {
+                *g = Some(Instant::now());
             }
         }
-    }
+        ip.ok_or(())
+    })
+    .await
+    .ok()
+}
+
+async fn fetch_public_ip() -> Option<String> {
     let out = tokio::process::Command::new("/usr/bin/curl")
         .args(["-fsS", "--max-time", "4", "https://api.ipify.org"])
         .output()
@@ -373,8 +390,6 @@ async fn cached_public_ip() -> Option<String> {
     if ip.is_empty() || ip.parse::<std::net::IpAddr>().is_err() {
         return None;
     }
-    let mut g = CACHE.lock().ok()?;
-    *g = Some((ip.clone(), std::time::Instant::now()));
     Some(ip)
 }
 

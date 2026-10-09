@@ -580,8 +580,9 @@ pub enum Request {
         slug: String,
         action: hyperion_types::WpThemeAction,
     },
-    /// Scan a hosting's installed plugins + themes against the
-    /// Wordfence Intelligence feed (cached on the owning node).
+    /// Check a hosting's WordPress core, plugins and themes for pending
+    /// updates (wp-cli, keyless — no vulnerability feed) and store the
+    /// result in the owning node's hosting_kv `vuln_scan`.
     WpVulnScan {
         hosting: HostingSelector,
     },

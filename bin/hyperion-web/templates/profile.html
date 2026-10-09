@@ -91,7 +91,7 @@
       <div class="me-avatar">
         {% if let Some(u) = user %}{{ crate::handlers::user_initial(u.username) }}{% else %}?{% endif %}
         {# Cache-bust per deploy; the request itself is no-store. #}
-        <img src="/avatar/me?t={{ css_version }}" alt="" onerror="this.remove()">
+        <img src="/avatar/me" alt="" onerror="this.remove()">
       </div>
       {% if let Some(u) = user %}
       <dl class="facts me-facts">
