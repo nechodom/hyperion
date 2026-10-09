@@ -375,6 +375,7 @@ fn test_state_with_setup(
         ftp_password_handoff: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         error_handoff: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         wp_lists: Default::default(),
+        caches: Default::default(),
         setup,
     })
 }
@@ -703,6 +704,43 @@ async fn static_htmx_is_served() {
         .to_str()
         .unwrap();
     assert!(ct.starts_with("application/javascript"));
+}
+
+#[tokio::test]
+async fn static_app_js_is_served_gzipped_and_cacheable() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d) = start_agent().await;
+    let app = build_app(sock, admin);
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/static/app.js")
+                .header(header::ACCEPT_ENCODING, "gzip, br")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.headers()[header::CONTENT_ENCODING], "gzip");
+    assert!(resp.headers()[header::CACHE_CONTROL]
+        .to_str()
+        .unwrap()
+        .contains("immutable"));
+    let etag = resp.headers()[header::ETAG].clone();
+    // A revalidation with that tag is answered without a body.
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/static/app.js")
+                .header(header::IF_NONE_MATCH, etag)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    assert_eq!(resp.status(), StatusCode::NOT_MODIFIED);
 }
 
 #[tokio::test]

@@ -115,8 +115,9 @@ async fn node_options(state: &SharedState) -> Vec<NodeOpt> {
         id: "local".into(),
         label: "master (this node)".into(),
     }];
-    if let Ok(RpcResponse::NodesList(nodes)) =
-        hyperion_rpc_client::call(&state.agent_socket, Request::NodesList).await
+    if let Ok(RpcResponse::NodesList(nodes)) = crate::dispatcher::cached_nodes(state)
+        .await
+        .map(hyperion_rpc::codec::Response::NodesList)
     {
         for n in nodes {
             v.push(NodeOpt {

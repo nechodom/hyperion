@@ -576,7 +576,10 @@ pub async fn get_list(
     const UNREACHABLE_HEARTBEAT_SECS: i64 = 300;
     let now_secs = hyperion_types::now_secs();
     let unreachable_set: std::collections::HashSet<String> =
-        match hyperion_rpc_client::call(&state.agent_socket, Request::NodesList).await {
+        match crate::dispatcher::cached_nodes(&state)
+            .await
+            .map(hyperion_rpc::codec::Response::NodesList)
+        {
             Ok(RpcResponse::NodesList(ns)) => ns
                 .into_iter()
                 .filter(|n| {
@@ -765,7 +768,9 @@ pub async fn get_new(State(state): State<SharedState>, ctx: AuthCtx) -> Result<R
 pub(crate) async fn fetch_remote_nodes(
     state: &SharedState,
 ) -> Result<Vec<hyperion_types::NodeSummary>, AppError> {
-    let resp = hyperion_rpc_client::call(&state.agent_socket, Request::NodesList).await?;
+    let resp = crate::dispatcher::cached_nodes(state)
+        .await
+        .map(hyperion_rpc::codec::Response::NodesList)?;
     match resp {
         RpcResponse::NodesList(v) => Ok(v),
         _ => Err(AppError::Internal("unexpected NodesList response".into())),
@@ -2168,8 +2173,9 @@ async fn ftp_host_for(
     owner_node: Option<&str>,
 ) -> String {
     if let Some(nid) = owner_node {
-        if let Ok(RpcResponse::NodesList(nodes)) =
-            hyperion_rpc_client::call(&state.agent_socket, Request::NodesList).await
+        if let Ok(RpcResponse::NodesList(nodes)) = crate::dispatcher::cached_nodes(state)
+            .await
+            .map(hyperion_rpc::codec::Response::NodesList)
         {
             if let Some(n) = nodes.iter().find(|n| n.node_id == nid) {
                 if let Some(ip) = n.public_ip.as_deref().filter(|s| !s.is_empty()) {
@@ -2317,6 +2323,14 @@ pub async fn get_detail(
                 (*l).clone()
             }
             crate::wp_list_cache::Lookup::Miss => {
+                // One inline fetch per hosting: a render that queued behind
+                // another one's fetch takes its answer instead of
+                // bootstrapping WordPress twice more.
+                let lock = state.wp_lists.fetch_lock(&hid);
+                let _fetching = lock.lock().await;
+                if let crate::wp_list_cache::Lookup::Fresh(l) = state.wp_lists.lookup(&hid) {
+                    return (*l).clone();
+                }
                 let gen = state.wp_lists.generation();
                 let fresh = fetch_wp_lists(&state, target, &sel_id).await;
                 state.wp_lists.store(&hid, fresh.clone(), gen);
@@ -6764,7 +6778,10 @@ async fn fetch_wp_assets(
 /// dropdown. Defaults to true (permissive) on any RPC failure or
 /// missing config field — least-surprise.
 async fn fetch_master_accepts_hostings(state: &SharedState) -> bool {
-    match hyperion_rpc_client::call(&state.agent_socket, Request::AgentConfigView).await {
+    match crate::dispatcher::cached_agent_config(state)
+        .await
+        .map(|c| hyperion_rpc::codec::Response::AgentConfigView((*c).clone()))
+    {
         Ok(RpcResponse::AgentConfigView(c)) => c.cluster.master_accepts_hostings,
         _ => true,
     }
@@ -6775,7 +6792,10 @@ async fn fetch_master_accepts_hostings(state: &SharedState) -> bool {
 /// (permissive) view on any RPC failure so a misconfigured agent
 /// doesn't deadlock the create form.
 pub(crate) async fn fetch_cluster_config(state: &SharedState) -> hyperion_types::ClusterConfigView {
-    match hyperion_rpc_client::call(&state.agent_socket, Request::AgentConfigView).await {
+    match crate::dispatcher::cached_agent_config(state)
+        .await
+        .map(|c| hyperion_rpc::codec::Response::AgentConfigView((*c).clone()))
+    {
         Ok(RpcResponse::AgentConfigView(c)) => c.cluster,
         _ => hyperion_types::ClusterConfigView::default(),
     }
@@ -6843,11 +6863,13 @@ pub(crate) async fn compute_preview_domain(
     // up" while the Settings page, using the same template plus the
     // hostname it DID have, had issued a perfectly valid wildcard. Same
     // template, two different answers, one missing hostname.
-    let (master_hostname, cluster) =
-        match hyperion_rpc_client::call(&state.agent_socket, Request::AgentConfigView).await {
-            Ok(RpcResponse::AgentConfigView(c)) => (c.hostname.clone(), c.cluster),
-            _ => (String::new(), hyperion_types::ClusterConfigView::default()),
-        };
+    let (master_hostname, cluster) = match crate::dispatcher::cached_agent_config(state)
+        .await
+        .map(|c| hyperion_rpc::codec::Response::AgentConfigView((*c).clone()))
+    {
+        Ok(RpcResponse::AgentConfigView(c)) => (c.hostname.clone(), c.cluster),
+        _ => (String::new(), hyperion_types::ClusterConfigView::default()),
+    };
     // Owner node id + its hostname label (so `{node}` → "s4", not the
     // long node_id). Empty node_id ⇒ master / local.
     let node_id = owner_node.unwrap_or("").to_string();
@@ -7118,7 +7140,9 @@ pub async fn find_hosting_anywhere(
         Err(e) => return Err(AppError::from(e)),
     }
     // 2. Fan out to enrolled nodes.
-    let nodes_resp = hyperion_rpc_client::call(&state.agent_socket, Request::NodesList).await;
+    let nodes_resp = crate::dispatcher::cached_nodes(state)
+        .await
+        .map(hyperion_rpc::codec::Response::NodesList);
     let nodes: Vec<hyperion_types::NodeSummary> = match nodes_resp {
         Ok(RpcResponse::NodesList(v)) => v,
         _ => Vec::new(),
@@ -7310,7 +7334,9 @@ pub(crate) async fn list_hostings_reporting(
     }
 
     // 2. Enrolled remote nodes — best-effort fan-out.
-    let nodes_resp = hyperion_rpc_client::call(&state.agent_socket, Request::NodesList).await;
+    let nodes_resp = crate::dispatcher::cached_nodes(state)
+        .await
+        .map(hyperion_rpc::codec::Response::NodesList);
     let nodes: Vec<hyperion_types::NodeSummary> = match nodes_resp {
         Ok(RpcResponse::NodesList(v)) => v,
         _ => Vec::new(), // failed lookup — fall back to master-only
@@ -8109,6 +8135,60 @@ pub async fn post_perm_autoheal(
     .await?;
     // Re-render the whole card so the tile and the check agree.
     get_perm_panel(State(state), ctx, Path(form.selector)).await
+}
+
+/// POST /hostings/page-cache/purge — empty the site's FastCGI page cache on
+/// its owning node. htmx-driven: answers with the one-line result that
+/// replaces the note next to the button.
+pub async fn post_page_cache_purge(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<PageCachePurgeForm>,
+) -> Result<Response, AppError> {
+    let sel = match require_manage_for_selector(
+        &state,
+        &ctx,
+        &form.selector,
+        Capability::HostingEditConfig,
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
+    let (_, owner) = find_hosting_anywhere(&state, sel.clone()).await?;
+    let html = match crate::dispatcher::dispatch_to_node(
+        &state,
+        owner.as_deref(),
+        Request::HostingPageCachePurge { sel },
+    )
+    .await
+    {
+        Ok(RpcResponse::HostingPageCachePurged(0)) => {
+            "<span class=\"note\">Nothing was cached.</span>".to_string()
+        }
+        Ok(RpcResponse::HostingPageCachePurged(n)) => format!(
+            "<span class=\"pill ok\">Purged {n} cached page{}</span>",
+            if n == 1 { "" } else { "s" }
+        ),
+        Ok(RpcResponse::Error(e)) => format!(
+            "<span class=\"pill err\">Purge failed: {}</span>",
+            askama_escape::escape(&e.to_string(), askama_escape::Html)
+        ),
+        Ok(_) => {
+            "<span class=\"pill err\">Purge failed: unexpected agent response</span>".to_string()
+        }
+        Err(e) => format!(
+            "<span class=\"pill err\">Purge failed: {}</span>",
+            askama_escape::escape(&e.to_string(), askama_escape::Html)
+        ),
+    };
+    Ok(Html(html).into_response())
+}
+
+#[derive(serde::Deserialize)]
+pub struct PageCachePurgeForm {
+    pub selector: String,
 }
 
 #[derive(serde::Deserialize)]

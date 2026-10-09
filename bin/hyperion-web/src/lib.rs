@@ -26,6 +26,7 @@ pub mod pma_tls;
 pub mod ratelimit;
 pub mod setup;
 pub mod state;
+pub mod ttl_cache;
 pub mod wp_list_cache;
 
 use crate::state::SharedState;
@@ -225,6 +226,10 @@ pub fn build_router(state: SharedState) -> Router {
         .route(
             "/hostings/perm-autoheal",
             post(handlers::hostings::post_perm_autoheal),
+        )
+        .route(
+            "/hostings/page-cache/purge",
+            post(handlers::hostings::post_page_cache_purge),
         )
         .route(
             "/hostings/dkim/enable",
@@ -1133,6 +1138,7 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/setup/finish", post(handlers::setup::post_finish))
         .route("/static/app.css", get(handlers::statics::app_css))
         .route("/static/htmx.min.js", get(handlers::statics::htmx_js))
+        .route("/static/app.js", get(handlers::statics::app_js_handler))
         // Node enrollment — no session auth (the token IS the credential).
         .route("/api/enroll", post(handlers::enroll::post_enroll))
         .route("/api/heartbeat", post(handlers::enroll::post_heartbeat))
@@ -1218,29 +1224,39 @@ pub fn build_router(state: SharedState) -> Router {
         .fallback(crate::error::not_found_fallback)
         .layer(from_fn_with_state(state.clone(), setup::setup_gate))
         .layer(axum::middleware::from_fn(security_headers))
-        .layer(from_fn_with_state(state.clone(), drop_wp_lists_on_write))
+        .layer(from_fn_with_state(state.clone(), drop_caches_on_write))
         .layer(from_fn_with_state(state.clone(), enforce_panel_hostname))
         .with_state(state)
 }
 
-/// Clears the cached WordPress plugin/theme lists around any request that
-/// can change them (see [`wp_list_cache::invalidates`]). Both sides of the
-/// handler: before, so a render racing the action cannot be served the old
-/// list; after, so a render that STARTED while the action ran (and fetched
-/// the half-way state) is not kept either.
-async fn drop_wp_lists_on_write(
+/// Drops cached answers around any request that can change them. Both
+/// sides of the handler: before, so a render racing the action cannot be
+/// served the old answer; after, so a render that STARTED while the action
+/// ran (and loaded the half-way state) is not kept either.
+///
+/// * WordPress plugin/theme lists — per [`wp_list_cache::invalidates`]
+///   (an allowlist of writes known not to touch them).
+/// * The cluster caches in [`state::PanelCaches`] — on every write but
+///   machine traffic ([`state::PanelCaches::invalidated_by`]). They are a
+///   local RPC each to reload, so precision is not worth a finer list.
+async fn drop_caches_on_write(
     axum::extract::State(state): axum::extract::State<SharedState>,
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
-    let hit = wp_list_cache::invalidates(req.method(), req.uri().path());
-    if hit {
-        state.wp_lists.invalidate_all();
-    }
+    let write = state::PanelCaches::invalidated_by(req.method(), req.uri().path());
+    let wp = wp_list_cache::invalidates(req.method(), req.uri().path());
+    let drop = |state: &SharedState| {
+        if write {
+            state.caches.invalidate_on_write();
+        }
+        if wp {
+            state.wp_lists.invalidate_all();
+        }
+    };
+    drop(&state);
     let resp = next.run(req).await;
-    if hit {
-        state.wp_lists.invalidate_all();
-    }
+    drop(&state);
     resp
 }
 

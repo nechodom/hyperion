@@ -257,6 +257,17 @@ struct VhostTpl<'a> {
     preview_server_name: &'a str,
     preview_cert_path: &'a str,
     preview_cert_key_path: &'a str,
+    /// Server-level gzip for text assets (CSS, JS, SVG, fonts…). Off when
+    /// the operator's own snippet already configures gzip — two `gzip`
+    /// lines in one server block are `[emerg] "gzip" directive is
+    /// duplicate` and a refused reload.
+    perf_gzip: bool,
+    /// `open_file_cache` for the static file handler. Off when the
+    /// snippet sets it, for the same reason.
+    perf_open_file_cache: bool,
+    /// Browser-cache lifetimes for static assets. Off when the snippet
+    /// already sets `expires`: the operator chose their own policy.
+    static_expires: bool,
 }
 
 /// Parse the operator's comma/newline-separated wp-admin allowlist into
@@ -784,8 +795,22 @@ pub fn render(input: &VhostInput<'_>) -> Result<String, AdapterError> {
         preview_server_name: input.preview_server_name.unwrap_or(""),
         preview_cert_path: input.preview_cert_path.unwrap_or(""),
         preview_cert_key_path: input.preview_cert_key_path.unwrap_or(""),
+        perf_gzip: !snippet_sets(&input.options.custom_nginx_snippet, "gzip"),
+        perf_open_file_cache: !snippet_sets(&input.options.custom_nginx_snippet, "open_file_cache"),
+        static_expires: !snippet_sets(&input.options.custom_nginx_snippet, "expires"),
     };
     Ok(tpl.render()?)
+}
+
+/// Does the operator's custom snippet use this directive (or a sibling
+/// sharing its prefix — `gzip_types` counts for `gzip`)? Comments are
+/// ignored, so a commented-out line does not switch the default off.
+fn snippet_sets(snippet: &str, directive: &str) -> bool {
+    snippet.lines().any(|l| {
+        let l = l.split('#').next().unwrap_or("");
+        l.split([';', '{', '}'])
+            .any(|stmt| stmt.trim_start().starts_with(directive))
+    })
 }
 
 /// The WAF rules this vhost renders.
@@ -1015,6 +1040,11 @@ pub async fn write_vhost(paths: &Paths, input: &VhostInput<'_>) -> Result<(), Ad
         atomic_write(&cache_path, cache_body.as_bytes(), 0o644).await?;
     } else {
         let _ = tokio::fs::remove_file(&cache_path).await;
+        // Turned off: drop the pages too. Left behind, they would be served
+        // again (stale) the moment the cache is switched back on.
+        if let Ok(dir) = fastcgi_cache_dir(input.hosting_id) {
+            let _ = purge_cache_dir(&dir).await;
+        }
     }
     if let Err(e) = cmd::run("/usr/sbin/nginx", &["-t"]).await {
         // Restore previous state. Only drop the sites-enabled symlink on
@@ -1261,8 +1291,98 @@ pub async fn delete_vhost(
     if let Some(id) = hosting_id {
         let _ = tokio::fs::remove_file(cache_zone_file(id)).await;
         let _ = tokio::fs::remove_file(htpasswd_file(id)).await;
+        // The cached pages themselves: up to max_size (512m) of a deleted
+        // site's rendered HTML would otherwise sit on disk for good.
+        if let Ok(dir) = fastcgi_cache_dir(id) {
+            let _ = purge_cache_dir(&dir).await;
+            let _ = tokio::fs::remove_dir(&dir).await;
+        }
     }
     reload().await
+}
+
+/// Root of every per-hosting FastCGI cache. Root-owned parent, the
+/// directory itself 0700 nginx-user (see `write_vhost`), so nothing in it
+/// is reachable or plantable by a tenant.
+pub const FASTCGI_CACHE_ROOT: &str = "/var/cache/nginx";
+
+/// `/var/cache/nginx/hyperion-<id>` — the `fastcgi_cache_path` of one
+/// hosting. Refuses an id that is not a plain token, so it can never name
+/// a path outside the cache root.
+pub fn fastcgi_cache_dir(hosting_id: &str) -> Result<PathBuf, AdapterError> {
+    if hosting_id.is_empty()
+        || !hosting_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(AdapterError::Other(format!(
+            "invalid hosting id {hosting_id:?}"
+        )));
+    }
+    Ok(PathBuf::from(FASTCGI_CACHE_ROOT).join(format!("hyperion-{hosting_id}")))
+}
+
+/// Empty one hosting's FastCGI page cache. Returns how many cached pages
+/// were dropped (0 when the site has never had a cache).
+///
+/// Deleting the files under a live cache is the supported way to purge
+/// with stock nginx (there is no purge module in Debian's build): a key
+/// whose file is gone is a plain miss — nginx asks PHP again and stores
+/// the new page. No reload needed.
+pub async fn purge_fastcgi_cache(hosting_id: &str) -> Result<u64, AdapterError> {
+    purge_cache_dir(&fastcgi_cache_dir(hosting_id)?).await
+}
+
+/// Remove everything INSIDE `dir` (the directory itself stays, so nginx
+/// keeps writing to it), counting the regular files removed. Symlinks are
+/// removed, never followed.
+async fn purge_cache_dir(dir: &std::path::Path) -> Result<u64, AdapterError> {
+    let dir = dir.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        fn count_files(p: &std::path::Path) -> u64 {
+            let Ok(meta) = std::fs::symlink_metadata(p) else {
+                return 0;
+            };
+            if !meta.is_dir() {
+                return u64::from(meta.is_file());
+            }
+            std::fs::read_dir(p)
+                .map(|rd| rd.flatten().map(|e| count_files(&e.path())).sum())
+                .unwrap_or(0)
+        }
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(rd) => rd,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(e) => return Err(AdapterError::Other(format!("read {}: {e}", dir.display()))),
+        };
+        let mut removed = 0u64;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let n = count_files(&path);
+            let is_dir = std::fs::symlink_metadata(&path)
+                .map(|m| m.is_dir())
+                .unwrap_or(false);
+            let res = if is_dir {
+                std::fs::remove_dir_all(&path)
+            } else {
+                std::fs::remove_file(&path)
+            };
+            match res {
+                Ok(()) => removed += n,
+                // nginx's cache manager may have evicted it meanwhile.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    return Err(AdapterError::Other(format!(
+                        "remove {}: {e}",
+                        path.display()
+                    )))
+                }
+            }
+        }
+        Ok(removed)
+    })
+    .await
+    .map_err(|e| AdapterError::Other(format!("purge task: {e}")))?
 }
 
 /// Reload nginx, self-healing the common "not active, cannot reload"
@@ -3144,5 +3264,121 @@ mod upstream_url_tests {
             redir.contains("client_max_body_size 5m;"),
             "the redirect vhost must carry the operator's snippet"
         );
+    }
+
+    fn render_with_snippet(snippet: &str) -> String {
+        let aliases: Vec<String> = vec![];
+        let opts = hyperion_types::VhostOptions {
+            custom_nginx_snippet: snippet.into(),
+            ..Default::default()
+        };
+        super::render(&super::VhostInput {
+            domain: "example.cz",
+            aliases: &aliases,
+            root_dir: "/home/example_cz/example.cz/htdocs",
+            logs_dir: "/home/example_cz/example.cz/logs",
+            system_user: "example_cz",
+            php_version: Some("8.3"),
+            cert_path: "/c/fullchain.pem",
+            key_path: "/c/privkey.pem",
+            acme_challenge_root: "/a",
+            hosting_id: "01HSTATIC",
+            options: &opts,
+            preview_server_name: None,
+            preview_cert_path: None,
+            preview_cert_key_path: None,
+        })
+        .expect("render")
+    }
+
+    /// Static assets get a browser-cache lifetime, text assets are gzipped
+    /// and hot files keep their descriptors — and none of it can let a
+    /// hidden file through or strip the security headers.
+    #[test]
+    fn static_assets_are_cached_and_compressed() {
+        let out = render_with_snippet("");
+        assert!(out.contains("gzip_types text/plain text/css"));
+        assert!(
+            !out.contains("application/json"),
+            "JSON stays uncompressed (BREACH)"
+        );
+        assert!(out.contains("open_file_cache max=2000 inactive=60s;"));
+        assert!(out.contains("location ~* \\.(?:css|js|mjs)$ {\n        expires 7d;"));
+        assert!(out.contains("expires 30d;"));
+        // Regex locations match in order: the hidden-file deny must come
+        // first, or `/.git/config.js` would be served as a static asset.
+        let deny = out
+            .find("location ~ /\\.(?!well-known)")
+            .expect("hidden deny");
+        let css = out
+            .find("location ~* \\.(?:css|js|mjs)$")
+            .expect("css location");
+        assert!(deny < css);
+        // No add_header inside the asset locations — it would replace the
+        // inherited HSTS / nosniff set.
+        let tail = &out[css..];
+        let block_end = tail.find("{%").unwrap_or(tail.len());
+        let block = &tail[..block_end.min(tail.find("\n}\n").unwrap_or(tail.len()))];
+        assert!(!block.contains("add_header"));
+        // A miss still reaches WordPress, as it did through `location /`.
+        assert!(tail.contains("try_files $uri /index.php?$args;"));
+    }
+
+    /// The operator's snippet wins: a directive it already sets is not
+    /// emitted again (a duplicate `gzip` is an [emerg] and a refused
+    /// reload), and its own asset location comes BEFORE ours.
+    #[test]
+    fn operator_snippet_overrides_the_static_defaults() {
+        let out = render_with_snippet(
+            "gzip off;\nopen_file_cache off;\nlocation ~* \\.css$ { expires 1h; }",
+        );
+        assert!(!out.contains("gzip on;"));
+        assert!(!out.contains("open_file_cache max="));
+        assert!(!out.contains("expires 7d;"));
+        // A commented-out directive does not count.
+        let out = render_with_snippet("# gzip off;\n");
+        assert!(out.contains("gzip on;"));
+        assert!(super::snippet_sets(
+            "location /x { gzip_types text/foo; }",
+            "gzip"
+        ));
+        assert!(!super::snippet_sets("add_header X-Gzip 1;", "gzip"));
+    }
+
+    #[tokio::test]
+    async fn purge_empties_the_cache_but_keeps_the_directory() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path().join("hyperion-01H");
+        std::fs::create_dir_all(dir.join("a/1b")).unwrap();
+        std::fs::create_dir_all(dir.join("c/2d")).unwrap();
+        std::fs::write(dir.join("a/1b/key1"), b"page").unwrap();
+        std::fs::write(dir.join("a/1b/key2"), b"page").unwrap();
+        std::fs::write(dir.join("c/2d/key3"), b"page").unwrap();
+        // A symlink is removed, and what it points at is left alone.
+        let outside = tmp.path().join("outside");
+        std::fs::write(&outside, b"keep").unwrap();
+        std::os::unix::fs::symlink(&outside, dir.join("link")).unwrap();
+        assert_eq!(super::purge_cache_dir(&dir).await.unwrap(), 3);
+        assert!(dir.is_dir());
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+        assert!(outside.exists());
+        // Never had a cache: nothing to do, not an error.
+        assert_eq!(
+            super::purge_cache_dir(&tmp.path().join("nope"))
+                .await
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn cache_dir_refuses_path_tricks() {
+        assert_eq!(
+            super::fastcgi_cache_dir("01HXYZ").unwrap(),
+            std::path::PathBuf::from("/var/cache/nginx/hyperion-01HXYZ")
+        );
+        for bad in ["", "../etc", "a/b", "x y", "id\0"] {
+            assert!(super::fastcgi_cache_dir(bad).is_err(), "{bad:?}");
+        }
     }
 }

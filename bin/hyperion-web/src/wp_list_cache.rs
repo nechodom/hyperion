@@ -66,6 +66,11 @@ struct Entry {
 #[derive(Default)]
 pub struct WpListCache {
     entries: Mutex<HashMap<String, Entry>>,
+    /// One inline fetch per hosting at a time. Without it, every render that
+    /// found a miss ran its own pair of wp-cli bootstraps — two tabs, or a
+    /// page plus its own 15-second live refresh, doubled the slowest call on
+    /// the page exactly when it was already slow.
+    fetching: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// Bumped by every invalidation. A fetch remembers the generation it
     /// started in and is dropped on store if it changed — otherwise a
     /// refresh already in flight when the operator updated a plugin would
@@ -93,6 +98,17 @@ impl WpListCache {
                 }
             }
         }
+    }
+
+    /// The lock to hold around an inline fetch for this hosting. Whoever
+    /// gets it second should [`lookup`](Self::lookup) again before fetching:
+    /// the first holder has usually just stored the answer.
+    pub fn fetch_lock(&self, hosting_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut locks = self.fetching.lock().unwrap_or_else(|p| p.into_inner());
+        // Drop the locks nobody holds or waits on, so the map stays as small
+        // as the number of fetches actually in flight.
+        locks.retain(|_, l| Arc::strong_count(l) > 1);
+        locks.entry(hosting_id.to_string()).or_default().clone()
     }
 
     pub fn generation(&self) -> u64 {
@@ -147,7 +163,7 @@ impl WpListCache {
     }
 }
 
-/// POSTs that are known NOT to change what `wp plugin list` / `wp theme
+/// Writes that are known NOT to change what `wp plugin list` / `wp theme
 /// list` report. Everything else invalidates the cache — the safe direction:
 /// an unlisted action costs one slow render, a wrongly listed one shows a
 /// stale plugin table. Must-use plugins count (they are in `wp plugin list`),
@@ -178,6 +194,7 @@ const KEEPS_WP_LISTS: &[&str] = &[
     "/hostings/bruteforce-scan",
     "/hostings/letter-language",
     "/hostings/perm-autoheal",
+    "/hostings/page-cache/",
     "/hostings/integrity/scan",
     "/hostings/ban",
     "/hostings/waf-",
@@ -197,6 +214,36 @@ const KEEPS_WP_LISTS: &[&str] = &[
     "/hostings/gitsync/disconnect",
     "/hostings/suspend",
     "/hostings/resume",
+    // ── Outside /hostings: nothing here touches a site's wp-content. ──
+    // Machine traffic first. Every node POSTs a heartbeat once a minute,
+    // so on a ten-node cluster this one alone emptied the cache every six
+    // seconds; an import upload is a POST per chunk.
+    "/api/heartbeat",
+    "/api/enroll",
+    "/import/upload/",
+    "/import/progress",
+    "/import/manifest/",
+    "/import/wizard/mint",
+    "/import/select",
+    "/import/cancel",
+    // The operator's own session and account.
+    "/login",
+    "/logout",
+    "/setup/",
+    "/profile/", // the operator's profile — NOT "/profiles/" (site plans)
+    "/notifications/",
+    "/api/notifications/",
+    "/api/email-autodetect",
+    // Panel and cluster administration.
+    "/admin/users",
+    "/roles",
+    "/settings/",
+    "/audit/",
+    "/install/",
+    "/services/",
+    "/firewall/",
+    "/bans/",
+    "/certs/",
 ];
 
 /// Does a request with this method + path have to drop the cache?
@@ -281,5 +328,35 @@ mod tests {
         assert!(!invalidates(&Method::POST, "/hostings/vhost-options"));
         assert!(!invalidates(&Method::POST, "/hostings/ftp/account/reset"));
         assert!(!invalidates(&Method::POST, "/hostings/backups/delete-bulk"));
+        // Machine and account traffic never touches wp-content.
+        assert!(!invalidates(&Method::POST, "/api/heartbeat"));
+        assert!(!invalidates(&Method::POST, "/import/upload/chunk"));
+        assert!(!invalidates(&Method::POST, "/api/notifications/mark-read"));
+        assert!(!invalidates(&Method::POST, "/profile/password"));
+        assert!(!invalidates(&Method::POST, "/settings/config"));
+        // ...but site plans, care plans, imports and trash can.
+        assert!(invalidates(&Method::POST, "/profiles/apply"));
+        assert!(invalidates(&Method::POST, "/profiles/reapply"));
+        assert!(invalidates(&Method::POST, "/packages/3/update"));
+        assert!(invalidates(&Method::POST, "/import/apply"));
+        assert!(invalidates(&Method::POST, "/trash/restore"));
+        assert!(invalidates(&Method::POST, "/webhooks/git/abc"));
+        assert!(invalidates(&Method::POST, "/api/v1/hostings/x/restore"));
+    }
+
+    #[tokio::test]
+    async fn one_inline_fetch_per_hosting() {
+        let c = WpListCache::default();
+        let a = c.fetch_lock("h");
+        let b = c.fetch_lock("h");
+        assert!(Arc::ptr_eq(&a, &b), "same hosting shares one lock");
+        assert!(!Arc::ptr_eq(&a, &c.fetch_lock("other")));
+        let held = a.lock().await;
+        assert!(b.try_lock().is_err(), "a second fetch waits");
+        drop(held);
+        drop((a, b));
+        // Unheld locks are pruned on the next call.
+        c.fetch_lock("x");
+        assert_eq!(c.fetching.lock().unwrap().len(), 1);
     }
 }

@@ -753,6 +753,10 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.permissions_autoheal_set(sel, enabled).await
     }
 
+    async fn hosting_page_cache_purge(&self, sel: HostingSelector) -> Result<u64, RpcError> {
+        self.svc.page_cache_purge(sel).await
+    }
+
     async fn firewall_enable_default_drop(
         &self,
         rollback_after_secs: i64,

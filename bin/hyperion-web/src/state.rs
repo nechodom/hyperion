@@ -75,6 +75,9 @@ pub struct AppState {
     /// not bootstrap WordPress twice on every render. See
     /// [`crate::wp_list_cache`].
     pub wp_lists: Arc<crate::wp_list_cache::WpListCache>,
+    /// Short-lived answers that are the same for every caller and asked
+    /// for far more often than they change. See [`PanelCaches`].
+    pub caches: Arc<PanelCaches>,
     /// First-run wizard: whether setup is pending, its one-time code, and
     /// the domain hand-off tokens. See [`crate::setup`].
     pub setup: Arc<crate::setup::SetupCtl>,
@@ -100,3 +103,111 @@ impl AppState {
 }
 
 pub type SharedState = Arc<AppState>;
+
+/// Per-process caches of cluster-wide answers, each a single-flight
+/// [`TtlCell`](crate::ttl_cache::TtlCell). Per `AppState` rather than
+/// `static` so two panels in one process (the test harness) never share.
+pub struct PanelCaches {
+    /// The master's `NodesList`. Read by EVERY remote dispatch (endpoint,
+    /// pins) and by every aggregate page before its fan-out — a page
+    /// fanning out to N nodes used to make N+1 identical local RPCs.
+    pub nodes: crate::ttl_cache::TtlCell<Vec<hyperion_types::NodeSummary>>,
+    /// The master's `AgentConfigView` (agent.toml, secrets masked). Read
+    /// on every remote dispatch for the `[cluster]` enforcement toggles —
+    /// it used to be one RPC (and a TOML parse) per dispatch — and by the
+    /// pages that render from it.
+    pub agent_config: crate::ttl_cache::TtlCell<std::sync::Arc<hyperion_types::AgentConfigView>>,
+    /// Cluster-wide trash total behind the sidebar badge (a fan-out).
+    pub trash_count: crate::ttl_cache::TtlCell<usize>,
+    /// Sites that need a person, behind the sidebar dot (a fan-out).
+    pub needs_you: crate::ttl_cache::TtlCell<usize>,
+}
+
+impl PanelCaches {
+    /// Short: a node enrolled from its own shell, or a toggle edited in
+    /// agent.toml by hand, shows up within seconds. Everything the PANEL
+    /// changes is dropped at once by [`Self::invalidate_on_write`].
+    pub const NODES_TTL: std::time::Duration = std::time::Duration::from_secs(5);
+    pub const TRASH_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+    /// A number read at a glance; the /vulns page refreshes it on view.
+    pub const NEEDS_YOU_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+
+    /// Called around every request [`Self::invalidated_by`] picks (see
+    /// `drop_caches_on_write` in lib.rs). A node reset, an enforcement toggle or a trash/restore must
+    /// never be answered from before it happened — an enforcement toggle
+    /// switched ON in particular must hold from the very next dispatch.
+    /// The needs-you count is left alone: it is a 5-minute summary, and
+    /// dropping it on every save would put a cluster fan-out behind the
+    /// next sidebar poll.
+    /// Does this request drop the caches? Every write except the
+    /// machine traffic that arrives on its own clock and changes none of
+    /// them: node heartbeats (one per node per minute — on a big cluster
+    /// these would keep the caches permanently empty; a pin a heartbeat
+    /// fills in still lands within [`Self::NODES_TTL`]), import upload
+    /// chunks, notification read-marks.
+    pub fn invalidated_by(method: &axum::http::Method, path: &str) -> bool {
+        use axum::http::Method;
+        const NOT_PANEL_WRITES: &[&str] = &[
+            "/api/heartbeat",
+            "/import/upload/",
+            "/import/progress",
+            "/api/notifications/",
+            "/notifications/",
+        ];
+        !matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS)
+            && !NOT_PANEL_WRITES.iter().any(|p| path.starts_with(p))
+    }
+
+    pub fn invalidate_on_write(&self) {
+        self.nodes.invalidate();
+        self.agent_config.invalidate();
+        self.trash_count.invalidate();
+    }
+}
+
+impl Default for PanelCaches {
+    fn default() -> Self {
+        PanelCaches {
+            nodes: crate::ttl_cache::TtlCell::new(Self::NODES_TTL),
+            agent_config: crate::ttl_cache::TtlCell::new(Self::NODES_TTL),
+            trash_count: crate::ttl_cache::TtlCell::new(Self::TRASH_TTL),
+            needs_you: crate::ttl_cache::TtlCell::new(Self::NEEDS_YOU_TTL),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PanelCaches;
+    use axum::http::Method;
+
+    #[test]
+    fn which_requests_drop_the_panel_caches() {
+        assert!(!PanelCaches::invalidated_by(&Method::GET, "/install"));
+        assert!(PanelCaches::invalidated_by(
+            &Method::POST,
+            "/install/reset-node-crypto"
+        ));
+        assert!(PanelCaches::invalidated_by(
+            &Method::POST,
+            "/settings/config"
+        ));
+        assert!(PanelCaches::invalidated_by(&Method::POST, "/trash/restore"));
+        assert!(PanelCaches::invalidated_by(
+            &Method::DELETE,
+            "/api/v1/hostings/x"
+        ));
+        assert!(!PanelCaches::invalidated_by(
+            &Method::POST,
+            "/api/heartbeat"
+        ));
+        assert!(!PanelCaches::invalidated_by(
+            &Method::POST,
+            "/import/upload/chunk"
+        ));
+        assert!(!PanelCaches::invalidated_by(
+            &Method::POST,
+            "/api/notifications/mark-read"
+        ));
+    }
+}

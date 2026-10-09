@@ -320,6 +320,20 @@ hctl hosting repair-perms example.com
 Use it after copying files in as root, or when FTP or WordPress can't write
 where they should. See [`hctl ftp perms`](#hctl-ftp-perms) to diagnose first.
 
+### hctl hosting purge-cache
+
+Empty a hosting's page cache.
+
+**Options:** `SELECTOR`
+
+```bash
+hctl hosting purge-cache example.com
+```
+
+Drops every cached page, so the next visitor gets a fresh one from PHP. Use
+it after changing content the cache would otherwise keep serving. Prints how
+many pages were dropped; `0` means nothing was cached.
+
 ### hctl hosting export
 
 Export a hosting as a migration bundle on this node's disk.

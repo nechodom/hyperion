@@ -1348,6 +1348,7 @@ pub fn print_pretty(resp: &Response) {
             "permission self-repair {}",
             if *on { "enabled" } else { "disabled" }
         ),
+        Response::HostingPageCachePurged(n) => println!("✓ page cache purged: {n} page(s)"),
         Response::FirewallDefaultDrop {
             message,
             armed_seconds_left,

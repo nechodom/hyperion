@@ -84,8 +84,9 @@ pub async fn get_certs(
     // dropped by the fan-out, which would otherwise read here as "that
     // node has no certificates" — hence the banner.
     let mut node_auth_warning = None;
-    if let Ok(RpcResponse::NodesList(nodes)) =
-        hyperion_rpc_client::call(&state.agent_socket, Request::NodesList).await
+    if let Ok(RpcResponse::NodesList(nodes)) = crate::dispatcher::cached_nodes(&state)
+        .await
+        .map(hyperion_rpc::codec::Response::NodesList)
     {
         let (answered, failed) =
             crate::dispatcher::fan_out_reporting(&state, nodes, Request::CertOverview).await;
@@ -179,8 +180,9 @@ pub async fn post_renew_all(
         _ => nodes_failed += 1,
     }
     // Workers.
-    if let Ok(RpcResponse::NodesList(nodes)) =
-        hyperion_rpc_client::call(&state.agent_socket, Request::NodesList).await
+    if let Ok(RpcResponse::NodesList(nodes)) = crate::dispatcher::cached_nodes(&state)
+        .await
+        .map(hyperion_rpc::codec::Response::NodesList)
     {
         for n in nodes {
             nodes_hit += 1;

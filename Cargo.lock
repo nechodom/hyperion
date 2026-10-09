@@ -1691,6 +1691,7 @@ dependencies = [
  "blake3",
  "chrono",
  "clap",
+ "flate2",
  "hex",
  "http-body-util",
  "hyperion-adapters",

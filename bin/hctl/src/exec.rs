@@ -293,6 +293,9 @@ pub async fn execute(socket: &Path, cmd: &Cmd) -> Result<Outcome> {
             HostingCmd::RepairPerms { selector } => Request::HostingRepairPermissions {
                 sel: parse_selector(selector)?,
             },
+            HostingCmd::PurgeCache { selector } => Request::HostingPageCachePurge {
+                sel: parse_selector(selector)?,
+            },
             HostingCmd::Export { selector } => Request::HostingExport {
                 hosting: parse_selector(selector)?,
             },

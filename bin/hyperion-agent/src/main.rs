@@ -621,6 +621,7 @@ async fn main() -> anyhow::Result<()> {
             if n > 0 {
                 tracing::info!(count = n, "boot: rolled the current vhost template out");
             }
+            rerender_svc.ensure_redis_memory_policy().await;
         });
     }
     // Self-heal / upgrade: re-assert the master panel vhost so template changes

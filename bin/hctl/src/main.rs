@@ -273,6 +273,8 @@ pub enum HostingCmd {
     },
     /// Repair ownership and modes under a hosting's document root.
     RepairPerms { selector: String },
+    /// Empty a hosting's page cache so visitors get fresh pages.
+    PurgeCache { selector: String },
     /// Export a hosting as a migration bundle (archive + manifest)
     /// on this node's disk. The bundle lives at
     /// /var/lib/hyperion/migration/<bundle_id>/. Transfer it to the

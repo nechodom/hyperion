@@ -664,8 +664,9 @@ pub(crate) async fn collect_all(
         _ => unreachable.push("master".to_string()),
     }
     let mut node_auth_warning = None;
-    if let Ok(RpcResponse::NodesList(nodes)) =
-        hyperion_rpc_client::call(&state.agent_socket, Request::NodesList).await
+    if let Ok(RpcResponse::NodesList(nodes)) = crate::dispatcher::cached_nodes(state)
+        .await
+        .map(hyperion_rpc::codec::Response::NodesList)
     {
         let (answered, failed) =
             crate::dispatcher::fan_out_reporting(state, nodes, Request::VulnFindingsList).await;
@@ -696,31 +697,21 @@ pub(crate) async fn collect_all(
     (all, node_auth_warning, unreachable)
 }
 
-/// Sidebar-dot cache: the dot polls every minute from every open tab, and a
-/// cluster fan-out per poll per tab is not worth a number read at a glance.
-static NAV_CACHE: std::sync::Mutex<Option<(std::time::Instant, usize)>> =
-    std::sync::Mutex::new(None);
-const NAV_TTL: std::time::Duration = std::time::Duration::from_secs(300);
-
-fn nav_cache_put(n: usize) {
-    if let Ok(mut g) = NAV_CACHE.lock() {
-        *g = Some((std::time::Instant::now(), n));
-    }
-}
-
-/// Sites across the cluster that need a person, cached for five minutes.
+/// Sites across the cluster that need a person, for the sidebar dot. The
+/// dot polls every minute from every open tab, and a cluster fan-out per
+/// poll per tab is not worth a number read at a glance: cached for
+/// [`PanelCaches::NEEDS_YOU_TTL`](crate::state::PanelCaches::NEEDS_YOU_TTL),
+/// loaded once however many tabs ask when it lapses.
 pub(crate) async fn needs_you_count_cached(state: &SharedState) -> usize {
-    if let Ok(g) = NAV_CACHE.lock() {
-        if let Some((at, n)) = *g {
-            if at.elapsed() < NAV_TTL {
-                return n;
-            }
-        }
-    }
-    let (rows, _, _) = collect_all(state).await;
-    let n = needs_you_sites(&rows, hyperion_types::now_secs());
-    nav_cache_put(n);
-    n
+    state
+        .caches
+        .needs_you
+        .get_or_load(|| async {
+            let (rows, _, _) = collect_all(state).await;
+            Ok::<_, ()>(needs_you_sites(&rows, hyperion_types::now_secs()))
+        })
+        .await
+        .unwrap_or(0)
 }
 
 pub async fn get_vulns(
@@ -736,7 +727,7 @@ pub async fn get_vulns(
     let now = hyperion_types::now_secs();
     let (all, node_auth_warning, unreachable) = collect_all(&state).await;
     // The page just did the fan-out the dot would; keep them in step.
-    nav_cache_put(needs_you_sites(&all, now));
+    state.caches.needs_you.put(needs_you_sites(&all, now));
 
     let (verdict, verdict_tone) = verdict(&all, now);
     let mut nodes: Vec<String> = all.iter().map(|s| s.node_id.clone()).collect();

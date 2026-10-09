@@ -146,10 +146,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 .to_string();
             match item.action {
                 Action::Create => match self.apply_one_import(&item.hosting, loc, ov).await {
-                    Ok((id, notes)) => created.push(ImportedHosting {
+                    Ok((id, notes, databases)) => created.push(ImportedHosting {
                         domain: final_domain,
                         hosting_id: id,
-                        databases: item.hosting.databases.len(),
+                        databases,
                         notes,
                     }),
                     Err(e) => {
@@ -198,7 +198,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         h: &IrHosting,
         loc: &Location,
         ov: Option<&hyperion_import::SiteImportOverride>,
-    ) -> Result<(String, Vec<String>), RpcError> {
+    ) -> Result<(String, Vec<String>, usize), RpcError> {
         // 1. Provision a fresh Hyperion hosting — reuses ALL of create()
         //    (system user, dirs, nginx vhost, php-fpm pool, DB if any).
         //    The operator may RENAME the site at import: create under the chosen
@@ -288,10 +288,26 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             IrSiteKind::Static => "static",
             _ => "php",
         };
+        // The source's aliases (Hestia's `www.<domain>` above all) — without
+        // them the site stops answering on www the moment DNS moves. One taken
+        // by another hosting here is left off with a note: create() would
+        // otherwise refuse the whole site over it.
+        let (wanted, alias_notes) = import_aliases(&h.aliases, &h.domain, domain.as_str());
+        notes.extend(alias_notes);
+        let mut aliases = Vec::with_capacity(wanted.len());
+        for a in wanted {
+            if domain_name_taken(&self.pool, a.as_str()).await {
+                notes.push(format!(
+                    "alias {a} not added — another hosting on this node already answers on it"
+                ));
+            } else {
+                aliases.push(a);
+            }
+        }
         let created = self
             .create(HostingCreateReq {
                 domain,
-                aliases: Vec::new(),
+                aliases,
                 php_version,
                 database,
                 system_user: None,
@@ -348,6 +364,17 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             });
         }
 
+        // A Hyperion hosting has one database; the adapter puts the one the
+        // site's config uses first. The rest are named, not silently dropped.
+        for extra in h.databases.iter().skip(1) {
+            notes.push(format!(
+                "database '{}' not imported — a hosting here has one database, and this \
+                 site's is '{}'; move '{}' by hand if the site needs it",
+                extra.name, h.databases[0].name, extra.name
+            ));
+        }
+        let mut restored_dbs = 0usize;
+
         // 4. DB: dump the source DB (locally or over ssh) and load it into the
         //    freshly-created one with the engine-appropriate restore helper.
         if let (Some(srcdb), Some(newdb)) = (h.databases.first(), created.db.as_ref()) {
@@ -383,6 +410,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             if skipped_db {
                 // Nothing to restore. Fall through to the rest of the site.
             } else {
+                restored_dbs = 1;
                 match srcdb.engine {
                     IrDbEngine::Postgres => {
                         hyperion_adapters::backup::restore_postgres_dump(&newdb.db_name, dump_path)
@@ -471,8 +499,65 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         )
         .await;
 
-        Ok((created.id.as_str().to_string(), notes))
+        Ok((created.id.as_str().to_string(), notes, restored_dbs))
     }
+}
+
+/// Is `name` already a hosting's domain or alias on this node, in any state?
+/// Both are unique across the node: an alias row clashing makes create() fail,
+/// and a name another hosting serves would give nginx two server blocks for it.
+async fn domain_name_taken(pool: &sqlx::SqlitePool, name: &str) -> bool {
+    sqlx::query_scalar::<_, i64>(
+        "SELECT 1 FROM hosting_aliases WHERE alias_domain = ?1 \
+         UNION ALL SELECT 1 FROM hostings WHERE domain = ?1 LIMIT 1",
+    )
+    .bind(name)
+    .fetch_optional(pool)
+    .await
+    // A failed lookup must not drop the alias; create() is still the backstop
+    // and reports a real conflict.
+    .map(|r| r.is_some())
+    .unwrap_or(false)
+}
+
+/// The source site's aliases as they should land on the target.
+///
+/// Kept as-is when the site keeps its domain. When the operator renamed it,
+/// only the aliases that are subdomains of the source domain carry over,
+/// rebased onto the new one (`www.old.cz` → `www.new.cz`); any other alias
+/// belongs to the old identity and is left off, with a note. A name that is
+/// not a valid hostname here (Hestia allows a `*.domain` wildcard) is noted too.
+fn import_aliases(aliases: &[String], source: &str, target: &str) -> (Vec<Domain>, Vec<String>) {
+    let source = source.trim().to_ascii_lowercase();
+    let target = target.trim().to_ascii_lowercase();
+    let renamed = source != target;
+    let mut out: Vec<Domain> = Vec::new();
+    let mut notes = Vec::new();
+    for raw in aliases {
+        let a = raw.trim().trim_end_matches('.').to_ascii_lowercase();
+        if a.is_empty() || a == source || a == target {
+            continue;
+        }
+        let a = if renamed {
+            match a.strip_suffix(&format!(".{source}")) {
+                Some(sub) => format!("{sub}.{target}"),
+                None => {
+                    notes.push(format!(
+                        "alias {a} not carried over — the site was renamed to {target}"
+                    ));
+                    continue;
+                }
+            }
+        } else {
+            a
+        };
+        match Domain::parse(&a) {
+            Ok(d) if !out.contains(&d) && d.as_str() != target => out.push(d),
+            Ok(_) => {}
+            Err(_) => notes.push(format!("alias {a} not added — not a valid hostname here")),
+        }
+    }
+    (out, notes)
 }
 
 /// Resolve the request into a [`Location`]. For `remote`, writes the supplied
@@ -1047,7 +1132,82 @@ async fn rewrite_wp_config(root_dir: &str, db_name: &str, db_user: &str, db_pass
 
 #[cfg(test)]
 mod tests {
-    use super::looks_like_out_of_space;
+    use super::{domain_name_taken, import_aliases, looks_like_out_of_space};
+
+    #[tokio::test]
+    async fn a_name_is_taken_by_another_hostings_domain_or_alias() {
+        let pool = hyperion_state::db::open_memory().await.expect("db");
+        let su = hyperion_state::system_users::insert(
+            &pool,
+            "shopcz",
+            2001,
+            "/home/shopcz",
+            "/bin/false",
+            0,
+        )
+        .await
+        .expect("user");
+        let id = hyperion_types::HostingId::new_v7();
+        hyperion_state::hostings::insert(
+            &pool,
+            &id,
+            "shop.cz",
+            su,
+            None,
+            "/home/shopcz/shop.cz/htdocs",
+            0,
+            None,
+        )
+        .await
+        .expect("hosting");
+        hyperion_state::hostings::insert_alias(&pool, &id, "www.shop.cz")
+            .await
+            .expect("alias");
+
+        assert!(domain_name_taken(&pool, "shop.cz").await);
+        assert!(domain_name_taken(&pool, "www.shop.cz").await);
+        assert!(!domain_name_taken(&pool, "www.blog.cz").await);
+    }
+
+    fn names(v: &[hyperion_validate::Domain]) -> Vec<&str> {
+        v.iter().map(|d| d.as_str()).collect()
+    }
+
+    #[test]
+    fn aliases_carry_over_when_the_site_keeps_its_domain() {
+        let (got, notes) = import_aliases(
+            &[
+                "www.shop.cz".into(),
+                "shop.cz".into(),
+                "old-shop.cz".into(),
+                "WWW.SHOP.CZ".into(),
+            ],
+            "shop.cz",
+            "shop.cz",
+        );
+        // The primary itself and a case-variant duplicate are dropped quietly.
+        assert_eq!(names(&got), ["www.shop.cz", "old-shop.cz"]);
+        assert!(notes.is_empty(), "{notes:?}");
+    }
+
+    #[test]
+    fn a_renamed_site_rebases_its_subdomain_aliases_and_drops_the_rest() {
+        let (got, notes) = import_aliases(
+            &["www.shop.cz".into(), "old-shop.cz".into()],
+            "shop.cz",
+            "shop.staging.example",
+        );
+        assert_eq!(names(&got), ["www.shop.staging.example"]);
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].contains("old-shop.cz"), "{notes:?}");
+    }
+
+    #[test]
+    fn an_invalid_alias_is_noted_not_fatal() {
+        let (got, notes) = import_aliases(&["*.shop.cz".into()], "shop.cz", "shop.cz");
+        assert!(got.is_empty());
+        assert_eq!(notes.len(), 1, "{notes:?}");
+    }
 
     /// The whole point of stopping the batch is that ENOSPC arrives here as a
     /// STRING, three `Display` conversions away from the `io::Error` that

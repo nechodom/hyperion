@@ -63,6 +63,8 @@ pub enum DispatchError {
     NoSigner,
     #[error("unexpected response from nodes_list")]
     UnexpectedNodesListResponse,
+    #[error("unexpected response from agent_config_view")]
+    UnexpectedAgentConfigResponse,
 }
 
 /// Translate `RemoteClientError::HttpError { code, stderr }` for
@@ -494,11 +496,7 @@ async fn resolve_node_endpoint(
     state: &SharedState,
     node_id: &str,
 ) -> Result<NodeRoute, DispatchError> {
-    let list_resp = call(&state.agent_socket, Request::NodesList).await?;
-    let nodes = match list_resp {
-        Response::NodesList(v) => v,
-        _ => return Err(DispatchError::UnexpectedNodesListResponse),
-    };
+    let nodes = cached_nodes(state).await?;
     let node = nodes
         .into_iter()
         .find(|n| n.node_id == node_id)
@@ -522,6 +520,27 @@ async fn resolve_node_endpoint(
     })
 }
 
+/// The master's `NodesList`, from the short-lived single-flight cache
+/// ([`crate::state::PanelCaches::nodes`]). Every remote dispatch resolves
+/// its endpoint and pins from here, and so does every aggregate page
+/// before its fan-out, so one page touching N nodes costs one local RPC
+/// instead of N+1. Dropped on every write the panel makes, so a node
+/// reset or removal is never answered from before it happened.
+pub async fn cached_nodes(
+    state: &SharedState,
+) -> Result<Vec<hyperion_types::NodeSummary>, DispatchError> {
+    state
+        .caches
+        .nodes
+        .get_or_load(|| async {
+            match call(&state.agent_socket, Request::NodesList).await? {
+                Response::NodesList(v) => Ok(v),
+                _ => Err(DispatchError::UnexpectedNodesListResponse),
+            }
+        })
+        .await
+}
+
 /// The cluster's two enforcement toggles.
 #[derive(Debug, Clone, Copy, Default)]
 struct Enforcement {
@@ -540,15 +559,42 @@ struct Enforcement {
 ///
 /// FAIL-SAFE: any read failure returns all-false (never enforce), so a
 /// flaky config read can't accidentally lock the master out of its
-/// workers — for either toggle.
+/// workers — for either toggle. A failed read is never cached, so the
+/// next dispatch asks again instead of running unenforced for a TTL.
+///
+/// Read from [`cached_agent_config`]: cached for
+/// [`PanelCaches::NODES_TTL`](crate::state::PanelCaches::NODES_TTL) and
+/// dropped by every panel write, so switching a toggle ON from
+/// Settings holds from the very next dispatch; only a hand edit of
+/// agent.toml can take up to that TTL to apply.
 async fn cluster_enforcement(state: &SharedState) -> Enforcement {
-    match call(&state.agent_socket, Request::AgentConfigView).await {
-        Ok(Response::AgentConfigView(c)) => Enforcement {
+    match cached_agent_config(state).await {
+        Ok(c) => Enforcement {
             cert_pinning: c.cluster.enforce_worker_cert_pinning,
             response_auth: c.cluster.enforce_response_auth,
         },
-        _ => Enforcement::default(),
+        Err(_) => Enforcement::default(),
     }
+}
+
+/// The master's own `AgentConfigView`, from the short-lived single-flight
+/// cache ([`crate::state::PanelCaches::agent_config`]). Every remote
+/// dispatch reads its enforcement toggles from here, and a hosting detail
+/// render used to ask for the same view twice in parallel. Dropped on
+/// every panel write, so a page rendered after a Settings save sees it.
+pub async fn cached_agent_config(
+    state: &SharedState,
+) -> Result<std::sync::Arc<hyperion_types::AgentConfigView>, DispatchError> {
+    state
+        .caches
+        .agent_config
+        .get_or_load(|| async {
+            match call(&state.agent_socket, Request::AgentConfigView).await? {
+                Response::AgentConfigView(c) => Ok(std::sync::Arc::new(c)),
+                _ => Err(DispatchError::UnexpectedAgentConfigResponse),
+            }
+        })
+        .await
 }
 
 /// Decide the `--pinnedpubkey` value for this dispatch, or refuse it.
@@ -828,6 +874,9 @@ impl From<DispatchError> for crate::error::AppError {
             ),
             DispatchError::UnexpectedNodesListResponse => {
                 AppError::Internal("agent returned an unexpected NodesList shape".into())
+            }
+            DispatchError::UnexpectedAgentConfigResponse => {
+                AppError::Internal("agent returned an unexpected AgentConfigView shape".into())
             }
         }
     }
