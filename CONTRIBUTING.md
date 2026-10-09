@@ -67,7 +67,8 @@ new DB engines, etc.
    pushed onto the LIFO stack if it mutates state.
 4. **RPC variant** in `hyperion-rpc::codec` + handler in
    `AgentApi` + dispatch in `hyperion-rpc-server`.
-5. **CLI subcommand** in `hctl` + UI handler + template in
+5. **CLI subcommand** in `hctl` with an entry in `docs/cli.md`
+   (a test fails until it has one) + UI handler + template in
    `hyperion-web` if user-facing.
 6. **Tests at every layer.** Pure-logic ones unconditional; the
    rare integration test that wants `useradd` or `systemctl` gets
