@@ -2511,6 +2511,15 @@ mod tests {
         assert!(LOGFORMAT_BODY.contains("\"$http_user_agent\" $request_time';"));
         assert!(out.contains("fastcgi_no_cache $hyperion_skip_cache $cookie_PHPSESSID;"));
         assert!(out.contains("fastcgi_cache_bypass $hyperion_skip_cache $cookie_PHPSESSID;"));
+        // A full PHP pool must not turn into 502/504 for anonymous visitors:
+        // one request refills an expired page while the rest wait on the
+        // lock, and a busy or failing backend serves the last good copy.
+        assert!(out.contains("fastcgi_cache_lock on;"));
+        assert!(out.contains("fastcgi_cache_lock_timeout 5s;"));
+        assert!(out.contains(
+            "fastcgi_cache_use_stale error timeout invalid_header updating http_500 http_503;"
+        ));
+        assert!(out.contains("fastcgi_cache_background_update on;"));
         // WordPress's login cookie carries a hash suffix, so the old exact
         // `$cookie_wordpress_logged_in` never matched; the skip must test a
         // PREFIX, and must cover a WooCommerce cart too.

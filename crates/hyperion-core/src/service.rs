@@ -38672,8 +38672,9 @@ fn limits_to_row(
 /// access log, page-cache skip for logged-in and WooCommerce visitors.
 /// 2: per-rule WAF whose refusals are tagged into the root-owned WAF log —
 /// without the rewrite an existing site's activity view and WAF auto-ban
-/// stay empty until somebody re-saves it.
-const VHOST_GEN: u32 = 2;
+/// stay empty until somebody re-saves it. 3: page cache serves the last good
+/// copy (and refills one request at a time) while the PHP pool is full.
+const VHOST_GEN: u32 = 3;
 /// Node-local `hosting_kv` key holding the generation a vhost was last
 /// rendered at.
 const VHOST_GEN_KV: &str = "nginx.vhost_gen";

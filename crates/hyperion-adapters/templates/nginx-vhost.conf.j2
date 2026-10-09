@@ -340,6 +340,17 @@
         fastcgi_cache_bypass $hyperion_skip_cache $cookie_PHPSESSID;
         fastcgi_no_cache $hyperion_skip_cache $cookie_PHPSESSID;
         fastcgi_cache_key "$scheme$request_method$host$request_uri";
+        {#- A full PHP pool must not reach anonymous visitors as 502/504.
+            The lock sends ONE request to PHP for a missing/expired page and
+            parks the rest on its result instead of all of them taking a
+            worker. use_stale + background_update serve the last good copy
+            while that refill runs, and when FPM is saturated (timeout),
+            gone (error) or failing (500/503). Logged-in and cart visitors
+            bypass the cache, so they never see a stale page. #}
+        fastcgi_cache_lock on;
+        fastcgi_cache_lock_timeout 5s;
+        fastcgi_cache_use_stale error timeout invalid_header updating http_500 http_503;
+        fastcgi_cache_background_update on;
         {#- X-Cache-Status is emitted at SERVER level (see https_body top) —
             an add_header here would drop the inherited security headers. #}
         {%- endif %}
