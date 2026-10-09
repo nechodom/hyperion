@@ -459,6 +459,26 @@
   openFromHash();
   window.addEventListener('hashchange', openFromHash);
 
+  // The update log is re-rendered every 3s, and a fresh <pre> starts at
+  // the top. Follow the tail like a terminal: stay pinned to the bottom
+  // unless the reader scrolled up, then keep their spot.
+  document.body.addEventListener('htmx:beforeSwap', function (e) {
+    const t = e.detail.target;
+    if (!t || !t.classList || !t.classList.contains('node-upd-status')) return;
+    const log = t.querySelector('pre.upd-log');
+    if (!log) { delete t.dataset.logTop; return; }
+    const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 24;
+    t.dataset.logTop = atBottom ? 'bottom' : String(log.scrollTop);
+  });
+  document.body.addEventListener('htmx:afterSwap', function (e) {
+    const t = e.detail.target;
+    if (!t || !t.classList || !t.classList.contains('node-upd-status')) return;
+    const log = t.querySelector('pre.upd-log');
+    if (!log) return;
+    const top = t.dataset.logTop;
+    log.scrollTop = (top === undefined || top === 'bottom') ? log.scrollHeight : Number(top);
+  });
+
   const KEY = 'hyperion.master_url_override';
   const input = document.getElementById('master-url-override');
   const reset = document.getElementById('master-url-reset');
