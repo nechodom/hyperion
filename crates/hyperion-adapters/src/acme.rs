@@ -430,6 +430,74 @@ fn session_path(domain: &str) -> PathBuf {
     PathBuf::from(DNS01_SESSION_DIR).join(format!("{safe}.json"))
 }
 
+/// The `(name, value)` every still-pending authorization of `order` needs.
+async fn pending_records(
+    order: &mut instant_acme::Order,
+) -> Result<Vec<Dns01Record>, AdapterError> {
+    use instant_acme::{AuthorizationStatus, ChallengeType, Identifier};
+    let mut records: Vec<Dns01Record> = Vec::new();
+    let mut authorizations = order.authorizations();
+    while let Some(result) = authorizations.next().await {
+        let mut authz = result.map_err(|e| AdapterError::Acme(format!("authorization: {e}")))?;
+        match authz.status {
+            AuthorizationStatus::Pending => {}
+            AuthorizationStatus::Valid => continue,
+            other => {
+                return Err(AdapterError::Acme(format!(
+                    "authorization in unexpected state {other:?}"
+                )));
+            }
+        }
+        let challenge = authz
+            .challenge(ChallengeType::Dns01)
+            .ok_or_else(|| AdapterError::Acme("no DNS-01 challenge offered".into()))?;
+        // The record name is per-authorization. `_acme-challenge` sits
+        // under the identifier's base name; the wildcard flag doesn't
+        // change it (`example.com` and `*.example.com` share
+        // `_acme-challenge.example.com`), but a distinct SAN like
+        // `www.example.com` gets `_acme-challenge.www.example.com`.
+        let ident = match challenge.identifier().identifier {
+            Identifier::Dns(n) => n.to_string(),
+            other => {
+                return Err(AdapterError::Acme(format!(
+                    "DNS-01 requires a DNS identifier, got {other:?}"
+                )))
+            }
+        };
+        records.push(Dns01Record {
+            name: challenge_record_name(&ident),
+            value: challenge.key_authorization().dns_value(),
+        });
+    }
+    Ok(records)
+}
+
+/// The records of a saved session for exactly these names that Let's
+/// Encrypt still holds open. `None` on anything else — no session, other
+/// names or environment, an order that went Invalid/expired/was finished,
+/// or any error reaching it — and the caller starts a new order.
+async fn resume_pending(domain: &str, names: &[String], staging: bool) -> Option<Vec<Dns01Record>> {
+    use instant_acme::{Account, OrderStatus};
+    let raw = tokio::fs::read(session_path(domain)).await.ok()?;
+    let session: Dns01Session = serde_json::from_slice(&raw).ok()?;
+    if session.staging != staging || session.names != names {
+        return None;
+    }
+    let creds: instant_acme::AccountCredentials =
+        serde_json::from_value(session.account_credentials).ok()?;
+    let account = Account::builder()
+        .ok()?
+        .from_credentials(creds)
+        .await
+        .ok()?;
+    let mut order = account.order(session.order_url).await.ok()?;
+    if !matches!(order.state().status, OrderStatus::Pending) {
+        return None;
+    }
+    let records = pending_records(&mut order).await.ok()?;
+    (!records.is_empty()).then_some(records)
+}
+
 /// Phase 1: create the ACME account + order for `domain` + sans (the
 /// caller adds `*.domain` for a wildcard), collect the DNS-01 TXT values,
 /// persist the resumable session, and return the records to publish.
@@ -440,10 +508,23 @@ pub async fn dns01_begin(
     contact_email: &str,
     staging: bool,
 ) -> Result<Dns01Pending, AdapterError> {
-    use instant_acme::{
-        Account, AuthorizationStatus, ChallengeType, Identifier, NewAccount, NewOrder,
-    };
+    use instant_acme::{Account, Identifier, NewAccount, NewOrder};
     install_crypto_provider();
+
+    let mut names: Vec<String> = std::iter::once(domain.to_string())
+        .chain(sans.iter().cloned())
+        .collect();
+    names.sort();
+    names.dedup();
+
+    // Asking again while the previous order is still pending hands back
+    // the SAME records. A fresh order every click meant fresh TXT values
+    // every click, so whatever the operator had just published was stale
+    // again before Let's Encrypt ever looked at it.
+    if let Some(records) = resume_pending(domain, &names, staging).await {
+        return Ok(Dns01Pending { records });
+    }
+
     let directory_url = if staging {
         "https://acme-staging-v02.api.letsencrypt.org/directory"
     } else {
@@ -464,11 +545,6 @@ pub async fn dns01_begin(
         .await
         .map_err(|e| AdapterError::Acme(format!("acme account: {e}")))?;
 
-    let mut names: Vec<String> = std::iter::once(domain.to_string())
-        .chain(sans.iter().cloned())
-        .collect();
-    names.sort();
-    names.dedup();
     let identifiers: Vec<Identifier> = names.iter().map(|n| Identifier::Dns(n.clone())).collect();
 
     let mut order = {
@@ -486,43 +562,7 @@ pub async fn dns01_begin(
         }
     };
 
-    let mut records: Vec<Dns01Record> = Vec::new();
-    {
-        let mut authorizations = order.authorizations();
-        while let Some(result) = authorizations.next().await {
-            let mut authz =
-                result.map_err(|e| AdapterError::Acme(format!("authorization: {e}")))?;
-            match authz.status {
-                AuthorizationStatus::Pending => {}
-                AuthorizationStatus::Valid => continue,
-                other => {
-                    return Err(AdapterError::Acme(format!(
-                        "authorization in unexpected state {other:?}"
-                    )));
-                }
-            }
-            let challenge = authz
-                .challenge(ChallengeType::Dns01)
-                .ok_or_else(|| AdapterError::Acme("no DNS-01 challenge offered".into()))?;
-            // The record name is per-authorization. `_acme-challenge` sits
-            // under the identifier's base name; the wildcard flag doesn't
-            // change it (`example.com` and `*.example.com` share
-            // `_acme-challenge.example.com`), but a distinct SAN like
-            // `www.example.com` gets `_acme-challenge.www.example.com`.
-            let ident = match challenge.identifier().identifier {
-                Identifier::Dns(n) => n.to_string(),
-                other => {
-                    return Err(AdapterError::Acme(format!(
-                        "DNS-01 requires a DNS identifier, got {other:?}"
-                    )))
-                }
-            };
-            records.push(Dns01Record {
-                name: challenge_record_name(&ident),
-                value: challenge.key_authorization().dns_value(),
-            });
-        }
-    }
+    let records = pending_records(&mut order).await?;
     if records.is_empty() {
         return Err(AdapterError::Acme(
             "every authorization was already valid — nothing to validate".into(),
@@ -572,6 +612,43 @@ pub async fn dns01_finish(domain: &str, certs_root: &str) -> Result<CertInfo, Ad
         .order(session.order_url.clone())
         .await
         .map_err(|e| AdapterError::Acme(format!("resume order: {e}")))?;
+    if matches!(order.state().status, OrderStatus::Invalid) {
+        let details = collect_authz_errors(&mut order).await;
+        return Err(AdapterError::Acme(format!(
+            "this ACME order already failed ({details}); start the wildcard \
+             issuance again to get a new order — its TXT values will differ"
+        )));
+    }
+
+    // Pre-flight: the zone's own nameservers must already serve every
+    // value. Telling Let's Encrypt "ready" is one-shot — if it sees
+    // NXDOMAIN the order goes Invalid and the next try starts over with
+    // NEW values. Refusing here leaves the order pending and the values
+    // the operator published still good.
+    let records = pending_records(&mut order).await?;
+    if !records.is_empty() {
+        let pairs: Vec<(String, String)> = records
+            .iter()
+            .map(|r| (r.name.clone(), r.value.clone()))
+            .collect();
+        match crate::dns_probe::check_txt_published(&pairs).await {
+            Ok(()) => {}
+            Err(crate::dns_probe::ProbeError::NotVisible(report)) => {
+                return Err(AdapterError::Acme(format!(
+                    "{}: {report}. Let's Encrypt was NOT asked to \
+                     validate, so the pending order and its TXT values are \
+                     unchanged — publish them (both values when two share one \
+                     name), wait for the DNS provider, and validate again.",
+                    hyperion_types::DNS01_NOT_READY
+                )));
+            }
+            // Outbound DNS blocked on this node: the check can't run, which
+            // says nothing about the record. Let Let's Encrypt decide.
+            Err(crate::dns_probe::ProbeError::NoResolver(e)) => {
+                tracing::warn!(domain, error = %e, "DNS-01 pre-flight skipped");
+            }
+        }
+    }
 
     {
         let mut authorizations = order.authorizations();

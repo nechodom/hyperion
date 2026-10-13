@@ -608,6 +608,14 @@ pub trait AgentApi: Send + Sync + 'static {
         &self,
         fields: std::collections::BTreeMap<String, String>,
     ) -> Result<(), RpcError>;
+    /// This node's agent.toml, secrets masked node-side.
+    async fn node_config_read(&self) -> Result<String, RpcError>;
+    /// Write one agent.toml section on THIS node and restart its agent.
+    async fn node_config_set(
+        &self,
+        section: String,
+        fields: std::collections::BTreeMap<String, String>,
+    ) -> Result<(), RpcError>;
 
     /// Compare the running binary's git SHA against the upstream
     /// `rolling` release. Cached agent-side; pass `force_refresh: true`

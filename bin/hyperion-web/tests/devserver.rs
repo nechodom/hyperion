@@ -408,11 +408,15 @@ type StubService = HostingService<StubAdapters>;
 async fn start_agent_with_service() -> (PathBuf, tempfile::TempDir, Arc<StubService>) {
     let dir = tempfile::tempdir().expect("dir");
     // Setup mode saves the ACME contact into agent.toml; give it a scratch one.
-    let agent_toml = std::env::var_os("DEVSERVER_SETUP").map(|_| {
-        let p = dir.path().join("agent.toml");
-        std::fs::write(&p, "[acme]\ncontact_email = \"\"\n").expect("agent.toml");
-        p
-    });
+    // The demo-nodes walk gets one too, so a node's Settings page can be read
+    // and saved on the master row.
+    let agent_toml = std::env::var_os("DEVSERVER_SETUP")
+        .or_else(|| std::env::var_os("DEVSERVER_DEMO_NODES"))
+        .map(|_| {
+            let p = dir.path().join("agent.toml");
+            std::fs::write(&p, "[acme]\ncontact_email = \"\"\n").expect("agent.toml");
+            p
+        });
     let pool = open_memory().await.expect("memory db");
     let secrets = Arc::new(SecretsStore::new(dir.path().join("secrets")));
     let svc = Arc::new(HostingService::<StubAdapters> {
