@@ -2336,6 +2336,11 @@ td .btn.small { padding: 0.25rem 0.6rem; }
   cursor: not-allowed;
   pointer-events: none;
 }
+/* A read-only block of forms (a node whose settings follow the master):
+   the values stay readable, the Save buttons have nothing to do. */
+fieldset:disabled button[type="submit"] {
+  display: none;
+}
 .btn.loading::after {
   content: '';
   width: 12px;

@@ -67,13 +67,15 @@
   <details class="alerts-more" style="margin-bottom:1rem">
     <summary class="text-soft" style="cursor:pointer;padding:.45rem .2rem">Show {{ alerts.len() - 3 }} more notification(s)…</summary>
   {% endif %}
-  <div class="flash {% if a.severity == "error" %}error{% else if a.severity == "warn" %}warn{% else %}info{% endif %}">
+  <div class="flash {% if a.severity == "error" %}error{% else if a.severity == "warn" %}warn{% else %}info{% endif %}" data-alert="{{ a.kind }}">
     <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
       {% if a.severity == "error" %}<circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
       {% else %}<path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>{% endif %}
     </svg>
     <div class="flash-body">
-      {{ a.message }}
+      {#- Every node's alerts are on this list; a row from a worker says which,
+          since "disk / is 96% full" means nothing without the box. -#}
+      {% if let Some(n) = a.node %}<strong>{{ n }}:</strong> {% endif %}{{ a.message }}
       {% if let Some(h) = a.hosting %}
         — <a href="/hostings/{{ h }}" style="color:inherit;text-decoration:underline">Open {{ h }}</a>
       {% endif %}

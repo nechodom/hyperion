@@ -164,7 +164,12 @@ pub async fn post_upsert(
     // showing the flash, "Save failed: …" would have arrived in the green
     // success banner with a tick beside it.
     let (key, msg) = match resp {
-        RpcResponse::BackupTargetUpserted { id } => ("flash", format!("Saved target #{id}")),
+        RpcResponse::BackupTargetUpserted { id } => {
+            // Workers' scheduled backups read the targets the settings sync
+            // gives them.
+            state.cluster_sync.kick();
+            ("flash", format!("Saved target #{id}"))
+        }
         RpcResponse::Error(e) => ("flash_error", format!("Save failed: {e}")),
         _ => (
             "flash_error",
@@ -184,6 +189,7 @@ pub async fn post_delete(
     }
     let _ =
         hyperion_rpc_client::call(&state.agent_socket, Request::BackupTargetDelete { id }).await?;
+    state.cluster_sync.kick();
     Ok(Redirect::to("/settings/backups?flash=Target+deleted").into_response())
 }
 

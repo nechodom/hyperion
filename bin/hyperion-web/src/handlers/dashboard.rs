@@ -35,7 +35,8 @@ struct DashboardTpl<'a> {
     /// a friendly site name instead of the opaque ULID. Filled by
     /// the handler from the `recent` + `cluster` lists.
     hosting_domains: std::collections::HashMap<String, String>,
-    alerts: Vec<DashboardAlert>,
+    /// Master + every node, each row labelled with the node that raised it.
+    alerts: Vec<NodeAlert>,
     services_health: ServicesHealth,
     spark_load: Sparkline,
     spark_bw: Sparkline,
@@ -86,7 +87,9 @@ pub async fn get_dashboard(
         // Over-fetch: sign-ins are filtered out below and would otherwise
         // crowd every real change off the feed.
         hyperion_rpc_client::call(&state.agent_socket, Request::AuditList { limit: 60 }),
-        hyperion_rpc_client::call(&state.agent_socket, Request::DashboardAlerts),
+        // Every node, not only this one: a worker's failed site, expired
+        // certificate or full disk is just as much "needs attention".
+        fetch_alerts(&state, is_tenant),
         hyperion_rpc_client::call(&state.agent_socket, Request::ServicesHealth),
         hyperion_rpc_client::call(
             &state.agent_socket,
@@ -113,13 +116,11 @@ pub async fn get_dashboard(
             .collect(),
         _ => vec![],
     };
-    let mut alerts = match alerts_res {
-        Ok(RpcResponse::DashboardAlerts(v)) => v,
-        _ => vec![],
-    };
-    // Errors first: only three alerts show before the fold, and those three
-    // should be the ones that are broken now, not the oldest warnings.
-    alerts.sort_by_key(|a| severity_rank(&a.severity));
+    let (alerts, alerts_failed) = alerts_res;
+    // The recent-hostings fan-out may have answered where this one did not:
+    // a node whose alerts were thrown away for a bad signature still says so.
+    let node_auth_warning =
+        node_auth_warning.or_else(|| crate::handlers::node_auth_warning(&alerts_failed));
     let services_health = match health_res {
         Ok(RpcResponse::ServicesHealth(h)) => h,
         _ => ServicesHealth::default(),
@@ -277,6 +278,135 @@ fn severity_rank(s: &str) -> u8 {
     }
 }
 
+/// One "needs attention" row: an agent's [`DashboardAlert`] plus the node
+/// that raised it (`None` = this master).
+pub(crate) struct NodeAlert {
+    pub kind: String,
+    pub severity: String,
+    pub message: String,
+    pub hosting: Option<String>,
+    pub node: Option<String>,
+}
+
+impl NodeAlert {
+    fn from_agent(a: DashboardAlert, node: Option<String>) -> Self {
+        NodeAlert {
+            kind: a.kind,
+            severity: a.severity,
+            message: a.message,
+            hosting: a.hosting,
+            node,
+        }
+    }
+}
+
+/// `DashboardAlerts` from the master and every enrolled node, merged. Each
+/// agent only knows its own sites, disks and load, so asking the master alone
+/// hid every worker's failed site, expired certificate and full disk. The
+/// failed half is handed back for the authentication banner.
+async fn fetch_alerts(
+    state: &SharedState,
+    is_tenant: bool,
+) -> (
+    Vec<NodeAlert>,
+    Vec<(
+        hyperion_types::NodeSummary,
+        crate::dispatcher::DispatchError,
+    )>,
+) {
+    // Cluster alerts are not shown to tenant roles at all — skip the fan-out.
+    if is_tenant {
+        return (Vec::new(), Vec::new());
+    }
+    let local = async {
+        match hyperion_rpc_client::call(&state.agent_socket, Request::DashboardAlerts).await {
+            Ok(RpcResponse::DashboardAlerts(v)) => v,
+            _ => Vec::new(),
+        }
+    };
+    let remote = async {
+        let nodes = crate::dispatcher::cached_nodes(state)
+            .await
+            .unwrap_or_default();
+        crate::dispatcher::fan_out_reporting(state, nodes, Request::DashboardAlerts).await
+    };
+    let (local, (answered, failed)) = tokio::join!(local, remote);
+    let answered = answered
+        .into_iter()
+        .filter_map(|(n, resp)| match resp {
+            RpcResponse::DashboardAlerts(v) => Some((n, v)),
+            _ => None,
+        })
+        .collect();
+    (merge_alerts(local, answered, &failed), failed)
+}
+
+/// The operator-chosen name of a node, falling back to its id.
+fn node_name(n: &hyperion_types::NodeSummary) -> String {
+    if n.label.trim().is_empty() {
+        n.node_id.clone()
+    } else {
+        n.label.clone()
+    }
+}
+
+/// Merge the master's alerts with each node's, label the node rows, and add
+/// a row for every node that did not answer — "no alerts" from a node nobody
+/// heard from is not "nothing needs attention". Errors sort first: only three
+/// alerts show before the fold, and those three should be the ones broken
+/// now, not the oldest warnings.
+///
+/// A node whose answer failed AUTHENTICATION is left out here: the page's
+/// security banner names it, and a "did not answer" row would dress a forged
+/// response up as downtime.
+fn merge_alerts(
+    local: Vec<DashboardAlert>,
+    answered: Vec<(hyperion_types::NodeSummary, Vec<DashboardAlert>)>,
+    failed: &[(
+        hyperion_types::NodeSummary,
+        crate::dispatcher::DispatchError,
+    )],
+) -> Vec<NodeAlert> {
+    use crate::dispatcher::DispatchError;
+    let mut out: Vec<NodeAlert> = local
+        .into_iter()
+        .map(|a| NodeAlert::from_agent(a, None))
+        .collect();
+    for (n, alerts) in answered {
+        let name = node_name(&n);
+        out.extend(
+            alerts
+                .into_iter()
+                .map(|a| NodeAlert::from_agent(a, Some(name.clone()))),
+        );
+    }
+    for (n, e) in failed {
+        // Only pre-scrubbed, fixed text: a raw transport error can carry
+        // the worker's address.
+        let (severity, why) = match e {
+            DispatchError::ResponseAuthFailed { .. } => continue,
+            DispatchError::NodeUnreachable { kind, .. } => ("error", kind.clone()),
+            DispatchError::CertPinMissing { .. } => (
+                "warn",
+                "it has no TLS certificate pin on file while pinning is enforced".to_string(),
+            ),
+            DispatchError::NoEndpoint(_) => ("warn", "it has no address on record".to_string()),
+            _ => ("warn", "its agent did not give an answer".to_string()),
+        };
+        out.push(NodeAlert {
+            kind: "node_unreachable".into(),
+            severity: severity.into(),
+            message: format!(
+                "Could not check this node: {why}. Its sites' alerts are not shown here."
+            ),
+            hosting: None,
+            node: Some(node_name(n)),
+        });
+    }
+    out.sort_by_key(|a| severity_rank(&a.severity));
+    out
+}
+
 /// Returns `(agent info, recent hostings, page error, node-auth warning)`.
 /// The last element is `Some` when a node's hostings were dropped because
 /// its response failed authentication — the card must not read as "this
@@ -372,6 +502,89 @@ mod tests {
         assert_eq!(fmt_window(3 * 3600 + 55 * 60), "4h");
         assert_eq!(fmt_window(45 * 60), "45m");
         assert_eq!(fmt_window(3 * 86400), "3d");
+    }
+
+    fn node(node_id: &str, label: &str) -> hyperion_types::NodeSummary {
+        hyperion_types::NodeSummary {
+            node_id: node_id.to_string(),
+            label: label.to_string(),
+            master_url: None,
+            agent_version: String::new(),
+            public_ip: None,
+            enrolled_at: 0,
+            last_seen_at: 0,
+            is_drained: false,
+            drain_reason: String::new(),
+            tls_spki_pin: None,
+            resp_pubkey: None,
+            rpc_port: None,
+            external_ip: None,
+        }
+    }
+
+    fn alert(kind: &str, severity: &str, hosting: Option<&str>) -> DashboardAlert {
+        DashboardAlert {
+            kind: kind.into(),
+            severity: severity.into(),
+            message: format!("{kind} happened"),
+            hosting: hosting.map(Into::into),
+        }
+    }
+
+    /// The worker's broken site and full disk used to be invisible: only the
+    /// master's agent was asked. Every row says which node raised it, and a
+    /// node that did not answer is itself on the list.
+    #[test]
+    fn worker_alerts_join_the_list_labelled_and_a_silent_node_is_listed() {
+        use crate::dispatcher::DispatchError;
+        let local = vec![alert("backup_stale", "warn", Some("a.cz"))];
+        let answered = vec![(
+            node("n-5", "s5"),
+            vec![
+                alert("hosting_failed", "error", Some("w.cz")),
+                alert("disk_critical", "error", None),
+            ],
+        )];
+        let failed = vec![(
+            node("n-6", "s6"),
+            DispatchError::NodeUnreachable {
+                node_id: "n-6".into(),
+                kind: "TCP connect refused".into(),
+            },
+        )];
+        let got = merge_alerts(local, answered, &failed);
+        // Errors first, master row kept.
+        assert_eq!(got[0].severity, "error");
+        assert!(got
+            .iter()
+            .any(|a| a.node.is_none() && a.kind == "backup_stale"));
+        let failed_site = got.iter().find(|a| a.kind == "hosting_failed").unwrap();
+        assert_eq!(failed_site.node.as_deref(), Some("s5"));
+        assert_eq!(failed_site.hosting.as_deref(), Some("w.cz"));
+        let disk = got.iter().find(|a| a.kind == "disk_critical").unwrap();
+        assert_eq!(disk.node.as_deref(), Some("s5"));
+        let silent = got.iter().find(|a| a.kind == "node_unreachable").unwrap();
+        assert_eq!(silent.node.as_deref(), Some("s6"));
+        assert!(
+            silent.message.contains("TCP connect refused"),
+            "{}",
+            silent.message
+        );
+    }
+
+    /// A forged answer has its own banner; listing it here as "did not
+    /// answer" would dress a security event up as downtime.
+    #[test]
+    fn an_unauthenticated_node_is_left_to_the_banner() {
+        use crate::dispatcher::DispatchError;
+        let failed = vec![(
+            node("n-6", "s6"),
+            DispatchError::ResponseAuthFailed {
+                node_id: "n-6".into(),
+                reason: "bad signature".into(),
+            },
+        )];
+        assert!(merge_alerts(vec![], vec![], &failed).is_empty());
     }
 
     #[test]

@@ -123,6 +123,15 @@ struct NodeSettingsTpl<'a> {
     raw_error: String,
     fail2ban: Option<Fail2banView>,
     acme_contact: String,
+    /// A worker whose synced sections the master's settings sync manages:
+    /// every card is shown read-only, because the next sync pass would undo
+    /// an edit made here. False for the master and for an agent too old to
+    /// take the sync (its own file is still the only way to set it).
+    managed: bool,
+    /// What the last sync pass said about this node; empty before the first.
+    sync_verdict: String,
+    sync_detail: String,
+    sync_ok: bool,
 }
 
 #[derive(Deserialize)]
@@ -213,6 +222,11 @@ pub async fn get_node_settings(
             .filter(|h| !h.is_empty())
             .unwrap_or_else(|| "this server".to_string()),
     };
+    let sync = if is_master {
+        None
+    } else {
+        state.cluster_sync.status_for(&node_id).await
+    };
     let tpl = NodeSettingsTpl {
         username: &ctx.username,
         user_initial: super::user_initial(&ctx.username),
@@ -230,6 +244,13 @@ pub async fn get_node_settings(
         raw_error,
         fail2ban,
         acme_contact,
+        managed: !is_master && sync.as_ref().map_or(true, |s| s.managed()),
+        sync_verdict: sync
+            .as_ref()
+            .map(|s| s.verdict().to_string())
+            .unwrap_or_default(),
+        sync_detail: sync.as_ref().map(|s| s.detail.clone()).unwrap_or_default(),
+        sync_ok: sync.as_ref().is_some_and(|s| s.is_ok()),
     };
     Ok(Html(tpl.render()?).into_response())
 }
@@ -286,9 +307,31 @@ pub async fn post_node_settings(
         ))
         .into_response());
     };
+    // The master's settings sync owns these sections on a worker that can
+    // take it; a value written here would be replaced on the next pass.
+    if !is_local(&node_id)
+        && state
+            .cluster_sync
+            .status_for(&node_id)
+            .await
+            .map_or(true, |s| s.managed())
+    {
+        return Ok(Redirect::to(&format!(
+            "{page}&flash_error={}#{anchor}",
+            urlencode(&format!(
+                "{label} is set for every node on Settings, and this node follows the master — \
+                 change it there"
+            ))
+        ))
+        .into_response());
+    }
     let section = form.section.clone();
     let fields = fields_to_write(&section, form.fields);
     let target = (!is_local(&node_id)).then_some(node_id.as_str());
+    if target.is_none() {
+        // The master's file IS the cluster's value.
+        state.cluster_sync.kick();
+    }
     let resp = crate::dispatcher::dispatch_to_node(
         &state,
         target,

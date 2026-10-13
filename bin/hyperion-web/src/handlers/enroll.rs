@@ -184,6 +184,9 @@ pub async fn post_enroll(
     match outcome {
         Ok((node_id, secret, master_rpc_pubkey)) => {
             let master_url = derive_master_from_headers(&headers, &state);
+            // A new node starts on its own agent.toml; hand it the cluster's
+            // settings as soon as it is up instead of at the next regular pass.
+            state.cluster_sync.kick();
             Ok(Json(EnrollResponse {
                 node_id,
                 master_url,

@@ -45,42 +45,7 @@ pub async fn get_monitoring(
         return Ok(axum::response::Redirect::to("/").into_response());
     }
 
-    let mut items: Vec<MonitorOverviewItem> = Vec::new();
-
-    // Master local.
-    if let Ok(RpcResponse::MonitorOverview(rows)) =
-        crate::dispatcher::dispatch_to_node(&state, None, Request::MonitorOverview).await
-    {
-        let mut rows = rows;
-        for r in &mut rows {
-            // Rows from the master local socket are local regardless of
-            // the node_id they stored — master rows stamp the hostname
-            // (e.g. "s4"), not empty. Tag them all with the LOCAL
-            // sentinel unconditionally (the old is_empty() guard left
-            // "s4" in place, which becomes the 400 "node s4 is not
-            // enrolled" the moment a monitor action form reuses it).
-            r.node_id = crate::dispatcher::LOCAL_NODE_SENTINEL.to_string();
-        }
-        items.extend(rows);
-    }
-
-    // Every enrolled worker. Goes through the shared fan-out helper (not a
-    // hand-rolled `if let Ok(..)` loop) so a node is queried concurrently AND
-    // a dropped node is logged + reportable — the old loop swallowed a failed
-    // response signature with no trace at all.
-    let workers = crate::handlers::hostings::fetch_remote_nodes(&state)
-        .await
-        .unwrap_or_default();
-    let (answered, failed) =
-        crate::dispatcher::fan_out_reporting(&state, workers, Request::MonitorOverview).await;
-    for (n, resp) in answered {
-        if let RpcResponse::MonitorOverview(mut rows) = resp {
-            for r in &mut rows {
-                r.node_id = n.node_id.clone();
-            }
-            items.extend(rows);
-        }
-    }
+    let (mut items, failed) = collect_overview(&state).await;
     let node_auth_warning = crate::handlers::node_auth_warning(&failed);
 
     // Resort the merged list — agents already sort their own slice,
@@ -115,4 +80,56 @@ pub async fn get_monitoring(
         node_auth_warning,
     };
     Ok(Html(tpl.render()?).into_response())
+}
+
+/// `MonitorOverview` from the master and every enrolled worker, merged, plus
+/// the workers that dropped out. Master rows carry the LOCAL sentinel and
+/// worker rows the enrolled `node_id`. Shared with the sidebar's monitoring
+/// dot, which must count the same sites this page lists.
+pub(crate) async fn collect_overview(
+    state: &SharedState,
+) -> (
+    Vec<MonitorOverviewItem>,
+    Vec<(
+        hyperion_types::NodeSummary,
+        crate::dispatcher::DispatchError,
+    )>,
+) {
+    let mut items: Vec<MonitorOverviewItem> = Vec::new();
+
+    // Master local.
+    if let Ok(RpcResponse::MonitorOverview(rows)) =
+        crate::dispatcher::dispatch_to_node(state, None, Request::MonitorOverview).await
+    {
+        let mut rows = rows;
+        for r in &mut rows {
+            // Rows from the master local socket are local regardless of
+            // the node_id they stored — master rows stamp the hostname
+            // (e.g. "s4"), not empty. Tag them all with the LOCAL
+            // sentinel unconditionally (the old is_empty() guard left
+            // "s4" in place, which becomes the 400 "node s4 is not
+            // enrolled" the moment a monitor action form reuses it).
+            r.node_id = crate::dispatcher::LOCAL_NODE_SENTINEL.to_string();
+        }
+        items.extend(rows);
+    }
+
+    // Every enrolled worker. Goes through the shared fan-out helper (not a
+    // hand-rolled `if let Ok(..)` loop) so a node is queried concurrently AND
+    // a dropped node is logged + reportable — the old loop swallowed a failed
+    // response signature with no trace at all.
+    let workers = crate::handlers::hostings::fetch_remote_nodes(state)
+        .await
+        .unwrap_or_default();
+    let (answered, failed) =
+        crate::dispatcher::fan_out_reporting(state, workers, Request::MonitorOverview).await;
+    for (n, resp) in answered {
+        if let RpcResponse::MonitorOverview(mut rows) = resp {
+            for r in &mut rows {
+                r.node_id = n.node_id.clone();
+            }
+            items.extend(rows);
+        }
+    }
+    (items, failed)
 }

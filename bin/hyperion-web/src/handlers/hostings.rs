@@ -7848,15 +7848,25 @@ fn mem_pct(s: &hyperion_types::NodeStats) -> f64 {
 /// returns the hosting wins; its `node_id` is returned so the
 /// handler can pass it to `dispatch_to_node`.
 ///
+/// A DOMAIN lookup does not stop at a suspended or trashed answer: a Move
+/// leaves the original parked (suspended) on the source under the same
+/// domain, and the master is asked first, so taking its answer resolved
+/// every domain-addressed action after a Move to the copy that no longer
+/// serves the site. The parked answer is kept and returned only when no
+/// node has a live one (see [`LookupPick`]).
+///
 /// Returns `(HostingDetail, node_id_or_None)`. `None` means master.
 pub async fn find_hosting_anywhere(
     state: &SharedState,
     sel: HostingSelector,
 ) -> Result<(hyperion_types::HostingDetail, Option<String>), AppError> {
+    let mut pick = LookupPick::new(&sel);
     // 1. Master local.
     match hyperion_rpc_client::call(&state.agent_socket, Request::HostingGet(sel.clone())).await {
         Ok(RpcResponse::HostingGet(d)) if detail_matches(&sel, d.id.as_str(), &d.domain) => {
-            return Ok((d, None))
+            if let Some(hit) = pick.offer(d.state, (d, None)) {
+                return Ok(hit);
+            }
         }
         Ok(RpcResponse::HostingGet(d)) => {
             // Cannot be an attack — this is our own socket — so it is a bug
@@ -7891,7 +7901,9 @@ pub async fn find_hosting_anywhere(
         .await;
         match r {
             Ok(RpcResponse::HostingGet(d)) if detail_matches(&sel, d.id.as_str(), &d.domain) => {
-                return Ok((d, Some(n.node_id)))
+                if let Some(hit) = pick.offer(d.state, (d, Some(n.node_id))) {
+                    return Ok(hit);
+                }
             }
             Ok(RpcResponse::HostingGet(d)) => {
                 // A node answered for a hosting that is not the one asked
@@ -7919,10 +7931,55 @@ pub async fn find_hosting_anywhere(
             }
         }
     }
+    // No live copy anywhere: the parked one is the site, as it was before.
+    // Preferred over a node error too — that is what the master-first
+    // lookup always answered for a hosting it held.
+    if let Some(hit) = pick.into_fallback() {
+        return Ok(hit);
+    }
     if let Some(e) = node_problem {
         return Err(e);
     }
     Err(AppError::NotFound)
+}
+
+/// Which of the matching answers a cluster lookup settles on.
+///
+/// An `Id` names exactly one row, so the first match is the answer whatever
+/// its state. A `Domain` can match several rows across the cluster — after a
+/// Move the source keeps the original SUSPENDED (and a trash keeps a row
+/// TRASHED) under the same name — so a parked answer is held back while the
+/// remaining nodes are asked, and the first LIVE match wins. The first parked
+/// answer is the fallback when nothing live turns up.
+struct LookupPick<T> {
+    prefer_live: bool,
+    fallback: Option<T>,
+}
+
+impl<T> LookupPick<T> {
+    fn new(sel: &HostingSelector) -> Self {
+        LookupPick {
+            prefer_live: matches!(sel, HostingSelector::Domain(_)),
+            fallback: None,
+        }
+    }
+
+    /// Offer one matching answer. `Some` = take it now; `None` = keep asking.
+    fn offer(&mut self, st: hyperion_types::HostingState, hit: T) -> Option<T> {
+        use hyperion_types::HostingState;
+        let parked = matches!(st, HostingState::Suspended | HostingState::Trashed);
+        if !self.prefer_live || !parked {
+            return Some(hit);
+        }
+        if self.fallback.is_none() {
+            self.fallback = Some(hit);
+        }
+        None
+    }
+
+    fn into_fallback(self) -> Option<T> {
+        self.fallback
+    }
 }
 
 fn is_not_found_error(e: &hyperion_rpc::error::RpcError) -> bool {
@@ -15326,6 +15383,60 @@ mod tests {
         assert!(!detail_matches(&asked, "h1", "victim.cz.evil"));
         assert!(!detail_matches(&asked, "h1", "notvictim.cz"));
         assert!(!detail_matches(&asked, "h1", ""));
+    }
+
+    /// After a Move the original stays behind SUSPENDED on the source node
+    /// under the same domain. A domain lookup that took the master's answer
+    /// first resolved every domain-addressed action to that parked copy.
+    #[test]
+    fn a_domain_lookup_prefers_the_live_copy_over_a_parked_one() {
+        use hyperion_types::HostingState;
+        let asked =
+            HostingSelector::Domain(hyperion_validate::Domain::parse("moved.cz").expect("parse"));
+        let mut pick = LookupPick::new(&asked);
+        // Master answers first with the suspended original: keep asking.
+        assert_eq!(pick.offer(HostingState::Suspended, "master"), None);
+        // The worker that received the Move has the live one: take it.
+        assert_eq!(pick.offer(HostingState::Active, "worker"), Some("worker"));
+    }
+
+    #[test]
+    fn a_parked_copy_is_still_found_when_it_is_the_only_one() {
+        use hyperion_types::HostingState;
+        let asked =
+            HostingSelector::Domain(hyperion_validate::Domain::parse("parked.cz").expect("parse"));
+        let mut pick = LookupPick::new(&asked);
+        assert_eq!(pick.offer(HostingState::Trashed, "master"), None);
+        assert_eq!(pick.offer(HostingState::Suspended, "worker"), None);
+        // The FIRST parked answer wins — the master's, as before.
+        assert_eq!(pick.into_fallback(), Some("master"));
+    }
+
+    /// An id names exactly one row, suspended or not — nothing to prefer.
+    #[test]
+    fn an_id_lookup_takes_the_first_match_whatever_its_state() {
+        use hyperion_types::{HostingId, HostingState};
+        let asked = HostingSelector::Id(HostingId::from("h1".to_string()));
+        let mut pick = LookupPick::new(&asked);
+        assert_eq!(
+            pick.offer(HostingState::Suspended, "master"),
+            Some("master")
+        );
+    }
+
+    #[test]
+    fn a_failed_or_provisioning_site_is_live_for_lookup() {
+        use hyperion_types::HostingState;
+        let asked =
+            HostingSelector::Domain(hyperion_validate::Domain::parse("x.cz").expect("parse"));
+        for st in [
+            HostingState::Active,
+            HostingState::Failed,
+            HostingState::Provisioning,
+        ] {
+            let mut pick = LookupPick::new(&asked);
+            assert_eq!(pick.offer(st, 1), Some(1), "{st:?}");
+        }
     }
 
     /// Render the site-health row for a given probe result.

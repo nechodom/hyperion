@@ -1653,6 +1653,22 @@ pub fn print_pretty(resp: &Response) {
         Response::EmailConfigSet => println!("email config set + applied (agent restarting)"),
         Response::NodeConfigRead(s) => print!("{s}"),
         Response::NodeConfigSet => println!("agent.toml updated (agent restarting)"),
+        Response::ClusterConfigRevision(r) => match r {
+            Some(r) => println!("cluster settings revision: {r}"),
+            None => println!("cluster settings: never received from the master"),
+        },
+        Response::ClusterConfigApply {
+            restart_scheduled,
+            ignored,
+        } => {
+            println!("cluster settings applied");
+            if *restart_scheduled {
+                println!("  agent restarts once no job is running");
+            }
+            if !ignored.is_empty() {
+                println!("  ignored (unknown to this agent): {}", ignored.join(", "));
+            }
+        }
         Response::UpdateCheck(s) => {
             println!("update check:");
             println!("  current: {}", s.current_sha);

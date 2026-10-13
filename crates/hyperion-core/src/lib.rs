@@ -18,6 +18,7 @@
 #![forbid(unsafe_code)]
 
 pub mod agent;
+pub mod cluster_sync;
 pub mod config_persist;
 pub mod letters;
 pub mod master_rpc;

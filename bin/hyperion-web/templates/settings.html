@@ -1917,7 +1917,7 @@
       but the files, database, certificates, and user are preserved. After the retention
       window, the scheduler runs the permanent-delete pipeline automatically.
       When off (the default), deletes are permanent immediately, as before.
-      {% if !nodes.is_empty() %}Saved on this master only.{% endif %}
+      Saved on every node — a delete runs on the node that owns the site, and reads its own copy.
     </p>
     <form method="post" action="/settings/config" autocomplete="off">
       <input type="hidden" name="_csrf" value="{{ csrf_token }}">
@@ -1966,7 +1966,8 @@
       local disk when you configured the target was never sent. This walks the
       backups that have no off-site copy recorded — <strong>oldest first</strong>,
       because the oldest is closest to being pruned off local disk — and
-      uploads them.
+      uploads them. It runs on this server and on every node, each over the
+      backups of the sites it owns, and the job log reports each node.
       <br>
       Backups whose archive has already been pruned are reported separately
       and counted as gone: nothing can retry those.

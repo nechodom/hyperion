@@ -68,6 +68,11 @@ pub struct NodeRow {
     pub version_skew: bool,
     /// Plain-language problems, worst first: `(tone, text)`.
     pub issues: Vec<(&'static str, String)>,
+    /// What the master's settings sync last said about this worker, e.g.
+    /// "in sync"; empty for the master and before the first pass.
+    pub sync_verdict: String,
+    /// The sentence behind `sync_verdict`, for its tooltip.
+    pub sync_detail: String,
 }
 
 impl NodeRow {
@@ -137,6 +142,8 @@ fn build_rows(
         is_test: master_is_test,
         version_skew: false,
         issues: Vec::new(),
+        sync_verdict: String::new(),
+        sync_detail: String::new(),
     });
     for n in nodes {
         let online = n.last_seen_at > 0 && now - n.last_seen_at <= STALE_HEARTBEAT_SECS;
@@ -176,12 +183,40 @@ fn build_rows(
             online,
             version_skew,
             issues,
+            sync_verdict: String::new(),
+            sync_detail: String::new(),
         });
     }
     rows
 }
 
 /// Name what needs a look, worst first, or say plainly that nothing does.
+/// Fold the settings sync's last word into the worker rows. A worker that is
+/// online but not taking the master's settings is a problem worth a line; an
+/// offline one already says "offline", which is the reason.
+fn merge_sync(
+    rows: &mut [NodeRow],
+    sync: &std::collections::HashMap<String, crate::cluster_sync::NodeSync>,
+) {
+    for r in rows.iter_mut().filter(|r| !r.is_master) {
+        let Some(s) = sync.get(&r.n.node_id) else {
+            continue;
+        };
+        r.sync_verdict = s.verdict().to_string();
+        r.sync_detail = s.detail.clone();
+        if r.online && !s.is_ok() {
+            let text = if s.managed() {
+                "settings from the master did not arrive"
+            } else {
+                "not taking the master's settings — update it"
+            };
+            // Keep worst-first: after every error, before anything milder.
+            let at = r.issues.iter().take_while(|(t, _)| *t == "err").count();
+            r.issues.insert(at, ("warn", text.to_string()));
+        }
+    }
+}
+
 fn build_verdict(rows: &[NodeRow]) -> NodesVerdict {
     let workers = rows.iter().filter(|r| !r.is_master).count();
     // One part per node, its problems joined — the node is named once, and
@@ -245,12 +280,13 @@ async fn render_page(
         fetch_cluster_test_node_ids(state),
         fetch_master_info(state),
     );
-    let rows = build_rows(
+    let mut rows = build_rows(
         master.as_ref(),
         nodes.unwrap_or_default(),
         &test_csv,
         hyperion_types::now_secs(),
     );
+    merge_sync(&mut rows, &state.cluster_sync.all().await);
     let verdict = build_verdict(&rows);
     let master_url = derive_master_url(state, headers).await;
     let tpl = InstallTpl {
@@ -1483,6 +1519,48 @@ mod tests {
             "a node is named once, its problems joined: {}",
             v.text
         );
+    }
+
+    #[test]
+    fn a_worker_off_the_masters_settings_is_a_problem_only_while_online() {
+        use crate::cluster_sync::{NodeSync, SyncState};
+        let now = hyperion_types::now_secs();
+        let mut rows = build_rows(
+            Some(&master_info("v1")),
+            vec![
+                worker("ok", now, "v1"),
+                worker("old", now, "v1"),
+                worker("down", now - 3600, "v1"),
+            ],
+            "",
+            now,
+        );
+        let mk = |state, detail: &str| NodeSync {
+            state,
+            at: now,
+            detail: detail.into(),
+        };
+        let sync = [
+            ("ok".to_string(), mk(SyncState::InSync, "has it")),
+            ("old".to_string(), mk(SyncState::OldAgent, "older agent")),
+            ("down".to_string(), mk(SyncState::Failed, "unreachable")),
+        ]
+        .into_iter()
+        .collect();
+        merge_sync(&mut rows, &sync);
+        assert_eq!(rows[1].sync_verdict, "in sync");
+        assert!(rows[1].issues.is_empty());
+        assert_eq!(
+            rows[2].issues,
+            vec![(
+                "warn",
+                "not taking the master's settings — update it".to_string()
+            )]
+        );
+        // Offline already explains itself, and stays the worst problem.
+        assert!(rows[3].issues.iter().all(|(_, t)| !t.contains("settings")));
+        assert_eq!(rows[3].sync_verdict, "sync failed");
+        assert_eq!(rows[0].sync_verdict, "", "the master is the source");
     }
 
     #[test]

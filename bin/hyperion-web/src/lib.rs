@@ -16,6 +16,7 @@
 
 pub mod admin_user;
 pub mod auth;
+pub mod cluster_sync;
 pub mod config;
 pub mod dispatcher;
 pub mod error;

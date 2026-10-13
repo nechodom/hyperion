@@ -14,6 +14,8 @@
     <div class="subtitle">
       {% if is_master %}
         What this server does with its own <code>agent.toml</code>. Panel-wide settings are on <a href="/settings">Settings</a>.
+      {% else if managed %}
+        What this node runs with: its scanner, its backups, its updates, its certificates. These follow the master — change them on <a href="/settings">Settings</a> and every node gets the new value within minutes.
       {% else %}
         What this node does on its own: its scanner, its backups, its updates, its certificates. Saved in the node’s <code>/etc/hyperion/agent.toml</code>; the node’s agent restarts to apply each save.
       {% endif %}
@@ -21,7 +23,23 @@
   </div>
 </div>
 
+{% if !is_master %}
+<div class="flash {% if sync_ok %}info{% else if sync_verdict.is_empty() %}info{% else %}error{% endif %}" id="settings-sync" style="margin-bottom:1rem">
+  <div class="flash-body">
+    {% if sync_verdict.is_empty() %}
+      <strong>Settings from the master:</strong> not checked yet — the first pass runs within a few minutes of the panel starting.
+    {% else %}
+      <strong>Settings from the master: {{ sync_verdict }}.</strong> {{ label }} {{ sync_detail }}.
+    {% endif %}
+    {% if managed && config.is_some() %}
+      The cards below show this node’s current values, read-only.
+    {% endif %}
+  </div>
+</div>
+{% endif %}
+
 {% if let Some(config) = config %}
+<fieldset {% if managed %}disabled{% endif %} style="border:0;padding:0;margin:0;min-width:0">
 
 {# ───── Updates ───── #}
 <div class="group">
@@ -151,12 +169,12 @@
 {# ───── Backups ───── #}
 <div class="group">
   <div class="ghead">Backups</div>
-  {% if has_workers %}
+  {% if has_workers && !managed %}
   <div class="item muted">
     <p class="text-soft small" style="margin:0;line-height:1.55">
       <strong>What is kept</strong>, <strong>Local backup copies</strong> and both retention cards are also on
       <a href="/settings#protection-mode">Settings → Backups &amp; trash</a>, which saves them to
-      <em>every</em> node. Set a different value here for this node only; the next save there replaces it.
+      <em>every</em> node.{% if is_master %} The values here are the ones every node follows.{% else %} This node runs an older agent that does not take the master’s settings yet, so set its value here until it is updated.{% endif %}
     </p>
   </div>
   {% endif %}
@@ -368,6 +386,7 @@
     </p>
   </div>
 </div>
+</fieldset>
 
 {% else %}
 <div class="flash error">

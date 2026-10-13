@@ -377,6 +377,7 @@ fn test_state_with_setup(
         wp_lists: Default::default(),
         caches: Default::default(),
         setup,
+        cluster_sync: Default::default(),
     })
 }
 
