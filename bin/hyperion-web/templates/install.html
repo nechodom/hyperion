@@ -247,6 +247,25 @@
         </div>
       </section>
 
+      {% if r.is_master %}
+      {# The master can host test sites too; draining it is not offered. #}
+      <section class="node-sec">
+        <h4>Placement</h4>
+        <div class="node-sec-row">
+          <form method="post" action="/install/toggle-test-node" class="inline-form"
+                data-confirm-title="{% if r.is_test %}Unmark {{ n.label }} as a test server{% else %}Mark {{ n.label }} as a test server{% endif %}"
+                data-confirm-body="{% if r.is_test %}This server returns to production-only mode. Existing sites stay where they are, and the wizard accepts production domains here again.{% else %}New sites created here must use the preview address (Settings → HTTPS &amp; previews → Preview address), and the wizard refuses a production domain on it. Existing sites keep working but show a TEST chip.{% endif %}"
+                data-confirm-confirm-label="{% if r.is_test %}Unmark as test{% else %}Mark as test{% endif %}"
+                data-confirm-variant="primary">
+            <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+            <input type="hidden" name="node_id" value="{{ n.node_id }}">
+            <button type="submit" class="btn small">{% if r.is_test %}Unmark as test{% else %}Mark as test{% endif %}</button>
+          </form>
+          <span class="text-soft small">{% if r.is_test %}Test server: the Test website form puts sites here.{% else %}A test server only takes sites on a preview subdomain.{% endif %}</span>
+        </div>
+      </section>
+      {% endif %}
+
       {% if !r.is_master %}
       {# ─── Placement: where new sites may land ─── #}
       <section class="node-sec">

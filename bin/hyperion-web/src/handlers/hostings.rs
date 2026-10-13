@@ -53,6 +53,8 @@ struct ListTpl<'a> {
     /// hostings were therefore discarded — the list below is INCOMPLETE.
     /// Rendered by `_node_auth_banner.html`.
     node_auth_warning: Option<String>,
+    /// A test site can be made — shows the "Test website" button.
+    test_available: bool,
 }
 
 #[derive(Template)]
@@ -106,6 +108,33 @@ struct NewTpl<'a> {
     /// in the form; post_create dispatches profile_apply after the
     /// hosting goes Active.
     profiles: Vec<hyperion_types::HostingProfile>,
+    /// A test site can be made (template + a test server) — shows the
+    /// "Test website" card that leads to the one-screen form.
+    test_available: bool,
+    /// The master's hostname, the `{node}` its test addresses use.
+    master_hostname: String,
+}
+
+/// `/hostings/new?test=1` — the one-screen test-site form. The operator
+/// picks what to run and types a subdomain; the address comes from the
+/// preview template, the server from the test-node list, and everything
+/// else from the same defaults the wizard uses.
+#[derive(Template)]
+#[template(path = "hostings_new_test.html")]
+struct NewTestTpl<'a> {
+    username: &'a str,
+    user_initial: char,
+    active: &'static str,
+    css_version: &'static str,
+    htmx_version: &'static str,
+    csrf_token: String,
+    error: Option<&'a str>,
+    setup: TestSetup,
+    name_in: String,
+    /// "" | "wordpress" | "static" | "php" | "reverse_proxy"
+    site_type_in: String,
+    target_node_in: String,
+    proxy_upstream_url_in: String,
 }
 
 /// Per-field append to `CreateForm` for the optional WP install
@@ -561,13 +590,22 @@ pub async fn get_list(
     // Pre-tag each row with `is_on_test_node` + `is_on_unreachable_node`
     // so the template can render the TEST chip + offline pill without
     // doing closure-based set lookups (askama can't parse Rust closures).
-    let test_set: std::collections::HashSet<String> = fetch_cluster_config(&state)
-        .await
+    let (master_hostname, cluster_cfg) = fetch_master_and_cluster(&state).await;
+    let mut test_set: std::collections::HashSet<String> = cluster_cfg
         .test_node_ids
         .split(',')
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect();
+    // The master may be listed as `local` or by hostname, and its rows
+    // carry either (or no node id at all) — a test master tags them all.
+    if is_master_test(&cluster_cfg, &master_hostname) {
+        test_set.insert(crate::dispatcher::LOCAL_NODE_SENTINEL.to_string());
+        if !master_hostname.is_empty() {
+            test_set.insert(master_hostname.clone());
+        }
+    }
+    let test_available = fetch_test_setup(&state).await.available();
     // Compute "unreachable" set: any node whose last_seen_at heartbeat
     // is more than UNREACHABLE_HEARTBEAT_SECS old. The agent posts
     // heartbeats every ~30s; 5 min of silence is a clear "the worker
@@ -592,11 +630,18 @@ pub async fn get_list(
     let on = |set: &std::collections::HashSet<String>, r: &HostingSummary| {
         r.node_id.as_ref().is_some_and(|n| set.contains(n))
     };
+    let on_test = |r: &HostingSummary| {
+        test_set.contains(
+            r.node_id
+                .as_deref()
+                .unwrap_or(crate::dispatcher::LOCAL_NODE_SENTINEL),
+        )
+    };
     let searched: Vec<ListRow> = rows
         .into_iter()
         .filter(|r| needle.is_empty() || r.domain.to_lowercase().contains(&needle))
         .map(|r| {
-            let (t, u) = (on(&test_set, &r), on(&unreachable_set, &r));
+            let (t, u) = (on_test(&r), on(&unreachable_set, &r));
             ListRow::new(r, t, u, now_secs)
         })
         .collect();
@@ -685,11 +730,23 @@ pub async fn get_list(
         flash: q.bulk_flash,
         wp_assets: fetch_wp_assets(&state).await.unwrap_or_default(),
         node_auth_warning,
+        test_available,
     };
     Ok(Html(tpl.render()?).into_response())
 }
 
-pub async fn get_new(State(state): State<SharedState>, ctx: AuthCtx) -> Result<Response, AppError> {
+#[derive(Deserialize, Default)]
+pub struct NewQuery {
+    /// `1` opens the one-screen test-site form instead of the wizard.
+    #[serde(default)]
+    test: String,
+}
+
+pub async fn get_new(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    axum::extract::Query(q): axum::extract::Query<NewQuery>,
+) -> Result<Response, AppError> {
     // Creating a new hosting is a cluster-scoped action. Tenant-
     // scoped roles (operator / customer / viewer) get bounced —
     // the post_create handler enforces this server-side anyway,
@@ -702,6 +759,24 @@ pub async fn get_new(State(state): State<SharedState>, ctx: AuthCtx) -> Result<R
     // button (form_id /hostings/dns-check-domain) in addition to the
     // main /hostings POST.
     let csrf_token = super::session_csrf_token(&state, &ctx);
+    let test_setup = fetch_test_setup(&state).await;
+    if q.test == "1" {
+        let tpl = NewTestTpl {
+            username: &ctx.username,
+            user_initial: super::user_initial(&ctx.username),
+            active: "hostings",
+            css_version: super::css_version(),
+            htmx_version: super::htmx_version(),
+            csrf_token,
+            error: None,
+            setup: test_setup,
+            name_in: String::new(),
+            site_type_in: String::new(),
+            target_node_in: String::new(),
+            proxy_upstream_url_in: String::new(),
+        };
+        return Ok(no_store(Html(tpl.render()?).into_response()));
+    }
     // Fetch enrolled remote nodes so the "Target node" dropdown can
     // offer them. Failure here just leaves the dropdown empty — the
     // form still works for the default-master case.
@@ -718,9 +793,11 @@ pub async fn get_new(State(state): State<SharedState>, ctx: AuthCtx) -> Result<R
     // Check the [cluster] section from agent.toml — master might be
     // set to control-plane-only, in which case we hide the master
     // option from the Target-node dropdown.
-    let cluster_cfg = fetch_cluster_config(&state).await;
+    let (master_hostname, cluster_cfg) = fetch_master_and_cluster(&state).await;
     let master_accepts_hostings = cluster_cfg.master_accepts_hostings;
     let tpl = NewTpl {
+        test_available: test_setup.available(),
+        master_hostname: master_hostname.clone(),
         username: &ctx.username,
         user_initial: super::user_initial(&ctx.username),
         active: "hostings",
@@ -738,16 +815,25 @@ pub async fn get_new(State(state): State<SharedState>, ctx: AuthCtx) -> Result<R
         nodes,
         target_node_in: String::new(),
         master_accepts_hostings,
-        test_node_ids: cluster_cfg.test_node_ids,
-        test_domain_template: cluster_cfg.test_domain_template,
+        // The master's option posts `local`; list it under that id too when
+        // it is a test server, so the short-name field follows it.
+        test_node_ids: if is_master_test(&cluster_cfg, &master_hostname) {
+            format!("{},local", cluster_cfg.test_node_ids)
+        } else {
+            cluster_cfg.test_node_ids.clone()
+        },
+        test_domain_template: cluster_cfg.test_domain_template.clone(),
         profiles: fetch_all_profiles(&state).await.unwrap_or_default(),
     };
-    // Browsers (and reverse proxies in front) can cache /hostings/new
-    // by default. After an enrollment the dropdown should refresh on
-    // the next visit, NOT show the previous stale rendering. The
-    // form also carries a one-time CSRF token, so a cached page
-    // would be useless on submit anyway.
-    let mut response = Html(tpl.render()?).into_response();
+    Ok(no_store(Html(tpl.render()?).into_response()))
+}
+
+/// Browsers (and reverse proxies in front) can cache /hostings/new
+/// by default. After an enrollment the dropdown should refresh on
+/// the next visit, NOT show the previous stale rendering. The
+/// form also carries a one-time CSRF token, so a cached page
+/// would be useless on submit anyway.
+fn no_store(mut response: Response) -> Response {
     let h = response.headers_mut();
     h.insert(
         axum::http::header::CACHE_CONTROL,
@@ -758,7 +844,7 @@ pub async fn get_new(State(state): State<SharedState>, ctx: AuthCtx) -> Result<R
         axum::http::HeaderValue::from_static("no-cache"),
     );
     h.insert("vary", axum::http::HeaderValue::from_static("Cookie"));
-    Ok(response)
+    response
 }
 
 /// Look up enrolled nodes via NodesList. The master itself isn't a
@@ -816,6 +902,11 @@ pub struct CreateForm {
     /// leave it empty.
     #[serde(default)]
     pub test_site_name: String,
+    /// "1" when the post came from the one-screen test-site form
+    /// (`/hostings/new?test=1`). The name is then required, and a refused
+    /// post re-renders that form instead of the full wizard.
+    #[serde(default)]
+    pub test_mode: String,
     /// "on" if the user checked the "install WordPress" checkbox.
     #[serde(default)]
     pub install_wp: String,
@@ -873,7 +964,7 @@ pub struct CreateForm {
 pub async fn post_create(
     State(state): State<SharedState>,
     ctx: AuthCtx,
-    Form(form): Form<CreateForm>,
+    Form(mut form): Form<CreateForm>,
 ) -> Result<Response, AppError> {
     // Creating a new hosting is a cluster-scoped action — operators
     // with per-hosting grants can't conjure new sites into existence.
@@ -887,19 +978,51 @@ pub async fn post_create(
     // "Site name" field, we synthesize the final domain from the
     // cluster template instead of using the free-form domain field.
     // Production targets fall through unchanged.
-    let cluster_cfg = fetch_cluster_config(&state).await;
+    let (master_hostname, cluster_cfg) = fetch_master_and_cluster(&state).await;
     let mut effective_domain = form.domain.trim().to_string();
-    let target_is_test = !form.target_node.is_empty()
-        && form.target_node != crate::dispatcher::LOCAL_NODE_SENTINEL
-        && cluster_cfg.is_test_node(&form.target_node);
+    let target_is_test = is_test_target(&cluster_cfg, &master_hostname, &form.target_node);
+    if form.test_mode == "1" {
+        if !target_is_test {
+            return Ok(render_new_error(
+                &state,
+                &ctx,
+                &csrf_token,
+                &form,
+                "That server no longer takes test sites. Pick another one, or mark it as a test server on the Nodes page.",
+            )
+            .await);
+        }
+        if form.test_site_name.trim().is_empty() {
+            return Ok(render_new_error(
+                &state,
+                &ctx,
+                &csrf_token,
+                &form,
+                "Type the subdomain name for the test site.",
+            )
+            .await);
+        }
+        // The test form asks for nothing but the name. A PHP app gets the
+        // runtime and database the wizard pre-selects; WordPress is
+        // backfilled below; static and proxy need neither.
+        if form.site_type == "php" {
+            if form.php.is_empty() {
+                form.php = "8.3".into();
+            }
+            if form.db.is_empty() {
+                form.db = "mariadb".into();
+            }
+        }
+    }
     if target_is_test && !form.test_site_name.trim().is_empty() {
         if cluster_cfg.test_domain_template.is_empty() {
             return Ok(render_new_error(
+                &state,
                 &ctx,
                 &csrf_token,
                 &form,
                 "Target is a test node but no preview address template is set (Settings → HTTPS & previews → Preview address). Set one first.",
-            ));
+            ).await);
         }
         // Validate the short-name: lowercase alphanum + dash, no
         // leading / trailing dash, ≤ 32 chars. Keeps the derived
@@ -912,24 +1035,22 @@ pub async fn post_create(
             || name.ends_with('-')
         {
             return Ok(render_new_error(
+                &state,
                 &ctx,
                 &csrf_token,
                 &form,
                 "Site name must be 1–32 chars of a–z 0–9 -, no leading/trailing dash.",
-            ));
+            )
+            .await);
         }
         // Resolve the target node's hostname (label) so `{node}`
         // expands to "s4" not "node_01kt9d6hrsbaw1pyzjdmwnmrhp" —
-        // operator-friendly URL. Falls back to the long node_id
-        // when NodesList lookup fails (rare).
-        let node_hostname = fetch_remote_nodes(&state)
-            .await
-            .unwrap_or_default()
-            .into_iter()
-            .find(|n| n.node_id == form.target_node)
-            .map(|n| n.label)
-            .unwrap_or_default();
-        effective_domain = cluster_cfg.render_test_domain(&name, &form.target_node, &node_hostname);
+        // operator-friendly URL. The master renders with its own
+        // hostname. Falls back to the long node_id when NodesList
+        // lookup fails (rare).
+        let (node_id, node_hostname) =
+            test_render_identity(&state, &master_hostname, &form.target_node).await;
+        effective_domain = cluster_cfg.render_test_domain(&name, &node_id, &node_hostname);
     } else if target_is_test && form.test_site_name.trim().is_empty() {
         // Operator picked a test node but didn't fill the short-name
         // field → enforce that the typed domain matches the template
@@ -946,6 +1067,7 @@ pub async fn post_create(
                     .ends_with(&suffix.to_ascii_lowercase())
             {
                 return Ok(render_new_error(
+                    &state,
                     &ctx,
                     &csrf_token,
                     &form,
@@ -954,7 +1076,8 @@ pub async fn post_create(
                          previews → Preview address). Either pick a production node, fill the \
                          short Site name field, or change the typed domain."
                     ),
-                ));
+                )
+                .await);
             }
         }
     } else if !target_is_test && !cluster_cfg.test_domain_template.is_empty() {
@@ -967,6 +1090,7 @@ pub async fn post_create(
                 .ends_with(&suffix.to_ascii_lowercase())
         {
             return Ok(render_new_error(
+                &state,
                 &ctx,
                 &csrf_token,
                 &form,
@@ -974,7 +1098,8 @@ pub async fn post_create(
                     "Domain ends with `{suffix}` which is reserved for test nodes. \
                      Either pick a test node or use a different domain."
                 ),
-            ));
+            )
+            .await);
         }
     }
 
@@ -1005,11 +1130,13 @@ pub async fn post_create(
     // Parse inputs; render the form with an error if anything is malformed.
     let domain = match Domain::parse(&effective_domain) {
         Ok(d) => d.without_www(),
-        Err(e) => return Ok(render_new_error(&ctx, &csrf_token, &form, &e.to_string())),
+        Err(e) => {
+            return Ok(render_new_error(&state, &ctx, &csrf_token, &form, &e.to_string()).await)
+        }
     };
     let aliases = match parse_aliases(&form.aliases) {
         Ok(v) => v,
-        Err(e) => return Ok(render_new_error(&ctx, &csrf_token, &form, &e)),
+        Err(e) => return Ok(render_new_error(&state, &ctx, &csrf_token, &form, &e).await),
     };
     // WordPress needs a PHP runtime AND a database. When the operator
     // chose the WordPress card but left the runtime at its blank/none
@@ -1034,7 +1161,7 @@ pub async fn post_create(
     } else {
         match PhpVersion::from_str(php_choice) {
             Ok(v) => Some(v),
-            Err(e) => return Ok(render_new_error(&ctx, &csrf_token, &form, &e)),
+            Err(e) => return Ok(render_new_error(&state, &ctx, &csrf_token, &form, &e).await),
         }
     };
     let db_choice = if form.db.is_empty() || form.db == "none" {
@@ -1051,7 +1178,7 @@ pub async fn post_create(
     } else {
         match DbProvision::from_str(db_choice) {
             Ok(v) => Some(v),
-            Err(e) => return Ok(render_new_error(&ctx, &csrf_token, &form, &e)),
+            Err(e) => return Ok(render_new_error(&state, &ctx, &csrf_token, &form, &e).await),
         }
     };
     let system_user = if form.system_user.trim().is_empty() {
@@ -1059,7 +1186,9 @@ pub async fn post_create(
     } else {
         match SystemUserName::parse(form.system_user.trim()) {
             Ok(v) => Some(v),
-            Err(e) => return Ok(render_new_error(&ctx, &csrf_token, &form, &e.to_string())),
+            Err(e) => {
+                return Ok(render_new_error(&state, &ctx, &csrf_token, &form, &e.to_string()).await)
+            }
         }
     };
     // A "redirect" hosting has no distinct backend kind — it is provisioned
@@ -1077,11 +1206,13 @@ pub async fn post_create(
         let u = form.proxy_upstream_url.trim().to_string();
         if u.is_empty() {
             return Ok(render_new_error(
+                &state,
                 &ctx,
                 &csrf_token,
                 &form,
                 "Reverse proxy requires an upstream URL.",
-            ));
+            )
+            .await);
         }
         Some(u)
     } else {
@@ -1091,11 +1222,13 @@ pub async fn post_create(
         let u = form.redirect_url.trim();
         if !(u.starts_with("http://") || u.starts_with("https://")) {
             return Ok(render_new_error(
+                &state,
                 &ctx,
                 &csrf_token,
                 &form,
                 "Redirect requires a target URL starting with http:// or https://.",
-            ));
+            )
+            .await);
         }
     }
     let req = HostingCreateReq {
@@ -1130,13 +1263,15 @@ pub async fn post_create(
                     tracing::info!("auto-placement: no workers, falling back to master");
                 } else {
                     return Ok(render_new_error(
+                        &state,
                         &ctx,
                         &csrf_token,
                         &form,
                         "Auto-placement found no online workers and master is \
                          in control-plane-only mode. Enrol a worker or enable \
                          master hosting in Settings → Cluster → Cluster placement.",
-                    ));
+                    )
+                    .await);
                 }
             }
         }
@@ -1153,11 +1288,12 @@ pub async fn post_create(
     // bypass it.
     if target.is_none() && !fetch_master_accepts_hostings(&state).await {
         return Ok(render_new_error(
+            &state,
             &ctx,
             &csrf_token,
             &form,
             "Master is in control-plane-only mode (Settings → Cluster → Cluster placement). Pick a worker node from the dropdown.",
-        ));
+        ).await);
     }
     // Server-side cluster-wide duplicate-domain guard. The wizard runs a
     // live /hostings/check-domain preflight, but that's advisory only — a
@@ -1183,6 +1319,7 @@ pub async fn post_create(
                     Some(n) => format!("node {n}"),
                 };
                 return Ok(render_new_error(
+                    &state,
                     &ctx,
                     &csrf_token,
                     &form,
@@ -1190,7 +1327,8 @@ pub async fn post_create(
                         "A hosting for {} already exists on {}. Pick a different domain.",
                         dup.domain, where_
                     ),
-                ));
+                )
+                .await);
             }
         }
         Err(e) => {
@@ -1701,12 +1839,9 @@ pub async fn post_create(
             };
             Ok(Html(tpl.render()?).into_response())
         }
-        RpcResponse::Error(e) => Ok(render_new_error(
-            &ctx,
-            &csrf_token,
-            &form,
-            &format!("agent: {e}"),
-        )),
+        RpcResponse::Error(e) => {
+            Ok(render_new_error(&state, &ctx, &csrf_token, &form, &format!("agent: {e}")).await)
+        }
         _ => Err(AppError::Internal("unexpected response".into())),
     }
 }
@@ -6252,6 +6387,59 @@ fn extract_test_suffix(template: &str) -> String {
 }
 
 #[cfg(test)]
+mod test_target_tests {
+    use super::{is_master_test, is_test_target, TEST_NAME_TOKEN};
+    use hyperion_types::ClusterConfigView;
+
+    fn cfg(ids: &str) -> ClusterConfigView {
+        ClusterConfigView {
+            test_node_ids: ids.into(),
+            test_domain_template: "{name}.{node}.example.com".into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn master_is_test_when_listed_as_local_or_by_hostname() {
+        assert!(is_master_test(&cfg("local"), "s4"));
+        assert!(is_master_test(&cfg("node_a,s4"), "s4"));
+        assert!(!is_master_test(&cfg("node_a"), "s4"));
+        // An unknown hostname must not match an empty CSV entry.
+        assert!(!is_master_test(&cfg("node_a"), ""));
+    }
+
+    #[test]
+    fn local_and_empty_targets_mean_the_master() {
+        let c = cfg("local");
+        assert!(is_test_target(&c, "s4", "local"));
+        assert!(is_test_target(&c, "s4", ""));
+        assert!(!is_test_target(&c, "s4", "node_a"));
+        // Auto-placement is never a test target, whatever the CSV says.
+        assert!(!is_test_target(&cfg("auto,local"), "s4", "auto"));
+    }
+
+    #[test]
+    fn worker_targets_follow_the_csv() {
+        let c = cfg("node_a");
+        assert!(is_test_target(&c, "s4", "node_a"));
+        assert!(!is_test_target(&c, "s4", "node_b"));
+        assert!(!is_test_target(&c, "s4", "local"));
+    }
+
+    #[test]
+    fn preview_pattern_is_the_real_template_with_a_slot() {
+        // The test form's JS swaps the token for the typed name; the
+        // token must survive the template's lowercasing untouched.
+        let p = cfg("local").render_test_domain(TEST_NAME_TOKEN, "s4", "s4");
+        assert_eq!(p, "__name__.s4.example.com");
+        assert_eq!(
+            p.replace(TEST_NAME_TOKEN, "blog"),
+            cfg("local").render_test_domain("blog", "s4", "s4")
+        );
+    }
+}
+
+#[cfg(test)]
 mod test_suffix_tests {
     use super::extract_test_suffix;
 
@@ -6706,12 +6894,35 @@ pub(crate) fn csrf_token_for(state: &SharedState, ctx: &AuthCtx, form_id: &str) 
     )
 }
 
-fn render_new_error<'a>(
-    ctx: &'a AuthCtx,
-    csrf_token: &'a str,
-    form: &'a CreateForm,
-    error: &'a str,
+async fn render_new_error(
+    state: &SharedState,
+    ctx: &AuthCtx,
+    csrf_token: &str,
+    form: &CreateForm,
+    error: &str,
 ) -> Response {
+    if form.test_mode == "1" {
+        let setup = fetch_test_setup(state).await;
+        let tpl = NewTestTpl {
+            username: &ctx.username,
+            user_initial: super::user_initial(&ctx.username),
+            active: "hostings",
+            css_version: super::css_version(),
+            htmx_version: super::htmx_version(),
+            csrf_token: csrf_token.to_string(),
+            error: Some(error),
+            setup,
+            name_in: form.test_site_name.trim().to_ascii_lowercase(),
+            site_type_in: form.site_type.clone(),
+            target_node_in: form.target_node.clone(),
+            proxy_upstream_url_in: form.proxy_upstream_url.clone(),
+        };
+        return Html(
+            tpl.render()
+                .unwrap_or_else(|_| "<h1>render error</h1>".into()),
+        )
+        .into_response();
+    }
     let tpl = NewTpl {
         username: &ctx.username,
         user_initial: super::user_initial(&ctx.username),
@@ -6749,6 +6960,8 @@ fn render_new_error<'a>(
         // fine because the operator's already past step 1 (the form
         // still carries profile_id from the original submit).
         profiles: Vec::new(),
+        test_available: false,
+        master_hostname: String::new(),
     };
     Html(
         tpl.render()
@@ -6799,6 +7012,129 @@ pub(crate) async fn fetch_cluster_config(state: &SharedState) -> hyperion_types:
         Ok(RpcResponse::AgentConfigView(c)) => c.cluster,
         _ => hyperion_types::ClusterConfigView::default(),
     }
+}
+
+/// Placeholder the test-site form's JS swaps for the typed name. Rendered
+/// through the real template server-side, so the preview the operator sees
+/// is the same string post_create will build — never JS template math.
+const TEST_NAME_TOKEN: &str = "__name__";
+
+/// One server a test site can land on.
+pub(crate) struct TestTarget {
+    /// What the form posts as `target_node`: `local` for the master.
+    pub node_id: String,
+    pub label: String,
+    /// Full address with `__name__` where the subdomain goes.
+    pub pattern: String,
+}
+
+/// Everything the test-site flow needs to know about the cluster.
+pub(crate) struct TestSetup {
+    pub template: String,
+    pub targets: Vec<TestTarget>,
+}
+
+impl TestSetup {
+    /// A test site can be created at all: a template to build the address
+    /// from, and at least one test server to put it on.
+    pub fn available(&self) -> bool {
+        !self.template.is_empty() && !self.targets.is_empty()
+    }
+}
+
+/// Is `target_node` (as the create form posts it) a test server? The master
+/// is posted as `local` but may sit in `test_node_ids` either as `local` (the
+/// Nodes page writes that) or by its hostname — the id its own rows carry.
+fn is_test_target(
+    cluster: &hyperion_types::ClusterConfigView,
+    master_hostname: &str,
+    target_node: &str,
+) -> bool {
+    let target = target_node.trim();
+    if target.is_empty() || target == crate::dispatcher::LOCAL_NODE_SENTINEL {
+        return is_master_test(cluster, master_hostname);
+    }
+    target != "auto" && cluster.is_test_node(target)
+}
+
+pub(crate) fn is_master_test(
+    cluster: &hyperion_types::ClusterConfigView,
+    master_hostname: &str,
+) -> bool {
+    cluster.is_test_node(crate::dispatcher::LOCAL_NODE_SENTINEL)
+        || (!master_hostname.trim().is_empty() && cluster.is_test_node(master_hostname.trim()))
+}
+
+/// `(node_id, hostname)` to render the test template with for `target_node`.
+/// The master renders with its hostname for both — that is the identity the
+/// agent itself resolves the wildcard base with, so the address we build and
+/// the wildcard that covers it come from the same string.
+async fn test_render_identity(
+    state: &SharedState,
+    master_hostname: &str,
+    target_node: &str,
+) -> (String, String) {
+    let target = target_node.trim();
+    if target.is_empty() || target == crate::dispatcher::LOCAL_NODE_SENTINEL {
+        return (master_hostname.to_string(), master_hostname.to_string());
+    }
+    let label = fetch_remote_nodes(state)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .find(|n| n.node_id == target)
+        .map(|n| n.label)
+        .unwrap_or_default();
+    (target.to_string(), label)
+}
+
+/// The master's hostname plus the cluster section, from one cached read.
+async fn fetch_master_and_cluster(
+    state: &SharedState,
+) -> (String, hyperion_types::ClusterConfigView) {
+    match crate::dispatcher::cached_agent_config(state).await {
+        Ok(c) => (c.hostname.clone(), c.cluster.clone()),
+        Err(_) => (String::new(), hyperion_types::ClusterConfigView::default()),
+    }
+}
+
+/// Which servers take test sites, and what address each would give. The
+/// master counts when it is marked as a test server and accepts sites;
+/// drained workers are left out, same as for any new site.
+pub(crate) async fn fetch_test_setup(state: &SharedState) -> TestSetup {
+    let (master_hostname, cluster) = fetch_master_and_cluster(state).await;
+    let template = cluster.test_domain_template.trim().to_string();
+    let mut targets = Vec::new();
+    if template.is_empty() {
+        return TestSetup { template, targets };
+    }
+    if cluster.master_accepts_hostings && is_master_test(&cluster, &master_hostname) {
+        let label = if master_hostname.is_empty() {
+            "This server".to_string()
+        } else {
+            master_hostname.clone()
+        };
+        targets.push(TestTarget {
+            node_id: crate::dispatcher::LOCAL_NODE_SENTINEL.to_string(),
+            label,
+            pattern: cluster.render_test_domain(
+                TEST_NAME_TOKEN,
+                &master_hostname,
+                &master_hostname,
+            ),
+        });
+    }
+    for n in fetch_remote_nodes(state).await.unwrap_or_default() {
+        if n.is_drained || !cluster.is_test_node(&n.node_id) {
+            continue;
+        }
+        targets.push(TestTarget {
+            pattern: cluster.render_test_domain(TEST_NAME_TOKEN, &n.node_id, &n.label),
+            node_id: n.node_id,
+            label: n.label,
+        });
+    }
+    TestSetup { template, targets }
 }
 
 /// Internal preview hostname for a hosting on its owner node, mirroring

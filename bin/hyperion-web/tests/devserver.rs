@@ -408,9 +408,18 @@ type StubService = HostingService<StubAdapters>;
 async fn start_agent_with_service() -> (PathBuf, tempfile::TempDir, Arc<StubService>) {
     let dir = tempfile::tempdir().expect("dir");
     // Setup mode saves the ACME contact into agent.toml; give it a scratch one.
-    let agent_toml = std::env::var_os("DEVSERVER_SETUP").map(|_| {
+    // `DEVSERVER_TEST_SITES=1` also marks this server as a test server with a
+    // preview template, so the Test website form has somewhere to put sites.
+    let test_sites = std::env::var_os("DEVSERVER_TEST_SITES").is_some();
+    let agent_toml = (std::env::var_os("DEVSERVER_SETUP").is_some() || test_sites).then(|| {
         let p = dir.path().join("agent.toml");
-        std::fs::write(&p, "[acme]\ncontact_email = \"\"\n").expect("agent.toml");
+        let mut toml = String::from("[acme]\ncontact_email = \"\"\n");
+        if test_sites {
+            toml.push_str(
+                "[cluster]\ntest_node_ids = \"local\"\ntest_domain_template = \"{name}.test.example.com\"\n",
+            );
+        }
+        std::fs::write(&p, toml).expect("agent.toml");
         p
     });
     let pool = open_memory().await.expect("memory db");
