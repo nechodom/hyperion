@@ -738,14 +738,14 @@
 <p class="note" style="margin:-0.25rem 0 1rem">
   <strong>Preview subdomain not active yet.</strong> This site (and every other on this node)
   will get an internal address under <code>*.{{ preview_domain.base }}</code> once you issue that
-  wildcard certificate — <a href="/settings#preview-wildcard">Settings → HTTPS &amp; previews → Preview wildcard certificates</a>.
+  wildcard certificate — <a href="/settings/https#preview-wildcard">Settings → HTTPS &amp; previews → Preview certificates</a>.
 </p>
 {% else if preview_domain.reason == "no-template" %}
 <p class="note" style="margin:-0.25rem 0 1rem">
   <strong>Want a preview URL for this site?</strong> Preview subdomains give every hosting on the
   node an internal address (e.g. <code>{{ detail.domain }}</code> → <code>preview.&lt;base&gt;</code>)
   with valid TLS, so you can open a site before its real DNS points here. Set it up once in
-  <a href="/settings#preview-address">Settings → HTTPS &amp; previews</a> — it applies to all sites,
+  <a href="/settings/https#preview-address">Settings → HTTPS &amp; previews</a> — it applies to all sites,
   production included.
 </p>
 {% else if preview_domain.reason == "under-base" %}
@@ -865,7 +865,7 @@
       <div class="tile">
         <div class="tile-title">Brute-force bans</div>
         <div class="tile-body"><span class="spinner-inline"></span> Checking this site's scan…</div>
-        <div class="tile-links"><a href="#settings">Ban list for this site →</a><a href="/settings#bruteforce">Node-wide thresholds →</a></div>
+        <div class="tile-links"><a href="#settings">Ban list for this site →</a><a href="/settings/bans#bruteforce-scanner">Scanner thresholds →</a></div>
       </div>
     </div>
   </div>
@@ -1416,7 +1416,7 @@
       </p>
       <p class="note" style="margin-top:0.5rem">
         On a <strong>test node</strong>? Issue one <code>*.&lt;base&gt;</code> wildcard for the whole
-        node under <a href="/settings#preview-wildcard">Settings → HTTPS &amp; previews</a> instead — every
+        node under <a href="/settings/https#preview-wildcard">Settings → HTTPS &amp; previews</a> instead — every
         auto-subdomain reuses it.
       </p>
       <form method="post" action="/hostings/cert/dns01/begin" style="margin-top:0.7rem">
@@ -2685,7 +2685,7 @@
       <div class="setting-row stacked">
         <label class="s-label" for="blocked_countries_text">Blocked countries <span class="hint">ISO codes, comma-separated · e.g. RU, CN, KP</span></label>
         <p class="s-help">
-          Needs the GeoIP database (<a href="/settings#geoip">Settings → Bans &amp; blocking → GeoIP</a>) —
+          Needs the GeoIP database (<a href="/settings/bans#geoip">Settings → Brute-force &amp; GeoIP → GeoIP database</a>) —
           without it every visitor resolves to <code>ZZ</code> and nothing is blocked, so turning this on
           early cannot cut the site off by accident. <strong>Blocking a country blocks its people, not
           just its bots</strong> — customers travelling, VPN users and mobile carriers routed abroad all
@@ -3274,8 +3274,8 @@
 <div class="panel-head">
   <h2>Backups</h2>
   <div class="panel-links">
-    <a href="/settings#backups">Retention &amp; kinds →</a>
-    <a href="/settings/backups">Backup targets →</a>
+    <a href="/settings/backups#backup-retention">Retention &amp; kinds →</a>
+    <a href="/settings/backups#offsite-targets">Off-site targets →</a>
   </div>
   <p>
     Three kinds of copy. <strong>Archives</strong> are a <code>.tar.gz</code> of the files plus a
@@ -3309,7 +3309,7 @@
       <dt>Automatic archives</dt>
       <dd>
         <strong>{{ backup_schedule_label }}</strong>
-        {% if backups_paused_by_mode && backup_cadence != "off" %}<span class="pill warn" style="font-size:0.6rem;margin-left:0.3rem" title="Settings → Backups &amp; trash → What this panel keeps is set to snapshots only. Scheduled archives run only for sites whose care package sells backups.">paused — snapshots-only mode</span>{% endif %}
+        {% if backups_paused_by_mode && backup_cadence != "off" %}<span class="pill warn" style="font-size:0.6rem;margin-left:0.3rem" title="Settings → Backups → What is kept is set to snapshots only. Scheduled archives run only for sites whose care package sells backups.">paused — snapshots-only mode</span>{% endif %}
       </dd>
     </div>
     <div class="fact">
@@ -3328,7 +3328,7 @@
       <div class="flash-body">
         <strong>Off-site copies are not happening for this site.</strong>
         {{ backup_target_warning }}
-        Fix the target in <a href="/settings/backups">Settings → Backup targets</a>, or
+        Fix the target in <a href="/settings/backups#offsite-targets">Settings → Backups → Off-site targets</a>, or
         pick a different destination below.
       </div>
     </div>
@@ -3385,9 +3385,9 @@
     </div>
     <p class="note" style="margin-top:0.8rem">
       How long archives and snapshots are kept, whether the local copy is deleted once it is
-      verified off-site, which kinds this node makes at all, and the FTP
-      off-site target are set in <a href="/settings#backups">Settings → Backups &amp; trash</a>; S3 targets in
-      <a href="/settings/backups">Settings → Backup targets</a>.
+      verified off-site, which kinds this node makes at all, and where off-site copies go
+      (<a href="/settings/backups#offsite-targets">FTP and S3 targets</a>) are all set in
+      <a href="/settings/backups">Settings → Backups</a>.
     </p>
   </details>
 </div>
@@ -3526,7 +3526,7 @@
       Backups already off-site (<em>uploaded</em> or <em>off-site ✓</em>) still keep their local copy
       on this site's node, because <strong>Delete the local copy once it is verified off-site</strong> is
       off there. Turn it on in
-      <a href="/settings#local-copies">Settings → Backups &amp; trash → Local backup copies</a> and this
+      <a href="/settings/backups#local-copies">Settings → Backups → Local copies</a> and this
       site's copies are dropped after its next archive backup (scheduled, or <em>Back up now</em>) — or use
       <em>Off-site &amp; drop</em> on a row now.
     </p>
@@ -4284,8 +4284,8 @@
     <div class="setting-group">Alert channels</div>
     <p class="note" style="margin:0 0 0.8rem">
       Configure any combination — channels left blank are skipped. These override the cluster default
-      webhook (<a href="/settings#slack">Settings → Alerts → Slack webhook</a>); the wording of every send
-      comes from the Alert wording card there. Email requires <code>[email]</code> configured in agent.toml.
+      webhook (<a href="/settings/alerts#slack">Settings → Alerts → Slack</a>); the wording of every send
+      comes from <a href="/settings/alerts#alert-templates">Settings → Alerts → Wording</a>. Email requires <code>[email]</code> configured in agent.toml.
     </p>
     <div class="field">
       <label for="m_email">Email recipients <span class="hint">comma-separated</span></label>
@@ -4551,12 +4551,14 @@
   <h2>Emails &amp; deliverability</h2>
   <div class="panel-links">
     <a href="/emails?hosting={{ detail.id.as_str() }}">Cluster email log for this site →</a>
-    <a href="/settings#mail">Settings → Mail →</a>
+    <a href="/settings/mail">Settings → Mail →</a>
   </div>
   <p>
     The whole deliverability story for <strong>{{ detail.domain }}</strong>: its DNS identity (SPF, DKIM),
-    the language its customer letters are written in, and both send logs. The node-level mail path —
-    relay vs direct MX, reverse DNS, ports — lives in <a href="/settings#mail">Settings → Mail</a>.
+    the language its customer letters are written in, and both send logs. The node's own relay is in
+    <a href="/settings/mail?node={{ target_node }}">Settings → Mail</a>; its postfix — direct MX or
+    smart host, reverse DNS, ports, queue — in
+    <a href="/services?node={{ target_node }}#mail-delivery">Service health → Mail delivery</a>.
   </p>
 </div>
 
@@ -4616,7 +4618,7 @@
   <p class="card-desc">The last 50 emails the agent sent on behalf of this hosting — alerts, certificate reminders, monitor down/up, billing notifications.</p>
 
   {% if email_log.is_empty() %}
-    <p class="note">No emails sent for this hosting yet. Configure SMTP in <a href="/settings#smtp-relay">Settings → Mail</a>, and the next monitor alert or certificate renewal will appear here.</p>
+    <p class="note">No emails sent for this hosting yet. Configure SMTP in <a href="/settings/mail#smtp-relay">Settings → Mail</a>, and the next monitor alert or certificate renewal will appear here.</p>
   {% else %}
   <div class="table-wrap flush-b">
     <table>

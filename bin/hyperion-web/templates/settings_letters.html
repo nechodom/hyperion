@@ -1,0 +1,567 @@
+{% extends "settings_base.html" %}
+{% block section %}
+{% if let Some(e) = config_error %}
+<div class="flash error">
+  <div class="flash-body">The agent's settings could not be read ({{ e }}). The values below are defaults, not what is set.</div>
+</div>
+{% endif %}
+{% if let Some(e) = toml_error %}
+<div class="flash error">
+  <div class="flash-body"><code>/etc/hyperion/agent.toml</code> could not be read ({{ e }}). The wording shown is the built-in English pack, not necessarily what is set.</div>
+</div>
+{% endif %}
+
+{#- What every letter says and in which language. The three cards write
+    [letters] from three separate forms; AgentConfigUpdate only touches the
+    keys a form posts, so each form owns its own keys. -#}
+<fieldset class="group"{{ chrome.ro() }}>
+  <div class="ghead">Language &amp; wording{% if chrome.has_nodes %}<span class="scope-tag" title="Set here, copied to every node by the settings sync">All nodes</span>{% endif %}</div>
+
+  <div class="item" id="letter-language">
+    <div class="row" style="align-items:center;gap:0.6rem;flex-wrap:wrap">
+      <h3 style="margin:0">Languages</h3>
+      <span class="pill muted">{{ lang_label }}</span>
+    </div>
+    <p class="text-soft small" style="margin:0.4rem 0 0.9rem">
+      Customer letters go out in {{ lang_label }} unless a site or its care
+      package picks another language.
+    </p>
+    <form method="post" action="/settings/config" autocomplete="off">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="section" value="letters">
+      <input type="hidden" name="_return_tab" value="letter-language">
+      <div class="field" style="max-width:34rem">
+        <label for="lt_lang">Customer letters <span class="hint">care report, expiry warning, disk-quota letters</span></label>
+        <select id="lt_lang" name="lang">
+          <option value="en"{% if lang == "en" %} selected{% endif %}>English</option>
+          <option value="cs"{% if lang == "cs" %} selected{% endif %}>Čeština</option>
+        </select>
+      </div>
+      <div class="field" style="max-width:34rem">
+        <label for="lt_overrides_lang">Your wording is written in <span class="hint">matters only when sites write in more than one language</span></label>
+        <select id="lt_overrides_lang" name="overrides_lang">
+          <option value=""{% if overrides_lang == "" %} selected{% endif %}>Not specified — use it in every letter</option>
+          <option value="cs"{% if overrides_lang == "cs" %} selected{% endif %}>Čeština — only in Czech letters</option>
+          <option value="en"{% if overrides_lang == "en" %} selected{% endif %}>English — only in English letters</option>
+        </select>
+      </div>
+      <div class="field" style="max-width:34rem">
+        <label for="lt_billing_lang">Billing reminder <span class="hint">the “invoice this client” mail and Slack line, to you</span></label>
+        <select id="lt_billing_lang" name="billing_lang">
+          <option value=""{% if billing_lang == "" %} selected{% endif %}>Same as the customer letters</option>
+          <option value="cs"{% if billing_lang == "cs" %} selected{% endif %}>Čeština</option>
+          <option value="en"{% if billing_lang == "en" %} selected{% endif %}>English</option>
+        </select>
+      </div>
+      <p class="text-soft small" style="margin:0">
+        Your own alerts have a language of their own:
+        <a href="/settings/alerts#alert-language">Alerts → Language</a>.
+      </p>
+      <div class="item-actions"><button type="submit" class="btn primary">Save</button></div>
+    </form>
+    <details class="howto">
+      <summary>How a letter's language is chosen</summary>
+      <ul>
+        <li>A site's own language wins (set on the site's page), then its care
+          package's, then <strong>Customer letters</strong> here. Headings,
+          month names, number separators and plural endings follow it; the
+          panel itself stays English.</li>
+        <li><strong>Your wording is written in</strong> names the language
+          you wrote your letters and sentences in. Set it, and they are used
+          only in letters of that language — a Czech sentence never lands in
+          an English letter, which gets the built-in wording instead. Not
+          specified, your wording goes into every letter, whatever its
+          language.</li>
+        <li>The billing reminder tells you to invoice a client, so it follows
+          the customer letters unless you pin it.</li>
+      </ul>
+    </details>
+  </div>
+
+  {#- ONE editor per letter, backed by the catalogue (`[letters]`). The older
+      whole-letter templates in [notifications] replaced it for every
+      language; while one is still set, the warning below offers to retire
+      it — see page_letters.rs. -#}
+  <div class="item" id="customer-letters">
+    <div class="row" style="align-items:center;gap:0.6rem;flex-wrap:wrap">
+      <h3 style="margin:0">Letters</h3>
+      {% if !legacy.is_empty() %}<span class="pill warn">older template in force</span>
+      {% else if care_set || expiry_set %}<span class="pill ok">your wording</span>
+      {% else %}<span class="pill muted">built-in</span>{% endif %}
+    </div>
+    <p class="text-soft small" style="margin:0.4rem 0 0.9rem">
+      The care report and the warning before a hosting expires, as site owners
+      receive them. An empty field sends the built-in wording, shown in grey.
+    </p>
+
+    {% if !legacy.is_empty() %}
+    <div class="flash warn" style="margin:0 0 1rem">
+      <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+      <div class="flash-body">
+        <strong>An older whole-letter template sets {{ legacy_names }}.</strong>
+        It replaces the editor's wording for every customer, in every language,
+        so changes made here do not reach anyone yet.
+        <div class="row" style="gap:0.5rem;margin-top:0.6rem">
+          <form method="post" action="/settings/letters/adopt-legacy"
+                data-confirm-title="Move the older template into the editor"
+                data-confirm-body="Its text replaces the editor's wording for the same parts of the letter, and the older template is removed. The editor then holds what customers receive."
+                data-confirm-confirm-label="Move">
+            <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+            <input type="hidden" name="mode" value="move">
+            <button type="submit" class="btn small primary">Move into the editor</button>
+          </form>
+          <form method="post" action="/settings/letters/adopt-legacy"
+                data-confirm-title="Discard the older template"
+                data-confirm-body="It is deleted. From the next letter on, customers receive the editor's wording, or the built-in letter where the editor is empty."
+                data-confirm-confirm-label="Discard">
+            <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+            <input type="hidden" name="mode" value="discard">
+            <button type="submit" class="btn small">Discard</button>
+          </form>
+        </div>
+      </div>
+    </div>
+    {% endif %}
+
+    <form method="post" action="/settings/config" autocomplete="off">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="section" value="letters">
+      <input type="hidden" name="_return_tab" value="customer-letters">
+
+      <div class="row" style="gap:0.5rem;margin:0 0 0.6rem">
+        <strong>Care report</strong>
+        <span class="text-soft small">{% if care_set %}your wording{% else %}built-in{% endif %}</span>
+        <span class="grow"></span>
+        <button type="button" class="btn small ghost" data-letter-fill="care">Start from the built-in</button>
+        <button type="button" class="btn small ghost" data-letter-clear="care">Clear</button>
+      </div>
+      <div class="row" style="align-items:flex-start;gap:1rem">
+        <div style="flex:1 1 32rem;min-width:0">
+          <div class="field">
+            <label for="lt_care_subject">Subject</label>
+            <input id="lt_care_subject" name="care.subject" type="text" data-letter="care"
+                   style="font-family:var(--font-mono);font-size:0.85rem"
+                   placeholder="{{ care_subject.built_in }}" value="{{ care_subject.current }}">
+          </div>
+          <div class="field">
+            <label for="lt_care_body">Body</label>
+            <textarea id="lt_care_body" name="care.body" rows="16" data-letter="care"
+                      style="font-family:var(--font-mono);font-size:0.82rem"
+                      placeholder="{{ care_body.built_in }}">{{ care_body.current }}</textarea>
+          </div>
+        </div>
+        <div style="flex:1 1 32rem;min-width:0">
+          <div class="text-soft small" style="margin:0 0 0.35rem">Preview — a sample site whose availability is not monitored</div>
+          <div style="background:var(--surface-2);border-radius:var(--radius-xs);padding:0.55rem 0.7rem;font-size:0.85rem;max-height:30rem;overflow:auto">
+            <div id="lt_care_subject_preview" style="font-weight:600;margin:0 0 0.5rem"></div>
+            <div id="lt_care_body_preview" style="white-space:pre-wrap;overflow-wrap:anywhere"></div>
+          </div>
+        </div>
+      </div>
+      <details class="howto" style="margin:0.2rem 0 1.4rem">
+        <summary>Care report placeholders</summary>
+        <p><strong>Sections</strong> — each becomes a whole worded section in
+          the letter's language, including “not monitored” when that is the
+          truth: <code>{attacks}</code> <code>{updates}</code>
+          <code>{traffic}</code> <code>{uptime}</code> <code>{backups}</code>
+          <code>{integrity}</code> <code>{performance}</code>
+          <code>{service}</code>. Their wording is under
+          <a href="#letter-wording">Sentences</a>.</p>
+        <p><strong>Values only</strong> — for sentences of your own:
+          <code>{domain}</code> <code>{period_start}</code> <code>{period_end}</code>
+          <code>{days}</code> <code>{days_count}</code>
+          <code>{period_start_iso}</code> <code>{period_end_iso}</code>
+          <code>{attacks_count}</code> <code>{updates_count}</code>
+          <code>{traffic_requests}</code> <code>{traffic_sent}</code>
+          <code>{traffic_received}</code> <code>{disk_peak}</code>
+          <code>{uptime_pct}</code> <code>{backups_count}</code>
+          <code>{backups_failed}</code> <code>{backup_last_iso}</code>.</p>
+        <p>A value that was never measured prints <code>—</code>, never
+          <code>0</code>. Leave out a section that was not measured and its
+          “we could not measure this” note is added at the end anyway; a
+          section the site's care plan does not include prints nothing. The
+          subject takes the same placeholders. A misspelt placeholder stays in
+          the text as typed, so the preview shows it.</p>
+      </details>
+
+      <div class="row" style="gap:0.5rem;margin:0 0 0.6rem">
+        <strong>Expiry warning</strong>
+        <span class="text-soft small">{% if expiry_set %}your wording{% else %}built-in{% endif %}</span>
+        <span class="grow"></span>
+        <button type="button" class="btn small ghost" data-letter-fill="expiry">Start from the built-in</button>
+        <button type="button" class="btn small ghost" data-letter-clear="expiry">Clear</button>
+      </div>
+      <div class="row" style="align-items:flex-start;gap:1rem">
+        <div style="flex:1 1 32rem;min-width:0">
+          <div class="field">
+            <label for="lt_expiry_subject">Subject</label>
+            <input id="lt_expiry_subject" name="expiry.subject.days" type="text" data-letter="expiry"
+                   style="font-family:var(--font-mono);font-size:0.85rem"
+                   placeholder="{{ expiry_subject.built_in }}" value="{{ expiry_subject.current }}">
+          </div>
+          <div class="field">
+            <label for="lt_expiry_subject_today">Subject on the day it expires</label>
+            <input id="lt_expiry_subject_today" name="expiry.subject.today" type="text" data-letter="expiry"
+                   style="font-family:var(--font-mono);font-size:0.85rem"
+                   placeholder="{{ expiry_subject_today.built_in }}" value="{{ expiry_subject_today.current }}">
+          </div>
+          <div class="field">
+            <label for="lt_expiry_body">Body</label>
+            <textarea id="lt_expiry_body" name="expiry.body" rows="12" data-letter="expiry"
+                      style="font-family:var(--font-mono);font-size:0.82rem"
+                      placeholder="{{ expiry_body.built_in }}">{{ expiry_body.current }}</textarea>
+          </div>
+        </div>
+        <div style="flex:1 1 32rem;min-width:0">
+          <div class="text-soft small" style="margin:0 0 0.35rem">Preview — a sample site, 7 days before it expires</div>
+          <div style="background:var(--surface-2);border-radius:var(--radius-xs);padding:0.55rem 0.7rem;font-size:0.85rem;max-height:30rem;overflow:auto">
+            <div id="lt_expiry_subject_preview" style="font-weight:600;margin:0 0 0.5rem"></div>
+            <div id="lt_expiry_body_preview" style="white-space:pre-wrap;overflow-wrap:anywhere"></div>
+          </div>
+          <div class="text-soft small" style="margin:0.5rem 0 0">On the day it expires, the subject reads: <span id="lt_expiry_today_preview" style="color:var(--text)"></span></div>
+        </div>
+      </div>
+      <details class="howto" style="margin:0.2rem 0 0">
+        <summary>Expiry warning placeholders</summary>
+        <p><strong>Worded</strong>, in the letter's language:
+          <code>{domain}</code> <code>{when}</code> <code>{expires_at}</code>
+          <code>{days_left}</code> <code>{grace_days}</code>
+          <code>{delete_at}</code>.</p>
+        <p><strong>Values only</strong>: <code>{days_left_count}</code>
+          <code>{grace_days_count}</code> <code>{expires_at_iso}</code>
+          <code>{delete_at_iso}</code>. The subjects also take
+          <code>{days}</code> and <code>{unit}</code> — the count and its
+          word.</p>
+        <p>The last warning goes out on the day the hosting expires, hence its
+          own subject. The dates are the ones the scheduler really queued:
+          suspension on expiry, deletion after the grace period.</p>
+      </details>
+
+      <div class="item-actions"><button type="submit" class="btn primary">Save</button></div>
+    </form>
+    <p class="text-soft small" style="margin:0.6rem 0 0">
+      To see what one specific customer receives — their language, their
+      plan's sections — use <strong>Preview</strong> on that site's Care
+      packages card.{% if chrome.has_nodes %} Each node writes the letters for
+      its own sites from this wording;
+      <a href="/settings/cluster#settings-sync">Settings sync</a> shows any
+      node that is behind.{% endif %}
+    </p>
+  </div>
+
+  <div class="item" id="letter-wording">
+    <div class="row" style="align-items:center;gap:0.6rem;flex-wrap:wrap">
+      <h3 style="margin:0">Sentences</h3>
+      {% if sentences_rewritten > 0 %}<span class="pill ok">{{ sentences_rewritten }} rewritten</span>
+      {% else %}<span class="pill muted">built-in</span>{% endif %}
+    </div>
+    <p class="text-soft small" style="margin:0.4rem 0 0.9rem">
+      Every other sentence Hyperion writes: the report's sections, the
+      disk-quota and billing letters, your alerts and Slack lines. An empty
+      field uses the built-in wording shown in grey.
+    </p>
+    <div class="row" style="gap:0.5rem;margin:0 0 0.9rem">
+      {% if chrome.can_edit %}<a class="btn small" href="/settings/letters.toml" download>Download all wording</a>{% endif %}
+      <button class="btn small ghost" type="button" id="lt-prefill">Fill empty fields with the built-in wording</button>
+    </div>
+    <form method="post" action="/settings/config" autocomplete="off" id="lt-sentences">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="section" value="letters">
+      <input type="hidden" name="_return_tab" value="letter-wording">
+      {% for g in groups %}
+      <details style="margin:0.4rem 0;border:1px solid var(--border);border-radius:var(--radius-xs)">
+        <summary style="cursor:pointer;padding:0.5rem 0.7rem;font-weight:600">{{ g.name }}{% if g.rewritten > 0 %} <span class="text-soft small" style="font-weight:400">· {{ g.rewritten }} rewritten</span>{% endif %}</summary>
+        <div style="padding:0.2rem 0.7rem 0.7rem">
+          {% for s in g.strings %}
+          <div class="field" style="margin-bottom:0.7rem">
+            <label for="{{ s.dom_id }}"><code style="font-size:0.8rem">{{ s.id }}</code><span class="hint">{{ s.note }}</span></label>
+            {% if s.multiline %}
+            <textarea id="{{ s.dom_id }}" name="{{ s.id }}" rows="4"
+                      style="font-family:var(--font-mono);font-size:0.82rem"
+                      placeholder="{{ s.built_in }}">{{ s.current }}</textarea>
+            {% else %}
+            <input id="{{ s.dom_id }}" type="text" name="{{ s.id }}"
+                   style="font-family:var(--font-mono);font-size:0.82rem"
+                   placeholder="{{ s.built_in }}" value="{{ s.current }}">
+            {% endif %}
+          </div>
+          {% endfor %}
+        </div>
+      </details>
+      {% endfor %}
+      <div class="item-actions"><button type="submit" class="btn primary">Save</button></div>
+    </form>
+    <details class="howto">
+      <summary>Replace the wording from a file</summary>
+      <p>
+        Paste an edited <code>hyperion-letters.toml</code> (from Download all
+        wording). Sentences the file does not mention keep their wording, so
+        a few lines are a valid paste; an id this version does not know is
+        named back to you. Ids work quoted or not —
+        <code>"care.subject"</code> or <code>care.subject</code>.
+      </p>
+      <form method="post" action="/settings/letters/import" autocomplete="off"
+            data-confirm-title="Replace the letter wording"
+            data-confirm-body="Every sentence in the pasted file replaces what is stored now. Sentences the file does not mention keep their current wording."
+            data-confirm-confirm-label="Replace wording">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <div class="field">
+          <label for="lt_import">File contents</label>
+          <textarea id="lt_import" name="toml" rows="10" required
+                    style="font-family:var(--font-mono);font-size:0.82rem"
+                    placeholder="[letters]&#10;lang = &quot;cs&quot;&#10;&quot;care.subject&quot; = &quot;…&quot;"></textarea>
+        </div>
+        <div class="item-actions" style="margin-top:0"><button type="submit" class="btn">Replace wording</button></div>
+      </form>
+    </details>
+    <details class="howto">
+      <summary>What is stored</summary>
+      <p>
+        Only what you change. A sentence left exactly as the built-in wording
+        — including one the fill button put there — is not stored, so later
+        improvements to it still reach you; change one character and it
+        becomes yours. Words in braces are filled in by the server, and a
+        misspelt one stays in the letter as typed rather than vanishing.
+      </p>
+    </details>
+  </div>
+</fieldset>
+
+<fieldset class="group"{{ chrome.ro() }}>
+  <div class="ghead">E-mail logo{% if chrome.has_nodes %}<span class="scope-tag" title="Used by the master only">Master</span>{% endif %}</div>
+  <div class="item" id="email-branding">
+    <div class="row" style="align-items:center;gap:0.6rem;flex-wrap:wrap">
+      <h3 style="margin:0">Logo</h3>
+      {% if email_logo_set %}<span class="pill ok">set</span>{% else %}<span class="pill muted">none</span>{% endif %}
+    </div>
+    <p class="text-soft small" style="margin:0.4rem 0 0.9rem">
+      Heads every notification e-mail, to customers and to you. Without one,
+      the panel hostname is the heading.{% if chrome.has_nodes %} Mail sent by
+      worker nodes does not carry it yet.{% endif %}
+    </p>
+    {% if email_logo_set %}
+    <div style="margin:0 0 0.9rem;padding:0.8rem;background:#fff;border:1px solid var(--border);border-radius:var(--radius-xs);display:inline-block">
+      <img src="/settings/email-logo.img" alt="Current e-mail logo" style="max-height:44px;max-width:220px;display:block">
+    </div>
+    {% endif %}
+    {#- Multipart: the CSRF middleware does not buffer these bodies, so the
+        token rides in the query string (template_lint.rs enforces it). -#}
+    <form method="post" action="/settings/email-logo?_csrf={{ csrf_token }}" enctype="multipart/form-data">
+      <div class="field" style="max-width:34rem">
+        <label for="email_logo">{% if email_logo_set %}Replace with{% else %}Image{% endif %} <span class="hint">PNG, JPEG or GIF, up to 512 KB</span></label>
+        <input id="email_logo" name="logo" type="file" accept="image/png,image/jpeg,image/gif" required>
+      </div>
+      <div class="item-actions">
+        <a class="btn ghost" href="/settings/email-preview" target="_blank" rel="noopener">Preview a message</a>
+        <button class="btn primary" type="submit">Upload</button>
+      </div>
+    </form>
+    {% if email_logo_set %}
+    {#- Its own form: the confirm driver reads data-confirm-* off the FORM,
+        and on the upload form it would make every upload ask "Remove?". -#}
+    <form method="post" action="/settings/email-logo?_csrf={{ csrf_token }}" enctype="multipart/form-data"
+          data-confirm-title="Remove the logo"
+          data-confirm-body="Notification e-mails fall back to the panel hostname as their heading."
+          data-confirm-confirm-label="Remove">
+      <input type="hidden" name="clear" value="1">
+      <div class="item-actions" style="margin-top:0.5rem"><button class="btn" type="submit">Remove the logo</button></div>
+    </form>
+    {% endif %}
+    <details class="howto">
+      <summary>Why the logo is embedded</summary>
+      <p>
+        Notifications go out as HTML with a plain-text alternative, so a mail
+        client that refuses HTML loses nothing. The logo travels inside each
+        message rather than as a link: mail clients block remote images by
+        default, and a linked logo would show as a broken box for most
+        recipients. The file is checked by its content, not by its name.
+      </p>
+    </details>
+  </div>
+</fieldset>
+
+<fieldset class="group"{{ chrome.ro() }}>
+  <div class="ghead">Care report measurements{% if chrome.has_nodes %}<span class="scope-tag" title="Set here, copied to every node by the settings sync">All nodes</span>{% endif %}</div>
+  <div class="item" id="performance">
+    <div class="row" style="align-items:center;gap:0.6rem;flex-wrap:wrap">
+      <h3 style="margin:0">Core Web Vitals</h3>
+      {% if config.performance.cwv_source == "psi" %}<span class="pill ok">PageSpeed Insights</span>
+      {% else if config.performance.cwv_source == "lighthouse" %}{% if config.performance.lighthouse_available %}<span class="pill ok">Lighthouse</span>{% else %}<span class="pill warn">Lighthouse not installed here</span>{% endif %}
+      {% else %}<span class="pill muted">off</span>{% endif %}
+    </div>
+    <p class="text-soft small" style="margin:0.4rem 0 0.9rem">
+      Where the care report's LCP, CLS and INP come from. Whether a site
+      renders and how fast it answers is always measured.
+    </p>
+    <form method="post" action="/settings/config" autocomplete="off">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="section" value="performance">
+      <input type="hidden" name="_return_tab" value="performance">
+      <div class="field" style="max-width:34rem">
+        <label for="cwv_source">Source</label>
+        <select id="cwv_source" name="cwv_source">
+          <option value="off"{% if config.performance.cwv_source == "off" %} selected{% endif %}>Off — no Core Web Vitals</option>
+          <option value="psi"{% if config.performance.cwv_source == "psi" %} selected{% endif %}>Google PageSpeed Insights — real-visitor and lab data</option>
+          <option value="lighthouse"{% if config.performance.cwv_source == "lighthouse" %} selected{% endif %}>Local Lighthouse — lab data, measured on each node</option>
+        </select>
+      </div>
+      <div class="field" style="max-width:34rem" id="cwv-psi"{% if config.performance.cwv_source != "psi" %} hidden{% endif %}>
+        <label for="psi_api_key">PageSpeed Insights API key <span class="hint">{% if config.performance.psi_key_set %}stored — leave blank to keep{% else %}optional{% endif %}</span></label>
+        <input id="psi_api_key" name="psi_api_key" type="password" autocomplete="new-password" value=""
+               placeholder="{% if config.performance.psi_key_set %}(unchanged){% else %}AIza…{% endif %}">
+      </div>
+      <div class="flash {% if config.performance.lighthouse_available %}info{% else %}warn{% endif %}" id="cwv-lighthouse" style="margin:0 0 1rem"{% if config.performance.cwv_source != "lighthouse" %} hidden{% endif %}>
+        <div class="flash-body">
+          {% if config.performance.lighthouse_available %}
+          Lighthouse is installed on this master. Each node measures its own
+          sites, so install it on every node that owns care-plan sites too.
+          {% else %}
+          Lighthouse is <strong>not</strong> installed on this master. Install
+          it on each node that owns care-plan sites — for example
+          <code>apt-get install -y chromium &amp;&amp; npm install -g lighthouse</code>
+          — or use PageSpeed Insights instead.
+          {% endif %}
+        </div>
+      </div>
+      <div class="field-row" style="max-width:42rem">
+        <div class="field">
+          <label for="cwv_strategy">Measure as</label>
+          <select id="cwv_strategy" name="strategy">
+            <option value="mobile"{% if config.performance.strategy == "mobile" %} selected{% endif %}>Mobile (what Google grades by)</option>
+            <option value="desktop"{% if config.performance.strategy == "desktop" %} selected{% endif %}>Desktop</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="cwv_interval">Re-measure</label>
+          <select id="cwv_interval" name="cwv_interval_days">
+            <option value="7"{% if config.performance.cwv_interval_days == 7 %} selected{% endif %}>Weekly</option>
+            <option value="14"{% if config.performance.cwv_interval_days == 14 %} selected{% endif %}>Every two weeks</option>
+            <option value="30"{% if config.performance.cwv_interval_days == 30 %} selected{% endif %}>Monthly</option>
+            <option value="0"{% if config.performance.cwv_interval_days == 0 %} selected{% endif %}>Only on demand</option>
+          </select>
+        </div>
+      </div>
+      <div class="item-actions"><button type="submit" class="btn primary">Save</button></div>
+    </form>
+    <details class="howto">
+      <summary>How it is measured</summary>
+      <ul>
+        <li>Core Web Vitals need a browser to render the page, which a node
+          does not have — hence the source. The render and speed half of the
+          report comes from the node's own site check either way.</li>
+        <li><strong>PageSpeed Insights</strong> works without a key at a low
+          rate limit, enough for a weekly check per site; a free key comes
+          from the Google Cloud console (enable the PageSpeed Insights API).
+          The key stays on the node; the site's address is sent to Google
+          when it is measured.</li>
+        <li><strong>Lighthouse</strong> gives lab data only, and the headless
+          Chrome it runs uses real CPU and RAM while it measures.</li>
+        <li>Care-plan sites are re-measured with the weekly site check, so the
+          interval can be longer than a week but not shorter. <em>Measure
+          now</em> on a site's Performance panel runs it any time.</li>
+      </ul>
+    </details>
+  </div>
+</fieldset>
+
+<script>
+(function () {
+  'use strict';
+  // Mirrors the server-side single-pass {key} substitution (render_template):
+  // unknown tokens are left verbatim, substituted values are NOT re-scanned.
+  function hypRender(tmpl, fields) {
+    var out = '', rest = tmpl;
+    while (true) {
+      var open = rest.indexOf('{');
+      if (open === -1) { out += rest; break; }
+      out += rest.slice(0, open);
+      var after = rest.slice(open + 1);
+      var close = after.indexOf('}');
+      if (close !== -1) {
+        var key = after.slice(0, close);
+        if (Object.prototype.hasOwnProperty.call(fields, key)) {
+          out += fields[key];
+          rest = after.slice(close + 1);
+          continue;
+        }
+      }
+      out += '{';
+      rest = after;
+    }
+    return out;
+  }
+  // Rendered server-side by the functions that write the real letters, in
+  // the letter language, so the preview cannot drift from what is sent.
+  var careSample = {{ care_sample_json|safe }};
+  var expirySample = {{ expiry_sample_json|safe }};
+  var expiryTodaySample = {{ expiry_today_sample_json|safe }};
+
+  function byId(id) { return document.getElementById(id); }
+  // Empty means "the built-in wording" — the same rule the renderer applies —
+  // and the built-in is the field's placeholder.
+  function wording(el) {
+    if (!el) return '';
+    return el.value.trim().length ? el.value : (el.getAttribute('placeholder') || '');
+  }
+  function show(id, text) {
+    var el = byId(id);
+    if (el) el.textContent = text.length ? text : '(empty)';
+  }
+  function update() {
+    show('lt_care_subject_preview', hypRender(wording(byId('lt_care_subject')), careSample));
+    show('lt_care_body_preview', hypRender(wording(byId('lt_care_body')), careSample));
+    show('lt_expiry_subject_preview', hypRender(wording(byId('lt_expiry_subject')), expirySample));
+    show('lt_expiry_body_preview', hypRender(wording(byId('lt_expiry_body')), expirySample));
+    show('lt_expiry_today_preview', hypRender(wording(byId('lt_expiry_subject_today')), expiryTodaySample));
+  }
+  document.querySelectorAll('[data-letter]').forEach(function (el) {
+    el.addEventListener('input', update);
+  });
+  // "Start from the built-in" copies the built-in into the letter's fields so
+  // it can be edited rather than retyped; "Clear" goes back to sending it.
+  // Neither is saved until Save, and saving the built-in unchanged stores
+  // nothing (the fork guard in post_config).
+  function setLetter(which, fromPlaceholder) {
+    document.querySelectorAll('[data-letter="' + which + '"]').forEach(function (el) {
+      el.value = fromPlaceholder ? (el.getAttribute('placeholder') || '') : '';
+    });
+    update();
+  }
+  document.querySelectorAll('[data-letter-fill]').forEach(function (btn) {
+    btn.addEventListener('click', function () { setLetter(btn.getAttribute('data-letter-fill'), true); });
+  });
+  document.querySelectorAll('[data-letter-clear]').forEach(function (btn) {
+    btn.addEventListener('click', function () { setLetter(btn.getAttribute('data-letter-clear'), false); });
+  });
+
+  // Copy the built-in wording into every EMPTY sentence field, so a sentence
+  // can be edited instead of retyped from text that can be seen but not
+  // selected. Never touches a field that already has wording.
+  var prefill = byId('lt-prefill');
+  var sentences = byId('lt-sentences');
+  if (prefill && sentences) {
+    prefill.addEventListener('click', function () {
+      var n = 0;
+      sentences.querySelectorAll('[placeholder]').forEach(function (el) {
+        if (!el.name || el.value !== '') return;
+        el.value = el.getAttribute('placeholder');
+        n++;
+      });
+      prefill.textContent = n + (n === 1 ? ' field' : ' fields') + ' filled in — edit, then Save';
+    });
+  }
+
+  // Show the PSI key or the Lighthouse note for the source picked.
+  var source = byId('cwv_source');
+  if (source) {
+    source.addEventListener('change', function () {
+      var psi = byId('cwv-psi'), lh = byId('cwv-lighthouse');
+      if (psi) psi.hidden = source.value !== 'psi';
+      if (lh) lh.hidden = source.value !== 'lighthouse';
+    });
+  }
+
+  update();
+})();
+</script>
+{% endblock %}

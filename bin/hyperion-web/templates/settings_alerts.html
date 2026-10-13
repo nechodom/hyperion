@@ -1,0 +1,237 @@
+{% extends "settings_base.html" %}
+{% block section %}
+{% if let Some(e) = config_error %}
+<div class="flash error">
+  <div class="flash-body">The agent's settings could not be read ({{ e }}). What is shown is the defaults, not what is set.</div>
+</div>
+{% endif %}
+
+<fieldset class="group"{{ chrome.ro() }}>
+  <div class="ghead">Slack{% if chrome.has_nodes %}<span class="scope-tag" title="Used by the master only">Master</span>{% endif %}</div>
+  <div class="item" id="slack">
+    <div class="row" style="align-items:center;gap:0.6rem;flex-wrap:wrap">
+      <h3 style="margin:0">Slack</h3>
+      {% if config.slack.default_webhook_set %}<span class="pill ok">connected</span>
+      {% else %}<span class="pill muted">not connected</span>{% endif %}
+    </div>
+    <p class="text-soft small" style="margin:0.4rem 0 0">
+      Alerts post to one channel: backup and certificate failures, monitors
+      going down and up, billing reminders. A site's own webhook, on its
+      Monitor tab, replaces it for that site.
+    </p>
+    {% if config.slack.default_webhook_set %}
+    {#- Connected: no URL field at all. An input left showing while a webhook
+        was stored CLEARED it on an empty submit, so the way to check "is it
+        still set?" was also the way to wipe it. Test it, or disconnect on
+        purpose and connect again. -#}
+    <div class="row" style="gap:0.5rem;flex-wrap:wrap;margin-top:0.9rem">
+      <form method="post" action="/settings/slack-test" style="margin:0">
+        <input type="hidden" name="_csrf" value="{{ csrf_slack_test }}">
+        <button type="submit" class="btn primary">Send test</button>
+      </form>
+      <form method="post" action="/settings/config" style="margin:0" autocomplete="off"
+            data-confirm-title="Disconnect Slack"
+            data-confirm-body="Alerts stop posting to Slack at once. Hyperion cannot show the webhook URL again — connecting again means pasting one from Slack."
+            data-confirm-confirm-label="Disconnect">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <input type="hidden" name="section" value="slack">
+        <input type="hidden" name="default_webhook" value="">
+        {#- An empty webhook is otherwise dropped as "leave blank to keep";
+            this marker is what makes the empty value mean "remove it". -#}
+        <input type="hidden" name="_disconnect" value="1">
+        <input type="hidden" name="_return_tab" value="slack">
+        <button type="submit" class="btn">Disconnect</button>
+      </form>
+    </div>
+    {% else %}
+    <form method="post" action="/settings/config" autocomplete="off" style="margin-top:0.9rem">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="section" value="slack">
+      <input type="hidden" name="_return_tab" value="slack">
+      <div class="field" style="margin:0">
+        <label for="default_webhook">Incoming webhook URL <span class="hint">Slack → Apps → Incoming Webhooks</span></label>
+        <input id="default_webhook" name="default_webhook" type="url" required
+               placeholder="https://hooks.slack.com/services/T…/B…/…" value="">
+      </div>
+      <div class="item-actions"><button type="submit" class="btn primary">Connect</button></div>
+    </form>
+    {% endif %}
+    <details class="howto">
+      <summary>How it works</summary>
+      <p>
+        The webhook URL is the integration's only credential, so it is stored and
+        never shown again. To check it, send a test; to change it, disconnect and
+        connect the new one.
+      </p>
+    </details>
+  </div>
+</fieldset>
+
+<fieldset class="group"{{ chrome.ro() }}>
+  <div class="ghead">E-mail{% if chrome.has_nodes %}<span class="scope-tag" title="Every node has its own">Each node</span>{% endif %}</div>
+  <div class="item" id="alert-recipients">
+    <h3>Recipients</h3>
+    <p class="text-soft small" style="margin:0">
+      Administrator addresses that get every alert not meant for one
+      customer{% if chrome.has_nodes %} — each node mails its own alerts to its own list{% endif %}.
+    </p>
+    {#- One row per node, read from every node at once: lazy, so a slow node
+        holds this card, not the page. -#}
+    <div hx-get="/settings/alerts/recipients" hx-trigger="load" hx-swap="innerHTML">
+      <p class="text-soft small" style="margin:0.8rem 0 0">Reading {% if chrome.has_nodes %}each node's addresses{% else %}the addresses{% endif %}…</p>
+    </div>
+    <details class="howto">
+      <summary>Where else alerts go</summary>
+      <ul>
+        <li>Everyone listed gets expiry warnings, backup and certificate failures and
+          every other alert the node raises on its own. A letter addressed to a
+          customer goes to that customer only.</li>
+        <li><strong>Per plan</strong> — extra recipients on each plan in <a href="/profiles">Profiles</a>.</li>
+        <li><strong>Per site</strong> — e-mail, Slack or a webhook on each hosting's Monitor &amp; logs tab.</li>
+        <li><strong>History</strong> — every alert, in <a href="/notifications">Notifications</a>.</li>
+        <li><strong>Delivery</strong> — every e-mail sent and the relay's answer, in the <a href="/emails">Email log</a>.</li>
+      </ul>
+    </details>
+  </div>
+</fieldset>
+
+<fieldset class="group"{{ chrome.ro() }}>
+  <div class="ghead">Language and wording{% if chrome.has_nodes %}<span class="scope-tag" title="Set here, copied to every node by the settings sync">All nodes</span>{% endif %}</div>
+  <div class="item" id="alert-language">
+    <h3>Language</h3>
+    <p class="text-soft small" style="margin:0 0 0.8rem">
+      What the notification bell and alert e-mail to your administrators are
+      written in. Customer letters have their own, in
+      <a href="/settings/letters#letter-language">Customer letters</a>.
+    </p>
+    <form method="post" action="/settings/config">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="section" value="letters">
+      <input type="hidden" name="_return_tab" value="alert-language">
+      <div class="field" style="margin:0;max-width:18rem">
+        <label for="operator_lang">Alerts are written in <span class="hint">English unless you pick Czech</span></label>
+        <select id="operator_lang" name="operator_lang">
+          <option value="en"{% if operator_lang == "en" %} selected{% endif %}>English</option>
+          <option value="cs"{% if operator_lang == "cs" %} selected{% endif %}>Čeština</option>
+        </select>
+      </div>
+      <div class="item-actions"><button type="submit" class="btn primary">Save</button></div>
+    </form>
+  </div>
+
+  <div class="item" id="alert-templates">
+    <h3>Wording</h3>
+    <p class="text-soft small" style="margin:0 0 0.9rem">
+      The text around every Slack post and alert e-mail. The preview fills in
+      sample data as you type; an empty field sends the alert as it is.
+    </p>
+    <form method="post" action="/settings/config" autocomplete="off">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="section" value="notifications">
+      <input type="hidden" name="_return_tab" value="alert-templates">
+
+      <div class="field">
+        <label for="nt_slack">Slack message
+          <span class="hint">placeholders <code>{message}</code> <code>{time}</code> <code>{panel}</code></span></label>
+        <textarea id="nt_slack" name="slack_template" rows="3"
+                  style="width:100%;font-family:var(--font-mono);font-size:0.85rem"
+                  placeholder="{message}">{{ config.notifications.slack_template }}</textarea>
+        <div class="text-soft small">Preview</div>
+        <div id="nt_slack_preview" aria-live="polite"
+             style="white-space:pre-wrap;overflow-wrap:anywhere;background:var(--surface-2);border-radius:var(--radius-xs);padding:0.55rem 0.7rem;font-size:0.85rem;min-height:1.4rem"></div>
+      </div>
+
+      <div class="field">
+        <label for="nt_subject">E-mail subject
+          <span class="hint">placeholders <code>{subject}</code> <code>{time}</code></span></label>
+        <input id="nt_subject" name="email_subject_template" type="text"
+               style="font-family:var(--font-mono);font-size:0.85rem"
+               placeholder="{subject}" value="{{ config.notifications.email_subject_template }}">
+        <div class="text-soft small">Preview</div>
+        <div id="nt_subject_preview" aria-live="polite"
+             style="overflow-wrap:anywhere;background:var(--surface-2);border-radius:var(--radius-xs);padding:0.45rem 0.7rem;font-size:0.85rem;font-weight:600;min-height:1.3rem"></div>
+      </div>
+
+      <div class="field" style="margin-bottom:0">
+        <label for="nt_body">E-mail body
+          <span class="hint">placeholders <code>{body}</code> <code>{time}</code> <code>{panel}</code> <code>{kind}</code></span></label>
+        <textarea id="nt_body" name="email_body_template" rows="5"
+                  style="width:100%;font-family:var(--font-mono);font-size:0.85rem"
+                  placeholder="{body}">{{ config.notifications.email_body_template }}</textarea>
+        <div class="text-soft small">Preview</div>
+        <div id="nt_body_preview" aria-live="polite"
+             style="white-space:pre-wrap;overflow-wrap:anywhere;background:var(--surface-2);border-radius:var(--radius-xs);padding:0.55rem 0.7rem;font-size:0.85rem;min-height:2.2rem"></div>
+      </div>
+      <div class="item-actions"><button type="submit" class="btn primary">Save</button></div>
+    </form>
+    <details class="howto">
+      <summary>Placeholders</summary>
+      <ul>
+        <li><code>{message}</code> — the alert as one line (Slack).</li>
+        <li><code>{subject}</code>, <code>{body}</code> — the e-mail's own subject and text.</li>
+        <li><code>{time}</code> — when it was sent; <code>{panel}</code> — the panel's address;
+          <code>{kind}</code> — what kind of alert it is, such as <code>backup</code>.</li>
+        <li>A placeholder Hyperion does not know is sent as typed, so a typo shows.</li>
+        <li>What the preview shows is what goes out, and what the <a href="/emails">Email log</a> records.</li>
+        <li>The sentences of the alerts themselves are reworded with the customer
+          letters, in <a href="/settings/letters#letter-wording">Sentences</a>.</li>
+      </ul>
+    </details>
+  </div>
+</fieldset>
+
+<script>
+(function () {
+  'use strict';
+  // Live preview of the alert wording. Mirrors the server's single-pass
+  // {key} substitution: an unknown token stays as typed, and a substituted
+  // value is not scanned again. An empty field previews its placeholder —
+  // the pass-through default the server falls back to.
+  function render(tmpl, fields) {
+    var out = '', rest = tmpl;
+    while (true) {
+      var open = rest.indexOf('{');
+      if (open === -1) { out += rest; break; }
+      out += rest.slice(0, open);
+      var after = rest.slice(open + 1);
+      var close = after.indexOf('}');
+      if (close !== -1) {
+        var key = after.slice(0, close);
+        if (Object.prototype.hasOwnProperty.call(fields, key)) {
+          out += fields[key];
+          rest = after.slice(close + 1);
+          continue;
+        }
+      }
+      out += '{';
+      rest = after;
+    }
+    return out;
+  }
+  var sample = {
+    message: 'Backup of example.com failed: not enough free disk space.',
+    subject: 'Backup failed — example.com',
+    body: 'The scheduled backup of example.com did not finish.\nReason: not enough free disk space on the node.',
+    time: '2026-06-19 03:00 UTC',
+    panel: 'https://panel.example.com',
+    kind: 'backup'
+  };
+  var fields = {
+    nt_slack: { message: sample.message, time: sample.time, panel: sample.panel },
+    nt_subject: { subject: sample.subject, time: sample.time },
+    nt_body: { body: sample.body, time: sample.time, panel: sample.panel, kind: sample.kind }
+  };
+  Object.keys(fields).forEach(function (id) {
+    var el = document.getElementById(id);
+    var out = document.getElementById(id + '_preview');
+    if (!el || !out) return;
+    function update() {
+      var tmpl = el.value.length ? el.value : (el.getAttribute('placeholder') || '');
+      out.textContent = render(tmpl, fields[id]);
+    }
+    el.addEventListener('input', update);
+    update();
+  });
+})();
+</script>
+{% endblock %}

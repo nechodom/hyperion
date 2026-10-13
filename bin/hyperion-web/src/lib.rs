@@ -326,7 +326,49 @@ pub fn build_router(state: SharedState) -> Router {
             "/services/install-status",
             get(handlers::services_health::get_service_install_status),
         )
-        .route("/settings", get(handlers::settings::get_settings))
+        // Mail delivery on Service health: a node's postfix and its fixes.
+        .route(
+            "/services/mail-diagnostics",
+            get(handlers::mail_health::get_mail_diagnostics),
+        )
+        .route(
+            "/services/mail/queue-flush",
+            post(handlers::mail_health::post_mta_queue_flush),
+        )
+        .route(
+            "/services/mail/queue-clear",
+            post(handlers::mail_health::post_mta_queue_clear),
+        )
+        .route(
+            "/services/mail/reconfigure",
+            post(handlers::mail_health::post_mta_reconfigure),
+        )
+        .route(
+            "/services/mail/test",
+            post(handlers::mail_health::post_mta_test),
+        )
+        // Settings: an overview plus one page per section (handlers/settings/).
+        .route("/settings", get(handlers::settings::get_overview))
+        .route("/settings/panel", get(handlers::settings::get_panel))
+        .route("/settings/https", get(handlers::settings::get_https))
+        .route("/settings/mail", get(handlers::settings::get_mail))
+        .route(
+            "/settings/mail/health",
+            get(handlers::settings::get_mail_health),
+        )
+        .route("/settings/alerts", get(handlers::settings::get_alerts))
+        .route(
+            "/settings/alerts/recipients",
+            get(handlers::settings::get_alert_recipients),
+        )
+        .route("/settings/letters", get(handlers::settings::get_letters))
+        .route("/settings/access", get(handlers::settings::get_access))
+        .route("/settings/bans", get(handlers::settings::get_bans))
+        .route("/settings/cluster", get(handlers::settings::get_cluster))
+        .route(
+            "/settings/cluster/sync",
+            post(handlers::settings::post_cluster_sync),
+        )
         .route(
             "/settings/email-test",
             post(handlers::settings::post_email_test),
@@ -335,33 +377,46 @@ pub fn build_router(state: SharedState) -> Router {
             "/settings/slack-test",
             post(handlers::settings::post_slack_test),
         )
+        // The postfix actions' pre-split addresses: kept one release for
+        // pages still open from before the update, then to be removed.
         .route(
             "/settings/mta-reconfigure",
-            post(handlers::settings::post_mta_reconfigure),
+            post(handlers::mail_health::post_mta_reconfigure),
         )
         .route(
             "/settings/mta-test",
-            post(handlers::settings::post_mta_test),
+            post(handlers::mail_health::post_mta_test),
         )
         .route(
             "/settings/mta-queue-flush",
-            post(handlers::settings::post_mta_queue_flush),
+            post(handlers::mail_health::post_mta_queue_flush),
         )
         .route(
             "/settings/mta-queue-clear",
-            post(handlers::settings::post_mta_queue_clear),
+            post(handlers::mail_health::post_mta_queue_clear),
         )
         .route(
             "/api/email-autodetect",
             post(handlers::settings::post_email_autodetect),
         )
         .route(
+            "/admin/api-keys",
+            get(handlers::api_keys::get_api_keys).post(handlers::api_keys::post_api_key_create),
+        )
+        .route(
+            "/admin/api-keys/revoke",
+            post(handlers::api_keys::post_api_key_revoke),
+        )
+        // Where the two forms posted while API keys lived on Settings; kept so
+        // a page rendered before the upgrade still works. Remove after one
+        // release.
+        .route(
             "/settings/api-keys",
-            post(handlers::settings::post_api_key_create),
+            post(handlers::api_keys::post_api_key_create),
         )
         .route(
             "/settings/api-keys/revoke",
-            post(handlers::settings::post_api_key_revoke),
+            post(handlers::api_keys::post_api_key_revoke),
         )
         // Bulk letter wording. The export is a plain TOML download — the same
         // shape the overrides are stored in, so it doubles as a backup and can
@@ -374,6 +429,12 @@ pub fn build_router(state: SharedState) -> Router {
         .route(
             "/settings/letters/import",
             post(handlers::settings::post_letters_import),
+        )
+        // Retire the older whole-letter templates in [notifications]: move
+        // them into the letter editor, or discard them.
+        .route(
+            "/settings/letters/adopt-legacy",
+            post(handlers::settings::post_adopt_legacy),
         )
         .route("/settings/config", post(handlers::settings::post_config))
         .route(
@@ -608,7 +669,7 @@ pub fn build_router(state: SharedState) -> Router {
             post(handlers::firewall::post_default_drop),
         )
         .route("/audit", get(handlers::audit::get_audit))
-        .route("/settings/backups", get(handlers::backups::get_backups))
+        .route("/settings/backups", get(handlers::settings::get_backups))
         .route(
             "/settings/backups/backfill",
             post(handlers::settings::post_offsite_backfill),
@@ -1272,7 +1333,7 @@ async fn drop_caches_on_write(
 }
 
 /// Once the operator's set up `cluster.panel_hostname` (via Panel
-/// domain provisioning in /settings#panel-domain), refuse requests
+/// domain provisioning in /settings/panel#panel-domain), refuse requests
 /// whose Host header is a raw IP address — they get a 308 redirect
 /// to `https://<panel_hostname>:<port><path>` instead. Three reasons:
 ///

@@ -1,0 +1,231 @@
+{% extends "settings_base.html" %}
+{% block read_only_note %}You can see the relay and send a test message; only an Owner can change the relay.{% endblock %}
+{% block section %}
+{#- Every card on this page is about ONE node, the one the picker names
+    (`?node=<id>`; the master when empty). The picker sits outside the
+    groups because all of them follow it. -#}
+{% if chrome.has_nodes %}
+<form method="get" action="/settings/mail" class="field" style="max-width:28rem;margin:0 0 1.25rem">
+  <label for="mail-node">Node <span class="hint">each one sends with its own relay</span></label>
+  <div class="row" style="flex-wrap:nowrap">
+    <select id="mail-node" name="node" onchange="this.form.submit()">
+      {% for o in picker %}
+      <option value="{{ o.id }}"{% if o.selected %} selected{% endif %}>{{ o.label }}</option>
+      {% endfor %}
+    </select>
+    <noscript><button class="btn small" type="submit">Show</button></noscript>
+  </div>
+</form>
+{% endif %}
+
+<fieldset class="group"{{ chrome.ro() }}>
+  <div class="ghead">Outgoing mail{% if chrome.has_nodes %} · {{ node_label }}<span class="scope-tag" title="Every node has its own">Each node</span>{% endif %}</div>
+  <div class="item" id="smtp-relay">
+    <div class="row" style="align-items:center;gap:0.6rem;flex-wrap:wrap">
+      <h3 style="margin:0">Outgoing relay</h3>
+      {% if email_error.is_none() %}
+      {% if email.enabled %}<span class="pill ok">relay on</span>{% else %}<span class="pill warn">relay off</span>{% endif %}
+      {% if is_master %}
+      <span class="grow"></span>
+      <button type="button" class="btn small" id="email-autodetect">Detect a local relay</button>
+      {% endif %}
+      {% endif %}
+    </div>
+
+    {% if let Some(e) = email_error %}
+    <div class="alert alert-warn" role="alert" style="margin:0.8rem 0 0">
+      {% if is_master %}The agent{% else %}{{ node_label }}{% endif %} did not answer ({{ e }}), so its relay is not shown.
+      A form filled with defaults would overwrite the real values on Save.
+      <a href="/settings/mail?node={{ node }}">Try again</a>
+    </div>
+    {% else %}
+    <p class="text-soft small" style="margin:0.4rem 0 0">
+      {% if email.enabled %}
+      Alerts, customer letters and tests from {{ node_label }} go out through
+      <strong>{{ email.smtp_host }}</strong>, and so does every site's <code>mail()</code>.
+      {% else %}
+      With the relay off, {{ node_label }} sends no alerts or letters by e-mail,
+      and postfix delivers sites' <code>mail()</code> straight to each recipient's server.
+      {% endif %}
+    </p>
+    {% if is_master %}<div id="email-autodetect-result"></div>{% endif %}
+
+    <form method="post" action="/settings/config" autocomplete="off" style="margin-top:1rem">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="section" value="email">
+      <input type="hidden" name="target_node" value="{{ node }}">
+      <input type="hidden" name="_checkboxes" value="enabled">
+      <input type="hidden" name="_return_tab" value="smtp-relay">
+      {#- `default_to` is NOT posted here: the administrator addresses are
+          edited on Alerts → Recipients, and a save only touches the keys it
+          posts (pinned by a hyperion-core test), so this form cannot wipe them. -#}
+      <label class="field-checkbox" style="margin:0 0 0.9rem">
+        <input type="checkbox" name="enabled" value="true"{% if email.enabled %} checked{% endif %}>
+        <span><strong>Send through this relay</strong></span>
+      </label>
+      <div class="field-row three">
+        <div class="field">
+          <label for="smtp_host">Relay host</label>
+          <input id="smtp_host" name="smtp_host" type="text" value="{{ email.smtp_host }}"
+                 placeholder="smtp.postmarkapp.com" autocapitalize="none" spellcheck="false">
+        </div>
+        <div class="field">
+          <label for="smtp_port">Port</label>
+          <input id="smtp_port" name="smtp_port" type="number" min="1" max="65535" value="{% if email.smtp_port > 0 %}{{ email.smtp_port }}{% else %}587{% endif %}">
+        </div>
+        <div class="field">
+          <label for="security">Encryption</label>
+          <select id="security" name="security">
+            <option value="starttls"{% if email.security == "starttls" %} selected{% endif %}>STARTTLS</option>
+            <option value="tls"{% if email.security == "tls" %} selected{% endif %}>TLS</option>
+            <option value="plain"{% if email.security == "plain" %} selected{% endif %}>None</option>
+          </select>
+        </div>
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label for="smtp_user">Username</label>
+          <input id="smtp_user" name="smtp_user" type="text" value="{{ email.smtp_user }}"
+                 autocapitalize="none" spellcheck="false">
+        </div>
+        <div class="field">
+          <label for="smtp_password">Password{% if email.smtp_password_set %} <span class="hint">stored — leave blank to keep</span>{% endif %}</label>
+          <input id="smtp_password" name="smtp_password" type="password" autocomplete="new-password" value="">
+        </div>
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label for="from_name">Sender name</label>
+          <input id="from_name" name="from_name" type="text" value="{{ email.from_name }}" placeholder="Hyperion">
+        </div>
+        <div class="field">
+          <label for="from_address">Sender address <span class="hint">on a domain whose SPF lists the relay</span></label>
+          <input id="from_address" name="from_address" type="email" value="{{ email.from_address }}"
+                 placeholder="notifications@your-domain.cz">
+        </div>
+      </div>
+      <div class="item-actions"><button type="submit" class="btn primary">Save</button></div>
+    </form>
+    {% endif %}
+
+    <details class="howto">
+      <summary>Choosing a relay</summary>
+      <ul>
+        <li><strong>Use a real provider</strong> — Postmark, Mailgun, SendGrid, Brevo,
+          Amazon SES, Gmail SMTP — or a postfix of your own that relays outbound.
+          Mail sent straight from a VPS to public mailboxes almost always lands in spam.</li>
+        <li><strong>SPF</strong> — the receiving server checks that the relay is on the
+          permitted-sender list (a DNS TXT record) of the sender address's domain.
+          Each hosting's page shows its own SPF analysis.</li>
+        <li><strong>Sender address</strong> — on a domain you control whose SPF includes
+          the relay. A placeholder on somebody else's domain is accepted and then
+          silently discarded by the receiver.</li>
+        {% if is_master %}<li><strong>Detect a local relay</strong> checks <code>localhost:25</code>
+          and <code>:587</code> on this server for a postfix or exim that already
+          accepts mail, and fills the form; the sender address it suggests comes
+          from <code>/etc/mailname</code>. Nothing is saved until you press Save.</li>{% endif %}
+        <li><strong>Every send is logged</strong> in the <a href="/emails">Email log</a> with
+          the relay's full answer, so "accepted" (250) and "refused" (550) are told
+          apart without leaving the panel.</li>
+      </ul>
+    </details>
+  </div>
+</fieldset>
+
+<div class="group">
+  <div class="ghead">Checks{% if chrome.has_nodes %} · {{ node_label }}{% endif %}</div>
+  <div class="item" id="mail-test">
+    <h3>Test message</h3>
+    {% if email_error.is_some() %}
+    <p class="text-soft small" style="margin:0">Not available while {% if is_master %}the agent{% else %}{{ node_label }}{% endif %} does not answer.</p>
+    {% else if !email.enabled %}
+    <p class="text-soft small" style="margin:0">
+      Turn the <a href="#smtp-relay">relay</a> on to test it — with it off,
+      {{ node_label }} sends no mail of its own.
+    </p>
+    {% else %}
+    <p class="text-soft small" style="margin:0 0 0.8rem">
+      One message from {{ node_label }} through {{ email.smtp_host }}. The result
+      shows the relay's answer (250 means accepted) and the
+      <a href="/emails">Email log</a> keeps the record.
+    </p>
+    <form method="post" action="/settings/email-test" style="display:flex;gap:0.5rem;align-items:flex-end;flex-wrap:wrap">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="target_node" value="{{ node }}">
+      <div class="field" style="margin:0;flex:1;min-width:15rem">
+        <label for="test_to">Send to</label>
+        <input id="test_to" type="email" name="to" required placeholder="you@example.cz" value="{{ test_to }}">
+      </div>
+      <button class="btn primary" type="submit">Send test</button>
+    </form>
+    {% endif %}
+  </div>
+
+  <div class="item" id="mail-health">
+    <h3>Local mail server</h3>
+    <p class="text-soft small" style="margin:0 0 0.7rem">
+      Sites' PHP <code>mail()</code> goes through postfix on {{ node_label }}: to the
+      relay when it is on, straight to the recipient's server when it is off.
+    </p>
+    {#- Lazy: the diagnosis behind this line probes DNS and outbound ports. -#}
+    <div hx-get="/settings/mail/health?node={{ node }}" hx-trigger="intersect once" hx-swap="innerHTML">
+      <span class="text-soft small">Checking postfix…</span>
+    </div>
+    <p class="small" style="margin:0.7rem 0 0"><a href="{{ services_href }}">Details and fixes on Service health</a></p>
+  </div>
+</div>
+
+{% if is_master %}
+<script>
+(function () {
+  'use strict';
+  // Probe this server's localhost for an SMTP server that already accepts
+  // mail and pre-fill the relay form from it. Nothing is saved.
+  var btn = document.getElementById('email-autodetect');
+  var out = document.getElementById('email-autodetect-result');
+  if (!btn || !out) return;
+  function show(kind, text) {
+    var f = document.createElement('div');
+    f.className = 'flash ' + kind;
+    f.style.margin = '0.8rem 0 0';
+    var b = document.createElement('div');
+    b.className = 'flash-body';
+    b.textContent = text;
+    f.appendChild(b);
+    out.replaceChildren(f);
+  }
+  function set(id, v) {
+    var el = document.getElementById(id);
+    if (el && v !== undefined && v !== null) el.value = v;
+  }
+  btn.addEventListener('click', function () {
+    var label = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = 'Probing…';
+    fetch('/api/email-autodetect', {
+      method: 'POST',
+      headers: { 'x-csrf-token': '{{ csrf_token }}', 'accept': 'application/json' }
+    })
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        if (!j.found) {
+          show('warn', j.notes || 'No local relay answered.');
+          return;
+        }
+        set('smtp_host', j.smtp_host);
+        set('smtp_port', j.smtp_port);
+        set('security', j.security);
+        var from = document.getElementById('from_address');
+        if (from && !from.value) from.value = j.suggested_from || '';
+        var en = document.querySelector('#smtp-relay input[name="enabled"]');
+        if (en) en.checked = true;
+        show('success', 'Found ' + j.smtp_host + ':' + j.smtp_port + ' (' + j.security + '). ' +
+          (j.notes ? j.notes + ' ' : '') + 'Press Save to keep it.');
+      })
+      .catch(function (e) { show('error', 'The probe failed: ' + e); })
+      .then(function () { btn.disabled = false; btn.textContent = label; });
+  });
+})();
+</script>
+{% endif %}
+{% endblock %}

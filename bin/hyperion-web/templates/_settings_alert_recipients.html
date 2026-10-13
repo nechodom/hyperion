@@ -1,0 +1,59 @@
+{#- Lazy body of the Recipients card on Settings → Alerts: one row per node,
+    the master first, each with its own form — `default_to` lives in every
+    node's own agent.toml. A node that did not answer gets no form: an empty
+    field saved over its real list would erase it.
+
+    The page wraps this card in `<fieldset … chrome.ro()>`, whose `disabled`
+    also covers controls inserted later; `can_edit` additionally leaves the
+    forms out for anybody but an Owner, so the fragment is read-only on its
+    own too. Always a 200: htmx does not swap an error status. -#}
+{% for r in rows %}
+<div style="padding:0.85rem 0 0.2rem;{% if !loop.first %}border-top:1px solid var(--border);margin-top:0.65rem;{% endif %}">
+  <div class="row" style="align-items:center;gap:0.5rem;margin:0 0 0.5rem">
+    <strong style="font-size:0.88rem">{{ r.label }}</strong>
+    {% if !r.known() %}<span class="pill muted">unknown</span>
+    {% else if r.count == 0 %}<span class="pill warn">no addresses</span>
+    {% else if r.count == 1 %}<span class="pill ok">1 address</span>
+    {% else %}<span class="pill ok">{{ r.count }} addresses</span>{% endif %}
+    {% if r.known() && !r.relay_on %}<span class="pill muted">relay off</span>{% endif %}
+  </div>
+  {% if let Some(e) = r.error %}
+  <p class="text-soft small" style="margin:0">
+    {% if has_nodes %}This node{% else %}The agent{% endif %} did not answer ({{ e }}), so its addresses are not shown.
+    Reload the page to ask again.
+  </p>
+  {% else %}
+  {% if !r.relay_on %}
+  <p class="chk-note tone-warn" style="margin:0 0 0.5rem">
+    Its relay is off, so it sends no e-mail and nobody listed here hears from it.
+    <a href="{{ r.mail_href() }}">Turn the relay on</a>
+  </p>
+  {% endif %}
+  {% if can_edit %}
+  <form method="post" action="/settings/config" autocomplete="off"
+        style="display:flex;gap:0.5rem;align-items:flex-end;flex-wrap:wrap;margin:0">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    <input type="hidden" name="section" value="email">
+    <input type="hidden" name="target_node" value="{{ r.node }}">
+    <input type="hidden" name="_return_tab" value="alert-recipients">
+    <div class="field" style="margin:0;flex:1;min-width:16rem">
+      <label for="{{ r.field_id }}">Addresses <span class="hint">commas, semicolons or new lines</span></label>
+      {#- NOT type="email": that takes exactly one address, and a team needs
+          several. The server splits on commas, semicolons, spaces and new
+          lines — a column pasted out of a spreadsheet works — and stores
+          them comma-separated; the mailer skips anything without an @
+          rather than failing the whole send. -#}
+      <textarea id="{{ r.field_id }}" name="default_to" rows="2"
+                autocapitalize="none" spellcheck="false"
+                placeholder="ops@example.cz, admin@example.cz">{{ r.default_to }}</textarea>
+    </div>
+    <button type="submit" class="btn primary">Save</button>
+  </form>
+  {% else %}
+  <p class="small" style="margin:0;overflow-wrap:anywhere">
+    {% if r.default_to.is_empty() %}<span class="text-soft">No addresses.</span>{% else %}{{ r.default_to }}{% endif %}
+  </p>
+  {% endif %}
+  {% endif %}
+</div>
+{% endfor %}

@@ -1547,7 +1547,7 @@ hctl completions fish > ~/.config/fish/completions/hctl.fish
 ## Remote API
 
 `hctl remote` drives a panel's `/api/v1` HTTP API with an API key (create one
-in the panel under Settings → Access). It works from any machine: a laptop,
+in the panel under Administration → API keys). It works from any machine: a laptop,
 CI, another server. Every command prints the API's JSON answer, ready for
 `jq`. An HTTP error prints the error body on stderr and exits `1`.
 

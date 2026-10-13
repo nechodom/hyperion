@@ -253,7 +253,25 @@ async fn start_agent() -> (PathBuf, tempfile::TempDir) {
 /// [`start_agent`] that also hands back the agent's database, for tests that
 /// seed rows no RPC writes directly (the email log).
 async fn start_agent_with_pool() -> (PathBuf, tempfile::TempDir, sqlx::SqlitePool) {
+    start_agent_with(None).await
+}
+
+/// [`start_agent`] with an agent.toml holding `toml`, for tests that save
+/// settings through the agent and read the file back. Returns the socket,
+/// the temp dir guard and the agent.toml path (inside that dir).
+async fn start_agent_with_toml(toml: &str) -> (PathBuf, tempfile::TempDir, PathBuf) {
+    let (sock, dir, _pool) = start_agent_with(Some(toml)).await;
+    let cfg = dir.path().join("agent.toml");
+    (sock, dir, cfg)
+}
+
+async fn start_agent_with(toml: Option<&str>) -> (PathBuf, tempfile::TempDir, sqlx::SqlitePool) {
     let dir = tempfile::tempdir().expect("dir");
+    let agent_config_path = toml.map(|t| {
+        let p = dir.path().join("agent.toml");
+        std::fs::write(&p, t).expect("agent.toml");
+        p
+    });
     let pool = open_memory().await.expect("memory db");
     let db = pool.clone();
     let secrets = Arc::new(SecretsStore::new(dir.path().join("secrets")));
@@ -272,7 +290,7 @@ async fn start_agent_with_pool() -> (PathBuf, tempfile::TempDir, sqlx::SqlitePoo
         email_config: None,
         email_default_to: None,
         fail2ban: hyperion_core::Fail2banConfig::default(),
-        agent_config_path: None,
+        agent_config_path,
         update_cache: Arc::new(tokio::sync::RwLock::new(None)),
         current_git_sha: "dev-unknown".into(),
         cert_issue_locks: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
@@ -4401,4 +4419,265 @@ async fn wordpress_updates_page_sorts_sites_by_what_they_need() {
     let body = get("/vulns?q=woocommerce").await;
     assert!(body.contains("major.example.cz"));
     assert!(!body.contains("fresh.example.cz"), "search leaked");
+}
+
+/// Every Settings page renders for an Owner and carries every card the card
+/// table puts on it — the ids every save redirect and deep link land on.
+/// Runs against the real router and a stub agent, so a page whose handler
+/// fails on an empty install (no nodes, no targets, default config) shows up
+/// here rather than as a 500 on a fresh box.
+#[tokio::test]
+async fn every_settings_page_renders_with_its_cards() {
+    use hyperion_web::handlers::settings::chrome::{CARDS, SECTIONS};
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d) = start_agent().await;
+    let app = build_app(sock, admin);
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/login")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(
+                    b"username=kevin&password=good-pw&next=/".to_vec(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .expect("login");
+    let cookie = extract_cookie(&resp);
+    let get = |uri: String| {
+        let app = app.clone();
+        let cookie = cookie.clone();
+        async move {
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .uri(&uri)
+                        .header(header::COOKIE, &cookie)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .expect("call");
+            (resp.status(), body_string(resp).await)
+        }
+    };
+
+    let (status, body) = get("/settings".into()).await;
+    assert_eq!(status, StatusCode::OK, "/settings");
+    assert!(body.contains("svc-verdict"), "overview has no verdict line");
+    for s in SECTIONS.iter().filter(|s| !s.cluster_only) {
+        assert!(
+            body.contains(&format!("href=\"/settings/{}\"", s.slug)),
+            "overview does not link /settings/{}",
+            s.slug
+        );
+    }
+
+    for s in SECTIONS {
+        let (status, body) = get(format!("/settings/{}", s.slug)).await;
+        assert_eq!(status, StatusCode::OK, "/settings/{}: {body}", s.slug);
+        for (card, page) in CARDS.iter().filter(|(_, p)| *p == s.slug) {
+            assert!(
+                body.contains(&format!("id=\"{card}\"")),
+                "/settings/{page} has no #{card}"
+            );
+        }
+        assert!(
+            !body.contains("STUB"),
+            "/settings/{} is still the skeleton stub",
+            s.slug
+        );
+    }
+
+    let (status, body) = get("/admin/api-keys".into()).await;
+    assert_eq!(status, StatusCode::OK, "/admin/api-keys");
+    assert!(body.contains("Create a key"));
+}
+
+/// The old per-node Mail link (`/settings?mail_node=X#mail`) still lands on
+/// that node's Mail page.
+#[tokio::test]
+async fn old_mail_node_link_lands_on_the_mail_page() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d) = start_agent().await;
+    let app = build_app(sock, admin);
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/login")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(
+                    b"username=kevin&password=good-pw&next=/".to_vec(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .expect("login");
+    let cookie = extract_cookie(&resp);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/settings?mail_node=web-2")
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    assert!(resp.status().is_redirection());
+    assert_eq!(
+        resp.headers()
+            .get(header::LOCATION)
+            .and_then(|v| v.to_str().ok()),
+        Some("/settings/mail?node=web-2")
+    );
+}
+
+/// The older whole-letter templates in `[notifications]` replace the letter
+/// editor for every language. The Customer letters page names them, and
+/// "Move into the editor" puts their text into the catalogue strings and
+/// empties the templates — after which the page no longer warns.
+#[tokio::test]
+async fn older_letter_templates_move_into_the_editor() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d, cfg) = start_agent_with_toml(
+        "[notifications]\n\
+         care_report_body_template = \"Dobry den, {domain}.\\r\\n{uptime}\"\n\
+         expiry_warning_subject_template = \"Konci {domain}: {days_left}\"\n",
+    )
+    .await;
+    let app = build_app(sock, admin);
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/login")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(
+                    b"username=kevin&password=good-pw&next=/".to_vec(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .expect("login");
+    let cookie = extract_cookie(&resp);
+    let get = || {
+        let app = app.clone();
+        let cookie = cookie.clone();
+        async move {
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .uri("/settings/letters")
+                        .header(header::COOKIE, &cookie)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .expect("call");
+            assert_eq!(resp.status(), StatusCode::OK);
+            body_string(resp).await
+        }
+    };
+
+    let page = get().await;
+    assert!(page.contains("older template in force"), "no warning");
+    assert!(
+        page.contains("the care report body and the expiry warning subject"),
+        "the warning does not name what is set"
+    );
+    let csrf = extract_csrf(&page);
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/settings/letters/adopt-legacy")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header(header::COOKIE, &cookie)
+                .body(Body::from(format!("_csrf={csrf}&mode=move")))
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    let to = resp
+        .headers()
+        .get(header::LOCATION)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        to.starts_with("/settings/letters?flash=") && to.ends_with("#customer-letters"),
+        "{to}"
+    );
+
+    let toml = std::fs::read_to_string(&cfg).expect("agent.toml");
+    let doc: toml_edit::DocumentMut = toml.parse().expect("toml");
+    let letters = doc["letters"].as_table().expect("[letters]");
+    assert_eq!(
+        letters["care.body"].as_str(),
+        Some("Dobry den, {domain}.\n{uptime}"),
+        "{toml}"
+    );
+    // The old subject's {days_left} is the catalogue's {days} {unit}.
+    assert_eq!(
+        letters["expiry.subject.days"].as_str(),
+        Some("Konci {domain}: {days} {unit}"),
+        "{toml}"
+    );
+    for key in [
+        "care_report_subject_template",
+        "care_report_body_template",
+        "expiry_warning_subject_template",
+        "expiry_warning_body_template",
+    ] {
+        assert_eq!(
+            doc["notifications"][key].as_str(),
+            Some(""),
+            "{key} left in force: {toml}"
+        );
+    }
+
+    let page = get().await;
+    assert!(!page.contains("older template in force"), "still warns");
+
+    // The Languages card saves all three of its keys. `billing_lang` (and
+    // `operator_lang`) used to be refused by the agent, which failed the
+    // whole form.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/settings/config")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header(header::COOKIE, &cookie)
+                .body(Body::from(format!(
+                    "_csrf={csrf}&section=letters&_return_tab=letter-language\
+                     &lang=cs&overrides_lang=cs&billing_lang=en"
+                )))
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    let to = resp
+        .headers()
+        .get(header::LOCATION)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        to.starts_with("/settings/letters?flash=") && to.ends_with("#letter-language"),
+        "{to}"
+    );
+    let toml = std::fs::read_to_string(&cfg).expect("agent.toml");
+    assert!(toml.contains("billing_lang = \"en\""), "{toml}");
+    assert!(toml.contains("lang = \"cs\""), "{toml}");
 }

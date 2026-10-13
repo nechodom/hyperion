@@ -1,0 +1,123 @@
+{% extends "settings_base.html" %}
+{% block section %}
+{% if let Some(e) = config_error %}
+<div class="flash error">
+  <div class="flash-body">The agent's settings could not be read ({{ e }}). The values below are defaults, not what is set.</div>
+</div>
+{% endif %}
+
+{#- `[cluster]` is written from cards on four pages. This form declares ONLY
+    enforce_admin_2fa in `_checkboxes`: every declared box missing from the
+    POST is written as false, so listing the hardening switches here would
+    turn them off on every 2FA save. -#}
+<fieldset class="group"{{ chrome.ro() }}>
+  <div class="ghead">Sign-in{% if chrome.has_nodes %}<span class="scope-tag" title="Used by the master only">Master</span>{% endif %}</div>
+  <div class="item" id="sign-in">
+    <div class="row" style="align-items:center;gap:0.6rem;flex-wrap:wrap">
+      <h3 style="margin:0">Two-factor sign-in</h3>
+      {% if config.cluster.enforce_admin_2fa %}<span class="pill ok">required</span>
+      {% else %}<span class="pill warn">optional</span>{% endif %}
+    </div>
+    <p class="text-soft small" style="margin:0.4rem 0 0">
+      {% if config.cluster.enforce_admin_2fa %}
+      An Administrator or Owner without 2FA is sent to set it up at sign-in and can reach nothing else until they have.
+      {% else %}
+      Administrators and Owners can sign in with a password alone. Every other role is unaffected either way.
+      {% endif %}
+    </p>
+    <form method="post" action="/settings/config" autocomplete="off" style="margin-top:0.9rem">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="section" value="cluster">
+      <input type="hidden" name="_return_tab" value="sign-in">
+      <input type="hidden" name="_checkboxes" value="enforce_admin_2fa">
+      <label class="field-checkbox" style="margin:0">
+        <input type="checkbox" name="enforce_admin_2fa" value="true" {% if config.cluster.enforce_admin_2fa %}checked{% endif %}>
+        <span><strong>Require 2FA for Administrator and Owner accounts</strong></span>
+      </label>
+      <p class="text-soft small" style="margin:0.3rem 0 0 1.6rem">
+        Turn it off only briefly, for example during a server move.
+      </p>
+      <div class="item-actions"><button type="submit" class="btn primary">Save</button></div>
+    </form>
+    <details class="howto">
+      <summary>When it takes effect</summary>
+      <p>
+        The rule is checked at sign-in. The panel picks up a change within
+        about 30 seconds; nobody who is already signed in is logged out.
+      </p>
+      <p>
+        Operators, customers and read-only users are never asked for 2FA by
+        this rule. Your own 2FA, password and signed-in devices are on
+        <a href="/profile">My profile</a>.
+      </p>
+    </details>
+  </div>
+</fieldset>
+
+<div class="group">
+  <div class="ghead">People and keys</div>
+  <div class="item muted" id="users-roles">
+    <h3>Users, roles and keys</h3>
+    <p class="text-soft small" style="margin:0 0 0.8rem">
+      Accounts, permissions and API keys have pages of their own, under Administration.
+    </p>
+    <dl class="kv">
+      <dt data-require-caps="users_manage"><a href="/admin/users">Users</a></dt>
+      <dd data-require-caps="users_manage" class="text-soft small">Panel accounts: add one, change its role, lock it, reset a password.</dd>
+      <dt data-require-caps="roles_manage"><a href="/roles">Roles</a></dt>
+      <dd data-require-caps="roles_manage" class="text-soft small">Custom roles that grant exactly the capabilities you pick.</dd>
+      <dt data-require-caps="api_keys_manage"><a href="/admin/api-keys">API keys</a></dt>
+      <dd data-require-caps="api_keys_manage" class="text-soft small">Keys for scripts using the <code>/api/v1</code> API. They used to be on this page and now live under Administration.</dd>
+      <dt><a href="/profile">My profile</a></dt>
+      <dd class="text-soft small">Your own 2FA, password and signed-in devices.</dd>
+    </dl>
+  </div>
+</div>
+
+<fieldset class="group"{{ chrome.ro() }}>
+  <div class="ghead">Audit log{% if chrome.has_nodes %}<span class="scope-tag" title="Used by the master only">Master</span>{% endif %}</div>
+  <div class="item" id="audit-retention">
+    <div class="row" style="align-items:center;gap:0.6rem;flex-wrap:wrap">
+      <h3 style="margin:0">Audit log retention</h3>
+      {% if config.cluster.audit_retention_days > 0 %}<span class="pill ok">{{ config.cluster.audit_retention_days }} days</span>
+      {% else %}<span class="pill muted">kept forever</span>{% endif %}
+    </div>
+    <p class="text-soft small" style="margin:0.4rem 0 0">
+      Entries older than this are deleted automatically. <a href="/audit?export=csv">Export the log as CSV</a> to keep a copy elsewhere.
+    </p>
+    <form method="post" action="/settings/config" autocomplete="off" style="margin-top:0.9rem">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="section" value="cluster">
+      <input type="hidden" name="_return_tab" value="audit-retention">
+      <div class="field" style="margin:0">
+        <label for="audit_retention_days">Keep entries for <span class="hint">days · 0 = forever</span></label>
+        <input id="audit_retention_days" name="audit_retention_days" type="number"
+               min="0" max="3650" step="1" style="max-width:12rem"
+               value="{{ config.cluster.audit_retention_days }}">
+      </div>
+      <div class="item-actions"><button type="submit" class="btn primary">Save</button></div>
+    </form>
+    <details class="howto">
+      <summary>How it works</summary>
+      <p>
+        Every change made through the panel is recorded in a tamper-evident
+        BLAKE3 hash chain. A purge re-anchors the chain at the oldest entry
+        kept, so <code>verify_chain</code> still checks what is left.
+      </p>
+      <p>
+        Kept forever, the log grows by tens of MB a month on a busy cluster.
+        Common choices are 90 days, 365 for stricter rules, or 0 when you
+        export the log off the server and want everything kept here too.
+        Purges run on the regular scheduler tick, about once a minute.
+      </p>
+      {% if chrome.has_nodes %}
+      <p>
+        This is the master's log. Every node keeps its own entries and purges
+        them by the <code>audit_retention_days</code> in its own
+        <code>agent.toml</code>, which keeps them forever unless set there.
+      </p>
+      {% endif %}
+    </details>
+  </div>
+</fieldset>
+{% endblock %}

@@ -117,7 +117,7 @@
 #      which node broke, and leaves a stampede of re-enrollments.
 #
 #   4. ONLY THEN flip the enforcement toggles, in
-#      Settings → Cluster → Cluster channel hardening:
+#      Settings → Cluster → Channel hardening:
 #        Step 1 · Enforce worker TLS certificate pinning
 #                 ([cluster] enforce_worker_cert_pinning)
 #        Step 2 · Enforce signed node responses

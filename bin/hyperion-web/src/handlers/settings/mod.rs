@@ -1,8 +1,34 @@
-//! `/settings` — agent-wide configuration view + email test trigger.
+//! `/settings` — the Settings pages and every action they post to.
 //!
-//! READ-ONLY for now; agent.toml editing is the next iteration. The
-//! page reads `AgentConfigView` from the RPC (sanitised — no secrets)
-//! and renders it with clear "set / not set" indicators.
+//! An overview (`overview.rs`) plus one page per section, each in its own
+//! file and loading only what it shows; `chrome.rs` holds the frame they
+//! share — the section list, the card → page table every redirect goes
+//! through, and the read-only rule for anybody but an Owner. This file keeps
+//! the POST handlers (they predate the split, and several pages share them)
+//! and the helpers more than one page needs.
+
+pub mod chrome;
+mod overview;
+mod page_access;
+mod page_alerts;
+mod page_backups;
+mod page_bans;
+mod page_cluster;
+mod page_https;
+mod page_letters;
+mod page_mail;
+mod page_panel;
+
+pub use overview::get_overview;
+pub use page_access::get_access;
+pub use page_alerts::{get_alert_recipients, get_alerts};
+pub use page_backups::get_backups;
+pub use page_bans::get_bans;
+pub use page_cluster::{get_cluster, post_cluster_sync};
+pub use page_https::get_https;
+pub use page_letters::{get_letters, post_adopt_legacy};
+pub use page_mail::{get_mail, get_mail_health};
+pub use page_panel::get_panel;
 
 use crate::auth::AuthCtx;
 use crate::error::AppError;
@@ -18,413 +44,29 @@ use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::Form;
 use hyperion_rpc::codec::{Request, Response as RpcResponse};
 use hyperion_state::capabilities::Capability;
-use hyperion_types::{AgentConfigView, SmtpAutodetect, UpdateStatus};
+use hyperion_types::{AgentConfigView, SmtpAutodetect};
 use serde::Deserialize;
 use std::net::SocketAddr;
 
-#[derive(Template)]
-#[template(path = "settings.html")]
-struct SettingsTpl<'a> {
-    username: &'a str,
-    user_initial: char,
-    active: &'static str,
-    css_version: &'static str,
-    htmx_version: &'static str,
-    config: AgentConfigView,
-    /// Per-form CSRF token for the Slack test-message button. Scoped to
-    /// its own path like every other non-/settings/config form here.
-    csrf_slack_test: String,
-    update_status: UpdateStatus,
-    update_current_short: String,
-    update_latest_short: String,
-    /// Enrolled remote nodes — drives the "From: <node>" dropdown
-    /// in the Send-test-email form. Empty on single-node setups.
-    nodes: Vec<hyperion_types::NodeSummary>,
-    /// Nodes (the master first) that can carry a node-wide `*.<base>`
-    /// preview wildcard cert, each with its computed base domain. Drives the
-    /// per-node issuance rows in the "Preview wildcard certificates" card
-    /// on HTTPS & previews.
-    wildcard_nodes: Vec<NodeWildcardRow>,
-    /// Labels of enrolled nodes that have NOT published an Ed25519
-    /// response-signing key yet. Readiness is decided by PRESENCE of the
-    /// key, never by `agent_version` — git-describe strings don't order
-    /// and the version column lags a node restart by a heartbeat.
-    /// Empty + `resp_auth_total > 0` ⇒ every node is covered and
-    /// `enforce_response_auth` should be on.
-    resp_auth_pending: Vec<String>,
-    /// How many nodes are enrolled at all. Without it "every node is
-    /// ready" and "there are no worker nodes" are indistinguishable
-    /// through an empty `resp_auth_pending`.
-    resp_auth_total: usize,
-    /// Read-only snapshot of agent.toml with secrets masked, for
-    /// the "Raw TOML" tab. Failing to read shows "(could not
-    /// read /etc/hyperion/agent.toml: …)".
-    raw_toml: String,
-    /// The master's `[fail2ban]` section, for the Bans & blocking tab.
-    /// `None` when agent.toml couldn't be read or parsed — the card then
-    /// says so instead of pre-filling a form with numbers nothing backs.
-    fail2ban: Option<Fail2banView>,
-    /// Live MTA (postfix) state — mode (smart-host / direct-mx /
-    /// not-installed / default), myhostname, relayhost, mailq depth,
-    /// recent mail.log. Drives the new "MTA" card under the SMTP
-    /// relay form. Defaults to MtaDiagnostics::default() on RPC
-    /// failure (card renders "unknown" and offers a Reconfigure
-    /// button — operator at least sees the slot exists).
-    mta: hyperion_types::MtaDiagnostics,
-    /// Which node the Mail tab is currently editing ("" / "local" = master).
-    /// The `mta` diagnostics + the form pre-fill are for THIS node.
-    mail_node: String,
-    error: Option<String>,
-    flash: Option<String>,
-    flash_error: Option<String>,
-    /// Auto-fire the off-site FTP connection check on load (set right after a
-    /// save, so a config change is verified without a manual click).
-    auto_probe_backup_remote: bool,
-    csrf_token: String,
-    /// Whether a logo is on file — drives the preview thumbnail and the
-    /// Remove button.
-    email_logo_set: bool,
-    geoip_installed: bool,
-    geoip_updated_at: i64,
-    /// Whether credentials are on file. The KEY itself is never sent to
-    /// the page — only whether one exists.
-    geoip_configured: bool,
-    /// The account id IS shown: it is an identifier, not a secret, and
-    /// seeing it is how an operator confirms which account is in use.
-    geoip_account_id: String,
-    /// Capability groups for the "create API key" multiselect (reuses the
-    /// roles capability groups). Empty when the user can't manage keys.
-    api_key_cap_groups: Vec<ApiKeyCapGroup>,
-    /// Existing API keys (prefix · label · caps summary · last used · expires).
-    api_keys: Vec<ApiKeyRowView>,
-    /// True ⇒ render the "Create API key" and "Existing keys" cards on
-    /// Access & API (user holds ApiKeysManage).
-    can_manage_api_keys: bool,
-    /// A freshly-minted raw key to reveal exactly once (via ?api_key_new=).
-    new_api_key: Option<String>,
-    /// The built-in customer letters, as templates. Rendered into hidden
-    /// <textarea>s so the "Care report & expiry warning" card can (a) preview the
-    /// default when the operator has written nothing and (b) hand them the
-    /// real default as a starting point. They come from hyperion-types —
-    /// the same constants a hyperion-core test pins to the built-in
-    /// wording — so the editor can never show a "default" the mailer
-    /// doesn't actually send.
-    /// Language-aware: with `[letters] lang = "cs"` these are the CZECH
-    /// built-ins, so "start from the built-in letter" hands the operator
-    /// the letter their customers are actually receiving rather than an
-    /// English one they would have to translate a second time.
-    care_report_default_template: String,
-    expiry_warning_default_template: String,
-    /// `[letters] lang` as stored — which built-in pack the letters use.
-    letter_lang: String,
-    /// The language the operator's rewritten sentences are declared to be in:
-    /// "", "en" or "cs". Empty means undeclared, which applies them to every
-    /// letter.
-    letter_overrides_lang: String,
-    /// `[letters] operator_lang` — the language of the operator's OWN messages
-    /// (notification bell, admin alerts), separate from the customer `lang`.
-    /// "en" (default) or "cs".
-    letter_operator_lang: String,
-    /// `[letters] billing_lang` — the billing reminder's language. "" follows
-    /// the customer `lang`; "en"/"cs" pins it.
-    letter_billing_lang: String,
-    /// Every translatable string, grouped for the editor.
-    letter_groups: Vec<LetterGroupCard>,
-    /// One row per enrolled node: which customer letters that node would
-    /// actually send right now. Empty on a single-node install (nothing can
-    /// diverge) — see [`letter_node_rows`] for why the card shows this at
-    /// all rather than trusting the last save to have stuck.
-    letter_nodes: Vec<LetterNodeRow>,
-    /// Sample values for the care-report preview, as a JSON object the
-    /// page's script uses directly.
-    ///
-    /// Rendered SERVER-SIDE by `hyperion_core::service::care_report_preview_fields`,
-    /// which runs the same `care_section_*` code the customer's letter
-    /// does. The page used to carry its own hand-copied prose, and it had
-    /// already drifted from the mailer — an operator adjusting wording
-    /// around a sentence was editing text nobody receives.
-    care_preview_json: String,
-}
-
-/// One card in the letter-wording editor: a group of strings that belong
-/// to the same part of a letter.
-pub struct LetterGroupCard {
-    pub name: String,
-    pub strings: Vec<LetterStringRow>,
-}
-
-/// One translatable string, as the editor needs it.
-///
-/// `built_in` is shown as the field's placeholder rather than its value, so
-/// an untouched string stays EMPTY in the form and therefore empty in
-/// agent.toml. That is what keeps "I have not customised this" different
-/// from "I have pinned this to today's wording": the first follows the
-/// built-in pack when it improves, the second does not.
-pub struct LetterStringRow {
-    pub id: String,
-    pub note: String,
-    pub built_in: String,
-    pub current: String,
-    /// Multi-line strings get a <textarea>, one-liners an <input>. Purely
-    /// a matter of the editor not being painful to use.
-    pub multiline: bool,
-}
-
-/// What one node currently holds for the two CUSTOMER letters, compared
-/// against the master's copy shown in the editor above it.
-///
-/// The letters are rendered on the node that OWNS each hosting, from that
-/// node's own agent.toml, because that is where the metrics behind a care
-/// report live. Settings writes the master's copy and pushes it to every
-/// node it can reach — but a node that was down, unenrolled from the signed
-/// channel, or running an older agent keeps the letter it already had, and
-/// its customers go on receiving it. That state is invisible from the
-/// master's file, so the card asks each node instead.
-pub struct LetterNodeRow {
-    pub label: String,
-    pub node_id: String,
-    /// `same` / `differs` / `unknown` — drives the badge and nothing else.
-    pub state: &'static str,
-    /// The sentence printed next to the badge. For `differs` it names WHICH
-    /// of the two letters is out of step, because the fix is per letter.
-    pub note: String,
-}
-
-/// How long the card waits for one node to answer with its letters. Short
-/// on purpose: this is a status line on a settings page, and a node that
-/// cannot answer in this window is reported as unknown rather than allowed
-/// to hold the whole page open. `dispatch_to_node`'s own ceiling is 30 s,
-/// which is right for an action and much too long for a badge.
-const LETTER_PROBE_TIMEOUT_SECS: u64 = 4;
-
-/// One node's verdict, from the two body comparisons: `(badge, sentence)`.
-///
-/// "In step" needs BOTH letters to match — a node that agrees about the care
-/// report and not about the expiry warning is still sending a letter the
-/// operator did not write, and the sentence has to name which one, because
-/// nothing else on the page will.
-fn letter_verdict(care_same: bool, expiry_same: bool) -> (&'static str, &'static str) {
-    match (care_same, expiry_same) {
-        (true, true) => ("same", "sends the same letters as this master"),
-        (false, true) => (
-            "differs",
-            "sends a DIFFERENT care report — its sites' owners get that node's wording, \
-             not the one in the box above",
+/// The master's `AgentConfigView`, or the defaults plus why it could not be
+/// read. A page built from defaults must say so: every value on it would
+/// otherwise look like a setting somebody chose.
+pub(crate) fn config_or_default<E: std::fmt::Display>(
+    res: Result<RpcResponse, E>,
+) -> (AgentConfigView, Option<String>) {
+    match res {
+        Ok(RpcResponse::AgentConfigView(c)) => (c, None),
+        Ok(RpcResponse::Error(e)) => (AgentConfigView::default(), Some(e.to_string())),
+        Ok(_) => (
+            AgentConfigView::default(),
+            Some("unexpected agent response".into()),
         ),
-        (true, false) => (
-            "differs",
-            "sends a DIFFERENT expiry warning — its sites' owners get that node's wording, \
-             not the one in the box above",
-        ),
-        (false, false) => (
-            "differs",
-            "sends DIFFERENT care reports AND expiry warnings — its sites' owners get \
-             neither letter in the boxes above",
-        ),
+        Err(e) => (AgentConfigView::default(), Some(format!("rpc: {e}"))),
     }
-}
-
-/// Ask every enrolled node which customer letters it currently holds.
-///
-/// Best-effort and parallel: one unreachable node must neither slow the page
-/// past [`LETTER_PROBE_TIMEOUT_SECS`] nor hide the answer for the others. A
-/// node that does not answer is reported as UNKNOWN — never as "same", which
-/// is the assumption this whole card exists to stop the operator making.
-async fn letter_node_rows(
-    state: &SharedState,
-    nodes: &[hyperion_types::NodeSummary],
-    master: &hyperion_types::NotificationTemplatesView,
-) -> Vec<LetterNodeRow> {
-    if nodes.is_empty() {
-        return Vec::new();
-    }
-    let mut set = tokio::task::JoinSet::new();
-    for n in nodes {
-        let st = state.clone();
-        let node_id = n.node_id.clone();
-        let label = if n.label.trim().is_empty() {
-            n.node_id.clone()
-        } else {
-            n.label.clone()
-        };
-        let care = master.care_report_body_template.clone();
-        let expiry = master.expiry_warning_body_template.clone();
-        let letters = master.letters_fingerprint.clone();
-        set.spawn(async move {
-            let probe = tokio::time::timeout(
-                std::time::Duration::from_secs(LETTER_PROBE_TIMEOUT_SECS),
-                crate::dispatcher::dispatch_to_node(
-                    &st,
-                    Some(node_id.as_str()),
-                    Request::AgentConfigView,
-                ),
-            )
-            .await;
-            let (state_str, note) = match probe {
-                Ok(Ok(RpcResponse::AgentConfigView(v))) => {
-                    // Compare exactly what the renderers compare: the body
-                    // strings themselves. Both sides read "" as "send the
-                    // built-in letter", so two empties are genuinely the
-                    // same letter, not two unknowns.
-                    // The two BODIES plus the `[letters]` fingerprint. The
-                    // badge used to compare only the bodies and then claim the
-                    // node "sends the same letters" — a statement about the
-                    // whole letter made from two of its fields, so a node on a
-                    // different LANGUAGE, or missing every sentence the
-                    // operator rewrote, read as agreement.
-                    //
-                    // An empty fingerprint means the node did not say (an agent
-                    // older than this field), which must read as unknown rather
-                    // than as agreement.
-                    let theirs = v.notifications.letters_fingerprint.as_str();
-                    let letters_same = if theirs.is_empty() || letters.is_empty() {
-                        None
-                    } else {
-                        Some(theirs == letters)
-                    };
-                    let (s, note) = letter_verdict(
-                        v.notifications.care_report_body_template == care,
-                        v.notifications.expiry_warning_body_template == expiry,
-                    );
-                    match letters_same {
-                        Some(false) => (
-                            "differs",
-                            "sends its letters in a DIFFERENT language or with different \
-                             wording — its sites' owners do not get what the box above says"
-                                .to_string(),
-                        ),
-                        None if s == "same" => (
-                            "unknown",
-                            "sends the same two letter bodies, but is too old to say which \
-                             language and wording it uses, so letter parity is unknown"
-                                .to_string(),
-                        ),
-                        _ => (s, note.to_string()),
-                    }
-                }
-                Ok(Ok(RpcResponse::Error(e))) => (
-                    "unknown",
-                    format!("could not be read, so which letter its customers get is unknown: {e}"),
-                ),
-                Ok(Ok(_)) => (
-                    "unknown",
-                    "answered with something unexpected, so which letter its customers get \
-                     is unknown"
-                        .into(),
-                ),
-                Ok(Err(e)) => (
-                    "unknown",
-                    format!(
-                        "could not be reached, so which letter its customers get is unknown: {e}"
-                    ),
-                ),
-                Err(_) => (
-                    "unknown",
-                    format!(
-                        "did not answer within {LETTER_PROBE_TIMEOUT_SECS}s, so which letter \
-                         its customers get is unknown"
-                    ),
-                ),
-            };
-            LetterNodeRow {
-                label,
-                node_id,
-                state: state_str,
-                note,
-            }
-        });
-    }
-    let mut rows: Vec<LetterNodeRow> = Vec::new();
-    while let Some(r) = set.join_next().await {
-        match r {
-            Ok(row) => rows.push(row),
-            // A panicked probe is still an unanswered question; it must not
-            // silently shrink the list into "every node agrees".
-            Err(e) => tracing::warn!(error = %e, "customer-letter probe task failed"),
-        }
-    }
-    // Stable order regardless of which node answered first.
-    rows.sort_by(|a, b| a.label.cmp(&b.label));
-    rows
 }
 
 fn short_sha(s: &str) -> String {
     s.chars().take(12).collect()
-}
-
-/// One capability checkbox in the API-key create form.
-pub struct ApiKeyCapRow {
-    pub machine: &'static str,
-    pub label: &'static str,
-}
-
-/// One capability group (e.g. "Hosting") for the API-key form.
-pub struct ApiKeyCapGroup {
-    pub label: &'static str,
-    pub caps: Vec<ApiKeyCapRow>,
-}
-
-/// A pre-decorated API-key row for the Settings list.
-pub struct ApiKeyRowView {
-    pub id: i64,
-    pub key_prefix: String,
-    pub label: String,
-    pub caps_summary: String,
-    pub last_used: String,
-    pub expires: String,
-    pub is_revoked: bool,
-    /// Human summary of the key's hardening ("2 IPs · 60/min", or "—").
-    pub restrictions: String,
-}
-
-/// Compact one-line summary of a key's IP allowlist + rate limit for the
-/// Settings list. "—" when the key has neither restriction.
-fn restrictions_summary(ip_allowlist: &[String], rate_limit_per_min: i64) -> String {
-    let mut parts: Vec<String> = Vec::new();
-    if !ip_allowlist.is_empty() {
-        let n = ip_allowlist.len();
-        parts.push(format!("{n} IP{}", if n == 1 { "" } else { "s" }));
-    }
-    if rate_limit_per_min > 0 {
-        parts.push(format!("{rate_limit_per_min}/min"));
-    }
-    if parts.is_empty() {
-        "—".to_string()
-    } else {
-        parts.join(" · ")
-    }
-}
-
-/// Build the capability-group checkboxes for the create form, reusing the
-/// canonical roles capability groups.
-fn api_key_cap_groups() -> Vec<ApiKeyCapGroup> {
-    hyperion_state::capabilities::groups()
-        .into_iter()
-        .map(|(label, members)| ApiKeyCapGroup {
-            label,
-            caps: members
-                .into_iter()
-                .map(|c| ApiKeyCapRow {
-                    machine: c.as_str(),
-                    label: c.label(),
-                })
-                .collect(),
-        })
-        .collect()
-}
-
-/// Short human summary of a CapSet for the list ("3 caps" / "all caps").
-fn caps_summary(caps: u64) -> String {
-    let set = hyperion_state::capabilities::CapSet::from_bits(caps);
-    let n = set.count();
-    let all = hyperion_state::capabilities::CapSet::all().count();
-    if n == 0 {
-        "no caps".to_string()
-    } else if n == all {
-        "all caps".to_string()
-    } else {
-        format!("{n} cap{}", if n == 1 { "" } else { "s" })
-    }
 }
 
 /// POST /settings/email-logo — replace or clear the notification logo.
@@ -438,10 +80,10 @@ pub async fn post_email_logo(
     mut multipart: axum::extract::Multipart,
 ) -> Result<Response, AppError> {
     if !ctx.is_super_admin() {
-        return Ok(
-            Redirect::to("/settings?flash_error=owner+role+required#email-branding")
-                .into_response(),
-        );
+        return Ok(chrome::back_with_error(
+            "email-branding",
+            "Only an Owner can change the logo.",
+        ));
     }
     let mut bytes: Vec<u8> = Vec::new();
     let mut clear = false;
@@ -462,9 +104,10 @@ pub async fn post_email_logo(
     }
     let payload = if clear { Vec::new() } else { bytes };
     if payload.is_empty() && !clear {
-        return Ok(
-            Redirect::to("/settings?flash_error=no+image+selected#email-branding").into_response(),
-        );
+        return Ok(chrome::back_with_error(
+            "email-branding",
+            "No image was selected.",
+        ));
     }
     let resp = hyperion_rpc_client::call(
         &state.agent_socket,
@@ -474,14 +117,15 @@ pub async fn post_email_logo(
     )
     .await?;
     match resp {
-        RpcResponse::EmailLogoSet => {
-            Ok(Redirect::to("/settings?flash=saved#email-branding").into_response())
-        }
-        RpcResponse::Error(e) => Ok(Redirect::to(&format!(
-            "/settings?flash_error={}#email-branding",
-            super::hostings::urlencoding(&e.to_string())
-        ))
-        .into_response()),
+        RpcResponse::EmailLogoSet => Ok(chrome::back_with_flash(
+            "email-branding",
+            if clear {
+                "Logo removed — e-mails are headed by the panel hostname again."
+            } else {
+                "Logo saved."
+            },
+        )),
+        RpcResponse::Error(e) => Ok(chrome::back_with_error("email-branding", &e.to_string())),
         _ => Err(AppError::Internal("unexpected response".into())),
     }
 }
@@ -618,7 +262,10 @@ pub async fn post_geoip_creds(
     axum::extract::Form(form): axum::extract::Form<GeoipCredsForm>,
 ) -> Result<Response, AppError> {
     if !ctx.is_super_admin() {
-        return Ok(Redirect::to("/settings?flash_error=owner+role+required#geoip").into_response());
+        return Ok(chrome::back_with_error(
+            "geoip",
+            "Only an Owner can change the GeoIP credentials.",
+        ));
     }
     let resp = hyperion_rpc_client::call(
         &state.agent_socket,
@@ -627,20 +274,16 @@ pub async fn post_geoip_creds(
             license_key: form.license_key.into(),
         },
     )
-    .await?;
-    match resp {
-        RpcResponse::GeoipSetCreds(n) => Ok(Redirect::to(&format!(
-            "/settings?flash={}#geoip",
-            super::hostings::urlencoding(&format!("GeoIP ready — {n} ranges"))
-        ))
-        .into_response()),
-        RpcResponse::Error(e) => Ok(Redirect::to(&format!(
-            "/settings?flash_error={}#geoip",
-            super::hostings::urlencoding(&e.to_string())
-        ))
-        .into_response()),
-        _ => Err(AppError::Internal("unexpected response".into())),
-    }
+    .await;
+    Ok(match resp {
+        Ok(RpcResponse::GeoipSetCreds(n)) => chrome::back_with_flash(
+            "geoip",
+            &format!("Credentials saved and the GeoIP database installed — {n} ranges."),
+        ),
+        Ok(RpcResponse::Error(e)) => chrome::back_with_error("geoip", &e.to_string()),
+        Ok(_) => chrome::back_with_error("geoip", "Unexpected answer from the agent."),
+        Err(e) => chrome::back_with_error("geoip", &format!("The agent did not answer: {e}")),
+    })
 }
 
 #[derive(serde::Deserialize)]
@@ -660,21 +303,21 @@ pub async fn post_geoip_refresh(
     ctx: AuthCtx,
 ) -> Result<Response, AppError> {
     if !ctx.is_super_admin() {
-        return Ok(Redirect::to("/settings?flash_error=owner+role+required#geoip").into_response());
+        return Ok(chrome::back_with_error(
+            "geoip",
+            "Only an Owner can refresh the GeoIP database.",
+        ));
     }
-    match hyperion_rpc_client::call(&state.agent_socket, Request::GeoipRefresh).await? {
-        RpcResponse::GeoipRefresh(n) => Ok(Redirect::to(&format!(
-            "/settings?flash={}#geoip",
-            super::hostings::urlencoding(&format!("GeoIP database installed — {n} ranges"))
-        ))
-        .into_response()),
-        RpcResponse::Error(e) => Ok(Redirect::to(&format!(
-            "/settings?flash_error={}#geoip",
-            super::hostings::urlencoding(&e.to_string())
-        ))
-        .into_response()),
-        _ => Err(AppError::Internal("unexpected response".into())),
-    }
+    Ok(
+        match hyperion_rpc_client::call(&state.agent_socket, Request::GeoipRefresh).await {
+            Ok(RpcResponse::GeoipRefresh(n)) => {
+                chrome::back_with_flash("geoip", &format!("GeoIP database installed — {n} ranges."))
+            }
+            Ok(RpcResponse::Error(e)) => chrome::back_with_error("geoip", &e.to_string()),
+            Ok(_) => chrome::back_with_error("geoip", "Unexpected answer from the agent."),
+            Err(e) => chrome::back_with_error("geoip", &format!("The agent did not answer: {e}")),
+        },
+    )
 }
 
 /// Render a unix timestamp as a short YYYY-MM-DD (UTC), or "—" for None.
@@ -687,12 +330,12 @@ fn fmt_date(ts: Option<i64>) -> String {
     }
 }
 
-/// The `[fail2ban]` section as it currently reads on disk, for the Bans &
-/// blocking tab's form.
+/// The `[fail2ban]` section as it currently reads on disk, for the
+/// Brute-force scanner card (`/settings/bans`) and the overview.
 ///
-/// Not part of `AgentConfigView`: the section is read straight out of the
-/// same `/etc/hyperion/agent.toml` the Raw TOML tab already reads, so the
-/// form shows the file rather than a value re-derived somewhere else.
+/// Not part of `AgentConfigView`: the section is read straight out of
+/// `/etc/hyperion/agent.toml`, so the form shows the file rather than a
+/// value re-derived somewhere else.
 pub struct Fail2banView {
     /// The values in the file, defaults filled in for absent keys.
     pub cfg: hyperion_core::Fail2banConfig,
@@ -707,7 +350,7 @@ pub struct Fail2banView {
     pub clamped: bool,
 }
 
-/// Parse the `[fail2ban]` table out of agent.toml for the Bans & blocking tab.
+/// Parse the `[fail2ban]` table out of agent.toml for the Brute-force scanner card.
 ///
 /// An absent table is not an error: the agent runs the built-in defaults
 /// then, which is exactly what's rendered — flagged with `in_toml = false`.
@@ -753,517 +396,6 @@ pub(crate) fn parse_fail2ban_section(raw: &str) -> Option<Fail2banView> {
     })
 }
 
-/// One node's preview wildcard-cert row in the "Preview wildcard
-/// certificates" card.
-pub struct NodeWildcardRow {
-    pub node_id: String,
-    pub label: String,
-    /// Base domain a `*.<base>` cert would cover (e.g. `four.example.cz`).
-    pub base: String,
-    /// The wildcard subject shown to the operator (`*.<base>`).
-    pub wildcard: String,
-    /// Live status of the `*.<base>` cert ON THAT NODE:
-    /// "" (unknown/unreachable), "missing", "ok", "warning" (<30d),
-    /// "critical" (<7d), "expired". Drives the pill so an operator who
-    /// just ran manual validation SEES it landed, instead of guessing
-    /// from the presence of a Preview link on some other page.
-    pub status: String,
-    /// Days until expiry when status is a live band; 0 otherwise.
-    pub days_left: i64,
-    /// Absolute expiry date, pre-formatted, or empty.
-    pub expires: String,
-}
-
-#[derive(Deserialize, Default)]
-pub struct SettingsQuery {
-    #[serde(default)]
-    flash: Option<String>,
-    #[serde(default)]
-    flash_error: Option<String>,
-    /// Node whose [email] config the Mail tab should show/edit.
-    /// "" / "local" = master. Drives the per-node MtaDiagnostics fetch.
-    #[serde(default)]
-    mail_node: String,
-    /// Set by the redirect after saving the off-site FTP target: auto-run the
-    /// connection check once the page loads (after the agent restart settles).
-    #[serde(default)]
-    probe_backup_remote: Option<String>,
-}
-
-/// Read one cookie value from the request's `Cookie` header (none if absent).
-fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
-    headers
-        .get(axum::http::header::COOKIE)?
-        .to_str()
-        .ok()?
-        .split(';')
-        .filter_map(|kv| kv.split_once('='))
-        .find(|(k, _)| k.trim() == name)
-        .map(|(_, v)| v.trim().to_string())
-}
-
-pub async fn get_settings(
-    State(state): State<SharedState>,
-    ctx: AuthCtx,
-    headers: HeaderMap,
-    axum::extract::Query(q): axum::extract::Query<SettingsQuery>,
-) -> Result<Response, AppError> {
-    // A freshly-minted API key is handed over via a one-time HttpOnly cookie
-    // (set by post_api_key_create) instead of the URL; read + clear it here so
-    // it's shown exactly once.
-    let new_api_key = cookie_value(&headers, "hyp_new_api_key");
-    // Cluster/agent configuration, node topology and every node's mail
-    // setup. Every POST under /settings is admin-gated, but
-    // the GET page was reachable by any logged-in user (the nav only hides the
-    // link). Tenant-scoped roles must not read it.
-    if !ctx.can(Capability::SettingsManage) {
-        return Ok(Redirect::to("/").into_response());
-    }
-    let (config_res, update_res) = tokio::join!(
-        hyperion_rpc_client::call(&state.agent_socket, Request::AgentConfigView),
-        hyperion_rpc_client::call(
-            &state.agent_socket,
-            Request::UpdateCheck {
-                force_refresh: false
-            },
-        ),
-    );
-    let (config, error) = match config_res {
-        Ok(RpcResponse::AgentConfigView(c)) => (c, None),
-        Ok(RpcResponse::Error(e)) => (AgentConfigView::default(), Some(e.to_string())),
-        Ok(_) => (
-            AgentConfigView::default(),
-            Some("unexpected agent response".into()),
-        ),
-        Err(e) => (AgentConfigView::default(), Some(format!("rpc: {e}"))),
-    };
-    let update_status: UpdateStatus = match update_res {
-        Ok(RpcResponse::UpdateCheck(u)) => u,
-        _ => UpdateStatus::default(),
-    };
-    // The Mail tab edits ONE node's [email] config at a time. Fetch that
-    // node's MTA diagnostics + config over the signed channel (master = local
-    // socket). The form pre-fills from `mta.cfg_*`.
-    let mail_node = q.mail_node.trim().to_string();
-    let mail_target = if mail_node.is_empty() || mail_node == "local" {
-        None
-    } else {
-        Some(mail_node.as_str())
-    };
-    let mta: hyperion_types::MtaDiagnostics =
-        match crate::dispatcher::dispatch_to_node(&state, mail_target, Request::MtaDiagnostics)
-            .await
-        {
-            Ok(RpcResponse::MtaDiagnostics(d)) => d,
-            _ => hyperion_types::MtaDiagnostics::default(),
-        };
-    // Enrolled nodes — for the "send test from <node>" dropdown.
-    // Best-effort: NodesList failure → empty Vec → dropdown shows
-    // only the master option.
-    let nodes: Vec<hyperion_types::NodeSummary> = match crate::dispatcher::cached_nodes(&state)
-        .await
-        .map(hyperion_rpc::codec::Response::NodesList)
-    {
-        Ok(RpcResponse::NodesList(v)) => v,
-        _ => Vec::new(),
-    };
-    // Read agent.toml once — for the Raw TOML tab (masked: anything that
-    // looks like a password / token line; token values are single-line
-    // strings so a regex on `password = "..."` / `token = "..."` /
-    // `webhook = "https://hooks..."` suffices) and for the Brute force
-    // tab's `[fail2ban]` form, which is parsed from the unmasked text.
-    let agent_toml = tokio::fs::read_to_string("/etc/hyperion/agent.toml").await;
-    let fail2ban = agent_toml.as_deref().ok().and_then(parse_fail2ban_section);
-    let raw_toml = match &agent_toml {
-        Ok(s) => mask_secrets_in_toml(s),
-        Err(e) => format!("(could not read /etc/hyperion/agent.toml: {e})"),
-    };
-    // The letter language + every per-string override, built from the SAME
-    // file the mailer reads. An unreadable agent.toml leaves the English
-    // pack, which is what a fresh install has.
-    let letter_cat = agent_toml
-        .as_deref()
-        .map(hyperion_core::service::letter_catalog_from_toml)
-        .unwrap_or_default();
-    let update_current_short = short_sha(&update_status.current_sha);
-    let update_latest_short = short_sha(&update_status.latest_sha);
-    // Per-node preview wildcard rows: a `*.<base>` cert issued once covers
-    // every preview address on the node (and every auto-subdomain a test
-    // node spins up).
-    // EVERY node with a derivable base — the master first, addressed by
-    // the `local` sentinel. Previously filtered to test-marked workers,
-    // which made previews unreachable on a single-server install (empty
-    // node list ⇒ no rows ⇒ no way to issue the wildcard).
-    let mut wildcard_nodes: Vec<NodeWildcardRow> = Vec::new();
-    if let Some(base) = config
-        .cluster
-        .node_wildcard_base(&config.hostname, &config.hostname)
-    {
-        wildcard_nodes.push(NodeWildcardRow {
-            node_id: crate::dispatcher::LOCAL_NODE_SENTINEL.to_string(),
-            label: format!("{} (this server)", config.hostname),
-            wildcard: format!("*.{base}"),
-            base,
-            status: String::new(),
-            days_left: 0,
-            expires: String::new(),
-        });
-    }
-    wildcard_nodes.extend(nodes.iter().filter_map(|n| {
-        config
-            .cluster
-            .node_wildcard_base(&n.node_id, &n.label)
-            .map(|base| NodeWildcardRow {
-                node_id: n.node_id.clone(),
-                label: n.label.clone(),
-                wildcard: format!("*.{base}"),
-                base,
-                status: String::new(),
-                days_left: 0,
-                expires: String::new(),
-            })
-    }));
-    // Fill each row's live cert status by asking the node it lives on.
-    // One CertOverview per DISTINCT target, not per row — a single-server
-    // install is one call. Unreachable node ⇒ status stays "" (unknown),
-    // never a false "missing": the standing rule that a probe which could
-    // not run must not masquerade as a finding.
-    for row in wildcard_nodes.iter_mut() {
-        let target =
-            (row.node_id != crate::dispatcher::LOCAL_NODE_SENTINEL).then_some(row.node_id.as_str());
-        let resp = crate::dispatcher::dispatch_to_node(&state, target, Request::CertOverview).await;
-        if let Ok(RpcResponse::CertOverview(items)) = resp {
-            // The wildcard subject is stored as its base domain (a
-            // `*.<base>` cert's row `domain` is `<base>`), matched
-            // case-insensitively.
-            if let Some(c) = items
-                .iter()
-                .find(|c| c.domain.eq_ignore_ascii_case(&row.base))
-            {
-                row.status = if c.days_left < 0 {
-                    "expired".to_string()
-                } else {
-                    c.band.clone()
-                };
-                row.days_left = c.days_left;
-                row.expires = fmt_date(Some(c.not_after));
-            } else {
-                row.status = "missing".to_string();
-            }
-        }
-    }
-    // Response-auth readiness for the Cluster channel hardening card's ladder.
-    // A blank key counts as absent: the heartbeat boundary already
-    // trims, but an empty string here would render a node "ready" that
-    // the dispatcher treats as unverifiable.
-    let resp_auth_total = nodes.len();
-    let resp_auth_pending: Vec<String> = nodes
-        .iter()
-        .filter(|n| n.resp_pubkey.as_deref().unwrap_or("").trim().is_empty())
-        .map(|n| {
-            if n.label.is_empty() {
-                n.node_id.clone()
-            } else {
-                n.label.clone()
-            }
-        })
-        .collect();
-    // API key cards (gated by ApiKeysManage). Fetch the list best-effort;
-    // a failed RPC just shows an empty list. The capability multiselect
-    // reuses the canonical roles groups.
-    let can_manage_api_keys = ctx.can(Capability::ApiKeysManage);
-    let api_keys: Vec<ApiKeyRowView> = if can_manage_api_keys {
-        match hyperion_rpc_client::call(&state.agent_socket, Request::ApiKeyList).await {
-            Ok(RpcResponse::ApiKeyList(rows)) => rows
-                .into_iter()
-                .map(|r| ApiKeyRowView {
-                    id: r.id,
-                    is_revoked: r.is_revoked(),
-                    key_prefix: r.key_prefix,
-                    caps_summary: caps_summary(r.caps),
-                    last_used: fmt_date(r.last_used_at),
-                    expires: fmt_date(r.expires_at),
-                    restrictions: restrictions_summary(&r.ip_allowlist, r.rate_limit_per_min),
-                    label: r.label,
-                })
-                .collect(),
-            _ => Vec::new(),
-        }
-    } else {
-        Vec::new()
-    };
-    let api_key_cap_groups = if can_manage_api_keys {
-        api_key_cap_groups()
-    } else {
-        Vec::new()
-    };
-    // What each node would actually send to ITS customers. Done after the
-    // node list is in hand, and only for a cluster: on a single-node install
-    // the master's file is the whole truth and there is nothing to compare.
-    let letter_nodes = letter_node_rows(&state, &nodes, &config.notifications).await;
-    let csrf_token = super::session_csrf_token(&state, &ctx);
-    let (geoip_installed, geoip_updated_at) =
-        match hyperion_rpc_client::call(&state.agent_socket, Request::GeoipStatus).await {
-            Ok(RpcResponse::GeoipStatus {
-                installed,
-                updated_at,
-            }) => (installed, updated_at),
-            _ => (false, 0),
-        };
-    let (geoip_configured, geoip_account_id) = match hyperion_adapters_geoip_creds(&state).await {
-        Some(id) => (true, id),
-        None => (false, String::new()),
-    };
-    let email_logo_set = matches!(
-        hyperion_rpc_client::call(&state.agent_socket, Request::EmailLogoGet).await,
-        Ok(RpcResponse::EmailLogoGet(Some(_)))
-    );
-    let tpl = SettingsTpl {
-        username: &ctx.username,
-        user_initial: super::user_initial(&ctx.username),
-        active: "settings",
-        css_version: super::css_version(),
-        htmx_version: super::htmx_version(),
-        config,
-        update_status,
-        update_current_short,
-        update_latest_short,
-        nodes,
-        wildcard_nodes,
-        resp_auth_pending,
-        resp_auth_total,
-        raw_toml,
-        fail2ban,
-        mta,
-        mail_node,
-        error,
-        flash: q.flash,
-        flash_error: q.flash_error,
-        auto_probe_backup_remote: q.probe_backup_remote.is_some(),
-        csrf_token,
-        csrf_slack_test: super::hostings::csrf_token_for(&state, &ctx, "/settings/slack-test"),
-        email_logo_set,
-        geoip_installed,
-        geoip_updated_at,
-        geoip_configured,
-        geoip_account_id,
-        api_key_cap_groups,
-        api_keys,
-        can_manage_api_keys,
-        new_api_key: new_api_key.clone(),
-        care_report_default_template: letter_cat.get("care.body").to_string(),
-        expiry_warning_default_template: letter_cat.get("expiry.body").to_string(),
-        letter_lang: letter_cat.lang.as_str().to_string(),
-        letter_overrides_lang: letter_cat
-            .overrides_lang
-            .map(|l| l.as_str().to_string())
-            .unwrap_or_default(),
-        letter_operator_lang: letter_cat.operator_lang.as_str().to_string(),
-        letter_billing_lang: letter_cat
-            .billing_lang
-            .map(|l| l.as_str().to_string())
-            .unwrap_or_default(),
-        letter_groups: letter_group_cards(&letter_cat),
-        letter_nodes,
-        care_preview_json: {
-            let map: std::collections::BTreeMap<&str, String> =
-                hyperion_core::service::care_report_preview_fields(&letter_cat)
-                    .into_iter()
-                    .collect();
-            // A failure here would only mean the preview has no sample, so
-            // fall back to an empty object: the placeholders then render as
-            // themselves, which is visibly "no sample" rather than a wrong one.
-            let json = serde_json::to_string(&map).unwrap_or_else(|_| "{}".to_string());
-            // Emitted with `|safe` into a <script> block, so the one
-            // sequence that could break out has to go. Today's sample is
-            // our own prose and contains none — this keeps that true if the
-            // sample ever grows a section that quotes markup.
-            json.replace("</", "<\\/")
-        },
-    };
-    let mut resp = Html(tpl.render()?).into_response();
-    // One-shot: clear the reveal cookie so a refresh doesn't show the key again.
-    if new_api_key.is_some() {
-        if let Ok(v) = axum::http::HeaderValue::from_str(
-            "hyp_new_api_key=; Max-Age=0; Path=/settings; HttpOnly; SameSite=Strict",
-        ) {
-            resp.headers_mut().insert(axum::http::header::SET_COOKIE, v);
-        }
-    }
-    Ok(resp)
-}
-
-/// `POST /settings/api-keys` — mint a new API key. Gated by
-/// ApiKeysManage. Caps are folded from the checked capability checkboxes
-/// (named by machine string) and clamped server-side to the owner's
-/// effective caps. The raw key is revealed once via the redirect.
-pub async fn post_api_key_create(
-    State(state): State<SharedState>,
-    ctx: AuthCtx,
-    Form(form): Form<ApiKeyCreateForm>,
-) -> Result<Response, AppError> {
-    if !ctx.can(Capability::ApiKeysManage) {
-        return Ok(
-            Redirect::to("/?flash_error=API+key+management+requires+permission").into_response(),
-        );
-    }
-    let Some(session) = ctx.session.as_ref() else {
-        // API-key management is a UI-only action (the create form lives
-        // in Settings); reject Bearer-driven self-minting here.
-        return Ok(Redirect::to("/login").into_response());
-    };
-    let label = form.label.trim();
-    if label.is_empty() {
-        return Ok(
-            Redirect::to("/settings?flash_error=API+key+label+is+required#api").into_response(),
-        );
-    }
-    // Fold checked capability checkboxes into a CapSet bitmask.
-    let mut caps = hyperion_state::capabilities::CapSet::empty();
-    for (k, v) in &form.extra {
-        if v == "on" {
-            if let Some(c) = hyperion_state::capabilities::Capability::from_machine_str(k) {
-                caps.insert(c);
-            }
-        }
-    }
-    // Optional expiry (YYYY-MM-DD → end-of-day UTC unix). Empty = never.
-    let expires_at = match form.expires.trim() {
-        "" => None,
-        s => match chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d") {
-            Ok(d) => d.and_hms_opt(23, 59, 59).map(|dt| dt.and_utc().timestamp()),
-            Err(_) => {
-                return Ok(Redirect::to(
-                    "/settings?flash_error=Invalid+expiry+date+(use+YYYY-MM-DD)#api",
-                )
-                .into_response())
-            }
-        },
-    };
-    let scope_all = ctx.scope_all();
-    // A tenant-scoped account can't own an API key yet — the /api/v1 read
-    // endpoints aren't tenant-filtered (that lands in p1b). The RPC refuses
-    // this too (authoritative backstop), but catch it here so the operator
-    // gets a clear flash on the Settings page instead of a bare 502.
-    if !scope_all {
-        return Ok(Redirect::to(
-            "/settings?flash_error=API+keys+require+an+account+with+cluster-wide+scope.+Per-tenant+keys+arrive+in+a+later+release.#api",
-        )
-        .into_response());
-    }
-    // Optional hardening. CIDRs are split on comma/whitespace/newline; each must
-    // parse as an IP network (a bare IP works too — ipnet accepts /32 · /128).
-    let mut ip_allowlist: Vec<String> = Vec::new();
-    for tok in form.ip_allowlist.split([',', '\n', '\r', ' ', '\t']) {
-        let tok = tok.trim();
-        if tok.is_empty() {
-            continue;
-        }
-        if tok.parse::<ipnet::IpNet>().is_err() && tok.parse::<std::net::IpAddr>().is_err() {
-            return Ok(Redirect::to(
-                "/settings?flash_error=Invalid+IP/CIDR+in+the+allowlist+(use+e.g.+203.0.113.0/24).#api",
-            )
-            .into_response());
-        }
-        ip_allowlist.push(tok.to_string());
-    }
-    let rate_limit_per_min: i64 = match form.rate_limit.trim() {
-        "" => 0,
-        s => match s.parse::<i64>() {
-            Ok(n) if n >= 0 => n,
-            _ => {
-                return Ok(Redirect::to(
-                    "/settings?flash_error=Rate+limit+must+be+a+non-negative+number+(0+%3D+unlimited).#api",
-                )
-                .into_response())
-            }
-        },
-    };
-    let resp = hyperion_rpc_client::call(
-        &state.agent_socket,
-        Request::ApiKeyCreate {
-            label: label.to_string(),
-            owner_user_id: session.user_id,
-            caps: caps.bits(),
-            scope_all,
-            expires_at,
-            ip_allowlist,
-            rate_limit_per_min,
-        },
-    )
-    .await?;
-    let created = match resp {
-        RpcResponse::ApiKeyCreated(c) => c,
-        RpcResponse::Error(e) => return Err(AppError::Rpc(e.to_string())),
-        _ => return Err(AppError::Internal("unexpected response".into())),
-    };
-    // Reveal the raw key exactly once via a short-lived HttpOnly cookie rather
-    // than the URL: a key in a redirect query string lands in browser history
-    // and the reverse-proxy access log. The settings page reads it once and
-    // clears it. (`hyp_<base62>` is cookie-safe — no encoding needed.)
-    let cookie = format!(
-        "hyp_new_api_key={}; Max-Age=120; Path=/settings; HttpOnly; SameSite=Strict",
-        created.raw_key
-    );
-    let mut resp = Redirect::to("/settings#api").into_response();
-    if let Ok(v) = axum::http::HeaderValue::from_str(&cookie) {
-        resp.headers_mut().insert(axum::http::header::SET_COOKIE, v);
-    }
-    Ok(resp)
-}
-
-/// `POST /settings/api-keys/revoke` — revoke a key by id. Gated by
-/// ApiKeysManage.
-pub async fn post_api_key_revoke(
-    State(state): State<SharedState>,
-    ctx: AuthCtx,
-    Form(form): Form<ApiKeyRevokeForm>,
-) -> Result<Response, AppError> {
-    if !ctx.can(Capability::ApiKeysManage) {
-        return Ok(
-            Redirect::to("/?flash_error=API+key+management+requires+permission").into_response(),
-        );
-    }
-    let revoked_by = ctx.session.as_ref().map(|s| s.user_id).unwrap_or(0);
-    let _ = hyperion_rpc_client::call(
-        &state.agent_socket,
-        Request::ApiKeyRevoke {
-            id: form.id,
-            revoked_by,
-        },
-    )
-    .await?;
-    Ok(Redirect::to("/settings?flash=API+key+revoked#api").into_response())
-}
-
-#[derive(Deserialize)]
-pub struct ApiKeyCreateForm {
-    #[serde(default)]
-    pub _csrf: String,
-    #[serde(default)]
-    pub label: String,
-    #[serde(default)]
-    pub expires: String,
-    /// Optional comma/newline-separated CIDRs the key may connect from
-    /// (e.g. "203.0.113.0/24, 198.51.100.7"). Empty = any peer IP.
-    #[serde(default)]
-    pub ip_allowlist: String,
-    /// Optional requests/min ceiling; empty or "0" = unlimited.
-    #[serde(default)]
-    pub rate_limit: String,
-    /// The capability checkboxes (named by machine string) + any other
-    /// fields. Each checked box arrives as `<machine>=on`.
-    #[serde(flatten)]
-    pub extra: std::collections::HashMap<String, String>,
-}
-
-#[derive(Deserialize)]
-pub struct ApiKeyRevokeForm {
-    #[serde(default)]
-    pub _csrf: String,
-    pub id: i64,
-}
-
 #[derive(Deserialize)]
 pub struct EmailTestForm {
     to: String,
@@ -1289,7 +421,7 @@ pub async fn post_slack_test(
 ) -> Result<Response, AppError> {
     if !ctx.can(Capability::SettingsManage) {
         return Ok(Redirect::to(
-            "/settings?flash_error=admin+role+required+to+send+a+test+message#slack",
+            "/settings/alerts?flash_error=admin+role+required+to+send+a+test+message#slack",
         )
         .into_response());
     }
@@ -1299,19 +431,19 @@ pub async fn post_slack_test(
         .check("slack-test", ip, Bucket::per_minute(3))
     {
         return Ok(Redirect::to(
-            "/settings?flash_error=test+message+rate+limit+exceeded+%E2%80%94+wait+a+minute#slack",
+            "/settings/alerts?flash_error=test+message+rate+limit+exceeded+%E2%80%94+wait+a+minute#slack",
         )
         .into_response());
     }
     let resp = crate::dispatcher::dispatch_to_node(&state, None, Request::SlackSendTest).await?;
     Ok(match resp {
         RpcResponse::SlackSendTest => Redirect::to(
-            "/settings?flash=Test+message+posted+%E2%80%94+check+the+Slack+channel#slack",
+            "/settings/alerts?flash=Test+message+posted+%E2%80%94+check+the+Slack+channel#slack",
         )
         .into_response(),
         RpcResponse::Error(e) => {
             let msg = super::hostings::urlencoding(&e.to_string());
-            Redirect::to(&format!("/settings?flash_error={msg}#slack")).into_response()
+            Redirect::to(&format!("/settings/alerts?flash_error={msg}#slack")).into_response()
         }
         _ => return Err(AppError::Internal("unexpected response".into())),
     })
@@ -1335,7 +467,7 @@ pub async fn post_email_test(
     // would also get blown out, breaking real cluster notifications.
     if !ctx.can(Capability::SettingsManage) {
         return Ok(Redirect::to(&format!(
-            "/settings?flash_error=admin+role+required+to+send+test+emails{node_q}#mail"
+            "/settings/mail?flash_error=admin+role+required+to+send+test+emails{node_q}#mail-test"
         ))
         .into_response());
     }
@@ -1349,7 +481,7 @@ pub async fn post_email_test(
         .check("email-test", ip, Bucket::per_minute(3))
     {
         return Ok(Redirect::to(&format!(
-            "/settings?flash_error=test+email+rate+limit+exceeded+%E2%80%94+wait+a+minute{node_q}#mail"
+            "/settings/mail?flash_error=test+email+rate+limit+exceeded+%E2%80%94+wait+a+minute{node_q}#mail-test"
         ))
         .into_response());
     }
@@ -1358,7 +490,7 @@ pub async fn post_email_test(
     // 'to' field can't blow out the Location header on the redirect.
     if to.len() > 254 {
         return Ok(Redirect::to(&format!(
-            "/settings?flash_error=address+too+long+%28max+254+chars%29{node_q}#mail"
+            "/settings/mail?flash_error=address+too+long+%28max+254+chars%29{node_q}#mail-test"
         ))
         .into_response());
     }
@@ -1392,17 +524,18 @@ pub async fn post_email_test(
                 target_owned.clone()
             };
             let msg = format!("Test email sent from {node_label} to {to} · SMTP relay said {smtp_code} · check /emails for the delivery record");
-            Ok(
-                Redirect::to(&format!("/settings?flash={}{node_q}#mail", urlencode(&msg)))
-                    .into_response(),
-            )
+            Ok(Redirect::to(&format!(
+                "/settings/mail?flash={}{node_q}#mail-test",
+                urlencode(&msg)
+            ))
+            .into_response())
         }
         RpcResponse::Error(e) => {
             // Include a pointer to /emails so the operator can see the
             // failed-row in context (it's already logged there).
             let msg = format!("{e} — see /emails for the failed row");
             Ok(Redirect::to(&format!(
-                "/settings?flash_error={}{node_q}#mail",
+                "/settings/mail?flash_error={}{node_q}#mail-test",
                 urlencode(&msg)
             ))
             .into_response())
@@ -1456,26 +589,31 @@ pub(crate) fn synthesize_unchecked_checkboxes(
     }
 }
 
-/// POST /settings/config — super_admin only. Updates one section of
-/// agent.toml in place, preserving comments, then restarts hyperion-agent
-/// a few seconds after the redirect so the new value takes effect.
+/// POST /settings/config — Owner only. Updates one section of agent.toml in
+/// place, preserving comments, then restarts hyperion-agent a few seconds
+/// after the redirect so the new value takes effect. The redirect lands on
+/// the card the form came from (`_return_tab`, else the section's own card),
+/// with the outcome shown inside that card.
 pub async fn post_config(
     State(state): State<SharedState>,
     ctx: AuthCtx,
     Form(form): Form<ConfigEditForm>,
 ) -> Result<Response, AppError> {
+    // `_return_tab` names the CARD to come back to. Several cards write the
+    // same section ([cluster] from five pages, [notifications] from two,
+    // [email] from Mail and Alerts), so the section alone cannot say which.
+    let return_tab_override = form
+        .fields
+        .get("_return_tab")
+        .and_then(|v| sanitize_return_tab(v));
+    let card = return_tab_override.unwrap_or_else(|| section_to_tab(&form.section));
     if !ctx.is_super_admin() {
-        // An Administrator can open Settings but not save agent.toml; say so
-        // on the card they tried to save instead of bouncing them to /.
-        let anchor = form
-            .fields
-            .get("_return_tab")
-            .and_then(|v| sanitize_return_tab(v))
-            .unwrap_or_else(|| section_to_tab(&form.section));
-        return Ok(Redirect::to(&format!(
-            "/settings?flash_error=owner+role+required#{anchor}"
-        ))
-        .into_response());
+        // The pages render these forms disabled for anybody but an Owner;
+        // this is the backstop for a form posted anyway.
+        return Ok(chrome::back_with_error(
+            card,
+            "Only an Owner can change settings.",
+        ));
     }
     // Strip the `section` field from the bag — it's not a TOML field
     // itself, it's the routing key. axum's `#[serde(flatten)]` collects
@@ -1483,12 +621,8 @@ pub async fn post_config(
     let mut fields = form.fields;
     fields.remove("section");
     fields.remove("_csrf");
-    // `_return_tab` is a UI hint — pull it out BEFORE field validation
-    // so it doesn't get written to agent.toml as if it were a real
-    // config key.
-    let return_tab_override = fields
-        .remove("_return_tab")
-        .and_then(|v| sanitize_return_tab(&v));
+    // `_return_tab` is a UI hint, not a config key.
+    fields.remove("_return_tab");
     // `_checkboxes` declares which boolean checkboxes THIS specific
     // form is responsible for. Synth-false defaults apply only to
     // these — see comment on synthesize_unchecked_checkboxes for the
@@ -1509,6 +643,13 @@ pub async fn post_config(
             fields.remove(*k);
         }
     }
+    // Disconnect Slack posts an empty webhook WITH `_disconnect` — the one
+    // case where empty means "remove it", not "leave blank to keep". Without
+    // the marker the empty value was dropped just above, so Disconnect saved
+    // nothing and still reported "Slack saved".
+    if fields.remove("_disconnect").is_some() && form.section == "slack" {
+        fields.insert("default_webhook".into(), String::new());
+    }
     // A letter sentence submitted EXACTLY as the pack writes it is not an
     // override, and storing it would fork that sentence: every later
     // improvement to the built-in wording would stop reaching this install,
@@ -1526,28 +667,8 @@ pub async fn post_config(
             if id == "lang" || value.is_empty() {
                 continue;
             }
-            // NORMALISE FIRST. A <textarea> submits CRLF per the HTML spec and
-            // the pack holds LF, so the comparison below was ALWAYS false for
-            // the 46 multi-line sentences — the fork guard never fired for any
-            // of them, and "Fill the fields with the built-in wording" followed
-            // by Save (the obvious next click) forked all 46 in one press. The
-            // exact failure this guard exists to prevent.
-            //
-            // Storing LF is right regardless: `letter_catalog_from_toml`
-            // already strips CRLF when reading, and a CRLF that survived would
-            // reach a plain-text mail body.
-            if value.contains('\r') {
-                *value = value.replace("\r\n", "\n").replace('\r', "\n");
-            }
-            if let Some(s) = hyperion_core::letters::lookup(id) {
-                if value.as_str() == s.built_in(cat.lang) {
-                    // CLEARED, not dropped. Typing the pack's own wording means
-                    // "I want what the pack says" — which is the same act as
-                    // emptying the field, and must remove an override that is
-                    // already there. Dropping the field instead would leave the
-                    // old override in place, the exact opposite.
-                    value.clear();
-                }
+            if hyperion_core::letters::lookup(id).is_some() {
+                *value = letter_value_to_store(id, value, cat.lang);
             }
         }
     }
@@ -1558,8 +679,8 @@ pub async fn post_config(
     // synthesis is the bug Kevin hit.
     synthesize_unchecked_checkboxes(&mut fields, &declared_checkboxes);
 
-    // `target_node` (present only on the Mail form) selects which node this
-    // save targets. Pull it out before the fields are persisted to agent.toml.
+    // `target_node` (present only on the per-node mail forms) selects which
+    // node this save targets. Pull it out before the fields are persisted.
     let target_node_raw = fields.remove("target_node").unwrap_or_default();
 
     // The email section is PER-NODE: dispatch EmailConfigSet to the chosen node
@@ -1568,45 +689,72 @@ pub async fn post_config(
     // is written on the master (local write + web-driven restart, below);
     // the synced ones then reach every node through `crate::cluster_sync`.
     if form.section == "email" {
-        let node_target: Option<&str> =
-            if target_node_raw.trim().is_empty() || target_node_raw == "local" {
-                None
-            } else {
-                Some(target_node_raw.trim())
-            };
-        let node_q = match node_target {
-            Some(n) => format!("&mail_node={}", urlencode(n)),
-            None => String::new(),
+        // Alerts → Recipients takes commas, semicolons and new lines; the
+        // file keeps one separator.
+        if let Some(v) = fields.get_mut("default_to") {
+            *v = page_alerts::normalize_address_list(v);
+        }
+        let (node_target, node_q) = mail_node_target(&target_node_raw);
+        // The Mail page edits one node and keeps it in its URL; Alerts lists
+        // every node's recipients at once, so it needs no node to come back to.
+        let node_q = if chrome::card_section(card) == Some("mail") {
+            node_q
+        } else {
+            String::new()
         };
         let resp = crate::dispatcher::dispatch_to_node(
             &state,
-            node_target,
+            node_target.as_deref(),
             Request::EmailConfigSet {
                 fields: fields.into(),
             },
         )
         .await
         .map_err(AppError::from)?;
-        let dest = match resp {
-            RpcResponse::EmailConfigSet => format!(
-                "/settings?flash=Mail+settings+saved+%26+applied+%E2%80%94+agent+restarting+%28~5s%29{node_q}#mail"
-            ),
-            RpcResponse::Error(e) => {
-                format!("/settings?flash_error={}{node_q}#mail", urlencode(&e.to_string()))
+        // Name the card and the node the way the pages do — a worker by its
+        // label, not its `node_…` id; one server needs no name at all.
+        let what = return_tab_override
+            .and_then(card_label)
+            .unwrap_or("Outgoing relay");
+        let nodes = chrome::enrolled_nodes(&state).await;
+        let msg = match node_target.as_deref() {
+            None if nodes.is_empty() => {
+                format!("{what} saved — the agent restarts in about 5 s.")
             }
+            None => format!("{what} saved on the master — its agent restarts in about 5 s."),
+            Some(id) => {
+                let name = nodes
+                    .iter()
+                    .find(|n| n.node_id == id)
+                    .map(|n| n.label.trim())
+                    .filter(|l| !l.is_empty())
+                    .unwrap_or(id);
+                format!("{what} saved on {name} — its agent restarts in about 5 s.")
+            }
+        };
+        let dest = match resp {
+            RpcResponse::EmailConfigSet => {
+                chrome::card_url(card, &format!("flash={}{node_q}", urlencode(&msg)))
+            }
+            RpcResponse::Error(e) => chrome::card_url(
+                card,
+                &format!("flash_error={}{node_q}", urlencode(&e.to_string())),
+            ),
             _ => return Err(AppError::Internal("unexpected response".into())),
         };
         return Ok(Redirect::to(&dest).into_response());
     }
 
-    // Settings ACTED ON by the node that owns each site must reach every
-    // node, not only the master's file. See `fields_for_workers`.
+    // Nodes the settings sync cannot update (an agent from before it) still
+    // get the settings their sites are run by pushed at save time. See
+    // `fields_for_workers` and `push_to_unsynced_nodes`.
     let propagated_fields = fields_for_workers(&form.section, &fields);
-    // [notifications] is written by two cards: the customer letters (whose
-    // failure message points at the per-node letter list) and Alert wording
-    // (operator alerts, which has no such list — it gets the generic text).
-    let is_letters = form.section == "letters"
-        || (form.section == "notifications" && return_tab_override != Some("alert-templates"));
+    // Does this save carry anything the settings sync distributes? Decided
+    // per KEY: [cluster] is mostly master-only, and only its trash keys go
+    // out, so a 2FA save must not promise the other nodes anything.
+    let synced = fields
+        .keys()
+        .any(|k| hyperion_core::cluster_sync::is_synced_key(&form.section, k));
     let resp = hyperion_rpc_client::call(
         &state.agent_socket,
         Request::AgentConfigUpdate {
@@ -1616,23 +764,11 @@ pub async fn post_config(
     )
     .await
     .map_err(AppError::from)?;
-    // Map TOML section → URL hash so the redirect lands the operator
-    // back on the SAME card they just saved. Without this the redirect
-    // bounces them to /settings (no fragment), which always opens the
-    // default tab. The hash is a tab id or a card anchor; the page's
-    // resolve() opens whichever tab holds that card. Forms can override
-    // the mapping with a hidden `_return_tab` field (sanitised), which
-    // is how every card of a section written from several places
-    // ([cluster] from Access, Cluster, HTTPS & previews and Backups &
-    // trash; [notifications] from Alerts and Customer letters) returns
-    // the operator to the card they used.
-    let tab = return_tab_override.unwrap_or_else(|| section_to_tab(&form.section));
     // The flash names the CARD that was saved when the form said which
     // one it was, so a 2FA save does not read "Cluster settings saved".
     let label = return_tab_override
         .and_then(card_label)
         .unwrap_or_else(|| section_label(&form.section));
-    let synced = hyperion_core::cluster_sync::SYNCED_SECTIONS.contains(&form.section.as_str());
     let dest = match resp {
         RpcResponse::AgentConfigUpdate => {
             // The settings sync carries every synced section to the other
@@ -1640,165 +776,107 @@ pub async fn post_config(
             if synced {
                 state.cluster_sync.kick();
             }
-            // Spawn a delayed restart so the redirect response gets back
-            // to the browser BEFORE the agent goes down. 3s buffer is
-            // plenty for the in-flight HTTP response to land. The agent
-            // itself restarts via systemd within ~2s after the kill,
-            // so the operator's next click sees the fresh config.
-            //
-            // Why not use the existing service_restart RPC? It refuses
-            // to restart hyperion-agent through the agent itself (would
-            // kill its own RPC pipe). Doing it from hyperion-web's
-            // process side dodges that — we're not the agent.
-            tokio::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                let out = tokio::process::Command::new("/usr/bin/systemctl")
-                    .args(["restart", "hyperion-agent"])
-                    .output()
-                    .await;
-                match out {
-                    Ok(o) if o.status.success() => {
-                        tracing::info!("auto-restart hyperion-agent after config save: ok");
+            restart_agent_soon();
+            let pushed = match propagated_fields {
+                Some((sect, f)) => push_to_unsynced_nodes(&state, &sect, f).await,
+                None => Ok(0),
+            };
+            let is_master = state.deployment_mode.read().await.as_str() == "master";
+            let has_nodes = !chrome::enrolled_nodes(&state).await.is_empty();
+            // After saving the off-site FTP target, carry a flag so the page
+            // re-runs the connection check once the agent is back.
+            let probe = if form.section == "backup_remote" {
+                "&probe_backup_remote=1"
+            } else {
+                ""
+            };
+            match pushed {
+                Ok(_) => {
+                    let mut msg = format!("{label} saved — the agent restarts in about 5 s");
+                    if synced && is_master && has_nodes {
+                        msg.push_str("; the other nodes get it within a minute");
                     }
-                    Ok(o) => {
-                        tracing::error!(
-                            stderr = %String::from_utf8_lossy(&o.stderr),
-                            exit_code = ?o.status.code(),
-                            "auto-restart hyperion-agent failed — operator must restart manually"
-                        );
-                    }
-                    Err(e) => {
-                        tracing::error!(error=%e, "auto-restart hyperion-agent: spawn failed");
-                    }
+                    msg.push('.');
+                    chrome::card_url(card, &format!("flash={}{probe}", urlencode(&msg)))
                 }
-            });
-            // The master's file is written. If this was `[notifications]`,
-            // the same text now has to reach every other node, because that
-            // is where each customer's letter is actually rendered. A node
-            // that refuses or cannot be reached keeps its old letter, and
-            // that is reported as an ERROR rather than folded into the
-            // success banner: the operator has just edited what their
-            // customers read, and "saved" would be a lie for that node's.
-            match propagated_fields {
-                Some((sect, f)) => match propagate_notifications(&state, &sect, f).await {
-                    Ok(0) => format!(
-                        "/settings?flash={}+saved+%E2%80%94+hyperion-agent+restarting+%28~5s%29#{}",
-                        urlencode(label),
-                        tab
-                    ),
-                    Ok(n) if is_letters => format!(
-                        "/settings?flash={}#{}",
+                Err(failed) => chrome::card_url(
+                    card,
+                    &format!(
+                        "flash_error={}{probe}",
                         urlencode(&format!(
-                            "Saved, and the same wording is now on {n} other node(s). \
-                             hyperion-agent is restarting here (~5s)."
-                        )),
-                        tab
-                    ),
-                    Ok(n) => format!(
-                        "/settings?flash={}#{}",
-                        urlencode(&format!("{label} saved here and on {n} other node(s).")),
-                        tab
-                    ),
-                    Err(failed) if !is_letters => format!(
-                        "/settings?flash_error={}#{}",
-                        urlencode(&format!(
-                            "Saved on this master, but {} did not take it: {}. \
-                             Sites on those nodes keep the PREVIOUS setting until the \
-                             settings sync reaches them — it retries every few minutes, and \
-                             the Nodes page shows which nodes are in sync.",
+                            "{label} saved on this master, but {} did not take it: {}. \
+                             Sites on {} keep the previous setting until it is updated — \
+                             the Nodes page shows which nodes have the master's settings.",
                             if failed.len() == 1 {
                                 "one node"
                             } else {
                                 "some nodes"
                             },
-                            failed.join("; ")
-                        )),
-                        tab
+                            failed.join("; "),
+                            if failed.len() == 1 { "it" } else { "them" },
+                        ))
                     ),
-                    Err(failed) => format!(
-                        "/settings?flash_error={}#{}",
-                        urlencode(&format!(
-                            "Saved on this master, but {} did not take it: {}. \
-                             Sites owned by those nodes keep sending the PREVIOUS letter \
-                             until the settings sync reaches them (it retries every few minutes) — the per-node list under \
-                             Customer letters → Care report & expiry warning shows \
-                             which is which.",
-                            if failed.len() == 1 {
-                                "one node"
-                            } else {
-                                "some nodes"
-                            },
-                            failed.join("; ")
-                        )),
-                        tab
-                    ),
-                },
-                None => {
-                    // After saving the off-site FTP target, carry a flag so the
-                    // settings page auto-runs the connection check once the
-                    // agent has restarted with the new config. Goes BEFORE the
-                    // `#tab` fragment (a fragment must be last in the URL).
-                    let probe = if form.section == "backup_remote" {
-                        "&probe_backup_remote=1"
-                    } else {
-                        ""
-                    };
-                    // A synced section that is not pushed above reaches the
-                    // other nodes through the settings sync alone.
-                    let others = if synced && state.deployment_mode.read().await.as_str() == "master"
-                    {
-                        "+%E2%80%94+other+nodes+get+it+within+a+minute"
-                    } else {
-                        ""
-                    };
-                    format!(
-                        "/settings?flash={}+saved+%E2%80%94+hyperion-agent+restarting+%28~5s%29{}{}#{}",
-                        urlencode(label),
-                        others,
-                        probe,
-                        tab
-                    )
-                }
+                ),
             }
         }
-        RpcResponse::Error(e) => format!(
-            "/settings?flash_error={}#{}",
-            urlencode(&e.to_string()),
-            tab
-        ),
+        RpcResponse::Error(e) => {
+            chrome::card_url(card, &format!("flash_error={}", urlencode(&e.to_string())))
+        }
         _ => return Err(AppError::Internal("unexpected response".into())),
     };
     Ok(Redirect::to(&dest).into_response())
 }
 
-/// Push a just-saved `[notifications]` section to every enrolled node.
+/// Restart the master's agent a few seconds from now, after a save to its
+/// agent.toml.
 ///
-/// The precedent is the Mail tab: `[email]` is per-node, so saving it
-/// dispatches to the chosen node instead of writing only the master's file.
-/// `[notifications]` has the same shape and one extra twist — the operator
-/// does not pick a node, because the letters must be the SAME everywhere.
-/// So this fans out to all of them with the identical fields.
+/// Delayed so the redirect response gets back to the browser BEFORE the
+/// agent goes down; 3 s is plenty for the in-flight response to land, and
+/// systemd brings the agent back within ~2 s, so the operator's next click
+/// sees the fresh config.
 ///
-/// Two things it deliberately does not do:
-///   * it does not restart anything. The templates are re-read from
-///     agent.toml on every send (`read_notifications_section`), so the next
-///     letter already uses the new wording. The master's own restart below
-///     is the pre-existing behaviour for every section, not a requirement
-///     of this one.
-///   * it does not treat "pushed" as "will stay pushed". Nothing here can
-///     reach a node that is down; the settings sync (`crate::cluster_sync`)
-///     catches it up on a later pass, and
-///     the card reads each node's actual file back rather than trusting
-///     this function's result — see [`letter_node_rows`].
+/// Why not the service_restart RPC? It refuses to restart hyperion-agent
+/// through the agent itself (it would kill its own RPC pipe). Doing it from
+/// hyperion-web's process side dodges that — we are not the agent.
+fn restart_agent_soon() {
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        let out = tokio::process::Command::new("/usr/bin/systemctl")
+            .args(["restart", "hyperion-agent"])
+            .output()
+            .await;
+        match out {
+            Ok(o) if o.status.success() => {
+                tracing::info!("auto-restart hyperion-agent after config save: ok");
+            }
+            Ok(o) => {
+                tracing::error!(
+                    stderr = %String::from_utf8_lossy(&o.stderr),
+                    exit_code = ?o.status.code(),
+                    "auto-restart hyperion-agent failed — operator must restart manually"
+                );
+            }
+            Err(e) => {
+                tracing::error!(error=%e, "auto-restart hyperion-agent: spawn failed");
+            }
+        }
+    });
+}
+
+/// Push a just-saved section straight to the nodes the settings sync cannot
+/// update.
 ///
-/// Unlike that read-back it takes no short deadline of its own, only
-/// `dispatch_to_node`'s: giving up early on a WRITE would report "did not
-/// take it" for a node that went on to apply it. A dead node costs this one
-/// POST the dispatcher's ceiling, which is the honest price.
+/// Since `crate::cluster_sync` the master's settings reach every node on
+/// their own — a node that is down for a save gets it on a later pass, and
+/// the Nodes and Cluster pages say which nodes are behind. An agent from
+/// before the sync cannot take them that way (the sync reports it as an
+/// old agent), and its sites would keep running on whatever that node last
+/// had. For those nodes — and for nodes the sync has not reported on yet —
+/// the save is still pushed directly, the way every save used to be.
 ///
-/// `Ok(n)` = the section is now identical on n other nodes. `Err(labels)`
-/// lists, per node, what went wrong, in words the operator can act on.
-async fn propagate_notifications(
+/// `Ok(n)` = the section is now on n such nodes. `Err(labels)` lists, per
+/// node, what went wrong, in words the operator can act on.
+async fn push_to_unsynced_nodes(
     state: &SharedState,
     section: &str,
     fields: std::collections::BTreeMap<String, String>,
@@ -1817,11 +895,26 @@ async fn propagate_notifications(
             ])
         }
     };
-    if nodes.is_empty() {
+    // The trash keys joined the sync later than the rest: a node from the
+    // first synced release ignores the `[cluster]` part of the payload, and
+    // would otherwise never get them. They go to every node.
+    let everyone = section == "cluster";
+    let mut targets = Vec::new();
+    for n in nodes {
+        let managed = state
+            .cluster_sync
+            .status_for(&n.node_id)
+            .await
+            .is_some_and(|s| s.managed());
+        if everyone || !managed {
+            targets.push(n);
+        }
+    }
+    if targets.is_empty() {
         return Ok(0);
     }
     let mut set = tokio::task::JoinSet::new();
-    for n in nodes {
+    for n in targets {
         let st = state.clone();
         let f = fields.clone();
         let sect = section.to_string();
@@ -1905,8 +998,15 @@ async fn propagate_notifications(
 
 /// `[cluster]` keys read by the node that OWNS a hosting. `delete()` reads
 /// its own node's `trash_enabled` and the trash GC its own retention, so a
-/// value saved on the master alone left every worker delete permanent.
-const CLUSTER_KEYS_FOR_WORKERS: &[&str] = &["trash_enabled", "trash_retention_days"];
+/// value saved on the master alone left every worker delete permanent; and
+/// each node's nginx builds its sites' preview aliases from its own
+/// `test_domain_template`, so previews never worked on a worker. The same
+/// keys `hyperion_core::cluster_sync::is_synced_key` carries.
+const CLUSTER_KEYS_FOR_WORKERS: &[&str] = &[
+    "trash_enabled",
+    "trash_retention_days",
+    "test_domain_template",
+];
 
 /// The `(section, fields)` a save must also send every enrolled node, or
 /// `None` when the section is master-only.
@@ -1983,17 +1083,17 @@ fn backup_fields_for_old_node(
 /// confirmation a save has, so it should name the thing that was saved.
 fn section_label(section: &str) -> &'static str {
     match section {
-        "backup_remote" => "Off-site backup target",
-        "backup_retention" => "Backup retention",
-        "backup" => "Local backup copies",
-        "protection" => "What this panel keeps",
+        "backup_remote" => "FTP / SFTP target",
+        "backup_retention" => "Archive retention",
+        "backup" => "Local copies",
+        "protection" => "What is kept",
         "snapshots" => "Snapshot retention",
-        "performance" => "Core Web Vitals source",
+        "performance" => "Core Web Vitals",
         "cluster" => "Cluster settings",
-        "notifications" => "Notification wording",
-        "letters" => "Customer letter wording",
-        "fail2ban" => "Brute-force thresholds",
-        "update" => "Automatic updates",
+        "notifications" => "Alert wording",
+        "letters" => "Sentences",
+        "fail2ban" => "Brute-force scanner",
+        "update" => "Updates",
         "acme" => "Let's Encrypt contact",
         "slack" => "Slack",
         _ => "Settings",
@@ -2008,15 +1108,19 @@ fn section_label(section: &str) -> &'static str {
 /// a tab id, a retired id — returns None and the section label is used.
 fn card_label(anchor: &str) -> Option<&'static str> {
     match anchor {
-        "sign-in" => Some("Sign-in security"),
-        "hardening" => Some("Cluster channel hardening"),
-        "placement" => Some("Cluster placement"),
+        "sign-in" => Some("Two-factor sign-in"),
+        "hardening" => Some("Channel hardening"),
+        "placement" => Some("Placement"),
         "test-nodes" => Some("Test nodes"),
         "preview-address" => Some("Preview address"),
-        "trash" => Some("Trash settings"),
+        "trash" => Some("Trash"),
         "audit-retention" => Some("Audit log retention"),
         "alert-templates" => Some("Alert wording"),
-        "customer-letters" => Some("Care report & expiry warning"),
+        "alert-language" => Some("Alert language"),
+        "alert-recipients" => Some("Recipients"),
+        "customer-letters" => Some("Letters"),
+        "letter-language" => Some("Letter languages"),
+        "letter-wording" => Some("Sentences"),
         _ => None,
     }
 }
@@ -2059,10 +1163,11 @@ pub async fn post_offsite_backfill(
     // `scope_all` on top, because an estate-wide action needs estate-wide
     // scope by definition.
     if !ctx.can(Capability::BackupTargets) || !ctx.scope_all() {
-        return Ok(Redirect::to(
-            "/settings?flash_error=Copying+backups+off-site+needs+the+backup-targets+capability#offsite-backfill",
-        )
-        .into_response());
+        return Ok(chrome::back_with_error(
+            "offsite-backfill",
+            "Copying existing backups off-site needs the \u{201c}Manage off-site backup targets\u{201d} \
+             permission and access to every site.",
+        ));
     }
     let drop_local = matches!(params.drop.as_deref(), Some("1") | Some("true"));
     // The S3 targets live in the master's table; resolving them here (reading
@@ -2330,25 +1435,19 @@ fn backfill_job_verdict(turns: &[BackfillTurn], drop_local: bool) -> (bool, Opti
     (failed == 0, None)
 }
 
-/// Map an agent.toml section to the redirect anchor that lands the operator
-/// back where they saved. The anchor is either a tab id or a card anchor, and
-/// the page's resolve() opens the tab that contains a card. A section with one
-/// form-card maps to that card. A section written by several cards
-/// ([cluster], [notifications]) maps to a fallback, because each of those
-/// forms sends its own `_return_tab`. Unknown sections fall back to `general`,
-/// the default tab, which is always visible.
+/// The card a save of `[section]` returns to when the form did not name one
+/// (`_return_tab`). Every value is a card in [`chrome::CARDS`].
 fn section_to_tab(section: &str) -> &'static str {
     match section {
-        // Per-node form. post_config returns early with its own
-        // `{node_q}#mail` redirect, so this arm only documents the mapping.
-        "email" => "mail",
+        "email" => "smtp-relay",
         "acme" => "acme",
         "update" => "updates",
         "slack" => "slack",
-        // Two forms write [notifications]: Alert wording on Alerts, and
-        // Care report & expiry warning on Customer letters. Each sends
-        // `_return_tab`; this is only the fallback.
-        "notifications" => "notifications",
+        // [notifications] is written by Alert wording and by the customer
+        // letters; [letters] by the letter editor, the language cards and
+        // the sentence list. Each form sends `_return_tab`; these are only
+        // the fallbacks.
+        "notifications" => "alert-templates",
         "letters" => "letter-wording",
         "performance" => "performance",
         "protection" => "protection-mode",
@@ -2356,52 +1455,23 @@ fn section_to_tab(section: &str) -> &'static str {
         "backup" => "local-copies",
         "backup_retention" => "backup-retention",
         "snapshots" => "snapshot-retention",
-        "fail2ban" => "bruteforce",
-        // Seven forms on four tabs write [cluster]: sign-in (Access),
-        // placement / test-nodes / hardening (Cluster), preview-address
-        // (HTTPS & previews), trash (Backups & trash) and audit-retention
-        // (Access). Every one sends `_return_tab`, and the fallback stays on
-        // a tab that standalone installs can see.
-        "cluster" => "general",
-        _ => "general",
+        "fail2ban" => "bruteforce-scanner",
+        // [cluster] is written from five pages and every form says which
+        // card it is; the fallback is a card every install has.
+        "cluster" => "panel-domain",
+        _ => "panel-domain",
     }
 }
 
-/// Sanitise an operator-supplied `_return_tab` hint (a tab id or a card
-/// anchor). Only known values are honoured, so a malicious or mistyped value
-/// cannot poison the redirect URL.
+/// Sanitise an operator-supplied `_return_tab` hint: only a card id from
+/// [`chrome::CARDS`] is honoured, so a malicious or mistyped value cannot
+/// poison the redirect URL.
 fn sanitize_return_tab(v: &str) -> Option<&'static str> {
-    match v.trim() {
-        // Tab ids, in strip order.
-        "general" => Some("general"),
-        "tls" => Some("tls"),
-        "mail" => Some("mail"),
-        "notifications" => Some("notifications"),
-        "letters" => Some("letters"),
-        "backups" => Some("backups"),
-        "access" => Some("access"),
-        "bruteforce" => Some("bruteforce"),
-        "cluster" => Some("cluster"),
-        "raw" => Some("raw"),
-        // Card anchors of forms whose section is shared with other cards.
-        "alert-templates" => Some("alert-templates"),
-        "customer-letters" => Some("customer-letters"),
-        "sign-in" => Some("sign-in"),
-        "placement" => Some("placement"),
-        "test-nodes" => Some("test-nodes"),
-        "hardening" => Some("hardening"),
-        "preview-address" => Some("preview-address"),
-        "trash" => Some("trash"),
-        "audit-retention" => Some("audit-retention"),
-        // Retired tab ids, kept so a form rendered before the upgrade still
-        // lands. The page's LEGACY alias map resolves them to their new cards
-        // (system→updates, testnodes→preview-address, retention→trash).
-        // Remove after one release.
-        "system" => Some("system"),
-        "testnodes" => Some("testnodes"),
-        "retention" => Some("retention"),
-        _ => None,
-    }
+    let v = v.trim();
+    chrome::CARDS
+        .iter()
+        .find(|(card, _)| *card == v)
+        .map(|(card, _)| *card)
 }
 
 #[derive(Deserialize)]
@@ -2521,15 +1591,16 @@ pub async fn post_panel_provision(
 ) -> Result<Response, AppError> {
     if !ctx.is_super_admin() {
         return Ok(
-            Redirect::to("/settings?flash_error=owner+role+required#panel-domain").into_response(),
+            Redirect::to("/settings/panel?flash_error=owner+role+required#panel-domain")
+                .into_response(),
         );
     }
     let hostname = form.hostname.trim().to_lowercase();
     if hostname.is_empty() {
-        return Ok(
-            Redirect::to("/settings?flash_error=Panel+hostname+is+required#panel-domain")
-                .into_response(),
-        );
+        return Ok(Redirect::to(
+            "/settings/panel?flash_error=Panel+hostname+is+required#panel-domain",
+        )
+        .into_response());
     }
     let skip_dns_check = matches!(
         form.skip_dns_check.as_deref(),
@@ -2569,10 +1640,10 @@ pub async fn post_panel_provision(
                 format!(" — {}", panel_url)
             };
             let summary = format!("{status}: {first_line}{url_hint}");
-            format!("/settings?{key}={}#panel-domain", urlencode(&summary))
+            format!("/settings/panel?{key}={}#panel-domain", urlencode(&summary))
         }
         RpcResponse::Error(e) => format!(
-            "/settings?flash_error={}#panel-domain",
+            "/settings/panel?flash_error={}#panel-domain",
             urlencode(&e.to_string())
         ),
         _ => return Err(AppError::Internal("unexpected response".into())),
@@ -2622,12 +1693,6 @@ pub async fn post_email_autodetect(
     Ok(Json(a).into_response())
 }
 
-/// Mask password / token / webhook values in raw TOML before rendering it.
-/// Lives in hyperion-core so a worker masks its own file before sending it.
-fn mask_secrets_in_toml(s: &str) -> String {
-    hyperion_core::config_persist::mask_secrets(s)
-}
-
 fn urlencode(s: &str) -> String {
     s.bytes()
         .map(|b| match b {
@@ -2642,7 +1707,7 @@ fn urlencode(s: &str) -> String {
 /// Resolve the effective source IP for the email-test rate limit
 /// bucket. Same precedence as the /api/enroll handler: forwarded-for
 /// → real-ip → peer socket.
-fn email_test_ip(headers: &HeaderMap, peer: SocketAddr) -> std::net::IpAddr {
+pub(crate) fn email_test_ip(headers: &HeaderMap, peer: SocketAddr) -> std::net::IpAddr {
     if let Some(v) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
         if let Some(first) = v.split(',').next() {
             if let Ok(ip) = first.trim().parse() {
@@ -2658,24 +1723,6 @@ fn email_test_ip(headers: &HeaderMap, peer: SocketAddr) -> std::net::IpAddr {
     peer.ip()
 }
 
-#[derive(Deserialize)]
-pub struct MtaTestForm {
-    pub to: String,
-    /// Which node to act on. "" / "local" = master. The MTA card shows
-    /// the selected node's diagnostics, so its buttons target it too.
-    #[serde(default)]
-    pub target_node: String,
-}
-
-/// Body for the button-only MTA actions (queue flush/clear, reconfigure).
-/// Carries just the Mail-tab node selector so the action runs on the same
-/// node whose diagnostics are on screen.
-#[derive(Deserialize, Default)]
-pub struct NodeActionForm {
-    #[serde(default)]
-    pub target_node: String,
-}
-
 /// Resolve a Mail-tab `target_node` value into a dispatch target + the
 /// redirect query suffix that keeps the operator on that node's Mail view.
 /// "" / "local" → master (local socket, no suffix).
@@ -2684,212 +1731,13 @@ fn mail_node_target(raw: &str) -> (Option<String>, String) {
     if t.is_empty() || t == "local" {
         (None, String::new())
     } else {
-        (Some(t.to_string()), format!("&mail_node={}", urlencode(t)))
+        (Some(t.to_string()), format!("&node={}", urlencode(t)))
     }
 }
 
-/// POST /settings/mta-queue-flush — `postqueue -f` to retry all
-/// deferred mail now. Admin-only; no rate limit (it's cheap and
-/// idempotent — re-clicking is fine).
-pub async fn post_mta_queue_flush(
-    State(state): State<SharedState>,
-    ctx: AuthCtx,
-    Form(form): Form<NodeActionForm>,
-) -> Result<Response, AppError> {
-    if !ctx.can(Capability::SettingsManage) {
-        return Ok(Redirect::to("/settings?flash_error=admin+role+required#mail").into_response());
-    }
-    let (target, node_q) = mail_node_target(&form.target_node);
-    let resp =
-        crate::dispatcher::dispatch_to_node(&state, target.as_deref(), Request::MtaQueueFlush)
-            .await
-            .map_err(AppError::from)?;
-    match resp {
-        RpcResponse::MtaQueueFlush { attempted, output } => {
-            let msg = if attempted == 0 {
-                "Queue flush requested · queue is now empty".to_string()
-            } else {
-                let tail: String = output.lines().take(2).collect::<Vec<_>>().join(" · ");
-                let tail = if tail.is_empty() {
-                    "(no output)".into()
-                } else {
-                    tail
-                };
-                format!(
-                    "Queue flush requested · {attempted} message(s) still deferred — \
-                     check the log tail for the reason · {tail}"
-                )
-            };
-            Ok(
-                Redirect::to(&format!("/settings?flash={}{node_q}#mail", urlencode(&msg)))
-                    .into_response(),
-            )
-        }
-        RpcResponse::Error(e) => Ok(Redirect::to(&format!(
-            "/settings?flash_error={}{node_q}#mail",
-            urlencode(&format!("queue flush failed: {e}"))
-        ))
-        .into_response()),
-        _ => Err(AppError::Internal("unexpected response".into())),
-    }
-}
-
-/// POST /settings/mta-queue-clear — `postsuper -d ALL`. Destructive;
-/// gated by the type-to-confirm modal in the template.
-pub async fn post_mta_queue_clear(
-    State(state): State<SharedState>,
-    ctx: AuthCtx,
-    Form(form): Form<NodeActionForm>,
-) -> Result<Response, AppError> {
-    if !ctx.can(Capability::SettingsManage) {
-        return Ok(Redirect::to("/settings?flash_error=admin+role+required#mail").into_response());
-    }
-    let (target, node_q) = mail_node_target(&form.target_node);
-    let resp =
-        crate::dispatcher::dispatch_to_node(&state, target.as_deref(), Request::MtaQueueClear)
-            .await
-            .map_err(AppError::from)?;
-    match resp {
-        RpcResponse::MtaQueueClear { cleared, output: _ } => {
-            let msg = if cleared == 0 {
-                "Queue clear requested · nothing was in queue".to_string()
-            } else {
-                format!("Queue clear · {cleared} message(s) discarded")
-            };
-            Ok(
-                Redirect::to(&format!("/settings?flash={}{node_q}#mail", urlencode(&msg)))
-                    .into_response(),
-            )
-        }
-        RpcResponse::Error(e) => Ok(Redirect::to(&format!(
-            "/settings?flash_error={}{node_q}#mail",
-            urlencode(&format!("queue clear failed: {e}"))
-        ))
-        .into_response()),
-        _ => Err(AppError::Internal("unexpected response".into())),
-    }
-}
-
-/// POST /settings/mta-reconfigure — re-apply postfix smart-host /
-/// direct-MX config based on the current `[email]` section. Used
-/// when the operator changed agent.toml without restarting the
-/// agent, or wants to roll forward after reverting a hand-edit.
-pub async fn post_mta_reconfigure(
-    State(state): State<SharedState>,
-    ctx: AuthCtx,
-    Form(form): Form<NodeActionForm>,
-) -> Result<Response, AppError> {
-    if !ctx.can(Capability::SettingsManage) {
-        return Ok(Redirect::to(
-            "/settings?flash_error=admin+role+required+to+reconfigure+MTA#mail",
-        )
-        .into_response());
-    }
-    let (target, node_q) = mail_node_target(&form.target_node);
-    let resp =
-        crate::dispatcher::dispatch_to_node(&state, target.as_deref(), Request::MtaReconfigure)
-            .await
-            .map_err(AppError::from)?;
-    match resp {
-        RpcResponse::MtaReconfigure { mode } => {
-            let msg = match mode.as_str() {
-                "skipped" => "postfix not installed — install it from /services first".to_string(),
-                m => format!("postfix reconfigured: now in {m} mode"),
-            };
-            Ok(
-                Redirect::to(&format!("/settings?flash={}{node_q}#mail", urlencode(&msg)))
-                    .into_response(),
-            )
-        }
-        RpcResponse::Error(e) => Ok(Redirect::to(&format!(
-            "/settings?flash_error={}{node_q}#mail",
-            urlencode(&format!("MTA reconfigure failed: {e}"))
-        ))
-        .into_response()),
-        _ => Err(AppError::Internal("unexpected response".into())),
-    }
-}
-
-/// POST /settings/mta-test — send a test mail via /usr/sbin/sendmail
-/// (exercises the PHP `mail()` chain end-to-end). Distinct from the
-/// existing /settings/email-test which uses the lettre SMTP client
-/// — this one validates the WHOLE pipe including postfix's
-/// outgoing leg.
-pub async fn post_mta_test(
-    State(state): State<SharedState>,
-    ctx: AuthCtx,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
-    Form(form): Form<MtaTestForm>,
-) -> Result<Response, AppError> {
-    // Resolved first so every early return keeps the node the operator was
-    // looking at, instead of snapping the Mail tab back to the master.
-    let (target, node_q) = mail_node_target(&form.target_node);
-    if !ctx.can(Capability::SettingsManage) {
-        return Ok(Redirect::to(&format!(
-            "/settings?flash_error=admin+role+required+to+send+test+emails{node_q}#mail"
-        ))
-        .into_response());
-    }
-    // Same per-IP rate limit as the SMTP-relay test. Prevents a
-    // compromised cookie from turning the local MTA into an
-    // address-enumerator or spam vector.
-    let ip = email_test_ip(&headers, peer);
-    if !state.ratelimit.check("mta-test", ip, Bucket::per_minute(3)) {
-        return Ok(Redirect::to(&format!(
-            "/settings?flash_error=test+email+rate+limit+exceeded+%E2%80%94+wait+a+minute{node_q}#mail"
-        ))
-        .into_response());
-    }
-    let to = form.to.trim().to_string();
-    if to.len() > 254 {
-        return Ok(Redirect::to(&format!(
-            "/settings?flash_error=address+too+long+%28max+254+chars%29{node_q}#mail"
-        ))
-        .into_response());
-    }
-    let resp = crate::dispatcher::dispatch_to_node(
-        &state,
-        target.as_deref(),
-        Request::MtaTestSend { to: to.clone() },
-    )
-    .await
-    .map_err(AppError::from)?;
-    match resp {
-        RpcResponse::MtaTestSend { exit_code, output } => {
-            if exit_code == 0 {
-                let msg = format!(
-                    "Sendmail queued the message to {to} (exit 0). \
-                     Check the recipient's inbox/spam + `tail /var/log/mail.log` \
-                     on this node for delivery progress."
-                );
-                Ok(
-                    Redirect::to(&format!("/settings?flash={}{node_q}#mail", urlencode(&msg)))
-                        .into_response(),
-                )
-            } else {
-                let trimmed = output.trim();
-                let tail = if trimmed.is_empty() {
-                    "(no output from sendmail)".to_string()
-                } else {
-                    trimmed.chars().take(180).collect()
-                };
-                let msg = format!("sendmail exit {exit_code}: {tail}");
-                Ok(Redirect::to(&format!(
-                    "/settings?flash_error={}{node_q}#mail",
-                    urlencode(&msg)
-                ))
-                .into_response())
-            }
-        }
-        RpcResponse::Error(e) => Ok(Redirect::to(&format!(
-            "/settings?flash_error={}{node_q}#mail",
-            urlencode(&e.to_string())
-        ))
-        .into_response()),
-        _ => Err(AppError::Internal("unexpected response".into())),
-    }
-}
+// The postfix actions (queue retry / discard, reconfigure, sendmail test)
+// moved to `handlers::mail_health`, beside the Mail delivery diagnostics on
+// Service health.
 
 // ── Node-level preview wildcard certs ─────────────────────────────────
 //
@@ -2965,9 +1813,18 @@ async fn resolve_node_wildcard_base(
     if !is_local && label.is_empty() {
         return None;
     }
+    // The master's id in a template is its hostname — what its agent and
+    // the HTTPS page's row both use — never the `local` sentinel the form
+    // posts, or a `{node_id}` template would issue for a different base
+    // than the row shows.
+    let template_id = if is_local {
+        config.hostname.as_str()
+    } else {
+        node_id
+    };
     config
         .cluster
-        .node_wildcard_base(node_id, &label)
+        .node_wildcard_base(template_id, &label)
         .map(|base| (label, base))
 }
 
@@ -2986,28 +1843,27 @@ pub async fn post_node_wildcard_begin(
     Form(form): Form<NodeWildcardBeginForm>,
 ) -> Result<Response, AppError> {
     if !ctx.is_super_admin() {
-        return Ok(
-            Redirect::to("/settings?flash_error=owner+role+required#preview-wildcard")
-                .into_response(),
-        );
+        return Ok(chrome::back_with_error(
+            "preview-wildcard",
+            "Only an Owner can issue preview certificates.",
+        ));
     }
-    let (_, base) = match resolve_node_wildcard_base(&state, &form.node_id).await {
+    let (label, base) = match resolve_node_wildcard_base(&state, &form.node_id).await {
         Some(v) => v,
         None => {
-            return Ok(Redirect::to(
-                "/settings?flash_error=no+preview+base+for+this+node+%E2%80%94+set+the+template+in+Step+1+%C2%B7+Preview+address+first#preview-wildcard",
-            )
-            .into_response());
+            return Ok(chrome::back_with_error(
+                "preview-wildcard",
+                "This node has no preview base yet — set the preview address first.",
+            ));
         }
     };
     let domain = match hyperion_validate::Domain::parse(&base) {
         Ok(d) => d,
         Err(e) => {
-            return Ok(Redirect::to(&format!(
-                "/settings?flash_error={}#preview-wildcard",
-                urlencode(&format!("invalid wildcard base {base}: {e}"))
-            ))
-            .into_response());
+            return Ok(chrome::back_with_error(
+                "preview-wildcard",
+                &format!("The preview address gives {base}, which is not a valid domain: {e}"),
+            ));
         }
     };
     let staging = form.staging.as_deref() == Some("on");
@@ -3024,11 +1880,10 @@ pub async fn post_node_wildcard_begin(
     match resp {
         RpcResponse::CertDns01BeginDomain {
             completed: true, ..
-        } => Ok(Redirect::to(&format!(
-            "/settings?flash={}#preview-wildcard",
-            urlencode(&format!("wildcard *.{base} issued on {}", form.node_id))
-        ))
-        .into_response()),
+        } => Ok(chrome::back_with_flash(
+            "preview-wildcard",
+            &format!("Preview certificate *.{base} issued on {label}."),
+        )),
         RpcResponse::CertDns01BeginDomain {
             completed: false,
             records,
@@ -3048,11 +1903,7 @@ pub async fn post_node_wildcard_begin(
             };
             Ok(Html(tpl.render()?).into_response())
         }
-        RpcResponse::Error(e) => Ok(Redirect::to(&format!(
-            "/settings?flash_error={}#preview-wildcard",
-            urlencode(&e.to_string())
-        ))
-        .into_response()),
+        RpcResponse::Error(e) => Ok(chrome::back_with_error("preview-wildcard", &e.to_string())),
         _ => Err(AppError::Internal("unexpected response".into())),
     }
 }
@@ -3074,19 +1925,18 @@ pub async fn post_node_wildcard_finish(
     Form(form): Form<NodeWildcardFinishForm>,
 ) -> Result<Response, AppError> {
     if !ctx.is_super_admin() {
-        return Ok(
-            Redirect::to("/settings?flash_error=owner+role+required#preview-wildcard")
-                .into_response(),
-        );
+        return Ok(chrome::back_with_error(
+            "preview-wildcard",
+            "Only an Owner can issue preview certificates.",
+        ));
     }
     let domain = match hyperion_validate::Domain::parse(form.base.trim()) {
         Ok(d) => d,
         Err(e) => {
-            return Ok(Redirect::to(&format!(
-                "/settings?flash_error={}#preview-wildcard",
-                urlencode(&format!("invalid wildcard base: {e}"))
-            ))
-            .into_response());
+            return Ok(chrome::back_with_error(
+                "preview-wildcard",
+                &format!("{} is not a valid domain: {e}", form.base.trim()),
+            ));
         }
     };
     let resp = crate::dispatcher::dispatch_to_node(
@@ -3117,28 +1967,49 @@ pub async fn post_node_wildcard_finish(
             };
             Ok(Html(tpl.render()?).into_response())
         }
-        RpcResponse::CertDns01FinishDomain(_) => Ok(Redirect::to(&format!(
-            "/settings?flash={}#preview-wildcard",
-            urlencode(&format!(
-                "wildcard *.{} issued + applied to test sites",
-                form.base
-            ))
-        ))
-        .into_response()),
-        RpcResponse::Error(e) => Ok(Redirect::to(&format!(
-            "/settings?flash_error={}#preview-wildcard",
-            urlencode(&e.to_string())
-        ))
-        .into_response()),
+        RpcResponse::CertDns01FinishDomain(_) => Ok(chrome::back_with_flash(
+            "preview-wildcard",
+            &format!("Preview certificate *.{} issued.", form.base.trim()),
+        )),
+        RpcResponse::Error(e) => Ok(chrome::back_with_error("preview-wildcard", &e.to_string())),
         _ => Err(AppError::Internal("unexpected response".into())),
     }
 }
 
-/// Group every catalogue string for the editor, in table order.
+/// What to store for catalogue string `id` when the operator submits `value`:
+/// LF line endings, and EMPTY when it is the pack's own wording for `lang`.
 ///
-/// The operator sees the built-in wording as a PLACEHOLDER and their own as
-/// the value, which is the same empty-means-default contract the two letter
-/// bodies already use — and the reason clearing a field is how you go back.
+/// A sentence submitted EXACTLY as the pack writes it is not an override, and
+/// storing it would fork that sentence: every later improvement to the
+/// built-in wording would stop reaching this install, with nothing in the UI
+/// to say so. "Fill empty fields with the built-in wording" and "Start from
+/// the built-in" put the pack's text into the form so an operator can EDIT a
+/// sentence instead of retyping it; pressing one and saving, which is the
+/// obvious thing to do, would otherwise fork every sentence in one click.
+///
+/// CLEARED, not dropped: typing the pack's own wording means "I want what the
+/// pack says", the same act as emptying the field, so it must also remove an
+/// override that is already there.
+///
+/// NORMALISED FIRST. A <textarea> submits CRLF per the HTML spec and the pack
+/// holds LF, so without it the comparison was always false for every
+/// multi-line sentence. Storing LF is right regardless: a CRLF that survived
+/// would reach a plain-text mail body.
+pub(super) fn letter_value_to_store(
+    id: &str,
+    value: &str,
+    lang: hyperion_core::letters::LetterLang,
+) -> String {
+    let value = if value.contains('\r') {
+        value.replace("\r\n", "\n").replace('\r', "\n")
+    } else {
+        value.to_string()
+    };
+    match hyperion_core::letters::lookup(id) {
+        Some(s) if value == s.built_in(lang) => String::new(),
+        _ => value,
+    }
+}
 
 /// The letter language + overrides exactly as the mailer reads them.
 ///
@@ -3274,7 +2145,7 @@ pub async fn get_letters_export(
          # Language pack in use: {lang}\n\
          #\n\
          # Edit the values, then paste the whole file back into Settings →\n\
-         # Customer letters → \"Letter language and wording\" → Replace all wording.\n\
+         # Customer letters → Sentences → \"Replace the wording from a file\".\n\
          # A value left EXACTLY as the built-in wording is not stored as an\n\
          # override, so future improvements to that sentence still reach you;\n\
          # change one character and it becomes yours and stops tracking.\n\
@@ -3346,16 +2217,16 @@ pub async fn post_letters_import(
     Form(form): Form<LettersImportForm>,
 ) -> Result<Response, AppError> {
     if !ctx.is_super_admin() {
-        return Ok(
-            Redirect::to("/settings?flash_error=super+admin+required#letter-wording")
-                .into_response(),
-        );
+        return Ok(Redirect::to(
+            "/settings/letters?flash_error=super+admin+required#letter-wording",
+        )
+        .into_response());
     }
     let doc: toml_edit::DocumentMut = match form.toml.parse() {
         Ok(d) => d,
         Err(e) => {
             return Ok(Redirect::to(&format!(
-                "/settings?flash_error={}#letter-wording",
+                "/settings/letters?flash_error={}#letter-wording",
                 urlencode(&format!("that is not valid TOML: {e}"))
             ))
             .into_response())
@@ -3411,7 +2282,7 @@ pub async fn post_letters_import(
     }
     if let Some(bad) = bad_lang {
         return Ok(Redirect::to(&format!(
-            "/settings?flash_error={}#letter-wording",
+            "/settings/letters?flash_error={}#letter-wording",
             urlencode(&format!(
                 "lang = \"{bad}\" is not a language this version has — the packs are \
                  English (en) and Czech (cs). Nothing was changed."
@@ -3498,7 +2369,7 @@ pub async fn post_letters_import(
             )
         };
         return Ok(Redirect::to(&format!(
-            "/settings?flash_error={}#letter-wording",
+            "/settings/letters?flash_error={}#letter-wording",
             urlencode(&msg)
         ))
         .into_response());
@@ -3515,32 +2386,28 @@ pub async fn post_letters_import(
     .map_err(AppError::from)?;
     if let RpcResponse::Error(e) = resp {
         return Ok(Redirect::to(&format!(
-            "/settings?flash_error={}#letter-wording",
+            "/settings/letters?flash_error={}#letter-wording",
             urlencode(&e.to_string())
         ))
         .into_response());
     }
-    // The letters are rendered on the node that OWNS each hosting, so the
-    // master's copy is not enough — the same propagation the per-string form
-    // already does.
-    // Letters render on the node that OWNS each hosting, so the master's write
-    // is not the job finished. A failure here used to be discarded while the
-    // flash still said success — the operator would believe their customers
-    // were getting the new wording when half the cluster was not sending it.
-    let propagation = propagate_notifications(&state, "letters", fields.clone()).await;
+    // Letters render on the node that OWNS each hosting, so the master's
+    // write is not the job finished: the settings sync carries it to every
+    // node (kicked now rather than on its next pass), and nodes it cannot
+    // update get it pushed directly. A push failure is said in the flash —
+    // the operator would otherwise believe their customers get the new
+    // wording when some nodes still send the old one.
+    state.cluster_sync.kick();
+    let propagation = push_to_unsynced_nodes(&state, "letters", fields.clone()).await;
 
     let mut msg = format!("{kept} sentence(s) now use your wording");
-    match &propagation {
-        Ok(0) => {}
-        Ok(n) => msg.push_str(&format!("; pushed to {n} other node(s)")),
-        Err(problems) => {
-            msg.push_str(&format!(
-                "; but {} node(s) did NOT get it and are still sending the old \
-                 wording: {}",
-                problems.len(),
-                problems.join("; ")
-            ));
-        }
+    if let Err(problems) = &propagation {
+        msg.push_str(&format!(
+            "; but {} node(s) did NOT get it and are still sending the old \
+             wording: {}",
+            problems.len(),
+            problems.join("; ")
+        ));
     }
     if !unknown.is_empty() {
         msg.push_str(&format!(
@@ -3555,40 +2422,15 @@ pub async fn post_letters_import(
         ));
     }
     Ok(Redirect::to(&format!(
-        "/settings?flash={}#letter-wording",
+        "/settings/letters?flash={}#letter-wording",
         urlencode(&msg)
     ))
     .into_response())
 }
 
-fn letter_group_cards(cat: &hyperion_core::letters::LetterCatalog) -> Vec<LetterGroupCard> {
-    hyperion_core::letters::groups()
-        .into_iter()
-        .map(|g| LetterGroupCard {
-            name: g.to_string(),
-            strings: hyperion_core::letters::STRINGS
-                .iter()
-                .filter(|s| s.group == g)
-                .map(|s| {
-                    let built_in = s.built_in(cat.lang);
-                    LetterStringRow {
-                        id: s.id.to_string(),
-                        note: s.note.to_string(),
-                        built_in: built_in.to_string(),
-                        current: cat.overrides.get(s.id).cloned().unwrap_or_default(),
-                        multiline: built_in.contains('\n') || built_in.len() > 60,
-                    }
-                })
-                .collect(),
-        })
-        .collect()
-}
 #[cfg(test)]
 mod tests {
-    use super::{
-        flatten_toml_strings, letter_verdict, mask_secrets_in_toml,
-        synthesize_unchecked_checkboxes, toml_key, toml_value,
-    };
+    use super::{flatten_toml_strings, synthesize_unchecked_checkboxes, toml_key, toml_value};
 
     /// Each node's backups live on that node, so the sweep runs once per
     /// node and the job log says which node did what — a node that could
@@ -3676,6 +2518,24 @@ mod tests {
         let f = m(&[("drop_local_after_offsite", "true")]);
         assert_eq!(fields_for_workers("backup", &f), Some(("backup".into(), f)));
         assert!(fields_for_workers("acme", &m(&[("contact_email", "a@b.cz")])).is_none());
+        // The preview template too: each node's nginx reads its own copy.
+        let got = fields_for_workers(
+            "cluster",
+            &m(&[("test_domain_template", "{name}.p.example.com")]),
+        )
+        .expect("preview template propagates");
+        assert_eq!(
+            got.1,
+            m(&[("test_domain_template", "{name}.p.example.com")])
+        );
+        // Every key pushed is one the sync carries too, and vice versa for
+        // [cluster] — the two paths must agree.
+        for k in super::CLUSTER_KEYS_FOR_WORKERS {
+            assert!(
+                hyperion_core::cluster_sync::is_synced_key("cluster", k),
+                "{k}"
+            );
+        }
     }
 
     /// A node from before `keep_local_latest` gets the [backup] save without
@@ -4026,61 +2886,6 @@ mod tests {
     /// An older node that cannot report its `[letters]` must read as UNKNOWN,
     /// never as agreement.
     ///
-    /// The badge compared only the two body templates and then claimed the node
-    /// "sends the same letters as this master" — a statement about the whole
-    /// letter made from two of its fields. A node on a different LANGUAGE, or
-    /// missing every sentence the operator had rewritten, satisfied it.
-    #[test]
-    fn letter_parity_is_unknown_when_a_node_cannot_report_its_wording() {
-        // The decision the node loop makes, in the same shape.
-        let verdict = |bodies_match: bool, ours: &str, theirs: &str| -> &'static str {
-            let letters_same = if theirs.is_empty() || ours.is_empty() {
-                None
-            } else {
-                Some(theirs == ours)
-            };
-            let base = if bodies_match { "same" } else { "differs" };
-            match letters_same {
-                Some(false) => "differs",
-                None if base == "same" => "unknown",
-                _ => base,
-            }
-        };
-        assert_eq!(verdict(true, "abc", "abc"), "same", "everything agrees");
-        assert_eq!(
-            verdict(true, "abc", "xyz"),
-            "differs",
-            "same bodies but different wording or language is NOT the same letter"
-        );
-        assert_eq!(
-            verdict(true, "abc", ""),
-            "unknown",
-            "a node too old to say must not be reported as agreeing"
-        );
-        assert_eq!(
-            verdict(false, "abc", "abc"),
-            "differs",
-            "a body mismatch still wins"
-        );
-    }
-
-    /// The badge may read "in step" only when BOTH customer letters match.
-    /// Half a match is still a node sending wording the operator never wrote,
-    /// and the sentence has to name which letter — that is what tells the
-    /// operator whether their care report or their expiry warning is the one
-    /// their customers are not getting.
-    #[test]
-    fn a_node_reads_as_in_step_only_when_both_letters_match() {
-        assert_eq!(letter_verdict(true, true).0, "same");
-        for (care_same, expiry_same) in [(false, true), (true, false), (false, false)] {
-            let (state, note) = letter_verdict(care_same, expiry_same);
-            assert_eq!(state, "differs", "care={care_same} expiry={expiry_same}");
-            assert!(note.contains("DIFFERENT"), "{note}");
-        }
-        assert!(letter_verdict(false, true).1.contains("care report"));
-        assert!(letter_verdict(true, false).1.contains("expiry warning"));
-    }
-
     #[test]
     fn declared_unchecked_synthesizes_false() {
         // Browser sends NO master_accepts_hostings when the box is
@@ -4145,7 +2950,7 @@ smtp_host = "smtp.postmark.com"
 smtp_password = "actual-secret-here"
 from_address = "ops@example.cz"
 "#;
-        let out = mask_secrets_in_toml(input);
+        let out = hyperion_core::config_persist::mask_secrets(input);
         assert!(out.contains("smtp_password = \"«set»\""));
         assert!(!out.contains("actual-secret-here"));
         // Non-suspect lines pass through unchanged.
@@ -4156,7 +2961,7 @@ from_address = "ops@example.cz"
     #[test]
     fn mask_distinguishes_empty_vs_set() {
         let input = "secret = \"\"\npassword = \"x\"\n";
-        let out = mask_secrets_in_toml(input);
+        let out = hyperion_core::config_persist::mask_secrets(input);
         assert!(out.contains("secret = \"«empty»\""));
         assert!(out.contains("password = \"«set»\""));
     }
@@ -4165,7 +2970,7 @@ from_address = "ops@example.cz"
     fn mask_handles_indented_keys() {
         // toml allows indented keys (common in editor-formatted files).
         let input = "    invite_token = \"super-secret\"\n";
-        let out = mask_secrets_in_toml(input);
+        let out = hyperion_core::config_persist::mask_secrets(input);
         assert!(out.contains("invite_token = \"«set»\""));
         assert!(!out.contains("super-secret"));
     }
@@ -4173,7 +2978,7 @@ from_address = "ops@example.cz"
     #[test]
     fn mask_leaves_non_secret_keys_alone() {
         let input = "url = \"https://example.cz\"\n";
-        let out = mask_secrets_in_toml(input);
+        let out = hyperion_core::config_persist::mask_secrets(input);
         assert!(out.contains("url = \"https://example.cz\""));
     }
 
@@ -4181,7 +2986,7 @@ from_address = "ops@example.cz"
     fn mask_does_not_match_partial_key_names() {
         // "passwordless" is NOT in the suspect list — leave it.
         let input = "passwordless = true\nmy_password = \"x\"\n";
-        let out = mask_secrets_in_toml(input);
+        let out = hyperion_core::config_persist::mask_secrets(input);
         assert!(out.contains("passwordless = true"));
         // A `_password` / `_key` / `_token` suffix IS masked: matching only
         // exact names printed `[performance] psi_api_key` in the clear.
@@ -4191,7 +2996,7 @@ from_address = "ops@example.cz"
     #[test]
     fn mask_handles_webhook_url() {
         let input = "default_webhook = \"https://hooks.slack.com/services/T/B/abc\"\n";
-        let out = mask_secrets_in_toml(input);
+        let out = hyperion_core::config_persist::mask_secrets(input);
         assert!(out.contains("default_webhook = \"«set»\""));
         assert!(!out.contains("hooks.slack.com"));
     }
@@ -4199,7 +3004,7 @@ from_address = "ops@example.cz"
     #[test]
     fn mask_leaves_comments_alone() {
         let input = "# password = \"never-stored-but-comment\"\nactual = \"value\"\n";
-        let out = mask_secrets_in_toml(input);
+        let out = hyperion_core::config_persist::mask_secrets(input);
         // Comment lines don't match because the key-detection
         // looks for "<key> =" before the equals sign and "# password"
         // doesn't match "password" exactly.
@@ -4207,7 +3012,7 @@ from_address = "ops@example.cz"
     }
 
     // ============================================================
-    //  [fail2ban] section → Bans & blocking tab
+    //  [fail2ban] section → Brute-force scanner card
     // ============================================================
 
     /// No section at all is the common case on an install that never
@@ -4263,9 +3068,7 @@ from_address = "ops@example.cz"
     //  Save redirects: section_to_tab / sanitize_return_tab / card_label
     // ============================================================
 
-    use super::{card_label, sanitize_return_tab, section_label, section_to_tab};
-
-    const SETTINGS_HTML: &str = include_str!("../../templates/settings.html");
+    use super::{card_label, chrome, sanitize_return_tab, section_label, section_to_tab};
 
     /// Every `[section]` a /settings/config form can post, plus two that no
     /// form posts, which must still land somewhere visible.
@@ -4288,193 +3091,27 @@ from_address = "ops@example.cz"
         "no-such-section",
     ];
 
-    /// Tab ids of the strip, in order.
-    const TAB_IDS: &[&str] = &[
-        "general",
-        "tls",
-        "mail",
-        "notifications",
-        "letters",
-        "backups",
-        "access",
-        "bruteforce",
-        "cluster",
-        "raw",
-    ];
-
-    /// Card anchors the page's resolve() can open.
-    const CARD_ANCHORS: &[&str] = &[
-        "panel-domain",
-        "updates",
-        "acme",
-        "preview-address",
-        "preview-wildcard",
-        "https-howto",
-        "smtp-relay",
-        "mail-test",
-        "local-mta",
-        "mail-howto",
-        "slack",
-        "alert-recipients",
-        "alert-templates",
-        "customer-letters",
-        "letter-wording",
-        "performance",
-        "email-branding",
-        "protection-mode",
-        "offsite-ftp",
-        "offsite-s3",
-        "local-copies",
-        "backup-retention",
-        "snapshot-retention",
-        "trash",
-        "offsite-backfill",
-        "sign-in",
-        "users-roles",
-        "api",
-        "api-keys",
-        "audit-retention",
-        "bruteforce-scanner",
-        "geoip",
-        "placement",
-        "test-nodes",
-        "hardening",
-        "multinode-tips",
-        "raw-toml",
-    ];
-
-    /// Retired tab ids. Still accepted from a pre-upgrade form, but a form
-    /// on the current page must not send one.
-    const RETIRED: &[&str] = &["system", "testnodes", "retention"];
-
-    /// Every `_return_tab` value a form in settings.html sends. A plain string
-    /// scan: find `name="_return_tab"`, take the enclosing tag, read its
-    /// `value=` (quoted or bare).
-    fn template_return_tabs() -> Vec<String> {
-        let mut out = Vec::new();
-        for needle in [
-            "name=\"_return_tab\"",
-            "name='_return_tab'",
-            "name=_return_tab",
-        ] {
-            let mut from = 0;
-            while let Some(i) = SETTINGS_HTML[from..].find(needle) {
-                let at = from + i;
-                from = at + needle.len();
-                let start = SETTINGS_HTML[..at].rfind('<').expect("inside a tag");
-                let end = at + SETTINGS_HTML[at..].find('>').expect("tag closes");
-                let tag = &SETTINGS_HTML[start..end];
-                let v = tag
-                    .find("value=")
-                    .map(|p| &tag[p + "value=".len()..])
-                    .unwrap_or_else(|| panic!("_return_tab input without a value: {tag}"));
-                let value = match v.chars().next() {
-                    Some(q @ ('"' | '\'')) => v[1..].split(q).next().unwrap_or(""),
-                    _ => v
-                        .split(|c: char| c.is_whitespace() || c == '/')
-                        .next()
-                        .unwrap_or(""),
-                };
-                out.push(value.to_string());
-            }
-        }
-        out
-    }
-
-    /// Whether the page has something resolve() can open for `anchor`: a tab
-    /// in the strip, or an element with that id.
-    fn template_has_anchor(anchor: &str) -> bool {
-        if SETTINGS_HTML.contains(&format!("data-tab=\"{anchor}\"")) {
-            return true;
-        }
-        // `id="x"` as its own attribute, not the tail of `data-id="x"`.
-        [format!("id=\"{anchor}\""), format!("id='{anchor}'")]
-            .iter()
-            .any(|needle| {
-                SETTINGS_HTML.match_indices(needle.as_str()).any(|(at, _)| {
-                    SETTINGS_HTML[..at]
-                        .chars()
-                        .next_back()
-                        .is_some_and(char::is_whitespace)
-                })
-            })
-    }
-
     #[test]
-    fn every_section_redirects_to_a_known_anchor() {
+    fn every_section_redirects_to_a_card() {
         for s in SECTIONS {
             let t = section_to_tab(s);
             assert!(
-                sanitize_return_tab(t).is_some()
-                    || TAB_IDS.contains(&t)
-                    || CARD_ANCHORS.contains(&t),
-                "section [{s}] redirects to #{t}, which is neither a tab nor a known card"
-            );
-            assert!(
-                !RETIRED.contains(&t),
-                "section [{s}] redirects to the retired #{t}"
+                chrome::card_section(t).is_some(),
+                "section [{s}] redirects to #{t}, which is not a card"
             );
         }
-        // Unknown input lands on the default tab, which is always visible.
-        assert_eq!(section_to_tab("no-such-section"), "general");
-        assert_eq!(section_to_tab(""), "general");
-        // [cluster] is written from four tabs; its fallback must not be the
-        // cluster-only tab a standalone install hides.
-        assert_eq!(section_to_tab("cluster"), "general");
-    }
-
-    #[test]
-    fn every_section_anchor_exists_on_the_page() {
-        for s in SECTIONS {
-            let t = section_to_tab(s);
-            assert!(
-                template_has_anchor(t),
-                "section [{s}] redirects to #{t}, but settings.html has no tab or id for it"
-            );
-        }
-    }
-
-    #[test]
-    fn sanitize_return_tab_accepts_every_template_value() {
-        let values = template_return_tabs();
-        assert!(
-            !values.is_empty(),
-            "the scan found no _return_tab inputs in settings.html"
+        // [cluster] is written from five pages; its fallback must be a card
+        // a standalone install has (the Cluster page is hidden there).
+        assert_ne!(
+            chrome::card_section(section_to_tab("cluster")),
+            Some("cluster")
         );
-        for v in &values {
-            assert_eq!(
-                sanitize_return_tab(v),
-                Some(v.as_str()),
-                "settings.html sends _return_tab={v:?}, which the handler drops"
-            );
-            assert!(
-                !RETIRED.contains(&v.as_str()),
-                "settings.html still sends the retired _return_tab={v:?}"
-            );
-            assert!(
-                template_has_anchor(v),
-                "_return_tab={v:?} has no tab or card with that id on the page"
-            );
-        }
     }
 
     #[test]
-    fn sanitize_return_tab_is_identity_on_known_values() {
-        for v in TAB_IDS.iter().chain(RETIRED) {
-            assert_eq!(sanitize_return_tab(v), Some(*v), "{v}");
-        }
-        for v in [
-            "alert-templates",
-            "customer-letters",
-            "sign-in",
-            "placement",
-            "test-nodes",
-            "hardening",
-            "preview-address",
-            "trash",
-            "audit-retention",
-        ] {
-            assert_eq!(sanitize_return_tab(v), Some(v), "{v}");
+    fn sanitize_return_tab_accepts_exactly_the_cards() {
+        for (card, _) in chrome::CARDS {
+            assert_eq!(sanitize_return_tab(card), Some(*card), "{card}");
         }
         assert_eq!(sanitize_return_tab("  trash \n"), Some("trash"));
     }
@@ -4486,8 +3123,9 @@ from_address = "ops@example.cz"
             " ",
             "evil",
             "GENERAL",
+            "general",
             "tab-general",
-            "general#x",
+            "trash#x",
             "trash&flash=pwned",
             "\"><script>alert(1)</script>",
             "https://evil.example/",
@@ -4503,33 +3141,34 @@ from_address = "ops@example.cz"
     /// save flash; everything else falls back to the section's label.
     #[test]
     fn card_label_names_shared_section_cards() {
-        for (anchor, label) in [
-            ("sign-in", "Sign-in security"),
-            ("hardening", "Cluster channel hardening"),
-            ("placement", "Cluster placement"),
-            ("test-nodes", "Test nodes"),
-            ("preview-address", "Preview address"),
-            ("trash", "Trash settings"),
-            ("audit-retention", "Audit log retention"),
-            ("alert-templates", "Alert wording"),
-            ("customer-letters", "Care report & expiry warning"),
+        for anchor in [
+            "sign-in",
+            "hardening",
+            "placement",
+            "test-nodes",
+            "preview-address",
+            "trash",
+            "audit-retention",
+            "alert-templates",
+            "alert-language",
+            "alert-recipients",
+            "customer-letters",
+            "letter-language",
+            "letter-wording",
         ] {
-            assert_eq!(card_label(anchor), Some(label), "{anchor}");
+            assert!(card_label(anchor).is_some(), "{anchor} has no label");
             assert!(
                 sanitize_return_tab(anchor).is_some(),
                 "{anchor} has a label but the handler would drop it"
             );
-        }
-        for v in TAB_IDS.iter().chain(RETIRED) {
-            assert_eq!(card_label(v), None, "{v}");
         }
         // The flash wiring post_config uses: card first, section as fallback.
         let flash = |rt: Option<&'static str>, section: &str| {
             rt.and_then(card_label)
                 .unwrap_or_else(|| section_label(section))
         };
-        assert_eq!(flash(Some("sign-in"), "cluster"), "Sign-in security");
-        assert_eq!(flash(Some("general"), "cluster"), "Cluster settings");
+        assert_eq!(flash(Some("sign-in"), "cluster"), "Two-factor sign-in");
+        assert_eq!(flash(Some("acme"), "acme"), "Let's Encrypt contact");
         assert_eq!(flash(None, "acme"), "Let's Encrypt contact");
     }
 }

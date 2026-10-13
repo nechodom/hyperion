@@ -454,7 +454,7 @@ pub static STRINGS: &[LetterString] = &[
     LetterString {
         id: "care.subject",
         group: "Care report — frame",
-        note: "Subject line. Tokens: {domain} {period_start} {period_end} {days} {days_count}.",
+        note: "Subject line. Takes every token the body does; the built-in uses {domain} {period_start} {period_end}.",
         en: "Care report for {domain} ({period_start} – {period_end})",
         cs: "Report údržby pro {domain} ({period_start} – {period_end})",
     },
@@ -1695,14 +1695,14 @@ pub static STRINGS: &[LetterString] = &[
     LetterString {
         id: "expiry.subject.today",
         group: "Expiry warning",
-        note: "Subject when the hosting expires today. Token: {domain}.",
+        note: "Subject on the day the hosting expires. Takes every token the body does, plus {days} {unit}.",
         en: "[Hyperion] Hosting for {domain} expires today",
         cs: "[Hyperion] Hosting pro {domain} vyprší dnes",
     },
     LetterString {
         id: "expiry.subject.days",
         group: "Expiry warning",
-        note: "Subject with days remaining. Tokens: {domain} {days} {unit}.",
+        note: "Subject while days remain. Takes every token the body does, plus {days} (the count) and {unit} (its word).",
         en: "[Hyperion] Hosting for {domain} expires in {days} {unit}",
         cs: "[Hyperion] Hosting pro {domain} vyprší za {days} {unit}",
     },

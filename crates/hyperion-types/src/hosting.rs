@@ -277,7 +277,7 @@ pub struct VhostOptions {
     pub blocked_bots: String,
     /// ISO-3166-1 alpha-2 codes to refuse, comma-separated and uppercase.
     ///
-    /// Requires the GeoIP database (Settings → Bans & blocking → GeoIP
+    /// Requires the GeoIP database (Settings → Brute-force & GeoIP → GeoIP
     /// database). Without it every visitor resolves to `ZZ` and no country
     /// rule can match — so a site cannot be accidentally cut off by
     /// enabling this before the data is there.

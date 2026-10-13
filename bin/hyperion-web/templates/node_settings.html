@@ -149,7 +149,7 @@
         </div>
       </div>
       <p class="text-soft small" style="margin:0 0 0.8rem;line-height:1.55">
-        What each number means is explained on <a href="/settings#bruteforce-scanner">Settings → Bans &amp; blocking</a>.
+        What each number means is explained on <a href="/settings/bans#bruteforce-scanner">Settings → Brute-force &amp; GeoIP</a>.
         Bans in force are on <a href="/protection#bans">Protection</a>.
       </p>
       <div class="item-actions"><button type="submit" class="btn primary">Save brute-force settings</button></div>
@@ -172,8 +172,8 @@
   {% if has_workers && !managed %}
   <div class="item muted">
     <p class="text-soft small" style="margin:0;line-height:1.55">
-      <strong>What is kept</strong>, <strong>Local backup copies</strong> and both retention cards are also on
-      <a href="/settings#protection-mode">Settings → Backups &amp; trash</a>, which saves them to
+      <strong>What is kept</strong>, <strong>Local copies</strong> and both retention cards are also on
+      <a href="/settings/backups#protection-mode">Settings → Backups</a>, which saves them to
       <em>every</em> node.{% if is_master %} The values here are the ones every node follows.{% else %} This node runs an older agent that does not take the master’s settings yet, so set its value here until it is updated.{% endif %}
     </p>
   </div>
@@ -211,7 +211,7 @@
     </div>
     <p class="text-soft small" style="margin:0 0 0.8rem">
       Where <strong>this node</strong> pushes the backups of the sites it holds. S3 targets are shared by every node and live on
-      <a href="/settings/backups">Backup targets</a>.
+      <a href="/settings/backups#offsite-targets">Settings → Backups → Off-site targets</a>.
     </p>
     <form method="post" action="/install/node-settings" autocomplete="off">
       <input type="hidden" name="_csrf" value="{{ csrf_token }}">
@@ -382,7 +382,7 @@
     <h3 style="font-size:0.95rem;margin:0 0 0.6rem">Outgoing mail</h3>
     <p class="text-soft small" style="margin:0;line-height:1.55">
       This node’s SMTP relay and local mail server are on
-      <a href="/settings?mail_node={{ node_id }}#mail">Settings → Mail</a>, already switched to {{ label }}.
+      <a href="/settings/mail?node={{ node_id }}">Settings → Mail</a>, already switched to {{ label }}.
     </p>
   </div>
 </div>

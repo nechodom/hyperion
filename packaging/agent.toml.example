@@ -122,9 +122,9 @@ waf_threshold  = 20   # ban-counted WAF refusals (per site; 3..=1000)
 # What Hyperion CANNOT do for you, and what direct delivery depends on:
 #   - The PTR (reverse DNS) for this node's IP must equal its `myhostname`.
 #     It is set wherever the IP is managed (the provider's console), not
-#     here. Settings -> Mail reports whether it matches.
+#     here. Service health -> Mail delivery reports whether it matches.
 #   - Outbound TCP/25 must not be blocked. Several providers block it by
-#     default and unblock on request. Settings -> Mail probes it.
+#     default and unblock on request. Service health -> Mail delivery probes it.
 #   - Each hosted domain needs its own DKIM record (per-hosting card) and
 #     an SPF record naming this node's IP. Envelope alignment — what makes
 #     that SPF record actually get consulted — is switched on for a site
@@ -133,9 +133,7 @@ waf_threshold  = 20   # ban-counted WAF refusals (per site; 3..=1000)
 # [notifications]
 # Editable outbound wording. Every key here is optional, and an empty or
 # missing one means "unchanged" — edit them in the panel under
-# Settings -> Alerts -> Alert wording (operator alerts) and
-# Settings -> Customer letters -> Care report & expiry warning, both with a
-# live preview.
+# Settings -> Alerts -> Wording, with a live preview.
 #
 # The first three WRAP what Hyperion already wrote (operator alerts,
 # reminders, test sends); their defaults are pass-through:
@@ -143,25 +141,35 @@ waf_threshold  = 20   # ban-counted WAF refusals (per site; 3..=1000)
 #   email_subject_template = "{subject}"   # {subject} {time}
 #   email_body_template    = "{body}"      # {body} {time} {panel} {kind}
 #
-# The last four are the two whole letters to the CUSTOMER — subject and
-# body each — and default to EMPTY, which means "send the built-in letter"
-# in the language chosen under [letters] below.
+# Four more keys are an OLDER way to word the two letters to the CUSTOMER:
+#   care_report_subject_template    care_report_body_template
+#   expiry_warning_subject_template expiry_warning_body_template
+# A non-empty one REPLACES that part of the letter for every customer, in
+# every language, and [letters] below is ignored for it. Leave them empty:
+# the letters are worded per language in [letters] ("care.subject",
+# "care.body", "expiry.subject.days", "expiry.subject.today", "expiry.body"),
+# which Settings -> Customer letters -> Letters edits — and offers to move
+# any of these four into.
 #
-#   care_report_body_template
+# The letters' placeholders (subjects take the same ones as their body):
+#
+#   care report
 #     {domain} {period_start} {period_end} {days}
 #     {attacks} {updates} {traffic} {uptime} {backups} {integrity}
+#     {performance} {service}
 #
-#     The six section placeholders carry the WHOLE rendered section,
-#     already worded — including "not monitored" / "not determined" /
-#     "not checked" when that section could not be measured. Beside them
-#     are bare values ({attacks_count}, {uptime_pct}, {traffic_sent},
-#     {days_count}, {period_start_iso} …) which carry the measurement and
-#     no wording at all, for a letter written from scratch. A value that
-#     was never measured prints an em dash, never a zero: no wording can
-#     promote something we did not measure into a figure.
+#     The section placeholders carry the WHOLE rendered section, already
+#     worded — including "not monitored" / "not determined" / "not checked"
+#     when that section could not be measured. Beside them are bare values
+#     ({attacks_count}, {uptime_pct}, {traffic_sent}, {days_count},
+#     {period_start_iso} …) which carry the measurement and no wording at
+#     all, for a letter written from scratch. A value that was never
+#     measured prints an em dash, never a zero: no wording can promote
+#     something we did not measure into a figure.
 #
-#   expiry_warning_body_template
+#   expiry warning
 #     {domain} {expires_at} {days_left} {grace_days} {delete_at} {when}
+#     (+ {days} {unit} in the subjects)
 #
 #     Dates and day counts arrive already worded ("1 Sep 2026", "7 days",
 #     "1 day", "expires today"), so a custom letter cannot mis-plural a
@@ -169,14 +177,6 @@ waf_threshold  = 20   # ban-counted WAF refusals (per site; 3..=1000)
 #
 # A placeholder that does not exist is left in the text exactly as typed —
 # never dropped, never an error — so a typo shows up in the preview.
-#
-# care_report_body_template = """
-# CARE REPORT for {domain} ({period_start} – {period_end})
-#
-# {attacks}
-#
-# {uptime}
-# """
 
 # ─── Customer letter language and wording ──────────────────────────────────
 #
@@ -191,7 +191,7 @@ waf_threshold  = 20   # ban-counted WAF refusals (per site; 3..=1000)
 # Every other key is one string, keyed by its id, and overrides that pack.
 # Missing or empty means "use the pack's wording", so a file with only
 # `lang` in it is a fully translated letter. Edit them in the panel under
-# Settings -> Customer letters -> Letter language and wording, which lists them
+# Settings -> Customer letters -> Sentences, which lists them
 # grouped with the built-in text shown in each field.
 #
 # The operator alerts are worth translating since profiles gained their own
@@ -321,7 +321,7 @@ enabled = true
 # strategy = "mobile" (Google's default) or "desktop".
 #
 # Measured weekly for care-plan sites, and on demand from a site's Performance
-# card. Edit this from Settings → Customer letters → Care report · Core Web Vitals, which saves it on every node.
+# card. Edit this from Settings → Customer letters → Core Web Vitals, which saves it on every node.
 [performance]
 cwv_source = "off"
 strategy = "mobile"

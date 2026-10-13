@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{#- The frame of every Settings page: the sub-navigation on the left, the
+    page's title and one-line lead, the read-only notice, the save flash.
+    A section template fills `section` (and optionally `header_actions`). -#}
+{% block title %}{{ chrome.title }}{% if chrome.section != "overview" %} · Settings{% endif %} · Hyperion{% endblock %}
+{% block main %}
+<div class="settings-shell">
+  <nav class="settings-nav" aria-label="Settings">
+    <a href="/settings"{% if chrome.section == "overview" %} class="active" aria-current="page"{% endif %}>Overview</a>
+    {% for g in chrome.nav() %}
+    <div class="settings-nav-label">{{ g.label }}</div>
+    {% for s in g.items %}
+    <a href="/settings/{{ s.slug }}"{% if s.slug == chrome.section %} class="active" aria-current="page"{% endif %}>{{ s.title }}</a>
+    {% endfor %}
+    {% endfor %}
+  </nav>
+
+  <div class="settings-main">
+    <div class="page-header">
+      <div>
+        <h1>{{ chrome.title }}</h1>
+        <div class="subtitle">{{ chrome.lead }}</div>
+      </div>
+      <span class="grow"></span>
+      {% block header_actions %}{% endblock %}
+    </div>
+
+    {% if !chrome.can_edit %}
+    <div class="flash info">
+      <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+      <div class="flash-body">{% block read_only_note %}You can see these settings; only an Owner can change them.{% endblock %}</div>
+    </div>
+    {% endif %}
+    {#- A save redirects to `#<card>`, which scrolls that card to the top —
+        past a flash printed up here. The script below moves the flash INTO
+        the card it is about; without JS it stays here, which still works. -#}
+    {% if let Some(m) = chrome.flash %}
+    <div class="flash success" data-settings-flash>
+      <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+      <div class="flash-body">{{ m }}</div>
+    </div>
+    {% endif %}
+    {% if let Some(e) = chrome.flash_error %}
+    <div class="flash error" data-settings-flash>
+      <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+      <div class="flash-body">{{ e }}</div>
+    </div>
+    {% endif %}
+
+    {% block section %}{% endblock %}
+  </div>
+</div>
+<script>
+(function () {
+  'use strict';
+  var id = decodeURIComponent((location.hash || '').slice(1));
+  var card = id && document.getElementById(id);
+  if (!card || !card.classList.contains('item')) return;
+  var flashes = document.querySelectorAll('[data-settings-flash]');
+  flashes.forEach(function (f) {
+    f.classList.add('in-card');
+    card.insertBefore(f, card.firstChild);
+  });
+  // A closed fold would hide the card that was just saved.
+  var fold = card.closest('details');
+  if (fold) fold.open = true;
+  if (flashes.length) card.scrollIntoView({ block: 'start' });
+})();
+</script>
+{% endblock %}

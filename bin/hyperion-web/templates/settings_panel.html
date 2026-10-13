@@ -1,0 +1,116 @@
+{% extends "settings_base.html" %}
+{% block section %}
+{% if let Some(e) = config_error %}
+<div class="flash error">
+  <div class="flash-body">The agent's settings could not be read ({{ e }}). The values below are defaults, not what is set.</div>
+</div>
+{% endif %}
+
+<fieldset class="group"{{ chrome.ro() }}>
+  <div class="ghead">Panel domain{% if chrome.has_nodes %}<span class="scope-tag" title="The address of the panel itself, on the master">Master</span>{% endif %}</div>
+  <div class="item" id="panel-domain">
+    {% if config.cluster.panel_hostname.is_empty() %}
+    <h3>No domain yet</h3>
+    <p class="text-soft small" style="margin:0 0 0.8rem">
+      The panel answers on its IP address with a self-signed certificate, so
+      every browser warns. Give it a hostname and it gets a trusted
+      certificate of its own.
+    </p>
+    {% else %}
+    <h3><a href="https://{{ config.cluster.panel_hostname }}:8443" target="_blank" rel="noopener">https://{{ config.cluster.panel_hostname }}:8443</a></h3>
+    <p class="text-soft small" style="margin:0 0 0.8rem">
+      Requests to the raw IP are redirected here. <code>localhost</code> stays
+      open for health checks and SSH tunnels.
+    </p>
+    {% endif %}
+
+    <div id="panel-cert-status"
+         hx-get="/settings/panel-cert-status"
+         hx-trigger="load"
+         hx-swap="innerHTML">
+      <span class="text-soft small">Checking the certificate…</span>
+    </div>
+
+    <form method="post" action="/settings/panel-provision" autocomplete="off" style="margin-top:1rem">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <div class="field">
+        <label for="panel_hostname">{% if config.cluster.panel_hostname.is_empty() %}Hostname{% else %}Move the panel to{% endif %}
+          <span class="hint">its A / AAAA record must already point to this server</span></label>
+        <input id="panel_hostname" name="hostname" type="text"
+               autocomplete="off" autocapitalize="none" spellcheck="false"
+               value="{{ config.cluster.panel_hostname }}"
+               placeholder="panel.example.com"
+               pattern="[a-zA-Z0-9.\-]+"
+               required>
+      </div>
+      <label class="field-checkbox" style="margin:0.4rem 0 0">
+        <input type="checkbox" name="skip_dns_check" value="on">
+        Skip the DNS check <span class="text-soft small">— when the record is right but a resolver still has the old one</span>
+      </label>
+      <div class="item-actions">
+        <button type="submit" class="btn primary">{% if config.cluster.panel_hostname.is_empty() %}Set up the domain{% else %}Move the panel{% endif %}</button>
+      </div>
+    </form>
+
+    <details class="howto">
+      <summary>What happens when you save</summary>
+      <ol style="padding-left:1.2rem">
+        <li>The hostname is checked in DNS (unless you skip it).</li>
+        <li>It is saved as <code>cluster.panel_hostname</code>.</li>
+        <li>The nginx site <code>/etc/nginx/sites-enabled/hyperion-panel.conf</code> is written with a temporary self-signed certificate, so the reload cannot fail.</li>
+        <li>nginx is tested and reloaded.</li>
+        <li>A Let's Encrypt certificate is requested in the background; the status above follows it.</li>
+      </ol>
+      <p>Bookmark the new address. The old IP address keeps working, but only through the redirect.</p>
+    </details>
+  </div>
+</fieldset>
+
+<fieldset class="group"{{ chrome.ro() }}>
+  <div class="ghead">Updates{% if chrome.has_nodes %}<span class="scope-tag" title="Set here, copied to every node by the settings sync">All nodes</span>{% endif %}</div>
+  <div class="item" id="updates">
+    <div class="row" style="align-items:center;gap:0.6rem;flex-wrap:wrap">
+      <h3 style="margin:0">Hyperion <code>{{ current_short }}</code></h3>
+      {% if update.update_available %}<span class="pill warn">update available</span>
+      {% else if update.current_sha == "dev-unknown" %}<span class="pill muted">development build</span>
+      {% else if update.latest_sha.is_empty() %}<span class="pill muted">not checked</span>
+      {% else %}<span class="pill ok">up to date</span>{% endif %}
+    </div>
+    {% if update.update_available %}
+    <p class="text-soft small" style="margin:0.4rem 0 0">
+      Release <code>{{ latest_short }}</code> is out.
+      Install it now from <a href="/install">Nodes</a>, or let the switch below do it.
+    </p>
+    {% endif %}
+    <form method="post" action="/settings/config" style="margin-top:0.9rem">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="section" value="update">
+      <input type="hidden" name="_checkboxes" value="auto">
+      <label class="field-checkbox" style="margin:0">
+        <input type="checkbox" name="auto" value="true" {% if config.update_auto %}checked{% endif %}>
+        <span><strong>Install new releases automatically</strong></span>
+      </label>
+      <p class="text-soft small" style="margin:0.3rem 0 0 1.6rem">
+        Checked hourly{% if chrome.has_nodes %} on every node{% endif %} and installed in safe mode: if a
+        node does not come back healthy, its previous version is restored.
+        System packages are never upgraded automatically.
+      </p>
+      <div class="item-actions"><button class="btn primary" type="submit">Save</button></div>
+    </form>
+    <details class="howto">
+      <summary>How safe mode works</summary>
+      <p>
+        The running binaries are copied aside before the update and put back
+        if the node is not healthy afterwards. That restores <strong>binaries,
+        not data</strong> — database migrations only ever add, so an older
+        binary still starts against the newer schema.
+      </p>
+      <p>
+        An unattended <code>apt upgrade</code> has a much bigger blast radius
+        than a Hyperion update, so system packages are left to you: run them
+        from <a href="/install">Nodes</a> while you are watching.
+      </p>
+    </details>
+  </div>
+</fieldset>
+{% endblock %}

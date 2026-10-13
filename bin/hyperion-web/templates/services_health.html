@@ -75,14 +75,14 @@
 {% endif %}
 
 {% if let Some(m) = flash %}
-  <div class="flash success">
+  <div class="flash success" data-svc-flash>
     <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
     <div class="flash-body">{{ m }}</div>
   </div>
 {% endif %}
 
 {% if let Some(e) = flash_error %}
-  <div class="flash error">
+  <div class="flash error" data-svc-flash>
     <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
     <div class="flash-body">{{ e }}</div>
   </div>
@@ -119,6 +119,28 @@
   {% for r in view.not_installed %}{% call svc_row(r) %}{% endfor %}
 </details>
 {% endif %}
+
+{#- Mail delivery: this node's postfix — how it sends, what stands in its
+    way, and the fixes (Settings → Mail only configures the relay). Lazy,
+    `intersect once`: the diagnosis runs DNS lookups and port probes. Kept
+    OUT of the live-refresh region, which would re-run them every 15 s and
+    snap the folds shut. Always rendered: Settings and pre-split bookmarks
+    link to #mail-delivery. The fragment is the whole group, swapped into
+    #mail-delivery-body, so its Re-check can swap it again in place. -#}
+<div id="mail-delivery" style="margin-top:var(--group-gap)">
+  <div id="mail-delivery-body">
+    <div class="group">
+      <div class="ghead">Mail delivery · {{ current_label }}</div>
+      <div class="item"
+           hx-get="/services/mail-diagnostics?node={{ current_node }}"
+           hx-trigger="intersect once"
+           hx-target="#mail-delivery-body"
+           hx-swap="innerHTML">
+        <span class="text-soft small">Checking postfix, DNS and outbound ports…</span>
+      </div>
+    </div>
+  </div>
+</div>
 
 {% if is_super_admin %}
 {# Install progress — only while an install runs or just finished, so a
@@ -196,4 +218,20 @@
   Refreshes every 15 s.
   {% if is_super_admin %}All actions are audited.{% else %}Restart and install need the super-admin role.{% endif %}
 </p>
+<script>
+(function () {
+  'use strict';
+  // A Mail delivery action redirects to #mail-delivery, which scrolls past
+  // the flash printed at the top of the page: carry it to that group, where
+  // the operator is looking — above the group's body, which the lazy load
+  // and Re-check replace. Without JS it stays at the top.
+  if (location.hash !== '#mail-delivery') return;
+  var box = document.getElementById('mail-delivery');
+  var body = document.getElementById('mail-delivery-body');
+  var flashes = document.querySelectorAll('[data-svc-flash]');
+  if (!box || !body || !flashes.length) return;
+  flashes.forEach(function (f) { box.insertBefore(f, body); });
+  box.scrollIntoView({ block: 'start' });
+})();
+</script>
 {% endblock %}

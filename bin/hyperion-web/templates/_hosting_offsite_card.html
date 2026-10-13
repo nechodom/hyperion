@@ -29,10 +29,10 @@
   {% if !configured %}
     <p class="text-soft small" style="margin:0;line-height:1.55">
       This node has no <strong>FTP/FTPS/SFTP</strong> off-site target, so this
-      card has nothing to list — <a href="/settings#offsite-ftp">set one up</a>.
+      card has nothing to list — <a href="/settings/backups#offsite-ftp">set one up</a>.
       <br>
-      S3 targets are configured separately at
-      <a href="/settings/backups">Backup targets</a> and are
+      S3 targets are configured separately in
+      <a href="/settings/backups#offsite-targets">Settings → Backups → Off-site targets</a> and are
       <strong>not</strong> shown here: they are uploaded encrypted, and the key
       to read them back is deliberately kept off this server, so the panel
       cannot list or restore them. If S3 is your only copy, make sure you still
@@ -50,7 +50,7 @@
       <br>
       Backups taken before the target was configured are <strong>not</strong>
       sent retroactively. Use <em>Copy existing backups off-site</em> in
-      <a href="/settings#offsite-backfill">Settings → Backups &amp; trash</a> to send the ones
+      <a href="/settings/backups#offsite-backfill">Settings → Backups</a> to send the ones
       already on disk, or wait for this site's next scheduled backup.
     </p>
   {% else if rows.is_empty() %}

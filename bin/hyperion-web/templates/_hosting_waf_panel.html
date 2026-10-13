@@ -31,7 +31,7 @@
       </div>
       <p class="s-help">
         {% if !fail2ban_enabled %}
-          Automatic banning is switched off for this whole node (<a href="/settings#bruteforce">Settings → Bans &amp; blocking</a>). Refusals are still recorded.
+          Automatic banning is switched off for this whole node (<a href="/settings/bans#bruteforce-scanner">Settings → Brute-force &amp; GeoIP</a>). Refusals are still recorded.
         {% else if autoban_enabled %}
           An address refused {{ threshold }} times within {{ window_min }} min is banned at the firewall — on the whole node, SSH included.
           Only rules no honest visitor or crawler trips over and over count: {{ ban_rules }}. Everything else is refused but never leads to a ban —

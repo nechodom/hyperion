@@ -1,4 +1,5 @@
 pub mod api_docs;
+pub mod api_keys;
 pub mod api_v1;
 pub mod audit;
 pub mod avatar;
@@ -18,6 +19,7 @@ pub mod import_wizard;
 pub mod install;
 pub mod jobs;
 pub mod login;
+pub mod mail_health;
 pub mod me;
 pub mod migration;
 pub mod monitoring;

@@ -1928,7 +1928,7 @@ async fn review_checks(state: &SharedState, s: &Session, file: &SetupFile) -> Ve
             tone: "warn",
             pill: "skipped",
             detail: "the panel stays on its IP address with a self-signed certificate".into(),
-            href: Some("/settings#panel-domain"),
+            href: Some("/settings/panel#panel-domain"),
         }
     } else {
         match cert.as_ref().map(|c| c.stage.as_str()) {
@@ -1937,7 +1937,7 @@ async fn review_checks(state: &SharedState, s: &Session, file: &SetupFile) -> Ve
                 tone: "err",
                 pill: "no certificate",
                 detail: format!("https://{panel} · Let's Encrypt refused the certificate"),
-                href: Some("/settings#panel-domain"),
+                href: Some("/settings/panel#panel-domain"),
             },
             Some("issued") | None => Check {
                 label: "Panel address",
@@ -1979,7 +1979,7 @@ async fn review_checks(state: &SharedState, s: &Session, file: &SetupFile) -> Ve
             tone: "warn",
             pill: "skipped",
             detail: "no alerts or password-reset emails until a mail server is set".into(),
-            href: Some("/settings#mail"),
+            href: Some("/settings/mail"),
         }
     });
 
@@ -2003,7 +2003,7 @@ async fn review_checks(state: &SharedState, s: &Session, file: &SetupFile) -> Ve
             tone: "warn",
             pill: "skipped",
             detail: "only copies on this server".into(),
-            href: Some("/settings/backups"),
+            href: Some("/settings/backups#offsite-targets"),
         }
     });
 

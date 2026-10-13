@@ -928,7 +928,7 @@ if [[ -n "$ADMIN_PASS" ]]; then
   echo "    Logs    journalctl -u hyperion-agent -u hyperion-web · $INSTALL_LOG"
   echo
   echo "  The certificate is self-signed until you set a panel domain"
-  echo "  (Settings → Panel & updates → Panel domain)."
+  echo "  (Settings → Panel → Panel domain)."
   echo
   exit 0
 fi

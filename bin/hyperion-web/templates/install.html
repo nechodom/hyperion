@@ -152,7 +152,7 @@
           </form>
           <span id="rpc-status-{{ n.node_id }}" class="text-soft small">Sends a signed call to the agent on port 9443 and reports the answer.</span>
         </div>
-        {# Readiness for the hardening ladder in Settings → Cluster. Both
+        {# Readiness for the hardening ladder in Settings → Cluster → Channel hardening. Both
            are pinned on first sight and a CHANGED key is refused, so the
            "Clear pinned crypto" escape hatch lives right beside them. #}
         <ul class="node-trust">
@@ -172,7 +172,7 @@
           </li>
         </ul>
         <p class="text-soft small node-note">
-          Turn on a step of <a href="/settings#hardening">Settings → Cluster → channel hardening</a> only once every node shows it on file.
+          Turn on a step of <a href="/settings/cluster#hardening">Settings → Cluster → Channel hardening</a> only once every node shows it on file.
           Whether a node verifies <em>this master's</em> certificate is set on the node itself (<code>[enrollment] verify_tls</code> in <code>/etc/hyperion/agent.toml</code>).
         </p>
         {% if n.resp_pubkey.is_some() || n.tls_spki_pin.is_some() %}
@@ -219,7 +219,7 @@
           <input type="hidden" name="node_id" value="local">
           <input type="hidden" name="do_apt" value="on">
           <button type="submit" class="btn small primary">Install system updates</button>
-          <span class="text-soft small">apt upgrade on this server; never removes a package. Hyperion itself updates on its own schedule (Settings → Updates).</span>
+          <span class="text-soft small">apt upgrade on this server; never removes a package. Hyperion itself updates on its own schedule (<a href="/settings/panel#updates">Settings → Panel</a>).</span>
         </form>
         {% else %}
         <h4>Update</h4>

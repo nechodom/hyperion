@@ -1,0 +1,287 @@
+{% extends "settings_base.html" %}
+{% block section %}
+<p class="text-soft small" style="margin:0 0 1rem">
+  Bans in force and what the WAF refused are on <a href="/protection">Protection</a>;
+  ports and the default policy on <a href="/firewall">Firewall</a>.
+</p>
+
+<fieldset class="group"{{ chrome.ro() }}>
+  <div class="ghead">Brute-force{% if chrome.has_nodes %}<span class="scope-tag" title="Set here, copied to every node by the settings sync">All nodes</span>{% endif %}</div>
+  <div class="item" id="bruteforce-scanner">
+    {% if let Some(s) = scanner %}
+    <div class="row" style="align-items:center;gap:0.6rem;flex-wrap:wrap">
+      <h3 style="margin:0">Brute-force scanner</h3>
+      {% if s.view.cfg.enabled %}<span class="pill ok">scanning</span>
+      {% else %}<span class="pill warn">off</span>{% endif %}
+    </div>
+    <p class="text-soft small" style="margin:0.4rem 0 0">
+      An address that fails too many logins, or trips the WAF too often, within the window is dropped at the firewall.
+    </p>
+
+    {#- Two things the form itself cannot say. Neither is decoration: one
+        means the numbers were never chosen, the other that they are not the
+        numbers in use. -#}
+    {% if !s.view.in_toml %}
+    <div class="flash info" style="margin:0.9rem 0 0">
+      <div class="flash-body">
+        <code>agent.toml</code> has no <code>[fail2ban]</code> section, so the
+        scanner runs the built-in defaults shown here. Saving writes the section.
+      </div>
+    </div>
+    {% endif %}
+    {% if s.view.clamped %}
+    <div class="alert alert-warn" role="alert" style="margin:0.9rem 0 0">
+      <strong>The file and the running scanner disagree.</strong>
+      A value in <code>[fail2ban]</code> is below the floor the agent applies at
+      start-up, so the scanner is <em>not</em> using the number shown. Saving
+      writes values that stand on their own.
+    </div>
+    {% endif %}
+
+    <form method="post" action="/settings/config" autocomplete="off" style="margin-top:0.9rem">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="section" value="fail2ban">
+      <input type="hidden" name="_return_tab" value="bruteforce-scanner">
+      <input type="hidden" name="_checkboxes" value="enabled">
+      <label class="field-checkbox" style="margin:0">
+        <input type="checkbox" name="enabled" value="true" {% if s.view.cfg.enabled %}checked{% endif %}>
+        <span><strong>Scan for login floods and ban offenders</strong></span>
+      </label>
+      <p class="text-soft small" style="margin:0.3rem 0 1rem 1.6rem">
+        Off: nothing is scanned and care reports say <em>not measured</em> for
+        blocked attacks. Bans added by hand still work and still expire.
+      </p>
+
+      <div class="field">
+        <label for="f2b_window">Window <span class="hint">seconds · how far back failures count</span></label>
+        <input id="f2b_window" name="window_secs" type="number" min="1" max="86400"
+               value="{{ s.view.cfg.window_secs }}" style="max-width:12rem"
+               data-secs aria-describedby="f2b_window_human">
+        <span class="help" id="f2b_window_human">{{ s.window_h }}</span>
+      </div>
+
+      <div role="group" aria-labelledby="f2b_thresholds_label">
+        <p class="small" id="f2b_thresholds_label" style="margin:1.2rem 0 0.6rem;font-weight:600">Failures within the window before a ban</p>
+        <div class="field-row three">
+          <div class="field">
+            <label for="f2b_http">Website login <span class="hint">per site</span></label>
+            <input id="f2b_http" name="http_threshold" type="number" min="2" max="10000"
+                   value="{{ s.view.cfg.http_threshold }}">
+          </div>
+          <div class="field">
+            <label for="f2b_ssh">SSH <span class="hint">node-wide</span></label>
+            <input id="f2b_ssh" name="ssh_threshold" type="number" min="2" max="10000"
+                   value="{{ s.view.cfg.ssh_threshold }}">
+          </div>
+          <div class="field">
+            <label for="f2b_ftp">FTP <span class="hint">node-wide</span></label>
+            <input id="f2b_ftp" name="ftp_threshold" type="number" min="2" max="10000"
+                   value="{{ s.view.cfg.ftp_threshold }}">
+          </div>
+          <div class="field">
+            <label for="f2b_mail">Mail <span class="hint">node-wide</span></label>
+            <input id="f2b_mail" name="mail_threshold" type="number" min="2" max="10000"
+                   value="{{ s.view.cfg.mail_threshold }}">
+          </div>
+          <div class="field">
+            <label for="f2b_waf">WAF refusals <span class="hint">per site</span></label>
+            <input id="f2b_waf" name="waf_threshold" type="number" min="3" max="1000"
+                   value="{{ s.view.cfg.waf_threshold }}">
+          </div>
+        </div>
+      </div>
+
+      <div role="group" aria-labelledby="f2b_lengths_label">
+        <p class="small" id="f2b_lengths_label" style="margin:0.4rem 0 0.6rem;font-weight:600">How long a ban lasts</p>
+        <div class="field-row three">
+          <div class="field">
+            <label for="f2b_ttl">First offence <span class="hint">seconds</span></label>
+            <input id="f2b_ttl" name="ban_ttl_secs" type="number" min="60" max="31536000"
+                   value="{{ s.view.cfg.ban_ttl_secs }}"
+                   data-secs aria-describedby="f2b_ttl_human">
+            <span class="help" id="f2b_ttl_human">{{ s.ban_h }}</span>
+          </div>
+          <div class="field">
+            <label for="f2b_repeat_ttl">Repeat offender <span class="hint">seconds</span></label>
+            <input id="f2b_repeat_ttl" name="repeat_ttl_secs" type="number" min="60" max="31536000"
+                   value="{{ s.view.cfg.repeat_ttl_secs }}"
+                   data-secs aria-describedby="f2b_repeat_ttl_human">
+            <span class="help" id="f2b_repeat_ttl_human">{{ s.repeat_h }}</span>
+          </div>
+          <div class="field">
+            <label for="f2b_lookback">Counts as a repeat for <span class="hint">seconds</span></label>
+            <input id="f2b_lookback" name="repeat_lookback_secs" type="number" min="0" max="31536000"
+                   value="{{ s.view.cfg.repeat_lookback_secs }}"
+                   data-secs data-secs-zero="never escalates" aria-describedby="f2b_lookback_human">
+            <span class="help" id="f2b_lookback_human">{{ s.lookback_h }}</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="item-actions"><button type="submit" class="btn primary">Save</button></div>
+    </form>
+
+    <details class="howto">
+      <summary>What is counted</summary>
+      <p>
+        Failed logins are read from four sources: each site's own
+        <code>access.log</code> (POSTs to <code>wp-login.php</code> and
+        <code>xmlrpc.php</code>) and the node-wide <strong>ssh</strong>,
+        <strong>ftp</strong> and <strong>mail</strong> journals. WAF refusals
+        are counted per site on top of those.
+      </p>
+      <p>
+        <strong>Website login</strong> is counted per site, so the ban is
+        recorded against that site and appears in its care report. It is the
+        only source that can be switched off for one site: the
+        <em>Brute-force bans</em> tile on the site's Security card. The ssh,
+        ftp and mail journals cover the whole machine and belong to no single
+        customer, so they stay on for everyone.
+      </p>
+      <p>
+        <strong>WAF refusals</strong> are requests a site's WAF turned away for
+        a rule no honest visitor or crawler trips over and over: attack
+        patterns in the URL, vulnerability scanners, sensitive WordPress files,
+        repository and secret files. Download, XML-RPC, country and bot
+        refusals never count.
+      </p>
+    </details>
+    <details class="howto">
+      <summary>Who is never banned, and other limits</summary>
+      <p>
+        Only public, routable addresses are banned automatically. Private,
+        loopback, CGNAT and link-local addresses are skipped, because a
+        node-wide drop on those is an outage: webmail talking to dovecot, the
+        master↔node link, a NAT gateway in front of a whole office. You can
+        still block any address by hand from a site's Settings tab.
+      </p>
+      <p>
+        An address already banned within the look-back gets the
+        repeat-offender length instead of the first-offence one; a look-back
+        of <code>0</code> never escalates. A ban shorter than a minute is
+        refused, because the ban list reads a zero length as
+        <em>never expires</em>.
+      </p>
+      <p>
+        Panel logins are guarded separately: repeated failures are throttled,
+        then the address is firewalled for an hour. These numbers do not
+        govern that.
+      </p>
+    </details>
+    {% else %}
+    <div class="row" style="align-items:center;gap:0.6rem;flex-wrap:wrap">
+      <h3 style="margin:0">Brute-force scanner</h3>
+      <span class="pill muted">unknown</span>
+    </div>
+    <p class="text-soft small" style="margin:0.4rem 0 0">
+      The master's <code>/etc/hyperion/agent.toml</code> cannot be used: {{ scanner_error }}.
+      The current numbers are unknown, so there is no form to guess them with.
+      The file is shown on the master's
+      <a href="/install/node-settings?node_id=local#raw-toml">node settings</a>.
+    </p>
+    {% endif %}
+  </div>
+</fieldset>
+
+<fieldset class="group"{{ chrome.ro() }}>
+  <div class="ghead">GeoIP{% if chrome.has_nodes %}<span class="scope-tag" title="Used by the master only">Master</span>{% endif %}</div>
+  <div class="item" id="geoip">
+    <div class="row" style="align-items:center;gap:0.6rem;flex-wrap:wrap">
+      <h3 style="margin:0">GeoIP database</h3>
+      {% if geoip_installed %}<span class="pill ok">installed</span>
+      {% else %}<span class="pill warn">not installed</span>{% endif %}
+    </div>
+    <p class="text-soft small" style="margin:0.4rem 0 0">
+      {% if geoip_installed %}
+      Last refreshed {{ geoip_updated_at|datetime }} UTC. Used for country blocking and traffic by country.
+      {% else %}
+      Country blocking and traffic by country need it. Until then no country rule matches anybody.
+      {% endif %}
+    </p>
+    <form method="post" action="/settings/geoip-creds" autocomplete="off" style="margin-top:0.9rem">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <div class="field-row">
+        <div class="field">
+          <label for="mm_account">MaxMind account ID</label>
+          <input id="mm_account" name="account_id" type="text" autocomplete="off"
+                 value="{{ geoip_account_id }}" placeholder="123456" required>
+        </div>
+        <div class="field">
+          <label for="mm_key">Licence key
+            <span class="hint">{% if geoip_configured %}stored — type a new one to replace it{% else %}MaxMind → My account → Manage licence keys{% endif %}</span>
+          </label>
+          <input id="mm_key" name="license_key" type="password" autocomplete="new-password"
+                 placeholder="{% if geoip_configured %}••••••••••••{% else %}paste the key{% endif %}" required>
+        </div>
+      </div>
+      <div class="item-actions">
+        {% if geoip_configured %}
+        <button class="btn" type="submit" form="geoip-refresh">{% if geoip_installed %}Refresh now{% else %}Download now{% endif %}</button>
+        {% endif %}
+        <button class="btn primary" type="submit">Save and download</button>
+      </div>
+    </form>
+    <form id="geoip-refresh" method="post" action="/settings/geoip-refresh" hidden>
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    </form>
+    <details class="howto">
+      <summary>How it works</summary>
+      <p>
+        The database is MaxMind's free GeoLite2 Country. The credentials are
+        read from <code>/etc/GeoIP.conf</code>, the same file MaxMind's own
+        <code>geoipupdate</code> uses, so if you already run that tool there
+        is nothing to enter here. A key saved here is written to that file,
+        readable by root only, and never shown on this page again.
+      </p>
+      <p>
+        Saving downloads the database straight away, so a wrong key fails now
+        rather than unnoticed later. Hyperion does not refresh it on a
+        schedule: refresh it now and then. MaxMind publishes twice a week, so
+        refreshing more often downloads the same data again.
+      </p>
+      <p>
+        Until it is installed every visitor resolves to <code>ZZ</code> and no
+        country rule matches, so no site is cut off by a rule set before the
+        data existed.{% if chrome.has_nodes %} It is downloaded to the master only.{% endif %}
+      </p>
+    </details>
+  </div>
+</fieldset>
+
+<script>
+(function () {
+  'use strict';
+  // The live "= 1 h" next to each seconds field. Mirrors
+  // page_bans::human_secs, which renders the first value — change both
+  // together.
+  var UNITS = [['d', 86400], ['h', 3600], ['min', 60], ['s', 1]];
+  function human(n) {
+    if (!Number.isInteger(n) || n < 0) return '';
+    if (n === 0) return '= 0 s';
+    var i = 0;
+    while (n < UNITS[i][1]) i++;
+    var a = Math.floor(n / UNITS[i][1]);
+    var rest = n - a * UNITS[i][1];
+    var out = a + ' ' + UNITS[i][0];
+    if (i + 1 < UNITS.length) {
+      var b = Math.floor(rest / UNITS[i + 1][1]);
+      if (b > 0) {
+        out += ' ' + b + ' ' + UNITS[i + 1][0];
+        rest -= b * UNITS[i + 1][1];
+      }
+    }
+    return (rest === 0 ? '= ' : '≈ ') + out;
+  }
+  document.querySelectorAll('input[data-secs]').forEach(function (input) {
+    var out = document.getElementById(input.id + '_human');
+    if (!out) return;
+    var zero = input.getAttribute('data-secs-zero');
+    input.addEventListener('input', function () {
+      var raw = input.value.trim();
+      var n = raw === '' ? NaN : Number(raw);
+      out.textContent = (n === 0 && zero) ? zero : human(n);
+    });
+  });
+})();
+</script>
+{% endblock %}

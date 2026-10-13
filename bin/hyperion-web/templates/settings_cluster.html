@@ -1,0 +1,318 @@
+{% extends "settings_base.html" %}
+{% block header_actions %}<a class="btn" href="/install">Nodes</a>{% endblock %}
+{% block section %}
+{% if let Some(e) = config_error %}
+<div class="flash error">
+  <div class="flash-body">The agent's settings could not be read ({{ e }}). The values below are defaults, not what is set.</div>
+</div>
+{% endif %}
+
+<fieldset class="group"{{ chrome.ro() }}>
+  <div class="ghead">New sites{% if chrome.has_nodes %}<span class="scope-tag" title="Used by the master only">Master</span>{% endif %}</div>
+  <div class="item" id="placement">
+    <div class="row" style="align-items:center;gap:0.6rem;flex-wrap:wrap">
+      <h3 style="margin:0">Placement</h3>
+      {% if config.cluster.master_accepts_hostings %}<span class="pill muted">master takes new sites</span>
+      {% else %}<span class="pill muted">workers only</span>{% endif %}
+    </div>
+    <p class="text-soft small" style="margin:0.3rem 0 0.8rem">
+      Whether a new site may be created on the master, or only on a worker.
+    </p>
+    <form method="post" action="/settings/config" autocomplete="off">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="section" value="cluster">
+      <input type="hidden" name="_return_tab" value="placement">
+      <input type="hidden" name="_checkboxes" value="master_accepts_hostings">
+      <label class="field-checkbox" style="margin:0">
+        <input type="checkbox" name="master_accepts_hostings" value="true" {% if config.cluster.master_accepts_hostings %}checked{% endif %}>
+        <span><strong>Allow new sites on the master</strong></span>
+      </label>
+      <p class="text-soft small" style="margin:0.3rem 0 0 1.6rem">
+        Off makes the master a control plane only: the create wizard stops
+        offering it and <code>hctl</code> on the master refuses to create a site.
+        Sites already on the master stay put.
+      </p>
+      <div class="item-actions"><button type="submit" class="btn primary">Save</button></div>
+    </form>
+  </div>
+
+  <div class="item" id="test-nodes">
+    <div class="row" style="align-items:center;gap:0.6rem;flex-wrap:wrap">
+      <h3 style="margin:0">Test nodes</h3>
+      {% if test_nodes.is_empty() %}<span class="pill muted">none</span>
+      {% else %}<span class="pill info">{{ test_nodes.len() }} marked</span>{% endif %}
+    </div>
+    <p class="text-soft small" style="margin:0.3rem 0 0.8rem">
+      A site on a test node takes its domain from the
+      <a href="/settings/https#preview-address">preview address</a>, so a test
+      site can never take a real customer's domain.
+    </p>
+    {% if test_nodes.is_empty() %}
+    <p class="small" style="margin:0 0 0.8rem">
+      None — every node is treated as production. Mark one with
+      <em>Mark as test</em> on <a href="/install">Nodes</a>.
+    </p>
+    {% else %}
+    <ul class="small" style="margin:0 0 0.4rem;padding-left:1.2rem;line-height:1.7">
+      {% for t in test_nodes %}
+      <li>
+        <strong>{{ t.label }}</strong>
+        {% if t.is_master %}<span class="text-soft">· this server</span>
+        {% else if !t.known %}<span class="text-soft">· not an enrolled node</span>
+        {% else if t.label != t.node_id %}<span class="text-soft">· <code>{{ t.node_id }}</code></span>{% endif %}
+      </li>
+      {% endfor %}
+    </ul>
+    <p class="text-soft small" style="margin:0 0 0.8rem">
+      Change this on <a href="/install">Nodes</a>: open a node and use
+      <em>Mark as test</em> or <em>Unmark as test</em>.
+    </p>
+    {% endif %}
+    <form method="post" action="/settings/config" autocomplete="off">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="section" value="cluster">
+      <input type="hidden" name="_return_tab" value="test-nodes">
+      <input type="hidden" name="_checkboxes" value="test_wp_no_index">
+      <label class="field-checkbox" style="margin:0">
+        <input type="checkbox" name="test_wp_no_index" value="true" {% if config.cluster.test_wp_no_index %}checked{% endif %}>
+        <span><strong>Ask search engines to skip WordPress sites on test nodes</strong></span>
+      </label>
+      <p class="text-soft small" style="margin:0.3rem 0 0 1.6rem">
+        Sets <code>blog_public = 0</code> right after a fresh install on a test
+        node; it can be changed later in WP admin → Settings → Reading.
+      </p>
+      <div class="item-actions"><button type="submit" class="btn primary">Save</button></div>
+    </form>
+    <details class="howto">
+      <summary>What a test node changes</summary>
+      <ul>
+        <li>Creating a site there asks only for a short name; the preview address template builds the rest of the domain.</li>
+        <li>The create wizard refuses a production domain on a test node, and a domain that matches the template on a production node.</li>
+        <li>This server can be a test node too.</li>
+      </ul>
+    </details>
+  </div>
+</fieldset>
+
+<fieldset class="group"{{ chrome.ro() }}>
+  <div class="ghead">Master ↔ node channel{% if chrome.has_nodes %}<span class="scope-tag" title="Used by the master only">Master</span>{% endif %}</div>
+  <div class="item" id="hardening">
+    <div class="row" style="align-items:center;gap:0.6rem;flex-wrap:wrap">
+      <h3 style="margin:0">Channel hardening</h3>
+      <span class="pill {{ hardening.0 }}">{{ hardening.1 }}</span>
+    </div>
+    <p class="text-soft small" style="margin:0.3rem 0 0.8rem">
+      Every command the master sends is already signed. These steps protect the
+      rest — who can read the channel, and whether the master can trust the
+      answer. Take them in order.
+    </p>
+    {% if readiness.total == 0 %}
+    <p class="text-soft small" style="margin:0 0 0.8rem">
+      No worker nodes are enrolled. The steps only affect master↔worker
+      traffic, so on a single server they change nothing.
+    </p>
+    {% else if config.cluster.enforce_response_auth && !config.cluster.enforce_worker_cert_pinning %}
+    <div class="alert alert-warn" role="alert" style="margin:0 0 0.8rem">
+      <strong>Out of order — step 2 is on while step 1 is off.</strong>
+      Signed replies prove who answered, but an unpinned channel still lets an
+      on-path attacker read them, and replies carry reset passwords and
+      enrollment tokens. Turn step 1 on as well.
+    </div>
+    {% endif %}
+    <form method="post" action="/settings/config" autocomplete="off">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="section" value="cluster">
+      <input type="hidden" name="_return_tab" value="hardening">
+      <input type="hidden" name="_checkboxes" value="enforce_worker_cert_pinning,enforce_response_auth">
+      <ol start="0" style="margin:0;padding-left:1.4rem;display:grid;gap:1rem">
+        <li>
+          <div class="row" style="align-items:center;gap:0.5rem;flex-wrap:wrap">
+            <strong style="font-size:0.9rem">Each node verifies the master's certificate</strong>
+            <span class="pill muted">not a switch</span>
+          </div>
+          <p class="text-soft small" style="margin:0.2rem 0 0">
+            Set on each node, as <code>verify_tls</code> under <code>[enrollment]</code>
+            in its <code>/etc/hyperion/agent.toml</code>.
+          </p>
+        </li>
+        <li>
+          <div class="row" style="align-items:center;gap:0.5rem;flex-wrap:wrap">
+            <label class="field-checkbox" style="margin:0">
+              <input type="checkbox" name="enforce_worker_cert_pinning" value="true" {% if config.cluster.enforce_worker_cert_pinning %}checked{% endif %}>
+              <span><strong>Pin each worker's TLS certificate</strong></span>
+            </label>
+            {% if config.cluster.enforce_worker_cert_pinning %}<span class="pill ok">on</span>{% else %}<span class="pill muted">off</span>{% endif %}
+          </div>
+          {% if readiness.total > 0 %}
+          <p class="text-soft small" style="margin:0.2rem 0 0">
+            {{ readiness.pin_line() }}.{% if readiness.unpinned.is_empty() && !config.cluster.enforce_worker_cert_pinning %}
+            Ready once the master's log shows no pin-mismatch warnings.{% endif %}
+          </p>
+          {% endif %}
+          {% if !readiness.unpinned.is_empty() %}
+          {% if config.cluster.enforce_worker_cert_pinning %}
+          <div class="alert alert-err" role="alert" style="margin:0.5rem 0 0">
+            <strong>Refused right now:</strong>
+            {% for l in readiness.unpinned %}<code>{{ l }}</code>{% if !loop.last %}, {% endif %}{% endfor %}
+            — no TLS pin on file, and while this step is on such a node is cut
+            off. Its sites drop out of every list until its pin is on file again.
+          </div>
+          {% else %}
+          <div class="alert alert-warn" role="status" style="margin:0.5rem 0 0">
+            <strong>Do not turn this on yet:</strong>
+            {% for l in readiness.unpinned %}<code>{{ l }}</code>{% if !loop.last %}, {% endif %}{% endfor %}
+            {% if readiness.unpinned.len() == 1 %}has{% else %}have{% endif %} no TLS pin on file.
+            While this step is on, a node without one is refused and its sites
+            drop out of every list. Update {% if readiness.unpinned.len() == 1 %}it{% else %}them{% endif %}
+            from <a href="/install">Nodes</a> and wait one heartbeat.
+          </div>
+          {% endif %}
+          {% endif %}
+        </li>
+        <li>
+          <div class="row" style="align-items:center;gap:0.5rem;flex-wrap:wrap">
+            <label class="field-checkbox" style="margin:0">
+              <input type="checkbox" name="enforce_response_auth" value="true" {% if config.cluster.enforce_response_auth %}checked{% endif %}>
+              <span><strong>Require signed replies</strong></span>
+            </label>
+            {% if config.cluster.enforce_response_auth %}<span class="pill ok">on</span>{% else %}<span class="pill muted">off</span>{% endif %}
+          </div>
+          {% if readiness.total > 0 %}
+          <p class="text-soft small" style="margin:0.2rem 0 0">{{ readiness.key_line() }}.</p>
+          {% endif %}
+          {% if !readiness.unsigned.is_empty() %}
+          {% if config.cluster.enforce_response_auth %}
+          <div class="alert alert-err" role="alert" style="margin:0.5rem 0 0">
+            <strong>Refused right now:</strong>
+            {% for l in readiness.unsigned %}<code>{{ l }}</code>{% if !loop.last %}, {% endif %}{% endfor %}
+            — no response-signing key on file, and while this step is on such a
+            node is cut off. Its sites drop out of every list until it publishes
+            its key: update it from <a href="/install">Nodes</a>.
+          </div>
+          {% else %}
+          <div class="alert alert-warn" role="status" style="margin:0.5rem 0 0">
+            <strong>Do not turn this on yet:</strong>
+            {% for l in readiness.unsigned %}<code>{{ l }}</code>{% if !loop.last %}, {% endif %}{% endfor %}
+            can't sign replies. While this step is on, a node with no key on file
+            is refused and its sites drop out of every list. Update
+            {% if readiness.unsigned.len() == 1 %}it{% else %}them{% endif %} from
+            <a href="/install">Nodes</a> and wait one heartbeat.
+          </div>
+          {% endif %}
+          {% else if readiness.total > 0 && !config.cluster.enforce_response_auth %}
+          <div class="alert alert-warn" role="alert" style="margin:0.5rem 0 0">
+            <strong>Every node can sign its replies, but this step is off.</strong>
+            Until it is on, an unsigned reply from a node known to sign is logged
+            and accepted anyway — exactly the downgrade an on-path attacker would
+            use. Turn it on{% if !config.cluster.enforce_worker_cert_pinning %}, after step 1{% endif %}.
+          </div>
+          {% endif %}
+        </li>
+      </ol>
+      <div class="item-actions"><button type="submit" class="btn primary">Save</button></div>
+    </form>
+    <details class="howto">
+      <summary>What each step protects</summary>
+      <p>
+        Every command carries an Ed25519 request signature, so a worker never
+        acts on a forged instruction. The order of the steps matters: signed
+        replies on an unpinned channel can still be read on the wire. Nodes
+        show what they have on file on <a href="/install">Nodes</a> (open a
+        node → Connection). Both switches apply within about 30 s.
+      </p>
+      <p>
+        <strong>0 · The node verifies the master.</strong> It comes first
+        because this leg carries each node's own secret, in the clear, on every
+        heartbeat. The node installer measures it: a master serving a CA-issued
+        certificate gets <code>verify_tls = true</code>; a self-signed one gets
+        <code>false</code>, and the installer says so. With the key absent, the
+        agent verifies whenever the master's URL is <code>https://</code> with
+        a DNS hostname. A failed check is never retried unverified — the node
+        stops heartbeating and prints the fix, so a node that goes stale right
+        after you change the master's certificate is telling you something.
+        Check with <code>journalctl -u hyperion-agent -g 'TLS policy'</code> on
+        the node.
+      </p>
+      <p>
+        <strong>1 · Pinning.</strong> The master refuses any call to a worker
+        whose TLS certificate does not match the pin that worker reported on
+        its heartbeat, which shuts a man-in-the-middle out of the channel. A pin
+        is recorded once and never silently replaced: a worker reporting a
+        different one later is refused and logged. Turn this on only when every
+        node has a pin on file and the log shows no warn-only pin-mismatch
+        warnings. While it is on, a worker with no pin on file is refused too —
+        suppressing the pin report is exactly how an attacker would get around
+        it — so a worker mid-upgrade, or whose agent restarted within the last
+        heartbeat, is cut off until its pin is on file again. A stale pin
+        behaves the same way: after a key change you expected, use
+        <em>Clear pinned crypto</em> on that node.
+      </p>
+      <p>
+        <strong>2 · Signed replies.</strong> A node that has published a
+        response-signing key signs every reply. A mis-signed reply is discarded
+        whether or not this is on; the switch adds refusing an
+        <em>unsigned</em> reply from a node known to sign, which is what
+        stripping the signature on the wire looks like. Turn it on only after
+        step 1, once every node has a key on file — that, not the agent
+        version, is the readiness signal. While it is on, a node with no key on
+        file is refused too: an unverifiable node must not end up more trusted
+        than one that merely dropped its signature.
+      </p>
+    </details>
+  </div>
+</fieldset>
+
+<div class="group">
+  <div class="ghead">Node settings</div>
+  <div class="item" id="settings-sync">
+    <div class="row" style="align-items:center;gap:0.6rem;flex-wrap:wrap">
+      <h3 style="margin:0">Settings sync</h3>
+      <span class="pill {{ sync_summary.0 }}">{{ sync_summary.1 }}</span>
+    </div>
+    <p class="text-soft small" style="margin:0.3rem 0 0.8rem">
+      Every node takes the master's backup and off-site, retention, protection,
+      Core Web Vitals, alert wording, letter, Let's Encrypt, auto-update,
+      brute-force, trash and preview-address settings. The master always wins.
+    </p>
+    {% if sync_rows.is_empty() %}
+    <p class="text-soft small" style="margin:0">
+      No worker nodes are enrolled yet — add one on <a href="/install">Nodes</a>.
+    </p>
+    {% else %}
+    <div class="table-wrap inset">
+      <table>
+        <thead><tr><th>Node</th><th>Status</th><th>Checked</th></tr></thead>
+        <tbody>
+        {% for r in sync_rows %}
+          <tr>
+            <td>
+              <strong>{{ r.label }}</strong>
+              {% if r.label != r.node_id %}<span class="cell-sub"><code>{{ r.node_id }}</code></span>{% endif %}
+            </td>
+            <td>
+              <span class="pill {{ r.tone }}">{{ r.verdict }}</span>
+              {% if !r.detail.is_empty() %}<span class="cell-sub">{{ r.detail }}</span>{% endif %}
+            </td>
+            <td>{% if r.checked.is_empty() %}<span class="text-soft">—</span>{% else %}<span title="{{ r.checked_utc }}">{{ r.checked }}</span>{% endif %}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <form method="post" action="/settings/cluster/sync">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <div class="item-actions"><button type="submit" class="btn">Sync now</button></div>
+    </form>
+    {% endif %}
+    <details class="howto">
+      <summary>How the sync works</summary>
+      <ul>
+        <li>A pass runs every five minutes, and a few seconds after any save that changes a synced setting. Only nodes that are behind get the settings.</li>
+        <li>The S3 targets travel too, so a worker's scheduled backups reach them.</li>
+        <li>A synced node's own settings page shows these values read-only: an edit there would be undone by the next pass.</li>
+        <li>A node on an agent from before the sync keeps its own settings until it is updated from <a href="/install">Nodes</a>; until then it still gets the ones its sites run by at the moment you save.</li>
+      </ul>
+    </details>
+  </div>
+</div>
+{% endblock %}

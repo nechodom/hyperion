@@ -1,0 +1,200 @@
+{% extends "settings_base.html" %}
+{% block section %}
+{% if let Some(e) = config_error %}
+<div class="flash error">
+  <div class="flash-body">The agent's settings could not be read ({{ e }}). The values below are defaults, not what is set.</div>
+</div>
+{% endif %}
+
+<fieldset class="group"{{ chrome.ro() }}>
+  <div class="ghead">Site certificates{% if chrome.has_nodes %}<span class="scope-tag" title="Set here, copied to every node by the settings sync">All nodes</span>{% endif %}</div>
+  <div class="item" id="acme">
+    <div class="row" style="align-items:center;gap:0.6rem;flex-wrap:wrap">
+      <h3 style="margin:0">Let's Encrypt contact</h3>
+      {% if config.acme.contact_email.is_empty() %}<span class="pill warn">not set</span>{% endif %}
+    </div>
+    <p class="text-soft small" style="margin:0.3rem 0 0.8rem">
+      Site certificates are requested under this address; Let's Encrypt uses it
+      for notices about your account.
+    </p>
+    <form method="post" action="/settings/config" autocomplete="off">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="section" value="acme">
+      <input type="hidden" name="_return_tab" value="acme">
+      <div class="field">
+        <label for="acme_email">Contact e-mail <span class="hint">a contact set on a site's hosting page overrides it</span></label>
+        <input id="acme_email" name="contact_email" type="email" required
+               autocomplete="off" spellcheck="false"
+               value="{{ config.acme.contact_email }}"
+               placeholder="admin@example.com">
+      </div>
+      <div class="item-actions"><button type="submit" class="btn primary">Save</button></div>
+    </form>
+    <details class="howto">
+      <summary>How sites get certificates</summary>
+      <ul>
+        <li>A new site starts with a self-signed certificate — enough for nginx to come up.</li>
+        <li>Once its domain resolves to the server, issue a Let's Encrypt certificate from the site's SSL tab.
+          It is validated over <strong>HTTP-01</strong>: a file under
+          <code>{{ config.acme.challenge_dir }}</code>{% if chrome.has_nodes %} (this server's path; every node has its own){% endif %}.</li>
+        <li>Wildcards — the <a href="#preview-wildcard">preview certificates</a>, or a per-site wildcard
+          from the SSL tab — are validated over <strong>DNS-01</strong>: you publish a TXT record by hand.</li>
+        <li>Certificates renew by themselves 30 days before they expire. A failed renewal raises an
+          <a href="/settings/alerts#alert-recipients">alert</a>.</li>
+        <li>Requests go to Let's Encrypt production; staging is only used when you ask for it on a single issuance.</li>
+        <li>The panel's own certificate is set up under <a href="/settings/panel#panel-domain">Panel domain</a>.</li>
+      </ul>
+    </details>
+  </div>
+</fieldset>
+
+<fieldset class="group"{{ chrome.ro() }}>
+  <div class="ghead">Previews{% if chrome.has_nodes %}<span class="scope-tag" title="Set here, copied to every node by the settings sync">All nodes</span>{% endif %}</div>
+  <div class="item" id="preview-address">
+    <div class="row" style="align-items:center;gap:0.6rem;flex-wrap:wrap">
+      <h3 style="margin:0">Preview address</h3>
+      {% if config.cluster.test_domain_template.is_empty() %}<span class="pill muted">off</span>
+      {% else if preview_base.is_some() %}<span class="pill ok">on</span>
+      {% else %}<span class="pill warn">no usable base</span>{% endif %}
+    </div>
+    {% if let Some(base) = preview_base %}
+    <p class="text-soft small" style="margin:0.3rem 0 0.8rem">
+      Every site on this server, production included, also answers under
+      <code>{{ base }}</code> (<code>mysite.com</code> at
+      <code>{{ preview_example }}</code>) once its
+      <a href="#preview-wildcard">preview certificate</a> is issued. A Preview
+      link then appears on each site's page.
+    </p>
+    {% else if config.cluster.test_domain_template.is_empty() %}
+    <p class="text-soft small" style="margin:0.3rem 0 0.8rem">
+      Previews are off. Set a template to give every site an address with
+      valid HTTPS that works before its DNS points here.
+    </p>
+    {% else %}
+    <p class="text-soft small" style="margin:0.3rem 0 0.8rem">
+      <code>{{ config.cluster.test_domain_template }}</code> leaves no parent
+      domain to issue a wildcard for, so no site gets a preview. Put at least
+      two labels after <code>{name}</code>, e.g. <code>{name}.preview.example.com</code>.
+    </p>
+    {% endif %}
+    <form method="post" action="/settings/config" autocomplete="off">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="section" value="cluster">
+      <input type="hidden" name="_return_tab" value="preview-address">
+      <div class="field">
+        <label for="test_domain_template">Template
+          <span class="hint"><code>{name}</code> is the site's first label, <code>{node}</code> the node's hostname; empty turns previews off</span></label>
+        <input id="test_domain_template" name="test_domain_template" type="text"
+               autocomplete="off" autocapitalize="none" spellcheck="false"
+               value="{{ config.cluster.test_domain_template }}"
+               placeholder="{% if config.hostname.is_empty() %}{name}.preview.example.com{% else %}{name}.{{ config.hostname }}{% endif %}">
+      </div>
+      {% if chrome.has_nodes %}
+      <p class="text-soft small" style="margin:0">
+        On a test node the template also builds the site's whole domain. Nodes
+        are marked as test on <a href="/install">Nodes</a> — see
+        <a href="/settings/cluster#test-nodes">Test nodes</a>.
+      </p>
+      {% endif %}
+      <div class="item-actions"><button type="submit" class="btn primary">Save</button></div>
+    </form>
+    <details class="howto">
+      <summary>Example and DNS</summary>
+      <p>
+        With <code>{name}.{node}.staging.example.com</code>, a site
+        <code>blog.com</code> on node <code>lab-01</code> is previewed at
+        <code>blog.lab-01.staging.example.com</code>.{% if chrome.has_nodes %}
+        On a test node, a site created as <code>blog</code> gets that address
+        as its real domain.{% endif %}
+      </p>
+      <p>
+        The names have to resolve: add one wildcard DNS record per node — here
+        <code>*.lab-01.staging.example.com</code> pointing at lab-01's IP
+        address. Then issue that node's <a href="#preview-wildcard">preview certificate</a>.
+      </p>
+      {% if chrome.has_nodes %}
+      <p>
+        With more than one node, keep <code>{node}</code> in the template. Each
+        node then gets a base of its own; a single wildcard record can only
+        point at one server.
+      </p>
+      {% endif %}
+      <p>
+        <code>{node_id}</code> puts in the node's long ID instead of its
+        hostname. The result is lower-cased.
+      </p>
+    </details>
+  </div>
+
+  <div class="item" id="preview-wildcard">
+    <div class="row" style="align-items:center;gap:0.6rem;flex-wrap:wrap">
+      <h3 style="margin:0">Preview certificates</h3>
+      {% if let Some(s) = wildcard_summary %}<span class="pill {{ s.0 }}">{{ s.1 }}</span>{% endif %}
+    </div>
+    <p class="text-soft small" style="margin:0.3rem 0 0.8rem">
+      One <code>*.&lt;base&gt;</code> certificate per node covers every preview
+      address on it: instant HTTPS, and no per-site Let's Encrypt requests.
+    </p>
+    {% if wildcard_rows.is_empty() %}
+    <p class="text-soft small" style="margin:0">
+      {% if config.cluster.test_domain_template.is_empty() %}
+      Set a <a href="#preview-address">preview address</a> first — the
+      certificates are issued for the base it gives each node.
+      {% else %}
+      The <a href="#preview-address">preview address</a> gives no node a base
+      to issue a wildcard for.
+      {% endif %}
+    </p>
+    {% else %}
+    {% if let Some(b) = shared_base %}
+    <div class="alert alert-warn" role="status" style="margin:0 0 0.8rem">
+      <strong>Several nodes share <code>{{ b }}</code>.</strong>
+      A wildcard DNS record points at one server, so only one of them can serve
+      its previews. Put <code>{node}</code> in the <a href="#preview-address">preview address</a>.
+    </div>
+    {% endif %}
+    <div class="table-wrap inset">
+      <table>
+        <thead><tr><th>Node</th><th>Wildcard</th><th>Status</th><th class="right"><span class="sr-only">Action</span></th></tr></thead>
+        <tbody>
+        {% for n in wildcard_rows %}
+          <tr>
+            <td>
+              <strong>{{ n.label }}</strong>
+              <span class="cell-sub">{% if n.is_master %}this server{% else %}<code>{{ n.node_id }}</code>{% endif %}</span>
+            </td>
+            <td><code style="word-break:break-all">{{ n.wildcard() }}</code></td>
+            <td>
+              <span class="pill {{ n.tone() }}">{{ n.verdict() }}</span>
+              {% if !n.note().is_empty() %}<span class="cell-sub">{{ n.note() }}</span>{% endif %}
+            </td>
+            <td class="right">
+              <form method="post" action="/settings/node-wildcard/begin" style="display:inline">
+                <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+                <input type="hidden" name="node_id" value="{{ n.node_id }}">
+                <button class="btn small{% if !n.issued() %} primary{% endif %}" type="submit" name="provider" value="manual"
+                        title="Shows the TXT records to publish, then validates them">{% if n.issued() %}Renew{% else %}Issue{% endif %}</button>
+              </form>
+            </td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
+    <details class="howto">
+      <summary>Before you issue</summary>
+      <ul>
+        <li>Add a DNS record <code>*.&lt;base&gt;</code> pointing at the node's IP address. On Cloudflare,
+          leave it unproxied (grey cloud): the universal certificate does not cover two-level subdomains.</li>
+        <li>Issuing shows the TXT records to publish at your DNS provider, then validates them over DNS-01.
+          Keep that page open until the certificate is issued.</li>
+        <li>This server holds no DNS credentials, so a wildcard cannot renew itself: renew it here
+          roughly every 60 days. The status column says when each one expires; reload after a
+          validation and the row turns green.</li>
+        <li>Every certificate on every node is listed on <a href="/certs">Certificates</a>.</li>
+      </ul>
+    </details>
+  </div>
+</fieldset>
+{% endblock %}

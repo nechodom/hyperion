@@ -1,0 +1,277 @@
+{#- The Mail delivery group on Service health: one node's postfix, how it
+    sends and what stands in its way. The WHOLE group, swapped into
+    #mail-delivery-body — by the lazy load and again by Re-check — so every
+    row is a direct child of the `.group`. One row per check — dot, name, one
+    line — with the fix under it only when there is one to make; a check that
+    could not run has no colour, because "could not tell" is not a finding.
+    Confirm attributes go on the <form>, never the <button>. Always a 200:
+    htmx does not swap an error status. -#}
+{% macro recheck(label) %}
+<button type="button" class="btn ghost" hx-get="/services/mail-diagnostics?node={{ node }}"
+        hx-target="#mail-delivery-body" hx-swap="innerHTML" hx-disabled-elt="this"
+        hx-indicator="#mail-recheck-busy"
+        title="Run every check again. A DNS change can take a few minutes to show.">{{ label }}</button>
+<span id="mail-recheck-busy" class="htmx-indicator text-soft small">Checking…</span>
+{% endmacro %}
+<div class="group">
+<div class="ghead">Mail delivery · {{ group_label }}</div>
+{% if let Some(e) = error %}
+<div class="item">
+  <p class="text-soft small" style="margin:0 0 0.6rem">
+    Could not read the mail server on {{ node_label }}: {{ e }}.
+  </p>
+  <div class="row">{% call recheck("Try again") %}</div>
+</div>
+{% else %}
+<div class="chk-row{% if v.postfix_tone() == "err" %} is-err{% endif %}">
+  <div class="chk-head">
+    <span class="chk-dot {{ v.postfix_tone() }}"></span>
+    <h3 class="chk-name">Postfix</h3>
+    <span class="chk-sum">{{ v.postfix_summary() }}</span>
+  </div>
+  {% if !v.installed() %}
+  <div class="chk-body">
+    <p class="chk-note">
+      Every site's <code>mail()</code> goes through <code>/usr/sbin/sendmail</code> into
+      postfix. Install postfix from its row on this page (under “Not installed on
+      this node”); the agent configures it when it next starts.
+    </p>
+  </div>
+  {% else if !v.d.sendmail_executable || v.d.mode == "default" || !v.d.service_enabled || v.d.marker_present %}
+  <div class="chk-body">
+    {% if !v.d.sendmail_executable %}
+    <p class="chk-note tone-err"><code>/usr/sbin/sendmail</code> is missing or not executable, so every site's <code>mail()</code> fails.</p>
+    {% endif %}
+    {% if v.d.mode == "default" %}
+    <p class="chk-note tone-warn">Hyperion has not configured postfix yet. <strong>Reconfigure postfix</strong> applies its setup: smart host when the node's relay is on, direct delivery when it is off.</p>
+    {% endif %}
+    {% if !v.d.service_enabled %}
+    <p class="chk-note">Postfix will not start after a reboot: <code>systemctl enable postfix</code>.</p>
+    {% endif %}
+    {% if v.d.marker_present %}
+    <details class="chk-fold">
+      <summary>Managed configuration (hyperion-relay.marker)</summary>
+      <pre class="chk-excerpt">{{ v.d.marker_body }}</pre>
+    </details>
+    {% endif %}
+  </div>
+  {% endif %}
+</div>
+
+{% if v.installed() %}
+<div class="chk-row">
+  <div class="chk-head">
+    <span class="chk-dot {{ v.helo_tone() }}"></span>
+    <h3 class="chk-name">Hostname (HELO)</h3>
+    <span class="chk-sum">{{ v.helo_summary() }}</span>
+  </div>
+  {% if v.helo_tone() == "warn" %}
+  <div class="chk-body">
+    <p class="chk-note">
+      Most receivers refuse a HELO without a dotted name. Set one with
+      <code>hostnamectl set-hostname &lt;name&gt;.&lt;domain&gt;</code>, then
+      <strong>Reconfigure postfix</strong>.
+    </p>
+  </div>
+  {% endif %}
+</div>
+
+<div class="chk-row">
+  <div class="chk-head">
+    <span class="chk-dot {{ v.ptr_tone() }}"></span>
+    <h3 class="chk-name">Reverse DNS (PTR)</h3>
+    <span class="chk-sum">{{ v.ptr_summary() }}</span>
+  </div>
+  {% if v.d.ptr_status != "ok" %}
+  <div class="chk-body">
+    {% if v.d.ptr_status == "hostname-not-fqdn" %}
+    {% if !v.d.ptr_name.is_empty() %}
+    <p class="chk-note">
+      The PTR record is fine; the hostname is the problem — <code>{{ v.d.myhostname }}</code>
+      is a bare word. Run <code>hostnamectl set-hostname {{ v.d.ptr_name }}</code>, then
+      <strong>Reconfigure postfix</strong>. Do not change the PTR.
+    </p>
+    {% else %}
+    <p class="chk-note">
+      Set a fully qualified hostname first
+      (<code>hostnamectl set-hostname &lt;name&gt;.&lt;domain&gt;</code>), then point the
+      PTR for <code>{{ v.d.public_ipv4 }}</code> at it.
+    </p>
+    {% endif %}
+    {% else if v.d.ptr_status == "mismatch" %}
+    <p class="chk-note">
+      Receivers compare the HELO name with this record. Set the PTR for
+      <code>{{ v.d.public_ipv4 }}</code> to <code>{{ v.d.myhostname }}</code> where the
+      address is managed (at Hetzner: Server → Networking → reverse DNS).
+      Hyperion cannot change it.
+    </p>
+    {% else if v.d.ptr_status == "missing" %}
+    <p class="chk-note tone-warn">
+      The most common reason direct delivery is refused outright, before SPF or
+      DKIM are even looked at. Point the PTR for <code>{{ v.d.public_ipv4 }}</code> at
+      <code>{{ v.d.myhostname }}</code> where the address is managed.
+    </p>
+    {% else %}
+    <p class="chk-note">
+      Not the same as “no record”: the node's public address or the lookup was
+      not available. Check by hand with <code>dig +short -x &lt;ip&gt;</code> before
+      changing anything.
+    </p>
+    {% endif %}
+  </div>
+  {% endif %}
+</div>
+
+<div class="chk-row{% if v.sender_tone() == "err" %} is-err{% endif %}">
+  <div class="chk-head">
+    <span class="chk-dot {{ v.sender_tone() }}"></span>
+    <h3 class="chk-name">Sender identity</h3>
+    <span class="chk-sum">{{ v.sender_summary() }}</span>
+  </div>
+  {% if !v.d.sender_auth_detail.is_empty() || v.d.sender_auth_status == "foreign-reject" || v.d.sender_auth_status == "no-spf" %}
+  <div class="chk-body">
+    {% if v.d.sender_auth_status == "foreign-reject" %}
+    <div class="chk-callout err">
+      <p>{{ v.d.sender_auth_detail }}</p>
+      <p>Receivers accept this mail and then drop it: no bounce, no queue entry,
+        nothing in spam. Change the sender address on
+        <a href="/settings/mail?node={{ node }}#smtp-relay">Settings → Mail</a> to a
+        domain you control.</p>
+    </div>
+    {% else if v.d.sender_auth_status == "no-spf" %}
+    <p class="chk-note">{{ v.d.sender_auth_detail }}</p>
+    {% if !v.d.sender_spf_suggested.is_empty() %}
+    <p class="chk-note">Publish this TXT record on <code>{{ v.d.sender_domain }}</code>:</p>
+    <pre class="chk-excerpt">{{ v.d.sender_spf_suggested }}</pre>
+    {% endif %}
+    {% else %}
+    <p class="chk-note">{{ v.d.sender_auth_detail }}</p>
+    {% endif %}
+  </div>
+  {% endif %}
+</div>
+
+<div class="chk-row{% if v.ports_tone() == "err" %} is-err{% endif %}">
+  <div class="chk-head">
+    <span class="chk-dot {{ v.ports_tone() }}"></span>
+    <h3 class="chk-name">Outbound ports</h3>
+    <span class="chk-sum">{{ v.ports_summary() }}</span>
+  </div>
+  {% if !v.d.outbound_smtp_probes.is_empty() %}
+  <div class="chk-body">
+    {% if v.port25_blocked() && v.d.mode != "smart-host" %}
+    <div class="chk-callout err">
+      <p><strong>Port 25 is blocked, so this node cannot deliver directly</strong> —
+        receiving servers accept mail on port 25 only.</p>
+      <ul class="small" style="margin:0;padding-left:1.2rem;line-height:1.55">
+        {% for port in v.open_alternatives() %}
+        <li>Port {{ port }} is open: turn on a relay that accepts submission on it in
+          <a href="/settings/mail?node={{ node }}#smtp-relay">Settings → Mail</a>, and postfix
+          sends through it from the moment you save.</li>
+        {% endfor %}
+        <li>Or ask the provider to unblock outbound TCP 25; most do after a check,
+          for legitimate mail.</li>
+      </ul>
+    </div>
+    {% endif %}
+    <details class="chk-fold">
+      <summary>Each port</summary>
+      <ul class="chk-list">
+        {% for p in v.d.outbound_smtp_probes %}
+        <li>
+          <span class="chk-dot {% if p.reachable %}ok{% else %}err{% endif %}"></span>
+          <strong>{{ p.port }} · {% if p.reachable %}open{% else %}blocked{% endif %}</strong>
+          <span class="chk-detail">{{ p.purpose }}{% if p.reachable %} · {{ p.latency_ms }} ms{% else if !p.error.is_empty() %} — {{ p.error }}{% endif %}</span>
+        </li>
+        {% endfor %}
+      </ul>
+    </details>
+  </div>
+  {% endif %}
+</div>
+
+<div class="chk-row">
+  <div class="chk-head">
+    <span class="chk-dot {{ v.queue_tone() }}"></span>
+    <h3 class="chk-name">Queue</h3>
+    <span class="chk-sum">{{ v.queue_summary() }}</span>
+  </div>
+  {% if v.d.mailq_total > 0 %}
+  <div class="chk-body">
+    <p class="chk-note">
+      Most often outbound port 25 is blocked (see Outbound ports). Otherwise: a PTR
+      mismatch, a recipient refusing on SPF, or a recipient's server timing out.
+      The mail log says which.
+    </p>
+    <details class="chk-fold" open>
+      <summary>Queue listing (postqueue -p)</summary>
+      <pre class="chk-excerpt">{{ v.d.mailq_detail }}</pre>
+    </details>
+    <div class="chk-fixes">
+      <form method="post" action="/services/mail/queue-flush">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <input type="hidden" name="target_node" value="{{ node }}">
+        <button class="btn small" type="submit" title="postqueue -f — retry every deferred message now; use it after fixing the cause">Retry now</button>
+      </form>
+      <form method="post" action="/services/mail/queue-clear"
+            data-confirm-title="Discard {{ v.d.mailq_total }} queued message(s)?"
+            data-confirm-body="postsuper -d ALL removes every message from the postfix queue on {{ node_label }}. Use it only when they cannot be delivered (wrong recipient, dead domain). This cannot be undone."
+            data-confirm-confirm-label="Discard all"
+            data-confirm-variant="danger">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <input type="hidden" name="target_node" value="{{ node }}">
+        <button class="btn small ghost" type="submit">Discard queue</button>
+      </form>
+    </div>
+  </div>
+  {% endif %}
+</div>
+{% endif %}
+
+<div class="item">
+  {% if v.installed() %}
+  {% if !v.d.recent_log_tail.is_empty() %}
+  <details class="chk-fold"{% if v.d.mailq_total > 0 %} open{% endif %} style="margin:0 0 1rem">
+    <summary>Mail log — last {{ v.d.recent_log_tail.len() }} lines (/var/log/mail.log)</summary>
+    <pre class="chk-excerpt">{% for line in v.d.recent_log_tail %}{{ line }}
+{% endfor %}</pre>
+  </details>
+  {% endif %}
+  <form method="post" action="/services/mail/test" style="display:flex;gap:0.5rem;align-items:flex-end;flex-wrap:wrap;margin:0">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    <input type="hidden" name="target_node" value="{{ node }}">
+    <div class="field" style="margin:0;flex:1;min-width:14rem">
+      <label for="mta_test_to">Test via local sendmail <span class="hint">the path sites' mail() takes</span></label>
+      <input id="mta_test_to" name="to" type="email" required placeholder="you@example.cz" value="{{ test_to }}">
+    </div>
+    <button class="btn" type="submit">Send test</button>
+  </form>
+  {% endif %}
+  <div class="item-actions" style="align-items:center">
+    {% call recheck("Re-check") %}
+    {% if v.installed() %}
+    <form method="post" action="/services/mail/reconfigure" style="margin:0">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="target_node" value="{{ node }}">
+      <button class="btn" type="submit">Reconfigure postfix</button>
+    </form>
+    {% endif %}
+  </div>
+  {% if v.installed() %}
+  <details class="howto">
+    <summary>What these do</summary>
+    <p><strong>Re-check</strong> runs every check again; a DNS change can take a few
+      minutes to show.</p>
+    <p><strong>Reconfigure postfix</strong> re-applies what the agent applies when it
+      starts — smart host when the node's relay is on, direct delivery when it is
+      off — without restarting anything. Use it after editing agent.toml by hand.</p>
+    <p><strong>Test via local sendmail</strong> hands one message to
+      <code>/usr/sbin/sendmail</code>, exactly as a site's <code>mail()</code> does.
+      Success means postfix queued it; the delivery shows in the mail log a few
+      seconds later. The test on <a href="/settings/mail?node={{ node }}#mail-test">Settings → Mail</a>
+      talks to the relay directly and skips postfix.</p>
+  </details>
+  {% endif %}
+</div>
+{% endif %}
+</div>

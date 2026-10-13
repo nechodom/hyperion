@@ -547,7 +547,7 @@ pub struct HostingService<A: AdapterPort + 'static> {
     /// privkey.pem.
     pub cert_issue_locks: Arc<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
     /// Live state of the panel-vhost ACME issuance — drives the
-    /// progress card on /settings#panel-domain. None ⇒ no panel hostname
+    /// progress card on /settings/panel#panel-domain. None ⇒ no panel hostname
     /// configured (or agent just started and hasn't checked yet).
     /// Updated by `panel_provision` + its background ACME task.
     pub panel_progress: Arc<tokio::sync::RwLock<Option<PanelProgress>>>,
@@ -2110,7 +2110,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         .await
         .map_err(|_| RpcError::Validation {
             message: "the GeoIP database is not installed — download it in \
-                          Settings -> Bans & blocking -> GeoIP database, then reload this tab."
+                          Settings -> Brute-force & GeoIP -> GeoIP database, then reload this tab."
                 .into(),
         })?;
 
@@ -6766,14 +6766,15 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 let (result, reason, letter) = match sendable {
                     Ok((r, exp, to)) => {
                         let template = self.expiry_warning_template();
-                        let letter = letter_origin(&template);
+                        // The CUSTOMER's last notice before suspension — it
+                        // follows the site's language, not the cluster's.
+                        let cat = self.letter_catalog_for(&r.id).await;
+                        let letter = letter_origin_with(&template, &cat, EXPIRY_FRAME_IDS);
                         let subject_template =
                             read_notifications_section(self.agent_config_path.as_deref())
                                 .expiry_warning_subject_template;
                         let (subject, body) = expiry_warning_mail_with(
-                            // The CUSTOMER's last notice before suspension —
-                            // it follows the site's language, not the cluster's.
-                            &self.letter_catalog_for(&r.id).await,
+                            &cat,
                             &r.domain,
                             exp,
                             r.grace_days,
@@ -10824,7 +10825,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             "lighthouse" => {
                 if !perf::lighthouse_available().await {
                     return Err(RpcError::Validation {
-                        message: "Lighthouse is not installed on the node that owns this site.                                   Install it there, or switch the Core Web Vitals source to                                   Google PageSpeed Insights in Settings → Customer letters → Core Web Vitals."
+                        message: "Lighthouse is not installed on the node that owns this site. \
+                                  Install it there, or switch the Core Web Vitals source to \
+                                  Google PageSpeed Insights in Settings → Customer letters → Core Web Vitals."
                             .into(),
                     });
                 }
@@ -10838,7 +10841,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             }
             _ => {
                 return Err(RpcError::Validation {
-                    message: "no Core Web Vitals source is configured — set one in                               Settings → Customer letters → Core Web Vitals."
+                    message: "no Core Web Vitals source is configured — set one in \
+                               Settings → Customer letters → Core Web Vitals."
                         .into(),
                 })
             }
@@ -12471,8 +12475,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 // to drop anything until the file says what it means.
                 sites.clear();
                 out.note = "No local copy was deleted: [backup] keep_local_latest in this node's \
-                            agent.toml is not a whole number — fix it (Settings → Backups & trash \
-                            → Local backup copies) and run this again."
+                            agent.toml is not a whole number — fix it (Settings → Backups \
+                            → Local copies) and run this again."
                     .into();
             }
             let targets: Vec<&hyperion_types::S3BackupTarget> = s3_targets.iter().collect();
@@ -20302,8 +20306,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let template = self.care_report_template();
         let subject_template = read_notifications_section(self.agent_config_path.as_deref())
             .care_report_subject_template;
+        let cat = self.letter_catalog_for(&detail.id).await;
+        let letter = letter_origin_with(&template, &cat, CARE_FRAME_IDS);
         let (subject, body) = care_report_render_full_omitting(
-            &self.letter_catalog_for(&detail.id).await,
+            &cat,
             &report,
             &detail.domain,
             &template,
@@ -20319,7 +20325,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             cadence: cadence.as_str().to_string(),
             entirely_unmeasured: report.is_entirely_unmeasured_for(omit),
         };
-        Ok((detail, mail, letter_origin(&template)))
+        Ok((detail, mail, letter))
     }
 
     /// Periodic sweep — one care report per entitled hosting per cadence.
@@ -20404,7 +20410,6 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let body_template = self.care_report_template();
         let subject_template = read_notifications_section(self.agent_config_path.as_deref())
             .care_report_subject_template;
-        let letter = letter_origin(&body_template);
         let mut sent = 0i64;
         for hosting_id in order {
             let Some((cadence, started_at, omits)) = wanted.get(hosting_id.as_str()) else {
@@ -20497,8 +20502,12 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 );
                 continue;
             }
+            // The catalogue is the SITE's (its language), so whether the
+            // operator's wording applies is decided per site too.
+            let cat = self.letter_catalog_for(&detail.id).await;
+            let letter = letter_origin_with(&body_template, &cat, CARE_FRAME_IDS);
             let (subject, body) = care_report_render_full_omitting(
-                &self.letter_catalog_for(&detail.id).await,
+                &cat,
                 &report,
                 &detail.domain,
                 &body_template,
@@ -26980,26 +26989,38 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         hostname: &str,
         version: &str,
     ) -> Result<hyperion_types::AgentConfigView, RpcError> {
-        let email_view = match &self.email_config {
-            Some(cfg) => hyperion_types::EmailConfigView {
-                enabled: true,
-                smtp_host: cfg.smtp_host.clone(),
-                smtp_port: cfg.smtp_port,
-                smtp_user: cfg.smtp_user.clone(),
-                smtp_password_set: !cfg.smtp_password.is_empty(),
-                from_address: cfg.from_address.clone(),
-                from_name: cfg.from_name.clone(),
-                security: cfg.security.clone(),
-                default_to: self.email_default_to.clone().unwrap_or_default(),
+        // `[email]` and `[slack]` come from agent.toml when it can be read —
+        // see `email_view_from_toml` — and from the boot copy otherwise.
+        let toml_path = self.agent_config_path.as_deref();
+        let email_view = match toml_path.and_then(read_email_section) {
+            Some(e) => email_view_from_toml(e),
+            None => match &self.email_config {
+                Some(cfg) => hyperion_types::EmailConfigView {
+                    enabled: true,
+                    smtp_host: cfg.smtp_host.clone(),
+                    smtp_port: cfg.smtp_port,
+                    smtp_user: cfg.smtp_user.clone(),
+                    smtp_password_set: !cfg.smtp_password.is_empty(),
+                    from_address: cfg.from_address.clone(),
+                    from_name: cfg.from_name.clone(),
+                    security: cfg.security.clone(),
+                    default_to: self.email_default_to.clone().unwrap_or_default(),
+                },
+                None => hyperion_types::EmailConfigView {
+                    default_to: self.email_default_to.clone().unwrap_or_default(),
+                    ..Default::default()
+                },
             },
-            None => hyperion_types::EmailConfigView::default(),
         };
         let slack_view = hyperion_types::SlackConfigView {
-            default_webhook_set: self
-                .slack_default_webhook
-                .as_deref()
-                .map(|s| !s.is_empty())
-                .unwrap_or(false),
+            default_webhook_set: toml_path
+                .and_then(slack_webhook_set_in_toml)
+                .unwrap_or_else(|| {
+                    self.slack_default_webhook
+                        .as_deref()
+                        .map(|s| !s.is_empty())
+                        .unwrap_or(false)
+                }),
         };
         // Read from agent.toml, NOT from `self.remote_backup`.
         //
@@ -33093,18 +33114,6 @@ fn care_report_parts_omitting(
     let days_count = days.to_string();
     let start_iso = iso_date(cat, report.period_start);
     let end_iso = iso_date(cat, last_day);
-    let subject = cat.render(
-        "care.subject",
-        &[
-            ("domain", domain),
-            ("period_start", &from_str),
-            ("period_end", &to_str),
-            ("days", &days_str),
-            ("days_count", &days_count),
-            ("period_start_iso", &start_iso),
-            ("period_end_iso", &end_iso),
-        ],
-    );
     let mut parts = [
         care_section_attacks(cat, report.attacks_blocked, report.attacks_covered_since),
         care_section_updates(cat, report.updates_applied),
@@ -33245,6 +33254,13 @@ fn care_report_parts_omitting(
             }
         }
     }
+    // The catalogue subject takes every placeholder the body does — the same
+    // set the old `[notifications] care_report_subject_template` was given —
+    // so wording moved from that template into `care.subject` (Settings →
+    // Customer letters → "Move into the editor") renders exactly as before.
+    // Rendered after the plan's choice, like the body.
+    let pairs: Vec<(&str, &str)> = fields.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let subject = cat.render("care.subject", &pairs);
     (subject, parts, fields)
 }
 
@@ -37869,6 +37885,47 @@ fn expiry_warning_mail_with(
     body_template: &str,
     subject_template: &str,
 ) -> (String, String) {
+    let (days_left, fields) = expiry_fields(cat, domain, expires_at, grace_days, now);
+    let subject_fields = expiry_subject_fields(cat, days_left, &fields);
+    let subject_args: Vec<(&str, &str)> = subject_fields
+        .iter()
+        .map(|(k, v)| (*k, v.as_str()))
+        .collect();
+    let body_args: Vec<(&str, &str)> = fields.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    // The subject takes the same placeholders as the body, so an operator who
+    // translated the letter can translate the line the customer sees FIRST.
+    // Empty falls back to the catalogue's, which is already in the letter's
+    // language — and which takes the very same set, so a subject moved from
+    // `[notifications]` into the catalogue renders as it did.
+    let subject = if subject_template.trim().is_empty() {
+        let id = if days_left == 0 {
+            "expiry.subject.today"
+        } else {
+            "expiry.subject.days"
+        };
+        cat.render(id, &subject_args)
+    } else {
+        render_template(subject_template, &subject_args)
+    };
+    let template = if body_template.trim().is_empty() {
+        cat.get("expiry.body").to_string()
+    } else {
+        body_template.to_string()
+    };
+    (subject, render_template(&template, &body_args))
+}
+
+/// Every placeholder the expiry warning's BODY fills, worded in `cat`'s
+/// language, and the number of days left. Shared by the letter and by
+/// [`expiry_warning_preview_fields`], so the Settings preview cannot drift
+/// from what a customer receives.
+fn expiry_fields(
+    cat: &LetterCatalog,
+    domain: &str,
+    expires_at: i64,
+    grace_days: i64,
+    now: i64,
+) -> (i64, Vec<(&'static str, String)>) {
     let days_left = expiry_days_left(expires_at, now);
     let grace = grace_days.max(1);
     let days_unit = cat.plural("unit_day", days_left);
@@ -37878,8 +37935,6 @@ fn expiry_warning_mail_with(
     // the month in English.
     let exp_date = report_date(cat, expires_at);
     let del_date = report_date(cat, expires_at + grace * 86_400);
-    let days_left_str = format!("{days_left} {days_unit}");
-    let grace_str = format!("{grace} {grace_unit}");
     let when = if days_left == 0 {
         cat.get("expiry.when.today").to_string()
     } else {
@@ -37892,57 +37947,57 @@ fn expiry_warning_mail_with(
             ],
         )
     };
-    let days_left_count = days_left.to_string();
-    let grace_days_count = grace.to_string();
-    let exp_iso = iso_date(cat, expires_at);
-    let del_iso = iso_date(cat, expires_at + grace * 86_400);
     // Bare values beside the ready-made ones, for the same reason the care
     // report has them: `{days_left}` carries its own unit word, so a
     // translated letter writing "{days_left} dní" produced "5 days dní", and
     // `{when}` is a whole sentence that lands in the middle of a paragraph.
     // `{expires_at}` and `{delete_at}` spell the month; the ISO forms are
     // digits, which every language can read.
-    let fields: Vec<(&str, &str)> = vec![
-        ("domain", domain),
-        ("expires_at", &exp_date),
-        ("days_left", &days_left_str),
+    let fields = vec![
+        ("domain", domain.to_string()),
+        ("expires_at", exp_date),
+        ("days_left", format!("{days_left} {days_unit}")),
         // Already clamped with `.max(1)`, so the letter names the date the
         // delete is really queued for.
-        ("grace_days", &grace_str),
-        ("delete_at", &del_date),
-        ("when", &when),
-        ("days_left_count", &days_left_count),
-        ("grace_days_count", &grace_days_count),
-        ("expires_at_iso", &exp_iso),
-        ("delete_at_iso", &del_iso),
+        ("grace_days", format!("{grace} {grace_unit}")),
+        ("delete_at", del_date),
+        ("when", when),
+        ("days_left_count", days_left.to_string()),
+        ("grace_days_count", grace.to_string()),
+        ("expires_at_iso", iso_date(cat, expires_at)),
+        ("delete_at_iso", iso_date(cat, expires_at + grace * 86_400)),
     ];
-    // The subject takes the same placeholders as the body, so an operator who
-    // translated the letter can translate the line the customer sees FIRST.
-    // Empty falls back to the catalogue's, which is already in the letter's
-    // language.
-    let subject = if subject_template.trim().is_empty() {
-        let id = if days_left == 0 {
-            "expiry.subject.today"
-        } else {
-            "expiry.subject.days"
-        };
-        cat.render(
-            id,
-            &[
-                ("domain", domain),
-                ("days", &days_left_count),
-                ("unit", days_unit),
-            ],
-        )
-    } else {
-        render_template(subject_template, &fields)
-    };
-    let template = if body_template.trim().is_empty() {
-        cat.get("expiry.body").to_string()
-    } else {
-        body_template.to_string()
-    };
-    (subject, render_template(&template, &fields))
+    (days_left, fields)
+}
+
+/// The expiry SUBJECT's placeholders: the body's, plus `{days}` and `{unit}`
+/// (the bare count and its word), which the built-in subjects are written in.
+fn expiry_subject_fields(
+    cat: &LetterCatalog,
+    days_left: i64,
+    body_fields: &[(&'static str, String)],
+) -> Vec<(&'static str, String)> {
+    let mut out = body_fields.to_vec();
+    out.push(("days", days_left.to_string()));
+    out.push(("unit", cat.plural("unit_day", days_left).to_string()));
+    out
+}
+
+/// The sample a Settings preview shows for each expiry-warning
+/// `{placeholder}` (subject placeholders included), as `(name, value)` pairs.
+///
+/// Built by the same code as the letter, in `cat`'s language, for a fixed
+/// hosting — example.com, expiring 1 Sep 2026 with a 14-day grace — seen
+/// `days_left` days before it expires (0 = on the day, which is when the
+/// "expires today" wording and subject are used).
+pub fn expiry_warning_preview_fields(
+    cat: &LetterCatalog,
+    days_left: i64,
+) -> Vec<(&'static str, String)> {
+    let expires_at = 1_788_220_800; // 2026-09-01 00:00 UTC
+    let now = expires_at - days_left.max(0) * 86_400;
+    let (left, fields) = expiry_fields(cat, "example.com", expires_at, 14, now);
+    expiry_subject_fields(cat, left, &fields)
 }
 
 /// Which of the two possible bodies a customer letter was rendered from,
@@ -37965,6 +38020,38 @@ fn letter_origin(template: &str) -> &'static str {
         "operator (this node's agent.toml)"
     }
 }
+
+/// [`letter_origin`], counting the operator's catalogue wording too.
+///
+/// Since Settings edits the care report and expiry warning as catalogue
+/// strings (`care.body`, `expiry.subject.days`, …) rather than as whole-letter
+/// templates, a letter in the operator's own words usually has an EMPTY
+/// template — so the template alone would record "built-in" for wording the
+/// operator wrote. `cat` is the catalogue the letter was rendered with (the
+/// site's language, overrides already dropped when they are in another
+/// language), and `ids` the strings that frame this letter.
+fn letter_origin_with(
+    template: &str,
+    cat: &crate::letters::LetterCatalog,
+    ids: &[&str],
+) -> &'static str {
+    if !template.trim().is_empty() {
+        return letter_origin(template);
+    }
+    let rewritten = ids
+        .iter()
+        .any(|id| cat.overrides.get(*id).is_some_and(|v| !v.trim().is_empty()));
+    if rewritten {
+        "operator wording (this node's agent.toml)"
+    } else {
+        "built-in"
+    }
+}
+
+/// The catalogue ids that frame the care report.
+const CARE_FRAME_IDS: &[&str] = &["care.subject", "care.body"];
+/// The catalogue ids that frame the expiry warning.
+const EXPIRY_FRAME_IDS: &[&str] = &["expiry.subject.days", "expiry.subject.today", "expiry.body"];
 
 /// Read the letter language and per-string overrides from `[letters]` in
 /// agent.toml.
@@ -38682,6 +38769,23 @@ fn parse_agent_section_fields(
                 other => {
                     return Err(bad(format!(
                         "letter wording language must be \"en\", \"cs\" or empty, got {other:?}"
+                    )))
+                }
+            },
+            // The operator's own alerts (bell + admin mail). Read since #179 but
+            // never writable: this arm was missing, so every Settings save that
+            // carried it — the whole letter-language form — was refused with
+            // "field `operator_lang` is not editable". Normalised like `lang`.
+            ("letters", "operator_lang") => {
+                crate::config_persist::FieldValue::Str(LetterLang::parse(v).as_str().to_string())
+            }
+            // The billing reminder. Empty = follow the customer `lang`, so it
+            // must be storable; a typo must not silently pin it to English.
+            ("letters", "billing_lang") => match v.trim() {
+                l @ ("" | "en" | "cs") => crate::config_persist::FieldValue::Str(l.to_string()),
+                other => {
+                    return Err(bad(format!(
+                        "billing reminder language must be \"en\", \"cs\" or empty, got {other:?}"
                     )))
                 }
             },
@@ -39692,7 +39796,7 @@ fn local_kept_reason(
             (
                 "setting_off",
                 "Kept on this node: \"Delete the local copy once it is verified off-site\" is \
-                 off for this node (Settings → Backups & trash → Local backup copies)."
+                 off for this node (Settings → Backups → Local copies)."
                     .to_string(),
             )
         } else {
@@ -39704,7 +39808,7 @@ fn local_kept_reason(
             "keep_newest",
             format!(
                 "Kept on this node: one of the {} newest local copies it is set to keep \
-                 (Settings → Backups & trash → Local backup copies).",
+                 (Settings → Backups → Local copies).",
                 policy.keep_latest
             ),
         );
@@ -40583,10 +40687,14 @@ struct EmailTomlView {
 /// Lets `mta_reconfigure` apply a just-saved config without an agent restart,
 /// and lets `mta_diagnostics` pre-fill the Settings → Mail form per node.
 fn load_email_section(path: &std::path::Path) -> EmailTomlView {
-    let doc = match crate::config_persist::load(path) {
-        Ok(d) => d,
-        Err(_) => return EmailTomlView::default(),
-    };
+    read_email_section(path).unwrap_or_default()
+}
+
+/// [`load_email_section`], with an unreadable file kept apart from an empty
+/// section: `None` means "the file said nothing", which a caller showing the
+/// values to an operator must not render as "nothing is set".
+fn read_email_section(path: &std::path::Path) -> Option<EmailTomlView> {
+    let doc = crate::config_persist::load(path).ok()?;
     let t = doc.as_table().get("email");
     let s = |k: &str| {
         t.and_then(|x| x.get(k))
@@ -40594,7 +40702,7 @@ fn load_email_section(path: &std::path::Path) -> EmailTomlView {
             .unwrap_or("")
             .to_string()
     };
-    EmailTomlView {
+    Some(EmailTomlView {
         enabled: t
             .and_then(|x| x.get("enabled"))
             .and_then(|v| v.as_bool())
@@ -40612,7 +40720,52 @@ fn load_email_section(path: &std::path::Path) -> EmailTomlView {
         default_to: s("default_to"),
         inet_protocols: s("inet_protocols"),
         bind_address: s("bind_address"),
+    })
+}
+
+/// `[email]` as the Settings pages show it, read from agent.toml.
+///
+/// Not from the copy the agent loaded at boot, for the reason
+/// `read_backup_remote_section` gives: a save restarts the agent a few
+/// seconds AFTER the page it redirects to has rendered, so a view built from
+/// memory showed the old relay right under "Saved". And the boot copy only
+/// exists while the relay is ON — with it off, every field read back empty,
+/// so ticking "enabled" again and pressing Save wrote those blanks over the
+/// host, the user and the sender still in the file.
+fn email_view_from_toml(e: EmailTomlView) -> hyperion_types::EmailConfigView {
+    hyperion_types::EmailConfigView {
+        enabled: e.enabled,
+        smtp_host: e.smtp_host,
+        // What the agent uses when the key is absent (`EmailSection`'s default).
+        smtp_port: u16::try_from(e.smtp_port)
+            .ok()
+            .filter(|p| *p != 0)
+            .unwrap_or(587),
+        smtp_user: e.smtp_user,
+        smtp_password_set: !e.smtp_password.is_empty(),
+        from_address: e.from_address,
+        from_name: e.from_name,
+        security: if e.security.trim().is_empty() {
+            "starttls".into()
+        } else {
+            e.security
+        },
+        default_to: e.default_to,
     }
+}
+
+/// `[slack] default_webhook` is set in agent.toml — same reasoning as
+/// [`email_view_from_toml`]: Connect and Disconnect must show at once.
+/// `None` when the file cannot be read.
+fn slack_webhook_set_in_toml(path: &std::path::Path) -> Option<bool> {
+    let doc = crate::config_persist::load(path).ok()?;
+    Some(
+        doc.as_table()
+            .get("slack")
+            .and_then(|t| t.get("default_webhook"))
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| !s.trim().is_empty()),
+    )
 }
 
 /// Ensure the `quota` user-space tools are installed (quotaon / quotacheck /
@@ -44630,6 +44783,26 @@ mod tests {
             );
         }
         assert!(letter_origin("Dobry den, {domain}").starts_with("operator"));
+        // Wording rewritten in the catalogue — the way Settings edits the
+        // letters now — is the operator's too, with an empty template.
+        let mut cat = crate::letters::LetterCatalog::default();
+        assert_eq!(
+            super::letter_origin_with("", &cat, super::CARE_FRAME_IDS),
+            "built-in"
+        );
+        cat.overrides
+            .insert("care.body".into(), "Dobry den, {domain}".into());
+        assert!(super::letter_origin_with("", &cat, super::CARE_FRAME_IDS).starts_with("operator"));
+        assert_eq!(
+            super::letter_origin_with("", &cat, super::EXPIRY_FRAME_IDS),
+            "built-in",
+            "a care-report sentence says nothing about the expiry warning"
+        );
+        cat.overrides.insert("care.body".into(), "   ".into());
+        assert_eq!(
+            super::letter_origin_with("", &cat, super::CARE_FRAME_IDS),
+            "built-in"
+        );
     }
 
     /// The scheduled report: a refused send must leave the period OPEN.
@@ -44817,6 +44990,118 @@ mod tests {
                 .any(|a| a.action.as_str().starts_with("notify_")),
             "a failed send must not bounce the row back to pending: {still_due:?}"
         );
+    }
+
+    /// `[email]` is written by two Settings forms: the relay (Mail) and the
+    /// administrator addresses (Alerts → Recipients). Each posts only its own
+    /// keys, so a save must leave every key it did not post exactly as it was —
+    /// otherwise saving the relay wipes the alert recipients, or saving the
+    /// recipients wipes the stored SMTP password.
+    #[tokio::test]
+    async fn email_save_leaves_keys_it_did_not_post_alone() {
+        let dir = tempfile::tempdir().expect("dir");
+        let path = dir.path().join("agent.toml");
+        std::fs::write(
+            &path,
+            "[email]\nenabled = true\nsmtp_host = \"smtp.example.cz\"\nsmtp_port = 587\n\
+             smtp_password = \"s3cret\"\ndefault_to = \"ops@example.cz, cto@example.cz\"\n",
+        )
+        .expect("seed");
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool, happy_mocks()).with_agent_config_path(path.clone());
+        let save = |pairs: Vec<(&'static str, &'static str)>| {
+            let fields: std::collections::BTreeMap<String, String> = pairs
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            s.agent_config_update("email".to_string(), fields)
+        };
+        let read = || -> toml_edit::DocumentMut {
+            std::fs::read_to_string(&path)
+                .expect("read back")
+                .parse()
+                .expect("parse")
+        };
+
+        // The relay form: no default_to, password left blank (post_config
+        // drops an empty password before it gets here).
+        save(vec![
+            ("enabled", "false"),
+            ("smtp_host", "relay.example.cz"),
+            ("from_address", "noreply@example.cz"),
+        ])
+        .await
+        .expect("relay save");
+        let doc = read();
+        assert_eq!(doc["email"]["smtp_host"].as_str(), Some("relay.example.cz"));
+        assert_eq!(doc["email"]["enabled"].as_bool(), Some(false));
+        assert_eq!(
+            doc["email"]["default_to"].as_str(),
+            Some("ops@example.cz, cto@example.cz")
+        );
+        assert_eq!(doc["email"]["smtp_password"].as_str(), Some("s3cret"));
+        assert_eq!(doc["email"]["smtp_port"].as_integer(), Some(587));
+
+        // The recipients form: default_to only.
+        save(vec![("default_to", "ops@example.cz")])
+            .await
+            .expect("recipients save");
+        let doc = read();
+        assert_eq!(doc["email"]["default_to"].as_str(), Some("ops@example.cz"));
+        assert_eq!(doc["email"]["smtp_password"].as_str(), Some("s3cret"));
+        assert_eq!(doc["email"]["smtp_host"].as_str(), Some("relay.example.cz"));
+        assert_eq!(
+            doc["email"]["from_address"].as_str(),
+            Some("noreply@example.cz")
+        );
+    }
+
+    /// The Settings pages read `[email]` and `[slack]` through
+    /// `agent_config_view`, which must report the FILE: with the relay off the
+    /// boot copy is empty (so the form came back blank and a save wrote the
+    /// blanks over the stored host), and right after a save the agent has not
+    /// restarted yet (so the page under "Saved" showed the old values).
+    #[tokio::test]
+    async fn config_view_reports_email_and_slack_as_written_in_agent_toml() {
+        let dir = tempfile::tempdir().expect("dir");
+        let path = dir.path().join("agent.toml");
+        std::fs::write(
+            &path,
+            "[email]\nenabled = false\nsmtp_host = \"relay.example.cz\"\nsmtp_user = \"u\"\n\
+             smtp_password = \"s3cret\"\nfrom_address = \"noreply@example.cz\"\n\
+             default_to = \"ops@example.cz\"\n\n[slack]\ndefault_webhook = \"https://hooks.slack.com/x\"\n",
+        )
+        .expect("seed");
+        let pool = open_memory().await.expect("open");
+        let mut mocks = happy_mocks();
+        mocks
+            .expect_nginx_user()
+            .returning(|| "www-data".to_string());
+        // No boot copy at all: the relay is off, so the agent has none.
+        let s = svc(pool, mocks)
+            .with_email(None, None)
+            .with_agent_config_path(path.clone());
+
+        let v = s.agent_config_view("h", "v").await.expect("view");
+        assert!(!v.email.enabled);
+        assert_eq!(v.email.smtp_host, "relay.example.cz");
+        assert_eq!(v.email.smtp_user, "u");
+        assert!(v.email.smtp_password_set);
+        assert_eq!(v.email.from_address, "noreply@example.cz");
+        assert_eq!(v.email.default_to, "ops@example.cz");
+        // Absent keys read as what the agent would use.
+        assert_eq!(v.email.smtp_port, 587);
+        assert_eq!(v.email.security, "starttls");
+        assert!(v.slack.default_webhook_set);
+
+        // Disconnect writes an empty webhook; the view says so at once.
+        let mut f = std::collections::BTreeMap::new();
+        f.insert("default_webhook".to_string(), String::new());
+        s.agent_config_update("slack".to_string(), f)
+            .await
+            .expect("disconnect");
+        let v = s.agent_config_view("h", "v").await.expect("view");
+        assert!(!v.slack.default_webhook_set);
     }
 
     /// The Settings form's round trip: a save lands in agent.toml under
@@ -46043,6 +46328,121 @@ mod tests {
             expiry_warning_mail_with(&en(), "example.cz", EXP_TS, 3, EXP_TS - 2 * 86_400, "", "");
         assert!(body.contains("2 days left."));
         assert!(body.contains("after a grace period of 3 days, on 4 Sep 2026"));
+    }
+
+    /// A subject written into the catalogue renders exactly as the same text
+    /// did as an old `[notifications]` subject template.
+    ///
+    /// Settings moves those templates into `care.subject` /
+    /// `expiry.subject.days`. The catalogue subjects used to get only a few
+    /// tokens ({domain}, the period / {days} {unit}), so a moved subject
+    /// naming `{expires_at}` or `{when}` — both documented for the old
+    /// template — would have reached the customer as literal braces.
+    #[test]
+    fn a_catalogue_subject_takes_every_placeholder_the_old_template_did() {
+        let mut cat = en();
+        let exp =
+            "{domain} | {expires_at} | {when} | {days_left} | {delete_at_iso} | {days} {unit}";
+        cat.overrides
+            .insert("expiry.subject.days".into(), exp.into());
+        let now = EXP_TS - 7 * 86_400;
+        let (from_catalogue, _) =
+            expiry_warning_mail_with(&cat, "example.cz", EXP_TS, 14, now, "", "");
+        let (from_template, _) =
+            expiry_warning_mail_with(&en(), "example.cz", EXP_TS, 14, now, "", exp);
+        assert_eq!(from_catalogue, from_template);
+        assert!(!from_catalogue.contains('{'), "{from_catalogue}");
+
+        let from = 1_780_272_000;
+        let r = CareReport::empty(
+            HostingId("t".into()),
+            "example.cz".into(),
+            from,
+            from + 30 * 86_400,
+        );
+        let care = "{domain} {period_end_iso} {attacks_count} {days}";
+        let mut cat = en();
+        cat.overrides.insert("care.subject".into(), care.into());
+        let (from_catalogue, _) = care_report_render_full(&cat, &r, "example.cz", "", "");
+        let (from_template, _) = care_report_render_full(&en(), &r, "example.cz", "", care);
+        assert_eq!(from_catalogue, from_template);
+        assert!(!from_catalogue.contains('{'), "{from_catalogue}");
+        // The built-in subjects are unchanged by the wider set.
+        let (s, _) = care_report_render_full(&en(), &r, "example.cz", "", "");
+        assert_eq!(s, "Care report for example.cz (1 Jun 2026 – 30 Jun 2026)");
+    }
+
+    /// The expiry preview sample is the letter's own wording, in the letter's
+    /// language — a Czech letter previewed with "7 days" in it reads as broken.
+    #[test]
+    fn the_expiry_preview_sample_comes_from_the_real_renderer() {
+        let get = |cat: &LetterCatalog, left: i64, k: &str| {
+            expiry_warning_preview_fields(cat, left)
+                .into_iter()
+                .find(|(n, _)| *n == k)
+                .map(|(_, v)| v)
+                .unwrap_or_default()
+        };
+        assert_eq!(get(&en(), 7, "days_left"), "7 days");
+        assert_eq!(get(&en(), 7, "expires_at"), "1 Sep 2026");
+        assert_eq!(get(&en(), 7, "delete_at_iso"), "2026-09-15");
+        assert_eq!(get(&en(), 0, "when"), "expires today");
+        assert_eq!(get(&en(), 7, "unit"), "days");
+        let cs = LetterCatalog::new(LetterLang::Cs);
+        assert_eq!(get(&cs, 7, "days_left"), "7 dní");
+        // The sample and the letter agree, token for token.
+        let fields = expiry_warning_preview_fields(&en(), 7);
+        let tmpl: String = fields.iter().map(|(k, _)| format!("{{{k}}}\n")).collect();
+        let (_, body) = expiry_warning_mail_with(
+            &en(),
+            "example.com",
+            EXP_TS,
+            14,
+            EXP_TS - 7 * 86_400,
+            &tmpl,
+            "",
+        );
+        let expected: String = fields
+            .iter()
+            .map(|(k, v)| {
+                // {days} and {unit} are subject-only placeholders.
+                if matches!(*k, "days" | "unit") {
+                    format!("{{{k}}}\n")
+                } else {
+                    format!("{v}\n")
+                }
+            })
+            .collect();
+        assert_eq!(body, expected);
+    }
+
+    /// `operator_lang` and `billing_lang` were read but never writable, so the
+    /// Settings form that set them was refused as a whole.
+    #[test]
+    fn the_letter_language_keys_are_writable() {
+        let one = |k: &str, v: &str| {
+            let mut f = std::collections::BTreeMap::new();
+            f.insert(k.to_string(), v.to_string());
+            parse_agent_section_fields("letters", &f)
+        };
+        assert!(one("operator_lang", "cs").is_ok());
+        assert!(
+            one("billing_lang", "").is_ok(),
+            "empty = follow the customer letters"
+        );
+        assert!(one("billing_lang", "en").is_ok());
+        assert!(
+            one("billing_lang", "sk").is_err(),
+            "a typo is named, not pinned to English"
+        );
+        assert!(crate::cluster_sync::is_synced_key(
+            "letters",
+            "operator_lang"
+        ));
+        assert!(crate::cluster_sync::is_synced_key(
+            "letters",
+            "billing_lang"
+        ));
     }
 
     // ============================================================

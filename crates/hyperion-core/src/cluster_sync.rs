@@ -27,9 +27,11 @@ use toml_edit::{DocumentMut, Item};
 use crate::config_persist::FieldValue;
 
 /// Every agent.toml section the master owns for the whole cluster, in the
-/// order they are sent. `[cluster]` is master-only by design, `[email]` is
-/// per node (each node's own MTA), `[slack]` is only read on the master, and
-/// `[agent]`/`[enrollment]`/`[remote_rpc]` are the node's own identity.
+/// order they are sent. `[email]` is per node (each node's own MTA),
+/// `[slack]` is only read on the master, and `[agent]`/`[enrollment]`/
+/// `[remote_rpc]` are the node's own identity. `[cluster]` is master-only
+/// except for the trash keys and the preview template, which every node
+/// reads for its own sites — [`is_synced_key`] carries only those.
 pub const SYNCED_SECTIONS: &[&str] = &[
     "backup",
     "backup_retention",
@@ -42,6 +44,7 @@ pub const SYNCED_SECTIONS: &[&str] = &[
     "acme",
     "update",
     "fail2ban",
+    "cluster",
 ];
 
 /// Sections the running agent reads only at start-up. A change to one of
@@ -80,11 +83,26 @@ pub fn is_synced_key(section: &str, key: &str) -> bool {
                 | "expiry_warning_subject_template"
                 | "expiry_warning_body_template"
         ),
+        // `operator_lang` and `billing_lang` too: every node renders its own
+        // alerts and runs its own billing sweep, so a language set only on
+        // the master governed only the master's.
         "letters" => {
-            matches!(key, "lang" | "overrides_lang") || crate::letters::lookup(key).is_some()
+            matches!(
+                key,
+                "lang" | "overrides_lang" | "operator_lang" | "billing_lang"
+            ) || crate::letters::lookup(key).is_some()
         }
         "acme" => key == "contact_email",
         "update" => key == "auto",
+        // A worker's delete reads ITS OWN trash switch and its trash GC its
+        // own retention, and its nginx builds each site's preview alias from
+        // ITS OWN preview template. Everything else in [cluster] (sign-in,
+        // placement, hardening, test nodes, the node's mode) stays the
+        // master's or the node's own.
+        "cluster" => matches!(
+            key,
+            "trash_enabled" | "trash_retention_days" | "test_domain_template"
+        ),
         "fail2ban" => matches!(
             key,
             "enabled"
@@ -338,9 +356,12 @@ mode = "master"
         let remote = secs.iter().find(|s| s.section == "backup_remote").unwrap();
         assert_eq!(remote.fields.get("port").unwrap(), "21");
         assert_eq!(remote.fields.get("enabled").unwrap(), "true");
-        assert!(secs
-            .iter()
-            .all(|s| s.section != "cluster" && s.section != "agent"));
+        assert!(secs.iter().all(|s| s.section != "agent"));
+        let cluster = secs.iter().find(|s| s.section == "cluster").unwrap();
+        assert!(
+            cluster.fields.is_empty(),
+            "[cluster] carries only the trash keys, never the node's mode"
+        );
         let f2b = secs.iter().find(|s| s.section == "fail2ban").unwrap();
         assert!(f2b.fields.is_empty(), "absent on master = defaults");
     }
@@ -398,6 +419,44 @@ ssh_threshold = 99
         // Second apply of the same payload changes nothing.
         let again = apply_sections(&mut doc, &master, parse_ok).unwrap();
         assert!(again.changed.is_empty());
+    }
+
+    #[test]
+    fn cluster_trash_keys_sync_and_the_rest_of_cluster_stays_put() {
+        let mut doc: DocumentMut = r#"
+[cluster]
+mode = "worker"
+enforce_admin_2fa = false
+trash_enabled = true
+trash_retention_days = 3
+"#
+        .parse()
+        .unwrap();
+        let master = extract_sections(
+            "[cluster]\nmode = \"master\"\nenforce_admin_2fa = true\ntrash_retention_days = 30\ntest_domain_template = \"{name}.preview.example.com\"\n",
+        )
+        .unwrap();
+        let cluster = master.iter().find(|s| s.section == "cluster").unwrap();
+        assert_eq!(
+            cluster.fields.keys().collect::<Vec<_>>(),
+            vec!["test_domain_template", "trash_retention_days"]
+        );
+        apply_sections(&mut doc, &master, parse_ok).unwrap();
+        assert_eq!(doc["cluster"]["mode"].as_str(), Some("worker"));
+        assert_eq!(doc["cluster"]["enforce_admin_2fa"].as_bool(), Some(false));
+        assert_eq!(
+            doc["cluster"]["trash_retention_days"].as_integer(),
+            Some(30)
+        );
+        assert_eq!(
+            doc["cluster"]["test_domain_template"].as_str(),
+            Some("{name}.preview.example.com"),
+            "a worker builds its own sites' preview aliases from it"
+        );
+        assert!(
+            doc["cluster"].get("trash_enabled").is_none(),
+            "the master has no trash switch, so the node falls back to the default too"
+        );
     }
 
     #[test]

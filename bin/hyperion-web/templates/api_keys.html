@@ -1,0 +1,128 @@
+{% extends "base.html" %}
+{% block title %}API keys · Hyperion{% endblock %}
+{% block main %}
+<div class="page-header">
+  <div>
+    <h1>API keys</h1>
+    <div class="subtitle">
+      Keys for scripts using the <code>/api/v1</code> API, sent as
+      <code>Authorization: Bearer hyp_…</code>. A key can never do more than
+      the person who created it. <a href="/api/v1/docs">API docs</a> ·
+      <a href="/api/v1/openapi.json">OpenAPI</a>
+    </div>
+  </div>
+</div>
+
+{% if let Some(m) = flash %}
+<div class="flash success">
+  <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+  <div class="flash-body">{{ m }}</div>
+</div>
+{% endif %}
+{% if let Some(e) = flash_error %}
+<div class="flash error">
+  <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+  <div class="flash-body">{{ e }}</div>
+</div>
+{% endif %}
+
+{% if let Some(k) = new_key %}
+<div class="group" id="new-key">
+  <div class="ghead">New key</div>
+  <div class="item">
+    <h3>Copy this key now — it is not shown again</h3>
+    <pre style="background:var(--surface-1);border-radius:6px;padding:0.7rem 0.9rem;margin:0.5rem 0 0;font-size:0.85rem;word-break:break-all;user-select:all">{{ k }}</pre>
+  </div>
+</div>
+{% endif %}
+
+<div class="group" id="keys">
+  <div class="ghead">Keys</div>
+  {% if keys.is_empty() %}
+  <div class="item muted"><p class="text-soft small" style="margin:0">No API keys yet. Create one below.</p></div>
+  {% else %}
+  <div class="scroll-x">
+  <table class="data-table" style="width:100%">
+    <thead>
+      <tr>
+        <th>Prefix</th><th>Label</th><th>Capabilities</th><th>Restrictions</th><th>Last used</th><th>Expires</th><th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for k in keys %}
+      <tr{% if k.is_revoked %} class="text-soft" style="opacity:0.55"{% endif %}>
+        <td><code>{{ k.key_prefix }}…</code></td>
+        <td>{{ k.label }}</td>
+        <td class="text-soft small">{{ k.caps_summary }}</td>
+        <td class="text-soft small">{{ k.restrictions }}</td>
+        <td class="text-soft small">{{ k.last_used }}</td>
+        <td class="text-soft small">{{ k.expires }}</td>
+        <td style="text-align:right">
+          {% if k.is_revoked %}
+          <span class="pill muted">revoked</span>
+          {% else %}
+          <form method="post" action="/admin/api-keys/revoke" style="margin:0;display:inline"
+                data-confirm-title="Revoke this API key"
+                data-confirm-body="Any client using it stops working immediately."
+                data-confirm-confirm-label="Revoke"
+                data-confirm-variant="danger">
+            <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+            <input type="hidden" name="id" value="{{ k.id }}">
+            <button type="submit" class="btn small danger">Revoke</button>
+          </form>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% endif %}
+</div>
+
+<div class="group" id="create-key">
+  <div class="ghead">Create a key</div>
+  <div class="item">
+    <form method="post" action="/admin/api-keys" autocomplete="off">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <div class="field-row" style="display:flex;gap:1rem;flex-wrap:wrap;align-items:flex-end">
+        <div class="field" style="flex:1;min-width:14rem">
+          <label for="api_key_label">Label <span class="hint">what uses it, e.g. ci-deploy</span></label>
+          <input id="api_key_label" name="label" type="text" required placeholder="ci-deploy" maxlength="120">
+        </div>
+        <div class="field">
+          <label for="api_key_expires">Expires <span class="hint">optional</span></label>
+          <input id="api_key_expires" name="expires" type="date">
+        </div>
+      </div>
+      <div class="field-row" style="display:flex;gap:1rem;flex-wrap:wrap;align-items:flex-end;margin-top:0.6rem">
+        <div class="field" style="flex:1;min-width:14rem">
+          <label for="api_key_ips">Allowed addresses <span class="hint">IPs or CIDRs, comma-separated · empty = any</span></label>
+          <input id="api_key_ips" name="ip_allowlist" type="text" placeholder="203.0.113.0/24, 198.51.100.7" autocomplete="off">
+        </div>
+        <div class="field">
+          <label for="api_key_rate">Requests per minute <span class="hint">0 = unlimited</span></label>
+          <input id="api_key_rate" name="rate_limit" type="number" min="0" step="1" placeholder="0" style="width:9rem">
+        </div>
+      </div>
+      <fieldset style="border:1px solid var(--border);border-radius:8px;padding:0.8rem 1rem;margin:0.9rem 0">
+        <legend class="text-soft small" style="padding:0 0.4rem">What the key may do</legend>
+        <div class="cap-groups" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(min(16rem, 100%), 1fr));gap:0.8rem 1.4rem">
+          {% for g in cap_groups %}
+          <div class="cap-group">
+            <div class="text-soft small" style="font-weight:600;margin-bottom:0.3rem">{{ g.label }}</div>
+            {% for c in g.caps %}
+            <label class="cap-row" style="display:flex;align-items:center;gap:0.45rem;padding:0.18rem 0">
+              <input type="checkbox" name="{{ c.machine }}">
+              <span class="cap-label" style="flex:1">{{ c.label }}</span>
+            </label>
+            {% endfor %}
+          </div>
+          {% endfor %}
+        </div>
+      </fieldset>
+      <div class="item-actions"><button type="submit" class="btn primary">Create key</button></div>
+    </form>
+  </div>
+</div>
+{% endblock %}

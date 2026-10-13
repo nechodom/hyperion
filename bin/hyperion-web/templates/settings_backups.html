@@ -1,189 +1,653 @@
-{% extends "base.html" %}
-{% block title %}Backup targets · Hyperion{% endblock %}
-{% block main %}
-<div class="page-header">
-  <div>
-    <h1>Backup targets</h1>
-    <div class="subtitle">
-      Off-site destinations for scheduled hosting backups, on any S3-compatible
-      storage (Wasabi, Backblaze B2, MinIO, AWS). Each target holds your
-      credentials and an age public key for client-side encryption. The
-      single-target FTP/FTPS/SFTP push and local retention live on
-      <a href="/settings#offsite-ftp">Settings → Backups &amp; trash</a>.
+{% extends "settings_base.html" %}
+{#- Backups: what is kept → where off-site copies go → how long things stay →
+    deleted sites → the one-off backfill. The agent.toml groups follow the
+    Owner-only switch (chrome.ro()); the S3 targets and the backfill follow
+    the BackupTargets capability (can_targets / can_backfill), which an
+    Administrator holds without being an Owner. -#}
+{% block read_only_note %}{% if can_targets %}Only an Owner can change what is kept and how long; you can manage the off-site targets{% if can_backfill %} and copy existing backups off-site{% endif %}.{% else %}You can see these settings; only an Owner can change them.{% endif %}{% endblock %}
+{% block section %}
+{% if let Some(e) = config_error %}
+<div class="flash error">
+  <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+  <div class="flash-body">The agent's settings could not be read ({{ e }}). The values below are defaults, not what is set.</div>
+</div>
+{% endif %}
+
+{# ── What is kept ───────────────────────────────────────────────────────── #}
+<fieldset class="group"{{ chrome.ro() }}>
+  <div class="ghead">What is kept{% if chrome.has_nodes %}<span class="scope-tag" title="Set here, copied to every node by the settings sync">All nodes</span>{% endif %}</div>
+  <div class="item" id="protection-mode">
+    <div class="row" style="align-items:center;gap:0.6rem;flex-wrap:wrap">
+      <h3 style="margin:0">What is kept</h3>
+      <span class="pill {{ protection.cls }}">{{ protection.word }}</span>
     </div>
-  </div>
-  <div>
-    <a href="/settings#offsite-s3" class="btn ghost">← Back to settings</a>
-  </div>
-</div>
-
-{# Said where the operator is looking. Every write on this page comes back
-   through a redirect carrying `?flash=`, and for a long time nothing
-   rendered it — the save worked and looked exactly like a save that had
-   not. #}
-{% if let Some(m) = flash %}
-  <div class="flash success" style="margin-bottom:1rem">
-    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-    <div class="flash-body">{{ m }}</div>
-  </div>
-{% endif %}
-{% if let Some(e) = flash_error %}
-  <div class="flash error" style="margin-bottom:1rem">
-    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-    <div class="flash-body">{{ e }}</div>
-  </div>
-{% endif %}
-<div class="flash info" style="margin-bottom:1rem">
-  <div class="flash-body">
-    <strong>How it runs.</strong> Whenever a hosting backup completes (manually, from the
-    hosting detail page), the agent also pushes it to every <em>enabled</em> S3 target here —
-    archive, database dump, and manifest. With an <strong>age recipient</strong> set, each object is
-    encrypted client-side and streamed (<code>age → aws</code>, no temp file), so the off-site
-    copy needs no extra local disk. After upload, the remote is pruned to the newest
-    <strong>“keep daily”</strong> backups per hosting.
-    Each node needs the AWS CLI (<code>apt install awscli</code>), plus <code>age</code> for encryption.
-    <span class="hint">Note: the weekly and monthly tiers below currently map to “keep newest = daily”. Full grandfather-father-son tiering is a later refinement.</span>
-  </div>
-</div>
-
-{% if !targets.is_empty() %}
-<div class="card" style="padding:0;margin-bottom:1rem">
-  <div class="scroll-x">
-<table class="data-table">
-    <thead>
-      <tr>
-        <th>Name</th>
-        <th>Endpoint / bucket</th>
-        <th>Retention <span class="text-soft small">(daily / weekly / monthly)</span></th>
-        <th>Encryption</th>
-        <th>Enabled</th>
-        <th>Test</th>
-        <th></th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for t in targets %}
-      <tr>
-        <td><strong>{{ t.name }}</strong></td>
-        <td>
-          <div class="text-soft small">{{ t.endpoint }}</div>
-          <div><code>{{ t.bucket }}</code> · region <code>{{ t.region }}</code></div>
-        </td>
-        <td>keep {{ t.retention_daily }}</td>
-        <td>
-          {% if t.age_recipient.is_some() %}
-            <span class="pill ok">configured</span>
-          {% else %}
-            <span class="pill warn">no encryption</span>
-          {% endif %}
-        </td>
-        <td>
-          {% if t.enabled %}
-            <span class="pill ok">on</span>
-          {% else %}
-            <span class="pill">off</span>
-          {% endif %}
-        </td>
-        <td>
-          <button class="btn small"
-                  type="button"
-                  hx-post="/settings/backups/{{ t.id }}/probe"
-                  hx-vals='{"_csrf": "{{ csrf_token }}"}'
-                  hx-target="#probe-{{ t.id }}"
-                  hx-swap="innerHTML"
-                  title="Check credentials and bucket reachability">
-            Test connection
-          </button>
-          <span id="probe-{{ t.id }}" style="margin-left:0.4rem"></span>
-        </td>
-        <td>
-          <form method="post" action="/settings/backups/{{ t.id }}/delete" style="display:inline"
-                data-confirm-title="Delete backup target {{ t.name }}?"
-                data-confirm-body="Backup runs that reference this target stay in the history (their target link is cleared). The secret file under /etc/hyperion/secrets/ is left in place — remove it manually if you no longer need it."
-                data-confirm-confirm-label="Delete permanently"
-                data-confirm-variant="danger">
-            <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-            <button class="btn small danger" type="submit">Delete</button>
-          </form>
-        </td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-</div>
-</div>
-{% endif %}
-
-<div class="card">
-  <h2>Add or edit a target</h2>
-  <form method="post" action="/settings/backups/upsert" style="margin-top:0.6rem">
-    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-    <input type="hidden" name="id" value="">
-    <div class="field-row">
-      <div class="field">
-        <label>Name <span class="hint">short, unique label</span></label>
-        <input name="name" type="text" required placeholder="wasabi-eu">
-      </div>
-      <div class="field">
-        <label>Kind</label>
-        <select name="kind">
-          <option value="s3" selected>S3-compatible</option>
-          <option value="local-dir">Local directory</option>
+    <p class="text-soft small" style="margin:0.4rem 0 0.8rem">
+      Archives bring a site back after a server is lost; snapshots undo a bad
+      update.
+    </p>
+    <form method="post" action="/settings/config" autocomplete="off">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="section" value="protection">
+      <input type="hidden" name="_return_tab" value="protection-mode">
+      <div class="field" style="max-width:34rem">
+        <label for="prot_mode">Keep</label>
+        <select id="prot_mode" name="mode">
+          <option value="both"{% if config.cluster.protection_mode == "both" %} selected{% endif %}>Both — archives for disaster recovery, snapshots for undo</option>
+          <option value="backups"{% if config.cluster.protection_mode == "backups" %} selected{% endif %}>Backup archives only — no snapshots are taken</option>
+          <option value="snapshots"{% if config.cluster.protection_mode == "snapshots" %} selected{% endif %}>Snapshots only — no scheduled archives, and no off-site copy</option>
         </select>
       </div>
+      {% if snapshots_only %}
+      <div class="flash warn" style="margin:0.2rem 0 0">
+        <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+        <div class="flash-body">
+          Nothing is copied off-site in this mode: snapshots stay on the node
+          that holds the site, so losing a node loses its sites. Sites whose
+          care package sells backups still get them — a plan is a record that
+          somebody paid, and this setting does not cancel it.
+        </div>
+      </div>
+      {% endif %}
+      <div class="item-actions"><button type="submit" class="btn primary">Save</button></div>
+    </form>
+    <details class="howto">
+      <summary>Archives and snapshots</summary>
+      <p>
+        <strong>Backup archives</strong> are a tar of the site plus a database
+        dump, made on each site's schedule and copied off-site. They answer
+        <em>“the server is gone”</em>, and they are what a care package sells
+        to a customer.
+      </p>
+      <p>
+        <strong>Snapshots</strong> are taken before Hyperion applies a site's
+        automatic updates, and by hand from a site's Backups tab. Shared
+        content is stored once, so thirty cost little more than one, and they
+        can show what an update changed. They answer <em>“last night's update
+        broke the site”</em>. They never leave the node.
+      </p>
+      <p>
+        Switching one off stops new copies; it never deletes what is already
+        kept. Backups taken internally to undo a move, a copy or a staging push
+        run in every mode — that is how those features roll themselves back.
+      </p>
+    </details>
+  </div>
+</fieldset>
+
+{# ── Off-site copies ────────────────────────────────────────────────────────
+   One panel, two rights: the table, the S3 form and their buttons need
+   BackupTargets (the group's fieldset); the FTP form writes agent.toml, so
+   it sits in a fieldset of its own that follows the Owner-only switch. An
+   Owner holds every capability, so the outer fieldset never disables the
+   inner one for somebody allowed to use it. #}
+<fieldset class="group"{% if !can_targets %} disabled{% endif %}>
+  <div class="ghead">Off-site copies{% if chrome.has_nodes %}<span class="scope-tag" title="Set here, copied to every node by the settings sync">All nodes</span>{% endif %}</div>
+
+  <div class="item" id="offsite-targets">
+    <div class="row" style="align-items:center;gap:0.6rem;flex-wrap:wrap">
+      <h3 style="margin:0">Off-site targets</h3>
+      <span class="pill {{ offsite.cls }}">{{ offsite.word }}</span>
     </div>
-    <div class="field-row">
-      <div class="field">
-        <label>Endpoint</label>
-        <input name="endpoint" type="text" required placeholder="https://s3.eu-central-1.wasabisys.com">
-      </div>
-      <div class="field">
-        <label>Bucket</label>
-        <input name="bucket" type="text" required placeholder="hyperion-prod">
-      </div>
-      <div class="field">
-        <label>Region</label>
-        <input name="region" type="text" value="us-east-1">
+    <p class="text-soft small" style="margin:0.4rem 0 0.8rem">
+      Every backup is copied to each target in use as soon as it finishes{% if chrome.has_nodes %}, by the node that made it{% endif %}.
+    </p>
+
+    {% if let Some(e) = targets_error %}
+    <div class="flash error" style="margin:0 0 0.9rem">
+      <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+      <div class="flash-body">The S3 targets could not be read ({{ e }}), so this table may be missing some.</div>
+    </div>
+    {% endif %}
+    {% if snapshots_only %}
+    <div class="flash warn" style="margin:0 0 0.9rem">
+      <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+      <div class="flash-body"><a href="#protection-mode">What is kept</a> is set to snapshots only: no archives are made, so nothing reaches these targets.</div>
+    </div>
+    {% else if active_targets == 0 && targets_error.is_none() %}
+    <div class="flash warn" style="margin:0 0 0.9rem">
+      <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+      <div class="flash-body">
+        Nothing is copied off-site: losing a server loses its sites and their
+        backups. Set up an <a href="#offsite-ftp">FTP / SFTP target</a> or add
+        an <a href="#offsite-s3">S3 target</a>.
       </div>
     </div>
-    <div class="field-row">
-      <div class="field">
-        <label>Access key ID</label>
-        <input name="access_key_id" type="text" required placeholder="AKIA…">
+    {% endif %}
+
+    {% if ftp.shown || !s3.is_empty() %}
+    <div class="table-wrap inset">
+      <table class="data-table data-table--cards">
+        <thead>
+          <tr>
+            <th scope="col">Target</th>
+            <th scope="col">Where</th>
+            <th scope="col">Copies there</th>
+            <th scope="col">State</th>
+            <th scope="col"><span class="sr-only">Actions</span></th>
+          </tr>
+        </thead>
+        <tbody>
+          {% if ftp.shown %}
+          <tr>
+            <td><strong>{{ ftp.protocol }}</strong></td>
+            <td>{% if ftp.address.is_empty() %}<span class="text-soft small">no host set</span>{% else %}<code style="word-break:break-all">{{ ftp.address }}</code>{% endif %}</td>
+            <td>
+              <span class="pill {{ ftp.encryption.cls }}" title="{{ ftp.encryption_note }}">{{ ftp.encryption.word }}</span>
+              <div class="text-soft small" style="margin-top:0.25rem">all kept, never pruned</div>
+            </td>
+            <td>
+              <span class="pill {{ ftp.state.cls }}">{{ ftp.state.word }}</span>
+              {% if !ftp.problem.is_empty() %}<div class="text-soft small" style="margin-top:0.25rem">{{ ftp.problem }}</div>{% endif %}
+              <div id="probe-ftp" class="small" style="margin-top:0.25rem"></div>
+            </td>
+            <td class="right">
+              <div class="row" style="justify-content:flex-end;gap:0.4rem">
+                {% if !ftp.address.is_empty() %}
+                <button type="button" class="btn small"
+                        hx-post="/settings/backup-remote/probe"
+                        hx-vals='{"_csrf": "{{ csrf_token }}"}'
+                        hx-target="#probe-ftp"
+                        hx-swap="innerHTML"
+                        title="Connect, log in and list the base path">Test</button>
+                {% endif %}
+                <a class="btn small ghost" href="#offsite-ftp">{% if chrome.can_edit %}Edit{% else %}Details{% endif %}</a>
+              </div>
+            </td>
+          </tr>
+          {% endif %}
+          {% for t in s3 %}
+          <tr>
+            <td><strong style="white-space:nowrap">{{ t.name }}</strong><div class="text-soft small">S3</div></td>
+            <td>
+              <div class="text-soft small" style="word-break:break-all">{{ t.endpoint }}</div>
+              <div><code>{{ t.bucket }}</code>{% if !t.region.is_empty() %} <span class="text-soft small">· {{ t.region }}</span>{% endif %}</div>
+            </td>
+            <td>
+              <span class="pill {{ t.encryption.cls }}" title="{{ t.encryption_note }}">{{ t.encryption.word }}</span>
+              <div class="text-soft small" style="margin-top:0.25rem">{{ t.keep }}</div>
+            </td>
+            <td>
+              <span class="pill {{ t.state.cls }}">{{ t.state.word }}</span>
+              {% if !t.problem.is_empty() %}<div class="text-soft small" style="margin-top:0.25rem">{{ t.problem }}</div>{% endif %}
+              <div id="probe-{{ t.id }}" class="small" style="margin-top:0.25rem"></div>
+            </td>
+            <td class="right">
+              <div class="row" style="justify-content:flex-end;gap:0.4rem">
+                <button type="button" class="btn small"
+                        hx-post="/settings/backups/{{ t.id }}/probe"
+                        hx-vals='{"_csrf": "{{ csrf_token }}"}'
+                        hx-target="#probe-{{ t.id }}"
+                        hx-swap="innerHTML"
+                        title="Ask the bucket's address for an answer (does not check the keys)">Test</button>
+                {% if can_targets %}
+                <button type="button" class="btn small ghost" data-s3-edit
+                        data-id="{{ t.id }}"
+                        data-name="{{ t.name }}"
+                        data-endpoint="{{ t.endpoint }}"
+                        data-bucket="{{ t.bucket }}"
+                        data-region="{{ t.region }}"
+                        data-access-key-id="{{ t.access_key_id }}"
+                        data-age-recipient="{{ t.age_recipient }}"
+                        data-keep="{{ t.keep_n }}"
+                        data-enabled="{{ t.enabled }}">Edit</button>
+                <form method="post" action="/settings/backups/{{ t.id }}/delete" style="margin:0"
+                      data-confirm-title="Delete the S3 target {{ t.name }}?"
+                      data-confirm-body="Backups stop being copied to it and its stored secret key is deleted. Copies already in the bucket stay there and are no longer pruned. A site pinned to this target gets no S3 copy until it is pinned elsewhere."
+                      data-confirm-confirm-label="Delete target"
+                      data-confirm-variant="danger">
+                  <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+                  <button class="btn small danger" type="submit">Delete</button>
+                </form>
+                {% endif %}
+              </div>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
+
+    <details class="howto">
+      <summary>How off-site copies work</summary>
+      <ul>
+        <li>Backups always land on local disk first. As soon as one finishes, the node{% if chrome.has_nodes %} that made it{% endif %} pushes it to the FTP / SFTP target and to every S3 target in use. A site pinned to one S3 target on its own Backups tab goes to that one only — and gets no S3 copy while that target cannot take it.</li>
+        <li>Each site picks its schedule on its own Backups tab.</li>
+        {% if chrome.has_nodes %}<li>The settings sync copies both kinds of target, credentials included, to every node, so every node must be able to reach them. Test runs from the master.</li>{% endif %}
+        <li>An S3 target keeps the newest copies set on it and prunes older ones after each upload. Hyperion never deletes anything on the FTP / SFTP server.</li>
+        <li>To send backups made before a target was set up, use <a href="#offsite-backfill">Copy existing backups off-site</a>.</li>
+      </ul>
+    </details>
+  </div>
+
+  <div class="item" id="offsite-ftp">
+    <div class="row" style="align-items:center;gap:0.6rem;flex-wrap:wrap">
+      <h3 style="margin:0">FTP / SFTP target</h3>
+      {% if ftp.shown %}<span class="pill {{ ftp.state.cls }}">{{ ftp.state.word }}</span>{% else %}<span class="pill muted">not set up</span>{% endif %}
+    </div>
+    <p class="text-soft small" style="margin:0.4rem 0 0.8rem">
+      One FTP, FTPS or SFTP server that receives a copy of every backup, each
+      site in its own folder under the base path.
+    </p>
+    <fieldset style="border:0;padding:0;margin:0;min-width:0"{{ chrome.ro() }}>
+      <form method="post" action="/settings/config" autocomplete="off">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <input type="hidden" name="section" value="backup_remote">
+        <input type="hidden" name="_checkboxes" value="enabled">
+        <input type="hidden" name="_return_tab" value="offsite-ftp">
+        <label class="field-checkbox" style="font-weight:600;margin:0 0 0.6rem">
+          <input type="checkbox" name="enabled" value="true" {% if config.backup_remote.enabled %}checked{% endif %}>
+          Copy every backup to this server
+        </label>
+        <div class="field-row three">
+          <div class="field">
+            <label for="scheme">Protocol</label>
+            <select id="scheme" name="scheme">
+              <option value="ftp" {% if config.backup_remote.scheme == "ftp" %}selected{% endif %}>FTP</option>
+              <option value="ftps" {% if config.backup_remote.scheme == "ftps" %}selected{% endif %}>FTPS</option>
+              <option value="sftp" {% if config.backup_remote.scheme == "sftp" %}selected{% endif %}>SFTP</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="bk_host">Host</label>
+            <input id="bk_host" name="host" type="text" autocapitalize="none" spellcheck="false" value="{{ config.backup_remote.host }}" placeholder="backup.example.com">
+          </div>
+          <div class="field">
+            <label for="bk_port">Port</label>
+            <input id="bk_port" name="port" type="number" min="1" max="65535" value="{% if config.backup_remote.port > 0 %}{{ config.backup_remote.port }}{% else if config.backup_remote.scheme == "sftp" %}22{% else %}21{% endif %}">
+          </div>
+        </div>
+        <div class="field-row">
+          <div class="field">
+            <label for="bk_user">Username</label>
+            <input id="bk_user" name="user" type="text" autocapitalize="none" spellcheck="false" value="{{ config.backup_remote.user }}">
+          </div>
+          <div class="field">
+            <label for="bk_password">Password</label>
+            {% if config.backup_remote.password_set %}
+            {#- A password is already stored. It sits inside a closed
+                disclosure so a stray keystroke cannot overwrite it: you open
+                "change" before you can type a new one. Left closed, the empty
+                field posts nothing to keep and the stored password stays
+                (post_config drops an empty `password`). -#}
+            <details class="pw-locked">
+              <summary class="btn small" style="list-style:none;cursor:pointer;display:inline-flex;align-items:center;gap:0.35rem">Stored — change it</summary>
+              <input id="bk_password" name="password" type="password" autocomplete="new-password" value=""
+                     placeholder="A new password replaces the stored one"
+                     style="margin-top:0.5rem">
+              <p class="text-soft small" style="margin:0.3rem 0 0">Leave this closed to keep the stored password.</p>
+            </details>
+            {% else %}
+            <input id="bk_password" name="password" type="password" autocomplete="new-password" value=""
+                   placeholder="Set a password">
+            {% endif %}
+          </div>
+        </div>
+        <div class="field">
+          <label for="bk_base">Base path <span class="hint">each site gets its own folder under it</span></label>
+          <input id="bk_base" name="base_path" type="text" autocapitalize="none" spellcheck="false" value="{{ config.backup_remote.base_path }}" placeholder="/hyperion-backups">
+        </div>
+        <div class="item-actions"><button type="submit" class="btn primary">Save</button></div>
+      </form>
+    </fieldset>
+    {#- Tests the SAVED target: connect, log in, list the base path. A save
+        restarts the agent (~5 s), so after one the result span fires the
+        check on its own, late enough for the agent to be back. -#}
+    <div class="row" style="align-items:center;gap:0.6rem;margin-top:0.6rem;flex-wrap:wrap">
+      <button type="button" class="btn small"
+              hx-post="/settings/backup-remote/probe"
+              hx-vals='{"_csrf": "{{ csrf_token }}"}'
+              hx-target="#bk-probe-result"
+              hx-swap="innerHTML"
+              title="Connect, log in and list the base path">Test connection</button>
+      <span id="bk-probe-result"
+        {% if auto_probe_backup_remote %}
+            hx-post="/settings/backup-remote/probe"
+            hx-vals='{"_csrf": "{{ csrf_token }}"}'
+            hx-trigger="load delay:6s"
+            hx-swap="innerHTML"
+        {% endif %}>
+        {% if auto_probe_backup_remote %}<span class="text-soft small"><span class="spinner-inline" style="margin-right:0.3rem"></span>Testing the connection once the agent is back…</span>{% endif %}
+      </span>
+    </div>
+    <details class="howto">
+      <summary>How the FTP / SFTP copy works</summary>
+      <ul>
+        <li>Backups land on local disk first, under <code>/var/lib/hyperion/backups/local</code>, and are pushed here as soon as each one finishes.</li>
+        <li>Test connects, logs in and lists the base path, using the target as <strong>saved</strong>{% if chrome.has_nodes %}, from the master{% endif %}. It runs on its own after each save.</li>
+        <li>Hyperion never prunes or deletes anything on this server: clean up old copies there.</li>
+        <li>Plain FTP sends the password and every backup unencrypted. Prefer SFTP or FTPS.</li>
+      </ul>
+    </details>
+  </div>
+
+  <div class="item" id="offsite-s3">
+    <div class="row" style="align-items:center;gap:0.6rem;flex-wrap:wrap">
+      <h3 style="margin:0">S3 target</h3>
+      <span class="pill info" id="s3-editing" hidden></span>
+    </div>
+    <p class="text-soft small" style="margin:0.4rem 0 0.8rem">
+      Add any S3-compatible bucket — AWS, Wasabi, Backblaze B2, MinIO.
+      With an age key, copies are encrypted before they leave the node.
+    </p>
+    <form method="post" action="/settings/backups/upsert" autocomplete="off" id="s3-form">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="id" value="">
+      <input type="hidden" name="kind" value="s3">
+      <div class="field-row">
+        <div class="field">
+          <label for="s3_name">Name <span class="hint">short and unique, shown on each site's Backups tab</span></label>
+          <input id="s3_name" name="name" type="text" required autocapitalize="none" spellcheck="false" placeholder="wasabi-eu">
+        </div>
+        <div class="field">
+          <label for="s3_region">Region</label>
+          <input id="s3_region" name="region" type="text" autocapitalize="none" spellcheck="false" value="us-east-1">
+        </div>
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label for="s3_endpoint">Endpoint</label>
+          <input id="s3_endpoint" name="endpoint" type="url" required spellcheck="false" placeholder="https://s3.eu-central-1.wasabisys.com">
+        </div>
+        <div class="field">
+          <label for="s3_bucket">Bucket</label>
+          <input id="s3_bucket" name="bucket" type="text" required autocapitalize="none" spellcheck="false" placeholder="hyperion-backups">
+        </div>
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label for="s3_access_key_id">Access key ID</label>
+          <input id="s3_access_key_id" name="access_key_id" type="text" required autocapitalize="none" spellcheck="false" placeholder="AKIA…">
+        </div>
+        <div class="field">
+          <label for="s3_secret_key">Secret key <span class="hint" id="s3-secret-hint">never shown again</span></label>
+          <input id="s3_secret_key" name="secret_key" type="password" autocomplete="new-password" required
+                 placeholder="Paste it once">
+        </div>
       </div>
       <div class="field">
-        <label>Secret key <span class="hint">stored at /etc/hyperion/secrets/backup-&lt;id&gt;.key (0600)</span></label>
-        <input name="secret_key" type="password" placeholder="Paste once; it is never shown again">
+        <label for="s3_age">age public key <span class="hint">recommended — blank sends copies unencrypted</span></label>
+        <input id="s3_age" name="age_recipient" type="text" autocapitalize="none" spellcheck="false" placeholder="age1…">
       </div>
-    </div>
-    <div class="field">
-      <label>age public recipient <span class="hint">leave blank for no encryption (not recommended)</span></label>
-      <input name="age_recipient" type="text" placeholder="age1xy…">
-    </div>
-    <div class="field-row">
-      <div class="field">
-        {# Honest label: the pruner keeps the newest N objects per hosting,
-           full stop — it does not understand days, weeks or months. The
-           old "Daily / Weekly / Monthly retention" trio implied a
-           grandfather-father-son scheme that does not exist: weekly and
-           monthly were stored and read by nothing, and "daily" was not
-           days. An operator sizing their off-site costs deserves the real
-           rule, not a fancier one that is not implemented. #}
-        <label>Keep newest <span class="hint">archives per site · older ones are pruned after each upload</span></label>
-        <input name="retention_daily" type="number" min="0" value="7">
+      <div class="field" style="max-width:24rem">
+        <label for="s3_keep">Keep the newest <span class="hint">per site in the bucket · 0 = all</span></label>
+        <input id="s3_keep" name="retention_daily" type="number" min="0" max="1000" step="1" required value="7">
       </div>
-    </div>
-    <div class="field">
-      <label style="display:flex;align-items:center;gap:0.4rem">
+      <label class="field-checkbox" style="margin:0.6rem 0 0">
         <input type="checkbox" name="enabled" value="on" checked>
-        Enabled — the scheduler pushes backups to this target
+        Send backups to this target
       </label>
+      <div class="item-actions">
+        <button type="button" class="btn ghost" id="s3-cancel" hidden>Cancel edit</button>
+        <button type="submit" class="btn primary" id="s3-submit">Add target</button>
+      </div>
+    </form>
+    <details class="howto">
+      <summary>How S3 copies work</summary>
+      <ul>
+        <li>After each backup the node uploads the archive, the database dump and the manifest. With an age key each file is encrypted on the node and streamed (<code>age → aws</code>), so it needs no extra local disk.</li>
+        <li>Only the age <em>public</em> key is stored. Keep the private key somewhere safe, off the servers: it is the only way to read these copies.</li>
+        <li>After each upload the bucket is pruned to the newest copies per site set here; 0 keeps everything.</li>
+        <li>Every node needs the AWS CLI (<code>apt install awscli</code>), and <code>age</code> for encryption.</li>
+        <li>The secret key is kept in a 0600 file under <code>/etc/hyperion/secrets/</code>{% if chrome.has_nodes %} and handed to the other nodes by the settings sync{% endif %}. When editing, leave it blank to keep the stored one.</li>
+        <li>Test asks the bucket's address for an answer: it proves the endpoint and bucket name, not the keys.</li>
+      </ul>
+    </details>
+  </div>
+</fieldset>
+
+{# ── How long things are kept ───────────────────────────────────────────── #}
+<fieldset class="group"{{ chrome.ro() }}>
+  <div class="ghead">How long things are kept{% if chrome.has_nodes %}<span class="scope-tag" title="Set here, copied to every node by the settings sync">All nodes</span>{% endif %}</div>
+
+  <div class="item" id="local-copies">
+    <div class="row" style="align-items:center;gap:0.6rem;flex-wrap:wrap">
+      <h3 style="margin:0">Local copies</h3>
+      <span class="pill {{ local.cls }}">{{ local.word }}</span>
     </div>
-    <button class="btn primary" type="submit">Save target</button>
-  </form>
-  <p class="text-soft small" style="margin-top:0.8rem">
-    The agent calls <code>aws --endpoint-url=…</code> at upload time, so install the AWS CLI on every node
-    (<code>apt install awscli</code>). For age encryption, also install <code>age</code>.
-  </p>
-</div>
+    <p class="text-soft small" style="margin:0.4rem 0 0.8rem">
+      Every backup lands on local disk first. Once its off-site copy is
+      confirmed, the local one can be deleted to save disk.
+    </p>
+    <form method="post" action="/settings/config" autocomplete="off">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="section" value="backup">
+      <input type="hidden" name="_checkboxes" value="drop_local_after_offsite">
+      <input type="hidden" name="_return_tab" value="local-copies">
+      <label class="field-checkbox" style="font-weight:600;margin:0">
+        <input type="checkbox" name="drop_local_after_offsite" value="true"
+               {% if config.backup.drop_local_after_offsite %}checked{% endif %}>
+        Delete the local copy once it is verified off-site
+      </label>
+      <div class="field" style="margin:0.7rem 0 0;max-width:20rem">
+        <label for="keep_local_latest">Keep the newest anyway <span class="hint">per site · 0 = keep none</span></label>
+        <input type="number" id="keep_local_latest" name="keep_local_latest" min="0" max="1000" step="1"
+               value="{{ config.backup.keep_local_latest }}">
+      </div>
+      <div class="item-actions"><button type="submit" class="btn primary">Save</button></div>
+    </form>
+    <details class="howto">
+      <summary>When a local copy is deleted</summary>
+      <ul>
+        <li>After each backup of a site, its local archives and database dumps — this backup's and any older one already off-site, except the newest kept here — are deleted <strong>only once each off-site copy has been re-checked and confirmed present</strong>, never on a mere “upload finished”.</li>
+        <li>A copy that cannot be confirmed is kept, and the site's Backups tab says why. A node with no off-site destination never deletes anything.</li>
+        <li>A restore then comes from the off-site copy, through the site's Off-site panel.</li>
+        <li><strong>Off by default</strong>: a local copy means a faster restore and a second copy, at the cost of disk.</li>
+        <li>Turning it on frees a site's existing copies after its next archive backup, on whichever node owns it. To free them now, use <a href="#offsite-backfill">Copy off-site &amp; delete local</a>; for one site, <em>Off-site &amp; drop</em> on its Backups tab.</li>
+        {% if chrome.has_nodes %}<li>A node running an older agent ignores the keep count; if dropping is on there, it does not take a count above 0 until it is upgraded.</li>{% endif %}
+      </ul>
+    </details>
+  </div>
+
+  <div class="item" id="backup-retention">
+    <h3>Archive retention</h3>
+    <p class="text-soft small" style="margin:0 0 0.8rem">
+      Old archives are deleted after each new backup, but every site keeps its
+      newest few however old they are.
+    </p>
+    <form method="post" action="/settings/config" autocomplete="off">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="section" value="backup_retention">
+      <input type="hidden" name="_return_tab" value="backup-retention">
+      <div class="field-row">
+        <div class="field">
+          <label for="max_age">Delete archives older than <span class="hint">days</span></label>
+          <input id="max_age" name="max_age_days" type="number" min="1" max="3650"
+                 value="{{ config.backup_retention.max_age_days }}">
+        </div>
+        <div class="field">
+          <label for="keep_latest">Always keep the newest <span class="hint">per site, however old</span></label>
+          <input id="keep_latest" name="keep_latest_n" type="number" min="1" max="1000"
+                 value="{{ config.backup_retention.keep_latest_n }}">
+        </div>
+      </div>
+      <div class="item-actions"><button type="submit" class="btn primary">Save</button></div>
+    </form>
+    <details class="howto">
+      <summary>How archive retention works</summary>
+      <ul>
+        <li>When a backup of a site completes, its archives older than the set age are deleted from the node — but its newest successful ones are always kept, so a site nobody has touched for months still has its last few backups.</li>
+        <li>A site's profile or care plan can set a longer history for that site.</li>
+        <li>Snapshots follow this rule too until <a href="#snapshot-retention">Snapshot retention</a> has been saved once.</li>
+        <li>Off-site copies have their own rule: an S3 target keeps the newest copies set on it, and the FTP / SFTP server is never pruned. Deleted sites wait in <a href="#trash">Trash</a>.</li>
+      </ul>
+    </details>
+  </div>
+
+  <div class="item" id="snapshot-retention">
+    <h3>Snapshot retention</h3>
+    <p class="text-soft small" style="margin:0 0 0.8rem">
+      Currently: snapshots are <strong>{{ config.snapshot_retention.describe() }}</strong>.
+    </p>
+    <form method="post" action="/settings/config" autocomplete="off">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="section" value="snapshots">
+      <input type="hidden" name="_return_tab" value="snapshot-retention">
+      <div class="field-row">
+        <div class="field">
+          <label for="snap_keep_days">Delete snapshots older than <span class="hint">days · 0 = never by age</span></label>
+          <input id="snap_keep_days" name="keep_days" type="number" min="0" max="3650"
+                 value="{{ config.snapshot_retention.keep_days }}">
+        </div>
+        <div class="field">
+          <label for="snap_keep_last">Always keep the newest <span class="hint">per site, however old</span></label>
+          <input id="snap_keep_last" name="keep_last" type="number" min="0" max="1000"
+                 value="{{ config.snapshot_retention.keep_last }}">
+        </div>
+      </div>
+      <div class="item-actions"><button type="submit" class="btn primary">Save</button></div>
+    </form>
+    <details class="howto">
+      <summary>How snapshot retention works</summary>
+      <ul>
+        <li>Until this card is saved once, snapshots follow <a href="#backup-retention">Archive retention</a>.</li>
+        <li>Age is counted from today. Old snapshots are deleted once a day on every node, and straight after each new snapshot; deleting frees the disk space they used.</li>
+        <li>Single snapshots can be deleted by hand on each site's Backups tab.</li>
+      </ul>
+    </details>
+  </div>
+</fieldset>
+
+{# ── Deleted sites ──────────────────────────────────────────────────────────
+   [cluster] is written by several cards on several pages: this form posts
+   ONLY the two trash keys and declares only its own checkbox. #}
+<fieldset class="group"{{ chrome.ro() }}>
+  <div class="ghead">Deleted sites{% if chrome.has_nodes %}<span class="scope-tag" title="Set here, copied to every node by the settings sync">All nodes</span>{% endif %}</div>
+  <div class="item" id="trash">
+    <div class="row" style="align-items:center;gap:0.6rem;flex-wrap:wrap">
+      <h3 style="margin:0">Trash</h3>
+      <span class="pill {{ trash.cls }}">{{ trash.word }}</span>
+    </div>
+    <p class="text-soft small" style="margin:0.4rem 0 0.8rem">
+      {% if config.cluster.trash_enabled %}A deleted site waits in <a href="/trash">Trash</a>, offline but intact, before it is removed for good.{% else %}Deleting a site removes it for good, straight away. With Trash on, it waits in <a href="/trash">Trash</a> first.{% endif %}
+    </p>
+    <form method="post" action="/settings/config" autocomplete="off">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="section" value="cluster">
+      <input type="hidden" name="_return_tab" value="trash">
+      <input type="hidden" name="_checkboxes" value="trash_enabled">
+      <label class="field-checkbox" style="font-weight:600;margin:0">
+        <input type="checkbox" name="trash_enabled" value="true"
+               {% if config.cluster.trash_enabled %}checked{% endif %}>
+        Move deleted sites to Trash first
+      </label>
+      <div class="field" style="margin:0.7rem 0 0;max-width:20rem">
+        <label for="trash_retention_days">Keep them for <span class="hint">days · 1–365</span></label>
+        <input id="trash_retention_days" name="trash_retention_days" type="number"
+               min="1" max="365" step="1"
+               value="{{ config.cluster.trash_retention_days }}">
+      </div>
+      <div class="item-actions"><button type="submit" class="btn primary">Save</button></div>
+    </form>
+    <details class="howto">
+      <summary>What Trash keeps</summary>
+      <ul>
+        <li>A trashed site is offline: nginx answers 503, PHP-FPM stops, and its database and system users are locked. Its files, database, certificates and user are kept.</li>
+        <li>Until the time is up you can restore it, or delete it for good, from <a href="/trash">Trash</a>. After that the scheduler runs the permanent delete on its own.</li>
+        <li>Off (the default) means a delete is permanent at once.</li>
+        {% if chrome.has_nodes %}<li>A delete runs on the node that owns the site, and reads that node's copy of this setting.</li>{% endif %}
+      </ul>
+    </details>
+  </div>
+</fieldset>
+
+{# ── Maintenance ────────────────────────────────────────────────────────────
+   Last on the page on purpose: settings first, then this one-off action,
+   whose second button deletes local copies. #}
+<fieldset class="group"{% if !can_backfill %} disabled{% endif %}>
+  <div class="ghead">Maintenance</div>
+  <div class="item" id="offsite-backfill">
+    <h3>Copy existing backups off-site</h3>
+    <p class="text-soft small" style="margin:0 0 0.8rem">
+      Sends the backups that never reached an off-site target, oldest first,
+      on every node — for example those made before a target was set up.
+    </p>
+    {% if active_targets == 0 && targets_error.is_none() %}
+    <p class="small" style="margin:0 0 0.8rem"><span class="pill warn">no target in use</span> <span class="text-soft">There is nowhere to copy to yet — see <a href="#offsite-targets">Off-site targets</a>.</span></p>
+    {% endif %}
+    <div class="row" style="gap:0.6rem;flex-wrap:wrap">
+      <form method="post" action="/settings/backups/backfill" style="margin:0"
+            data-confirm-title="Copy existing backups off-site"
+            data-confirm-body="Uploads every backup that has no off-site copy to the off-site targets in use, on every node, oldest first. This transfers real data and can take a long time and a lot of bandwidth. It never deletes anything."
+            data-confirm-confirm-label="Start copying">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <button class="btn primary" type="submit">Copy existing backups off-site</button>
+      </form>
+      <form method="post" action="/settings/backups/backfill?drop=1" style="margin:0"
+            data-confirm-title="Copy off-site, then delete local"
+            data-confirm-body="Uploads backups that have no off-site copy, then DELETES each local archive and database dump — of those and of backups already off-site — once it is independently re-verified present off-site. Each site's newest local copies set under Local copies stay. A copy that cannot be confirmed off-site is kept. The off-site copy remains and can still be restored. Runs on every node and can take a long time."
+            data-confirm-variant="danger"
+            data-confirm-confirm-label="Copy, then delete local">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <button class="btn danger" type="submit">Copy off-site &amp; delete local</button>
+      </form>
+    </div>
+    <details class="howto">
+      <summary>What the two buttons do</summary>
+      <ul>
+        <li>Off-site copies are made as each backup runs, so anything already on local disk when a target was set up was never sent. The copy walks the backups with no off-site copy recorded — <strong>oldest first</strong>, because the oldest is closest to being pruned off local disk — and uploads them.</li>
+        <li>It runs as a background job on {% if chrome.has_nodes %}the master and every node at once, each over the backups of the sites it owns; the job log reports each node{% else %}this server{% endif %}. One run copies at most 200 backups per node: run it again to continue.</li>
+        <li>Backups whose archive was already pruned are reported separately and counted as gone: nothing can retry those.</li>
+        <li><strong>Copy off-site &amp; delete local</strong> also deletes each local copy once it has been independently re-verified off-site — including copies that were <strong>already off-site</strong>, which are re-checked where they are rather than uploaded again. Each site's newest copies set under <a href="#local-copies">Local copies</a> stay. A copy that cannot be confirmed (missing, wrong size, or the target unreachable) is <strong>kept</strong>, so this never deletes the only copy.</li>
+      </ul>
+    </details>
+  </div>
+</fieldset>
+
+<script>
+(function () {
+  'use strict';
+  // "Edit" on an S3 row fills the S3 form with that target (never its
+  // secret) and turns the form into an edit of it; "Cancel edit" turns it
+  // back into "add". A hidden input's value IS its default, so form.reset()
+  // does not clear the id: it is set by hand both ways.
+  var form = document.getElementById('s3-form');
+  if (!form) return;
+  var field = function (n) { return form.elements.namedItem(n); };
+  var badge = document.getElementById('s3-editing');
+  var submit = document.getElementById('s3-submit');
+  var cancel = document.getElementById('s3-cancel');
+  var hint = document.getElementById('s3-secret-hint');
+  var secret = field('secret_key');
+
+  function addMode() {
+    form.reset();
+    field('id').value = '';
+    submit.textContent = 'Add target';
+    cancel.hidden = true;
+    badge.hidden = true;
+    badge.textContent = '';
+    secret.required = true;
+    secret.placeholder = 'Paste it once';
+    hint.textContent = 'never shown again';
+  }
+
+  document.querySelectorAll('[data-s3-edit]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var d = btn.dataset;
+      form.reset();
+      field('id').value = d.id;
+      field('name').value = d.name || '';
+      field('endpoint').value = d.endpoint || '';
+      field('bucket').value = d.bucket || '';
+      field('region').value = d.region || '';
+      field('access_key_id').value = d.accessKeyId || '';
+      field('age_recipient').value = d.ageRecipient || '';
+      field('retention_daily').value = d.keep || '0';
+      field('enabled').checked = d.enabled === 'true';
+      secret.value = '';
+      secret.required = false;
+      secret.placeholder = 'Stored — leave blank to keep';
+      hint.textContent = 'blank keeps the stored key';
+      submit.textContent = 'Save changes';
+      cancel.hidden = false;
+      badge.textContent = 'editing ' + (d.name || '');
+      badge.hidden = false;
+      document.getElementById('offsite-s3').scrollIntoView({ block: 'start' });
+      field('name').focus({ preventScroll: true });
+    });
+  });
+  cancel.addEventListener('click', addMode);
+})();
+</script>
 {% endblock %}

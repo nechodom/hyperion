@@ -860,7 +860,7 @@ pub fn print_pretty(resp: &Response) {
                 println!(
                     "no directory on the off-site store for this site — nothing has ever been \
                      pushed for it (the folder is created by the first upload). Use the \
-                     \"Copy existing backups off-site\" button in Settings."
+                     \"Copy existing backups off-site\" button in Settings → Backups."
                 );
             } else if listing.files.is_empty() {
                 println!("the off-site directory exists but is EMPTY");

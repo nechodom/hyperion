@@ -196,8 +196,12 @@ document.addEventListener('click', function (ev) {
   const params = new URLSearchParams(location.search);
   const ok = params.get('flash');
   const er = params.get('flash_error');
-  if (ok) window.toast(ok, 'success', 5000);
-  if (er) window.toast(er, 'error', 7000);
+  // A page that shows the flash itself, next to what it is about (Settings
+  // moves it into the saved card, Service health next to its group), must
+  // not repeat it as a toast in the corner.
+  const shownInPage = document.querySelector('[data-settings-flash], [data-svc-flash]');
+  if (ok && !shownInPage) window.toast(ok, 'success', 5000);
+  if (er && !shownInPage) window.toast(er, 'error', 7000);
   if (ok || er) {
     // Drop the flash from the URL so a refresh doesn't replay it.
     params.delete('flash'); params.delete('flash_error');
@@ -223,7 +227,19 @@ document.addEventListener('click', function (ev) {
     { group: 'Pages', label: 'Email log',       href: '/emails',     keys: ['email', 'mail', 'smtp', 'sent', 'inbox', 'outbox'] },
     { group: 'Pages', label: 'Users',           href: '/admin/users',keys: ['users', 'admin', 'rbac', 'roles'] },
     { group: 'Pages', label: 'My profile',      href: '/profile',    keys: ['profile', 'me', 'account', '2fa'] },
-    { group: 'Pages', label: 'Settings',        href: '/settings',   keys: ['settings', 'config', 'agent', 'smtp', 'slack', 'api', 'api keys', 'backups', 'trash', 'retention', 'letters', 'alerts', 'bans', 'geoip', 'updates', 'previews', '2fa'] },
+    { group: 'Pages', label: 'API keys',        href: '/admin/api-keys', keys: ['api', 'api keys', 'keys', 'tokens', 'bearer'] },
+    { group: 'Pages', label: 'Settings',        href: '/settings',   keys: ['settings', 'config', 'configuration', 'agent.toml'] },
+    // One entry per Settings page, so a search lands on the page rather than
+    // the overview. `meta` keeps "Mail" apart from the Email log.
+    { group: 'Pages', label: 'Panel',           href: '/settings/panel',   meta: 'Settings', keys: ['panel domain', 'hostname', 'updates', 'version', 'upgrade', 'auto-update'] },
+    { group: 'Pages', label: 'HTTPS & previews', href: '/settings/https',  meta: 'Settings', keys: ['https', 'tls', 'ssl', 'acme', "let's encrypt", 'letsencrypt', 'preview', 'wildcard', 'certificate'] },
+    { group: 'Pages', label: 'Mail',            href: '/settings/mail',    meta: 'Settings', keys: ['mail', 'smtp', 'relay', 'sender', 'test email'] },
+    { group: 'Pages', label: 'Alerts',          href: '/settings/alerts',  meta: 'Settings', keys: ['alerts', 'slack', 'webhook', 'recipients', 'alert language', 'alert wording'] },
+    { group: 'Pages', label: 'Customer letters', href: '/settings/letters', meta: 'Settings', keys: ['letters', 'care report', 'expiry', 'logo', 'branding', 'core web vitals', 'cwv', 'translation', 'language'] },
+    { group: 'Pages', label: 'Backups',         href: '/settings/backups', meta: 'Settings', keys: ['backups', 'off-site', 'offsite', 'ftp', 'sftp', 's3', 'retention', 'snapshots', 'trash', 'local copies'] },
+    { group: 'Pages', label: 'Access',          href: '/settings/access',  meta: 'Settings', keys: ['access', '2fa', 'two-factor', 'sign-in', 'audit retention'] },
+    { group: 'Pages', label: 'Brute-force & GeoIP', href: '/settings/bans', meta: 'Settings', keys: ['bans', 'brute-force', 'bruteforce', 'fail2ban', 'thresholds', 'geoip', 'maxmind', 'country'] },
+    { group: 'Pages', label: 'Cluster',         href: '/settings/cluster', meta: 'Settings', keys: ['cluster', 'placement', 'test nodes', 'hardening', 'pinning', 'settings sync'] },
     { group: 'Pages', label: 'Nodes / install', href: '/install',    keys: ['nodes', 'install', 'invite', 'enroll'] },
     { group: 'Actions', label: 'Show keyboard shortcuts', action: 'shortcuts', keys: ['shortcuts', 'keys', 'help'] },
     { group: 'Actions', label: 'Sign out',      action: 'logout',    keys: ['logout', 'signout', 'exit'] },

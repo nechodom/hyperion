@@ -835,6 +835,110 @@ details.svc-fold .svc-row .pill.muted { display: none; }
   .svc-row .svc-main { flex-basis: 100%; }
 }
 
+/* ============================================================
+ *  Settings — an overview plus one page per section, with a
+ *  sub-navigation beside the content (it becomes a scrolling strip
+ *  above the content on narrow screens). Same monochrome tokens as
+ *  the main sidebar.
+ * ============================================================ */
+.settings-shell {
+  display: grid;
+  grid-template-columns: 12.5rem minmax(0, 1fr);
+  gap: 2.25rem;
+  align-items: start;
+}
+.settings-nav {
+  position: sticky;
+  top: 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 0.875rem;
+}
+.settings-nav a {
+  display: block;
+  padding: 0.42rem 0.7rem;
+  border-radius: var(--radius-sm);
+  color: var(--text-dim);
+  text-decoration: none;
+  line-height: 1.3;
+}
+.settings-nav a:hover { background: var(--surface-2); color: var(--text); }
+.settings-nav a.active { background: var(--surface-2); color: var(--text); font-weight: 600; }
+.settings-nav-label {
+  margin: 1.1rem 0 0.3rem;
+  padding: 0 0.7rem;
+  font-size: 0.7rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-weight: 600;
+  color: var(--text-soft);
+}
+.settings-main { min-width: 0; max-width: 60rem; }
+.settings-main > .flash { margin-bottom: 1rem; }
+.item > .flash.in-card { margin: 0 0 1rem; }
+
+/* A panel of owner-only forms is a <fieldset class="group">, so one
+   `disabled` makes the whole panel read-only for everybody else. */
+fieldset.group { margin-inline: 0; padding: 0; min-inline-size: 0; }
+
+/* Who a setting applies to, on the panel's header. Only rendered when
+   worker nodes exist — on one server every setting is "this server". */
+.scope-tag {
+  margin-left: auto;
+  padding: 0.08rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--text-soft);
+  background: var(--surface);
+  white-space: nowrap;
+}
+
+/* "How it works" — the long explanation, folded under the controls. */
+details.howto { margin-top: 0.9rem; font-size: 0.85rem; color: var(--text-soft); }
+details.howto > summary { cursor: pointer; color: var(--text-dim); font-weight: 500; list-style: none; }
+details.howto > summary::-webkit-details-marker { display: none; }
+details.howto > summary::before { content: "▸"; margin-right: 0.35rem; }
+details.howto[open] > summary::before { content: "▾"; }
+details.howto > :not(summary) { margin: 0.5rem 0 0; line-height: 1.6; }
+details.howto ul { padding-left: 1.2rem; }
+
+/* Settings overview: one row per page, its state in a sentence. */
+.group > a.set-row {
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
+  padding: 0.85rem 1.25rem;
+  border-bottom: 1px solid var(--border);
+  color: inherit;
+  text-decoration: none;
+}
+.group > a.set-row:last-child { border-bottom: none; }
+.group > a.set-row:hover { background: var(--surface-2); }
+.set-row .set-main { flex: 1; min-width: 0; }
+.set-row .set-title { font-weight: 600; font-size: 0.92rem; }
+.set-row .set-state { color: var(--text-dim); font-size: 0.85rem; margin-top: 0.1rem; overflow-wrap: anywhere; }
+.set-row .set-chevron { width: 16px; height: 16px; color: var(--text-soft); flex: none; }
+
+@media (max-width: 880px) {
+  .settings-shell { grid-template-columns: minmax(0, 1fr); gap: 1rem; }
+  .settings-nav {
+    position: static;
+    flex-direction: row;
+    overflow-x: auto;
+    gap: 0.25rem;
+    padding-bottom: 0.5rem;
+    border-bottom: 1px solid var(--border);
+    scrollbar-width: thin;
+  }
+  .settings-nav-label { display: none; }
+  .settings-nav a { white-space: nowrap; }
+}
+
 /* Hosting → WordPress tab: one row per check inside a .group — status dot,
    name, a one-line verdict, actions. Problems list underneath; what passes
    folds away. Every row is a lazy partial that re-renders itself by its id,

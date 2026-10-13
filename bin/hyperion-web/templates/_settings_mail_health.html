@@ -1,0 +1,11 @@
+{#- The Local mail server card's one line on Settings → Mail, from the
+    node's postfix diagnosis (`mail_health::verdict`). Always a 200: htmx
+    does not swap an error status, which would leave "Checking…" forever. -#}
+{% if let Some(e) = error %}
+<span class="text-soft small">Could not check postfix: {{ e }}</span>
+{% else %}
+<div class="row" style="align-items:center;gap:0.55rem;flex-wrap:nowrap">
+  <span class="chk-dot {{ tone }}"></span>
+  <span>{{ line }}</span>
+</div>
+{% endif %}
