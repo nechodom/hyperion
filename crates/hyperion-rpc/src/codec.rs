@@ -670,6 +670,18 @@ pub enum Request {
     EmailConfigSet {
         fields: RedactedFields,
     },
+    /// THIS node's agent.toml as it is on disk, secrets masked by the node
+    /// itself (they never leave it). Drives the per-node settings page.
+    NodeConfigRead,
+    /// Write one section of THIS node's agent.toml and restart its own agent
+    /// so the value takes effect. Same per-section validation as
+    /// `AgentConfigUpdate`; unlike it, the restart is done node-side, which is
+    /// what lets the panel change a worker's settings without SSH. `fields`
+    /// is redacted in `Debug` (an FTP password can be among them).
+    NodeConfigSet {
+        section: String,
+        fields: RedactedFields,
+    },
     /// Replace (or, with empty bytes, remove) the logo embedded in
     /// notification e-mails. Per-node, because the agent that SENDS the mail
     /// is the one that has to read the file.
@@ -2215,6 +2227,8 @@ pub enum Response {
     OsUpdates(hyperion_types::OsUpdateStatus),
     AgentConfigUpdate,
     EmailConfigSet,
+    NodeConfigRead(String),
+    NodeConfigSet,
     EmailLogoSet,
     EmailLogoGet(Option<String>),
     GeoipRefresh(i64),
@@ -2841,6 +2855,25 @@ mod tests {
         );
         let back: Request = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(req, back, "EmailConfigSet must round-trip through serde");
+    }
+
+    #[test]
+    fn node_config_set_debug_redacts_ftp_password() {
+        // NodeConfigSet reaches workers too and can carry the off-site FTP
+        // password; same masking contract as EmailConfigSet.
+        let mut map = std::collections::BTreeMap::new();
+        map.insert("host".to_string(), "ftp.example.com".to_string());
+        map.insert("password".to_string(), "ftp-SUPERSECRET".to_string());
+        let req = Request::NodeConfigSet {
+            section: "backup_remote".to_string(),
+            fields: map.into(),
+        };
+        let dbg = format!("{req:?}");
+        assert!(!dbg.contains("ftp-SUPERSECRET"), "password leaked: {dbg}");
+        assert!(dbg.contains("ftp.example.com"), "{dbg}");
+        let back: Request =
+            serde_json::from_str(&serde_json::to_string(&req).expect("ser")).expect("de");
+        assert_eq!(req, back);
     }
 
     #[test]

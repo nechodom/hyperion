@@ -20,6 +20,9 @@ set -uo pipefail
 export DEBIAN_FRONTEND=noninteractive
 export LC_ALL=C.UTF-8 LANG=C.UTF-8
 unset LANGUAGE
+# A transient unit starts with no HOME, and update.sh, git, cargo and rustup
+# all read it — update.sh died on `$HOME: unbound variable`.
+export HOME="${HOME:-/root}"
 export NEEDRESTART_MODE=l
 export APT_LISTCHANGES_FRONTEND=none
 export UCF_FORCE_CONFFOLD=1

@@ -160,6 +160,9 @@
 #==========================================================================
 
 set -euo pipefail
+# Run from a systemd transient unit (the panel's node update) there is no HOME;
+# git and cargo need one.
+export HOME="${HOME:-/root}"
 
 INSTALL_DIR="${HYPERION_INSTALL_DIR:-/opt/hyperion}"
 REF="${HYPERION_REF:-main}"
@@ -433,7 +436,7 @@ fi
 
 # cargo is only needed if we end up building — checked there, not here: a box
 # installed from pre-built binaries has no toolchain and must still update.
-export PATH="$HOME/.cargo/bin:/root/.cargo/bin:$PATH"
+export PATH="${HOME:-/root}/.cargo/bin:/root/.cargo/bin:$PATH"
 
 # An update.sh from before the reorder below stops the services FIRST and then
 # re-execs into this copy. Those services are ours to bring back if this copy

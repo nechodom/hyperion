@@ -28899,13 +28899,45 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         &self,
         fields: std::collections::BTreeMap<String, String>,
     ) -> Result<(), RpcError> {
-        self.agent_config_update("email".to_string(), fields)
-            .await?;
-        // Apply postfix immediately from the just-written agent.toml.
-        let _ = self.mta_reconfigure().await;
-        // Schedule a self-restart so self.email_config (loaded at boot) is also
-        // refreshed. Detached + delayed: same approach hyperion-web uses for
-        // the master, but done agent-side so it works on workers too.
+        self.node_config_set("email".to_string(), fields).await
+    }
+
+    /// This node's agent.toml exactly as it is on disk, secrets masked HERE —
+    /// so a worker's SMTP / FTP password never crosses the wire to the panel.
+    /// Read fresh on every call: right after a save the file runs a few
+    /// seconds ahead of the restarting agent, and the page must show the file.
+    pub async fn node_config_read(&self) -> Result<String, RpcError> {
+        let path = self
+            .agent_config_path
+            .as_ref()
+            .ok_or_else(|| RpcError::Validation {
+                message: "agent_config_path not wired — config reading disabled".into(),
+            })?;
+        let raw = tokio::fs::read_to_string(path).await.map_err(|e| {
+            RpcError::Internal_with(format!("could not read {}: {e}", path.display()))
+        })?;
+        Ok(crate::config_persist::mask_secrets(&raw))
+    }
+
+    /// Write one section of THIS node's agent.toml and make it take effect.
+    ///
+    /// The per-node counterpart of `agent_config_update`: that one only writes
+    /// the file and leaves the restart to hyperion-web, which can restart the
+    /// master's agent and nobody else's. This one is dispatched to any node
+    /// over the signed channel, so it restarts the agent it runs in — detached
+    /// and delayed, so this RPC's answer is back before the agent goes down.
+    /// Same validation as `agent_config_update` (`parse_agent_section_fields`).
+    pub async fn node_config_set(
+        &self,
+        section: String,
+        fields: std::collections::BTreeMap<String, String>,
+    ) -> Result<(), RpcError> {
+        let is_email = section == "email";
+        self.agent_config_update(section, fields).await?;
+        if is_email {
+            // Apply postfix immediately from the just-written agent.toml.
+            let _ = self.mta_reconfigure().await;
+        }
         tokio::spawn(async {
             tokio::time::sleep(std::time::Duration::from_secs(3)).await;
             match tokio::process::Command::new("/usr/bin/systemctl")
@@ -28914,11 +28946,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 .await
             {
                 Ok(o) if o.status.success() => {
-                    tracing::info!("self-restart after email config set: ok")
+                    tracing::info!("self-restart after node config set: ok")
                 }
                 Ok(o) => tracing::error!(
                     stderr = %String::from_utf8_lossy(&o.stderr).trim(),
-                    "self-restart after email config set failed — restart hyperion-agent manually"
+                    "self-restart after node config set failed — restart hyperion-agent manually"
                 ),
                 Err(e) => tracing::error!(error = %e, "self-restart spawn failed"),
             }

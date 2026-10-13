@@ -1001,6 +1001,18 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.email_config_set(fields).await
     }
 
+    async fn node_config_read(&self) -> Result<String, RpcError> {
+        self.svc.node_config_read().await
+    }
+
+    async fn node_config_set(
+        &self,
+        section: String,
+        fields: std::collections::BTreeMap<String, String>,
+    ) -> Result<(), RpcError> {
+        self.svc.node_config_set(section, fields).await
+    }
+
     async fn update_check(
         &self,
         force_refresh: bool,

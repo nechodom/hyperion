@@ -9,6 +9,18 @@
   </div>
 </div>
 
+{% if let Some(err) = error %}
+<div class="flash error" style="max-width:760px;margin-bottom:0.9rem">
+  <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+  <div class="flash-body">
+    <strong>Not validated yet — the records below are still the right ones.</strong>
+    The domain's own nameservers don't serve them yet, so Let's Encrypt was
+    not asked (asking now would fail the order and give you new values).
+    <div class="small" style="margin-top:0.35rem;word-break:break-word">{{ err }}</div>
+  </div>
+</div>
+{% endif %}
+
 <div class="card" style="max-width:760px">
   <h2>Step 1 — publish these DNS records</h2>
   <p class="muted">
@@ -31,9 +43,10 @@
     </table>
   </div>
   <p class="muted small">
-    Verify each with <code>dig +short TXT &lt;name&gt;</code> — the values
-    should appear before you continue. The pending order is held on the node,
-    so you can return to this page within the hour.
+    Before asking Let's Encrypt, the panel checks the domain's own
+    nameservers for every value and stops if any is missing — so an early
+    click costs nothing and the values stay the same. Starting the wildcard
+    again while this order is pending also shows these same values.
   </p>
 
   <h2 style="margin-top:1.25rem">Step 2 — validate and issue</h2>
@@ -44,6 +57,7 @@
   </p>
   <form method="post" action="/settings/node-wildcard/finish">
     <input type="hidden" name="_csrf" value="{{ csrf_finish }}">
+    <input type="hidden" name="records" value="{{ records_field }}">
     <input type="hidden" name="node_id" value="{{ node_id }}">
     <input type="hidden" name="base" value="{{ base }}">
     <div class="row" style="gap:0.5rem;align-items:center;margin-top:0.5rem">
