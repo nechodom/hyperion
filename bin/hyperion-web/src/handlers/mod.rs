@@ -21,6 +21,7 @@ pub mod login;
 pub mod me;
 pub mod migration;
 pub mod monitoring;
+pub mod node_settings;
 pub mod notifications;
 pub mod packages;
 pub mod pma;

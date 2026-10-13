@@ -865,6 +865,16 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(()) => Response::EmailConfigSet,
             Err(e) => Response::Error(e),
         },
+        Request::NodeConfigRead => match api.node_config_read().await {
+            Ok(s) => Response::NodeConfigRead(s),
+            Err(e) => Response::Error(e),
+        },
+        Request::NodeConfigSet { section, fields } => {
+            match api.node_config_set(section, fields.into_inner()).await {
+                Ok(()) => Response::NodeConfigSet,
+                Err(e) => Response::Error(e),
+            }
+        }
         Request::UpdateCheck { force_refresh } => match api.update_check(force_refresh).await {
             Ok(v) => Response::UpdateCheck(v),
             Err(e) => Response::Error(e),
@@ -2721,6 +2731,16 @@ mod tests {
 
         async fn email_config_set(
             &self,
+            _: std::collections::BTreeMap<String, String>,
+        ) -> Result<(), RpcError> {
+            Ok(())
+        }
+        async fn node_config_read(&self) -> Result<String, RpcError> {
+            Ok(String::new())
+        }
+        async fn node_config_set(
+            &self,
+            _: String,
             _: std::collections::BTreeMap<String, String>,
         ) -> Result<(), RpcError> {
             Ok(())

@@ -1676,7 +1676,8 @@
       {% else %}<span class="pill warn">local only</span>{% endif %}
     </div>
     <p class="text-soft small" style="margin:0 0 0.6rem">
-      Saved on <strong>this master's</strong> agent.toml only. S3-compatible targets are on the
+      Saved on <strong>this master's</strong> agent.toml only{% if !nodes.is_empty() %} — each node's own
+      target is on its <em>Settings</em> page, opened from <a href="/install">Nodes</a>{% endif %}. S3-compatible targets are on the
       next card; each site picks its schedule and target on its own Backups tab.
     </p>
     <p class="text-soft small" style="margin:0 0 1rem">
@@ -2373,7 +2374,8 @@
       <p class="text-soft small" style="margin:0 0 1rem;line-height:1.55">
         <strong>This form edits {{ config.hostname }} only.</strong> Every enrolled
         node scans with its own <code>[fail2ban]</code> section; changing it here
-        does not reach them.
+        does not reach them. Change another node's on its own
+        <em>Settings</em> page, opened from <a href="/install">Nodes</a>.
       </p>
       {% endif %}
       <p class="text-soft small" style="margin:0 0 1rem;line-height:1.55">

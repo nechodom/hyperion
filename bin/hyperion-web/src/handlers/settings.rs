@@ -713,7 +713,7 @@ pub struct Fail2banView {
 /// then, which is exactly what's rendered — flagged with `in_toml = false`.
 /// `None` means the file didn't parse at all, and the card says that instead
 /// of showing numbers it can't stand behind.
-fn parse_fail2ban_section(raw: &str) -> Option<Fail2banView> {
+pub(crate) fn parse_fail2ban_section(raw: &str) -> Option<Fail2banView> {
     let doc: toml::Value = raw.parse().ok()?;
     let table = doc.get("fail2ban");
     let d = hyperion_core::Fail2banConfig::default();
@@ -1441,7 +1441,7 @@ pub struct ConfigEditForm {
 ///
 /// Forms without checkboxes omit `_checkboxes` entirely (or leave
 /// it empty); the helper is a no-op then.
-fn synthesize_unchecked_checkboxes(
+pub(crate) fn synthesize_unchecked_checkboxes(
     fields: &mut std::collections::BTreeMap<String, String>,
     declared: &str,
 ) {
@@ -2461,56 +2461,10 @@ pub async fn post_email_autodetect(
     Ok(Json(a).into_response())
 }
 
-/// Mask password / token / webhook values in raw TOML before
-/// rendering it to the Raw TOML tab on /settings. We never want
-/// to leak credentials into HTML the operator might screenshot.
-///
-/// Strategy: replace the contents of any double-quoted value on a
-/// line whose key matches the suspect list with `"«set»"` (or
-/// `"«empty»"` if it was already blank). Operates line-by-line so
-/// it's robust against multi-line values that we don't have
-/// (everything in agent.toml is single-line strings).
+/// Mask password / token / webhook values in raw TOML before rendering it.
+/// Lives in hyperion-core so a worker masks its own file before sending it.
 fn mask_secrets_in_toml(s: &str) -> String {
-    const SUSPECT_KEYS: &[&str] = &[
-        "password",
-        "smtp_password",
-        "invite_token",
-        "secret",
-        "webhook",
-        "default_webhook",
-        "auth_token",
-        "api_key",
-        "key",
-    ];
-    let mut out = String::with_capacity(s.len());
-    for line in s.lines() {
-        let trimmed = line.trim_start();
-        // Find `<key> = "..."` lines that match a suspect.
-        if let Some(eq) = trimmed.find('=') {
-            let key = trimmed[..eq].trim();
-            if SUSPECT_KEYS.contains(&key) {
-                let value_part = trimmed[eq + 1..].trim();
-                if value_part.starts_with('"') {
-                    let indent_len = line.len() - trimmed.len();
-                    let mask = if value_part == "\"\"" {
-                        "«empty»"
-                    } else {
-                        "«set»"
-                    };
-                    out.push_str(&line[..indent_len]);
-                    out.push_str(key);
-                    out.push_str(" = \"");
-                    out.push_str(mask);
-                    out.push('"');
-                    out.push('\n');
-                    continue;
-                }
-            }
-        }
-        out.push_str(line);
-        out.push('\n');
-    }
-    out
+    hyperion_core::config_persist::mask_secrets(s)
 }
 
 fn urlencode(s: &str) -> String {
@@ -3950,10 +3904,9 @@ from_address = "ops@example.cz"
         let input = "passwordless = true\nmy_password = \"x\"\n";
         let out = mask_secrets_in_toml(input);
         assert!(out.contains("passwordless = true"));
-        // my_password isn't in the explicit list either — leave it.
-        // (operators using non-standard key names get protection
-        // by the on-disk file mode, not by this best-effort scrub.)
-        assert!(out.contains("my_password = \"x\""));
+        // A `_password` / `_key` / `_token` suffix IS masked: matching only
+        // exact names printed `[performance] psi_api_key` in the clear.
+        assert!(out.contains("my_password = \"«set»\""));
     }
 
     #[test]

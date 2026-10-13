@@ -1,0 +1,401 @@
+{% extends "base.html" %}
+{% block title %}{{ label }} settings · Nodes · Hyperion{% endblock %}
+{% block main %}
+<div class="breadcrumbs">
+  <a href="/install">Nodes</a>
+  <span class="sep">›</span>
+  <a href="/install#node-{{ node_id }}">{{ label }}</a>
+  <span class="sep">›</span>
+  <span>Settings</span>
+</div>
+<div class="page-header">
+  <div>
+    <h1>{{ label }} settings</h1>
+    <div class="subtitle">
+      {% if is_master %}
+        What this server does with its own <code>agent.toml</code>. Panel-wide settings are on <a href="/settings">Settings</a>.
+      {% else %}
+        What this node does on its own: its scanner, its backups, its updates, its certificates. Saved in the node’s <code>/etc/hyperion/agent.toml</code>; the node’s agent restarts to apply each save.
+      {% endif %}
+    </div>
+  </div>
+</div>
+
+{% if let Some(config) = config %}
+
+{# ───── Updates ───── #}
+<div class="group">
+  <div class="ghead">Updates</div>
+  <div class="item" id="updates">
+    <h3>
+      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 4v6h-6"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+      Automatic updates
+    </h3>
+    <p class="text-soft small" style="margin:0 0 0.8rem;line-height:1.55">
+      When on, this node checks hourly for a new Hyperion release and installs it
+      <strong>in safe mode</strong>: binaries are snapshotted first and restored
+      if the node does not come back healthy. System packages are never touched;
+      install those from <a href="/install#node-{{ node_id }}">Nodes</a> when you are watching.
+    </p>
+    <form method="post" action="/install/node-settings" class="row" style="gap:0.6rem;align-items:center">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="node_id" value="{{ node_id }}">
+      <input type="hidden" name="section" value="update">
+      <input type="hidden" name="_checkboxes" value="auto">
+      <label class="field-checkbox" style="margin:0">
+        <input type="checkbox" name="auto" value="true" {% if config.update_auto %}checked{% endif %}>
+        <span><strong>Update {{ label }} automatically</strong></span>
+      </label>
+      <button class="btn primary" type="submit">Save</button>
+    </form>
+  </div>
+</div>
+
+{# ───── Brute-force scanner ───── #}
+<div class="group">
+  <div class="ghead">Brute-force scanner</div>
+  {% if let Some(f) = fail2ban %}
+  <div class="item" id="bruteforce">
+    <div class="row" style="align-items:center;gap:0.6rem;margin-bottom:0.5rem">
+      <h3 style="margin:0">
+        <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+        Brute-force scanner
+      </h3>
+      {% if f.cfg.enabled %}<span class="pill ok">scanning</span>
+      {% else %}<span class="pill warn">off</span>{% endif %}
+    </div>
+    {% if !f.in_toml %}
+    <div class="flash info" style="margin-bottom:0.85rem">
+      <div class="flash-body">
+        This node’s <code>agent.toml</code> has no <code>[fail2ban]</code> section, so it runs the
+        built-in defaults — that is what’s filled in below. Saving writes the section for the first time.
+      </div>
+    </div>
+    {% endif %}
+    {% if f.clamped %}
+    <div class="alert alert-warn" role="alert" style="margin:0 0 0.85rem">
+      <strong>The file and the running scanner disagree.</strong>
+      At least one value is below the floor the agent applies at start-up, so the
+      scanner is <em>not</em> using the number shown. Saving writes values that stand on their own.
+    </div>
+    {% endif %}
+    <form method="post" action="/install/node-settings" autocomplete="off">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="node_id" value="{{ node_id }}">
+      <input type="hidden" name="section" value="fail2ban">
+      <input type="hidden" name="_checkboxes" value="enabled">
+      <label class="field-checkbox" style="font-weight:600">
+        <input type="checkbox" name="enabled" value="true" {% if f.cfg.enabled %}checked{% endif %}>
+        Scan for login floods and ban offenders
+      </label>
+      <div class="field" style="margin-top:0.6rem">
+        <label for="f2b_window">Window (seconds) <span class="hint">how far back each scan counts failures</span></label>
+        <input id="f2b_window" name="window_secs" type="number" min="1" max="86400"
+               value="{{ f.cfg.window_secs }}" style="max-width:12rem">
+      </div>
+      <div class="field-row">
+        <div class="field" style="flex:1">
+          <label for="f2b_http">Website login <span class="hint">per site</span></label>
+          <input id="f2b_http" name="http_threshold" type="number" min="2" max="10000" value="{{ f.cfg.http_threshold }}">
+        </div>
+        <div class="field" style="flex:1">
+          <label for="f2b_ssh">SSH</label>
+          <input id="f2b_ssh" name="ssh_threshold" type="number" min="2" max="10000" value="{{ f.cfg.ssh_threshold }}">
+        </div>
+        <div class="field" style="flex:1">
+          <label for="f2b_ftp">FTP</label>
+          <input id="f2b_ftp" name="ftp_threshold" type="number" min="2" max="10000" value="{{ f.cfg.ftp_threshold }}">
+        </div>
+        <div class="field" style="flex:1">
+          <label for="f2b_mail">Mail</label>
+          <input id="f2b_mail" name="mail_threshold" type="number" min="2" max="10000" value="{{ f.cfg.mail_threshold }}">
+        </div>
+        <div class="field" style="flex:1">
+          <label for="f2b_waf">WAF refusals <span class="hint">per site</span></label>
+          <input id="f2b_waf" name="waf_threshold" type="number" min="3" max="1000" value="{{ f.cfg.waf_threshold }}">
+        </div>
+      </div>
+      <p class="text-soft small" style="margin:0 0 0.8rem">Failures inside the window before an address is banned.</p>
+      <div class="field-row">
+        <div class="field" style="flex:1">
+          <label for="f2b_ttl">First ban (seconds)</label>
+          <input id="f2b_ttl" name="ban_ttl_secs" type="number" min="60" max="31536000" value="{{ f.cfg.ban_ttl_secs }}">
+        </div>
+        <div class="field" style="flex:1">
+          <label for="f2b_repeat_ttl">Repeat offender (seconds)</label>
+          <input id="f2b_repeat_ttl" name="repeat_ttl_secs" type="number" min="60" max="31536000" value="{{ f.cfg.repeat_ttl_secs }}">
+        </div>
+        <div class="field" style="flex:1">
+          <label for="f2b_lookback">Counts as a repeat for (seconds) <span class="hint">0 = never escalate</span></label>
+          <input id="f2b_lookback" name="repeat_lookback_secs" type="number" min="0" max="31536000" value="{{ f.cfg.repeat_lookback_secs }}">
+        </div>
+      </div>
+      <p class="text-soft small" style="margin:0 0 0.8rem;line-height:1.55">
+        What each number means is explained on <a href="/settings#bruteforce-scanner">Settings → Bans &amp; blocking</a>.
+        Bans in force are on <a href="/protection#bans">Protection</a>.
+      </p>
+      <div class="item-actions"><button type="submit" class="btn primary">Save brute-force settings</button></div>
+    </form>
+  </div>
+  {% else %}
+  <div class="item" id="bruteforce">
+    <h3 style="font-size:0.95rem;margin:0 0 0.6rem">Brute-force scanner — thresholds unknown</h3>
+    <p class="text-soft small" style="margin:0;line-height:1.55">
+      {% if raw_error.is_empty() %}This node’s <code>agent.toml</code> did not parse{% else %}{{ raw_error }}{% endif %},
+      so the current thresholds can’t be shown and a form here would be guessing.
+    </p>
+  </div>
+  {% endif %}
+</div>
+
+{# ───── Backups ───── #}
+<div class="group">
+  <div class="ghead">Backups</div>
+  {% if has_workers %}
+  <div class="item muted">
+    <p class="text-soft small" style="margin:0;line-height:1.55">
+      <strong>What is kept</strong>, <strong>Local backup copies</strong> and both retention cards are also on
+      <a href="/settings#protection-mode">Settings → Backups &amp; trash</a>, which saves them to
+      <em>every</em> node. Set a different value here for this node only; the next save there replaces it.
+    </p>
+  </div>
+  {% endif %}
+
+  <div class="item" id="protection-mode">
+    <h3>
+      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v6"/><path d="m8 6 4-4 4 4"/><rect x="3" y="10" width="18" height="11" rx="2"/><path d="M7 15h10"/></svg>
+      What this node keeps
+    </h3>
+    <form method="post" action="/install/node-settings" autocomplete="off">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="node_id" value="{{ node_id }}">
+      <input type="hidden" name="section" value="protection">
+      <div class="field" style="max-width:34rem">
+        <label for="prot_mode">Keep</label>
+        <select id="prot_mode" name="mode">
+          <option value="both"{% if config.cluster.protection_mode == "both" %} selected{% endif %}>Both — archives for disaster recovery, snapshots for undo</option>
+          <option value="backups"{% if config.cluster.protection_mode == "backups" %} selected{% endif %}>Backup archives only — no snapshots are taken</option>
+          <option value="snapshots"{% if config.cluster.protection_mode == "snapshots" %} selected{% endif %}>Snapshots only — no scheduled archives, and no off-site copy</option>
+        </select>
+      </div>
+      <div class="item-actions"><button class="btn primary" type="submit">Save</button></div>
+    </form>
+  </div>
+
+  <div class="item" id="offsite-ftp">
+    <div class="row" style="align-items:center;gap:0.6rem;margin-bottom:0.5rem">
+      <h3 style="margin:0">
+        <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+        Off-site backup target (FTP/FTPS/SFTP)
+      </h3>
+      {% if config.backup_remote.enabled %}<span class="pill ok">pushing</span>
+      {% else %}<span class="pill warn">local only</span>{% endif %}
+    </div>
+    <p class="text-soft small" style="margin:0 0 0.8rem">
+      Where <strong>this node</strong> pushes the backups of the sites it holds. S3 targets are shared by every node and live on
+      <a href="/settings/backups">Backup targets</a>.
+    </p>
+    <form method="post" action="/install/node-settings" autocomplete="off">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="node_id" value="{{ node_id }}">
+      <input type="hidden" name="section" value="backup_remote">
+      <input type="hidden" name="_checkboxes" value="enabled">
+      <label class="field-checkbox" style="font-weight:600">
+        <input type="checkbox" name="enabled" value="true" {% if config.backup_remote.enabled %}checked{% endif %}>
+        Push every backup to a remote target
+      </label>
+      <div class="field-row" style="margin-top:0.5rem">
+        <div class="field" style="width:8rem">
+          <label for="scheme">Protocol</label>
+          <select id="scheme" name="scheme">
+            <option value="ftp" {% if config.backup_remote.scheme == "ftp" %}selected{% endif %}>FTP</option>
+            <option value="ftps" {% if config.backup_remote.scheme == "ftps" %}selected{% endif %}>FTPS</option>
+            <option value="sftp" {% if config.backup_remote.scheme == "sftp" %}selected{% endif %}>SFTP</option>
+          </select>
+        </div>
+        <div class="field" style="flex:1">
+          <label for="bk_host">Host</label>
+          <input id="bk_host" name="host" type="text" value="{{ config.backup_remote.host|e }}">
+        </div>
+        <div class="field" style="width:6rem">
+          <label for="bk_port">Port</label>
+          <input id="bk_port" name="port" type="number" min="1" max="65535" value="{{ config.backup_remote.port }}">
+        </div>
+      </div>
+      <div class="field-row">
+        <div class="field" style="flex:1">
+          <label for="bk_user">Username</label>
+          <input id="bk_user" name="user" type="text" value="{{ config.backup_remote.user|e }}">
+        </div>
+        <div class="field" style="flex:1">
+          <label for="bk_password">Password</label>
+          {% if config.backup_remote.password_set %}
+          <details class="pw-locked">
+            <summary class="btn small" style="list-style:none;cursor:pointer;display:inline-flex;align-items:center;gap:0.35rem">
+              Stored — click to change it
+            </summary>
+            <input id="bk_password" name="password" type="password" autocomplete="new-password" value=""
+                   placeholder="Type a NEW password to replace the stored one" style="margin-top:0.5rem">
+            <p class="text-soft small" style="margin:0.3rem 0 0">Leave this closed to keep the current password.</p>
+          </details>
+          {% else %}
+          <input id="bk_password" name="password" type="password" autocomplete="new-password" value="" placeholder="Set a password">
+          {% endif %}
+        </div>
+      </div>
+      <div class="field">
+        <label for="bk_base">Base path on remote <span class="hint">per-hosting sub-directory is appended automatically</span></label>
+        <input id="bk_base" name="base_path" type="text" value="{{ config.backup_remote.base_path|e }}" placeholder="/hyperion-backups">
+      </div>
+      <div class="item-actions"><button type="submit" class="btn primary">Save backup target</button></div>
+    </form>
+    <div class="row" style="align-items:center;gap:0.6rem;margin-top:0.8rem;flex-wrap:wrap">
+      <button type="button" class="btn small"
+              hx-post="/install/node-settings/probe"
+              hx-vals='{"_csrf": "{{ csrf_token }}", "node_id": "{{ node_id }}"}'
+              hx-target="#bk-probe-result"
+              hx-swap="innerHTML"
+              title="Connect from this node, log in and list the target directory">
+        Test connection
+      </button>
+      <span id="bk-probe-result"></span>
+    </div>
+    <p class="text-soft small" style="margin:0.4rem 0 0">
+      Runs on {{ label }} against the target as <strong>saved</strong>. Right after a save, give the agent a few seconds to restart.
+    </p>
+  </div>
+
+  <div class="item" id="local-copies">
+    <h3>
+      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+      Local backup copies
+    </h3>
+    <form method="post" action="/install/node-settings" autocomplete="off">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="node_id" value="{{ node_id }}">
+      <input type="hidden" name="section" value="backup">
+      <input type="hidden" name="_checkboxes" value="drop_local_after_offsite">
+      <label class="field-checkbox" style="font-weight:600">
+        <input type="checkbox" name="drop_local_after_offsite" value="true" {% if config.backup.drop_local_after_offsite %}checked{% endif %}>
+        Delete the local copy once it is verified off-site
+      </label>
+      <div class="field" style="margin:0.7rem 0 0">
+        <label for="keep_local_latest">Keep the newest local copies anyway <span class="hint">per site, 0 = keep none</span></label>
+        <input type="number" id="keep_local_latest" name="keep_local_latest" min="0" max="1000" step="1"
+               value="{{ config.backup.keep_local_latest }}" style="max-width:8rem">
+      </div>
+      <p class="text-soft small" style="margin:0.5rem 0 0.8rem;line-height:1.55">
+        A copy is deleted only after its off-site copy has been re-checked and confirmed present. A node with no off-site destination never deletes anything.
+      </p>
+      <div class="item-actions"><button type="submit" class="btn primary">Save</button></div>
+    </form>
+  </div>
+
+  <div class="item" id="backup-retention">
+    <h3>
+      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+      Backup retention
+    </h3>
+    <form method="post" action="/install/node-settings" autocomplete="off">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="node_id" value="{{ node_id }}">
+      <input type="hidden" name="section" value="backup_retention">
+      <div class="field-row">
+        <div class="field" style="flex:1">
+          <label for="max_age">Max age (days)</label>
+          <input id="max_age" name="max_age_days" type="number" min="1" max="3650" value="{{ config.backup_retention.max_age_days }}">
+        </div>
+        <div class="field" style="flex:1">
+          <label for="keep_latest">Keep latest N per hosting</label>
+          <input id="keep_latest" name="keep_latest_n" type="number" min="1" max="1000" value="{{ config.backup_retention.keep_latest_n }}">
+        </div>
+      </div>
+      <div class="item-actions"><button type="submit" class="btn primary">Save retention policy</button></div>
+    </form>
+  </div>
+
+  <div class="item" id="snapshot-retention">
+    <h3>
+      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v6"/><path d="m8 6 4-4 4 4"/><rect x="3" y="10" width="18" height="11" rx="2"/><path d="M7 15h10"/></svg>
+      Snapshot retention
+    </h3>
+    <p class="text-soft small" style="margin:0.3rem 0 0.6rem">
+      Currently: snapshots are <strong>{{ config.snapshot_retention.describe() }}</strong>.
+    </p>
+    <form method="post" action="/install/node-settings" autocomplete="off">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="node_id" value="{{ node_id }}">
+      <input type="hidden" name="section" value="snapshots">
+      <div class="field-row">
+        <div class="field" style="flex:1">
+          <label for="snap_keep_days">Delete snapshots older than (days) <span class="hint">0 = never by age</span></label>
+          <input id="snap_keep_days" name="keep_days" type="number" min="0" max="3650" value="{{ config.snapshot_retention.keep_days }}">
+        </div>
+        <div class="field" style="flex:1">
+          <label for="snap_keep_last">Always keep the newest <span class="hint">per site</span></label>
+          <input id="snap_keep_last" name="keep_last" type="number" min="0" max="1000" value="{{ config.snapshot_retention.keep_last }}">
+        </div>
+      </div>
+      <div class="item-actions"><button type="submit" class="btn primary">Save snapshot retention</button></div>
+    </form>
+  </div>
+</div>
+
+{# ───── Certificates + mail ───── #}
+<div class="group">
+  <div class="ghead">Certificates &amp; mail</div>
+  <div class="item" id="acme">
+    <h3>
+      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+      Let's Encrypt contact
+    </h3>
+    <form method="post" action="/install/node-settings" autocomplete="off">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="node_id" value="{{ node_id }}">
+      <input type="hidden" name="section" value="acme">
+      <div class="field">
+        <label for="acme_email">Contact email <span class="hint">Let's Encrypt sends this node's expiry warnings here</span></label>
+        <input id="acme_email" name="contact_email" type="email" required value="{{ acme_contact|e }}" style="width:100%">
+      </div>
+      <div class="item-actions"><button type="submit" class="btn primary">Save contact</button></div>
+    </form>
+  </div>
+  <div class="item muted" id="mail">
+    <h3 style="font-size:0.95rem;margin:0 0 0.6rem">Outgoing mail</h3>
+    <p class="text-soft small" style="margin:0;line-height:1.55">
+      This node’s SMTP relay and local mail server are on
+      <a href="/settings?mail_node={{ node_id }}#mail">Settings → Mail</a>, already switched to {{ label }}.
+    </p>
+  </div>
+</div>
+
+{% else %}
+<div class="flash error">
+  <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+  <div class="flash-body">
+    <strong>{{ label }} did not answer, so its settings can’t be shown.</strong>
+    {{ config_error }}. Nothing is pre-filled from defaults: saving those would overwrite the node’s real values.
+    <a href="/install#node-{{ node_id }}">Test the connection</a> on the Nodes page.
+  </div>
+</div>
+{% endif %}
+
+{# ───── Raw agent.toml ───── #}
+<div class="group">
+  <div class="ghead">Raw configuration</div>
+  <div class="item" id="raw-toml">
+    <h3>
+      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+      Raw agent.toml
+    </h3>
+    {% if let Some(raw) = raw_toml %}
+    <p class="text-soft small" style="margin:0 0 0.8rem">
+      {{ label }}’s file as it is on disk right now, read-only. Passwords and keys are masked on the node itself and never sent here.
+    </p>
+    <pre style="background:var(--surface-1);border-radius:6px;padding:0.9rem 1rem;font-size:0.78rem;line-height:1.55;overflow:auto;max-height:36rem">{{ raw }}</pre>
+    {% else %}
+    <p class="text-soft small" style="margin:0">Not available: {{ raw_error }}.</p>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}
