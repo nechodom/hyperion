@@ -17,7 +17,6 @@ use crate::state::SharedState;
 use askama::Template;
 use axum::extract::{Query, State};
 use axum::response::{Html, IntoResponse, Redirect, Response};
-use hyperion_rpc::codec::{Request, Response as RpcResponse};
 use hyperion_state::capabilities::Capability;
 use hyperion_types::{EmailConfigView, NodeSummary};
 
@@ -113,23 +112,9 @@ pub async fn get_mail(
             })
             .unwrap_or_else(|| id.to_string()),
     };
-    let res = tokio::time::timeout(
-        std::time::Duration::from_secs(4),
-        crate::dispatcher::dispatch_to_node(&state, target.as_deref(), Request::AgentConfigView),
-    )
-    .await;
-    let (email, email_error) = match res {
-        Ok(Ok(RpcResponse::AgentConfigView(c))) => (c.email, None),
-        Ok(Ok(RpcResponse::Error(e))) => (EmailConfigView::default(), Some(e.to_string())),
-        Ok(Ok(_)) => (
-            EmailConfigView::default(),
-            Some("unexpected answer from the agent".into()),
-        ),
-        Ok(Err(e)) => (EmailConfigView::default(), Some(e.to_string())),
-        Err(_) => (
-            EmailConfigView::default(),
-            Some("no answer within 4 s".into()),
-        ),
+    let (email, email_error) = match super::node_email(&state, target.as_deref()).await {
+        Ok(e) => (e, None),
+        Err(e) => (EmailConfigView::default(), Some(e)),
     };
     let tpl = PageTpl {
         username: &ctx.username,

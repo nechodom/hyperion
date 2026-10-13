@@ -224,7 +224,7 @@ pub async fn sync_once(state: &SharedState) -> Result<usize, String> {
 /// Is this the answer of an agent that does not know the request at all?
 /// Such an agent fails to decode it and answers HTTP 400, which curl reports
 /// as exit 22 — the same signal the per-node settings page relies on.
-fn is_old_agent(e: &DispatchError) -> bool {
+pub(crate) fn is_old_agent(e: &DispatchError) -> bool {
     matches!(
         e,
         DispatchError::Remote(hyperion_rpc_client::remote::RemoteClientError::HttpError {

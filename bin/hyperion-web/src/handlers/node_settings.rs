@@ -36,11 +36,11 @@ use std::collections::BTreeMap;
 const SECTIONS: &[(&str, &str, &str)] = &[
     ("update", "updates", "Automatic updates"),
     ("fail2ban", "bruteforce", "Brute-force thresholds"),
-    ("backup_remote", "offsite-ftp", "Off-site backup target"),
+    ("backup_remote", "offsite-ftp", "FTP / SFTP target"),
     ("acme", "acme", "Let's Encrypt contact"),
-    ("protection", "protection-mode", "What this node keeps"),
-    ("backup", "local-copies", "Local backup copies"),
-    ("backup_retention", "backup-retention", "Backup retention"),
+    ("protection", "protection-mode", "What is kept"),
+    ("backup", "local-copies", "Local copies"),
+    ("backup_retention", "backup-retention", "Archive retention"),
     ("snapshots", "snapshot-retention", "Snapshot retention"),
 ];
 

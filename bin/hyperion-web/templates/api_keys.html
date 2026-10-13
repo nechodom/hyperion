@@ -39,13 +39,13 @@
 <div class="group" id="keys">
   <div class="ghead">Keys</div>
   {% if keys.is_empty() %}
-  <div class="item muted"><p class="text-soft small" style="margin:0">No API keys yet. Create one below.</p></div>
+  <div class="item muted"><p class="text-soft small" style="margin:0">No API keys yet. <a href="#create-key">Create one</a>.</p></div>
   {% else %}
   <div class="scroll-x">
   <table class="data-table" style="width:100%">
     <thead>
       <tr>
-        <th>Prefix</th><th>Label</th><th>Capabilities</th><th>Restrictions</th><th>Last used</th><th>Expires</th><th></th>
+        <th>Prefix</th><th>Label</th><th>Capabilities</th><th>Restrictions</th><th>Last used</th><th>Expires</th><th><span class="sr-only">Actions</span></th>
       </tr>
     </thead>
     <tbody>

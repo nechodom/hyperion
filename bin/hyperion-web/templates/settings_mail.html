@@ -5,21 +5,23 @@
     (`?node=<id>`; the master when empty). The picker sits outside the
     groups because all of them follow it. -#}
 {% if chrome.has_nodes %}
+{#- A plain GET form with a visible button: submitting on change would
+    load another node's page on every arrow key a keyboard user presses. -#}
 <form method="get" action="/settings/mail" class="field" style="max-width:28rem;margin:0 0 1.25rem">
   <label for="mail-node">Node <span class="hint">each one sends with its own relay</span></label>
-  <div class="row" style="flex-wrap:nowrap">
-    <select id="mail-node" name="node" onchange="this.form.submit()">
+  <div class="row" style="flex-wrap:nowrap;gap:0.5rem">
+    <select id="mail-node" name="node">
       {% for o in picker %}
       <option value="{{ o.id }}"{% if o.selected %} selected{% endif %}>{{ o.label }}</option>
       {% endfor %}
     </select>
-    <noscript><button class="btn small" type="submit">Show</button></noscript>
+    <button class="btn small" type="submit">Show</button>
   </div>
 </form>
 {% endif %}
 
 <fieldset class="group"{{ chrome.ro() }}>
-  <div class="ghead">Outgoing mail{% if chrome.has_nodes %} · {{ node_label }}<span class="scope-tag" title="Every node has its own">Each node</span>{% endif %}</div>
+  <div class="ghead">Outgoing mail{% if chrome.has_nodes %} · {% if is_master %}Master{% else %}{{ node_label }}{% endif %}<span class="scope-tag" title="Every node has its own">Each node</span>{% endif %}</div>
   <div class="item" id="smtp-relay">
     <div class="row" style="align-items:center;gap:0.6rem;flex-wrap:wrap">
       <h3 style="margin:0">Outgoing relay</h3>
@@ -33,7 +35,7 @@
     </div>
 
     {% if let Some(e) = email_error %}
-    <div class="alert alert-warn" role="alert" style="margin:0.8rem 0 0">
+    <div class="alert alert-warn" role="status" style="margin:0.8rem 0 0">
       {% if is_master %}The agent{% else %}{{ node_label }}{% endif %} did not answer ({{ e }}), so its relay is not shown.
       A form filled with defaults would overwrite the real values on Save.
       <a href="/settings/mail?node={{ node }}">Try again</a>
@@ -41,11 +43,13 @@
     {% else %}
     <p class="text-soft small" style="margin:0.4rem 0 0">
       {% if email.enabled %}
-      Alerts, customer letters and tests from {{ node_label }} go out through
+      Alerts to the <a href="/settings/alerts#alert-recipients">administrator addresses</a>,
+      customer letters and tests from {{ node_label }} go out through
       <strong>{{ email.smtp_host }}</strong>, and so does every site's <code>mail()</code>.
       {% else %}
-      With the relay off, {{ node_label }} sends no alerts or letters by e-mail,
-      and postfix delivers sites' <code>mail()</code> straight to each recipient's server.
+      With the relay off, {{ node_label }} sends no email to the
+      <a href="/settings/alerts#alert-recipients">administrator addresses</a> or
+      customers, and postfix delivers sites' <code>mail()</code> straight to each recipient's server.
       {% endif %}
     </p>
     {% if is_master %}<div id="email-autodetect-result"></div>{% endif %}
@@ -133,7 +137,7 @@
 </fieldset>
 
 <div class="group">
-  <div class="ghead">Checks{% if chrome.has_nodes %} · {{ node_label }}{% endif %}</div>
+  <div class="ghead">Checks{% if chrome.has_nodes %} · {% if is_master %}Master{% else %}{{ node_label }}{% endif %}{% endif %}</div>
   <div class="item" id="mail-test">
     <h3>Test message</h3>
     {% if email_error.is_some() %}

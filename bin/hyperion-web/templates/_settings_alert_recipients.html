@@ -15,7 +15,7 @@
     {% else if r.count == 0 %}<span class="pill warn">no addresses</span>
     {% else if r.count == 1 %}<span class="pill ok">1 address</span>
     {% else %}<span class="pill ok">{{ r.count }} addresses</span>{% endif %}
-    {% if r.known() && !r.relay_on %}<span class="pill muted">relay off</span>{% endif %}
+    {% if r.known() && !r.relay_on %}<span class="pill warn">relay off</span>{% endif %}
   </div>
   {% if let Some(e) = r.error %}
   <p class="text-soft small" style="margin:0">
@@ -25,7 +25,7 @@
   {% else %}
   {% if !r.relay_on %}
   <p class="chk-note tone-warn" style="margin:0 0 0.5rem">
-    Its relay is off, so it sends no e-mail and nobody listed here hears from it.
+    Its relay is off, so it sends no email and nobody listed here hears from it.
     <a href="{{ r.mail_href() }}">Turn the relay on</a>
   </p>
   {% endif %}

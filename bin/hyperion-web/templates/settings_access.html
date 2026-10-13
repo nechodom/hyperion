@@ -2,7 +2,7 @@
 {% block section %}
 {% if let Some(e) = config_error %}
 <div class="flash error">
-  <div class="flash-body">The agent's settings could not be read ({{ e }}). The values below are defaults, not what is set.</div>
+  <div class="flash-body">The agent's settings could not be read ({{ e }}). These are defaults, not what is set, so saving is off until it answers.</div>
 </div>
 {% endif %}
 
@@ -10,7 +10,7 @@
     enforce_admin_2fa in `_checkboxes`: every declared box missing from the
     POST is written as false, so listing the hardening switches here would
     turn them off on every 2FA save. -#}
-<fieldset class="group"{{ chrome.ro() }}>
+<fieldset class="group"{{ chrome.ro() }}{% if config_error.is_some() %} disabled{% endif %}>
   <div class="ghead">Sign-in{% if chrome.has_nodes %}<span class="scope-tag" title="Used by the master only">Master</span>{% endif %}</div>
   <div class="item" id="sign-in">
     <div class="row" style="align-items:center;gap:0.6rem;flex-wrap:wrap">
@@ -67,14 +67,14 @@
       <dt data-require-caps="roles_manage"><a href="/roles">Roles</a></dt>
       <dd data-require-caps="roles_manage" class="text-soft small">Custom roles that grant exactly the capabilities you pick.</dd>
       <dt data-require-caps="api_keys_manage"><a href="/admin/api-keys">API keys</a></dt>
-      <dd data-require-caps="api_keys_manage" class="text-soft small">Keys for scripts using the <code>/api/v1</code> API. They used to be on this page and now live under Administration.</dd>
+      <dd data-require-caps="api_keys_manage" class="text-soft small">Keys for scripts using the <code>/api/v1</code> API.</dd>
       <dt><a href="/profile">My profile</a></dt>
       <dd class="text-soft small">Your own 2FA, password and signed-in devices.</dd>
     </dl>
   </div>
 </div>
 
-<fieldset class="group"{{ chrome.ro() }}>
+<fieldset class="group"{{ chrome.ro() }}{% if config_error.is_some() %} disabled{% endif %}>
   <div class="ghead">Audit log{% if chrome.has_nodes %}<span class="scope-tag" title="Used by the master only">Master</span>{% endif %}</div>
   <div class="item" id="audit-retention">
     <div class="row" style="align-items:center;gap:0.6rem;flex-wrap:wrap">

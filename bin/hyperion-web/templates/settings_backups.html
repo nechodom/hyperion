@@ -9,14 +9,18 @@
 {% if let Some(e) = config_error %}
 <div class="flash error">
   <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-  <div class="flash-body">The agent's settings could not be read ({{ e }}). The values below are defaults, not what is set.</div>
+  <div class="flash-body">The agent's settings could not be read ({{ e }}). These are defaults, not what is set, so saving is off until it answers.</div>
 </div>
 {% endif %}
 
 {# ── What is kept ───────────────────────────────────────────────────────── #}
-<fieldset class="group"{{ chrome.ro() }}>
+<fieldset class="group"{{ chrome.ro() }}{% if config_error.is_some() %} disabled{% endif %}>
   <div class="ghead">What is kept{% if chrome.has_nodes %}<span class="scope-tag" title="Set here, copied to every node by the settings sync">All nodes</span>{% endif %}</div>
   <div class="item" id="protection-mode">
+    {% if config_hidden %}
+    <h3>What is kept</h3>
+    <p class="text-soft small" style="margin:0">Shown to people with the Settings permission; you can manage the S3 targets on this page.</p>
+    {% else %}
     <div class="row" style="align-items:center;gap:0.6rem;flex-wrap:wrap">
       <h3 style="margin:0">What is kept</h3>
       <span class="pill {{ protection.cls }}">{{ protection.word }}</span>
@@ -71,6 +75,7 @@
         run in every mode — that is how those features roll themselves back.
       </p>
     </details>
+    {% endif %}
   </div>
 </fieldset>
 
@@ -114,7 +119,7 @@
     </div>
     {% endif %}
 
-    {% if ftp.shown || !s3.is_empty() %}
+    {% if (ftp.shown && !config_hidden) || !s3.is_empty() %}
     <div class="table-wrap inset">
       <table class="data-table data-table--cards">
         <thead>
@@ -127,7 +132,7 @@
           </tr>
         </thead>
         <tbody>
-          {% if ftp.shown %}
+          {% if ftp.shown && !config_hidden %}
           <tr>
             <td><strong>{{ ftp.protocol }}</strong></td>
             <td>{% if ftp.address.is_empty() %}<span class="text-soft small">no host set</span>{% else %}<code style="word-break:break-all">{{ ftp.address }}</code>{% endif %}</td>
@@ -208,6 +213,9 @@
     </div>
     {% endif %}
 
+    {% if s3_hidden > 0 %}
+    <p class="text-soft small" style="margin:0.6rem 0 0">{{ s3_hidden }} S3 target(s) are listed only for people allowed to manage backup targets.</p>
+    {% endif %}
     <details class="howto">
       <summary>How off-site copies work</summary>
       <ul>
@@ -221,15 +229,19 @@
   </div>
 
   <div class="item" id="offsite-ftp">
+    {% if config_hidden %}
+    <h3>FTP / SFTP target</h3>
+    <p class="text-soft small" style="margin:0">Shown to people with the Settings permission; you can manage the S3 targets on this page.</p>
+    {% else %}
     <div class="row" style="align-items:center;gap:0.6rem;flex-wrap:wrap">
       <h3 style="margin:0">FTP / SFTP target</h3>
-      {% if ftp.shown %}<span class="pill {{ ftp.state.cls }}">{{ ftp.state.word }}</span>{% else %}<span class="pill muted">not set up</span>{% endif %}
+      {% if ftp.shown %}<span class="pill {{ ftp.state.cls }}">{{ ftp.state.word }}</span>{% else %}<span class="pill muted">not set</span>{% endif %}
     </div>
     <p class="text-soft small" style="margin:0.4rem 0 0.8rem">
       One FTP, FTPS or SFTP server that receives a copy of every backup, each
       site in its own folder under the base path.
     </p>
-    <fieldset style="border:0;padding:0;margin:0;min-width:0"{{ chrome.ro() }}>
+    <fieldset style="border:0;padding:0;margin:0;min-width:0"{{ chrome.ro() }}{% if config_error.is_some() %} disabled{% endif %}>
       <form method="post" action="/settings/config" autocomplete="off">
         <input type="hidden" name="_csrf" value="{{ csrf_token }}">
         <input type="hidden" name="section" value="backup_remote">
@@ -263,14 +275,17 @@
             <input id="bk_user" name="user" type="text" autocapitalize="none" spellcheck="false" value="{{ config.backup_remote.user }}">
           </div>
           <div class="field">
-            <label for="bk_password">Password</label>
+            <label for="bk_password" id="bk_password_label">Password</label>
             {% if config.backup_remote.password_set %}
             {#- A password is already stored. It sits inside a closed
                 disclosure so a stray keystroke cannot overwrite it: you open
                 "change" before you can type a new one. Left closed, the empty
                 field posts nothing to keep and the stored password stays
                 (post_config drops an empty `password`). -#}
-            <details class="pw-locked">
+            {#- The label points into a closed disclosure, where nothing can
+                take focus: a click on it opens the disclosure first (script
+                at the end of the page). -#}
+            <details class="pw-locked" id="bk_password_lock">
               <summary class="btn small" style="list-style:none;cursor:pointer;display:inline-flex;align-items:center;gap:0.35rem">Stored — change it</summary>
               <input id="bk_password" name="password" type="password" autocomplete="new-password" value=""
                      placeholder="A new password replaces the stored one"
@@ -319,6 +334,7 @@
         <li>Plain FTP sends the password and every backup unencrypted. Prefer SFTP or FTPS.</li>
       </ul>
     </details>
+    {% endif %}
   </div>
 
   <div class="item" id="offsite-s3">
@@ -328,7 +344,7 @@
     </div>
     <p class="text-soft small" style="margin:0.4rem 0 0.8rem">
       Add any S3-compatible bucket — AWS, Wasabi, Backblaze B2, MinIO.
-      With an age key, copies are encrypted before they leave the node.
+      With an encryption key, copies are encrypted before they leave the node.
     </p>
     <form method="post" action="/settings/backups/upsert" autocomplete="off" id="s3-form">
       <input type="hidden" name="_csrf" value="{{ csrf_token }}">
@@ -366,7 +382,7 @@
         </div>
       </div>
       <div class="field">
-        <label for="s3_age">age public key <span class="hint">recommended — blank sends copies unencrypted</span></label>
+        <label for="s3_age">Encryption key (age public key) <span class="hint">recommended — blank sends copies unencrypted</span></label>
         <input id="s3_age" name="age_recipient" type="text" autocapitalize="none" spellcheck="false" placeholder="age1…">
       </div>
       <div class="field" style="max-width:24rem">
@@ -397,10 +413,14 @@
 </fieldset>
 
 {# ── How long things are kept ───────────────────────────────────────────── #}
-<fieldset class="group"{{ chrome.ro() }}>
+<fieldset class="group"{{ chrome.ro() }}{% if config_error.is_some() %} disabled{% endif %}>
   <div class="ghead">How long things are kept{% if chrome.has_nodes %}<span class="scope-tag" title="Set here, copied to every node by the settings sync">All nodes</span>{% endif %}</div>
 
   <div class="item" id="local-copies">
+    {% if config_hidden %}
+    <h3>Local copies</h3>
+    <p class="text-soft small" style="margin:0">Shown to people with the Settings permission; you can manage the S3 targets on this page.</p>
+    {% else %}
     <div class="row" style="align-items:center;gap:0.6rem;flex-wrap:wrap">
       <h3 style="margin:0">Local copies</h3>
       <span class="pill {{ local.cls }}">{{ local.word }}</span>
@@ -431,17 +451,25 @@
       <ul>
         <li>After each backup of a site, its local archives and database dumps — this backup's and any older one already off-site, except the newest kept here — are deleted <strong>only once each off-site copy has been re-checked and confirmed present</strong>, never on a mere “upload finished”.</li>
         <li>A copy that cannot be confirmed is kept, and the site's Backups tab says why. A node with no off-site destination never deletes anything.</li>
-        <li>A restore then comes from the off-site copy, through the site's Off-site panel.</li>
+        <li>A restore then comes from the off-site copy, through the Off-site copies card on the site's Backups tab.</li>
         <li><strong>Off by default</strong>: a local copy means a faster restore and a second copy, at the cost of disk.</li>
         <li>Turning it on frees a site's existing copies after its next archive backup, on whichever node owns it. To free them now, use <a href="#offsite-backfill">Copy off-site &amp; delete local</a>; for one site, <em>Off-site &amp; drop</em> on its Backups tab.</li>
-        {% if chrome.has_nodes %}<li>A node running an older agent ignores the keep count; if dropping is on there, it does not take a count above 0 until it is upgraded.</li>{% endif %}
+        {% if chrome.has_nodes %}<li>A node on an older agent has no keep count: with deleting on, it keeps no local copy at all. So it is not given deleting with a count above 0 — it keeps its earlier setting until it is upgraded.</li>{% endif %}
       </ul>
     </details>
+    {% endif %}
   </div>
 
   <div class="item" id="backup-retention">
+    {% if config_hidden %}
     <h3>Archive retention</h3>
-    <p class="text-soft small" style="margin:0 0 0.8rem">
+    <p class="text-soft small" style="margin:0">Shown to people with the Settings permission; you can manage the S3 targets on this page.</p>
+    {% else %}
+    <div class="row" style="align-items:center;gap:0.6rem;flex-wrap:wrap">
+      <h3 style="margin:0">Archive retention</h3>
+      <span class="pill {{ retention.cls }}">{{ retention.word }}</span>
+    </div>
+    <p class="text-soft small" style="margin:0.4rem 0 0.8rem">
       Old archives are deleted after each new backup, but every site keeps its
       newest few however old they are.
     </p>
@@ -472,9 +500,14 @@
         <li>Off-site copies have their own rule: an S3 target keeps the newest copies set on it, and the FTP / SFTP server is never pruned. Deleted sites wait in <a href="#trash">Trash</a>.</li>
       </ul>
     </details>
+    {% endif %}
   </div>
 
   <div class="item" id="snapshot-retention">
+    {% if config_hidden %}
+    <h3>Snapshot retention</h3>
+    <p class="text-soft small" style="margin:0">Shown to people with the Settings permission; you can manage the S3 targets on this page.</p>
+    {% else %}
     <h3>Snapshot retention</h3>
     <p class="text-soft small" style="margin:0 0 0.8rem">
       Currently: snapshots are <strong>{{ config.snapshot_retention.describe() }}</strong>.
@@ -505,15 +538,20 @@
         <li>Single snapshots can be deleted by hand on each site's Backups tab.</li>
       </ul>
     </details>
+    {% endif %}
   </div>
 </fieldset>
 
 {# ── Deleted sites ──────────────────────────────────────────────────────────
    [cluster] is written by several cards on several pages: this form posts
    ONLY the two trash keys and declares only its own checkbox. #}
-<fieldset class="group"{{ chrome.ro() }}>
+<fieldset class="group"{{ chrome.ro() }}{% if config_error.is_some() %} disabled{% endif %}>
   <div class="ghead">Deleted sites{% if chrome.has_nodes %}<span class="scope-tag" title="Set here, copied to every node by the settings sync">All nodes</span>{% endif %}</div>
   <div class="item" id="trash">
+    {% if config_hidden %}
+    <h3>Trash</h3>
+    <p class="text-soft small" style="margin:0">Shown to people with the Settings permission; you can manage the S3 targets on this page.</p>
+    {% else %}
     <div class="row" style="align-items:center;gap:0.6rem;flex-wrap:wrap">
       <h3 style="margin:0">Trash</h3>
       <span class="pill {{ trash.cls }}">{{ trash.word }}</span>
@@ -548,6 +586,7 @@
         {% if chrome.has_nodes %}<li>A delete runs on the node that owns the site, and reads that node's copy of this setting.</li>{% endif %}
       </ul>
     </details>
+    {% endif %}
   </div>
 </fieldset>
 
@@ -648,6 +687,21 @@
     });
   });
   cancel.addEventListener('click', addMode);
+})();
+(function () {
+  'use strict';
+  // The FTP password's label points at an input inside a closed
+  // disclosure, which cannot take focus: open it, then focus the field.
+  var label = document.getElementById('bk_password_label');
+  var lock = document.getElementById('bk_password_lock');
+  var input = document.getElementById('bk_password');
+  if (!label || !lock || !input) return;
+  label.addEventListener('click', function (e) {
+    if (lock.open) return;
+    e.preventDefault();
+    lock.open = true;
+    input.focus();
+  });
 })();
 </script>
 {% endblock %}

@@ -16,7 +16,7 @@ use crate::state::SharedState;
 use askama::Template;
 use axum::extract::{Query, State};
 use axum::response::{Html, IntoResponse, Redirect, Response};
-use hyperion_rpc::codec::{Request, Response as RpcResponse};
+use hyperion_rpc::codec::Request;
 use hyperion_state::capabilities::Capability;
 use hyperion_types::{AgentConfigView, EmailConfigView};
 
@@ -36,6 +36,10 @@ struct PageTpl<'a> {
     config_error: Option<String>,
     /// `[letters] operator_lang`: `en` / `cs`.
     operator_lang: String,
+    /// agent.toml could not be read, so `operator_lang` is the default
+    /// (`en`), not what is set — the Language form is switched off rather
+    /// than offering to save a guess.
+    lang_error: Option<String>,
 }
 
 pub async fn get_alerts(
@@ -47,11 +51,15 @@ pub async fn get_alerts(
         return Ok(Redirect::to("/").into_response());
     }
     let (chrome, _nodes) = chrome::chrome(&state, &ctx, "alerts", &q).await;
-    let (config_res, letters) = tokio::join!(
+    let (config_res, toml_res) = tokio::join!(
         hyperion_rpc_client::call(&state.agent_socket, Request::AgentConfigView),
-        super::current_letter_catalogue(),
+        tokio::fs::read_to_string("/etc/hyperion/agent.toml"),
     );
     let (config, config_error) = super::config_or_default(config_res);
+    let (letters, lang_error) = match toml_res {
+        Ok(raw) => (hyperion_core::service::letter_catalog_from_toml(&raw), None),
+        Err(e) => (Default::default(), Some(e.to_string())),
+    };
     let tpl = PageTpl {
         username: &ctx.username,
         user_initial: crate::handlers::user_initial(&ctx.username),
@@ -64,6 +72,7 @@ pub async fn get_alerts(
         config,
         config_error,
         operator_lang: letters.operator_lang.as_str().to_string(),
+        lang_error,
     };
     Ok(Html(tpl.render()?).into_response())
 }
@@ -186,22 +195,7 @@ pub async fn get_alert_recipients(
         let state = state.clone();
         let target = (i > 0).then(|| node.clone());
         set.spawn(async move {
-            let res = tokio::time::timeout(
-                std::time::Duration::from_secs(4),
-                crate::dispatcher::dispatch_to_node(
-                    &state,
-                    target.as_deref(),
-                    Request::AgentConfigView,
-                ),
-            )
-            .await;
-            let answer = match res {
-                Ok(Ok(RpcResponse::AgentConfigView(c))) => Ok(c.email),
-                Ok(Ok(RpcResponse::Error(e))) => Err(e.to_string()),
-                Ok(Ok(_)) => Err("unexpected answer".to_string()),
-                Ok(Err(e)) => Err(e.to_string()),
-                Err(_) => Err("no answer within 4 s".to_string()),
-            };
+            let answer = super::node_email(&state, target.as_deref()).await;
             (i, answer)
         });
     }
@@ -285,6 +279,7 @@ mod tests {
             config,
             config_error: None,
             operator_lang: lang.into(),
+            lang_error: None,
         }
         .render()
         .expect("render")

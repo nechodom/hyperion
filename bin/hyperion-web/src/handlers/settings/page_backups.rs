@@ -234,6 +234,20 @@ pub fn local_copies_pill(b: &BackupConfigView) -> Pill {
     }
 }
 
+/// The pill on "Archive retention". In snapshots-only mode no archives are
+/// made, so the rule governs nothing new.
+pub fn retention_pill(max_age_days: i64, keep_latest_n: i64, snapshots_only: bool) -> Pill {
+    if snapshots_only {
+        return pill("muted", "no archives made");
+    }
+    let days = if max_age_days == 1 {
+        "1 day".to_string()
+    } else {
+        format!("{max_age_days} days")
+    };
+    pill("ok", format!("{days} · newest {keep_latest_n} kept"))
+}
+
 /// The pill on "Trash".
 pub fn trash_pill(enabled: bool, days: i64) -> Pill {
     match (enabled, days) {
@@ -265,9 +279,17 @@ struct BackupsTpl<'a> {
     offsite: Pill,
     protection: Pill,
     local: Pill,
+    retention: Pill,
     trash: Pill,
     /// May add, edit, test and delete S3 targets.
     can_targets: bool,
+    /// The user lacks the Settings permission (they are here for the S3
+    /// targets): the agent.toml cards and the FTP row are not rendered and
+    /// `config` holds defaults, never the real values.
+    config_hidden: bool,
+    /// S3 targets withheld from a user without the backup-targets right
+    /// (their endpoints, buckets and access key ids are that right's).
+    s3_hidden: usize,
     /// May run the backfill: the targets right AND every site in scope,
     /// which the handler also demands.
     can_backfill: bool,
@@ -290,7 +312,12 @@ pub async fn get_backups(
         hyperion_rpc_client::call(&state.agent_socket, Request::AgentConfigView),
         hyperion_rpc_client::call(&state.agent_socket, Request::BackupTargetList),
     );
-    let (config, config_error) = super::config_or_default(config_res);
+    let can_settings = ctx.can(Capability::SettingsManage);
+    let (config, config_error) = if can_settings {
+        super::config_or_default(config_res)
+    } else {
+        (hyperion_types::AgentConfigView::default(), None)
+    };
     let (targets, targets_error) = match targets_res {
         Ok(RpcResponse::BackupTargetList(v)) => (v, None),
         Ok(RpcResponse::Error(e)) => (Vec::new(), Some(e.to_string())),
@@ -308,7 +335,11 @@ pub async fn get_backups(
         s3.push(s3_row(t, on_disk));
     }
     let ftp = ftp_row(&config.backup_remote);
+    // Counted before hiding, so the page can say what it withheld; the
+    // active-target count below still sees them (it is a number, not data).
     let active_targets = usize::from(ftp.active) + s3.iter().filter(|r| r.active).count();
+    let s3_hidden = if can_targets { 0 } else { s3.len() };
+    let s3 = if can_targets { s3 } else { Vec::new() };
     let snapshots_only = config.cluster.protection_mode == "snapshots";
     let tpl = BackupsTpl {
         username: &ctx.username,
@@ -321,6 +352,11 @@ pub async fn get_backups(
         offsite: offsite_pill(active_targets, targets_error.is_none(), snapshots_only),
         protection: protection_pill(&config.cluster.protection_mode),
         local: local_copies_pill(&config.backup),
+        retention: retention_pill(
+            config.backup_retention.max_age_days,
+            config.backup_retention.keep_latest_n,
+            snapshots_only,
+        ),
         trash: trash_pill(
             config.cluster.trash_enabled,
             config.cluster.trash_retention_days,
@@ -333,6 +369,8 @@ pub async fn get_backups(
         config,
         config_error,
         can_targets,
+        config_hidden: !can_settings,
+        s3_hidden,
         can_backfill: can_targets && ctx.scope_all(),
         auto_probe_backup_remote: q.probe_backup_remote.is_some(),
     };
@@ -518,6 +556,9 @@ mod tests {
         assert_eq!(local_copies_pill(&b(true, 0)).word, "deleted once off-site");
         assert_eq!(local_copies_pill(&b(true, 2)).word, "newest 2 kept");
 
+        assert_eq!(retention_pill(30, 3, false).word, "30 days · newest 3 kept");
+        assert_eq!(retention_pill(1, 1, false).word, "1 day · newest 1 kept");
+        assert_eq!(retention_pill(30, 3, true).word, "no archives made");
         assert_eq!(trash_pill(false, 30).word, "off");
         assert_eq!(trash_pill(true, 30).word, "on · 30 days");
         assert_eq!(trash_pill(true, 1).word, "on · 1 day");
@@ -545,6 +586,7 @@ mod tests {
             offsite: offsite_pill(active_targets, true, false),
             protection: protection_pill("both"),
             local: local_copies_pill(&config.backup),
+            retention: retention_pill(30, 3, false),
             trash: trash_pill(false, 30),
             active_targets,
             snapshots_only: false,
@@ -554,6 +596,8 @@ mod tests {
             config,
             config_error: None,
             can_targets,
+            config_hidden: false,
+            s3_hidden: 0,
             can_backfill: can_targets,
             auto_probe_backup_remote: false,
         }

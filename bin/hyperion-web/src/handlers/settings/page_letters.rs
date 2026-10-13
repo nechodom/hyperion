@@ -140,25 +140,33 @@ fn expiry_subject_in_catalogue_tokens(s: &str) -> String {
 /// save from the editor — so a template that only ever repeated the built-in
 /// letter is stored as "no override", and follows each letter's language
 /// from now on instead of pinning one.
+///
+/// The older expiry subject was ALSO the subject of the last notice, on the
+/// day a hosting expires; the catalogue splits that into its own id. Unless
+/// the operator already wrote that one, it gets the moved subject too, so the
+/// most important notice keeps the operator's wording and language.
 pub(super) fn moved_fields(
     n: &NotificationTemplatesView,
     lang: LetterLang,
+    today_subject_written: bool,
 ) -> BTreeMap<String, String> {
-    active_legacy(n)
-        .into_iter()
-        .map(|l| {
-            let raw = legacy_value(n, l.key);
-            let raw = if l.id == "expiry.subject.days" {
-                expiry_subject_in_catalogue_tokens(raw)
-            } else {
-                raw.to_string()
-            };
-            (
-                l.id.to_string(),
-                super::letter_value_to_store(l.id, &raw, lang),
-            )
-        })
-        .collect()
+    let mut out = BTreeMap::new();
+    for l in active_legacy(n) {
+        let raw = legacy_value(n, l.key);
+        let raw = if l.id == "expiry.subject.days" {
+            expiry_subject_in_catalogue_tokens(raw)
+        } else {
+            raw.to_string()
+        };
+        let stored = super::letter_value_to_store(l.id, &raw, lang);
+        // Only real wording: a template that merely repeated the built-in
+        // "expires in N days" must not become the expiry-day subject.
+        if l.id == "expiry.subject.days" && !today_subject_written && !stored.is_empty() {
+            out.insert("expiry.subject.today".to_string(), stored.clone());
+        }
+        out.insert(l.id.to_string(), stored);
+    }
+    out
 }
 
 /// What retiring the older templates writes to `[notifications]`: all four
@@ -456,7 +464,11 @@ pub async fn post_adopt_legacy(
 
     let moved = if moving {
         let cat = super::current_letter_catalogue().await;
-        let fields = moved_fields(&notifications, cat.lang);
+        let today_written = cat
+            .overrides
+            .get("expiry.subject.today")
+            .is_some_and(|v| !v.trim().is_empty());
+        let fields = moved_fields(&notifications, cat.lang, today_written);
         if let Err(e) = config_update(&state, "letters", &fields).await {
             return Ok(chrome::back_with_error(
                 CARD,
@@ -491,8 +503,15 @@ pub async fn post_adopt_legacy(
             failed.extend(e);
         }
     }
-    if let Err(e) = super::push_to_unsynced_nodes(&state, "notifications", cleared).await {
-        failed.extend(e);
+    // Moving: a node the sync cannot update keeps its older template. It
+    // may have refused the wording above (an agent older than the catalogue),
+    // and clearing the template there would leave its customers with the
+    // built-in letter — neither the old wording nor the new. The template
+    // still wins on such a node, so its letters stay what they were.
+    if !moving {
+        if let Err(e) = super::push_to_unsynced_nodes(&state, "notifications", cleared).await {
+            failed.extend(e);
+        }
     }
     super::restart_agent_soon();
 
@@ -528,10 +547,16 @@ pub async fn post_adopt_legacy(
     }
     msg.push('.');
     if moving && active.iter().any(|l| l.id == "expiry.subject.days") {
-        msg.push_str(
-            " The expiry subject now applies while days remain; on the day a hosting \
-             expires, the \u{201c}Subject on the day it expires\u{201d} is used.",
-        );
+        let both = moved
+            .as_ref()
+            .is_some_and(|f| f.contains_key("expiry.subject.today"));
+        msg.push_str(if both {
+            " The expiry subject is used both while days remain and on the day a \
+             hosting expires; edit either in the Expiry warning letter."
+        } else {
+            " The expiry subject applies while days remain; your own subject for the \
+             day a hosting expires is kept."
+        });
     }
     Ok(chrome::back_with_flash(CARD, &msg))
 }
@@ -606,7 +631,7 @@ mod tests {
     #[test]
     fn each_template_lands_on_its_own_id() {
         let n = templates("S {domain}", "B {attacks}", "ES {domain}", "EB {when}");
-        let f = moved_fields(&n, LetterLang::En);
+        let f = moved_fields(&n, LetterLang::En, false);
         assert_eq!(
             f.get("care.subject").map(String::as_str),
             Some("S {domain}")
@@ -617,7 +642,12 @@ mod tests {
             Some("ES {domain}")
         );
         assert_eq!(f.get("expiry.body").map(String::as_str), Some("EB {when}"));
-        assert_eq!(f.len(), 4, "nothing else is written: {f:?}");
+        // The older expiry subject also covered the expiry day.
+        assert_eq!(
+            f.get("expiry.subject.today").map(String::as_str),
+            Some("ES {domain}")
+        );
+        assert_eq!(f.len(), 5, "nothing else is written: {f:?}");
     }
 
     /// The renderers never used a blank template, so moving one would write
@@ -625,7 +655,7 @@ mod tests {
     #[test]
     fn a_blank_template_is_not_moved() {
         let n = templates("", "  \n", "", "Hello {domain}");
-        let f = moved_fields(&n, LetterLang::En);
+        let f = moved_fields(&n, LetterLang::En, false);
         assert_eq!(f.keys().collect::<Vec<_>>(), vec!["expiry.body"]);
         assert_eq!(
             active_legacy(&n).iter().map(|l| l.key).collect::<Vec<_>>(),
@@ -647,7 +677,7 @@ mod tests {
         for lang in [LetterLang::En, LetterLang::Cs] {
             let body = built_in("care.body", lang).replace('\n', "\r\n");
             let n = templates("", &body, "", &built_in("expiry.body", lang));
-            let f = moved_fields(&n, lang);
+            let f = moved_fields(&n, lang, false);
             assert_eq!(f.get("care.body").map(String::as_str), Some(""), "{lang:?}");
             assert_eq!(
                 f.get("expiry.body").map(String::as_str),
@@ -658,7 +688,7 @@ mod tests {
         // The CZECH built-in moved on an ENGLISH install is the operator's
         // wording there, and is kept (normalised to LF).
         let cs = built_in("care.body", LetterLang::Cs).replace('\n', "\r\n");
-        let f = moved_fields(&templates("", &cs, "", ""), LetterLang::En);
+        let f = moved_fields(&templates("", &cs, "", ""), LetterLang::En, false);
         assert_eq!(
             f.get("care.body").map(String::as_str),
             Some(built_in("care.body", LetterLang::Cs).as_str())
@@ -676,14 +706,32 @@ mod tests {
             "Za {days_left_count} dní: {domain} ({days_left})",
             "",
         );
-        let f = moved_fields(&n, LetterLang::Cs);
+        let f = moved_fields(&n, LetterLang::Cs, false);
         assert_eq!(
             f.get("expiry.subject.days").map(String::as_str),
             Some("Za {days} dní: {domain} ({days} {unit})")
         );
         let old_spelling = "[Hyperion] Hosting for {domain} expires in {days_left}";
-        let f = moved_fields(&templates("", "", old_spelling, ""), LetterLang::En);
+        let f = moved_fields(&templates("", "", old_spelling, ""), LetterLang::En, false);
         assert_eq!(f.get("expiry.subject.days").map(String::as_str), Some(""));
+        assert!(
+            !f.contains_key("expiry.subject.today"),
+            "the built-in wording is not the operator's expiry-day subject"
+        );
+    }
+
+    /// The older subject was also the expiry-day subject; it stays that,
+    /// unless the operator already wrote their own for that day.
+    #[test]
+    fn a_moved_expiry_subject_also_covers_the_expiry_day() {
+        let n = templates("", "", "Vaše hosting {domain} brzy vyprší", "");
+        let f = moved_fields(&n, LetterLang::Cs, false);
+        assert_eq!(
+            f.get("expiry.subject.today").map(String::as_str),
+            Some("Vaše hosting {domain} brzy vyprší")
+        );
+        let f = moved_fields(&n, LetterLang::Cs, true);
+        assert!(!f.contains_key("expiry.subject.today"));
     }
 
     #[test]

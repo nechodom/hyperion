@@ -54,7 +54,7 @@ pub const SECTIONS: &[Section] = &[
         slug: "mail",
         title: "Mail",
         group: "Basics",
-        lead: "How each node sends e-mail: its relay and sender address.",
+        lead: "How each node sends email: its relay and sender address.",
         cluster_only: false,
     },
     Section {

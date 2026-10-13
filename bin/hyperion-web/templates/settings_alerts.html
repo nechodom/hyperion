@@ -2,11 +2,11 @@
 {% block section %}
 {% if let Some(e) = config_error %}
 <div class="flash error">
-  <div class="flash-body">The agent's settings could not be read ({{ e }}). What is shown is the defaults, not what is set.</div>
+  <div class="flash-body">The agent's settings could not be read ({{ e }}). These are defaults, not what is set, so saving is off until it answers.</div>
 </div>
 {% endif %}
 
-<fieldset class="group"{{ chrome.ro() }}>
+<fieldset class="group"{{ chrome.ro() }}{% if config_error.is_some() %} disabled{% endif %}>
   <div class="ghead">Slack{% if chrome.has_nodes %}<span class="scope-tag" title="Used by the master only">Master</span>{% endif %}</div>
   <div class="item" id="slack">
     <div class="row" style="align-items:center;gap:0.6rem;flex-wrap:wrap">
@@ -17,8 +17,14 @@
     <p class="text-soft small" style="margin:0.4rem 0 0">
       Alerts post to one channel: backup and certificate failures, monitors
       going down and up, billing reminders. A site's own webhook, on its
-      Monitor tab, replaces it for that site.
+      Monitoring &amp; logs tab, replaces it for that site.
     </p>
+    {% if chrome.has_nodes %}
+    <p class="text-soft small" style="margin:0.4rem 0 0">
+      Only the master posts here: this webhook is not copied to worker nodes,
+      so an alert a worker raises reaches Slack only through that site's own webhook.
+    </p>
+    {% endif %}
     {% if config.slack.default_webhook_set %}
     {#- Connected: no URL field at all. An input left showing while a webhook
         was stored CLEARED it on an empty submit, so the way to check "is it
@@ -67,8 +73,11 @@
   </div>
 </fieldset>
 
+{#- Not switched off with the others when the master's config cannot be
+    read: each node's row is read from that node, and a node that does not
+    answer already gets no form. -#}
 <fieldset class="group"{{ chrome.ro() }}>
-  <div class="ghead">E-mail{% if chrome.has_nodes %}<span class="scope-tag" title="Every node has its own">Each node</span>{% endif %}</div>
+  <div class="ghead">Email{% if chrome.has_nodes %}<span class="scope-tag" title="Every node has its own">Each node</span>{% endif %}</div>
   <div class="item" id="alert-recipients">
     <h3>Recipients</h3>
     <p class="text-soft small" style="margin:0">
@@ -87,23 +96,33 @@
           every other alert the node raises on its own. A letter addressed to a
           customer goes to that customer only.</li>
         <li><strong>Per plan</strong> — extra recipients on each plan in <a href="/profiles">Profiles</a>.</li>
-        <li><strong>Per site</strong> — e-mail, Slack or a webhook on each hosting's Monitor &amp; logs tab.</li>
+        <li><strong>Per site</strong> — email, Slack or a webhook on each site's Monitoring &amp; logs tab.</li>
         <li><strong>History</strong> — every alert, in <a href="/notifications">Notifications</a>.</li>
-        <li><strong>Delivery</strong> — every e-mail sent and the relay's answer, in the <a href="/emails">Email log</a>.</li>
+        <li><strong>Delivery</strong> — every email sent and the relay's answer, in the <a href="/emails">Email log</a>.</li>
       </ul>
     </details>
   </div>
 </fieldset>
 
-<fieldset class="group"{{ chrome.ro() }}>
-  <div class="ghead">Language and wording{% if chrome.has_nodes %}<span class="scope-tag" title="Set here, copied to every node by the settings sync">All nodes</span>{% endif %}</div>
+<fieldset class="group"{{ chrome.ro() }}{% if config_error.is_some() %} disabled{% endif %}>
+  <div class="ghead">Language &amp; wording{% if chrome.has_nodes %}<span class="scope-tag" title="Set here, copied to every node by the settings sync">All nodes</span>{% endif %}</div>
   <div class="item" id="alert-language">
     <h3>Language</h3>
     <p class="text-soft small" style="margin:0 0 0.8rem">
-      What the notification bell and alert e-mail to your administrators are
+      What the notification bell and alert email to your administrators are
       written in. Customer letters have their own, in
       <a href="/settings/letters#letter-language">Customer letters</a>.
     </p>
+    {% if let Some(e) = lang_error %}
+    <p class="chk-note tone-warn" style="margin:0 0 0.8rem">
+      <code>/etc/hyperion/agent.toml</code> could not be read ({{ e }}), so the
+      language set is unknown and saving is off until it can be read.
+    </p>
+    {% endif %}
+    {#- Its own fieldset: the language comes from agent.toml, not from the
+        agent's config view, and an unreadable file must not offer to save
+        the default over what is set. -#}
+    <fieldset style="border:0;padding:0;margin:0;min-width:0"{{ chrome.ro() }}{% if lang_error.is_some() %} disabled{% endif %}>
     <form method="post" action="/settings/config">
       <input type="hidden" name="_csrf" value="{{ csrf_token }}">
       <input type="hidden" name="section" value="letters">
@@ -117,14 +136,19 @@
       </div>
       <div class="item-actions"><button type="submit" class="btn primary">Save</button></div>
     </form>
+    </fieldset>
   </div>
 
   <div class="item" id="alert-templates">
     <h3>Wording</h3>
     <p class="text-soft small" style="margin:0 0 0.9rem">
-      The text around every Slack post and alert e-mail. The preview fills in
+      The text around every Slack post and alert email. The preview fills in
       sample data as you type; an empty field sends the alert as it is.
     </p>
+    {#- A fieldset of its own only so the read-only switch is the nearest
+        one (the Language form above closes another): the group's still
+        covers it. -#}
+    <fieldset style="border:0;padding:0;margin:0;min-width:0"{{ chrome.ro() }}>
     <form method="post" action="/settings/config" autocomplete="off">
       <input type="hidden" name="_csrf" value="{{ csrf_token }}">
       <input type="hidden" name="section" value="notifications">
@@ -137,38 +161,39 @@
                   style="width:100%;font-family:var(--font-mono);font-size:0.85rem"
                   placeholder="{message}">{{ config.notifications.slack_template }}</textarea>
         <div class="text-soft small">Preview</div>
-        <div id="nt_slack_preview" aria-live="polite"
+        <div id="nt_slack_preview"
              style="white-space:pre-wrap;overflow-wrap:anywhere;background:var(--surface-2);border-radius:var(--radius-xs);padding:0.55rem 0.7rem;font-size:0.85rem;min-height:1.4rem"></div>
       </div>
 
       <div class="field">
-        <label for="nt_subject">E-mail subject
+        <label for="nt_subject">Email subject
           <span class="hint">placeholders <code>{subject}</code> <code>{time}</code></span></label>
         <input id="nt_subject" name="email_subject_template" type="text"
                style="font-family:var(--font-mono);font-size:0.85rem"
                placeholder="{subject}" value="{{ config.notifications.email_subject_template }}">
         <div class="text-soft small">Preview</div>
-        <div id="nt_subject_preview" aria-live="polite"
+        <div id="nt_subject_preview"
              style="overflow-wrap:anywhere;background:var(--surface-2);border-radius:var(--radius-xs);padding:0.45rem 0.7rem;font-size:0.85rem;font-weight:600;min-height:1.3rem"></div>
       </div>
 
       <div class="field" style="margin-bottom:0">
-        <label for="nt_body">E-mail body
+        <label for="nt_body">Email body
           <span class="hint">placeholders <code>{body}</code> <code>{time}</code> <code>{panel}</code> <code>{kind}</code></span></label>
         <textarea id="nt_body" name="email_body_template" rows="5"
                   style="width:100%;font-family:var(--font-mono);font-size:0.85rem"
                   placeholder="{body}">{{ config.notifications.email_body_template }}</textarea>
         <div class="text-soft small">Preview</div>
-        <div id="nt_body_preview" aria-live="polite"
+        <div id="nt_body_preview"
              style="white-space:pre-wrap;overflow-wrap:anywhere;background:var(--surface-2);border-radius:var(--radius-xs);padding:0.55rem 0.7rem;font-size:0.85rem;min-height:2.2rem"></div>
       </div>
       <div class="item-actions"><button type="submit" class="btn primary">Save</button></div>
     </form>
+    </fieldset>
     <details class="howto">
       <summary>Placeholders</summary>
       <ul>
         <li><code>{message}</code> — the alert as one line (Slack).</li>
-        <li><code>{subject}</code>, <code>{body}</code> — the e-mail's own subject and text.</li>
+        <li><code>{subject}</code>, <code>{body}</code> — the email's own subject and text.</li>
         <li><code>{time}</code> — when it was sent; <code>{panel}</code> — the panel's address;
           <code>{kind}</code> — what kind of alert it is, such as <code>backup</code>.</li>
         <li>A placeholder Hyperion does not know is sent as typed, so a typo shows.</li>

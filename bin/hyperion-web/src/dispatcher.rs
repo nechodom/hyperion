@@ -81,7 +81,7 @@ fn classify_curl_failure(code: Option<i32>) -> Option<&'static str> {
         Some(90) => Some(
             "TLS certificate pin mismatch — the worker's cert no longer matches the SPKI \
              pin it reported. Restart the worker's agent so it re-reports its pin, or turn \
-             off Enforce worker TLS certificate pinning in Settings → Cluster → \
+             off \"Pin each worker's TLS certificate\" in Settings → Cluster → \
              Channel hardening.",
         ),
         _ => None,
@@ -679,7 +679,7 @@ fn check_cert_pinning(
                  pin on file, so the RPC would run over an unverified connection with nothing \
                  to check the cert against. Refused. Restart the node's agent and wait one \
                  heartbeat for it to report its pin (the 🔒 chip on Nodes), or turn off \
-                 Enforce worker TLS certificate pinning in Settings → Cluster → \
+                 \"Pin each worker's TLS certificate\" in Settings → Cluster → \
                  Channel hardening."
             );
             Err(DispatchError::CertPinMissing {
@@ -833,7 +833,7 @@ fn check_response_auth(
                     "SECURITY (warn-only): worker publishes a response-signing key but \
                      answered UNSIGNED — a downgrade would look exactly like this. \
                      Response auth is NOT enforced yet, so this request was allowed. \
-                     Turn on Enforce response authentication in Settings → Cluster → \
+                     Turn on \"Require signed replies\" in Settings → Cluster → \
                      Channel hardening once every node signs."
                 );
                 Ok(())
@@ -899,8 +899,8 @@ impl From<DispatchError> for crate::error::AppError {
             // in the order an operator should try them — re-reporting the
             // pin keeps the protection, switching the toggle off drops it.
             DispatchError::CertPinMissing { node_id } => AppError::Rpc(format!(
-                "node {node_id} has not reported a TLS certificate pin, and Enforce worker TLS \
-                 certificate pinning is on in Settings → Cluster → Channel hardening — \
+                "node {node_id} has not reported a TLS certificate pin, and \"Pin each worker's \
+                 TLS certificate\" is on in Settings → Cluster → Channel hardening — \
                  so the master refused to dispatch over a connection it cannot check. Restart \
                  hyperion-agent on that node and wait one heartbeat (about 30 s) for the 🔒 chip \
                  to appear on Nodes, or turn the setting off."

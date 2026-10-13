@@ -29,6 +29,9 @@ struct HttpsTpl<'a> {
     csrf_token: String,
     config: AgentConfigView,
     config_error: Option<String>,
+    /// The contact is a placeholder Let's Encrypt is never sent (the
+    /// agent's built-in `admin@example.com`, `…@hyperion.invalid`).
+    acme_placeholder: bool,
     /// This server's preview base — what its `*.<base>` wildcard covers —
     /// when the template yields one.
     preview_base: Option<String>,
@@ -174,6 +177,9 @@ pub async fn get_https(
         wildcard_rows,
         preview_base,
         preview_example,
+        acme_placeholder: config_error.is_none()
+            && !config.acme.contact_email.trim().is_empty()
+            && super::overview::acme_contact_missing(&config.acme.contact_email),
         config,
         config_error,
     };

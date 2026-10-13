@@ -8,7 +8,7 @@
   {% for a in attention %}
   <a class="set-row" href="{{ a.href }}">
     <span class="chk-dot {{ a.tone }}"></span>
-    <span class="set-main"><span class="set-state" style="color:var(--text)">{{ a.text }}</span></span>
+    <span class="set-main"><span class="set-state" style="color:var(--text)"><span class="sr-only">{% if a.tone == "info" %}Info: {% else %}Needs attention: {% endif %}</span>{{ a.text }}</span></span>
     <svg class="set-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
   </a>
   {% endfor %}
@@ -31,9 +31,9 @@
 {% endfor %}
 
 <p class="text-soft small" style="margin:var(--group-gap) 0 0;line-height:1.6">
-  Settings live in <code>/etc/hyperion/agent.toml</code> on each node. A save
-  writes it (keeping a <code>.bak</code>) and restarts the agent, which takes
-  about 5&nbsp;s. The file as it is on disk, secrets hidden, is on
+  Most settings live in <code>/etc/hyperion/agent.toml</code>; a save writes
+  the master's (keeping a <code>.bak</code>) and the settings sync carries the
+  shared ones to the other nodes. The file as it is on disk, secrets hidden, is on
   <a href="/install/node-settings?node_id=local#raw-toml">this server's node settings</a>.
   API keys are under <a href="/admin/api-keys">Administration → API keys</a>.
 </p>

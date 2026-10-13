@@ -263,7 +263,7 @@ For agencies that sell maintenance:
 A scriptable HTTP API at `/api/v1` for provisioning and running the cluster from
 CI, cron or your own tools.
 
-- **Auth:** a Bearer key created in **Settings → Access & API**. Its
+- **Auth:** a Bearer key created in **Administration → API keys**. Its
   capabilities can't exceed its owner's and are checked again on every call,
   so locking or demoting the owner takes effect immediately.
 - **Hardening:** optional per-key IP allowlist and rate limit.

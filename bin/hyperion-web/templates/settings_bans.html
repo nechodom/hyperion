@@ -30,7 +30,7 @@
     </div>
     {% endif %}
     {% if s.view.clamped %}
-    <div class="alert alert-warn" role="alert" style="margin:0.9rem 0 0">
+    <div class="alert alert-warn" role="status" style="margin:0.9rem 0 0">
       <strong>The file and the running scanner disagree.</strong>
       A value in <code>[fail2ban]</code> is below the floor the agent applies at
       start-up, so the scanner is <em>not</em> using the number shown. Saving
@@ -153,7 +153,7 @@
         loopback, CGNAT and link-local addresses are skipped, because a
         node-wide drop on those is an outage: webmail talking to dovecot, the
         master↔node link, a NAT gateway in front of a whole office. You can
-        still block any address by hand from a site's Settings tab.
+        still block any address by hand from a site's Settings &amp; limits tab.
       </p>
       <p>
         An address already banned within the look-back gets the
@@ -197,6 +197,7 @@
       {% else %}
       Country blocking and traffic by country need it. Until then no country rule matches anybody.
       {% endif %}
+      {% if chrome.has_nodes %}Only sites on the master can block countries: worker nodes have no copy.{% endif %}
     </p>
     <form method="post" action="/settings/geoip-creds" autocomplete="off" style="margin-top:0.9rem">
       <input type="hidden" name="_csrf" value="{{ csrf_token }}">
@@ -242,7 +243,7 @@
       <p>
         Until it is installed every visitor resolves to <code>ZZ</code> and no
         country rule matches, so no site is cut off by a rule set before the
-        data existed.{% if chrome.has_nodes %} It is downloaded to the master only.{% endif %}
+        data existed.
       </p>
     </details>
   </div>

@@ -21713,6 +21713,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // secret_key_id alone (lets the UI render the form
         // without re-prompting for the secret on every edit).
         let now = now_secs();
+        let mut replaced_secret: Option<String> = None;
         let secret_path = if let Some(plaintext) = secret_key.as_deref() {
             // Random filename — it must NOT depend on the row id. For a NEW
             // target the id is unknown here, and the old code reused
@@ -21724,26 +21725,37 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 "/etc/hyperion/secrets/backup-{}.key",
                 ulid::Ulid::new().to_string().to_ascii_lowercase()
             );
-            // Best-effort write; failure is non-fatal — the row gets stored
-            // without a secret path, the UI shows "secret never persisted" and
-            // the runner refuses.
+            // The target's current secret, if it has one: replaced below once
+            // the row points at the new file, so stale credentials don't
+            // linger on disk.
+            let current = match id {
+                Some(existing_id) => hyperion_state::backup_targets::get(&self.pool, existing_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .and_then(|r| r.secret_key_id),
+                None => None,
+            };
             if let Err(e) = write_secret_file(&fresh, plaintext.as_bytes()).await {
                 tracing::warn!(path = %fresh, error = %e, "backup secret write failed");
-            }
-            // Replacing a secret on an existing target: best-effort remove the
-            // old secret file so stale credentials don't linger on disk.
-            if let Some(existing_id) = id {
-                if let Ok(Some(old)) =
-                    hyperion_state::backup_targets::get(&self.pool, existing_id).await
-                {
-                    if let Some(oldpath) = old.secret_key_id {
-                        if oldpath != fresh {
-                            let _ = tokio::fs::remove_file(&oldpath).await;
-                        }
-                    }
+                // An edit of a target that has working credentials is
+                // refused: the old code stored the new (never written) path
+                // and deleted the old file first, so a full disk or a
+                // permissions slip cost the target its credentials.
+                if current.is_some() {
+                    return Err(RpcError::Internal_with(format!(
+                        "could not store the new secret key ({e}) — the target keeps its \
+                         current one and was not changed"
+                    )));
                 }
+                // A new target (or one with no secret yet) is stored without
+                // a secret: the Backups page shows it as taking no copy, and
+                // why, rather than pointing at a file that does not exist.
+                None
+            } else {
+                replaced_secret = current.filter(|p| *p != fresh);
+                Some(fresh)
             }
-            Some(fresh)
         } else if let Some(existing_id) = id {
             // No new secret on update → keep the existing path.
             hyperion_state::backup_targets::get(&self.pool, existing_id)
@@ -21773,8 +21785,25 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 now,
             },
         )
-        .await
-        .map_err(|e| RpcError::Internal_with(format!("backup_target upsert: {e}")))?;
+        .await;
+        let new_id = match new_id {
+            Ok(id) => id,
+            Err(e) => {
+                // The row still points at the old secret; the new file is
+                // the one to drop.
+                if secret_key.is_some() {
+                    if let Some(p) = &secret_path {
+                        let _ = tokio::fs::remove_file(p).await;
+                    }
+                }
+                return Err(RpcError::Internal_with(format!(
+                    "backup_target upsert: {e}"
+                )));
+            }
+        };
+        if let Some(old) = replaced_secret {
+            let _ = tokio::fs::remove_file(&old).await;
+        }
 
         self.append_audit(
             "backup.target.upsert",
@@ -28714,6 +28743,15 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         if to.is_empty() || !to.contains('@') {
             return Err(RpcError::Validation {
                 message: "destination address is required and must contain '@'".into(),
+            });
+        }
+        // `to` goes into a header of a message handed to `sendmail -t`, which
+        // takes its recipients FROM the headers. A CR/LF would let the field
+        // add `Bcc:` lines, a subject and a body of the sender's choosing; a
+        // comma or semicolon, more recipients. Exactly one plain address.
+        if !is_single_plain_address(to) {
+            return Err(RpcError::Validation {
+                message: "enter exactly one e-mail address".into(),
             });
         }
         // Bound the address — Location-header / argv-length safety.
@@ -38021,6 +38059,21 @@ fn letter_origin(template: &str) -> &'static str {
     }
 }
 
+/// One bare e-mail address and nothing else: no whitespace or control
+/// characters (so no CR/LF header injection), no list separators, no display
+/// name or angle brackets, exactly one `@` with something on both sides.
+fn is_single_plain_address(s: &str) -> bool {
+    if s.chars().any(|c| {
+        c.is_whitespace() || c.is_control() || matches!(c, ',' | ';' | '<' | '>' | '"' | '(' | ')')
+    }) {
+        return false;
+    }
+    match s.split_once('@') {
+        Some((local, domain)) => !local.is_empty() && domain.contains('.') && !domain.contains('@'),
+        None => false,
+    }
+}
+
 /// [`letter_origin`], counting the operator's catalogue wording too.
 ///
 /// Since Settings edits the care report and expiry warning as catalogue
@@ -38764,7 +38817,10 @@ fn parse_agent_section_fields(
             // a declaration back. A typo must not silently become "en": that
             // would withhold every sentence from every Czech site, which is
             // the exact failure this key was added to end.
-            ("letters", "overrides_lang") => match v.trim() {
+            // Case-insensitive like the reader: a hand-written "CS" works
+            // locally, and refusing it here would make the master's settings
+            // sync refuse the whole payload on every node.
+            ("letters", "overrides_lang") => match v.trim().to_ascii_lowercase().as_str() {
                 l @ ("" | "en" | "cs") => crate::config_persist::FieldValue::Str(l.to_string()),
                 other => {
                     return Err(bad(format!(
@@ -38781,7 +38837,10 @@ fn parse_agent_section_fields(
             }
             // The billing reminder. Empty = follow the customer `lang`, so it
             // must be storable; a typo must not silently pin it to English.
-            ("letters", "billing_lang") => match v.trim() {
+            // Case-insensitive like the reader: a hand-written "CS" works
+            // locally, and refusing it here would make the master's settings
+            // sync refuse the whole payload on every node.
+            ("letters", "billing_lang") => match v.trim().to_ascii_lowercase().as_str() {
                 l @ ("" | "en" | "cs") => crate::config_persist::FieldValue::Str(l.to_string()),
                 other => {
                     return Err(bad(format!(
@@ -44798,6 +44857,18 @@ mod tests {
             "built-in",
             "a care-report sentence says nothing about the expiry warning"
         );
+        assert!(super::is_single_plain_address("ops@example.cz"));
+        for bad in [
+            "ops@example.cz\r\nBcc: x@evil.test",
+            "a@b.cz, c@d.cz",
+            "a@b.cz;c@d.cz",
+            "Ops <ops@example.cz>",
+            "no-at-sign",
+            "@example.cz",
+            "a@localhost",
+        ] {
+            assert!(!super::is_single_plain_address(bad), "{bad:?}");
+        }
         cat.overrides.insert("care.body".into(), "   ".into());
         assert_eq!(
             super::letter_origin_with("", &cat, super::CARE_FRAME_IDS),

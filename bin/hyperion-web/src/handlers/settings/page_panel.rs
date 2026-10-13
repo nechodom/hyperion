@@ -23,6 +23,9 @@ struct PanelTpl<'a> {
     csrf_token: String,
     config: AgentConfigView,
     config_error: Option<String>,
+    /// No usable Let's Encrypt contact (empty or a placeholder), so the
+    /// panel's certificate request would be refused.
+    acme_missing: bool,
     update: UpdateStatus,
     current_short: String,
     latest_short: String,
@@ -66,6 +69,8 @@ pub async fn get_panel(
         csrf_token: crate::handlers::session_csrf_token(&state, &ctx),
         current_short: super::short_sha(&update.current_sha),
         latest_short: super::short_sha(&update.latest_sha),
+        acme_missing: config_error.is_none()
+            && super::overview::acme_contact_missing(&config.acme.contact_email),
         config,
         config_error,
         update,

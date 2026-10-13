@@ -2,19 +2,19 @@
 {% block section %}
 {% if let Some(e) = config_error %}
 <div class="flash error">
-  <div class="flash-body">The agent's settings could not be read ({{ e }}). The values below are defaults, not what is set.</div>
+  <div class="flash-body">The agent's settings could not be read ({{ e }}). These are defaults, not what is set, so saving is off until it answers.</div>
 </div>
 {% endif %}
 {% if let Some(e) = toml_error %}
 <div class="flash error">
-  <div class="flash-body"><code>/etc/hyperion/agent.toml</code> could not be read ({{ e }}). The wording shown is the built-in English pack, not necessarily what is set.</div>
+  <div class="flash-body"><code>/etc/hyperion/agent.toml</code> could not be read ({{ e }}). The wording shown is the built-in English pack, not what is set, so saving it is off until the file can be read.</div>
 </div>
 {% endif %}
 
 {#- What every letter says and in which language. The three cards write
     [letters] from three separate forms; AgentConfigUpdate only touches the
     keys a form posts, so each form owns its own keys. -#}
-<fieldset class="group"{{ chrome.ro() }}>
+<fieldset class="group"{{ chrome.ro() }}{% if config_error.is_some() || toml_error.is_some() %} disabled{% endif %}>
   <div class="ghead">Language &amp; wording{% if chrome.has_nodes %}<span class="scope-tag" title="Set here, copied to every node by the settings sync">All nodes</span>{% endif %}</div>
 
   <div class="item" id="letter-language">
@@ -38,7 +38,7 @@
         </select>
       </div>
       <div class="field" style="max-width:34rem">
-        <label for="lt_overrides_lang">Your wording is written in <span class="hint">matters only when sites write in more than one language</span></label>
+        <label for="lt_overrides_lang">Your wording is written in <span class="hint">matters only when your letters go out in more than one language</span></label>
         <select id="lt_overrides_lang" name="overrides_lang">
           <option value=""{% if overrides_lang == "" %} selected{% endif %}>Not specified — use it in every letter</option>
           <option value="cs"{% if overrides_lang == "cs" %} selected{% endif %}>Čeština — only in Czech letters</option>
@@ -91,7 +91,7 @@
     </div>
     <p class="text-soft small" style="margin:0.4rem 0 0.9rem">
       The care report and the warning before a hosting expires, as site owners
-      receive them. An empty field sends the built-in wording, shown in grey.
+      receive them. An empty field sends the built-in wording, shown as the field's placeholder.
     </p>
 
     {% if !legacy.is_empty() %}
@@ -104,7 +104,7 @@
         <div class="row" style="gap:0.5rem;margin-top:0.6rem">
           <form method="post" action="/settings/letters/adopt-legacy"
                 data-confirm-title="Move the older template into the editor"
-                data-confirm-body="Its text replaces the editor's wording for the same parts of the letter, and the older template is removed. The editor then holds what customers receive."
+                data-confirm-body="Its text replaces the editor's wording for the same parts of the letter, and the older template is removed. The editor then holds what customers receive.{% for l in legacy %}{% if l.key == "expiry_warning_subject_template" %} Its expiry subject also fills the subject on the day the hosting expires, unless you have written one.{% endif %}{% endfor %}{% if overrides_lang != "" %} The older template went into letters in every language; once moved, it is used only in {% if overrides_lang == "cs" %}Czech{% else %}English{% endif %} letters, because your wording is marked as written in {% if overrides_lang == "cs" %}Czech{% else %}English{% endif %}.{% endif %}"
                 data-confirm-confirm-label="Move">
             <input type="hidden" name="_csrf" value="{{ csrf_token }}">
             <input type="hidden" name="mode" value="move">
@@ -258,7 +258,7 @@
     <p class="text-soft small" style="margin:0.4rem 0 0.9rem">
       Every other sentence Hyperion writes: the report's sections, the
       disk-quota and billing letters, your alerts and Slack lines. An empty
-      field uses the built-in wording shown in grey.
+      field uses the built-in wording, shown as the field's placeholder.
     </p>
     <div class="row" style="gap:0.5rem;margin:0 0 0.9rem">
       {% if chrome.can_edit %}<a class="btn small" href="/settings/letters.toml" download>Download all wording</a>{% endif %}
@@ -328,20 +328,20 @@
 </fieldset>
 
 <fieldset class="group"{{ chrome.ro() }}>
-  <div class="ghead">E-mail logo{% if chrome.has_nodes %}<span class="scope-tag" title="Used by the master only">Master</span>{% endif %}</div>
+  <div class="ghead">Email logo{% if chrome.has_nodes %}<span class="scope-tag" title="Used by the master only">Master</span>{% endif %}</div>
   <div class="item" id="email-branding">
     <div class="row" style="align-items:center;gap:0.6rem;flex-wrap:wrap">
       <h3 style="margin:0">Logo</h3>
-      {% if email_logo_set %}<span class="pill ok">set</span>{% else %}<span class="pill muted">none</span>{% endif %}
+      {% if email_logo_set %}<span class="pill ok">set</span>{% else %}<span class="pill muted">not set</span>{% endif %}
     </div>
     <p class="text-soft small" style="margin:0.4rem 0 0.9rem">
-      Heads every notification e-mail, to customers and to you. Without one,
+      Heads every notification email, to customers and to you. Without one,
       the panel hostname is the heading.{% if chrome.has_nodes %} Mail sent by
       worker nodes does not carry it yet.{% endif %}
     </p>
     {% if email_logo_set %}
     <div style="margin:0 0 0.9rem;padding:0.8rem;background:#fff;border:1px solid var(--border);border-radius:var(--radius-xs);display:inline-block">
-      <img src="/settings/email-logo.img" alt="Current e-mail logo" style="max-height:44px;max-width:220px;display:block">
+      <img src="/settings/email-logo.img" alt="Current email logo" style="max-height:44px;max-width:220px;display:block">
     </div>
     {% endif %}
     {#- Multipart: the CSRF middleware does not buffer these bodies, so the
@@ -361,7 +361,7 @@
         and on the upload form it would make every upload ask "Remove?". -#}
     <form method="post" action="/settings/email-logo?_csrf={{ csrf_token }}" enctype="multipart/form-data"
           data-confirm-title="Remove the logo"
-          data-confirm-body="Notification e-mails fall back to the panel hostname as their heading."
+          data-confirm-body="Notification emails fall back to the panel hostname as their heading."
           data-confirm-confirm-label="Remove">
       <input type="hidden" name="clear" value="1">
       <div class="item-actions" style="margin-top:0.5rem"><button class="btn" type="submit">Remove the logo</button></div>
@@ -380,18 +380,19 @@
   </div>
 </fieldset>
 
-<fieldset class="group"{{ chrome.ro() }}>
+<fieldset class="group"{{ chrome.ro() }}{% if config_error.is_some() %} disabled{% endif %}>
   <div class="ghead">Care report measurements{% if chrome.has_nodes %}<span class="scope-tag" title="Set here, copied to every node by the settings sync">All nodes</span>{% endif %}</div>
   <div class="item" id="performance">
     <div class="row" style="align-items:center;gap:0.6rem;flex-wrap:wrap">
       <h3 style="margin:0">Core Web Vitals</h3>
       {% if config.performance.cwv_source == "psi" %}<span class="pill ok">PageSpeed Insights</span>
-      {% else if config.performance.cwv_source == "lighthouse" %}{% if config.performance.lighthouse_available %}<span class="pill ok">Lighthouse</span>{% else %}<span class="pill warn">Lighthouse not installed here</span>{% endif %}
+      {% else if config.performance.cwv_source == "lighthouse" %}{% if config.performance.lighthouse_available %}<span class="pill ok">Lighthouse</span>{% else %}<span class="pill warn">Lighthouse not installed</span>{% endif %}
       {% else %}<span class="pill muted">off</span>{% endif %}
     </div>
     <p class="text-soft small" style="margin:0.4rem 0 0.9rem">
-      Where the care report's LCP, CLS and INP come from. Whether a site
-      renders and how fast it answers is always measured.
+      Where the care report's Core Web Vitals come from: loading speed (LCP),
+      layout stability (CLS) and responsiveness (INP). Whether a site renders
+      and how fast it answers is always measured.
     </p>
     <form method="post" action="/settings/config" autocomplete="off">
       <input type="hidden" name="_csrf" value="{{ csrf_token }}">
@@ -413,11 +414,15 @@
       <div class="flash {% if config.performance.lighthouse_available %}info{% else %}warn{% endif %}" id="cwv-lighthouse" style="margin:0 0 1rem"{% if config.performance.cwv_source != "lighthouse" %} hidden{% endif %}>
         <div class="flash-body">
           {% if config.performance.lighthouse_available %}
+          {% if chrome.has_nodes %}
           Lighthouse is installed on this master. Each node measures its own
           sites, so install it on every node that owns care-plan sites too.
           {% else %}
-          Lighthouse is <strong>not</strong> installed on this master. Install
-          it on each node that owns care-plan sites — for example
+          Lighthouse is installed on this server.
+          {% endif %}
+          {% else %}
+          Lighthouse is <strong>not</strong> installed on this {% if chrome.has_nodes %}master{% else %}server{% endif %}.
+          Install it{% if chrome.has_nodes %} on each node that owns care-plan sites{% endif %} — for example
           <code>apt-get install -y chromium &amp;&amp; npm install -g lighthouse</code>
           — or use PageSpeed Insights instead.
           {% endif %}
@@ -452,8 +457,9 @@
         <li><strong>PageSpeed Insights</strong> works without a key at a low
           rate limit, enough for a weekly check per site; a free key comes
           from the Google Cloud console (enable the PageSpeed Insights API).
-          The key stays on the node; the site's address is sent to Google
-          when it is measured.</li>
+          The key is {% if chrome.has_nodes %}copied to every node by the
+          settings sync and {% endif %}sent only to Google; the site's address
+          goes to Google when it is measured.</li>
         <li><strong>Lighthouse</strong> gives lab data only, and the headless
           Chrome it runs uses real CPU and RAM while it measures.</li>
         <li>Care-plan sites are re-measured with the weekly site check, so the

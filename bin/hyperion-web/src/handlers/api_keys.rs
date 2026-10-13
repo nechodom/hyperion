@@ -303,10 +303,15 @@ pub async fn post_api_key_create(
     // Reveal the raw key exactly once via a short-lived HttpOnly cookie rather
     // than the URL: a key in a redirect query string lands in browser history
     // and the reverse-proxy access log. The page reads it once and clears it. (`hyp_<base62>` is cookie-safe — no encoding needed.)
-    let cookie = format!(
+    let mut cookie = format!(
         "hyp_new_api_key={}; Max-Age=120; Path=/admin/api-keys; HttpOnly; SameSite=Strict",
         created.raw_key
     );
+    // The panel vhost also answers on :80; without `Secure` a plain-http
+    // visit within the two minutes would carry the raw key in cleartext.
+    if state.secure_cookies() {
+        cookie.push_str("; Secure");
+    }
     let mut resp = Redirect::to("/admin/api-keys#new-key").into_response();
     if let Ok(v) = axum::http::HeaderValue::from_str(&cookie) {
         resp.headers_mut().insert(axum::http::header::SET_COOKIE, v);

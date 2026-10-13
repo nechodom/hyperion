@@ -1,13 +1,14 @@
 {% extends "settings_base.html" %}
 {% block header_actions %}<a class="btn" href="/install">Nodes</a>{% endblock %}
+{% block read_only_note %}You can see these settings and run <a href="#settings-sync">Sync now</a>; only an Owner can change them.{% endblock %}
 {% block section %}
 {% if let Some(e) = config_error %}
 <div class="flash error">
-  <div class="flash-body">The agent's settings could not be read ({{ e }}). The values below are defaults, not what is set.</div>
+  <div class="flash-body">The agent's settings could not be read ({{ e }}). These are defaults, not what is set, so saving is off until it answers.</div>
 </div>
 {% endif %}
 
-<fieldset class="group"{{ chrome.ro() }}>
+<fieldset class="group"{{ chrome.ro() }}{% if config_error.is_some() %} disabled{% endif %}>
   <div class="ghead">New sites{% if chrome.has_nodes %}<span class="scope-tag" title="Used by the master only">Master</span>{% endif %}</div>
   <div class="item" id="placement">
     <div class="row" style="align-items:center;gap:0.6rem;flex-wrap:wrap">
@@ -94,7 +95,7 @@
   </div>
 </fieldset>
 
-<fieldset class="group"{{ chrome.ro() }}>
+<fieldset class="group"{{ chrome.ro() }}{% if config_error.is_some() %} disabled{% endif %}>
   <div class="ghead">Master ↔ node channel{% if chrome.has_nodes %}<span class="scope-tag" title="Used by the master only">Master</span>{% endif %}</div>
   <div class="item" id="hardening">
     <div class="row" style="align-items:center;gap:0.6rem;flex-wrap:wrap">
@@ -112,7 +113,7 @@
       traffic, so on a single server they change nothing.
     </p>
     {% else if config.cluster.enforce_response_auth && !config.cluster.enforce_worker_cert_pinning %}
-    <div class="alert alert-warn" role="alert" style="margin:0 0 0.8rem">
+    <div class="alert alert-warn" role="status" style="margin:0 0 0.8rem">
       <strong>Out of order — step 2 is on while step 1 is off.</strong>
       Signed replies prove who answered, but an unpinned channel still lets an
       on-path attacker read them, and replies carry reset passwords and
@@ -146,12 +147,12 @@
           {% if readiness.total > 0 %}
           <p class="text-soft small" style="margin:0.2rem 0 0">
             {{ readiness.pin_line() }}.{% if readiness.unpinned.is_empty() && !config.cluster.enforce_worker_cert_pinning %}
-            Ready once the master's log shows no pin-mismatch warnings.{% endif %}
+            Ready once the master's <code>hyperion-web</code> journal shows no pin-mismatch warnings.{% endif %}
           </p>
           {% endif %}
           {% if !readiness.unpinned.is_empty() %}
           {% if config.cluster.enforce_worker_cert_pinning %}
-          <div class="alert alert-err" role="alert" style="margin:0.5rem 0 0">
+          <div class="alert alert-err" role="status" style="margin:0.5rem 0 0">
             <strong>Refused right now:</strong>
             {% for l in readiness.unpinned %}<code>{{ l }}</code>{% if !loop.last %}, {% endif %}{% endfor %}
             — no TLS pin on file, and while this step is on such a node is cut
@@ -182,7 +183,7 @@
           {% endif %}
           {% if !readiness.unsigned.is_empty() %}
           {% if config.cluster.enforce_response_auth %}
-          <div class="alert alert-err" role="alert" style="margin:0.5rem 0 0">
+          <div class="alert alert-err" role="status" style="margin:0.5rem 0 0">
             <strong>Refused right now:</strong>
             {% for l in readiness.unsigned %}<code>{{ l }}</code>{% if !loop.last %}, {% endif %}{% endfor %}
             — no response-signing key on file, and while this step is on such a
@@ -200,7 +201,7 @@
           </div>
           {% endif %}
           {% else if readiness.total > 0 && !config.cluster.enforce_response_auth %}
-          <div class="alert alert-warn" role="alert" style="margin:0.5rem 0 0">
+          <div class="alert alert-warn" role="status" style="margin:0.5rem 0 0">
             <strong>Every node can sign its replies, but this step is off.</strong>
             Until it is on, an unsigned reply from a node known to sign is logged
             and accepted anyway — exactly the downgrade an on-path attacker would
@@ -239,8 +240,9 @@
         its heartbeat, which shuts a man-in-the-middle out of the channel. A pin
         is recorded once and never silently replaced: a worker reporting a
         different one later is refused and logged. Turn this on only when every
-        node has a pin on file and the log shows no warn-only pin-mismatch
-        warnings. While it is on, a worker with no pin on file is refused too —
+        node has a pin on file and the master's <code>hyperion-web</code> journal
+        (<code>journalctl -u hyperion-web -g 'SPKI pin'</code>) shows no warn-only
+        pin-mismatch warnings. While it is on, a worker with no pin on file is refused too —
         suppressing the pin report is exactly how an attacker would get around
         it — so a worker mid-upgrade, or whose agent restarted within the last
         heartbeat, is cut off until its pin is on file again. A stale pin

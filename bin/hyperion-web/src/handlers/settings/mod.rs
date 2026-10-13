@@ -48,6 +48,97 @@ use hyperion_types::{AgentConfigView, SmtpAutodetect};
 use serde::Deserialize;
 use std::net::SocketAddr;
 
+/// One node's `[email]` as its agent.toml has it, for the Mail page and
+/// Alerts → Recipients — whose forms are saved straight back, so a blank
+/// read must never look like a blank setting.
+///
+/// The master's own agent answers `AgentConfigView` from the file. A worker
+/// is asked for its masked agent.toml (`NodeConfigRead`) instead: an agent
+/// from before this release builds `AgentConfigView.email` from its boot copy,
+/// which is EMPTY whenever its relay is off — the form would show blanks and
+/// a Save would write them over the stored host and sender. A worker too old
+/// to answer `NodeConfigRead` is reported as such and gets no form.
+pub(crate) async fn node_email(
+    state: &SharedState,
+    target: Option<&str>,
+) -> Result<hyperion_types::EmailConfigView, String> {
+    let wait = std::time::Duration::from_secs(4);
+    let Some(node) = target else {
+        return match tokio::time::timeout(
+            wait,
+            hyperion_rpc_client::call(&state.agent_socket, Request::AgentConfigView),
+        )
+        .await
+        {
+            Ok(Ok(RpcResponse::AgentConfigView(c))) => Ok(c.email),
+            Ok(Ok(RpcResponse::Error(e))) => Err(e.to_string()),
+            Ok(Ok(_)) => Err("unexpected answer from the agent".into()),
+            Ok(Err(e)) => Err(e.to_string()),
+            Err(_) => Err("no answer within 4 s".into()),
+        };
+    };
+    match tokio::time::timeout(
+        wait,
+        crate::dispatcher::dispatch_to_node(state, Some(node), Request::NodeConfigRead),
+    )
+    .await
+    {
+        Ok(Ok(RpcResponse::NodeConfigRead(raw))) => email_view_from_masked_toml(&raw),
+        Ok(Ok(RpcResponse::Error(e))) => Err(e.to_string()),
+        Ok(Ok(_)) => Err("unexpected answer from the node".into()),
+        // An agent from before NodeConfigRead cannot decode the request.
+        Ok(Err(e)) if crate::cluster_sync::is_old_agent(&e) => Err(
+            "it runs an older agent that cannot show its mail settings here — update it from Nodes"
+                .into(),
+        ),
+        Ok(Err(e)) => Err(e.to_string()),
+        Err(_) => Err("no answer within 4 s".into()),
+    }
+}
+
+/// `[email]` out of a node's masked agent.toml (`config_persist::mask_secrets`
+/// turns the password into `«set»` / `«empty»`). Defaults are the agent's own
+/// for absent keys.
+pub(crate) fn email_view_from_masked_toml(
+    raw: &str,
+) -> Result<hyperion_types::EmailConfigView, String> {
+    let doc: toml::Value = raw
+        .parse()
+        .map_err(|e| format!("its agent.toml does not parse: {e}"))?;
+    let e = doc.get("email");
+    let text = |k: &str| {
+        e.and_then(|t| t.get(k))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
+    let password = text("smtp_password");
+    let security = text("security");
+    Ok(hyperion_types::EmailConfigView {
+        enabled: e
+            .and_then(|t| t.get("enabled"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        smtp_host: text("smtp_host"),
+        smtp_port: e
+            .and_then(|t| t.get("smtp_port"))
+            .and_then(|v| v.as_integer())
+            .and_then(|p| u16::try_from(p).ok())
+            .filter(|p| *p != 0)
+            .unwrap_or(587),
+        smtp_user: text("smtp_user"),
+        smtp_password_set: !password.is_empty() && password != "«empty»",
+        from_address: text("from_address"),
+        from_name: text("from_name"),
+        security: if security.trim().is_empty() {
+            "starttls".into()
+        } else {
+            security
+        },
+        default_to: text("default_to"),
+    })
+}
+
 /// The master's `AgentConfigView`, or the defaults plus why it could not be
 /// read. A page built from defaults must say so: every value on it would
 /// otherwise look like a setting somebody chose.
@@ -120,7 +211,7 @@ pub async fn post_email_logo(
         RpcResponse::EmailLogoSet => Ok(chrome::back_with_flash(
             "email-branding",
             if clear {
-                "Logo removed — e-mails are headed by the panel hostname again."
+                "Logo removed — emails are headed by the panel hostname again."
             } else {
                 "Logo saved."
             },
@@ -450,7 +541,7 @@ pub async fn post_slack_test(
 }
 
 /// POST /settings/email-test — fires a one-off SMTP send + redirects
-/// back to the Mail tab with a flash message.
+/// back to Settings → Mail (`/settings/mail#mail-test`) with a flash message.
 pub async fn post_email_test(
     State(state): State<SharedState>,
     ctx: AuthCtx,
@@ -458,7 +549,7 @@ pub async fn post_email_test(
     headers: HeaderMap,
     Form(form): Form<EmailTestForm>,
 ) -> Result<Response, AppError> {
-    // Every redirect below returns to the Mail tab AND keeps the node the
+    // Every redirect below returns to Settings → Mail AND keeps the node the
     // operator was looking at (`&mail_node=…`), so it is computed before
     // any gate. ""/"local" (the master) adds no suffix.
     let (_, node_q) = mail_node_target(&form.target_node);
@@ -523,7 +614,7 @@ pub async fn post_email_test(
             } else {
                 target_owned.clone()
             };
-            let msg = format!("Test email sent from {node_label} to {to} · SMTP relay said {smtp_code} · check /emails for the delivery record");
+            let msg = format!("Test email sent from {node_label} to {to} · SMTP relay said {smtp_code} · the Email log has the delivery record");
             Ok(Redirect::to(&format!(
                 "/settings/mail?flash={}{node_q}#mail-test",
                 urlencode(&msg)
@@ -531,9 +622,9 @@ pub async fn post_email_test(
             .into_response())
         }
         RpcResponse::Error(e) => {
-            // Include a pointer to /emails so the operator can see the
-            // failed-row in context (it's already logged there).
-            let msg = format!("{e} — see /emails for the failed row");
+            // Point at the Email log (/emails) so the operator can see the
+            // failed row in context (it's already logged there).
+            let msg = format!("{e} — the Email log has the failed attempt");
             Ok(Redirect::to(&format!(
                 "/settings/mail?flash_error={}{node_q}#mail-test",
                 urlencode(&msg)
@@ -970,6 +1061,41 @@ async fn push_to_unsynced_nodes(
                         )),
                     }
                 }
+                // An agent from before the language keys were writable
+                // refuses the whole [letters] save over them — and with it
+                // `lang` and the sentences it does understand. Resend without.
+                Ok(RpcResponse::Error(e))
+                    if sect == "letters"
+                        && LETTERS_KEYS_OLD_NODES_REFUSE
+                            .iter()
+                            .any(|k| e.to_string().contains(k))
+                        && f.keys()
+                            .any(|k| LETTERS_KEYS_OLD_NODES_REFUSE.contains(&k.as_str())) =>
+                {
+                    let mut f_old = f.clone();
+                    f_old.retain(|k, _| !LETTERS_KEYS_OLD_NODES_REFUSE.contains(&k.as_str()));
+                    if f_old.is_empty() {
+                        return Err(format!(
+                            "{label} runs an older agent that cannot take the alert or billing \
+                             language — update it"
+                        ));
+                    }
+                    match crate::dispatcher::dispatch_to_node(
+                        &st,
+                        Some(node_id.as_str()),
+                        Request::AgentConfigUpdate {
+                            section: sect.to_string(),
+                            fields: f_old.into(),
+                        },
+                    )
+                    .await
+                    {
+                        Ok(RpcResponse::AgentConfigUpdate) => Ok(()),
+                        Ok(RpcResponse::Error(e)) => Err(format!("{label} refused it ({e})")),
+                        Ok(_) => Err(format!("{label} answered with something unexpected")),
+                        Err(e) => Err(format!("{label} could not be updated ({e})")),
+                    }
+                }
                 // An older agent that doesn't know these keys refuses the
                 // write; the operator needs to hear THAT, not "unreachable".
                 Ok(RpcResponse::Error(e)) => Err(format!("{label} refused it ({e})")),
@@ -995,6 +1121,10 @@ async fn push_to_unsynced_nodes(
         Err(failed)
     }
 }
+
+/// `[letters]` keys an agent from before this release refuses as "not
+/// editable" — and with them the whole save.
+const LETTERS_KEYS_OLD_NODES_REFUSE: &[&str] = &["operator_lang", "billing_lang"];
 
 /// `[cluster]` keys read by the node that OWNS a hosting. `delete()` reads
 /// its own node's `trash_enabled` and the trash GC its own retention, so a
@@ -1490,7 +1620,7 @@ pub struct PanelProvisionForm {
 }
 
 /// GET /settings/panel-cert-status — tiny HTML fragment for the
-/// HTMX poll loop on /settings#panel-domain. The progress card polls
+/// HTMX poll loop on /settings/panel#panel-domain. The progress card polls
 /// every 2 s while stage is "issuing" / "self-signed", and stops
 /// polling once it lands on "issued" / "failed". Output: a
 /// single <div> whose contents the page swaps in place.
@@ -1508,9 +1638,31 @@ pub async fn get_panel_cert_status(
         _ => None,
     };
     let body = match snap {
-        None => String::from(
-            "<div class=\"text-soft small\" style=\"padding:0.4rem 0\">No panel cert issuance in progress.</div>"
-        ),
+        // Nothing in flight since the agent started: say what the config
+        // does tell us rather than a bare "nothing in progress".
+        None => {
+            let host = match hyperion_rpc_client::call(
+                &state.agent_socket,
+                Request::AgentConfigView,
+            )
+            .await
+            {
+                Ok(RpcResponse::AgentConfigView(c)) => Some(c.cluster.panel_hostname),
+                _ => None,
+            };
+            let text = match host.as_deref().map(str::trim) {
+                Some("") => "No domain is set, so the panel serves its own self-signed \
+                             certificate."
+                    .to_string(),
+                Some(h) => format!(
+                    "No certificate request for {} is running now. Its certificate renews \
+                     on its own; saving the domain again requests a new one.",
+                    html_escape(h)
+                ),
+                None => "No certificate request is running now.".to_string(),
+            };
+            format!("<div class=\"text-soft small\" style=\"padding:0.4rem 0\">{text}</div>")
+        }
         Some(p) => {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1521,10 +1673,16 @@ pub async fn get_panel_cert_status(
             // whether HTMX keeps polling.
             let (pill_class, pill_text, bar_pct, bar_color, keep_polling) = match p.stage.as_str() {
                 "self-signed" => ("warn", "self-signed", 10, "var(--warn)", true),
-                "issuing"     => ("warn", "issuing…",    50 + ((elapsed % 30) * 50 / 30).min(40), "var(--accent)", true),
-                "issued"      => ("ok",   "real LE cert", 100, "var(--success)", false),
-                "failed"      => ("err",  "failed",       100, "var(--danger)", false),
-                _             => ("",     p.stage.as_str(),0, "var(--surface-2)", false),
+                "issuing" => (
+                    "warn",
+                    "issuing…",
+                    50 + ((elapsed % 30) * 50 / 30).min(40),
+                    "var(--info)",
+                    true,
+                ),
+                "issued" => ("ok", "trusted certificate", 100, "var(--success)", false),
+                "failed" => ("err", "failed", 100, "var(--danger)", false),
+                _ => ("", p.stage.as_str(), 0, "var(--surface-2)", false),
             };
             let trigger_attrs = if keep_polling {
                 "hx-get=\"/settings/panel-cert-status\" hx-trigger=\"every 2s\" hx-swap=\"innerHTML\" hx-target=\"this\""
@@ -1582,7 +1740,7 @@ fn html_escape(s: &str) -> String {
 ///      cert will land within ~30s; flip the page or check
 ///      /services for the new vhost.
 ///
-/// Redirects back to /settings#panel-domain with a flash message
+/// Redirects back to /settings/panel#panel-domain with a flash message
 /// containing the agent's reply (status + panel URL).
 pub async fn post_panel_provision(
     State(state): State<SharedState>,
@@ -1708,15 +1866,17 @@ fn urlencode(s: &str) -> String {
 /// bucket. Same precedence as the /api/enroll handler: forwarded-for
 /// → real-ip → peer socket.
 pub(crate) fn email_test_ip(headers: &HeaderMap, peer: SocketAddr) -> std::net::IpAddr {
-    if let Some(v) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-        if let Some(first) = v.split(',').next() {
-            if let Ok(ip) = first.trim().parse() {
-                return ip;
-            }
-        }
-    }
-    if let Some(v) = headers.get("x-real-ip").and_then(|v| v.to_str().ok()) {
-        if let Ok(ip) = v.trim().parse() {
+    // Only a request that came through the panel's own nginx (loopback peer)
+    // may name its client, and only through X-Real-IP, which that nginx SETS
+    // to `$remote_addr`. X-Forwarded-For was read first before: its first
+    // entry is whatever the client sent, so every request could pick a fresh
+    // bucket and the per-address limit on test sends never held.
+    if peer.ip().is_loopback() {
+        if let Some(ip) = headers
+            .get("x-real-ip")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.trim().parse().ok())
+        {
             return ip;
         }
     }
@@ -2886,6 +3046,43 @@ mod tests {
     /// An older node that cannot report its `[letters]` must read as UNKNOWN,
     /// never as agreement.
     ///
+    #[test]
+    fn a_workers_email_is_read_from_its_file_not_its_boot_copy() {
+        let raw = "[email]\nenabled = false\nsmtp_host = \"smtp.example.com\"\n\
+                   smtp_password = \"«set»\"\nfrom_address = \"n@example.cz\"\n\
+                   default_to = \"ops@example.cz\"\n";
+        let v = super::email_view_from_masked_toml(raw).unwrap();
+        assert!(!v.enabled);
+        assert_eq!(
+            v.smtp_host, "smtp.example.com",
+            "relay off must not read blank"
+        );
+        assert!(v.smtp_password_set);
+        assert_eq!(v.smtp_port, 587);
+        assert_eq!(v.default_to, "ops@example.cz");
+        let none =
+            super::email_view_from_masked_toml("[email]\nsmtp_password = \"«empty»\"\n").unwrap();
+        assert!(!none.smtp_password_set);
+        assert!(super::email_view_from_masked_toml("not = [toml").is_err());
+    }
+
+    #[test]
+    fn test_send_limit_keys_on_the_real_client() {
+        use axum::http::HeaderMap;
+        let mut h = HeaderMap::new();
+        h.insert("x-forwarded-for", "203.0.113.9".parse().unwrap());
+        h.insert("x-real-ip", "198.51.100.7".parse().unwrap());
+        let direct: std::net::SocketAddr = "192.0.2.1:5000".parse().unwrap();
+        let proxied: std::net::SocketAddr = "127.0.0.1:5000".parse().unwrap();
+        // Straight to :8443 — no header is believed.
+        assert_eq!(super::email_test_ip(&h, direct), direct.ip());
+        // Through our nginx — X-Real-IP (set by nginx), never X-Forwarded-For.
+        assert_eq!(
+            super::email_test_ip(&h, proxied).to_string(),
+            "198.51.100.7"
+        );
+    }
+
     #[test]
     fn declared_unchecked_synthesizes_false() {
         // Browser sends NO master_accepts_hostings when the box is

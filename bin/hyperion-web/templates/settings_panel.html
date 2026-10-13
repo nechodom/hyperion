@@ -2,25 +2,35 @@
 {% block section %}
 {% if let Some(e) = config_error %}
 <div class="flash error">
-  <div class="flash-body">The agent's settings could not be read ({{ e }}). The values below are defaults, not what is set.</div>
+  <div class="flash-body">The agent's settings could not be read ({{ e }}). These are defaults, not what is set, so saving is off until it answers.</div>
 </div>
 {% endif %}
 
-<fieldset class="group"{{ chrome.ro() }}>
-  <div class="ghead">Panel domain{% if chrome.has_nodes %}<span class="scope-tag" title="The address of the panel itself, on the master">Master</span>{% endif %}</div>
+<fieldset class="group"{{ chrome.ro() }}{% if config_error.is_some() %} disabled{% endif %}>
+  <div class="ghead">Panel domain{% if chrome.has_nodes %}<span class="scope-tag" title="Used by the master only">Master</span>{% endif %}</div>
   <div class="item" id="panel-domain">
+    <div class="row" style="align-items:center;gap:0.6rem;flex-wrap:wrap">
+      <h3 style="margin:0">Panel domain</h3>
+      {% if config.cluster.panel_hostname.is_empty() %}<span class="pill warn">not set</span>
+      {% else %}<span class="pill ok">set</span>{% endif %}
+    </div>
     {% if config.cluster.panel_hostname.is_empty() %}
-    <h3>No domain yet</h3>
-    <p class="text-soft small" style="margin:0 0 0.8rem">
+    <p class="text-soft small" style="margin:0.4rem 0 0.8rem">
       The panel answers on its IP address with a self-signed certificate, so
       every browser warns. Give it a hostname and it gets a trusted
       certificate of its own.
     </p>
     {% else %}
-    <h3><a href="https://{{ config.cluster.panel_hostname }}:8443" target="_blank" rel="noopener">https://{{ config.cluster.panel_hostname }}:8443</a></h3>
-    <p class="text-soft small" style="margin:0 0 0.8rem">
-      Requests to the raw IP are redirected here. <code>localhost</code> stays
+    <p class="text-soft small" style="margin:0.4rem 0 0.8rem">
+      The panel is at <a href="https://{{ config.cluster.panel_hostname }}" target="_blank" rel="noopener">https://{{ config.cluster.panel_hostname }}</a>.
+      Requests to the raw IP are redirected there; <code>localhost</code> stays
       open for health checks and SSH tunnels.
+    </p>
+    {% endif %}
+    {% if acme_missing %}
+    <p class="chk-note tone-warn" style="margin:0 0 0.8rem">
+      No Let's Encrypt contact is set, so the panel cannot get a trusted certificate.
+      <a href="/settings/https#acme">Set the contact</a>
     </p>
     {% endif %}
 
@@ -59,14 +69,14 @@
         <li>It is saved as <code>cluster.panel_hostname</code>.</li>
         <li>The nginx site <code>/etc/nginx/sites-enabled/hyperion-panel.conf</code> is written with a temporary self-signed certificate, so the reload cannot fail.</li>
         <li>nginx is tested and reloaded.</li>
-        <li>A Let's Encrypt certificate is requested in the background; the status above follows it.</li>
+        <li>A Let's Encrypt certificate is requested in the background; the certificate status in this card follows it.</li>
       </ol>
       <p>Bookmark the new address. The old IP address keeps working, but only through the redirect.</p>
     </details>
   </div>
 </fieldset>
 
-<fieldset class="group"{{ chrome.ro() }}>
+<fieldset class="group"{{ chrome.ro() }}{% if config_error.is_some() %} disabled{% endif %}>
   <div class="ghead">Updates{% if chrome.has_nodes %}<span class="scope-tag" title="Set here, copied to every node by the settings sync">All nodes</span>{% endif %}</div>
   <div class="item" id="updates">
     <div class="row" style="align-items:center;gap:0.6rem;flex-wrap:wrap">
@@ -79,12 +89,13 @@
     {% if update.update_available %}
     <p class="text-soft small" style="margin:0.4rem 0 0">
       Release <code>{{ latest_short }}</code> is out.
-      Install it now from <a href="/install">Nodes</a>, or let the switch below do it.
+      Install it now from <a href="/install">Nodes</a>, or turn on automatic installs.
     </p>
     {% endif %}
     <form method="post" action="/settings/config" style="margin-top:0.9rem">
       <input type="hidden" name="_csrf" value="{{ csrf_token }}">
       <input type="hidden" name="section" value="update">
+      <input type="hidden" name="_return_tab" value="updates">
       <input type="hidden" name="_checkboxes" value="auto">
       <label class="field-checkbox" style="margin:0">
         <input type="checkbox" name="auto" value="true" {% if config.update_auto %}checked{% endif %}>

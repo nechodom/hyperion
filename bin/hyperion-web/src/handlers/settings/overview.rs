@@ -80,7 +80,11 @@ pub struct Facts {
     pub fail2ban_on: Option<bool>,
     pub geoip_installed: bool,
     pub letter_lang: String,
+    /// Catalogue sentences rewritten, not counting the Letters editor's own
+    /// subjects and bodies (those are `letters_own_wording`).
     pub letters_rewritten: usize,
+    /// A subject or body was rewritten in the Letters editor.
+    pub letters_own_wording: bool,
     /// Enrolled worker nodes.
     pub nodes: usize,
     /// Workers whose last settings sync did not leave them with the master's
@@ -90,6 +94,9 @@ pub struct Facts {
     pub sync_known: usize,
     /// Workers that have published a response-signing key.
     pub resp_auth_ready: usize,
+    /// Workers with a TLS pin on file — what "Pin each worker's TLS
+    /// certificate" needs from every one of them.
+    pub pin_ready: usize,
 }
 
 pub async fn get_overview(
@@ -181,7 +188,13 @@ async fn gather(state: &SharedState, nodes: &[hyperion_types::NodeSummary]) -> F
         f.fail2ban_on = super::parse_fail2ban_section(&raw).map(|v| v.cfg.enabled);
         let cat = hyperion_core::service::letter_catalog_from_toml(&raw);
         f.letter_lang = cat.lang.as_str().to_string();
-        f.letters_rewritten = cat.overrides.values().filter(|v| !v.is_empty()).count();
+        let editor = super::page_letters::EDITOR_IDS;
+        let rewritten = cat.overrides.iter().filter(|(_, v)| !v.is_empty());
+        f.letters_rewritten = rewritten
+            .clone()
+            .filter(|(k, _)| !editor.contains(&k.as_str()))
+            .count();
+        f.letters_own_wording = rewritten.clone().any(|(k, _)| editor.contains(&k.as_str()));
     }
     f.nodes = nodes.len();
     let sync = state.cluster_sync.all().await;
@@ -197,6 +210,10 @@ async fn gather(state: &SharedState, nodes: &[hyperion_types::NodeSummary]) -> F
         .iter()
         .filter(|n| !n.resp_pubkey.as_deref().unwrap_or("").trim().is_empty())
         .count();
+    f.pin_ready = nodes
+        .iter()
+        .filter(|n| !n.tls_spki_pin.as_deref().unwrap_or("").trim().is_empty())
+        .count();
     f
 }
 
@@ -205,6 +222,32 @@ fn node_label(n: &hyperion_types::NodeSummary) -> String {
         n.node_id.clone()
     } else {
         n.label.clone()
+    }
+}
+
+/// Is the Let's Encrypt contact one the agent refuses to issue with? Empty,
+/// not an address, or one of the placeholders it rejects before asking Let's
+/// Encrypt (an unset `[acme] contact_email` reads as `admin@example.com`).
+pub fn acme_contact_missing(email: &str) -> bool {
+    let e = email.trim().to_ascii_lowercase();
+    e.is_empty()
+        || !e.contains('@')
+        || [
+            "@example.com",
+            "@example.org",
+            "@example.net",
+            "@hyperion.invalid",
+        ]
+        .iter()
+        .any(|p| e.ends_with(p))
+}
+
+/// Who a sentence about the master's own settings is about.
+fn this_server(has_nodes: bool) -> &'static str {
+    if has_nodes {
+        "The master"
+    } else {
+        "This server"
     }
 }
 
@@ -244,6 +287,14 @@ pub fn assess(f: &Facts, has_nodes: bool) -> (Verdict, Vec<Attention>) {
             href: card_url("panel-domain", ""),
         });
     }
+    if f.config_error.is_none() && acme_contact_missing(&c.acme.contact_email) {
+        out.push(Attention {
+            tone: "warn",
+            text: "No Let's Encrypt contact — the panel and sites cannot get trusted certificates."
+                .into(),
+            href: card_url("acme", ""),
+        });
+    }
     if c.cluster.protection_mode == "snapshots" {
         out.push(Attention {
             tone: "warn",
@@ -260,19 +311,29 @@ pub fn assess(f: &Facts, has_nodes: bool) -> (Verdict, Vec<Attention>) {
     // Admin mail only leaves through the relay: with `[email]` off the
     // addresses are kept but nothing is sent to them.
     let addresses = address_count(&c.email.default_to);
+    // Slack and these addresses are the master's; each worker mails its
+    // own alerts to its own list, so with workers say whose alerts these are.
     if !c.slack.default_webhook_set && !(c.email.enabled && addresses > 0) {
+        let whose = if has_nodes {
+            "The master's alerts"
+        } else {
+            "Alerts"
+        };
         out.push(if addresses > 0 {
             Attention {
                 tone: "warn",
-                text: "Alerts reach nobody — the administrator addresses get no mail while the \
-                       outgoing relay is off, and Slack is not connected."
-                    .into(),
+                text: format!(
+                    "{whose} reach nobody — the administrator addresses get no mail while the \
+                     outgoing relay is off, and Slack is not connected."
+                ),
                 href: card_url("smtp-relay", ""),
             }
         } else {
             Attention {
                 tone: "warn",
-                text: "Alerts reach nobody — connect Slack or add an administrator address.".into(),
+                text: format!(
+                    "{whose} reach nobody — connect Slack or add an administrator address."
+                ),
                 href: card_url("alert-recipients", ""),
             }
         });
@@ -301,13 +362,28 @@ pub fn assess(f: &Facts, has_nodes: bool) -> (Verdict, Vec<Attention>) {
             href: card_url("settings-sync", ""),
         });
     }
-    if has_nodes && f.nodes > 0 && f.resp_auth_ready == f.nodes && !c.cluster.enforce_response_auth
-    {
-        out.push(Attention {
-            tone: "warn",
-            text: "Every node can sign its replies, but the master does not require it yet.".into(),
-            href: card_url("hardening", ""),
-        });
+    // Channel hardening: flagged only when the next step can be taken —
+    // every worker has what it needs — so the row is always actionable.
+    if has_nodes && f.nodes > 0 {
+        let pinning = c.cluster.enforce_worker_cert_pinning;
+        let signed = c.cluster.enforce_response_auth;
+        let text = if !pinning && f.pin_ready == f.nodes {
+            Some(
+                "Channel hardening is not finished — pin the workers' certificates, then \
+                 require signed replies.",
+            )
+        } else if pinning && !signed && f.resp_auth_ready == f.nodes {
+            Some("Every node can sign its replies, but the master does not require it yet.")
+        } else {
+            None
+        };
+        if let Some(text) = text {
+            out.push(Attention {
+                tone: "warn",
+                text: text.into(),
+                href: card_url("hardening", ""),
+            });
+        }
     }
     if f.update_available {
         out.push(Attention {
@@ -370,7 +446,11 @@ fn state_of(slug: &str, f: &Facts, has_nodes: bool) -> String {
             parts.push(if host.is_empty() {
                 "No domain — reached by IP".into()
             } else {
-                format!("https://{host}:8443")
+                // nginx serves the panel on 443 and proxies to the
+                // panel's own :8443, which is loopback-only.
+                // Not the bare URL: the sentence's first letter is
+                // capitalised, which would turn it into "Https://…".
+                format!("Reached at https://{host}")
             });
             parts.push(if c.update_auto {
                 "updates itself".into()
@@ -383,7 +463,7 @@ fn state_of(slug: &str, f: &Facts, has_nodes: bool) -> String {
         }
         "https" => {
             let contact = c.acme.contact_email.trim();
-            parts.push(if contact.is_empty() {
+            parts.push(if acme_contact_missing(contact) {
                 "No Let's Encrypt contact".into()
             } else {
                 format!("Let's Encrypt contact {contact}")
@@ -399,22 +479,14 @@ fn state_of(slug: &str, f: &Facts, has_nodes: bool) -> String {
             parts.push(if c.email.enabled && !c.email.smtp_host.trim().is_empty() {
                 format!(
                     "{} relays through {}:{}",
-                    if has_nodes {
-                        "The master"
-                    } else {
-                        "This server"
-                    },
+                    this_server(has_nodes),
                     c.email.smtp_host.trim(),
                     c.email.smtp_port
                 )
             } else {
                 format!(
-                    "{} has no relay and delivers directly",
-                    if has_nodes {
-                        "The master"
-                    } else {
-                        "This server"
-                    }
+                    "{} has no relay — no alert or letter email; sites' mail() goes out directly",
+                    this_server(has_nodes)
                 )
             });
             if has_nodes {
@@ -444,8 +516,15 @@ fn state_of(slug: &str, f: &Facts, has_nodes: bool) -> String {
                 "cs" => "In Czech".into(),
                 _ => "In English".into(),
             });
+            if f.letters_own_wording {
+                parts.push("your own letter wording".into());
+            }
             parts.push(if f.letters_rewritten == 0 {
-                "built-in wording".into()
+                if f.letters_own_wording {
+                    "built-in sentences".into()
+                } else {
+                    "built-in wording".into()
+                }
             } else {
                 format!(
                     "{} rewritten",
@@ -480,10 +559,14 @@ fn state_of(slug: &str, f: &Facts, has_nodes: bool) -> String {
             } else {
                 format!("off-site to {}", offsite.join(" + "))
             });
-            parts.push(format!(
-                "archives kept {} days",
-                c.backup_retention.max_age_days
-            ));
+            // No archives are made in snapshots-only mode, so their
+            // retention says nothing.
+            if c.cluster.protection_mode != "snapshots" {
+                parts.push(format!(
+                    "archives kept {} days",
+                    c.backup_retention.max_age_days
+                ));
+            }
         }
         "access" => {
             parts.push(if c.cluster.enforce_admin_2fa {
@@ -554,6 +637,7 @@ mod tests {
     fn healthy() -> Facts {
         let mut f = Facts::default();
         f.config.cluster.panel_hostname = "panel.example.com".into();
+        f.config.acme.contact_email = "ops@hosting.cz".into();
         f.config.cluster.protection_mode = "both".into();
         f.ftp_active = true;
         f.config.slack.default_webhook_set = true;
@@ -627,6 +711,7 @@ mod tests {
         f.nodes = 2;
         f.sync_known = 2;
         f.sync_behind = vec!["web-2".into()];
+        f.pin_ready = 2;
         f.resp_auth_ready = 2;
         let (v, a) = assess(&f, true);
         assert_eq!(v.tone, "warn");
@@ -634,6 +719,94 @@ mod tests {
         assert!(a.iter().any(|a| a.href.ends_with("#hardening")));
         let (v, _) = assess(&f, false);
         assert_eq!(v.tone, "ok");
+    }
+
+    fn hardening_row(f: &Facts) -> Option<String> {
+        assess(f, true)
+            .1
+            .into_iter()
+            .find(|a| a.href.ends_with("#hardening"))
+            .map(|a| a.text)
+    }
+
+    #[test]
+    fn hardening_is_flagged_only_when_the_next_step_can_be_taken() {
+        let mut f = healthy();
+        f.nodes = 2;
+        // A worker without a TLS pin: pinning would refuse it, so nothing to do yet.
+        f.pin_ready = 1;
+        f.resp_auth_ready = 2;
+        assert_eq!(hardening_row(&f), None);
+        // Every worker pinned: step 1 is next.
+        f.pin_ready = 2;
+        let t = hardening_row(&f).expect("step 1 flagged");
+        assert!(t.contains("pin the workers' certificates"), "{t}");
+        // Pinning on, every worker can sign: step 2 is next.
+        f.config.cluster.enforce_worker_cert_pinning = true;
+        let t = hardening_row(&f).expect("step 2 flagged");
+        assert!(t.contains("does not require it yet"), "{t}");
+        // A worker cannot sign yet: requiring it would cut that worker off.
+        f.resp_auth_ready = 1;
+        assert_eq!(hardening_row(&f), None);
+        // Both steps done.
+        f.resp_auth_ready = 2;
+        f.config.cluster.enforce_response_auth = true;
+        assert_eq!(hardening_row(&f), None);
+    }
+
+    #[test]
+    fn a_missing_or_placeholder_acme_contact_is_flagged() {
+        let mut f = healthy();
+        for bad in [
+            "",
+            "  ",
+            "admin@example.com",
+            "x@hyperion.invalid",
+            "nobody",
+        ] {
+            f.config.acme.contact_email = bad.into();
+            let (v, a) = assess(&f, false);
+            assert_eq!(v.tone, "warn", "{bad:?}");
+            assert!(
+                a.iter().any(|a| a.href.ends_with("/settings/https#acme")),
+                "{bad:?}"
+            );
+        }
+        // Unreadable config: the defaults say nothing about the contact.
+        f.config_error = Some("boom".into());
+        assert!(!assess(&f, false)
+            .1
+            .iter()
+            .any(|a| a.href.ends_with("#acme")));
+    }
+
+    #[test]
+    fn alerts_to_nobody_names_the_master_when_there_are_workers() {
+        let mut f = healthy();
+        f.config.slack.default_webhook_set = false;
+        let (_, a) = assess(&f, true);
+        assert!(a
+            .iter()
+            .any(|a| a.text.starts_with("The master's alerts reach nobody")));
+        let (_, a) = assess(&f, false);
+        assert!(a.iter().any(|a| a.text.starts_with("Alerts reach nobody")));
+    }
+
+    #[test]
+    fn row_sentences_follow_the_settings() {
+        let mut f = healthy();
+        let row = |f: &Facts, slug: &str| state_of(slug, f, false);
+        assert!(row(&f, "panel").starts_with("Reached at https://panel.example.com ·"));
+        assert!(!row(&f, "panel").contains(":8443"));
+        assert!(row(&f, "mail").contains("has no relay — no alert or letter email"));
+        assert!(row(&f, "backups").contains("archives kept"));
+        f.config.cluster.protection_mode = "snapshots".into();
+        assert!(!row(&f, "backups").contains("archives kept"));
+        f.letters_rewritten = 2;
+        f.letters_own_wording = true;
+        let l = row(&f, "letters");
+        assert!(l.contains("your own letter wording"), "{l}");
+        assert!(l.contains("2 sentences rewritten"), "{l}");
     }
 
     #[test]
