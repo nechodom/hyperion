@@ -135,6 +135,77 @@ struct NewTestTpl<'a> {
     site_type_in: String,
     target_node_in: String,
     proxy_upstream_url_in: String,
+    /// WordPress fields, echoed after a refused post (never the password).
+    wp: TestWpIn,
+    /// Library plugins + themes to offer; empty when the library is empty
+    /// or the user may not install from it.
+    library_plugins: Vec<hyperion_types::WpAssetSummary>,
+    library_themes: Vec<hyperion_types::WpAssetSummary>,
+}
+
+#[derive(Default)]
+struct TestWpIn {
+    admin_email: String,
+    title: String,
+    admin_user: String,
+    locale: String,
+    /// Picked plugin ids, `,`-wrapped (",3,7,") so the template can ask
+    /// `contains(",3,")` without a closure.
+    plugin_ids: String,
+    theme_id: i64,
+}
+
+impl TestWpIn {
+    fn from_form(form: &CreateForm) -> Self {
+        let ids: Vec<String> = parse_asset_ids(&form.wp_plugin_assets)
+            .unwrap_or_default()
+            .iter()
+            .map(i64::to_string)
+            .collect();
+        Self {
+            admin_email: form.wp_admin_email.trim().to_string(),
+            title: form.wp_title.trim().to_string(),
+            admin_user: form.wp_admin_user.trim().to_string(),
+            locale: form.wp_locale.trim().to_string(),
+            plugin_ids: format!(",{},", ids.join(",")),
+            theme_id: form.wp_theme_asset,
+        }
+    }
+
+    fn picked(&self, id: &i64) -> bool {
+        self.plugin_ids.contains(&format!(",{id},"))
+    }
+}
+
+/// The library split by kind for the test form, or nothing when this user
+/// can't install from it.
+async fn test_form_library(
+    state: &SharedState,
+    ctx: &AuthCtx,
+) -> (
+    Vec<hyperion_types::WpAssetSummary>,
+    Vec<hyperion_types::WpAssetSummary>,
+) {
+    if !ctx.can(Capability::ProfilesManage) {
+        return (Vec::new(), Vec::new());
+    }
+    fetch_wp_assets(state)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .partition(|a| a.kind == "plugin")
+}
+
+/// The signed-in user's email, to prefill the WordPress admin address — the
+/// welcome mail to `admin@<test subdomain>` would go nowhere.
+async fn session_user_email(state: &SharedState, ctx: &AuthCtx) -> String {
+    let Some(uid) = ctx.session.as_ref().map(|s| s.user_id) else {
+        return String::new();
+    };
+    match hyperion_rpc_client::call(&state.agent_socket, Request::WebUserGet { id: uid }).await {
+        Ok(RpcResponse::WebUserGet(Some(u))) => u.email,
+        _ => String::new(),
+    }
 }
 
 /// Per-field append to `CreateForm` for the optional WP install
@@ -761,6 +832,7 @@ pub async fn get_new(
     let csrf_token = super::session_csrf_token(&state, &ctx);
     let test_setup = fetch_test_setup(&state).await;
     if q.test == "1" {
+        let (library_plugins, library_themes) = test_form_library(&state, &ctx).await;
         let tpl = NewTestTpl {
             username: &ctx.username,
             user_initial: super::user_initial(&ctx.username),
@@ -774,6 +846,12 @@ pub async fn get_new(
             site_type_in: String::new(),
             target_node_in: String::new(),
             proxy_upstream_url_in: String::new(),
+            wp: TestWpIn {
+                admin_email: session_user_email(&state, &ctx).await,
+                ..Default::default()
+            },
+            library_plugins,
+            library_themes,
         };
         return Ok(no_store(Html(tpl.render()?).into_response()));
     }
@@ -907,6 +985,15 @@ pub struct CreateForm {
     /// post re-renders that form instead of the full wizard.
     #[serde(default)]
     pub test_mode: String,
+    /// Library plugins to install (and activate) right after WordPress, as
+    /// comma-joined `wp_assets` ids — one field, because axum's `Form` can't
+    /// collect repeated keys.
+    #[serde(default)]
+    pub wp_plugin_assets: String,
+    /// One library theme to install and activate after WordPress; 0 = keep
+    /// the WordPress default.
+    #[serde(default)]
+    pub wp_theme_asset: i64,
     /// "on" if the user checked the "install WordPress" checkbox.
     #[serde(default)]
     pub install_wp: String,
@@ -1295,6 +1382,13 @@ pub async fn post_create(
             "Master is in control-plane-only mode (Settings → Cluster → Cluster placement). Pick a worker node from the dropdown.",
         ).await);
     }
+    // Library plugins/themes picked on the form. Checked before anything is
+    // created, so a bad pick refuses the form instead of leaving a site that
+    // silently lacks what was asked for.
+    let library_picks = match resolve_library_picks(&state, &ctx, &form, &site_type, target).await {
+        Ok(v) => v,
+        Err(msg) => return Ok(render_new_error(&state, &ctx, &csrf_token, &form, &msg).await),
+    };
     // Server-side cluster-wide duplicate-domain guard. The wizard runs a
     // live /hostings/check-domain preflight, but that's advisory only — a
     // hand-crafted POST, a stale form, or two operators racing the same
@@ -1541,6 +1635,12 @@ pub async fn post_create(
             // Spawn the post-create pipeline whenever there's
             // background work to do: LE cert and/or WP install
             // (each optional, profile rides along with WP).
+            // Library picks only make sense once WordPress is in.
+            let job_library = if wp_req_opt.is_some() {
+                library_picks
+            } else {
+                Vec::new()
+            };
             if wp_req_opt.is_some() || issue_cert_checked {
                 let job_state = state.clone();
                 let job_target_owned = target.map(|s| s.to_string());
@@ -1559,6 +1659,7 @@ pub async fn post_create(
                     "issue_cert": issue_cert_checked,
                     "install_wp": wp_req_opt.is_some(),
                     "profile_id": job_profile_id,
+                    "library_assets": job_library.iter().map(|p| p.id).collect::<Vec<_>>(),
                 });
                 let actor_label = ctx.username.clone();
                 let actor_uid = ctx.session.as_ref().map(|s| s.user_id).unwrap_or(0);
@@ -1581,6 +1682,7 @@ pub async fn post_create(
                             issue_cert_checked,
                             job_wp_req,
                             job_profile_id,
+                            job_library,
                         )
                         .await;
                     },
@@ -6440,6 +6542,77 @@ mod test_target_tests {
 }
 
 #[cfg(test)]
+mod library_pick_tests {
+    use super::{match_library_picks, parse_asset_ids, LibraryPick, MAX_LIBRARY_PICKS};
+    use hyperion_types::WpAssetSummary;
+
+    fn asset(id: i64, kind: &str, name: &str) -> WpAssetSummary {
+        WpAssetSummary {
+            id,
+            kind: kind.into(),
+            original_name: name.into(),
+            size_bytes: 0,
+            sha256: String::new(),
+            uploaded_at: 0,
+            uploaded_by: String::new(),
+            profile_refs: 0,
+            install_count: 0,
+        }
+    }
+
+    #[test]
+    fn ids_parse_dedupe_and_keep_order() {
+        assert_eq!(parse_asset_ids("").unwrap(), Vec::<i64>::new());
+        assert_eq!(parse_asset_ids(" 7, 3,,7 ,12").unwrap(), vec![7, 3, 12]);
+    }
+
+    #[test]
+    fn garbage_ids_refuse_instead_of_skipping() {
+        assert!(parse_asset_ids("3,abc").is_err());
+        assert!(parse_asset_ids("0").is_err());
+        assert!(parse_asset_ids("-4").is_err());
+        let many: Vec<String> = (1..=(MAX_LIBRARY_PICKS as i64 + 1))
+            .map(|i| i.to_string())
+            .collect();
+        assert!(parse_asset_ids(&many.join(",")).is_err());
+    }
+
+    #[test]
+    fn picks_match_the_library_plugins_first_theme_last() {
+        let lib = vec![
+            asset(1, "plugin", "seo.zip"),
+            asset(2, "theme", "astra.zip"),
+            asset(3, "plugin", "forms.zip"),
+        ];
+        let picks = match_library_picks(&[3, 1], 2, &lib).unwrap();
+        let names: Vec<&str> = picks.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["forms.zip", "seo.zip", "astra.zip"]);
+        assert_eq!(
+            picks[2],
+            LibraryPick {
+                id: 2,
+                kind: "theme".into(),
+                name: "astra.zip".into()
+            }
+        );
+    }
+
+    #[test]
+    fn wrong_kind_or_missing_item_refuses() {
+        let lib = vec![
+            asset(1, "plugin", "seo.zip"),
+            asset(2, "theme", "astra.zip"),
+        ];
+        // A theme ticked as a plugin, a plugin chosen as the theme.
+        assert!(match_library_picks(&[2], 0, &lib).is_err());
+        assert!(match_library_picks(&[], 1, &lib).is_err());
+        // Deleted from the library since the form was rendered.
+        assert!(match_library_picks(&[9], 0, &lib).is_err());
+        assert!(match_library_picks(&[], 0, &lib).unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
 mod test_suffix_tests {
     use super::extract_test_suffix;
 
@@ -6903,6 +7076,7 @@ async fn render_new_error(
 ) -> Response {
     if form.test_mode == "1" {
         let setup = fetch_test_setup(state).await;
+        let (library_plugins, library_themes) = test_form_library(state, ctx).await;
         let tpl = NewTestTpl {
             username: &ctx.username,
             user_initial: super::user_initial(&ctx.username),
@@ -6916,6 +7090,9 @@ async fn render_new_error(
             site_type_in: form.site_type.clone(),
             target_node_in: form.target_node.clone(),
             proxy_upstream_url_in: form.proxy_upstream_url.clone(),
+            wp: TestWpIn::from_form(form),
+            library_plugins,
+            library_themes,
         };
         return Html(
             tpl.render()
@@ -13016,6 +13193,108 @@ pub async fn post_migration_move(
 /// readable jumps (Export 25% → Bundle 45% → Import 80% → Suspend
 /// 95% → Done 100%). Always calls `.finish()` exactly once — even
 /// on early bailout — so the row never gets stuck in `running`.
+/// A plugin or theme from the WP asset library, to install after WordPress.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct LibraryPick {
+    pub id: i64,
+    /// "plugin" | "theme"
+    pub kind: String,
+    pub name: String,
+}
+
+/// Parse `wp_plugin_assets` ("3,7, 12") into ids. Garbage is an error, not a
+/// silent skip — a site missing a plugin someone ticked is worse than a
+/// refused form. Duplicates collapse; the order the operator saw is kept.
+fn parse_asset_ids(csv: &str) -> Result<Vec<i64>, String> {
+    let mut ids: Vec<i64> = Vec::new();
+    for part in csv.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        let id: i64 = part
+            .parse()
+            .ok()
+            .filter(|n| *n > 0)
+            .ok_or_else(|| format!("`{part}` is not a library item id."))?;
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    if ids.len() > MAX_LIBRARY_PICKS {
+        return Err(format!(
+            "Pick at most {MAX_LIBRARY_PICKS} library plugins at once."
+        ));
+    }
+    Ok(ids)
+}
+
+const MAX_LIBRARY_PICKS: usize = 30;
+
+/// Match the picked ids against the library: each must exist and be of the
+/// kind its field asked for (plugins in the plugin list, a theme in the theme
+/// field). Plugins first, then the theme, so the theme activates last.
+fn match_library_picks(
+    plugin_ids: &[i64],
+    theme_id: i64,
+    library: &[hyperion_types::WpAssetSummary],
+) -> Result<Vec<LibraryPick>, String> {
+    let find = |id: i64, kind: &str| -> Result<LibraryPick, String> {
+        let a = library
+            .iter()
+            .find(|a| a.id == id)
+            .ok_or_else(|| format!("Library item {id} no longer exists — reload the form."))?;
+        if a.kind != kind {
+            return Err(format!(
+                "\"{}\" in the library is a {}, not a {kind}.",
+                a.original_name, a.kind
+            ));
+        }
+        Ok(LibraryPick {
+            id,
+            kind: a.kind.clone(),
+            name: a.original_name.clone(),
+        })
+    };
+    let mut out = Vec::with_capacity(plugin_ids.len() + 1);
+    for &id in plugin_ids {
+        out.push(find(id, "plugin")?);
+    }
+    if theme_id > 0 {
+        out.push(find(theme_id, "theme")?);
+    }
+    Ok(out)
+}
+
+/// Resolve the form's library picks, or say why they can't be honoured.
+/// Installing from the library needs the same right as the WordPress tab's
+/// "Install from library" (profiles), a WordPress site, and the master as the
+/// host: the ZIPs and their table live there, and a worker can't see them.
+async fn resolve_library_picks(
+    state: &SharedState,
+    ctx: &AuthCtx,
+    form: &CreateForm,
+    site_type: &str,
+    target: Option<&str>,
+) -> Result<Vec<LibraryPick>, String> {
+    let plugin_ids = parse_asset_ids(&form.wp_plugin_assets)?;
+    if plugin_ids.is_empty() && form.wp_theme_asset <= 0 {
+        return Ok(Vec::new());
+    }
+    if !ctx.can(Capability::ProfilesManage) {
+        return Err("Installing from the plugin library needs the profiles permission.".into());
+    }
+    if site_type != "wordpress" {
+        return Err("Library plugins and themes need a WordPress site.".into());
+    }
+    if target.is_some() {
+        return Err(
+            "Library plugins can only be installed on a site hosted on this server — the library lives here. Pick this server, or install them after creation."
+                .into(),
+        );
+    }
+    let library = fetch_wp_assets(state)
+        .await
+        .map_err(|e| format!("Couldn't read the plugin library: {e}"))?;
+    match_library_picks(&plugin_ids, form.wp_theme_asset, &library)
+}
+
 /// Background runner for the post-create setup pipeline. Lives
 /// behind `spawn_job("post_create_setup", …)` so the handler can
 /// return the hosting detail page (with credentials) within
@@ -13042,6 +13321,7 @@ async fn run_post_create_job(
     issue_cert: bool,
     wp_req: Option<hyperion_types::WpInstallRequest>,
     profile_id: i64,
+    library: Vec<LibraryPick>,
 ) {
     let target = target_node.as_deref();
     let mut deferred_failures: Vec<String> = Vec::new();
@@ -13182,6 +13462,8 @@ async fn run_post_create_job(
         }
 
         // ── Phase 3: profile (plugins/themes ride with WP) ───
+        // Shares the 70–95% band with the library phase when both run.
+        let profile_span = if library.is_empty() { 25 } else { 12 };
         if profile_id > 0 {
             if let Err(msg) = run_profile_apply_phase(
                 &reporter,
@@ -13190,7 +13472,7 @@ async fn run_post_create_job(
                 &hosting_id,
                 profile_id,
                 70,
-                25,
+                profile_span,
                 None,
             )
             .await
@@ -13201,6 +13483,69 @@ async fn run_post_create_job(
                     .await;
                 return;
             }
+        }
+
+        // ── Phase 4: plugins/themes picked from the library ──
+        // A failed item doesn't stop the rest; they're reported together.
+        let (base, span) = if profile_id > 0 { (82, 13) } else { (70, 25) };
+        let total = library.len() as i64;
+        for (idx, pick) in library.iter().enumerate() {
+            reporter
+                .step(
+                    &format!(
+                        "Installing {} {}/{} from the library: {}",
+                        pick.kind,
+                        idx + 1,
+                        total,
+                        pick.name
+                    ),
+                    base + (idx as i64) * span / total.max(1),
+                    "",
+                )
+                .await;
+            let resp = crate::dispatcher::dispatch_to_node(
+                &state,
+                target,
+                Request::WpInstallFromAsset {
+                    sel: HostingSelector::Id(hosting_id.clone()),
+                    asset_id: pick.id,
+                    activate: true,
+                },
+            )
+            .await;
+            let line = match resp {
+                Ok(RpcResponse::WpInstallFromAsset { .. }) => {
+                    format!("✓ {} installed and activated\n", pick.name)
+                }
+                Ok(RpcResponse::Error(e)) => {
+                    deferred_failures.push(format!(
+                        "Library {} \"{}\" failed: {e}. Install it from the WordPress tab.",
+                        pick.kind, pick.name
+                    ));
+                    format!("✗ {}: {e}\n", pick.name)
+                }
+                Ok(other) => {
+                    deferred_failures.push(format!(
+                        "Library {} \"{}\" returned an unexpected response ({other:?}).",
+                        pick.kind, pick.name
+                    ));
+                    format!("✗ {}: unexpected response\n", pick.name)
+                }
+                Err(e) => {
+                    deferred_failures.push(format!(
+                        "Library {} \"{}\" couldn't reach the agent: {e}. Install it from the WordPress tab.",
+                        pick.kind, pick.name
+                    ));
+                    format!("✗ {}: {e}\n", pick.name)
+                }
+            };
+            reporter
+                .step(
+                    &format!("Library {} {}/{}", pick.kind, idx + 1, total),
+                    base + ((idx as i64) + 1) * span / total.max(1),
+                    &line,
+                )
+                .await;
         }
     }
 

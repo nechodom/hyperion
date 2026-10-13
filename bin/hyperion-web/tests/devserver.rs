@@ -423,6 +423,19 @@ async fn start_agent_with_service() -> (PathBuf, tempfile::TempDir, Arc<StubServ
         p
     });
     let pool = open_memory().await.expect("memory db");
+    // A few library rows for the test form's picker. Rows only: the ZIPs
+    // would live under /var/lib/hyperion, so an install reports them missing.
+    if test_sites {
+        for (kind, name) in [
+            ("plugin", "seo-pack.zip"),
+            ("plugin", "contact-forms.zip"),
+            ("theme", "astra.zip"),
+        ] {
+            hyperion_state::wp_assets::insert(&pool, kind, name, name, 1024, name, 0, "kevin")
+                .await
+                .expect("seed wp asset");
+        }
+    }
     let secrets = Arc::new(SecretsStore::new(dir.path().join("secrets")));
     let svc = Arc::new(HostingService::<StubAdapters> {
         pool,

@@ -115,6 +115,79 @@
       </div>
     </div>
 
+    {# WordPress details — the same fields the wizard asks, all optional.
+       Blank user = "admin", blank/short password = generated and shown
+       once, blank title = the address. #}
+    <div class="field" id="wp-fields">
+      <div class="wp-grid">
+        <div class="field" style="margin:0">
+          <label for="wp_admin_email">Admin email <span class="hint">where the WordPress welcome goes</span></label>
+          <input id="wp_admin_email" name="wp_admin_email" type="email" value="{{ wp.admin_email }}" placeholder="you@example.cz">
+        </div>
+        <div class="field" style="margin:0">
+          <label for="wp_title">Site title <span class="hint">blank = the address</span></label>
+          <input id="wp_title" name="wp_title" type="text" value="{{ wp.title }}" placeholder="My test site">
+        </div>
+        <div class="field" style="margin:0">
+          <label for="wp_admin_user">Admin username <span class="hint">blank = <code>admin</code></span></label>
+          <input id="wp_admin_user" name="wp_admin_user" type="text" value="{{ wp.admin_user }}"
+                 maxlength="60" pattern="[A-Za-z0-9._@\-]+" placeholder="admin" title="Letters, digits, and . _ @ -">
+        </div>
+        <div class="field" style="margin:0">
+          <label for="wp_admin_password">Admin password <span class="hint">blank = generated, shown once</span></label>
+          <input id="wp_admin_password" name="wp_admin_password" type="text" autocomplete="new-password" placeholder="Leave blank to generate">
+        </div>
+        <div class="field" style="margin:0">
+          <label for="wp_locale">Language</label>
+          <select id="wp_locale" name="wp_locale">
+            <option value="en_US" {% if wp.locale.is_empty() || wp.locale == "en_US" %}selected{% endif %}>English (en_US)</option>
+            <option value="cs_CZ" {% if wp.locale == "cs_CZ" %}selected{% endif %}>Čeština (cs_CZ)</option>
+            <option value="sk_SK" {% if wp.locale == "sk_SK" %}selected{% endif %}>Slovenčina (sk_SK)</option>
+            <option value="de_DE" {% if wp.locale == "de_DE" %}selected{% endif %}>Deutsch (de_DE)</option>
+            <option value="es_ES" {% if wp.locale == "es_ES" %}selected{% endif %}>Español (es_ES)</option>
+            <option value="fr_FR" {% if wp.locale == "fr_FR" %}selected{% endif %}>Français (fr_FR)</option>
+            <option value="pl_PL" {% if wp.locale == "pl_PL" %}selected{% endif %}>Polski (pl_PL)</option>
+          </select>
+        </div>
+      </div>
+
+      {% if !library_plugins.is_empty() || !library_themes.is_empty() %}
+      <fieldset class="library" id="library">
+        <legend>From the plugin library <span class="hint">installed and activated after WordPress</span></legend>
+        {# Checkboxes carry no name: axum's Form can't collect repeated keys,
+           so the script joins the ticked ids into wp_plugin_assets. #}
+        <input type="hidden" name="wp_plugin_assets" id="wp_plugin_assets" value="{{ wp.plugin_ids.trim_matches(',') }}">
+        {% if !library_plugins.is_empty() %}
+        <div class="library-list">
+          {% for a in library_plugins %}
+          <label class="field-checkbox">
+            <input type="checkbox" class="lib-plugin" value="{{ a.id }}" {% if wp.picked(a.id) %}checked{% endif %}>
+            {{ a.original_name }}
+          </label>
+          {% endfor %}
+        </div>
+        {% endif %}
+        {% if !library_themes.is_empty() %}
+        <div class="field" style="margin:0.6rem 0 0">
+          <label for="wp_theme_asset">Theme</label>
+          <select id="wp_theme_asset" name="wp_theme_asset">
+            <option value="0">WordPress default</option>
+            {% for a in library_themes %}
+            <option value="{{ a.id }}" {% if wp.theme_id == a.id %}selected{% endif %}>{{ a.original_name }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        {% endif %}
+        <p class="text-soft small" id="library-remote" style="margin:0.5rem 0 0" hidden>
+          The library lives on this server, so it can only install onto sites hosted here. Pick this server, or install from the site's WordPress tab later.
+        </p>
+        <p class="text-soft small" style="margin:0.5rem 0 0">
+          Manage the library in <a href="/profiles/wp-assets">Profiles → WordPress library</a>.
+        </p>
+      </fieldset>
+      {% endif %}
+    </div>
+
     <div class="field" id="upstream-field">
       <label for="proxy_upstream_url">Where is the app running? <span class="hint">only for an app behind a proxy</span></label>
       <input id="proxy_upstream_url" name="proxy_upstream_url" type="url"
@@ -169,9 +242,31 @@
   margin-top: 0.25rem;
   line-height: 1.45;
 }
-/* The upstream field shows with JS off; with JS on only for a proxy. */
-#test-form.js-on #upstream-field { display: none; }
-#test-form.js-on.is-proxy #upstream-field { display: block; }
+/* Per-type fields show with JS off; with JS on only for their type. */
+#test-form.js-on #upstream-field,
+#test-form.js-on #wp-fields { display: none; }
+#test-form.js-on.is-proxy #upstream-field,
+#test-form.js-on.is-wp #wp-fields { display: block; }
+.wp-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr));
+  gap: 0.5rem 0.75rem;
+}
+.library {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0.6rem 0.85rem 0.75rem;
+  margin: 0.9rem 0 0;
+}
+.library legend { font-weight: 600; font-size: 0.85rem; padding: 0 0.3rem; }
+.library legend .hint { font-weight: 400; color: var(--text-soft); margin-left: 0.35rem; }
+.library-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(220px, 100%), 1fr));
+  gap: 0.2rem 0.75rem;
+}
+.library[disabled] .library-list,
+.library[disabled] select { opacity: 0.5; }
 </style>
 
 <script>
@@ -237,8 +332,29 @@
     const type = checked ? checked.value : 'wordpress';
     cards.forEach(c => c.classList.toggle('selected', c.contains(checked)));
     form.classList.toggle('is-proxy', type === 'reverse_proxy');
+    form.classList.toggle('is-wp', type === 'wordpress');
     if (upstream) upstream.required = (type === 'reverse_proxy');
   }
+
+  // The library installs only onto this server (it lives here): grey it out
+  // for a worker, and say why. The server refuses it either way.
+  const library = document.getElementById('library');
+  const libRemote = document.getElementById('library-remote');
+  const libHidden = document.getElementById('wp_plugin_assets');
+  function applyTarget() {
+    if (!library || !target) return;
+    const remote = target.value !== 'local';
+    library.disabled = remote;
+    if (libRemote) libRemote.hidden = !remote;
+  }
+  function syncLibrary() {
+    if (!libHidden) return;
+    const ids = [...form.querySelectorAll('.lib-plugin:checked')].map(c => c.value);
+    libHidden.value = ids.join(',');
+  }
+  form.querySelectorAll('.lib-plugin').forEach(c => c.addEventListener('change', syncLibrary));
+  if (target && target.tagName === 'SELECT') target.addEventListener('change', applyTarget);
+  applyTarget();
 
   // Lowercase as they type, so the address and the posted name agree.
   nameInput.addEventListener('input', () => {
