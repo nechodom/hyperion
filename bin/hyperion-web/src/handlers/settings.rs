@@ -1565,7 +1565,8 @@ pub async fn post_config(
     // The email section is PER-NODE: dispatch EmailConfigSet to the chosen node
     // (master = local socket). It writes that node's agent.toml, applies
     // postfix live, and self-restarts the node's agent. Every other section
-    // stays master-only (local write + web-driven restart, below).
+    // is written on the master (local write + web-driven restart, below);
+    // the synced ones then reach every node through `crate::cluster_sync`.
     if form.section == "email" {
         let node_target: Option<&str> =
             if target_node_raw.trim().is_empty() || target_node_raw == "local" {
@@ -1652,8 +1653,14 @@ pub async fn post_config(
     let label = return_tab_override
         .and_then(card_label)
         .unwrap_or_else(|| section_label(&form.section));
+    let synced = hyperion_core::cluster_sync::SYNCED_SECTIONS.contains(&form.section.as_str());
     let dest = match resp {
         RpcResponse::AgentConfigUpdate => {
+            // The settings sync carries every synced section to the other
+            // nodes — including the ones down right now, on a later pass.
+            if synced {
+                state.cluster_sync.kick();
+            }
             // Spawn a delayed restart so the redirect response gets back
             // to the browser BEFORE the agent goes down. 3s buffer is
             // plenty for the in-flight HTTP response to land. The agent
@@ -1717,8 +1724,9 @@ pub async fn post_config(
                         "/settings?flash_error={}#{}",
                         urlencode(&format!(
                             "Saved on this master, but {} did not take it: {}. \
-                             Sites on those nodes keep the PREVIOUS setting until a save \
-                             reaches them.",
+                             Sites on those nodes keep the PREVIOUS setting until the \
+                             settings sync reaches them — it retries every few minutes, and \
+                             the Nodes page shows which nodes are in sync.",
                             if failed.len() == 1 {
                                 "one node"
                             } else {
@@ -1733,7 +1741,7 @@ pub async fn post_config(
                         urlencode(&format!(
                             "Saved on this master, but {} did not take it: {}. \
                              Sites owned by those nodes keep sending the PREVIOUS letter \
-                             until a save reaches them — the per-node list under \
+                             until the settings sync reaches them (it retries every few minutes) — the per-node list under \
                              Customer letters → Care report & expiry warning shows \
                              which is which.",
                             if failed.len() == 1 {
@@ -1756,9 +1764,18 @@ pub async fn post_config(
                     } else {
                         ""
                     };
+                    // A synced section that is not pushed above reaches the
+                    // other nodes through the settings sync alone.
+                    let others = if synced && state.deployment_mode.read().await.as_str() == "master"
+                    {
+                        "+%E2%80%94+other+nodes+get+it+within+a+minute"
+                    } else {
+                        ""
+                    };
                     format!(
-                        "/settings?flash={}+saved+%E2%80%94+hyperion-agent+restarting+%28~5s%29{}#{}",
+                        "/settings?flash={}+saved+%E2%80%94+hyperion-agent+restarting+%28~5s%29{}{}#{}",
                         urlencode(label),
+                        others,
                         probe,
                         tab
                     )
@@ -1790,7 +1807,8 @@ pub async fn post_config(
 ///     is the pre-existing behaviour for every section, not a requirement
 ///     of this one.
 ///   * it does not treat "pushed" as "will stay pushed". Nothing here can
-///     reach a node that is down, and nothing re-tries later; that is why
+///     reach a node that is down; the settings sync (`crate::cluster_sync`)
+///     catches it up on a later pass, and
 ///     the card reads each node's actual file back rather than trusting
 ///     this function's result — see [`letter_node_rows`].
 ///

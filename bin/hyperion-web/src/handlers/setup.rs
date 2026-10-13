@@ -1757,6 +1757,7 @@ pub async fn post_backups(
     .await?;
     let (probe, error) = match saved {
         RpcResponse::BackupTargetUpserted { id } => {
+            state.cluster_sync.kick();
             match rpc(&state, Request::BackupTargetProbe { id }).await {
                 Ok(RpcResponse::BackupTargetProbe(p)) => (Some((p.ok, p.message)), None),
                 Ok(RpcResponse::Error(e)) => (Some((false, e.to_string())), None),

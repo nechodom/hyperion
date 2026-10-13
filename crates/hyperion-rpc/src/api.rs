@@ -616,6 +616,16 @@ pub trait AgentApi: Send + Sync + 'static {
         section: String,
         fields: std::collections::BTreeMap<String, String>,
     ) -> Result<(), RpcError>;
+    /// The master-settings revision this node last applied.
+    async fn cluster_config_revision(&self) -> Result<Option<String>, RpcError>;
+    /// Apply the master's cluster-wide settings on THIS node. Returns
+    /// `(restart_scheduled, ignored_keys)`.
+    async fn cluster_config_apply(
+        &self,
+        revision: String,
+        sections: Vec<(String, std::collections::BTreeMap<String, String>)>,
+        s3_targets: Vec<hyperion_types::S3BackupTarget>,
+    ) -> Result<(bool, Vec<String>), RpcError>;
 
     /// Compare the running binary's git SHA against the upstream
     /// `rolling` release. Cached agent-side; pass `force_refresh: true`

@@ -153,6 +153,7 @@ async fn serve(cfg: Config) -> anyhow::Result<()> {
         wp_lists: Default::default(),
         caches: Default::default(),
         setup,
+        cluster_sync: Default::default(),
     });
     // Spawn a background refresher that polls the agent for the
     // current `cluster.panel_hostname` every 30 s. The host-enforce
@@ -186,6 +187,7 @@ async fn serve(cfg: Config) -> anyhow::Result<()> {
         });
     }
     hyperion_web::notify_collector::spawn(state.clone());
+    hyperion_web::cluster_sync::spawn(state.clone());
     let pma_state = state.clone();
     let app = hyperion_web::build_router(state);
     let bind_addr: std::net::SocketAddr = listen

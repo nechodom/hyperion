@@ -335,6 +335,29 @@ pub async fn reap_stale(pool: &SqlitePool, now: i64, stale_secs: i64) -> Result<
     Ok(res.rows_affected())
 }
 
+/// How much work is in flight right now: running jobs that touched their row
+/// within `job_stale_secs`, plus running backups started within
+/// `backup_stale_secs`. The same rule `update.sh` waits on before it stops the
+/// agent — anything older is a row a crash left behind, not real work.
+pub async fn running_work_count(
+    pool: &SqlitePool,
+    now: i64,
+    job_stale_secs: i64,
+    backup_stale_secs: i64,
+) -> Result<i64, StateError> {
+    let (n,): (i64,) = sqlx::query_as(
+        r#"SELECT (SELECT COUNT(*) FROM jobs
+                    WHERE state = 'running' AND updated_at >= ?)
+                + (SELECT COUNT(*) FROM backup_runs
+                    WHERE state = 'running' AND started_at >= ?)"#,
+    )
+    .bind(now - job_stale_secs)
+    .bind(now - backup_stale_secs)
+    .fetch_one(pool)
+    .await?;
+    Ok(n)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -499,5 +522,39 @@ mod tests {
         // A second reap is a no-op (the job is already terminal).
         let n = reap_stale(&pool, 7400, 3600).await.expect("reap-2");
         assert_eq!(n, 0);
+    }
+
+    #[tokio::test]
+    async fn running_work_count_ignores_stale_and_finished_jobs() {
+        let pool = fresh_pool().await;
+        assert_eq!(
+            running_work_count(&pool, 10_000, 3600, 21_600)
+                .await
+                .unwrap(),
+            0
+        );
+        for (id, at) in [("live", 9_000), ("stale", 1_000)] {
+            start(
+                &pool,
+                StartReq {
+                    id,
+                    kind: "backup",
+                    target: None,
+                    payload_json: "{}",
+                    actor_uid: 0,
+                    actor_label: "t",
+                    started_at: at,
+                },
+            )
+            .await
+            .unwrap();
+        }
+        // Only the job that touched its row within the hour counts.
+        assert_eq!(
+            running_work_count(&pool, 10_000, 3600, 21_600)
+                .await
+                .unwrap(),
+            1
+        );
     }
 }

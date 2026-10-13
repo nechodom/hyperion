@@ -121,6 +121,9 @@
         <div><dt>Enrolled</dt><dd title="{{ n.enrolled_at }}">{{ crate::handlers::stats::fmt_ago(n.enrolled_at) }}</dd></div>
         <div><dt>Last heartbeat</dt><dd class="{% if !r.online %}tone-err{% endif %}" title="{{ n.last_seen_at }}">{{ crate::handlers::stats::fmt_ago(n.last_seen_at) }}</dd></div>
         {% endif %}
+        {% if !r.sync_verdict.is_empty() %}
+        <div><dt>Settings sync</dt><dd title="{{ r.sync_detail }}">{{ r.sync_verdict }}</dd></div>
+        {% endif %}
         <div><dt>See also</dt><dd><a href="/stats?node={{ n.node_id }}">Stats</a> · <a href="/services?node={{ n.node_id }}">Services</a> · <a href="/install/node-settings?node_id={{ n.node_id }}">Settings</a></dd></div>
       </dl>
 

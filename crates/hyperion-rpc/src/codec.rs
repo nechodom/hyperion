@@ -682,6 +682,22 @@ pub enum Request {
         section: String,
         fields: RedactedFields,
     },
+    /// The master-settings revision THIS node last applied (`None` = it has
+    /// never received one). The master's sync loop asks this first and sends
+    /// [`Request::ClusterConfigApply`] only to a node that is behind, so the
+    /// secrets in the payload cross the wire only when something changed.
+    ClusterConfigRevision,
+    /// The master's cluster-wide settings: every synced agent.toml section
+    /// (see `hyperion_core::cluster_sync::SYNCED_SECTIONS`) and the enabled S3
+    /// backup targets, secrets inline. The node REPLACES its synced keys with
+    /// these (the master always wins), keeps the targets for its scheduled
+    /// backups, and records `revision`. Field values are redacted in `Debug`;
+    /// so are the targets' secret keys.
+    ClusterConfigApply {
+        revision: String,
+        sections: Vec<(String, RedactedFields)>,
+        s3_targets: Vec<hyperion_types::S3BackupTarget>,
+    },
     /// Replace (or, with empty bytes, remove) the logo embedded in
     /// notification e-mails. Per-node, because the agent that SENDS the mail
     /// is the one that has to read the file.
@@ -2237,6 +2253,14 @@ pub enum Response {
     EmailConfigSet,
     NodeConfigRead(String),
     NodeConfigSet,
+    ClusterConfigRevision(Option<String>),
+    /// `restart_scheduled`: a section the agent reads only at start-up
+    /// changed, so it restarts once no job or backup is running. `ignored`:
+    /// `section.key`s this agent does not manage (newer than it) — skipped.
+    ClusterConfigApply {
+        restart_scheduled: bool,
+        ignored: Vec<String>,
+    },
     EmailLogoSet,
     EmailLogoGet(Option<String>),
     GeoipRefresh(i64),

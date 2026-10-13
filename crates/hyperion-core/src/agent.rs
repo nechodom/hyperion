@@ -1009,6 +1009,21 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.node_config_set(section, fields).await
     }
 
+    async fn cluster_config_revision(&self) -> Result<Option<String>, RpcError> {
+        self.svc.cluster_config_revision().await
+    }
+
+    async fn cluster_config_apply(
+        &self,
+        revision: String,
+        sections: Vec<(String, std::collections::BTreeMap<String, String>)>,
+        s3_targets: Vec<hyperion_types::S3BackupTarget>,
+    ) -> Result<(bool, Vec<String>), RpcError> {
+        self.svc
+            .cluster_config_apply(revision, sections, s3_targets)
+            .await
+    }
+
     async fn update_check(
         &self,
         force_refresh: bool,

@@ -7434,7 +7434,13 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// owner a destination.
     fn offsite_gap_reason(&self, source: OffsiteSource) -> Option<&'static str> {
         match source {
-            OffsiteSource::ThisNode if self.is_worker_node() => Some(OFFSITE_WORKER_HAS_NO_TARGETS),
+            // Once the master's settings sync has reached this worker, an
+            // empty list means the same as on the master: no target exists.
+            OffsiteSource::ThisNode
+                if self.is_worker_node() && self.cluster_sync_state().is_none() =>
+            {
+                Some(OFFSITE_WORKER_HAS_NO_TARGETS)
+            }
             OffsiteSource::ThisNode | OffsiteSource::Caller | OffsiteSource::NotWanted => None,
         }
     }
@@ -17768,6 +17774,18 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 age_recipient: r.age_recipient,
                 retention_daily: r.retention_daily,
             });
+        }
+        // On a worker the table is empty; the cluster's targets arrive with
+        // the master's settings sync instead. A name already in the table
+        // wins (that row is this node's own, deliberately configured).
+        if self.is_worker_node() {
+            if let Some(st) = self.cluster_sync_state() {
+                for t in st.s3_targets {
+                    if !out.iter().any(|o| o.name == t.name) {
+                        out.push(t);
+                    }
+                }
+            }
         }
         out
     }
@@ -29022,6 +29040,178 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(())
     }
 
+    /// Where this node keeps what the master's settings sync gave it (the
+    /// revision and the S3 targets), beside its agent.toml.
+    fn cluster_sync_path(&self) -> Option<std::path::PathBuf> {
+        self.agent_config_path
+            .as_deref()
+            .and_then(|p| p.parent())
+            .map(|d| d.join(crate::cluster_sync::STATE_FILE))
+    }
+
+    /// The last master-settings sync this node applied, if any.
+    fn cluster_sync_state(&self) -> Option<crate::cluster_sync::NodeSyncState> {
+        crate::cluster_sync::read_state(&self.cluster_sync_path()?)
+    }
+
+    /// The master-settings revision this node last applied.
+    pub async fn cluster_config_revision(&self) -> Result<Option<String>, RpcError> {
+        Ok(self.cluster_sync_state().map(|s| s.revision))
+    }
+
+    /// Apply the master's cluster-wide settings on THIS node.
+    ///
+    /// Every synced section of agent.toml is replaced by the master's values
+    /// (see [`crate::cluster_sync`]); the S3 targets go into the node's sync
+    /// file, where the scheduled backup sweep reads them. The file is only
+    /// rewritten when a value actually changed, and the agent restarts only
+    /// when a section it reads at start-up changed — and then not until no
+    /// job or backup is running, so a sync never kills a backup halfway.
+    ///
+    /// Refused on the master: its own file is the source of the payload.
+    pub async fn cluster_config_apply(
+        &self,
+        revision: String,
+        sections: Vec<(String, std::collections::BTreeMap<String, String>)>,
+        s3_targets: Vec<hyperion_types::S3BackupTarget>,
+    ) -> Result<(bool, Vec<String>), RpcError> {
+        if !self.is_worker_node() {
+            return Err(RpcError::Validation {
+                message: "this node is not an enrolled worker — the master's settings are the \
+                          source of the sync, not a copy of it"
+                    .into(),
+            });
+        }
+        let path = self
+            .agent_config_path
+            .as_ref()
+            .ok_or_else(|| RpcError::Validation {
+                message: "agent_config_path not wired — settings sync disabled".into(),
+            })?;
+        let sync_path = self
+            .cluster_sync_path()
+            .ok_or_else(|| RpcError::Validation {
+                message: "agent_config_path not wired — settings sync disabled".into(),
+            })?;
+        let sections: Vec<crate::cluster_sync::SyncedSection> = sections
+            .into_iter()
+            .map(|(section, fields)| crate::cluster_sync::SyncedSection { section, fields })
+            .collect();
+
+        // One apply at a time: two overlapping syncs would each read the
+        // file, change it, and the second write would drop the first's.
+        static APPLY_GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+        let _gate = APPLY_GATE.lock().await;
+
+        let mut doc = crate::config_persist::load(path)
+            .map_err(|e| RpcError::Internal_with(format!("agent.toml read failed: {e}")))?;
+        let outcome = crate::cluster_sync::apply_sections(&mut doc, &sections, |s, f| {
+            parse_agent_section_fields(s, f).map_err(|e| e.to_string())
+        })
+        .map_err(|message| RpcError::Validation { message })?;
+        if !outcome.changed.is_empty() {
+            crate::config_persist::save(path, &doc)
+                .map_err(|e| RpcError::Internal_with(format!("config write failed: {e}")))?;
+        }
+        // The revision goes down LAST: if anything above failed, the node
+        // still reports the old one and the next sync pass tries again.
+        let target_names: Vec<String> = s3_targets.iter().map(|t| t.name.clone()).collect();
+        crate::cluster_sync::write_state(
+            &sync_path,
+            &crate::cluster_sync::NodeSyncState {
+                revision: revision.clone(),
+                applied_at: now_secs(),
+                s3_targets,
+            },
+        )
+        .map_err(|e| {
+            RpcError::Internal_with(format!("could not write {}: {e}", sync_path.display()))
+        })?;
+
+        let restart = outcome
+            .changed
+            .iter()
+            .any(|c| crate::cluster_sync::RESTART_SECTIONS.contains(&c.as_str()));
+        // Audit names, never values (an FTP password is among them).
+        self.append_audit(
+            "cluster.config.apply",
+            None,
+            &serde_json::json!({
+                "revision": revision,
+                "changed": outcome.changed,
+                "ignored": outcome.ignored,
+                "s3_targets": target_names,
+                "restart": restart,
+            })
+            .to_string(),
+            "ok",
+        )
+        .await;
+        if restart {
+            self.restart_agent_when_idle();
+        }
+        Ok((restart, outcome.ignored))
+    }
+
+    /// Restart this agent once nothing is running — the same "is real work in
+    /// flight?" rule `update.sh` waits on. Gives up waiting after six hours
+    /// (whatever is still "running" by then is a row a crash left behind) and
+    /// restarts anyway. At most one waiter at a time: later calls are folded
+    /// into it, since one restart picks up every change.
+    fn restart_agent_when_idle(&self) {
+        static PENDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if PENDING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        let pool = self.pool.clone();
+        tokio::spawn(async move {
+            const JOB_STALE_SECS: i64 = 3600;
+            const BACKUP_STALE_SECS: i64 = 6 * 3600;
+            const MAX_WAIT_SECS: i64 = 6 * 3600;
+            // Let the RPC answer get back before anything goes down.
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            let started = now_secs();
+            loop {
+                let busy = hyperion_state::jobs::running_work_count(
+                    &pool,
+                    now_secs(),
+                    JOB_STALE_SECS,
+                    BACKUP_STALE_SECS,
+                )
+                .await
+                .unwrap_or(0);
+                if busy == 0 || now_secs() - started > MAX_WAIT_SECS {
+                    break;
+                }
+                tracing::info!(
+                    running = busy,
+                    "settings from the master need an agent restart — waiting for running work"
+                );
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            }
+            match tokio::process::Command::new("/usr/bin/systemctl")
+                .args(["restart", "hyperion-agent"])
+                .output()
+                .await
+            {
+                Ok(o) if o.status.success() => {
+                    tracing::info!("restart after master settings sync: ok")
+                }
+                Ok(o) => {
+                    PENDING.store(false, std::sync::atomic::Ordering::SeqCst);
+                    tracing::error!(
+                        stderr = %String::from_utf8_lossy(&o.stderr).trim(),
+                        "restart after master settings sync failed — restart hyperion-agent manually"
+                    )
+                }
+                Err(e) => {
+                    PENDING.store(false, std::sync::atomic::Ordering::SeqCst);
+                    tracing::error!(error = %e, "restart after master settings sync: spawn failed")
+                }
+            }
+        });
+    }
+
     /// Compare the running binary's compile-time git SHA against the
     /// SHA the upstream `rolling` tag points to. Cached for
     /// `UPDATE_CHECK_TTL_SECS` so the dashboard banner doesn't trigger
@@ -39371,9 +39561,9 @@ enum OffsiteSource {
 /// not two that have drifted apart.
 const OFFSITE_WORKER_HAS_NO_TARGETS: &str =
     "no off-site target reached this scheduled run: the cluster's off-site targets live in the \
-     master's table and a worker keeps none of its own, so this backup exists only on this node. \
-     Until that is fixed, run the backup from the panel (which sends the targets with the \
-     request) or give this node its own copy via [backup_remote] in its agent.toml";
+     master's table and the master's settings sync has not reached this node yet, so this backup \
+     exists only on this node. The sync runs every few minutes once the master and this node are \
+     on the same version — the Nodes page shows whether this node is in sync";
 
 /// Which of the resolved off-site targets one hosting's backup may use.
 /// Borrows the caller's slice — nothing is copied until an upload happens.
@@ -43451,6 +43641,109 @@ mod tests {
         // worker least of all (that is every pre-export/pre-push snapshot).
         assert_eq!(worker.offsite_gap_reason(OffsiteSource::Caller), None);
         assert_eq!(worker.offsite_gap_reason(OffsiteSource::NotWanted), None);
+    }
+
+    /// A worker set up from the master's settings sync: agent.toml plus
+    /// node-id.json in one temp dir.
+    async fn synced_worker(toml: &str) -> (HostingService<MockAdapterPort>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tmp");
+        let cfg = dir.path().join("agent.toml");
+        std::fs::write(&cfg, toml).expect("write agent.toml");
+        let state = dir.path().join("node-id.json");
+        std::fs::write(&state, b"{}").expect("write node-id.json");
+        let pool = open_memory().await.expect("memory db");
+        let s = svc(pool, MockAdapterPort::new())
+            .with_agent_config_path(cfg)
+            .with_node_state_file(state);
+        (s, dir)
+    }
+
+    fn sync_target(name: &str) -> hyperion_types::S3BackupTarget {
+        hyperion_types::S3BackupTarget {
+            name: name.into(),
+            endpoint: "https://s3.example".into(),
+            bucket: "bk".into(),
+            region: "eu".into(),
+            access_key_id: "AK".into(),
+            secret_access_key: "SK".into(),
+            age_recipient: None,
+            retention_daily: 7,
+        }
+    }
+
+    #[tokio::test]
+    async fn cluster_sync_reaches_a_worker_scheduled_backup() {
+        use super::OffsiteSource;
+        let (w, dir) = synced_worker(
+            "[backup_retention]\nkeep_latest_n = 9\n[acme]\nchallenge_dir = \"/srv/acme\"\n",
+        )
+        .await;
+        assert_eq!(w.cluster_config_revision().await.unwrap(), None);
+        assert!(w.resolve_local_s3_targets().await.is_empty());
+        assert!(w.offsite_gap_reason(OffsiteSource::ThisNode).is_some());
+
+        let master_toml = "[backup_retention]\nkeep_latest_n = 3\nmax_age_days = 30\n";
+        let sections: Vec<(String, std::collections::BTreeMap<String, String>)> =
+            crate::cluster_sync::extract_sections(master_toml)
+                .unwrap()
+                .into_iter()
+                .map(|s| (s.section, s.fields))
+                .collect();
+        let (restart, ignored) = w
+            .cluster_config_apply("rev-1".into(), sections, vec![sync_target("b2")])
+            .await
+            .unwrap();
+        assert!(
+            !restart,
+            "retention is re-read from disk, no restart needed"
+        );
+        assert!(ignored.is_empty());
+
+        let file = std::fs::read_to_string(dir.path().join("agent.toml")).unwrap();
+        assert!(file.contains("keep_latest_n = 3"), "{file}");
+        assert!(file.contains("max_age_days = 30"), "{file}");
+        assert!(
+            file.contains("challenge_dir = \"/srv/acme\""),
+            "node-local key kept: {file}"
+        );
+
+        assert_eq!(
+            w.cluster_config_revision().await.unwrap().as_deref(),
+            Some("rev-1")
+        );
+        let targets = w.resolve_local_s3_targets().await;
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].name, "b2");
+        assert_eq!(targets[0].secret_access_key, "SK");
+        // Synced: an empty list now means "the master has none", not a gap.
+        assert_eq!(w.offsite_gap_reason(OffsiteSource::ThisNode), None);
+    }
+
+    #[tokio::test]
+    async fn cluster_sync_refuses_an_invalid_value_and_keeps_the_old_revision() {
+        let (w, dir) = synced_worker("[backup_retention]\nkeep_latest_n = 9\n").await;
+        let bad = vec![(
+            "backup_retention".to_string(),
+            [("keep_latest_n".to_string(), "0".to_string())].into(),
+        )];
+        let err = w
+            .cluster_config_apply("rev-bad".into(), bad, vec![])
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("keep_latest_n"), "{err}");
+        assert_eq!(w.cluster_config_revision().await.unwrap(), None);
+        let file = std::fs::read_to_string(dir.path().join("agent.toml")).unwrap();
+        assert!(file.contains("keep_latest_n = 9"));
+    }
+
+    #[tokio::test]
+    async fn cluster_sync_is_refused_on_the_master() {
+        let (m, _dir) = svc_with_mode(Some("master")).await;
+        let err = m
+            .cluster_config_apply("rev".into(), vec![], vec![])
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("not an enrolled worker"), "{err}");
     }
 
     #[tokio::test]

@@ -875,6 +875,30 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
                 Err(e) => Response::Error(e),
             }
         }
+        Request::ClusterConfigRevision => match api.cluster_config_revision().await {
+            Ok(r) => Response::ClusterConfigRevision(r),
+            Err(e) => Response::Error(e),
+        },
+        Request::ClusterConfigApply {
+            revision,
+            sections,
+            s3_targets,
+        } => {
+            let sections = sections
+                .into_iter()
+                .map(|(s, f)| (s, f.into_inner()))
+                .collect();
+            match api
+                .cluster_config_apply(revision, sections, s3_targets)
+                .await
+            {
+                Ok((restart_scheduled, ignored)) => Response::ClusterConfigApply {
+                    restart_scheduled,
+                    ignored,
+                },
+                Err(e) => Response::Error(e),
+            }
+        }
         Request::UpdateCheck { force_refresh } => match api.update_check(force_refresh).await {
             Ok(v) => Response::UpdateCheck(v),
             Err(e) => Response::Error(e),
@@ -2754,6 +2778,17 @@ mod tests {
             _: std::collections::BTreeMap<String, String>,
         ) -> Result<(), RpcError> {
             Ok(())
+        }
+        async fn cluster_config_revision(&self) -> Result<Option<String>, RpcError> {
+            Ok(None)
+        }
+        async fn cluster_config_apply(
+            &self,
+            _: String,
+            _: Vec<(String, std::collections::BTreeMap<String, String>)>,
+            _: Vec<hyperion_types::S3BackupTarget>,
+        ) -> Result<(bool, Vec<String>), RpcError> {
+            Ok((false, Vec::new()))
         }
         async fn update_check(&self, _: bool) -> Result<hyperion_types::UpdateStatus, RpcError> {
             Ok(hyperion_types::UpdateStatus::default())

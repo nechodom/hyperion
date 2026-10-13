@@ -81,6 +81,9 @@ pub struct AppState {
     /// First-run wizard: whether setup is pending, its one-time code, and
     /// the domain hand-off tokens. See [`crate::setup`].
     pub setup: Arc<crate::setup::SetupCtl>,
+    /// The master → node settings sync loop: kick it after a save, read
+    /// which nodes are in step. See [`crate::cluster_sync`].
+    pub cluster_sync: Arc<crate::cluster_sync::SyncCtl>,
 }
 
 impl AppState {
