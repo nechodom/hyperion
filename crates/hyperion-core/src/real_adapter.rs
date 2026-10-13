@@ -995,6 +995,7 @@ impl AdapterPort for RealAdapter {
                 acme_challenge_root: &acme_root,
                 upstream_url: upstream,
                 custom_nginx_snippet: &detail.vhost_options.custom_nginx_snippet,
+                noindex: detail.vhost_options.noindex,
             };
             return hyperion_adapters::nginx::write_vhost_proxy(&self.nginx_paths, &input).await;
         }

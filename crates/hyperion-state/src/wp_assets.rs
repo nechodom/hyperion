@@ -157,6 +157,49 @@ pub async fn replace(
     Ok(())
 }
 
+/// Store a row under a GIVEN id — the node side of the master's library
+/// mirror, where the id has to match the master's so `@asset:<id>` means
+/// the same file everywhere. An existing row with that id is overwritten in
+/// place (UPDATE, not delete + insert), so its `wp_asset_installs` history
+/// survives the cascade.
+#[allow(clippy::too_many_arguments)]
+pub async fn upsert_with_id(
+    pool: &SqlitePool,
+    id: i64,
+    kind: &str,
+    original_name: &str,
+    stored_filename: &str,
+    size_bytes: i64,
+    sha256: &str,
+    uploaded_at: i64,
+    uploaded_by: &str,
+) -> Result<(), StateError> {
+    sqlx::query(
+        "INSERT INTO wp_assets \
+            (id, kind, original_name, stored_filename, size_bytes, sha256, uploaded_at, uploaded_by) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
+         ON CONFLICT(id) DO UPDATE SET \
+            kind = excluded.kind, \
+            original_name = excluded.original_name, \
+            stored_filename = excluded.stored_filename, \
+            size_bytes = excluded.size_bytes, \
+            sha256 = excluded.sha256, \
+            uploaded_at = excluded.uploaded_at, \
+            uploaded_by = excluded.uploaded_by",
+    )
+    .bind(id)
+    .bind(kind)
+    .bind(original_name)
+    .bind(stored_filename)
+    .bind(size_bytes)
+    .bind(sha256)
+    .bind(uploaded_at)
+    .bind(uploaded_by)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// Record (or update) the fact that `hosting_id` (on `node_id`)
 /// got `asset_id` installed. Upsert keyed on (asset_id, hosting_id)
 /// so re-install just bumps last_at. Best-effort callers can
@@ -316,6 +359,36 @@ mod tests {
             .unwrap();
         delete(&pool, id).await.unwrap();
         assert!(get_by_id(&pool, id).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn upsert_with_id_keeps_the_masters_id_and_install_history() {
+        let pool = open_memory().await.expect("open");
+        // The master's id, not the next autoincrement value.
+        upsert_with_id(&pool, 42, "plugin", "a.zip", "a.zip", 10, "h1", 1, "k")
+            .await
+            .unwrap();
+        let row = get_by_id(&pool, 42).await.unwrap().expect("row at id 42");
+        assert_eq!(row.sha256, "h1");
+        record_install(&pool, 42, "hosting-1", "node", true, 5)
+            .await
+            .unwrap();
+        // A newer upload on the master overwrites in place…
+        upsert_with_id(&pool, 42, "plugin", "a-2.zip", "a-2.zip", 20, "h2", 2, "k")
+            .await
+            .unwrap();
+        let row = get_by_id(&pool, 42).await.unwrap().unwrap();
+        assert_eq!(
+            (
+                row.original_name.as_str(),
+                row.sha256.as_str(),
+                row.size_bytes
+            ),
+            ("a-2.zip", "h2", 20)
+        );
+        assert_eq!(list(&pool).await.unwrap().len(), 1);
+        // …and the FK cascade never fired.
+        assert_eq!(install_count(&pool, 42).await.unwrap(), 1);
     }
 
     #[tokio::test]

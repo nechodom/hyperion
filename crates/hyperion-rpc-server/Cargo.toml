@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 hyperion-rpc = { path = "../hyperion-rpc" }
+hyperion-types = { path = "../hyperion-types" }
 tokio = { workspace = true }
 tracing.workspace = true
 thiserror.workspace = true
@@ -16,7 +17,6 @@ base64 = { workspace = true }
 [dev-dependencies]
 hyperion-rpc-client = { path = "../hyperion-rpc-client" }
 hyperion-import = { path = "../hyperion-import" }
-hyperion-types = { path = "../hyperion-types" }
 hyperion-validate = { path = "../hyperion-validate" }
 hyperion-state = { path = "../hyperion-state" }
 hyperion-core = { path = "../hyperion-core" }

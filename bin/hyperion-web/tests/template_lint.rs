@@ -312,6 +312,8 @@ fn every_page_is_reachable_from_the_nav() {
         "/install/update-node-status",
         // Per-row fragment the Nodes page lazy-loads into each summary.
         "/install/node-facts",
+        // Per-card fragment the test-site form lazy-loads into each server.
+        "/hostings/new/server-facts",
         "/services/install-status",
         "/settings/panel-cert-status",
         "/settings/email-preview",
@@ -466,6 +468,48 @@ fn no_template_disables_escaping() {
         "template(s) opting out of HTML escaping — any tenant-controlled value they \
          render becomes script in the operator's session:\n  {}\nUse |safe on the one \
          value that is really markup instead.",
+        offenders.join("\n  ")
+    );
+}
+
+/// An input's `pattern` must still be a valid regular expression under the
+/// `v` flag, which is how browsers compile it now.
+///
+/// In `v` mode a bare `-` at the edge of a character class (`[a-z0-9-]`) is a
+/// syntax error. The browser does not refuse the page: it logs to the console
+/// and drops the constraint, so the field quietly accepts anything and every
+/// "use a–z, 0–9 and dashes" hint built on `checkValidity()` never fires. That
+/// shipped on the test-site subdomain field. Escape it: `[a-z0-9\-]`.
+#[test]
+fn input_patterns_survive_the_v_flag() {
+    let mut offenders = Vec::new();
+    for entry in std::fs::read_dir(templates_dir()).expect("read templates") {
+        let path = entry.expect("dir entry").path();
+        if path.extension().and_then(|e| e.to_str()) != Some("html") {
+            continue;
+        }
+        let body = std::fs::read_to_string(&path).expect("read template");
+        for (at, value) in attr_values(&body, "pattern") {
+            let b = value.as_bytes();
+            let bad = (0..b.len()).any(|i| {
+                b[i] == b'-'
+                    && ((i > 0 && b[i - 1] == b'[')
+                        || (i + 1 < b.len() && b[i + 1] == b']' && (i == 0 || b[i - 1] != b'\\')))
+            });
+            if bad {
+                offenders.push(format!(
+                    "{}:{}  {value}",
+                    path.file_name().expect("name").to_string_lossy(),
+                    line_of(&body, at)
+                ));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "pattern attribute(s) with an unescaped `-` at the edge of a character \
+         class — invalid under the `v` flag, so the browser ignores the whole \
+         pattern:\n  {}",
         offenders.join("\n  ")
     );
 }

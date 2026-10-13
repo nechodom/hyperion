@@ -143,7 +143,7 @@
       <label for="test_site_name">Test-site short name <span class="hint">lowercase letters, digits, and dashes</span></label>
       <input id="test_site_name" name="test_site_name" type="text"
              value="" placeholder="blog" autocomplete="off"
-             pattern="[a-z0-9][a-z0-9-]{0,30}[a-z0-9]?" maxlength="32">
+             pattern="[a-z0-9][a-z0-9\-]{0,30}[a-z0-9]?" maxlength="32">
       <p class="text-soft small" style="margin:0.3rem 0 0">
         The full address is built from the preview address template (<a href="/settings#preview-address">Settings → HTTPS &amp; previews → Preview address</a>) on the test node you pick under Advanced options.
         <strong>Preview:</strong> <code id="test_domain_preview" style="color:var(--text-soft)">—</code>
@@ -242,7 +242,7 @@
       <label class="field-checkbox" style="margin-top:0.6rem">
         <input type="checkbox" name="wp_no_index" value="on">
         Keep this site out of Google for now
-        <span class="muted" style="margin-left:0.4rem;font-size:0.82rem">— for a site still being built; turn it off before launch</span>
+        <span class="muted" style="margin-left:0.4rem;font-size:0.82rem">— for a site still being built; switch it off under Vhost options at launch</span>
       </label>
       <p class="text-soft small" style="margin-top:0.4rem">
         WordPress is installed right after the site is created — usually 10–60 seconds. The admin login

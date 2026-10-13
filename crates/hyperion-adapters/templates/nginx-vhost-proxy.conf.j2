@@ -41,6 +41,10 @@ server {
     add_header X-Frame-Options "SAMEORIGIN" always;
     add_header X-Content-Type-Options "nosniff" always;
     add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    {%- if noindex %}
+    # "Hide from search engines" — see nginx-vhost.conf.j2.
+    add_header X-Robots-Tag "noindex, nofollow" always;
+    {%- endif %}
     server_tokens off;
 
     access_log {{ logs_dir }}/access.log;

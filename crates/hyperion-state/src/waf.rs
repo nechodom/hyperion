@@ -542,6 +542,7 @@ mod tests {
         opts.set_waf_level(hyperion_types::waf::WafLevel::Strict);
         opts.waf_overrides = r#"{"xmlrpc":false,"bogus":true}"#.into();
         opts.canonical_host = "non-www".into();
+        opts.noindex = true;
         crate::hostings::set_vhost_options(&pool, &hid, &opts, None, 2)
             .await
             .expect("set");
@@ -560,6 +561,16 @@ mod tests {
             back.canonical_host, "non-www",
             "neighbouring bind unshifted"
         );
+        assert!(back.noindex, "noindex written, not shifted into updated_at");
+        assert_eq!(
+            crate::hostings::get_by_id(&pool, &hid)
+                .await
+                .unwrap()
+                .unwrap()
+                .updated_at,
+            2,
+            "updated_at still gets `now`"
+        );
 
         // A legacy writer: empty level, bool on ⇒ stored as standard.
         let legacy = hyperion_types::VhostOptions {
@@ -576,5 +587,6 @@ mod tests {
             .vhost_options;
         assert_eq!(back.waf_level, "standard");
         assert!(back.waf_enabled);
+        assert!(!back.noindex, "the hash-writing statement binds it too");
     }
 }

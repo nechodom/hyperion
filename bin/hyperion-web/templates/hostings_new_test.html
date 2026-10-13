@@ -12,7 +12,7 @@
   <div>
     <h1>Test website</h1>
     <div class="subtitle">
-      A throwaway site on a test server. Type a subdomain — the address, server, HTTPS, and logins are filled in for you.
+      A throwaway site on a test server. Pick a subdomain — the address, HTTPS, database and logins are taken care of.
     </div>
   </div>
   <span class="grow"></span>
@@ -30,243 +30,516 @@
 
 {% if !setup.available() %}
 {# Say which of the two setup steps is missing instead of a dead form. #}
-<div class="card">
-  <h2 style="margin-top:0">Test websites aren't set up yet</h2>
-  <ol style="margin:0;padding-left:1.2rem;line-height:1.7">
-    <li>
-      {% if setup.template.is_empty() %}<strong>Set a preview address template</strong>{% else %}<span class="text-soft">Preview address template is set</span>{% endif %}
-      — in <a href="/settings#preview-address">Settings → HTTPS &amp; previews → Preview address</a>, e.g. <code>{name}.{node}.example.com</code>.
-    </li>
-    <li>
-      {% if setup.targets.is_empty() %}<strong>Mark a server as a test server</strong>{% else %}<span class="text-soft">A test server is marked</span>{% endif %}
-      — on the <a href="/install">Nodes page</a>, open the server and click <em>Mark as test</em>. This server can be one too.
-    </li>
-  </ol>
+<div class="group">
+  <div class="ghead">Before the first test website</div>
+  <div class="item">
+    <h3>
+      {% if setup.template.is_empty() %}<span class="tw-step">1</span>{% else %}<span class="tw-step is-done">✓</span>{% endif %}
+      Preview address template
+    </h3>
+    <p class="help" style="margin:0">
+      Where test addresses come from, e.g. <code>{name}.{node}.example.com</code>.
+      Set it in <a href="/settings#preview-address">Settings → HTTPS &amp; previews → Preview address</a>.
+    </p>
+  </div>
+  <div class="item">
+    <h3>
+      {% if setup.targets.is_empty() %}<span class="tw-step">2</span>{% else %}<span class="tw-step is-done">✓</span>{% endif %}
+      A test server
+    </h3>
+    <p class="help" style="margin:0">
+      On the <a href="/install">Nodes page</a>, open a server and click <em>Mark as test</em>.
+      This server can be one too.
+    </p>
+  </div>
 </div>
 {% else %}
-<div class="card" style="max-width:46rem">
-  <form method="post" action="/hostings" id="test-form">
-    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-    <input type="hidden" name="test_mode" value="1">
-    <input type="hidden" name="domain" value="">
-    {# Test content never belongs in a search index. #}
-    <input type="hidden" name="wp_no_index" value="on">
+<form method="post" action="/hostings" id="test-form" class="tw">
+  <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+  <input type="hidden" name="test_mode" value="1">
+  <input type="hidden" name="domain" value="">
 
-    <div class="field">
-      <label for="test_site_name">Subdomain <span class="hint">lowercase letters, digits, and dashes</span></label>
-      <input id="test_site_name" name="test_site_name" type="text" required autofocus
-             value="{{ name_in }}" placeholder="blog" autocomplete="off" spellcheck="false"
-             pattern="[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?" maxlength="32"
-             title="1–32 characters: a–z, 0–9, and dashes, not at the start or end">
-      <p class="small" style="margin:0.4rem 0 0">
-        <span class="text-soft">Address:</span>
-        <code id="test-address">{% for t in setup.targets %}{% if (target_node_in.is_empty() && loop.first) || target_node_in == t.node_id %}{% if name_in.is_empty() %}{{ t.pattern.replace("__name__", "…") }}{% else %}{{ t.pattern.replace("__name__", name_in) }}{% endif %}{% endif %}{% endfor %}</code>
-      </p>
-      <div id="test-check" class="text-soft small" style="margin-top:0.3rem;min-height:1.2em"></div>
-    </div>
+  <div class="tw-layout">
+    <div class="tw-main">
 
-    {% if setup.targets.len() > 1 %}
-    <div class="field">
-      <label for="target_node">Test server</label>
-      <select id="target_node" name="target_node">
-        {% for t in setup.targets %}
-        <option value="{{ t.node_id }}" data-pattern="{{ t.pattern }}"
-                {% if target_node_in == t.node_id || (target_node_in.is_empty() && loop.first) %}selected{% endif %}>{{ t.label }}</option>
-        {% endfor %}
-      </select>
-    </div>
-    {% else %}
-    {% for t in setup.targets %}
-    <input type="hidden" id="target_node" name="target_node" value="{{ t.node_id }}" data-pattern="{{ t.pattern }}">
-    {% endfor %}
-    {% endif %}
-
-    <div class="field">
-      <label>What runs on it</label>
-      <div class="type-picker">
-        <label class="type-card{% if site_type_in.is_empty() || site_type_in == "wordpress" %} selected{% endif %}">
-          <input type="radio" name="site_type" value="wordpress" {% if site_type_in.is_empty() || site_type_in == "wordpress" %}checked{% endif %}>
-          <div class="type-card-body">
-            <div class="type-name">WordPress</div>
-            <div class="type-meta">Installed with a database; the admin login is shown once on the next page.</div>
+      {# ─── Address ─────────────────────────────────────────────── #}
+      <section class="group">
+        <div class="ghead">Address</div>
+        <div class="item">
+          <label class="tw-label" for="test_site_name">Subdomain</label>
+          <div class="tw-addr">
+            {% for t in setup.targets %}{% if t.node_id == selected_node %}
+            <span class="tw-addr-part" id="addr-pre"{% if t.prefix().is_empty() %} hidden{% endif %}>{{ t.prefix() }}</span>
+            {% endif %}{% endfor %}
+            <input id="test_site_name" name="test_site_name" type="text" required autofocus
+                   value="{{ input.name }}" placeholder="blog" autocomplete="off" spellcheck="false"
+                   autocapitalize="none" inputmode="url"
+                   pattern="[a-z0-9]([a-z0-9\-]{0,30}[a-z0-9])?" maxlength="32"
+                   title="1–32 characters: a–z, 0–9 and dashes, not at the start or end"
+                   aria-describedby="test-check name-help">
+            {% for t in setup.targets %}{% if t.node_id == selected_node %}
+            <span class="tw-addr-part" id="addr-suf">{{ t.suffix() }}</span>
+            {% endif %}{% endfor %}
           </div>
-        </label>
-        <label class="type-card{% if site_type_in == "static" %} selected{% endif %}">
-          <input type="radio" name="site_type" value="static" {% if site_type_in == "static" %}checked{% endif %}>
-          <div class="type-card-body">
-            <div class="type-name">Static website</div>
-            <div class="type-meta">HTML, CSS, and images, served as-is.</div>
+          <div class="tw-addr-meta">
+            <span id="test-check" class="tw-check" aria-live="polite"></span>
+            <span class="grow"></span>
+            <button type="button" class="btn small ghost" id="name-random" hidden>Random name</button>
           </div>
-        </label>
-        <label class="type-card{% if site_type_in == "php" %} selected{% endif %}">
-          <input type="radio" name="site_type" value="php" {% if site_type_in == "php" %}checked{% endif %}>
-          <div class="type-card-body">
-            <div class="type-name">PHP application</div>
-            <div class="type-meta">PHP 8.3 and a MariaDB database for your own app.</div>
-          </div>
-        </label>
-        <label class="type-card{% if site_type_in == "reverse_proxy" %} selected{% endif %}">
-          <input type="radio" name="site_type" value="reverse_proxy" {% if site_type_in == "reverse_proxy" %}checked{% endif %}>
-          <div class="type-card-body">
-            <div class="type-name">App behind a proxy</div>
-            <div class="type-meta">Forward the address to an app running elsewhere — Node, Python, a container.</div>
-          </div>
-        </label>
-      </div>
-    </div>
+          <p class="help" id="name-help">Lowercase letters, digits and dashes, up to 32 characters.</p>
+        </div>
+      </section>
 
-    {# WordPress details — the same fields the wizard asks, all optional.
-       Blank user = "admin", blank/short password = generated and shown
-       once, blank title = the address. #}
-    <div class="field" id="wp-fields">
-      <div class="wp-grid">
-        <div class="field" style="margin:0">
-          <label for="wp_admin_email">Admin email <span class="hint">where the WordPress welcome goes</span></label>
-          <input id="wp_admin_email" name="wp_admin_email" type="email" value="{{ wp.admin_email }}" placeholder="you@example.cz">
+      {# ─── Server ──────────────────────────────────────────────── #}
+      <section class="group">
+        <div class="ghead">
+          Server
+          <span class="ghead-note">{{ setup.targets.len() }} test server{% if setup.targets.len() != 1 %}s{% endif %}</span>
         </div>
-        <div class="field" style="margin:0">
-          <label for="wp_title">Site title <span class="hint">blank = the address</span></label>
-          <input id="wp_title" name="wp_title" type="text" value="{{ wp.title }}" placeholder="My test site">
-        </div>
-        <div class="field" style="margin:0">
-          <label for="wp_admin_user">Admin username <span class="hint">blank = <code>admin</code></span></label>
-          <input id="wp_admin_user" name="wp_admin_user" type="text" value="{{ wp.admin_user }}"
-                 maxlength="60" pattern="[A-Za-z0-9._@\-]+" placeholder="admin" title="Letters, digits, and . _ @ -">
-        </div>
-        <div class="field" style="margin:0">
-          <label for="wp_admin_password">Admin password <span class="hint">blank = generated, shown once</span></label>
-          <input id="wp_admin_password" name="wp_admin_password" type="text" autocomplete="new-password" placeholder="Leave blank to generate">
-        </div>
-        <div class="field" style="margin:0">
-          <label for="wp_locale">Language</label>
-          <select id="wp_locale" name="wp_locale">
-            <option value="en_US" {% if wp.locale.is_empty() || wp.locale == "en_US" %}selected{% endif %}>English (en_US)</option>
-            <option value="cs_CZ" {% if wp.locale == "cs_CZ" %}selected{% endif %}>Čeština (cs_CZ)</option>
-            <option value="sk_SK" {% if wp.locale == "sk_SK" %}selected{% endif %}>Slovenčina (sk_SK)</option>
-            <option value="de_DE" {% if wp.locale == "de_DE" %}selected{% endif %}>Deutsch (de_DE)</option>
-            <option value="es_ES" {% if wp.locale == "es_ES" %}selected{% endif %}>Español (es_ES)</option>
-            <option value="fr_FR" {% if wp.locale == "fr_FR" %}selected{% endif %}>Français (fr_FR)</option>
-            <option value="pl_PL" {% if wp.locale == "pl_PL" %}selected{% endif %}>Polski (pl_PL)</option>
-          </select>
-        </div>
-      </div>
-
-      {% if !library_plugins.is_empty() || !library_themes.is_empty() %}
-      <fieldset class="library" id="library">
-        <legend>From the plugin library <span class="hint">installed and activated after WordPress</span></legend>
-        {# Checkboxes carry no name: axum's Form can't collect repeated keys,
-           so the script joins the ticked ids into wp_plugin_assets. #}
-        <input type="hidden" name="wp_plugin_assets" id="wp_plugin_assets" value="{{ wp.plugin_ids.trim_matches(',') }}">
-        {% if !library_plugins.is_empty() %}
-        <div class="library-list">
-          {% for a in library_plugins %}
-          <label class="field-checkbox">
-            <input type="checkbox" class="lib-plugin" value="{{ a.id }}" {% if wp.picked(a.id) %}checked{% endif %}>
-            {{ a.original_name }}
-          </label>
-          {% endfor %}
-        </div>
-        {% endif %}
-        {% if !library_themes.is_empty() %}
-        <div class="field" style="margin:0.6rem 0 0">
-          <label for="wp_theme_asset">Theme</label>
-          <select id="wp_theme_asset" name="wp_theme_asset">
-            <option value="0">WordPress default</option>
-            {% for a in library_themes %}
-            <option value="{{ a.id }}" {% if wp.theme_id == a.id %}selected{% endif %}>{{ a.original_name }}</option>
+        <div class="item">
+          <div class="choice-grid srv-grid" role="radiogroup" aria-label="Server">
+            {% for t in setup.targets %}
+            <label class="choice srv-card">
+              <input type="radio" name="target_node" value="{{ t.node_id }}"
+                     data-label="{{ t.label }}" data-prefix="{{ t.prefix() }}" data-suffix="{{ t.suffix() }}"
+                     {% if t.node_id == selected_node %}checked{% endif %}>
+              <span class="choice-body">
+                <span class="choice-title">
+                  <svg class="choice-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="7" rx="2"/><rect x="2" y="14" width="20" height="7" rx="2"/><line x1="6" y1="6.5" x2="6.01" y2="6.5"/><line x1="6" y1="17.5" x2="6.01" y2="17.5"/></svg>
+                  <span class="choice-name" title="{{ t.label }}">{{ t.label }}</span>
+                  {% if t.node_id == "local" %}<span class="pill small muted">this server</span>{% endif %}
+                </span>
+                <span class="choice-meta mono">{{ t.prefix() }}…{{ t.suffix() }}</span>
+                <span class="srv-facts" hx-get="/hostings/new/server-facts?node={{ t.node_id }}" hx-trigger="load" hx-swap="innerHTML">
+                  <span class="srv-fact">checking…</span>
+                </span>
+              </span>
+            </label>
             {% endfor %}
-          </select>
+          </div>
+          {% if !setup.others.is_empty() %}
+          <details class="srv-others">
+            <summary>
+              {{ setup.others.len() }} other server{% if setup.others.len() != 1 %}s{% endif %} can't take test sites
+            </summary>
+            <ul>
+              {% for o in setup.others %}
+              <li>
+                <span>{{ o.label }}</span>
+                {% if is_super_admin %}<a href="/install#node-{{ o.node_id }}">Make it a test server</a>{% endif %}
+              </li>
+              {% endfor %}
+            </ul>
+            <p class="help">
+              A test address is a subdomain of the server's own preview domain, and only test servers are set up for it.
+              {% if is_super_admin %}Marking one as a test server is a click on the Nodes page.{% else %}An owner can mark more servers as test servers.{% endif %}
+            </p>
+          </details>
+          {% endif %}
+        </div>
+      </section>
+
+      {# ─── What runs on it ─────────────────────────────────────── #}
+      <section class="group">
+        <div class="ghead">What runs on it</div>
+        <div class="item">
+          <div class="choice-grid type-grid" role="radiogroup" aria-label="Site type">
+            <label class="choice">
+              <input type="radio" name="site_type" value="wordpress" data-label="WordPress" {% if input.is_type("wordpress") %}checked{% endif %}>
+              <span class="choice-body">
+                <span class="choice-title">
+                  <svg class="choice-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M4.5 8.5 9 20l3-8 3 8 4.5-11.5"/><line x1="3" y1="8.5" x2="7" y2="8.5"/><line x1="11" y1="8.5" x2="15" y2="8.5"/></svg>
+                  WordPress
+                </span>
+                <span class="choice-meta">Installed with a database. The admin login is shown on the next page.</span>
+              </span>
+            </label>
+            <label class="choice">
+              <input type="radio" name="site_type" value="static" data-label="Static website" {% if input.is_type("static") %}checked{% endif %}>
+              <span class="choice-body">
+                <span class="choice-title">
+                  <svg class="choice-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+                  Static website
+                </span>
+                <span class="choice-meta">HTML, CSS and images, served as-is.</span>
+              </span>
+            </label>
+            <label class="choice">
+              <input type="radio" name="site_type" value="php" data-label="PHP application" {% if input.is_type("php") %}checked{% endif %}>
+              <span class="choice-body">
+                <span class="choice-title">
+                  <svg class="choice-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+                  PHP application
+                </span>
+                <span class="choice-meta">PHP 8.3 and a MariaDB database for your own code.</span>
+              </span>
+            </label>
+            <label class="choice">
+              <input type="radio" name="site_type" value="reverse_proxy" data-label="App behind a proxy" {% if input.is_type("reverse_proxy") %}checked{% endif %}>
+              <span class="choice-body">
+                <span class="choice-title">
+                  <svg class="choice-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>
+                  App behind a proxy
+                </span>
+                <span class="choice-meta">Forward the address to an app running elsewhere — Node, Python, a container.</span>
+              </span>
+            </label>
+          </div>
+        </div>
+        <div class="item tw-when-proxy">
+          <div class="field" style="margin:0">
+            <label for="proxy_upstream_url">Where is the app running?</label>
+            <input id="proxy_upstream_url" name="proxy_upstream_url" type="url"
+                   placeholder="http://localhost:3000" value="{{ input.proxy_upstream_url }}">
+          </div>
+        </div>
+      </section>
+
+      {# ─── WordPress ───────────────────────────────────────────────
+         The same fields the wizard asks, all optional. Blank user =
+         "admin", blank or short password = generated and shown once,
+         blank title = the address. #}
+      <section class="group tw-when-wp" id="wp-fields">
+        <div class="ghead">WordPress <span class="ghead-note">all optional</span></div>
+        <div class="item">
+          <div class="field-row">
+            <div class="field">
+              <label for="wp_admin_email">Admin email <span class="hint">gets the WordPress welcome</span></label>
+              <input id="wp_admin_email" name="wp_admin_email" type="email" value="{{ input.wp.admin_email }}" placeholder="you@example.cz">
+            </div>
+            <div class="field">
+              <label for="wp_title">Site title <span class="hint">blank = the address</span></label>
+              <input id="wp_title" name="wp_title" type="text" value="{{ input.wp.title }}" placeholder="My test site">
+            </div>
+          </div>
+          <div class="field-row">
+            <div class="field">
+              <label for="wp_admin_user">Admin username <span class="hint">blank = <code>admin</code></span></label>
+              <input id="wp_admin_user" name="wp_admin_user" type="text" value="{{ input.wp.admin_user }}"
+                     maxlength="60" pattern="[A-Za-z0-9._@\-]+" placeholder="admin" autocomplete="off"
+                     title="Letters, digits, and . _ @ -">
+            </div>
+            <div class="field">
+              <label for="wp_admin_password">Admin password <span class="hint">blank = generated</span></label>
+              <input id="wp_admin_password" name="wp_admin_password" type="text" autocomplete="new-password"
+                     spellcheck="false" placeholder="Generated and shown once">
+            </div>
+          </div>
+          <div class="field-row">
+            <div class="field" style="margin:0">
+              <label for="wp_locale">Language</label>
+              <select id="wp_locale" name="wp_locale">
+                <option value="en_US" {% if input.wp.locale.is_empty() || input.wp.locale == "en_US" %}selected{% endif %}>English</option>
+                <option value="cs_CZ" {% if input.wp.locale == "cs_CZ" %}selected{% endif %}>Čeština</option>
+                <option value="sk_SK" {% if input.wp.locale == "sk_SK" %}selected{% endif %}>Slovenčina</option>
+                <option value="de_DE" {% if input.wp.locale == "de_DE" %}selected{% endif %}>Deutsch</option>
+                <option value="es_ES" {% if input.wp.locale == "es_ES" %}selected{% endif %}>Español</option>
+                <option value="fr_FR" {% if input.wp.locale == "fr_FR" %}selected{% endif %}>Français</option>
+                <option value="pl_PL" {% if input.wp.locale == "pl_PL" %}selected{% endif %}>Polski</option>
+              </select>
+            </div>
+          </div>
+        </div>
+
+        {% if library_allowed %}
+        <div class="item" id="library">
+          <div class="lib-head">
+            <h3>Plugins &amp; theme from the library</h3>
+            {% if library_plugins.len() > 1 %}
+            <button type="button" class="btn small ghost" id="lib-all" hidden>Select all</button>
+            {% endif %}
+          </div>
+          {% if library_plugins.is_empty() && library_themes.is_empty() %}
+          <p class="help" style="margin:0">
+            The library is empty. Upload plugin or theme ZIPs in
+            <a href="/profiles/wp-assets">Profiles → WordPress library</a> and they show up here, ready for every server.
+          </p>
+          {% else %}
+          <p class="help" style="margin:0 0 0.75rem">
+            Installed and activated right after WordPress. A server other than this one gets its copy automatically.
+          </p>
+          {# Checkboxes carry no name: axum's Form can't collect repeated
+             keys, so the script joins the ticked ids into wp_plugin_assets.
+             Without JS the hidden field keeps what was posted before. #}
+          <input type="hidden" name="wp_plugin_assets" id="wp_plugin_assets" value="{{ input.wp.plugin_ids.trim_matches(',') }}">
+          {% if library_plugins.len() > 8 %}
+          <input type="search" class="lib-filter" id="lib-filter" placeholder="Filter plugins…" aria-label="Filter plugins" hidden>
+          {% endif %}
+          {% if !library_plugins.is_empty() %}
+          <div class="lib-list" id="lib-list">
+            {% for a in library_plugins %}
+            <label class="lib-row">
+              <input type="checkbox" class="lib-plugin" value="{{ a.id }}" data-name="{{ a.original_name }}" {% if input.wp.picked(a.id) %}checked{% endif %}>
+              <span class="lib-name">{{ a.original_name }}</span>
+              <span class="lib-size">{{ crate::handlers::stats::fmt_bytes(a.size_bytes) }}</span>
+            </label>
+            {% endfor %}
+          </div>
+          {% endif %}
+          {% if !library_themes.is_empty() %}
+          <div class="field" style="margin:0.9rem 0 0">
+            <label for="wp_theme_asset">Theme</label>
+            <select id="wp_theme_asset" name="wp_theme_asset">
+              <option value="0">WordPress default</option>
+              {% for a in library_themes %}
+              <option value="{{ a.id }}" {% if input.wp.theme_id == a.id %}selected{% endif %}>{{ a.original_name }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          {% endif %}
+          {% endif %}
         </div>
         {% endif %}
-        <p class="text-soft small" id="library-remote" style="margin:0.5rem 0 0" hidden>
-          The library lives on this server, so it can only install onto sites hosted here. Pick this server, or install from the site's WordPress tab later.
-        </p>
-        <p class="text-soft small" style="margin:0.5rem 0 0">
-          Manage the library in <a href="/profiles/wp-assets">Profiles → WordPress library</a>.
-        </p>
-      </fieldset>
-      {% endif %}
+      </section>
+
+      {# ─── Search engines ──────────────────────────────────────── #}
+      <section class="group">
+        <div class="ghead">Search engines</div>
+        <div class="item">
+          <div class="choice-grid seg-grid" role="radiogroup" aria-label="Search engines">
+            <label class="choice">
+              <input type="radio" name="search_visibility" value="hidden" {% if input.search_hidden %}checked{% endif %}>
+              <span class="choice-body">
+                <span class="choice-title">
+                  <svg class="choice-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+                  Hidden
+                  <span class="pill small muted">recommended</span>
+                </span>
+                <span class="choice-meta">Search engines are asked not to list it, so a half-built copy never competes with the real site.</span>
+              </span>
+            </label>
+            <label class="choice">
+              <input type="radio" name="search_visibility" value="visible" {% if !input.search_hidden %}checked{% endif %}>
+              <span class="choice-body">
+                <span class="choice-title">
+                  <svg class="choice-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                  Visible
+                </span>
+                <span class="choice-meta">Google, Bing and Seznam may index it like any other site.</span>
+              </span>
+            </label>
+          </div>
+          <p class="help" style="margin:0.75rem 0 0">
+            Hidden sends <code>X-Robots-Tag: noindex</code> on every response; WordPress also gets “Discourage search engines”.
+            Switch it later under the site's <em>Vhost options</em>.
+          </p>
+        </div>
+      </section>
     </div>
 
-    <div class="field" id="upstream-field">
-      <label for="proxy_upstream_url">Where is the app running? <span class="hint">only for an app behind a proxy</span></label>
-      <input id="proxy_upstream_url" name="proxy_upstream_url" type="url"
-             placeholder="http://localhost:3000" value="{{ proxy_upstream_url_in }}">
-    </div>
-
-    <div class="btn-group" style="margin-top:1rem;display:flex;justify-content:space-between">
-      <a href="/hostings" class="btn ghost">Cancel</a>
-      <button class="btn primary lg" type="submit">Create test website</button>
-    </div>
-  </form>
-</div>
+    {# ─── Summary ─────────────────────────────────────────────────
+       Server-rendered for the starting choices; the script keeps it in
+       step. The submit lives here so it stays in view on a wide screen. #}
+    <aside class="tw-side">
+      <div class="group tw-summary">
+        <div class="ghead">Summary</div>
+        <div class="item">
+          <div class="tw-sum-label">Address</div>
+          {% for t in setup.targets %}{% if t.node_id == selected_node %}
+          <div class="tw-sum-addr mono" id="sum-address">https://{{ t.prefix() }}<b id="sum-name">{% if input.name.is_empty() %}…{% else %}{{ input.name }}{% endif %}</b>{{ t.suffix() }}</div>
+          {% endif %}{% endfor %}
+          <dl class="tw-kv">
+            <dt>Server</dt>
+            <dd id="sum-server">{% for t in setup.targets %}{% if t.node_id == selected_node %}{{ t.label }}{% endif %}{% endfor %}</dd>
+            <dt>Runs</dt>
+            <dd id="sum-type">{% if input.is_type("static") %}Static website{% else if input.is_type("php") %}PHP application{% else if input.is_type("reverse_proxy") %}App behind a proxy{% else %}WordPress{% endif %}</dd>
+            <dt>HTTPS</dt>
+            <dd>Server's wildcard certificate</dd>
+            <dt>Search</dt>
+            <dd id="sum-search">{% if input.search_hidden %}Hidden{% else %}Visible{% endif %}</dd>
+            <dt class="tw-when-wp">Login</dt>
+            <dd class="tw-when-wp" id="sum-login">admin · generated password</dd>
+            {% if library_allowed && (!library_plugins.is_empty() || !library_themes.is_empty()) %}
+            <dt class="tw-when-wp">Library</dt>
+            <dd class="tw-when-wp" id="sum-lib">nothing picked</dd>
+            {% endif %}
+          </dl>
+        </div>
+        <div class="item tw-actions">
+          <button class="btn primary lg" type="submit" id="tw-submit">Create test website</button>
+          <a href="/hostings" class="btn ghost">Cancel</a>
+        </div>
+      </div>
+    </aside>
+  </div>
+</form>
 {% endif %}
 
 <style>
-.type-picker {
+.tw-layout {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(200px, 100%), 1fr));
-  gap: 0.6rem;
-  margin: 0.4rem 0 0;
+  grid-template-columns: minmax(0, 1fr) minmax(17rem, 21rem);
+  gap: var(--group-gap, 1.25rem);
+  align-items: start;
 }
-.type-card {
-  position: relative;
-  display: block;
-  border: 1.5px solid var(--border);
-  border-radius: var(--radius-sm);
-  padding: 0.7rem 0.85rem;
-  cursor: pointer;
-  background: var(--surface);
-  transition: border-color var(--t-fast), background var(--t-fast);
+.tw-main > .group + .group { margin-top: var(--group-gap, 1.25rem); }
+.tw-side { position: sticky; top: 1rem; }
+@media (max-width: 980px) {
+  .tw-layout { grid-template-columns: minmax(0, 1fr); }
+  .tw-side { position: static; }
 }
-.type-card:hover { border-color: var(--primary-h); }
-.type-card.selected {
-  border-color: var(--primary);
-  background: color-mix(in oklab, var(--primary) 8%, transparent);
+
+.tw-label { display: block; font-size: 0.82rem; font-weight: 500; margin-bottom: 0.45rem; }
+.tw-step {
+  display: inline-grid; place-items: center;
+  width: 1.35rem; height: 1.35rem; border-radius: 50%;
+  border: 1px solid var(--border-strong);
+  font-size: 0.72rem; font-weight: 600; color: var(--text-dim);
 }
-.type-card input[type="radio"] {
-  position: absolute;
-  top: 0.7rem;
-  right: 0.7rem;
-  accent-color: var(--primary);
-}
-.type-card-body .type-name {
-  font-weight: 600;
-  font-size: 0.95rem;
-  color: var(--text);
-  padding-right: 1.4rem;
-}
-.type-card-body .type-meta {
-  font-size: 0.8rem;
-  color: var(--text-soft);
-  margin-top: 0.25rem;
-  line-height: 1.45;
-}
-/* Per-type fields show with JS off; with JS on only for their type. */
-#test-form.js-on #upstream-field,
-#test-form.js-on #wp-fields { display: none; }
-#test-form.js-on.is-proxy #upstream-field,
-#test-form.js-on.is-wp #wp-fields { display: block; }
-.wp-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr));
-  gap: 0.5rem 0.75rem;
-}
-.library {
+.tw-step.is-done { border-color: var(--success); color: var(--success); }
+
+/* Address: the subdomain field sits inside the address it becomes. */
+.tw-addr {
+  display: flex; align-items: center;
+  background: var(--bg-2);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
-  padding: 0.6rem 0.85rem 0.75rem;
-  margin: 0.9rem 0 0;
+  font-family: var(--font-mono);
+  font-size: 1.05rem;
+  transition: border-color var(--t-fast), box-shadow var(--t-fast);
+  overflow: hidden;
 }
-.library legend { font-weight: 600; font-size: 0.85rem; padding: 0 0.3rem; }
-.library legend .hint { font-weight: 400; color: var(--text-soft); margin-left: 0.35rem; }
-.library-list {
+.tw-addr:hover { border-color: var(--border-strong); }
+.tw-addr:focus-within {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--primary) 25%, transparent);
+}
+.tw-addr { cursor: text; }
+/* The field grows with what is typed, so the rest of the address follows
+   the name instead of waiting at the far edge. Without field-sizing the
+   input keeps its default width — still correct, just less snug. */
+.tw-addr input[type="text"] {
+  flex: 0 1 auto; width: auto; min-width: 4ch; max-width: 100%;
+  field-sizing: content;
+  border: 0; background: transparent; box-shadow: none;
+  font: inherit; padding: 0.75rem 0 0.75rem 0.9rem;
+}
+.tw-addr input[type="text"]:focus { box-shadow: none; background: transparent; }
+.tw-addr-part {
+  color: var(--text-soft); white-space: nowrap;
+  padding: 0.75rem 0.9rem 0.75rem 0;
+  overflow: hidden; text-overflow: ellipsis;
+}
+#addr-suf { flex: 1 1 auto; min-width: 0; }
+#addr-pre { padding: 0.75rem 0 0.75rem 0.9rem; }
+#addr-pre:not([hidden]) + input[type="text"] { padding-left: 0; }
+.tw-addr-meta { display: flex; align-items: center; gap: 0.5rem; min-height: 2rem; margin-top: 0.35rem; }
+.tw-addr-meta .grow { flex: 1; }
+.tw-check { font-size: 0.82rem; color: var(--text-soft); }
+.tw-check.is-ok { color: var(--success); }
+.tw-check.is-err { color: var(--danger); }
+.tw-main .help { font-size: 0.8rem; color: var(--text-soft); line-height: 1.55; margin: 0.2rem 0 0; }
+
+/* Radio choice cards: server, type, search visibility. The selected look
+   comes from :has(), so it is right before any script runs. */
+.choice-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(min(220px, 100%), 1fr));
-  gap: 0.2rem 0.75rem;
+  grid-template-columns: repeat(auto-fill, minmax(min(15rem, 100%), 1fr));
+  gap: 0.6rem;
 }
-.library[disabled] .library-list,
-.library[disabled] select { opacity: 0.5; }
+.choice {
+  position: relative;
+  display: flex;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-2);
+  padding: 0.85rem 2.4rem 0.85rem 0.95rem;
+  cursor: pointer;
+  transition: border-color var(--t-fast), background var(--t-fast);
+}
+.choice:hover { border-color: var(--border-strong); }
+.choice:has(input:checked) {
+  border-color: var(--primary);
+  background: var(--surface-2);
+}
+.choice:has(input:focus-visible) {
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--primary) 25%, transparent);
+}
+.choice > input[type="radio"] {
+  position: absolute; top: 0.95rem; right: 0.9rem;
+  margin: 0; accent-color: var(--primary);
+}
+.choice-body { display: flex; flex-direction: column; gap: 0.3rem; min-width: 0; }
+.choice-title {
+  display: flex; align-items: center; gap: 0.45rem; min-width: 0;
+  font-weight: 600; font-size: 0.92rem; color: var(--text);
+}
+.choice-icon { width: 16px; height: 16px; color: var(--text-dim); flex: none; }
+.choice-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.choice-title .pill { flex: none; }
+.choice:has(input:checked) .choice-icon { color: var(--text); }
+.choice-meta { font-size: 0.8rem; color: var(--text-soft); line-height: 1.45; }
+.choice-meta.mono {
+  font-family: var(--font-mono); font-size: 0.76rem;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.srv-grid { grid-template-columns: repeat(auto-fill, minmax(min(21rem, 100%), 1fr)); }
+.srv-facts { display: flex; flex-wrap: wrap; gap: 0.25rem 0.7rem; margin-top: 0.15rem; }
+.srv-fact { font-size: 0.76rem; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.srv-fact.is-warn { color: var(--warn); }
+.srv-fact.is-err { color: var(--danger); }
+/* Sized by the form column, not the window: the summary takes a share of
+   the width, so a viewport breakpoint would leave 3 + 1 type cards. */
+.tw-main { container-type: inline-size; }
+.type-grid, .seg-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+@container (min-width: 54rem) {
+  .type-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+}
+@container (max-width: 30rem) {
+  .type-grid, .seg-grid { grid-template-columns: minmax(0, 1fr); }
+}
+
+.srv-others { margin-top: 0.85rem; font-size: 0.84rem; }
+.srv-others > summary { cursor: pointer; color: var(--text-dim); }
+.srv-others ul { list-style: none; margin: 0.6rem 0 0; padding: 0; }
+.srv-others li {
+  display: flex; justify-content: space-between; gap: 1rem;
+  padding: 0.4rem 0; border-top: 1px solid var(--border);
+}
+.srv-others li:first-child { border-top: 0; }
+
+/* Library */
+.lib-head { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; margin-bottom: 0.35rem; }
+.lib-head h3 { margin: 0; }
+.lib-filter { margin: 0 0 0.6rem; }
+.lib-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(17rem, 100%), 1fr));
+  gap: 0.4rem;
+}
+.lib-row {
+  display: flex; align-items: center; gap: 0.6rem;
+  padding: 0.55rem 0.75rem;
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--bg-2);
+  cursor: pointer; font-size: 0.86rem;
+  transition: border-color var(--t-fast), background var(--t-fast);
+}
+.lib-row:hover { border-color: var(--border-strong); }
+.lib-row:has(input:checked) { border-color: var(--primary); background: var(--surface-2); }
+.lib-row input { margin: 0; flex: none; accent-color: var(--primary); }
+.lib-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lib-size { color: var(--text-soft); font-size: 0.76rem; font-variant-numeric: tabular-nums; flex: none; }
+.lib-row[hidden] { display: none; }
+
+/* Summary */
+.tw-summary .item { padding: 1.1rem 1.25rem; }
+.tw-sum-label { font-size: 0.75rem; color: var(--text-soft); margin-bottom: 0.3rem; }
+.tw-sum-addr {
+  font-family: var(--font-mono); font-size: 0.86rem; color: var(--text-dim);
+  word-break: break-all; line-height: 1.5; margin-bottom: 1rem;
+}
+.tw-sum-addr b { color: var(--text); font-weight: 600; }
+.tw-kv { display: grid; grid-template-columns: auto 1fr; gap: 0.45rem 1rem; margin: 0; font-size: 0.85rem; }
+.tw-kv dt { color: var(--text-soft); }
+.tw-kv dd { margin: 0; color: var(--text); min-width: 0; overflow-wrap: anywhere; }
+.tw-actions { display: flex; flex-direction: column; gap: 0.5rem; }
+.tw-actions .btn { width: 100%; justify-content: center; }
+
+/* Per-type parts. Shown by default (no :has, no script = every field is
+   there); hidden once the chosen type says they don't apply. */
+.tw:has(input[name="site_type"]:checked:not([value="wordpress"])) .tw-when-wp { display: none; }
+.tw:has(input[name="site_type"]:checked:not([value="reverse_proxy"])) .tw-when-proxy { display: none; }
 </style>
 
 <script>
@@ -274,28 +547,29 @@
   'use strict';
   const form = document.getElementById('test-form');
   if (!form) return;
-  form.classList.add('js-on');
-  const nameInput = document.getElementById('test_site_name');
-  const target = document.getElementById('target_node');
-  const address = document.getElementById('test-address');
-  const check = document.getElementById('test-check');
-  const upstream = document.getElementById('proxy_upstream_url');
-  const cards = form.querySelectorAll('.type-card');
+  const $ = (id) => document.getElementById(id);
+  const nameInput = $('test_site_name');
+  const check = $('test-check');
+  const upstream = $('proxy_upstream_url');
+  const submit = $('tw-submit');
 
-  // Patterns are rendered server-side through the real template, with
-  // `__name__` where the subdomain goes — the preview is that string.
-  function pattern() {
-    if (!target) return '';
-    if (target.tagName === 'SELECT') {
-      const opt = target.options[target.selectedIndex];
-      return opt ? opt.dataset.pattern || '' : '';
-    }
-    return target.dataset.pattern || '';
-  }
+  function picked(name) { return form.querySelector('input[name="' + name + '"]:checked'); }
+  function server() { return picked('target_node'); }
   function name() { return (nameInput.value || '').trim().toLowerCase(); }
+  // Prefix and suffix are rendered server-side through the real template;
+  // the address is only ever their concatenation around the typed name.
+  function address(n) {
+    const s = server();
+    return s ? (s.dataset.prefix || '') + n + (s.dataset.suffix || '') : n;
+  }
 
+  // ── Availability ──
   let timer = null;
   let ctrl = null;
+  function say(text, tone) {
+    check.textContent = text;
+    check.className = 'tw-check' + (tone ? ' is-' + tone : '');
+  }
   async function checkTaken(domain) {
     if (ctrl) ctrl.abort();
     ctrl = new AbortController();
@@ -304,68 +578,143 @@
         { signal: ctrl.signal, credentials: 'same-origin' });
       if (!r.ok) return;
       const j = await r.json();
-      if (!j.checked) { check.textContent = ''; return; }
-      if (j.exists) {
-        check.style.color = 'var(--danger)';
-        check.textContent = 'Already in use — pick another name.';
-      } else {
-        check.style.color = 'var(--success)';
-        check.textContent = 'Available';
-      }
+      if (!j.checked) { say(''); return; }
+      if (j.exists) say('Already in use — pick another name.', 'err');
+      else say('Available', 'ok');
     } catch (_) { /* aborted or offline */ }
   }
 
-  function render() {
+  // ── Summary + address ──
+  function renderAddress() {
     const n = name();
-    const p = pattern();
-    address.textContent = p.split('__name__').join(n || '…');
-    check.textContent = '';
-    check.style.color = '';
-    if (timer) clearTimeout(timer);
-    if (n && nameInput.checkValidity()) {
-      timer = setTimeout(() => checkTaken(p.split('__name__').join(n)), 350);
+    const s = server();
+    if (s) {
+      const pre = $('addr-pre');
+      if (pre) { pre.textContent = s.dataset.prefix || ''; pre.hidden = !s.dataset.prefix; }
+      const suf = $('addr-suf');
+      if (suf) suf.textContent = s.dataset.suffix || '';
+      const sum = $('sum-address');
+      if (sum) {
+        sum.textContent = 'https://' + (s.dataset.prefix || '');
+        const b = document.createElement('b');
+        b.id = 'sum-name';
+        b.textContent = n || '…';
+        sum.appendChild(b);
+        sum.appendChild(document.createTextNode(s.dataset.suffix || ''));
+      }
+      const srv = $('sum-server');
+      if (srv) srv.textContent = s.dataset.label || s.value;
     }
+    if (timer) clearTimeout(timer);
+    if (!n) { say(''); return; }
+    if (!nameInput.checkValidity()) {
+      say('Use a–z, 0–9 and dashes; no dash at the start or end.', 'err');
+      return;
+    }
+    say('Checking…');
+    timer = setTimeout(() => checkTaken(address(n)), 300);
   }
 
-  function applyType() {
-    const checked = form.querySelector('input[name="site_type"]:checked');
-    const type = checked ? checked.value : 'wordpress';
-    cards.forEach(c => c.classList.toggle('selected', c.contains(checked)));
-    form.classList.toggle('is-proxy', type === 'reverse_proxy');
-    form.classList.toggle('is-wp', type === 'wordpress');
-    if (upstream) upstream.required = (type === 'reverse_proxy');
+  function renderType() {
+    const t = picked('site_type');
+    if ($('sum-type') && t) $('sum-type').textContent = t.dataset.label || t.value;
+    if (upstream) upstream.required = !!t && t.value === 'reverse_proxy';
   }
 
-  // The library installs only onto this server (it lives here): grey it out
-  // for a worker, and say why. The server refuses it either way.
-  const library = document.getElementById('library');
-  const libRemote = document.getElementById('library-remote');
-  const libHidden = document.getElementById('wp_plugin_assets');
-  function applyTarget() {
-    if (!library || !target) return;
-    const remote = target.value !== 'local';
-    library.disabled = remote;
-    if (libRemote) libRemote.hidden = !remote;
+  function renderSearch() {
+    const v = picked('search_visibility');
+    if ($('sum-search') && v) $('sum-search').textContent = v.value === 'visible' ? 'Visible' : 'Hidden';
   }
-  function syncLibrary() {
-    if (!libHidden) return;
-    const ids = [...form.querySelectorAll('.lib-plugin:checked')].map(c => c.value);
-    libHidden.value = ids.join(',');
+
+  function renderLogin() {
+    const el = $('sum-login');
+    if (!el) return;
+    const user = ($('wp_admin_user').value || '').trim() || 'admin';
+    const pw = ($('wp_admin_password').value || '');
+    el.textContent = user + ' · ' + (pw.length >= 6 ? 'your password' : 'generated password');
   }
-  form.querySelectorAll('.lib-plugin').forEach(c => c.addEventListener('change', syncLibrary));
-  if (target && target.tagName === 'SELECT') target.addEventListener('change', applyTarget);
-  applyTarget();
+
+  // ── Library ──
+  const libHidden = $('wp_plugin_assets');
+  const libBoxes = [...form.querySelectorAll('.lib-plugin')];
+  const theme = $('wp_theme_asset');
+  function renderLibrary() {
+    if (libHidden) libHidden.value = libBoxes.filter(c => c.checked).map(c => c.value).join(',');
+    const el = $('sum-lib');
+    if (!el) return;
+    const n = libBoxes.filter(c => c.checked).length;
+    const parts = [];
+    if (n) parts.push(n + ' plugin' + (n === 1 ? '' : 's'));
+    if (theme && theme.value !== '0') parts.push(theme.options[theme.selectedIndex].text);
+    el.textContent = parts.length ? parts.join(' + ') : 'nothing picked';
+    const all = $('lib-all');
+    if (all) all.textContent = libBoxes.every(c => c.checked) ? 'Select none' : 'Select all';
+  }
+  libBoxes.forEach(c => c.addEventListener('change', renderLibrary));
+  if (theme) theme.addEventListener('change', renderLibrary);
+  const libAll = $('lib-all');
+  if (libAll) {
+    libAll.hidden = false;
+    libAll.addEventListener('click', () => {
+      const on = !libBoxes.every(c => c.checked);
+      libBoxes.forEach(c => { if (!c.closest('.lib-row').hidden) c.checked = on; });
+      renderLibrary();
+    });
+  }
+  const libFilter = $('lib-filter');
+  if (libFilter) {
+    libFilter.hidden = false;
+    libFilter.addEventListener('input', () => {
+      const q = libFilter.value.trim().toLowerCase();
+      libBoxes.forEach(c => {
+        c.closest('.lib-row').hidden = !!q && !(c.dataset.name || '').toLowerCase().includes(q);
+      });
+    });
+  }
+
+  // ── Random name ──
+  const WORDS = ['alfa', 'beta', 'gama', 'delta', 'sigma', 'omega', 'nova', 'luna', 'atlas', 'orion', 'vega', 'kappa'];
+  const rnd = $('name-random');
+  if (rnd) {
+    rnd.hidden = false;
+    rnd.addEventListener('click', () => {
+      const w = WORDS[Math.floor(Math.random() * WORDS.length)];
+      nameInput.value = w + '-' + String(Math.floor(Math.random() * 900) + 100);
+      renderAddress();
+      nameInput.focus();
+    });
+  }
+
+  // The whole address box is the field: a click on the suffix lands in it.
+  const box = form.querySelector('.tw-addr');
+  if (box) box.addEventListener('mousedown', (e) => {
+    if (e.target !== nameInput) { e.preventDefault(); nameInput.focus(); }
+  });
 
   // Lowercase as they type, so the address and the posted name agree.
   nameInput.addEventListener('input', () => {
     const lower = nameInput.value.toLowerCase();
     if (lower !== nameInput.value) nameInput.value = lower;
-    render();
+    renderAddress();
   });
-  if (target && target.tagName === 'SELECT') target.addEventListener('change', render);
-  form.querySelectorAll('input[name="site_type"]').forEach(r => r.addEventListener('change', applyType));
-  applyType();
-  render();
+  form.querySelectorAll('input[name="target_node"]').forEach(r => r.addEventListener('change', renderAddress));
+  form.querySelectorAll('input[name="site_type"]').forEach(r => r.addEventListener('change', renderType));
+  form.querySelectorAll('input[name="search_visibility"]').forEach(r => r.addEventListener('change', renderSearch));
+  ['wp_admin_user', 'wp_admin_password'].forEach(id => { const el = $(id); if (el) el.addEventListener('input', renderLogin); });
+
+  // One create per click: a second submit while the first is still being
+  // provisioned would race it for the same name.
+  form.addEventListener('submit', () => {
+    if (submit) {
+      setTimeout(() => { submit.disabled = true; submit.textContent = 'Creating…'; }, 0);
+    }
+  });
+
+  renderType();
+  renderSearch();
+  renderLogin();
+  renderLibrary();
+  renderAddress();
 })();
 </script>
 {% endblock %}

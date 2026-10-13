@@ -993,6 +993,25 @@ fn wp_asset_disk_path(id: i64, stored_filename: &str) -> String {
     format!("/var/lib/hyperion/wp-assets/{id}/{stored_filename}")
 }
 
+/// The on-disk name for an uploaded ZIP: the operator's filename cut down
+/// to alphanumerics, dot, dash and underscore (64 chars), always ending in
+/// `.zip`. It is joined onto a directory path, so nothing that could climb
+/// out of it (`/`, `..` as a whole name) survives.
+fn wp_asset_stored_filename(original_name: &str) -> String {
+    let safe_name: String = original_name
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '.' || *c == '-' || *c == '_')
+        .take(64)
+        .collect();
+    if safe_name.is_empty() || safe_name.chars().all(|c| c == '.') {
+        "asset.zip".to_string()
+    } else if !safe_name.ends_with(".zip") {
+        format!("{safe_name}.zip")
+    } else {
+        safe_name
+    }
+}
+
 /// Count `@asset:<id>` references for a given asset id across all
 /// profiles' wp_plugins + wp_themes text fields. Uses substring
 /// search rather than a regex because the syntax is narrow
@@ -29319,18 +29338,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // Sanitize the operator filename — keep alphanumerics, dot,
         // dash, underscore. Trim to 64 chars. Empty after sanitize →
         // "asset.zip".
-        let safe_name: String = original_name
-            .chars()
-            .filter(|c| c.is_ascii_alphanumeric() || *c == '.' || *c == '-' || *c == '_')
-            .take(64)
-            .collect();
-        let stored_filename = if safe_name.is_empty() {
-            "asset.zip".to_string()
-        } else if !safe_name.ends_with(".zip") {
-            format!("{safe_name}.zip")
-        } else {
-            safe_name
-        };
+        let stored_filename = wp_asset_stored_filename(&original_name);
         let now = now_secs();
         let id = hyperion_state::wp_assets::insert(
             &self.pool,
@@ -29540,18 +29548,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         tokio::fs::create_dir_all(&dir)
             .await
             .map_err(|e| RpcError::Internal_with(format!("mkdir wp-assets/{id}: {e}")))?;
-        let safe_name: String = original_name
-            .chars()
-            .filter(|c| c.is_ascii_alphanumeric() || *c == '.' || *c == '-' || *c == '_')
-            .take(64)
-            .collect();
-        let stored_filename = if safe_name.is_empty() {
-            "asset.zip".to_string()
-        } else if !safe_name.ends_with(".zip") {
-            format!("{safe_name}.zip")
-        } else {
-            safe_name
-        };
+        let stored_filename = wp_asset_stored_filename(&original_name);
         let path = dir.join(&stored_filename);
         tokio::fs::write(&path, &bytes).await.map_err(|e| {
             RpcError::Internal_with(format!("write wp-assets/{id}/{stored_filename}: {e}"))
@@ -29641,6 +29638,139 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         )
         .await;
         Ok((ok, fail, failure_tail))
+    }
+
+    /// One library asset's row and ZIP bytes, for the master to copy onto
+    /// a node ([`Self::wp_asset_mirror`] there).
+    pub async fn wp_asset_read(
+        &self,
+        id: i64,
+    ) -> Result<(hyperion_types::WpAssetSummary, Vec<u8>), RpcError> {
+        let row = hyperion_state::wp_assets::get_by_id(&self.pool, id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("wp_asset lookup: {e}")))?
+            .ok_or_else(|| RpcError::NotFound {
+                kind: "wp_asset".into(),
+                id: id.to_string(),
+            })?;
+        let path = wp_asset_disk_path(id, &row.stored_filename);
+        let bytes = tokio::fs::read(&path).await.map_err(|e| {
+            RpcError::Internal_with(format!(
+                "{} (library item {id}) is missing on this server's disk: {e}",
+                row.original_name
+            ))
+        })?;
+        Ok((
+            hyperion_types::WpAssetSummary {
+                id: row.id,
+                kind: row.kind,
+                original_name: row.original_name,
+                size_bytes: row.size_bytes,
+                sha256: row.sha256,
+                uploaded_at: row.uploaded_at,
+                uploaded_by: row.uploaded_by,
+                profile_refs: 0,
+                install_count: 0,
+            },
+            bytes,
+        ))
+    }
+
+    /// Store a copy of a master library asset on this node under the
+    /// master's id. The bytes must hash to the master's recorded hash, so a
+    /// ZIP that rotted on the master's disk (or was mangled in transit) is
+    /// refused here rather than handed to wp-cli on a customer's site.
+    ///
+    /// Written to a temp name and renamed into place, so an install reading
+    /// the old file mid-mirror sees either the old ZIP or the new one, never
+    /// half of one.
+    pub async fn wp_asset_mirror(
+        &self,
+        asset: hyperion_types::WpAssetSummary,
+        bytes: Vec<u8>,
+    ) -> Result<(), RpcError> {
+        if asset.id <= 0 {
+            return Err(RpcError::Validation {
+                message: format!("library id must be positive, got {}", asset.id),
+            });
+        }
+        if asset.kind != "plugin" && asset.kind != "theme" {
+            return Err(RpcError::Validation {
+                message: format!("kind must be `plugin` or `theme`, got {:?}", asset.kind),
+            });
+        }
+        if bytes.len() < 4 || &bytes[..4] != b"PK\x03\x04" {
+            return Err(RpcError::Validation {
+                message: format!("{} is not a ZIP archive", asset.original_name),
+            });
+        }
+        let got = hex::encode(blake3::hash(&bytes).as_bytes());
+        if !got.eq_ignore_ascii_case(asset.sha256.trim()) {
+            return Err(RpcError::Validation {
+                message: format!(
+                    "{} doesn't match the checksum the master recorded for it — \
+                     re-upload it to the library",
+                    asset.original_name
+                ),
+            });
+        }
+        let id = asset.id;
+        let stored_filename = wp_asset_stored_filename(&asset.original_name);
+        let dir = std::path::PathBuf::from("/var/lib/hyperion/wp-assets").join(id.to_string());
+        tokio::fs::create_dir_all(&dir)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("mkdir wp-assets/{id}: {e}")))?;
+        let tmp = dir.join(format!(".{stored_filename}.mirror"));
+        let path = dir.join(&stored_filename);
+        tokio::fs::write(&tmp, &bytes)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("write wp-assets/{id}: {e}")))?;
+        use std::os::unix::fs::PermissionsExt;
+        let _ = tokio::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o644)).await;
+        if let Err(e) = tokio::fs::rename(&tmp, &path).await {
+            let _ = tokio::fs::remove_file(&tmp).await;
+            return Err(RpcError::Internal_with(format!(
+                "rename into wp-assets/{id}: {e}"
+            )));
+        }
+        // The previous version may have had another name; it is dead weight
+        // once the row points at the new one.
+        let previous = hyperion_state::wp_assets::get_by_id(&self.pool, id)
+            .await
+            .ok()
+            .flatten()
+            .map(|r| r.stored_filename);
+        hyperion_state::wp_assets::upsert_with_id(
+            &self.pool,
+            id,
+            &asset.kind,
+            &asset.original_name,
+            &stored_filename,
+            bytes.len() as i64,
+            &got,
+            asset.uploaded_at,
+            &asset.uploaded_by,
+        )
+        .await
+        .map_err(|e| RpcError::Internal_with(format!("wp_asset mirror: {e}")))?;
+        if let Some(old) = previous.filter(|old| *old != stored_filename) {
+            let _ = tokio::fs::remove_file(dir.join(wp_asset_stored_filename(&old))).await;
+        }
+        self.append_audit(
+            "wp_asset.mirror",
+            None,
+            &serde_json::json!({
+                "id": id,
+                "kind": asset.kind,
+                "original_name": asset.original_name,
+                "size_bytes": bytes.len(),
+                "sha256": got,
+            })
+            .to_string(),
+            "ok",
+        )
+        .await;
+        Ok(())
     }
 
     pub async fn wp_asset_delete(&self, id: i64) -> Result<(), RpcError> {
@@ -46510,6 +46640,29 @@ mod tests {
             "nope".to_string(),
         )]);
         assert!(parse_agent_section_fields("notifications", &bogus).is_err());
+    }
+
+    /// The stored name is joined onto `/var/lib/hyperion/wp-assets/<id>/`
+    /// as root — on a worker it now comes from the master's row, so nothing
+    /// in it may climb out of that directory.
+    #[test]
+    fn wp_asset_stored_filename_stays_inside_its_directory() {
+        assert_eq!(
+            wp_asset_stored_filename("akismet.5.3.zip"),
+            "akismet.5.3.zip"
+        );
+        assert_eq!(
+            wp_asset_stored_filename("My Plugin (1).zip"),
+            "MyPlugin1.zip"
+        );
+        assert_eq!(wp_asset_stored_filename("theme"), "theme.zip");
+        assert_eq!(
+            wp_asset_stored_filename("../../etc/passwd"),
+            "....etcpasswd.zip"
+        );
+        for dots in ["", ".", "..", "/", "///"] {
+            assert_eq!(wp_asset_stored_filename(dots), "asset.zip", "{dots:?}");
+        }
     }
 
     // ============================================================

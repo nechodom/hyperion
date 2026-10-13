@@ -186,6 +186,7 @@ async fn serve(cfg: Config) -> anyhow::Result<()> {
         });
     }
     hyperion_web::notify_collector::spawn(state.clone());
+    hyperion_web::wp_library::spawn(state.clone());
     let pma_state = state.clone();
     let app = hyperion_web::build_router(state);
     let bind_addr: std::net::SocketAddr = listen

@@ -167,9 +167,32 @@ pub async fn dispatch_to_node(
                     "dispatch (remote signed RPC)"
                 );
             }
+            // A worker installs library ZIPs from its own disk, so it needs
+            // the master's current copy before the install runs.
+            let needed = crate::wp_library::asset_ids_needed(&req);
+            if !needed.is_empty() {
+                if let Err(message) =
+                    crate::wp_library::ensure_on_node(state, node_id, &needed).await
+                {
+                    return Ok(Response::Error(hyperion_rpc::RpcError::Internal {
+                        message,
+                    }));
+                }
+            }
             dispatch_remote(state, node_id, req).await
         }
     }
+}
+
+/// Send `req` to an enrolled worker as-is — no master-hostname mapping and
+/// no plugin-library top-up. For [`crate::wp_library`], which IS the top-up
+/// (going through [`dispatch_to_node`] there would recurse).
+pub(crate) async fn dispatch_remote_unchecked(
+    state: &SharedState,
+    node_id: &str,
+    req: Request,
+) -> Result<Response, DispatchError> {
+    dispatch_remote(state, node_id, req).await
 }
 
 /// Is `node_id` the master's own hostname (as its rows store it)?
@@ -239,7 +262,9 @@ fn timeout_for_request(req: &Request) -> u64 {
         | Request::HostingCreate(_)
         | Request::HostingDelete { .. }
         | Request::WpInstall { .. }
-        | Request::WpInstallFromAsset { .. } => 600,
+        | Request::WpInstallFromAsset { .. }
+        // Up to 50 MB of ZIP, base64'd, over the WAN.
+        | Request::WpAssetMirror { .. } => 600,
         // First-time enable apt-installs opendkim + opendkim-tools before it
         // generates the key — well past 30s on a cold apt cache.
         Request::DkimEnable { .. } => 600,

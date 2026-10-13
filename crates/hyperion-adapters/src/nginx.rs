@@ -209,6 +209,8 @@ fn nginx_wants_http2_directive() -> bool {
 struct VhostTpl<'a> {
     /// See `http2_uses_directive`.
     http2_directive: bool,
+    /// Send `X-Robots-Tag: noindex, nofollow` (VhostOptions::noindex).
+    noindex: bool,
     /// nginx user-agent tokens to refuse; empty ⇒ no rule is emitted.
     blocked_bots: Vec<&'static str>,
     /// ISO country codes to refuse; empty ⇒ no rule is emitted.
@@ -572,6 +574,8 @@ pub struct ProxyVhostInput<'a> {
     /// block. Admin-only (HostingEditNginxRaw); `write_vhost_proxy` gates it
     /// behind `nginx -t`, so a bad snippet rolls back instead of bricking.
     pub custom_nginx_snippet: &'a str,
+    /// Send `X-Robots-Tag: noindex, nofollow` (VhostOptions::noindex).
+    pub noindex: bool,
 }
 
 #[derive(askama::Template)]
@@ -587,6 +591,7 @@ struct ProxyVhostTpl<'a> {
     acme_challenge_root: &'a str,
     upstream_url: &'a str,
     custom_nginx_snippet: &'a str,
+    noindex: bool,
 }
 
 /// Validate an upstream URL and give back the form that is safe to emit.
@@ -651,6 +656,7 @@ pub fn render_proxy(input: &ProxyVhostInput<'_>) -> Result<String, AdapterError>
         acme_challenge_root: input.acme_challenge_root,
         upstream_url: &upstream,
         custom_nginx_snippet: input.custom_nginx_snippet,
+        noindex: input.noindex,
     };
     Ok(tpl.render()?)
 }
@@ -773,6 +779,7 @@ pub fn render(input: &VhostInput<'_>) -> Result<String, AdapterError> {
         custom_nginx_snippet: &input.options.custom_nginx_snippet,
         maintenance_mode: input.options.maintenance_mode,
         fastcgi_cache_enabled: input.options.fastcgi_cache_enabled,
+        noindex: input.options.noindex,
         canonical_server_name: match input.options.canonical_host.as_str() {
             // A hosting whose primary name is itself `www.<name>` has the bare
             // name as its apex; deriving from the primary verbatim would
@@ -2289,6 +2296,63 @@ mod tests {
         );
     }
 
+    /// "Hide from search engines" sends the header on every response of the
+    /// HTTPS server — at server level, where the PHP and static locations
+    /// inherit it — and nothing at all when it is off.
+    #[test]
+    fn noindex_sends_x_robots_tag_only_when_asked() {
+        let aliases: Vec<String> = vec![];
+        let render_with = |noindex: bool| {
+            let opts = hyperion_types::VhostOptions {
+                noindex,
+                ..Default::default()
+            };
+            render(&VhostInput {
+                domain: "test.example.cz",
+                aliases: &aliases,
+                root_dir: "/home/t/test.example.cz/htdocs",
+                logs_dir: "/home/t/test.example.cz/logs",
+                system_user: "t",
+                php_version: Some("8.3"),
+                cert_path: "/c",
+                key_path: "/k",
+                acme_challenge_root: "/a",
+                hosting_id: "01H0000000000000000000",
+                options: &opts,
+                preview_server_name: None,
+                preview_cert_path: None,
+                preview_cert_key_path: None,
+            })
+            .expect("render")
+        };
+        let header = r#"add_header X-Robots-Tag "noindex, nofollow" always;"#;
+        assert!(!render_with(false).contains("X-Robots-Tag"));
+        let on = render_with(true);
+        assert_eq!(on.matches(header).count(), 1, "{on}");
+        // Next to the other server-level headers, not inside a location:
+        // no block opens between the security headers and it.
+        let at = on.find(header).unwrap();
+        let nosniff = on[..at].rfind("X-Content-Type-Options").unwrap();
+        assert!(!on[nosniff..at].contains('{'), "{}", &on[nosniff..at]);
+
+        let proxy = |noindex| {
+            super::render_proxy(&super::ProxyVhostInput {
+                domain: "app.example.cz",
+                aliases: &aliases,
+                logs_dir: "/l",
+                cert_path: "/c",
+                key_path: "/k",
+                acme_challenge_root: "/a",
+                upstream_url: "http://127.0.0.1:3000",
+                custom_nginx_snippet: "",
+                noindex,
+            })
+            .expect("proxy render")
+        };
+        assert!(proxy(true).contains(header));
+        assert!(!proxy(false).contains("X-Robots-Tag"));
+    }
+
     /// The canonical-host redirect: one hop from http, `$host` guard on
     /// https, and the exact hostname the operator chose — in BOTH
     /// directions, because a bool could not have carried direction.
@@ -3222,6 +3286,7 @@ mod upstream_url_tests {
             acme_challenge_root: "/var/lib/hyperion/acme",
             upstream_url: "http://127.0.0.1:3000; } location / { root /etc",
             custom_nginx_snippet: "",
+            noindex: false,
         });
         assert!(out.is_err(), "the renderer emitted an injected upstream");
     }
@@ -3241,6 +3306,7 @@ mod upstream_url_tests {
             acme_challenge_root: "/a",
             upstream_url: "http://127.0.0.1:3000",
             custom_nginx_snippet: "add_header X-Test 1 always;",
+            noindex: false,
         })
         .expect("proxy render");
         assert!(
