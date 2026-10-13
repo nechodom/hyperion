@@ -27,6 +27,9 @@ set -uo pipefail
 export DEBIAN_FRONTEND=noninteractive
 export LC_ALL=C.UTF-8 LANG=C.UTF-8
 unset LANGUAGE
+# A transient unit starts with no HOME, and update.sh, git, cargo and rustup
+# all read it — update.sh died on `$HOME: unbound variable`.
+export HOME="${HOME:-/root}"
 # needrestart: list what needs a restart, never restart anything itself. A
 # library upgrade must not bounce MariaDB or PHP-FPM in the middle of the day
 # on its own initiative.

@@ -698,7 +698,7 @@ build_from_source() {
   begin "Building Hyperion from source (5–15 minutes — tail -f $INSTALL_LOG)"
   quietly apt-get install -y -q -o DPkg::Lock::Timeout=300 build-essential pkg-config \
     || fail "Installing the build tools failed — see the lines above."
-  export PATH="$HOME/.cargo/bin:/root/.cargo/bin:$PATH"
+  export PATH="${HOME:-/root}/.cargo/bin:/root/.cargo/bin:$PATH"
   if ! command -v cargo >/dev/null 2>&1; then
     quietly sh -c "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
       | sh -s -- -y --profile minimal --default-toolchain stable" || true
