@@ -100,6 +100,12 @@ pub use wp::{
     WpThemeAction, WpThemeActionResult, WpThemeListResponse, WpVulnFinding, WpVulnScanResult,
 };
 
+/// Leads the DNS-01 "TXT not on the authoritative nameservers yet"
+/// refusal. Let's Encrypt was never asked, so the order is still pending
+/// and its values still good — the panel keeps the records page up rather
+/// than sending the operator off to start over.
+pub const DNS01_NOT_READY: &str = "DNS-01 records not visible on the authoritative nameservers yet";
+
 /// Current Unix epoch seconds. Centralized so tests can replace it if needed.
 pub fn now_secs() -> i64 {
     chrono::Utc::now().timestamp()

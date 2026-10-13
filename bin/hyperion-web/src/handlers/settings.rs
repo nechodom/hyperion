@@ -2797,7 +2797,11 @@ struct NodeWildcardDns01Tpl<'a> {
     node_id: String,
     base: String,
     records: Vec<(String, String)>,
+    records_field: String,
     csrf_finish: String,
+    /// Set when a validation was refused because the records aren't on the
+    /// authoritative nameservers yet.
+    error: Option<String>,
 }
 
 /// Resolve a node's preview-wildcard base domain (+ display label).
@@ -2922,8 +2926,10 @@ pub async fn post_node_wildcard_begin(
                 htmx_version: super::htmx_version(),
                 node_id: form.node_id.clone(),
                 base,
+                records_field: super::dns01_records_field(&records),
                 records,
                 csrf_finish: super::session_csrf_token(&state, &ctx),
+                error: None,
             };
             Ok(Html(tpl.render()?).into_response())
         }
@@ -2940,6 +2946,9 @@ pub async fn post_node_wildcard_begin(
 pub struct NodeWildcardFinishForm {
     pub node_id: String,
     pub base: String,
+    /// The records the page showed (see `dns01_records_field`).
+    #[serde(default)]
+    pub records: String,
 }
 
 /// POST /settings/node-wildcard/finish — validate the published TXT,
@@ -2971,7 +2980,28 @@ pub async fn post_node_wildcard_finish(
         Request::CertDns01FinishDomain { domain },
     )
     .await?;
+    let records = super::parse_dns01_records_field(&form.records);
     match resp {
+        // Nothing was sent to Let's Encrypt: same order, same values —
+        // stay on the records page rather than start a new order.
+        RpcResponse::Error(e)
+            if super::is_dns01_not_ready(&e.to_string()) && !records.is_empty() =>
+        {
+            let tpl = NodeWildcardDns01Tpl {
+                username: &ctx.username,
+                user_initial: super::user_initial(&ctx.username),
+                active: "settings",
+                css_version: super::css_version(),
+                htmx_version: super::htmx_version(),
+                node_id: form.node_id.clone(),
+                base: form.base.trim().to_string(),
+                records_field: super::dns01_records_field(&records),
+                records,
+                csrf_finish: super::session_csrf_token(&state, &ctx),
+                error: Some(e.to_string()),
+            };
+            Ok(Html(tpl.render()?).into_response())
+        }
         RpcResponse::CertDns01FinishDomain(_) => Ok(Redirect::to(&format!(
             "/settings?flash={}#preview-wildcard",
             urlencode(&format!(

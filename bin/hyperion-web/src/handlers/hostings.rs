@@ -11176,7 +11176,11 @@ struct Dns01Tpl {
     domain: String,
     selector: String,
     records: Vec<(String, String)>,
+    records_field: String,
     csrf_finish: String,
+    /// Set when a validation was refused because the records aren't on the
+    /// authoritative nameservers yet.
+    error: Option<String>,
 }
 
 pub async fn post_cert_dns01_begin(
@@ -11216,8 +11220,10 @@ pub async fn post_cert_dns01_begin(
                 htmx_version: super::htmx_version(),
                 domain: detail.domain.clone(),
                 selector: detail.id.as_str().to_string(),
+                records_field: super::dns01_records_field(&records),
                 records,
                 csrf_finish: csrf_token_for(&state, &ctx, "/hostings/cert/dns01/finish"),
+                error: None,
             };
             Ok(Html(tpl.render()?).into_response())
         }
@@ -11232,6 +11238,9 @@ pub async fn post_cert_dns01_begin(
 #[derive(Deserialize)]
 pub struct Dns01FinishForm {
     pub selector: String,
+    /// The records the page showed (see `dns01_records_field`).
+    #[serde(default)]
+    pub records: String,
 }
 
 pub async fn post_cert_dns01_finish(
@@ -11247,19 +11256,43 @@ pub async fn post_cert_dns01_finish(
             Err(r) => return Ok(r),
         };
     let sel_url = urlencoding(&form.selector);
-    let target_owned: Option<String> = find_hosting_anywhere(&state, sel.clone())
-        .await
-        .ok()
-        .and_then(|(_d, n)| n);
+    let found = find_hosting_anywhere(&state, sel.clone()).await.ok();
+    let target_owned: Option<String> = found.as_ref().and_then(|(_d, n)| n.clone());
     let resp = crate::dispatcher::dispatch_to_node(
         &state,
         target_owned.as_deref(),
         Request::CertDns01Finish { sel },
     )
     .await?;
+    let records = super::parse_dns01_records_field(&form.records);
     match resp {
         RpcResponse::CertDns01Finish(_) => {
             Ok(Redirect::to(&format!("/hostings/{}?cert=wildcard", sel_url)).into_response())
+        }
+        // Nothing was sent to Let's Encrypt: same order, same values. Keep
+        // the operator on the records page instead of making them start a
+        // new order (= new values) from the hosting page.
+        RpcResponse::Error(e)
+            if super::is_dns01_not_ready(&e.to_string()) && !records.is_empty() =>
+        {
+            let (domain, selector) = match &found {
+                Some((d, _)) => (d.domain.clone(), d.id.as_str().to_string()),
+                None => (form.selector.clone(), form.selector.clone()),
+            };
+            let tpl = Dns01Tpl {
+                username: ctx.username.clone(),
+                user_initial: super::user_initial(&ctx.username),
+                active: "hostings",
+                css_version: super::css_version(),
+                htmx_version: super::htmx_version(),
+                domain,
+                selector,
+                records_field: super::dns01_records_field(&records),
+                records,
+                csrf_finish: csrf_token_for(&state, &ctx, "/hostings/cert/dns01/finish"),
+                error: Some(e.to_string()),
+            };
+            Ok(Html(tpl.render()?).into_response())
         }
         RpcResponse::Error(e) => {
             let msg = urlencoding(&e.to_string());

@@ -39,6 +39,38 @@ pub mod trash;
 pub mod users;
 pub mod vulns;
 
+/// The DNS-01 records a "validate now" form carries back, one
+/// `name value` pair per comma (hostnames and base64url values hold
+/// neither; a newline inside an input's value isn't reliable), so a
+/// refused validation can show the very same records again without
+/// another round trip to the node. One field: `axum::Form` can't collect
+/// repeated keys into a `Vec`.
+pub fn dns01_records_field(records: &[(String, String)]) -> String {
+    records
+        .iter()
+        .map(|(n, v)| format!("{n} {v}"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// Inverse of [`dns01_records_field`]; malformed lines are dropped.
+pub fn parse_dns01_records_field(field: &str) -> Vec<(String, String)> {
+    field
+        .split(',')
+        .filter_map(|l| {
+            let mut it = l.split_whitespace();
+            let (n, v) = (it.next()?, it.next()?);
+            it.next().is_none().then(|| (n.to_string(), v.to_string()))
+        })
+        .collect()
+}
+
+/// A finish refusal that means "not published yet, nothing burned":
+/// re-show the records instead of sending the operator back to start.
+pub fn is_dns01_not_ready(err: &str) -> bool {
+    err.contains(hyperion_types::DNS01_NOT_READY)
+}
+
 /// Uppercase first ASCII letter of `username`, or `?` if empty / non-ASCII.
 /// Used as the avatar glyph in the sidebar.
 pub fn user_initial(username: &str) -> char {
@@ -397,6 +429,33 @@ async fn fetch_public_ip() -> Option<String> {
 mod tests {
     use super::*;
     use crate::dispatcher::DispatchError;
+
+    #[test]
+    fn dns01_records_survive_the_finish_form() {
+        let recs = vec![
+            (
+                "_acme-challenge.hos-1.digitalka.cz".to_string(),
+                "-fXg0qNmL5CooeFthnCq5mSt9z5TZ1c1fD4FNSR5UpU".to_string(),
+            ),
+            (
+                "_acme-challenge.hos-1.digitalka.cz".to_string(),
+                "bNMESAJ3OCUzorTjqRiHfreu5IzmyTQwXZ-aAON_FSQ".to_string(),
+            ),
+        ];
+        assert_eq!(parse_dns01_records_field(&dns01_records_field(&recs)), recs);
+        assert!(parse_dns01_records_field("").is_empty());
+        assert!(parse_dns01_records_field("only-a-name,a b c").is_empty());
+    }
+
+    #[test]
+    fn not_ready_is_recognised_through_the_rpc_error_text() {
+        let e = format!(
+            "provisioning failed at stage 'acme_dns01_finish': acme: {}: x",
+            hyperion_types::DNS01_NOT_READY
+        );
+        assert!(is_dns01_not_ready(&e));
+        assert!(!is_dns01_not_ready("ACME order status=Invalid"));
+    }
 
     fn node(node_id: &str, label: &str) -> hyperion_types::NodeSummary {
         hyperion_types::NodeSummary {
