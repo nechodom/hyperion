@@ -608,6 +608,14 @@ pub trait AgentApi: Send + Sync + 'static {
         &self,
         fields: std::collections::BTreeMap<String, String>,
     ) -> Result<(), RpcError>;
+    /// This node's agent.toml, secrets masked node-side.
+    async fn node_config_read(&self) -> Result<String, RpcError>;
+    /// Write one agent.toml section on THIS node and restart its agent.
+    async fn node_config_set(
+        &self,
+        section: String,
+        fields: std::collections::BTreeMap<String, String>,
+    ) -> Result<(), RpcError>;
 
     /// Compare the running binary's git SHA against the upstream
     /// `rolling` release. Cached agent-side; pass `force_refresh: true`
@@ -1238,6 +1246,7 @@ pub trait AgentApi: Send + Sync + 'static {
         prior_node_id: Option<String>,
         prior_secret: Option<String>,
         resp_pubkey: Option<String>,
+        endpoint: hyperion_types::NodeEndpointReport,
     ) -> Result<(String, String, Option<String>), RpcError>;
 
     /// Master-side heartbeat: verifies (node_id, secret) and bumps
@@ -1260,6 +1269,7 @@ pub trait AgentApi: Send + Sync + 'static {
         agent_version: String,
         tls_spki_pin: Option<String>,
         resp_pubkey: Option<String>,
+        endpoint: hyperion_types::NodeEndpointReport,
     ) -> Result<Option<String>, RpcError>;
 
     /// List enrolled nodes (master-side `nodes` table).

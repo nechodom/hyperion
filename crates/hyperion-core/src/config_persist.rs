@@ -141,6 +141,66 @@ fn ensure_table(doc: &mut DocumentMut, section: &str) -> Result<(), ConfigPersis
     }
 }
 
+/// Mask password / token / webhook values in raw agent.toml text before it
+/// is shown anywhere (the Raw TOML tab, a node's settings page). Credentials
+/// must never reach HTML an operator might screenshot — and for a worker the
+/// masking happens on the WORKER, so the secret never crosses the wire.
+///
+/// Strategy: replace the contents of any double-quoted value on a line whose
+/// key matches the suspect list with `"«set»"` (or `"«empty»"` if it was
+/// already blank). Operates line-by-line; everything in agent.toml is
+/// single-line strings.
+pub fn mask_secrets(s: &str) -> String {
+    const SUSPECT_KEYS: &[&str] = &[
+        "password",
+        "smtp_password",
+        "invite_token",
+        "secret",
+        "webhook",
+        "default_webhook",
+        "auth_token",
+        "api_key",
+        "key",
+    ];
+    // Suffixes catch the keys the list above never named. `psi_api_key`
+    // ([performance]) was printed in the clear on the Raw TOML tab because
+    // only an exact `api_key` matched; a new secret key should not need an
+    // edit here to stay hidden. Over-masking a harmless value costs nothing.
+    const SUSPECT_SUFFIXES: &[&str] = &["_password", "_token", "_secret", "_key", "_webhook"];
+    let is_suspect = |key: &str| {
+        SUSPECT_KEYS.contains(&key) || SUSPECT_SUFFIXES.iter().any(|sfx| key.ends_with(sfx))
+    };
+    let mut out = String::with_capacity(s.len());
+    for line in s.lines() {
+        let trimmed = line.trim_start();
+        // Find `<key> = "..."` lines that match a suspect.
+        if let Some(eq) = trimmed.find('=') {
+            let key = trimmed[..eq].trim();
+            if is_suspect(key) {
+                let value_part = trimmed[eq + 1..].trim();
+                if value_part.starts_with('"') {
+                    let indent_len = line.len() - trimmed.len();
+                    let mask = if value_part == "\"\"" {
+                        "«empty»"
+                    } else {
+                        "«set»"
+                    };
+                    out.push_str(&line[..indent_len]);
+                    out.push_str(key);
+                    out.push_str(" = \"");
+                    out.push_str(mask);
+                    out.push('"');
+                    out.push('\n');
+                    continue;
+                }
+            }
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
 fn sibling_tmp(p: &Path) -> PathBuf {
     let mut s = p.as_os_str().to_owned();
     s.push(".new");
@@ -239,5 +299,16 @@ smtp_port = 587
         let after = std::fs::read_to_string(&p).expect("read");
         assert!(after.contains("[acme]"));
         assert!(after.contains(r#"contact_email = "x@y.cz""#));
+    }
+
+    #[test]
+    fn mask_secrets_hides_suffixed_keys() {
+        let out = mask_secrets(
+            "[performance]\npsi_api_key = \"AIzaREAL\"\ncwv_source = \"psi\"\n[x]\nfoo_token = \"\"\n",
+        );
+        assert!(!out.contains("AIzaREAL"), "{out}");
+        assert!(out.contains("psi_api_key = \"«set»\""), "{out}");
+        assert!(out.contains("foo_token = \"«empty»\""), "{out}");
+        assert!(out.contains("cwv_source = \"psi\""), "{out}");
     }
 }

@@ -1389,7 +1389,9 @@ hctl node reassign --from node-old1 --to node-7f3a
 ```
 
 Run on the master. Use it when a box re-enrolled under a new id and its
-hostings still carry the old one.
+hostings still carry the old one. The `--from` id must no longer be enrolled:
+a node that is still on the Nodes page is refused, so swapped arguments can't
+re-point a live node's sites. Remove the dead node there first.
 
 ### hctl node update
 

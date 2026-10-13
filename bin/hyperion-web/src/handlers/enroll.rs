@@ -105,6 +105,10 @@ pub struct EnrollRequest {
     /// node's responses are unverifiable".
     #[serde(default)]
     pub resp_pubkey: Option<String>,
+    /// Port of the node's inbound RPC listener, and its public IP when
+    /// `public_ip` is a private RPC address. Absent from older agents.
+    #[serde(flatten)]
+    pub endpoint: hyperion_types::NodeEndpointReport,
 }
 
 #[derive(Serialize)]
@@ -174,6 +178,7 @@ pub async fn post_enroll(
         req.prior_node_id.as_deref(),
         req.prior_secret.as_deref(),
         resp_pubkey.as_deref(),
+        req.endpoint,
     )
     .await;
     match outcome {
@@ -202,6 +207,7 @@ async fn consume_and_register(
     prior_node_id: Option<&str>,
     prior_secret: Option<&str>,
     resp_pubkey: Option<&str>,
+    endpoint: hyperion_types::NodeEndpointReport,
 ) -> Result<(String, String, Option<String>), String> {
     let resp = hyperion_rpc_client::call(
         &state.agent_socket,
@@ -215,6 +221,7 @@ async fn consume_and_register(
             prior_node_id: prior_node_id.map(String::from),
             prior_secret: prior_secret.map(String::from),
             resp_pubkey: resp_pubkey.map(String::from),
+            endpoint,
         },
     )
     .await
@@ -248,6 +255,10 @@ pub struct HeartbeatRequest {
     /// verification for the node (never `agent_version`).
     #[serde(default)]
     pub resp_pubkey: Option<String>,
+    /// Same as on enrollment, re-sent every tick so a port change reaches
+    /// the master without a re-enrollment.
+    #[serde(flatten)]
+    pub endpoint: hyperion_types::NodeEndpointReport,
 }
 
 pub async fn post_heartbeat(
@@ -284,6 +295,7 @@ pub async fn post_heartbeat(
             agent_version: req.agent_version,
             tls_spki_pin,
             resp_pubkey,
+            endpoint: req.endpoint,
         },
     )
     .await?;
@@ -333,6 +345,22 @@ mod tests {
     /// padded) and a real-shaped Ed25519 public key (43 chars, unpadded).
     const FIXTURE_PIN: &str = "/4IrPU/vEdcxQgcB9m3gD/9oaQ9/8WmdvXZIDD+ZVxg=";
     const FIXTURE_PUBKEY: &str = "O2onvM62pC1io6jQKm8Nc2UyFXcd4kOmOsBIoYtZ2ik";
+
+    #[test]
+    fn heartbeat_carries_the_endpoint_and_old_agents_still_parse() {
+        let new: HeartbeatRequest = serde_json::from_str(
+            r#"{"node_id":"n","secret":"s","rpc_port":9555,"external_ip":"203.0.113.7"}"#,
+        )
+        .unwrap();
+        assert_eq!(new.endpoint.rpc_port, Some(9555));
+        assert_eq!(new.endpoint.external_ip.as_deref(), Some("203.0.113.7"));
+        let old: HeartbeatRequest =
+            serde_json::from_str(r#"{"node_id":"n","secret":"s","agent_version":"v"}"#).unwrap();
+        assert_eq!(old.endpoint, hyperion_types::NodeEndpointReport::default());
+        let null: EnrollRequest =
+            serde_json::from_str(r#"{"token":"t","rpc_port":null,"external_ip":null}"#).unwrap();
+        assert_eq!(null.endpoint, hyperion_types::NodeEndpointReport::default());
+    }
 
     #[test]
     fn node_key_accepts_real_pin_and_pubkey_shapes() {

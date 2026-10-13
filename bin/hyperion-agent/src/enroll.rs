@@ -51,6 +51,10 @@ pub struct EnrollmentConfig {
     /// from its very first dispatch instead of trusting a ~60 s window of
     /// unauthenticated ones. `None` when the key file couldn't be loaded.
     pub resp_pubkey: Option<String>,
+    /// Port of our inbound RPC listener (`[remote_rpc] bind`), so the
+    /// master dials it instead of assuming 9443. `None` when inbound RPC
+    /// is off.
+    pub rpc_port: Option<u16>,
 }
 
 #[derive(Serialize)]
@@ -73,6 +77,13 @@ struct EnrollRequest<'a> {
     /// for a master that doesn't know the field.
     #[serde(skip_serializing_if = "Option::is_none")]
     resp_pubkey: Option<&'a str>,
+    /// Where our listener is, beyond the address: its port, and our
+    /// public IP when `public_ip` carries a private advertise address.
+    /// Skipped when empty, like the fields above.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rpc_port: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    external_ip: Option<String>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -152,9 +163,18 @@ pub async fn enroll_with_retry(cfg: &EnrollmentConfig) -> Result<(), String> {
             }
         }
     }
+    // Never advise deleting node-id.json here. On a re-enrollment it holds
+    // the identity + secret that let the master give this box back its own
+    // node id; without them the box comes back under a NEW id and every
+    // site it hosts is orphaned on the master.
     Err(format!(
-        "{}\n→ {} attempts exhausted. Retry manually with: \
-         sudo rm -f /etc/hyperion/node-id.json && sudo systemctl restart hyperion-agent",
+        "{}\n→ {} attempts exhausted; retrying in 30 min. To retry now: \
+         sudo systemctl restart hyperion-agent. If the master says the invite \
+         token is invalid or already used, mint a new one on the master's \
+         Nodes page, put it in invite_token under [enrollment] in \
+         /etc/hyperion/agent.toml and restart — do NOT delete \
+         /etc/hyperion/node-id.json, which would enroll this box as a new node \
+         and orphan its sites.",
         last_err,
         DELAYS_SECS.len()
     ))
@@ -337,9 +357,13 @@ pub async fn enroll_now(cfg: &EnrollmentConfig) -> Result<(), String> {
     // network IP) over the auto-detected public IP, so the master dials this
     // node on that network. The field name stays `public_ip` on the wire for
     // compatibility — it means "the address the master reaches me at".
-    let public_ip = match cfg.advertise_addr.as_deref() {
-        Some(a) if !a.trim().is_empty() => Some(a.trim().to_string()),
-        _ => fetch_public_ip().await,
+    //
+    // With an advertise address the public IP is still probed and sent
+    // separately: it is what customers connect to (FTP host, DNS hints),
+    // and the private address must never be handed to them.
+    let (public_ip, external_ip) = match cfg.advertise_addr.as_deref() {
+        Some(a) if !a.trim().is_empty() => (Some(a.trim().to_string()), fetch_public_ip().await),
+        _ => (fetch_public_ip().await, None),
     };
     let base = cfg.master_url.trim_end_matches('/').to_string();
     // Block B: if we still hold a node-id.json, present that identity so a
@@ -361,6 +385,8 @@ pub async fn enroll_now(cfg: &EnrollmentConfig) -> Result<(), String> {
         prior_node_id,
         prior_secret,
         resp_pubkey: cfg.resp_pubkey.as_deref(),
+        rpc_port: cfg.rpc_port,
+        external_ip,
     })
     .map_err(|e| format!("serialize: {e}"))?;
 
@@ -536,7 +562,10 @@ async fn finish_enrollment(cfg: &EnrollmentConfig, stdout: &[u8]) -> Result<(), 
         enrolled_at: chrono::Utc::now().timestamp(),
         master_rpc_pubkey: resp.master_rpc_pubkey.clone(),
     };
-    atomically_persist(&cfg.state_file, &persisted).await?;
+    {
+        let _guard = hyperion_core::node_state::lock().await;
+        atomically_persist(&cfg.state_file, &persisted).await?;
+    }
     // Best-effort: wipe the one-time invite_token from agent.toml.
     // The master invalidated it server-side already; keeping it on
     // disk just clutters the file and could mislead a future
@@ -585,15 +614,11 @@ async fn clear_invite_token_in_config(path: &std::path::Path) -> Result<(), Stri
     }
     doc["enrollment"]["invite_token"] = toml_edit::value("");
     let updated = doc.to_string();
-    let tmp = path.with_extension("toml.tmp");
-    tokio::fs::write(&tmp, updated.as_bytes())
+    // agent.toml holds credentials of its own (backup targets, mail), so it
+    // gets the same 0600-from-the-first-byte write as node-id.json.
+    hyperion_core::node_state::write_private(path, updated.as_bytes())
         .await
-        .map_err(|e| format!("write tmp {}: {e}", tmp.display()))?;
-    use std::os::unix::fs::PermissionsExt;
-    let _ = tokio::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600)).await;
-    tokio::fs::rename(&tmp, path)
-        .await
-        .map_err(|e| format!("rename {} → {}: {e}", tmp.display(), path.display()))?;
+        .map_err(|e| format!("write {}: {e}", path.display()))?;
     tracing::info!(path=%path.display(), "blanked enrollment.invite_token in agent.toml");
     Ok(())
 }
@@ -619,6 +644,8 @@ pub async fn heartbeat_loop(
     verify_tls: Option<bool>,
     inbound_cert: std::path::PathBuf,
     resp_pubkey: Option<String>,
+    rpc_port: Option<u16>,
+    advertise_addr: Option<String>,
 ) {
     // Real build SHA (not "0.1.0") so the master's nodes.agent_version — and
     // thus the cluster version-skew pill — reflects the deployed commit.
@@ -635,6 +662,12 @@ pub async fn heartbeat_loop(
     // are identical on every tick, and this loop runs 1440 times a day.
     let mut tls_policy_logged = false;
     let mut tls_help_logged = false;
+    // Our public IP, only wanted when we advertise a private address for
+    // RPC (see enroll_now). Probed lazily and re-probed hourly until it
+    // answers — a node on a private network may have no egress at all,
+    // and a probe a minute would be pure noise there.
+    let mut external_ip: Option<String> = None;
+    let mut ticks_since_probe: u32 = u32::MAX;
     let period = std::time::Duration::from_secs(period_secs);
     let mut interval = tokio::time::interval(period);
     // First tick fires immediately — skip it so we wait one period after
@@ -648,6 +681,14 @@ pub async fn heartbeat_loop(
         };
         if tls_spki_pin.is_none() {
             tls_spki_pin = hyperion_core::tls_pin::spki_pin_from_cert_file(&inbound_cert).await;
+        }
+        if advertise_addr.is_some() && external_ip.is_none() {
+            if ticks_since_probe >= 60 {
+                ticks_since_probe = 0;
+                external_ip = fetch_public_ip().await;
+            } else {
+                ticks_since_probe += 1;
+            }
         }
         // The master URL comes from node-id.json (operator-supplied at
         // enrollment, never from the response), so this is a decision
@@ -664,6 +705,8 @@ pub async fn heartbeat_loop(
             "agent_version": agent_version,
             "tls_spki_pin": tls_spki_pin,
             "resp_pubkey": resp_pubkey,
+            "rpc_port": rpc_port,
+            "external_ip": external_ip,
         })) {
             Ok(b) => b,
             Err(e) => {
@@ -738,17 +781,17 @@ pub async fn heartbeat_loop(
                         }
                         PubkeyPin::Keep => { /* same key already pinned — nothing to do */ }
                         PubkeyPin::Adopt => {
-                            let mut updated = p.clone();
-                            updated.master_rpc_pubkey = Some(new_pk);
-                            if let Err(e) = atomically_persist(&state_file, &updated).await {
-                                tracing::warn!(
+                            match adopt_master_pubkey(&state_file, &p, new_pk).await {
+                                Ok(true) => tracing::info!(
+                                    "pinned master_rpc_pubkey from heartbeat ack (first receipt)"
+                                ),
+                                Ok(false) => tracing::debug!(
+                                    "node-id.json changed during the heartbeat — pin skipped"
+                                ),
+                                Err(e) => tracing::warn!(
                                     error=%e,
                                     "persisting master_rpc_pubkey to node-id.json failed"
-                                );
-                            } else {
-                                tracing::info!(
-                                    "pinned master_rpc_pubkey from heartbeat ack (first receipt)"
-                                );
+                                ),
                             }
                         }
                     }
@@ -828,26 +871,48 @@ fn parse_heartbeat_pubkey(stdout: &[u8]) -> Option<String> {
         .map(String::from)
 }
 
-/// Atomic write of node-id.json (tmp → chmod 0600 → rename) so a
-/// crash midway can never leave the file at a wider mode than 0600.
-/// Used both by initial enrollment and by the heartbeat loop when
-/// it updates fields in-place (e.g. picking up master_rpc_pubkey).
+/// Atomic 0600 write of node-id.json, see [`hyperion_core::node_state`].
+/// The caller holds [`hyperion_core::node_state::lock`] when what it
+/// writes was derived from an earlier read of the file.
 async fn atomically_persist(
     state_file: &std::path::Path,
     persisted: &PersistedNodeId,
 ) -> Result<(), String> {
     let bytes =
         serde_json::to_vec_pretty(persisted).map_err(|e| format!("serialize persisted: {e}"))?;
-    let tmp = state_file.with_extension("json.tmp");
-    tokio::fs::write(&tmp, &bytes)
+    hyperion_core::node_state::write_private(state_file, &bytes)
         .await
-        .map_err(|e| format!("write tmp {}: {e}", tmp.display()))?;
-    use std::os::unix::fs::PermissionsExt;
-    let _ = tokio::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600)).await;
-    tokio::fs::rename(&tmp, state_file)
-        .await
-        .map_err(|e| format!("rename {} → {}: {e}", tmp.display(), state_file.display()))?;
-    Ok(())
+        .map_err(|e| format!("write {}: {e}", state_file.display()))
+}
+
+/// Pin the master's RPC pubkey from a heartbeat ack — the first-receipt
+/// case of [`decide_pubkey_pin`].
+///
+/// Re-reads node-id.json under the node-state lock instead of writing
+/// back the copy the heartbeat read before its round trip: a
+/// re-enrollment that landed meanwhile has a new identity and secret in
+/// the file, and writing the stale copy over it used to resurrect the old
+/// secret and break every heartbeat after. If the file no longer holds
+/// the identity this ack was for, or already pins a key, nothing is
+/// written.
+async fn adopt_master_pubkey(
+    state_file: &std::path::Path,
+    seen: &PersistedNodeId,
+    pubkey: String,
+) -> Result<bool, String> {
+    let _guard = hyperion_core::node_state::lock().await;
+    let Some(mut current) = load_persisted(state_file).await else {
+        return Ok(false);
+    };
+    if current.node_id != seen.node_id
+        || current.secret != seen.secret
+        || current.master_rpc_pubkey.is_some()
+    {
+        return Ok(false);
+    }
+    current.master_rpc_pubkey = Some(pubkey);
+    atomically_persist(state_file, &current).await?;
+    Ok(true)
 }
 
 async fn fetch_public_ip() -> Option<String> {
@@ -859,17 +924,83 @@ async fn fetch_public_ip() -> Option<String> {
     if !out.status.success() {
         return None;
     }
-    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if s.is_empty() {
-        None
-    } else {
-        Some(s)
+    parse_probed_ip(&out.stdout)
+}
+
+/// The probe's answer, only if it IS an address. A captive portal or a
+/// proxy error page answering 200 used to be stored as the node's
+/// address and dialled by the master forever after.
+fn parse_probed_ip(stdout: &[u8]) -> Option<String> {
+    let s = String::from_utf8_lossy(stdout).trim().to_string();
+    s.parse::<std::net::IpAddr>().ok().map(|ip| ip.to_string())
+}
+
+/// Port of the inbound RPC listener as configured in `[remote_rpc] bind`,
+/// for the master to dial. `None` when inbound RPC is off or the bind
+/// doesn't parse (the listener then isn't running either).
+pub fn rpc_port_from_bind(enabled: bool, bind: &str) -> Option<u16> {
+    if !enabled {
+        return None;
     }
+    bind.trim()
+        .parse::<std::net::SocketAddr>()
+        .ok()
+        .map(|a| a.port())
+        .filter(|p| *p != 0)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn probed_ip_must_be_an_address() {
+        assert_eq!(
+            parse_probed_ip(b"203.0.113.7\n").as_deref(),
+            Some("203.0.113.7")
+        );
+        assert_eq!(
+            parse_probed_ip(b"2a01:4f8::1").as_deref(),
+            Some("2a01:4f8::1")
+        );
+        assert_eq!(parse_probed_ip(b"<html>captive portal</html>"), None);
+        assert_eq!(parse_probed_ip(b""), None);
+    }
+
+    #[test]
+    fn rpc_port_comes_from_the_bind() {
+        assert_eq!(rpc_port_from_bind(true, "0.0.0.0:9443"), Some(9443));
+        assert_eq!(rpc_port_from_bind(true, "10.0.0.5:9555"), Some(9555));
+        assert_eq!(rpc_port_from_bind(true, "[fd00::5]:9556"), Some(9556));
+        assert_eq!(rpc_port_from_bind(false, "0.0.0.0:9555"), None);
+        assert_eq!(rpc_port_from_bind(true, "fd00::5:9443"), None);
+    }
+
+    #[tokio::test]
+    async fn heartbeat_pin_never_resurrects_a_replaced_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("node-id.json");
+        let old = PersistedNodeId {
+            node_id: "n1".into(),
+            master_url: "https://m.example.com".into(),
+            secret: "old".into(),
+            enrolled_at: 1,
+            master_rpc_pubkey: None,
+        };
+        // The heartbeat read `old`; a re-enrollment then wrote a new secret.
+        let new = PersistedNodeId {
+            secret: "new".into(),
+            ..old.clone()
+        };
+        atomically_persist(&f, &new).await.unwrap();
+        assert!(!adopt_master_pubkey(&f, &old, "PK".into()).await.unwrap());
+        assert_eq!(load_persisted(&f).await.unwrap().secret, "new");
+        // Same identity: the key is pinned and nothing else changes.
+        assert!(adopt_master_pubkey(&f, &new, "PK".into()).await.unwrap());
+        let now = load_persisted(&f).await.unwrap();
+        assert_eq!(now.secret, "new");
+        assert_eq!(now.master_rpc_pubkey.as_deref(), Some("PK"));
+    }
 
     #[test]
     fn pubkey_pin_first_wins_and_refuses_silent_rotation() {

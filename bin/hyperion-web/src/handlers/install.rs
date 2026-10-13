@@ -108,6 +108,10 @@ fn build_rows(
         .filter(|s| !s.is_empty())
         .collect();
     let master_ver = master.map(|m| m.version.as_str()).unwrap_or("");
+    // The Nodes page marks the master as `local`; a hand-edited CSV may
+    // name it by hostname, the id its own hosting rows carry.
+    let master_is_test = test_set.contains(crate::dispatcher::LOCAL_NODE_SENTINEL)
+        || master.is_some_and(|m| !m.hostname.is_empty() && test_set.contains(m.hostname.as_str()));
     let mut rows = Vec::with_capacity(nodes.len() + 1);
     rows.push(NodeRow {
         n: NodeSummary {
@@ -125,10 +129,12 @@ fn build_rows(
             drain_reason: String::new(),
             tls_spki_pin: None,
             resp_pubkey: None,
+            rpc_port: None,
+            external_ip: None,
         },
         is_master: true,
         online: true,
-        is_test: false,
+        is_test: master_is_test,
         version_skew: false,
         issues: Vec::new(),
     });
@@ -590,8 +596,8 @@ pub async fn post_remove_node(
         RpcResponse::NodeRemoved { removed: true, hostings_blocking } => {
             let msg = if hostings_blocking > 0 {
                 format!(
-                    "Node {} removed. {} hosting(s) were orphaned — they keep their nginx/FPM running on the now-detached box, but cannot be managed from the master until you re-enrol the node or migrate them.",
-                    node_id, hostings_blocking
+                    "Node {} removed. {} hosting(s) were orphaned — they keep their nginx/FPM running on the now-detached box, but cannot be managed from the master. Re-enrolling the box gives it a NEW node id, so to bring them back run on the master: hctl node reassign --from {} --to <the box's new node id>.",
+                    node_id, hostings_blocking, node_id
                 )
             } else {
                 format!("Node {} removed from the cluster.", node_id)
@@ -1180,9 +1186,21 @@ pub async fn post_toggle_test_node(
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect();
-    let already_test = ids.iter().any(|s| s == node_id);
+    // The master is `local` here, but may also be listed by hostname —
+    // unmarking it must drop both, or it stays a test server.
+    let master_hostname = if node_id == crate::dispatcher::LOCAL_NODE_SENTINEL {
+        fetch_master_info(&state)
+            .await
+            .map(|m| m.hostname)
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let is_this =
+        |s: &String| s == node_id || (!master_hostname.is_empty() && *s == master_hostname);
+    let already_test = ids.iter().any(is_this);
     if already_test {
-        ids.retain(|s| s != node_id);
+        ids.retain(|s| !is_this(s));
     } else {
         ids.push(node_id.to_string());
     }
@@ -1203,8 +1221,13 @@ pub async fn post_toggle_test_node(
     match resp {
         RpcResponse::AgentConfigUpdate => {
             let action = if already_test { "unmarked" } else { "marked" };
+            let who = if master_hostname.is_empty() {
+                node_id
+            } else {
+                master_hostname.as_str()
+            };
             let msg = format!(
-                "{node_id} {action} as test node. Restart hyperion-agent on this master \
+                "{who} {action} as test node. Restart hyperion-agent on this master \
                  (Service health → Restart) for the wizard's domain-validation to fully pick up \
                  the change."
             );
@@ -1381,6 +1404,8 @@ mod tests {
             drain_reason: String::new(),
             tls_spki_pin: Some("pin".into()),
             resp_pubkey: Some("key".into()),
+            rpc_port: None,
+            external_ip: None,
         }
     }
 

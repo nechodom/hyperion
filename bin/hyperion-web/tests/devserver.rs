@@ -408,12 +408,39 @@ type StubService = HostingService<StubAdapters>;
 async fn start_agent_with_service() -> (PathBuf, tempfile::TempDir, Arc<StubService>) {
     let dir = tempfile::tempdir().expect("dir");
     // Setup mode saves the ACME contact into agent.toml; give it a scratch one.
-    let agent_toml = std::env::var_os("DEVSERVER_SETUP").map(|_| {
+    // The demo-nodes walk gets one too, so a node's Settings page can be read
+    // and saved on the master row. `DEVSERVER_TEST_SITES=1` also marks this
+    // server as a test server with a preview template, so the Test website
+    // form has somewhere to put sites.
+    let test_sites = std::env::var_os("DEVSERVER_TEST_SITES").is_some();
+    let wants_toml = std::env::var_os("DEVSERVER_SETUP").is_some()
+        || std::env::var_os("DEVSERVER_DEMO_NODES").is_some()
+        || test_sites;
+    let agent_toml = wants_toml.then(|| {
         let p = dir.path().join("agent.toml");
-        std::fs::write(&p, "[acme]\ncontact_email = \"\"\n").expect("agent.toml");
+        let mut toml = String::from("[acme]\ncontact_email = \"\"\n");
+        if test_sites {
+            toml.push_str(
+                "[cluster]\ntest_node_ids = \"local\"\ntest_domain_template = \"{name}.test.example.com\"\n",
+            );
+        }
+        std::fs::write(&p, toml).expect("agent.toml");
         p
     });
     let pool = open_memory().await.expect("memory db");
+    // A few library rows for the test form's picker. Rows only: the ZIPs
+    // would live under /var/lib/hyperion, so an install reports them missing.
+    if test_sites {
+        for (kind, name) in [
+            ("plugin", "seo-pack.zip"),
+            ("plugin", "contact-forms.zip"),
+            ("theme", "astra.zip"),
+        ] {
+            hyperion_state::wp_assets::insert(&pool, kind, name, name, 1024, name, 0, "kevin")
+                .await
+                .expect("seed wp asset");
+        }
+    }
     let secrets = Arc::new(SecretsStore::new(dir.path().join("secrets")));
     let svc = Arc::new(HostingService::<StubAdapters> {
         pool,

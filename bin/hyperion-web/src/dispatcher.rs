@@ -9,17 +9,10 @@
 //! socket as before.
 
 use crate::state::SharedState;
-use hyperion_core::master_rpc::VerifyOpts;
-use hyperion_core::node_rpc::verify_response;
+use hyperion_core::node_rpc::{verify_response, RESPONSE_VERIFY_OPTS};
 use hyperion_rpc::codec::{Request, Response};
 use hyperion_rpc_client::remote::{call_remote_attested, RemoteCallOutcome};
 use hyperion_rpc_client::{call, ClientError, RemoteCallOpts, RemoteClientError};
-
-/// Default port the agent's inbound listener binds. Mirrors
-/// `RemoteRpcSection::default().bind`. When a per-node endpoint
-/// becomes configurable (Batch 11+ work) this constant will be
-/// replaced by a lookup against the `nodes` table.
-const DEFAULT_AGENT_RPC_PORT: u16 = 9443;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DispatchError {
@@ -115,9 +108,19 @@ pub async fn dispatch_to_node(
     target_node_id: Option<&str>,
     req: Request,
 ) -> Result<Response, DispatchError> {
-    let target = target_node_id
+    let mut target = target_node_id
         .map(str::trim)
         .filter(|s| !s.is_empty() && *s != LOCAL_NODE_SENTINEL);
+    // The master's own rows carry its HOSTNAME as node_id, not the
+    // sentinel, and it has no `nodes` row of its own — so a hostname that
+    // leaked out of a row (an API response fed back as `node`, a form
+    // value) was refused as "not enrolled" instead of meaning "here".
+    // Enrolled ids are `node_<ulid>` and can never collide with it.
+    if let Some(t) = target {
+        if is_master_hostname(state, t).await {
+            target = None;
+        }
+    }
     // Every dispatch leaves a journalctl breadcrumb so operators
     // can debug "I selected stav but it ended up on master" by
     // checking the master's logs:
@@ -166,6 +169,14 @@ pub async fn dispatch_to_node(
             }
             dispatch_remote(state, node_id, req).await
         }
+    }
+}
+
+/// Is `node_id` the master's own hostname (as its rows store it)?
+async fn is_master_hostname(state: &SharedState, node_id: &str) -> bool {
+    match cached_agent_config(state).await {
+        Ok(c) => !c.hostname.is_empty() && c.hostname == node_id,
+        Err(_) => false,
     }
 }
 
@@ -284,6 +295,30 @@ fn timeout_for_request(req: &Request) -> u64 {
         // Fans out per hosting on the node: activations plus one kv read
         // each, so it scales with the estate rather than being constant.
         Request::CareOverview { .. } => 120,
+        // A staging copy is a whole HostingCreate (600 s on its own) plus a
+        // certificate and a copy of the site; a push takes two full backups
+        // first. A reinstall wipes and re-installs WordPress, and a trash
+        // purge is the same hard delete HostingDelete gets 600 s for — on
+        // 30 s the operator was told the node was unreachable half-way
+        // through a destructive operation, and invited to retry it.
+        Request::WpStagingCreate { .. }
+        | Request::WpStagingPush { .. }
+        | Request::WpReinstall { .. }
+        | Request::TrashPurge { .. } => 3600,
+        // ACME: an order is ~25 s on a good day, and the adapter retries
+        // with 15/30/60 s backoff. A "retry" after a false timeout burns
+        // Let's Encrypt's failed-validation limit on a working order.
+        Request::CertIssueAcme { .. }
+        | Request::CertDns01Finish { .. }
+        | Request::CertDns01FinishDomain { .. } => 600,
+        // Enabling quotas apt-installs `quota` and runs quotacheck, which
+        // the node itself allows 240 s; QuotaSet enables them inline.
+        Request::QuotaEnableKernel { .. } | Request::QuotaSet { .. } => 600,
+        // ClamAV over the docroot plus wp-cli checksums.
+        Request::WpIntegrityScan { .. } => 900,
+        Request::WpCoreRepair { .. } => 900,
+        // SSH preflight + remote extract against the source panel.
+        Request::HostingImportPanelPlan { .. } => 900,
         _ => 30,
     }
 }
@@ -503,21 +538,30 @@ async fn resolve_node_endpoint(
         .ok_or_else(|| DispatchError::UnknownNode(node_id.to_string()))?;
     let reported_pin = node.tls_spki_pin.clone();
     let resp_pubkey = node.resp_pubkey.clone();
+    // The port the node REPORTED its listener on; 9443 for nodes that
+    // never did. Hard-coding 9443 here left every node installed on
+    // another port (install-node.sh asks) enrolled and unreachable.
+    let port = node.rpc_port();
     let ip = node
         .public_ip
         .filter(|s| !s.is_empty())
         .ok_or_else(|| DispatchError::NoEndpoint(node_id.to_string()))?;
-    // Wrap v6 addresses in brackets.
-    let host_part = if ip.contains(':') {
-        format!("[{ip}]")
-    } else {
-        ip
-    };
     Ok(NodeRoute {
-        endpoint: format!("https://{host_part}:{}", DEFAULT_AGENT_RPC_PORT),
+        endpoint: endpoint_url(&ip, port),
         reported_pin,
         resp_pubkey,
     })
+}
+
+/// `https://<host>:<port>` for a node address as stored: an IPv6 literal
+/// gets its brackets, anything else (IPv4, hostname) goes in as-is.
+fn endpoint_url(addr: &str, port: u16) -> String {
+    let addr = addr.trim().trim_start_matches('[').trim_end_matches(']');
+    if addr.parse::<std::net::Ipv6Addr>().is_ok() {
+        format!("https://[{addr}]:{port}")
+    } else {
+        format!("https://{addr}:{port}")
+    }
 }
 
 /// The master's `NodesList`, from the short-lived single-flight cache
@@ -717,7 +761,7 @@ fn check_response_auth(
             out.req_ts,
             &out.raw_body,
             chrono::Utc::now().timestamp(),
-            VerifyOpts::default(),
+            RESPONSE_VERIFY_OPTS,
         ) {
             Ok(_) => Ok(()),
             Err(reason) => {
@@ -891,6 +935,24 @@ mod tests {
     /// Stand-in for a response whose content an attacker would love to
     /// rewrite (the password shown to the operator after a reset).
     const BODY: &[u8] = br#"{"HostingResetPassword":{"password":"real-secret"}}"#;
+
+    #[test]
+    fn endpoint_dials_the_reported_port_and_brackets_only_ipv6() {
+        assert_eq!(endpoint_url("10.0.0.5", 9443), "https://10.0.0.5:9443");
+        assert_eq!(endpoint_url("10.0.0.5", 9555), "https://10.0.0.5:9555");
+        assert_eq!(
+            endpoint_url("2a01:4f8::1", 9443),
+            "https://[2a01:4f8::1]:9443"
+        );
+        assert_eq!(
+            endpoint_url("[2a01:4f8::1]", 9443),
+            "https://[2a01:4f8::1]:9443"
+        );
+        assert_eq!(
+            endpoint_url("node1.example.com", 9443),
+            "https://node1.example.com:9443"
+        );
+    }
 
     fn fresh_signer() -> NodeRpcSigner {
         let tmp = tempfile::tempdir().expect("tempdir");

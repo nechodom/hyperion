@@ -101,10 +101,12 @@ async fn read_node_state(path: &std::path::Path) -> (Option<String>, Option<Stri
 /// key (anti-MITM). Returns the key that was cleared, if any.
 ///
 /// Parses as a generic JSON object so every other field (node_id,
-/// secret, master_url, enrolled_at, …) is preserved untouched. Atomic
-/// write (tmp → chmod 0600 → rename) keeps the 0600 perms + avoids a
-/// torn read by the heartbeat / inbound-RPC loops that re-read this file.
+/// secret, master_url, enrolled_at, …) is preserved untouched. Written
+/// through [`crate::node_state`] — under its lock, 0600 from the first
+/// byte, atomic rename — so the heartbeat and enrollment can't interleave
+/// and the inbound-RPC loop never reads a torn file.
 async fn clear_pinned_pubkey_in_file(path: &std::path::Path) -> Result<Option<String>, String> {
+    let _guard = crate::node_state::lock().await;
     let bytes = tokio::fs::read(path)
         .await
         .map_err(|e| format!("read {}: {e}", path.display()))?;
@@ -119,15 +121,9 @@ async fn clear_pinned_pubkey_in_file(path: &std::path::Path) -> Result<Option<St
         .map(String::from);
     obj.insert("master_rpc_pubkey".to_string(), serde_json::Value::Null);
     let serialized = serde_json::to_vec_pretty(&v).map_err(|e| format!("serialize: {e}"))?;
-    let tmp = path.with_extension("json.tmp");
-    tokio::fs::write(&tmp, &serialized)
+    crate::node_state::write_private(path, &serialized)
         .await
-        .map_err(|e| format!("write {}: {e}", tmp.display()))?;
-    use std::os::unix::fs::PermissionsExt;
-    let _ = tokio::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600)).await;
-    tokio::fs::rename(&tmp, path)
-        .await
-        .map_err(|e| format!("rename {} → {}: {e}", tmp.display(), path.display()))?;
+        .map_err(|e| format!("write {}: {e}", path.display()))?;
     Ok(cleared)
 }
 
@@ -1001,6 +997,18 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.email_config_set(fields).await
     }
 
+    async fn node_config_read(&self) -> Result<String, RpcError> {
+        self.svc.node_config_read().await
+    }
+
+    async fn node_config_set(
+        &self,
+        section: String,
+        fields: std::collections::BTreeMap<String, String>,
+    ) -> Result<(), RpcError> {
+        self.svc.node_config_set(section, fields).await
+    }
+
     async fn update_check(
         &self,
         force_refresh: bool,
@@ -1720,6 +1728,7 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         prior_node_id: Option<String>,
         prior_secret: Option<String>,
         resp_pubkey: Option<String>,
+        endpoint: hyperion_types::NodeEndpointReport,
     ) -> Result<(String, String, Option<String>), RpcError> {
         let (effective_node_id, secret) = self
             .svc
@@ -1733,6 +1742,7 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
                 prior_node_id,
                 prior_secret,
                 resp_pubkey,
+                endpoint,
             )
             .await?;
         Ok((effective_node_id, secret, self.svc.master_rpc_pubkey_b64()))
@@ -1745,9 +1755,17 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         agent_version: String,
         tls_spki_pin: Option<String>,
         resp_pubkey: Option<String>,
+        endpoint: hyperion_types::NodeEndpointReport,
     ) -> Result<Option<String>, RpcError> {
         self.svc
-            .node_heartbeat(node_id, secret, agent_version, tls_spki_pin, resp_pubkey)
+            .node_heartbeat(
+                node_id,
+                secret,
+                agent_version,
+                tls_spki_pin,
+                resp_pubkey,
+                endpoint,
+            )
             .await?;
         Ok(self.svc.master_rpc_pubkey_b64())
     }

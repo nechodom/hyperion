@@ -35,7 +35,9 @@ use axum::Router;
 use hyperion_core::master_rpc::{
     sign_envelope, verify_envelope, MasterRpcSigner, SignedAuthorization, VerifyOpts,
 };
-use hyperion_core::node_rpc::{sign_response, verify_response, NodeRpcSigner, RESP_SIG_HEADER};
+use hyperion_core::node_rpc::{
+    sign_response, verify_response, NodeRpcSigner, RESPONSE_VERIFY_OPTS, RESP_SIG_HEADER,
+};
 use hyperion_rpc::codec::{Request, Response as RpcResponse};
 use hyperion_rpc::wire::{HostingCreateReq, HostingSelector};
 use hyperion_rpc::AgentApi;
@@ -247,7 +249,7 @@ fn master_check_response_auth(
             out.req_ts,
             &out.raw_body,
             chrono::Utc::now().timestamp(),
-            VerifyOpts::default(),
+            RESPONSE_VERIFY_OPTS,
         )
         .map(|_| ())
         .map_err(str::to_string),
@@ -472,10 +474,21 @@ async fn wire_rejects_request_signed_by_a_different_master() {
         RemoteCallOpts::default(),
     )
     .await;
-    assert!(
-        result.is_err(),
-        "worker must reject a request signed by an untrusted master, got {result:?}"
-    );
+    // The refusal keeps curl's "HTTP error" exit code, so callers can still
+    // tell it from an unreachable node, AND it now carries the worker's
+    // reason — which `curl -f` used to throw away.
+    match result {
+        Err(hyperion_rpc_client::RemoteClientError::HttpError { code, stderr }) => {
+            assert_eq!(code, Some(22));
+            assert!(
+                stderr.contains("401") && stderr.contains("signature verify failed"),
+                "refusal must name its status and reason, got {stderr:?}"
+            );
+        }
+        other => {
+            panic!("worker must reject a request signed by an untrusted master, got {other:?}")
+        }
+    }
 }
 
 // ---- Response authentication, over the real wire ----

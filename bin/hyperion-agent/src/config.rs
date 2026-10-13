@@ -142,7 +142,9 @@ pub struct RemoteRpcSection {
     /// advertise the auto-detected public IP. Pair with `bind = <this-ip>:9443`
     /// (or `0.0.0.0:9443`) and a firewall that only admits the master.
     /// Reported to the master at enrollment; changing it later needs a
-    /// re-enroll.
+    /// re-enroll. The PORT of `bind`, by contrast, is re-reported on every
+    /// heartbeat, so moving the listener to another port needs only a
+    /// restart.
     #[serde(default)]
     pub advertise_addr: String,
     pub tls_cert_file: PathBuf,

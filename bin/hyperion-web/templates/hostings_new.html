@@ -116,6 +116,16 @@
           <div class="type-meta">Send everyone who visits this domain straight to another web address.</div>
         </div>
       </label>
+      {# Not a fifth radio: a test site skips this wizard for a one-screen
+         form that only asks for the subdomain. #}
+      {% if test_available %}
+      <a class="type-card is-link" href="/hostings/new?test=1">
+        <div class="type-card-body">
+          <div class="type-name">Test website →</div>
+          <div class="type-meta">A throwaway site on a test server. Type a subdomain; the address, server, and HTTPS are filled in for you.</div>
+        </div>
+      </a>
+      {% endif %}
     </div>
     </div><!-- /wizard-step 1 -->
 
@@ -326,6 +336,7 @@
           {% if master_accepts_hostings %}
           <option value="local"
                   data-label="master (this node)"
+                  data-hostname="{{ master_hostname }}"
                   data-detail=""
                   {% if target_node_in.is_empty() || target_node_in == "local" %}selected{% endif %}>
             ◯  master (this node)
@@ -557,6 +568,7 @@ Themes:
 }
 .type-card:hover,
 .profile-card:hover { border-color: var(--primary-h); }
+.type-card.is-link { border-style: dashed; text-decoration: none; }
 .type-card.selected,
 .profile-card.selected {
   border-color: var(--primary);
@@ -632,7 +644,7 @@ Themes:
 // of this from `site_type`, so this is a UI mirror only.
 (function () {
   'use strict';
-  const cards = document.querySelectorAll('.type-card');
+  const cards = document.querySelectorAll('.type-card[data-site-type]');
   if (cards.length === 0) return;
   const heading = document.getElementById('details-heading');
   const submitLabel = document.getElementById('provision-submit-label');
@@ -725,11 +737,13 @@ Themes:
     const v = (nameInput.value || '').toLowerCase().trim();
     if (!v) { preview.textContent = '—'; return; }
     const opt = sel.options[sel.selectedIndex];
-    const hostname = (opt && opt.dataset.label || sel.value || '').trim();
+    // The master posts as `local` but its addresses use its hostname.
+    const hostname = (opt && (opt.dataset.hostname || opt.dataset.label) || sel.value || '').trim();
+    const nodeId = sel.value === 'local' ? hostname : sel.value;
     const out = TEMPLATE
       .replace('{name}', v)
       .replace('{node}', hostname)
-      .replace('{node_id}', sel.value)
+      .replace('{node_id}', nodeId)
       .replace('{hostname}', hostname)
       .toLowerCase();
     preview.textContent = out;

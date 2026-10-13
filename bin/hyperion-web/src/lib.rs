@@ -744,6 +744,16 @@ pub fn build_router(state: SharedState) -> Router {
             "/install/os-updates-check",
             post(handlers::install::post_os_updates_check),
         )
+        // One node's own agent.toml settings, edited from the master.
+        .route(
+            "/install/node-settings",
+            get(handlers::node_settings::get_node_settings)
+                .post(handlers::node_settings::post_node_settings),
+        )
+        .route(
+            "/install/node-settings/probe",
+            post(handlers::node_settings::post_node_backup_probe),
+        )
         .route("/hostings/:selector", get(handlers::hostings::get_detail))
         // Lazy HTMX fragments for the detail page — both shell out
         // to dig/curl on the agent and would otherwise gate the

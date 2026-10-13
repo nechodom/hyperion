@@ -1,0 +1,371 @@
+{% extends "base.html" %}
+{% block title %}Test website · Hyperion{% endblock %}
+{% block main %}
+<div class="breadcrumbs">
+  <a href="/hostings">Websites</a>
+  <span class="sep">›</span>
+  <a href="/hostings/new">Add</a>
+  <span class="sep">›</span>
+  <span>Test website</span>
+</div>
+<div class="page-header">
+  <div>
+    <h1>Test website</h1>
+    <div class="subtitle">
+      A throwaway site on a test server. Type a subdomain — the address, server, HTTPS, and logins are filled in for you.
+    </div>
+  </div>
+  <span class="grow"></span>
+  <div class="actions">
+    <a href="/hostings/new" class="btn ghost">Full wizard</a>
+  </div>
+</div>
+
+{% if let Some(e) = error %}
+  <div class="flash error">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+    <div class="flash-body">{{ e }}</div>
+  </div>
+{% endif %}
+
+{% if !setup.available() %}
+{# Say which of the two setup steps is missing instead of a dead form. #}
+<div class="card">
+  <h2 style="margin-top:0">Test websites aren't set up yet</h2>
+  <ol style="margin:0;padding-left:1.2rem;line-height:1.7">
+    <li>
+      {% if setup.template.is_empty() %}<strong>Set a preview address template</strong>{% else %}<span class="text-soft">Preview address template is set</span>{% endif %}
+      — in <a href="/settings#preview-address">Settings → HTTPS &amp; previews → Preview address</a>, e.g. <code>{name}.{node}.example.com</code>.
+    </li>
+    <li>
+      {% if setup.targets.is_empty() %}<strong>Mark a server as a test server</strong>{% else %}<span class="text-soft">A test server is marked</span>{% endif %}
+      — on the <a href="/install">Nodes page</a>, open the server and click <em>Mark as test</em>. This server can be one too.
+    </li>
+  </ol>
+</div>
+{% else %}
+<div class="card" style="max-width:46rem">
+  <form method="post" action="/hostings" id="test-form">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    <input type="hidden" name="test_mode" value="1">
+    <input type="hidden" name="domain" value="">
+    {# Test content never belongs in a search index. #}
+    <input type="hidden" name="wp_no_index" value="on">
+
+    <div class="field">
+      <label for="test_site_name">Subdomain <span class="hint">lowercase letters, digits, and dashes</span></label>
+      <input id="test_site_name" name="test_site_name" type="text" required autofocus
+             value="{{ name_in }}" placeholder="blog" autocomplete="off" spellcheck="false"
+             pattern="[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?" maxlength="32"
+             title="1–32 characters: a–z, 0–9, and dashes, not at the start or end">
+      <p class="small" style="margin:0.4rem 0 0">
+        <span class="text-soft">Address:</span>
+        <code id="test-address">{% for t in setup.targets %}{% if (target_node_in.is_empty() && loop.first) || target_node_in == t.node_id %}{% if name_in.is_empty() %}{{ t.pattern.replace("__name__", "…") }}{% else %}{{ t.pattern.replace("__name__", name_in) }}{% endif %}{% endif %}{% endfor %}</code>
+      </p>
+      <div id="test-check" class="text-soft small" style="margin-top:0.3rem;min-height:1.2em"></div>
+    </div>
+
+    {% if setup.targets.len() > 1 %}
+    <div class="field">
+      <label for="target_node">Test server</label>
+      <select id="target_node" name="target_node">
+        {% for t in setup.targets %}
+        <option value="{{ t.node_id }}" data-pattern="{{ t.pattern }}"
+                {% if target_node_in == t.node_id || (target_node_in.is_empty() && loop.first) %}selected{% endif %}>{{ t.label }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    {% else %}
+    {% for t in setup.targets %}
+    <input type="hidden" id="target_node" name="target_node" value="{{ t.node_id }}" data-pattern="{{ t.pattern }}">
+    {% endfor %}
+    {% endif %}
+
+    <div class="field">
+      <label>What runs on it</label>
+      <div class="type-picker">
+        <label class="type-card{% if site_type_in.is_empty() || site_type_in == "wordpress" %} selected{% endif %}">
+          <input type="radio" name="site_type" value="wordpress" {% if site_type_in.is_empty() || site_type_in == "wordpress" %}checked{% endif %}>
+          <div class="type-card-body">
+            <div class="type-name">WordPress</div>
+            <div class="type-meta">Installed with a database; the admin login is shown once on the next page.</div>
+          </div>
+        </label>
+        <label class="type-card{% if site_type_in == "static" %} selected{% endif %}">
+          <input type="radio" name="site_type" value="static" {% if site_type_in == "static" %}checked{% endif %}>
+          <div class="type-card-body">
+            <div class="type-name">Static website</div>
+            <div class="type-meta">HTML, CSS, and images, served as-is.</div>
+          </div>
+        </label>
+        <label class="type-card{% if site_type_in == "php" %} selected{% endif %}">
+          <input type="radio" name="site_type" value="php" {% if site_type_in == "php" %}checked{% endif %}>
+          <div class="type-card-body">
+            <div class="type-name">PHP application</div>
+            <div class="type-meta">PHP 8.3 and a MariaDB database for your own app.</div>
+          </div>
+        </label>
+        <label class="type-card{% if site_type_in == "reverse_proxy" %} selected{% endif %}">
+          <input type="radio" name="site_type" value="reverse_proxy" {% if site_type_in == "reverse_proxy" %}checked{% endif %}>
+          <div class="type-card-body">
+            <div class="type-name">App behind a proxy</div>
+            <div class="type-meta">Forward the address to an app running elsewhere — Node, Python, a container.</div>
+          </div>
+        </label>
+      </div>
+    </div>
+
+    {# WordPress details — the same fields the wizard asks, all optional.
+       Blank user = "admin", blank/short password = generated and shown
+       once, blank title = the address. #}
+    <div class="field" id="wp-fields">
+      <div class="wp-grid">
+        <div class="field" style="margin:0">
+          <label for="wp_admin_email">Admin email <span class="hint">where the WordPress welcome goes</span></label>
+          <input id="wp_admin_email" name="wp_admin_email" type="email" value="{{ wp.admin_email }}" placeholder="you@example.cz">
+        </div>
+        <div class="field" style="margin:0">
+          <label for="wp_title">Site title <span class="hint">blank = the address</span></label>
+          <input id="wp_title" name="wp_title" type="text" value="{{ wp.title }}" placeholder="My test site">
+        </div>
+        <div class="field" style="margin:0">
+          <label for="wp_admin_user">Admin username <span class="hint">blank = <code>admin</code></span></label>
+          <input id="wp_admin_user" name="wp_admin_user" type="text" value="{{ wp.admin_user }}"
+                 maxlength="60" pattern="[A-Za-z0-9._@\-]+" placeholder="admin" title="Letters, digits, and . _ @ -">
+        </div>
+        <div class="field" style="margin:0">
+          <label for="wp_admin_password">Admin password <span class="hint">blank = generated, shown once</span></label>
+          <input id="wp_admin_password" name="wp_admin_password" type="text" autocomplete="new-password" placeholder="Leave blank to generate">
+        </div>
+        <div class="field" style="margin:0">
+          <label for="wp_locale">Language</label>
+          <select id="wp_locale" name="wp_locale">
+            <option value="en_US" {% if wp.locale.is_empty() || wp.locale == "en_US" %}selected{% endif %}>English (en_US)</option>
+            <option value="cs_CZ" {% if wp.locale == "cs_CZ" %}selected{% endif %}>Čeština (cs_CZ)</option>
+            <option value="sk_SK" {% if wp.locale == "sk_SK" %}selected{% endif %}>Slovenčina (sk_SK)</option>
+            <option value="de_DE" {% if wp.locale == "de_DE" %}selected{% endif %}>Deutsch (de_DE)</option>
+            <option value="es_ES" {% if wp.locale == "es_ES" %}selected{% endif %}>Español (es_ES)</option>
+            <option value="fr_FR" {% if wp.locale == "fr_FR" %}selected{% endif %}>Français (fr_FR)</option>
+            <option value="pl_PL" {% if wp.locale == "pl_PL" %}selected{% endif %}>Polski (pl_PL)</option>
+          </select>
+        </div>
+      </div>
+
+      {% if !library_plugins.is_empty() || !library_themes.is_empty() %}
+      <fieldset class="library" id="library">
+        <legend>From the plugin library <span class="hint">installed and activated after WordPress</span></legend>
+        {# Checkboxes carry no name: axum's Form can't collect repeated keys,
+           so the script joins the ticked ids into wp_plugin_assets. #}
+        <input type="hidden" name="wp_plugin_assets" id="wp_plugin_assets" value="{{ wp.plugin_ids.trim_matches(',') }}">
+        {% if !library_plugins.is_empty() %}
+        <div class="library-list">
+          {% for a in library_plugins %}
+          <label class="field-checkbox">
+            <input type="checkbox" class="lib-plugin" value="{{ a.id }}" {% if wp.picked(a.id) %}checked{% endif %}>
+            {{ a.original_name }}
+          </label>
+          {% endfor %}
+        </div>
+        {% endif %}
+        {% if !library_themes.is_empty() %}
+        <div class="field" style="margin:0.6rem 0 0">
+          <label for="wp_theme_asset">Theme</label>
+          <select id="wp_theme_asset" name="wp_theme_asset">
+            <option value="0">WordPress default</option>
+            {% for a in library_themes %}
+            <option value="{{ a.id }}" {% if wp.theme_id == a.id %}selected{% endif %}>{{ a.original_name }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        {% endif %}
+        <p class="text-soft small" id="library-remote" style="margin:0.5rem 0 0" hidden>
+          The library lives on this server, so it can only install onto sites hosted here. Pick this server, or install from the site's WordPress tab later.
+        </p>
+        <p class="text-soft small" style="margin:0.5rem 0 0">
+          Manage the library in <a href="/profiles/wp-assets">Profiles → WordPress library</a>.
+        </p>
+      </fieldset>
+      {% endif %}
+    </div>
+
+    <div class="field" id="upstream-field">
+      <label for="proxy_upstream_url">Where is the app running? <span class="hint">only for an app behind a proxy</span></label>
+      <input id="proxy_upstream_url" name="proxy_upstream_url" type="url"
+             placeholder="http://localhost:3000" value="{{ proxy_upstream_url_in }}">
+    </div>
+
+    <div class="btn-group" style="margin-top:1rem;display:flex;justify-content:space-between">
+      <a href="/hostings" class="btn ghost">Cancel</a>
+      <button class="btn primary lg" type="submit">Create test website</button>
+    </div>
+  </form>
+</div>
+{% endif %}
+
+<style>
+.type-picker {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(200px, 100%), 1fr));
+  gap: 0.6rem;
+  margin: 0.4rem 0 0;
+}
+.type-card {
+  position: relative;
+  display: block;
+  border: 1.5px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0.7rem 0.85rem;
+  cursor: pointer;
+  background: var(--surface);
+  transition: border-color var(--t-fast), background var(--t-fast);
+}
+.type-card:hover { border-color: var(--primary-h); }
+.type-card.selected {
+  border-color: var(--primary);
+  background: color-mix(in oklab, var(--primary) 8%, transparent);
+}
+.type-card input[type="radio"] {
+  position: absolute;
+  top: 0.7rem;
+  right: 0.7rem;
+  accent-color: var(--primary);
+}
+.type-card-body .type-name {
+  font-weight: 600;
+  font-size: 0.95rem;
+  color: var(--text);
+  padding-right: 1.4rem;
+}
+.type-card-body .type-meta {
+  font-size: 0.8rem;
+  color: var(--text-soft);
+  margin-top: 0.25rem;
+  line-height: 1.45;
+}
+/* Per-type fields show with JS off; with JS on only for their type. */
+#test-form.js-on #upstream-field,
+#test-form.js-on #wp-fields { display: none; }
+#test-form.js-on.is-proxy #upstream-field,
+#test-form.js-on.is-wp #wp-fields { display: block; }
+.wp-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr));
+  gap: 0.5rem 0.75rem;
+}
+.library {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0.6rem 0.85rem 0.75rem;
+  margin: 0.9rem 0 0;
+}
+.library legend { font-weight: 600; font-size: 0.85rem; padding: 0 0.3rem; }
+.library legend .hint { font-weight: 400; color: var(--text-soft); margin-left: 0.35rem; }
+.library-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(220px, 100%), 1fr));
+  gap: 0.2rem 0.75rem;
+}
+.library[disabled] .library-list,
+.library[disabled] select { opacity: 0.5; }
+</style>
+
+<script>
+(function () {
+  'use strict';
+  const form = document.getElementById('test-form');
+  if (!form) return;
+  form.classList.add('js-on');
+  const nameInput = document.getElementById('test_site_name');
+  const target = document.getElementById('target_node');
+  const address = document.getElementById('test-address');
+  const check = document.getElementById('test-check');
+  const upstream = document.getElementById('proxy_upstream_url');
+  const cards = form.querySelectorAll('.type-card');
+
+  // Patterns are rendered server-side through the real template, with
+  // `__name__` where the subdomain goes — the preview is that string.
+  function pattern() {
+    if (!target) return '';
+    if (target.tagName === 'SELECT') {
+      const opt = target.options[target.selectedIndex];
+      return opt ? opt.dataset.pattern || '' : '';
+    }
+    return target.dataset.pattern || '';
+  }
+  function name() { return (nameInput.value || '').trim().toLowerCase(); }
+
+  let timer = null;
+  let ctrl = null;
+  async function checkTaken(domain) {
+    if (ctrl) ctrl.abort();
+    ctrl = new AbortController();
+    try {
+      const r = await fetch('/api/check-domain?domain=' + encodeURIComponent(domain),
+        { signal: ctrl.signal, credentials: 'same-origin' });
+      if (!r.ok) return;
+      const j = await r.json();
+      if (!j.checked) { check.textContent = ''; return; }
+      if (j.exists) {
+        check.style.color = 'var(--danger)';
+        check.textContent = 'Already in use — pick another name.';
+      } else {
+        check.style.color = 'var(--success)';
+        check.textContent = 'Available';
+      }
+    } catch (_) { /* aborted or offline */ }
+  }
+
+  function render() {
+    const n = name();
+    const p = pattern();
+    address.textContent = p.split('__name__').join(n || '…');
+    check.textContent = '';
+    check.style.color = '';
+    if (timer) clearTimeout(timer);
+    if (n && nameInput.checkValidity()) {
+      timer = setTimeout(() => checkTaken(p.split('__name__').join(n)), 350);
+    }
+  }
+
+  function applyType() {
+    const checked = form.querySelector('input[name="site_type"]:checked');
+    const type = checked ? checked.value : 'wordpress';
+    cards.forEach(c => c.classList.toggle('selected', c.contains(checked)));
+    form.classList.toggle('is-proxy', type === 'reverse_proxy');
+    form.classList.toggle('is-wp', type === 'wordpress');
+    if (upstream) upstream.required = (type === 'reverse_proxy');
+  }
+
+  // The library installs only onto this server (it lives here): grey it out
+  // for a worker, and say why. The server refuses it either way.
+  const library = document.getElementById('library');
+  const libRemote = document.getElementById('library-remote');
+  const libHidden = document.getElementById('wp_plugin_assets');
+  function applyTarget() {
+    if (!library || !target) return;
+    const remote = target.value !== 'local';
+    library.disabled = remote;
+    if (libRemote) libRemote.hidden = !remote;
+  }
+  function syncLibrary() {
+    if (!libHidden) return;
+    const ids = [...form.querySelectorAll('.lib-plugin:checked')].map(c => c.value);
+    libHidden.value = ids.join(',');
+  }
+  form.querySelectorAll('.lib-plugin').forEach(c => c.addEventListener('change', syncLibrary));
+  if (target && target.tagName === 'SELECT') target.addEventListener('change', applyTarget);
+  applyTarget();
+
+  // Lowercase as they type, so the address and the posted name agree.
+  nameInput.addEventListener('input', () => {
+    const lower = nameInput.value.toLowerCase();
+    if (lower !== nameInput.value) nameInput.value = lower;
+    render();
+  });
+  if (target && target.tagName === 'SELECT') target.addEventListener('change', render);
+  form.querySelectorAll('input[name="site_type"]').forEach(r => r.addEventListener('change', applyType));
+  applyType();
+  render();
+})();
+</script>
+{% endblock %}

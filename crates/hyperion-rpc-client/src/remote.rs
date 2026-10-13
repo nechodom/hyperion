@@ -126,6 +126,7 @@ impl Default for RemoteCallOpts {
 /// the parse from inside a trailer.
 const CERT_MARKER: &str = "\n__HYPERION_CURL_CERTS__\n";
 const SIG_MARKER: &str = "\n__HYPERION_CURL_SIG__\n";
+const CODE_MARKER: &str = "\n__HYPERION_CURL_CODE__\n";
 
 /// Peel one `--write-out` trailer off the END of `buf`, returning
 /// `(everything before the marker, the trailer)`. Pure + total: never
@@ -150,18 +151,33 @@ fn peel_trailer<'a>(buf: &'a [u8], marker: &str) -> (&'a [u8], Option<&'a str>) 
     }
 }
 
-/// Split curl stdout into `(body, certs_pem, resp_sig)`.
+/// Split curl stdout into `(body, certs_pem, resp_sig, http_status)`.
 ///
 /// The layout curl produces is
-/// `<body><CERT_MARKER><certs><SIG_MARKER><resp-sig header>`, so the
-/// trailers are peeled right-to-left, the exact reverse of the order
-/// they were written. Either trailer being empty or absent (older curl
-/// that doesn't know `%{certs}` / `%header{}`, or a node that didn't
-/// sign) yields `None` for that piece and never a mis-cut body.
-fn split_body_and_trailers(stdout: &[u8]) -> (&[u8], Option<&str>, Option<&str>) {
-    let (head, sig) = peel_trailer(stdout, SIG_MARKER);
+/// `<body><CERT_MARKER><certs><SIG_MARKER><resp-sig header><CODE_MARKER><status>`,
+/// so the trailers are peeled right-to-left, the exact reverse of the
+/// order they were written. Either of the first two being empty or absent
+/// (older curl that doesn't know `%{certs}` / `%header{}`, or a node that
+/// didn't sign) yields `None` for that piece and never a mis-cut body.
+fn split_body_and_trailers(stdout: &[u8]) -> (&[u8], Option<&str>, Option<&str>, Option<u16>) {
+    let (rest, code) = peel_trailer(stdout, CODE_MARKER);
+    let (head, sig) = peel_trailer(rest, SIG_MARKER);
     let (body, certs) = peel_trailer(head, CERT_MARKER);
-    (body, certs, sig)
+    (body, certs, sig, code.and_then(|c| c.parse().ok()))
+}
+
+/// What the node said when it refused a request, fit for an error
+/// message: one line, printable, bounded. The agent only ever refuses
+/// with short fixed strings ("envelope in future — …", "bad request
+/// body", axum's 413 text), so this is about not trusting that, not
+/// about trimming real content.
+fn refusal_text(body: &[u8]) -> String {
+    let text: String = String::from_utf8_lossy(body)
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .take(300)
+        .collect();
+    text.trim().to_string()
 }
 
 /// Turn the captured signature trailer into "did the worker sign this
@@ -177,6 +193,38 @@ fn normalize_resp_sig(raw: Option<&str>) -> Option<String> {
     raw.map(str::trim)
         .filter(|s| !s.is_empty() && !s.starts_with('%'))
         .map(str::to_string)
+}
+
+/// SPKI pin of a presented chain, remembered by the chain's bytes.
+///
+/// Computing one forks a bash + openssl pipeline, and it used to run on
+/// EVERY remote call — a phpMyAdmin page relays dozens of RPCs, each
+/// paying four process spawns to re-derive the same pin from the same
+/// certificate. A worker's cert changes almost never, so the answer is
+/// cached per distinct chain; the cache is tiny and simply starts over
+/// when full. A failed computation is not cached, so it is retried.
+async fn observed_pin_cached(pem: &str) -> Option<String> {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    static CACHE: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
+    const MAX_ENTRIES: usize = 64;
+
+    if let Some(pin) = CACHE
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .as_ref()
+        .and_then(|m| m.get(pem).cloned())
+    {
+        return Some(pin);
+    }
+    let pin = hyperion_core::tls_pin::spki_pin_from_cert_pem(pem).await?;
+    let mut g = CACHE.lock().unwrap_or_else(|p| p.into_inner());
+    let map = g.get_or_insert_with(HashMap::new);
+    if map.len() >= MAX_ENTRIES {
+        map.clear();
+    }
+    map.insert(pem.to_string(), pin.clone());
+    Some(pin)
 }
 
 /// Sign + POST + decode. `endpoint_base` should be the full base URL
@@ -269,7 +317,12 @@ pub async fn call_remote_attested(
     let header = format!("Authorization: Bearer {}", auth.to_header_value());
     let url = format!("{}/agent-rpc", endpoint_base.trim_end_matches('/'));
 
-    let mut args: Vec<String> = vec!["-fsS".into()];
+    // No `-f`: with it curl swallows the body of an HTTP error, and the
+    // body is the only place the node says WHY it refused — "envelope in
+    // future" (the clocks disagree) and "replayed nonce" both used to
+    // reach the operator as a bare "curl exit 22 … returned error: 401".
+    // The status comes back as a trailer instead and is checked below.
+    let mut args: Vec<String> = vec!["-sS".into()];
     args.push("--max-time".into());
     args.push(opts.timeout_secs.to_string());
     // Cap the response the master buffers in RAM so one malicious or buggy
@@ -287,7 +340,7 @@ pub async fn call_remote_attested(
     // it differently, verification would silently switch itself off.
     args.push("--write-out".into());
     args.push(format!(
-        "{CERT_MARKER}%{{certs}}{SIG_MARKER}%header{{{}}}",
+        "{CERT_MARKER}%{{certs}}{SIG_MARKER}%header{{{}}}{CODE_MARKER}%{{http_code}}",
         RESP_SIG_HEADER.to_ascii_lowercase()
     ));
     if !opts.verify_tls {
@@ -334,7 +387,16 @@ pub async fn call_remote_attested(
             stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
         });
     }
-    let (body_bytes, certs_pem, resp_sig) = split_body_and_trailers(&out.stdout);
+    let (body_bytes, certs_pem, resp_sig, status) = split_body_and_trailers(&out.stdout);
+    // An HTTP error keeps the shape `-f` used to give it — exit 22 — so
+    // every caller that tells "the node refused" apart from "the node is
+    // unreachable" still does; it now also carries the node's reason.
+    if let Some(status) = status.filter(|s| !(200..300).contains(s)) {
+        return Err(RemoteClientError::HttpError {
+            code: Some(22),
+            stderr: format!("HTTP {status}: {}", refusal_text(body_bytes)),
+        });
+    }
     let body_len = body_bytes.len();
     let resp: Response =
         serde_json::from_slice(body_bytes).map_err(|e| RemoteClientError::Parse(e.to_string()))?;
@@ -343,7 +405,7 @@ pub async fn call_remote_attested(
     // Best-effort pin of the leaf cert. Failure here must never fail the
     // call — the RPC already succeeded.
     let observed_pin = match &certs_pem {
-        Some(pem) if !pem.is_empty() => hyperion_core::tls_pin::spki_pin_from_cert_pem(pem).await,
+        Some(pem) if !pem.is_empty() => observed_pin_cached(pem).await,
         _ => None,
     };
     // Hand the body back byte-identical to what the node signed. Truncating
@@ -368,15 +430,16 @@ mod tests {
 
     /// Rebuild exactly what curl writes to stdout for our `--write-out`.
     fn curl_stdout(body: &str, certs: &str, sig: &str) -> Vec<u8> {
-        format!("{body}{CERT_MARKER}{certs}{SIG_MARKER}{sig}").into_bytes()
+        format!("{body}{CERT_MARKER}{certs}{SIG_MARKER}{sig}{CODE_MARKER}200").into_bytes()
     }
 
     #[test]
     fn split_no_marker_is_all_body() {
-        let (body, certs, sig) = split_body_and_trailers(b"{\"ok\":true}");
+        let (body, certs, sig, code) = split_body_and_trailers(b"{\"ok\":true}");
         assert_eq!(body, b"{\"ok\":true}");
         assert_eq!(certs, None);
         assert_eq!(sig, None);
+        assert_eq!(code, None);
     }
 
     #[test]
@@ -386,10 +449,11 @@ mod tests {
             "-----BEGIN CERTIFICATE-----\nAAA\n-----END CERTIFICATE-----\n",
             "1700000000.c2ln",
         );
-        let (body, certs, sig) = split_body_and_trailers(&raw);
+        let (body, certs, sig, code) = split_body_and_trailers(&raw);
         assert_eq!(body, b"{\"ok\":true}");
         assert!(certs.unwrap().starts_with("-----BEGIN CERTIFICATE-----"));
         assert_eq!(sig, Some("1700000000.c2ln"));
+        assert_eq!(code, Some(200));
     }
 
     #[test]
@@ -397,7 +461,7 @@ mod tests {
         // Node didn't sign and no cert was captured: both markers are
         // present with nothing between/after them.
         let raw = curl_stdout("{\"ok\":true}", "", "");
-        let (body, certs, sig) = split_body_and_trailers(&raw);
+        let (body, certs, sig, _) = split_body_and_trailers(&raw);
         assert_eq!(body, b"{\"ok\":true}");
         // trimmed empty strings — caller treats both as absent.
         assert_eq!(certs, Some(""));
@@ -409,7 +473,7 @@ mod tests {
         // curl old enough to know %{certs} but not %header{} — the sig
         // marker never appears, and the body must still be cut correctly.
         let raw = format!("{{\"ok\":true}}{CERT_MARKER}PEM").into_bytes();
-        let (body, certs, sig) = split_body_and_trailers(&raw);
+        let (body, certs, sig, _) = split_body_and_trailers(&raw);
         assert_eq!(body, b"{\"ok\":true}");
         assert_eq!(certs, Some("PEM"));
         assert_eq!(sig, None);
@@ -422,9 +486,10 @@ mod tests {
         // then verify a signature over) and a cert chain of its choosing.
         // Peeling from the right defeats it: the real trailers are always
         // the rightmost ones.
-        let evil = format!("{{\"x\":\"{CERT_MARKER}FAKEPEM{SIG_MARKER}9.FAKESIG\"}}");
+        let evil =
+            format!("{{\"x\":\"{CERT_MARKER}FAKEPEM{SIG_MARKER}9.FAKESIG{CODE_MARKER}500\"}}");
         let raw = curl_stdout(&evil, "REALPEM", "1700000000.REALSIG");
-        let (body, certs, sig) = split_body_and_trailers(&raw);
+        let (body, certs, sig, code) = split_body_and_trailers(&raw);
         assert_eq!(
             body,
             evil.as_bytes(),
@@ -432,6 +497,24 @@ mod tests {
         );
         assert_eq!(certs, Some("REALPEM"));
         assert_eq!(sig, Some("1700000000.REALSIG"));
+        assert_eq!(code, Some(200));
+    }
+
+    #[test]
+    fn an_http_refusal_carries_its_status_and_reason() {
+        let raw =
+            format!("envelope in future — sync clocks{CERT_MARKER}{SIG_MARKER}{CODE_MARKER}401")
+                .into_bytes();
+        let (body, _, sig, code) = split_body_and_trailers(&raw);
+        assert_eq!(code, Some(401));
+        assert_eq!(sig, Some(""));
+        assert_eq!(refusal_text(body), "envelope in future — sync clocks");
+    }
+
+    #[test]
+    fn refusal_text_is_one_bounded_line() {
+        assert_eq!(refusal_text(b"a\nb\r\x1bc"), "a b  c");
+        assert_eq!(refusal_text(&[b'x'; 5000]).len(), 300);
     }
 
     #[test]

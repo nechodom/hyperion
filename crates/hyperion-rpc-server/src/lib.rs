@@ -865,6 +865,16 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(()) => Response::EmailConfigSet,
             Err(e) => Response::Error(e),
         },
+        Request::NodeConfigRead => match api.node_config_read().await {
+            Ok(s) => Response::NodeConfigRead(s),
+            Err(e) => Response::Error(e),
+        },
+        Request::NodeConfigSet { section, fields } => {
+            match api.node_config_set(section, fields.into_inner()).await {
+                Ok(()) => Response::NodeConfigSet,
+                Err(e) => Response::Error(e),
+            }
+        }
         Request::UpdateCheck { force_refresh } => match api.update_check(force_refresh).await {
             Ok(v) => Response::UpdateCheck(v),
             Err(e) => Response::Error(e),
@@ -1435,6 +1445,7 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             prior_node_id,
             prior_secret,
             resp_pubkey,
+            endpoint,
         } => match api
             .enroll_consume(
                 token,
@@ -1446,6 +1457,7 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
                 prior_node_id,
                 prior_secret,
                 resp_pubkey,
+                endpoint,
             )
             .await
         {
@@ -1462,8 +1474,16 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             agent_version,
             tls_spki_pin,
             resp_pubkey,
+            endpoint,
         } => match api
-            .node_heartbeat(node_id, secret, agent_version, tls_spki_pin, resp_pubkey)
+            .node_heartbeat(
+                node_id,
+                secret,
+                agent_version,
+                tls_spki_pin,
+                resp_pubkey,
+                endpoint,
+            )
             .await
         {
             Ok(master_rpc_pubkey) => Response::NodeHeartbeat { master_rpc_pubkey },
@@ -2725,6 +2745,16 @@ mod tests {
         ) -> Result<(), RpcError> {
             Ok(())
         }
+        async fn node_config_read(&self) -> Result<String, RpcError> {
+            Ok(String::new())
+        }
+        async fn node_config_set(
+            &self,
+            _: String,
+            _: std::collections::BTreeMap<String, String>,
+        ) -> Result<(), RpcError> {
+            Ok(())
+        }
         async fn update_check(&self, _: bool) -> Result<hyperion_types::UpdateStatus, RpcError> {
             Ok(hyperion_types::UpdateStatus::default())
         }
@@ -3251,6 +3281,7 @@ mod tests {
             _: Option<String>,
             _: Option<String>,
             _: Option<String>,
+            _: hyperion_types::NodeEndpointReport,
         ) -> Result<(String, String, Option<String>), RpcError> {
             Ok(("test-node".into(), "test-secret".into(), None))
         }
@@ -3261,6 +3292,7 @@ mod tests {
             _: String,
             _: Option<String>,
             _: Option<String>,
+            _: hyperion_types::NodeEndpointReport,
         ) -> Result<Option<String>, RpcError> {
             Ok(None)
         }
