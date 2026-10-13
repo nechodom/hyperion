@@ -70,36 +70,8 @@ pub async fn get_certs(
             axum::response::Redirect::to("/?flash_error=admin+role+required").into_response(),
         );
     }
-    // Collect from master + every enrolled node. A worker that's
-    // offline / rejects RPC contributes nothing — best-effort,
-    // the page still renders.
-    let mut all: Vec<hyperion_types::CertOverviewItem> = Vec::new();
-    // Local agent first.
-    if let Ok(RpcResponse::CertOverview(items)) =
-        hyperion_rpc_client::call(&state.agent_socket, Request::CertOverview).await
-    {
-        all.extend(items);
-    }
-    // Remote workers. A node whose response can't be AUTHENTICATED is
-    // dropped by the fan-out, which would otherwise read here as "that
-    // node has no certificates" — hence the banner.
-    let mut node_auth_warning = None;
-    if let Ok(RpcResponse::NodesList(nodes)) = crate::dispatcher::cached_nodes(&state)
-        .await
-        .map(hyperion_rpc::codec::Response::NodesList)
-    {
-        let (answered, failed) =
-            crate::dispatcher::fan_out_reporting(&state, nodes, Request::CertOverview).await;
-        for (n, resp) in answered {
-            if let RpcResponse::CertOverview(mut items) = resp {
-                for item in items.iter_mut() {
-                    item.node_id = n.label.clone();
-                }
-                all.extend(items);
-            }
-        }
-        node_auth_warning = super::node_auth_warning(&failed);
-    }
+    let (mut all, failed) = collect_overview(&state).await;
+    let node_auth_warning = super::node_auth_warning(&failed);
     // Already sorted ASC at agent level, but inter-node merge may
     // have produced an out-of-order interleave. Re-sort.
     all.sort_by_key(|i| i.not_after);
@@ -140,6 +112,47 @@ pub async fn get_certs(
         node_auth_warning,
     };
     Ok(Html(tpl.render()?).into_response())
+}
+
+/// `CertOverview` from the master and every enrolled node, merged, plus the
+/// nodes that dropped out. Worker rows carry the node's label; master rows
+/// keep what the agent wrote. Shared with the sidebar's certificate dot,
+/// which must count the same certificates this page lists.
+///
+/// A worker that's offline / rejects RPC contributes nothing — best-effort,
+/// the page still renders. A node whose response can't be AUTHENTICATED is
+/// dropped too, which would otherwise read as "that node has no
+/// certificates" — hence the failed half, for the banner.
+pub(crate) async fn collect_overview(
+    state: &SharedState,
+) -> (
+    Vec<hyperion_types::CertOverviewItem>,
+    Vec<(
+        hyperion_types::NodeSummary,
+        crate::dispatcher::DispatchError,
+    )>,
+) {
+    let mut all: Vec<hyperion_types::CertOverviewItem> = Vec::new();
+    // Local agent first.
+    if let Ok(RpcResponse::CertOverview(items)) =
+        hyperion_rpc_client::call(&state.agent_socket, Request::CertOverview).await
+    {
+        all.extend(items);
+    }
+    let nodes = crate::dispatcher::cached_nodes(state)
+        .await
+        .unwrap_or_default();
+    let (answered, failed) =
+        crate::dispatcher::fan_out_reporting(state, nodes, Request::CertOverview).await;
+    for (n, resp) in answered {
+        if let RpcResponse::CertOverview(mut items) = resp {
+            for item in items.iter_mut() {
+                item.node_id = n.label.clone();
+            }
+            all.extend(items);
+        }
+    }
+    (all, failed)
 }
 
 /// POST /certs/renew-all — sweep every node and run CertRenewAll.

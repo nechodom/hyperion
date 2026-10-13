@@ -1598,30 +1598,9 @@ pub async fn post_config(
         return Ok(Redirect::to(&dest).into_response());
     }
 
-    // `[notifications]` holds the two CUSTOMER letters, and those are read on
-    // the node that OWNS each hosting — not here. Keep a copy of the fields
-    // so the same text can go to every node once the master's write lands.
-    //
-    // The backup engine choice and both retention rules are the same kind of
-    // setting: they are ACTED ON by the node that owns each site (the
-    // scheduled backup sweep, the pre-change snapshot, the retention sweeps),
-    // so a value saved only on the master governed only the master's sites.
-    // [performance] is the same shape: the care report and the CWV measurement
-    // run on the owning node, so it too must reach every node.
-    let propagated_fields = matches!(
-        form.section.as_str(),
-        "notifications"
-            | "letters"
-            | "protection"
-            | "snapshots"
-            | "backup_retention"
-            // [backup] drop_local_after_offsite is ACTED ON by the node that
-            // owns each site (its backup run drops the local copy), so a value
-            // saved only on the master would govern only the master's sites.
-            | "backup"
-            | "performance"
-    )
-    .then(|| (form.section.clone(), fields.clone()));
+    // Settings ACTED ON by the node that owns each site must reach every
+    // node, not only the master's file. See `fields_for_workers`.
+    let propagated_fields = fields_for_workers(&form.section, &fields);
     // [notifications] is written by two cards: the customer letters (whose
     // failure message points at the per-node letter list) and Alert wording
     // (operator alerts, which has no such list — it gets the generic text).
@@ -1906,6 +1885,45 @@ async fn propagate_notifications(
     }
 }
 
+/// `[cluster]` keys read by the node that OWNS a hosting. `delete()` reads
+/// its own node's `trash_enabled` and the trash GC its own retention, so a
+/// value saved on the master alone left every worker delete permanent.
+const CLUSTER_KEYS_FOR_WORKERS: &[&str] = &["trash_enabled", "trash_retention_days"];
+
+/// The `(section, fields)` a save must also send every enrolled node, or
+/// `None` when the section is master-only.
+///
+/// `[notifications]` holds the two CUSTOMER letters, and those are read on
+/// the node that OWNS each hosting — not here. The backup engine choice and
+/// both retention rules are the same kind of setting: they are ACTED ON by the
+/// node that owns each site (the scheduled backup sweep, the pre-change
+/// snapshot, the retention sweeps), so a value saved only on the master
+/// governed only the master's sites. `[backup] drop_local_after_offsite` is
+/// acted on by the owning node's backup run, and `[performance]` by its care
+/// report and CWV measurement.
+///
+/// `[cluster]` is mostly master-only (sign-in, placement, hardening, previews
+/// — seven cards write it), so only [`CLUSTER_KEYS_FOR_WORKERS`] go out, and
+/// only when the save carries one.
+fn fields_for_workers(
+    section: &str,
+    fields: &std::collections::BTreeMap<String, String>,
+) -> Option<(String, std::collections::BTreeMap<String, String>)> {
+    match section {
+        "notifications" | "letters" | "protection" | "snapshots" | "backup_retention"
+        | "backup" | "performance" => Some((section.to_string(), fields.clone())),
+        "cluster" => {
+            let picked: std::collections::BTreeMap<String, String> = fields
+                .iter()
+                .filter(|(k, _)| CLUSTER_KEYS_FOR_WORKERS.contains(&k.as_str()))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            (!picked.is_empty()).then(|| (section.to_string(), picked))
+        }
+        _ => None,
+    }
+}
+
 /// Did a node refuse a `[backup]` save only because it predates
 /// `keep_local_latest`? (Its config parser rejects unknown keys by name.)
 fn backup_keep_unknown_to_old_node(section: &str, error: &str) -> bool {
@@ -2056,117 +2074,242 @@ pub async fn post_offsite_backfill(
                     "",
                 )
                 .await;
-            // One blocking RPC that uploads and, with drop on, re-checks every
-            // site's local copies: heartbeat the job row so a long sweep is not
-            // reaped as stale (and its real result thrown away) mid-flight.
+            // One blocking RPC per node that uploads and, with drop on,
+            // re-checks every site's local copies: heartbeat the job row so a
+            // long sweep is not reaped as stale (and its real result thrown
+            // away) mid-flight. The percentage is the nodes finished so far,
+            // shared so a heartbeat never moves the bar backwards.
+            let pct = std::sync::Arc::new(std::sync::atomic::AtomicI64::new(5));
             let hb = {
                 let reporter = reporter.clone();
+                let pct = pct.clone();
                 tokio::spawn(async move {
-                    let mut pct = 5;
                     loop {
                         tokio::time::sleep(std::time::Duration::from_secs(120)).await;
-                        pct = (pct + 5).min(90);
                         reporter
                             .step(
                                 "Still working — copying off-site and re-checking local copies…",
-                                pct,
+                                pct.load(std::sync::atomic::Ordering::Relaxed),
                                 "",
                             )
                             .await;
                     }
                 })
             };
-            let resp = hyperion_rpc_client::call(
-                &job_state.agent_socket,
-                Request::BackupOffsiteBackfill {
-                    limit: BACKFILL_BATCH,
-                    drop_local,
-                    s3_targets,
-                },
-            )
-            .await;
-            hb.abort();
-            match resp {
-                Ok(RpcResponse::BackupOffsiteBackfill(r)) => {
-                    let mut log = format!(
-                        "considered: {}\npushed:     {}\nfailed:     {}\n",
-                        r.considered, r.pushed, r.failed
-                    );
-                    if drop_local {
-                        log.push_str(&format!(
-                            "dropped:    {} local cop{} removed after an independent off-site \
-                             re-verify\nkept local: {} cop{} kept — could NOT be confirmed \
-                             off-site (missing, wrong size, or unreachable to re-check)\n",
-                            r.dropped,
-                            if r.dropped == 1 { "y" } else { "ies" },
-                            r.kept_local,
-                            if r.kept_local == 1 { "y" } else { "ies" },
-                        ));
-                        if r.already_offsite > 0 {
-                            log.push_str(&format!(
-                                "            ({} of those were already off-site: re-checked \
-                                 there and dropped without being uploaded again)\n",
-                                r.already_offsite
-                            ));
-                        }
-                    }
-                    // Separated from `failed` because no retry fixes it: the
-                    // archive was pruned off local disk before anything copied
-                    // it anywhere. Those backups are simply gone, and saying
-                    // so is the point.
-                    if r.missing_locally > 0 {
-                        log.push_str(&format!(
-                            "GONE:       {} backup(s) had no local archive left to send — \
-                             they were pruned before ever being copied off-site\n",
-                            r.missing_locally
-                        ));
-                    }
-                    // This ran against the LOCAL agent, so it covered the
-                    // backups on this node only. On a multi-node install the
-                    // workers' rows live on the workers, and a summary that
-                    // did not say so reads as "the estate is off-site now"
-                    // when most of it is not.
-                    log.push_str(
-                        "\nThis covered the backups stored on THIS node. Sites owned by other \
-                         nodes keep their backup rows there.\n",
-                    );
-                    if r.considered >= BACKFILL_BATCH {
-                        log.push_str(
-                            "There are more waiting than one run copies — run it again to \
-                             continue.\n",
-                        );
-                    }
-                    if !r.note.is_empty() {
-                        log.push_str(&format!("\n{}\n", r.note));
-                    }
-                    reporter.step("Finished.", 100, &log).await;
-                    // A kept copy is not a failure of the sweep, but with
-                    // "delete local" asked for it is not done either — say so
-                    // rather than show green over copies still on disk.
-                    let kept =
-                        (drop_local && r.kept_local > 0).then(|| {
-                            format!(
-                            "{} local cop{} kept — not confirmed off-site; each site's Backups \
-                             tab says why",
-                            r.kept_local,
-                            if r.kept_local == 1 { "y was" } else { "ies were" },
-                        )
-                        });
-                    let kept = kept.or_else(|| (!r.note.is_empty()).then(|| r.note.clone()));
-                    reporter.finish(r.failed == 0 && kept.is_none(), kept).await;
+            // Each node keeps its OWN sites' backup rows and archives, so the
+            // sweep runs on every node — the master and each enrolled worker,
+            // concurrently — and each node's result goes into the log as it
+            // lands. The per-site off-site card sends worker sites' owners
+            // here too, so a master-only sweep left exactly them behind.
+            let mut targets: Vec<(Option<String>, String)> =
+                vec![(None, "master (this server)".to_string())];
+            // Not knowing the workers is not "there are none": that becomes a
+            // turn of its own, and fails the job so it does not read as
+            // estate-wide.
+            let mut node_list_problem: Option<String> = None;
+            match crate::dispatcher::cached_nodes(&job_state).await {
+                Ok(nodes) => targets.extend(nodes.into_iter().map(|n| {
+                    let label = if n.label.trim().is_empty() {
+                        n.node_id.clone()
+                    } else {
+                        n.label.clone()
+                    };
+                    (Some(n.node_id), label)
+                })),
+                Err(e) => {
+                    node_list_problem = Some(format!(
+                        "the enrolled-node list could not be read ({e}), so no worker was swept"
+                    ))
                 }
-                Ok(RpcResponse::Error(e)) => reporter.finish(false, Some(e.to_string())).await,
-                Ok(_) => {
-                    reporter
-                        .finish(false, Some("unexpected agent response".into()))
-                        .await
-                }
-                Err(e) => reporter.finish(false, Some(e.to_string())).await,
             }
+            let mut set = tokio::task::JoinSet::new();
+            for (i, (node, label)) in targets.iter().cloned().enumerate() {
+                let st = job_state.clone();
+                let s3 = s3_targets.clone();
+                set.spawn(async move {
+                    let outcome = match crate::dispatcher::dispatch_to_node(
+                        &st,
+                        node.as_deref(),
+                        Request::BackupOffsiteBackfill {
+                            limit: BACKFILL_BATCH,
+                            drop_local,
+                            s3_targets: s3,
+                        },
+                    )
+                    .await
+                    {
+                        Ok(RpcResponse::BackupOffsiteBackfill(r)) => Ok(r),
+                        Ok(RpcResponse::Error(e)) => Err(e.to_string()),
+                        Ok(_) => Err("unexpected agent response".to_string()),
+                        Err(e) => Err(e.to_string()),
+                    };
+                    (i, label, outcome)
+                });
+            }
+            let total = targets.len();
+            let mut turns: Vec<(usize, BackfillTurn)> = Vec::with_capacity(total);
+            while let Some(joined) = set.join_next().await {
+                let Ok((i, label, outcome)) = joined else {
+                    continue;
+                };
+                let block = backfill_node_block(&label, &outcome, drop_local);
+                let done = turns.len() + 1;
+                let now_pct = (5 + 90 * done / total.max(1)) as i64;
+                pct.store(now_pct, std::sync::atomic::Ordering::Relaxed);
+                reporter
+                    .step(
+                        &format!("{done} of {total} node(s) finished…"),
+                        now_pct,
+                        &block,
+                    )
+                    .await;
+                turns.push((i, (label, outcome)));
+            }
+            hb.abort();
+            // A panicked task left no turn behind: never let that read as done.
+            if turns.len() < total {
+                let answered: Vec<usize> = turns.iter().map(|(i, _)| *i).collect();
+                for (i, (_, label)) in targets.iter().enumerate() {
+                    if !answered.contains(&i) {
+                        turns.push((i, (label.clone(), Err("the sweep crashed".to_string()))));
+                    }
+                }
+            }
+            turns.sort_by_key(|(i, _)| *i);
+            let mut turns: Vec<BackfillTurn> = turns.into_iter().map(|(_, t)| t).collect();
+            let mut last_block = String::new();
+            if let Some(problem) = node_list_problem {
+                let outcome = Err(problem);
+                last_block = backfill_node_block("enrolled nodes", &outcome, drop_local);
+                turns.push(("enrolled nodes".to_string(), outcome));
+            }
+            let (ok, err) = backfill_job_verdict(&turns, drop_local);
+            reporter.step("Finished.", 100, &last_block).await;
+            reporter.finish(ok, err).await;
         },
     )
     .await?;
     Ok(Redirect::to(&format!("/jobs/{}", job_id)).into_response())
+}
+
+/// One node's turn in the off-site backfill job: its label, and its result
+/// or why it did not run.
+type BackfillTurn = (
+    String,
+    Result<hyperion_types::OffsiteBackfillResult, String>,
+);
+
+/// The job-log block for one node's turn.
+fn backfill_node_block(
+    label: &str,
+    outcome: &Result<hyperion_types::OffsiteBackfillResult, String>,
+    drop_local: bool,
+) -> String {
+    let mut log = format!("\n── {label} ──\n");
+    let r = match outcome {
+        Ok(r) => r,
+        Err(e) => {
+            log.push_str(&format!(
+                "NOT RUN:    {e}\n            The backups on this node were not looked at — \
+                 run the copy again once it answers.\n"
+            ));
+            return log;
+        }
+    };
+    log.push_str(&format!(
+        "considered: {}\npushed:     {}\nfailed:     {}\n",
+        r.considered, r.pushed, r.failed
+    ));
+    if drop_local {
+        log.push_str(&format!(
+            "dropped:    {} local cop{} removed after an independent off-site \
+             re-verify\nkept local: {} cop{} kept — could NOT be confirmed \
+             off-site (missing, wrong size, or unreachable to re-check)\n",
+            r.dropped,
+            if r.dropped == 1 { "y" } else { "ies" },
+            r.kept_local,
+            if r.kept_local == 1 { "y" } else { "ies" },
+        ));
+        if r.already_offsite > 0 {
+            log.push_str(&format!(
+                "            ({} of those were already off-site: re-checked \
+                 there and dropped without being uploaded again)\n",
+                r.already_offsite
+            ));
+        }
+    }
+    // Separated from `failed` because no retry fixes it: the archive was
+    // pruned off local disk before anything copied it anywhere. Those backups
+    // are simply gone, and saying so is the point.
+    if r.missing_locally > 0 {
+        log.push_str(&format!(
+            "GONE:       {} backup(s) had no local archive left to send — \
+             they were pruned before ever being copied off-site\n",
+            r.missing_locally
+        ));
+    }
+    if r.considered >= BACKFILL_BATCH {
+        log.push_str("There are more waiting than one run copies — run it again to continue.\n");
+    }
+    if !r.note.is_empty() {
+        log.push_str(&format!("{}\n", r.note));
+    }
+    log
+}
+
+/// `(ok, error)` for the whole job. Green only when EVERY node ran and none
+/// failed a push. A node that did not run is named first — "the estate is
+/// off-site now" must not be read over a node nobody looked at. A copy kept
+/// with "delete local" asked for is not a failure of the sweep, but it is not
+/// done either, so it is not shown green over copies still on disk.
+fn backfill_job_verdict(turns: &[BackfillTurn], drop_local: bool) -> (bool, Option<String>) {
+    let not_run: Vec<&str> = turns
+        .iter()
+        .filter(|(_, o)| o.is_err())
+        .map(|(l, _)| l.as_str())
+        .collect();
+    if !not_run.is_empty() {
+        return (
+            false,
+            Some(format!(
+                "not run on {} — those backups were not looked at",
+                not_run.join(", ")
+            )),
+        );
+    }
+    let ok_turns = || {
+        turns
+            .iter()
+            .filter_map(|(l, o)| o.as_ref().ok().map(|r| (l, r)))
+    };
+    let failed: i64 = ok_turns().map(|(_, r)| r.failed).sum();
+    let kept: Vec<String> = ok_turns()
+        .filter(|(_, r)| drop_local && r.kept_local > 0)
+        .map(|(l, r)| {
+            format!(
+                "{} local cop{} on {l}",
+                r.kept_local,
+                if r.kept_local == 1 { "y" } else { "ies" }
+            )
+        })
+        .collect();
+    if !kept.is_empty() {
+        return (
+            false,
+            Some(format!(
+                "{} kept — not confirmed off-site; each site's Backups tab says why",
+                kept.join(", ")
+            )),
+        );
+    }
+    let notes: Vec<String> = ok_turns()
+        .filter(|(_, r)| !r.note.is_empty())
+        .map(|(l, r)| format!("{l}: {}", r.note))
+        .collect();
+    if !notes.is_empty() {
+        return (false, Some(notes.join(" · ")));
+    }
+    (failed == 0, None)
 }
 
 /// Map an agent.toml section to the redirect anchor that lands the operator
@@ -3474,6 +3617,94 @@ mod tests {
         flatten_toml_strings, letter_verdict, mask_secrets_in_toml,
         synthesize_unchecked_checkboxes, toml_key, toml_value,
     };
+
+    /// Each node's backups live on that node, so the sweep runs once per
+    /// node and the job log says which node did what — a node that could
+    /// not be reached must read as "not done", never as "nothing to copy".
+    #[test]
+    fn offsite_backfill_reports_every_node_and_fails_on_an_unreached_one() {
+        use super::{backfill_job_verdict, backfill_node_block};
+        let clean = hyperion_types::OffsiteBackfillResult {
+            considered: 3,
+            pushed: 3,
+            ..Default::default()
+        };
+        let turns = vec![
+            ("master".to_string(), Ok(clean.clone())),
+            (
+                "s5".to_string(),
+                Err("node s5 unreachable: TCP connect refused".to_string()),
+            ),
+        ];
+        let block = backfill_node_block(&turns[0].0, &turns[0].1, false);
+        assert!(block.contains("master"), "{block}");
+        assert!(block.contains("pushed:     3"), "{block}");
+        let block = backfill_node_block(&turns[1].0, &turns[1].1, false);
+        assert!(block.contains("s5"), "{block}");
+        assert!(block.contains("NOT RUN"), "{block}");
+        let (ok, err) = backfill_job_verdict(&turns, false);
+        assert!(!ok);
+        assert!(err.as_deref().unwrap_or("").contains("s5"), "{err:?}");
+
+        // Every node answered, nothing failed → green.
+        let all_ok = vec![
+            ("master".to_string(), Ok(clean.clone())),
+            ("s5".to_string(), Ok(clean.clone())),
+        ];
+        assert_eq!(backfill_job_verdict(&all_ok, false), (true, None));
+
+        // A copy kept with "delete local" asked for is not done either, and
+        // the message names the node holding it.
+        let kept = hyperion_types::OffsiteBackfillResult {
+            kept_local: 2,
+            ..clean.clone()
+        };
+        let turns = vec![
+            ("master".to_string(), Ok(clean)),
+            ("s5".to_string(), Ok(kept)),
+        ];
+        let (ok, err) = backfill_job_verdict(&turns, true);
+        assert!(!ok);
+        assert!(err.as_deref().unwrap_or("").contains("s5"), "{err:?}");
+    }
+
+    /// `delete()` runs on the node that OWNS the hosting and reads that
+    /// node's own `[cluster] trash_enabled`, so trash saved on the master
+    /// alone left every worker delete permanent.
+    #[test]
+    fn trash_settings_reach_the_workers_but_no_other_cluster_key_does() {
+        use super::fields_for_workers;
+        let m = |pairs: &[(&str, &str)]| -> std::collections::BTreeMap<String, String> {
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect()
+        };
+        let got = fields_for_workers(
+            "cluster",
+            &m(&[("trash_enabled", "true"), ("trash_retention_days", "14")]),
+        )
+        .expect("trash card propagates");
+        assert_eq!(got.0, "cluster");
+        assert_eq!(
+            got.1,
+            m(&[("trash_enabled", "true"), ("trash_retention_days", "14")])
+        );
+        // The other [cluster] cards are master-only (sign-in, placement,
+        // hardening…): pushing them would rewrite worker config.
+        assert!(fields_for_workers("cluster", &m(&[("require_2fa", "true")])).is_none());
+        // A mixed bag sends the trash keys ONLY.
+        let got = fields_for_workers(
+            "cluster",
+            &m(&[("trash_enabled", "false"), ("require_2fa", "true")]),
+        )
+        .expect("trash key present");
+        assert_eq!(got.1, m(&[("trash_enabled", "false")]));
+        // The sections that already propagated still do, whole.
+        let f = m(&[("drop_local_after_offsite", "true")]);
+        assert_eq!(fields_for_workers("backup", &f), Some(("backup".into(), f)));
+        assert!(fields_for_workers("acme", &m(&[("contact_email", "a@b.cz")])).is_none());
+    }
 
     /// A node from before `keep_local_latest` gets the [backup] save without
     /// it only when that cannot change what the node does.

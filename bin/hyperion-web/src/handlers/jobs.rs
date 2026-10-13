@@ -352,33 +352,73 @@ pub async fn get_nav_status(
     if !ctx.is_admin_or_higher() {
         return Ok(axum::Json(zero).into_response());
     }
-    let (mon, wp_outdated, certs) = tokio::join!(
-        hyperion_rpc_client::call(&state.agent_socket, Request::MonitorOverview),
+    let (dots, wp_outdated) = tokio::join!(
+        nav_dots_cached(&state),
         // Sites across the cluster that need a person — not every site with
         // an update: a minor the next sweep applies is not "needs me", and a
         // badge that is always red says nothing. Cached; see the helper.
         super::vulns::needs_you_count_cached(&state),
-        hyperion_rpc_client::call(&state.agent_socket, Request::CertOverview),
     );
-    let monitors_down = match mon {
-        Ok(RpcResponse::MonitorOverview(v)) => {
-            v.iter().filter(|m| m.alert_state == "alerting").count()
-        }
-        _ => 0,
-    };
-    let certs_expiring = match certs {
-        Ok(RpcResponse::CertOverview(v)) => v
-            .iter()
-            .filter(|c| c.days_left < 14 && c.issuer.to_lowercase().contains("letsencrypt"))
-            .count(),
-        _ => 0,
-    };
+    let NavDots {
+        monitors_down,
+        certs_expiring,
+    } = dots;
     Ok(axum::Json(serde_json::json!({
         "monitors_down": monitors_down,
         "wp_outdated": wp_outdated,
         "certs_expiring": certs_expiring,
     }))
     .into_response())
+}
+
+/// The monitoring and certificate dots' counts, cluster-wide.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NavDots {
+    /// Monitored sites currently alerting.
+    pub monitors_down: usize,
+    /// Let's Encrypt certificates with under 14 days left (or expired).
+    pub certs_expiring: usize,
+}
+
+impl NavDots {
+    fn count(
+        monitors: &[hyperion_types::MonitorOverviewItem],
+        certs: &[hyperion_types::CertOverviewItem],
+    ) -> Self {
+        NavDots {
+            monitors_down: monitors
+                .iter()
+                .filter(|m| m.alert_state == "alerting")
+                .count(),
+            certs_expiring: certs
+                .iter()
+                .filter(|c| c.days_left < 14 && c.issuer.to_lowercase().contains("letsencrypt"))
+                .count(),
+        }
+    }
+}
+
+/// [`NavDots`] over the master AND every enrolled node — the same fan-outs
+/// /monitoring and /certs render from, so a dot never disagrees with the
+/// page it links to (the WordPress dot beside them was already cluster-wide;
+/// these two used to count the master's sites only). Two fan-outs per poll
+/// per tab is not worth a number read at a glance: cached for
+/// [`PanelCaches::NAV_DOTS_TTL`](crate::state::PanelCaches::NAV_DOTS_TTL),
+/// loaded once however many tabs ask when it lapses. A node that does not
+/// answer adds nothing — a hint, not the page; the pages say who is missing.
+async fn nav_dots_cached(state: &SharedState) -> NavDots {
+    state
+        .caches
+        .nav_dots
+        .get_or_load(|| async {
+            let ((monitors, _), (certs, _)) = tokio::join!(
+                super::monitoring::collect_overview(state),
+                super::certs::collect_overview(state),
+            );
+            Ok::<_, ()>(NavDots::count(&monitors, &certs))
+        })
+        .await
+        .unwrap_or_default()
 }
 
 pub async fn get_running_count(
@@ -1003,6 +1043,50 @@ where
 #[cfg(test)]
 mod tests {
     use super::looks_like_hosting_id;
+
+    /// The dots count what /monitoring and /certs list — every node's rows,
+    /// not the master's alone (the WordPress dot beside them always was).
+    #[test]
+    fn nav_dots_count_every_nodes_rows() {
+        use super::NavDots;
+        let mon = |node: &str, st: &str| hyperion_types::MonitorOverviewItem {
+            hosting_id: String::new(),
+            domain: String::new(),
+            url_path: "/".into(),
+            interval_secs: 60,
+            alert_state: st.into(),
+            consecutive_fails: 0,
+            last_alert_at: None,
+            samples_24h: 0,
+            success_pct_24h: 0,
+            avg_response_ms_24h: 0,
+            last_sampled_at: 0,
+            node_id: node.into(),
+        };
+        let cert = |node: &str, days: i64, issuer: &str| hyperion_types::CertOverviewItem {
+            days_left: days,
+            issuer: issuer.into(),
+            node_id: node.into(),
+            ..Default::default()
+        };
+        let dots = NavDots::count(
+            &[
+                mon("local", "ok"),
+                mon("n-5", "alerting"),
+                mon("n-6", "alerting"),
+                mon("n-6", "unknown"),
+            ],
+            &[
+                cert("", 40, "letsencrypt"),
+                cert("s5", 3, "letsencrypt"),
+                // Self-signed is the per-site SSL card's business, not "expiring".
+                cert("s5", 3, "self-signed"),
+                cert("s6", -1, "letsencrypt"),
+            ],
+        );
+        assert_eq!(dots.monitors_down, 2);
+        assert_eq!(dots.certs_expiring, 2);
+    }
 
     #[test]
     fn hosting_id_shape() {

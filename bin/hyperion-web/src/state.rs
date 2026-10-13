@@ -121,6 +121,9 @@ pub struct PanelCaches {
     pub trash_count: crate::ttl_cache::TtlCell<usize>,
     /// Sites that need a person, behind the sidebar dot (a fan-out).
     pub needs_you: crate::ttl_cache::TtlCell<usize>,
+    /// Monitors down + certificates expiring cluster-wide, behind the
+    /// sidebar's monitoring and certificate dots (two fan-outs).
+    pub nav_dots: crate::ttl_cache::TtlCell<crate::handlers::jobs::NavDots>,
 }
 
 impl PanelCaches {
@@ -131,14 +134,16 @@ impl PanelCaches {
     pub const TRASH_TTL: std::time::Duration = std::time::Duration::from_secs(60);
     /// A number read at a glance; the /vulns page refreshes it on view.
     pub const NEEDS_YOU_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+    /// The sidebar polls once a minute per tab; one fan-out serves them all.
+    pub const NAV_DOTS_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 
     /// Called around every request [`Self::invalidated_by`] picks (see
     /// `drop_caches_on_write` in lib.rs). A node reset, an enforcement toggle or a trash/restore must
     /// never be answered from before it happened — an enforcement toggle
     /// switched ON in particular must hold from the very next dispatch.
-    /// The needs-you count is left alone: it is a 5-minute summary, and
-    /// dropping it on every save would put a cluster fan-out behind the
-    /// next sidebar poll.
+    /// The needs-you count and the nav dots are left alone: they are
+    /// at-a-glance summaries, and dropping them on every save would put a
+    /// cluster fan-out behind the next sidebar poll.
     /// Does this request drop the caches? Every write except the
     /// machine traffic that arrives on its own clock and changes none of
     /// them: node heartbeats (one per node per minute — on a big cluster
@@ -172,6 +177,7 @@ impl Default for PanelCaches {
             agent_config: crate::ttl_cache::TtlCell::new(Self::NODES_TTL),
             trash_count: crate::ttl_cache::TtlCell::new(Self::TRASH_TTL),
             needs_you: crate::ttl_cache::TtlCell::new(Self::NEEDS_YOU_TTL),
+            nav_dots: crate::ttl_cache::TtlCell::new(Self::NAV_DOTS_TTL),
         }
     }
 }
