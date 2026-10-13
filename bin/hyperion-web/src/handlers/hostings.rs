@@ -7339,9 +7339,19 @@ pub(crate) struct TestSetup {
     pub template: String,
     pub targets: Vec<TestTarget>,
     pub others: Vec<OtherServer>,
+    /// The template has a server token (`{node}` …). Without one every
+    /// server renders the same address base.
+    pub names_node: bool,
 }
 
 impl TestSetup {
+    /// More than one server takes sites, but the template gives them all the
+    /// same address base: a site on the second one gets a name whose DNS and
+    /// wildcard certificate belong to the first.
+    pub fn shared_base(&self) -> bool {
+        !self.names_node && self.targets.len() + self.others.len() > 1
+    }
+
     /// A test site can be created at all: a template to build the address
     /// from, and at least one test server to put it on.
     pub fn available(&self) -> bool {
@@ -7413,11 +7423,13 @@ pub(crate) async fn fetch_test_setup(state: &SharedState) -> TestSetup {
     let template = cluster.test_domain_template.trim().to_string();
     let mut targets = Vec::new();
     let mut others = Vec::new();
+    let names_node = cluster.template_names_the_node();
     if template.is_empty() {
         return TestSetup {
             template,
             targets,
             others,
+            names_node,
         };
     }
     if cluster.master_accepts_hostings {
@@ -7462,6 +7474,7 @@ pub(crate) async fn fetch_test_setup(state: &SharedState) -> TestSetup {
         template,
         targets,
         others,
+        names_node,
     }
 }
 
@@ -7498,10 +7511,65 @@ pub async fn get_server_facts(
     {
         return (axum::http::StatusCode::BAD_REQUEST, "").into_response();
     }
-    match crate::dispatcher::dispatch_to_node(&state, node_target(node), Request::NodeStats).await {
-        Ok(RpcResponse::NodeStats(s)) => html(render_server_facts(&s)),
-        _ => html("<span class=\"srv-fact is-err\">not answering</span>".into()),
+    let target = node_target(node);
+    // Does the server's wildcard actually point at it? Asked of the server
+    // itself, so "us" is its own public address. Any label under the base
+    // will do — that is what a wildcard means.
+    let (master_hostname, cluster) = fetch_master_and_cluster(&state).await;
+    let (node_id, hostname) = test_render_identity(&state, &master_hostname, node).await;
+    let probe = cluster
+        .node_wildcard_base(&node_id, &hostname)
+        .and_then(|base| {
+            Domain::parse(&format!("hyperion-check.{base}"))
+                .ok()
+                .map(|d| (base, d))
+        });
+    let stats = crate::dispatcher::dispatch_to_node(&state, target, Request::NodeStats);
+    let dns = async {
+        match probe {
+            Some((base, domain)) => Some((
+                base,
+                crate::dispatcher::dispatch_to_node(&state, target, Request::DnsCheck { domain })
+                    .await,
+            )),
+            None => None,
+        }
+    };
+    let (stats, dns) = tokio::join!(stats, dns);
+    let mut out = match stats {
+        Ok(RpcResponse::NodeStats(s)) => render_server_facts(&s),
+        _ => return html("<span class=\"srv-fact is-err\">not answering</span>".into()),
+    };
+    if let Some((base, Ok(RpcResponse::DnsCheck(r)))) = dns {
+        out.push_str(&render_dns_fact(&base, &r));
     }
+    html(out)
+}
+
+/// One fact about `*.<base>` → this server, the thing that decides whether a
+/// test site on it opens at all. Cloudflare-proxied counts as pointing here
+/// (the edge forwards to the origin); a probe that couldn't learn the
+/// server's own address says nothing rather than guessing.
+fn render_dns_fact(base: &str, r: &hyperion_types::DnsCheckResult) -> String {
+    let esc = |s: &str| askama_escape::escape(s, askama_escape::Html).to_string();
+    let base = esc(base);
+    if r.matches || r.proxied {
+        return format!(
+            "<span class=\"srv-fact is-ok\" title=\"*.{base} points at this server\">DNS ✓</span>"
+        );
+    }
+    if r.resolved_a.is_empty() && r.resolved_aaaa.is_empty() {
+        return format!(
+            "<span class=\"srv-fact is-warn\" title=\"No DNS record answers for *.{base} — add a wildcard A record pointing at this server\">no DNS for *.{base}</span>"
+        );
+    }
+    if r.our_public_ipv4.is_none() && r.our_public_ipv6.is_none() {
+        return String::new();
+    }
+    let ips = esc(&r.resolved_a.join(", "));
+    format!(
+        "<span class=\"srv-fact is-warn\" title=\"*.{base} resolves to {ips}, not to this server\">DNS points elsewhere ({ips})</span>"
+    )
 }
 
 /// The facts line: figures stay grey; a disk past 90 % takes the warning

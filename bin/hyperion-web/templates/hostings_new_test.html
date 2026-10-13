@@ -54,6 +54,21 @@
   </div>
 </div>
 {% else %}
+{% if setup.shared_base() %}
+{# The template names no server, so every server renders the same base:
+   a site on any other server gets a name whose DNS and wildcard
+   certificate belong to the first one. #}
+<div class="flash warn">
+  <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+  <div class="flash-body">
+    <strong>Every server gets the same address.</strong>
+    The preview address template <code>{{ setup.template }}</code> doesn't name the server, so a test site
+    on any server lands under that one domain — whose DNS and certificate belong to a single machine.
+    Use <code>{node}</code> for the server's own name, e.g. <code>{name}.{node}</code>, in
+    {% if is_super_admin %}<a href="/settings#preview-address">Settings → HTTPS &amp; previews → Preview address</a>{% else %}Settings → HTTPS &amp; previews (owner){% endif %}.
+  </div>
+</div>
+{% endif %}
 <form method="post" action="/hostings" id="test-form" class="tw">
   <input type="hidden" name="_csrf" value="{{ csrf_token }}">
   <input type="hidden" name="test_mode" value="1">
@@ -476,6 +491,7 @@
 .srv-grid { grid-template-columns: repeat(auto-fill, minmax(min(21rem, 100%), 1fr)); }
 .srv-facts { display: flex; flex-wrap: wrap; gap: 0.25rem 0.7rem; margin-top: 0.15rem; }
 .srv-fact { font-size: 0.76rem; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.srv-fact.is-ok { color: var(--success); }
 .srv-fact.is-warn { color: var(--warn); }
 .srv-fact.is-err { color: var(--danger); }
 /* Sized by the form column, not the window: the summary takes a share of

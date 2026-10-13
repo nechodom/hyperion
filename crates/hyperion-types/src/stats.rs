@@ -766,6 +766,25 @@ impl Default for ClusterConfigView {
     }
 }
 
+/// `token` without the literal text that follows `{node}` in `template`,
+/// when it already ends with it (`tes-1.example.com` under
+/// `{name}.{node}.example.com` → `tes-1`). Anything else is returned as-is.
+fn strip_template_tail<'a>(template: &str, token: &'a str) -> &'a str {
+    let Some((_, after)) = template.split_once("{node}") else {
+        return token;
+    };
+    // Up to the next token: the part that is plain domain text.
+    let tail = after.split('{').next().unwrap_or("");
+    if tail.len() < 2 || !tail.starts_with('.') || token.len() <= tail.len() {
+        return token;
+    }
+    let cut = token.len() - tail.len();
+    match token.get(cut..) {
+        Some(end) if end.eq_ignore_ascii_case(tail) => &token[..cut],
+        _ => token,
+    }
+}
+
 impl ClusterConfigView {
     /// Is this node id flagged as a test node?
     pub fn is_test_node(&self, node_id: &str) -> bool {
@@ -785,6 +804,12 @@ impl ClusterConfigView {
     /// `{node_id}` is also supported as an explicit alternative
     /// for operators who want the long ID for namespacing.
     /// Returns empty string when the template isn't configured.
+    ///
+    /// A hostname that is already a full name under the template's own
+    /// domain is not repeated: with `{name}.{node}.example.com`, node
+    /// `tes-1.example.com` gives `blog.tes-1.example.com`, not
+    /// `blog.tes-1.example.com.example.com` — so the same template works
+    /// whether a server calls itself `tes-1` or `tes-1.example.com`.
     pub fn render_test_domain(&self, name: &str, node_id: &str, node_hostname: &str) -> String {
         if self.test_domain_template.is_empty() {
             return String::new();
@@ -794,12 +819,22 @@ impl ClusterConfigView {
         } else {
             node_hostname.trim()
         };
+        let node_token = strip_template_tail(&self.test_domain_template, node_token);
         self.test_domain_template
             .replace("{name}", name.trim())
             .replace("{node}", node_token)
             .replace("{node_id}", node_id.trim())
             .replace("{hostname}", node_hostname.trim())
             .to_ascii_lowercase()
+    }
+
+    /// Does the template name the server at all? Without `{node}`,
+    /// `{node_id}` or `{hostname}` every server renders the SAME base, so
+    /// a second server's sites land under the first one's wildcard — DNS
+    /// and the certificate point at the wrong machine.
+    pub fn template_names_the_node(&self) -> bool {
+        let t = &self.test_domain_template;
+        t.contains("{node}") || t.contains("{node_id}") || t.contains("{hostname}")
     }
 
     /// The wildcard BASE domain for a test node — everything below an
@@ -2405,6 +2440,58 @@ mod tests {
         // No template configured ⇒ no base.
         let empty = ClusterConfigView::default();
         assert_eq!(empty.node_wildcard_base("s4", "four"), None);
+    }
+
+    #[test]
+    fn node_token_is_not_repeated_when_the_hostname_is_already_full() {
+        let mut c = ClusterConfigView::default();
+        c.test_domain_template = "{name}.{node}.digitalka.cz".into();
+        // Short and full hostnames give the same address…
+        assert_eq!(
+            c.render_test_domain("blog", "node_1", "tes-1"),
+            "blog.tes-1.digitalka.cz"
+        );
+        assert_eq!(
+            c.render_test_domain("blog", "node_1", "TES-1.digitalka.cz"),
+            "blog.tes-1.digitalka.cz"
+        );
+        // …and the node's wildcard agrees with the address.
+        assert_eq!(
+            c.node_wildcard_base("node_1", "tes-1.digitalka.cz")
+                .as_deref(),
+            Some("tes-1.digitalka.cz")
+        );
+        // A different domain is not touched.
+        assert_eq!(
+            c.render_test_domain("blog", "node_1", "tes-1.other.cz"),
+            "blog.tes-1.other.cz.digitalka.cz"
+        );
+        // `{name}.{node}` takes a full hostname as the base, unchanged.
+        c.test_domain_template = "{name}.{node}".into();
+        assert_eq!(
+            c.render_test_domain("blog", "node_1", "tes-1.digitalka.cz"),
+            "blog.tes-1.digitalka.cz"
+        );
+    }
+
+    #[test]
+    fn a_template_without_a_node_token_names_no_server() {
+        let mut c = ClusterConfigView::default();
+        c.test_domain_template = "{name}.hos-1.digitalka.cz".into();
+        assert!(!c.template_names_the_node());
+        // Every server gets the same base — the case the forms warn about.
+        assert_eq!(
+            c.node_wildcard_base("a", "hos-1.digitalka.cz"),
+            c.node_wildcard_base("b", "tes-1.digitalka.cz")
+        );
+        for t in [
+            "{name}.{node}",
+            "{name}.{node_id}.x.cz",
+            "{name}.{hostname}",
+        ] {
+            c.test_domain_template = t.into();
+            assert!(c.template_names_the_node(), "{t}");
+        }
     }
 
     #[test]

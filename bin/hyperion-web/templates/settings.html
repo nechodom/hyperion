@@ -318,11 +318,25 @@
     <p class="text-soft small" style="margin:0 0 0.8rem;padding:0.55rem 0.75rem;background:var(--surface-1);border-radius:6px">
       <strong>This is what turns on preview URLs — for EVERY site on the node, production
       included, not just test nodes.</strong> The part after <code>{name}</code> is the
-      wildcard base: with <code>{name}.{{ config.hostname }}</code>, every hosting gets an
+      wildcard base: with <code>{name}.{node}</code>, every hosting on this server gets an
       internal address like <code>mysite.{{ config.hostname }}</code> once you issue the
-      <code>*.{{ config.hostname }}</code> certificate in Step 2. A <em>Preview site</em> button
-      then appears on each site's detail page.
+      <code>*.{{ config.hostname }}</code> certificate in Step 2 — and every other server gets
+      one under its own name. A <em>Preview site</em> button then appears on each site's detail page.
     </p>
+    {% if !config.cluster.test_domain_template.is_empty() && !config.cluster.template_names_the_node() && !nodes.is_empty() %}
+    {# A fixed base (often this server's hostname typed in) gives every
+       server the same wildcard — sites on the others get names whose DNS
+       and certificate belong to one machine. #}
+    <div class="flash warn" style="margin:0 0 0.8rem">
+      <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+      <div class="flash-body">
+        <strong>Every server gets the same base.</strong> This template doesn't name the server, so
+        sites on every node get addresses under one domain — and that domain's DNS and certificate
+        point at a single machine. Put <code>{node}</code> where the server's name goes, e.g.
+        <code>{name}.{node}</code>.
+      </div>
+    </div>
+    {% endif %}
     <form method="post" action="/settings/config" autocomplete="off">
       <input type="hidden" name="_csrf" value="{{ csrf_token }}">
       <input type="hidden" name="section" value="cluster">
@@ -332,10 +346,13 @@
         <label for="test_domain_template">Preview address template <span class="hint">the base for every site's preview subdomain</span></label>
         <input id="test_domain_template" name="test_domain_template" type="text" autocomplete="off"
                value="{{ config.cluster.test_domain_template }}"
-               placeholder="e.g. {name}.{{ config.hostname }}">
+               placeholder="e.g. {name}.{node}">
         <p class="text-soft small" style="margin:0.3rem 0 0">
           Tokens: <code>{name}</code> — the site's first label (or the name typed in the wizard on
-          a test node); <code>{node}</code> — the node ID. Result is lower-cased.
+          a test node); <code>{node}</code> — each server's own hostname (this one is
+          <code>{{ config.hostname }}</code>). A full hostname isn't repeated:
+          <code>{name}.{node}.example.com</code> gives <code>blog.web-2.example.com</code> for
+          <code>web-2</code> and <code>web-2.example.com</code> alike. Result is lower-cased.
           <span data-cluster-only>On a test node this template also builds the site's whole
           domain — mark test nodes under <a href="#test-nodes">Cluster → Test nodes</a>.</span>
         </p>
