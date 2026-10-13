@@ -722,6 +722,54 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
                 }),
             }
         }
+        Request::WpAssetRead { id } => match api.wp_asset_read(id).await {
+            Ok((a, bytes)) => {
+                use base64::Engine;
+                Response::WpAssetRead {
+                    id: a.id,
+                    kind: a.kind,
+                    original_name: a.original_name,
+                    sha256: a.sha256,
+                    uploaded_at: a.uploaded_at,
+                    uploaded_by: a.uploaded_by,
+                    bytes_b64: base64::engine::general_purpose::STANDARD.encode(&bytes),
+                }
+            }
+            Err(e) => Response::Error(e),
+        },
+        Request::WpAssetMirror {
+            id,
+            kind,
+            original_name,
+            sha256,
+            uploaded_at,
+            uploaded_by,
+            bytes_b64,
+        } => {
+            use base64::Engine;
+            match base64::engine::general_purpose::STANDARD.decode(bytes_b64.as_bytes()) {
+                Ok(bytes) => {
+                    let asset = hyperion_types::WpAssetSummary {
+                        id,
+                        kind,
+                        original_name,
+                        size_bytes: bytes.len() as i64,
+                        sha256,
+                        uploaded_at,
+                        uploaded_by,
+                        profile_refs: 0,
+                        install_count: 0,
+                    };
+                    match api.wp_asset_mirror(asset, bytes).await {
+                        Ok(()) => Response::WpAssetMirror,
+                        Err(e) => Response::Error(e),
+                    }
+                }
+                Err(e) => Response::Error(hyperion_rpc::RpcError::Validation {
+                    message: format!("bytes_b64 decode: {e}"),
+                }),
+            }
+        }
         Request::WpAssetReinstallAll {
             asset_id,
             force_activate,
@@ -2651,6 +2699,22 @@ mod tests {
             _: String,
             _: Vec<u8>,
             _: String,
+        ) -> Result<(), RpcError> {
+            Ok(())
+        }
+        async fn wp_asset_read(
+            &self,
+            _: i64,
+        ) -> Result<(hyperion_types::WpAssetSummary, Vec<u8>), RpcError> {
+            Err(RpcError::NotFound {
+                kind: "wp_asset".into(),
+                id: "0".into(),
+            })
+        }
+        async fn wp_asset_mirror(
+            &self,
+            _: hyperion_types::WpAssetSummary,
+            _: Vec<u8>,
         ) -> Result<(), RpcError> {
             Ok(())
         }

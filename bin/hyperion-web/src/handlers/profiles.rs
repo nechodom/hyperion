@@ -299,7 +299,7 @@ async fn fetch_assets(state: &SharedState) -> (Vec<WpAssetSummary>, Vec<WpAssetS
 
 /// A new profile's starting values — the same defaults `CreateForm` falls
 /// back to when a field is missing.
-fn blank_profile() -> HostingProfile {
+pub(crate) fn blank_profile() -> HostingProfile {
     profile_from_input(
         0,
         &ProfileInput {
@@ -1355,6 +1355,9 @@ pub async fn post_wp_asset_upload(
     .await?;
     match resp {
         RpcResponse::WpAssetUpload { id, deduped } => {
+            if !deduped {
+                crate::wp_library::sync_all_in_background(state.clone());
+            }
             let msg = if deduped {
                 format!(
                     "Asset \"{original_name}\" already in library as id {id} — no duplicate stored."
@@ -1523,13 +1526,16 @@ pub async fn post_wp_asset_replace(
     )
     .await?;
     match resp {
-        RpcResponse::WpAssetReplace => Ok(Redirect::to(&format!(
-            "/profiles/wp-assets?flash={}",
-            urlencoding(&format!(
-                "Asset id {id} replaced with \"{original_name}\". Click \"Re-install on all\" to push the new version."
+        RpcResponse::WpAssetReplace => {
+            crate::wp_library::sync_all_in_background(state.clone());
+            Ok(Redirect::to(&format!(
+                "/profiles/wp-assets?flash={}",
+                urlencoding(&format!(
+                    "Asset id {id} replaced with \"{original_name}\". Click \"Re-install on all\" to push the new version."
+                ))
             ))
-        ))
-        .into_response()),
+            .into_response())
+        }
         RpcResponse::Error(e) => Ok(Redirect::to(&format!(
             "/profiles/wp-assets?error={}",
             urlencoding(&e.to_string())
@@ -1619,6 +1625,7 @@ pub async fn post_wp_asset_delete(
             .await?;
     match resp {
         RpcResponse::WpAssetDelete => {
+            crate::wp_library::sync_all_in_background(state.clone());
             Ok(Redirect::to("/profiles/wp-assets?flash=Asset+deleted").into_response())
         }
         RpcResponse::Error(e) => Ok(Redirect::to(&format!(

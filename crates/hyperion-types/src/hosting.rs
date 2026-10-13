@@ -224,6 +224,15 @@ pub struct VhostOptions {
     #[serde(default)]
     pub canonical_host: String,
 
+    /// Ask search engines to keep the site out of their results: every
+    /// response carries `X-Robots-Tag: noindex, nofollow` (migration 082).
+    /// A header rather than a `robots.txt` Disallow, because a crawler that
+    /// may not fetch a page never sees its noindex and can still list the
+    /// bare URL. Works for every site type; a WordPress install asked for it
+    /// also gets `blog_public = 0`.
+    #[serde(default)]
+    pub noindex: bool,
+
     /// The original single WAF switch (migration 036): on meant the rule
     /// set that is now the Standard level (`crate::waf`).
     ///

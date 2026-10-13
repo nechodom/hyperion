@@ -573,6 +573,32 @@ pub enum Request {
         /// recorded at last install.
         force_activate: Option<bool>,
     },
+    /// Read one library asset's ZIP back out — the master's half of
+    /// [`Request::WpAssetMirror`]. Local-socket only in practice: the
+    /// library is written on the master and copied outwards from there.
+    WpAssetRead {
+        id: i64,
+    },
+    /// Store a copy of one master library asset on THIS node under the
+    /// master's id, so `@asset:<id>` in a profile and "Install from
+    /// library" on a site's WordPress tab mean the same ZIP on every
+    /// server. The master is the library's only writer; a node's
+    /// `wp_assets` table is a mirror of it. Upsert: an existing row with
+    /// the id is replaced (a newer upload), its install history kept.
+    WpAssetMirror {
+        id: i64,
+        /// "plugin" or "theme".
+        kind: String,
+        original_name: String,
+        /// The master's recorded hash of the bytes (the `sha256` column,
+        /// BLAKE3 hex). The node refuses bytes that don't hash to it, and
+        /// stores it so the next comparison is a string match.
+        sha256: String,
+        uploaded_at: i64,
+        uploaded_by: String,
+        /// See WpAssetUpload.bytes_b64.
+        bytes_b64: String,
+    },
     /// `wp theme list --format=json` against this hosting.
     WpThemeList {
         hosting: HostingSelector,
@@ -2221,6 +2247,20 @@ pub enum Response {
         original_name: String,
     },
     WpAssetReplace,
+    /// One library asset with its bytes. `sha256` is the recorded hash
+    /// (the column), not a fresh one — the mirror checks the bytes
+    /// against it, so a ZIP that rotted on the master's disk is refused
+    /// on the way out instead of installed on a worker.
+    WpAssetRead {
+        id: i64,
+        kind: String,
+        original_name: String,
+        sha256: String,
+        uploaded_at: i64,
+        uploaded_by: String,
+        bytes_b64: String,
+    },
+    WpAssetMirror,
     /// Result of a "re-install on all" run.
     WpAssetReinstallAll {
         installed_ok: i64,

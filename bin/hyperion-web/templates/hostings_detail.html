@@ -2368,6 +2368,7 @@
       {% if detail.vhost_options.maintenance_mode %}<span class="pill warn">maintenance on</span>{% endif %}
       {% if detail.vhost_options.fastcgi_cache_enabled %}<span class="pill ok">cache</span>{% endif %}
       {% if detail.vhost_options.basic_auth_enabled %}<span class="pill">basic auth</span>{% endif %}
+      {% if detail.vhost_options.noindex %}<span class="pill">hidden from search</span>{% endif %}
     </div>
   </div>
   <form method="post" action="/hostings/vhost-options" hx-post="/hostings/vhost-options" hx-swap="none">
@@ -2391,7 +2392,7 @@
               <label for="basic_auth_user">Username</label>
               <input type="text" id="basic_auth_user" name="basic_auth_user"
                      value="{{ detail.vhost_options.basic_auth_user }}"
-                     autocomplete="off" pattern="[A-Za-z0-9_.-]{1,64}"
+                     autocomplete="off" pattern="[A-Za-z0-9_.\-]{1,64}"
                      maxlength="64">
             </div>
             <div class="field">
@@ -2468,6 +2469,12 @@
         <p class="s-help">Use during deploys or database restores. Browsers see a generic "we'll be back" page; Let's Encrypt renewals continue because <code>/.well-known/acme-challenge/</code> bypasses the 503.</p>
         <div class="s-control"><input type="checkbox" class="switch" id="maintenance_mode" name="maintenance_mode" value="on"
              {% if detail.vhost_options.maintenance_mode %}checked{% endif %}></div>
+      </div>
+      <div class="setting-row">
+        <label class="s-label" for="noindex">Hide from search engines <span class="hint">noindex</span></label>
+        <p class="s-help">Every response carries <code>X-Robots-Tag: noindex, nofollow</code>, so Google, Bing and Seznam leave the site out of their results. For test sites and work in progress — turn it off at launch, or the site never shows up in search.</p>
+        <div class="s-control"><input type="checkbox" class="switch" id="noindex" name="noindex" value="on"
+             {% if detail.vhost_options.noindex %}checked{% endif %}></div>
       </div>
       <div class="setting-row">
         <label class="s-label" for="fastcgi_cache_enabled">FastCGI page cache</label>
@@ -4009,7 +4016,7 @@
           becomes <code>{{ ftp_login_example }}</code></span>
       </label>
       <input id="ftp_new_login" name="login" type="text" required
-             placeholder="deploy" pattern="[a-z0-9_-]+"
+             placeholder="deploy" pattern="[a-z0-9_\-]+"
              maxlength="{{ ftp_login_name_max }}"
              autocomplete="off" autocapitalize="off" spellcheck="false"
              {# One qualifier per possible name length, pipe-separated and

@@ -73,6 +73,12 @@
     add_header X-Frame-Options "SAMEORIGIN" always;
     add_header X-Content-Type-Options "nosniff" always;
     add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    {%- if noindex %}
+    # "Hide from search engines". A header, not a robots.txt Disallow: a
+    # crawler barred from a page never sees its noindex. Server level with the
+    # others — a location-level add_header would drop the inherited set.
+    add_header X-Robots-Tag "noindex, nofollow" always;
+    {%- endif %}
     {%- if fastcgi_cache_enabled %}
     # Cache-status debug header. Declared HERE (server level) and not inside
     # the PHP location: a location-level add_header would REPLACE the whole

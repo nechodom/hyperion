@@ -495,6 +495,17 @@ pub trait AgentApi: Send + Sync + 'static {
         bytes: Vec<u8>,
         uploaded_by: String,
     ) -> Result<(), RpcError>;
+    /// One library asset's row + ZIP bytes (the master's side of the mirror).
+    async fn wp_asset_read(
+        &self,
+        id: i64,
+    ) -> Result<(hyperion_types::WpAssetSummary, Vec<u8>), RpcError>;
+    /// Store a master library asset on this node under the master's id.
+    async fn wp_asset_mirror(
+        &self,
+        asset: hyperion_types::WpAssetSummary,
+        bytes: Vec<u8>,
+    ) -> Result<(), RpcError>;
     /// Re-install an asset on every hosting tracked in
     /// wp_asset_installs. Returns (ok_count, fail_count, failure_tail).
     async fn wp_asset_reinstall_all(

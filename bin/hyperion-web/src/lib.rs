@@ -28,6 +28,7 @@ pub mod ratelimit;
 pub mod setup;
 pub mod state;
 pub mod ttl_cache;
+pub mod wp_library;
 pub mod wp_list_cache;
 
 use crate::state::SharedState;
@@ -41,6 +42,10 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/", get(handlers::dashboard::get_dashboard))
         .route("/hostings", get(handlers::hostings::get_list))
         .route("/hostings/new", get(handlers::hostings::get_new))
+        .route(
+            "/hostings/new/server-facts",
+            get(handlers::hostings::get_server_facts),
+        )
         .route("/hostings", post(handlers::hostings::post_create))
         .route("/hostings/delete", post(handlers::hostings::post_delete))
         .route("/hostings/suspend", post(handlers::hostings::post_suspend))

@@ -386,6 +386,7 @@ struct RawHostingVhost {
     canonical_host: String,
     waf_level: String,
     waf_overrides: String,
+    noindex: i64,
 }
 
 const QUERY_BASE: &str =
@@ -402,7 +403,7 @@ const QUERY_VHOST_BY_ID: &str =
             redirect_url, redirect_code, redirect_preserve_path, waf_enabled, signup_limit_enabled, wp_admin_allowlist, \
              blocked_bots,
             blocked_countries, blocked_countries, \
-            canonical_host, waf_level, waf_overrides \
+            canonical_host, waf_level, waf_overrides, noindex \
      FROM hostings WHERE id = ?";
 
 // Third row tuple for the WP/Redis extras (migration 021). Same PK
@@ -474,6 +475,7 @@ async fn fetch_one<'a>(
             canonical_host,
             waf_level,
             waf_overrides,
+            noindex,
         }) => hyperion_types::VhostOptions {
             basic_auth_enabled: basic_auth_enabled != 0,
             basic_auth_user,
@@ -495,6 +497,7 @@ async fn fetch_one<'a>(
             canonical_host,
             waf_level,
             waf_overrides,
+            noindex: noindex != 0,
         },
         None => hyperion_types::VhostOptions::default(),
     };
@@ -579,7 +582,7 @@ pub async fn set_vhost_options(
                 force_https=?, hsts_max_age=?, custom_nginx_snippet=?, \
                 maintenance_mode=?, fastcgi_cache_enabled=?, fastcgi_cache_ttl=?, \
                 redirect_url=?, redirect_code=?, redirect_preserve_path=?, \
-                waf_enabled=?, signup_limit_enabled=?, wp_admin_allowlist=?, blocked_bots=?, blocked_countries=?, canonical_host=?, waf_level=?, waf_overrides=?, updated_at=? \
+                waf_enabled=?, signup_limit_enabled=?, wp_admin_allowlist=?, blocked_bots=?, blocked_countries=?, canonical_host=?, waf_level=?, waf_overrides=?, noindex=?, updated_at=? \
              WHERE id = ?",
         )
         .bind(opts.basic_auth_enabled as i64)
@@ -615,6 +618,8 @@ pub async fn set_vhost_options(
         .bind(hyperion_types::waf::overrides_to_string(
             &hyperion_types::waf::parse_overrides(&opts.waf_overrides),
         ))
+        // noindex is the last option column, right before updated_at.
+        .bind(opts.noindex as i64)
         .bind(now)
         .bind(id.as_str())
         .execute(pool)
@@ -625,7 +630,7 @@ pub async fn set_vhost_options(
                 force_https=?, hsts_max_age=?, custom_nginx_snippet=?, \
                 maintenance_mode=?, fastcgi_cache_enabled=?, fastcgi_cache_ttl=?, \
                 redirect_url=?, redirect_code=?, redirect_preserve_path=?, \
-                waf_enabled=?, signup_limit_enabled=?, wp_admin_allowlist=?, blocked_bots=?, blocked_countries=?, canonical_host=?, waf_level=?, waf_overrides=?, updated_at=? \
+                waf_enabled=?, signup_limit_enabled=?, wp_admin_allowlist=?, blocked_bots=?, blocked_countries=?, canonical_host=?, waf_level=?, waf_overrides=?, noindex=?, updated_at=? \
              WHERE id = ?",
         )
         .bind(opts.basic_auth_enabled as i64)
@@ -660,6 +665,8 @@ pub async fn set_vhost_options(
         .bind(hyperion_types::waf::overrides_to_string(
             &hyperion_types::waf::parse_overrides(&opts.waf_overrides),
         ))
+        // noindex is the last option column, right before updated_at.
+        .bind(opts.noindex as i64)
         .bind(now)
         .bind(id.as_str())
         .execute(pool)

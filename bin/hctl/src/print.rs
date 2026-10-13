@@ -1807,6 +1807,21 @@ pub fn print_pretty(resp: &Response) {
         Response::WpAssetReplace => {
             println!("wp asset replaced");
         }
+        Response::WpAssetRead {
+            id,
+            kind,
+            original_name,
+            bytes_b64,
+            ..
+        } => {
+            println!(
+                "wp asset {id}: {kind} {original_name} ({} base64 bytes)",
+                bytes_b64.len()
+            );
+        }
+        Response::WpAssetMirror => {
+            println!("wp asset mirrored");
+        }
         Response::WpAssetReinstallAll {
             installed_ok,
             installed_failed,

@@ -130,17 +130,87 @@ struct NewTestTpl<'a> {
     csrf_token: String,
     error: Option<&'a str>,
     setup: TestSetup,
-    name_in: String,
-    /// "" | "wordpress" | "static" | "php" | "reverse_proxy"
-    site_type_in: String,
-    target_node_in: String,
-    proxy_upstream_url_in: String,
-    /// WordPress fields, echoed after a refused post (never the password).
-    wp: TestWpIn,
+    /// What the operator typed/picked, echoed after a refused post.
+    input: TestFormIn,
+    /// The id of the server card that starts selected: the posted one if it
+    /// is still a test server, else the first.
+    selected_node: String,
+    /// The user may install from the plugin library (profiles permission).
+    library_allowed: bool,
     /// Library plugins + themes to offer; empty when the library is empty
     /// or the user may not install from it.
     library_plugins: Vec<hyperion_types::WpAssetSummary>,
     library_themes: Vec<hyperion_types::WpAssetSummary>,
+    /// Owner role: may mark a server as a test server on the Nodes page.
+    is_super_admin: bool,
+}
+
+/// The test form's fields as the operator left them.
+#[derive(Default)]
+struct TestFormIn {
+    name: String,
+    /// "" | "wordpress" | "static" | "php" | "reverse_proxy"
+    site_type: String,
+    target_node: String,
+    proxy_upstream_url: String,
+    /// "Show in search engines?" — hidden unless they chose otherwise.
+    search_hidden: bool,
+    /// WordPress fields (never the password).
+    wp: TestWpIn,
+}
+
+impl TestFormIn {
+    fn from_form(form: &CreateForm) -> Self {
+        Self {
+            name: form.test_site_name.trim().to_ascii_lowercase(),
+            site_type: form.site_type.trim().to_string(),
+            target_node: form.target_node.trim().to_string(),
+            proxy_upstream_url: form.proxy_upstream_url.trim().to_string(),
+            search_hidden: form.search_visibility.trim() != "visible",
+            wp: TestWpIn::from_form(form),
+        }
+    }
+
+    /// The site type card that starts selected.
+    fn is_type(&self, t: &str) -> bool {
+        self.site_type == t || (self.site_type.is_empty() && t == "wordpress")
+    }
+}
+
+/// Render `/hostings/new?test=1`, fresh or after a refused post.
+async fn render_test_form(
+    state: &SharedState,
+    ctx: &AuthCtx,
+    csrf_token: String,
+    error: Option<&str>,
+    input: TestFormIn,
+) -> Result<String, askama::Error> {
+    let (setup, (library_plugins, library_themes)) =
+        tokio::join!(fetch_test_setup(state), test_form_library(state, ctx));
+    let selected_node = setup
+        .targets
+        .iter()
+        .find(|t| t.node_id == input.target_node)
+        .or_else(|| setup.targets.first())
+        .map(|t| t.node_id.clone())
+        .unwrap_or_default();
+    NewTestTpl {
+        username: &ctx.username,
+        user_initial: super::user_initial(&ctx.username),
+        active: "hostings",
+        css_version: super::css_version(),
+        htmx_version: super::htmx_version(),
+        csrf_token,
+        error,
+        setup,
+        input,
+        selected_node,
+        library_allowed: ctx.can(Capability::ProfilesManage),
+        library_plugins,
+        library_themes,
+        is_super_admin: ctx.is_super_admin(),
+    }
+    .render()
 }
 
 #[derive(Default)]
@@ -830,31 +900,19 @@ pub async fn get_new(
     // button (form_id /hostings/dns-check-domain) in addition to the
     // main /hostings POST.
     let csrf_token = super::session_csrf_token(&state, &ctx);
-    let test_setup = fetch_test_setup(&state).await;
     if q.test == "1" {
-        let (library_plugins, library_themes) = test_form_library(&state, &ctx).await;
-        let tpl = NewTestTpl {
-            username: &ctx.username,
-            user_initial: super::user_initial(&ctx.username),
-            active: "hostings",
-            css_version: super::css_version(),
-            htmx_version: super::htmx_version(),
-            csrf_token,
-            error: None,
-            setup: test_setup,
-            name_in: String::new(),
-            site_type_in: String::new(),
-            target_node_in: String::new(),
-            proxy_upstream_url_in: String::new(),
+        let input = TestFormIn {
+            search_hidden: true,
             wp: TestWpIn {
                 admin_email: session_user_email(&state, &ctx).await,
                 ..Default::default()
             },
-            library_plugins,
-            library_themes,
+            ..Default::default()
         };
-        return Ok(no_store(Html(tpl.render()?).into_response()));
+        let html = render_test_form(&state, &ctx, csrf_token, None, input).await?;
+        return Ok(no_store(Html(html).into_response()));
     }
+    let test_setup = fetch_test_setup(&state).await;
     // Fetch enrolled remote nodes so the "Target node" dropdown can
     // offer them. Failure here just leaves the dropdown empty — the
     // form still works for the default-master case.
@@ -1020,6 +1078,12 @@ pub struct CreateForm {
     /// "on" when the operator ticked "Discourage search engines".
     #[serde(default)]
     pub wp_no_index: Option<String>,
+    /// "hidden" | "visible" — the test form's explicit "show in search
+    /// engines?" answer, for every site type. Wins over `wp_no_index` and the
+    /// test-node policy, because the operator chose. Empty = the legacy
+    /// behaviour (the wizard and the API don't send it).
+    #[serde(default)]
+    pub search_visibility: String,
     /// Hosting-profile id selected in the wizard's first step.
     /// `0` (or absent) = no profile — operator wants raw defaults.
     /// When non-zero, post_create dispatches profile_apply right
@@ -1284,6 +1348,22 @@ pub async fn post_create(
     // as a plain static site whose vhost we then switch to a 301/302 (applied
     // right after HostingCreate succeeds, below).
     let is_redirect = effective_kind == "redirect";
+    // Search-engine visibility. `vhost_noindex` sends X-Robots-Tag from
+    // nginx (any site type); `wp_no_index` also sets WordPress's own
+    // blog_public = 0. An explicit answer decides both. Without one, the
+    // wizard's "Discourage search engines" box does, and WordPress on a test
+    // node follows the cluster's test-node policy as before.
+    let (vhost_noindex, wp_no_index) = match form.search_visibility.trim() {
+        "hidden" => (true, true),
+        "visible" => (false, false),
+        _ => {
+            let ticked = form.wp_no_index.as_deref() == Some("on");
+            (
+                ticked,
+                ticked || (target_is_test && cluster_cfg.test_wp_no_index),
+            )
+        }
+    };
     let kind = if effective_kind == "reverse_proxy" {
         "reverse_proxy".to_string()
     } else if effective_kind == "static" || is_redirect {
@@ -1387,7 +1467,7 @@ pub async fn post_create(
     // Library plugins/themes picked on the form. Checked before anything is
     // created, so a bad pick refuses the form instead of leaving a site that
     // silently lacks what was asked for.
-    let library_picks = match resolve_library_picks(&state, &ctx, &form, &site_type, target).await {
+    let library_picks = match resolve_library_picks(&state, &ctx, &form, &site_type).await {
         Ok(v) => v,
         Err(msg) => return Ok(render_new_error(&state, &ctx, &csrf_token, &form, &msg).await),
     };
@@ -1454,13 +1534,28 @@ pub async fn post_create(
             // synchronously so the operator lands on a working redirect, not a
             // bare placeholder. A failure here is non-fatal (the hosting still
             // exists) — surface it as a flash rather than aborting.
-            if is_redirect {
-                let options = hyperion_types::VhostOptions {
-                    redirect_url: form.redirect_url.trim().to_string(),
-                    redirect_code: if form.redirect_code == 302 { 302 } else { 301 },
-                    redirect_preserve_path: form.redirect_preserve_path.eq_ignore_ascii_case("on"),
-                    ..Default::default()
+            //
+            // "Hide from search engines" rides the same write. It starts from
+            // what the node stored — its column defaults (cache TTL, redirect
+            // code) are not `VhostOptions::default()`.
+            if is_redirect || vhost_noindex {
+                let mut options = match crate::dispatcher::dispatch_to_node(
+                    &state,
+                    target,
+                    Request::HostingGet(HostingSelector::Id(created.id.clone())),
+                )
+                .await
+                {
+                    Ok(RpcResponse::HostingGet(d)) => d.vhost_options,
+                    _ => hyperion_types::VhostOptions::default(),
                 };
+                if is_redirect {
+                    options.redirect_url = form.redirect_url.trim().to_string();
+                    options.redirect_code = if form.redirect_code == 302 { 302 } else { 301 };
+                    options.redirect_preserve_path =
+                        form.redirect_preserve_path.eq_ignore_ascii_case("on");
+                }
+                options.noindex = vhost_noindex;
                 match crate::dispatcher::dispatch_to_node(
                     &state,
                     target,
@@ -1474,12 +1569,12 @@ pub async fn post_create(
                 {
                     Ok(RpcResponse::HostingSetVhostOptions(_)) => {}
                     Ok(RpcResponse::Error(e)) => {
-                        tracing::warn!(error = %e, "applying redirect vhost after create failed");
+                        tracing::warn!(error = %e, "applying vhost options after create failed");
                     }
                     other => {
                         tracing::warn!(
                             ?other,
-                            "unexpected response applying redirect vhost after create"
+                            "unexpected response applying vhost options after create"
                         );
                     }
                 }
@@ -1610,8 +1705,7 @@ pub async fn post_create(
                     // node-wide test-node policy does. Test nodes keep
                     // forcing it: a throwaway staging copy must never be
                     // indexable just because nobody remembered to tick a box.
-                    let no_index = form.wp_no_index.as_deref() == Some("on")
-                        || (target_is_test && cluster_cfg.test_wp_no_index);
+                    let no_index = wp_no_index;
                     wp_req_opt = Some(hyperion_types::WpInstallRequest {
                         site_url: site_url.clone(),
                         title,
@@ -4647,6 +4741,8 @@ pub struct VhostOptionsForm {
     wp_admin_allowlist: String,
     #[serde(default)]
     canonical_host: String,
+    #[serde(default)]
+    noindex: Option<String>,
 }
 
 impl VhostOptionsForm {
@@ -4824,6 +4920,7 @@ pub async fn post_vhost_options(
         options.redirect_code = form.redirect_code;
         options.redirect_preserve_path = checkbox_on(&form.redirect_preserve_path);
         options.canonical_host = form.canonical_host.trim().to_string();
+        options.noindex = checkbox_on(&form.noindex);
     }
     if save_protection {
         form.apply_protection(&mut options);
@@ -7098,30 +7195,16 @@ async fn render_new_error(
     error: &str,
 ) -> Response {
     if form.test_mode == "1" {
-        let setup = fetch_test_setup(state).await;
-        let (library_plugins, library_themes) = test_form_library(state, ctx).await;
-        let tpl = NewTestTpl {
-            username: &ctx.username,
-            user_initial: super::user_initial(&ctx.username),
-            active: "hostings",
-            css_version: super::css_version(),
-            htmx_version: super::htmx_version(),
-            csrf_token: csrf_token.to_string(),
-            error: Some(error),
-            setup,
-            name_in: form.test_site_name.trim().to_ascii_lowercase(),
-            site_type_in: form.site_type.clone(),
-            target_node_in: form.target_node.clone(),
-            proxy_upstream_url_in: form.proxy_upstream_url.clone(),
-            wp: TestWpIn::from_form(form),
-            library_plugins,
-            library_themes,
-        };
-        return Html(
-            tpl.render()
-                .unwrap_or_else(|_| "<h1>render error</h1>".into()),
+        let html = render_test_form(
+            state,
+            ctx,
+            csrf_token.to_string(),
+            Some(error),
+            TestFormIn::from_form(form),
         )
-        .into_response();
+        .await
+        .unwrap_or_else(|_| "<h1>render error</h1>".into());
+        return Html(html).into_response();
     }
     let tpl = NewTpl {
         username: &ctx.username,
@@ -7228,10 +7311,34 @@ pub(crate) struct TestTarget {
     pub pattern: String,
 }
 
+impl TestTarget {
+    /// The address before the subdomain (usually empty).
+    pub fn prefix(&self) -> &str {
+        self.pattern
+            .split_once(TEST_NAME_TOKEN)
+            .map_or("", |(p, _)| p)
+    }
+
+    /// The address after the subdomain, e.g. `.s4.example.com`.
+    pub fn suffix(&self) -> &str {
+        self.pattern
+            .split_once(TEST_NAME_TOKEN)
+            .map_or(self.pattern.as_str(), |(_, s)| s)
+    }
+}
+
+/// A server that takes sites but not test sites — listed on the test form
+/// so "why can't I pick X?" has an answer on the page.
+pub(crate) struct OtherServer {
+    pub node_id: String,
+    pub label: String,
+}
+
 /// Everything the test-site flow needs to know about the cluster.
 pub(crate) struct TestSetup {
     pub template: String,
     pub targets: Vec<TestTarget>,
+    pub others: Vec<OtherServer>,
 }
 
 impl TestSetup {
@@ -7305,27 +7412,44 @@ pub(crate) async fn fetch_test_setup(state: &SharedState) -> TestSetup {
     let (master_hostname, cluster) = fetch_master_and_cluster(state).await;
     let template = cluster.test_domain_template.trim().to_string();
     let mut targets = Vec::new();
+    let mut others = Vec::new();
     if template.is_empty() {
-        return TestSetup { template, targets };
+        return TestSetup {
+            template,
+            targets,
+            others,
+        };
     }
-    if cluster.master_accepts_hostings && is_master_test(&cluster, &master_hostname) {
+    if cluster.master_accepts_hostings {
         let label = if master_hostname.is_empty() {
             "This server".to_string()
         } else {
             master_hostname.clone()
         };
-        targets.push(TestTarget {
-            node_id: crate::dispatcher::LOCAL_NODE_SENTINEL.to_string(),
-            label,
-            pattern: cluster.render_test_domain(
-                TEST_NAME_TOKEN,
-                &master_hostname,
-                &master_hostname,
-            ),
-        });
+        let node_id = crate::dispatcher::LOCAL_NODE_SENTINEL.to_string();
+        if is_master_test(&cluster, &master_hostname) {
+            targets.push(TestTarget {
+                node_id,
+                label,
+                pattern: cluster.render_test_domain(
+                    TEST_NAME_TOKEN,
+                    &master_hostname,
+                    &master_hostname,
+                ),
+            });
+        } else {
+            others.push(OtherServer { node_id, label });
+        }
     }
     for n in fetch_remote_nodes(state).await.unwrap_or_default() {
-        if n.is_drained || !cluster.is_test_node(&n.node_id) {
+        if n.is_drained {
+            continue;
+        }
+        if !cluster.is_test_node(&n.node_id) {
+            others.push(OtherServer {
+                node_id: n.node_id,
+                label: n.label,
+            });
             continue;
         }
         targets.push(TestTarget {
@@ -7334,7 +7458,74 @@ pub(crate) async fn fetch_test_setup(state: &SharedState) -> TestSetup {
             label: n.label,
         });
     }
-    TestSetup { template, targets }
+    TestSetup {
+        template,
+        targets,
+        others,
+    }
+}
+
+#[derive(Deserialize)]
+pub struct ServerFactsQuery {
+    #[serde(default)]
+    node: String,
+}
+
+/// GET /hostings/new/server-facts?node=… — the live line on a server card of
+/// the test-site form: how many sites it carries, how full its disk is, its
+/// load. One request per card, so a slow or dead server can't hold up the
+/// form; it just says it isn't answering.
+pub async fn get_server_facts(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    axum::extract::Query(q): axum::extract::Query<ServerFactsQuery>,
+) -> Response {
+    let html = |body: String| {
+        (
+            axum::http::StatusCode::OK,
+            [("content-type", "text/html; charset=utf-8")],
+            body,
+        )
+            .into_response()
+    };
+    if !ctx.can(Capability::HostingCreate) {
+        return (axum::http::StatusCode::FORBIDDEN, "").into_response();
+    }
+    let node = q.node.trim();
+    if !node
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    {
+        return (axum::http::StatusCode::BAD_REQUEST, "").into_response();
+    }
+    match crate::dispatcher::dispatch_to_node(&state, node_target(node), Request::NodeStats).await {
+        Ok(RpcResponse::NodeStats(s)) => html(render_server_facts(&s)),
+        _ => html("<span class=\"srv-fact is-err\">not answering</span>".into()),
+    }
+}
+
+/// The facts line: figures stay grey; a disk past 90 % takes the warning
+/// colour, because that is the one thing that should change the choice.
+fn render_server_facts(s: &hyperion_types::NodeStats) -> String {
+    let mut out = format!(
+        "<span class=\"srv-fact\">{} site{}</span>",
+        s.hostings_count,
+        if s.hostings_count == 1 { "" } else { "s" }
+    );
+    if s.node_disk_total_bytes > 0 {
+        let used = (s.total_disk_bytes.max(0) as f64) / (s.node_disk_total_bytes as f64);
+        let free_gb = (s.node_disk_total_bytes - s.total_disk_bytes).max(0) as f64 / 1e9;
+        let tone = if used >= 0.9 { " is-warn" } else { "" };
+        out.push_str(&format!(
+            "<span class=\"srv-fact{tone}\" title=\"{:.0} % of the disk in use\">{free_gb:.0} GB free</span>",
+            used * 100.0
+        ));
+    }
+    out.push_str(&format!(
+        "<span class=\"srv-fact\" title=\"1-minute load average\">load {:.2}</span>",
+        s.loadavg_1m_x100 as f64 / 100.0
+    ));
+    out
 }
 
 /// Internal preview hostname for a hosting on its owner node, mirroring
@@ -13406,14 +13597,14 @@ fn match_library_picks(
 
 /// Resolve the form's library picks, or say why they can't be honoured.
 /// Installing from the library needs the same right as the WordPress tab's
-/// "Install from library" (profiles), a WordPress site, and the master as the
-/// host: the ZIPs and their table live there, and a worker can't see them.
+/// "Install from library" (profiles) and a WordPress site. Any server will
+/// do: a worker gets the master's copy of each ZIP right before the install
+/// (see `crate::wp_library`).
 async fn resolve_library_picks(
     state: &SharedState,
     ctx: &AuthCtx,
     form: &CreateForm,
     site_type: &str,
-    target: Option<&str>,
 ) -> Result<Vec<LibraryPick>, String> {
     let plugin_ids = parse_asset_ids(&form.wp_plugin_assets)?;
     if plugin_ids.is_empty() && form.wp_theme_asset <= 0 {
@@ -13424,12 +13615,6 @@ async fn resolve_library_picks(
     }
     if site_type != "wordpress" {
         return Err("Library plugins and themes need a WordPress site.".into());
-    }
-    if target.is_some() {
-        return Err(
-            "Library plugins can only be installed on a site hosted on this server — the library lives here. Pick this server, or install them after creation."
-                .into(),
-        );
     }
     let library = fetch_wp_assets(state)
         .await

@@ -838,6 +838,19 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
             .wp_asset_replace(id, original_name, bytes, uploaded_by)
             .await
     }
+    async fn wp_asset_read(
+        &self,
+        id: i64,
+    ) -> Result<(hyperion_types::WpAssetSummary, Vec<u8>), RpcError> {
+        self.svc.wp_asset_read(id).await
+    }
+    async fn wp_asset_mirror(
+        &self,
+        asset: hyperion_types::WpAssetSummary,
+        bytes: Vec<u8>,
+    ) -> Result<(), RpcError> {
+        self.svc.wp_asset_mirror(asset, bytes).await
+    }
     async fn wp_asset_reinstall_all(
         &self,
         asset_id: i64,
