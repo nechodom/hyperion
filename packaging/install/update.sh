@@ -1917,3 +1917,7 @@ fi
 echo "  Tail live logs with:"
 (( HAVE_AGENT )) && echo "    journalctl -u hyperion-agent -f"
 (( HAVE_WEB   )) && echo "    journalctl -u hyperion-web -f"
+# Explicit: without it the script's status is the LAST command's — and on a
+# worker (no hyperion-web) that is the false `(( HAVE_WEB ))` above, so every
+# successful node update exited 1 and the panel reported it failed.
+exit 0
