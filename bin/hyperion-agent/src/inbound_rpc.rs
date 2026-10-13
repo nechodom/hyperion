@@ -32,24 +32,33 @@
 //! hyperion-agent. So the listener belongs here.
 
 use axum::body::Bytes;
-use axum::extract::State;
+use axum::extract::{DefaultBodyLimit, State};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::Router;
 use hyperion_core::master_rpc::{verify_envelope, SignedAuthorization, VerifyOpts};
 use hyperion_core::node_rpc::{sign_response, NodeRpcSigner, RESP_SIG_HEADER};
-use hyperion_rpc::codec::Request;
+use hyperion_rpc::codec::{Request, Response as RpcResponse, MAX_FRAME};
 use hyperion_rpc::AgentApi;
 use std::collections::HashMap;
+use std::future::Future;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+/// Runs one verified request. In production this is
+/// `hyperion_rpc_server::dispatch` over the agent; the tests swap in a
+/// stub so they can drive the REAL handler (verify, limits, detaching)
+/// without a whole `AgentApi`.
+type Dispatcher =
+    Arc<dyn Fn(Request) -> Pin<Box<dyn Future<Output = RpcResponse> + Send>> + Send + Sync>;
+
 #[derive(Clone)]
 struct InboundState {
-    agent: Arc<dyn AgentApi>,
+    dispatch: Dispatcher,
     /// Resolves the receiver's own node_id + master pubkey on every
     /// request — re-read from `/etc/hyperion/node-id.json` so that
     /// a heartbeat-driven pubkey rotation takes effect immediately
@@ -67,10 +76,11 @@ struct InboundState {
     resp_signer: Option<Arc<NodeRpcSigner>>,
 }
 
-/// How long a nonce stays in the cache. Slightly longer than the
-/// signature freshness window so a request signed at `ts - 60s` and
-/// arriving at `now` still finds its nonce in the cache when an
-/// attacker tries to replay it 1s later.
+/// How long a nonce stays in the cache. A request stays acceptable
+/// until its `ts` is `max_age_secs` old, and `ts` may lie up to
+/// `max_skew_secs` in our future, so a nonce must outlive
+/// `max_age_secs + max_skew_secs` (60 + 30) after it arrives — or a
+/// replay sent just after eviction would be taken as new.
 const MAX_NONCE_AGE: Duration = Duration::from_secs(120);
 
 /// Spawn the inbound HTTPS listener. Returns immediately; the
@@ -97,15 +107,16 @@ pub async fn spawn_listener(
     let rustls_config =
         axum_server::tls_rustls::RustlsConfig::from_pem_file(&tls_cert, &tls_key).await?;
 
-    let st = InboundState {
-        agent,
+    let dispatch: Dispatcher = Arc::new(move |req| {
+        let agent = agent.clone();
+        Box::pin(async move { hyperion_rpc_server::dispatch(agent, req).await })
+    });
+    let app = router(InboundState {
+        dispatch,
         state_file,
         nonce_cache: Arc::new(Mutex::new(HashMap::new())),
         resp_signer,
-    };
-    let app = Router::new()
-        .route("/agent-rpc", post(handle_rpc))
-        .with_state(st);
+    });
 
     tokio::spawn(async move {
         tracing::info!(addr=%bind_addr, "hyperion-agent inbound RPC ready");
@@ -117,6 +128,20 @@ pub async fn spawn_listener(
         }
     });
     Ok(())
+}
+
+/// The `/agent-rpc` route.
+///
+/// The body limit is the Unix socket's `MAX_FRAME`. axum's DEFAULT is
+/// 2 MiB, and with nothing set every request above that — a plugin ZIP,
+/// an uploaded file, anything else the local socket carries fine — was
+/// refused with a 413 the moment its hosting lived on a worker instead of
+/// on the master.
+fn router(st: InboundState) -> Router {
+    Router::new()
+        .route("/agent-rpc", post(handle_rpc))
+        .layer(DefaultBodyLimit::max(MAX_FRAME))
+        .with_state(st)
 }
 
 async fn handle_rpc(State(st): State<InboundState>, headers: HeaderMap, body: Bytes) -> Response {
@@ -160,7 +185,7 @@ async fn handle_rpc(State(st): State<InboundState>, headers: HeaderMap, body: By
         VerifyOpts::default(),
     ) {
         Ok(e) => e,
-        Err(e) => return (StatusCode::UNAUTHORIZED, e).into_response(),
+        Err(e) => return (StatusCode::UNAUTHORIZED, explain_refusal(e)).into_response(),
     };
 
     // 3. Replay protection — refuse a previously-seen nonce.
@@ -179,7 +204,22 @@ async fn handle_rpc(State(st): State<InboundState>, headers: HeaderMap, body: By
             return (StatusCode::BAD_REQUEST, "bad request body").into_response();
         }
     };
-    let resp = hyperion_rpc_server::dispatch(st.agent.clone(), req).await;
+    // Run the request DETACHED from this connection. hyper drops a
+    // handler's future the moment the client goes away, and the master
+    // goes away whenever its curl `--max-time` lapses or hyperion-web
+    // restarts — which used to abort a provisioning, a restore or a
+    // delete half-way through, at whatever await point it had reached.
+    // The local Unix socket never did that (it notices a gone client only
+    // when it writes the answer), so the same RPC behaved differently
+    // depending on which node owned the site. Now the work always runs to
+    // completion; only the answer is lost when nobody waits for it.
+    let resp = match tokio::spawn((st.dispatch)(req)).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!(error=%e, "inbound RPC: dispatch task failed");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "dispatch failed").into_response();
+        }
+    };
     let body_json = match serde_json::to_vec(&resp) {
         Ok(b) => b,
         Err(e) => {
@@ -241,6 +281,20 @@ async fn handle_rpc(State(st): State<InboundState>, headers: HeaderMap, body: By
         }
     }
     out
+}
+
+/// The text a refused request gets back. The verifier's strings are
+/// deliberately terse; the two freshness refusals get the one fact that
+/// fixes them, because a node whose clock has drifted refuses EVERY
+/// request the master sends and nothing else on either side says why.
+fn explain_refusal(e: &'static str) -> String {
+    match e {
+        "envelope too old" | "envelope in future" => format!(
+            "{e} — the clocks of the master and this node disagree; sync both with NTP \
+             (timedatectl set-ntp true)"
+        ),
+        other => other.to_string(),
+    }
 }
 
 impl InboundState {
@@ -329,6 +383,154 @@ mod tests {
         assert!(
             HeaderValue::from_str(&value).is_ok(),
             "signature header value must be ASCII-safe: {value}"
+        );
+    }
+
+    /// A node id + master key on disk, a stub dispatcher, and the REAL
+    /// router serving plain HTTP on a loopback port. TLS is not what these
+    /// tests are about — the handler is transport-agnostic, and the wire
+    /// tests in hyperion-rpc-server cover curl + rustls.
+    struct Harness {
+        addr: SocketAddr,
+        signer: hyperion_core::master_rpc::MasterRpcSigner,
+        _dir: tempfile::TempDir,
+    }
+
+    const NODE_ID: &str = "node-under-test";
+
+    async fn spawn_harness(dispatch: Dispatcher) -> Harness {
+        let dir = tempfile::tempdir().unwrap();
+        let signer =
+            hyperion_core::master_rpc::MasterRpcSigner::load_or_init(&dir.path().join("m.key"))
+                .unwrap();
+        let state_file = dir.path().join("node-id.json");
+        let persisted = crate::enroll::PersistedNodeId {
+            node_id: NODE_ID.into(),
+            master_url: "https://master.example.com".into(),
+            secret: "s".into(),
+            enrolled_at: 0,
+            master_rpc_pubkey: Some(signer.pubkey_b64().to_string()),
+        };
+        std::fs::write(&state_file, serde_json::to_vec(&persisted).unwrap()).unwrap();
+        let app = router(InboundState {
+            dispatch,
+            state_file,
+            nonce_cache: Arc::new(Mutex::new(HashMap::new())),
+            resp_signer: None,
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        Harness {
+            addr,
+            signer,
+            _dir: dir,
+        }
+    }
+
+    /// A signed HTTP/1.1 POST of `req`, exactly as the master would send it.
+    fn signed_post(h: &Harness, req: &Request) -> Vec<u8> {
+        let body = serde_json::to_vec(req).unwrap();
+        let auth = hyperion_core::master_rpc::sign_envelope(
+            &h.signer,
+            NODE_ID,
+            &body,
+            chrono::Utc::now().timestamp(),
+            &format!("nonce-{}", body.len()),
+        );
+        let mut out = format!(
+            "POST /agent-rpc HTTP/1.1\r\nHost: node\r\nAuthorization: Bearer {}\r\n\
+             Content-Type: application/json\r\nContent-Length: {}\r\n\
+             Connection: close\r\n\r\n",
+            auth.to_header_value(),
+            body.len()
+        )
+        .into_bytes();
+        out.extend_from_slice(&body);
+        out
+    }
+
+    fn agent_info_stub() -> Dispatcher {
+        Arc::new(|_req| {
+            Box::pin(async {
+                RpcResponse::Error(hyperion_rpc::RpcError::NotFound {
+                    kind: "test".into(),
+                    id: "x".into(),
+                })
+            })
+        })
+    }
+
+    #[tokio::test]
+    async fn accepts_a_request_larger_than_axums_default_limit() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let h = spawn_harness(agent_info_stub()).await;
+        // 3 MiB of payload: past axum's 2 MiB default, well inside MAX_FRAME.
+        let req = Request::WpAssetUpload {
+            kind: "plugin".into(),
+            original_name: "big.zip".into(),
+            bytes_b64: "A".repeat(3 * 1024 * 1024),
+            uploaded_by: "admin".into(),
+        };
+        let mut conn = tokio::net::TcpStream::connect(h.addr).await.unwrap();
+        conn.write_all(&signed_post(&h, &req)).await.unwrap();
+        let mut resp = Vec::new();
+        conn.read_to_end(&mut resp).await.unwrap();
+        let head = String::from_utf8_lossy(&resp[..resp.len().min(64)]).to_string();
+        assert!(
+            head.starts_with("HTTP/1.1 200"),
+            "a 3 MiB request must reach dispatch, got: {head}"
+        );
+    }
+
+    #[tokio::test]
+    async fn work_survives_the_master_hanging_up() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use tokio::io::AsyncWriteExt;
+        let finished = Arc::new(AtomicBool::new(false));
+        let flag = finished.clone();
+        let slow: Dispatcher = Arc::new(move |_req| {
+            let flag = flag.clone();
+            Box::pin(async move {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                flag.store(true, Ordering::SeqCst);
+                RpcResponse::Error(hyperion_rpc::RpcError::NotFound {
+                    kind: "test".into(),
+                    id: "x".into(),
+                })
+            })
+        });
+        let h = spawn_harness(slow).await;
+        let mut conn = tokio::net::TcpStream::connect(h.addr).await.unwrap();
+        conn.write_all(&signed_post(&h, &Request::AgentInfo))
+            .await
+            .unwrap();
+        // The master's curl times out (or hyperion-web restarts) while the
+        // node is still working.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        drop(conn);
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        assert!(
+            finished.load(Ordering::SeqCst),
+            "the RPC was abandoned half-way when the master disconnected"
+        );
+    }
+
+    #[test]
+    fn clock_refusals_name_the_fix() {
+        assert!(explain_refusal("envelope in future").contains("NTP"));
+        assert!(explain_refusal("envelope too old").contains("NTP"));
+        assert_eq!(explain_refusal("body hash mismatch"), "body hash mismatch");
+    }
+
+    #[test]
+    fn nonce_outlives_every_acceptable_timestamp() {
+        let o = VerifyOpts::default();
+        assert!(
+            MAX_NONCE_AGE.as_secs() as i64 >= o.max_age_secs + o.max_skew_secs,
+            "a replay could be accepted after its nonce was forgotten"
         );
     }
 

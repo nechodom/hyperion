@@ -706,7 +706,9 @@ pub async fn get_new(State(state): State<SharedState>, ctx: AuthCtx) -> Result<R
     // offer them. Failure here just leaves the dropdown empty — the
     // form still works for the default-master case.
     let nodes = match fetch_remote_nodes(&state).await {
-        Ok(v) => v,
+        // Drained nodes are left out: draining promises that no new site
+        // is placed there, by the placer or by this form.
+        Ok(v) => v.into_iter().filter(|n| !n.is_drained).collect(),
         Err(e) => {
             tracing::warn!(
                 error=%e,
@@ -2164,7 +2166,7 @@ impl PhpIniSettings {
 ///
 /// * Master-local hosting (`owner_node` None) → the host the operator
 ///   reached the panel on, which on a single-node box IS the FTP host.
-/// * Worker hosting (`Some(node_id)`) → that worker's `public_ip`
+/// * Worker hosting (`Some(node_id)`) → that worker's public address
 ///   (its enrollment `label`, then the panel host, as fallbacks) —
 ///   FTP connects straight to the owning box, never the master.
 async fn ftp_host_for(
@@ -2178,7 +2180,10 @@ async fn ftp_host_for(
             .map(hyperion_rpc::codec::Response::NodesList)
         {
             if let Some(n) = nodes.iter().find(|n| n.node_id == nid) {
-                if let Some(ip) = n.public_ip.as_deref().filter(|s| !s.is_empty()) {
+                // The node's PUBLIC address — not `public_ip` as such, which
+                // holds the private RPC address on a node that advertises
+                // one and would hand customers an unreachable FTP host.
+                if let Some(ip) = n.customer_host() {
                     return ip.to_string();
                 }
                 if !n.label.is_empty() {
@@ -4159,7 +4164,7 @@ pub async fn post_set_php_ini(
     let bytes_b64 = base64_encode(body.as_bytes());
     // Write the file on the owning node (jailed write chowns to the
     // hosting user, so PHP can read it).
-    let _ = crate::dispatcher::dispatch_to_node(
+    let written = crate::dispatcher::dispatch_to_node(
         &state,
         owner_node.as_deref(),
         Request::HostingFileWrite {
@@ -4169,6 +4174,25 @@ pub async fn post_set_php_ini(
         },
     )
     .await;
+    // A write that did not land must not be reported — or stored for
+    // re-display — as saved: with the owning node down, the form used to
+    // say "PHP settings saved" and show the new values while PHP kept the
+    // old ones.
+    let write_error = match written {
+        Ok(RpcResponse::Error(e)) => Some(e.to_string()),
+        Ok(_) => None,
+        Err(e) => Some(e.to_string()),
+    };
+    if let Some(e) = write_error {
+        tracing::warn!(hosting = %hosting_id, error = %e, "PHP settings: .user.ini write failed");
+        return Ok(save_result(
+            &headers,
+            false,
+            "PHP settings were NOT saved — the server hosting this site could not write them. \
+             Try again in a moment.",
+            format!("/hostings/{sel_url}?flash_error=PHP+settings+not+saved#settings"),
+        ));
+    }
     // Persist values for re-display (master KV, keyed by ULID).
     for (k, v) in [
         ("php.memory_limit", form.memory_limit.trim()),
@@ -6117,15 +6141,14 @@ pub async fn require_manage_for_selector(
     }
     let hosting_id = match &sel {
         HostingSelector::Id(id) => id.as_str().to_string(),
-        _ => {
-            let resp =
-                hyperion_rpc_client::call(&state.agent_socket, Request::HostingGet(sel.clone()))
-                    .await;
-            match resp {
-                Ok(RpcResponse::HostingGet(d)) => d.id.as_str().to_string(),
-                _ => return Err(forbidden()),
-            }
-        }
+        // Resolve on whichever node OWNS the site. This asked only the
+        // master's socket, so a tenant addressing a worker-hosted site by
+        // domain — the FTP table and every /hostings/<domain> page do —
+        // got NotFound here and a 403 on every action.
+        _ => match find_hosting_anywhere(state, sel.clone()).await {
+            Ok((d, _)) => d.id.as_str().to_string(),
+            Err(_) => return Err(forbidden()),
+        },
     };
     require_hosting_access(state, ctx, &hosting_id, true, cap).await?;
     Ok(sel)
@@ -7006,7 +7029,14 @@ async fn pull_bundle_from_worker(
 async fn pick_auto_placement_target(state: &SharedState) -> Option<String> {
     use hyperion_types::NodeStats;
 
-    let nodes = fetch_remote_nodes(state).await.unwrap_or_default();
+    // A drained node takes no new sites — that is the whole promise of the
+    // Drain button, and the placer never checked it.
+    let nodes: Vec<_> = fetch_remote_nodes(state)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|n| !n.is_drained)
+        .collect();
     let master_accepts = fetch_master_accepts_hostings(state).await;
 
     // Collect candidate NodeStats. Each entry is (target_string, NodeStats).
@@ -7027,19 +7057,19 @@ async fn pick_auto_placement_target(state: &SharedState) -> Option<String> {
         }
     }
 
-    for ns in nodes {
-        match crate::dispatcher::dispatch_to_node(state, Some(&ns.node_id), Request::ClusterStats)
-            .await
-        {
-            Ok(RpcResponse::ClusterStats(c)) => {
-                if let Some(stat) = c.nodes.into_iter().next() {
-                    if stat.agent_online {
-                        candidates.push((ns.node_id.clone(), stat));
-                    }
+    // Concurrently: asked one at a time, a single slow node held the
+    // create form for its whole timeout before the next was even asked.
+    let (answered, failed) =
+        crate::dispatcher::fan_out_reporting(state, nodes, Request::ClusterStats).await;
+    for (ns, _) in failed {
+        tracing::warn!(node = %ns.node_id, "auto-placement: stats unavailable; skipping");
+    }
+    for (ns, resp) in answered {
+        if let RpcResponse::ClusterStats(c) = resp {
+            if let Some(stat) = c.nodes.into_iter().next() {
+                if stat.agent_online {
+                    candidates.push((ns.node_id.clone(), stat));
                 }
-            }
-            _ => {
-                tracing::warn!(node = %ns.node_id, "auto-placement: stats unavailable; skipping");
             }
         }
     }
@@ -11488,10 +11518,32 @@ pub async fn post_restore_upload(
     // tell whose upload an archive was, so restore had nothing to check a
     // caller-supplied path against beyond "is it under a backup root" — and
     // every tenant's archives are under the same root.
-    let hosting_ns = find_hosting_anywhere(&state, sel.clone())
+    let (hosting_ns, owner_node) = find_hosting_anywhere(&state, sel.clone())
         .await
-        .map(|(d, _)| d.id.as_str().to_string())
+        .map(|(d, owner)| (d.id.as_str().to_string(), owner))
         .map_err(|e| AppError::Internal(format!("resolve hosting: {e}")))?;
+    // The archive lands on THIS server's disk and the restore runs on this
+    // server's agent. For a site on a worker neither is where the site is:
+    // the restore used to fail with "not found" (or, by domain, could hit a
+    // same-named site here). Say so plainly until uploads can be shipped to
+    // the owning node.
+    if let Some(node) = owner_node {
+        let label = crate::dispatcher::cached_nodes(&state)
+            .await
+            .ok()
+            .and_then(|v| v.into_iter().find(|n| n.node_id == node).map(|n| n.label))
+            .unwrap_or(node);
+        let msg = urlencoding(&format!(
+            "Restoring from an uploaded archive works only for sites on the master, and this \
+             site is on {label}. Nothing was changed. Restore one of the site's own backups \
+             from the list below instead."
+        ));
+        return Ok(Redirect::to(&format!(
+            "/hostings/{}?restore_error={msg}",
+            urlencoding(&selector)
+        ))
+        .into_response());
+    }
     let incoming_dir =
         std::path::PathBuf::from("/var/lib/hyperion/backups/incoming").join(&hosting_ns);
     tokio::fs::create_dir_all(&incoming_dir)
@@ -13281,7 +13333,10 @@ async fn run_migration_job(
     reporter
         .step("Suspending source copy (best-effort)", 95, "")
         .await;
-    let _ = crate::dispatcher::dispatch_to_node(
+    // Best-effort, but never silently: if the suspend fails, BOTH copies
+    // are live, and telling the operator "the original is now SUSPENDED"
+    // sends them to repoint DNS with two sites answering for one domain.
+    let suspend = crate::dispatcher::dispatch_to_node(
         &state,
         source_dispatch,
         Request::HostingSuspend {
@@ -13295,6 +13350,22 @@ async fn run_migration_job(
         },
     )
     .await;
+    let suspend_failed = match suspend {
+        Ok(RpcResponse::HostingSuspend) => None,
+        Ok(RpcResponse::Error(e)) => Some(e.to_string()),
+        Ok(_) => Some("unexpected response".to_string()),
+        Err(e) => Some(e.to_string()),
+    };
+    let original_state = match &suspend_failed {
+        None => "The original is now SUSPENDED here as a fallback.".to_string(),
+        Some(e) => {
+            tracing::warn!(selector = %selector_text, error = %e, "move: suspending the source failed");
+            format!(
+                "WARNING: suspending the original FAILED ({e}) — it is still LIVE.\n\
+                 Suspend it yourself from its page before pointing DNS at the new copy."
+            )
+        }
+    };
 
     tracing::info!(
         selector = %selector_text,
@@ -13309,7 +13380,7 @@ async fn run_migration_job(
             100,
             &format!(
                 "Move complete. New hosting id {} on {target_node}.\n\
-                 The original is now SUSPENDED here as a fallback.\n\n\
+                 {original_state}\n\n\
                  Next steps to go live:\n\
                  1. Point this domain's DNS at {target_node}'s IP.\n\
                  2. On the target, re-issue the TLS certificate (SSL tab) — keys never travel.\n\
@@ -13340,6 +13411,25 @@ pub async fn post_migration_export(
         Err(r) => return Ok(r),
     };
     let sel_url = urlencoding(&form.selector);
+    // The bundle is built by this server's agent and served from this
+    // server's disk (/api/migration/bundle). A site on a worker is on
+    // neither, and the export used to fail with a bare "not found".
+    if let Ok((_, Some(node))) = find_hosting_anywhere(&state, sel.clone()).await {
+        let label = crate::dispatcher::cached_nodes(&state)
+            .await
+            .ok()
+            .and_then(|v| v.into_iter().find(|n| n.node_id == node).map(|n| n.label))
+            .unwrap_or(node);
+        let msg = urlencoding(&format!(
+            "Export bundles can be made only for sites on the master, and this site is on \
+             {label}. To move it to another server, use Move instead."
+        ));
+        return Ok(Redirect::to(&format!(
+            "/hostings/{}?flash_error={}#migration",
+            sel_url, msg
+        ))
+        .into_response());
+    }
     let resp =
         hyperion_rpc_client::call(&state.agent_socket, Request::HostingExport { hosting: sel })
             .await?;

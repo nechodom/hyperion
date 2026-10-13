@@ -125,6 +125,8 @@ fn build_rows(
             drain_reason: String::new(),
             tls_spki_pin: None,
             resp_pubkey: None,
+            rpc_port: None,
+            external_ip: None,
         },
         is_master: true,
         online: true,
@@ -590,8 +592,8 @@ pub async fn post_remove_node(
         RpcResponse::NodeRemoved { removed: true, hostings_blocking } => {
             let msg = if hostings_blocking > 0 {
                 format!(
-                    "Node {} removed. {} hosting(s) were orphaned — they keep their nginx/FPM running on the now-detached box, but cannot be managed from the master until you re-enrol the node or migrate them.",
-                    node_id, hostings_blocking
+                    "Node {} removed. {} hosting(s) were orphaned — they keep their nginx/FPM running on the now-detached box, but cannot be managed from the master. Re-enrolling the box gives it a NEW node id, so to bring them back run on the master: hctl node reassign --from {} --to <the box's new node id>.",
+                    node_id, hostings_blocking, node_id
                 )
             } else {
                 format!("Node {} removed from the cluster.", node_id)
@@ -1381,6 +1383,8 @@ mod tests {
             drain_reason: String::new(),
             tls_spki_pin: Some("pin".into()),
             resp_pubkey: Some("key".into()),
+            rpc_port: None,
+            external_ip: None,
         }
     }
 

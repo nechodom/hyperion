@@ -177,6 +177,51 @@ pub struct NodeSummary {
     /// workers on the older wire format still deserialize.
     #[serde(default)]
     pub resp_pubkey: Option<String>,
+    /// Port of the node's inbound RPC listener. `None` = the default 9443
+    /// (every node enrolled before nodes reported it). See
+    /// [`NodeEndpointReport`].
+    #[serde(default)]
+    pub rpc_port: Option<u16>,
+    /// The node's public address when `public_ip` is a private one the
+    /// master dials over a private network. `None` = `public_ip` is the
+    /// public address. Use [`NodeSummary::customer_host`] for anything a
+    /// customer connects to.
+    #[serde(default)]
+    pub external_ip: Option<String>,
+}
+
+impl NodeSummary {
+    /// Port of the node's inbound RPC listener when it never reported one.
+    pub const DEFAULT_RPC_PORT: u16 = 9443;
+
+    /// The port the master dials this node's RPC listener on.
+    pub fn rpc_port(&self) -> u16 {
+        self.rpc_port.unwrap_or(Self::DEFAULT_RPC_PORT)
+    }
+
+    /// The address a CUSTOMER reaches this node at (FTP, DNS records).
+    /// Never the private RPC address when the node advertises one.
+    pub fn customer_host(&self) -> Option<&str> {
+        self.external_ip
+            .as_deref()
+            .or(self.public_ip.as_deref())
+            .filter(|s| !s.is_empty())
+    }
+}
+
+/// How a node can be reached, as it reports it at enrollment and on every
+/// heartbeat. Both fields optional and `serde(default)` so agents that
+/// predate them keep enrolling — they simply get the old behaviour
+/// (port 9443, `public_ip` used for everything).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NodeEndpointReport {
+    /// Port the inbound RPC listener is bound to (`[remote_rpc] bind`).
+    #[serde(default)]
+    pub rpc_port: Option<u16>,
+    /// Auto-detected public IP, sent when the node advertises a different
+    /// (private) address for RPC.
+    #[serde(default)]
+    pub external_ip: Option<String>,
 }
 
 /// Cluster-wide aggregate. Today single-node = node_stats[0]; later

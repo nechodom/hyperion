@@ -411,6 +411,8 @@ mod tests {
             drain_reason: String::new(),
             tls_spki_pin: None,
             resp_pubkey: None,
+            rpc_port: None,
+            external_ip: None,
         }
     }
 

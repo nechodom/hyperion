@@ -276,9 +276,16 @@ pub struct VerifyOpts {
     /// older than this are rejected even with a valid signature
     /// (replay protection in the time dimension).
     pub max_age_secs: i64,
-    /// Maximum allowed *future* skew. Tolerate a small amount to
-    /// survive a few-second clock drift between master and node
-    /// without dropping legitimate requests.
+    /// Maximum allowed *future* skew: how far the SENDER's clock may run
+    /// ahead of the receiver's before a valid request is refused.
+    ///
+    /// This used to be 5 s, which made a master whose clock had drifted
+    /// six seconds ahead of a worker unable to send it anything at all —
+    /// every RPC a 401, the node "unreachable" while it heartbeated fine.
+    /// 30 s survives an unsynced VM. It is bounded by the agent's nonce
+    /// cache (`MAX_NONCE_AGE`, 120 s): a nonce has to stay remembered for
+    /// as long as its request could still be accepted, i.e. up to
+    /// `max_age_secs + max_skew_secs` after it arrives.
     pub max_skew_secs: i64,
 }
 
@@ -286,7 +293,7 @@ impl Default for VerifyOpts {
     fn default() -> Self {
         Self {
             max_age_secs: 60,
-            max_skew_secs: 5,
+            max_skew_secs: 30,
         }
     }
 }

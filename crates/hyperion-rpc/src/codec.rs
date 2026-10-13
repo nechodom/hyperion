@@ -1433,6 +1433,10 @@ pub enum Request {
         /// a missing pubkey rather than a rejected enrollment.
         #[serde(default)]
         resp_pubkey: Option<String>,
+        /// RPC port + public IP as the node reports them. Default (all
+        /// `None`) for agents that predate them.
+        #[serde(default)]
+        endpoint: hyperion_types::NodeEndpointReport,
     },
     NodesList,
     /// Cluster-wide certificate inventory — every cert this agent
@@ -1508,6 +1512,10 @@ pub enum Request {
         /// master this node's responses can be verified at all.
         #[serde(default)]
         resp_pubkey: Option<String>,
+        /// RPC port + public IP as the node reports them, so a port or
+        /// address change reaches the master without a re-enrollment.
+        #[serde(default)]
+        endpoint: hyperion_types::NodeEndpointReport,
     },
     WpResetPassword {
         sel: HostingSelector,

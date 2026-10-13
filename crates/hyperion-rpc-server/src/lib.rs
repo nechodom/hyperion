@@ -1435,6 +1435,7 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             prior_node_id,
             prior_secret,
             resp_pubkey,
+            endpoint,
         } => match api
             .enroll_consume(
                 token,
@@ -1446,6 +1447,7 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
                 prior_node_id,
                 prior_secret,
                 resp_pubkey,
+                endpoint,
             )
             .await
         {
@@ -1462,8 +1464,16 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             agent_version,
             tls_spki_pin,
             resp_pubkey,
+            endpoint,
         } => match api
-            .node_heartbeat(node_id, secret, agent_version, tls_spki_pin, resp_pubkey)
+            .node_heartbeat(
+                node_id,
+                secret,
+                agent_version,
+                tls_spki_pin,
+                resp_pubkey,
+                endpoint,
+            )
             .await
         {
             Ok(master_rpc_pubkey) => Response::NodeHeartbeat { master_rpc_pubkey },
@@ -3251,6 +3261,7 @@ mod tests {
             _: Option<String>,
             _: Option<String>,
             _: Option<String>,
+            _: hyperion_types::NodeEndpointReport,
         ) -> Result<(String, String, Option<String>), RpcError> {
             Ok(("test-node".into(), "test-secret".into(), None))
         }
@@ -3261,6 +3272,7 @@ mod tests {
             _: String,
             _: Option<String>,
             _: Option<String>,
+            _: hyperion_types::NodeEndpointReport,
         ) -> Result<Option<String>, RpcError> {
             Ok(None)
         }

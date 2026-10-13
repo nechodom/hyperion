@@ -14026,8 +14026,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 .collect();
         if let Ok(nodes) = hyperion_state::nodes::list(&self.pool).await {
             for n in nodes {
-                if let Some(ip) = n.public_ip.as_deref().and_then(|s| s.trim().parse().ok()) {
-                    set.insert(ip);
+                for addr in [n.public_ip.as_deref(), n.external_ip.as_deref()] {
+                    if let Some(ip) = addr.and_then(|s| s.trim().parse().ok()) {
+                        set.insert(ip);
+                    }
                 }
                 if let Some(url) = n.master_url.as_deref() {
                     set.extend(resolve_url_host(url).await);
@@ -21112,6 +21114,25 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 message: format!("target node {to} is not enrolled — pick a live node"),
             });
         }
+        // The source must be DEAD. Re-pointing a live node's sites at
+        // another box — `--from`/`--to` swapped, or the wrong id pasted —
+        // would route all their management to a machine that doesn't hold
+        // their files, while nothing warned. A node that really is gone is
+        // removed from the Nodes page first, which is also what orphans
+        // the ids this exists to adopt.
+        let from_enrolled = hyperion_state::nodes::get_by_node_id(&self.pool, from)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("node lookup: {e}")))?
+            .is_some();
+        if from_enrolled {
+            return Err(RpcError::Validation {
+                message: format!(
+                    "source node {from} is still enrolled — its sites are not orphaned. \
+                     Check --from/--to; if that box is really gone, remove it on the \
+                     Nodes page first"
+                ),
+            });
+        }
         let moved = hyperion_state::nodes::reassign_hostings(&self.pool, from, to)
             .await
             .map_err(|e| RpcError::Internal_with(format!("reassign: {e}")))?
@@ -21162,6 +21183,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 // panel needs it to show "responses verified / taken on
                 // trust" per node without a second round trip.
                 resp_pubkey: r.resp_pubkey,
+                rpc_port: r.rpc_port,
+                external_ip: r.external_ip,
             })
             .collect())
     }
@@ -21187,6 +21210,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         prior_node_id: Option<String>,
         prior_secret: Option<String>,
         resp_pubkey: Option<String>,
+        endpoint: hyperion_types::NodeEndpointReport,
     ) -> Result<(String, String), RpcError> {
         if token.trim().is_empty() {
             return Err(RpcError::Validation {
@@ -21222,20 +21246,36 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             });
         }
         let hash = hyperion_state::invites::hash_token(&token);
-        // Mint a 32-byte per-node secret. Plaintext returned to the caller
-        // exactly once; master persists only the BLAKE3 hash. On a reuse
-        // this re-mints (rotates) the secret.
-        let mut secret_bytes = [0u8; 32];
-        use rand::RngCore;
-        rand::thread_rng().fill_bytes(&mut secret_bytes);
-        let secret_plain = hex::encode(secret_bytes);
+        // A fresh identity gets a freshly minted 32-byte secret, returned
+        // in plaintext exactly once; the master persists only its BLAKE3
+        // hash.
+        //
+        // A REUSED identity keeps the secret it just proved it holds. This
+        // used to re-mint it, which made the enrollment response the only
+        // copy of the node's new credential: if that response never landed
+        // (curl's 15 s budget ran out after the master committed, or the
+        // node failed to write node-id.json) the box was left with a secret
+        // the master no longer accepted and a token already spent — every
+        // heartbeat "bad secret" from then on, and the next re-enroll,
+        // presenting that dead secret, was handed a FRESH id that orphaned
+        // all of its sites. Keeping the secret makes a lost response
+        // harmless: the node simply carries on with what it already has.
+        let secret_plain = match (reused_identity, prior_secret.as_deref()) {
+            (true, Some(prior)) => prior.to_string(),
+            _ => {
+                let mut secret_bytes = [0u8; 32];
+                use rand::RngCore;
+                rand::thread_rng().fill_bytes(&mut secret_bytes);
+                hex::encode(secret_bytes)
+            }
+        };
         let secret_hash = hex::encode(blake3::hash(secret_plain.as_bytes()).as_bytes());
         let row = hyperion_state::nodes::NewNode {
             node_id: effective_node_id.clone(),
             label,
             master_url: None,
             agent_version,
-            public_ip,
+            public_ip: checked_node_addr(&effective_node_id, "public_ip", public_ip),
             enrolled_via_hash: hash,
             secret_hash,
         };
@@ -21245,6 +21285,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         hyperion_state::nodes::upsert_enrollment(&self.pool, &row, now)
             .await
             .map_err(|e| RpcError::Internal_with(format!("nodes upsert: {e}")))?;
+        self.record_node_endpoint(&effective_node_id, endpoint)
+            .await;
         // A box with a worker is a master by definition. Doing it here means
         // adding the first node never requires the operator to go and find a
         // setting — and it makes the cluster UI appear exactly when it starts
@@ -21385,6 +21427,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         agent_version: String,
         tls_spki_pin: Option<String>,
         resp_pubkey: Option<String>,
+        endpoint: hyperion_types::NodeEndpointReport,
     ) -> Result<(), RpcError> {
         // Compute the candidate hash unconditionally — the same
         // amount of crypto work happens regardless of node_id state.
@@ -21460,7 +21503,28 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         )
         .await
         .map_err(|e| RpcError::Internal_with(format!("touch: {e}")))?;
+        self.record_node_endpoint(&node_id, endpoint).await;
         Ok(())
+    }
+
+    /// Store a node's self-reported RPC port and public IP, dropping a
+    /// malformed value instead of failing the enrollment or heartbeat it
+    /// rode on. Best-effort: a failed write leaves the last known values,
+    /// which the next heartbeat retries.
+    async fn record_node_endpoint(&self, node_id: &str, ep: hyperion_types::NodeEndpointReport) {
+        let rpc_port = ep.rpc_port.filter(|p| *p != 0);
+        let external_ip = checked_node_addr(node_id, "external_ip", ep.external_ip)
+            .filter(|a| a.parse::<std::net::IpAddr>().is_ok());
+        if let Err(e) = hyperion_state::nodes::record_endpoint(
+            &self.pool,
+            node_id,
+            rpc_port,
+            external_ip.as_deref(),
+        )
+        .await
+        {
+            tracing::warn!(node = node_id, error = %e, "recording the node's endpoint failed");
+        }
     }
 
     /// Operator recovery: forget both pinned crypto anchors for one node
@@ -41254,6 +41318,46 @@ impl Rollback for CertRowDelete {
     }
 }
 
+/// A node-reported address, kept only if it is something the master can
+/// put in `https://<addr>:<port>/` and mean one host: an IP literal or a
+/// DNS hostname, nothing else. Anything else is logged and dropped — the
+/// enrollment or heartbeat it rode on still goes through, the node just
+/// has no address on record — because the value ends up in a URL handed
+/// to curl, and `evil/x?` or `user@host` there would dial somewhere the
+/// operator never chose.
+fn checked_node_addr(node_id: &str, field: &str, v: Option<String>) -> Option<String> {
+    let v = v?.trim().to_string();
+    if v.is_empty() {
+        return None;
+    }
+    let bare = v.trim_start_matches('[').trim_end_matches(']');
+    let ok = bare.parse::<std::net::IpAddr>().is_ok() || is_dns_hostname(bare);
+    if ok {
+        Some(bare.to_string())
+    } else {
+        tracing::warn!(
+            node = node_id,
+            field,
+            "node reported an address that is neither an IP nor a hostname — ignored"
+        );
+        None
+    }
+}
+
+/// `label(.label)*` of letters, digits and hyphens, no label starting or
+/// ending with a hyphen, at most 253 bytes.
+fn is_dns_hostname(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 253
+        && s.trim_end_matches('.').split('.').all(|l| {
+            !l.is_empty()
+                && l.len() <= 63
+                && !l.starts_with('-')
+                && !l.ends_with('-')
+                && l.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        })
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -44940,6 +45044,7 @@ mod tests {
                 Some("ghost-node".into()),
                 Some("garbage".into()),
                 None,
+                Default::default(),
             )
             .await
             .expect("enroll");
@@ -44972,6 +45077,7 @@ mod tests {
                 None,
                 None,
                 None,
+                Default::default(),
             )
             .await
             .expect("e1");
@@ -44989,16 +45095,196 @@ mod tests {
                 Some(id1.clone()),
                 Some(secret1.clone()),
                 None,
+                Default::default(),
             )
             .await
             .expect("e2");
         assert_eq!(id2, "cand_1", "reused the prior id, not the new candidate");
-        assert_ne!(secret2, secret1, "secret re-minted on reuse");
+        // The proven secret is kept, so a re-enroll whose response never
+        // reaches the node leaves it holding a secret that still works.
+        assert_eq!(secret2, secret1, "a proven secret survives the re-enroll");
+        s.node_heartbeat(
+            id1.clone(),
+            secret1.clone(),
+            "v2".into(),
+            None,
+            None,
+            Default::default(),
+        )
+        .await
+        .expect("the node's on-disk secret must still heartbeat after a re-enroll");
         assert_eq!(
             hyperion_state::nodes::list(&s.pool).await.unwrap().len(),
             1,
             "no duplicate node row on reuse"
         );
+    }
+
+    #[tokio::test]
+    async fn reenroll_keeps_the_address_and_label_it_cannot_report() {
+        let pool = open_memory().await.expect("db");
+        let s = svc(pool, MockAdapterPort::new());
+        let m1 = s.invite_create("n".into(), 3600).await.expect("i1");
+        let (id, secret) = s
+            .enroll_consume(
+                m1.token.clone(),
+                "1.2.3.4".into(),
+                "cand_1".into(),
+                "web-01".into(),
+                "v1".into(),
+                Some("203.0.113.7".into()),
+                None,
+                None,
+                None,
+                Default::default(),
+            )
+            .await
+            .expect("e1");
+        s.node_set_label(&id, "Prague primary")
+            .await
+            .expect("rename");
+        // Re-enroll from a box whose public-IP probe failed this time.
+        let m2 = s.invite_create("n".into(), 3600).await.expect("i2");
+        s.enroll_consume(
+            m2.token.clone(),
+            "1.2.3.4".into(),
+            "cand_2".into(),
+            "web-01".into(),
+            "v2".into(),
+            None,
+            Some(id.clone()),
+            Some(secret),
+            None,
+            Default::default(),
+        )
+        .await
+        .expect("e2");
+        let row = hyperion_state::nodes::get_by_node_id(&s.pool, &id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            row.public_ip.as_deref(),
+            Some("203.0.113.7"),
+            "a missing address must not blank the one on record"
+        );
+        assert_eq!(row.label, "Prague primary", "the panel's rename survives");
+    }
+
+    #[tokio::test]
+    async fn enrollment_and_heartbeat_record_where_the_node_listens() {
+        let pool = open_memory().await.expect("db");
+        let s = svc(pool, MockAdapterPort::new());
+        let m = s.invite_create("n".into(), 3600).await.expect("i");
+        let (id, secret) = s
+            .enroll_consume(
+                m.token.clone(),
+                "1.2.3.4".into(),
+                "cand_1".into(),
+                "label".into(),
+                "v1".into(),
+                // Garbage where an address belongs is dropped, not dialled.
+                Some("evil.example/x?".into()),
+                None,
+                None,
+                None,
+                hyperion_types::NodeEndpointReport {
+                    rpc_port: Some(9555),
+                    external_ip: Some("198.51.100.9".into()),
+                },
+            )
+            .await
+            .expect("enroll");
+        let n = &s.nodes_list().await.unwrap()[0];
+        assert_eq!(n.public_ip, None);
+        assert_eq!(n.rpc_port(), 9555);
+        assert_eq!(n.customer_host(), Some("198.51.100.9"));
+        // A heartbeat moves the port; one that reports nothing keeps it.
+        for (port, want) in [(Some(9666), 9666), (None, 9666)] {
+            s.node_heartbeat(
+                id.clone(),
+                secret.clone(),
+                "v1".into(),
+                None,
+                None,
+                hyperion_types::NodeEndpointReport {
+                    rpc_port: port,
+                    external_ip: Some("not an ip".into()),
+                },
+            )
+            .await
+            .expect("heartbeat");
+            let n = &s.nodes_list().await.unwrap()[0];
+            assert_eq!(n.rpc_port(), want);
+            assert_eq!(n.external_ip.as_deref(), Some("198.51.100.9"));
+        }
+    }
+
+    #[tokio::test]
+    async fn reassign_refuses_to_take_sites_from_a_live_node() {
+        let pool = open_memory().await.expect("db");
+        let s = svc(pool, MockAdapterPort::new());
+        let mut ids = Vec::new();
+        for cand in ["cand_a", "cand_b"] {
+            let m = s.invite_create("n".into(), 3600).await.expect("i");
+            let (id, _) = s
+                .enroll_consume(
+                    m.token.clone(),
+                    "1.2.3.4".into(),
+                    cand.into(),
+                    "label".into(),
+                    "v1".into(),
+                    None,
+                    None,
+                    None,
+                    None,
+                    Default::default(),
+                )
+                .await
+                .expect("enroll");
+            ids.push(id);
+        }
+        let err = s
+            .node_reassign_hostings(&ids[0], &ids[1])
+            .await
+            .expect_err("both nodes are alive");
+        assert!(err.to_string().contains("still enrolled"), "{err}");
+        // A dead id (removed / never seen) is exactly what it is for.
+        assert_eq!(s.node_reassign_hostings("gone", &ids[1]).await.unwrap(), 0);
+    }
+
+    #[test]
+    fn node_addresses_must_be_one_host() {
+        for ok in [
+            "10.0.0.5",
+            "[2a01:4f8::1]",
+            "2a01:4f8::1",
+            "node1.example.com",
+        ] {
+            assert!(
+                checked_node_addr("n", "f", Some(ok.into())).is_some(),
+                "{ok}"
+            );
+        }
+        assert_eq!(
+            checked_node_addr("n", "f", Some("[2a01:4f8::1]".into())).as_deref(),
+            Some("2a01:4f8::1"),
+            "brackets are the dialler's job, not the stored value's"
+        );
+        for bad in [
+            "evil/x?",
+            "user@host",
+            "1.2.3.4:9443",
+            "-a.b",
+            "a b",
+            "<html>",
+        ] {
+            assert!(
+                checked_node_addr("n", "f", Some(bad.into())).is_none(),
+                "{bad}"
+            );
+        }
+        assert!(checked_node_addr("n", "f", Some("  ".into())).is_none());
     }
 
     #[tokio::test]
@@ -45017,6 +45303,7 @@ mod tests {
                 None,
                 None,
                 None,
+                Default::default(),
             )
             .await
             .expect("e1");
@@ -45032,6 +45319,7 @@ mod tests {
                 Some(id1.clone()),
                 Some("WRONG".into()),
                 None,
+                Default::default(),
             )
             .await
             .expect("e2");
@@ -45088,6 +45376,7 @@ mod tests {
             prior.map(|(id, _)| id.to_string()),
             prior.map(|(_, sec)| sec.to_string()),
             resp_pubkey.map(String::from),
+            Default::default(),
         )
         .await
         .expect("enroll")
@@ -45143,6 +45432,7 @@ mod tests {
             "v2".into(),
             None,
             Some("pk-a".into()),
+            Default::default(),
         )
         .await
         .expect("adopt");
@@ -45154,6 +45444,7 @@ mod tests {
             "v2".into(),
             None,
             Some("pk-a".into()),
+            Default::default(),
         )
         .await
         .expect("keep");
@@ -45167,6 +45458,7 @@ mod tests {
             "v2".into(),
             None,
             Some("pk-EVIL".into()),
+            Default::default(),
         )
         .await
         .expect("refuse still heartbeats");
@@ -45177,9 +45469,16 @@ mod tests {
         );
         // Omitting the field (older agent, or remote RPC disabled) likewise
         // leaves the pin alone rather than nulling it.
-        s.node_heartbeat(id.clone(), secret, "v2".into(), None, None)
-            .await
-            .expect("absent");
+        s.node_heartbeat(
+            id.clone(),
+            secret,
+            "v2".into(),
+            None,
+            None,
+            Default::default(),
+        )
+        .await
+        .expect("absent");
         assert_eq!(pinned_key(&s, &id).await.as_deref(), Some("pk-a"));
     }
 
@@ -45198,6 +45497,7 @@ mod tests {
             "v2".into(),
             Some("sha256//good=".into()),
             None,
+            Default::default(),
         )
         .await
         .expect("adopt");
@@ -45209,6 +45509,7 @@ mod tests {
             "v2".into(),
             Some("sha256//EVIL=".into()),
             None,
+            Default::default(),
         )
         .await
         .expect("refuse still heartbeats");
@@ -45231,6 +45532,7 @@ mod tests {
                 "v2".into(),
                 None,
                 Some("pk-attacker".into()),
+                Default::default(),
             )
             .await;
         assert!(r.is_err(), "bad secret → refused before any write");
@@ -45252,6 +45554,7 @@ mod tests {
             "v2".into(),
             Some("sha256//abc=".into()),
             Some("pk-a".into()),
+            Default::default(),
         )
         .await
         .expect("beat");
@@ -45265,9 +45568,16 @@ mod tests {
             .expect("row");
         assert_eq!(row.resp_pubkey, None, "response pubkey forgotten");
         assert_eq!(row.tls_spki_pin, None, "TLS pin forgotten too");
-        s.node_heartbeat(id.clone(), secret, "v2".into(), None, Some("pk-b".into()))
-            .await
-            .expect("re-pin");
+        s.node_heartbeat(
+            id.clone(),
+            secret,
+            "v2".into(),
+            None,
+            Some("pk-b".into()),
+            Default::default(),
+        )
+        .await
+        .expect("re-pin");
         assert_eq!(pinned_key(&s, &id).await.as_deref(), Some("pk-b"));
         // Unknown node is a forgiving no-op, matching node_remove.
         assert!(!s.node_reset_crypto("ghost", 1).await.expect("noop"));

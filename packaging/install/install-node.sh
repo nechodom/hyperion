@@ -221,8 +221,16 @@ if [[ -z "$ADVERTISE_ADDR" && -r /dev/tty && "${HYPERION_NONINTERACTIVE:-}" != "
   IFS= read -r ADVERTISE_ADDR < /dev/tty || ADVERTISE_ADDR=""
 fi
 ADVERTISE_ADDR="$(printf '%s' "$ADVERTISE_ADDR" | tr -d '[:space:]')"
+ADVERTISE_ADDR="${ADVERTISE_ADDR#[}"; ADVERTISE_ADDR="${ADVERTISE_ADDR%]}"
 if [[ -n "$ADVERTISE_ADDR" ]]; then
-  RPC_BIND="${ADVERTISE_ADDR}:${RPC_PORT}"
+  # An IPv6 address needs brackets in host:port form. Without them
+  # `fd00::5:9443` is not a socket address, the agent refuses the bind and
+  # the node comes up with no RPC listener at all.
+  if [[ "$ADVERTISE_ADDR" == *:* ]]; then
+    RPC_BIND="[${ADVERTISE_ADDR}]:${RPC_PORT}"
+  else
+    RPC_BIND="${ADVERTISE_ADDR}:${RPC_PORT}"
+  fi
 else
   RPC_BIND="0.0.0.0:${RPC_PORT}"
 fi
@@ -536,11 +544,14 @@ default_webhook = ""
 # under Enrolled nodes.
 #
 # Retry on failure: if the master isn't reachable on first boot,
-# the agent retries 5× with growing backoff (~9 min total). Past
-# that, run on this node:
-#   sudo rm -f /etc/hyperion/node-id.json
+# the agent retries 5× with growing backoff (~9 min total), then
+# again every 30 min. To retry at once:
 #   sudo systemctl restart hyperion-agent
 # and watch journalctl -u hyperion-agent -f | grep enroll
+# If the master answers that the token is invalid or used, mint a
+# new invite on the master's Nodes page and paste it below. Do NOT
+# delete /etc/hyperion/node-id.json: it is this box's identity, and
+# without it the box re-enrolls as a NEW node, orphaning its sites.
 [enrollment]
 master_url   = "$MASTER"
 invite_token = "$TOKEN"

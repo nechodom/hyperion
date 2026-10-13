@@ -983,15 +983,23 @@ pub async fn post_reapply_all(
     };
     // Add worker-resident hostings so a re-apply covers the whole cluster, not
     // just master-local sites (their apply rows live on the owning node).
-    ids.extend(remote_usage_ids(&state, profile_id).await);
+    let (remote_ids, unreachable) = remote_usage_ids_reporting(&state, profile_id).await;
+    ids.extend(remote_ids);
     ids.sort();
     ids.dedup();
     if ids.is_empty() {
-        return Ok(Redirect::to(&format!(
-            "{edit_url}?flash={}",
-            urlencoding("No hostings are on this profile yet — nothing to re-apply.")
-        ))
-        .into_response());
+        let msg = if unreachable.is_empty() {
+            "No hostings are on this profile yet — nothing to re-apply.".to_string()
+        } else {
+            format!(
+                "No reachable hostings are on this profile — node(s) {} could not be asked. \
+                 Try again once they are back.",
+                unreachable.join(", ")
+            )
+        };
+        return Ok(
+            Redirect::to(&format!("{edit_url}?flash={}", urlencoding(&msg))).into_response(),
+        );
     }
     let actor_label = ctx.username.clone();
     let actor_uid = ctx.session.as_ref().map(|s| s.user_id).unwrap_or(0);
@@ -1075,6 +1083,13 @@ pub async fn post_reapply_all(
                     Err(msg) => failed.push(format!("{}: {msg}", detail.domain)),
                 }
             }
+            if !unreachable.is_empty() {
+                failed.push(format!(
+                    "node(s) {} could not be reached — their sites were not re-applied; \
+                     run this again once they are back",
+                    unreachable.join(", ")
+                ));
+            }
             if failed.is_empty() {
                 reporter
                     .step("Done", 100, &format!("Re-applied to all {ok} site(s).\n"))
@@ -1125,21 +1140,37 @@ async fn remote_usage_counts(state: &SharedState) -> std::collections::HashMap<i
 /// already holds the master-local ids. Drives cluster-wide re-apply + the
 /// edit-page count. Best-effort (a down node contributes nothing).
 async fn remote_usage_ids(state: &SharedState, profile_id: i64) -> Vec<String> {
+    remote_usage_ids_reporting(state, profile_id).await.0
+}
+
+/// [`remote_usage_ids`] plus the labels of the nodes that could not be
+/// asked. A re-apply has to name those: their sites are not in the list
+/// at all, so without this the job finished "Re-applied to all N site(s)"
+/// while a whole node's worth of sites kept the old settings.
+async fn remote_usage_ids_reporting(
+    state: &SharedState,
+    profile_id: i64,
+) -> (Vec<String>, Vec<String>) {
     let mut out = Vec::new();
     let workers = super::hostings::fetch_remote_nodes(state)
         .await
         .unwrap_or_default();
     if workers.is_empty() {
-        return out;
+        return (out, Vec::new());
     }
-    for (_n, resp) in
-        crate::dispatcher::fan_out(state, workers, Request::ProfileUsage { id: profile_id }).await
-    {
+    let (answered, failed) = crate::dispatcher::fan_out_reporting(
+        state,
+        workers,
+        Request::ProfileUsage { id: profile_id },
+    )
+    .await;
+    for (_n, resp) in answered {
         if let RpcResponse::ProfileUsage(ids) = resp {
             out.extend(ids);
         }
     }
-    out
+    let unreachable = failed.into_iter().map(|(n, _)| n.label).collect();
+    (out, unreachable)
 }
 
 fn parse_opt_i64(s: &str) -> Option<i64> {

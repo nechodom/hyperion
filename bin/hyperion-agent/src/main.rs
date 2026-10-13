@@ -1424,6 +1424,7 @@ async fn main() -> anyhow::Result<()> {
                 (!a.is_empty()).then(|| a.to_string())
             },
             resp_pubkey: resp_pubkey.clone(),
+            rpc_port: enroll::rpc_port_from_bind(cfg.remote_rpc.enabled, &cfg.remote_rpc.bind),
         };
         // Outer loop — if the 5-attempt inner burst (~9 min) doesn't
         // succeed, sleep 30 min and try the burst again, indefinitely.
@@ -1471,8 +1472,24 @@ async fn main() -> anyhow::Result<()> {
         // were enrolled before this existed get pinned on their next
         // heartbeat without needing a re-enrollment.
         let hb_resp_pubkey = resp_pubkey.clone();
+        // Re-reported every tick so a changed bind port reaches the master
+        // without a re-enrollment.
+        let rpc_port = enroll::rpc_port_from_bind(cfg.remote_rpc.enabled, &cfg.remote_rpc.bind);
+        let advertise = {
+            let a = cfg.remote_rpc.advertise_addr.trim();
+            (!a.is_empty()).then(|| a.to_string())
+        };
         tokio::spawn(async move {
-            enroll::heartbeat_loop(path, 60, verify, inbound_cert, hb_resp_pubkey).await;
+            enroll::heartbeat_loop(
+                path,
+                60,
+                verify,
+                inbound_cert,
+                hb_resp_pubkey,
+                rpc_port,
+                advertise,
+            )
+            .await;
         });
     }
 

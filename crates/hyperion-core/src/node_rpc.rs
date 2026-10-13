@@ -223,6 +223,24 @@ pub fn sign_response(
     format!("{resp_ts}.{sig_b64}")
 }
 
+/// Freshness window for a signed RESPONSE.
+///
+/// Wide on purpose. A response signature already names the request it
+/// answers — the master's nonce, minted for this one call — so a captured
+/// answer can never be replayed against another request whatever its
+/// timestamp says; `resp_ts` adds nothing to that. What a tight window
+/// DID add was a hard failure: the request window's 5 s of future skew
+/// meant a worker whose clock ran a few seconds ahead of the master had
+/// every single answer thrown away as "response in future" — with
+/// enforcement off too, because a mis-verified signature is never
+/// downgraded to a warning — and a large answer still downloading a
+/// minute after it was signed came back "too old". The window only has
+/// to keep out timestamps that are plainly nonsense.
+pub const RESPONSE_VERIFY_OPTS: VerifyOpts = VerifyOpts {
+    max_age_secs: 15 * 60,
+    max_skew_secs: 5 * 60,
+};
+
 /// Verify a [`RESP_SIG_HEADER`] value against the node's advertised
 /// pubkey (`nodes.resp_pubkey`), the node we dispatched to, the nonce
 /// and ts we signed into the request, and the RAW response bytes.
@@ -457,6 +475,48 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err, "response in future");
+    }
+
+    #[test]
+    fn response_window_tolerates_clock_skew_between_nodes() {
+        // Worker clock two minutes ahead of the master, and a big answer
+        // that took a few minutes to download: both still verify, because
+        // the signature is bound to this request's nonce.
+        let s = fresh_signer();
+        let body = b"{}";
+        for (resp_ts, now) in [
+            (1_700_000_120, 1_700_000_000),
+            (1_700_000_000, 1_700_000_400),
+        ] {
+            let h = sign_response(&s, "s4", "n1", 1_700_000_000, resp_ts, body);
+            verify_response(
+                &h,
+                s.pubkey_b64(),
+                "s4",
+                "n1",
+                1_700_000_000,
+                body,
+                now,
+                RESPONSE_VERIFY_OPTS,
+            )
+            .expect("skewed but genuine response must verify");
+        }
+        // Nonsense timestamps are still refused.
+        let h = sign_response(&s, "s4", "n1", 1_700_000_000, 1_700_100_000, body);
+        assert_eq!(
+            verify_response(
+                &h,
+                s.pubkey_b64(),
+                "s4",
+                "n1",
+                1_700_000_000,
+                body,
+                1_700_000_000,
+                RESPONSE_VERIFY_OPTS,
+            )
+            .unwrap_err(),
+            "response in future"
+        );
     }
 
     #[test]

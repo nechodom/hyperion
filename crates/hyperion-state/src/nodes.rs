@@ -32,6 +32,12 @@ pub struct NodeRow {
     /// a full heartbeat. Pinned trust-on-first-use and cleared only by
     /// re-enrollment (see `touch_last_seen` / `upsert_enrollment`).
     pub resp_pubkey: Option<String>,
+    /// Port of the node's inbound RPC listener; `None` = 9443 (migration
+    /// 081 — nodes enrolled before it never reported one).
+    pub rpc_port: Option<u16>,
+    /// Public address when `public_ip` is the private one the master
+    /// dials (migration 081). `None` = `public_ip` is public.
+    pub external_ip: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -53,7 +59,7 @@ pub struct NewNode {
 /// column lists that silently shift the destructuring when they drift.
 const COLS: &str = "id, node_id, label, master_url, enrolled_at, last_seen_at, \
                     agent_version, public_ip, enrolled_via, secret_hash, tls_spki_pin, \
-                    resp_pubkey";
+                    resp_pubkey, rpc_port, external_ip";
 
 type RawNode = (
     i64,
@@ -67,6 +73,8 @@ type RawNode = (
     String,
     String,
     Option<String>,
+    Option<String>,
+    Option<i64>,
     Option<String>,
 );
 
@@ -84,6 +92,10 @@ fn to_row(r: RawNode) -> NodeRow {
         secret_hash: r.9,
         tls_spki_pin: r.10,
         resp_pubkey: r.11,
+        // A port outside u16 can only be a hand-edited row; dial the
+        // default rather than wrap it into some other port.
+        rpc_port: r.12.and_then(|p| u16::try_from(p).ok()).filter(|p| *p != 0),
+        external_ip: r.13,
     }
 }
 
@@ -122,10 +134,19 @@ pub async fn insert(pool: &SqlitePool, n: &NewNode, now: i64) -> Result<i64, Sta
 }
 
 /// Insert a freshly-enrolled node, OR — when `node_id` already exists —
-/// update it in place: re-mint its secret hash and refresh
-/// label/master_url/agent_version/public_ip/last_seen. `enrolled_at` is
+/// update it in place: store its secret hash and refresh
+/// master_url/agent_version/public_ip/last_seen. `enrolled_at` is
 /// deliberately NOT touched on the update path so the original
 /// enrollment time survives a re-enroll.
+///
+/// Two columns are KEPT on the update path:
+/// - `label` — the operator may have renamed the node in the panel, and
+///   re-running install-node.sh used to silently revert that to the
+///   hostname;
+/// - `public_ip`, when the re-enrolling node could not report one (its
+///   public-IP probe failed). Overwriting the address with NULL left a
+///   node that heartbeated fine and could never be dialled again —
+///   heartbeats don't carry it, so nothing would ever repair it.
 ///
 /// This backs idempotent (re-)enrollment (Block B): a box that proves
 /// continuity (matching prior secret) or adopts a currently-free id
@@ -152,11 +173,10 @@ pub async fn upsert_enrollment(
             agent_version, public_ip, enrolled_via, secret_hash)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(node_id) DO UPDATE SET
-              label         = excluded.label,
               master_url    = COALESCE(excluded.master_url, nodes.master_url),
               last_seen_at  = excluded.last_seen_at,
               agent_version = excluded.agent_version,
-              public_ip     = excluded.public_ip,
+              public_ip     = COALESCE(excluded.public_ip, nodes.public_ip),
               enrolled_via  = excluded.enrolled_via,
               secret_hash   = excluded.secret_hash,
               tls_spki_pin  = NULL,
@@ -229,6 +249,39 @@ pub async fn touch_last_seen(
     .bind(version)
     .bind(tls_spki_pin)
     .bind(resp_pubkey)
+    .bind(node_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Record how a node says it can be reached (migration 081): its RPC
+/// listener port and, when it dials over a private address, its public
+/// one. A field the node did not report keeps its stored value, so an
+/// older agent — or one whose public-IP probe failed this time — never
+/// blanks what an earlier report established.
+///
+/// Newest-wins otherwise, unlike the crypto pins: neither field is a
+/// trust anchor. A wrong port or address can only make the master fail
+/// to connect, never accept a different node — the request signature,
+/// the TLS pin and the response signature are all checked regardless of
+/// where the connection went.
+pub async fn record_endpoint(
+    pool: &SqlitePool,
+    node_id: &str,
+    rpc_port: Option<u16>,
+    external_ip: Option<&str>,
+) -> Result<(), StateError> {
+    if rpc_port.is_none() && external_ip.is_none() {
+        return Ok(());
+    }
+    sqlx::query(
+        "UPDATE nodes SET rpc_port    = COALESCE(?, rpc_port),
+                          external_ip = COALESCE(?, external_ip)
+         WHERE node_id = ?",
+    )
+    .bind(rpc_port.map(i64::from))
+    .bind(external_ip)
     .bind(node_id)
     .execute(pool)
     .await?;
@@ -598,8 +651,10 @@ mod tests {
             "enrolled_at preserved across re-enroll"
         );
         assert_eq!(row.last_seen_at, 500, "last_seen bumped");
-        assert_eq!(row.secret_hash, "hash-b", "secret re-minted");
-        assert_eq!(row.label, "renamed");
+        assert_eq!(row.secret_hash, "hash-b", "secret hash stored");
+        // The label is the panel's to change (a rename survives re-running
+        // the installer); the address is refreshed.
+        assert_ne!(row.label, "renamed", "label kept on re-enroll");
         assert_eq!(row.public_ip.as_deref(), Some("2.2.2.2"));
         // Re-enrollment is the ONLY thing that clears the pinned crypto:
         // a reinstalled box legitimately brings a new cert + new
