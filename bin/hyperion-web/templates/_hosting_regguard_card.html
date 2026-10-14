@@ -21,7 +21,7 @@
       <form hx-post="/hostings/regguard" hx-target="#regguard-panel" hx-swap="outerHTML" hx-trigger="change">
         <input type="hidden" name="_csrf" value="{{ csrf_toggle }}">
         <input type="hidden" name="selector" value="{{ selector }}">
-        <label class="chk-switch" title="Works on native WordPress, WooCommerce and Paid Member Subscriptions. Runs as a must-use plugin — no dashboard entry, nothing for a customer to switch off by accident.">
+        <label class="chk-switch" title="Works on native WordPress, WooCommerce and Paid Member Subscriptions. Runs inside the Hyperion must-use plugin — nothing for a customer to switch off by accident; wp-admin shows its state under Tools → Hyperion.">
           <input type="checkbox" class="switch" name="enabled" value="on" aria-label="Block automated spam sign-ups"{% if view.enabled %} checked{% endif %}{% if !can_manage %} disabled{% endif %}>
         </label>
       </form>

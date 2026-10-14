@@ -42,7 +42,7 @@
     <div class="chk-fixes">
       <form hx-post="/hostings/wp/mail-repair" hx-target="#wpmail-panel" hx-swap="outerHTML"
             data-confirm-title="Configure WordPress mail"
-            data-confirm-body="Installs a must-use plugin that keeps the From address on this domain and records any send that fails. If mail has actually been failing and an SMTP plugin is handling it, Hyperion also takes sending back — and tells you it did."
+            data-confirm-body="Installs the Hyperion mail plugin, which records any send that fails and — unless rewriting is switched off below — keeps the From address on this domain. If mail has actually been failing and an SMTP plugin is handling it, Hyperion also takes sending back — and tells you it did."
             data-confirm-confirm-label="Configure">
         <input type="hidden" name="_csrf" value="{{ csrf_repair }}">
         <input type="hidden" name="selector" value="{{ selector }}">
@@ -75,17 +75,49 @@
     {% endif %}
     {% endif %}
 
-    {#- The switch for the check above, in the same row for the same reason
-        the permission one is: a page that lists problems while something
-        silently fixes them elsewhere is two halves of one story. Posts to the
-        OWNING node, which is where the five-minute tick reads the key. -#}
+    {#- The switches for the check above, in the same row for the same
+        reason the permission one is: a page that lists problems while
+        something silently fixes them elsewhere is two halves of one story.
+        Both post to the OWNING node, which is where the tick reads them. -#}
+    <form class="chk-foot" hx-post="/hostings/wp/mail-override" hx-target="#wpmail-panel" hx-swap="outerHTML"
+          {% if switches.rewrite %}
+          data-confirm-title="Stop rewriting this site's mail"
+          data-confirm-body="For a site that sends through its own SMTP server. Hyperion will no longer change the From address, and will not take sending over from an SMTP plugin even if it fails — failed sends are still recorded here. Mail From another domain then depends on the SMTP server being allowed to send for it."
+          data-confirm-confirm-label="Stop rewriting"
+          {% endif %}>
+      <input type="hidden" name="_csrf" value="{{ csrf_override }}">
+      <input type="hidden" name="selector" value="{{ selector }}">
+      {% if switches.rewrite %}
+        <input type="hidden" name="mode" value="off">
+        <span title="WordPress and its plugins may set any From address; one on another domain fails SPF and is dropped without a bounce, so Hyperion rewrites it to this site's own address.">
+          <strong>Hyperion rewrites the sender</strong> — a From address on another domain is replaced with this site's own
+        </span>
+        <button class="chk-link" type="submit">Turn off (own SMTP server)</button>
+      {% else %}
+        <input type="hidden" name="mode" value="on">
+        <span><strong>Hyperion leaves mail alone</strong> — the site's own From address and SMTP settings are used; failures are still recorded</span>
+        <button class="chk-link" type="submit">Rewrite the sender again</button>
+      {% endif %}
+    </form>
+    {% if switches.forced %}
+    <form class="chk-foot" hx-post="/hostings/wp/mail-override" hx-target="#wpmail-panel" hx-swap="outerHTML"
+          data-confirm-title="Hand sending back to the SMTP plugin"
+          data-confirm-body="Hyperion stops sending in the plugin's place and the plugin's own settings take effect again. Do this once its credentials are fixed: failures from before now are not counted again."
+          data-confirm-confirm-label="Hand back">
+      <input type="hidden" name="_csrf" value="{{ csrf_override }}">
+      <input type="hidden" name="selector" value="{{ selector }}">
+      <input type="hidden" name="mode" value="hand_back">
+      <span><strong>Hyperion is sending instead of the SMTP plugin</strong> — the plugin's sends were failing</span>
+      <button class="chk-link" type="submit">Hand back to the plugin</button>
+    </form>
+    {% endif %}
     <form class="chk-foot" hx-post="/hostings/wp/mail-autofix" hx-target="#wpmail-panel" hx-swap="outerHTML">
       <input type="hidden" name="_csrf" value="{{ csrf_autofix }}">
       <input type="hidden" name="selector" value="{{ selector }}">
-      {% if autofix_enabled %}
+      {% if switches.autofix %}
         <input type="hidden" name="enabled" value="off">
-        <span title="Hyperion keeps the sender pinned and the failure log running. Turning this off stops future changes; it does not undo past ones.">
-          <strong>Auto-configure on</strong> — sender kept pinned every five minutes
+        <span title="Hyperion keeps the mail plugin current and the failure log running. Turning this off stops future changes; it does not undo past ones.">
+          <strong>Auto-configure on</strong> — the mail plugin is kept current every five minutes
         </span>
         <button class="chk-link" type="submit">Turn off</button>
       {% else %}

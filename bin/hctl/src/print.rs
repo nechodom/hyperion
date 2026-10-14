@@ -1019,7 +1019,7 @@ pub fn print_pretty(resp: &Response) {
         }
         // The three self-check responses share one shape; print them the
         // same way the FTP check already is.
-        Response::WpMailSelfCheck(r) | Response::WpMailRepair(r) => {
+        Response::WpMailSelfCheck(r) | Response::WpMailRepair(r) | Response::WpMailOverrideSet(r) => {
             for it in &r.items {
                 println!("[{}] {}: {}", it.severity, it.label, it.detail);
             }

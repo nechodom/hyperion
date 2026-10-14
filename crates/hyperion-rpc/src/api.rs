@@ -995,6 +995,12 @@ pub trait AgentApi: Send + Sync + 'static {
         sel: HostingSelector,
         enabled: bool,
     ) -> Result<bool, RpcError>;
+    /// Per-site switch for Hyperion rewriting mail at all. Default ON.
+    async fn wp_mail_override_set(
+        &self,
+        sel: HostingSelector,
+        mode: String,
+    ) -> Result<hyperion_types::FtpCheckReport, RpcError>;
     async fn ftp_repair_site(&self, sel: HostingSelector) -> Result<String, RpcError>;
     async fn ftp_repair_node_config(&self) -> Result<String, RpcError>;
     async fn ftp_set_ftps(&self, enabled: bool, require_tls: bool) -> Result<String, RpcError>;

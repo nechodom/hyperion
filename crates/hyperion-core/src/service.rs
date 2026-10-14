@@ -11156,6 +11156,90 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         }
     }
 
+    /// May Hyperion change this site's mail at all? Absent or unreadable ⇒
+    /// yes, like the other switches: the pin is what keeps an unconfigured
+    /// site's mail from vanishing, so a read error must not drop it.
+    pub async fn wp_mail_override_enabled(&self, hosting_id: &str) -> bool {
+        match hyperion_state::hosting_kv::get(&self.pool, hosting_id, WP_MAIL_OVERRIDE_KV_KEY).await
+        {
+            Ok(Some(v)) => v.trim() != "off",
+            _ => true,
+        }
+    }
+
+    /// What the mail module may do on this site, and since when Hyperion
+    /// has been sending instead of an SMTP plugin (only while it may).
+    async fn wp_mail_policy(
+        &self,
+        hosting_id: &str,
+    ) -> (hyperion_adapters::wpmail::MailPolicy, Option<i64>) {
+        use hyperion_adapters::wpmail::MailPolicy;
+        if !self.wp_mail_override_enabled(hosting_id).await {
+            return (MailPolicy::HandsOff, None);
+        }
+        match self.wp_mail_force_local(hosting_id).await {
+            Some(at) => (MailPolicy::PinFromAndForceLocal, Some(at)),
+            None => (MailPolicy::PinFrom, None),
+        }
+    }
+
+    /// Change what Hyperion may do to one site's mail, and write the module
+    /// to match straight away — whatever the auto-configure switch says,
+    /// because this is an operator asking for it now.
+    ///
+    /// * `on` — rewrite a From address on another domain (the default).
+    /// * `off` — leave mail alone: for a site sending through its own SMTP
+    ///   server. Also hands mail back if Hyperion had taken it over.
+    /// * `hand_back` — stop sending instead of the SMTP plugin (its
+    ///   credentials were fixed), keep the sender rewrite.
+    pub async fn wp_mail_override_set(
+        &self,
+        sel: HostingSelector,
+        mode: String,
+    ) -> Result<hyperion_types::FtpCheckReport, RpcError> {
+        let detail = self.get(sel.clone()).await?;
+        let id = detail.id.as_str();
+        let mode = mode.trim().to_ascii_lowercase();
+        let set = |v: &'static str| {
+            hyperion_state::hosting_kv::set(&self.pool, id, WP_MAIL_OVERRIDE_KV_KEY, v, now_secs())
+        };
+        match mode.as_str() {
+            "on" => set("on").await,
+            "off" => set("off").await,
+            "hand_back" => Ok(()),
+            other => {
+                return Err(RpcError::Internal_with(format!(
+                    "unknown mail override mode {other:?} (on, off, hand_back)"
+                )))
+            }
+        }
+        .map_err(|e| RpcError::Internal_with(format!("wp mail override set: {e}")))?;
+        if mode != "on" {
+            hyperion_state::hosting_kv::delete(&self.pool, id, WP_MAIL_FORCE_LOCAL_KV_KEY)
+                .await
+                .map_err(|e| RpcError::Internal_with(format!("wp mail hand back: {e}")))?;
+        }
+        let now = now_secs();
+        hyperion_state::hosting_kv::set(
+            &self.pool,
+            id,
+            WP_MAIL_OVERRIDE_CHANGED_KV_KEY,
+            &now.to_string(),
+            now,
+        )
+        .await
+        .map_err(|e| RpcError::Internal_with(format!("wp mail override set: {e}")))?;
+        self.append_audit(
+            "hosting.wp_mail.override.set",
+            Some(id),
+            &serde_json::json!({ "domain": detail.domain, "mode": mode }).to_string(),
+            "ok",
+        )
+        .await;
+        self.wp_mail_apply(&detail).await?;
+        self.wp_mail_self_check(sel).await
+    }
+
     /// Everything we can say about one site's outgoing mail.
     ///
     /// Reads only — the repair is [`Self::wp_mail_repair`]. Reported through
@@ -11182,11 +11266,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let from = self
             .wp_mail_from_address(detail.id.as_str(), &detail.domain)
             .await;
-        let forced_at = self.wp_mail_force_local(detail.id.as_str()).await;
+        let (policy, forced_at) = self.wp_mail_policy(detail.id.as_str()).await;
         let log = wpmail::failure_log_path(&root)
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_default();
-        let expected = wpmail::render_mu_plugin(&detail.domain, &from, &log, forced_at.is_some());
+        let expected = wpmail::render_mu_plugin(&detail.domain, &from, &log, policy);
         let state = wpmail::mu_plugin_state(&root, &expected).await;
 
         if matches!(state, wpmail::MuState::NotWordPress) {
@@ -11221,14 +11305,40 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         }
 
         match state {
+            wpmail::MuState::Current if !policy.pins_from() => push(
+                "wp_mail_plugin",
+                "Hyperion does not rewrite this site's mail",
+                "info",
+                format!(
+                    "Rewriting is switched off for this site, so the From address and SMTP \
+                     settings WordPress uses go out unchanged — the setting for a site that sends \
+                     through its own SMTP server. Failed sends are still recorded. Mail From an \
+                     address outside {} relies on that server being allowed to send for it.",
+                    detail.domain
+                ),
+                "",
+            ),
             wpmail::MuState::Current => push(
                 "wp_mail_plugin",
                 "Sender is pinned to this domain",
                 "ok",
                 format!(
-                    "WordPress sends as {from}, which is what this domain's SPF record covers."
+                    "Hyperion rewrites any From address outside {} to {from}, which is what this \
+                     domain's SPF record covers; a sender already on the domain is left as it is. \
+                     A site that sends through its own SMTP server can have the rewrite switched \
+                     off below.",
+                    detail.domain
                 ),
                 "",
+            ),
+            wpmail::MuState::Missing if !policy.pins_from() => push(
+                "wp_mail_plugin",
+                "Failed sends are not being recorded",
+                "warn",
+                "Rewriting is switched off for this site, but the plugin that records failed \
+                 sends is not installed, so a broken SMTP setup would go unnoticed."
+                    .into(),
+                "site_repair",
             ),
             wpmail::MuState::Missing => push(
                 "wp_mail_plugin",
@@ -11328,12 +11438,21 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 "An SMTP plugin is handling mail",
                 if weekly > 0 { "warn" } else { "info" },
                 format!(
-                    "{} is active and sends the site's mail itself. {}",
+                    "{} is active and sends the site's mail itself. {}{}",
                     smtp.join(", "),
                     if weekly > 0 {
                         "Since sends are failing, its credentials are the first thing to check."
                     } else {
-                        "It is working, so Hyperion leaves it alone."
+                        "It is working, so Hyperion does not send in its place."
+                    },
+                    if policy.pins_from() {
+                        format!(
+                            " Hyperion still rewrites a From address outside {} to {from}; if \
+                             the SMTP server needs its own sender address, switch the rewrite off.",
+                            detail.domain
+                        )
+                    } else {
+                        String::new()
                     }
                 ),
                 if weekly > 0 { "site_repair" } else { "" },
@@ -11347,7 +11466,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 format!(
                     "Since {}, Hyperion has been overriding the SMTP plugin and sending through \
                      this server's own mail path, because sends were failing. Fix the plugin's \
-                     credentials and turn this off to hand it back.",
+                     credentials, then hand sending back to it below.",
                     iso_date(&LetterCatalog::default(), at)
                 ),
                 "",
@@ -11394,16 +11513,28 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let log = wpmail::failure_log_path(&root)
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_default();
-        let mut forced_at = self.wp_mail_force_local(id).await;
+        let (mut policy, forced_at) = self.wp_mail_policy(id).await;
 
         // Has mail been failing, and is something in the way?
         // `log` above is the log's PATH, which goes into the plugin; this is
         // its CONTENT.
         let failures = wpmail::read_failure_log(&root, 20).await;
+        // Only since the operator last touched the switch: failures from
+        // before a hand-back are the ones they just fixed.
+        let changed_at =
+            hyperion_state::hosting_kv::get(&self.pool, id, WP_MAIL_OVERRIDE_CHANGED_KV_KEY)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|v| v.trim().parse::<i64>().ok())
+                .unwrap_or(0);
+        let since = (now_secs() - 7 * 86_400).max(changed_at);
         // Unreadable is not "failing": taking mail off a working SMTP plugin
         // because we could not open a log file would be acting on nothing.
-        let failing = wpmail::failures_since(failures.lines(), now_secs() - 7 * 86_400) > 0;
-        if failing && forced_at.is_none() {
+        let failing = wpmail::failures_since(failures.lines(), since) > 0;
+        // Never while rewriting is switched off: that site chose its SMTP
+        // server, and its failures are for the card to report.
+        if failing && forced_at.is_none() && policy.pins_from() {
             let active: Vec<String> =
                 match hyperion_adapters::wpcli::plugin_list(&user, &root).await {
                     Ok((p, _)) => p
@@ -11424,7 +11555,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     now,
                 )
                 .await;
-                forced_at = Some(now);
+                policy = wpmail::MailPolicy::PinFromAndForceLocal;
                 // Announced, not quiet: this overrides a decision somebody
                 // made deliberately, and an operator who does not know it
                 // happened cannot explain it to their customer.
@@ -11439,7 +11570,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             }
         }
 
-        let contents = wpmail::render_mu_plugin(&detail.domain, &from, &log, forced_at.is_some());
+        let contents = wpmail::render_mu_plugin(&detail.domain, &from, &log, policy);
         match wpmail::mu_plugin_state(&root, &contents).await {
             wpmail::MuState::Current | wpmail::MuState::NotWordPress => Ok(false),
             _ => {
@@ -11517,6 +11648,166 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                         "wp_mail_failing",
                     )
                     .await;
+                }
+            }
+        }
+        Ok(acted)
+    }
+
+    /// Keep every WordPress site's Hyperion plugin in shape, and tell its
+    /// status page what we see.
+    ///
+    /// Per active WordPress hosting: move pre-merge top-level files into the
+    /// plugin's module directory, keep the loader current, reland the spam
+    /// guard when the operator has it on but the file on disk is older than
+    /// this agent's, and write `status.php` — the page in wp-admin reads its
+    /// age as "is Hyperion still looking after this site?".
+    ///
+    /// The status is rewritten when what it says changes, and otherwise once
+    /// an hour, so a node with hundreds of sites is not rewriting hundreds of
+    /// files every five minutes. Returns how many sites had a plugin file
+    /// written (status refreshes do not count).
+    pub async fn wp_plugin_tick(&self) -> Result<i64, RpcError> {
+        use hyperion_adapters::{regguard, wpmail, wpplugin};
+        // hosting id → (status without its timestamp, when last written).
+        static WRITTEN: std::sync::OnceLock<std::sync::Mutex<HashMap<String, (String, i64)>>> =
+            std::sync::OnceLock::new();
+        let written = WRITTEN.get_or_init(Default::default);
+        let now = now_secs();
+        let mut acted = 0i64;
+        for s in self.list().await? {
+            if s.state != HostingState::Active {
+                continue;
+            }
+            let Ok(detail) = self.get(HostingSelector::Id(s.id.clone())).await else {
+                continue;
+            };
+            let root = detail.root_dir.trim().to_string();
+            let user = detail.system_user.trim().to_string();
+            if root.is_empty()
+                || user.is_empty()
+                || !std::path::Path::new(&root).join("wp-content").is_dir()
+            {
+                continue;
+            }
+            let id = detail.id.as_str();
+            // "Report only" means Hyperion adds nothing to the site on its
+            // own. A site switched to it that carries no Hyperion file yet
+            // stays that way; one that already has the plugin keeps it
+            // current, since a stale copy is worse than either.
+            let has_any = std::path::Path::new(&root)
+                .join("wp-content/mu-plugins")
+                .join(wpplugin::LOADER_FILE)
+                .exists()
+                || std::path::Path::new(&root)
+                    .join("wp-content/mu-plugins")
+                    .join(wpplugin::MODULE_DIR)
+                    .exists()
+                || wpplugin::Module::ALL.iter().any(|m| {
+                    std::path::Path::new(&root)
+                        .join("wp-content/mu-plugins")
+                        .join(m.legacy_file())
+                        .exists()
+                });
+            if !has_any && !self.wp_mail_autofix_enabled(id).await {
+                continue;
+            }
+            let mut wrote = false;
+            match wpplugin::adopt_legacy(&root, &user).await {
+                Ok(n) => wrote |= n > 0,
+                Err(e) => {
+                    tracing::warn!(domain = %detail.domain, error = %e, "wp plugin: legacy files not moved")
+                }
+            }
+            match wpplugin::ensure_loader(&root, &user).await {
+                Ok(w) => wrote |= w,
+                Err(e) => {
+                    tracing::warn!(domain = %detail.domain, error = %e, "wp plugin: loader not written");
+                    continue;
+                }
+            }
+            // The spam guard used to reland only when somebody toggled it,
+            // so a corrected guard never reached the sites that had it on.
+            let guard_on = matches!(
+                hyperion_state::hosting_kv::get(&self.pool, id, "regguard_enabled").await,
+                Ok(Some(v)) if v == "1"
+            );
+            if guard_on && !regguard::is_installed(&root).await {
+                match regguard::install(&root, &user).await {
+                    Ok(w) => wrote |= w,
+                    Err(e) => {
+                        tracing::warn!(domain = %detail.domain, error = %e, "wp plugin: spam guard not written")
+                    }
+                }
+            }
+            if wrote {
+                acted += 1;
+            }
+
+            // What the status page shows.
+            let mail = if wpplugin::module_contents(&root, wpplugin::Module::Mail)
+                .await
+                .is_some()
+            {
+                let (policy, _) = self.wp_mail_policy(id).await;
+                // Unreadable says nothing, rather than "no failures".
+                let failures_7d = match wpmail::read_failure_log(&root, 200).await {
+                    wpmail::FailureLog::Read(lines) => {
+                        Some(wpmail::failures_since(&lines, now - 7 * 86_400))
+                    }
+                    wpmail::FailureLog::Absent => Some(0),
+                    wpmail::FailureLog::Unreadable => None,
+                };
+                Some(wpplugin::MailStatus {
+                    from: self.wp_mail_from_address(id, &detail.domain).await,
+                    failures_7d,
+                    forced_local: policy.forces_local(),
+                    pin_from: policy.pins_from(),
+                })
+            } else {
+                None
+            };
+            let runs = hyperion_state::backups::list_for(&self.pool, &detail.id, 50)
+                .await
+                .unwrap_or_default();
+            let backup = wpplugin::BackupStatus {
+                last_ok_at: runs
+                    .iter()
+                    .find(|r| r.state == "ok")
+                    .map(|r| r.finished_at.unwrap_or(r.started_at)),
+                last_failed_at: runs
+                    .iter()
+                    .find(|r| r.state == "failed")
+                    .map(|r| r.finished_at.unwrap_or(r.started_at)),
+            };
+            let mut status = wpplugin::SiteStatus {
+                checked_at: 0,
+                agent: self.current_git_sha.chars().take(12).collect(),
+                node: self.current_node_id(),
+                domain: detail.domain.clone(),
+                mail,
+                backup,
+            };
+            let key = serde_json::to_string(&status).unwrap_or_default();
+            let due = match written.lock() {
+                Ok(m) => match m.get(id) {
+                    Some((k, at)) => *k != key || now - at >= 3_600,
+                    None => true,
+                },
+                Err(_) => true,
+            };
+            if !due {
+                continue;
+            }
+            status.checked_at = now;
+            match wpplugin::write_status(&root, &user, &status).await {
+                Ok(_) => {
+                    if let Ok(mut m) = written.lock() {
+                        m.insert(id.to_string(), (key, now));
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(domain = %detail.domain, error = %e, "wp plugin: status not written")
                 }
             }
         }
@@ -36392,6 +36683,15 @@ const WP_MAIL_AUTOFIX_KV_KEY: &str = "wp_mail_autofix_enabled";
 const WP_MAIL_FORCE_LOCAL_KV_KEY: &str = "wp_mail_force_local_at";
 /// Operator override for the sender address; absent ⇒ `wordpress@<domain>`.
 const WP_MAIL_FROM_KV_KEY: &str = "wp_mail_from";
+/// Per-site switch for Hyperion rewriting the site's mail at all (sender
+/// pin, SMTP takeover). Absent ⇒ ON; `off` is for a site on its own SMTP
+/// server whose provider wants the account's own From address.
+const WP_MAIL_OVERRIDE_KV_KEY: &str = "wp_mail_override";
+/// Unix seconds of the operator's last change to that switch. Failures
+/// recorded before it are not evidence for a takeover: they are what the
+/// operator just dealt with, and counting them took mail straight back off
+/// the SMTP plugin on the next tick after it was handed back.
+const WP_MAIL_OVERRIDE_CHANGED_KV_KEY: &str = "wp_mail_override_changed_at";
 /// Last automated page walk, as JSON.
 const SITE_CHECK_KV_KEY: &str = "site_check_last";
 
@@ -47942,6 +48242,105 @@ mod tests {
         let secrets_dir = tempfile::tempdir().expect("dir");
         let secrets = Arc::new(SecretsStore::new(secrets_dir.keep()));
         HostingService::new(pool, Arc::new(a), secrets)
+    }
+
+    /// The mail-rewrite switch, end to end on a real WordPress-shaped tree:
+    /// `off` writes a module that changes nothing and hands sending back,
+    /// `on` pins the sender again, `hand_back` keeps the pin but stops the
+    /// takeover — and a takeover stamp never survives `off`.
+    #[tokio::test]
+    async fn wp_mail_override_switch_rewrites_the_module() {
+        use hyperion_adapters::wpmail;
+        let pool = open_memory().await.expect("memory db");
+        let s = svc(pool.clone(), MockAdapterPort::new());
+        let site = tempfile::tempdir().expect("tmp");
+        let root = site.path().join("htdocs");
+        std::fs::create_dir_all(root.join("wp-content")).expect("wp-content");
+        let suid = system_users::insert(
+            &pool,
+            "web_mail_cz",
+            5001,
+            "/home/web_mail_cz",
+            "/bin/bash",
+            now_secs(),
+        )
+        .await
+        .expect("user");
+        let id = HostingId::new_v7();
+        hostings::insert(
+            &pool,
+            &id,
+            "mail.cz",
+            suid,
+            None,
+            &root.to_string_lossy(),
+            now_secs(),
+            None,
+        )
+        .await
+        .expect("hosting");
+        let sel = HostingSelector::Id(id.clone());
+        let module = || {
+            std::fs::read_to_string(wpmail::mu_plugin_path(&root.to_string_lossy()))
+                .expect("module written")
+        };
+
+        // Hyperion had taken sending over; the operator says "own SMTP".
+        hyperion_state::hosting_kv::set(&pool, id.as_str(), WP_MAIL_FORCE_LOCAL_KV_KEY, "1", 1)
+            .await
+            .expect("kv");
+        let report = s
+            .wp_mail_override_set(sel.clone(), "off".into())
+            .await
+            .expect("off");
+        assert!(module().contains("define('HYPERION_MAIL_PIN_FROM', false);"));
+        assert!(module().contains("define('HYPERION_MAIL_FORCE_LOCAL', false);"));
+        assert_eq!(
+            hyperion_state::hosting_kv::get(&pool, id.as_str(), WP_MAIL_FORCE_LOCAL_KV_KEY)
+                .await
+                .expect("kv"),
+            None,
+            "turning rewriting off must hand sending back"
+        );
+        let item = report
+            .items
+            .iter()
+            .find(|i| i.id == "wp_mail_plugin")
+            .expect("plugin item");
+        assert_eq!(item.severity, "info", "{item:?}");
+        assert!(item.label.contains("does not rewrite"), "{item:?}");
+
+        // Back on: the sender is pinned again, and the card says so.
+        let report = s
+            .wp_mail_override_set(sel.clone(), "on".into())
+            .await
+            .expect("on");
+        assert!(module().contains("define('HYPERION_MAIL_PIN_FROM', true);"));
+        let item = report
+            .items
+            .iter()
+            .find(|i| i.id == "wp_mail_plugin")
+            .expect("plugin item");
+        assert!(
+            item.detail
+                .contains("rewrites any From address outside mail.cz"),
+            "{item:?}"
+        );
+
+        // Taken over again, then handed back: pin stays, takeover goes.
+        hyperion_state::hosting_kv::set(&pool, id.as_str(), WP_MAIL_FORCE_LOCAL_KV_KEY, "1", 1)
+            .await
+            .expect("kv");
+        s.wp_mail_override_set(sel.clone(), "hand_back".into())
+            .await
+            .expect("hand back");
+        assert!(module().contains("define('HYPERION_MAIL_PIN_FROM', true);"));
+        assert!(module().contains("define('HYPERION_MAIL_FORCE_LOCAL', false);"));
+
+        assert!(s
+            .wp_mail_override_set(sel, "sideways".into())
+            .await
+            .is_err());
     }
 
     #[tokio::test]

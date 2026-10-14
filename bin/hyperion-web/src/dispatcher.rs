@@ -316,7 +316,9 @@ fn timeout_for_request(req: &Request) -> u64 {
         Request::GitSyncCheck { .. } => 660,
         // A repair writes the mu-plugin and may run wp-cli to enumerate
         // plugins, which on a cold site is seconds, not milliseconds.
-        Request::WpMailSelfCheck { .. } | Request::WpMailRepair { .. } => 300,
+        Request::WpMailSelfCheck { .. }
+        | Request::WpMailRepair { .. }
+        | Request::WpMailOverrideSet { .. } => 300,
         // Fans out per hosting on the node: activations plus one kv read
         // each, so it scales with the estate rather than being constant.
         Request::CareOverview { .. } => 120,

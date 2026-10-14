@@ -156,23 +156,44 @@ impl RealAdapter {
     }
 }
 
-/// The WordPress must-use plugin that makes a preview vhost usable.
+/// The Hyperion plugin module that makes a preview vhost usable.
 ///
 /// Keyed on the `HYPERION_PREVIEW_HOST` fastcgi param, which only the
 /// preview server block sets — so on the real vhost this file does
-/// nothing and normal visitors never touch this code path.
+/// nothing and normal visitors never touch this code path. A request header
+/// cannot forge it: headers reach PHP as `HTTP_*`, never under this name.
 const PREVIEW_SHIM_PHP: &str = r#"<?php
 /**
- * Hyperion preview shim (managed — do not edit).
+ * Hyperion preview — loaded by mu-plugins/hyperion.php (managed — do not edit).
  *
  * When a request arrives through the node's internal preview vhost (which
  * sets the HYPERION_PREVIEW_HOST fastcgi param), keep WordPress ON that
  * hostname instead of bouncing to the site's real Site Address. On the
  * real vhost the param is absent and this whole block is skipped.
  */
-if (!empty($_SERVER['HYPERION_PREVIEW_HOST'])) {
-    $hyp_host = $_SERVER['HYPERION_PREVIEW_HOST'];
+if (!defined('ABSPATH')) { exit; }
+if (!empty($_SERVER['HYPERION_PREVIEW_HOST']) && !defined('HYPERION_PREVIEW_HOST')) {
+    define('HYPERION_PREVIEW_HOST', strtolower((string) $_SERVER['HYPERION_PREVIEW_HOST']));
+    $hyp_host = HYPERION_PREVIEW_HOST;
     $hyp_url  = 'https://' . $hyp_host;
+
+    // The site's REAL hostnames, read before the filters below change what
+    // get_option() answers (WP_HOME / WP_SITEURL are already folded in by
+    // core's own option filters, which load before mu-plugins). Only these
+    // are rewritten: a redirect to a payment gateway or an OAuth provider
+    // has to leave the site, and pinning every redirect to the preview host
+    // sent those to a 404 on the preview instead.
+    $hyp_real = array();
+    foreach (array(get_option('home'), get_option('siteurl')) as $hyp_u) {
+        $hyp_h = is_string($hyp_u) ? parse_url($hyp_u, PHP_URL_HOST) : null;
+        if (is_string($hyp_h) && $hyp_h !== '') {
+            $hyp_h = strtolower($hyp_h);
+            $hyp_real[$hyp_h] = true;
+            $hyp_real[strpos($hyp_h, 'www.') === 0 ? substr($hyp_h, 4) : 'www.' . $hyp_h] = true;
+        }
+    }
+    unset($hyp_real[$hyp_host], $hyp_u, $hyp_h);
+    $hyp_real = array_keys($hyp_real);
 
     // Force home/siteurl to the preview host. Priority 999 so this beats
     // WordPress's own _config_wp_home/_config_wp_siteurl (priority 10),
@@ -182,25 +203,53 @@ if (!empty($_SERVER['HYPERION_PREVIEW_HOST'])) {
     add_filter('option_home',    function () use ($hyp_url) { return $hyp_url; }, 999);
     add_filter('option_siteurl', function () use ($hyp_url) { return $hyp_url; }, 999);
 
-    // Rewrite the HOST of any generated URL to the preview host, so links
-    // and assets resolve here rather than at the real domain.
-    $hyp_rewrite = function ($url) use ($hyp_host) {
+    // Rewrite the host of a URL to the preview host — when it is one of the
+    // site's own. Relative URLs and foreign hosts pass through unchanged.
+    $hyp_rewrite = function ($url) use ($hyp_url, $hyp_real) {
         if (!is_string($url) || $url === '') { return $url; }
-        return preg_replace('#^(https?://)[^/]+#i', '${1}' . $hyp_host, $url);
+        return preg_replace_callback('#^(?:https?:)?//([^/:?\#]+)(?::\d+)?#i', function ($m) use ($hyp_url, $hyp_real) {
+            return in_array(strtolower($m[1]), $hyp_real, true) ? $hyp_url : $m[0];
+        }, $url, 1);
     };
     add_filter('home_url', $hyp_rewrite, 999);
     add_filter('site_url', $hyp_rewrite, 999);
+    add_filter('content_url', $hyp_rewrite, 999);
+    add_filter('plugins_url', $hyp_rewrite, 999);
 
-    // The catch-all: EVERY WordPress redirect goes through wp_redirect(),
-    // and this pins its target back onto the preview host. So a canonical
-    // bounce, a login redirect, an SSL/security plugin, whatever — none of
-    // them can send the visitor to the real domain. This is what makes the
-    // preview reliable regardless of the site's plugins or constants.
+    // The catch-all for redirects: EVERY WordPress redirect goes through
+    // wp_redirect(), so a canonical bounce, a login redirect or an SSL
+    // plugin cannot send the visitor back to the real domain.
     add_filter('wp_redirect', $hyp_rewrite, 999);
 
     // And drop the canonical redirect outright (registered before
     // mu-plugins load, so remove_action here takes effect).
     remove_action('template_redirect', 'redirect_canonical');
+
+    // Absolute URLs stored in the content itself — every image in every
+    // post, page-builder CSS, menus — still name the real domain, which
+    // before the DNS cutover is the OLD server or nothing at all. Rewrite
+    // them in the response, preview requests only, text responses only.
+    if ($hyp_real) {
+        $hyp_quoted = implode('|', array_map(function ($h) { return preg_quote($h, '#'); }, $hyp_real));
+        ob_start(function ($out) use ($hyp_host, $hyp_quoted) {
+            if (!is_string($out) || $out === '') { return $out; }
+            foreach (headers_list() as $h) {
+                if (stripos($h, 'content-type:') === 0 && !preg_match('#text/|json|xml|javascript#i', $h)) {
+                    return $out;
+                }
+            }
+            // `//host`, `http(s)://host`, and the JSON-escaped `https:\/\/host`,
+            // but not a longer name that merely starts with the host.
+            return preg_replace_callback(
+                '#(?:https?:)?(//|\\\\/\\\\/)(?:' . $hyp_quoted . ')(?::\d+)?(?![a-z0-9-]|\.[a-z0-9])#i',
+                function ($m) use ($hyp_host) {
+                    return $m[1] === '//' ? 'https://' . $hyp_host : 'https:\/\/' . $hyp_host;
+                },
+                $out
+            );
+        });
+    }
+    unset($hyp_host, $hyp_url, $hyp_real, $hyp_rewrite, $hyp_quoted);
 }
 "#;
 
@@ -226,78 +275,35 @@ impl RealAdapter {
     }
 }
 
-/// Write or remove `wp-content/mu-plugins/hyperion-preview.php`.
+/// Write or remove the preview module of the Hyperion plugin.
 ///
 /// Only touches WordPress sites (detected by an existing `wp-content`),
 /// and only when a preview vhost is being written. Best-effort: a failure
 /// to write the shim must not fail the vhost write — the site still
 /// serves, the preview just keeps redirecting until the next converge.
+/// Path safety (the tree is tenant-owned, this runs as root) lives in
+/// `hyperion_adapters::wpplugin`.
 async fn ensure_preview_shim(root_dir: &str, system_user: &str, preview_active: bool) {
-    let wp_content = std::path::Path::new(root_dir).join("wp-content");
-    // Not WordPress (no wp-content) ⇒ nothing to do.
-    if !tokio::fs::try_exists(&wp_content).await.unwrap_or(false) {
+    use hyperion_adapters::wpplugin::{self, Module};
+    if !std::path::Path::new(root_dir).join("wp-content").is_dir() {
         return;
     }
-    // `remove_file` unlinks a symlink rather than its target, so clearing
-    // the shim needs no resolution.
-    let shim_logical = wp_content.join("mu-plugins").join("hyperion-preview.php");
     if !preview_active {
         // No preview for this site anymore — remove a shim we may have
         // dropped before, so it can't linger.
-        let _ = tokio::fs::remove_file(&shim_logical).await;
+        wpplugin::remove_module(root_dir, Module::Preview).await;
         return;
     }
-    // Everything below runs as ROOT in a tree the TENANT owns. Resolving
-    // `mu-plugins` by name let a symlink there be followed by create_dir_all
-    // (which dereferences), by the write, and by a chown with no `-h` —
-    // which hands the tenant whatever they pointed at. `resolve_inside_jail`
-    // refuses a symlink at any segment and pins the result inside the site.
-    let Ok(mu_dir) = hyperion_adapters::files::resolve_inside_jail(
-        std::path::Path::new(root_dir),
-        "wp-content/mu-plugins",
-    )
-    .await
-    else {
-        tracing::warn!(
-            root_dir,
-            "preview shim: refusing a symlinked mu-plugins path"
-        );
-        return;
-    };
-    if tokio::fs::create_dir_all(&mu_dir).await.is_err() {
+    if wpplugin::module_state(root_dir, Module::Preview, PREVIEW_SHIM_PHP).await
+        == wpplugin::FileState::Current
+    {
         return;
     }
-    // The NAME is ours to manage, so a symlink sitting on it is cleared
-    // rather than refused — otherwise a tenant disables the preview shim
-    // permanently by planting one link.
-    let logical = mu_dir.join("hyperion-preview.php");
-    if let Ok(md) = tokio::fs::symlink_metadata(&logical).await {
-        if md.file_type().is_symlink() {
-            let _ = tokio::fs::remove_file(&logical).await;
-        }
+    if let Err(e) =
+        wpplugin::install_module(root_dir, system_user, Module::Preview, PREVIEW_SHIM_PHP).await
+    {
+        tracing::warn!(root_dir, error = %e, "preview shim: not written");
     }
-    let Ok(shim) = hyperion_adapters::files::resolve_inside_jail(
-        std::path::Path::new(root_dir),
-        "wp-content/mu-plugins/hyperion-preview.php",
-    )
-    .await
-    else {
-        return;
-    };
-    if tokio::fs::write(&shim, PREVIEW_SHIM_PHP).await.is_err() {
-        return;
-    }
-    // The site runs as its own user; a root-owned mu-plugin is readable by
-    // PHP-FPM anyway, but chown keeps the tree uniform (and lets the site
-    // owner delete it over FTP). `-h` because chown dereferences by default,
-    // which is the whole escalation this function used to allow.
-    let _ = tokio::process::Command::new("/usr/bin/chown")
-        .arg("-h")
-        .arg(format!("{system_user}:{system_user}"))
-        .arg(&mu_dir)
-        .arg(&shim)
-        .output()
-        .await;
 }
 
 /// Resolved internal-preview server block for one hosting.
@@ -1834,7 +1840,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tmp");
         let root = tmp.path().join("htdocs");
         std::fs::create_dir_all(&root).expect("mkdir");
-        let shim = root.join("wp-content/mu-plugins/hyperion-preview.php");
+        let shim = root.join("wp-content/mu-plugins/hyperion/preview.php");
 
         // Not WordPress yet (no wp-content) ⇒ nothing written even with a
         // preview active.
@@ -2442,7 +2448,7 @@ mod preview_shim_symlink_tests {
         ensure_preview_shim(&root.to_string_lossy(), "victim", true).await;
 
         assert!(
-            !outside.path().join("hyperion-preview.php").exists(),
+            !outside.path().join("hyperion").exists(),
             "root wrote outside the site through a symlink"
         );
     }
@@ -2459,7 +2465,8 @@ mod preview_shim_symlink_tests {
         let shim = root
             .join("wp-content")
             .join("mu-plugins")
-            .join("hyperion-preview.php");
+            .join("hyperion")
+            .join("preview.php");
         assert!(shim.exists(), "the shim was not installed");
     }
 }

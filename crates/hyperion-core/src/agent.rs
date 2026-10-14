@@ -2227,6 +2227,13 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
     ) -> Result<bool, RpcError> {
         self.svc.wp_mail_autofix_set(sel, enabled).await
     }
+    async fn wp_mail_override_set(
+        &self,
+        sel: HostingSelector,
+        mode: String,
+    ) -> Result<hyperion_types::FtpCheckReport, RpcError> {
+        self.svc.wp_mail_override_set(sel, mode).await
+    }
     async fn package_activate(
         &self,
         sel: HostingSelector,

@@ -44,6 +44,7 @@ pub mod users;
 pub mod waflog;
 pub mod wpcli;
 pub mod wpmail;
+pub mod wpplugin;
 
 pub mod files;
 

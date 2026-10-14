@@ -1800,6 +1800,12 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
                 Err(e) => Response::Error(e),
             }
         }
+        Request::WpMailOverrideSet { sel, mode } => {
+            match api.wp_mail_override_set(sel, mode).await {
+                Ok(r) => Response::WpMailOverrideSet(r),
+                Err(e) => Response::Error(e),
+            }
+        }
         Request::FtpSelfCheck { sel } => match api.ftp_self_check(sel).await {
             Ok(r) => Response::FtpSelfCheck(r),
             Err(e) => Response::Error(e),
@@ -3842,6 +3848,13 @@ mod tests {
         }
         async fn wp_mail_autofix_set(&self, _: HostingSelector, _: bool) -> Result<bool, RpcError> {
             Ok(true)
+        }
+        async fn wp_mail_override_set(
+            &self,
+            _: HostingSelector,
+            _: String,
+        ) -> Result<hyperion_types::FtpCheckReport, RpcError> {
+            Ok(Default::default())
         }
         async fn package_activate(
             &self,

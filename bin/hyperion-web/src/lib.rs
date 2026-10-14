@@ -967,6 +967,10 @@ pub fn build_router(state: SharedState) -> Router {
             post(handlers::hostings::post_wpmail_autofix),
         )
         .route(
+            "/hostings/wp/mail-override",
+            post(handlers::hostings::post_wpmail_override),
+        )
+        .route(
             "/hostings/:selector/perm-panel",
             get(handlers::hostings::get_perm_panel),
         )

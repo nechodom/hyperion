@@ -1007,6 +1007,17 @@ async fn main() -> anyhow::Result<()> {
                     Ok(_) => {}
                     Err(e) => tracing::warn!(error=%e, "wp mail tick failed"),
                 }
+                // The one Hyperion plugin every WordPress site carries: old
+                // single-file copies moved into it, the loader and spam
+                // guard kept current, and the wp-admin status page told what
+                // this node last saw.
+                match tick_svc.wp_plugin_tick().await {
+                    Ok(n) if n > 0 => {
+                        tracing::info!(sites = n, "wp plugin: wrote plugin files")
+                    }
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!(error=%e, "wp plugin tick failed"),
+                }
                 match tick_svc.ftp_autoheal_tick().await {
                     Ok(n) if n > 0 => {
                         tracing::warn!(healed = n, "ftp autoheal: repaired FTP roots")

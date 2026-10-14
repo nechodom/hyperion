@@ -43,75 +43,300 @@ use std::path::{Path, PathBuf};
 /// The self-check compares this against the marker inside the file on disk,
 /// so an agent update lands a corrected plugin on the next pass instead of
 /// waiting for somebody to notice the old one is still there.
-pub const MU_PLUGIN_VERSION: u32 = 1;
+pub const MU_PLUGIN_VERSION: u32 = 3;
 
-/// File name under `wp-content/mu-plugins/`.
-pub const MU_PLUGIN_FILE: &str = "hyperion-mail.php";
+/// This feature's file within the Hyperion plugin.
+pub const MODULE: crate::wpplugin::Module = crate::wpplugin::Module::Mail;
 
-/// `{{FROM}}`, `{{DOMAIN}}`, `{{VERSION}}`, `{{LOG}}` and `{{FORCE_LOCAL}}`
-/// are substituted before the file is written.
+/// `{{FROM}}`, `{{DOMAIN}}`, `{{VERSION}}`, `{{LOG}}`, `{{PIN_FROM}}` and
+/// `{{FORCE_LOCAL}}` are substituted before the file is written.
 ///
 /// Everything in here runs on every request of every site, so it is written
 /// to do nothing at all in the common case: three filters and one action,
 /// no I/O unless a send actually fails.
 const MU_PLUGIN_TEMPLATE: &str = r#"<?php
 /**
- * Plugin Name: Hyperion mail
- * Description: Keeps this site's outgoing mail on its own domain so it passes SPF, and records any send that fails. Managed by Hyperion — edits are overwritten.
+ * Hyperion mail — loaded by mu-plugins/hyperion.php.
+ *
+ * Keeps this site's outgoing mail on its own domain so it passes SPF, and
+ * records any send that fails. Managed by Hyperion — edits are overwritten.
  * Version: {{VERSION}}
  */
 if (!defined('ABSPATH')) { exit; }
+if (defined('HYPERION_MAIL_VERSION')) { return; }
 
 define('HYPERION_MAIL_VERSION', {{VERSION}});
 define('HYPERION_MAIL_DOMAIN', '{{DOMAIN}}');
 define('HYPERION_MAIL_FROM', '{{FROM}}');
 define('HYPERION_MAIL_LOG', '{{LOG}}');
+/*
+ * Off when the operator switched Hyperion's rewriting off for this site —
+ * a site sending through its own SMTP server, whose provider insists on the
+ * account's own From address. Then nothing below changes a single message;
+ * only failed sends are still recorded.
+ */
+define('HYPERION_MAIL_PIN_FROM', {{PIN_FROM}});
 define('HYPERION_MAIL_FORCE_LOCAL', {{FORCE_LOCAL}});
 
-/**
- * Keep the From address on this site's own domain.
- *
- * An address on another domain fails SPF at the receiving end — the mail
- * leaves this server, is accepted, and is then dropped by the recipient with
- * no bounce. A sender that is already ours (the domain itself or any
- * subdomain of it) is left exactly as the site set it: this is a floor, not
- * a policy.
- */
-add_filter('wp_mail_from', function ($from) {
-    $ours = HYPERION_MAIL_DOMAIN;
-    if (is_string($from) && $from !== '' && strpos($from, '@') !== false) {
-        $parts = explode('@', $from);
-        $domain = strtolower(end($parts));
-        if ($domain === $ours || substr($domain, -(strlen($ours) + 1)) === '.' . $ours) {
-            return $from;
+if (HYPERION_MAIL_PIN_FROM) {
+    /**
+     * Keep the From address on this site's own domain.
+     *
+     * An address on another domain fails SPF at the receiving end — the mail
+     * leaves this server, is accepted, and is then dropped by the recipient
+     * with no bounce. A sender that is already ours (the domain itself or any
+     * subdomain of it) is left exactly as the site set it: this is a floor,
+     * not a policy.
+     */
+    add_filter('wp_mail_from', function ($from) {
+        $ours = HYPERION_MAIL_DOMAIN;
+        if (is_string($from) && strpos($from, '@') !== false) {
+            $parts = explode('@', trim($from));
+            $domain = strtolower(end($parts));
+            if ($domain === $ours || substr($domain, -(strlen($ours) + 1)) === '.' . $ours) {
+                return trim($from);
+            }
         }
-    }
-    return HYPERION_MAIL_FROM;
-}, 99);
+        return HYPERION_MAIL_FROM;
+    }, 99);
 
-/** A blank From name makes the mail look like spam to a human reader. */
-add_filter('wp_mail_from_name', function ($name) {
-    if (is_string($name) && trim($name) !== '' && $name !== 'WordPress') {
-        return $name;
-    }
-    $site = get_bloginfo('name');
-    return $site !== '' ? $site : HYPERION_MAIL_DOMAIN;
-}, 99);
+    /** A blank From name makes the mail look like spam to a human reader. */
+    add_filter('wp_mail_from_name', function ($name) {
+        if (is_string($name) && trim($name) !== '' && $name !== 'WordPress') {
+            return $name;
+        }
+        $site = wp_specialchars_decode(get_bloginfo('name'), ENT_QUOTES);
+        return $site !== '' ? $site : HYPERION_MAIL_DOMAIN;
+    }, 99);
+}
 
 /**
  * Send through the local mail transport, ignoring any SMTP plugin.
  *
  * Off unless Hyperion turned it on, and Hyperion only turns it on after
  * mail has actually been failing: an SMTP plugin with working credentials
- * is the site owner's choice and is none of our business. When it IS on,
- * this runs at priority 1000 so it lands after the plugin that configured
- * SMTP rather than before it.
+ * is the site owner's choice and is none of our business. Plugins take mail
+ * over in three different ways, so there are three answers:
+ *
+ * - phpmailer_init (most SMTP plugins): put the transport back at priority
+ *   1000, after the plugin set its SMTP host.
+ * - WP Mail SMTP and Easy WP SMTP API mailers swap in their own mailer whose
+ *   send() ignores that. Their documented constants override their saved
+ *   settings, and this file loads before any plugin.
+ * - FluentSMTP and Post SMTP replace wp_mail() itself, but still ask core's
+ *   pre_wp_mail filter first — answered here by sending through mail().
+ *   Mail Bank replaces it without asking, so for Mail Bank this file owns
+ *   wp_mail() before Mail Bank loads (it only defines it when nobody has).
  */
 if (HYPERION_MAIL_FORCE_LOCAL) {
+    if (!defined('WPMS_ON')) { define('WPMS_ON', true); }
+    if (!defined('WPMS_MAILER')) { define('WPMS_MAILER', 'mail'); }
+    if (!defined('EASY_WP_SMTP_ON')) { define('EASY_WP_SMTP_ON', true); }
+    if (!defined('EASY_WP_SMTP_MAILER')) { define('EASY_WP_SMTP_MAILER', 'mail'); }
+
     add_action('phpmailer_init', function ($phpmailer) {
         $phpmailer->isMail();
         $phpmailer->SMTPAuth = false;
     }, 1000);
+
+    if (!function_exists('hyperion_mail_send_local')) {
+        /** Split `Name <a@b>` into the address and the name. */
+        function hyperion_mail_split_address($addr) {
+            $addr = trim((string) $addr);
+            if (preg_match('/^(.*)<(.+)>\s*$/', $addr, $m)) {
+                return array(trim($m[2]), trim(trim($m[1]), '"'));
+            }
+            return array($addr, '');
+        }
+
+        /** Is wp_mail() somebody else's — neither core's nor this file's? */
+        function hyperion_mail_wp_mail_replaced() {
+            if (!function_exists('wp_mail')) { return false; }
+            try {
+                $file = str_replace('\\', '/', (string) (new ReflectionFunction('wp_mail'))->getFileName());
+            } catch (Exception $e) {
+                return false;
+            }
+            $core = 'wp-includes/pluggable.php';
+            return substr($file, -strlen($core)) !== $core
+                && $file !== str_replace('\\', '/', __FILE__);
+        }
+
+        /**
+         * Send one message through this server's mail() — the path with the
+         * site's SPF envelope and DKIM signature on it — whatever plugin has
+         * replaced wp_mail(). Follows core's wp_mail(): the same headers, the
+         * same filters, the same wp_mail_failed / wp_mail_succeeded actions.
+         */
+        function hyperion_mail_send_local($atts) {
+            $to          = isset($atts['to']) ? $atts['to'] : array();
+            $subject     = isset($atts['subject']) ? (string) $atts['subject'] : '';
+            $message     = isset($atts['message']) ? (string) $atts['message'] : '';
+            $headers     = isset($atts['headers']) ? $atts['headers'] : array();
+            $attachments = isset($atts['attachments']) ? $atts['attachments'] : array();
+            $embeds      = isset($atts['embeds']) ? $atts['embeds'] : array();
+            if (!is_array($to)) { $to = explode(',', (string) $to); }
+            if (!is_array($headers)) { $headers = explode("\n", str_replace("\r\n", "\n", (string) $headers)); }
+            if (!is_array($attachments)) { $attachments = explode("\n", str_replace("\r\n", "\n", (string) $attachments)); }
+            if (!is_array($embeds)) { $embeds = array(); }
+            $data = compact('to', 'subject', 'message', 'headers', 'attachments');
+
+            $from_email = ''; $from_name = ''; $content_type = ''; $charset = ''; $boundary = '';
+            $cc = array(); $bcc = array(); $reply_to = array(); $custom = array();
+            foreach ($headers as $header) {
+                $header = (string) $header;
+                if (strpos($header, ':') === false) {
+                    if (stripos($header, 'boundary=') !== false) {
+                        $parts = preg_split('/boundary=/i', trim($header));
+                        $boundary = trim(str_replace(array("'", '"'), '', $parts[1]));
+                    }
+                    continue;
+                }
+                list($name, $value) = explode(':', trim($header), 2);
+                $name = trim($name);
+                $value = trim($value);
+                switch (strtolower($name)) {
+                    case 'from':
+                        list($from_email, $from_name) = hyperion_mail_split_address($value);
+                        break;
+                    case 'content-type':
+                        $bits = explode(';', $value, 2);
+                        $content_type = trim($bits[0]);
+                        if (isset($bits[1]) && preg_match('/charset\s*=\s*"?([^";\s]+)/i', $bits[1], $m)) { $charset = $m[1]; }
+                        if (isset($bits[1]) && preg_match('/boundary\s*=\s*"?([^";\s]+)/i', $bits[1], $m)) { $boundary = $m[1]; }
+                        break;
+                    case 'cc':       $cc = array_merge($cc, explode(',', $value)); break;
+                    case 'bcc':      $bcc = array_merge($bcc, explode(',', $value)); break;
+                    case 'reply-to': $reply_to = array_merge($reply_to, explode(',', $value)); break;
+                    default:         $custom[$name] = $value;
+                }
+            }
+
+            require_once ABSPATH . WPINC . '/PHPMailer/PHPMailer.php';
+            require_once ABSPATH . WPINC . '/PHPMailer/SMTP.php';
+            require_once ABSPATH . WPINC . '/PHPMailer/Exception.php';
+            if (is_file(ABSPATH . WPINC . '/class-wp-phpmailer.php')) {
+                require_once ABSPATH . WPINC . '/class-wp-phpmailer.php';
+            }
+            // A fresh mailer, never the global one: an SMTP plugin may have
+            // left its own subclass there, and that is what this routes around.
+            $mail = class_exists('WP_PHPMailer') ? new WP_PHPMailer(true) : new PHPMailer\PHPMailer\PHPMailer(true);
+            $mail::$validator = static function ($email) { return (bool) is_email($email); };
+
+            if ($from_email === '') {
+                $host = strtolower((string) wp_parse_url(network_home_url(), PHP_URL_HOST));
+                if (strpos($host, 'www.') === 0) { $host = substr($host, 4); }
+                $from_email = 'wordpress@' . $host;
+            }
+            if ($from_name === '') { $from_name = 'WordPress'; }
+            try {
+                $mail->setFrom(apply_filters('wp_mail_from', $from_email), apply_filters('wp_mail_from_name', $from_name), false);
+            } catch (PHPMailer\PHPMailer\Exception $e) {
+                $data['phpmailer_exception_code'] = $e->getCode();
+                do_action('wp_mail_failed', new WP_Error('wp_mail_failed', $e->getMessage(), $data));
+                return false;
+            }
+            foreach (array('to' => $to, 'cc' => $cc, 'bcc' => $bcc, 'reply_to' => $reply_to) as $kind => $list) {
+                foreach ($list as $addr) {
+                    list($email, $name) = hyperion_mail_split_address($addr);
+                    if ($email === '') { continue; }
+                    try {
+                        if ($kind === 'to') { $mail->addAddress($email, $name); }
+                        elseif ($kind === 'cc') { $mail->addCC($email, $name); }
+                        elseif ($kind === 'bcc') { $mail->addBCC($email, $name); }
+                        else { $mail->addReplyTo($email, $name); }
+                    } catch (PHPMailer\PHPMailer\Exception $e) {
+                        continue;
+                    }
+                }
+            }
+
+            $mail->Subject = $subject;
+            $mail->Body = $message;
+            $content_type = apply_filters('wp_mail_content_type', $content_type !== '' ? $content_type : 'text/plain');
+            $mail->ContentType = $content_type;
+            if ($content_type === 'text/html') { $mail->isHTML(true); }
+            $mail->CharSet = apply_filters('wp_mail_charset', $charset !== '' ? $charset : get_bloginfo('charset'));
+            foreach ($custom as $name => $value) {
+                try { $mail->addCustomHeader(sprintf('%1$s: %2$s', $name, $value)); } catch (PHPMailer\PHPMailer\Exception $e) { continue; }
+            }
+            if (stripos($content_type, 'multipart') !== false && $boundary !== '') {
+                $mail->addCustomHeader(sprintf('Content-Type: %s; boundary="%s"', $content_type, $boundary));
+            }
+            foreach ($attachments as $name => $path) {
+                if (!is_string($path) || $path === '') { continue; }
+                try { $mail->addAttachment($path, is_string($name) ? $name : ''); } catch (PHPMailer\PHPMailer\Exception $e) { continue; }
+            }
+            foreach ($embeds as $cid => $path) {
+                if (!is_string($path) || $path === '') { continue; }
+                try { $mail->addEmbeddedImage($path, is_string($cid) ? $cid : basename($path)); } catch (PHPMailer\PHPMailer\Exception $e) { continue; }
+            }
+
+            do_action_ref_array('phpmailer_init', array(&$mail));
+            // After everyone else's phpmailer_init: an SMTP plugin listening
+            // there must not get the transport back.
+            $mail->isMail();
+            $mail->SMTPAuth = false;
+
+            try {
+                $sent = $mail->send();
+                do_action('wp_mail_succeeded', $data);
+                return $sent;
+            } catch (PHPMailer\PHPMailer\Exception $e) {
+                $data['phpmailer_exception_code'] = $e->getCode();
+                do_action('wp_mail_failed', new WP_Error('wp_mail_failed', $e->getMessage(), $data));
+                return false;
+            }
+        }
+    }
+
+    $hyperion_active = (array) get_option('active_plugins', array());
+    if (is_multisite()) {
+        $hyperion_active = array_merge($hyperion_active, array_keys((array) get_site_option('active_sitewide_plugins', array())));
+    }
+    if (!function_exists('wp_mail') && in_array('wp-mail-bank/wp-mail-bank.php', $hyperion_active, true)) {
+        function wp_mail($to, $subject, $message, $headers = '', $attachments = array(), $embeds = array()) {
+            $atts = apply_filters('wp_mail', compact('to', 'subject', 'message', 'headers', 'attachments', 'embeds'));
+            $pre = apply_filters('pre_wp_mail', null, $atts);
+            if (null !== $pre) { return $pre; }
+            return hyperion_mail_send_local($atts);
+        }
+    }
+    unset($hyperion_active);
+
+    add_filter('pre_wp_mail', function ($return, $atts) {
+        if (null !== $return || !hyperion_mail_wp_mail_replaced()) { return $return; }
+        return hyperion_mail_send_local($atts);
+    }, PHP_INT_MAX, 2);
+}
+
+/*
+ * Say so where somebody would be configuring mail: on an SMTP plugin's own
+ * settings screen, so a site owner setting up their SMTP server learns from
+ * the page in front of them that Hyperion changes the sender (or sends
+ * instead of the plugin) — and where that is switched off.
+ *
+ * Not admin_notices: WP Mail SMTP, Easy WP SMTP and Post SMTP strip every
+ * other plugin's notice from their own screens, which are exactly the
+ * screens this is for. in_admin_header is left alone, and the box carries
+ * its own style rather than `.notice`, which some of them hide with CSS.
+ */
+if (is_admin() && (HYPERION_MAIL_PIN_FROM || HYPERION_MAIL_FORCE_LOCAL)) {
+    add_action('in_admin_header', function () {
+        $page = isset($_GET['page']) ? (string) wp_unslash($_GET['page']) : '';
+        if (!current_user_can('manage_options') || !preg_match('/smtp|postman|fluent-mail|mail-bank|mail_bank|wp-mail|^mb_/i', $page)) {
+            return;
+        }
+        $t = function_exists('hyperion_t') ? 'hyperion_t' : function ($en, $cs) { return $en; };
+        $msg = HYPERION_MAIL_FORCE_LOCAL
+            ? $t('Hyperion is sending this site\'s mail through the server instead of this plugin, because the plugin\'s sends were failing. Settings saved here have no effect until that is switched off in the Hyperion panel.',
+                 'Hyperion odesílá e-maily tohoto webu přes server místo tohoto pluginu, protože plugin selhával. Nastavení uložené zde se neprojeví, dokud se to nevypne v panelu Hyperion.')
+            : sprintf($t('Hyperion rewrites any From address outside %1$s to %2$s, so mail passes SPF. If your SMTP server needs its own sender address, ask for the rewrite to be switched off in the Hyperion panel.',
+                         'Hyperion přepisuje adresu odesílatele mimo doménu %1$s na %2$s, aby e-maily prošly kontrolou SPF. Pokud váš SMTP server vyžaduje vlastní adresu odesílatele, nechte přepisování vypnout v panelu Hyperion.'),
+                      HYPERION_MAIL_DOMAIN, HYPERION_MAIL_FROM);
+        echo '<div class="hyperion-mail-note" role="status" style="margin:12px 20px 4px 2px;padding:10px 14px;background:#fff;border-left:4px solid #72aee6;box-shadow:0 1px 1px rgba(0,0,0,.04);font-size:13px;line-height:1.5">'
+            . '<strong>Hyperion:</strong> ' . esc_html($msg) . '</div>';
+    });
 }
 
 /**
@@ -131,10 +356,19 @@ add_action('wp_mail_failed', function ($error) {
             $to = is_array($data['to']) ? implode(',', $data['to']) : (string) $data['to'];
         }
     }
-    $line = gmdate('c') . "\t" . $to . "\t" . str_replace(array("\n", "\r", "\t"), ' ', $msg) . "\n";
-    // Cap the file rather than rotate it: this is evidence for a person
-    // reading the last few failures, not a stream anything consumes.
-    if (@filesize(HYPERION_MAIL_LOG) > 262144) { @unlink(HYPERION_MAIL_LOG); }
+    $flat = function ($s) { return str_replace(array("\n", "\r", "\t"), ' ', (string) $s); };
+    $line = gmdate('c') . "\t" . $flat($to) . "\t" . $flat($msg) . "\n";
+    // Cap the file by keeping its newest half. Deleting it outright erased
+    // exactly the evidence a site failing in a loop produces, and the panel
+    // then read the empty log as "nothing has failed".
+    $size = @filesize(HYPERION_MAIL_LOG);
+    if ($size !== false && $size > 262144) {
+        $tail = @file_get_contents(HYPERION_MAIL_LOG, false, null, $size - 131072);
+        if (is_string($tail)) {
+            $nl = strpos($tail, "\n");
+            @file_put_contents(HYPERION_MAIL_LOG, $nl === false ? '' : substr($tail, $nl + 1), LOCK_EX);
+        }
+    }
     @file_put_contents(HYPERION_MAIL_LOG, $line, FILE_APPEND | LOCK_EX);
 });
 "#;
@@ -157,25 +391,12 @@ pub const SMTP_PLUGIN_SLUGS: &[&str] = &[
     "cf7-smtp",
 ];
 
-/// State of the mu-plugin on disk.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MuState {
-    /// Not a WordPress site at all — nothing to install, and saying
-    /// "missing" would be a finding about a site that has no mail.
-    NotWordPress,
-    Missing,
-    /// Present, but written by an older agent or for a different From
-    /// address. Rewriting is the fix and it is safe to do unattended.
-    Stale,
-    Current,
-}
+/// State of the mail module on disk.
+pub use crate::wpplugin::FileState as MuState;
 
-/// `<root_dir>/wp-content/mu-plugins/hyperion-mail.php`.
+/// `<root_dir>/wp-content/mu-plugins/hyperion/mail.php` — the logical path.
 pub fn mu_plugin_path(root_dir: &str) -> PathBuf {
-    Path::new(root_dir)
-        .join("wp-content")
-        .join("mu-plugins")
-        .join(MU_PLUGIN_FILE)
+    crate::wpplugin::module_path(root_dir, MODULE)
 }
 
 /// Where the plugin appends failures.
@@ -199,16 +420,58 @@ pub fn default_from(domain: &str) -> String {
     format!("wordpress@{}", domain.trim().trim_start_matches("www."))
 }
 
+/// The domain the From check compares against: lower-case, without `www.`.
+///
+/// A site keyed on `www.example.cz` that sends as `info@example.cz` is
+/// sending as itself. Compared against the raw key, the plugin read that as
+/// a foreign sender and rewrote it to `wordpress@example.cz`.
+fn mail_domain(domain: &str) -> String {
+    let d = domain.trim().to_ascii_lowercase();
+    d.strip_prefix("www.").map(str::to_string).unwrap_or(d)
+}
+
+/// What the plugin is allowed to change on one site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MailPolicy {
+    /// The default: senders on another domain are rewritten to the site's
+    /// own address; the SMTP plugin, if any, keeps sending.
+    PinFrom,
+    /// [`MailPolicy::PinFrom`], and mail is taken back off an SMTP plugin
+    /// whose sends were failing.
+    PinFromAndForceLocal,
+    /// The operator switched rewriting off — the site sends through its own
+    /// SMTP server, whose provider wants the account's own From address.
+    /// Nothing about a message is changed; failures are still recorded.
+    HandsOff,
+}
+
+impl MailPolicy {
+    pub fn pins_from(self) -> bool {
+        !matches!(self, MailPolicy::HandsOff)
+    }
+    pub fn forces_local(self) -> bool {
+        matches!(self, MailPolicy::PinFromAndForceLocal)
+    }
+}
+
 /// Render the plugin for one site.
-pub fn render_mu_plugin(domain: &str, from: &str, log_path: &str, force_local: bool) -> String {
+pub fn render_mu_plugin(domain: &str, from: &str, log_path: &str, policy: MailPolicy) -> String {
     MU_PLUGIN_TEMPLATE
         .replace("{{VERSION}}", &MU_PLUGIN_VERSION.to_string())
-        .replace("{{DOMAIN}}", &php_single_quoted(domain))
+        .replace("{{DOMAIN}}", &php_single_quoted(&mail_domain(domain)))
         .replace("{{FROM}}", &php_single_quoted(from))
         .replace("{{LOG}}", &php_single_quoted(log_path))
         .replace(
+            "{{PIN_FROM}}",
+            if policy.pins_from() { "true" } else { "false" },
+        )
+        .replace(
             "{{FORCE_LOCAL}}",
-            if force_local { "true" } else { "false" },
+            if policy.forces_local() {
+                "true"
+            } else {
+                "false"
+            },
         )
 }
 
@@ -216,110 +479,32 @@ pub fn render_mu_plugin(domain: &str, from: &str, log_path: &str, force_local: b
 /// there. A domain cannot legally contain either, but this file is written
 /// from values that reached us over RPC, and "cannot" is not a check.
 fn php_single_quoted(v: &str) -> String {
-    v.replace('\\', "\\\\").replace('\'', "\\'")
+    crate::wpplugin::php_single_quoted(v)
 }
 
 /// What is on disk right now.
 pub async fn mu_plugin_state(root_dir: &str, expected: &str) -> MuState {
-    let wp_content = Path::new(root_dir).join("wp-content");
-    if !tokio::fs::try_exists(&wp_content).await.unwrap_or(false) {
-        return MuState::NotWordPress;
-    }
-    // A symlink here reads as `Stale`, which sends the caller to
-    // `install_mu_plugin` — where the link is removed and a real file put in
-    // its place. Reading THROUGH it would compare some unrelated file to our
-    // template and, worse, invite the write that follows.
-    let Ok(path) =
-        resolve_in_site(root_dir, &format!("wp-content/mu-plugins/{MU_PLUGIN_FILE}")).await
-    else {
-        return MuState::Stale;
-    };
-    match tokio::fs::read_to_string(path).await {
-        Ok(found) if found == expected => MuState::Current,
-        Ok(_) => MuState::Stale,
-        Err(_) => MuState::Missing,
-    }
+    crate::wpplugin::module_state(root_dir, MODULE, expected).await
 }
 
-/// Resolve a path inside the site, refusing to follow a symlink at ANY
-/// segment.
-///
-/// This is the whole security story of this module. Every path here lives in
-/// a tree the tenant can write, and everything below runs as ROOT. Without
-/// this check a tenant replaces `wp-content/mu-plugins` with a symlink to
-/// `/etc` and gets three things for free: root writing a file there, root
-/// creating directories under it, and — the one that ends the argument —
-/// `chown` following the link and handing them ownership of `/etc`.
-///
-/// `resolve_inside_jail` already refuses a symlink at any segment and pins
-/// the result inside the jail; reusing it means this module cannot drift
-/// from the file manager's rules.
-async fn resolve_in_site(root_dir: &str, rel: &str) -> Result<PathBuf, AdapterError> {
-    crate::files::resolve_inside_jail(Path::new(root_dir), rel).await
-}
-
-/// Write (or rewrite) the plugin, owned by the site user.
+/// Write (or rewrite) the module, owned by the site user, plus the loader
+/// that includes it — see [`crate::wpplugin`] for how paths are resolved and
+/// files written in a tenant-owned tree.
 ///
 /// Returns `Ok(false)` when the site is not WordPress — not an error, just
-/// nothing to do. The directory is created if the site has never had a
-/// must-use plugin.
+/// nothing to do.
 pub async fn install_mu_plugin(
     root_dir: &str,
     system_user: &str,
     contents: &str,
 ) -> Result<bool, AdapterError> {
-    if !tokio::fs::try_exists(Path::new(root_dir).join("wp-content"))
-        .await
-        .unwrap_or(false)
-    {
-        return Ok(false);
-    }
-    // Refuses a symlinked `wp-content` or `mu-plugins`; falls back to the
-    // logical path when `mu-plugins` simply does not exist yet, which is the
-    // ordinary case on a site that has never had one.
-    let mu_dir = resolve_in_site(root_dir, "wp-content/mu-plugins").await?;
-    tokio::fs::create_dir_all(&mu_dir)
-        .await
-        .map_err(|e| AdapterError::Other(format!("create {}: {e}", mu_dir.display())))?;
-    // Clear a symlink sitting on the NAME before resolving, not after: the
-    // resolver refuses a symlinked final segment, so leaving one there would
-    // wedge the feature for that site for ever — a tenant could opt out of
-    // having their sender pinned by planting one link. The name belongs to
-    // this module, and `remove_file` unlinks the link rather than its target,
-    // so clearing it is safe. `mu_dir` is already a resolved real directory
-    // inside the site, so this join cannot escape.
-    let logical = mu_dir.join(MU_PLUGIN_FILE);
-    if let Ok(md) = tokio::fs::symlink_metadata(&logical).await {
-        if md.file_type().is_symlink() {
-            let _ = tokio::fs::remove_file(&logical).await;
-        }
-    }
-    let path =
-        resolve_in_site(root_dir, &format!("wp-content/mu-plugins/{MU_PLUGIN_FILE}")).await?;
-    tokio::fs::write(&path, contents)
-        .await
-        .map_err(|e| AdapterError::Other(format!("write {}: {e}", path.display())))?;
-    // PHP runs as the site user and nginx as another, so the tree needs
-    // world-read to be served and the file needs to belong to the site so
-    // its owner can see (and, if they insist, delete) it.
-    //
-    // `-h` because chown FOLLOWS a symlink by default: without it, a link
-    // planted between the resolve above and this call would hand the target
-    // to the tenant. The paths are already checked; this closes the race.
-    let _ = tokio::process::Command::new("/usr/bin/chown")
-        .arg("-h")
-        .arg(format!("{system_user}:{system_user}"))
-        .arg(&mu_dir)
-        .arg(&path)
-        .output()
-        .await;
-    Ok(true)
+    crate::wpplugin::install_module(root_dir, system_user, MODULE, contents).await
 }
 
 /// Remove it — used when a site stops being WordPress, or an operator turns
 /// the feature off for one site.
 pub async fn remove_mu_plugin(root_dir: &str) {
-    let _ = tokio::fs::remove_file(mu_plugin_path(root_dir)).await;
+    crate::wpplugin::remove_module(root_dir, MODULE).await
 }
 
 /// What the failure log could tell us.
@@ -515,19 +700,50 @@ mod tests {
             "example.cz",
             "wordpress@example.cz",
             "/home/u/example.cz/logs/wp-mail-failures.log",
-            false,
+            MailPolicy::PinFrom,
         );
         assert!(!php.contains("{{"), "unsubstituted token left: {php}");
         assert!(php.contains("define('HYPERION_MAIL_DOMAIN', 'example.cz');"));
-        assert!(php.contains("define('HYPERION_MAIL_FORCE_LOCAL', false);"));
+        // A site keyed on www compares senders against the bare domain.
+        let www = render_mu_plugin("WWW.Example.cz", "a@example.cz", "/l", MailPolicy::PinFrom);
+        assert!(
+            www.contains("define('HYPERION_MAIL_DOMAIN', 'example.cz');"),
+            "{www}"
+        );
         // Off by default: a working SMTP plugin is the owner's choice.
-        assert!(!php.contains("$phpmailer->isMail();\n    }, 1000);\n"));
+        assert!(php.contains("define('HYPERION_MAIL_FORCE_LOCAL', false);"));
+        assert!(php.contains("define('HYPERION_MAIL_PIN_FROM', true);"));
+    }
+
+    /// Hands-off is for a site on its own SMTP server: no rewriting and no
+    /// takeover, but the failure log keeps running.
+    #[test]
+    fn hands_off_changes_nothing_but_still_records() {
+        let php = render_mu_plugin("example.cz", "a@example.cz", "/l", MailPolicy::HandsOff);
+        assert!(php.contains("define('HYPERION_MAIL_PIN_FROM', false);"));
+        assert!(php.contains("define('HYPERION_MAIL_FORCE_LOCAL', false);"));
+        assert!(php.contains("add_action('wp_mail_failed'"));
+        // The sender filter only runs behind the switch.
+        let guard = php.find("if (HYPERION_MAIL_PIN_FROM) {").expect("guard");
+        let filter = php.find("add_filter('wp_mail_from'").expect("filter");
+        assert!(guard < filter);
     }
 
     #[test]
     fn force_local_is_opt_in() {
-        let on = render_mu_plugin("example.cz", "a@example.cz", "/l", true);
+        let on = render_mu_plugin(
+            "example.cz",
+            "a@example.cz",
+            "/l",
+            MailPolicy::PinFromAndForceLocal,
+        );
         assert!(on.contains("define('HYPERION_MAIL_FORCE_LOCAL', true);"));
+        // WP Mail SMTP's and Easy WP SMTP's API mailers ignore the transport
+        // phpmailer_init picks; their own constants hand the mail back.
+        assert!(on.contains("define('WPMS_MAILER', 'mail')"));
+        assert!(on.contains("define('EASY_WP_SMTP_MAILER', 'mail')"));
+        // FluentSMTP / Post SMTP replace wp_mail() but ask pre_wp_mail.
+        assert!(on.contains("add_filter('pre_wp_mail'"));
     }
 
     /// A quote in a value must not be able to close the PHP string and
@@ -535,7 +751,7 @@ mod tests {
     /// rendered from values that arrived over RPC.
     #[test]
     fn a_quote_cannot_escape_the_php_string() {
-        let php = render_mu_plugin("ev'il\\.cz", "a@b", "/l", false);
+        let php = render_mu_plugin("ev'il\\.cz", "a@b", "/l", MailPolicy::PinFrom);
         assert!(
             php.contains("define('HYPERION_MAIL_DOMAIN', 'ev\\'il\\\\.cz');"),
             "{php}"
@@ -620,7 +836,8 @@ mod symlink_tests {
             "refused for the wrong reason: {err}"
         );
         assert!(
-            !outside.path().join(MU_PLUGIN_FILE).exists(),
+            !outside.path().join(crate::wpplugin::MODULE_DIR).exists()
+                && !outside.path().join(crate::wpplugin::LOADER_FILE).exists(),
             "root wrote OUTSIDE the site"
         );
     }
@@ -636,9 +853,9 @@ mod symlink_tests {
         std::fs::write(&victim, "original").expect("victim");
 
         let root = site.path().join("htdocs");
-        let mu = root.join("wp-content").join("mu-plugins");
-        std::fs::create_dir_all(&mu).expect("mu");
-        symlink(&victim, mu.join(MU_PLUGIN_FILE)).expect("symlink");
+        let plugin = mu_plugin_path(&root.to_string_lossy());
+        std::fs::create_dir_all(plugin.parent().expect("dir")).expect("mu");
+        symlink(&victim, &plugin).expect("symlink");
 
         install_mu_plugin(&root.to_string_lossy(), "victim", "<?php // ours")
             .await

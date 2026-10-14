@@ -15623,13 +15623,50 @@ mod tests {
 struct WpMailCardTpl {
     report: hyperion_types::FtpCheckReport,
     selector: String,
-    /// Is the automatic version of this check allowed to act on this site?
-    /// Read from the OWNING node, because that is where the tick reads it —
-    /// a master-local read would show a switch wired to nothing.
-    autofix_enabled: bool,
+    /// The per-site switches, read from the OWNING node, because that is
+    /// where the tick reads them — a master-local read would show a switch
+    /// wired to nothing.
+    switches: WpMailSwitches,
     csrf_repair: String,
     csrf_autofix: String,
+    csrf_override: String,
     error: Option<String>,
+}
+
+/// The mail card's switches. Absent keys read as the node's own defaults.
+#[derive(Clone, Copy)]
+struct WpMailSwitches {
+    /// May the five-minute tick configure this site on its own?
+    autofix: bool,
+    /// May Hyperion change the site's mail at all (sender rewrite, SMTP
+    /// takeover)? Off for a site on its own SMTP server.
+    rewrite: bool,
+    /// Is Hyperion currently sending instead of the site's SMTP plugin?
+    forced: bool,
+}
+
+impl Default for WpMailSwitches {
+    fn default() -> Self {
+        Self {
+            autofix: true,
+            rewrite: true,
+            forced: false,
+        }
+    }
+}
+
+impl WpMailSwitches {
+    fn from_kv(kv: &[(String, String)]) -> Self {
+        let get = |key: &str| kv.iter().find(|(k, _)| k == key).map(|(_, v)| v.trim());
+        let rewrite = get("wp_mail_override") != Some("off");
+        Self {
+            autofix: get("wp_mail_autofix_enabled") != Some("off"),
+            rewrite,
+            // Only while rewriting is allowed: the node ignores a takeover
+            // stamp on a site that is switched off.
+            forced: rewrite && get("wp_mail_force_local_at").is_some_and(|v| !v.is_empty()),
+        }
+    }
 }
 
 /// GET /hostings/:selector/wpmail-panel — how this site's WordPress mail is
@@ -15639,14 +15676,15 @@ pub async fn get_wpmail_panel(
     ctx: AuthCtx,
     Path(selector): Path<String>,
 ) -> Result<Response, AppError> {
-    let card = |report, autofix_enabled: bool, error: Option<String>| {
+    let card = |report, switches: WpMailSwitches, error: Option<String>| {
         Html(
             WpMailCardTpl {
                 report,
                 selector: selector.clone(),
-                autofix_enabled,
+                switches,
                 csrf_repair: csrf_token_for(&state, &ctx, "/hostings/wp/mail-repair"),
                 csrf_autofix: csrf_token_for(&state, &ctx, "/hostings/wp/mail-autofix"),
+                csrf_override: csrf_token_for(&state, &ctx, "/hostings/wp/mail-override"),
                 error,
             }
             .render()
@@ -15659,14 +15697,20 @@ pub async fn get_wpmail_panel(
         Err(e) => {
             return Ok(card(
                 Default::default(),
-                true,
+                Default::default(),
                 Some(format!("could not read the selector: {e}")),
             ))
         }
     };
     let (detail, owner) = match find_hosting_anywhere(&state, sel.clone()).await {
         Ok(v) => v,
-        Err(e) => return Ok(card(Default::default(), true, Some(e.to_string()))),
+        Err(e) => {
+            return Ok(card(
+                Default::default(),
+                Default::default(),
+                Some(e.to_string()),
+            ))
+        }
     };
     // A read probe, so HostingView is the right gate; the repair below is
     // what needs manage rights.
@@ -15682,12 +15726,12 @@ pub async fn get_wpmail_panel(
     {
         return Ok(card(
             Default::default(),
-            true,
+            Default::default(),
             Some("You do not have access to this hosting.".into()),
         ));
     }
-    // Absent or unreadable ⇒ ON, matching what the tick itself answers.
-    let autofix_enabled = match crate::dispatcher::dispatch_to_node(
+    // Absent or unreadable ⇒ the defaults, matching what the node answers.
+    let switches = match crate::dispatcher::dispatch_to_node(
         &state,
         owner.as_deref(),
         Request::HostingKvList {
@@ -15696,12 +15740,8 @@ pub async fn get_wpmail_panel(
     )
     .await
     {
-        Ok(RpcResponse::HostingKvList(v)) => v
-            .into_iter()
-            .find(|(k, _)| k == "wp_mail_autofix_enabled")
-            .map(|(_, val)| val.trim() != "off")
-            .unwrap_or(true),
-        _ => true,
+        Ok(RpcResponse::HostingKvList(v)) => WpMailSwitches::from_kv(&v),
+        _ => WpMailSwitches::default(),
     };
     match crate::dispatcher::dispatch_to_node(
         &state,
@@ -15710,22 +15750,14 @@ pub async fn get_wpmail_panel(
     )
     .await
     {
-        Ok(RpcResponse::WpMailSelfCheck(r)) => Ok(card(r, autofix_enabled, None)),
-        Ok(RpcResponse::Error(e)) => Ok(card(
-            Default::default(),
-            autofix_enabled,
-            Some(e.to_string()),
-        )),
+        Ok(RpcResponse::WpMailSelfCheck(r)) => Ok(card(r, switches, None)),
+        Ok(RpcResponse::Error(e)) => Ok(card(Default::default(), switches, Some(e.to_string()))),
         Ok(_) => Ok(card(
             Default::default(),
-            autofix_enabled,
+            switches,
             Some("unexpected response from the node".into()),
         )),
-        Err(e) => Ok(card(
-            Default::default(),
-            autofix_enabled,
-            Some(e.to_string()),
-        )),
+        Err(e) => Ok(card(Default::default(), switches, Some(e.to_string()))),
     }
 }
 
@@ -15801,6 +15833,48 @@ pub async fn post_wpmail_autofix(
     )
     .await?;
     // Re-render the whole card so the switch and the findings agree.
+    get_wpmail_panel(State(state), ctx, Path(form.selector)).await
+}
+
+#[derive(serde::Deserialize)]
+pub struct WpMailOverrideForm {
+    pub selector: String,
+    /// `on`, `off` or `hand_back` — validated by the node.
+    pub mode: String,
+}
+
+/// POST /hostings/wp/mail-override — may Hyperion change this site's mail?
+///
+/// `off` is for a site that sends through its own SMTP server and needs its
+/// own From address; `hand_back` returns sending to an SMTP plugin Hyperion
+/// took it from. The node rewrites the mail plugin straight away.
+pub async fn post_wpmail_override(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<WpMailOverrideForm>,
+) -> Result<Response, AppError> {
+    let sel = match require_manage_for_selector(
+        &state,
+        &ctx,
+        &form.selector,
+        Capability::HostingEditConfig,
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
+    let (_, owner) = find_hosting_anywhere(&state, sel.clone()).await?;
+    let _ = crate::dispatcher::dispatch_to_node(
+        &state,
+        owner.as_deref(),
+        Request::WpMailOverrideSet {
+            sel,
+            mode: form.mode.trim().to_string(),
+        },
+    )
+    .await?;
+    // Re-render from the node, so the card shows what it actually did.
     get_wpmail_panel(State(state), ctx, Path(form.selector)).await
 }
 
@@ -18446,5 +18520,60 @@ mod gitsync_card_tests {
             gitsync_webhook_url(&h, "/webhooks/git/h1"),
             "https://panel.example:8443/webhooks/git/h1"
         );
+    }
+}
+
+#[cfg(test)]
+mod wpmail_card_tests {
+    use super::*;
+
+    fn render(kv: &[(&str, &str)]) -> String {
+        let kv: Vec<(String, String)> = kv
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        WpMailCardTpl {
+            report: Default::default(),
+            selector: "mail.cz".into(),
+            switches: WpMailSwitches::from_kv(&kv),
+            csrf_repair: "r".into(),
+            csrf_autofix: "a".into(),
+            csrf_override: "o".into(),
+            error: None,
+        }
+        .render()
+        .expect("render")
+    }
+
+    /// The default says out loud that Hyperion rewrites the sender, and
+    /// offers the switch for a site on its own SMTP server — behind a
+    /// confirm, since it changes what every mail of the site looks like.
+    #[test]
+    fn default_card_says_the_sender_is_rewritten_and_offers_the_switch() {
+        let html = render(&[]);
+        assert!(html.contains("Hyperion rewrites the sender"));
+        assert!(html.contains(r#"name="mode" value="off""#));
+        assert!(html.contains("Turn off (own SMTP server)"));
+        assert!(html.contains(r#"data-confirm-title="Stop rewriting this site's mail""#));
+        assert!(!html.contains("Hand back to the plugin"));
+    }
+
+    #[test]
+    fn switched_off_card_says_mail_is_left_alone() {
+        let html = render(&[
+            ("wp_mail_override", "off"),
+            // A stale takeover stamp means nothing while rewriting is off.
+            ("wp_mail_force_local_at", "123"),
+        ]);
+        assert!(html.contains("Hyperion leaves mail alone"));
+        assert!(html.contains(r#"name="mode" value="on""#));
+        assert!(!html.contains("Hand back to the plugin"));
+    }
+
+    #[test]
+    fn a_takeover_offers_the_hand_back() {
+        let html = render(&[("wp_mail_force_local_at", "123")]);
+        assert!(html.contains("Hyperion is sending instead of the SMTP plugin"));
+        assert!(html.contains(r#"name="mode" value="hand_back""#));
     }
 }

@@ -1752,6 +1752,14 @@ pub enum Request {
         sel: HostingSelector,
         enabled: bool,
     },
+    /// What Hyperion may change in one site's mail: `on` (rewrite a sender
+    /// on another domain — the default), `off` (leave the site's own SMTP
+    /// setup alone), `hand_back` (stop sending instead of the SMTP plugin).
+    /// Answers with the re-run self-check.
+    WpMailOverrideSet {
+        sel: HostingSelector,
+        mode: String,
+    },
     FtpSelfCheck {
         sel: HostingSelector,
     },
@@ -2587,6 +2595,7 @@ pub enum Response {
     WpMailSelfCheck(hyperion_types::FtpCheckReport),
     WpMailRepair(hyperion_types::FtpCheckReport),
     WpMailAutofixSet(bool),
+    WpMailOverrideSet(hyperion_types::FtpCheckReport),
     SiteCheck(hyperion_types::SiteCheckReport),
     SiteCheckLast(Option<hyperion_types::SiteCheckReport>),
     PerformanceView(hyperion_types::PerformanceView),
