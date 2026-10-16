@@ -10,12 +10,20 @@ use axum::extract::{Query, State};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use hyperion_rpc::codec::{Request, Response as RpcResponse};
 use hyperion_state::capabilities::Capability;
-use hyperion_types::{AgentConfigView, CertOverviewItem, ClusterConfigView, NodeSummary};
+use hyperion_types::{
+    AgentConfigView, CertOverviewItem, ClusterConfigView, DnsCheckResult, NodeSummary,
+};
+use serde::Deserialize;
 use std::time::Duration;
 
 /// How long one node gets to list its certificates. A node that takes
 /// longer reads "unknown" rather than holding the page.
 const CERT_TIMEOUT: Duration = Duration::from_secs(4);
+
+/// How long one node gets for its DNS check: two `dig`s, the authoritative
+/// walk and the public-IP lookup. The check loads lazily, so it holds up
+/// nothing but its own cell.
+const DNS_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Template)]
 #[template(path = "settings_https.html")]
@@ -313,6 +321,193 @@ pub fn shared_base(rows: &[WildcardRow]) -> Option<String> {
         .map(|r| r.base.clone())
 }
 
+/// Does a name under a node's preview base reach that node? A valid
+/// `*.<base>` certificate says nothing about it: without the wildcard DNS
+/// record every preview address is NXDOMAIN while the card reads "valid".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PreviewDns {
+    /// The check did not run (old agent, timeout, no base). Never reported
+    /// as missing.
+    Unknown(String),
+    /// No A or AAAA record. `ip` is the node's own public IPv4, the value
+    /// the record should hold, when the node knows it.
+    Missing { ip: Option<String> },
+    /// Every address is a Cloudflare edge. The universal certificate does
+    /// not cover two-level subdomains, so the proxy breaks HTTPS here.
+    Proxied,
+    /// Resolves, but not to this node.
+    Elsewhere { seen: Vec<String>, ours: String },
+    /// Resolves to this node.
+    Here { ip: String },
+    /// Resolves; the node could not learn its own public IP to compare.
+    Resolves { seen: Vec<String> },
+}
+
+impl PreviewDns {
+    pub fn tone(&self) -> &'static str {
+        match self {
+            PreviewDns::Unknown(_) | PreviewDns::Resolves { .. } => "muted",
+            PreviewDns::Missing { .. } => "err",
+            PreviewDns::Proxied | PreviewDns::Elsewhere { .. } => "warn",
+            PreviewDns::Here { .. } => "ok",
+        }
+    }
+
+    pub fn verdict(&self) -> &'static str {
+        match self {
+            PreviewDns::Unknown(_) => "unknown",
+            PreviewDns::Missing { .. } => "no record",
+            PreviewDns::Proxied => "proxied",
+            PreviewDns::Elsewhere { .. } => "points elsewhere",
+            PreviewDns::Here { .. } => "points here",
+            PreviewDns::Resolves { .. } => "resolves",
+        }
+    }
+}
+
+/// The verdict for one probe name. The node's own `DnsCheck` already
+/// compares the records with its public IPs; this only orders the cases.
+pub fn preview_dns(r: &DnsCheckResult) -> PreviewDns {
+    let seen: Vec<String> = r
+        .resolved_a
+        .iter()
+        .chain(&r.resolved_aaaa)
+        .cloned()
+        .collect();
+    if seen.is_empty() {
+        return PreviewDns::Missing {
+            ip: r.our_public_ipv4.clone(),
+        };
+    }
+    // `matches` is true for a proxied name too; proxied is the finding.
+    if r.proxied {
+        return PreviewDns::Proxied;
+    }
+    let ours: Vec<&String> = r.our_public_ipv4.iter().chain(&r.our_public_ipv6).collect();
+    if r.matches {
+        let ip = seen
+            .iter()
+            .find(|s| ours.contains(s))
+            .unwrap_or(&seen[0])
+            .clone();
+        return PreviewDns::Here { ip };
+    }
+    match ours.first() {
+        Some(o) => PreviewDns::Elsewhere {
+            seen,
+            ours: (*o).clone(),
+        },
+        None => PreviewDns::Resolves { seen },
+    }
+}
+
+/// The DNS cell: a pill and the line under it.
+pub fn render_preview_dns(base: &str, dns: &PreviewDns) -> String {
+    let esc = super::html_escape;
+    let note = match dns {
+        PreviewDns::Unknown(why) => format!(
+            "<span class=\"cell-sub\" title=\"{}\">could not be checked</span>",
+            esc(why)
+        ),
+        PreviewDns::Missing { ip } => format!(
+            "<span class=\"cell-sub\">previews do not resolve — add <code>*.{}</code> A {}</span>",
+            esc(base),
+            ip.as_deref()
+                .map(|ip| format!("<code>{}</code>", esc(ip)))
+                .unwrap_or_else(|| "pointing at this node".into())
+        ),
+        PreviewDns::Proxied => {
+            "<span class=\"cell-sub\">Cloudflare proxy on — set the record to DNS only</span>"
+                .to_string()
+        }
+        PreviewDns::Elsewhere { seen, ours } => format!(
+            "<span class=\"cell-sub\">{} — this node is <code>{}</code></span>",
+            esc(&seen.join(", ")),
+            esc(ours)
+        ),
+        PreviewDns::Here { ip } => format!("<span class=\"cell-sub\">{}</span>", esc(ip)),
+        PreviewDns::Resolves { seen } => format!(
+            "<span class=\"cell-sub\">{} · this node's IP unknown</span>",
+            esc(&seen.join(", "))
+        ),
+    };
+    format!(
+        "<span class=\"pill {}\">{}</span>{note}",
+        dns.tone(),
+        dns.verdict()
+    )
+}
+
+/// A made-up name under the base. Fresh each time, so no resolver can
+/// answer from a cached NXDOMAIN of an earlier check.
+fn probe_name(base: &str) -> String {
+    format!("hyperion-check-{:08x}.{base}", rand::random::<u32>())
+}
+
+#[derive(Deserialize)]
+pub struct PreviewDnsQuery {
+    #[serde(default)]
+    pub node_id: String,
+}
+
+/// GET /settings/https/preview-dns?node_id=… — the DNS cell of one row.
+/// The node itself resolves a made-up name under its base and compares
+/// the answer with its own public IP (`DnsCheck`). Lazy per row: the
+/// public-IP lookup alone can take seconds.
+pub async fn get_preview_dns(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Query(q): Query<PreviewDnsQuery>,
+) -> Response {
+    let html = |status: axum::http::StatusCode, body: String| {
+        (status, [("content-type", "text/html; charset=utf-8")], body).into_response()
+    };
+    if !ctx.can(Capability::SettingsManage) {
+        return html(
+            axum::http::StatusCode::FORBIDDEN,
+            "<span class=\"pill err\">not allowed</span>".into(),
+        );
+    }
+    let node_id = q.node_id.trim();
+    if node_id.is_empty()
+        || !node_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    {
+        return html(
+            axum::http::StatusCode::BAD_REQUEST,
+            "<span class=\"pill err\">invalid node id</span>".into(),
+        );
+    }
+    // The base comes from the config, never from the query string.
+    let Some((_, base)) = super::resolve_node_wildcard_base(&state, node_id).await else {
+        return html(
+            axum::http::StatusCode::OK,
+            render_preview_dns("", &PreviewDns::Unknown("no preview base".into())),
+        );
+    };
+    let dns = match hyperion_validate::Domain::parse(&probe_name(&base)) {
+        Err(e) => PreviewDns::Unknown(e.to_string()),
+        Ok(domain) => match tokio::time::timeout(
+            DNS_TIMEOUT,
+            crate::dispatcher::dispatch_to_node(
+                &state,
+                Some(node_id),
+                Request::DnsCheck { domain },
+            ),
+        )
+        .await
+        {
+            Ok(Ok(RpcResponse::DnsCheck(r))) => preview_dns(&r),
+            Ok(Ok(RpcResponse::Error(e))) => PreviewDns::Unknown(e.to_string()),
+            Ok(Ok(_)) => PreviewDns::Unknown("unexpected response".into()),
+            Ok(Err(e)) => PreviewDns::Unknown(e.to_string()),
+            Err(_) => PreviewDns::Unknown("the node did not answer in time".into()),
+        },
+    };
+    html(axum::http::StatusCode::OK, render_preview_dns(&base, &dns))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -507,5 +702,93 @@ mod tests {
         assert_eq!(shared_base(&shared).as_deref(), Some("preview.example.com"));
         let own = wildcard_rows(&cluster("{name}.{node}.preview.example.com"), "s4", &nodes);
         assert_eq!(shared_base(&own), None);
+    }
+
+    fn dns(a: &[&str], ours: Option<&str>, matches: bool, proxied: bool) -> DnsCheckResult {
+        DnsCheckResult {
+            domain: "hyperion-check-0.n.example.com".into(),
+            resolved_a: a.iter().map(|s| s.to_string()).collect(),
+            resolved_aaaa: vec![],
+            our_public_ipv4: ours.map(str::to_string),
+            our_public_ipv6: None,
+            matches,
+            note: String::new(),
+            proxied,
+            origin_cert_self_signed: false,
+        }
+    }
+
+    #[test]
+    fn no_record_under_the_base_is_missing_with_the_ip_to_add() {
+        // The reported case: `*.hos-1` never published, certificate valid.
+        let d = preview_dns(&dns(&[], Some("37.27.109.116"), false, false));
+        assert_eq!(
+            d,
+            PreviewDns::Missing {
+                ip: Some("37.27.109.116".into())
+            }
+        );
+        assert_eq!((d.tone(), d.verdict()), ("err", "no record"));
+        let html = render_preview_dns("hos-1.digitalka.cz", &d);
+        assert!(html.contains("<code>*.hos-1.digitalka.cz</code> A <code>37.27.109.116</code>"));
+        let unknown_ip = render_preview_dns("a.example.com", &PreviewDns::Missing { ip: None });
+        assert!(unknown_ip.contains("pointing at this node"));
+    }
+
+    #[test]
+    fn a_record_at_this_node_points_here() {
+        let d = preview_dns(&dns(&["178.105.99.35"], Some("178.105.99.35"), true, false));
+        assert_eq!(
+            d,
+            PreviewDns::Here {
+                ip: "178.105.99.35".into()
+            }
+        );
+        assert_eq!(d.tone(), "ok");
+    }
+
+    #[test]
+    fn proxied_wins_over_matches() {
+        // DnsCheck reports a proxied name as matching; for a two-level
+        // wildcard the proxy is the problem.
+        let d = preview_dns(&dns(&["104.16.1.1"], Some("1.2.3.4"), true, true));
+        assert_eq!(d, PreviewDns::Proxied);
+        assert_eq!(d.tone(), "warn");
+    }
+
+    #[test]
+    fn another_address_points_elsewhere_or_is_unverified_without_our_ip() {
+        let d = preview_dns(&dns(&["5.6.7.8"], Some("1.2.3.4"), false, false));
+        assert_eq!(
+            d,
+            PreviewDns::Elsewhere {
+                seen: vec!["5.6.7.8".into()],
+                ours: "1.2.3.4".into()
+            }
+        );
+        assert_eq!(d.verdict(), "points elsewhere");
+        let d = preview_dns(&dns(&["5.6.7.8"], None, false, false));
+        assert_eq!(
+            d,
+            PreviewDns::Resolves {
+                seen: vec!["5.6.7.8".into()]
+            }
+        );
+        assert_eq!(d.tone(), "muted");
+    }
+
+    #[test]
+    fn the_dns_cell_escapes_what_it_shows() {
+        let html = render_preview_dns("x.example.com", &PreviewDns::Unknown("<b>\"".into()));
+        assert!(html.contains("title=\"&lt;b&gt;&quot;\""));
+        assert!(html.starts_with("<span class=\"pill muted\">unknown</span>"));
+    }
+
+    #[test]
+    fn the_probe_name_is_a_valid_fresh_name_under_the_base() {
+        let a = probe_name("hos-1.digitalka.cz");
+        assert!(a.starts_with("hyperion-check-") && a.ends_with(".hos-1.digitalka.cz"));
+        assert!(hyperion_validate::Domain::parse(&a).is_ok());
+        assert_ne!(a, probe_name("hos-1.digitalka.cz"));
     }
 }

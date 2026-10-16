@@ -25,7 +25,7 @@ pub use page_alerts::{get_alert_recipients, get_alerts};
 pub use page_backups::get_backups;
 pub use page_bans::get_bans;
 pub use page_cluster::{get_cluster, post_cluster_sync};
-pub use page_https::get_https;
+pub use page_https::{get_https, get_preview_dns};
 pub use page_letters::{get_letters, post_adopt_legacy};
 pub use page_mail::{get_mail, get_mail_health};
 pub use page_panel::get_panel;

@@ -364,6 +364,10 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/settings", get(handlers::settings::get_overview))
         .route("/settings/panel", get(handlers::settings::get_panel))
         .route("/settings/https", get(handlers::settings::get_https))
+        .route(
+            "/settings/https/preview-dns",
+            get(handlers::settings::get_preview_dns),
+        )
         .route("/settings/mail", get(handlers::settings::get_mail))
         .route(
             "/settings/mail/health",

@@ -172,7 +172,7 @@
     {% endif %}
     <div class="table-wrap inset">
       <table>
-        <thead><tr><th>Node</th><th>Wildcard</th><th>Status</th><th class="right"><span class="sr-only">Action</span></th></tr></thead>
+        <thead><tr><th>Node</th><th>Wildcard</th><th>DNS</th><th>Status</th><th class="right"><span class="sr-only">Action</span></th></tr></thead>
         <tbody>
         {% for n in wildcard_rows %}
           <tr>
@@ -181,6 +181,11 @@
               <span class="cell-sub">{% if n.is_master %}this server{% else %}<code>{{ n.node_id }}</code>{% endif %}</span>
             </td>
             <td><code style="word-break:break-all">{{ n.wildcard() }}</code></td>
+            <td>
+              <span hx-get="/settings/https/preview-dns?node_id={{ n.node_id }}"
+                    hx-trigger="intersect once"
+                    hx-swap="innerHTML"><span class="cell-sub">checking…</span></span>
+            </td>
             <td>
               <span class="pill {{ n.tone() }}">{{ n.verdict() }}</span>
               {% if !n.note().is_empty() %}<span class="cell-sub">{{ n.note() }}</span>{% endif %}
@@ -204,6 +209,9 @@
       <ul>
         <li>Add a DNS record <code>*.&lt;base&gt;</code> pointing at the node's IP address. On Cloudflare,
           leave it unproxied (grey cloud): the universal certificate does not cover two-level subdomains.</li>
+        <li>The DNS column looks up a made-up name under each base from that node, so it shows whether
+          the wildcard record exists and points at the node. A valid certificate alone does not make
+          previews reachable.</li>
         <li>Issuing shows the TXT records to publish at your DNS provider, then validates them over DNS-01.
           Keep that page open until the certificate is issued.</li>
         <li>This server holds no DNS credentials, so a wildcard cannot renew itself: renew it here

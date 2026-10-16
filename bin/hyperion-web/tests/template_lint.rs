@@ -312,6 +312,8 @@ fn every_page_is_reachable_from_the_nav() {
         "/install/update-node-status",
         // Per-row fragment the Nodes page lazy-loads into each summary.
         "/install/node-facts",
+        // Per-row DNS cell the HTTPS settings page lazy-loads for each node.
+        "/settings/https/preview-dns",
         // Per-card fragment the test-site form lazy-loads into each server.
         "/hostings/new/server-facts",
         "/services/install-status",
