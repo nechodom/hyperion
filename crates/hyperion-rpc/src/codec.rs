@@ -271,6 +271,11 @@ pub enum Request {
     WafOverview {
         days: u32,
     },
+    /// This node's ModSecurity engine (module + Core Rule Set) and how many
+    /// of its sites use it.
+    ModsecStatus,
+    /// Install ModSecurity + the Core Rule Set on this node (apt; minutes).
+    ModsecInstall,
     UpcomingExpiries {
         within_seconds: i64,
     },
@@ -2134,6 +2139,8 @@ pub enum Response {
     HostingKvSet,
     HostingKvList(Vec<(String, String)>),
     HostingWafActivity(hyperion_types::waf::WafActivity),
+    ModsecStatus(hyperion_types::crs::ModsecStatus),
+    ModsecInstall(hyperion_types::crs::ModsecStatus),
     WafOverview(hyperion_types::waf::WafOverview),
     UpcomingExpiries(Vec<ExpiringHosting>),
     SchedulerTick {

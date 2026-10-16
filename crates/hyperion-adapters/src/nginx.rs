@@ -35,6 +35,10 @@ pub struct VhostInput<'a> {
     /// `preview_server_name` is `Some`.
     pub preview_cert_path: Option<&'a str>,
     pub preview_cert_key_path: Option<&'a str>,
+    /// The ModSecurity connector is loaded on this node. Without it a
+    /// `modsecurity` directive is unknown and fails `nginx -t`, so a site's
+    /// CRS settings render only when this is true.
+    pub modsec_available: bool,
 }
 
 /// How this box's nginx wants HTTP/2 turned on.
@@ -237,6 +241,11 @@ struct VhostTpl<'a> {
     fastcgi_cache_ttl: i64,
     /// Effective WAF rules (level + overrides + has_php), flattened.
     waf: hyperion_types::waf::WafRules,
+    /// OWASP Core Rule Set on for this site (and the engine present).
+    crs_on: bool,
+    /// The site's ModSecurity rules, one directive per line (see
+    /// `modsec::render_site_rules`) — inlined into `modsecurity_rules '…'`.
+    crs_rules: String,
     /// Something in this vhost tags refusals into `$hyperion_waf` (a WAF
     /// rule, a country or a bot family), so the server block gets the
     /// root-owned WAF log and the verdict pass.
@@ -759,6 +768,13 @@ fn apex_of(domain: &str) -> &str {
 
 pub fn render(input: &VhostInput<'_>) -> Result<String, AdapterError> {
     let waf = waf_rules(input);
+    let crs = input.options.crs_settings();
+    let crs_on = crs.mode != hyperion_types::crs::CrsMode::Off && input.modsec_available;
+    let crs_rules = if crs_on {
+        crate::modsec::render_site_rules(&crs)
+    } else {
+        String::new()
+    };
     let tpl = VhostTpl {
         http2_directive: nginx_wants_http2_directive(),
         blocked_bots: bot_patterns(&input.options.blocked_bots),
@@ -790,6 +806,8 @@ pub fn render(input: &VhostInput<'_>) -> Result<String, AdapterError> {
         },
         fastcgi_cache_ttl: input.options.fastcgi_cache_ttl,
         waf,
+        crs_on,
+        crs_rules,
         waf_log: uses_waf_log(input),
         signup_limit_enabled: input.options.signup_limit_enabled,
         wp_admin_allow: parse_admin_allowlist(&input.options.wp_admin_allowlist),
@@ -1925,6 +1943,7 @@ mod tests {
             preview_server_name: None,
             preview_cert_path: None,
             preview_cert_key_path: None,
+            modsec_available: false,
         })
         .expect("render");
         let wants_directive = nginx_wants_http2_directive();
@@ -2012,6 +2031,7 @@ mod tests {
             preview_server_name: None,
             preview_cert_path: None,
             preview_cert_key_path: None,
+            modsec_available: false,
         })
         .expect("render");
         let param_form = out.contains("ssl http2;");
@@ -2055,6 +2075,7 @@ mod tests {
             preview_server_name: None,
             preview_cert_path: None,
             preview_cert_key_path: None,
+            modsec_available: false,
         })
         .expect("render");
 
@@ -2117,6 +2138,7 @@ mod tests {
             preview_server_name: None,
             preview_cert_path: None,
             preview_cert_key_path: None,
+            modsec_available: false,
         })
         .expect("render");
         assert!(out.contains("GPTBot"), "no bot rule emitted:\n{out}");
@@ -2208,6 +2230,7 @@ mod tests {
             preview_server_name: None,
             preview_cert_path: None,
             preview_cert_key_path: None,
+            modsec_available: false,
         })
         .expect("render");
         assert!(out.contains("$hyperion_country"), "no country rule:\n{out}");
@@ -2243,6 +2266,7 @@ mod tests {
             preview_server_name: None,
             preview_cert_path: None,
             preview_cert_key_path: None,
+            modsec_available: false,
         })
         .expect("render");
         assert!(out.contains("server_name example.cz;"));
@@ -2322,6 +2346,7 @@ mod tests {
                 preview_server_name: None,
                 preview_cert_path: None,
                 preview_cert_key_path: None,
+                modsec_available: false,
             })
             .expect("render")
         };
@@ -2379,6 +2404,7 @@ mod tests {
                 preview_server_name: None,
                 preview_cert_path: None,
                 preview_cert_key_path: None,
+                modsec_available: false,
             })
             .expect("render");
             assert!(
@@ -2423,6 +2449,7 @@ mod tests {
                 preview_server_name: None,
                 preview_cert_path: None,
                 preview_cert_key_path: None,
+                modsec_available: false,
             })
             .expect("render");
             assert!(
@@ -2452,6 +2479,7 @@ mod tests {
             preview_server_name: None,
             preview_cert_path: None,
             preview_cert_key_path: None,
+            modsec_available: false,
         })
         .expect("render");
         assert!(out.contains("server_name example.cz www.example.cz example.com;"));
@@ -2481,6 +2509,7 @@ mod tests {
             preview_server_name: None,
             preview_cert_path: None,
             preview_cert_key_path: None,
+            modsec_available: false,
         })
         .expect("render");
         // Exactly one HTTPS listener ⇒ no preview block leaked in.
@@ -2516,6 +2545,7 @@ mod tests {
             preview_server_name: Some("shop-example-com.s4.testovaciverze.cz"),
             preview_cert_path: Some("/etc/hyperion/certs/s4.testovaciverze.cz/fullchain.pem"),
             preview_cert_key_path: Some("/etc/hyperion/certs/s4.testovaciverze.cz/privkey.pem"),
+            modsec_available: false,
         })
         .expect("render");
         // TWO HTTPS server blocks now.
@@ -2581,6 +2611,7 @@ mod tests {
             preview_server_name: Some("shop-example-com.s4.testovaciverze.cz"),
             preview_cert_path: None,
             preview_cert_key_path: None,
+            modsec_available: false,
         })
         .expect("render");
         assert_eq!(out.matches("listen 443 ssl http2;").count(), 1);
@@ -2616,6 +2647,7 @@ mod tests {
             preview_server_name: None,
             preview_cert_path: None,
             preview_cert_key_path: None,
+            modsec_available: false,
         })
         .expect("render");
         assert!(out.contains("auth_basic           \"Restricted\";"));
@@ -2649,6 +2681,7 @@ mod tests {
             preview_server_name: None,
             preview_cert_path: None,
             preview_cert_key_path: None,
+            modsec_available: false,
         })
         .expect("render");
         assert!(out.contains("location / { return 503; }"));
@@ -2684,6 +2717,7 @@ mod tests {
             preview_server_name: None,
             preview_cert_path: None,
             preview_cert_key_path: None,
+            modsec_available: false,
         })
         .expect("render");
         assert!(out.contains("fastcgi_cache hyperion_01HCACHE;"));
@@ -2757,6 +2791,7 @@ mod tests {
             preview_server_name: None,
             preview_cert_path: None,
             preview_cert_key_path: None,
+            modsec_available: false,
         })
         .expect("render");
         assert!(
@@ -2829,6 +2864,7 @@ mod tests {
             preview_server_name: None,
             preview_cert_path: None,
             preview_cert_key_path: None,
+            modsec_available: false,
         })
         .expect("render");
         // WAF rules present.
@@ -2865,8 +2901,78 @@ mod tests {
             preview_server_name: Some("p.example.net"),
             preview_cert_path: Some("/c.pem"),
             preview_cert_key_path: Some("/k.pem"),
+            modsec_available: false,
         })
         .expect("render")
+    }
+
+    fn render_crs(opts: &hyperion_types::VhostOptions, available: bool) -> String {
+        let aliases: Vec<String> = vec![];
+        render(&VhostInput {
+            domain: "example.cz",
+            aliases: &aliases,
+            root_dir: "/home/example_cz/example.cz/htdocs",
+            logs_dir: "/home/example_cz/example.cz/logs",
+            system_user: "example_cz",
+            php_version: Some("8.3"),
+            cert_path: "/etc/lm/certs/example.cz/fullchain.pem",
+            key_path: "/etc/lm/certs/example.cz/privkey.pem",
+            acme_challenge_root: "/var/lib/lm/acme-challenges",
+            hosting_id: "01HCRS",
+            options: opts,
+            preview_server_name: Some("p.example.net"),
+            preview_cert_path: Some("/c.pem"),
+            preview_cert_key_path: Some("/k.pem"),
+            modsec_available: available,
+        })
+        .expect("render")
+    }
+
+    /// CRS renders only when it is on AND this node has the module: a
+    /// `modsecurity` directive without it fails `nginx -t` for every site.
+    #[test]
+    fn crs_renders_only_when_on_and_available() {
+        let mut opts = hyperion_types::VhostOptions {
+            crs_mode: "block".into(),
+            crs_paranoia: 2,
+            crs_threshold: 10,
+            crs_wordpress: true,
+            crs_exclusions: r#"[{"rules":[942100],"path":"/wp-admin/admin-ajax.php"}]"#.into(),
+            ..Default::default()
+        };
+        let out = render_crs(&opts, true);
+        for block in out
+            .split("\nserver {")
+            .filter(|b| b.contains("listen 443 ssl"))
+        {
+            assert!(block.contains("    modsecurity on;\n"), "{block}");
+            assert!(block.contains("modsecurity_transaction_id \"01HCRS-$msec-$request_id\";"));
+            assert!(block.contains("SecRuleEngine On\n"));
+            assert!(block.contains("setvar:tx.paranoia_level=2"));
+            assert!(block.contains("@beginsWith /wp-admin/admin-ajax.php"));
+            // The ACME location switches it off again.
+            let acme = block
+                .find("location /.well-known/acme-challenge/ {")
+                .expect("acme location");
+            let close = block[acme..].find('}').expect("close") + acme;
+            assert!(block[acme..close].contains("modsecurity off;"));
+        }
+        // One quoted string per site, and nothing inside it can close it.
+        let quoted = out.split("modsecurity_rules '").nth(1).expect("rules");
+        let body = quoted.split("';").next().expect("end");
+        assert!(!body.contains('\''));
+
+        assert!(
+            !render_crs(&opts, false).contains("modsecurity"),
+            "no engine: nothing"
+        );
+        opts.crs_mode = "off".into();
+        assert!(
+            !render_crs(&opts, true).contains("modsecurity"),
+            "off: nothing"
+        );
+        opts.crs_mode = "detect".into();
+        assert!(render_crs(&opts, true).contains("SecRuleEngine DetectionOnly\n"));
     }
 
     /// Off renders no WAF at all — no log, no verdict pass — so a site that
@@ -3353,6 +3459,7 @@ mod upstream_url_tests {
             preview_server_name: None,
             preview_cert_path: None,
             preview_cert_key_path: None,
+            modsec_available: false,
         })
         .expect("render")
     }

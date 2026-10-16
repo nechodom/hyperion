@@ -1059,6 +1059,7 @@ impl AdapterPort for RealAdapter {
             preview_server_name: preview.as_ref().map(|p| p.server_name.as_str()),
             preview_cert_path: preview.as_ref().map(|p| p.cert_path.as_str()),
             preview_cert_key_path: preview.as_ref().map(|p| p.key_path.as_str()),
+            modsec_available: hyperion_adapters::modsec::module_available(),
         };
         hyperion_adapters::nginx::write_vhost(&self.nginx_paths, &input).await?;
 
@@ -1477,6 +1478,18 @@ impl AdapterPort for RealAdapter {
                 Err(e) => tracing::error!(error = %e, "self-restart spawn failed"),
             }
         });
+    }
+
+    async fn modsec_status(&self) -> hyperion_types::crs::ModsecStatus {
+        hyperion_adapters::modsec::status().await
+    }
+
+    async fn modsec_install(&self) -> Result<(), AdapterError> {
+        hyperion_adapters::modsec::ensure_installed().await
+    }
+
+    async fn modsec_sync_http(&self, need: bool) -> Result<bool, AdapterError> {
+        hyperion_adapters::modsec::sync_http(need).await
     }
 
     async fn redis_is_available(&self) -> bool {

@@ -74,8 +74,8 @@ pub async fn record(
     }
     for h in &batch.recent {
         sqlx::query(
-            "INSERT INTO waf_recent (hosting_id, ts, ip, rule, method, uri, ua, browser) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO waf_recent (hosting_id, ts, ip, rule, method, uri, ua, browser, detail) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(hosting_id)
         .bind(h.ts)
@@ -85,6 +85,7 @@ pub async fn record(
         .bind(truncate(&h.uri))
         .bind(truncate(&h.ua))
         .bind(h.browser)
+        .bind(truncate(&h.detail))
         .execute(&mut *tx)
         .await?;
     }
@@ -130,8 +131,8 @@ pub async fn recent(
     limit: i64,
 ) -> Result<Vec<WafHit>, StateError> {
     #[allow(clippy::type_complexity)]
-    let rows: Vec<(i64, String, String, String, String, String, bool)> = sqlx::query_as(
-        "SELECT ts, ip, rule, method, uri, ua, browser FROM waf_recent \
+    let rows: Vec<(i64, String, String, String, String, String, bool, String)> = sqlx::query_as(
+        "SELECT ts, ip, rule, method, uri, ua, browser, detail FROM waf_recent \
          WHERE hosting_id = ? ORDER BY id DESC LIMIT ?",
     )
     .bind(hosting_id)
@@ -140,7 +141,7 @@ pub async fn recent(
     .await?;
     Ok(rows
         .into_iter()
-        .map(|(ts, ip, rule, method, uri, ua, browser)| WafHit {
+        .map(|(ts, ip, rule, method, uri, ua, browser, detail)| WafHit {
             ts,
             ip,
             rule,
@@ -148,6 +149,7 @@ pub async fn recent(
             uri,
             ua,
             browser,
+            detail,
             ..Default::default()
         })
         .collect())
@@ -383,6 +385,20 @@ mod tests {
             ip_offenders(&pool, "h1", t - 10, 3).await.expect("off"),
             vec!["1.1.1.1".to_string()]
         );
+        record(
+            &pool,
+            "h3",
+            &WafBatch::from_hits([WafHit {
+                detail: "942100 · score 5".into(),
+                ..hit(t, "1.1.1.1", "crs_sqli")
+            }]),
+        )
+        .await
+        .expect("record");
+        assert_eq!(
+            recent(&pool, "h3", 1).await.expect("r")[0].detail,
+            "942100 · score 5"
+        );
         let rec = recent(&pool, "h1", 10).await.expect("recent");
         assert_eq!(rec.len(), 4);
         assert_eq!(rec[0].ts, t + 3, "newest first");
@@ -571,6 +587,33 @@ mod tests {
             2,
             "updated_at still gets `now`"
         );
+        assert_eq!(back.crs_mode, "off", "default");
+
+        // CRS settings round-trip, resolved and canonical.
+        let mut crs = back.clone();
+        crs.crs_mode = "block".into();
+        crs.crs_paranoia = 2;
+        crs.crs_threshold = 10;
+        crs.crs_wordpress = true;
+        crs.crs_exclusions = r#"[{"rules":[942100,949110],"path":"/x"}]"#.into();
+        crate::hostings::set_vhost_options(&pool, &hid, &crs, None, 3)
+            .await
+            .expect("set");
+        let back = crate::hostings::get_by_id(&pool, &hid)
+            .await
+            .expect("get")
+            .expect("row")
+            .vhost_options;
+        assert_eq!(back.crs_mode, "block");
+        assert_eq!(back.crs_paranoia, 2);
+        assert_eq!(back.crs_threshold, 10);
+        assert!(back.crs_wordpress);
+        assert_eq!(
+            back.crs_exclusions, r#"[{"rules":[942100],"path":"/x"}]"#,
+            "949110 dropped"
+        );
+        assert_eq!(back.waf_level, "strict", "WAF columns unshifted");
+        assert_eq!(back.canonical_host, "non-www");
 
         // A legacy writer: empty level, bool on ⇒ stored as standard.
         let legacy = hyperion_types::VhostOptions {

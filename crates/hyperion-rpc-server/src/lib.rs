@@ -236,6 +236,14 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(v) => Response::WafOverview(v),
             Err(e) => Response::Error(e),
         },
+        Request::ModsecStatus => match api.modsec_status().await {
+            Ok(v) => Response::ModsecStatus(v),
+            Err(e) => Response::Error(e),
+        },
+        Request::ModsecInstall => match api.modsec_install().await {
+            Ok(v) => Response::ModsecInstall(v),
+            Err(e) => Response::Error(e),
+        },
         Request::HostingKvList { hosting_id } => match api.hosting_kv_list(hosting_id).await {
             Ok(v) => Response::HostingKvList(v),
             Err(e) => Response::Error(e),
@@ -2398,6 +2406,12 @@ mod tests {
         }
         async fn waf_overview(&self, _: u32) -> Result<hyperion_types::waf::WafOverview, RpcError> {
             Ok(hyperion_types::waf::WafOverview::default())
+        }
+        async fn modsec_status(&self) -> Result<hyperion_types::crs::ModsecStatus, RpcError> {
+            Ok(hyperion_types::crs::ModsecStatus::default())
+        }
+        async fn modsec_install(&self) -> Result<hyperion_types::crs::ModsecStatus, RpcError> {
+            Ok(hyperion_types::crs::ModsecStatus::default())
         }
         async fn hosting_kv_list(&self, _: String) -> Result<Vec<(String, String)>, RpcError> {
             Ok(vec![])

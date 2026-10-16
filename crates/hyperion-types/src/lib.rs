@@ -16,6 +16,7 @@
 pub mod care_check;
 pub mod cert;
 pub mod clock;
+pub mod crs;
 pub mod db;
 pub mod dkim;
 pub mod dns;

@@ -125,6 +125,7 @@ pub fn job_kind_label(kind: &str) -> String {
         "node_update" => "Update node",
         "post_create_setup" => "Set up new hosting",
         "wp_install" => "Install WordPress",
+        "modsec_install" => "Install ModSecurity + OWASP CRS",
         "wp_reinstall" => "Reinstall WordPress core",
         "wp_reinstall_all" => "Reinstall WordPress core everywhere",
         "profile_apply" => "Apply profile",

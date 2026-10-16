@@ -134,6 +134,7 @@ pub fn parse_line(line: &str) -> Option<WafHit> {
             fetch_site,
             "same-origin" | "same-site" | "cross-site" | "none"
         ),
+        detail: String::new(),
     })
 }
 
@@ -147,7 +148,11 @@ fn rotated_sibling(path: &Path) -> Option<PathBuf> {
 /// Feed every complete line of `reader` (at most `budget` bytes) into
 /// `batch`. Returns the bytes consumed: a trailing line without its newline
 /// is still being written and is left for the next pass.
-fn read_lines<R: Read>(reader: R, budget: u64, batch: &mut WafBatch) -> std::io::Result<u64> {
+fn read_lines<R: Read>(
+    reader: R,
+    budget: u64,
+    on_line: &mut dyn FnMut(&str),
+) -> std::io::Result<u64> {
     let mut r = BufReader::new(reader.take(budget));
     let mut line = Vec::with_capacity(512);
     let mut consumed = 0u64;
@@ -158,23 +163,13 @@ fn read_lines<R: Read>(reader: R, budget: u64, batch: &mut WafBatch) -> std::io:
             break;
         }
         consumed += n as u64;
-        if let Some(hit) = parse_line(&String::from_utf8_lossy(&line)) {
-            batch.push(hit);
-        }
+        on_line(&String::from_utf8_lossy(&line));
     }
     Ok(consumed)
 }
 
 /// Read the whole lines appended since `pos`, aggregated. Returns the batch
-/// and the position to store for next time.
-///
-/// - Rotated (the inode changed): the rest of the previous file is read
-///   from `<log>.1` first, so the lines written between the last pass and
-///   the rotation are not lost, then the new file from the start.
-/// - Truncated (shorter than the offset): restart at 0.
-/// - More than [`MAX_READ_BYTES`] unread: skip to the newest
-///   `MAX_READ_BYTES`, starting at a line boundary, and say how much was
-///   skipped. Bans are decided on recent hits; old ones only feed totals.
+/// and the position to store for next time. See [`read_new_lines`].
 pub fn read_new(path: &Path, pos: Option<LogPos>) -> std::io::Result<(WafBatch, LogPos)> {
     read_new_with_budget(path, pos, MAX_READ_BYTES)
 }
@@ -184,8 +179,37 @@ fn read_new_with_budget(
     pos: Option<LogPos>,
     budget: u64,
 ) -> std::io::Result<(WafBatch, LogPos)> {
-    use std::os::unix::fs::MetadataExt;
     let mut batch = WafBatch::default();
+    let (pos, skipped) = read_new_lines(path, pos, budget, &mut |line| {
+        if let Some(hit) = parse_line(line) {
+            batch.push(hit);
+        }
+    })?;
+    batch.skipped_bytes = skipped;
+    Ok((batch, pos))
+}
+
+/// Hand every whole line appended to `path` since `pos` to `on_line`.
+/// Returns the position to store for next time and the bytes skipped.
+///
+/// - Rotated (the inode changed): the rest of the previous file is read
+///   from `<log>.1` first, so the lines written between the last pass and
+///   the rotation are not lost, then the new file from the start.
+/// - Truncated in place (`copytruncate`): the rest is read from the copy in
+///   `<log>.1`, then the live file from the start.
+/// - More than `budget` unread: skip to the newest `budget` bytes, starting
+///   at a line boundary. Bans are decided on recent hits; old ones only feed
+///   totals.
+/// - A trailing line without its newline is still being written and is
+///   left for the next pass.
+pub fn read_new_lines(
+    path: &Path,
+    pos: Option<LogPos>,
+    budget: u64,
+    on_line: &mut dyn FnMut(&str),
+) -> std::io::Result<(LogPos, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    let mut skipped = 0u64;
     let mut file = std::fs::File::open(path)?;
     let meta = file.metadata()?;
     let inode = meta.ino();
@@ -202,7 +226,7 @@ fn read_new_with_budget(
                     let copy_len = copy.metadata().map(|m| m.len()).unwrap_or(0);
                     if p.offset < copy_len {
                         copy.seek(SeekFrom::Start(p.offset))?;
-                        read_lines(copy, (copy_len - p.offset).min(budget), &mut batch)?;
+                        read_lines(copy, (copy_len - p.offset).min(budget), on_line)?;
                     }
                 }
             }
@@ -216,7 +240,7 @@ fn read_new_with_budget(
                         if m.ino() == p.inode && p.offset < m.len() {
                             let mut old = old;
                             old.seek(SeekFrom::Start(p.offset))?;
-                            read_lines(old, (m.len() - p.offset).min(budget), &mut batch)?;
+                            read_lines(old, (m.len() - p.offset).min(budget), on_line)?;
                         }
                     }
                 }
@@ -228,7 +252,7 @@ fn read_new_with_budget(
 
     if len - offset > budget {
         let start = len - budget;
-        batch.skipped_bytes += start - offset;
+        skipped += start - offset;
         // Land on a line boundary: unless `start` already is one, drop the
         // rest of the line it falls inside.
         file.seek(SeekFrom::Start(start - 1))?;
@@ -239,12 +263,12 @@ fn read_new_with_budget(
             let mut partial = Vec::new();
             n = BufReader::new((&mut file).take(budget)).read_until(b'\n', &mut partial)? as u64;
         }
-        batch.skipped_bytes += n;
+        skipped += n;
         offset = start + n;
     }
     file.seek(SeekFrom::Start(offset))?;
-    offset += read_lines(&mut file, len - offset, &mut batch)?;
-    Ok((batch, LogPos { inode, offset }))
+    offset += read_lines(&mut file, len - offset, on_line)?;
+    Ok((LogPos { inode, offset }, skipped))
 }
 
 #[cfg(test)]

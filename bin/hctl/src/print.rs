@@ -892,6 +892,12 @@ pub fn print_pretty(resp: &Response) {
                 );
             }
         }
+        Response::ModsecStatus(s) | Response::ModsecInstall(s) => {
+            println!(
+                "module: {}  CRS: {} {}  loaded: {}  sites using it: {}",
+                s.module, s.crs, s.crs_version, s.loaded, s.active_sites
+            );
+        }
         Response::WafOverview(o) => {
             for s in &o.sites {
                 let n: i64 = s.totals_24h.iter().map(|c| c.hits).sum();
