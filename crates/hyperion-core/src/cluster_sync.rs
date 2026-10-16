@@ -63,7 +63,10 @@ pub fn is_synced_key(section: &str, key: &str) -> bool {
     match section {
         "backup" => matches!(key, "drop_local_after_offsite" | "keep_local_latest"),
         "backup_retention" => {
-            matches!(key, "max_age_days" | "keep_latest_n" | "pre_update_keep_days")
+            matches!(
+                key,
+                "max_age_days" | "keep_latest_n" | "pre_update_keep_days"
+            )
         }
         "backup_remote" => matches!(
             key,

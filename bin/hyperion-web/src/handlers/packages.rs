@@ -2324,7 +2324,10 @@ fn included_features(f: &PackageFeatures, live: Option<&LiveFeatureState>) -> Ve
             Some(l) if l == want || (want == WafLevel::Standard && l == WafLevel::Strict) => {
                 ("active", String::new())
             }
-            Some(l) => ("inactive", format!("currently {}", l.label().to_lowercase())),
+            Some(l) => (
+                "inactive",
+                format!("currently {}", l.label().to_lowercase()),
+            ),
         };
         out.push(IncludedFeature {
             label: match want {
@@ -2344,7 +2347,10 @@ fn included_features(f: &PackageFeatures, live: Option<&LiveFeatureState>) -> Ve
         let (status, live_label) = match live.map(|l| l.crs) {
             None => ("unknown", String::new()),
             Some(m) if m == want => ("active", String::new()),
-            Some(m) => ("inactive", format!("currently {}", m.label().to_lowercase())),
+            Some(m) => (
+                "inactive",
+                format!("currently {}", m.label().to_lowercase()),
+            ),
         };
         out.push(IncludedFeature {
             label: match want {

@@ -20340,13 +20340,14 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             } else if !self.http_bruteforce_scan_enabled(id).await {
                 reasons.push(cat.render("ops.protection_reason.scan_off", &[]));
             } else {
-                let last = hyperion_state::hosting_kv::get(&self.pool, id, FAIL2BAN_HTTP_SINCE_KV_KEY)
-                    .await
-                    .ok()
-                    .flatten()
-                    .as_deref()
-                    .and_then(parse_coverage_stamp)
-                    .map(|(_, last)| last);
+                let last =
+                    hyperion_state::hosting_kv::get(&self.pool, id, FAIL2BAN_HTTP_SINCE_KV_KEY)
+                        .await
+                        .ok()
+                        .flatten()
+                        .as_deref()
+                        .and_then(parse_coverage_stamp)
+                        .map(|(_, last)| last);
                 if bruteforce_evidence_missing(last, since, now) {
                     reasons.push(cat.render("ops.protection_reason.no_scan", &[]));
                 }
@@ -39641,7 +39642,9 @@ fn parse_agent_section_fields(
             ("backup_retention", "pre_update_keep_days") => {
                 let n = parse_int(v)?;
                 if !(1..=3650).contains(&n) {
-                    return Err(bad(format!("pre_update_keep_days must be 1..=3650, got {n}")));
+                    return Err(bad(format!(
+                        "pre_update_keep_days must be 1..=3650, got {n}"
+                    )));
                 }
                 crate::config_persist::FieldValue::Int(n)
             }
@@ -44449,12 +44452,23 @@ mod tests {
             let id = detail.id.clone();
             async move {
                 let at = now - age_days * day;
-                let r = backups::start(&pool, &id, "local", at).await.expect("start");
-                backups::mark_ok(&pool, r, &format!("/nonexistent/pre.cz-{at}.tar.gz"), None, 1, at + 1)
+                let r = backups::start(&pool, &id, "local", at)
                     .await
-                    .expect("ok");
+                    .expect("start");
+                backups::mark_ok(
+                    &pool,
+                    r,
+                    &format!("/nonexistent/pre.cz-{at}.tar.gz"),
+                    None,
+                    1,
+                    at + 1,
+                )
+                .await
+                .expect("ok");
                 if !purpose.is_empty() {
-                    backups::set_purpose(&pool, r, purpose, held).await.expect("purpose");
+                    backups::set_purpose(&pool, r, purpose, held)
+                        .await
+                        .expect("purpose");
                 }
                 r
             }
@@ -44478,12 +44492,20 @@ mod tests {
         assert!(left.contains(&fresh_clean), "clean, within 14 days");
         assert!(left.contains(&old_held), "held: never by age");
         assert!(!left.contains(&old_clean), "clean, past 14 days");
-        assert!(left.contains(&ord_a) && left.contains(&ord_b), "the newest 2 ORDINARY backups");
+        assert!(
+            left.contains(&ord_a) && left.contains(&ord_b),
+            "the newest 2 ORDINARY backups"
+        );
         assert!(!left.contains(&ord_c), "third ordinary, past 30 days");
 
         // Read back what the sweep writes, through the same row the list sees.
-        backups::set_held(&pool, old_held, false).await.expect("release");
-        let row = backups::get_by_id(&pool, old_held).await.expect("get").expect("row");
+        backups::set_held(&pool, old_held, false)
+            .await
+            .expect("release");
+        let row = backups::get_by_id(&pool, old_held)
+            .await
+            .expect("get")
+            .expect("row");
         assert!(row.is_pre_update() && !row.held);
         assert_eq!(s.prune_old_backups(&detail.id).await.expect("prune 2"), 1);
     }
@@ -53722,7 +53744,12 @@ mod tests {
         engine.store(true, Ordering::SeqCst);
         assert_eq!(s.package_enforce_tick().await.expect("tick 3"), 1);
         assert_eq!(
-            s.get(sel.clone()).await.expect("get").vhost_options.crs_settings().mode,
+            s.get(sel.clone())
+                .await
+                .expect("get")
+                .vhost_options
+                .crs_settings()
+                .mode,
             CrsMode::Detect
         );
         assert_eq!(

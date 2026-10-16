@@ -1484,7 +1484,10 @@ mod tests {
         off.set_firewall_choice("off");
         assert_eq!(standard.combine(strict).firewall_choice(), "strict");
         assert_eq!(strict.combine(off).firewall_choice(), "strict");
-        assert_eq!(off.combine(PackageFeatures::default()).firewall_choice(), "off");
+        assert_eq!(
+            off.combine(PackageFeatures::default()).firewall_choice(),
+            "off"
+        );
         // A Strict flag on a package that turns the firewall OFF must not
         // leak into a combine where another package turns it on.
         let odd = PackageFeatures {
