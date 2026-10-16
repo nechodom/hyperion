@@ -196,7 +196,7 @@ pub(crate) async fn dispatch_remote_unchecked(
 }
 
 /// Is `node_id` the master's own hostname (as its rows store it)?
-async fn is_master_hostname(state: &SharedState, node_id: &str) -> bool {
+pub(crate) async fn is_master_hostname(state: &SharedState, node_id: &str) -> bool {
     match cached_agent_config(state).await {
         Ok(c) => !c.hostname.is_empty() && c.hostname == node_id,
         Err(_) => false,

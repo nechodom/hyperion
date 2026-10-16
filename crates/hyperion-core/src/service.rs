@@ -18976,6 +18976,74 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok((relanguaged, relisted))
     }
 
+    /// Re-price the activations THIS node owns to a definition's price.
+    ///
+    /// Never automatic: the price is snapshotted at activation because it is
+    /// what the customer agreed to. The panel calls this on every node only
+    /// when the operator ticks "apply the new price to sites already on this
+    /// package" while saving it. Takes the VALUES for the same reason as
+    /// [`Self::package_relist`]: a worker has no `service_packages` row to
+    /// look them up in.
+    ///
+    /// Re-validated here, not trusted: the request may come from a master of
+    /// another build, and a bad interval stored on a worker would silently
+    /// stop that site's reminders. Returns how many ACTIVE activations moved.
+    pub async fn package_reprice(
+        &self,
+        package_id: i64,
+        price_minor: Option<i64>,
+        price_currency: Option<String>,
+        price_interval: Option<String>,
+    ) -> Result<u64, RpcError> {
+        if price_minor.is_some_and(|m| m < 0) {
+            return Err(RpcError::Validation {
+                message: "price must not be negative".into(),
+            });
+        }
+        let currency = price_currency
+            .map(|c| c.trim().to_string())
+            .filter(|c| !c.is_empty());
+        let interval = price_interval
+            .map(|i| i.trim().to_lowercase())
+            .filter(|i| !i.is_empty());
+        let interval_secs = match interval.as_deref() {
+            None => None,
+            Some(iv) => Some(
+                billing_interval_secs(iv).ok_or_else(|| RpcError::Validation {
+                    message: "price interval must be monthly | quarterly | yearly".into(),
+                })?,
+            ),
+        };
+        let repriced = packages::set_price(
+            &self.pool,
+            package_id,
+            price_minor,
+            currency.as_deref(),
+            interval.as_deref(),
+            interval_secs,
+            now_secs(),
+        )
+        .await
+        .map_err(|e| RpcError::Internal_with(format!("package reprice: {e}")))?;
+        if repriced > 0 {
+            self.append_audit(
+                "package.reprice",
+                None,
+                &serde_json::json!({
+                    "package_id": package_id,
+                    "price_minor": price_minor,
+                    "price_currency": currency,
+                    "price_interval": interval,
+                    "activations_repriced": repriced,
+                })
+                .to_string(),
+                "ok",
+            )
+            .await;
+        }
+        Ok(repriced)
+    }
+
     /// Delete a definition. Existing activations SURVIVE with `package_id`
     /// NULLed (the FK is ON DELETE SET NULL): the price the customer agreed
     /// to and the prior state a clean cancel needs are not ours to erase.
@@ -52244,6 +52312,62 @@ mod tests {
         assert_eq!(
             s.package_relist(999, "cs", &items, "").await.expect("noop"),
             (0, 0)
+        );
+    }
+
+    /// The opt-in re-price reaches a site whose definition lives on another
+    /// box, and refuses an interval the billing sweep could not step.
+    #[tokio::test]
+    async fn package_reprice_moves_the_activations_this_node_owns() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), package_mocks());
+        let detail = hosting_for_packages(&s, "repriced.cz").await;
+        let id = hyperion_state::packages::activate(
+            &pool,
+            &hyperion_state::packages::NewActivation {
+                report_omit: String::new(),
+                valid_from: None,
+                enforcement_started: true,
+                hosting_id: detail.id.clone(),
+                package_id: 42,
+                package_name: "Péče Plus".into(),
+                letters_lang: "cs".into(),
+                check_items: String::new(),
+                price_minor: Some(49_000),
+                price_currency: Some("Kč".into()),
+                price_interval: Some("monthly".into()),
+                features: PackageFeatures::default(),
+                next_billing_at: Some(9_999_999_999),
+                prior_state_json: None,
+            },
+            0,
+        )
+        .await
+        .expect("activate");
+
+        assert!(s
+            .package_reprice(42, Some(1), None, Some("weekly".into()))
+            .await
+            .is_err());
+        let n = s
+            .package_reprice(42, Some(59_000), Some(" Kč ".into()), Some("Yearly".into()))
+            .await
+            .expect("reprice");
+        assert_eq!(n, 1);
+        let row = hyperion_state::packages::get_activation(&pool, id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.price_minor, Some(59_000));
+        assert_eq!(row.price_currency.as_deref(), Some("Kč"));
+        assert_eq!(row.price_interval.as_deref(), Some("yearly"));
+        assert_eq!(row.next_billing_at, Some(9_999_999_999));
+        // Nothing held here: a no-op, not an error.
+        assert_eq!(
+            s.package_reprice(999, Some(1), None, None)
+                .await
+                .expect("noop"),
+            0
         );
     }
 

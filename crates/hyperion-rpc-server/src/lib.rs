@@ -1992,6 +1992,18 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             },
             Err(e) => Response::Error(e),
         },
+        Request::PackageReprice {
+            package_id,
+            price_minor,
+            price_currency,
+            price_interval,
+        } => match api
+            .package_reprice(package_id, price_minor, price_currency, price_interval)
+            .await
+        {
+            Ok(repriced) => Response::PackageReprice { repriced },
+            Err(e) => Response::Error(e),
+        },
         Request::CareOverview { period } => match api.care_overview(period).await {
             Ok(v) => Response::CareOverview(v),
             Err(e) => Response::Error(e),
@@ -3677,6 +3689,15 @@ mod tests {
             _: String,
         ) -> Result<(u64, u64), RpcError> {
             Ok((0, 0))
+        }
+        async fn package_reprice(
+            &self,
+            _: i64,
+            _: Option<i64>,
+            _: Option<String>,
+            _: Option<String>,
+        ) -> Result<u64, RpcError> {
+            Ok(0)
         }
         async fn backup_offsite_list(
             &self,

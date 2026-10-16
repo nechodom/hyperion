@@ -1017,6 +1017,9 @@ pub fn print_pretty(resp: &Response) {
                 "✓ {relisted} activation(s) relisted, {relanguaged} relanguaged on this node"
             )
         }
+        Response::PackageReprice { repriced } => {
+            println!("✓ {repriced} activation(s) repriced on this node")
+        }
         // The three self-check responses share one shape; print them the
         // same way the FTP check already is.
         Response::WpMailSelfCheck(r) | Response::WpMailRepair(r) | Response::WpMailOverrideSet(r) => {

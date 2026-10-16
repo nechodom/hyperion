@@ -2000,6 +2000,18 @@ pub enum Request {
         #[serde(default)]
         report_omit: String,
     },
+    /// Re-price the ACTIVE activations of a package on THIS node to the
+    /// given price. Only sent when the operator asked for it on save — the
+    /// activation's price is otherwise what the customer agreed to and stays.
+    /// Carries the values, like `PackageRelist`. An older node cannot decode
+    /// it and answers with an error, which the panel reports as a node whose
+    /// sites kept the old price.
+    PackageReprice {
+        package_id: i64,
+        price_minor: Option<i64>,
+        price_currency: Option<String>,
+        price_interval: Option<String>,
+    },
     /// Every site on THIS node that holds a care package, with how much of
     /// `period`'s monthly service checklist is done.
     ///
@@ -2674,6 +2686,10 @@ pub enum Response {
     PackageRelist {
         relanguaged: u64,
         relisted: u64,
+    },
+    /// How many ACTIVE activations on that node took the new price.
+    PackageReprice {
+        repriced: u64,
     },
     PackageActivations(Vec<hyperion_types::HostingPackage>),
     CareOverview(Vec<hyperion_types::care_check::CareOverviewRow>),

@@ -559,6 +559,11 @@ pub struct PackageForm {
     pub price_currency: String,
     #[serde(default)]
     pub price_interval: String,
+    /// Edit form only: also move the sites ALREADY on this package to the
+    /// price being saved. Absent (unticked) = they keep the price they agreed
+    /// to, which is the default on purpose.
+    #[serde(default)]
+    pub reprice_existing: Option<String>,
     // The tri-state bundle. Parsed through `from_stored`, so a value the
     // browser somehow mangled degrades to "leave" (no opinion) instead of
     // forcing something nobody bought.
@@ -908,6 +913,7 @@ pub async fn post_update(
             RpcResponse::Error(e) => return Ok(redirect_error(&e.to_string())),
             _ => return Err(AppError::Internal("unexpected response".into())),
         };
+    let reprice = form.reprice_existing.is_some();
     let input = form.into_input(
         current,
         Some(&current_lang),
@@ -936,10 +942,38 @@ pub async fn post_update(
                 &p.report_omit,
             )
             .await;
+            // Opt-in: the price on an activation is what that customer agreed
+            // to, so it only moves when the operator asked for it on this save.
+            let repriced = if reprice {
+                Some(reprice_on_every_node(&state, &p).await)
+            } else {
+                None
+            };
+            if let Some((_, reprice_missed)) = repriced.as_ref().filter(|(_, m)| !m.is_empty()) {
+                return Ok(redirect_error(&format!(
+                    "Package \"{}\" was saved, but {} did not take the new price, so sites there \
+                     still show and remind the previous one. Save again with the price option \
+                     ticked once {} reachable.",
+                    p.name,
+                    reprice_missed.join(", "),
+                    if reprice_missed.len() == 1 {
+                        "it is"
+                    } else {
+                        "they are"
+                    },
+                )));
+            }
             if missed.is_empty() {
+                let price_note = match repriced {
+                    Some((n, _)) => format!(
+                        " {n} site{} already on it now use the new price.",
+                        if n == 1 { "" } else { "s" }
+                    ),
+                    None => " Sites already on it keep the price they agreed to.".to_string(),
+                };
                 Ok(redirect_flash(&format!(
-                    "Package \"{}\" updated. Sites already holding it pick the change up on the next enforcement pass.",
-                    p.name
+                    "Package \"{}\" updated. Sites already holding it pick the change up on the next enforcement pass.{}",
+                    p.name, price_note
                 )))
             } else {
                 Ok(redirect_error(&format!(
@@ -2072,6 +2106,63 @@ async fn relist_on_every_node(
     missed
 }
 
+/// Move every ACTIVE activation of `pkg` — on this server and on every node —
+/// to the definition's current price. Returns how many moved and the nodes
+/// that could not be told (by label), which a caller MUST surface: those
+/// sites go on showing and reminding the old price.
+///
+/// The master is asked over its own socket, and skipped in the node list if
+/// it appears there, so its sites are counted once.
+async fn reprice_on_every_node(state: &SharedState, pkg: &ServicePackage) -> (u64, Vec<String>) {
+    let req = Request::PackageReprice {
+        package_id: pkg.id,
+        price_minor: pkg.price_minor,
+        price_currency: pkg.price_currency.clone(),
+        price_interval: pkg.price_interval.clone(),
+    };
+    let mut moved = 0u64;
+    let mut missed: Vec<String> = Vec::new();
+    match hyperion_rpc_client::call(&state.agent_socket, req.clone()).await {
+        Ok(RpcResponse::PackageReprice { repriced }) => moved += repriced,
+        _ => missed.push("this server".to_string()),
+    }
+    let nodes: Vec<hyperion_types::NodeSummary> = match crate::dispatcher::cached_nodes(state)
+        .await
+        .map(hyperion_rpc::codec::Response::NodesList)
+    {
+        Ok(RpcResponse::NodesList(v)) => v,
+        _ => {
+            missed.push("the other nodes (could not list them)".to_string());
+            return (moved, missed);
+        }
+    };
+    let mut remote = Vec::with_capacity(nodes.len());
+    for n in nodes {
+        if n.node_id != crate::dispatcher::LOCAL_NODE_SENTINEL
+            && !crate::dispatcher::is_master_hostname(state, &n.node_id).await
+        {
+            remote.push(n);
+        }
+    }
+    if remote.is_empty() {
+        return (moved, missed);
+    }
+    let (answered, failed) = crate::dispatcher::fan_out_reporting(state, remote, req).await;
+    for (node, resp) in answered {
+        match resp {
+            RpcResponse::PackageReprice { repriced } => moved += repriced,
+            // An agent too old to know the request answers with an error.
+            _ => missed.push(super::care::node_label(&node)),
+        }
+    }
+    for (node, _) in failed {
+        missed.push(super::care::node_label(&node));
+    }
+    missed.sort();
+    missed.dedup();
+    (moved, missed)
+}
+
 /// The site's ACTIVE activations, from the node that owns it.
 ///
 /// `None` when the node did not answer — which a caller must not read as
@@ -2950,6 +3041,7 @@ mod tests {
             price_major: String::new(),
             price_currency: String::new(),
             price_interval: String::new(),
+            reprice_existing: None,
             feat_wp_auto_update: "leave".into(),
             feat_integrity_scan: "leave".into(),
             feat_monitoring: "leave".into(),
@@ -3032,6 +3124,7 @@ mod tests {
             price_major: String::new(),
             price_currency: String::new(),
             price_interval: String::new(),
+            reprice_existing: None,
             feat_wp_auto_update: "leave".into(),
             feat_integrity_scan: "leave".into(),
             feat_monitoring: "leave".into(),

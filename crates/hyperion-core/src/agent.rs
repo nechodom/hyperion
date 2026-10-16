@@ -2044,6 +2044,17 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
             .package_relist(package_id, &letters_lang, &check_items, &report_omit)
             .await
     }
+    async fn package_reprice(
+        &self,
+        package_id: i64,
+        price_minor: Option<i64>,
+        price_currency: Option<String>,
+        price_interval: Option<String>,
+    ) -> Result<u64, RpcError> {
+        self.svc
+            .package_reprice(package_id, price_minor, price_currency, price_interval)
+            .await
+    }
     async fn package_activations(
         &self,
         sel: HostingSelector,

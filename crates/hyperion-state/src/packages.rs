@@ -724,6 +724,51 @@ pub async fn set_report_omit(
     Ok(n)
 }
 
+/// Re-price a package's ACTIVE activations to the definition's current price.
+///
+/// The price is snapshotted at activation on purpose — it is what the customer
+/// agreed to — so this never happens on its own. It runs only when the
+/// operator ticks "apply the new price to sites already on this package"
+/// while editing it, i.e. after they have told those customers.
+///
+/// The reminder clock follows the interval: no interval now means no reminder
+/// (`next_billing_at` cleared); an activation that had no clock and now has an
+/// interval gets one, one interval after `now` (or after its start date when
+/// that is still ahead); an existing clock is kept, so the reminder already
+/// scheduled is not moved. `interval_secs` is `None` exactly when
+/// `price_interval` is.
+///
+/// Cancelled activations are left alone: their price is history.
+pub async fn set_price(
+    pool: &SqlitePool,
+    package_id: i64,
+    price_minor: Option<i64>,
+    price_currency: Option<&str>,
+    price_interval: Option<&str>,
+    interval_secs: Option<i64>,
+    now: i64,
+) -> Result<u64, StateError> {
+    let n = sqlx::query(
+        "UPDATE hosting_packages SET price_minor = ?, price_currency = ?, price_interval = ?, \
+             next_billing_at = CASE \
+                 WHEN ? IS NULL THEN NULL \
+                 WHEN next_billing_at IS NULL THEN MAX(COALESCE(valid_from, 0), ?) + ? \
+                 ELSE next_billing_at END \
+         WHERE package_id = ? AND state = 'active'",
+    )
+    .bind(price_minor)
+    .bind(price_currency)
+    .bind(price_interval)
+    .bind(interval_secs)
+    .bind(now)
+    .bind(interval_secs)
+    .bind(package_id)
+    .execute(pool)
+    .await?
+    .rows_affected();
+    Ok(n)
+}
+
 /// Move one ACTIVE activation's start date and re-aim its reminder clock.
 ///
 /// `next_billing_at` is passed in rather than derived: the billing interval
@@ -995,6 +1040,93 @@ mod tests {
             ..care_package()
         };
         assert!(insert(&pool, &same_slug, 3).await.is_err(), "slug");
+    }
+
+    /// Re-pricing moves only the ACTIVE activations of that package, carries
+    /// all three price columns, and keeps or seeds the reminder clock — never
+    /// moves one already scheduled.
+    #[tokio::test]
+    async fn set_price_reprices_active_activations_only() {
+        let pool = fresh().await;
+        let kept = activate(
+            &pool,
+            &NewActivation {
+                next_billing_at: Some(5_000),
+                ..activation("h1", 7, 100)
+            },
+            0,
+        )
+        .await
+        .unwrap();
+        let gone = activate(&pool, &activation("h2", 7, 100), 0).await.unwrap();
+        cancel(&pool, gone, 1).await.unwrap();
+        let other = activate(&pool, &activation("h1", 9, 100), 0).await.unwrap();
+        let unclocked = activate(
+            &pool,
+            &NewActivation {
+                next_billing_at: None,
+                ..activation("h2", 8, 100)
+            },
+            0,
+        )
+        .await
+        .unwrap();
+
+        let year = 365 * 86_400;
+        let n = set_price(
+            &pool,
+            7,
+            Some(59_000),
+            Some("EUR"),
+            Some("yearly"),
+            Some(year),
+            1_000,
+        )
+        .await
+        .unwrap();
+        assert_eq!(n, 1, "only the ACTIVE activation of package 7 moves");
+        let row = get_activation(&pool, kept).await.unwrap().unwrap();
+        assert_eq!(row.price_minor, Some(59_000));
+        assert_eq!(row.price_currency.as_deref(), Some("EUR"));
+        assert_eq!(row.price_interval.as_deref(), Some("yearly"));
+        assert_eq!(
+            row.next_billing_at,
+            Some(5_000),
+            "a scheduled reminder stays put"
+        );
+        assert_eq!(row.package_name, "pkg-7", "nothing else on the row moves");
+        let row = get_activation(&pool, gone).await.unwrap().unwrap();
+        assert_eq!(
+            row.price_minor,
+            Some(100),
+            "a cancelled activation is history"
+        );
+        let row = get_activation(&pool, other).await.unwrap().unwrap();
+        assert_eq!(row.price_minor, Some(100), "another package is untouched");
+
+        // No clock yet + an interval now: seeded one interval after `now`
+        // (valid_from 40 is in the past).
+        set_price(
+            &pool,
+            8,
+            Some(1),
+            Some("Kč"),
+            Some("yearly"),
+            Some(year),
+            1_000,
+        )
+        .await
+        .unwrap();
+        let row = get_activation(&pool, unclocked).await.unwrap().unwrap();
+        assert_eq!(row.next_billing_at, Some(1_000 + year));
+        // No interval: no reminder.
+        set_price(&pool, 8, None, None, None, None, 2_000)
+            .await
+            .unwrap();
+        let row = get_activation(&pool, unclocked).await.unwrap().unwrap();
+        assert_eq!(row.price_minor, None);
+        assert_eq!(row.price_interval, None);
+        assert_eq!(row.next_billing_at, None);
     }
 
     /// A definition's language must reach the sites ALREADY on it.

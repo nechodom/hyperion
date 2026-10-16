@@ -63,6 +63,15 @@
         </select>
       </div>
     </div>
+    {% if !e.is_new %}
+    <label class="pkg-check">
+      <input type="checkbox" name="reprice_existing" value="1">
+      <span>
+        Also apply this price to the {{ e.active_count }} site{% if e.active_count != 1 %}s{% endif %} already on this package.
+        <span class="text-soft">Unticked, they keep the price they agreed to and only sites activated from now on get this one.</span>
+      </span>
+    </label>
+    {% endif %}
   </section>
 
   <section class="pkg-fs">
@@ -205,7 +214,7 @@
       </span>
     </label>
     <span class="grow"></span>
-    {% if !e.is_new %}<span class="text-soft small">Sites on it pick changes up on the next enforcement pass.</span>{% endif %}
+    {% if !e.is_new %}<span class="text-soft small">Sites on it pick changes up on the next enforcement pass — the price only when ticked above.</span>{% endif %}
     <button class="btn primary" type="submit">
       <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
       {% if e.is_new %}Create package{% else %}Save changes{% endif %}

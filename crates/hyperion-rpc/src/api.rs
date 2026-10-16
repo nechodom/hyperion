@@ -1425,6 +1425,15 @@ pub trait AgentApi: Send + Sync + 'static {
         check_items: String,
         report_omit: String,
     ) -> Result<(u64, u64), RpcError>;
+    /// Re-price a package's ACTIVE activations on THIS node (opt-in, on
+    /// save). Returns how many moved.
+    async fn package_reprice(
+        &self,
+        package_id: i64,
+        price_minor: Option<i64>,
+        price_currency: Option<String>,
+        price_interval: Option<String>,
+    ) -> Result<u64, RpcError>;
     /// Activations a hosting holds; `history` also returns cancelled ones.
     async fn package_activations(
         &self,
