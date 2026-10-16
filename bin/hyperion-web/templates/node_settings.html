@@ -327,6 +327,10 @@
           <label for="keep_latest">Keep latest N per hosting</label>
           <input id="keep_latest" name="keep_latest_n" type="number" min="1" max="1000" value="{{ config.backup_retention.keep_latest_n }}">
         </div>
+        <div class="field" style="flex:1">
+          <label for="pre_update_keep">Keep pre-update backups (days)</label>
+          <input id="pre_update_keep" name="pre_update_keep_days" type="number" min="1" max="3650" value="{{ config.backup_retention.pre_update_keep_days }}">
+        </div>
       </div>
       <div class="item-actions"><button type="submit" class="btn primary">Save retention policy</button></div>
     </form>

@@ -1031,6 +1031,20 @@ pub struct BackupRemoteConfigView {
 pub struct BackupRetentionConfigView {
     pub max_age_days: i64,
     pub keep_latest_n: i64,
+    /// Days a pre-update backup (the full backup taken before an automatic
+    /// update batch) stays on disk once its batch went in cleanly. One that
+    /// did not is held until deleted by hand. `#[serde(default)]` so an older
+    /// agent's view still deserializes — as the default, never as 0.
+    #[serde(default = "default_pre_update_keep_days")]
+    pub pre_update_keep_days: i64,
+}
+
+/// What `pre_update_keep_days` is when nothing set it: two weeks, the
+/// shortest history a care plan sells ("kept for at least 14 days").
+pub const DEFAULT_PRE_UPDATE_KEEP_DAYS: i64 = 14;
+
+fn default_pre_update_keep_days() -> i64 {
+    DEFAULT_PRE_UPDATE_KEEP_DAYS
 }
 
 /// `[backup]` — node-wide backup behaviour flags. Default is the safe,
@@ -1059,6 +1073,7 @@ impl Default for BackupRetentionConfigView {
         Self {
             max_age_days: 30,
             keep_latest_n: 5,
+            pre_update_keep_days: DEFAULT_PRE_UPDATE_KEEP_DAYS,
         }
     }
 }

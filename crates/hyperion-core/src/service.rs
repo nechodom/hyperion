@@ -7000,6 +7000,34 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         }
     }
 
+    /// The full backup taken before an automatic update batch. Local only
+    /// (a rollback copy, never pushed off-site or dropped), marked
+    /// `pre-update` and HELD from the moment it exists: the sweep releases it
+    /// to `[backup_retention] pre_update_keep_days` only once every update in
+    /// the batch went in cleanly, so a failed batch — or an agent that died
+    /// half-way — keeps it until somebody deletes it by hand.
+    ///
+    /// Returns the run id; an error means no usable backup exists and the
+    /// caller must not update.
+    pub(crate) async fn pre_update_backup(&self, id: &HostingId) -> Result<i64, String> {
+        let run = self
+            .backup_run_for(
+                HostingSelector::Id(id.clone()),
+                Vec::new(),
+                OffsiteSource::NotWanted,
+                None,
+                hyperion_state::backups::PURPOSE_PRE_UPDATE,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        if run.state != "ok" {
+            return Err(run
+                .error_message
+                .unwrap_or_else(|| format!("backup ended in state {}", run.state)));
+        }
+        Ok(run.id)
+    }
+
     /// Produce a tar.gz + DB dump backup. Single 'local' target for v1.
     ///
     /// The RPC entry point, i.e. every backup a HUMAN asked for: the panel
@@ -7028,6 +7056,23 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         s3_targets: Vec<hyperion_types::S3BackupTarget>,
         offsite: OffsiteSource,
         progress_job_id: Option<String>,
+    ) -> Result<hyperion_types::BackupRunWire, RpcError> {
+        self.backup_run_for(sel, s3_targets, offsite, progress_job_id, "")
+            .await
+    }
+
+    /// [`Self::backup_run`] for a run with a `purpose` (migration 083). The
+    /// purpose is written — held — the moment the row exists, BEFORE the
+    /// prune at the end of the run: written afterwards, the new run would
+    /// count once as one of the site's newest backups and could push a real
+    /// one past the floor.
+    async fn backup_run_for(
+        &self,
+        sel: HostingSelector,
+        s3_targets: Vec<hyperion_types::S3BackupTarget>,
+        offsite: OffsiteSource,
+        progress_job_id: Option<String>,
+        purpose: &str,
     ) -> Result<hyperion_types::BackupRunWire, RpcError> {
         let detail = self.get(sel).await?;
         let backup_root = self.paths.backup_root.clone();
@@ -7068,6 +7113,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             if let Err(e) = hyperion_state::backups::mark_no_offsite(&self.pool, run_id).await {
                 tracing::warn!(error = %e, "could not mark rollback snapshot no_offsite");
             }
+        }
+        if !purpose.is_empty() {
+            hyperion_state::backups::set_purpose(&self.pool, run_id, purpose, true)
+                .await
+                .map_err(|e| RpcError::Internal_with(format!("backup purpose: {e}")))?;
         }
         // Build target dir
         let ts = now_secs();
@@ -8183,7 +8233,17 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 .await
                 .unwrap_or(global.keep_latest_n),
         };
-        let cutoff = now_secs() - retention.max_age_days.max(1) * 24 * 3600;
+        let now = now_secs();
+        let cutoff = now - retention.max_age_days.max(1) * 24 * 3600;
+        // Pre-update backups live by their own rule, read live like the rest.
+        let pre_update_cutoff = now
+            - match self.agent_config_path.as_deref() {
+                Some(path) => read_backup_retention_section(Some(path)).pre_update_keep_days,
+                None => hyperion_types::DEFAULT_PRE_UPDATE_KEEP_DAYS,
+            }
+            .max(1)
+                * 24
+                * 3600;
         let keep = retention.keep_latest_n.max(1) as usize;
         let mut pruned = 0u64;
         let mut good_kept = 0usize;
@@ -8195,12 +8255,21 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             if r.state == "running" {
                 continue;
             }
-            if r.state == "ok" && good_kept < keep {
-                good_kept += 1;
-                continue;
-            }
-            if r.started_at >= cutoff {
-                continue;
+            if r.is_pre_update() {
+                // Its own rule, and never one of the site's newest N: a
+                // nightly update batch must not push the real scheduled
+                // backups past the floor.
+                if !pre_update_due_for_prune(&r, pre_update_cutoff) {
+                    continue;
+                }
+            } else {
+                if r.state == "ok" && good_kept < keep {
+                    good_kept += 1;
+                    continue;
+                }
+                if r.started_at >= cutoff {
+                    continue;
+                }
             }
             // A restore (or a push) is reading it right now: pruning it would
             // pull the database dump out from under the restore. The next
@@ -15826,15 +15895,40 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     .filter(|f| !crate::wp_updates::is_paused(&skips, &f.slug, now))
                     .map(|f| (f.kind.clone(), f.slug.clone()))
                     .collect();
-                // One snapshot before the batch, not one per plugin: the
-                // operator's question is "what did tonight's updates change",
-                // and five snapshots taken seconds apart answer a question
-                // nobody asked while costing five prunes.
-                if !targets.is_empty() {
-                    if let Ok(d) = self.get(HostingSelector::Id(s.id.clone())).await {
-                        let _ = self.snapshot_before_change(&d, "pre-update").await;
+                // The minor core release this batch would apply, decided up
+                // front so the backup below covers core as well.
+                let core_release = scan.core_updates.iter().find(|u| u.is_minor()).cloned();
+                // ONE full backup (files + database) before the batch — what a
+                // care plan promises ("backed up before every update"), and the
+                // same kind of copy every other backup is, restorable from the
+                // same screen. Not one per plugin: the question afterwards is
+                // "what did tonight's updates change".
+                //
+                // No backup, no updates: an update that breaks the site with
+                // nothing to go back to is exactly what the promise rules out.
+                // The site waits for the next sweep and the operator hears why.
+                let mut pre_update_run: Option<i64> = None;
+                let mut batch_failed = false;
+                let mut skip_batch = false;
+                if !targets.is_empty() || core_release.is_some() {
+                    match self.pre_update_backup(&s.id).await {
+                        Ok(id) => pre_update_run = Some(id),
+                        Err(e) => {
+                            skip_batch = true;
+                            tracing::warn!(domain = %s.domain, error = %e,
+                                "wp auto-update: pre-update backup failed — updates skipped");
+                            self.notify_admins_say(
+                                "warn",
+                                "ops.preupdate_backup_failed",
+                                &[("domain", &s.domain), ("error", &e)],
+                                &format!("/hostings/{}#backups", s.domain),
+                                &format!("wp.update.backup_failed:{}", s.domain),
+                            )
+                            .await;
+                        }
                     }
                 }
+                let targets = if skip_batch { Vec::new() } else { targets };
                 for (kind, slug) in targets {
                     let state = if kind == "theme" {
                         self.wp_theme_action(
@@ -15862,6 +15956,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                             }
                         }
                         other => {
+                            batch_failed = true;
                             let err_msg = match &other {
                                 Ok(_) => format!("wp update {kind} {slug} reported failed"),
                                 Err(e) => e.to_string(),
@@ -15902,9 +15997,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 // major is where themes break and stays a decision a
                 // person makes while they are around to look at it.
                 //
-                // The snapshot above already covers this: it is taken
+                // The backup above already covers this: it is taken
                 // before the whole batch, so a core update that goes
                 // wrong is one restore away like everything else.
+                let core_release = if skip_batch { None } else { core_release };
                 if let Ok(detail) = self.get(HostingSelector::Id(s.id.clone())).await {
                     let user = detail.system_user.trim().to_string();
                     let root = detail.root_dir.trim().to_string();
@@ -15912,16 +16008,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                         // The scan above asked `wp core check-update`; an
                         // error there left the list empty — "we do not know"
                         // must not become "update anyway".
-                        if let Some(rel) = scan.core_updates.iter().find(|u| u.is_minor()).cloned()
-                        {
-                            // A snapshot before core specifically, even
-                            // though the batch already took one: a site
-                            // whose plugins updated cleanly and whose CORE
-                            // then broke wants to go back to the working
-                            // plugins, not to last night.
-                            let _ = self
-                                .snapshot_before_change(&detail, "pre-core-update")
-                                .await;
+                        if let Some(rel) = core_release.clone() {
                             match hyperion_adapters::wpcli::core_update_minor(&user, &root).await {
                                 Ok(out) => {
                                     auto_updated += 1;
@@ -15945,6 +16032,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                                     .await;
                                 }
                                 Err(e) => {
+                                    batch_failed = true;
                                     // Worth telling somebody: unlike a
                                     // commercial plugin needing a licence,
                                     // a core update that will not apply
@@ -15981,6 +16069,31 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                         Ok(r) => rescan_error = Some(r.error),
                         Err(e) => rescan_error = Some(e.to_string()),
                     }
+                }
+                // Release the pre-update backup to its retention only when the
+                // whole batch went in cleanly. Anything else keeps it held —
+                // it is the last copy from before whatever went wrong.
+                if let Some(run_id) = pre_update_run {
+                    let clean = !batch_failed && rescan_error.is_none();
+                    if clean {
+                        if let Err(e) =
+                            hyperion_state::backups::set_held(&self.pool, run_id, false).await
+                        {
+                            tracing::warn!(error = %e, "pre-update backup: release failed");
+                        }
+                    }
+                    self.append_audit(
+                        "hosting.backup.pre_update",
+                        Some(s.id.as_str()),
+                        &serde_json::json!({
+                            "run_id": run_id,
+                            "updated": auto_updated,
+                            "held": !clean,
+                        })
+                        .to_string(),
+                        "ok",
+                    )
+                    .await;
                 }
             }
             scan.auto_updated = auto_updated;
@@ -39036,6 +39149,11 @@ pub(crate) fn read_backup_retention_section(
             .get("keep_latest_n")
             .and_then(|x| x.as_integer())
             .unwrap_or(d.keep_latest_n),
+        pre_update_keep_days: sec
+            .get("pre_update_keep_days")
+            .and_then(|x| x.as_integer())
+            .filter(|n| *n > 0)
+            .unwrap_or(d.pre_update_keep_days),
     }
 }
 
@@ -39273,6 +39391,13 @@ fn parse_agent_section_fields(
                 let n = parse_int(v)?;
                 if !(1..=1000).contains(&n) {
                     return Err(bad(format!("keep_latest_n must be 1..=1000, got {n}")));
+                }
+                crate::config_persist::FieldValue::Int(n)
+            }
+            ("backup_retention", "pre_update_keep_days") => {
+                let n = parse_int(v)?;
+                if !(1..=3650).contains(&n) {
+                    return Err(bad(format!("pre_update_keep_days must be 1..=3650, got {n}")));
                 }
                 crate::config_persist::FieldValue::Int(n)
             }
@@ -39586,6 +39711,23 @@ fn row_to_summary(u: hyperion_state::web_users::WebUserRow) -> hyperion_types::W
     }
 }
 
+/// Whether a PRE-UPDATE backup has outlived its own retention: its batch went
+/// in cleanly (not held) and it started before `cutoff`. Always false for an
+/// ordinary backup, which the archive rule decides about. A failed pre-update
+/// run is due like a clean one — there is nothing in it to roll back to.
+pub(crate) fn pre_update_due_for_prune(
+    r: &hyperion_state::backups::BackupRun,
+    cutoff: i64,
+) -> bool {
+    if !r.is_pre_update() {
+        return false;
+    }
+    if r.state == "failed" {
+        return r.started_at < cutoff;
+    }
+    !r.held && r.started_at < cutoff
+}
+
 fn run_to_wire(r: hyperion_state::backups::BackupRun) -> hyperion_types::BackupRunWire {
     hyperion_types::BackupRunWire {
         sha256_hex: r.sha256_hex,
@@ -39597,6 +39739,8 @@ fn run_to_wire(r: hyperion_state::backups::BackupRun) -> hyperion_types::BackupR
         local_kept: String::new(),
         local_note: String::new(),
         s3_ok_targets: r.s3_ok_targets,
+        purpose: r.purpose,
+        held: r.held,
         id: r.id,
         hosting_id: r.hosting_id,
         target: r.target,
@@ -43608,6 +43752,8 @@ mod tests {
             no_offsite,
             local_note: String::new(),
             s3_ok_targets: Vec::new(),
+            purpose: String::new(),
+            held: false,
         }
     }
 
@@ -44028,6 +44174,74 @@ mod tests {
             .await
             .expect_err("no target → must refuse");
         assert!(matches!(err, RpcError::Validation { .. }), "got: {err:?}");
+    }
+
+    /// Pre-update backups live by their own rule: a clean one goes after
+    /// `pre_update_keep_days`, a held one never by age, and none of them is
+    /// one of the site's newest N — so a nightly update batch cannot push a
+    /// real scheduled backup past the floor.
+    #[tokio::test]
+    async fn prune_gives_pre_update_backups_their_own_retention() {
+        use hyperion_state::backups;
+        let pool = open_memory().await.expect("open");
+        let mut s = svc(pool.clone(), happy_mocks());
+        let dir = tempfile::tempdir().expect("dir");
+        let cfg = dir.path().join("agent.toml");
+        std::fs::write(
+            &cfg,
+            "[backup_retention]\nmax_age_days = 30\nkeep_latest_n = 2\npre_update_keep_days = 14\n",
+        )
+        .expect("cfg");
+        s.agent_config_path = Some(cfg);
+        s.create(req("pre.cz")).await.expect("create");
+        let detail = s
+            .get(HostingSelector::Domain(Domain::parse("pre.cz").unwrap()))
+            .await
+            .expect("get");
+        let day = 86_400;
+        let now = now_secs();
+        let mk = |age_days: i64, purpose: &'static str, held: bool| {
+            let pool = pool.clone();
+            let id = detail.id.clone();
+            async move {
+                let at = now - age_days * day;
+                let r = backups::start(&pool, &id, "local", at).await.expect("start");
+                backups::mark_ok(&pool, r, &format!("/nonexistent/pre.cz-{at}.tar.gz"), None, 1, at + 1)
+                    .await
+                    .expect("ok");
+                if !purpose.is_empty() {
+                    backups::set_purpose(&pool, r, purpose, held).await.expect("purpose");
+                }
+                r
+            }
+        };
+        let pu = backups::PURPOSE_PRE_UPDATE;
+        let fresh_clean = mk(1, pu, false).await;
+        let old_held = mk(100, pu, true).await;
+        let old_clean = mk(20, pu, false).await;
+        let ord_a = mk(40, "", false).await;
+        let ord_b = mk(41, "", false).await;
+        let ord_c = mk(42, "", false).await;
+
+        let pruned = s.prune_old_backups(&detail.id).await.expect("prune");
+        let left: std::collections::HashSet<i64> = backups::list_for(&pool, &detail.id, 100)
+            .await
+            .expect("list")
+            .into_iter()
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(pruned, 2, "left: {left:?}");
+        assert!(left.contains(&fresh_clean), "clean, within 14 days");
+        assert!(left.contains(&old_held), "held: never by age");
+        assert!(!left.contains(&old_clean), "clean, past 14 days");
+        assert!(left.contains(&ord_a) && left.contains(&ord_b), "the newest 2 ORDINARY backups");
+        assert!(!left.contains(&ord_c), "third ordinary, past 30 days");
+
+        // Read back what the sweep writes, through the same row the list sees.
+        backups::set_held(&pool, old_held, false).await.expect("release");
+        let row = backups::get_by_id(&pool, old_held).await.expect("get").expect("row");
+        assert!(row.is_pre_update() && !row.held);
+        assert_eq!(s.prune_old_backups(&detail.id).await.expect("prune 2"), 1);
     }
 
     /// The Backups card's reason comes from the OWNING node's policy: with the

@@ -1339,11 +1339,27 @@ pub static STRINGS: &[LetterString] = &[
         group: "Operator alerts — WordPress",
         note: "Tokens: {domain} {version} {error}.",
         en: "{domain} — the {version} security release could not be applied automatically, so \
-             the site is still on the older core. A snapshot was taken first, so nothing is \
-             lost. Error: {error}",
+             the site is still on the older core. A full backup was taken first and is kept \
+             until you delete it, so nothing is lost. Error: {error}",
         cs: "{domain} — bezpečnostní vydání {version} se nepodařilo nasadit automaticky, web \
-             tedy stále běží na starším jádře. Předtím byl pořízen snapshot, takže se nic \
-             neztratilo. Chyba: {error}",
+             tedy stále běží na starším jádře. Předtím byla pořízena úplná záloha, která zůstane \
+             uložená, dokud ji nesmažete, takže se nic neztratilo. Chyba: {error}",
+    },
+    LetterString {
+        id: "ops.preupdate_backup_failed.title",
+        group: "Operator alerts — WordPress",
+        note: "The backup before an automatic update batch failed, so no update was applied.",
+        en: "Updates skipped: backup before updating failed",
+        cs: "Aktualizace vynechány: záloha před aktualizací selhala",
+    },
+    LetterString {
+        id: "ops.preupdate_backup_failed.body",
+        group: "Operator alerts — WordPress",
+        note: "Tokens: {domain} {error}.",
+        en: "{domain} — the full backup taken before automatic updates failed, so no update was \
+             applied. The next run tries again. Error: {error}",
+        cs: "{domain} — úplná záloha před automatickými aktualizacemi selhala, proto se žádná \
+             aktualizace nenasadila. Příští běh to zkusí znovu. Chyba: {error}",
     },
     LetterString {
         id: "ops.major_update.title",

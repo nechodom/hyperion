@@ -3409,7 +3409,7 @@
 <div class="tab-panel" id="tab-backups">
 {# One tab, three kinds of copy, in the order an operator reaches for them:
    ARCHIVES (the whole site + database as a file, on a schedule, copied
-   off-site), SNAPSHOTS (before automatic updates or by hand, on the node,
+   off-site, and before automatic updates), SNAPSHOTS (by hand, on the node,
    restore replaces), OFF-SITE COPIES (archives on the remote — what is left if
    the node is gone). The summary card on top says how this site is set up and
    carries the one action most visits are for; the rarer restore paths are
@@ -3422,8 +3422,8 @@
   </div>
   <p>
     Three kinds of copy. <strong>Archives</strong> are a <code>.tar.gz</code> of the files plus a
-    database dump, kept on this site's node, made on a schedule or on demand. <strong>Snapshots</strong>
-    are taken before automatic updates or by hand and can show what changed. <strong>Off-site copies</strong>
+    database dump, kept on this site's node, made on a schedule, on demand and before automatic
+    updates. <strong>Snapshots</strong> are taken by hand and can show what changed. <strong>Off-site copies</strong>
     are the archives on the remote server — what is left if the node itself is lost.
   </p>
 </div>
@@ -3696,6 +3696,13 @@
               {% if b.state == "ok" %}<span class="pill ok">{{ b.state }}</span>
               {% else if b.state == "failed" %}<span class="pill err">{{ b.state }}</span>
               {% else %}<span class="pill warn pulse">{{ b.state }}</span>{% endif %}
+              {#- The backup taken before an automatic update batch. Held =
+                  the batch did not go in cleanly: kept until deleted by hand
+                  rather than aged out with the rest. -#}
+              {%- if b.purpose == "pre-update" %}
+              <span class="cell-sub" style="font-size:0.6rem{% if b.held %};color:var(--warn){% endif %}"
+                    title="{% if b.held %}Taken before automatic updates that did not all go in cleanly — kept until you delete it{% else %}Taken before automatic updates — deleted after the pre-update retention set in Settings → Backups{% endif %}">before updates{% if b.held %} · kept{% endif %}</span>
+              {%- endif %}
             </td>
             {#- What is known about the copy that is NOT on this box. "uploaded"
                 and "off-site ✓" are different words on purpose — one means the

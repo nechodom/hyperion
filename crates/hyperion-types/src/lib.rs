@@ -79,6 +79,7 @@ pub use stats::{decode_mime_header, render_html_shell, CountryTraffic};
 pub use stats::{
     notification_topic, AcmeConfigView, AgentConfigView, BackupConfigView, BackupRemoteConfigView,
     BackupRetentionConfigView, BackupStorageRow, ClusterConfigView, ClusterStats,
+    DEFAULT_PRE_UPDATE_KEEP_DAYS,
     CustomRoleSummary, DashboardAlert, EffectiveRoleWire, EmailConfigView, EmailLogEntry,
     FirewallPort, FirewallView, FsDiagnostics, FsFixStep, FtpAccountSummary, FtpCheckItem,
     FtpCheckReport, FtpExtraAccount, HostingFileContent, HostingFileEntry, HostingStats,

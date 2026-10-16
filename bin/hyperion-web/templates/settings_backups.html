@@ -63,16 +63,17 @@
         to a customer.
       </p>
       <p>
-        <strong>Snapshots</strong> are taken before Hyperion applies a site's
-        automatic updates, and by hand from a site's Backups tab. Shared
-        content is stored once, so thirty cost little more than one, and they
-        can show what an update changed. They answer <em>“last night's update
-        broke the site”</em>. They never leave the node.
+        <strong>Snapshots</strong> are taken by hand from a site's Backups tab.
+        Shared content is stored once, so thirty cost little more than one,
+        and they can show what changed. They never leave the node. Before
+        automatic updates Hyperion takes a full backup archive instead — see
+        <a href="#backup-retention">Archive retention</a> for how long it is
+        kept.
       </p>
       <p>
         Switching one off stops new copies; it never deletes what is already
-        kept. Backups taken internally to undo a move, a copy or a staging push
-        run in every mode — that is how those features roll themselves back.
+        kept. Backups taken internally to undo a move, a copy or a staging push,
+        and the backup before automatic updates, run in every mode — that is how those features roll themselves back.
       </p>
     </details>
     {% endif %}
@@ -488,6 +489,11 @@
           <input id="keep_latest" name="keep_latest_n" type="number" min="1" max="1000"
                  value="{{ config.backup_retention.keep_latest_n }}">
         </div>
+        <div class="field">
+          <label for="pre_update_keep">Keep backups taken before updates <span class="hint">days</span></label>
+          <input id="pre_update_keep" name="pre_update_keep_days" type="number" min="1" max="3650"
+                 value="{{ config.backup_retention.pre_update_keep_days }}">
+        </div>
       </div>
       <div class="item-actions"><button type="submit" class="btn primary">Save</button></div>
     </form>
@@ -496,6 +502,7 @@
       <ul>
         <li>When a backup of a site completes, its archives older than the set age are deleted from the node — but its newest successful ones are always kept, so a site nobody has touched for months still has its last few backups.</li>
         <li>A site's profile or care plan can set a longer history for that site.</li>
+        <li>Before automatic WordPress updates, a full backup of the site is taken. Once every update in that run went in cleanly it is deleted after the days set above; if any update failed it is kept until you delete it. These backups are not counted among a site's newest ones.</li>
         <li>Snapshots follow this rule too until <a href="#snapshot-retention">Snapshot retention</a> has been saved once.</li>
         <li>Off-site copies have their own rule: an S3 target keeps the newest copies set on it, and the FTP / SFTP server is never pruned. Deleted sites wait in <a href="#trash">Trash</a>.</li>
       </ul>

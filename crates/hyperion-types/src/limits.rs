@@ -294,6 +294,14 @@ pub struct BackupRunWire {
     /// S3-only backup this is the only sign it is off-site.
     #[serde(default)]
     pub s3_ok_targets: Vec<String>,
+    /// `"pre-update"` for the full backup taken before an automatic update
+    /// batch; empty for every ordinary backup. Older nodes send nothing.
+    #[serde(default)]
+    pub purpose: String,
+    /// Kept until deleted by hand: a pre-update backup whose batch did not
+    /// go in cleanly. Never pruned by age.
+    #[serde(default)]
+    pub held: bool,
 }
 
 impl BackupRunWire {

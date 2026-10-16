@@ -173,8 +173,12 @@ deploys and recovery steps.
 - **Off-site copies** to S3 (client-side `age` encryption, several targets with
   their own retention) or FTP / FTPS / SFTP. The local copy can be dropped once
   the off-site copy is verified.
-- **restic snapshots** per site, taken automatically before updates, with diff,
-  restore and keep-for-N-days.
+- **Backup before every automatic update:** a full backup (files plus database)
+  is taken before each WordPress auto-update run. It is deleted after a set
+  number of days (14 by default) when every update went in cleanly, and kept
+  until deleted by hand when one failed.
+- **restic snapshots** per site, by hand, with diff, restore and
+  keep-for-N-days.
 - Restore everything, only the database or only the files; restore into a new
   domain with WordPress URLs rewritten; download a backup, or upload a
   `.tar.gz` to restore.

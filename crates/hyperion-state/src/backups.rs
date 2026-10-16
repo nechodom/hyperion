@@ -50,9 +50,25 @@ pub struct BackupRun {
     /// off-site — and, for an age target, what makes a later existence check
     /// mean "the complete copy is there". Sorted, deduplicated.
     pub s3_ok_targets: Vec<String>,
+    /// Why this run exists beyond "a backup": empty for every ordinary one,
+    /// [`PURPOSE_PRE_UPDATE`] for the copy taken before an automatic update
+    /// batch (migration 083). Such a run has its own retention.
+    pub purpose: String,
+    /// Keep until deleted by hand (migration 083). Set on a pre-update backup
+    /// whose batch did not finish cleanly — see the migration.
+    pub held: bool,
 }
 
+/// `backup_runs.purpose` of the full backup taken before an update batch.
+pub const PURPOSE_PRE_UPDATE: &str = "pre-update";
+
 impl BackupRun {
+    /// Taken before an automatic update batch (own retention, never counted
+    /// among a site's newest backups).
+    pub fn is_pre_update(&self) -> bool {
+        self.purpose == PURPOSE_PRE_UPDATE
+    }
+
     /// Is there a record that this run has an off-site copy: the FTP push
     /// returned success (`ok`) or was verified, or an S3 push completed.
     pub fn offsite_on_record(&self) -> bool {
@@ -93,6 +109,10 @@ struct BackupRunRow {
     local_note: Option<String>,
     #[sqlx(default)]
     s3_ok_targets: Option<String>,
+    #[sqlx(default)]
+    purpose: Option<String>,
+    #[sqlx(default)]
+    held: Option<i64>,
 }
 
 impl From<BackupRunRow> for BackupRun {
@@ -115,13 +135,16 @@ impl From<BackupRunRow> for BackupRun {
             no_offsite: r.no_offsite.unwrap_or(0) != 0,
             local_note: r.local_note.unwrap_or_default(),
             s3_ok_targets: parse_target_list(r.s3_ok_targets.as_deref()),
+            purpose: r.purpose.unwrap_or_default(),
+            held: r.held.unwrap_or(0) != 0,
         }
     }
 }
 
 const SELECT_COLS: &str = "id, hosting_id, target, started_at, finished_at, state, \
      sha256_hex, remote_blob_key, remote_state, remote_error, archive_path, \
-     db_dump_path, bytes_total, error_message, no_offsite, local_note, s3_ok_targets";
+     db_dump_path, bytes_total, error_message, no_offsite, local_note, s3_ok_targets, \
+     purpose, held";
 
 /// The stored JSON array of S3 target names, sorted and deduplicated. Anything
 /// unreadable is "none on record" — the safe reading, since this list can only
@@ -294,6 +317,32 @@ pub async fn set_remote(
 /// `list_needing_offsite` and, defensively, out of the on-demand push+drop.
 pub async fn mark_no_offsite(pool: &SqlitePool, id: i64) -> Result<(), StateError> {
     sqlx::query("UPDATE backup_runs SET no_offsite = 1 WHERE id = ?")
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Record why a run exists and whether it is held (migration 083).
+pub async fn set_purpose(
+    pool: &SqlitePool,
+    id: i64,
+    purpose: &str,
+    held: bool,
+) -> Result<(), StateError> {
+    sqlx::query("UPDATE backup_runs SET purpose = ?, held = ? WHERE id = ?")
+        .bind(purpose)
+        .bind(held as i64)
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Hold a run (keep until deleted by hand) or release it to its retention.
+pub async fn set_held(pool: &SqlitePool, id: i64, held: bool) -> Result<(), StateError> {
+    sqlx::query("UPDATE backup_runs SET held = ? WHERE id = ?")
+        .bind(held as i64)
         .bind(id)
         .execute(pool)
         .await?;

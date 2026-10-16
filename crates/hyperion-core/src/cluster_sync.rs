@@ -62,7 +62,9 @@ const PAYLOAD_VERSION: &str = "cluster-sync/1";
 pub fn is_synced_key(section: &str, key: &str) -> bool {
     match section {
         "backup" => matches!(key, "drop_local_after_offsite" | "keep_local_latest"),
-        "backup_retention" => matches!(key, "max_age_days" | "keep_latest_n"),
+        "backup_retention" => {
+            matches!(key, "max_age_days" | "keep_latest_n" | "pre_update_keep_days")
+        }
         "backup_remote" => matches!(
             key,
             "enabled" | "scheme" | "host" | "port" | "user" | "password" | "base_path"

@@ -1,0 +1,21 @@
+-- 083_backup_pre_update.sql
+--
+-- The backup taken before an automatic update batch is a full backup (files
+-- + database), not a restic snapshot: it is what a care plan promises the
+-- customer ("backed up before every update"), so it has to be the same kind
+-- of copy every other backup is, restorable from the same screen.
+--
+-- It does not follow the archive retention rule. It is not one of a site's
+-- "newest N" (a nightly update would otherwise push the real scheduled
+-- backups past the floor), and its lifetime is its own setting:
+-- `[backup_retention] pre_update_keep_days`.
+--
+--   purpose  '' for every ordinary backup; 'pre-update' for this one.
+--   held     1 = keep until somebody deletes it by hand. Written as 1 when the
+--            run starts and cleared only once every update in the batch went
+--            in cleanly — so a batch that failed, or an agent that died
+--            half-way through it, leaves the copy on disk rather than letting
+--            the age rule delete the one backup that still predates the
+--            breakage.
+ALTER TABLE backup_runs ADD COLUMN purpose TEXT NOT NULL DEFAULT '';
+ALTER TABLE backup_runs ADD COLUMN held INTEGER NOT NULL DEFAULT 0;
