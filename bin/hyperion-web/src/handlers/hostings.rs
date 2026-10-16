@@ -1737,6 +1737,7 @@ pub async fn post_create(
             } else {
                 Vec::new()
             };
+            let job_installs_wp = wp_req_opt.is_some();
             if wp_req_opt.is_some() || issue_cert_checked {
                 let job_state = state.clone();
                 let job_target_owned = target.map(|s| s.to_string());
@@ -1769,6 +1770,10 @@ pub async fn post_create(
                     &actor_label,
                     actor_uid,
                     move |reporter| async move {
+                        let announce = job_wp_req.is_some();
+                        let announce_state = job_state.clone();
+                        let announce_target = job_target_owned.clone();
+                        let announce_id = job_hosting_id.clone();
                         run_post_create_job(
                             reporter,
                             job_state,
@@ -1781,6 +1786,17 @@ pub async fn post_create(
                             job_library,
                         )
                         .await;
+                        // This job applied the profile, so it announces —
+                        // after the price snapshot exists. Even a failed job
+                        // announces: the hosting exists either way.
+                        if announce {
+                            announce_hosting_created(
+                                &announce_state,
+                                announce_target.as_deref(),
+                                &announce_id,
+                            )
+                            .await;
+                        }
                     },
                 )
                 .await;
@@ -1793,7 +1809,12 @@ pub async fn post_create(
                     }
                 }
             }
-            if wp_install_job_id.is_some() {
+            // The job applies the profile only when it installs WordPress
+            // (plugins/themes need WP first). A cert-only job leaves the
+            // profile to the synchronous branch — skipping it there too
+            // meant the profile was never applied at all.
+            let job_applies_profile = wp_install_job_id.is_some() && job_installs_wp;
+            if job_applies_profile {
                 // Background job owns the profile apply — skip the
                 // synchronous fallback below.
             } else if form.profile_id > 0 {
@@ -1844,19 +1865,11 @@ pub async fn post_create(
 
             // Announce the new site on Slack — AFTER the profile step, so the
             // message carries the price and the billing date rather than
-            // "not set" for every hosting. Idempotent on the node side, so a
-            // retried create cannot announce twice. Best-effort: a Slack
-            // outage must not fail a provision that succeeded.
-            if let Err(e) = crate::dispatcher::dispatch_to_node(
-                &state,
-                target,
-                Request::HostingAnnounceCreated {
-                    sel: HostingSelector::Id(created.id.clone()),
-                },
-            )
-            .await
-            {
-                tracing::warn!(error = %e, "new-hosting Slack announcement failed");
+            // "not set". When the background job owns the profile apply, the
+            // job announces once it is done; announcing here would race it
+            // and lose (the price snapshot isn't written yet).
+            if !job_applies_profile {
+                announce_hosting_created(&state, target, &created.id).await;
             }
 
             // Re-fetch detail for nice display. Must go to the SAME
@@ -13639,6 +13652,27 @@ async fn resolve_library_picks(
 /// cert error in the message so the operator knows to fix DNS and
 /// re-issue from the SSL tab.
 #[allow(clippy::too_many_arguments)]
+/// Post the one-time "new hosting" Slack message. Idempotent on the node
+/// side (hosting_kv marker), so a retried create cannot announce twice.
+/// Best-effort: a Slack outage must not fail a provision that succeeded.
+async fn announce_hosting_created(
+    state: &SharedState,
+    target: Option<&str>,
+    id: &hyperion_types::HostingId,
+) {
+    if let Err(e) = crate::dispatcher::dispatch_to_node(
+        state,
+        target,
+        Request::HostingAnnounceCreated {
+            sel: HostingSelector::Id(id.clone()),
+        },
+    )
+    .await
+    {
+        tracing::warn!(error = %e, "new-hosting Slack announcement failed");
+    }
+}
+
 async fn run_post_create_job(
     reporter: crate::handlers::jobs::JobReporter,
     state: SharedState,
