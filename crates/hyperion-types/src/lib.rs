@@ -65,7 +65,8 @@ pub use limits::{
 };
 pub use migration::{HostingImportResult, HostingMigrationBundle, HostingMigrationManifest};
 pub use package::{
-    BackupCadence, FeatureToggle, HostingPackage, LiveFeatureState, PackageFeatures, PackageInput,
+    BackupCadence, CrsPin, FeatureToggle, HostingPackage, LiveFeatureState, PackageFeatures,
+    PackageInput, FIREWALL_CHOICES,
     PackagePriorState, PackageState, ServicePackage,
 };
 pub use perf::{

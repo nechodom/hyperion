@@ -851,7 +851,9 @@ pub fn print_pretty(resp: &Response) {
             println!("  wp_auto_update:  {}", p.features.wp_auto_update);
             println!("  integrity_scan:  {}", p.features.integrity_scan);
             println!("  monitoring:      {}", p.features.monitoring);
-            println!("  hardening:       {}", p.features.hardening);
+            println!("  firewall:        {}", p.features.firewall_choice());
+            println!("  core_rule_set:   {}", p.features.crs);
+            println!("  bruteforce:      {}", p.features.bruteforce);
             println!("  backup_cadence:  {}", p.features.backup_cadence);
         }
         Response::BackupOffsiteList(listing) => {

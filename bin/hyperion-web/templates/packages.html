@@ -79,8 +79,42 @@
     </div>
     <div class="field-row">
       {% call toggle(e.prefix, "monitoring", "feat_monitoring", "Uptime monitoring", e.monitoring) %}
-      {% call toggle(e.prefix, "hardening", "feat_hardening", "Web-application firewall & hardening", e.hardening) %}
+      {% call toggle(e.prefix, "bruteforce", "feat_bruteforce", "Brute-force protection", e.bruteforce) %}
     </div>
+  </section>
+
+  {# One firewall, two layers: the nginx rules (Standard / Strict) and the
+     OWASP Core Rule Set run by ModSecurity. Both land on the site's
+     Protection card. "Standard" keeps a Strict level set by hand; "Strict"
+     holds it there. #}
+  <section class="pkg-fs">
+    <div class="pkg-fs-head">Firewall <span class="pkg-fs-note">the site's Protection card — kept as set here, like the rest</span></div>
+    <div class="field-row">
+      <div class="field">
+        <label for="{{ e.prefix }}_firewall">Firewall rules <span class="hint">Standard blocks common attacks; Strict adds the rules that can need tuning</span></label>
+        <select id="{{ e.prefix }}_firewall" name="feat_hardening">
+          <option value="leave"{% if e.firewall == "leave" %} selected{% endif %}>Leave alone — not part of this package</option>
+          <option value="standard"{% if e.firewall == "standard" %} selected{% endif %}>Standard — at least Standard, keep it on</option>
+          <option value="strict"{% if e.firewall == "strict" %} selected{% endif %}>Strict — keep it on Strict</option>
+          <option value="off"{% if e.firewall == "off" %} selected{% endif %}>Off — keep the firewall switched off</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="{{ e.prefix }}_crs">OWASP Core Rule Set <span class="hint">ModSecurity on the site's server; start with detection on a live site</span></label>
+        <select id="{{ e.prefix }}_crs" name="feat_crs">
+          <option value="leave"{% if e.crs == "leave" %} selected{% endif %}>Leave alone — not part of this package</option>
+          <option value="detect"{% if e.crs == "detect" %} selected{% endif %}>Detection only — log, never block</option>
+          <option value="block"{% if e.crs == "block" %} selected{% endif %}>Blocking</option>
+          <option value="off"{% if e.crs == "off" %} selected{% endif %}>Off — keep it switched off</option>
+        </select>
+      </div>
+    </div>
+    <p class="pkg-fs-help">
+      Brute-force protection and the Core Rule Set also need the server: the
+      brute-force scanner switched on for the node, and ModSecurity installed
+      on it. Hyperion checks both for every site on the package and tells you
+      in Notifications when either is missing.
+    </p>
   </section>
 
   {# Custom period + retention ride with the cadence: seeded into the site's

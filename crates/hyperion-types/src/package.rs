@@ -321,6 +321,98 @@ impl FromStr for ReportCadence {
     }
 }
 
+/// What a package says about the OWASP Core Rule Set tier of the site's
+/// firewall (ModSecurity v3, `hostings.crs_mode`). Same tri-state idea as
+/// [`FeatureToggle`] with two "on" strengths: `Detect` evaluates and logs,
+/// `Block` refuses. `Leave` = no opinion.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum CrsPin {
+    #[default]
+    Leave,
+    Off,
+    Detect,
+    Block,
+}
+
+impl CrsPin {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Leave => "leave",
+            Self::Off => "off",
+            Self::Detect => "detect",
+            Self::Block => "block",
+        }
+    }
+
+    /// The site mode this package forces, or `None` when it does not care.
+    pub fn forces(self) -> Option<crate::crs::CrsMode> {
+        match self {
+            Self::Leave => None,
+            Self::Off => Some(crate::crs::CrsMode::Off),
+            Self::Detect => Some(crate::crs::CrsMode::Detect),
+            Self::Block => Some(crate::crs::CrsMode::Block),
+        }
+    }
+
+    pub fn is_leave(self) -> bool {
+        matches!(self, Self::Leave)
+    }
+
+    /// See [`FeatureToggle::from_stored`] — same fail-safe to `Leave`.
+    pub fn from_stored(s: &str) -> Self {
+        Self::from_str(s.trim()).unwrap_or(Self::Leave)
+    }
+
+    fn rank(self) -> u8 {
+        match self {
+            Self::Leave => 0,
+            Self::Off => 1,
+            Self::Detect => 2,
+            Self::Block => 3,
+        }
+    }
+
+    /// Two packages on one hosting: the stronger protection wins, as `On`
+    /// beats `Off` for the booleans — a customer paying for blocking keeps
+    /// it while also holding a package that only asks for detection.
+    pub fn combine(self, other: Self) -> Self {
+        if other.rank() > self.rank() {
+            other
+        } else {
+            self
+        }
+    }
+}
+
+impl fmt::Display for CrsPin {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for CrsPin {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "leave" => Ok(Self::Leave),
+            "off" => Ok(Self::Off),
+            "detect" => Ok(Self::Detect),
+            "block" => Ok(Self::Block),
+            other => Err(format!("unknown core rule set setting: {other}")),
+        }
+    }
+}
+
+/// The firewall level one select in the package form stands for, folded from
+/// [`PackageFeatures::hardening`] + [`PackageFeatures::firewall_strict`].
+pub const FIREWALL_CHOICES: [(&str, &str); 4] = [
+    ("leave", "Leave as is"),
+    ("off", "Off"),
+    ("standard", "Standard"),
+    ("strict", "Strict"),
+];
+
 /// The bundle of capabilities a package sells.
 ///
 /// Each field names a feature hyperion already has, and each lives
@@ -345,11 +437,29 @@ pub struct PackageFeatures {
     /// RPC.
     #[serde(default)]
     pub monitoring: FeatureToggle,
-    /// The per-site WAF: Enable puts it on Standard (or keeps a stricter
-    /// level), Disable turns it off — `hostings.waf_level`, set via the
-    /// vhost-options RPC. The wp-admin lock is never a package's to set.
+    /// The per-site firewall (WAF): On puts it on Standard (or keeps a
+    /// stricter level) — Strict when [`Self::firewall_strict`] — Off turns it
+    /// off; `hostings.waf_level`, set via the vhost-options RPC. The wp-admin
+    /// lock is never a package's to set. The field keeps its historical name
+    /// on the wire so an older node still reads the on/off half.
     #[serde(default)]
     pub hardening: FeatureToggle,
+    /// With `hardening = On`: the firewall is held at Strict, not merely at
+    /// least Standard. Ignored otherwise. An older node does not know it and
+    /// enforces Standard — the safe degradation.
+    #[serde(default)]
+    pub firewall_strict: bool,
+    /// The OWASP Core Rule Set tier of the same firewall
+    /// (`hostings.crs_mode`). Needs the ModSecurity engine on the owning
+    /// node; without it the setting is stored and the operator is told.
+    #[serde(default)]
+    pub crs: CrsPin,
+    /// Brute-force protection: the per-site HTTP brute-force scan
+    /// (`hosting_kv` `http_bruteforce_scan_enabled` on the owning node). With
+    /// `On`, the drift tick also checks the node actually runs it (fail2ban on,
+    /// fresh scanner evidence) and tells the operator when it does not.
+    #[serde(default)]
+    pub bruteforce: FeatureToggle,
     /// Recurring backups — `hosting_kv` `backup_cadence` on the owning
     /// node.
     #[serde(default)]
@@ -393,6 +503,8 @@ impl PackageFeatures {
             self.integrity_scan.is_leave(),
             self.monitoring.is_leave(),
             self.hardening.is_leave(),
+            self.crs.is_leave(),
+            self.bruteforce.is_leave(),
             self.backup_cadence.is_leave(),
             self.report_cadence.is_leave(),
         ]
@@ -408,16 +520,61 @@ impl PackageFeatures {
     pub fn combine(self, other: Self) -> Self {
         let (backup_cadence, backup_interval_days, backup_keep_days, backup_keep_last) =
             self.combine_backup(other);
+        let hardening = self.hardening.combine(other.hardening);
         Self {
             wp_auto_update: self.wp_auto_update.combine(other.wp_auto_update),
             integrity_scan: self.integrity_scan.combine(other.integrity_scan),
             monitoring: self.monitoring.combine(other.monitoring),
-            hardening: self.hardening.combine(other.hardening),
+            hardening,
+            // Strict is the stronger promise: either package holding the
+            // firewall on at Strict makes it Strict.
+            firewall_strict: hardening == FeatureToggle::On
+                && ((self.hardening == FeatureToggle::On && self.firewall_strict)
+                    || (other.hardening == FeatureToggle::On && other.firewall_strict)),
+            crs: self.crs.combine(other.crs),
+            bruteforce: self.bruteforce.combine(other.bruteforce),
             backup_cadence,
             backup_interval_days,
             backup_keep_days,
             backup_keep_last,
             report_cadence: self.report_cadence.combine(other.report_cadence),
+        }
+    }
+
+    /// The firewall level as the package form's one select names it:
+    /// `leave` | `off` | `standard` | `strict`.
+    pub fn firewall_choice(&self) -> &'static str {
+        match (self.hardening, self.firewall_strict) {
+            (FeatureToggle::Leave, _) => "leave",
+            (FeatureToggle::Off, _) => "off",
+            (FeatureToggle::On, false) => "standard",
+            (FeatureToggle::On, true) => "strict",
+        }
+    }
+
+    /// Set [`Self::hardening`] + [`Self::firewall_strict`] from the form's
+    /// select. Anything unrecognised is `leave` — the package then has no
+    /// opinion, never a forced state nobody chose.
+    pub fn set_firewall_choice(&mut self, choice: &str) {
+        let (h, strict) = match choice.trim() {
+            "off" => (FeatureToggle::Off, false),
+            "standard" | "on" => (FeatureToggle::On, false),
+            "strict" => (FeatureToggle::On, true),
+            _ => (FeatureToggle::Leave, false),
+        };
+        self.hardening = h;
+        self.firewall_strict = strict;
+    }
+
+    /// The WAF level this bundle holds the site at, or `None` when it leaves
+    /// the firewall alone. `On` without Strict is "at least Standard": the
+    /// caller keeps a stricter level the operator set by hand.
+    pub fn firewall_level(&self) -> Option<crate::waf::WafLevel> {
+        match (self.hardening, self.firewall_strict) {
+            (FeatureToggle::Leave, _) => None,
+            (FeatureToggle::Off, _) => Some(crate::waf::WafLevel::Off),
+            (FeatureToggle::On, false) => Some(crate::waf::WafLevel::Standard),
+            (FeatureToggle::On, true) => Some(crate::waf::WafLevel::Strict),
         }
     }
 
@@ -537,6 +694,14 @@ pub struct LiveFeatureState {
     pub integrity_scan: bool,
     pub monitoring: bool,
     pub hardening: bool,
+    /// The site's WAF level right now (`off` | `standard` | `strict`), so a
+    /// Strict package sees a Standard site as drifted and a cancel puts back
+    /// the exact level, not just "on".
+    pub waf_level: crate::waf::WafLevel,
+    /// The Core Rule Set mode right now.
+    pub crs: crate::crs::CrsMode,
+    /// The per-site HTTP brute-force scan is on (absent key = on).
+    pub bruteforce: bool,
     /// Concrete cadence currently in `hosting_kv` — never `Leave`, which is
     /// a package intent, not a site state ("no cadence" is `Off`).
     pub backup_cadence: BackupCadence,
@@ -572,6 +737,18 @@ pub struct PackagePriorState {
     pub monitoring: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hardening: Option<bool>,
+    /// The exact WAF level before the package forced the firewall
+    /// (`off` | `standard` | `strict`), so a cancel can put a Standard site
+    /// back to Standard after a Strict package. `None` on rows written before
+    /// it existed — those restore through `hardening` as they always did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waf_level: Option<String>,
+    /// Core Rule Set mode before the package forced it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crs: Option<String>,
+    /// The per-site brute-force scan before the package forced it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bruteforce: Option<bool>,
     /// Prior cadence, e.g. `Weekly`. `None` is the "wasn't forced" case —
     /// `Leave` never appears here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -597,6 +774,9 @@ impl Default for PackagePriorState {
             integrity_scan: None,
             monitoring: None,
             hardening: None,
+            waf_level: None,
+            crs: None,
+            bruteforce: None,
             backup_cadence: None,
             backup_interval_days: None,
             backup_keep_days: None,
@@ -628,6 +808,12 @@ impl PackagePriorState {
                 .map(|_| live.integrity_scan),
             monitoring: features.monitoring.forces().map(|_| live.monitoring),
             hardening: features.hardening.forces().map(|_| live.hardening),
+            waf_level: features
+                .hardening
+                .forces()
+                .map(|_| live.waf_level.as_str().to_string()),
+            crs: features.crs.forces().map(|_| live.crs.as_str().to_string()),
+            bruteforce: features.bruteforce.forces().map(|_| live.bruteforce),
             backup_cadence: touches_backups.then_some(live.backup_cadence),
             backup_interval_days: touches_backups.then_some(live.backup_interval_days),
             backup_keep_days: touches_backups.then_some(live.backup_keep_days),
@@ -642,6 +828,9 @@ impl PackagePriorState {
             && self.integrity_scan.is_none()
             && self.monitoring.is_none()
             && self.hardening.is_none()
+            && self.waf_level.is_none()
+            && self.crs.is_none()
+            && self.bruteforce.is_none()
             && self.backup_cadence.is_none()
             && self.backup_interval_days.is_none()
             && self.backup_keep_days.is_none()
@@ -1265,12 +1454,86 @@ mod tests {
     }
 
     #[test]
+    fn firewall_choice_round_trips_and_older_on_means_standard() {
+        for c in ["leave", "off", "standard", "strict"] {
+            let mut f = PackageFeatures::default();
+            f.set_firewall_choice(c);
+            assert_eq!(f.firewall_choice(), c);
+        }
+        let mut f = PackageFeatures::default();
+        f.set_firewall_choice("on");
+        assert_eq!(f.firewall_choice(), "standard");
+        f.set_firewall_choice("garbage");
+        assert_eq!(f.firewall_choice(), "leave", "unknown is no opinion");
+        // Strict without the firewall on is meaningless and reads as such.
+        let f = PackageFeatures {
+            hardening: FeatureToggle::Off,
+            firewall_strict: true,
+            ..Default::default()
+        };
+        assert_eq!(f.firewall_level(), Some(crate::waf::WafLevel::Off));
+    }
+
+    #[test]
+    fn combine_keeps_the_stronger_protection() {
+        let mut strict = PackageFeatures::default();
+        strict.set_firewall_choice("strict");
+        let mut standard = PackageFeatures::default();
+        standard.set_firewall_choice("standard");
+        let mut off = PackageFeatures::default();
+        off.set_firewall_choice("off");
+        assert_eq!(standard.combine(strict).firewall_choice(), "strict");
+        assert_eq!(strict.combine(off).firewall_choice(), "strict");
+        assert_eq!(off.combine(PackageFeatures::default()).firewall_choice(), "off");
+        // A Strict flag on a package that turns the firewall OFF must not
+        // leak into a combine where another package turns it on.
+        let odd = PackageFeatures {
+            hardening: FeatureToggle::Off,
+            firewall_strict: true,
+            ..Default::default()
+        };
+        assert_eq!(odd.combine(standard).firewall_choice(), "standard");
+
+        assert_eq!(CrsPin::Detect.combine(CrsPin::Block), CrsPin::Block);
+        assert_eq!(CrsPin::Off.combine(CrsPin::Detect), CrsPin::Detect);
+        assert_eq!(CrsPin::Leave.combine(CrsPin::Off), CrsPin::Off);
+        assert_eq!(CrsPin::from_stored("nonsense"), CrsPin::Leave);
+        let bf = PackageFeatures {
+            bruteforce: FeatureToggle::On,
+            ..Default::default()
+        };
+        assert_eq!(bf.forced_count(), 1);
+        assert_eq!(
+            bf.combine(PackageFeatures {
+                bruteforce: FeatureToggle::Off,
+                ..Default::default()
+            })
+            .bruteforce,
+            FeatureToggle::On
+        );
+    }
+
+    /// An activation snapshot from an older master carries none of the new
+    /// fields: it must still decode, with no opinion about any of them.
+    #[test]
+    fn features_from_an_older_master_decode_with_no_firewall_opinion() {
+        let f: PackageFeatures =
+            serde_json::from_str(r#"{"wp_auto_update":"on","hardening":"on"}"#).expect("de");
+        assert_eq!(f.firewall_choice(), "standard");
+        assert_eq!(f.crs, CrsPin::Leave);
+        assert_eq!(f.bruteforce, FeatureToggle::Leave);
+    }
+
+    #[test]
     fn features_serde_round_trip() {
         let f = PackageFeatures {
             wp_auto_update: FeatureToggle::On,
             integrity_scan: FeatureToggle::Off,
             monitoring: FeatureToggle::Leave,
             hardening: FeatureToggle::On,
+            firewall_strict: true,
+            crs: CrsPin::Detect,
+            bruteforce: FeatureToggle::On,
             backup_cadence: BackupCadence::Custom,
             backup_interval_days: 3,
             backup_keep_days: 90,
@@ -1467,6 +1730,9 @@ mod tests {
             integrity_scan: true,
             monitoring: true,
             hardening: false,
+            waf_level: crate::waf::WafLevel::Off,
+            crs: crate::crs::CrsMode::Off,
+            bruteforce: true,
             backup_cadence: BackupCadence::Weekly,
             backup_interval_days: 0,
             backup_keep_days: 45,
@@ -1502,6 +1768,9 @@ mod tests {
             integrity_scan: true,
             monitoring: true,
             hardening: true,
+            waf_level: crate::waf::WafLevel::Standard,
+            crs: crate::crs::CrsMode::Off,
+            bruteforce: true,
             backup_cadence: BackupCadence::Daily,
             backup_interval_days: 7,
             backup_keep_days: 30,

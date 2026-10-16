@@ -14,7 +14,7 @@ use hyperion_state::{
     certificates, databases, hostings, metrics, packages, profiles, system_users, wordpress,
 };
 use hyperion_types::package::{
-    CareBackups, CareIntegrity, CareReport, CareUptime, CareUsage, ReportCadence,
+    CareBackups, CareIntegrity, CareReport, CareUptime, CareUsage, CrsPin, ReportCadence,
 };
 use hyperion_types::report_sections::{ReportOmit, ReportSection};
 use hyperion_types::{
@@ -20094,7 +20094,21 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             wp_auto_update: toggle_of(prior.wp_auto_update),
             integrity_scan: toggle_of(prior.integrity_scan),
             monitoring: toggle_of(prior.monitoring),
-            hardening: toggle_of(prior.hardening),
+            // An exact prior level (rows from migration 084 on) is put back
+            // below, after the push; an older row restores through the
+            // on/off it recorded, as it always did.
+            hardening: if prior.waf_level.is_some() {
+                FeatureToggle::Leave
+            } else {
+                toggle_of(prior.hardening)
+            },
+            firewall_strict: false,
+            crs: prior
+                .crs
+                .as_deref()
+                .map(CrsPin::from_stored)
+                .unwrap_or_default(),
+            bruteforce: toggle_of(prior.bruteforce),
             backup_cadence: prior.backup_cadence.unwrap_or_default(),
             // The custom period + retention ride with the cadence above: a
             // non-`Leave` prior cadence re-opens the backup block in
@@ -20123,15 +20137,43 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         if still_forced.monitoring.forces().is_some() {
             restore.monitoring = FeatureToggle::Leave;
         }
-        if still_forced.hardening.forces().is_some() {
+        let firewall_still_forced = still_forced.hardening.forces().is_some();
+        if firewall_still_forced {
             restore.hardening = FeatureToggle::Leave;
+        }
+        if !still_forced.crs.is_leave() {
+            restore.crs = CrsPin::Leave;
+        }
+        if still_forced.bruteforce.forces().is_some() {
+            restore.bruteforce = FeatureToggle::Leave;
         }
         if !still_forced.backup_cadence.is_leave() {
             restore.backup_cadence = BackupCadence::Leave;
         }
 
         let live = self.package_live_state(&detail).await;
-        let changed = self.package_push_features(&detail, &restore, &live).await;
+        let mut changed = self.package_push_features(&detail, &restore, &live).await;
+        // The exact WAF level from before the package: a Standard site that a
+        // Strict plan raised goes back to Standard, not "still on".
+        if !firewall_still_forced {
+            if let Some(level) = prior
+                .waf_level
+                .as_deref()
+                .and_then(hyperion_types::waf::WafLevel::parse)
+            {
+                if level != live.waf_level {
+                    let r = self.package_set_waf_level(&detail, level).await;
+                    push_change(
+                        &mut changed,
+                        &detail,
+                        "firewall",
+                        live.waf_level.as_str(),
+                        level.as_str(),
+                        r,
+                    );
+                }
+            }
+        }
         self.append_audit(
             "package.cancel",
             Some(detail.id.as_str()),
@@ -20188,7 +20230,22 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // other every tick (On beats Off; the more frequent cadence wins).
         let mut order: Vec<HostingId> = Vec::new();
         let mut wanted: HashMap<String, PackageFeatures> = HashMap::new();
+        // Which plans sell protection to each site, and since when — for the
+        // protection check below (its alert names the plan; a plan that only
+        // just started gets the scanner's first pass before anyone is told).
+        let mut sellers: HashMap<String, (Vec<String>, i64)> = HashMap::new();
         for row in rows {
+            if row.features.bruteforce == FeatureToggle::On
+                || matches!(row.features.crs, CrsPin::Detect | CrsPin::Block)
+            {
+                let e = sellers
+                    .entry(row.hosting_id.as_str().to_string())
+                    .or_insert_with(|| (Vec::new(), i64::MAX));
+                if !e.0.contains(&row.package_name) {
+                    e.0.push(row.package_name.clone());
+                }
+                e.1 = e.1.min(row.valid_from.unwrap_or(row.activated_at));
+            }
             // The bundle comes from the ACTIVATION's own snapshot, never from
             // the definition: definitions are master-only, so resolving one
             // here would make this tick a silent no-op on every worker node.
@@ -20207,6 +20264,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         }
 
         let mut corrected = 0i64;
+        // Asked at most once per tick, and only if some site needs it.
+        let mut engine: Option<bool> = None;
         for hosting_id in order {
             let Some(want) = wanted.get(hosting_id.as_str()) else {
                 continue;
@@ -20226,6 +20285,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             }
             let live = self.package_live_state(&detail).await;
             let changed = self.package_push_features(&detail, want, &live).await;
+            if let Some((names, since)) = sellers.get(hosting_id.as_str()) {
+                self.package_protection_check(&detail, want, names, *since, &mut engine)
+                    .await;
+            }
             if changed.is_empty() {
                 continue; // nothing drifted — the common case
             }
@@ -20250,6 +20313,89 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .await;
         }
         Ok(corrected)
+    }
+
+    /// Is the protection a plan sells actually running on this site? A
+    /// package can force the per-site switches, but two things it cannot
+    /// force live on the NODE: the brute-force scanner (`[fail2ban] enabled`,
+    /// and the scanner having really looked at the site lately) and the
+    /// ModSecurity engine the Core Rule Set needs. When either is missing the
+    /// operator is told — once per change of reason, not on every tick — and
+    /// told nothing more once it is fixed.
+    async fn package_protection_check(
+        &self,
+        detail: &HostingDetail,
+        want: &PackageFeatures,
+        plans: &[String],
+        since: i64,
+        engine: &mut Option<bool>,
+    ) {
+        let id = detail.id.as_str();
+        let now = now_secs();
+        let cat = self.operator_catalog();
+        let mut reasons: Vec<String> = Vec::new();
+        if want.bruteforce == FeatureToggle::On {
+            if !self.fail2ban.enabled {
+                reasons.push(cat.render("ops.protection_reason.fail2ban_off", &[]));
+            } else if !self.http_bruteforce_scan_enabled(id).await {
+                reasons.push(cat.render("ops.protection_reason.scan_off", &[]));
+            } else {
+                let last = hyperion_state::hosting_kv::get(&self.pool, id, FAIL2BAN_HTTP_SINCE_KV_KEY)
+                    .await
+                    .ok()
+                    .flatten()
+                    .as_deref()
+                    .and_then(parse_coverage_stamp)
+                    .map(|(_, last)| last);
+                if bruteforce_evidence_missing(last, since, now) {
+                    reasons.push(cat.render("ops.protection_reason.no_scan", &[]));
+                }
+            }
+        }
+        if matches!(want.crs, CrsPin::Detect | CrsPin::Block) {
+            let available = match *engine {
+                Some(a) => a,
+                None => {
+                    let a = self.adapters.modsec_status().await.available();
+                    *engine = Some(a);
+                    a
+                }
+            };
+            if !available {
+                reasons.push(cat.render("ops.protection_reason.no_modsec", &[]));
+            }
+        }
+        let reason = reasons.join(" ");
+        let warned = hyperion_state::hosting_kv::get(&self.pool, id, PACKAGE_PROTECTION_WARNED_KV)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        if reason == warned {
+            return;
+        }
+        if !reason.is_empty() {
+            self.notify_admins_say(
+                "warn",
+                "ops.package_protection",
+                &[
+                    ("domain", &detail.domain),
+                    ("plan", &plans.join(", ")),
+                    ("reason", &reason),
+                ],
+                &format!("/hostings/{}#protection", detail.domain),
+                &format!("protection.package:{}", detail.domain),
+            )
+            .await;
+        }
+        let _ = hyperion_state::hosting_kv::set(
+            &self.pool,
+            id,
+            PACKAGE_PROTECTION_WARNED_KV,
+            &reason,
+            now,
+        )
+        .await;
     }
 
     /// What every active package on this hosting adds up to. `Leave` on a
@@ -20311,6 +20457,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 .unwrap_or(false),
             hardening: detail.vhost_options.effective_waf_level()
                 != hyperion_types::waf::WafLevel::Off,
+            waf_level: detail.vhost_options.effective_waf_level(),
+            crs: detail.vhost_options.crs_settings().mode,
+            bruteforce: self.http_bruteforce_scan_enabled(id).await,
             // A site state, never `Leave`: "no cadence configured" is `Off`.
             backup_cadence: match hyperion_state::hosting_kv::get(&self.pool, id, BACKUP_KV_CADENCE)
                 .await
@@ -20393,14 +20542,56 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 );
             }
         }
-        if let Some(on) = want.hardening.forces() {
-            if on != live.hardening {
-                let r = self.package_set_hardening(detail, on).await;
+        // The firewall: Off, at least Standard (a stricter level the operator
+        // chose stays), or held at Strict.
+        if let Some(target) = package_waf_target(want.firewall_level(), live.waf_level) {
+            if target != live.waf_level {
+                let r = self.package_set_waf_level(detail, target).await;
                 push_change(
                     &mut changed,
                     detail,
-                    "hardening",
-                    feature_kv_value(live.hardening),
+                    "firewall",
+                    live.waf_level.as_str(),
+                    target.as_str(),
+                    r,
+                );
+            }
+        }
+        // The Core Rule Set tier of the same firewall. Switching it ON needs
+        // the ModSecurity engine on this node (the vhost path refuses
+        // otherwise), so without one the push waits quietly — the protection
+        // check tells the operator — and lands on the first tick after the
+        // engine is installed.
+        if let Some(mode) = want.crs.forces() {
+            let needs_engine = mode != hyperion_types::crs::CrsMode::Off
+                && live.crs == hyperion_types::crs::CrsMode::Off;
+            let engine_ok = !needs_engine || self.adapters.modsec_status().await.available();
+            if mode != live.crs && engine_ok {
+                let r = self.package_set_crs(detail, mode).await;
+                push_change(
+                    &mut changed,
+                    detail,
+                    "core_rule_set",
+                    live.crs.as_str(),
+                    mode.as_str(),
+                    r,
+                );
+            }
+        }
+        if let Some(on) = want.bruteforce.forces() {
+            if on != live.bruteforce {
+                let r = self
+                    .hosting_kv_set(
+                        id.to_string(),
+                        FAIL2BAN_HTTP_KV_KEY.into(),
+                        feature_kv_value(on).into(),
+                    )
+                    .await;
+                push_change(
+                    &mut changed,
+                    detail,
+                    "bruteforce",
+                    feature_kv_value(live.bruteforce),
                     feature_kv_value(on),
                     r,
                 );
@@ -20505,26 +20696,44 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         .await
     }
 
-    /// Flip the WAF through the vhost-options path, which re-renders the
-    /// vhost and runs `nginx -t` before the change counts. The wp-admin
-    /// allowlist is deliberately untouched: it is a list of the operator's
-    /// own IPs, and no package can invent one.
-    async fn package_set_hardening(
+    /// Put the WAF on exactly `level` through the vhost-options path (vhost
+    /// re-render + `nginx -t`). Off goes through `waf_turn_off`, so rules
+    /// pinned on go too — the same "no WAF" the old switch meant.
+    async fn package_set_waf_level(
         &self,
         detail: &HostingDetail,
-        enabled: bool,
+        level: hyperion_types::waf::WafLevel,
     ) -> Result<(), RpcError> {
-        let mut options = detail.vhost_options.clone();
-        // Enabling keeps a stricter level the operator already chose;
-        // the package's promise is "protected", and Strict is that too.
-        // Disabling is "no WAF" — rules pinned on go as well.
-        match (enabled, detail.vhost_options.effective_waf_level()) {
-            (false, _) => options.waf_turn_off(),
-            (true, hyperion_types::waf::WafLevel::Off) => {
-                options.set_waf_level(hyperion_types::waf::WafLevel::Standard)
-            }
-            (true, current) => options.set_waf_level(current),
+        // Re-read: one push may write the firewall AND the rule set, and
+        // starting the second from the caller's snapshot would undo the first.
+        let mut options = self
+            .get(HostingSelector::Id(detail.id.clone()))
+            .await?
+            .vhost_options;
+        if level == hyperion_types::waf::WafLevel::Off {
+            options.waf_turn_off();
+        } else {
+            options.set_waf_level(level);
         }
+        self.set_vhost_options(HostingSelector::Id(detail.id.clone()), options, None)
+            .await?;
+        Ok(())
+    }
+
+    /// Set the Core Rule Set mode, leaving paranoia, threshold, the WordPress
+    /// exclusions and the operator's own exclusions as they are — those are
+    /// tuning for one site, not something a plan can know.
+    async fn package_set_crs(
+        &self,
+        detail: &HostingDetail,
+        mode: hyperion_types::crs::CrsMode,
+    ) -> Result<(), RpcError> {
+        // Re-read, for the same reason as `package_set_waf_level`.
+        let mut options = self
+            .get(HostingSelector::Id(detail.id.clone()))
+            .await?
+            .vhost_options;
+        options.crs_mode = mode.as_str().to_string();
         self.set_vhost_options(HostingSelector::Id(detail.id.clone()), options, None)
             .await?;
         Ok(())
@@ -33389,6 +33598,21 @@ fn feature_kv_value(on: bool) -> &'static str {
     }
 }
 
+/// The WAF level a package's firewall intent drives the site to, given the
+/// level it is on now — `None` when the package leaves the firewall alone.
+/// "At least Standard" keeps a Strict the operator set by hand: the promise
+/// is "protected", and Strict is that too.
+fn package_waf_target(
+    want: Option<hyperion_types::waf::WafLevel>,
+    live: hyperion_types::waf::WafLevel,
+) -> Option<hyperion_types::waf::WafLevel> {
+    use hyperion_types::waf::WafLevel;
+    Some(match want? {
+        WafLevel::Standard if live == WafLevel::Strict => WafLevel::Strict,
+        other => other,
+    })
+}
+
 /// A captured prior value as a restore intent. `None` — the package never
 /// forced this feature — stays `Leave`, so cancelling leaves it alone.
 fn toggle_of(prior: Option<bool>) -> FeatureToggle {
@@ -37437,6 +37661,26 @@ const SITE_MAIL_WRAPPER: &str = "/usr/local/lib/hyperion/site-mail-wrapper";
 /// `[fail2ban] enabled` was off. Generous on purpose: the cost of being
 /// too strict is a letter that under-claims, which is the safe direction.
 const FAIL2BAN_COVERAGE_GAP_SECS: i64 = 3600;
+
+/// The last "protection is not running" reason a care plan's protection check
+/// told the operator about for a site (`hosting_kv`). Empty = nothing
+/// outstanding. Lets the check alert once per change instead of every tick.
+const PACKAGE_PROTECTION_WARNED_KV: &str = "package_protection_warned";
+
+/// Whether a site sold brute-force protection lacks recent proof that the
+/// scanner looked at it. The scanner stamps every tick; twice the coverage
+/// gap without a stamp means it is not running for this site. A plan that
+/// started less than that ago gets the scanner's first passes first.
+fn bruteforce_evidence_missing(last_scan: Option<i64>, plan_start: i64, now: i64) -> bool {
+    let grace = 2 * FAIL2BAN_COVERAGE_GAP_SECS;
+    if now.saturating_sub(plan_start) < grace {
+        return false;
+    }
+    match last_scan {
+        Some(last) => now.saturating_sub(last) > grace,
+        None => true,
+    }
+}
 
 /// The window an "attacks blocked" figure may be counted over, given when
 /// protection demonstrably started (`since`) and the report period
@@ -53346,7 +53590,9 @@ mod tests {
             .await
             .expect("drift");
         s.package_set_monitoring(&live, false).await.expect("drift");
-        s.package_set_hardening(&live, false).await.expect("drift");
+        s.package_set_waf_level(&live, hyperion_types::waf::WafLevel::Off)
+            .await
+            .expect("drift");
 
         assert_eq!(
             s.package_enforce_tick().await.expect("tick"),
@@ -53372,6 +53618,159 @@ mod tests {
         );
         // …and the pass right after a correction is quiet again.
         assert_eq!(s.package_enforce_tick().await.expect("tick"), 0);
+    }
+
+    /// The firewall a plan sells: held at Strict, the Core Rule Set and the
+    /// brute-force scan forced, the operator told when the node lacks what
+    /// the plan needs (once, not every tick), and a cancel putting back the
+    /// EXACT prior level — Standard, not merely "still on".
+    #[tokio::test]
+    async fn firewall_package_enforces_warns_once_and_restores_exactly() {
+        use hyperion_types::crs::CrsMode;
+        use hyperion_types::waf::WafLevel;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let pool = open_memory().await.expect("open");
+        let mut mocks = package_mocks();
+        // No ModSecurity engine on this node — until the test installs one.
+        let engine = std::sync::Arc::new(AtomicBool::new(false));
+        let e = engine.clone();
+        mocks.expect_modsec_status().returning(move || {
+            let on = e.load(Ordering::SeqCst);
+            hyperion_types::crs::ModsecStatus {
+                module: on,
+                crs: on,
+                ..Default::default()
+            }
+        });
+        mocks.expect_modsec_sync_http().returning(|_| Ok(true));
+        let s = svc(pool.clone(), mocks);
+        let detail = hosting_for_packages(&s, "fw.cz").await;
+        let hid = detail.id.as_str().to_string();
+        let sel = HostingSelector::Id(detail.id.clone());
+        // The customer's own setup: WAF on Standard, scan opted out.
+        s.package_set_waf_level(&detail, WafLevel::Standard)
+            .await
+            .expect("seed waf");
+        s.hosting_kv_set(hid.clone(), FAIL2BAN_HTTP_KV_KEY.into(), "off".into())
+            .await
+            .expect("seed scan");
+
+        let mut f = PackageFeatures {
+            crs: CrsPin::Detect,
+            bruteforce: FeatureToggle::On,
+            ..Default::default()
+        };
+        f.set_firewall_choice("strict");
+        let def = s
+            .package_create(care_input("Bezpečnost", f))
+            .await
+            .expect("define");
+        let act = s
+            .package_activate(sel.clone(), def.id, None, None)
+            .await
+            .expect("activate");
+        let opts = s.get(sel.clone()).await.expect("get").vhost_options;
+        assert_eq!(opts.effective_waf_level(), WafLevel::Strict);
+        assert_eq!(
+            opts.crs_settings().mode,
+            CrsMode::Off,
+            "no engine: the Core Rule Set waits instead of failing the activation"
+        );
+        assert_eq!(
+            kv_of(&pool, &hid, FAIL2BAN_HTTP_KV_KEY).await.as_deref(),
+            Some("on")
+        );
+        let prior: PackagePriorState =
+            serde_json::from_str(&act.prior_state_json.expect("captured")).expect("de");
+        assert_eq!(prior.waf_level.as_deref(), Some("standard"));
+        assert_eq!(prior.crs.as_deref(), Some("off"));
+        assert_eq!(prior.bruteforce, Some(false));
+
+        // Read back what the definition and the activation stored (mig 084).
+        let back = s.package_get(def.id).await.expect("get def");
+        assert_eq!(back.features.firewall_choice(), "strict");
+        assert_eq!(back.features.crs, CrsPin::Detect);
+        assert_eq!(back.features.bruteforce, FeatureToggle::On);
+        let row = hyperion_state::packages::get_activation(&pool, act.id)
+            .await
+            .expect("read")
+            .expect("row");
+        assert!(row.features.firewall_strict);
+        assert_eq!(row.features.crs, CrsPin::Detect);
+
+        // The node has no ModSecurity: the operator is told, and told once.
+        assert_eq!(s.package_enforce_tick().await.expect("tick"), 0);
+        let warned = kv_of(&pool, &hid, PACKAGE_PROTECTION_WARNED_KV)
+            .await
+            .unwrap_or_default();
+        assert!(warned.contains("ModSecurity"), "{warned}");
+        assert!(
+            !warned.contains("brute-force"),
+            "a plan that only just started gets the scanner's first pass: {warned}"
+        );
+        s.package_enforce_tick().await.expect("tick 2");
+        assert_eq!(
+            kv_of(&pool, &hid, PACKAGE_PROTECTION_WARNED_KV)
+                .await
+                .unwrap_or_default(),
+            warned,
+            "same reason, no new alert"
+        );
+
+        // Engine installed: the next tick switches the rule set on and the
+        // outstanding alert clears.
+        engine.store(true, Ordering::SeqCst);
+        assert_eq!(s.package_enforce_tick().await.expect("tick 3"), 1);
+        assert_eq!(
+            s.get(sel.clone()).await.expect("get").vhost_options.crs_settings().mode,
+            CrsMode::Detect
+        );
+        assert_eq!(
+            kv_of(&pool, &hid, PACKAGE_PROTECTION_WARNED_KV)
+                .await
+                .unwrap_or_default(),
+            ""
+        );
+
+        // A hand-lowered level comes back to Strict.
+        let live = s.get(sel.clone()).await.expect("re-read");
+        s.package_set_waf_level(&live, WafLevel::Standard)
+            .await
+            .expect("drift");
+        assert_eq!(s.package_enforce_tick().await.expect("tick 4"), 1);
+
+        // Cancel: exactly what the site had before.
+        s.package_cancel(sel.clone(), act.id).await.expect("cancel");
+        let opts = s.get(sel.clone()).await.expect("get").vhost_options;
+        assert_eq!(opts.effective_waf_level(), WafLevel::Standard);
+        assert_eq!(opts.crs_settings().mode, CrsMode::Off);
+        assert_eq!(
+            kv_of(&pool, &hid, FAIL2BAN_HTTP_KV_KEY).await.as_deref(),
+            Some("off")
+        );
+    }
+
+    #[test]
+    fn package_waf_target_keeps_a_stricter_hand_set_level() {
+        use hyperion_types::waf::WafLevel::*;
+        assert_eq!(package_waf_target(None, Strict), None);
+        assert_eq!(package_waf_target(Some(Standard), Strict), Some(Strict));
+        assert_eq!(package_waf_target(Some(Standard), Off), Some(Standard));
+        assert_eq!(package_waf_target(Some(Strict), Standard), Some(Strict));
+        assert_eq!(package_waf_target(Some(Off), Strict), Some(Off));
+    }
+
+    #[test]
+    fn bruteforce_evidence_needs_a_recent_scan_after_the_grace() {
+        let now = 1_000_000;
+        let grace = 2 * FAIL2BAN_COVERAGE_GAP_SECS;
+        // A plan that just started: never missing yet.
+        assert!(!bruteforce_evidence_missing(None, now - 60, now));
+        // Started long ago, never scanned / scanned long ago: missing.
+        assert!(bruteforce_evidence_missing(None, now - 10 * grace, now));
+        assert!(bruteforce_evidence_missing(Some(now - grace - 1), 0, now));
+        // A recent scan is evidence.
+        assert!(!bruteforce_evidence_missing(Some(now - 300), 0, now));
     }
 
     #[tokio::test]

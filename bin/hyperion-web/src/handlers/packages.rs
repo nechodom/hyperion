@@ -35,8 +35,8 @@ use hyperion_state::capabilities::Capability;
 use hyperion_types::package::ReportCadence;
 use hyperion_types::report_sections::{ReportOmit, ReportSection};
 use hyperion_types::{
-    BackupCadence, FeatureToggle, HostingPackage, LiveFeatureState, PackageFeatures, PackageInput,
-    ServicePackage,
+    BackupCadence, CrsPin, FeatureToggle, HostingPackage, LiveFeatureState, PackageFeatures,
+    PackageInput, ServicePackage,
 };
 use serde::Deserialize;
 
@@ -113,7 +113,10 @@ pub struct Editor {
     wp: &'static str,
     integrity: &'static str,
     monitoring: &'static str,
-    hardening: &'static str,
+    /// `leave` | `off` | `standard` | `strict`.
+    firewall: &'static str,
+    crs: &'static str,
+    bruteforce: &'static str,
     backup: &'static str,
     report: &'static str,
     lang: String,
@@ -149,7 +152,9 @@ impl Editor {
             wp: "leave",
             integrity: "leave",
             monitoring: "leave",
-            hardening: "leave",
+            firewall: "leave",
+            crs: "leave",
+            bruteforce: "leave",
             backup: "leave",
             report: "leave",
             lang: String::new(),
@@ -178,7 +183,9 @@ impl Editor {
             wp: f.wp_auto_update.as_str(),
             integrity: f.integrity_scan.as_str(),
             monitoring: f.monitoring.as_str(),
-            hardening: f.hardening.as_str(),
+            firewall: f.firewall_choice(),
+            crs: f.crs.as_str(),
+            bruteforce: f.bruteforce.as_str(),
             backup: f.backup_cadence.as_str(),
             report: f.report_cadence.as_str(),
             lang: pkg.letters_lang.clone(),
@@ -201,7 +208,7 @@ fn includes(pkg: &ServicePackage) -> Vec<Included> {
         (f.wp_auto_update, "WordPress updates"),
         (f.integrity_scan, "Integrity & malware scan"),
         (f.monitoring, "Uptime monitoring"),
-        (f.hardening, "Firewall & hardening"),
+        (f.bruteforce, "Brute-force protection"),
     ];
     for (t, label) in toggles {
         match t {
@@ -216,6 +223,39 @@ fn includes(pkg: &ServicePackage) -> Vec<Included> {
                 detail: "kept off".into(),
                 off: true,
             }),
+        }
+    }
+    // The firewall: one line for the level and the Core Rule Set together,
+    // the way the form asks for them.
+    let crs = match f.crs {
+        CrsPin::Leave => None,
+        CrsPin::Off => Some("Core Rule Set off"),
+        CrsPin::Detect => Some("Core Rule Set detecting"),
+        CrsPin::Block => Some("Core Rule Set blocking"),
+    };
+    match (f.firewall_choice(), crs) {
+        ("leave", None) => {}
+        ("off", c) => out.push(Included {
+            label: "Firewall",
+            detail: match c {
+                Some(c) if f.crs != CrsPin::Off => format!("kept off · {c}"),
+                _ => "kept off".into(),
+            },
+            off: f.crs == CrsPin::Leave || f.crs == CrsPin::Off,
+        }),
+        (level, c) => {
+            let mut parts = Vec::new();
+            if level != "leave" {
+                parts.push(level.to_string());
+            }
+            if let Some(c) = c {
+                parts.push(c.to_string());
+            }
+            out.push(Included {
+                label: "Firewall",
+                detail: parts.join(" · "),
+                off: false,
+            });
         }
     }
     match f.backup_cadence {
@@ -568,8 +608,17 @@ pub struct PackageForm {
     pub feat_integrity_scan: String,
     #[serde(default)]
     pub feat_monitoring: String,
+    /// The firewall level: `leave` | `off` | `standard` | `strict` (an older
+    /// form's `on` reads as "at least Standard" — see `into_input`).
     #[serde(default)]
     pub feat_hardening: String,
+    /// Core Rule Set: `leave` | `off` | `detect` | `block`. `Option` like the
+    /// cadence below: absent (an older cached form) keeps what is stored.
+    #[serde(default)]
+    pub feat_crs: Option<String>,
+    /// Brute-force protection, tri-state. Absent keeps what is stored.
+    #[serde(default)]
+    pub feat_bruteforce: Option<String>,
     #[serde(default)]
     pub feat_backup_cadence: String,
     /// Custom backup period in days (used when the cadence is "custom") and
@@ -769,8 +818,18 @@ impl PackageForm {
         current_items: Option<&str>,
         current_backup: Option<(i64, i64, i64)>,
         current_omit: Option<&str>,
+        current_protection: Option<(bool, CrsPin, FeatureToggle)>,
     ) -> Result<PackageInput, AppError> {
         let price_minor = parse_price_major(&self.price_major)?;
+        let (cur_strict, cur_crs, cur_bf) =
+            current_protection.unwrap_or((false, CrsPin::Leave, FeatureToggle::Leave));
+        let mut firewall = PackageFeatures::default();
+        firewall.set_firewall_choice(&self.feat_hardening);
+        // An older form only knew on/off: its "on" must not quietly demote a
+        // plan that is held at Strict.
+        if self.feat_hardening.trim() == "on" && cur_strict {
+            firewall.firewall_strict = true;
+        }
         let currency = self.price_currency.trim().to_string();
         let interval = self.price_interval.trim().to_string();
         let report_cadence = match self.feat_report_cadence.as_deref() {
@@ -849,7 +908,16 @@ impl PackageForm {
                 wp_auto_update: FeatureToggle::from_stored(&self.feat_wp_auto_update),
                 integrity_scan: FeatureToggle::from_stored(&self.feat_integrity_scan),
                 monitoring: FeatureToggle::from_stored(&self.feat_monitoring),
-                hardening: FeatureToggle::from_stored(&self.feat_hardening),
+                hardening: firewall.hardening,
+                firewall_strict: firewall.firewall_strict,
+                crs: match self.feat_crs.as_deref() {
+                    Some(v) => CrsPin::from_stored(v),
+                    None => cur_crs,
+                },
+                bruteforce: match self.feat_bruteforce.as_deref() {
+                    Some(v) => FeatureToggle::from_stored(v),
+                    None => cur_bf,
+                },
                 backup_cadence: BackupCadence::from_stored(&self.feat_backup_cadence),
                 backup_interval_days: num(&self.feat_backup_interval_days, cur_iv),
                 backup_keep_days: num(&self.feat_backup_keep_days, cur_kd),
@@ -868,7 +936,7 @@ pub async fn post_create(
     if !ctx.can(Capability::ProfilesManage) {
         return Err(AppError::Forbidden);
     }
-    let input = form.into_input(None, None, None, None, None)?;
+    let input = form.into_input(None, None, None, None, None, None)?;
     match hyperion_rpc_client::call(&state.agent_socket, Request::PackageCreate(input)).await? {
         RpcResponse::PackageCreate(p) => Ok(redirect_flash(&format!(
             "Package \"{}\" created. Activate it on a hosting from that site's detail page.",
@@ -892,7 +960,7 @@ pub async fn post_update(
     // incoming form might not post back — see
     // `PackageForm::feat_report_cadence` for why absent must not mean
     // "leave".
-    let (current, current_lang, current_items, current_backup, current_omit) =
+    let (current, current_lang, current_items, current_backup, current_omit, current_protection) =
         match hyperion_rpc_client::call(&state.agent_socket, Request::PackageGet { id }).await? {
             RpcResponse::PackageGet(p) => (
                 Some(p.features.report_cadence),
@@ -904,6 +972,11 @@ pub async fn post_update(
                     p.features.backup_keep_last,
                 ),
                 p.report_omit,
+                (
+                    p.features.firewall_strict,
+                    p.features.crs,
+                    p.features.bruteforce,
+                ),
             ),
             RpcResponse::Error(e) => return Ok(redirect_error(&e.to_string())),
             _ => return Err(AppError::Internal("unexpected response".into())),
@@ -914,6 +987,7 @@ pub async fn post_update(
         Some(&current_items),
         Some(current_backup),
         Some(&current_omit),
+        Some(current_protection),
     )?;
     match hyperion_rpc_client::call(&state.agent_socket, Request::PackageUpdate { id, input })
         .await?
@@ -2242,13 +2316,57 @@ fn included_features(f: &PackageFeatures, live: Option<&LiveFeatureState>) -> Ve
         "The site is fetched on a schedule and an alert goes out when it \
          stops answering — you hear it from us, not from a customer.",
     ));
+    if let Some(want) = f.firewall_level() {
+        use hyperion_types::waf::WafLevel;
+        let (status, live_label) = match live.map(|l| l.waf_level) {
+            None => ("unknown", String::new()),
+            // "At least Standard" is kept by Strict too.
+            Some(l) if l == want || (want == WafLevel::Standard && l == WafLevel::Strict) => {
+                ("active", String::new())
+            }
+            Some(l) => ("inactive", format!("currently {}", l.label().to_lowercase())),
+        };
+        out.push(IncludedFeature {
+            label: match want {
+                WafLevel::Off => "Firewall switched off".to_string(),
+                WafLevel::Standard => "Web-application firewall".to_string(),
+                WafLevel::Strict => "Web-application firewall, strict rules".to_string(),
+            },
+            detail: "Common attack patterns are blocked at the web server, before they \
+                     ever reach WordPress."
+                .to_string(),
+            status,
+            live_label,
+        });
+    }
+    if let Some(want) = f.crs.forces() {
+        use hyperion_types::crs::CrsMode;
+        let (status, live_label) = match live.map(|l| l.crs) {
+            None => ("unknown", String::new()),
+            Some(m) if m == want => ("active", String::new()),
+            Some(m) => ("inactive", format!("currently {}", m.label().to_lowercase())),
+        };
+        out.push(IncludedFeature {
+            label: match want {
+                CrsMode::Off => "OWASP Core Rule Set switched off".to_string(),
+                CrsMode::Detect => "OWASP Core Rule Set, detection".to_string(),
+                CrsMode::Block => "OWASP Core Rule Set".to_string(),
+            },
+            detail: "Every request is checked against the OWASP Core Rule Set, the \
+                     industry-standard rules for SQL injection, cross-site scripting and \
+                     other attacks."
+                .to_string(),
+            status,
+            live_label,
+        });
+    }
     out.extend(bool_feature(
-        f.hardening,
-        live.map(|l| l.hardening),
-        "Web-application firewall and hardening",
-        "Firewall and hardening switched off",
-        "Common attack patterns are blocked at the web server, before they \
-         ever reach WordPress.",
+        f.bruteforce,
+        live.map(|l| l.bruteforce),
+        "Brute-force protection",
+        "Brute-force protection switched off",
+        "Repeated failed logins to WordPress get the address blocked at the \
+         server's firewall.",
     ));
     if let Some(want) = f.backup_cadence.kv_value() {
         let (status, live_label) = match live.map(|l| l.backup_cadence) {
@@ -2515,6 +2633,12 @@ async fn live_feature_state(
         integrity_scan,
         monitoring,
         hardening: detail.vhost_options.effective_waf_level() != hyperion_types::waf::WafLevel::Off,
+        waf_level: detail.vhost_options.effective_waf_level(),
+        crs: detail.vhost_options.crs_settings().mode,
+        // Default ON when absent, like the scanner's own reading.
+        bruteforce: value("http_bruteforce_scan_enabled")
+            .map(|v| v != "off")
+            .unwrap_or(true),
         backup_cadence,
         backup_interval_days,
         backup_keep_days,
@@ -2671,7 +2795,7 @@ mod tests {
             got,
             vec![
                 ("WordPress updates", String::new(), false),
-                ("Firewall & hardening", "kept off".to_string(), true),
+                ("Firewall", "kept off".to_string(), true),
                 ("Backups", "every 3 days · kept 30 days".to_string(), false),
                 (
                     "Care report",
@@ -2775,6 +2899,9 @@ mod tests {
             integrity_scan: false,
             monitoring,
             hardening: false,
+            waf_level: hyperion_types::waf::WafLevel::Off,
+            crs: hyperion_types::crs::CrsMode::Off,
+            bruteforce: true,
             backup_cadence: cadence,
             backup_interval_days: 0,
             backup_keep_days: 0,
@@ -2954,6 +3081,8 @@ mod tests {
             feat_integrity_scan: "leave".into(),
             feat_monitoring: "leave".into(),
             feat_hardening: "leave".into(),
+            feat_crs: None,
+            feat_bruteforce: None,
             feat_backup_cadence: "leave".into(),
             feat_backup_interval_days: None,
             feat_backup_keep_days: None,
@@ -2978,7 +3107,7 @@ mod tests {
         let stored = "";
         let shown = check_items_to_text(&parse_check_items(stored));
         let out = form(Some(shown))
-            .into_input(None, None, Some(stored), None, None)
+            .into_input(None, None, Some(stored), None, None, None)
             .expect("input");
         assert_eq!(
             parse_check_items(&out.check_items),
@@ -3000,21 +3129,21 @@ mod tests {
         ]);
         let shown = check_items_to_text(&parse_check_items(&custom));
         let out = form(Some(shown))
-            .into_input(None, None, Some(&custom), None, None)
+            .into_input(None, None, Some(&custom), None, None, None)
             .expect("input");
         assert_eq!(out.check_items, custom);
 
         // A form that does not carry the field at all leaves the stored list
         // alone. Absent must never mean "clear it".
         let out = form(None)
-            .into_input(None, None, Some(&custom), None, None)
+            .into_input(None, None, Some(&custom), None, None, None)
             .expect("input");
         assert_eq!(out.check_items, custom);
 
         // A form that carries it EMPTY does mean "clear it" — which the agent
         // reads back as the built-in four, never as a plan promising nothing.
         let out = form(Some(String::new()))
-            .into_input(None, None, Some(&custom), None, None)
+            .into_input(None, None, Some(&custom), None, None, None)
             .expect("input");
         assert_eq!(out.check_items, "");
     }
@@ -3036,6 +3165,8 @@ mod tests {
             feat_integrity_scan: "leave".into(),
             feat_monitoring: "leave".into(),
             feat_hardening: "leave".into(),
+            feat_crs: None,
+            feat_bruteforce: None,
             feat_backup_cadence: "leave".into(),
             feat_backup_interval_days: None,
             feat_backup_keep_days: None,
@@ -3056,12 +3187,12 @@ mod tests {
 
         // No marker: the stored choice stands, ticked boxes or not.
         let out = base()
-            .into_input(None, None, None, None, Some("attacks,uptime"))
+            .into_input(None, None, None, None, Some("attacks,uptime"), None)
             .expect("input");
         assert_eq!(out.report_omit, "attacks,uptime");
         // …and creating a plan from a form with no group sends everything.
         let out = base()
-            .into_input(None, None, None, None, None)
+            .into_input(None, None, None, None, None, None)
             .expect("input");
         assert_eq!(out.report_omit, "");
 
@@ -3079,7 +3210,7 @@ mod tests {
             *slot = Some("on".into());
         }
         let out = f
-            .into_input(None, None, None, None, Some(""))
+            .into_input(None, None, None, None, Some(""), None)
             .expect("input");
         assert_eq!(out.report_omit, "attacks,uptime");
 
@@ -3099,7 +3230,7 @@ mod tests {
             *slot = Some("on".into());
         }
         let out = f
-            .into_input(None, None, None, None, Some("attacks"))
+            .into_input(None, None, None, None, Some("attacks"), None)
             .expect("input");
         assert_eq!(out.report_omit, "");
     }

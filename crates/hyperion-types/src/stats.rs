@@ -2022,6 +2022,7 @@ pub const NOTIFICATION_TOPICS: &[(&str, &str)] = &[
     ("quota", "Disk quota"),
     ("server", "Server"),
     ("trash", "Trash"),
+    ("protection", "Protection"),
     ("other", "Other"),
 ];
 
@@ -2045,6 +2046,7 @@ pub fn notification_topic(kind: &str) -> (&'static str, &'static str) {
         "quota" => "quota",
         "system" => "server",
         "hosting" if family == "hosting.trash" => "trash",
+        "protection" => "protection",
         _ => "other",
     };
     NOTIFICATION_TOPICS
@@ -3008,6 +3010,8 @@ mod notification_topic_tests {
             ("site_check_broken", "pages"),
             ("wp.update.paused:id:akismet", "wordpress"),
             ("wp.core.failed:id", "wordpress"),
+            ("wp.update.backup_failed:a.cz", "wordpress"),
+            ("protection.package:a.cz", "protection"),
             ("wp.update.major:id:x", "wordpress"),
             ("wp.integrity:id", "wordpress"),
             ("wp.signup_flood:a.cz", "wordpress"),

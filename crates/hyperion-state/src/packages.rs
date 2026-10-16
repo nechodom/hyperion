@@ -13,7 +13,7 @@
 
 use crate::db::StateError;
 use hyperion_types::package::{
-    BackupCadence, FeatureToggle, PackageFeatures, PackageState, ReportCadence,
+    BackupCadence, CrsPin, FeatureToggle, PackageFeatures, PackageState, ReportCadence,
 };
 use hyperion_types::HostingId;
 use sqlx::SqlitePool;
@@ -51,6 +51,13 @@ pub struct PackageRow {
     pub feat_backup_keep_days: i64,
     #[sqlx(default)]
     pub feat_backup_keep_last: i64,
+    /// Migration 084 — Strict firewall, Core Rule Set, brute-force scan.
+    #[sqlx(default)]
+    pub feat_firewall_strict: i64,
+    #[sqlx(default)]
+    pub feat_crs: String,
+    #[sqlx(default)]
+    pub feat_bruteforce: String,
     /// Default letter language for this package's customers. Empty = no
     /// opinion. Column order matters: this sits before the timestamps, matching
     /// SELECT_PACKAGES and the migration.
@@ -81,6 +88,9 @@ impl PackageRow {
             integrity_scan: FeatureToggle::from_stored(&self.feat_integrity_scan),
             monitoring: FeatureToggle::from_stored(&self.feat_monitoring),
             hardening: FeatureToggle::from_stored(&self.feat_hardening),
+            firewall_strict: self.feat_firewall_strict != 0,
+            crs: CrsPin::from_stored(&self.feat_crs),
+            bruteforce: FeatureToggle::from_stored(&self.feat_bruteforce),
             backup_cadence: BackupCadence::from_stored(&self.feat_backup_cadence),
             backup_interval_days: self.feat_backup_interval_days,
             backup_keep_days: self.feat_backup_keep_days,
@@ -230,6 +240,7 @@ const SELECT_PACKAGES: &str =
             price_interval, feat_wp_auto_update, feat_integrity_scan, feat_monitoring,
             feat_hardening, feat_backup_cadence, feat_report_cadence,
             feat_backup_interval_days, feat_backup_keep_days, feat_backup_keep_last,
+            feat_firewall_strict, feat_crs, feat_bruteforce,
             letters_lang, check_items, report_omit, created_at, updated_at
      FROM service_packages";
 
@@ -242,12 +253,13 @@ pub async fn insert(pool: &SqlitePool, p: &NewPackage, now: i64) -> Result<i64, 
             feat_wp_auto_update, feat_integrity_scan, feat_monitoring, feat_hardening,
             feat_backup_cadence, feat_report_cadence,
             feat_backup_interval_days, feat_backup_keep_days, feat_backup_keep_last,
+            feat_firewall_strict, feat_crs, feat_bruteforce,
             letters_lang, check_items, report_omit,
             created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            RETURNING id"#,
     )
-    // 21 columns, 21 placeholders, 21 binds — in column order.
+    // 24 columns, 24 placeholders, 24 binds — in column order.
     .bind(&p.name)
     .bind(&p.slug)
     .bind(&p.description)
@@ -264,6 +276,9 @@ pub async fn insert(pool: &SqlitePool, p: &NewPackage, now: i64) -> Result<i64, 
     .bind(p.features.backup_interval_days)
     .bind(p.features.backup_keep_days)
     .bind(p.features.backup_keep_last)
+    .bind(p.features.firewall_strict as i64)
+    .bind(p.features.crs.as_str())
+    .bind(p.features.bruteforce.as_str())
     .bind(&p.letters_lang)
     .bind(&p.check_items)
     .bind(&p.report_omit)
@@ -292,10 +307,11 @@ pub async fn update(
             feat_wp_auto_update = ?, feat_integrity_scan = ?, feat_monitoring = ?,
             feat_hardening = ?, feat_backup_cadence = ?, feat_report_cadence = ?,
             feat_backup_interval_days = ?, feat_backup_keep_days = ?, feat_backup_keep_last = ?,
+            feat_firewall_strict = ?, feat_crs = ?, feat_bruteforce = ?,
             letters_lang = ?, check_items = ?, report_omit = ?, updated_at = ?
            WHERE id = ?"#,
     )
-    // 19 SET placeholders + the WHERE id — the trailing `.bind(id)` is what
+    // 23 SET placeholders + the WHERE id — the trailing `.bind(id)` is what
     // keeps this from becoming `WHERE id = NULL` (a silent zero-row update).
     .bind(&p.name)
     .bind(&p.slug)
@@ -313,6 +329,9 @@ pub async fn update(
     .bind(p.features.backup_interval_days)
     .bind(p.features.backup_keep_days)
     .bind(p.features.backup_keep_last)
+    .bind(p.features.firewall_strict as i64)
+    .bind(p.features.crs.as_str())
+    .bind(p.features.bruteforce.as_str())
     .bind(&p.letters_lang)
     .bind(&p.check_items)
     .bind(&p.report_omit)
@@ -402,6 +421,7 @@ const SELECT_ACTIVATIONS: &str =
             a.feat_wp_auto_update, a.feat_integrity_scan, a.feat_monitoring,
             a.feat_hardening, a.feat_backup_cadence, a.feat_report_cadence,
             a.feat_backup_interval_days, a.feat_backup_keep_days, a.feat_backup_keep_last,
+            a.feat_firewall_strict, a.feat_crs, a.feat_bruteforce,
             a.letters_lang, a.check_items, a.report_omit, a.valid_from,
             a.enforcement_started
      FROM hosting_packages a";
@@ -435,6 +455,12 @@ struct ActivationRowRaw {
     feat_backup_keep_days: i64,
     #[sqlx(default)]
     feat_backup_keep_last: i64,
+    #[sqlx(default)]
+    feat_firewall_strict: i64,
+    #[sqlx(default)]
+    feat_crs: String,
+    #[sqlx(default)]
+    feat_bruteforce: String,
     letters_lang: String,
     check_items: String,
     report_omit: String,
@@ -461,6 +487,9 @@ fn map_activation(r: ActivationRowRaw) -> HostingPackageRow {
             integrity_scan: FeatureToggle::from_stored(&r.feat_integrity_scan),
             monitoring: FeatureToggle::from_stored(&r.feat_monitoring),
             hardening: FeatureToggle::from_stored(&r.feat_hardening),
+            firewall_strict: r.feat_firewall_strict != 0,
+            crs: CrsPin::from_stored(&r.feat_crs),
+            bruteforce: FeatureToggle::from_stored(&r.feat_bruteforce),
             backup_cadence: BackupCadence::from_stored(&r.feat_backup_cadence),
             backup_interval_days: r.feat_backup_interval_days,
             backup_keep_days: r.feat_backup_keep_days,
@@ -491,11 +520,12 @@ pub async fn activate(pool: &SqlitePool, a: &NewActivation, now: i64) -> Result<
             prior_state_json, feat_wp_auto_update, feat_integrity_scan,
             feat_monitoring, feat_hardening, feat_backup_cadence, feat_report_cadence,
             feat_backup_interval_days, feat_backup_keep_days, feat_backup_keep_last,
+            feat_firewall_strict, feat_crs, feat_bruteforce,
             letters_lang, check_items, report_omit, valid_from, enforcement_started)
-           VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            RETURNING id"#,
     )
-    // 22 placeholders (state / cancelled_at are literals), 22 binds.
+    // 25 placeholders (state / cancelled_at are literals), 25 binds.
     .bind(a.hosting_id.as_str())
     .bind(a.package_id)
     .bind(&a.package_name)
@@ -514,6 +544,9 @@ pub async fn activate(pool: &SqlitePool, a: &NewActivation, now: i64) -> Result<
     .bind(a.features.backup_interval_days)
     .bind(a.features.backup_keep_days)
     .bind(a.features.backup_keep_last)
+    .bind(a.features.firewall_strict as i64)
+    .bind(a.features.crs.as_str())
+    .bind(a.features.bruteforce.as_str())
     .bind(&a.letters_lang)
     .bind(&a.check_items)
     .bind(&a.report_omit)
@@ -1464,6 +1497,9 @@ mod tests {
             integrity_scan: false,
             monitoring: true,
             hardening: false,
+            waf_level: hyperion_types::waf::WafLevel::Off,
+            crs: hyperion_types::crs::CrsMode::Off,
+            bruteforce: true,
             backup_cadence: BackupCadence::Weekly,
             backup_interval_days: 0,
             backup_keep_days: 45,

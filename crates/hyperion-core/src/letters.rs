@@ -1346,6 +1346,51 @@ pub static STRINGS: &[LetterString] = &[
              uložená, dokud ji nesmažete, takže se nic neztratilo. Chyba: {error}",
     },
     LetterString {
+        id: "ops.package_protection.title",
+        group: "Operator alerts — protection",
+        note: "A care plan sells protection that is not actually running on the site.",
+        en: "Care plan protection is not running",
+        cs: "Ochrana z balíčku péče neběží",
+    },
+    LetterString {
+        id: "ops.package_protection.body",
+        group: "Operator alerts — protection",
+        note: "Tokens: {domain} {plan} {reason}. {reason} is one or more of the ops.protection_reason.* sentences.",
+        en: "{domain} — the care plan {plan} includes protection this site does not have right \
+             now. {reason}",
+        cs: "{domain} — balíček péče {plan} zahrnuje ochranu, kterou tento web teď nemá. {reason}",
+    },
+    LetterString {
+        id: "ops.protection_reason.fail2ban_off",
+        group: "Operator alerts — protection",
+        note: "One reason sentence inside ops.package_protection.body.",
+        en: "Brute-force protection is switched off on this server (Settings → Brute-force & GeoIP).",
+        cs: "Ochrana proti brute-force je na tomto serveru vypnutá (Nastavení → Brute-force & GeoIP).",
+    },
+    LetterString {
+        id: "ops.protection_reason.scan_off",
+        group: "Operator alerts — protection",
+        note: "One reason sentence inside ops.package_protection.body.",
+        en: "The brute-force scan is switched off for this site and could not be switched back on.",
+        cs: "Kontrola brute-force útoků je u tohoto webu vypnutá a nepodařilo se ji znovu zapnout.",
+    },
+    LetterString {
+        id: "ops.protection_reason.no_scan",
+        group: "Operator alerts — protection",
+        note: "One reason sentence inside ops.package_protection.body.",
+        en: "The brute-force scanner has not checked this site's access log for over two hours.",
+        cs: "Kontrola brute-force útoků neprošla přístupový log tohoto webu déle než dvě hodiny.",
+    },
+    LetterString {
+        id: "ops.protection_reason.no_modsec",
+        group: "Operator alerts — protection",
+        note: "One reason sentence inside ops.package_protection.body.",
+        en: "ModSecurity is not installed on this server, so the OWASP Core Rule Set is not \
+             running — install it from the site's Protection card.",
+        cs: "Na tomto serveru není nainstalovaný ModSecurity, takže OWASP Core Rule Set neběží — \
+             nainstalujte ho z karty Ochrana u webu.",
+    },
+    LetterString {
         id: "ops.preupdate_backup_failed.title",
         group: "Operator alerts — WordPress",
         note: "The backup before an automatic update batch failed, so no update was applied.",
