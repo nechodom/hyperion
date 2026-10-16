@@ -227,6 +227,10 @@ pub struct ProfileApply {
     pub price_interval: Option<String>,
     pub next_billing_at: Option<i64>,
     pub applied_at: i64,
+    /// The price was set on the hosting by hand and is kept when a profile
+    /// is re-applied. Defaults to false so an old agent's reply still reads.
+    #[serde(default)]
+    pub price_pinned: bool,
 }
 
 impl ProfileApply {

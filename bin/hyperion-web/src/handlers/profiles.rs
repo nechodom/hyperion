@@ -1178,7 +1178,7 @@ fn parse_opt_i64(s: &str) -> Option<i64> {
 }
 
 /// Parse "199.00" / "199,00" / "199" → 19900 (minor units).
-fn parse_price_major(s: &str) -> Result<Option<i64>, AppError> {
+pub(crate) fn parse_price_major(s: &str) -> Result<Option<i64>, AppError> {
     let s = s.trim().replace(',', ".");
     if s.is_empty() {
         return Ok(None);

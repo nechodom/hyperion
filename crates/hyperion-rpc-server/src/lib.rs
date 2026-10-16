@@ -1957,6 +1957,19 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(v) => Response::ProfileGetApply(v),
             Err(e) => Response::Error(e),
         },
+        Request::HostingPriceSet {
+            sel,
+            price_minor,
+            price_currency,
+            price_interval,
+            pinned,
+        } => match api
+            .hosting_price_set(sel, price_minor, price_currency, price_interval, pinned)
+            .await
+        {
+            Ok(v) => Response::HostingPriceSet(v),
+            Err(e) => Response::Error(e),
+        },
         Request::ProfileWpItemInstall {
             sel,
             item_kind,
@@ -3658,6 +3671,18 @@ mod tests {
             _: HostingSelector,
         ) -> Result<Option<ProfileApply>, RpcError> {
             Ok(None)
+        }
+        async fn hosting_price_set(
+            &self,
+            _: HostingSelector,
+            _: Option<i64>,
+            _: Option<String>,
+            _: Option<String>,
+            _: bool,
+        ) -> Result<ProfileApply, RpcError> {
+            Err(RpcError::Internal {
+                message: "not supported by this agent".into(),
+            })
         }
         async fn profile_wp_item_install(
             &self,

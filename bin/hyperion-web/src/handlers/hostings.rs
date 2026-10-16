@@ -396,6 +396,16 @@ struct DetailTpl<'a> {
     backup_target_error: Option<String>,
     expiry_error: Option<String>,
     expiry_flash: Option<String>,
+    /// Lifecycle & billing → Price: outcome of a `/hostings/price/set` save.
+    price_error: Option<String>,
+    price_flash: Option<String>,
+    csrf_price_set: String,
+    /// Only a user who may apply profiles may change what a site costs.
+    can_set_price: bool,
+    /// The price form's amount, prefilled from the snapshot ("2400.00").
+    price_major: String,
+    /// The price was set on this hosting and outlives a profile re-apply.
+    price_pinned: bool,
     /// Reverse-proxy upstream card: outcome of a `/hostings/proxy-upstream` save.
     proxy_flash: Option<String>,
     proxy_error: Option<String>,
@@ -1984,6 +1994,12 @@ pub async fn post_create(
                 backup_target_error: None,
                 expiry_error: None,
                 expiry_flash: None,
+                price_error: None,
+                price_flash: None,
+                csrf_price_set: csrf_token_for(&state, &ctx, "/hostings/price/set"),
+                can_set_price: ctx.can(Capability::ProfilesManage),
+                price_major: String::new(),
+                price_pinned: false,
                 proxy_flash: None,
                 proxy_error: None,
                 cert_error: None,
@@ -3102,6 +3118,13 @@ pub async fn get_detail(
         // second alarm for one fact helps nobody.
         None => Vec::new(),
     };
+    // Same "199.00" shape the profile form prefills with.
+    let price_major = profile_apply
+        .as_ref()
+        .and_then(|a| a.price_minor)
+        .map(|m| format!("{:.2}", m as f64 / 100.0))
+        .unwrap_or_default();
+    let price_pinned = profile_apply.as_ref().is_some_and(|a| a.price_pinned);
     // Computed before `detail` moves into the template struct.
     let ftp_login_example = ftp_login_example(&detail.domain);
     let ftp_login_qualifiers = hyperion_validate::ftplogin::login_qualifiers(&detail.domain);
@@ -3201,6 +3224,12 @@ pub async fn get_detail(
                 "Expiry updated.".to_string()
             }
         }),
+        price_error: q.price_error,
+        price_flash: q.price.map(|_| "Price updated.".to_string()),
+        csrf_price_set: csrf_token_for(&state, &ctx, "/hostings/price/set"),
+        can_set_price: ctx.can(Capability::ProfilesManage),
+        price_major,
+        price_pinned,
         proxy_flash: q.proxy_saved.map(|_| "Upstream updated.".to_string()),
         proxy_error: q.proxy_error,
         cert_error: q.cert_error,
@@ -3461,6 +3490,11 @@ pub struct DetailQuery {
     pub expiry: Option<String>,
     #[serde(default)]
     pub expiry_error: Option<String>,
+    /// Lifecycle & billing → Price saved (any value ⇒ success flash).
+    #[serde(default)]
+    pub price: Option<String>,
+    #[serde(default)]
+    pub price_error: Option<String>,
     /// Reverse-proxy upstream save landed (any value ⇒ success flash).
     #[serde(default)]
     pub proxy_saved: Option<String>,
@@ -3972,6 +4006,83 @@ pub async fn post_set_expiry(
                     .into_response(),
             )
         }
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct SetPriceForm {
+    pub selector: String,
+    /// "2400" / "2400.00" / "2400,00"; empty = no price on this hosting.
+    #[serde(default)]
+    pub price_major: String,
+    #[serde(default)]
+    pub price_currency: String,
+    #[serde(default)]
+    pub price_interval: String,
+    /// Checkbox: present ⇒ keep this price when a profile is re-applied.
+    #[serde(default)]
+    pub pinned: Option<String>,
+}
+
+/// Lifecycle & billing → Price. Billing is a platform matter, so this takes
+/// the same capability as applying a profile (which also sets the price),
+/// not the per-site edit one a customer holds for their own site.
+pub async fn post_set_price(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<SetPriceForm>,
+) -> Result<Response, AppError> {
+    let sel =
+        match require_manage_for_selector(&state, &ctx, &form.selector, Capability::ProfilesManage)
+            .await
+        {
+            Ok(s) => s,
+            Err(r) => return Ok(r),
+        };
+    let sel_url = urlencoding(&form.selector);
+    let refused = |msg: &str| {
+        Redirect::to(&format!(
+            "/hostings/{}?price_error={}#hosting-price",
+            sel_url,
+            urlencoding(msg)
+        ))
+        .into_response()
+    };
+    let price_minor = match super::profiles::parse_price_major(&form.price_major) {
+        Ok(v) => v,
+        Err(AppError::BadRequest(m)) => return Ok(refused(&m)),
+        Err(e) => return Err(e),
+    };
+    let opt = |s: &str| {
+        let t = s.trim();
+        (!t.is_empty()).then(|| t.to_string())
+    };
+    // The price row lives on the node that owns the site, next to the
+    // profile snapshot the detail page reads.
+    let target_owned: Option<String> = find_hosting_anywhere(&state, sel.clone())
+        .await
+        .ok()
+        .and_then(|(_d, n)| n);
+    let resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        target_owned.as_deref(),
+        Request::HostingPriceSet {
+            sel,
+            price_minor,
+            price_currency: opt(&form.price_currency),
+            price_interval: opt(&form.price_interval),
+            pinned: form.pinned.is_some(),
+        },
+    )
+    .await?;
+    match resp {
+        RpcResponse::HostingPriceSet(_) => Ok(Redirect::to(&format!(
+            "/hostings/{}?price=set#hosting-price",
+            sel_url
+        ))
+        .into_response()),
+        RpcResponse::Error(e) => Ok(refused(&e.to_string())),
         _ => Err(AppError::Internal("unexpected response".into())),
     }
 }

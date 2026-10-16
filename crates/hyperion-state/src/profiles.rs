@@ -126,6 +126,10 @@ pub struct ProfileApplyRow {
     /// (migration 063), for the same reason `slack_webhook` is snapshotted.
     pub alert_emails: Option<String>,
     pub applied_at: i64,
+    /// The price was set on the hosting itself and the operator asked it to
+    /// survive a profile re-apply (migration 085). `upsert_apply` never
+    /// touches it; only `set_price` does.
+    pub price_pinned: bool,
 }
 
 pub async fn insert(pool: &SqlitePool, p: &NewProfile, now: i64) -> Result<i64, StateError> {
@@ -305,6 +309,46 @@ pub async fn upsert_apply(
     Ok(())
 }
 
+/// Set the price on one hosting by hand (Lifecycle & billing card), outside
+/// any profile. Creates the row when the site never had a profile. Leaves the
+/// profile link, the apply time and the alert snapshots alone: this changes
+/// what the site costs, not which profile it is on. `pinned` decides whether
+/// the next profile apply keeps this price (see `ProfileApplyRow::price_pinned`).
+#[allow(clippy::too_many_arguments)]
+pub async fn set_price(
+    pool: &SqlitePool,
+    hosting_id: &HostingId,
+    price_minor: Option<i64>,
+    price_currency: Option<&str>,
+    price_interval: Option<&str>,
+    next_billing_at: Option<i64>,
+    pinned: bool,
+    now: i64,
+) -> Result<(), StateError> {
+    sqlx::query(
+        r#"INSERT INTO hosting_profile_apply
+            (hosting_id, profile_id, price_minor, price_currency, price_interval,
+             next_billing_at, applied_at, price_pinned)
+           VALUES (?, NULL, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(hosting_id) DO UPDATE SET
+            price_minor = excluded.price_minor,
+            price_currency = excluded.price_currency,
+            price_interval = excluded.price_interval,
+            next_billing_at = excluded.next_billing_at,
+            price_pinned = excluded.price_pinned"#,
+    )
+    .bind(hosting_id.as_str())
+    .bind(price_minor)
+    .bind(price_currency)
+    .bind(price_interval)
+    .bind(next_billing_at)
+    .bind(now)
+    .bind(pinned)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// How many LIVE hostings are on this profile (drives the "in use: N" badge +
 /// the re-apply / delete-confirm copy). Trashed sites are excluded — they're on
 /// their way out and shouldn't inflate the count or the re-apply scope.
@@ -380,9 +424,10 @@ pub async fn get_apply(
         Option<String>,
         Option<String>,
         i64,
+        bool,
     )> = sqlx::query_as(
         "SELECT hosting_id, profile_id, price_minor, price_currency, price_interval,
-                next_billing_at, slack_webhook, alert_emails, applied_at
+                next_billing_at, slack_webhook, alert_emails, applied_at, price_pinned
          FROM hosting_profile_apply WHERE hosting_id = ?",
     )
     .bind(hosting_id.as_str())
@@ -399,6 +444,7 @@ pub async fn get_apply(
             slack_webhook,
             alert_emails,
             applied_at,
+            price_pinned,
         )| ProfileApplyRow {
             hosting_id: HostingId(hosting_id),
             profile_id,
@@ -409,6 +455,7 @@ pub async fn get_apply(
             slack_webhook,
             alert_emails,
             applied_at,
+            price_pinned,
         },
     ))
 }
@@ -431,9 +478,10 @@ pub async fn due_billings(
         Option<String>,
         Option<String>,
         i64,
+        bool,
     )> = sqlx::query_as(
         "SELECT a.hosting_id, a.profile_id, a.price_minor, a.price_currency, a.price_interval,
-                a.next_billing_at, a.slack_webhook, a.alert_emails, a.applied_at
+                a.next_billing_at, a.slack_webhook, a.alert_emails, a.applied_at, a.price_pinned
          FROM hosting_profile_apply a
            JOIN hostings h ON h.id = a.hosting_id
          WHERE a.next_billing_at IS NOT NULL AND a.next_billing_at <= ? AND h.state != 'trashed'
@@ -455,6 +503,7 @@ pub async fn due_billings(
                 slack_webhook,
                 alert_emails,
                 applied_at,
+                price_pinned,
             )| ProfileApplyRow {
                 hosting_id: HostingId(hosting_id),
                 profile_id,
@@ -465,6 +514,7 @@ pub async fn due_billings(
                 slack_webhook,
                 alert_emails,
                 applied_at,
+                price_pinned,
             },
         )
         .collect())
@@ -731,5 +781,120 @@ mod alert_email_tests {
             .expect("get_apply")
             .expect("row");
         assert_eq!(row.alert_emails.as_deref(), Some("b@x.cz"));
+    }
+
+    /// A site that never had a profile can still be given a price; the row
+    /// it creates carries no profile.
+    #[tokio::test]
+    async fn set_price_works_without_a_profile() {
+        let pool = open_memory().await.expect("open");
+        let hosting = HostingId("h1".into());
+        seed_hosting(&pool, &hosting).await;
+        set_price(
+            &pool,
+            &hosting,
+            Some(240_000),
+            Some("CZK"),
+            Some("yearly"),
+            Some(500),
+            true,
+            100,
+        )
+        .await
+        .expect("set_price");
+        let row = get_apply(&pool, &hosting).await.expect("get").expect("row");
+        assert_eq!(row.profile_id, None);
+        assert_eq!(row.price_minor, Some(240_000));
+        assert_eq!(row.price_currency.as_deref(), Some("CZK"));
+        assert_eq!(row.price_interval.as_deref(), Some("yearly"));
+        assert_eq!(row.next_billing_at, Some(500));
+        assert!(row.price_pinned);
+    }
+
+    /// Changing the price must not unlink the profile or lose the alert
+    /// snapshot — the site is still on the same plan, it just costs more.
+    #[tokio::test]
+    async fn set_price_keeps_the_profile_link_and_snapshots() {
+        let pool = open_memory().await.expect("open");
+        let id = insert(&pool, &profile_with_alerts("ops@klient.cz"), 100)
+            .await
+            .expect("insert");
+        let hosting = HostingId("h1".into());
+        seed_hosting(&pool, &hosting).await;
+        upsert_apply(
+            &pool,
+            &hosting,
+            Some(id),
+            Some(19_900),
+            Some("CZK"),
+            Some("monthly"),
+            Some(300),
+            Some("https://hooks.slack.com/x"),
+            Some("ops@klient.cz"),
+            100,
+        )
+        .await
+        .expect("apply");
+        set_price(
+            &pool,
+            &hosting,
+            Some(200_000),
+            Some("EUR"),
+            Some("yearly"),
+            Some(900),
+            false,
+            200,
+        )
+        .await
+        .expect("set_price");
+        let row = get_apply(&pool, &hosting).await.expect("get").expect("row");
+        assert_eq!(row.profile_id, Some(id));
+        assert_eq!(row.applied_at, 100, "a price edit is not a profile apply");
+        assert_eq!(
+            row.slack_webhook.as_deref(),
+            Some("https://hooks.slack.com/x")
+        );
+        assert_eq!(row.alert_emails.as_deref(), Some("ops@klient.cz"));
+        assert_eq!(row.price_minor, Some(200_000));
+        assert_eq!(row.price_currency.as_deref(), Some("EUR"));
+        assert_eq!(row.next_billing_at, Some(900));
+        assert!(!row.price_pinned);
+    }
+
+    /// The pin belongs to the operator: a profile apply rewrites the price
+    /// columns it is handed but never flips the pin.
+    #[tokio::test]
+    async fn upsert_apply_leaves_the_pin_alone() {
+        let pool = open_memory().await.expect("open");
+        let hosting = HostingId("h1".into());
+        seed_hosting(&pool, &hosting).await;
+        set_price(
+            &pool,
+            &hosting,
+            Some(1),
+            Some("CZK"),
+            Some("yearly"),
+            None,
+            true,
+            100,
+        )
+        .await
+        .expect("set_price");
+        upsert_apply(
+            &pool,
+            &hosting,
+            None,
+            Some(1),
+            Some("CZK"),
+            Some("yearly"),
+            None,
+            None,
+            None,
+            200,
+        )
+        .await
+        .expect("apply");
+        let row = get_apply(&pool, &hosting).await.expect("get").expect("row");
+        assert!(row.price_pinned);
     }
 }

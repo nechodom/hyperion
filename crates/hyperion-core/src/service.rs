@@ -18845,35 +18845,35 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         self.set_expiry(HostingSelector::Id(detail.id.clone()), expiry)
             .await?;
 
-        // Pricing snapshot + billing clock. On the FIRST apply (or when the
-        // interval changed) start a fresh clock at now + interval. On a RE-apply
-        // with the same interval, PRESERVE the running date — re-applying a
-        // profile to push a limit/quota change must not shove every site's
-        // billing date forward and skip its imminent reminder.
+        // Pricing snapshot + billing clock (see `next_billing_on_price_change`).
+        // A price the operator set on this hosting and pinned stays: the
+        // profile's price is only copied over an unpinned one.
         let now = now_secs();
         let existing = profiles::get_apply(&self.pool, &detail.id)
             .await
             .ok()
             .flatten();
-        let interval_changed = existing
-            .as_ref()
-            .map(|e| e.price_interval.as_deref() != p.price_interval.as_deref())
-            .unwrap_or(true);
-        let next = match existing.as_ref().and_then(|e| e.next_billing_at) {
-            Some(existing_next) if !interval_changed => Some(existing_next),
-            _ => p
-                .price_interval
-                .as_deref()
-                .and_then(billing_interval_secs)
-                .map(|s| now + s),
+        let price_kept = existing.as_ref().is_some_and(|e| e.price_pinned);
+        let (price_minor, price_currency, price_interval) = match existing.as_ref() {
+            Some(e) if price_kept => (
+                e.price_minor,
+                e.price_currency.clone(),
+                e.price_interval.clone(),
+            ),
+            _ => (
+                p.price_minor,
+                p.price_currency.clone(),
+                p.price_interval.clone(),
+            ),
         };
+        let next = next_billing_on_price_change(existing.as_ref(), price_interval.as_deref(), now);
         profiles::upsert_apply(
             &self.pool,
             &detail.id,
             Some(p.id),
-            p.price_minor,
-            p.price_currency.as_deref(),
-            p.price_interval.as_deref(),
+            price_minor,
+            price_currency.as_deref(),
+            price_interval.as_deref(),
             next,
             p.slack_webhook.as_deref(),
             // Snapshotted for the same reason the price and the Slack
@@ -18922,7 +18922,12 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         self.append_audit(
             "profile.apply",
             Some(detail.id.as_str()),
-            &serde_json::json!({"profile_id": profile_id, "profile_name": p.name}).to_string(),
+            &serde_json::json!({
+                "profile_id": profile_id,
+                "profile_name": p.name,
+                "price_kept": price_kept,
+            })
+            .to_string(),
             "ok",
         )
         .await;
@@ -18930,11 +18935,12 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(ProfileApply {
             hosting_id: detail.id,
             profile_id: Some(p.id),
-            price_minor: p.price_minor,
-            price_currency: p.price_currency,
-            price_interval: p.price_interval,
+            price_minor,
+            price_currency,
+            price_interval,
             next_billing_at: next,
             applied_at: now,
+            price_pinned: price_kept,
         })
     }
 
@@ -19105,7 +19111,64 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             price_interval: r.price_interval,
             next_billing_at: r.next_billing_at,
             applied_at: r.applied_at,
+            price_pinned: r.price_pinned,
         }))
+    }
+
+    /// Set one hosting's price by hand (Lifecycle & billing card). An amount
+    /// needs a currency and an interval; no amount drops the price entirely.
+    /// The billing clock follows the same rule as a profile apply. `pinned`
+    /// decides whether the next profile apply keeps this price.
+    pub async fn hosting_price_set(
+        &self,
+        sel: HostingSelector,
+        price_minor: Option<i64>,
+        price_currency: Option<String>,
+        price_interval: Option<String>,
+        pinned: bool,
+    ) -> Result<ProfileApply, RpcError> {
+        let (price_minor, price_currency, price_interval) =
+            validate_hosting_price(price_minor, price_currency, price_interval)?;
+        let detail = self.get(sel).await?;
+        let now = now_secs();
+        let existing = profiles::get_apply(&self.pool, &detail.id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("apply read: {e}")))?;
+        let next = next_billing_on_price_change(existing.as_ref(), price_interval.as_deref(), now);
+        profiles::set_price(
+            &self.pool,
+            &detail.id,
+            price_minor,
+            price_currency.as_deref(),
+            price_interval.as_deref(),
+            next,
+            pinned,
+            now,
+        )
+        .await
+        .map_err(|e| RpcError::Internal_with(format!("price set: {e}")))?;
+        self.append_audit(
+            "hosting.price.set",
+            Some(detail.id.as_str()),
+            &serde_json::json!({
+                "old": existing.as_ref().map(|e| serde_json::json!({
+                    "price_minor": e.price_minor,
+                    "price_currency": e.price_currency,
+                    "price_interval": e.price_interval,
+                    "pinned": e.price_pinned,
+                })),
+                "price_minor": price_minor,
+                "price_currency": price_currency,
+                "price_interval": price_interval,
+                "pinned": pinned,
+            })
+            .to_string(),
+            "ok",
+        )
+        .await;
+        self.profile_get_apply(HostingSelector::Id(detail.id))
+            .await?
+            .ok_or_else(|| RpcError::Internal_with("price set: row vanished".into()))
     }
 
     // ================================================================
@@ -33499,6 +33562,55 @@ fn advance_billing_date(current: i64, interval: &str, now: i64) -> Option<i64> {
         next += step;
     }
     Some(next)
+}
+
+/// The billing clock after a site's price is (re)set, by a profile apply or by
+/// hand. A first price, or a new interval, starts a fresh clock at now +
+/// interval. The same interval KEEPS the running date — re-applying a profile
+/// to push a limit change, or correcting the amount, must not shove the
+/// billing date forward and skip an imminent reminder. No interval, no clock.
+fn next_billing_on_price_change(
+    existing: Option<&profiles::ProfileApplyRow>,
+    interval: Option<&str>,
+    now: i64,
+) -> Option<i64> {
+    match existing {
+        Some(e) if e.price_interval.as_deref() == interval && e.next_billing_at.is_some() => {
+            e.next_billing_at
+        }
+        _ => interval.and_then(billing_interval_secs).map(|s| now + s),
+    }
+}
+
+/// A hand-set hosting price: all three parts, or none. Currency is trimmed and
+/// upper-cased (the field only LOOKS uppercase); blanks count as missing.
+fn validate_hosting_price(
+    price_minor: Option<i64>,
+    price_currency: Option<String>,
+    price_interval: Option<String>,
+) -> Result<(Option<i64>, Option<String>, Option<String>), RpcError> {
+    let Some(minor) = price_minor else {
+        return Ok((None, None, None));
+    };
+    let invalid = |m: &str| RpcError::Validation { message: m.into() };
+    if minor < 0 {
+        return Err(invalid("price must not be negative"));
+    }
+    let currency = price_currency
+        .map(|c| c.trim().to_ascii_uppercase())
+        .filter(|c| !c.is_empty())
+        .ok_or_else(|| invalid("a price needs a currency"))?;
+    if currency.len() != 3 || !currency.chars().all(|ch| ch.is_ascii_uppercase()) {
+        return Err(invalid("currency must be 3 ISO-4217 letters, e.g. CZK"));
+    }
+    let interval = price_interval
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| invalid("a price needs a billing interval"))?;
+    if billing_interval_secs(&interval).is_none() {
+        return Err(invalid("interval must be monthly | quarterly | yearly"));
+    }
+    Ok((Some(minor), Some(currency), Some(interval)))
 }
 
 fn validate_profile(mut p: ProfileInput) -> Result<ProfileInput, RpcError> {
@@ -51293,6 +51405,134 @@ mod tests {
             .await
             .expect("pending");
         assert!(after.is_empty(), "actions canceled");
+    }
+
+    /// A price typed on the hosting outlives a profile re-apply only when the
+    /// operator pinned it; unpinned, the profile's price comes back.
+    #[tokio::test]
+    async fn a_pinned_hosting_price_survives_a_profile_re_apply() {
+        let pool = open_memory().await.expect("open");
+        // profile_apply pushes the profile's limits onto the site.
+        let mut a = happy_mocks();
+        a.expect_apply_php_limits()
+            .returning(|_, _, _, _, _, _, _| Ok(()));
+        let s = svc(pool.clone(), a);
+        s.create(req("cena.cz")).await.expect("create");
+        let sel = HostingSelector::Domain(Domain::parse("cena.cz").unwrap());
+        let profile = s
+            .profile_create(hyperion_types::ProfileInput {
+                name: "Basic".into(),
+                php_memory_mb: 256,
+                php_max_exec_secs: 30,
+                php_max_children: 10,
+                php_max_requests: 500,
+                db_max_connections: 50,
+                price_minor: Some(19_900),
+                price_currency: Some("CZK".into()),
+                price_interval: Some("monthly".into()),
+                ..Default::default()
+            })
+            .await
+            .expect("profile");
+        s.profile_apply(sel.clone(), profile.id, true, None)
+            .await
+            .expect("apply");
+
+        let set = s
+            .hosting_price_set(
+                sel.clone(),
+                Some(240_000),
+                Some(" czk ".into()),
+                Some("yearly".into()),
+                true,
+            )
+            .await
+            .expect("price set");
+        assert_eq!(set.pretty_price(), "2400.00 CZK/year");
+        assert!(set.price_pinned);
+        assert_eq!(set.profile_id, Some(profile.id), "still on the profile");
+        let yearly_clock = set.next_billing_at.expect("clock");
+
+        let again = s
+            .profile_apply(sel.clone(), profile.id, true, None)
+            .await
+            .expect("re-apply");
+        assert_eq!(
+            again.pretty_price(),
+            "2400.00 CZK/year",
+            "pinned price kept"
+        );
+        assert!(again.price_pinned);
+        assert_eq!(again.next_billing_at, Some(yearly_clock), "clock not moved");
+
+        s.hosting_price_set(
+            sel.clone(),
+            Some(240_000),
+            Some("CZK".into()),
+            Some("yearly".into()),
+            false,
+        )
+        .await
+        .expect("unpin");
+        let back = s
+            .profile_apply(sel.clone(), profile.id, true, None)
+            .await
+            .expect("re-apply unpinned");
+        assert_eq!(
+            back.pretty_price(),
+            "199.00 CZK/month",
+            "profile price back"
+        );
+        assert!(!back.price_pinned);
+    }
+
+    #[tokio::test]
+    async fn a_hosting_price_needs_all_three_parts_or_none() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), happy_mocks());
+        s.create(req("cena.cz")).await.expect("create");
+        let sel = HostingSelector::Domain(Domain::parse("cena.cz").unwrap());
+        for (cur, iv) in [
+            (None, Some("yearly")),
+            (Some("CZK"), None),
+            (Some("KČ"), Some("yearly")),
+            (Some("CZK"), Some("weekly")),
+        ] {
+            let err = s
+                .hosting_price_set(
+                    sel.clone(),
+                    Some(100),
+                    cur.map(Into::into),
+                    iv.map(Into::into),
+                    false,
+                )
+                .await
+                .expect_err("refused");
+            assert!(
+                matches!(err, RpcError::Validation { .. }),
+                "{cur:?} {iv:?}: {err:?}"
+            );
+        }
+        assert!(matches!(
+            s.hosting_price_set(
+                sel.clone(),
+                Some(-1),
+                Some("CZK".into()),
+                Some("yearly".into()),
+                false
+            )
+            .await,
+            Err(RpcError::Validation { .. })
+        ));
+        // No amount drops the price, whatever else came along with it.
+        let cleared = s
+            .hosting_price_set(sel, None, Some("CZK".into()), Some("yearly".into()), true)
+            .await
+            .expect("clear");
+        assert_eq!(cleared.price_minor, None);
+        assert_eq!(cleared.price_interval, None);
+        assert_eq!(cleared.next_billing_at, None, "no price, no billing clock");
+        assert!(cleared.price_pinned);
     }
 
     /// The whole point of widening the session probe: a privilege taken away

@@ -161,6 +161,10 @@ pub fn build_router(state: SharedState) -> Router {
             post(handlers::hostings::post_clear_expiry),
         )
         .route(
+            "/hostings/price/set",
+            post(handlers::hostings::post_set_price),
+        )
+        .route(
             "/hostings/dns-check",
             post(handlers::hostings::post_dns_check),
         )

@@ -4681,3 +4681,105 @@ async fn older_letter_templates_move_into_the_editor() {
     assert!(toml.contains("billing_lang = \"en\""), "{toml}");
     assert!(toml.contains("lang = \"cs\""), "{toml}");
 }
+
+/// Lifecycle & billing → Price: an admin sets one site's price by hand and
+/// pins it; an operator — who may edit the site but not what it costs — is
+/// refused.
+#[tokio::test]
+async fn hosting_price_is_set_on_the_detail_page_and_only_by_admins() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d) = start_agent().await;
+    let app = build_app(sock.clone(), admin);
+
+    let resp = post_form(&app, "/login", "", "username=kevin&password=good-pw&next=/").await;
+    let admin_cookie = extract_cookie(&resp);
+
+    let new_page = body_string(get_with(&app, "/hostings/new", &admin_cookie).await).await;
+    let csrf = extract_csrf(&new_page);
+    let resp = post_form(
+        &app,
+        "/hostings",
+        &admin_cookie,
+        &format!("_csrf={csrf}&domain=cena-e2e.cz&aliases=&php=8.3&db=mariadb&system_user="),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let detail = body_string(get_with(&app, "/hostings/cena-e2e.cz", &admin_cookie).await).await;
+    let csrf = extract_csrf_named(&detail, "/hostings/price/set");
+    let resp = post_form(
+        &app,
+        "/hostings/price/set",
+        &admin_cookie,
+        &format!(
+            "_csrf={}&selector=cena-e2e.cz&price_major=2400&price_currency=czk&price_interval=yearly&pinned=on",
+            enc(&csrf)
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let to = resp.headers()[header::LOCATION]
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(to.contains("price=set"), "redirect: {to}");
+
+    let applied = match hyperion_rpc_client::call(
+        &sock,
+        hyperion_rpc::codec::Request::ProfileGetApply {
+            sel: hyperion_rpc::wire::HostingSelector::Domain(
+                hyperion_validate::Domain::parse("cena-e2e.cz").unwrap(),
+            ),
+        },
+    )
+    .await
+    .expect("rpc")
+    {
+        hyperion_rpc::codec::Response::ProfileGetApply(Some(a)) => a,
+        other => panic!("unexpected: {other:?}"),
+    };
+    assert_eq!(applied.pretty_price(), "2400.00 CZK/year");
+    assert!(applied.price_pinned);
+
+    let detail = body_string(get_with(&app, "/hostings/cena-e2e.cz", &admin_cookie).await).await;
+    assert!(detail.contains("2400.00 CZK/year"), "price pill missing");
+    assert!(detail.contains(">set here<"), "pinned tag missing");
+
+    // An operator holds the per-site edit capability but not ProfilesManage.
+    match hyperion_rpc_client::call(
+        &sock,
+        hyperion_rpc::codec::Request::WebUserCreate {
+            username: "price-op".into(),
+            email: "price-op@example.invalid".into(),
+            password: "operator-pw-1".into(),
+            role: "operator".into(),
+        },
+    )
+    .await
+    .expect("create operator")
+    {
+        hyperion_rpc::codec::Response::WebUserCreate { .. } => {}
+        other => panic!("unexpected create response: {other:?}"),
+    }
+    let resp = post_form(
+        &app,
+        "/login",
+        "",
+        "username=price-op&password=operator-pw-1&next=/",
+    )
+    .await;
+    let op_cookie = extract_cookie(&resp);
+    let profile_page = body_string(get_with(&app, "/profile", &op_cookie).await).await;
+    let op_csrf = extract_csrf(&profile_page);
+    let resp = post_form(
+        &app,
+        "/hostings/price/set",
+        &op_cookie,
+        &format!(
+            "_csrf={}&selector=cena-e2e.cz&price_major=1&price_currency=CZK&price_interval=yearly",
+            enc(&op_csrf)
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}

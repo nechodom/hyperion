@@ -1285,6 +1285,11 @@ pub fn print_pretty(resp: &Response) {
             }
             None => println!("(no profile applied to this hosting)"),
         },
+        Response::HostingPriceSet(a) => {
+            println!("price: {}", a.pretty_price());
+            println!("pinned: {}", a.price_pinned);
+            println!("next_billing_at: {:?}", a.next_billing_at);
+        }
         Response::DashboardAlerts(alerts) => {
             if alerts.is_empty() {
                 println!("(no alerts)");

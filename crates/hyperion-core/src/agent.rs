@@ -2006,6 +2006,18 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
     ) -> Result<Option<ProfileApply>, RpcError> {
         self.svc.profile_get_apply(sel).await
     }
+    async fn hosting_price_set(
+        &self,
+        sel: HostingSelector,
+        price_minor: Option<i64>,
+        price_currency: Option<String>,
+        price_interval: Option<String>,
+        pinned: bool,
+    ) -> Result<ProfileApply, RpcError> {
+        self.svc
+            .hosting_price_set(sel, price_minor, price_currency, price_interval, pinned)
+            .await
+    }
     async fn profile_wp_item_install(
         &self,
         sel: HostingSelector,

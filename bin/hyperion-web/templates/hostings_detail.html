@@ -496,6 +496,8 @@
   {% if let Some(e) = backup_target_error %}{% call flash("error", "Off-site destination not changed:", e) %}{% endif %}
   {% if let Some(m) = expiry_flash %}{% call flash("success", "", m) %}{% endif %}
   {% if let Some(e) = expiry_error %}{% call flash("error", "", e) %}{% endif %}
+  {% if let Some(m) = price_flash %}{% call flash("success", "", m) %}{% endif %}
+  {% if let Some(e) = price_error %}{% call flash("error", "Price not changed:", e) %}{% endif %}
   {% if let Some(m) = proxy_flash %}{% call flash("success", "", m) %}{% endif %}
   {% if let Some(e) = proxy_error %}{% call flash("error", "", e) %}{% endif %}
   {% if let Some(m) = cert_flash %}{% call flash("success", "", m) %}{% endif %}
@@ -3290,7 +3292,7 @@
   </div>
   <p class="card-desc">
     {% if let Some(name) = applied_profile_name %}
-      Currently applied: <strong>{{ name }}</strong>. Re-applying refreshes the limits, expiry policy and pricing snapshot.
+      Currently applied: <strong>{{ name }}</strong>. Re-applying refreshes the limits, expiry policy{% if price_pinned %} — but not the price, which is set on this hosting{% else %} and pricing snapshot{% endif %}.
     {% else %}
       Pick a profile to push limits, expiry policy and pricing in one step.
     {% endif %}
@@ -3301,7 +3303,7 @@
   {% else %}
     <form method="post" action="/profiles/apply"
           data-confirm-title="Apply hosting profile"
-          data-confirm-body="The current limits, expiry policy and price snapshot for {{ detail.domain }} will be overwritten by the chosen profile."
+          data-confirm-body="The current limits{% if price_pinned %} and expiry policy for {{ detail.domain }} will be overwritten by the chosen profile. The price set on this hosting stays.{% else %}, expiry policy and price snapshot for {{ detail.domain }} will be overwritten by the chosen profile.{% endif %}"
           data-confirm-confirm-label="Apply profile"
           data-confirm-variant="primary">
       <input type="hidden" name="_csrf" value="{{ csrf_profile_apply }}">
@@ -3363,11 +3365,69 @@
         if (d.db) parts.push('DB <b>' + d.db + '</b>');
         if (d.plugins && d.plugins !== '0') parts.push('<b>' + d.plugins + '</b> plugin(s)');
         if (d.themes && d.themes !== '0') parts.push('<b>' + d.themes + '</b> theme(s)');
-        if (d.price && d.price !== '—') parts.push('price <b>' + d.price + '</b>');
+        if ({% if price_pinned %}true{% else %}false{% endif %}) parts.push('price <b>kept</b> (set on this hosting)');
+        else if (d.price && d.price !== '—') parts.push('price <b>' + d.price + '</b>');
         box.innerHTML = 'Will set: ' + parts.join(' · ') + '. <span style="color:var(--warn)">Overwrites the current values.</span>';
       }
       hyperionApplyPreview();
     </script>
+  {% endif %}
+</div>
+
+<div class="card" id="hosting-price">
+  <div class="card-head">
+    <h2>
+      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/></svg>
+      Price
+    </h2>
+    {% if price_pinned %}<span class="tag accent" title="Set on this hosting; applying a profile does not change it">set here</span>{% else if let Some(pn) = applied_profile_name %}<span class="tag accent" title="Copied from the {{ pn }} profile when it was applied">from {{ pn }}</span>{% endif %}
+    <div class="card-tools">
+      {% if let Some(pa) = profile_apply %}{% if pa.price_minor.is_some() %}<span class="pill neutral">{{ pa.pretty_price() }}</span>{% else %}<span class="pill neutral">no price</span>{% endif %}{% else %}<span class="pill neutral">no price</span>{% endif %}
+    </div>
+  </div>
+  <p class="card-desc">
+    What this hosting costs and how often it is billed. Hyperion only sends the
+    billing reminder — it never charges anyone.
+    {% if let Some(pa) = profile_apply %}{% if let Some(nb) = pa.next_billing_at %}Next billing <strong>{{ nb|date }}</strong>.{% endif %}{% endif %}
+  </p>
+  {% if can_set_price %}
+  <form method="post" action="/hostings/price/set">
+    <input type="hidden" name="_csrf" value="{{ csrf_price_set }}">
+    <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
+    <div class="field-row three">
+      <div class="field">
+        <label for="price_major">Amount <span class="hint">empty = no price</span></label>
+        <input id="price_major" name="price_major" type="text" inputmode="decimal" placeholder="2400.00" value="{{ price_major }}">
+      </div>
+      <div class="field">
+        <label for="price_currency">Currency <span class="hint">ISO 4217</span></label>
+        <input id="price_currency" name="price_currency" type="text" maxlength="3" placeholder="CZK" class="upper"
+               value="{% if let Some(pa) = profile_apply %}{% if let Some(c) = pa.price_currency %}{{ c }}{% endif %}{% endif %}">
+      </div>
+      <div class="field">
+        <label for="price_interval">Billed</label>
+        <select id="price_interval" name="price_interval">
+          {% for (val, label) in [("yearly", "Yearly"), ("quarterly", "Quarterly"), ("monthly", "Monthly")] %}
+          <option value="{{ val }}"{% if let Some(pa) = profile_apply %}{% if pa.price_interval.as_deref() == Some(val) %} selected{% endif %}{% endif %}>{{ label }}</option>
+          {% endfor %}
+        </select>
+      </div>
+    </div>
+    <label class="field-checkbox">
+      <input type="checkbox" name="pinned" value="on"{% if price_pinned %} checked{% endif %}>
+      <span><strong>Keep this price</strong> when a profile is applied again <span class="hint">— unticked, the next apply puts the profile's price back</span></span>
+    </label>
+    <p class="help">
+      Same interval keeps the next billing date. A different interval starts
+      the billing clock again from today.
+    </p>
+    <div class="form-footer">
+      <button class="btn primary" type="submit">
+        <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
+        Save price
+      </button>
+    </div>
+  </form>
   {% endif %}
 </div>
 

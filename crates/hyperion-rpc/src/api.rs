@@ -1388,6 +1388,15 @@ pub trait AgentApi: Send + Sync + 'static {
         &self,
         sel: HostingSelector,
     ) -> Result<Option<ProfileApply>, RpcError>;
+    /// Set one hosting's price by hand (see `Request::HostingPriceSet`).
+    async fn hosting_price_set(
+        &self,
+        sel: HostingSelector,
+        price_minor: Option<i64>,
+        price_currency: Option<String>,
+        price_interval: Option<String>,
+        pinned: bool,
+    ) -> Result<ProfileApply, RpcError>;
     /// Install ONE profile wp_plugins / wp_themes line on a hosting.
     /// Returns (human label, activated). See codec.rs for the line
     /// syntax.

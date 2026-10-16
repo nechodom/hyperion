@@ -1943,6 +1943,18 @@ pub enum Request {
     ProfileGetApply {
         sel: HostingSelector,
     },
+    /// Set one hosting's price by hand, outside its profile. All three of
+    /// `price_*` set, or all three `None` to drop the price. `pinned` = keep
+    /// this price when a profile is applied to the site again; otherwise the
+    /// next apply overwrites it with the profile's price. Answered with the
+    /// updated `ProfileGetApply` row. Runs on the node that owns the site.
+    HostingPriceSet {
+        sel: HostingSelector,
+        price_minor: Option<i64>,
+        price_currency: Option<String>,
+        price_interval: Option<String>,
+        pinned: bool,
+    },
     /// Install ONE line of a profile's wp_plugins / wp_themes list
     /// on a hosting. `line` uses the same syntax as the profile
     /// fields: `slug`, `@asset:<id>`, trailing `!` = activate,
@@ -2676,6 +2688,7 @@ pub enum Response {
     ProfileUsageCounts(Vec<(i64, i64)>),
     ProfileApply(ProfileApply),
     ProfileGetApply(Option<ProfileApply>),
+    HostingPriceSet(ProfileApply),
     /// Ack for ProfileWpItemInstall. `label` is the human-readable
     /// name of what got installed (asset original_name for
     /// `@asset:` lines, the slug otherwise); `activated` echoes
