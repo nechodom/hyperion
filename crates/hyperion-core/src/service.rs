@@ -17629,7 +17629,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 .map(
                     |p| match (p.price_minor, &p.price_currency, &p.price_interval) {
                         (Some(m), Some(c), Some(iv)) => {
-                            format!("{} ({:.2} {c} {iv})", p.package_name, m as f64 / 100.0)
+                            format!("{} — {}", p.package_name, fmt_billing_price(&cat, m, c, iv))
                         }
                         _ => p.package_name.clone(),
                     },
@@ -17641,55 +17641,50 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let base_line = match &base {
             Some((m, c, iv)) => cat.render(
                 "slack.price_line",
-                &[(
-                    "price",
-                    &format!(
-                        "{} {c} ({iv})",
-                        cat.decimal(&format!("{:.2}", *m as f64 / 100.0))
-                    ),
-                )],
+                &[("price", &fmt_billing_price(&cat, *m, c, iv))],
             ),
             None => cat.get("slack.price_unset").to_string(),
         };
 
-        // One currency and one interval, or no total.
-        let mut currency: Option<String> = base.as_ref().map(|(_, c, _)| c.clone());
-        let mut interval: Option<String> = base.as_ref().map(|(_, _, iv)| iv.clone());
-        let mut total: i64 = base.as_ref().map(|(m, _, _)| *m).unwrap_or(0);
-        let mut comparable = base.is_some() || !packages.is_empty();
+        // Every part priced, or no total: a package with no price cannot be
+        // added up, and saying nothing beats a total that quietly omits it.
+        let mut parts: Vec<(i64, &str, &str)> = Vec::new();
+        if let Some((m, c, iv)) = &base {
+            parts.push((*m, c.as_str(), iv.as_str()));
+        }
+        let mut all_priced = true;
         for p in &packages {
             match (p.price_minor, &p.price_currency, &p.price_interval) {
-                (Some(m), Some(c), Some(iv)) => {
-                    if currency.get_or_insert_with(|| c.clone()) != c
-                        || interval.get_or_insert_with(|| iv.clone()) != iv
-                    {
-                        comparable = false;
-                        break;
-                    }
-                    total += m;
-                }
-                // A package with no price cannot be added up; saying nothing
-                // beats a total that quietly omits it.
-                _ => {
-                    comparable = false;
-                    break;
-                }
+                (Some(m), Some(c), Some(iv)) => parts.push((m, c.as_str(), iv.as_str())),
+                _ => all_priced = false,
             }
         }
-        let total_line = match (comparable, currency, interval) {
-            (true, Some(c), Some(iv)) if !packages.is_empty() => cat.render(
+        let total_line = match billing_total(&parts) {
+            Some((sum, c, iv)) if all_priced && !packages.is_empty() => cat.render(
                 "slack.total",
-                &[(
-                    "total",
-                    &format!(
-                        "{} {c} ({iv})",
-                        cat.decimal(&format!("{:.2}", total as f64 / 100.0))
-                    ),
-                )],
+                &[("total", &fmt_billing_price(&cat, sum, &c, &iv))],
             ),
             _ => String::new(),
         };
         (base_line, plan_line, total_line)
+    }
+
+    /// The "next invoice" line for one billing clock: the date the period
+    /// starts and the moment the sweep will really send its reminder (a lead
+    /// window earlier). Printing the billing date as "next reminder" promised
+    /// a message three days after it would actually arrive.
+    fn next_invoice_line(cat: &LetterCatalog, what: &str, due: Option<i64>, now: i64) -> String {
+        match due {
+            Some(t) => cat.render(
+                "slack.next_reminder",
+                &[
+                    ("what", what),
+                    ("due", &fmt_notif_time(t)),
+                    ("when", &fmt_notif_time(billing_reminder_at(t, now))),
+                ],
+            ),
+            None => cat.get("slack.next_reminder_none").to_string(),
+        }
     }
 
     /// Announce a newly provisioned hosting on Slack, once.
@@ -17723,10 +17718,12 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // message uses — the two must never disagree about one site.
         let (price_line, plan_line, total_line) = self.price_picture(&detail.id).await;
         let cat = self.letter_catalog();
-        let next_line = match applied.as_ref().and_then(|a| a.next_billing_at) {
-            Some(t) => cat.render("slack.next_reminder", &[("when", &fmt_notif_time(t))]),
-            None => cat.get("slack.next_reminder_none").to_string(),
-        };
+        let next_line = Self::next_invoice_line(
+            &cat,
+            cat.get("slack.what_hosting"),
+            applied.as_ref().and_then(|a| a.next_billing_at),
+            now_secs(),
+        );
         let node = detail
             .node_id
             .as_deref()
@@ -17846,7 +17843,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// charges anyone — this only ever sends a message.
     pub async fn billing_sweep(&self) -> Result<i64, RpcError> {
         let now = now_secs();
-        let due = profiles::due_billings(&self.pool, now, 3 * 86400)
+        let due = profiles::due_billings(&self.pool, now, BILLING_REMINDER_LEAD_SECS)
             .await
             .map_err(|e| RpcError::Internal_with(format!("billing sweep: {e}")))?;
         let mut count = 0i64;
@@ -17881,16 +17878,16 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             let cat = self.billing_catalog();
             let (price_str, action) =
                 match (row.price_minor, &row.price_currency, &row.price_interval) {
-                    (Some(m), Some(c), Some(iv)) => {
-                        let amount = cat.decimal(&format!("{:.2}", m as f64 / 100.0));
-                        (
-                            format!("{amount} {c} ({iv})"),
-                            cat.render(
-                                "slack.invoice_action",
-                                &[("amount", &format!("{amount} {c}")), ("interval", iv)],
-                            ),
-                        )
-                    }
+                    (Some(m), Some(c), Some(iv)) => (
+                        fmt_billing_price(&cat, m, c, iv),
+                        cat.render(
+                            "slack.invoice_action",
+                            &[
+                                ("amount", &fmt_billing_amount(&cat, m, c)),
+                                ("interval", &fmt_billing_interval(&cat, iv)),
+                            ],
+                        ),
+                    ),
                     _ => (
                         cat.get("slack.price_not_set").to_string(),
                         cat.get("slack.no_price_hosting").to_string(),
@@ -17949,7 +17946,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // the window), so everything below is the profile branch with a
         // package label — including advancing the clock, without which the
         // same package re-notifies every hour forever.
-        let due_packages = packages::due_billings(&self.pool, now, 3 * 86400)
+        let due_packages = packages::due_billings(&self.pool, now, BILLING_REMINDER_LEAD_SECS)
             .await
             .map_err(|e| RpcError::Internal_with(format!("billing sweep (packages): {e}")))?;
         for row in due_packages {
@@ -17990,16 +17987,16 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             let cat = self.billing_catalog();
             let (price_str, action) =
                 match (row.price_minor, &row.price_currency, &row.price_interval) {
-                    (Some(m), Some(c), Some(iv)) => {
-                        let amount = cat.decimal(&format!("{:.2}", m as f64 / 100.0));
-                        (
-                            format!("{amount} {c} ({iv})"),
-                            cat.render(
-                                "slack.invoice_action",
-                                &[("amount", &format!("{amount} {c}")), ("interval", iv)],
-                            ),
-                        )
-                    }
+                    (Some(m), Some(c), Some(iv)) => (
+                        fmt_billing_price(&cat, m, c, iv),
+                        cat.render(
+                            "slack.invoice_action",
+                            &[
+                                ("amount", &fmt_billing_amount(&cat, m, c)),
+                                ("interval", &fmt_billing_interval(&cat, iv)),
+                            ],
+                        ),
+                    ),
                     // Said out loud rather than skipped: a care package with
                     // no price is one nobody is charging for, and the day it
                     // comes due is when that is worth noticing.
@@ -19461,17 +19458,26 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // now pays in total, which is the number that goes on the invoice.
         let (price_line, plan_line, total_line) = self.price_picture(&detail.id).await;
         let cat = self.letter_catalog();
-        let next_line = match row.next_billing_at {
-            Some(t) => cat.render("slack.next_reminder", &[("when", &fmt_notif_time(t))]),
-            None => cat.get("slack.next_reminder_none").to_string(),
-        };
-        // Same channel the hosting's own billing messages go to: the profile's
-        // webhook snapshotted at apply time, else the cluster default.
-        let webhook = hyperion_state::profiles::get_apply(&self.pool, &detail.id)
+        // Both clocks, each named: the plan's own (what this message is
+        // about) and the hosting's, which runs on its own cycle. One unnamed
+        // date read as the next invoice for everything on the site.
+        let applied = hyperion_state::profiles::get_apply(&self.pool, &detail.id)
             .await
             .ok()
-            .flatten()
-            .and_then(|a| a.slack_webhook);
+            .flatten();
+        let mut next_line = Self::next_invoice_line(&cat, &def.name, row.next_billing_at, now);
+        if let Some(t) = applied.as_ref().and_then(|a| a.next_billing_at) {
+            next_line.push('\n');
+            next_line.push_str(&Self::next_invoice_line(
+                &cat,
+                cat.get("slack.what_hosting"),
+                Some(t),
+                now,
+            ));
+        }
+        // Same channel the hosting's own billing messages go to: the profile's
+        // webhook snapshotted at apply time, else the cluster default.
+        let webhook = applied.and_then(|a| a.slack_webhook);
         let msg = cat.render(
             "slack.care_activated",
             &[
@@ -32755,6 +32761,85 @@ fn validate_crontab(body: &str) -> Result<(), RpcError> {
     Ok(())
 }
 
+/// How long before a billing date its reminder goes out. The sweep picks a
+/// clock up once it is inside this window, so "the next reminder" a message
+/// promises is this much earlier than the billing date itself.
+const BILLING_REMINDER_LEAD_SECS: i64 = 3 * 86400;
+
+/// When the billing sweep will actually send the reminder for a clock due at
+/// `due`: one lead window earlier, but never in the past — a clock already
+/// inside the window goes out on the next hourly pass.
+fn billing_reminder_at(due: i64, now: i64) -> i64 {
+    (due - BILLING_REMINDER_LEAD_SECS).max(now)
+}
+
+/// Billing periods in a year, counted the way an invoice counts them (twelve
+/// months, four quarters) rather than by the 30/90/365-day clock step.
+fn billing_periods_per_year(interval: &str) -> Option<i64> {
+    match interval {
+        "monthly" => Some(12),
+        "quarterly" => Some(4),
+        "yearly" => Some(1),
+        _ => None,
+    }
+}
+
+/// A price as an operator reads it on an invoice: "1 500,00 CZK měsíčně" in
+/// Czech, "1,500.00 CZK per month" in English. Grouped and separated by the
+/// letter language, and the cycle in words — the raw "monthly" token in a
+/// Czech message is the stored enum leaking out, not a sentence.
+fn fmt_billing_price(cat: &LetterCatalog, minor: i64, currency: &str, interval: &str) -> String {
+    format!(
+        "{} {}",
+        fmt_billing_amount(cat, minor, currency),
+        fmt_billing_interval(cat, interval)
+    )
+}
+
+/// The amount alone, "1 500,00 CZK".
+fn fmt_billing_amount(cat: &LetterCatalog, minor: i64, currency: &str) -> String {
+    let sign = if minor < 0 { "-" } else { "" };
+    let abs = minor.unsigned_abs();
+    format!(
+        "{sign}{}{}{:02} {currency}",
+        cat.group_int((abs / 100) as i64),
+        cat.get("num_decimal_sep"),
+        abs % 100
+    )
+}
+
+/// The cycle in words, "per month" / "měsíčně"; an interval the catalogue does
+/// not know is shown as stored rather than hidden.
+fn fmt_billing_interval(cat: &LetterCatalog, interval: &str) -> String {
+    match interval {
+        "monthly" | "quarterly" | "yearly" => cat.get(&format!("price.per.{interval}")).to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// Add up a hosting's prices: `(minor, currency, interval)` per part.
+///
+/// One cycle throughout sums on that cycle. Mixed cycles — a yearly hosting
+/// with a monthly care plan, the common case — sum per YEAR, because that
+/// is a figure that is actually true; refusing to add them left the operator
+/// with no total at all on exactly the sites that have a plan. Mixed
+/// currencies, or a cycle with no yearly equivalent, give `None`.
+fn billing_total(parts: &[(i64, &str, &str)]) -> Option<(i64, String, String)> {
+    let (_, currency, first_iv) = *parts.first()?;
+    if parts.iter().any(|(_, c, _)| *c != currency) {
+        return None;
+    }
+    if parts.iter().all(|(_, _, iv)| *iv == first_iv) {
+        let sum = parts.iter().map(|(m, _, _)| *m).sum();
+        return Some((sum, currency.to_string(), first_iv.to_string()));
+    }
+    let mut sum = 0i64;
+    for (m, _, iv) in parts {
+        sum += m.checked_mul(billing_periods_per_year(iv)?)?;
+    }
+    Some((sum, currency.to_string(), "yearly".to_string()))
+}
+
 /// Seconds in one billing interval, or `None` for an unknown/absent interval.
 fn billing_interval_secs(interval: &str) -> Option<i64> {
     match interval {
@@ -43122,6 +43207,66 @@ mod tests {
             .expect("match")
             .expect("changed");
         assert_eq!(out, "UUID=x /srv xfs defaults,uquota,gquota 0 2\n");
+    }
+
+    /// The spolchemie.cz announcement: a 2 150 CZK/year hosting with a
+    /// 1 500 CZK/month plan printed "2150,00 CZK (yearly)" as THE price,
+    /// "1500.00" in the other format, raw English cycles, and no total.
+    #[test]
+    fn billing_prices_read_like_an_invoice() {
+        use super::{billing_total, fmt_billing_price};
+        let cs = LetterCatalog::new(LetterLang::Cs);
+        let en = LetterCatalog::new(LetterLang::En);
+        assert_eq!(
+            fmt_billing_price(&cs, 150_000, "CZK", "monthly"),
+            "1 500,00 CZK měsíčně"
+        );
+        assert_eq!(
+            fmt_billing_price(&en, 215_000, "CZK", "yearly"),
+            "2,150.00 CZK per year"
+        );
+        assert_eq!(
+            fmt_billing_price(&cs, 5, "EUR", "quarterly"),
+            "0,05 EUR čtvrtletně"
+        );
+        assert_eq!(
+            fmt_billing_price(&cs, 100, "CZK", "weekly"),
+            "1,00 CZK weekly"
+        );
+
+        // Mixed cycles add up per year: 2 150 + 12 × 1 500.
+        assert_eq!(
+            billing_total(&[(215_000, "CZK", "yearly"), (150_000, "CZK", "monthly")]),
+            Some((2_015_000, "CZK".into(), "yearly".into()))
+        );
+        // One cycle stays on that cycle.
+        assert_eq!(
+            billing_total(&[(10_000, "CZK", "monthly"), (150_000, "CZK", "monthly")]),
+            Some((160_000, "CZK".into(), "monthly".into()))
+        );
+        assert_eq!(
+            billing_total(&[(1, "CZK", "monthly"), (1, "EUR", "monthly")]),
+            None
+        );
+        assert_eq!(
+            billing_total(&[(1, "CZK", "monthly"), (1, "CZK", "weekly")]),
+            None
+        );
+        assert_eq!(billing_total(&[]), None);
+    }
+
+    /// The reminder goes out a lead window before the billing date, or on
+    /// the next pass when that moment has already gone.
+    #[test]
+    fn billing_reminder_lands_before_the_due_date() {
+        use super::{billing_reminder_at, BILLING_REMINDER_LEAD_SECS};
+        let now = 1_000_000;
+        let due = now + 30 * 86_400;
+        assert_eq!(
+            billing_reminder_at(due, now),
+            due - BILLING_REMINDER_LEAD_SECS
+        );
+        assert_eq!(billing_reminder_at(now + 86_400, now), now);
     }
 
     #[test]
