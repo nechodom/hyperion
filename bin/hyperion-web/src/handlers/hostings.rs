@@ -7927,6 +7927,54 @@ pub(crate) async fn compute_preview_domain(
     }
 }
 
+/// The request that imports bundle `bundle_id` (on the master's disk by
+/// now: exported there, or pulled from a worker) on `target_node`, plus the
+/// job-log line describing it.
+///
+/// A worker downloads it from the master's signed bundle endpoint. The
+/// master itself reads it straight off its own disk: going over HTTP to its
+/// own public name made a copy onto the master hinge on what that name
+/// resolves to on the master (127.0.1.1, a private address, a split-horizon
+/// answer, nothing inside the agent), and the import-from-URL address check
+/// refused the job at 65%.
+async fn bundle_import_request(
+    state: &SharedState,
+    target_node: &str,
+    bundle_id: &str,
+    master_url: &str,
+    bundle_ttl: i64,
+    override_domain: Option<String>,
+) -> (Request, String) {
+    if crate::dispatcher::remote_target(state, Some(target_node))
+        .await
+        .is_none()
+    {
+        return (
+            Request::HostingImportLocalBundle {
+                bundle_id: bundle_id.to_string(),
+                override_domain,
+                override_aliases: Vec::new(),
+            },
+            format!("bundle_id={bundle_id} (read from the master's own disk)\n"),
+        );
+    }
+    let exp = hyperion_types::now_secs() + bundle_ttl;
+    let token = hyperion_auth::bundle_sig::mint(state.csrf_key.as_ref(), bundle_id, exp);
+    let base_url = format!("{master_url}/api/migration/bundle/{bundle_id}");
+    let log = format!("base_url={base_url}\n");
+    (
+        Request::HostingImportFromUrl {
+            base_url,
+            token,
+            override_domain,
+            override_aliases: Vec::new(),
+            // Built above from our own address to our own bundle endpoint.
+            master_minted: true,
+        },
+        log,
+    )
+}
+
 /// Pull the two bundle files (manifest.json + archive.tar.gz) off
 /// a worker source via signed RPC and write them under the master's
 /// own /var/lib/hyperion/migration/<bundle_id>/. After this the
@@ -13897,43 +13945,40 @@ async fn run_clone_job(
             .await;
     }
 
-    let exp = hyperion_types::now_secs() + bundle_ttl;
-    let token = hyperion_auth::bundle_sig::mint(state.csrf_key.as_ref(), &bundle.bundle_id, exp);
-    let base_url = format!("{master_url}/api/migration/bundle/{}", bundle.bundle_id);
-
+    let (import_req, import_log) = bundle_import_request(
+        &state,
+        &target_node,
+        &bundle.bundle_id,
+        &master_url,
+        bundle_ttl,
+        Some(new_domain.clone()),
+    )
+    .await;
     reporter
         .step(
             &format!("Importing as {} on {}", new_domain, target_node),
             65,
-            &format!("override_domain={new_domain}\nbase_url={base_url}\n"),
+            &format!("override_domain={new_domain}\n{import_log}"),
         )
         .await;
-    let import = match crate::dispatcher::dispatch_to_node(
-        &state,
-        Some(target_node.as_str()),
-        Request::HostingImportFromUrl {
-            base_url: base_url.clone(),
-            token: token.clone(),
-            override_domain: Some(new_domain.clone()),
-            override_aliases: Vec::new(),
-            // Built above from our own address to our own bundle endpoint.
-            master_minted: true,
-        },
-    )
-    .await
-    {
-        Ok(v) => v,
-        Err(e) => {
-            reporter
-                .finish(false, Some(format!("dispatch HostingImportFromUrl: {e}")))
-                .await;
-            return;
-        }
-    };
+    let import =
+        match crate::dispatcher::dispatch_to_node(&state, Some(target_node.as_str()), import_req)
+            .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                reporter
+                    .finish(false, Some(format!("dispatch bundle import: {e}")))
+                    .await;
+                return;
+            }
+        };
     // The domain the target actually created — `create` folds a typed
     // `www.` into the bare name, so the cert and the final link use this.
     let (new_id, new_domain) = match import {
-        RpcResponse::HostingImportFromUrl(r) => (r.new_hosting_id, r.domain),
+        RpcResponse::HostingImportFromUrl(r) | RpcResponse::HostingImportLocalBundle(r) => {
+            (r.new_hosting_id, r.domain)
+        }
         RpcResponse::Error(e) => {
             reporter
                 .finish(false, Some(format!("Target import failed: {e}")))
@@ -13942,7 +13987,7 @@ async fn run_clone_job(
         }
         _ => {
             reporter
-                .finish(false, Some("expected HostingImportFromUrl response".into()))
+                .finish(false, Some("expected a bundle import response".into()))
                 .await;
             return;
         }
@@ -15047,43 +15092,41 @@ async fn run_migration_job(
             .await;
     }
 
-    // ---- 2. Mint signed download URL ----
-    let exp = hyperion_types::now_secs() + bundle_ttl;
-    let token = hyperion_auth::bundle_sig::mint(state.csrf_key.as_ref(), &bundle.bundle_id, exp);
-    let base_url = format!("{master_url}/api/migration/bundle/{}", bundle.bundle_id);
+    // ---- 2. Signed download URL, or the master's own disk ----
+    let (import_req, import_log) = bundle_import_request(
+        &state,
+        &target_node,
+        &bundle.bundle_id,
+        &master_url,
+        bundle_ttl,
+        None,
+    )
+    .await;
 
     // ---- 3. Import on target ----
     reporter
         .step(
             &format!("Importing on target {}", target_node),
             65,
-            &format!("HostingImportFromUrl base_url={}\n", base_url),
+            &import_log,
         )
         .await;
-    let import = match crate::dispatcher::dispatch_to_node(
-        &state,
-        Some(target_node.as_str()),
-        Request::HostingImportFromUrl {
-            base_url: base_url.clone(),
-            token: token.clone(),
-            override_domain: None,
-            override_aliases: Vec::new(),
-            // Built above from our own address to our own bundle endpoint.
-            master_minted: true,
-        },
-    )
-    .await
-    {
-        Ok(v) => v,
-        Err(e) => {
-            reporter
-                .finish(false, Some(format!("dispatch HostingImportFromUrl: {e}")))
-                .await;
-            return;
-        }
-    };
+    let import =
+        match crate::dispatcher::dispatch_to_node(&state, Some(target_node.as_str()), import_req)
+            .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                reporter
+                    .finish(false, Some(format!("dispatch bundle import: {e}")))
+                    .await;
+                return;
+            }
+        };
     let new_id = match import {
-        RpcResponse::HostingImportFromUrl(r) => r.new_hosting_id,
+        RpcResponse::HostingImportFromUrl(r) | RpcResponse::HostingImportLocalBundle(r) => {
+            r.new_hosting_id
+        }
         RpcResponse::Error(e) => {
             reporter
                 .finish(false, Some(format!("Target import failed: {e}")))
@@ -15092,7 +15135,7 @@ async fn run_migration_job(
         }
         _ => {
             reporter
-                .finish(false, Some("expected HostingImportFromUrl response".into()))
+                .finish(false, Some("expected a bundle import response".into()))
                 .await;
             return;
         }

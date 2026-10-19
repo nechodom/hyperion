@@ -1140,6 +1140,20 @@ pub enum Request {
         #[serde(default)]
         master_minted: bool,
     },
+    /// Import a bundle that already sits in this node's own
+    /// `/var/lib/hyperion/migration/<bundle_id>/` — the master's Copy and
+    /// Move when the target is the master itself. No download, so none of
+    /// the import-from-URL address checks apply: the master's own name can
+    /// resolve to anything on the master (127.0.1.1, a private address, a
+    /// split-horizon answer) and the copy no longer depends on it.
+    HostingImportLocalBundle {
+        bundle_id: String,
+        /// Same meaning as on `HostingImportFromUrl`.
+        #[serde(default)]
+        override_domain: Option<String>,
+        #[serde(default)]
+        override_aliases: Vec<String>,
+    },
     /// List installed WordPress plugins for `hosting`.
     WpPluginList {
         hosting: HostingSelector,
@@ -2384,6 +2398,7 @@ pub enum Response {
     HostingImportPanelPlan(hyperion_import::ImportPlan),
     HostingImportPanel(hyperion_import::ImportPanelResult),
     HostingImportFromUrl(hyperion_types::HostingImportResult),
+    HostingImportLocalBundle(hyperion_types::HostingImportResult),
     EmailLogList(Vec<hyperion_types::EmailLogEntry>),
     SiteEmailLogList(Vec<hyperion_types::SiteEmailLogEntry>),
     FtpAccountsList(Vec<hyperion_types::FtpAccountSummary>),
@@ -2892,6 +2907,23 @@ mod tests {
         write_frame(&mut a, &req).await.expect("write");
         let got: Request = read_frame(&mut b).await.expect("read");
         assert_eq!(req, got);
+    }
+
+    /// The overrides are optional on the wire, as on `HostingImportFromUrl`.
+    #[test]
+    fn import_local_bundle_parses_without_overrides() {
+        let req: Request = serde_json::from_str(
+            r#"{"method":"hosting_import_local_bundle","params":{"bundle_id":"mig_X"}}"#,
+        )
+        .expect("parses");
+        assert_eq!(
+            req,
+            Request::HostingImportLocalBundle {
+                bundle_id: "mig_X".into(),
+                override_domain: None,
+                override_aliases: Vec::new(),
+            }
+        );
     }
 
     /// An old master never sends `master_minted`; the agent must read that as

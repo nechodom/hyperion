@@ -108,19 +108,7 @@ pub async fn dispatch_to_node(
     target_node_id: Option<&str>,
     req: Request,
 ) -> Result<Response, DispatchError> {
-    let mut target = target_node_id
-        .map(str::trim)
-        .filter(|s| !s.is_empty() && *s != LOCAL_NODE_SENTINEL);
-    // The master's own rows carry its HOSTNAME as node_id, not the
-    // sentinel, and it has no `nodes` row of its own — so a hostname that
-    // leaked out of a row (an API response fed back as `node`, a form
-    // value) was refused as "not enrolled" instead of meaning "here".
-    // Enrolled ids are `node_<ulid>` and can never collide with it.
-    if let Some(t) = target {
-        if is_master_hostname(state, t).await {
-            target = None;
-        }
-    }
+    let target = remote_target(state, target_node_id).await;
     // Every dispatch leaves a journalctl breadcrumb so operators
     // can debug "I selected stav but it ended up on master" by
     // checking the master's logs:
@@ -195,6 +183,29 @@ pub(crate) async fn dispatch_remote_unchecked(
     dispatch_remote(state, node_id, req).await
 }
 
+/// The enrolled worker `target_node_id` names, or `None` when it means the
+/// master itself: absent, blank, the `local` sentinel, or the master's own
+/// hostname. [`dispatch_to_node`] sends `None` to the local socket.
+///
+/// The master's own rows carry its HOSTNAME as node_id, not the sentinel,
+/// and it has no `nodes` row of its own — so a hostname that leaked out of
+/// a row (an API response fed back as `node`, a form value) was refused as
+/// "not enrolled" instead of meaning "here". Enrolled ids are `node_<ulid>`
+/// and can never collide with it.
+pub(crate) async fn remote_target<'a>(
+    state: &SharedState,
+    target_node_id: Option<&'a str>,
+) -> Option<&'a str> {
+    let t = target_node_id
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && *s != LOCAL_NODE_SENTINEL)?;
+    if is_master_hostname(state, t).await {
+        None
+    } else {
+        Some(t)
+    }
+}
+
 /// Is `node_id` the master's own hostname (as its rows store it)?
 pub(crate) async fn is_master_hostname(state: &SharedState, node_id: &str) -> bool {
     match cached_agent_config(state).await {
@@ -237,6 +248,8 @@ fn timeout_for_request(req: &Request) -> u64 {
         // site: the master reported failure while the target was still
         // importing, and the retry hit "already exists".
         Request::HostingImportFromUrl { .. } => 6 * 3600,
+        // No download, but the same restore — and a big tree outlasts an hour.
+        Request::HostingImportLocalBundle { .. } => 6 * 3600,
         // A self-service panel import is the longest single RPC in the system:
         // unpack one bundle, then per site inflate a docroot, create a user and
         // load a database, and only then reply. Thirty sites and tens of
