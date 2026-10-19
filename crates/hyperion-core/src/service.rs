@@ -43425,7 +43425,10 @@ mod tests {
             "/settings/https#preview-wildcard"
         );
         // The panel's own certificate.
-        assert_eq!(cert_alert_href("panel.a.cz", false, false), "/settings/https");
+        assert_eq!(
+            cert_alert_href("panel.a.cz", false, false),
+            "/settings/https"
+        );
         assert!(wildcard_renew_hint(true).contains("SSL tab"));
         assert!(wildcard_renew_hint(false).contains("Preview certificates"));
     }
