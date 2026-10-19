@@ -13659,6 +13659,13 @@ pub struct HostingCloneForm {
     /// the operator can issue later from the SSL tab.
     #[serde(default)]
     pub issue_cert: bool,
+    /// Also serve the copy on `www.<new_domain>`. A Copy never carries the
+    /// source's aliases (they name the SOURCE), so without this a copy put
+    /// under a live domain answered the bare name only, and every visitor on
+    /// `www.` got the node's "No site here yet" page. Honoured only where a
+    /// `www.` makes sense — see [`clone_www_alias`].
+    #[serde(default)]
+    pub add_www: bool,
 }
 
 /// The copy's domain as typed → the bare lowercase domain the importer
@@ -13670,21 +13677,42 @@ pub struct HostingCloneForm {
 /// so checking `www.example.cz` for duplicates (and labelling the job with
 /// it) while the hosting lands as `example.cz` would check the wrong name.
 fn clone_domain_from_input(raw: &str) -> Result<String, String> {
+    hyperion_validate::Domain::parse(clone_typed_host(raw))
+        .map(|d| d.without_www().into_inner())
+        .map_err(|_| format!("\"{}\" is not a valid domain for the copy.", raw.trim()))
+}
+
+/// The host part of what was typed into the copy's domain field.
+fn clone_typed_host(raw: &str) -> &str {
     let s = raw.trim();
     let s = s
         .strip_prefix("https://")
         .or_else(|| s.strip_prefix("http://"))
         .unwrap_or(s);
     let host = s.split(['/', '?', '#']).next().unwrap_or_default();
-    let host = host.split(':').next().unwrap_or_default();
-    hyperion_validate::Domain::parse(host)
-        .map(|d| d.without_www().into_inner())
-        .map_err(|_| format!("\"{}\" is not a valid domain for the copy.", raw.trim()))
+    host.split(':').next().unwrap_or_default()
+}
+
+/// The `www.` alias the copy gets, if any. `bare` is
+/// [`clone_domain_from_input`]'s answer for `raw`.
+///
+/// Asked for (`wanted`) AND either typed with its `www.` — the operator
+/// pasted the live address — or a two-label name like `example.cz`. A
+/// staging subdomain gets none: `www.staging.example.cz` resolves nowhere,
+/// and an alias without DNS keeps the certificate from being issued.
+fn clone_www_alias(raw: &str, bare: &str, wanted: bool) -> Option<String> {
+    if !wanted {
+        return None;
+    }
+    let typed_www =
+        hyperion_validate::Domain::parse(clone_typed_host(raw)).is_ok_and(|d| d.as_str() != bare);
+    let two_labels = bare.split('.').count() == 2;
+    (typed_www || two_labels).then(|| format!("www.{bare}"))
 }
 
 #[cfg(test)]
 mod clone_domain_tests {
-    use super::clone_domain_from_input;
+    use super::{clone_domain_from_input, clone_www_alias};
 
     #[test]
     fn strips_what_an_address_bar_paste_carries() {
@@ -13709,6 +13737,28 @@ mod clone_domain_tests {
             clone_domain_from_input("staging.jtmotors.cz").as_deref(),
             Ok("staging.jtmotors.cz")
         );
+    }
+
+    #[test]
+    fn www_alias_for_a_live_domain_only() {
+        let www = |raw: &str, wanted| {
+            let bare = clone_domain_from_input(raw).expect("valid");
+            clone_www_alias(raw, &bare, wanted)
+        };
+        // A main domain, typed bare or as pasted from the address bar.
+        assert_eq!(www("jtmotors.cz", true).as_deref(), Some("www.jtmotors.cz"));
+        assert_eq!(
+            www("https://WWW.jtmotors.cz/", true).as_deref(),
+            Some("www.jtmotors.cz")
+        );
+        // A deeper name only when typed with its www.
+        assert_eq!(www("staging.jtmotors.cz", true), None);
+        assert_eq!(
+            www("www.shop.example.co.uk", true).as_deref(),
+            Some("www.shop.example.co.uk")
+        );
+        // Unticked: never.
+        assert_eq!(www("www.jtmotors.cz", false), None);
     }
 
     #[test]
@@ -13833,9 +13883,11 @@ pub async fn post_hosting_clone(
     // bucket so /jobs shows them under their own filter row.
     let master_url = super::derive_master_url(&state, &headers).await;
     let bundle_ttl = crate::handlers::migration::BUNDLE_DOWNLOAD_TTL_SECS;
+    let www_alias = clone_www_alias(&form.new_domain, &new_domain, form.add_www);
     let payload = serde_json::json!({
         "selector": form.selector,
         "new_domain": new_domain,
+        "www_alias": www_alias,
         "source_node": source_node_str,
         "target_node": target_node_str,
         "issue_cert": form.issue_cert,
@@ -13867,6 +13919,7 @@ pub async fn post_hosting_clone(
                 clone_source,
                 clone_target,
                 clone_new_domain,
+                www_alias,
                 master_url,
                 bundle_ttl,
                 clone_issue_cert,
@@ -13898,6 +13951,7 @@ async fn run_clone_job(
     source_node: String,
     target_node: String,
     new_domain: String,
+    www_alias: Option<String>,
     master_url: String,
     bundle_ttl: i64,
     issue_cert: bool,
@@ -14080,17 +14134,22 @@ async fn run_clone_job(
         "hosting clone completed"
     );
 
-    // ---- Optional: issue an HTTPS cert for the new domain ----
+    // ---- Optional: the `www.` alias and an HTTPS cert for the new domain ----
     // HTTP-01 needs the domain to resolve to the TARGET node, so we gate on a
     // DnsCheck against that node first. A miss (DNS not pointed yet) is NOT a
     // clone failure — we note it and the operator can issue later from the SSL
     // tab once DNS propagates. Dispatched to the target node (where the site +
     // its nginx now live).
-    let cert_note = if issue_cert {
-        issue_clone_cert(&state, &target_node, &new_id, &new_domain, &reporter).await
-    } else {
-        String::new()
-    };
+    let names_note = finish_clone_names(
+        &state,
+        &target_node,
+        &new_id,
+        &new_domain,
+        www_alias.is_some(),
+        issue_cert,
+        &reporter,
+    )
+    .await;
 
     reporter
         .step(
@@ -14099,7 +14158,7 @@ async fn run_clone_job(
                 new_domain,
                 new_id.as_str(),
                 target_node,
-                cert_note
+                names_note
             ),
             100,
             "clone ok\n",
@@ -14108,77 +14167,172 @@ async fn run_clone_job(
     reporter.finish(true, None).await;
 }
 
-/// Best-effort HTTPS issuance for a freshly-cloned domain. Returns a short
-/// suffix for the final job step ("" when issuance wasn't attempted/needed).
-/// Never fails the clone — every branch returns a note instead.
+/// The copy's `www.` alias and HTTPS certificate. Returns a suffix for the
+/// final job step. Never fails the clone — every branch adds a note instead.
+///
+/// The alias goes on after the import, not inside it: a name already taken
+/// on the target would otherwise fail the whole import after the bundle was
+/// exported and downloaded. Here it costs only the alias. Derived from the
+/// domain that landed, since `create` may have folded the typed one.
+///
+/// DNS decides the order. The certificate names every alias, and HTTP-01
+/// for a name that does not reach the target fails the whole order — so a
+/// `www.` whose DNS is not here yet goes on AFTER a certificate for the bare
+/// name, served (behind a name warning) until the operator reissues.
+async fn finish_clone_names(
+    state: &SharedState,
+    target_node: &str,
+    new_id: &hyperion_types::HostingId,
+    new_domain: &str,
+    want_www: bool,
+    issue_cert: bool,
+    reporter: &crate::handlers::jobs::JobReporter,
+) -> String {
+    let www = want_www.then(|| format!("www.{new_domain}"));
+    let mut note = String::new();
+    let cert_dns = if issue_cert {
+        reporter
+            .step(
+                &format!("Checking DNS for {new_domain} before issuing HTTPS"),
+                85,
+                "",
+            )
+            .await;
+        Some(clone_dns_points_here(state, target_node, new_domain).await)
+    } else {
+        None
+    };
+    let www_reaches = match (&cert_dns, &www) {
+        (Some(Ok(_)), Some(w)) => clone_dns_points_here(state, target_node, w).await.is_ok(),
+        _ => false,
+    };
+    let alias_after_cert = matches!(cert_dns, Some(Ok(_))) && www.is_some() && !www_reaches;
+    if let (Some(w), false) = (&www, alias_after_cert) {
+        note += &add_clone_www(state, target_node, new_id, w, reporter)
+            .await
+            .1;
+    }
+    match cert_dns {
+        Some(Ok(dns_note)) => {
+            note += &issue_clone_cert(state, target_node, new_id, new_domain, &dns_note, reporter)
+                .await;
+        }
+        Some(Err(skip)) => note += &skip,
+        None => {}
+    }
+    if let (Some(w), true) = (&www, alias_after_cert) {
+        let (added, added_note) = add_clone_www(state, target_node, new_id, w, reporter).await;
+        note += &added_note;
+        if added {
+            note.push_str(
+                " (not in the certificate yet — its DNS doesn't point here; \
+                 reissue from the SSL tab once it does)",
+            );
+        }
+    }
+    note
+}
+
+/// Put `www` on the fresh copy as its alias: whether it is now served, and
+/// the note for the job step.
+async fn add_clone_www(
+    state: &SharedState,
+    target_node: &str,
+    new_id: &hyperion_types::HostingId,
+    www: &str,
+    reporter: &crate::handlers::jobs::JobReporter,
+) -> (bool, String) {
+    let Ok(www_dom) = Domain::parse(www) else {
+        return (false, format!(" · {www} not added — not a valid name"));
+    };
+    reporter
+        .step(&format!("Adding {www} as an alias"), 88, "")
+        .await;
+    match crate::dispatcher::dispatch_to_node(
+        state,
+        Some(target_node),
+        Request::HostingSetAliases {
+            sel: HostingSelector::Id(new_id.clone()),
+            aliases: vec![www_dom],
+        },
+    )
+    .await
+    {
+        Ok(RpcResponse::HostingSetAliases(_)) => (true, format!(" · also on {www}")),
+        Ok(RpcResponse::Error(e)) => (
+            false,
+            format!(" · {www} not added ({e}) — add it on the site's Domains card"),
+        ),
+        Ok(_) => (false, format!(" · {www} not added — unexpected response")),
+        Err(e) => (false, format!(" · {www} not added — dispatch failed: {e}")),
+    }
+}
+
+/// Does `name` resolve to the target node? `Ok` = the check's note, `Err` =
+/// the job-step note saying why HTTPS was skipped.
+async fn clone_dns_points_here(
+    state: &SharedState,
+    target_node: &str,
+    name: &str,
+) -> Result<String, String> {
+    let Ok(domain) = Domain::parse(name) else {
+        return Err(format!(" · HTTPS skipped — {name} is not a valid name"));
+    };
+    match crate::dispatcher::dispatch_to_node(
+        state,
+        Some(target_node),
+        Request::DnsCheck { domain },
+    )
+    .await
+    {
+        Ok(RpcResponse::DnsCheck(r)) if r.matches => Ok(r.note),
+        Ok(RpcResponse::DnsCheck(r)) => Err(format!(
+            " · HTTPS skipped — DNS for {name} doesn't point to this node yet ({}); \
+             issue it from the SSL tab once DNS propagates",
+            r.note
+        )),
+        Ok(RpcResponse::Error(e)) => Err(format!(" · HTTPS skipped — DNS check failed: {e}")),
+        _ => Err(" · HTTPS skipped — DNS check unavailable".to_string()),
+    }
+}
+
+/// Issue the copy's HTTPS certificate, its DNS already checked.
 async fn issue_clone_cert(
     state: &SharedState,
     target_node: &str,
     new_id: &hyperion_types::HostingId,
     new_domain: &str,
+    dns_note: &str,
     reporter: &crate::handlers::jobs::JobReporter,
 ) -> String {
-    let Ok(domain) = Domain::parse(new_domain) else {
-        // The import already succeeded, so the domain was valid there; if it
-        // somehow doesn't reparse, just skip silently.
-        return String::new();
-    };
     reporter
         .step(
-            &format!("Checking DNS for {new_domain} before issuing HTTPS"),
-            85,
-            "",
+            &format!("DNS points here — issuing HTTPS certificate for {new_domain}"),
+            92,
+            &format!("{dns_note}\n"),
         )
         .await;
-    let dns = crate::dispatcher::dispatch_to_node(
+    // `CertIssueAcme`, not the legacy `CertIssue`: every agent answers
+    // that one "not supported", so the ticked-by-default box never
+    // issued a certificate.
+    match crate::dispatcher::dispatch_to_node(
         state,
         Some(target_node),
-        Request::DnsCheck {
-            domain: domain.clone(),
+        Request::CertIssueAcme {
+            sel: HostingSelector::Id(new_id.clone()),
+            req: hyperion_types::CertIssueRequest {
+                staging: false,
+                require_dns_match: false,
+                extra_sans: vec![],
+            },
         },
     )
-    .await;
-    match dns {
-        Ok(RpcResponse::DnsCheck(r)) if r.matches => {
-            reporter
-                .step(
-                    &format!("DNS points here — issuing HTTPS certificate for {new_domain}"),
-                    92,
-                    &format!("{}\n", r.note),
-                )
-                .await;
-            // `CertIssueAcme`, not the legacy `CertIssue`: every agent answers
-            // that one "not supported", so the ticked-by-default box never
-            // issued a certificate.
-            match crate::dispatcher::dispatch_to_node(
-                state,
-                Some(target_node),
-                Request::CertIssueAcme {
-                    sel: HostingSelector::Id(new_id.clone()),
-                    req: hyperion_types::CertIssueRequest {
-                        staging: false,
-                        require_dns_match: false,
-                        extra_sans: vec![],
-                    },
-                },
-            )
-            .await
-            {
-                Ok(RpcResponse::CertIssueAcme(_)) => format!(" · HTTPS issued for {new_domain}"),
-                Ok(RpcResponse::Error(e)) => format!(" · HTTPS skipped — issuance failed: {e}"),
-                Ok(_) => " · HTTPS skipped — unexpected response".to_string(),
-                Err(e) => format!(" · HTTPS skipped — dispatch failed: {e}"),
-            }
-        }
-        Ok(RpcResponse::DnsCheck(r)) => format!(
-            " · HTTPS skipped — DNS for {new_domain} doesn't point to this node yet ({}); \
-             issue it from the SSL tab once DNS propagates",
-            r.note
-        ),
-        Ok(RpcResponse::Error(e)) => {
-            format!(" · HTTPS skipped — DNS check failed: {e}")
-        }
-        _ => " · HTTPS skipped — DNS check unavailable".to_string(),
+    .await
+    {
+        Ok(RpcResponse::CertIssueAcme(_)) => format!(" · HTTPS issued for {new_domain}"),
+        Ok(RpcResponse::Error(e)) => format!(" · HTTPS skipped — issuance failed: {e}"),
+        Ok(_) => " · HTTPS skipped — unexpected response".to_string(),
+        Err(e) => format!(" · HTTPS skipped — dispatch failed: {e}"),
     }
 }
 

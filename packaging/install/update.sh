@@ -1067,6 +1067,11 @@ HTML
 # Hyperion-branded "no site here" page, styled like the maintenance / error
 # pages, and disable the Debian default so there is exactly one
 # default_server per port.
+#
+# `no-store`: this page answers a name BEFORE its site exists here. Without
+# it a browser that hit the name mid-cutover (DNS already moved, site not yet
+# copied) heuristically caches "No site here yet" off the file's old
+# Last-Modified and keeps showing it after the site is live.
 install -d -m 0755 /var/lib/hyperion/default
 DEFAULT_HTML="/var/lib/hyperion/default/index.html"
 plant_page "$DEFAULT_HTML" x-hyperion-default "Hyperion default landing page" <<'HTML'
@@ -1146,6 +1151,7 @@ if command -v nginx >/dev/null 2>&1; then
     echo "    listen [::]:80 default_server;"
     echo "    server_name _;"
     echo "    root /var/lib/hyperion/default;"
+    echo "    add_header Cache-Control \"no-store\" always;"
     echo "    location / { try_files /index.html =404; }"
     echo "}"
     if [[ -f "$SNAKE_CRT" && -f "$SNAKE_KEY" ]]; then
@@ -1156,6 +1162,7 @@ if command -v nginx >/dev/null 2>&1; then
       echo "    ssl_certificate     $SNAKE_CRT;"
       echo "    ssl_certificate_key $SNAKE_KEY;"
       echo "    root /var/lib/hyperion/default;"
+      echo "    add_header Cache-Control \"no-store\" always;"
       echo "    location / { try_files /index.html =404; }"
       echo "}"
     fi
