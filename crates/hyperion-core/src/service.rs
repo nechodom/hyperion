@@ -25491,11 +25491,12 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     error: format!("invalid stored domain {domain_str}: {e}"),
                 },
                 Ok(_) if is_wild => CertRenewOutcome::Skipped {
-                    reason: "wildcard cert — wildcards can only be validated over DNS-01, and \
-                             this server holds no DNS credentials, so it cannot renew one \
-                             unattended. Re-issue it from the site's SSL tab: start wildcard \
-                             issuance, publish the TXT records it shows you, then validate."
-                        .into(),
+                    reason: format!(
+                        "wildcard cert — wildcards can only be validated over DNS-01, and \
+                         this server holds no DNS credentials, so it cannot renew one \
+                         unattended. {}",
+                        wildcard_renew_hint(hosting_row.is_some())
+                    ),
                 },
                 // Renew without going through issue_real_cert. Two cases land
                 // here, for the same underlying reason — issue_real_cert
@@ -25665,6 +25666,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             let trashed = hosting_row
                 .as_ref()
                 .is_some_and(|r| r.state == HostingState::Trashed);
+            let href = cert_alert_href(&domain_str, hosting_row.is_some(), is_wild);
             match &outcome {
                 _ if trashed => {}
                 CertRenewOutcome::Failed { error } => {
@@ -25680,7 +25682,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                             ("error", &error.to_string()),
                             ("days", &days_left.to_string()),
                         ],
-                        &format!("/hostings/{}", domain_str),
+                        &href,
                         &format!("cert.renew_failed:{domain_str}"),
                     )
                     .await;
@@ -25694,7 +25696,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                         "info",
                         "ops.cert_renewed_late",
                         &[("domain", &domain_str), ("days", &days_left.to_string())],
-                        &format!("/hostings/{}", domain_str),
+                        &href,
                         &format!("cert.renewed_late:{domain_str}"),
                     )
                     .await;
@@ -25711,7 +25713,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                             ("reason", &reason.to_string()),
                             ("days", &days_left.to_string()),
                         ],
-                        &format!("/hostings/{}", domain_str),
+                        &href,
                         &format!("cert.wildcard_manual:{domain_str}"),
                     )
                     .await;
@@ -35504,6 +35506,32 @@ fn pct_x100_str(cat: &LetterCatalog, x: i64) -> String {
     cat.decimal(&format!("{}.{:02} %", x / 100, (x % 100).abs()))
 }
 
+/// Where a certificate alert from the renewal sweep links to. Only a cert a
+/// hosting owns has a hosting detail page; the rest are a node's preview
+/// wildcard (`*.<base>`, issued from Settings → HTTPS) or the panel's own
+/// certificate, and linking those to `/hostings/<domain>` was a 404.
+fn cert_alert_href(domain: &str, has_hosting: bool, is_wildcard: bool) -> String {
+    if has_hosting {
+        format!("/hostings/{domain}")
+    } else if is_wildcard {
+        "/settings/https#preview-wildcard".to_string()
+    } else {
+        "/settings/https".to_string()
+    }
+}
+
+/// The "how to renew it by hand" half of the skipped-wildcard alert, pointed
+/// at the place the operator can actually do it.
+fn wildcard_renew_hint(has_hosting: bool) -> &'static str {
+    if has_hosting {
+        "Re-issue it from the site's SSL tab: start wildcard issuance, publish \
+         the TXT records it shows you, then validate."
+    } else {
+        "Renew it in Settings → HTTPS → Preview certificates: press Renew, \
+         publish the TXT records it shows you, then validate."
+    }
+}
+
 fn derive_user_from_summary(s: &HostingSummary) -> Option<String> {
     // HostingSummary doesn't carry system_user yet; fall back to deriving
     // it from the domain the same way the create flow does.
@@ -43386,6 +43414,22 @@ fn is_dns_hostname(s: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cert_alert_links_only_hosting_certs_to_hosting_detail() {
+        use super::{cert_alert_href, wildcard_renew_hint};
+        assert_eq!(cert_alert_href("a.cz", true, false), "/hostings/a.cz");
+        assert_eq!(cert_alert_href("a.cz", true, true), "/hostings/a.cz");
+        // A node's preview wildcard has no hosting: /hostings/<base> was a 404.
+        assert_eq!(
+            cert_alert_href("hosting.nechodom.cz", false, true),
+            "/settings/https#preview-wildcard"
+        );
+        // The panel's own certificate.
+        assert_eq!(cert_alert_href("panel.a.cz", false, false), "/settings/https");
+        assert!(wildcard_renew_hint(true).contains("SSL tab"));
+        assert!(wildcard_renew_hint(false).contains("Preview certificates"));
+    }
+
     #[test]
     fn curl_failure_reason_keeps_the_message_not_the_exit_code() {
         use super::curl_failure_reason;
