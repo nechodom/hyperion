@@ -1109,6 +1109,17 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
             .await
     }
 
+    async fn hosting_import_local_bundle(
+        &self,
+        bundle_id: String,
+        override_domain: Option<String>,
+        override_aliases: Vec<String>,
+    ) -> Result<hyperion_types::HostingImportResult, RpcError> {
+        self.svc
+            .hosting_import_local_bundle(bundle_id, override_domain, override_aliases)
+            .await
+    }
+
     async fn email_log_list(
         &self,
         hosting_id: Option<String>,

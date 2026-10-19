@@ -16885,12 +16885,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     ) -> Result<(String, u64, bool), RpcError> {
         use base64::Engine;
         use tokio::io::{AsyncReadExt, AsyncSeekExt};
-        // bundle_id must be all-alphanumeric (ULID/timestamp shape).
-        if bundle_id.is_empty()
-            || !bundle_id
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-        {
+        if !bundle_id_ok(&bundle_id) {
             return Err(RpcError::Validation {
                 message: format!("bundle_id has illegal chars: {bundle_id:?}"),
             });
@@ -18178,32 +18173,20 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         };
         let resolve_pins = resolve_url_pins(&base, policy).await.map_err(|e| {
             tracing::warn!(error = %e, "import-from-url SSRF guard rejected base URL");
-            RpcError::Validation {
-                message: "import URL points at a disallowed (internal) address".into(),
-            }
+            // A typed URL gets the bare refusal: echoing what its host
+            // resolved to would turn the form into a probe of the node's
+            // view of the network. A URL the master minted to itself is no
+            // such probe, and the bare message left nothing to go on when
+            // one was refused — the reason is all there is to debug.
+            let message = if master_minted {
+                format!("import URL points at a disallowed (internal) address: {e}")
+            } else {
+                "import URL points at a disallowed (internal) address".into()
+            };
+            RpcError::Validation { message }
         })?;
 
-        // Staging area lives next to the export dir so /var/lib has
-        // a single migration namespace operators can grep / delete.
-        let staging_id = format!("inc_{}", ulid::Ulid::new());
-        let staging =
-            std::path::PathBuf::from("/var/lib/hyperion/migration-incoming").join(&staging_id);
-        tokio::fs::create_dir_all(&staging)
-            .await
-            .map_err(|e| RpcError::Internal_with(format!("mkdir staging: {e}")))?;
-        // 0700 on the staging dir AND its parent. A migration bundle holds
-        // plaintext database dumps and wp-config secrets for every site being
-        // moved; the outbound half already did this, the inbound half did
-        // not. The parent matters too — without it another local user can
-        // traverse in and read by name.
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let p700 = std::fs::Permissions::from_mode(0o700);
-            let _ =
-                tokio::fs::set_permissions("/var/lib/hyperion/migration-incoming", p700.clone())
-                    .await;
-            let _ = tokio::fs::set_permissions(&staging, p700).await;
-        }
+        let staging = make_incoming_staging().await?;
         // Everything from here runs inside one block so EVERY exit — a
         // timed-out or refused download included — wipes staging. The early
         // `?` returns used to skip the cleanup and leave partial archives of
@@ -18234,6 +18217,104 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         )
         .await;
         Ok(result)
+    }
+
+    /// Import a bundle that already sits in this node's own migration dir —
+    /// the master's Copy and Move when the target is the master itself.
+    ///
+    /// Those used to go through [`Self::hosting_import_from_url`] with the
+    /// master's public name, so a copy onto the master depended on what that
+    /// name resolves to ON the master: 127.0.1.1 from Debian's /etc/hosts, a
+    /// private address, a split-horizon answer, or nothing at all inside the
+    /// agent — and any of those failed the job at the import step with
+    /// "disallowed (internal) address". The files are right here; nothing
+    /// needs to travel.
+    ///
+    /// The bundle itself stays untouched (a retry, or the source's own
+    /// cleanup, still finds it whole): its files are hard-linked — copied if
+    /// that fails — into a fresh staging dir, the clone overrides rewrite the
+    /// STAGED manifest, and [`Self::hosting_import`] runs there exactly as it
+    /// does after a download, sha checks included.
+    pub async fn hosting_import_local_bundle(
+        &self,
+        bundle_id: String,
+        override_domain: Option<String>,
+        override_aliases: Vec<String>,
+    ) -> Result<hyperion_types::HostingImportResult, RpcError> {
+        if !bundle_id_ok(&bundle_id) {
+            return Err(RpcError::Validation {
+                message: format!("bundle_id has illegal chars: {bundle_id:?}"),
+            });
+        }
+        let source = std::path::PathBuf::from("/var/lib/hyperion/migration").join(&bundle_id);
+        if !source.join("manifest.json").is_file() {
+            return Err(RpcError::NotFound {
+                kind: "migration_bundle".into(),
+                id: bundle_id,
+            });
+        }
+        let staging = make_incoming_staging().await?;
+        let outcome = self
+            .import_local_bundle_staged(
+                &staging,
+                &source,
+                override_domain.as_deref(),
+                &override_aliases,
+            )
+            .await;
+        let _ = tokio::fs::remove_dir_all(&staging).await;
+
+        let result = outcome?;
+        self.append_audit(
+            "hosting.migration.import_local",
+            Some(result.new_hosting_id.as_str()),
+            &serde_json::json!({
+                "bundle_id": &bundle_id,
+                "bytes": result.restored_bytes,
+            })
+            .to_string(),
+            "ok",
+        )
+        .await;
+        Ok(result)
+    }
+
+    /// The staging half of [`Self::hosting_import_local_bundle`], writing
+    /// only under `staging` (which the caller always removes).
+    async fn import_local_bundle_staged(
+        &self,
+        staging: &std::path::Path,
+        source: &std::path::Path,
+        override_domain: Option<&str>,
+        override_aliases: &[String],
+    ) -> Result<hyperion_types::HostingImportResult, RpcError> {
+        let manifest_path = staging.join("manifest.json");
+        tokio::fs::copy(source.join("manifest.json"), &manifest_path)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("stage manifest: {e}")))?;
+        if let Some(new_dom) = override_domain {
+            rewrite_manifest_domain(&manifest_path, new_dom, override_aliases).await?;
+        }
+        // A file the bundle lacks is left out: `hosting_import` names exactly
+        // what is missing (the archive always; the dump only when the
+        // manifest says the site has a database).
+        for name in [
+            "archive.tar.gz",
+            hyperion_types::HostingMigrationManifest::DB_DUMP_FILE,
+        ] {
+            let from = source.join(name);
+            if !from.is_file() {
+                continue;
+            }
+            let to = staging.join(name);
+            if tokio::fs::hard_link(&from, &to).await.is_err() {
+                tokio::fs::copy(&from, &to)
+                    .await
+                    .map_err(|e| RpcError::Internal_with(format!("stage {name}: {e}")))?;
+            }
+        }
+        self.hosting_import(manifest_path.display().to_string())
+            .await
     }
 
     /// The download + import half of [`Self::hosting_import_from_url`],
@@ -40323,6 +40404,41 @@ async fn ssrf_guard_resolve(url: &str) -> Result<Vec<String>, String> {
     resolve_url_pins(url, InternalAddrs::Refuse).await
 }
 
+/// A migration bundle id is one path component of ULID/timestamp shape:
+/// letters, digits, `-` and `_` only — no `/`, no dots, so never `..`.
+fn bundle_id_ok(bundle_id: &str) -> bool {
+    !bundle_id.is_empty()
+        && bundle_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// A fresh `/var/lib/hyperion/migration-incoming/inc_<ulid>/` for one
+/// incoming bundle. The caller removes it on every exit.
+async fn make_incoming_staging() -> Result<std::path::PathBuf, RpcError> {
+    // Staging area lives next to the export dir so /var/lib has
+    // a single migration namespace operators can grep / delete.
+    let staging_id = format!("inc_{}", ulid::Ulid::new());
+    let staging =
+        std::path::PathBuf::from("/var/lib/hyperion/migration-incoming").join(&staging_id);
+    tokio::fs::create_dir_all(&staging)
+        .await
+        .map_err(|e| RpcError::Internal_with(format!("mkdir staging: {e}")))?;
+    // 0700 on the staging dir AND its parent. A migration bundle holds
+    // plaintext database dumps and wp-config secrets for every site being
+    // moved; the outbound half already did this, the inbound half did
+    // not. The parent matters too — without it another local user can
+    // traverse in and read by name.
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let p700 = std::fs::Permissions::from_mode(0o700);
+        let _ =
+            tokio::fs::set_permissions("/var/lib/hyperion/migration-incoming", p700.clone()).await;
+        let _ = tokio::fs::set_permissions(&staging, p700).await;
+    }
+    Ok(staging)
+}
+
 /// Which internal addresses [`resolve_url_pins`] lets through.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum InternalAddrs {
@@ -45225,6 +45341,65 @@ mod tests {
         ] {
             assert!(resolve_url_pins(bad, own).await.is_err(), "{bad}");
         }
+    }
+
+    /// A bundle id names one directory under the migration dir: a path never
+    /// gets through, and a missing bundle is NotFound before any staging dir
+    /// is made.
+    #[tokio::test]
+    async fn local_bundle_import_refuses_paths_and_missing_bundles() {
+        let pool = open_memory().await.expect("memory db");
+        let s = svc(pool, MockAdapterPort::new());
+        for bad in ["", "..", "../etc", "mig/../../x", "a.b"] {
+            let e = s
+                .hosting_import_local_bundle(bad.into(), None, Vec::new())
+                .await
+                .unwrap_err();
+            assert!(matches!(e, RpcError::Validation { .. }), "{bad}: {e:?}");
+        }
+        let e = s
+            .hosting_import_local_bundle("mig_no_such_bundle_zz".into(), None, Vec::new())
+            .await
+            .unwrap_err();
+        assert!(matches!(e, RpcError::NotFound { .. }), "{e:?}");
+    }
+
+    /// The clone override rewrites the STAGED manifest only. The bundle on
+    /// disk stays as exported, so a retried copy still finds it whole.
+    #[tokio::test]
+    async fn local_bundle_import_stages_and_leaves_the_bundle_alone() {
+        let pool = open_memory().await.expect("memory db");
+        let s = svc(pool, MockAdapterPort::new());
+        let source = tempfile::tempdir().expect("tmp");
+        let staging = tempfile::tempdir().expect("tmp");
+        let manifest = r#"{"domain":"jtmotors.cz"}"#;
+        std::fs::write(source.path().join("manifest.json"), manifest).expect("manifest");
+        std::fs::write(source.path().join("archive.tar.gz"), b"tar").expect("archive");
+        // The manifest is too thin to import, which is fine: the importer
+        // refuses it before touching anything, after the staging is done.
+        let _ = s
+            .import_local_bundle_staged(
+                staging.path(),
+                source.path(),
+                Some("copy.jtmotors.cz"),
+                &[],
+            )
+            .await;
+        let staged: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(staging.path().join("manifest.json")).expect("staged manifest"),
+        )
+        .expect("json");
+        assert_eq!(staged["domain"], "copy.jtmotors.cz");
+        assert_eq!(staged["renamed_from"], "jtmotors.cz");
+        assert_eq!(
+            std::fs::read(staging.path().join("archive.tar.gz")).expect("staged archive"),
+            b"tar"
+        );
+        assert!(!staging.path().join("archive.sql").exists());
+        assert_eq!(
+            std::fs::read_to_string(source.path().join("manifest.json")).expect("source"),
+            manifest
+        );
     }
 
     // ============================================================

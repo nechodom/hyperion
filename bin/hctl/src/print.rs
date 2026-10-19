@@ -1784,7 +1784,7 @@ pub fn print_pretty(resp: &Response) {
                 println!("  carry  : {line}");
             }
         }
-        Response::HostingImport(r) => {
+        Response::HostingImport(r) | Response::HostingImportLocalBundle(r) => {
             println!("imported hosting {}", r.domain);
             println!("  new id : {}", r.new_hosting_id.as_str());
             println!("  bytes  : {}", r.restored_bytes);

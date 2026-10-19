@@ -1014,6 +1014,17 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
                 Err(e) => Response::Error(e),
             }
         }
+        Request::HostingImportLocalBundle {
+            bundle_id,
+            override_domain,
+            override_aliases,
+        } => match api
+            .hosting_import_local_bundle(bundle_id, override_domain, override_aliases)
+            .await
+        {
+            Ok(v) => Response::HostingImportLocalBundle(v),
+            Err(e) => Response::Error(e),
+        },
         Request::EmailLogList { hosting_id, limit } => {
             match api.email_log_list(hosting_id, limit).await {
                 Ok(v) => Response::EmailLogList(v),
@@ -2963,6 +2974,21 @@ mod tests {
             _: Option<String>,
             _: Vec<String>,
             _: bool,
+        ) -> Result<hyperion_types::HostingImportResult, RpcError> {
+            Ok(hyperion_types::HostingImportResult {
+                new_hosting_id: hyperion_types::HostingId("01J".into()),
+                domain: "mock".into(),
+                restored_bytes: 0,
+                state: "ok".into(),
+                message: "mock".into(),
+                carry_report: Vec::new(),
+            })
+        }
+        async fn hosting_import_local_bundle(
+            &self,
+            _: String,
+            _: Option<String>,
+            _: Vec<String>,
         ) -> Result<hyperion_types::HostingImportResult, RpcError> {
             Ok(hyperion_types::HostingImportResult {
                 new_hosting_id: hyperion_types::HostingId("01J".into()),
