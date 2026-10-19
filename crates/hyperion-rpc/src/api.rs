@@ -812,6 +812,15 @@ pub trait AgentApi: Send + Sync + 'static {
         master_minted: bool,
     ) -> Result<hyperion_types::HostingImportResult, RpcError>;
 
+    /// Import a bundle already on this node's disk under
+    /// `/var/lib/hyperion/migration/<bundle_id>/` (Copy/Move onto the master).
+    async fn hosting_import_local_bundle(
+        &self,
+        bundle_id: String,
+        override_domain: Option<String>,
+        override_aliases: Vec<String>,
+    ) -> Result<hyperion_types::HostingImportResult, RpcError>;
+
     /// List installed WordPress plugins for a hosting.
     async fn wp_plugin_list(
         &self,
