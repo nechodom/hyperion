@@ -1061,9 +1061,11 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         &self,
         bundle_id: String,
         filename: String,
-    ) -> Result<String, RpcError> {
+        offset: u64,
+        len: u32,
+    ) -> Result<(String, u64, bool), RpcError> {
         self.svc
-            .hosting_migration_fetch_bundle_file(bundle_id, filename)
+            .hosting_migration_fetch_bundle_file(bundle_id, filename, offset, len)
             .await
     }
 

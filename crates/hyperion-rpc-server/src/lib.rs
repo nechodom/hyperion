@@ -966,12 +966,18 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
         Request::HostingMigrationFetchBundleFile {
             bundle_id,
             filename,
+            offset,
+            len,
         } => {
             match api
-                .hosting_migration_fetch_bundle_file(bundle_id, filename)
+                .hosting_migration_fetch_bundle_file(bundle_id, filename, offset, len)
                 .await
             {
-                Ok(bytes_b64) => Response::HostingMigrationFetchBundleFile { bytes_b64 },
+                Ok((bytes_b64, total_size, eof)) => Response::HostingMigrationFetchBundleFile {
+                    bytes_b64,
+                    total_size,
+                    eof,
+                },
                 Err(e) => Response::Error(e),
             }
         }
@@ -2932,8 +2938,10 @@ mod tests {
             &self,
             _: String,
             _: String,
-        ) -> Result<String, RpcError> {
-            Ok(String::new())
+            _: u64,
+            _: u32,
+        ) -> Result<(String, u64, bool), RpcError> {
+            Ok((String::new(), 0, true))
         }
         async fn hosting_import(
             &self,

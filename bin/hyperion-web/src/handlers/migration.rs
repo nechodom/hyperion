@@ -41,7 +41,9 @@ pub const BUNDLE_DOWNLOAD_TTL_SECS: i64 = 60 * 60;
 /// Whitelisted filenames inside a bundle dir. Anything else 404s —
 /// stops `..` and friends from escaping the bundle directory even
 /// though we already do path-join validation below.
-const ALLOWED_FILES: &[&str] = &["manifest.json", "archive.tar.gz"];
+/// `archive.sql` is the database dump: without it on this list a Move or
+/// Copy shipped the files and silently left the database behind.
+const ALLOWED_FILES: &[&str] = &["manifest.json", "archive.tar.gz", "archive.sql"];
 
 #[derive(Deserialize)]
 pub struct DownloadQuery {
@@ -103,10 +105,10 @@ pub async fn get_bundle_file(
     let stream = ReaderStream::new(file);
     let body = Body::from_stream(stream);
 
-    let ct = if filename == "manifest.json" {
-        "application/json"
-    } else {
-        "application/gzip"
+    let ct = match filename.as_str() {
+        "manifest.json" => "application/json",
+        "archive.sql" => "application/sql",
+        _ => "application/gzip",
     };
     use axum::http::HeaderValue;
     let mut resp = body.into_response();
@@ -204,9 +206,10 @@ pub async fn post_import_from_url(
     ctx: AuthCtx,
     Form(form): Form<ImportFromUrlForm>,
 ) -> Result<Response, AppError> {
-    // Admin-or-higher: creating a hosting is admin-level, importing
-    // is the same operation under the hood.
-    if !ctx.can(Capability::HostingMigrateClone) {
+    // An import creates a hosting, so it needs HostingCreate as well as the
+    // migration capability: the built-in Customer role holds the latter but
+    // deliberately not the former.
+    if !ctx.can(Capability::HostingMigrateClone) || !ctx.can(Capability::HostingCreate) {
         return Ok(Redirect::to("/import/hyperion?error=admin+role+required").into_response());
     }
     let base = form.base_url.trim().to_string();
@@ -216,37 +219,70 @@ pub async fn post_import_from_url(
             Redirect::to("/import/hyperion?error=both+URL+and+token+are+required").into_response(),
         );
     }
-    let resp = hyperion_rpc_client::call(
-        &state.agent_socket,
-        Request::HostingImportFromUrl {
-            base_url: base,
-            token,
-            override_domain: None,
-            override_aliases: Vec::new(),
-            // A pasted URL: keep the full SSRF guard.
-            master_minted: false,
+    // A background job, not an inline call: the download is the whole site
+    // (gigabytes), and the request used to hold the browser for all of it —
+    // a closed tab or a proxy timeout showed a failure while the agent kept
+    // importing, and a resubmit then hit "already exists". The token stays
+    // out of the stored payload.
+    let payload = serde_json::json!({ "base_url": base });
+    let actor_uid = ctx.session.as_ref().map(|s| s.user_id).unwrap_or(0);
+    let job_state = state.clone();
+    let job_id = crate::handlers::jobs::spawn_job(
+        state.clone(),
+        "hosting_import_url",
+        None,
+        &payload.to_string(),
+        &ctx.username,
+        actor_uid,
+        move |reporter| async move {
+            reporter
+                .step("Downloading and importing the bundle", 10, "")
+                .await;
+            let resp = hyperion_rpc_client::call(
+                &job_state.agent_socket,
+                Request::HostingImportFromUrl {
+                    base_url: base,
+                    token,
+                    override_domain: None,
+                    override_aliases: Vec::new(),
+                    // A pasted URL: keep the full SSRF guard.
+                    master_minted: false,
+                },
+            )
+            .await;
+            match resp {
+                Ok(RpcResponse::HostingImportFromUrl(r)) => {
+                    reporter
+                        .step(
+                            &format!("Imported {} — open it from Hostings", r.domain),
+                            100,
+                            &format!(
+                                "new_hosting_id={} restored_bytes={}\n",
+                                r.new_hosting_id.as_str(),
+                                r.restored_bytes
+                            ),
+                        )
+                        .await;
+                    reporter.finish(true, None).await;
+                }
+                Ok(RpcResponse::Error(e)) => {
+                    reporter
+                        .finish(false, Some(format!("Import failed: {e}")))
+                        .await
+                }
+                Ok(_) => {
+                    reporter
+                        .finish(false, Some("unexpected agent response".into()))
+                        .await
+                }
+                Err(e) => {
+                    reporter
+                        .finish(false, Some(format!("agent call: {e}")))
+                        .await
+                }
+            }
         },
     )
     .await?;
-    match resp {
-        RpcResponse::HostingImportFromUrl(r) => {
-            // Redirect straight to the imported hosting's detail page.
-            let url = format!(
-                "/hostings/{}?flash=Imported+{}+bytes",
-                urlencode(&r.domain),
-                r.restored_bytes
-            );
-            Ok(Redirect::to(&url).into_response())
-        }
-        RpcResponse::Error(e) => Ok(Redirect::to(&format!(
-            "/import/hyperion?error={}",
-            urlencode(&e.to_string())
-        ))
-        .into_response()),
-        _ => Err(AppError::Internal("unexpected response".into())),
-    }
-}
-
-fn urlencode(s: &str) -> String {
-    url::form_urlencoded::byte_serialize(s.as_bytes()).collect()
+    Ok(Redirect::to(&format!("/jobs/{job_id}")).into_response())
 }

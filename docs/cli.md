@@ -344,9 +344,9 @@ Export a hosting as a migration bundle on this node's disk.
 hctl hosting export example.com
 ```
 
-Writes an archive and `manifest.json` under
-`/var/lib/hyperion/migration/<bundle_id>/` and prints the command to run on
-the target node.
+Writes an archive, `manifest.json` and, for a site with a database, the
+dump `archive.sql` under `/var/lib/hyperion/migration/<bundle_id>/`. Copy the
+whole directory to the target node and run `hctl hosting import` there.
 
 ### hctl hosting import
 
@@ -374,8 +374,9 @@ hctl hosting import-from-url \
   --token AAAA.BBBB
 ```
 
-The URL and the signed token come from the export result page in the panel.
-The token expires an hour after the export.
+The URL and the signed token come from the export result page in the panel;
+`hctl hosting export` cannot sign one. The token expires an hour after the
+export.
 
 ### hctl hosting import-panel
 

@@ -231,8 +231,12 @@ fn timeout_for_request(req: &Request) -> u64 {
         // Pull a whole site tree back from disk/S3 — can be very large.
         Request::BackupRestore { .. }
         | Request::BackupRestoreAsNew { .. }
-        | Request::HostingImport { .. }
-        | Request::HostingImportFromUrl { .. } => 3600,
+        | Request::HostingImport { .. } => 3600,
+        // Download the whole bundle (curl gives up only on a stall, not on
+        // size), then the restore above. An hour ran out mid-import on a big
+        // site: the master reported failure while the target was still
+        // importing, and the retry hit "already exists".
+        Request::HostingImportFromUrl { .. } => 6 * 3600,
         // A self-service panel import is the longest single RPC in the system:
         // unpack one bundle, then per site inflate a docroot, create a user and
         // load a database, and only then reply. Thirty sites and tens of
@@ -245,7 +249,9 @@ fn timeout_for_request(req: &Request) -> u64 {
         // one — a 12 GB tree is minutes of tar + gzip before the dump even
         // starts. 600s was a coin flip on a large site, and losing it was
         // misreported as "node unreachable".
-        Request::BackupNow { .. } => 3600,
+        // An export IS a backup run (plus a hash of the archive), so it gets
+        // the same budget — it had 600s, which a large site's tar outlasts.
+        Request::BackupNow { .. } | Request::HostingExport { .. } => 3600,
         // A cheap in-memory read of the running backup's sub-steps, polled
         // every couple of seconds — keep its timeout short so a slow poll
         // never stacks up behind the long backup it is reporting on.
@@ -261,7 +267,7 @@ fn timeout_for_request(req: &Request) -> u64 {
         Request::ModsecInstall => 900,
         // Move a bundle / install WordPress.
         Request::BackupFetchChunk { .. }
-        | Request::HostingExport { .. }
+        | Request::HostingMigrationFetchBundleFile { .. }
         | Request::HostingCreate(_)
         | Request::HostingDelete { .. }
         | Request::WpInstall { .. }
