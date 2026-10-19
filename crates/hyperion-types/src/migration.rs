@@ -111,9 +111,25 @@ pub struct HostingMigrationManifest {
     /// reverse-proxy migration silently lost its upstream.
     #[serde(default)]
     pub proxy_upstream_url: Option<String>,
+    /// Sha256 of `archive.sql`, the database dump shipped next to the
+    /// archive. `None` = no dump in this bundle. Bundles from before this
+    /// field never carried the dump at all, so a site with a database moved
+    /// with them arrived with an EMPTY database while the job said "ok";
+    /// the importer now refuses a DB site whose bundle has no dump.
+    #[serde(default)]
+    pub db_dump_sha256: Option<String>,
+    /// The domain the bundle was exported under, set when a Copy rewrites
+    /// `domain` to the new name. The importer rewrites the WordPress URLs
+    /// from this to `domain`.
+    #[serde(default)]
+    pub renamed_from: Option<String>,
 }
 
 impl HostingMigrationManifest {
+    /// File name of the database dump inside a bundle directory. Named so
+    /// `backup_restore` finds it as the sibling of `archive.tar.gz`.
+    pub const DB_DUMP_FILE: &'static str = "archive.sql";
+
     /// Current schema version. Bump on every breaking field change;
     /// the importer refuses bundles with unknown future versions.
     pub const CURRENT_SCHEMA_VERSION: u32 = 1;
@@ -156,10 +172,44 @@ mod tests {
             crontab: "* * * * * echo hi\n".into(),
             archive_sha256: "deadbeef".into(),
             proxy_upstream_url: None,
+            db_dump_sha256: Some("cafe".into()),
+            renamed_from: None,
         };
         let json = serde_json::to_string(&m).expect("ser");
         let back: HostingMigrationManifest = serde_json::from_str(&json).expect("de");
         assert_eq!(m, back);
+    }
+
+    /// A manifest written before the dump existed still parses: no dump,
+    /// no rename.
+    #[test]
+    fn old_manifest_without_dump_fields_parses() {
+        let mut v = serde_json::to_value(HostingMigrationManifest {
+            schema_version: 1,
+            source_hosting_id: HostingId("01J".into()),
+            source_node_id: "n".into(),
+            source_hyperion_version: "x".into(),
+            exported_at: 0,
+            domain: "example.cz".into(),
+            aliases: vec![],
+            kind: "php".into(),
+            php_version: None,
+            db_engine: Some("mariadb".into()),
+            had_real_cert: false,
+            wp_version: None,
+            crontab: String::new(),
+            archive_sha256: "x".into(),
+            proxy_upstream_url: None,
+            db_dump_sha256: None,
+            renamed_from: None,
+        })
+        .expect("to value");
+        let obj = v.as_object_mut().expect("object");
+        obj.remove("db_dump_sha256");
+        obj.remove("renamed_from");
+        let back: HostingMigrationManifest = serde_json::from_value(v).expect("old shape parses");
+        assert_eq!(back.db_dump_sha256, None);
+        assert_eq!(back.renamed_from, None);
     }
 
     #[test]

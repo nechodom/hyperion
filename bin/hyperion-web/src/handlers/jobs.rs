@@ -115,6 +115,7 @@ pub fn job_kind_label(kind: &str) -> String {
     match kind {
         "migration" => "Move hosting",
         "hosting_clone" => "Copy hosting",
+        "hosting_import_url" => "Import hosting from a bundle URL",
         "hosting_delete" => "Delete hosting",
         "hosting_restore" | "restore" => "Restore backup",
         "backup" | "hosting_backup" => "Backup",

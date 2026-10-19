@@ -656,13 +656,16 @@ pub trait AgentApi: Send + Sync + 'static {
 
     /// Read raw bytes from one of the two files in
     /// `/var/lib/hyperion/migration/<bundle_id>/`: either
-    /// `manifest.json` or `archive.tar.gz`. Returned as base64.
+    /// `manifest.json`, `archive.tar.gz` or `archive.sql`. Returns
+    /// `(base64 bytes, total_size, eof)`; `len == 0` = the whole file.
     /// Used by the master to pull bundles off a worker source.
     async fn hosting_migration_fetch_bundle_file(
         &self,
         bundle_id: String,
         filename: String,
-    ) -> Result<String, RpcError>;
+        offset: u64,
+        len: u32,
+    ) -> Result<(String, u64, bool), RpcError>;
 
     /// Import a migration bundle on this node.
     async fn hosting_import(

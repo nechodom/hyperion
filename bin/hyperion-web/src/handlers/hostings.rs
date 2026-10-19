@@ -7940,35 +7940,183 @@ async fn pull_bundle_from_worker(
     source_node: &str,
     bundle_id: &str,
 ) -> Result<std::path::PathBuf, String> {
-    use base64::Engine;
-    let local_dir = std::path::PathBuf::from("/var/lib/hyperion/migration").join(bundle_id);
+    use std::os::unix::fs::PermissionsExt;
+    let root = std::path::Path::new("/var/lib/hyperion/migration");
+    let local_dir = root.join(bundle_id);
     tokio::fs::create_dir_all(&local_dir)
         .await
         .map_err(|e| format!("create local bundle dir: {e}"))?;
-    for filename in ["manifest.json", "archive.tar.gz"] {
-        let resp = crate::dispatcher::dispatch_to_node(
-            state,
-            Some(source_node),
-            Request::HostingMigrationFetchBundleFile {
-                bundle_id: bundle_id.to_string(),
-                filename: filename.to_string(),
-            },
-        )
+    // 0700 on the bundle dir AND its parent, as the agent does for its own
+    // exports: the bundle is the site's whole tree, database dump and
+    // wp-config included. hyperion-web runs as root with the default umask,
+    // so these came out 0755/0644 — readable by every tenant on the master
+    // for the week the bundle is kept.
+    let p700 = std::fs::Permissions::from_mode(0o700);
+    let _ = tokio::fs::set_permissions(root, p700.clone()).await;
+    tokio::fs::set_permissions(&local_dir, p700)
         .await
-        .map_err(|e| format!("rpc {filename}: {e}"))?;
-        let bytes_b64 = match resp {
-            RpcResponse::HostingMigrationFetchBundleFile { bytes_b64 } => bytes_b64,
-            RpcResponse::Error(e) => return Err(format!("source rejected {filename}: {e}")),
-            _ => return Err(format!("unexpected response for {filename}")),
-        };
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(bytes_b64.as_bytes())
-            .map_err(|e| format!("b64 {filename}: {e}"))?;
-        tokio::fs::write(local_dir.join(filename), &bytes)
-            .await
-            .map_err(|e| format!("write {filename}: {e}"))?;
+        .map_err(|e| format!("lock local bundle dir: {e}"))?;
+    let result = pull_bundle_files(state, source_node, bundle_id, &local_dir).await;
+    if result.is_err() {
+        // A half-pulled bundle is useless and holds site data — drop it.
+        let _ = tokio::fs::remove_dir_all(&local_dir).await;
     }
-    Ok(local_dir)
+    result.map(|()| local_dir)
+}
+
+/// Give the hosting `to` the same per-user access grants `from` has.
+///
+/// An import always mints a new hosting id and grants are keyed by id, so a
+/// customer whose site was moved (or who copied their own site) could see
+/// only the suspended original and got a 403 on the live copy. Returns a
+/// line for the job log; a failure is reported there, never fatal — the
+/// site itself has landed.
+async fn carry_access_grants(state: &SharedState, from: &str, to: &str) -> String {
+    let grants = match hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::WebListHostingAccess {
+            hosting_id: from.to_string(),
+        },
+    )
+    .await
+    {
+        Ok(RpcResponse::WebListHostingAccess(g)) => g,
+        Ok(RpcResponse::Error(e)) => return format!("access grants NOT carried over: {e}\n"),
+        Ok(_) => return "access grants NOT carried over: unexpected response\n".into(),
+        Err(e) => return format!("access grants NOT carried over: {e}\n"),
+    };
+    let mut failed = Vec::new();
+    for g in &grants {
+        let ok = matches!(
+            hyperion_rpc_client::call(
+                &state.agent_socket,
+                Request::WebGrantHostingAccess {
+                    user_id: g.user_id,
+                    hosting_id: to.to_string(),
+                    level: g.level.clone(),
+                    granted_by: g.granted_by,
+                },
+            )
+            .await,
+            Ok(RpcResponse::WebGrantHostingAccess)
+        );
+        if !ok {
+            failed.push(g.username.clone());
+        }
+    }
+    if failed.is_empty() {
+        format!("access grants carried over: {}\n", grants.len())
+    } else {
+        format!(
+            "access grants carried over: {} — FAILED for {} (grant them on the new site)\n",
+            grants.len() - failed.len(),
+            failed.join(", ")
+        )
+    }
+}
+
+/// The master's copy of a bundle pulled off a worker, removed when the job
+/// is done with it — success or failure. It is a real copy (the source's own
+/// export is a hardlink of its backup), so leaving it meant a week of master
+/// disk holding the site's data; a retry exports a fresh bundle anyway.
+struct PulledBundle(String);
+
+impl Drop for PulledBundle {
+    fn drop(&mut self) {
+        let id = std::mem::take(&mut self.0);
+        // Same shape check as the download route: never join an arbitrary id.
+        if id.len() == 4 + 26
+            && id.starts_with("mig_")
+            && id[4..].chars().all(|c| c.is_ascii_alphanumeric())
+        {
+            let dir = std::path::Path::new("/var/lib/hyperion/migration").join(id);
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+}
+
+/// The files of one worker bundle → `local_dir`, each fetched in slices.
+///
+/// One RPC per file used to carry the whole archive base64'd in a single
+/// response, which the remote client's 192 MiB response cap (and the 30 s
+/// default timeout) cut off for any site over ~144 MiB: "Bundle proxy
+/// failed" for every ordinary WordPress site on a worker.
+async fn pull_bundle_files(
+    state: &SharedState,
+    source_node: &str,
+    bundle_id: &str,
+    local_dir: &std::path::Path,
+) -> Result<(), String> {
+    use base64::Engine;
+    use tokio::io::AsyncWriteExt;
+    const CHUNK: u32 = 8 * 1024 * 1024;
+    let mut files = vec!["manifest.json", "archive.tar.gz"];
+    let mut idx = 0;
+    while idx < files.len() {
+        let filename = files[idx];
+        idx += 1;
+        let dest = local_dir.join(filename);
+        let mut out = tokio::fs::File::create(&dest)
+            .await
+            .map_err(|e| format!("create {filename}: {e}"))?;
+        let mut offset: u64 = 0;
+        loop {
+            let resp = crate::dispatcher::dispatch_to_node(
+                state,
+                Some(source_node),
+                Request::HostingMigrationFetchBundleFile {
+                    bundle_id: bundle_id.to_string(),
+                    filename: filename.to_string(),
+                    offset,
+                    len: CHUNK,
+                },
+            )
+            .await
+            .map_err(|e| format!("rpc {filename}: {e}"))?;
+            let (bytes_b64, total_size, eof) = match resp {
+                RpcResponse::HostingMigrationFetchBundleFile {
+                    bytes_b64,
+                    total_size,
+                    eof,
+                } => (bytes_b64, total_size, eof),
+                RpcResponse::Error(e) => return Err(format!("source rejected {filename}: {e}")),
+                _ => return Err(format!("unexpected response for {filename}")),
+            };
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(bytes_b64.as_bytes())
+                .map_err(|e| format!("b64 {filename}: {e}"))?;
+            out.write_all(&bytes)
+                .await
+                .map_err(|e| format!("write {filename}: {e}"))?;
+            offset += bytes.len() as u64;
+            // total_size 0 = an agent that predates slicing: it sent the
+            // whole file in this one response.
+            if eof || total_size == 0 || bytes.is_empty() {
+                if total_size != 0 && offset != total_size {
+                    return Err(format!(
+                        "{filename} came back short: {offset} of {total_size} bytes"
+                    ));
+                }
+                break;
+            }
+        }
+        out.flush()
+            .await
+            .map_err(|e| format!("flush {filename}: {e}"))?;
+        // The database dump travels only when the manifest says there is
+        // one — the importer refuses a DB site whose bundle lacks it.
+        if filename == "manifest.json" {
+            let has_dump = tokio::fs::read(&dest)
+                .await
+                .ok()
+                .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+                .is_some_and(|v| v.get("db_dump_sha256").is_some_and(|d| d.is_string()));
+            if has_dump {
+                files.push(hyperion_types::HostingMigrationManifest::DB_DUMP_FILE);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Auto-placement: pick the best-fit node for a new hosting when
@@ -13400,6 +13548,10 @@ pub struct HostingCloneForm {
 /// needs. Forgives what a paste from the address bar carries (`https://`,
 /// a trailing `/` or path, a `:port`) and refuses anything that still isn't
 /// a domain, with a message fit for the clone card.
+///
+/// A leading `www.` goes too: `create` folds it into the bare name anyway,
+/// so checking `www.example.cz` for duplicates (and labelling the job with
+/// it) while the hosting lands as `example.cz` would check the wrong name.
 fn clone_domain_from_input(raw: &str) -> Result<String, String> {
     let s = raw.trim();
     let s = s
@@ -13409,7 +13561,7 @@ fn clone_domain_from_input(raw: &str) -> Result<String, String> {
     let host = s.split(['/', '?', '#']).next().unwrap_or_default();
     let host = host.split(':').next().unwrap_or_default();
     hyperion_validate::Domain::parse(host)
-        .map(|d| d.as_str().to_string())
+        .map(|d| d.without_www().into_inner())
         .map_err(|_| format!("\"{}\" is not a valid domain for the copy.", raw.trim()))
 }
 
@@ -13427,13 +13579,19 @@ mod clone_domain_tests {
             "WWW.JTMotors.cz",
             "www.jtmotors.cz:443/",
             "www.jtmotors.cz.",
+            "jtmotors.cz",
         ] {
             assert_eq!(
                 clone_domain_from_input(raw).as_deref(),
-                Ok("www.jtmotors.cz"),
+                Ok("jtmotors.cz"),
                 "{raw}"
             );
         }
+        // Only a leading `www.` that leaves a real domain is folded.
+        assert_eq!(
+            clone_domain_from_input("staging.jtmotors.cz").as_deref(),
+            Ok("staging.jtmotors.cz")
+        );
     }
 
     #[test]
@@ -13468,6 +13626,20 @@ pub async fn post_hosting_clone(
         Err(r) => return Ok(r),
     };
     let sel_url = urlencoding(&form.selector);
+    let refuse = |msg: &str| {
+        Ok(Redirect::to(&format!(
+            "/hostings/{}?flash_error={}#clone",
+            sel_url,
+            urlencoding(msg)
+        ))
+        .into_response())
+    };
+    // A copy is a brand-new hosting. The built-in Customer role holds
+    // HostingMigrateClone but deliberately not HostingCreate, so gating on
+    // the former alone let a customer mint sites on any node.
+    if !ctx.can(Capability::HostingCreate) {
+        return refuse("Copying a site creates a new hosting, which your role cannot do.");
+    }
 
     // ── Sanity gates ──
     if form.new_domain.trim().is_empty() {
@@ -13491,22 +13663,47 @@ pub async fn post_hosting_clone(
             .into_response());
         }
     };
-    if new_domain.eq_ignore_ascii_case(form.selector.trim()) {
-        return Ok(Redirect::to(&format!(
-            "/hostings/{}?flash_error={}#clone",
-            sel_url,
-            urlencoding("Clone domain must differ from the source domain.")
-        ))
-        .into_response());
+    // Where the source lives and what it is called, from the cluster — not
+    // from the page. The form posts the hosting's ULID as `selector`, so
+    // comparing the new domain against it never matched, and the hidden
+    // `source_node` is only as current as the page (a Retry replays it).
+    let (source, source_owner) = match find_hosting_anywhere(&state, sel.clone()).await {
+        Ok(v) => v,
+        Err(_) => return refuse("The source hosting could not be found."),
+    };
+    if new_domain.eq_ignore_ascii_case(&source.domain) {
+        return refuse("Clone domain must differ from the source domain.");
+    }
+    // A domain already live anywhere in the cluster: two vhosts for one
+    // name, whichever node DNS points at answers. On the same node the agent
+    // would refuse too — but only after the whole export had run.
+    match list_hostings(&state).await {
+        Ok(rows) => {
+            if let Some(dup) = rows
+                .iter()
+                .find(|r| r.domain.eq_ignore_ascii_case(&new_domain))
+            {
+                let where_ = match dup.node_id.as_deref() {
+                    Some(crate::dispatcher::LOCAL_NODE_SENTINEL) | None => {
+                        "the master node".to_string()
+                    }
+                    Some(n) => format!("node {n}"),
+                };
+                return refuse(&format!(
+                    "A hosting for {} already exists on {where_}. Pick a different domain.",
+                    dup.domain
+                ));
+            }
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, domain = %new_domain,
+                "clone: cluster duplicate-domain check skipped (list failed) — proceeding");
+        }
     }
 
-    let source_local =
-        form.source_node.is_empty() || form.source_node == crate::dispatcher::LOCAL_NODE_SENTINEL;
-    let source_node_str = if source_local {
-        crate::dispatcher::LOCAL_NODE_SENTINEL.to_string()
-    } else {
-        form.source_node.clone()
-    };
+    let source_local = source_owner.is_none();
+    let source_node_str =
+        source_owner.unwrap_or_else(|| crate::dispatcher::LOCAL_NODE_SENTINEL.to_string());
     // Default target_node = source when empty so single-node deploys
     // can clone in place.
     let target_node_str = if form.target_node.trim().is_empty() {
@@ -13522,7 +13719,7 @@ pub async fn post_hosting_clone(
     let payload = serde_json::json!({
         "selector": form.selector,
         "new_domain": new_domain,
-        "source_node": form.source_node,
+        "source_node": source_node_str,
         "target_node": target_node_str,
         "issue_cert": form.issue_cert,
     });
@@ -13531,7 +13728,7 @@ pub async fn post_hosting_clone(
     let clone_state = state.clone();
     let clone_sel = sel.clone();
     let clone_form_sel = form.selector.clone();
-    let clone_source = form.source_node.clone();
+    let clone_source = source_node_str.clone();
     let clone_target = target_node_str.clone();
     let clone_new_domain = new_domain.clone();
     let clone_issue_cert = form.issue_cert;
@@ -13679,6 +13876,8 @@ async fn run_clone_job(
         )
         .await;
 
+    // Lives to the end of the job: the pulled copy goes on every exit.
+    let _pulled = (!source_local).then(|| PulledBundle(bundle.bundle_id.clone()));
     if !source_local {
         reporter
             .step("Proxying bundle from worker to master", 45, "")
@@ -13731,8 +13930,10 @@ async fn run_clone_job(
             return;
         }
     };
-    let new_id = match import {
-        RpcResponse::HostingImportFromUrl(r) => r.new_hosting_id,
+    // The domain the target actually created — `create` folds a typed
+    // `www.` into the bare name, so the cert and the final link use this.
+    let (new_id, new_domain) = match import {
+        RpcResponse::HostingImportFromUrl(r) => (r.new_hosting_id, r.domain),
         RpcResponse::Error(e) => {
             reporter
                 .finish(false, Some(format!("Target import failed: {e}")))
@@ -13746,6 +13947,11 @@ async fn run_clone_job(
             return;
         }
     };
+    let grants_note =
+        carry_access_grants(&state, bundle.source_hosting_id.as_str(), new_id.as_str()).await;
+    reporter
+        .step(&format!("Imported as {new_domain}"), 80, &grants_note)
+        .await;
 
     tracing::info!(
         source = %selector_text,
@@ -13762,7 +13968,7 @@ async fn run_clone_job(
     // tab once DNS propagates. Dispatched to the target node (where the site +
     // its nginx now live).
     let cert_note = if issue_cert {
-        issue_clone_cert(&state, &target_node, &new_domain, &reporter).await
+        issue_clone_cert(&state, &target_node, &new_id, &new_domain, &reporter).await
     } else {
         String::new()
     };
@@ -13789,6 +13995,7 @@ async fn run_clone_job(
 async fn issue_clone_cert(
     state: &SharedState,
     target_node: &str,
+    new_id: &hyperion_types::HostingId,
     new_domain: &str,
     reporter: &crate::handlers::jobs::JobReporter,
 ) -> String {
@@ -13821,14 +14028,24 @@ async fn issue_clone_cert(
                     &format!("{}\n", r.note),
                 )
                 .await;
+            // `CertIssueAcme`, not the legacy `CertIssue`: every agent answers
+            // that one "not supported", so the ticked-by-default box never
+            // issued a certificate.
             match crate::dispatcher::dispatch_to_node(
                 state,
                 Some(target_node),
-                Request::CertIssue { domain },
+                Request::CertIssueAcme {
+                    sel: HostingSelector::Id(new_id.clone()),
+                    req: hyperion_types::CertIssueRequest {
+                        staging: false,
+                        require_dns_match: false,
+                        extra_sans: vec![],
+                    },
+                },
             )
             .await
             {
-                Ok(RpcResponse::CertIssue(_)) => format!(" · HTTPS issued for {new_domain}"),
+                Ok(RpcResponse::CertIssueAcme(_)) => format!(" · HTTPS issued for {new_domain}"),
                 Ok(RpcResponse::Error(e)) => format!(" · HTTPS skipped — issuance failed: {e}"),
                 Ok(_) => " · HTTPS skipped — unexpected response".to_string(),
                 Err(e) => format!(" · HTTPS skipped — dispatch failed: {e}"),
@@ -14023,13 +14240,23 @@ pub async fn post_migration_move(
         ))
         .into_response());
     }
-    let source_local =
-        form.source_node.is_empty() || form.source_node == crate::dispatcher::LOCAL_NODE_SENTINEL;
-    let source_node_str = if source_local {
-        crate::dispatcher::LOCAL_NODE_SENTINEL.to_string()
-    } else {
-        form.source_node.clone()
+    // Where the source lives, from the cluster rather than the page's hidden
+    // field (a Retry replays the page's value, which a since-moved site
+    // makes wrong).
+    let source_owner = match find_hosting_anywhere(&state, sel.clone()).await {
+        Ok((_, owner)) => owner,
+        Err(_) => {
+            return Ok(Redirect::to(&format!(
+                "/hostings/{}?flash_error={}#migration",
+                sel_url,
+                urlencoding("The source hosting could not be found.")
+            ))
+            .into_response())
+        }
     };
+    let source_local = source_owner.is_none();
+    let source_node_str =
+        source_owner.unwrap_or_else(|| crate::dispatcher::LOCAL_NODE_SENTINEL.to_string());
     let target_owned = target.to_string();
     if target_owned == source_node_str {
         return Ok(Redirect::to(&format!(
@@ -14050,13 +14277,13 @@ pub async fn post_migration_move(
     let bundle_ttl = crate::handlers::migration::BUNDLE_DOWNLOAD_TTL_SECS;
     let payload = serde_json::json!({
         "selector": form.selector,
-        "source_node": form.source_node,
+        "source_node": source_node_str,
         "target_node": target_owned,
     });
     let migration_state = state.clone();
     let migration_sel = sel.clone();
     let migration_form_sel = form.selector.clone();
-    let migration_source_node = form.source_node.clone();
+    let migration_source_node = source_node_str.clone();
     let migration_target = target_owned.clone();
     let actor_label = ctx.username.clone();
     let actor_uid = ctx.session.as_ref().map(|s| s.user_id).unwrap_or(0);
@@ -14799,6 +15026,8 @@ async fn run_migration_job(
         .await;
 
     // ---- 1b. Pull bundle to master if source was a worker ----
+    // Lives to the end of the job: the pulled copy goes on every exit.
+    let _pulled = (!source_local).then(|| PulledBundle(bundle.bundle_id.clone()));
     if !source_local {
         reporter
             .step("Proxying bundle from worker to master", 45, "")
@@ -14868,11 +15097,13 @@ async fn run_migration_job(
             return;
         }
     };
+    let grants_note =
+        carry_access_grants(&state, bundle.source_hosting_id.as_str(), new_id.as_str()).await;
     reporter
         .step(
             "Imported on target",
             85,
-            &format!("new_hosting_id={}\n", new_id.as_str()),
+            &format!("new_hosting_id={}\n{grants_note}", new_id.as_str()),
         )
         .await;
 

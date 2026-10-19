@@ -1105,12 +1105,60 @@ async fn run_cmd(bin: &str, args: &[&str]) -> Result<(), String> {
 /// Best-effort rewrite of wp-config.php DB constants to the new credentials.
 /// No-op if the file is absent (non-WordPress site).
 async fn rewrite_wp_config(root_dir: &str, db_name: &str, db_user: &str, db_pass: &str) {
-    let path = Path::new(root_dir).join("wp-config.php");
-    let Ok(content) = tokio::fs::read_to_string(&path).await else {
-        return;
-    };
+    if let Err(e) = repoint_wp_config_db(root_dir, db_name, db_user, db_pass).await {
+        tracing::warn!(error = %e, root_dir, "could not repoint wp-config.php at the new database");
+    }
+}
+
+/// Point the site's wp-config.php (in the document root, or one level up
+/// where WordPress also looks) at `db_name`/`db_user`/`db_pass`. Written
+/// through [`hyperion_adapters::fs::rewrite_no_follow`]: the tree belongs to
+/// the site user, so root must not follow a link they left in its place.
+/// `Ok(false)` = no wp-config.php (not WordPress) or no DB constants in it.
+pub(crate) async fn repoint_wp_config_db(
+    root_dir: &str,
+    db_name: &str,
+    db_user: &str,
+    db_pass: &str,
+) -> Result<bool, String> {
+    let root = Path::new(root_dir);
+    let candidates = [
+        Some(root.join("wp-config.php")),
+        root.parent().map(|p| p.join("wp-config.php")),
+    ];
+    let (name, user, pass) = (
+        db_name.to_string(),
+        db_user.to_string(),
+        db_pass.to_string(),
+    );
+    let paths: Vec<std::path::PathBuf> = candidates.into_iter().flatten().collect();
+    tokio::task::spawn_blocking(move || {
+        for p in paths {
+            if !p.exists() {
+                continue;
+            }
+            return hyperion_adapters::fs::rewrite_no_follow(&p, |c| {
+                wp_config_with_db(c, &name, &user, &pass)
+            })
+            .map_err(|e| e.to_string());
+        }
+        Ok(false)
+    })
+    .await
+    .map_err(|e| format!("join: {e}"))?
+}
+
+/// wp-config.php content with its `DB_NAME` / `DB_USER` / `DB_PASSWORD`
+/// defines replaced, or `None` when it defines none of them.
+pub(crate) fn wp_config_with_db(
+    content: &str,
+    db_name: &str,
+    db_user: &str,
+    db_pass: &str,
+) -> Option<String> {
     let esc = |v: &str| v.replace('\\', "\\\\").replace('\'', "\\'");
-    let rewritten: Vec<String> = content
+    let mut touched = false;
+    let mut rewritten: Vec<String> = content
         .lines()
         .map(|line| {
             for (key, val) in [
@@ -1121,18 +1169,39 @@ async fn rewrite_wp_config(root_dir: &str, db_name: &str, db_user: &str, db_pass
                 let is_def = line.contains("define")
                     && (line.contains(&format!("'{key}'")) || line.contains(&format!("\"{key}\"")));
                 if is_def {
+                    touched = true;
                     return format!("define( '{key}', '{}' );", esc(val));
                 }
             }
             line.to_string()
         })
         .collect();
-    let _ = tokio::fs::write(&path, rewritten.join("\n")).await;
+    if !touched {
+        return None;
+    }
+    if content.ends_with('\n') {
+        rewritten.push(String::new());
+    }
+    Some(rewritten.join("\n"))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{domain_name_taken, import_aliases, looks_like_out_of_space};
+    use super::{domain_name_taken, import_aliases, looks_like_out_of_space, wp_config_with_db};
+
+    #[test]
+    fn wp_config_db_defines_are_repointed() {
+        let src = "<?php\ndefine( 'DB_NAME', 'old_db' );\ndefine(\"DB_USER\", \"old\");\n\
+                   define( 'DB_PASSWORD', 'x' );\ndefine( 'DB_HOST', 'localhost' );\n";
+        let out = wp_config_with_db(src, "new_db", "new_u", "p'w\\d").expect("rewritten");
+        assert!(out.contains("define( 'DB_NAME', 'new_db' );"));
+        assert!(out.contains("define( 'DB_USER', 'new_u' );"));
+        assert!(out.contains(r"define( 'DB_PASSWORD', 'p\'w\\d' );"));
+        assert!(out.contains("define( 'DB_HOST', 'localhost' );"));
+        assert!(out.ends_with('\n'));
+        assert!(!out.contains("old"));
+        assert_eq!(wp_config_with_db("<?php echo 1;\n", "a", "b", "c"), None);
+    }
 
     #[tokio::test]
     async fn a_name_is_taken_by_another_hostings_domain_or_alias() {

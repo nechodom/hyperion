@@ -777,11 +777,21 @@ pub enum Request {
     /// node sees one canonical download URL regardless of where
     /// the bundle was produced.
     ///
-    /// `filename` is whitelisted: only "manifest.json" or
-    /// "archive.tar.gz" are accepted.
+    /// `filename` is whitelisted: "manifest.json", "archive.tar.gz" or
+    /// "archive.sql" (the database dump).
+    ///
+    /// `len > 0` reads one slice at `offset` (the response carries
+    /// `total_size` + `eof`), so an archive of any size crosses in bounded
+    /// frames. `len == 0` (an old master) returns the whole file in one
+    /// response, which the remote client's response cap limits to ~144 MiB
+    /// of archive.
     HostingMigrationFetchBundleFile {
         bundle_id: String,
         filename: String,
+        #[serde(default)]
+        offset: u64,
+        #[serde(default)]
+        len: u32,
     },
     /// Import a migration bundle by manifest path. Sibling
     /// `archive.tar.gz` is expected next to the manifest.
@@ -2363,6 +2373,12 @@ pub enum Response {
     HostingExport(hyperion_types::HostingMigrationBundle),
     HostingMigrationFetchBundleFile {
         bytes_b64: String,
+        /// Size of the whole file. 0 from an old agent, which always sent
+        /// the whole file regardless of `len`.
+        #[serde(default)]
+        total_size: u64,
+        #[serde(default)]
+        eof: bool,
     },
     HostingImport(hyperion_types::HostingImportResult),
     HostingImportPanelPlan(hyperion_import::ImportPlan),

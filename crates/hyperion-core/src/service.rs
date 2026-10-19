@@ -1339,7 +1339,9 @@ async fn prune_migration_bundle_dir(
             continue;
         }
         // Stale `mig_*` / `bundle-*` sub-dirs.
-        if meta.is_dir() && (name.starts_with("mig_") || name.starts_with("bundle-")) {
+        if meta.is_dir()
+            && (name.starts_with("mig_") || name.starts_with("bundle-") || name.starts_with("inc_"))
+        {
             match tokio::fs::remove_dir_all(&path).await {
                 Ok(()) => {
                     tracing::info!(bundle=%name, "pruned stale migration bundle dir");
@@ -1450,6 +1452,13 @@ async fn rewrite_manifest_domain(
             message: format!("manifest is not valid JSON: {e}"),
         })?;
     if let Some(obj) = json.as_object_mut() {
+        // Remember the exported name so the importer can rewrite the
+        // WordPress URLs from it. Kept if already set (a re-rewrite).
+        if !obj.get("renamed_from").is_some_and(|v| v.is_string()) {
+            if let Some(old) = obj.get("domain").cloned() {
+                obj.insert("renamed_from".into(), old);
+            }
+        }
         obj.insert(
             "domain".into(),
             serde_json::Value::String(new_domain.to_string()),
@@ -1496,7 +1505,11 @@ async fn curl_to_file(
 ) -> Result<(), RpcError> {
     // -f: fail with non-zero exit on 4xx/5xx (otherwise curl happily
     //     writes the error body to disk and we'd "import" garbage).
-    // --max-time 1800: 30-minute hard cap for multi-GB archives.
+    // Stall detection, not a wall clock: abort below 1 KiB/s for 5 minutes
+    //   (speed-limit/speed-time) and after 30 s without a connection. The old
+    //   `max-time 1800` killed every archive over ~20 GB at 100 Mbit/s while
+    //   the cap allows 64 GB — and with no resume each retry started over.
+    //   `max-time` stays as a 24 h backstop.
     // --max-filesize: refuse a download larger than `max_bytes` (the caller's
     //   cap — the configured archive limit, or the tight manifest limit).
     //   Without this a malicious upstream could fill the disk.
@@ -1525,7 +1538,7 @@ async fn curl_to_file(
     //
     // The URL carries the bundle TOKEN in its query string, so it does not go
     // on argv: /proc/<pid>/cmdline is world-readable, this download holds for
-    // up to 30 minutes, and the token grants a fetch of the full site export
+    // hours on a big site, and the token grants a fetch of the full site export
     // — every database dump and wp-config in the bundle — from anywhere.
     // Options ride on stdin instead. Every interpolated value is escaped, so
     // a crafted URL cannot close its quotes and inject further directives.
@@ -1538,7 +1551,10 @@ async fn curl_to_file(
             "silent\n",
             "show-error\n",
             "insecure\n",
-            "max-time = 1800\n",
+            "connect-timeout = 30\n",
+            "speed-limit = 1024\n",
+            "speed-time = 300\n",
+            "max-time = 86400\n",
             "max-filesize = {maxsize}\n",
             "max-redirs = 0\n",
             "proto = \"=https,http\"\n",
@@ -3385,7 +3401,23 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         if cluster_cfg.trash_enabled && !opts.keep_user && !opts.keep_database {
             return self.trash_hosting(detail).await;
         }
+        self.delete_now(detail, opts).await
+    }
 
+    /// Undo a hosting this very call just created and failed to fill
+    /// (import, restore-as-new, staging). Always a HARD delete: routing it
+    /// through [`Self::delete`] put the half-restored tree, its database and
+    /// user into the trash for the whole retention period and announced a
+    /// "moved to trash" for a site nobody ever had.
+    async fn roll_back_created(&self, id: &HostingId) {
+        if let Ok(detail) = self.get(HostingSelector::Id(id.clone())).await {
+            let _ = self.delete_now(detail, DeleteOpts::default()).await;
+        }
+    }
+
+    /// The hard-delete half of [`Self::delete`]: tear everything down now,
+    /// never via the trash.
+    async fn delete_now(&self, detail: HostingDetail, opts: DeleteOpts) -> Result<(), RpcError> {
         hostings::set_state(&self.pool, &detail.id, HostingState::Deleting, now_secs())
             .await
             .map_err(|e| RpcError::Internal_with(format!("set deleting: {e}")))?;
@@ -6773,12 +6805,24 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// mtime is older than 7 days. The bundle download URL also
     /// expires after ~1h, so anything older than a week is dead
     /// inventory the operator clearly no longer needs.
+    ///
+    /// Also sweeps `/var/lib/hyperion/migration-incoming/inc_*`: the
+    /// download staging of an import that died before its own cleanup ran
+    /// (agent restart mid-download) holds a partial archive of plaintext
+    /// site data that nothing else would ever remove.
     pub(crate) async fn prune_old_migration_bundles(&self) -> Result<u32, RpcError> {
-        prune_migration_bundle_dir(
+        let week = std::time::Duration::from_secs(7 * 86_400);
+        let bundles = prune_migration_bundle_dir(
             &std::path::PathBuf::from("/var/lib/hyperion/migration"),
-            std::time::Duration::from_secs(7 * 86_400),
+            week,
         )
-        .await
+        .await?;
+        let incoming = prune_migration_bundle_dir(
+            &std::path::PathBuf::from("/var/lib/hyperion/migration-incoming"),
+            week,
+        )
+        .await?;
+        Ok(bundles.saturating_add(incoming))
     }
 
     async fn reconcile_scheduled_rows(&self) -> Result<(), hyperion_state::StateError> {
@@ -16568,16 +16612,25 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// bytes as base64. Used by the master to pull a bundle off
     /// a worker source during worker-to-X migration.
     ///
-    /// Whitelist: "manifest.json" or "archive.tar.gz" only. Both
+    /// Whitelist: "manifest.json", "archive.tar.gz" or "archive.sql". Both
     /// the bundle_id and the filename are validated to refuse
     /// path traversal — ULID-shape for bundle_id, exact match for
     /// filename.
+    ///
+    /// `len > 0`: one slice of at most 16 MiB at `offset`, with the file's
+    /// total size and whether this slice reaches its end. `len == 0`: the
+    /// whole file at once (an older master's call), capped at 1 GiB — in
+    /// practice the master's response cap stops it near 144 MiB, which is
+    /// why the master now asks in slices.
     pub async fn hosting_migration_fetch_bundle_file(
         &self,
         bundle_id: String,
         filename: String,
-    ) -> Result<String, RpcError> {
+        offset: u64,
+        len: u32,
+    ) -> Result<(String, u64, bool), RpcError> {
         use base64::Engine;
+        use tokio::io::{AsyncReadExt, AsyncSeekExt};
         // bundle_id must be all-alphanumeric (ULID/timestamp shape).
         if bundle_id.is_empty()
             || !bundle_id
@@ -16588,34 +16641,55 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 message: format!("bundle_id has illegal chars: {bundle_id:?}"),
             });
         }
-        if !matches!(filename.as_str(), "manifest.json" | "archive.tar.gz") {
+        if !matches!(
+            filename.as_str(),
+            "manifest.json" | "archive.tar.gz" | "archive.sql"
+        ) {
             return Err(RpcError::Validation {
                 message: format!(
-                    "filename must be `manifest.json` or `archive.tar.gz`, got {filename:?}"
+                    "filename must be `manifest.json`, `archive.tar.gz` or `archive.sql`, \
+                     got {filename:?}"
                 ),
             });
         }
         let path = std::path::PathBuf::from("/var/lib/hyperion/migration")
             .join(&bundle_id)
             .join(&filename);
-        let md = tokio::fs::metadata(&path)
+        let mut file = tokio::fs::File::open(&path)
             .await
             .map_err(|e| RpcError::NotFound {
                 kind: "migration_bundle_file".into(),
                 id: format!("{bundle_id}/{filename}: {e}"),
             })?;
-        // Defense in depth — same 64 MiB cap as the file manager.
-        const MAX: u64 = 1024 * 1024 * 1024; // 1 GiB cap for archives
-        if md.len() > MAX {
-            return Err(RpcError::Validation {
-                message: format!("bundle file {} bytes exceeds 1 GiB cap", md.len()),
-            });
-        }
-        let bytes = tokio::fs::read(&path)
+        let total = file
+            .metadata()
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("stat: {e}")))?
+            .len();
+        let want: u64 = if len == 0 {
+            const MAX: u64 = 1024 * 1024 * 1024; // whole-file mode: 1 GiB cap
+            if total > MAX {
+                return Err(RpcError::Validation {
+                    message: format!("bundle file {total} bytes exceeds 1 GiB cap"),
+                });
+            }
+            total
+        } else {
+            u64::from(len).min(16 * 1024 * 1024)
+        };
+        let start = if len == 0 { 0 } else { offset.min(total) };
+        file.seek(std::io::SeekFrom::Start(start))
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("seek: {e}")))?;
+        let mut buf = Vec::with_capacity(want.min(total - start) as usize);
+        (&mut file)
+            .take(want)
+            .read_to_end(&mut buf)
             .await
             .map_err(|e| RpcError::Internal_with(format!("read: {e}")))?;
-        let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-        Ok(b64)
+        let eof = start + buf.len() as u64 >= total;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&buf);
+        Ok((b64, total, eof))
     }
 
     pub async fn hosting_export(
@@ -16686,6 +16760,34 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .map(|m| m.len() as i64)
             .unwrap_or(0);
 
+        // The database dump. `backup_run` writes it as a SIBLING of the
+        // archive (`<domain>-<ts>.sql` next to `<domain>-<ts>.tar.gz`), not
+        // inside it — so linking only the archive shipped every Move and Copy
+        // without its data: the target restored the files, found no dump,
+        // and reported "ok" over the empty database `create` had just made.
+        // Ship it as `archive.sql`, the name `backup_restore` looks for next
+        // to `archive.tar.gz`.
+        let db_dump_sha256 = if detail.database.is_some() {
+            let src_dump = archive_path_str
+                .strip_suffix(".tar.gz")
+                .map(|stem| std::path::PathBuf::from(format!("{stem}.sql")))
+                .filter(|p| p.exists())
+                .ok_or_else(|| {
+                    RpcError::Internal_with(
+                        "the backup taken for the export has no database dump".into(),
+                    )
+                })?;
+            let dump_dest = bundle_dir.join(hyperion_types::HostingMigrationManifest::DB_DUMP_FILE);
+            if tokio::fs::hard_link(&src_dump, &dump_dest).await.is_err() {
+                tokio::fs::copy(&src_dump, &dump_dest)
+                    .await
+                    .map_err(|e| RpcError::Internal_with(format!("copy dump into bundle: {e}")))?;
+            }
+            Some(compute_sha256(&dump_dest).await?)
+        } else {
+            None
+        };
+
         // Pull the per-hosting cron tab + WP version best-effort. The
         // operator doesn't need these to succeed for migration to work
         // — they're nice-to-have metadata.
@@ -16720,6 +16822,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             crontab,
             archive_sha256: sha.clone(),
             proxy_upstream_url: detail.proxy_upstream_url.clone(),
+            db_dump_sha256,
+            renamed_from: None,
         };
         let manifest_path = bundle_dir.join("manifest.json");
         let manifest_json = serde_json::to_string_pretty(&manifest)
@@ -16821,6 +16925,34 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .map(|m| m.len() as i64)
             .unwrap_or(0);
 
+        // The database dump, checked BEFORE anything is created. A site with
+        // a database whose bundle carries no dump would arrive with the empty
+        // database `create` makes and be reported as imported — exactly what
+        // every Move/Copy did before the export shipped the dump.
+        let dump_path =
+            archive_path.with_file_name(hyperion_types::HostingMigrationManifest::DB_DUMP_FILE);
+        if manifest.db_engine.is_some() {
+            let Some(want) = manifest.db_dump_sha256.as_deref() else {
+                return Err(RpcError::Validation {
+                    message: "this bundle carries no database dump, so importing it would \
+                              leave the site with an empty database — it was exported by an \
+                              older Hyperion; update the source node and export again"
+                        .into(),
+                });
+            };
+            if !dump_path.exists() {
+                return Err(RpcError::Validation {
+                    message: format!("database dump missing at {}", dump_path.display()),
+                });
+            }
+            let live = compute_sha256(&dump_path).await?;
+            if live != want {
+                return Err(RpcError::Validation {
+                    message: format!("database dump sha mismatch — manifest={want} dump={live}"),
+                });
+            }
+        }
+
         // Provision the hosting with the same config. We re-issue the
         // cert (never copy private keys across the network) and let
         // the operator click "Issue Cert" once DNS resolves on the
@@ -16877,16 +17009,69 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 error = %restore_err,
                 "migration import: restore failed — rolling back half-created hosting"
             );
-            let _ = self
-                .delete(
-                    HostingSelector::Id(created.id.clone()),
-                    DeleteOpts {
-                        keep_user: false,
-                        keep_database: false,
-                    },
-                )
-                .await;
+            self.roll_back_created(&created.id).await;
             return Err(restore_err);
+        }
+        let new_domain = self
+            .get(HostingSelector::Id(created.id.clone()))
+            .await
+            .map(|d| d.domain)
+            .unwrap_or_else(|_| manifest.domain.clone());
+
+        // WordPress: the restored wp-config.php still names the SOURCE's
+        // database, user and password (and its Redis ACL user). On another
+        // node that is "Error establishing a database connection"; on the
+        // same node a Copy would run against — and panel actions like a WP
+        // reset would drop — the production tables. Point it at the database
+        // `create` just made, before any wp-cli runs.
+        if let Some(db) = created.db.as_ref() {
+            match crate::panel_import::repoint_wp_config_db(
+                &created.root_dir,
+                &db.db_name,
+                &db.db_user,
+                &db.password,
+            )
+            .await
+            {
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(
+                        hosting = %created.id.as_str(), error = %e,
+                        "migration import: could not repoint wp-config.php — rolling back"
+                    );
+                    self.roll_back_created(&created.id).await;
+                    return Err(RpcError::ProvisioningFailed {
+                        stage: "wp_config".into(),
+                        reason: format!("could not point wp-config.php at the new database: {e}"),
+                    });
+                }
+            }
+        }
+        // The source's Redis settings belong to the source: its ACL user does
+        // not exist here (or, on a same-node Copy, is production's cache).
+        // Park the drop-in FIRST — a drop-in that cannot connect fatals every
+        // request, wp-cli included — then drop the WP_REDIS_* constants. The
+        // operator turns Redis on for the new site from its panel.
+        if hyperion_adapters::wpcli::set_object_cache_dropin(
+            &created.system_user,
+            &created.root_dir,
+            false,
+        )
+        .await
+        .unwrap_or(false)
+        {
+            let _ = self
+                .adapters
+                .wp_set_redis(&created.system_user, &created.root_dir, None)
+                .await;
+        }
+        // A Copy lands under a new name: rewrite the WordPress URLs so the
+        // copy does not redirect to (and link) the source.
+        if let Some(from) = manifest.renamed_from.as_deref() {
+            if from != new_domain {
+                self.wp_rewrite_domain(&created.system_user, &created.root_dir, from, &new_domain)
+                    .await;
+            }
         }
 
         // Re-apply the crontab when present.
@@ -16915,7 +17100,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
 
         Ok(hyperion_types::HostingImportResult {
             new_hosting_id: created.id,
-            domain: manifest.domain,
+            // What `create` actually made (it folds `www.` into the alias),
+            // not what the manifest asked for.
+            domain: new_domain,
             restored_bytes: archive_bytes,
             state: "ok".into(),
             message: format!(
@@ -16978,13 +17165,20 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // archive live under `base`, so the same pins cover both fetches and
         // also defeat DNS rebinding between the two requests.
         //
-        // `master_minted` lifts ONLY the internal-address refusal: the master's
-        // own copy/move job built this URL to its own bundle endpoint, and that
-        // address is legitimately internal — the master's FQDN resolves to
-        // 127.0.1.1 via Debian's /etc/hosts when the copy lands on the master
-        // itself, and a private-network cluster reaches it on 10.x. A URL a
-        // person typed (import form, hctl) always goes through the full guard.
-        let resolve_pins = resolve_url_pins(&base, !master_minted).await.map_err(|e| {
+        // `master_minted` admits loopback and PRIVATE-network addresses only:
+        // the master's own copy/move job built this URL to its own bundle
+        // endpoint, and the master's FQDN resolves to 127.0.1.1 via Debian's
+        // /etc/hosts when the copy lands on the master itself, and to 10.x on
+        // a private-network cluster. Link-local (169.254.169.254 metadata),
+        // unspecified and the rest stay refused even then — the URL's host
+        // comes from the browser's Host header. A URL a person typed (import
+        // form, hctl) always goes through the full guard.
+        let policy = if master_minted {
+            InternalAddrs::AllowOwnNetwork
+        } else {
+            InternalAddrs::Refuse
+        };
+        let resolve_pins = resolve_url_pins(&base, policy).await.map_err(|e| {
             tracing::warn!(error = %e, "import-from-url SSRF guard rejected base URL");
             RpcError::Validation {
                 message: "import URL points at a disallowed (internal) address".into(),
@@ -17012,70 +17206,20 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     .await;
             let _ = tokio::fs::set_permissions(&staging, p700).await;
         }
-        let manifest_path = staging.join("manifest.json");
-        let archive_path = staging.join("archive.tar.gz");
-
-        let manifest_url = format!("{base}/manifest.json?t={token_q}");
-        let archive_url = format!("{base}/archive.tar.gz?t={token_q}");
-
-        // Per-node cap on the archive download (default 64 GB). The archive can
-        // legitimately be tens of GB; the cap only stops a runaway upstream from
-        // filling /var/lib.
-        let max_archive_bytes =
-            read_migration_max_download_bytes(self.agent_config_path.as_deref());
-
-        // Download manifest first — small file, fail fast on bad
-        // signature / wrong URL before we burn time on the archive. The manifest
-        // is JSON (KBs); cap it tight so a bogus URL can't stream GBs here.
-        curl_to_file(
-            &manifest_url,
-            &manifest_path,
-            &resolve_pins,
-            64 * 1024 * 1024,
-            false,
-        )
-        .await?;
-
-        // CLONE OVERRIDES: when the caller passed `override_domain`
-        // (the typical `hosting clone` flow), rewrite the manifest
-        // on disk BEFORE the downstream importer reads it. The
-        // archive itself is unchanged — the importer creates a new
-        // hosting under the new domain and untars the same files +
-        // DB dump into it. The archive_sha256 in the manifest is
-        // preserved (it's the archive's checksum, not the
-        // manifest's), so the integrity check still passes.
-        if let Some(ref new_dom) = override_domain {
-            if let Err(e) =
-                rewrite_manifest_domain(&manifest_path, new_dom, &override_aliases).await
-            {
-                // Wipe staging before bailing — manifest rewrite is
-                // pre-archive, so we haven't burned the GB yet.
-                let _ = tokio::fs::remove_dir_all(&staging).await;
-                return Err(e);
-            }
-        }
-
-        // Then the archive — can be many GB. curl streams to disk
-        // directly so RSS stays flat.
-        curl_to_file(
-            &archive_url,
-            &archive_path,
-            &resolve_pins,
-            max_archive_bytes,
-            true,
-        )
-        .await?;
-
-        // Delegate to the existing path-based importer. It re-reads
-        // the SHA from disk and refuses on mismatch — that doubles
-        // as our integrity check after the HTTP transfer.
+        // Everything from here runs inside one block so EVERY exit — a
+        // timed-out or refused download included — wipes staging. The early
+        // `?` returns used to skip the cleanup and leave partial archives of
+        // plaintext site data in migration-incoming for good.
         let outcome = self
-            .hosting_import(manifest_path.display().to_string())
+            .import_from_url_staged(
+                &staging,
+                &base,
+                &token_q,
+                &resolve_pins,
+                override_domain.as_deref(),
+                &override_aliases,
+            )
             .await;
-
-        // Always wipe staging after import (success OR failure) to
-        // avoid /var/lib/hyperion/migration-incoming growing
-        // unbounded.
         let _ = tokio::fs::remove_dir_all(&staging).await;
 
         let result = outcome?;
@@ -17091,6 +17235,86 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         )
         .await;
         Ok(result)
+    }
+
+    /// The download + import half of [`Self::hosting_import_from_url`],
+    /// writing only under `staging` (which the caller always removes).
+    async fn import_from_url_staged(
+        &self,
+        staging: &std::path::Path,
+        base: &str,
+        token_q: &str,
+        resolve_pins: &[String],
+        override_domain: Option<&str>,
+        override_aliases: &[String],
+    ) -> Result<hyperion_types::HostingImportResult, RpcError> {
+        let manifest_path = staging.join("manifest.json");
+        let archive_path = staging.join("archive.tar.gz");
+        let dump_file = hyperion_types::HostingMigrationManifest::DB_DUMP_FILE;
+
+        // Per-node cap on each big download (default 64 GB). The archive can
+        // legitimately be tens of GB; the cap only stops a runaway upstream
+        // from filling /var/lib.
+        let max_archive_bytes =
+            read_migration_max_download_bytes(self.agent_config_path.as_deref());
+
+        // Download manifest first — small file, fail fast on bad
+        // signature / wrong URL before we burn time on the archive. The manifest
+        // is JSON (KBs); cap it tight so a bogus URL can't stream GBs here.
+        curl_to_file(
+            &format!("{base}/manifest.json?t={token_q}"),
+            &manifest_path,
+            resolve_pins,
+            64 * 1024 * 1024,
+            false,
+        )
+        .await?;
+
+        // CLONE OVERRIDES: when the caller passed `override_domain`
+        // (the typical `hosting clone` flow), rewrite the manifest
+        // on disk BEFORE the downstream importer reads it. The
+        // archive itself is unchanged — the importer creates a new
+        // hosting under the new domain and untars the same files +
+        // DB dump into it. The archive_sha256 in the manifest is
+        // preserved (it's the archive's checksum, not the
+        // manifest's), so the integrity check still passes.
+        if let Some(new_dom) = override_domain {
+            rewrite_manifest_domain(&manifest_path, new_dom, override_aliases).await?;
+        }
+        let has_dump = tokio::fs::read(&manifest_path)
+            .await
+            .ok()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+            .is_some_and(|v| v.get("db_dump_sha256").is_some_and(|d| d.is_string()));
+
+        // Then the archive — can be many GB. curl streams to disk
+        // directly so RSS stays flat.
+        curl_to_file(
+            &format!("{base}/archive.tar.gz?t={token_q}"),
+            &archive_path,
+            resolve_pins,
+            max_archive_bytes,
+            true,
+        )
+        .await?;
+        // And the database dump beside it, under the name `hosting_import`
+        // (via backup_restore) looks for.
+        if has_dump {
+            curl_to_file(
+                &format!("{base}/{dump_file}?t={token_q}"),
+                &staging.join(dump_file),
+                resolve_pins,
+                max_archive_bytes,
+                true,
+            )
+            .await?;
+        }
+
+        // Delegate to the existing path-based importer. It re-reads
+        // the SHA from disk and refuses on mismatch — that doubles
+        // as our integrity check after the HTTP transfer.
+        self.hosting_import(manifest_path.display().to_string())
+            .await
     }
 
     /// Stable node identifier for this agent. Today we use the
@@ -32905,15 +33129,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 error = %e,
                 "restore-as-new: restore failed — rolling back new hosting"
             );
-            let _ = self
-                .delete(
-                    HostingSelector::Id(created.id.clone()),
-                    DeleteOpts {
-                        keep_user: false,
-                        keep_database: false,
-                    },
-                )
-                .await;
+            self.roll_back_created(&created.id).await;
             return Err(e);
         }
 
@@ -33158,15 +33374,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             )
             .await
         {
-            let _ = self
-                .delete(
-                    HostingSelector::Id(created.id.clone()),
-                    DeleteOpts {
-                        keep_user: false,
-                        keep_database: false,
-                    },
-                )
-                .await;
+            self.roll_back_created(&created.id).await;
             return Err(e);
         }
         let staging = self.get(HostingSelector::Id(created.id.clone())).await?;
@@ -39105,14 +39313,44 @@ async fn http_post_json(url: &str, json_body: &str) -> Result<(), String> {
 /// pinned to the validated address (defeats DNS rebinding). SSRF guard for
 /// operator-supplied outbound URLs (e.g. alert webhooks).
 async fn ssrf_guard_resolve(url: &str) -> Result<Vec<String>, String> {
-    resolve_url_pins(url, true).await
+    resolve_url_pins(url, InternalAddrs::Refuse).await
 }
 
-/// [`ssrf_guard_resolve`] with the internal-address refusal optional. The
+/// Which internal addresses [`resolve_url_pins`] lets through.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum InternalAddrs {
+    /// None — every operator- or user-supplied URL.
+    Refuse,
+    /// Loopback and private networks (RFC1918, CGNAT, IPv6 ULA) — and only
+    /// for a URL the master minted to its own bundle endpoint. Link-local
+    /// (cloud metadata), unspecified, broadcast and documentation ranges
+    /// stay refused.
+    AllowOwnNetwork,
+}
+
+/// True for the addresses a master can legitimately be reached on from its
+/// own cluster: itself (127.0.0.0/8, ::1) or a private network.
+fn is_own_network_ip(ip: &std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            v4.is_loopback()
+                || v4.is_private()
+                || (v4.octets()[0] == 100 && (64..=127).contains(&v4.octets()[1]))
+        }
+        std::net::IpAddr::V6(v6) => {
+            v6.is_loopback()
+                || (v6.segments()[0] & 0xfe00) == 0xfc00
+                || v6
+                    .to_ipv4_mapped()
+                    .is_some_and(|m| is_own_network_ip(&std::net::IpAddr::V4(m)))
+        }
+    }
+}
+
+/// [`ssrf_guard_resolve`] with a choice of [`InternalAddrs`] policy. The
 /// scheme check, the single resolution and the `--resolve` pins stay on
-/// either way; only a URL the master minted for itself may pass
-/// `refuse_internal = false`.
-async fn resolve_url_pins(url: &str, refuse_internal: bool) -> Result<Vec<String>, String> {
+/// either way.
+async fn resolve_url_pins(url: &str, policy: InternalAddrs) -> Result<Vec<String>, String> {
     let parsed = url::Url::parse(url).map_err(|e| format!("invalid url: {e}"))?;
     match parsed.scheme() {
         "http" | "https" => {}
@@ -39134,8 +39372,9 @@ async fn resolve_url_pins(url: &str, refuse_internal: bool) -> Result<Vec<String
     if addrs.is_empty() {
         return Err(format!("{host} did not resolve"));
     }
-    for ip in addrs.iter().filter(|_| refuse_internal) {
-        if is_internal_ip(ip) {
+    for ip in &addrs {
+        let allowed = policy == InternalAddrs::AllowOwnNetwork && is_own_network_ip(ip);
+        if is_internal_ip(ip) && !allowed {
             return Err(format!(
                 "refusing outbound request to internal address {ip} ({host})"
             ));
@@ -43957,14 +44196,28 @@ mod tests {
     /// with "disallowed (internal) address". Everything else still holds.
     #[tokio::test]
     async fn master_minted_url_may_be_internal_but_keeps_scheme_check() {
-        let pins = resolve_url_pins("https://127.0.1.1:8443/api/migration/bundle/x", false)
+        let own = InternalAddrs::AllowOwnNetwork;
+        let pins = resolve_url_pins("https://127.0.1.1:8443/api/migration/bundle/x", own)
             .await
             .expect("internal allowed for a master-minted url");
         assert_eq!(pins, vec!["127.0.1.1:8443:127.0.1.1".to_string()]);
-        assert!(resolve_url_pins("https://127.0.1.1:8443/x", true)
+        assert!(resolve_url_pins("https://10.0.0.5:8443/x", own)
             .await
-            .is_err());
-        assert!(resolve_url_pins("file:///etc/passwd", false).await.is_err());
+            .is_ok());
+        assert!(
+            resolve_url_pins("https://127.0.1.1:8443/x", InternalAddrs::Refuse)
+                .await
+                .is_err()
+        );
+        // The host comes from a Host header: metadata and friends stay out.
+        for bad in [
+            "http://169.254.169.254/latest",
+            "http://0.0.0.0/x",
+            "http://[fe80::1]/x",
+            "file:///etc/passwd",
+        ] {
+            assert!(resolve_url_pins(bad, own).await.is_err(), "{bad}");
+        }
     }
 
     // ============================================================
@@ -49033,9 +49286,10 @@ mod tests {
         let mig_a = root.join("mig_aaa");
         let mig_b = root.join("mig_bbb");
         let bundle_dir = root.join("bundle-01ABC"); // panel-import staging dir
+        let inc_dir = root.join("inc_01ABC"); // import-from-url download staging
         let other = root.join("keepme");
         let plain_file = root.join("README");
-        for d in [&mig_a, &mig_b, &bundle_dir, &other] {
+        for d in [&mig_a, &mig_b, &bundle_dir, &inc_dir, &other] {
             tokio::fs::create_dir_all(d).await.unwrap();
             tokio::fs::write(d.join("archive.tar.gz"), b"x")
                 .await
@@ -49056,8 +49310,9 @@ mod tests {
         let n = prune_migration_bundle_dir(root, std::time::Duration::from_millis(0))
             .await
             .unwrap();
-        // 2 mig_* dirs + 1 bundle-* dir + 1 bundle-*.tar file.
-        assert_eq!(n, 4, "all mig_*/bundle-* artifacts should be removed");
+        // 2 mig_* dirs + 1 bundle-* dir + 1 inc_* dir + 1 bundle-*.tar file.
+        assert_eq!(n, 5, "all mig_*/bundle-*/inc_* artifacts should be removed");
+        assert!(!inc_dir.exists(), "abandoned import staging is swept");
         assert!(!mig_a.exists());
         assert!(!mig_b.exists());
         assert!(!bundle_dir.exists(), "bundle-* staging dirs are swept");
