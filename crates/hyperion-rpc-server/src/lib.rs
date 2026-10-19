@@ -2964,6 +2964,7 @@ mod tests {
                 restored_bytes: 0,
                 state: "ok".into(),
                 message: "mock".into(),
+                carry_report: Vec::new(),
             })
         }
         async fn hosting_import_from_url(
@@ -2980,6 +2981,7 @@ mod tests {
                 restored_bytes: 0,
                 state: "ok".into(),
                 message: "mock".into(),
+                carry_report: Vec::new(),
             })
         }
         async fn hosting_import_local_bundle(
@@ -2994,6 +2996,7 @@ mod tests {
                 restored_bytes: 0,
                 state: "ok".into(),
                 message: "mock".into(),
+                carry_report: Vec::new(),
             })
         }
         async fn email_log_list(

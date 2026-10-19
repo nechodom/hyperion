@@ -257,9 +257,13 @@ pub async fn post_import_from_url(
                             &format!("Imported {} — open it from Hostings", r.domain),
                             100,
                             &format!(
-                                "new_hosting_id={} restored_bytes={}\n",
+                                "new_hosting_id={} restored_bytes={}\n{}",
                                 r.new_hosting_id.as_str(),
-                                r.restored_bytes
+                                r.restored_bytes,
+                                r.carry_report
+                                    .iter()
+                                    .map(|l| format!("{l}\n"))
+                                    .collect::<String>()
                             ),
                         )
                         .await;

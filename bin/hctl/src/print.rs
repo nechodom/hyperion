@@ -1780,6 +1780,9 @@ pub fn print_pretty(resp: &Response) {
             println!("  bytes  : {}", r.restored_bytes);
             println!("  state  : {}", r.state);
             println!("  note   : {}", r.message);
+            for line in &r.carry_report {
+                println!("  carry  : {line}");
+            }
         }
         Response::HostingImport(r) | Response::HostingImportLocalBundle(r) => {
             println!("imported hosting {}", r.domain);
@@ -1787,6 +1790,9 @@ pub fn print_pretty(resp: &Response) {
             println!("  bytes  : {}", r.restored_bytes);
             println!("  state  : {}", r.state);
             println!("  note   : {}", r.message);
+            for line in &r.carry_report {
+                println!("  carry  : {line}");
+            }
         }
         Response::WpAssetUpload { id, deduped } => {
             if *deduped {

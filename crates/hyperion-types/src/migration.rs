@@ -123,6 +123,179 @@ pub struct HostingMigrationManifest {
     /// from this to `domain`.
     #[serde(default)]
     pub renamed_from: Option<String>,
+    /// The source site's tree (`<home>/<domain>`, the parent of htdocs) and
+    /// its account's home. The importer rewrites crontab lines naming them
+    /// to the new site's place. Empty in older bundles: cron then travels
+    /// unchanged, as it always did.
+    #[serde(default)]
+    pub source_tree: String,
+    #[serde(default)]
+    pub source_home: String,
+    /// Everything about the site beyond what `create` takes: limits, quota,
+    /// vhost options, schedules, plans. `None` = a bundle from before these
+    /// travelled; the importer says so in its report instead of implying it
+    /// carried them.
+    #[serde(default)]
+    pub settings: Option<HostingCarriedSettings>,
+}
+
+/// Per-site settings captured at export and re-applied by the importer.
+///
+/// What travels, and on which operation, is decided field by field (see the
+/// importer's `apply_carried_settings`): a Move carries everything below; a
+/// Copy is a NEW site, so it takes the technical settings but not what the
+/// customer pays for or is promised (billing, care plans, expiry, uptime
+/// alerts). Secrets never travel — the target makes its own (see
+/// `not_carried`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct HostingCarriedSettings {
+    /// PHP-FPM and resource limits (`hosting_limits`).
+    #[serde(default)]
+    pub limits: Option<crate::HostingLimits>,
+    /// Disk/memory/bandwidth caps and the overage action.
+    #[serde(default)]
+    pub quota: Option<crate::HostingQuotaView>,
+    /// nginx-side options: HTTPS/HSTS, redirects, cache, WAF level and
+    /// pins, OWASP CRS, noindex, blocked bots/countries, raw snippet, …
+    #[serde(default)]
+    pub vhost_options: Option<crate::VhostOptions>,
+    /// bcrypt hash of the HTTP basic-auth password, so a protected site
+    /// stays protected with the password its visitors already have. A hash,
+    /// not the password: the bundle already holds every WordPress password
+    /// hash in its database dump.
+    #[serde(default)]
+    pub basic_auth_hash: Option<String>,
+    #[serde(default)]
+    pub wp_debug: Option<CarriedWpDebug>,
+    /// The source had the Redis object cache on. The target provisions its
+    /// own ACL user, database number and password.
+    #[serde(default)]
+    pub redis_enabled: bool,
+    /// Allow-listed `hosting_kv` configuration (backup schedule, PHP memory
+    /// automation, WordPress update policy, protection switches, …). State
+    /// (last-run stamps, log positions, scan results) and secrets never get
+    /// in here — see the exporter's allow-list.
+    #[serde(default)]
+    pub kv: std::collections::BTreeMap<String, String>,
+    /// Key-only SFTP was on, and the public keys from the account's
+    /// `authorized_keys`. Public keys are not secrets; the person who could
+    /// reach the site still can.
+    #[serde(default)]
+    pub sftp_enabled: bool,
+    #[serde(default)]
+    pub sftp_keys: Vec<String>,
+    /// Extra FTP logins (name part + the directory they are confined to).
+    /// Recreated with a fresh random password nobody knows: the operator
+    /// resets each one to hand it out. Passwords never travel.
+    #[serde(default)]
+    pub ftp_logins: Vec<CarriedFtpLogin>,
+    /// Renewal date, owner address, grace period. Move only.
+    #[serde(default)]
+    pub expiry: Option<crate::HostingExpiry>,
+    /// Uptime monitor settings. Move only — a copy must not page anyone.
+    #[serde(default)]
+    pub monitor: Option<CarriedMonitor>,
+    /// Profile link and price with its billing clock. Move only — a copy
+    /// billed like its original would charge the customer twice.
+    #[serde(default)]
+    pub billing: Option<CarriedBilling>,
+    /// Care plans the site holds (active, including ones waiting for their
+    /// start date). Move only.
+    #[serde(default)]
+    pub care_plans: Vec<CarriedCarePlan>,
+    /// Things the source has that deliberately do not travel, one line
+    /// each, for the job log ("DKIM: … enable it again …").
+    #[serde(default)]
+    pub not_carried: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct CarriedWpDebug {
+    pub enabled: bool,
+    pub log: bool,
+    pub display: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct CarriedFtpLogin {
+    /// The operator-chosen part before `.<domain>`.
+    pub name: String,
+    /// Landing directory relative to the document root.
+    #[serde(default)]
+    pub path: String,
+    #[serde(default)]
+    pub label: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct CarriedMonitor {
+    pub enabled: bool,
+    pub url_path: String,
+    pub interval_secs: i64,
+    pub alert_after_fails: i64,
+    #[serde(default)]
+    pub alert_email: Option<String>,
+    #[serde(default)]
+    pub alert_slack_webhook: Option<String>,
+    #[serde(default)]
+    pub alert_webhook_url: Option<String>,
+}
+
+/// The site's `hosting_profile_apply` row.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct CarriedBilling {
+    #[serde(default)]
+    pub profile_id: Option<i64>,
+    #[serde(default)]
+    pub price_minor: Option<i64>,
+    #[serde(default)]
+    pub price_currency: Option<String>,
+    #[serde(default)]
+    pub price_interval: Option<String>,
+    #[serde(default)]
+    pub next_billing_at: Option<i64>,
+    #[serde(default)]
+    pub slack_webhook: Option<String>,
+    #[serde(default)]
+    pub alert_emails: Option<String>,
+    #[serde(default)]
+    pub applied_at: i64,
+    #[serde(default)]
+    pub price_pinned: bool,
+}
+
+/// One care-plan activation, with its snapshots. Self-contained by design
+/// (the owning node has no plan definitions), so it moves as-is.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct CarriedCarePlan {
+    #[serde(default)]
+    pub package_id: Option<i64>,
+    pub package_name: String,
+    #[serde(default)]
+    pub price_minor: Option<i64>,
+    #[serde(default)]
+    pub price_currency: Option<String>,
+    #[serde(default)]
+    pub price_interval: Option<String>,
+    pub features: crate::package::PackageFeatures,
+    #[serde(default)]
+    pub next_billing_at: Option<i64>,
+    #[serde(default)]
+    pub activated_at: i64,
+    /// What the forced features were before the plan — a cancel on the
+    /// target restores exactly what a cancel on the source would have.
+    #[serde(default)]
+    pub prior_state_json: Option<String>,
+    #[serde(default)]
+    pub letters_lang: String,
+    #[serde(default)]
+    pub check_items: String,
+    #[serde(default)]
+    pub report_omit: String,
+    #[serde(default)]
+    pub valid_from: Option<i64>,
+    #[serde(default)]
+    pub enforcement_started: bool,
 }
 
 impl HostingMigrationManifest {
@@ -148,6 +321,11 @@ pub struct HostingImportResult {
     pub restored_bytes: i64,
     pub state: String,
     pub message: String,
+    /// One line per setting the importer re-applied, could not apply, or
+    /// deliberately left behind — the Move/Copy job prints it, so "the site
+    /// moved" never silently means "the site moved without its limits".
+    #[serde(default)]
+    pub carry_report: Vec<String>,
 }
 
 #[cfg(test)]
@@ -174,6 +352,18 @@ mod tests {
             proxy_upstream_url: None,
             db_dump_sha256: Some("cafe".into()),
             renamed_from: None,
+            source_tree: "/home/example_cz/example.cz".into(),
+            source_home: "/home/example_cz".into(),
+            settings: Some(HostingCarriedSettings {
+                limits: Some(crate::HostingLimits::defaults()),
+                redis_enabled: true,
+                kv: [("backup_at".to_string(), "03:30".to_string())].into(),
+                care_plans: vec![CarriedCarePlan {
+                    package_name: "Care".into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
         };
         let json = serde_json::to_string(&m).expect("ser");
         let back: HostingMigrationManifest = serde_json::from_str(&json).expect("de");
@@ -202,14 +392,28 @@ mod tests {
             proxy_upstream_url: None,
             db_dump_sha256: None,
             renamed_from: None,
+            source_tree: String::new(),
+            source_home: String::new(),
+            settings: None,
         })
         .expect("to value");
         let obj = v.as_object_mut().expect("object");
-        obj.remove("db_dump_sha256");
-        obj.remove("renamed_from");
+        for k in [
+            "db_dump_sha256",
+            "renamed_from",
+            "source_tree",
+            "source_home",
+            "settings",
+        ] {
+            obj.remove(k);
+        }
         let back: HostingMigrationManifest = serde_json::from_value(v).expect("old shape parses");
         assert_eq!(back.db_dump_sha256, None);
         assert_eq!(back.renamed_from, None);
+        assert_eq!(
+            back.settings, None,
+            "an old bundle is told apart from an empty one"
+        );
     }
 
     #[test]

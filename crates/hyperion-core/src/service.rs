@@ -1493,6 +1493,246 @@ async fn rewrite_manifest_domain(
     Ok(())
 }
 
+/// System-user names an import may use for a site, best first: the name
+/// `create` would derive, then `<base>_2` … `<base>_99`, each trimmed so it
+/// still fits the 32-character limit.
+///
+/// The derived name is not unique: `my-shop.cz` and `my.shop.cz` both become
+/// `my_shop_cz`, and so does a Copy of a site under a name that folds the same
+/// way. `create` reuses an existing account by design (several sites may share
+/// one), so an import that let it derive the name could land a copy ON the
+/// source's account — same uid, same home, same crontab, each site able to
+/// rewrite the other's files.
+fn import_user_candidates(domain: &str) -> Result<Vec<SystemUserName>, RpcError> {
+    let base = SystemUserName::derive_from_domain(domain)?;
+    let mut out = vec![base.clone()];
+    for n in 2..=99u32 {
+        let suffix = format!("_{n}");
+        let mut stem = base.as_str().to_string();
+        stem.truncate(32 - suffix.len());
+        let stem = stem.trim_end_matches('_');
+        if let Ok(name) = SystemUserName::parse(&format!("{stem}{suffix}")) {
+            if !out.contains(&name) {
+                out.push(name);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Drop the raw nginx snippet from a downloaded manifest's carried vhost
+/// options, leaving a note for the import report when there was one. See
+/// the caller for why only pasted-URL imports go through this.
+async fn strip_raw_nginx_snippet(manifest_path: &std::path::Path) -> Result<(), RpcError> {
+    let raw = tokio::fs::read(manifest_path)
+        .await
+        .map_err(|e| RpcError::Internal_with(format!("read manifest: {e}")))?;
+    let mut json: serde_json::Value =
+        serde_json::from_slice(&raw).map_err(|e| RpcError::Validation {
+            message: format!("manifest is not valid JSON: {e}"),
+        })?;
+    if !strip_raw_nginx_snippet_json(&mut json) {
+        return Ok(());
+    }
+    let bytes = serde_json::to_vec_pretty(&json)
+        .map_err(|e| RpcError::Internal_with(format!("re-serialize manifest: {e}")))?;
+    tokio::fs::write(manifest_path, bytes)
+        .await
+        .map_err(|e| RpcError::Internal_with(format!("write manifest: {e}")))
+}
+
+/// The JSON half of [`strip_raw_nginx_snippet`]. True when it changed
+/// something.
+fn strip_raw_nginx_snippet_json(json: &mut serde_json::Value) -> bool {
+    let Some(settings) = json.get_mut("settings").and_then(|v| v.as_object_mut()) else {
+        return false;
+    };
+    let had = settings
+        .get("vhost_options")
+        .and_then(|v| v.get("custom_nginx_snippet"))
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| !s.trim().is_empty());
+    if !had {
+        return false;
+    }
+    if let Some(v) = settings
+        .get_mut("vhost_options")
+        .and_then(|v| v.as_object_mut())
+    {
+        v.insert(
+            "custom_nginx_snippet".into(),
+            serde_json::Value::String(String::new()),
+        );
+    }
+    let note = serde_json::Value::String(
+        "Custom nginx snippet: dropped — it came from another installation by URL; review it \
+         there and add it again by hand if it is wanted."
+            .into(),
+    );
+    match settings
+        .get_mut("not_carried")
+        .and_then(|v| v.as_array_mut())
+    {
+        Some(list) => list.push(note),
+        None => {
+            settings.insert("not_carried".into(), serde_json::Value::Array(vec![note]));
+        }
+    }
+    true
+}
+
+/// Which imports a carried `hosting_kv` key applies to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CarryScope {
+    /// Move and Copy: how the site is run.
+    Always,
+    /// Move only: what the customer is promised or billed for, and the
+    /// bookkeeping of that promise. A Copy is a new site with none of it.
+    MoveOnly,
+}
+
+/// The allow-list of `hosting_kv` keys a migration bundle carries. `None` =
+/// never: run state (last-run stamps, log positions, scan results, warning
+/// de-dup markers) is the source node's own bookkeeping, and secrets (DKIM
+/// record, git deploy key and webhook secret) are made fresh on the target.
+/// An allow-list rather than a deny-list so a key added later stays home
+/// until someone decides it should travel.
+fn carried_kv_scope(key: &str) -> Option<CarryScope> {
+    use hyperion_types::phpmem;
+    const ALWAYS: &[&str] = &[
+        BACKUP_KV_CADENCE,
+        BACKUP_KV_INTERVAL_DAYS,
+        BACKUP_KV_AT,
+        BACKUP_KV_KEEP_DAYS,
+        BACKUP_KV_KEEP_LAST,
+        BACKUP_KV_TARGET,
+        phpmem::KV_ENABLED,
+        phpmem::KV_MAX_MB,
+        // The floor and raise history: limits travel with the raised value,
+        // and without the floor the automation would adopt it as the
+        // operator's own and never come back down.
+        phpmem::KV_STATE,
+        INTEGRITY_ENABLED_KV_KEY,
+        PERM_AUTOHEAL_KV_KEY,
+        WP_MAIL_AUTOFIX_KV_KEY,
+        WP_MAIL_OVERRIDE_KV_KEY,
+        WP_MAIL_FROM_KV_KEY,
+        // Matches the mail module restored with the files.
+        WP_MAIL_FORCE_LOCAL_KV_KEY,
+        FAIL2BAN_HTTP_KV_KEY,
+        WAF_AUTOBAN_KV_KEY,
+        "regguard_enabled",
+        "wp_auto_update",
+        "wp_update_skips",
+        // = HostingService::LETTER_LANG_KV_KEY (checked in a test).
+        "letters.lang",
+        // Git deploy settings. NOT the key, token or webhook secret (fresh
+        // on the target), and NOT the webhook switch: on without a secret
+        // would be a deploy trigger anyone can pull.
+        "gitsync_repo",
+        "gitsync_branch",
+        "gitsync_subdir",
+        "gitsync_auth",
+    ];
+    const MOVE_ONLY: &[&str] = &[
+        CARE_CHECKS_KV_KEY,
+        CARE_REPORT_RECIPIENTS_KV_KEY,
+        // Which period the last care report covered: without it the target
+        // reports a period the customer already has, or skips one.
+        CARE_REPORT_KV_PERIOD_END,
+        // The "new site" Slack announcement already went out for this one.
+        "created_announced",
+    ];
+    if ALWAYS.contains(&key) {
+        Some(CarryScope::Always)
+    } else if MOVE_ONLY.contains(&key) {
+        Some(CarryScope::MoveOnly)
+    } else {
+        None
+    }
+}
+
+/// Replace every occurrence of the path `from` in `line` with `to`, but only
+/// where `from` stands as a whole path: not preceded by a name character or
+/// `/`, and not followed by a name character. `/home/a/x.cz` must not match
+/// inside `/home/a/x.cz.old` or `/srv/home/a/x.cz`. With `subpaths` false a
+/// following `/` does not match either — the path itself, never what is
+/// under it.
+fn replace_bounded_path(line: &str, from: &str, to: &str, subpaths: bool) -> String {
+    let is_name = |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-');
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
+    while let Some(pos) = rest.find(from) {
+        let before = rest[..pos].chars().next_back();
+        let after = rest[pos + from.len()..].chars().next();
+        let bounded = !before.is_some_and(|c| is_name(c) || c == '/')
+            && !after.is_some_and(|c| is_name(c) || (!subpaths && c == '/'));
+        out.push_str(&rest[..pos]);
+        out.push_str(if bounded { to } else { from });
+        rest = &rest[pos + from.len()..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Point a carried crontab at the site's new place.
+///
+/// `crontab -u <user> -l` is the whole ACCOUNT's crontab, and its lines name
+/// absolute paths: `/home/<srcuser>/<srcdomain>/htdocs/wp-cron.php`. Restored
+/// as-is on a Copy, every job kept running against the SOURCE tree under the
+/// copy's account — its `wp cron` against production's files and database.
+///
+/// The source site's tree becomes the new tree and the bare source home the
+/// new home. A line that still names something else under the source home —
+/// another site that shared the source account — is commented out and
+/// reported: it belongs to a site that did not travel, and run here it would
+/// act on that site (on the same node) or on nothing (on another).
+///
+/// Returns the new body and one note per disabled line.
+fn rewrite_crontab_paths(
+    body: &str,
+    from_tree: &str,
+    to_tree: &str,
+    from_home: &str,
+    to_home: &str,
+) -> (String, Vec<String>) {
+    let from_tree = from_tree.trim_end_matches('/');
+    let to_tree = to_tree.trim_end_matches('/');
+    let from_home = from_home.trim_end_matches('/');
+    let to_home = to_home.trim_end_matches('/');
+    let mut out = String::with_capacity(body.len());
+    let mut notes = Vec::new();
+    for line in body.lines() {
+        if line.trim_start().starts_with('#') || from_tree.is_empty() {
+            out.push_str(line);
+            out.push('\n');
+            continue;
+        }
+        let moved = replace_bounded_path(line, from_tree, to_tree, true);
+        let moved = if from_home.is_empty() {
+            moved
+        } else {
+            replace_bounded_path(&moved, from_home, to_home, false)
+        };
+        // Anything still under the source home, once the new tree's own
+        // paths are set aside, belongs to a site that stayed behind.
+        let foreign = !from_home.is_empty()
+            && replace_bounded_path(&moved, to_tree, "", true).contains(&format!("{from_home}/"));
+        if foreign {
+            notes.push(format!(
+                "cron line disabled (it points at another site of the source account): {}",
+                line.trim()
+            ));
+            out.push_str("# hyperion: disabled on import, points at another site: ");
+            out.push_str(line);
+        } else {
+            out.push_str(&moved);
+        }
+        out.push('\n');
+    }
+    (out, notes)
+}
+
 async fn curl_to_file(
     url: &str,
     dest: &std::path::Path,
@@ -5227,14 +5467,15 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(updated)
     }
 
-    pub async fn set_vhost_options(
+    /// Validate and normalise vhost options before they are stored and
+    /// rendered: every value here ends up in nginx config, so anything
+    /// outside its closed set or bounds is refused by name. Shared by the
+    /// panel save and the migration importer — a bundle is input too.
+    async fn normalize_vhost_options(
         &self,
-        sel: HostingSelector,
+        detail: &HostingDetail,
         mut options: hyperion_types::VhostOptions,
-        basic_auth_password: Option<String>,
     ) -> Result<hyperion_types::VhostOptions, RpcError> {
-        let detail = self.get(sel).await?;
-
         // ─── Validation ─────────────────────────────────────────────
         // HSTS bounds. 0 = disabled; anything above ~2y is silly.
         if options.hsts_max_age < 0 || options.hsts_max_age > 63_072_000 {
@@ -5410,6 +5651,19 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 }
             }
         }
+        Ok(options)
+    }
+
+    pub async fn set_vhost_options(
+        &self,
+        sel: HostingSelector,
+        options: hyperion_types::VhostOptions,
+        basic_auth_password: Option<String>,
+    ) -> Result<hyperion_types::VhostOptions, RpcError> {
+        let detail = self.get(sel).await?;
+
+        let mut options = self.normalize_vhost_options(&detail, options).await?;
+        let stored_crs = detail.vhost_options.crs_settings();
         // Whether the node's need for the http-level rule set may change.
         let crs_toggled = (options.crs_settings().mode == hyperion_types::crs::CrsMode::Off)
             != (stored_crs.mode == hyperion_types::crs::CrsMode::Off);
@@ -16687,6 +16941,180 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok((b64, total, eof))
     }
 
+    /// Everything about a site beyond what `create` takes, for the bundle.
+    ///
+    /// Each read is best-effort: a setting that cannot be read is left out
+    /// (and the importer reports "not set" for it) rather than failing an
+    /// export whose files and database are fine.
+    pub(crate) async fn collect_carried_settings(
+        &self,
+        detail: &HostingDetail,
+    ) -> hyperion_types::migration::HostingCarriedSettings {
+        use hyperion_types::migration as m;
+        let id = detail.id.as_str();
+        let mut out = m::HostingCarriedSettings {
+            vhost_options: Some(detail.vhost_options.clone()),
+            redis_enabled: detail.wp_extras.redis_enabled,
+            ..Default::default()
+        };
+        if let Ok(Some(row)) = hyperion_state::limits::get(&self.pool, &detail.id).await {
+            out.limits = Some(row_to_limits(row));
+        }
+        if let Ok(row) = hyperion_state::hosting_quotas::read(&self.pool, id).await {
+            out.quota = Some(hyperion_types::HostingQuotaView {
+                hosting_id: row.hosting_id,
+                disk_soft_kib: row.disk_soft_kib,
+                disk_hard_kib: row.disk_hard_kib,
+                mem_limit_mib: row.mem_limit_mib,
+                bw_soft_mib: row.bw_soft_mib,
+                bw_hard_mib: row.bw_hard_mib,
+                applied_at: None,
+                last_error: None,
+                updated_at: row.updated_at,
+                exceed_action: self.hosting_quota_action(id).await.as_str().to_string(),
+            });
+        }
+        if detail.vhost_options.basic_auth_set {
+            out.basic_auth_hash =
+                hyperion_state::hostings::get_basic_auth_hash(&self.pool, &detail.id)
+                    .await
+                    .ok()
+                    .filter(|h| !h.is_empty());
+        }
+        let wp = &detail.wp_extras;
+        if wp.wp_debug_enabled {
+            out.wp_debug = Some(m::CarriedWpDebug {
+                enabled: true,
+                log: wp.wp_debug_log,
+                display: wp.wp_debug_display,
+            });
+        }
+        let kv = hyperion_state::hosting_kv::list(&self.pool, id)
+            .await
+            .unwrap_or_default();
+        let kv_get = |k: &str| {
+            kv.iter()
+                .find(|(key, _)| key == k)
+                .map(|(_, v)| v.as_str())
+                .unwrap_or("")
+        };
+        out.kv = kv
+            .iter()
+            .filter(|(k, _)| carried_kv_scope(k).is_some())
+            .cloned()
+            .collect();
+        if let Ok(st) = self
+            .sftp_status(HostingSelector::Id(detail.id.clone()))
+            .await
+        {
+            if st.enabled || !st.keys.is_empty() {
+                out.sftp_enabled = st.enabled;
+                out.sftp_keys = st.keys;
+            }
+        }
+        if let Ok(rows) =
+            hyperion_state::ftp_accounts::list_for_hosting(&self.pool, &detail.id).await
+        {
+            let root = detail.root_dir.trim_end_matches('/');
+            out.ftp_logins = rows
+                .into_iter()
+                .map(|r| m::CarriedFtpLogin {
+                    name: r.login.split('.').next().unwrap_or_default().to_string(),
+                    path: r
+                        .local_root
+                        .strip_prefix(root)
+                        .unwrap_or("")
+                        .trim_matches('/')
+                        .to_string(),
+                    label: r.label,
+                })
+                .collect();
+        }
+        if let Ok(e) = self
+            .get_expiry(HostingSelector::Id(detail.id.clone()))
+            .await
+        {
+            out.expiry = Some(e);
+        }
+        if let Ok(Some(mc)) = hyperion_state::monitors::get(&self.pool, &detail.id).await {
+            out.monitor = Some(m::CarriedMonitor {
+                enabled: mc.enabled,
+                url_path: mc.url_path,
+                interval_secs: mc.interval_secs,
+                alert_after_fails: mc.alert_after_fails,
+                alert_email: mc.alert_email,
+                alert_slack_webhook: mc.alert_slack_webhook,
+                alert_webhook_url: mc.alert_webhook_url,
+            });
+        }
+        if let Ok(Some(a)) = profiles::get_apply(&self.pool, &detail.id).await {
+            out.billing = Some(m::CarriedBilling {
+                profile_id: a.profile_id,
+                price_minor: a.price_minor,
+                price_currency: a.price_currency,
+                price_interval: a.price_interval,
+                next_billing_at: a.next_billing_at,
+                slack_webhook: a.slack_webhook,
+                alert_emails: a.alert_emails,
+                applied_at: a.applied_at,
+                price_pinned: a.price_pinned,
+            });
+        }
+        if let Ok(rows) = hyperion_state::packages::list_for_hosting(&self.pool, &detail.id).await {
+            out.care_plans = rows
+                .into_iter()
+                .map(|r| m::CarriedCarePlan {
+                    package_id: r.package_id,
+                    package_name: r.package_name,
+                    price_minor: r.price_minor,
+                    price_currency: r.price_currency,
+                    price_interval: r.price_interval,
+                    features: r.features,
+                    next_billing_at: r.next_billing_at,
+                    activated_at: r.activated_at,
+                    prior_state_json: r.prior_state_json,
+                    letters_lang: r.letters_lang,
+                    check_items: r.check_items,
+                    report_omit: r.report_omit,
+                    valid_from: r.valid_from,
+                    enforcement_started: r.enforcement_started,
+                })
+                .collect();
+        }
+
+        // What exists here and deliberately stays: secrets the target makes
+        // its own, and things that belong to this node.
+        if self.dkim_kv_get(id).await.enabled {
+            out.not_carried.push(
+                "DKIM signing: the private key never leaves its node. Turn DKIM on for the \
+                 new site and publish the new TXT record it shows."
+                    .into(),
+            );
+        }
+        let pat_set = tokio::fs::try_exists(gitsync_pat_path(id))
+            .await
+            .unwrap_or(false);
+        if !kv_get("gitsync_pubkey").is_empty()
+            || !kv_get("gitsync_webhook_secret").is_empty()
+            || pat_set
+        {
+            out.not_carried.push(
+                "Git deploy: the repository, branch and folder came along; the deploy key, \
+                 access token and webhook secret did not. Generate a new key (or enter the \
+                 token) and, if you used the webhook, turn it on again and update it at the \
+                 Git host."
+                    .into(),
+            );
+        }
+        if !kv_get("staging_domain").is_empty() {
+            out.not_carried.push(format!(
+                "Staging copy {}: it stays where it is, as its own site.",
+                kv_get("staging_domain")
+            ));
+        }
+        out
+    }
+
     pub async fn hosting_export(
         &self,
         sel: HostingSelector,
@@ -16819,6 +17247,12 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             proxy_upstream_url: detail.proxy_upstream_url.clone(),
             db_dump_sha256,
             renamed_from: None,
+            source_tree: std::path::Path::new(&detail.root_dir)
+                .parent()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default(),
+            source_home: self.home_dir_for(&detail.system_user),
+            settings: Some(self.collect_carried_settings(&detail).await),
         };
         let manifest_path = bundle_dir.join("manifest.json");
         let manifest_json = serde_json::to_string_pretty(&manifest)
@@ -16858,6 +17292,530 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             bundle_token: String::new(),
             token_expires_at: 0,
         })
+    }
+
+    /// A system user no site on this node has and no account in passwd
+    /// holds, for an imported site. See [`import_user_candidates`] for why
+    /// an import may not share: the account would be the source's (a Copy
+    /// on the same node) or an unrelated site's (a Move or a Copy whose name
+    /// folds onto one already here).
+    async fn free_import_user(&self, domain: &str) -> Result<SystemUserName, RpcError> {
+        for name in import_user_candidates(domain)? {
+            let known = system_users::get_by_name(&self.pool, name.as_str())
+                .await
+                .map_err(|e| RpcError::Internal_with(format!("system user lookup: {e}")))?;
+            if known.is_some() {
+                continue;
+            }
+            // passwd too: an account Hyperion never recorded (a leftover, an
+            // extra login's namespace) would be silently adopted by `create`.
+            if matches!(
+                hyperion_adapters::users::lookup_raw(name.as_str()).await,
+                Ok(Some(_))
+            ) {
+                continue;
+            }
+            return Ok(name);
+        }
+        Err(RpcError::Conflict {
+            message: format!("no free system user name left for {domain}"),
+        })
+    }
+
+    /// Re-apply a bundle's settings to the site an import just created and
+    /// filled. `is_copy` = the bundle lands under a new name (a Copy), which
+    /// takes the technical settings but not billing, plans, expiry or
+    /// uptime alerts (see [`hyperion_types::migration::HostingCarriedSettings`]).
+    ///
+    /// Never fails: the site's files and database are already in place, and
+    /// a setting that does not take is a line in the report for the operator
+    /// to redo by hand — not a reason to throw the import away. Every line
+    /// says what happened, so "the site moved" never silently means "the
+    /// site moved without its limits".
+    pub(crate) async fn apply_carried_settings(
+        &self,
+        detail: &HostingDetail,
+        settings: Option<&hyperion_types::migration::HostingCarriedSettings>,
+        is_copy: bool,
+    ) -> Vec<String> {
+        let mut report = Vec::new();
+        let Some(s) = settings else {
+            report.push(
+                "settings NOT carried: this bundle was exported by an older Hyperion. Limits, \
+                 quota, vhost options, schedules, plans and billing must be set on the new \
+                 site by hand (or update the source and run the move again)."
+                    .into(),
+            );
+            return report;
+        };
+        let sel = || HostingSelector::Id(detail.id.clone());
+        let id = detail.id.as_str();
+        let fail = |what: &str, e: &dyn std::fmt::Display| format!("{what}: NOT carried ({e})");
+
+        // Limits before the kv: `set_limits` rebases the PHP-memory floor on
+        // a changed value, and the carried floor (php.mem_auto_state) must
+        // be what stays.
+        if let Some(limits) = s.limits.clone() {
+            report.push(match self.set_limits(sel(), limits).await {
+                Ok(l) => format!(
+                    "limits: carried (PHP memory {} MB, {} workers)",
+                    l.php_memory_mb, l.php_max_children
+                ),
+                Err(e) => fail("limits", &e),
+            });
+        }
+
+        let mut kv_done = 0usize;
+        let mut kv_skipped = Vec::new();
+        for (k, v) in &s.kv {
+            match carried_kv_scope(k) {
+                Some(CarryScope::Always) => {}
+                Some(CarryScope::MoveOnly) if !is_copy => {}
+                Some(CarryScope::MoveOnly) => {
+                    kv_skipped.push(k.as_str());
+                    continue;
+                }
+                // Not on this node's list (a newer source, a tampered
+                // manifest): leave it out rather than write unknown state.
+                None => continue,
+            }
+            match hyperion_state::hosting_kv::set(&self.pool, id, k, v, now_secs()).await {
+                Ok(()) => kv_done += 1,
+                Err(e) => report.push(fail(&format!("setting {k}"), &e)),
+            }
+        }
+        if kv_done > 0 {
+            report.push(format!(
+                "site settings carried: {kv_done} (backup schedule, PHP memory automation, \
+                 update and protection switches, …)"
+            ));
+        }
+        if !kv_skipped.is_empty() {
+            report.push(format!(
+                "not carried to the copy (they belong to the original's care service): {}",
+                kv_skipped.join(", ")
+            ));
+        }
+
+        if let Some(q) = s.quota.as_ref() {
+            let any_cap = q.disk_soft_kib > 0
+                || q.disk_hard_kib > 0
+                || q.mem_limit_mib > 0
+                || q.bw_soft_mib > 0
+                || q.bw_hard_mib > 0;
+            if any_cap || q.exceed_action == "suspend" {
+                report.push(
+                    match self
+                        .quota_set(
+                            sel(),
+                            q.disk_soft_kib,
+                            q.disk_hard_kib,
+                            q.mem_limit_mib,
+                            q.bw_soft_mib,
+                            q.bw_hard_mib,
+                            &q.exceed_action,
+                        )
+                        .await
+                    {
+                        Ok(v) => match v.last_error {
+                            Some(e) => format!(
+                                "quota: saved, but the kernel did not take the disk cap yet ({e})"
+                            ),
+                            None => format!(
+                                "quota: carried (disk hard {} MiB, on overage: {})",
+                                q.disk_hard_kib / 1024,
+                                v.exceed_action
+                            ),
+                        },
+                        Err(e) => fail("quota", &e),
+                    },
+                );
+            }
+        }
+
+        if let Some(opts) = s.vhost_options.clone() {
+            report.extend(
+                self.apply_carried_vhost(detail, opts, s.basic_auth_hash.as_deref())
+                    .await,
+            );
+        }
+
+        if let Some(d) = s.wp_debug {
+            report.push(
+                match self.set_wp_debug(sel(), d.enabled, d.log, d.display).await {
+                    Ok(_) => "WP_DEBUG: carried".into(),
+                    Err(e) => fail("WP_DEBUG", &e),
+                },
+            );
+        }
+
+        if s.redis_enabled {
+            report.push(match self.set_redis(sel(), true).await {
+                Ok(_) => {
+                    // The import parked the source's drop-in; with Redis
+                    // provisioned here it can come back.
+                    let _ = hyperion_adapters::wpcli::set_object_cache_dropin(
+                        &detail.system_user,
+                        &detail.root_dir,
+                        true,
+                    )
+                    .await;
+                    "Redis object cache: on, with new credentials on this node".into()
+                }
+                Err(e) => fail("Redis object cache", &e),
+            });
+        }
+
+        if s.sftp_enabled || !s.sftp_keys.is_empty() {
+            report.push(
+                match self
+                    .sftp_set(sel(), s.sftp_enabled, s.sftp_keys.clone())
+                    .await
+                {
+                    Ok(st) => format!(
+                        "SFTP: carried ({}, {} key(s))",
+                        if st.enabled { "on" } else { "off" },
+                        st.keys.len()
+                    ),
+                    Err(e) => fail("SFTP", &e),
+                },
+            );
+        }
+
+        for f in &s.ftp_logins {
+            report.push(
+                match self
+                    .ftp_account_create(
+                        sel(),
+                        f.name.clone(),
+                        f.path.clone(),
+                        f.label.clone(),
+                        "migration".into(),
+                    )
+                    .await
+                {
+                    // The fresh password is dropped on purpose: it is never
+                    // logged, and the operator resets the login to hand one out.
+                    Ok((login, _password)) => format!(
+                        "extra FTP login {login}: recreated with a new password — reset it \
+                         in the FTP card to hand it out"
+                    ),
+                    Err(e) => fail(&format!("extra FTP login {}", f.name), &e),
+                },
+            );
+        }
+
+        if is_copy {
+            let mut left = Vec::new();
+            if s.billing.is_some() {
+                left.push("profile and price".to_string());
+            }
+            if !s.care_plans.is_empty() {
+                left.push(format!("care plans ({})", s.care_plans.len()));
+            }
+            if s.expiry.as_ref().is_some_and(|e| e.expires_at.is_some()) {
+                left.push("renewal date".to_string());
+            }
+            if s.monitor.as_ref().is_some_and(|m| m.enabled) {
+                left.push("uptime monitor".to_string());
+            }
+            if !left.is_empty() {
+                report.push(format!(
+                    "not carried to the copy (a copy is a new site): {}",
+                    left.join(", ")
+                ));
+            }
+        } else {
+            report.extend(self.apply_carried_commercial(detail, s).await);
+        }
+
+        report.extend(s.not_carried.iter().map(|n| format!("not carried: {n}")));
+        report
+    }
+
+    /// The vhost half of [`Self::apply_carried_settings`]. Validated like a
+    /// panel save, then written to the row and rendered — not through
+    /// `set_vhost_options` itself, whose redirect-loop probe follows DNS,
+    /// which still points at the source during a move.
+    async fn apply_carried_vhost(
+        &self,
+        detail: &HostingDetail,
+        mut opts: hyperion_types::VhostOptions,
+        basic_auth_hash: Option<&str>,
+    ) -> Vec<String> {
+        use hyperion_types::crs::CrsMode;
+        let mut report = Vec::new();
+        // "www" needs www.<domain> on the site; a Copy arrives without the
+        // source's aliases, and redirecting to a name with no vhost and no
+        // certificate takes the copy down.
+        if opts.canonical_host == "www" {
+            let www = format!("www.{}", detail.domain);
+            if !detail.aliases.iter().any(|a| a == &www) {
+                opts.canonical_host.clear();
+                report.push(format!(
+                    "canonical host www: NOT carried — the new site has no alias {www}; add it, \
+                     issue the certificate, then turn the redirect on"
+                ));
+            }
+        }
+        if opts.crs_settings().mode != CrsMode::Off
+            && !self.adapters.modsec_status().await.available()
+        {
+            opts.crs_mode = CrsMode::Off.as_str().to_string();
+            report.push(
+                "OWASP Core Rule Set: NOT carried — ModSecurity is not installed on this node; \
+                 install it from the Protection card and turn the rule set on again"
+                    .into(),
+            );
+        }
+        // The same checks a panel save gets: every value lands in nginx
+        // config, and a bundle is input like any other.
+        let mut opts = match self.normalize_vhost_options(detail, opts).await {
+            Ok(o) => o,
+            Err(e) => {
+                report.push(format!(
+                    "vhost options: NOT carried — refused ({e}); the site runs with default \
+                     options, set them again in the vhost card"
+                ));
+                return report;
+            }
+        };
+        let hash = basic_auth_hash.filter(|h| !h.is_empty());
+        if opts.basic_auth_enabled {
+            match hash {
+                Some(h) => {
+                    if let Err(e) = self
+                        .adapters
+                        .nginx_write_htpasswd(detail.id.as_str(), &opts.basic_auth_user, h)
+                        .await
+                    {
+                        opts.basic_auth_enabled = false;
+                        report.push(format!(
+                            "basic auth: NOT carried ({e}) — the site is NOT password-protected; \
+                             set a password in the vhost card"
+                        ));
+                    }
+                }
+                None => {
+                    opts.basic_auth_enabled = false;
+                    report.push(
+                        "basic auth: NOT carried (no password on record) — the site is NOT \
+                         password-protected; set a password in the vhost card"
+                            .into(),
+                    );
+                }
+            }
+        }
+        opts.basic_auth_set = opts.basic_auth_enabled;
+        let stored_hash = if opts.basic_auth_enabled {
+            hash
+        } else {
+            Some("")
+        };
+        if let Err(e) = hyperion_state::hostings::set_vhost_options(
+            &self.pool,
+            &detail.id,
+            &opts,
+            stored_hash,
+            now_secs(),
+        )
+        .await
+        {
+            report.push(format!("vhost options: NOT carried ({e})"));
+            return report;
+        }
+        if opts.crs_settings().mode != CrsMode::Off {
+            if let Err(e) = self.crs_sync().await {
+                report.push(format!(
+                    "OWASP Core Rule Set: could not load the rule set ({e})"
+                ));
+            }
+        }
+        let mut rendered = detail.clone();
+        rendered.vhost_options = opts.clone();
+        match self.write_vhost_for_state(&rendered).await {
+            Ok(()) => report.push(format!(
+                "vhost options: carried (WAF {}, HTTPS redirect {}{}{})",
+                opts.effective_waf_level().as_str(),
+                if opts.force_https { "on" } else { "off" },
+                if opts.noindex { ", noindex" } else { "" },
+                if opts.basic_auth_enabled {
+                    ", basic auth"
+                } else {
+                    ""
+                },
+            )),
+            Err(e) => {
+                // nginx refused it: serve the plain vhost the import made
+                // rather than a half-applied one, and say so.
+                let _ = hyperion_state::hostings::set_vhost_options(
+                    &self.pool,
+                    &detail.id,
+                    &detail.vhost_options,
+                    Some(""),
+                    now_secs(),
+                )
+                .await;
+                let _ = self.write_vhost_for_state(detail).await;
+                let _ = self
+                    .adapters
+                    .nginx_delete_htpasswd(detail.id.as_str())
+                    .await;
+                report.push(format!(
+                    "vhost options: NOT carried — nginx refused them ({e}); the site runs \
+                     with default options, set them again in the vhost card"
+                ));
+            }
+        }
+        report
+    }
+
+    /// The Move-only half of [`Self::apply_carried_settings`]: what the
+    /// customer pays for and is promised. A Copy never gets here.
+    async fn apply_carried_commercial(
+        &self,
+        detail: &HostingDetail,
+        s: &hyperion_types::migration::HostingCarriedSettings,
+    ) -> Vec<String> {
+        let mut report = Vec::new();
+        let sel = || HostingSelector::Id(detail.id.clone());
+        let fail = |what: &str, e: &dyn std::fmt::Display| format!("{what}: NOT carried ({e})");
+
+        if let Some(e) = s.expiry.clone() {
+            if e.expires_at.is_some() || e.owner_email.is_some() || e.customer_since.is_some() {
+                report.push(match self.set_expiry(sel(), e).await {
+                    Ok(_) => "renewal date and owner address: carried".into(),
+                    Err(err) => fail("renewal date", &err),
+                });
+            }
+        }
+
+        if let Some(m) = s.monitor.clone() {
+            if m.enabled || m.alert_email.is_some() || m.alert_webhook_url.is_some() {
+                report.push(
+                    match self
+                        .monitor_set(
+                            sel(),
+                            m.enabled,
+                            Some(m.url_path),
+                            Some(m.interval_secs),
+                            Some(m.alert_after_fails),
+                            m.alert_email,
+                            m.alert_slack_webhook,
+                            false,
+                            m.alert_webhook_url,
+                        )
+                        .await
+                    {
+                        Ok(()) => format!(
+                            "uptime monitor: carried ({})",
+                            if m.enabled { "on" } else { "off" }
+                        ),
+                        Err(e) => fail("uptime monitor", &e),
+                    },
+                );
+            }
+        }
+
+        if let Some(b) = s.billing.as_ref() {
+            let applied_at = if b.applied_at > 0 {
+                b.applied_at
+            } else {
+                now_secs()
+            };
+            // The link is a foreign key into this node's profiles table. A
+            // profile this node does not know cannot be linked; the price,
+            // the clock and the alert snapshots — what billing actually
+            // reads — travel regardless.
+            let profile_id = match b.profile_id {
+                Some(pid) if matches!(profiles::get(&self.pool, pid).await, Ok(Some(_))) => {
+                    Some(pid)
+                }
+                Some(pid) => {
+                    report.push(format!(
+                        "profile link: NOT kept — profile #{pid} is not defined on this node;                          the price and billing clock were carried, re-apply the profile to                          link it again"
+                    ));
+                    None
+                }
+                None => None,
+            };
+            let mut res = profiles::upsert_apply(
+                &self.pool,
+                &detail.id,
+                profile_id,
+                b.price_minor,
+                b.price_currency.as_deref(),
+                b.price_interval.as_deref(),
+                b.next_billing_at,
+                b.slack_webhook.as_deref(),
+                b.alert_emails.as_deref(),
+                applied_at,
+            )
+            .await;
+            if res.is_ok() && b.price_pinned {
+                res = profiles::set_price(
+                    &self.pool,
+                    &detail.id,
+                    b.price_minor,
+                    b.price_currency.as_deref(),
+                    b.price_interval.as_deref(),
+                    b.next_billing_at,
+                    true,
+                    applied_at,
+                )
+                .await;
+            }
+            report.push(match res {
+                Ok(()) => format!(
+                    "profile and price: carried{} (billing clock unchanged)",
+                    if b.price_pinned {
+                        ", price kept across profile re-apply"
+                    } else {
+                        ""
+                    }
+                ),
+                Err(e) => fail("profile and price", &e),
+            });
+        }
+
+        for p in &s.care_plans {
+            let Some(package_id) = p.package_id else {
+                report.push(format!(
+                    "care plan {}: NOT carried — its definition was deleted, so it cannot be \
+                     re-activated; it stays in the source's history",
+                    p.package_name
+                ));
+                continue;
+            };
+            let a = hyperion_state::packages::NewActivation {
+                hosting_id: detail.id.clone(),
+                package_id,
+                package_name: p.package_name.clone(),
+                price_minor: p.price_minor,
+                price_currency: p.price_currency.clone(),
+                price_interval: p.price_interval.clone(),
+                features: p.features,
+                next_billing_at: p.next_billing_at,
+                prior_state_json: p.prior_state_json.clone(),
+                letters_lang: p.letters_lang.clone(),
+                check_items: p.check_items.clone(),
+                report_omit: p.report_omit.clone(),
+                valid_from: p.valid_from,
+                enforcement_started: p.enforcement_started,
+            };
+            let at = if p.activated_at > 0 {
+                p.activated_at
+            } else {
+                now_secs()
+            };
+            report.push(
+                match hyperion_state::packages::activate(&self.pool, &a, at).await {
+                    Ok(_) => format!("care plan {}: carried", p.package_name),
+                    Err(e) => fail(&format!("care plan {}", p.package_name), &e),
+                },
+            );
+        }
+        report
     }
 
     /// Import a migration bundle on the target node. Reads the
@@ -16962,6 +17920,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .iter()
             .filter_map(|a| hyperion_validate::Domain::parse(a).ok())
             .collect();
+        // An account of its own, never whichever one the name folds onto.
+        let system_user = self
+            .free_import_user(domain.clone().without_www().as_str())
+            .await?;
         let create = HostingCreateReq {
             domain,
             aliases,
@@ -16971,7 +17933,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 "postgres" => Some(hyperion_types::DbProvision::Postgres),
                 _ => None,
             }),
-            system_user: None,
+            system_user: Some(system_user),
             kind: manifest.kind.clone(),
             // Carry the reverse-proxy upstream from the manifest —
             // previously the importer silently dropped it, leaving
@@ -17069,14 +18031,49 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             }
         }
 
-        // Re-apply the crontab when present.
+        // Re-apply the crontab when present, pointed at the new tree: its
+        // lines name absolute paths under the source's account.
+        let mut carry_report = Vec::new();
         if !manifest.crontab.trim().is_empty() {
-            let _ = self
-                .cron_replace(
-                    HostingSelector::Id(created.id.clone()),
-                    manifest.crontab.clone(),
+            let new_tree = std::path::Path::new(&created.root_dir)
+                .parent()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default();
+            let (body, notes) = if manifest.source_tree.is_empty() {
+                (manifest.crontab.clone(), Vec::new())
+            } else {
+                rewrite_crontab_paths(
+                    &manifest.crontab,
+                    &manifest.source_tree,
+                    &new_tree,
+                    &manifest.source_home,
+                    &self.home_dir_for(created.system_user.as_str()),
                 )
-                .await;
+            };
+            carry_report.push(
+                match self
+                    .cron_replace(HostingSelector::Id(created.id.clone()), body)
+                    .await
+                {
+                    Ok(()) => format!(
+                        "cron: carried ({} line(s))",
+                        manifest.crontab.lines().count()
+                    ),
+                    Err(e) => format!("cron: NOT carried ({e})"),
+                },
+            );
+            carry_report.extend(notes);
+        }
+        match self.get(HostingSelector::Id(created.id.clone())).await {
+            Ok(detail) => carry_report.extend(
+                self.apply_carried_settings(
+                    &detail,
+                    manifest.settings.as_ref(),
+                    manifest.renamed_from.is_some(),
+                )
+                .await,
+            ),
+            Err(e) => carry_report.push(format!("settings NOT carried: {e}")),
         }
 
         self.append_audit(
@@ -17105,6 +18102,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 manifest.source_hosting_id.as_str(),
                 manifest.source_node_id
             ),
+            carry_report,
         })
     }
 
@@ -17201,6 +18199,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 &resolve_pins,
                 override_domain.as_deref(),
                 &override_aliases,
+                master_minted,
             )
             .await;
         let _ = tokio::fs::remove_dir_all(&staging).await;
@@ -17328,6 +18327,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         resolve_pins: &[String],
         override_domain: Option<&str>,
         override_aliases: &[String],
+        master_minted: bool,
     ) -> Result<hyperion_types::HostingImportResult, RpcError> {
         let manifest_path = staging.join("manifest.json");
         let archive_path = staging.join("archive.tar.gz");
@@ -17361,6 +18361,13 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // manifest's), so the integrity check still passes.
         if let Some(new_dom) = override_domain {
             rewrite_manifest_domain(&manifest_path, new_dom, override_aliases).await?;
+        }
+        // A bundle from a URL someone pasted comes from another
+        // installation: its raw nginx snippet would be root-level config
+        // written on this node on that installation's say-so. Only the
+        // master's own Move/Copy (a site this cluster already ran) keeps it.
+        if !master_minted {
+            strip_raw_nginx_snippet(&manifest_path).await?;
         }
         let has_dump = tokio::fs::read(&manifest_path)
             .await
@@ -55524,6 +56531,641 @@ mod tests {
             omit.to_stored(),
             "uptime",
             "left out only where every report-selling plan leaves it out"
+        );
+    }
+
+    // ───────────── Move / Copy: what travels with the site ─────────────
+
+    /// `my-shop.cz` and `my.shop.cz` derive the same account; the import
+    /// must get a name of its own, and every candidate must be a valid
+    /// system user even when the base already fills 32 characters.
+    #[test]
+    fn import_user_candidates_are_unique_and_valid() {
+        let a = import_user_candidates("my-shop.cz").expect("derive");
+        let b = import_user_candidates("my.shop.cz").expect("derive");
+        assert_eq!(a[0], b[0], "the collision this guards against");
+        assert_eq!(a[0].as_str(), "my_shop_cz");
+        assert_eq!(a[1].as_str(), "my_shop_cz_2");
+        let long =
+            import_user_candidates("a-very-extremely-long-subdomain-name-here.cz").expect("derive");
+        assert_eq!(long.len(), 99);
+        let mut seen = std::collections::HashSet::new();
+        for n in &long {
+            assert!(n.as_str().len() <= 32, "{n}");
+            assert!(SystemUserName::parse(n.as_str()).is_ok(), "{n}");
+            assert!(seen.insert(n.clone()), "duplicate candidate {n}");
+        }
+        assert!(long[1].as_str().ends_with("_2"));
+    }
+
+    /// The import skips a name a site on this node already has.
+    #[tokio::test]
+    async fn free_import_user_skips_a_taken_account() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), MockAdapterPort::new());
+        system_users::insert(
+            &pool,
+            "my_shop_cz",
+            5001,
+            "/home/my_shop_cz",
+            "/bin/bash",
+            1,
+        )
+        .await
+        .expect("user");
+        let got = s.free_import_user("my.shop.cz").await.expect("free");
+        assert_eq!(got.as_str(), "my_shop_cz_2");
+        let got = s.free_import_user("other.cz").await.expect("free");
+        assert_eq!(got.as_str(), "other_cz");
+    }
+
+    #[test]
+    fn crontab_paths_follow_the_site_to_its_new_tree() {
+        let body = "\
+# m h dom mon dow command — /home/shop_cz/shop.cz stays in comments
+*/5 * * * * php /home/shop_cz/shop.cz/htdocs/wp-cron.php >/dev/null
+0 3 * * * cd /home/shop_cz && ./backup.sh /home/shop_cz/shop.cz
+0 4 * * * tar czf /tmp/x.tgz /home/shop_cz/shop.cz.old
+0 5 * * * wp --path=/home/shop_cz/blog.cz/htdocs cron event run --due-now
+HOME=/home/shop_cz
+";
+        let (out, notes) = rewrite_crontab_paths(
+            body,
+            "/home/shop_cz/shop.cz",
+            "/home/copy_cz/copy.cz",
+            "/home/shop_cz",
+            "/home/copy_cz",
+        );
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines[0],
+            "# m h dom mon dow command — /home/shop_cz/shop.cz stays in comments"
+        );
+        assert_eq!(
+            lines[1],
+            "*/5 * * * * php /home/copy_cz/copy.cz/htdocs/wp-cron.php >/dev/null"
+        );
+        assert_eq!(
+            lines[2],
+            "0 3 * * * cd /home/copy_cz && ./backup.sh /home/copy_cz/copy.cz"
+        );
+        // `shop.cz.old` is another path, not the site's tree — and it is
+        // under the source home, so it belongs to the source account.
+        assert!(
+            lines[3].starts_with("# hyperion: disabled on import"),
+            "{}",
+            lines[3]
+        );
+        assert!(lines[3].contains("/home/shop_cz/shop.cz.old"));
+        // Another site of the source account: disabled, never repointed.
+        assert!(
+            lines[4].starts_with("# hyperion: disabled on import"),
+            "{}",
+            lines[4]
+        );
+        assert!(lines[4].contains("/home/shop_cz/blog.cz/htdocs"));
+        assert_eq!(lines[5], "HOME=/home/copy_cz");
+        assert_eq!(notes.len(), 2, "{notes:?}");
+        assert!(out.ends_with('\n'));
+        validate_crontab(&out).expect("still a valid crontab");
+    }
+
+    /// A Move whose account keeps its name: the site's own lines stay,
+    /// lines for sites that stayed behind are still disabled.
+    #[test]
+    fn crontab_rewrite_on_a_same_named_account() {
+        let body = "* * * * * php /home/a_cz/a.cz/htdocs/x.php\n\
+                    * * * * * php /home/a_cz/b.cz/htdocs/x.php\n";
+        let (out, notes) = rewrite_crontab_paths(
+            body,
+            "/home/a_cz/a.cz",
+            "/home/a_cz/a.cz",
+            "/home/a_cz",
+            "/home/a_cz",
+        );
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines[0], "* * * * * php /home/a_cz/a.cz/htdocs/x.php");
+        assert!(lines[1].starts_with("# hyperion: disabled on import"));
+        assert_eq!(notes.len(), 1);
+    }
+
+    #[test]
+    fn replace_bounded_path_matches_whole_paths_only() {
+        let f = |l: &str| replace_bounded_path(l, "/home/a/x.cz", "/N", true);
+        assert_eq!(f("cd /home/a/x.cz"), "cd /N");
+        assert_eq!(f("cd /home/a/x.cz/htdocs;ls"), "cd /N/htdocs;ls");
+        assert_eq!(f("--path='/home/a/x.cz'"), "--path='/N'");
+        assert_eq!(f("/home/a/x.cz.old"), "/home/a/x.cz.old");
+        assert_eq!(f("/srv/home/a/x.cz"), "/srv/home/a/x.cz");
+        assert_eq!(f("x/home/a/x.cz"), "x/home/a/x.cz");
+        assert_eq!(
+            replace_bounded_path("/home/a/b /home/a", "/home/a", "/H", false),
+            "/home/a/b /H"
+        );
+    }
+
+    /// The allow-list: configuration travels, secrets and run state never.
+    #[test]
+    fn carried_kv_allow_list() {
+        for k in [
+            "backup_at",
+            "backup_cadence",
+            "backup_target",
+            "php.mem_auto",
+            "php.mem_auto_max_mb",
+            "php.mem_auto_state",
+            "wp_auto_update",
+            "regguard_enabled",
+            "gitsync_repo",
+        ] {
+            assert_eq!(carried_kv_scope(k), Some(CarryScope::Always), "{k}");
+        }
+        for k in [
+            "care_service_checks",
+            "care_report_recipients",
+            "care_report_period_end",
+        ] {
+            assert_eq!(carried_kv_scope(k), Some(CarryScope::MoveOnly), "{k}");
+        }
+        for k in [
+            // secrets
+            "dkim",
+            "gitsync_pubkey",
+            "gitsync_webhook_secret",
+            // on without its (uncarried) secret = open deploy trigger
+            "gitsync_webhook",
+            // run state
+            "backup_last_run_at",
+            "quota_exceed_state",
+            "waf_log_pos",
+            "nginx.vhost_gen",
+            "logins_locked",
+            "integrity_scan",
+            "staging_domain",
+            "php.workers_full",
+        ] {
+            assert_eq!(carried_kv_scope(k), None, "{k}");
+        }
+        assert_eq!(
+            carried_kv_scope(HostingService::<MockAdapterPort>::LETTER_LANG_KV_KEY),
+            Some(CarryScope::Always)
+        );
+    }
+
+    fn carry_mocks() -> MockAdapterPort {
+        // Several sites per test: each needs its own uid.
+        let mut a = happy_mocks_many();
+        a.expect_apply_php_limits()
+            .returning(|_, _, _, _, _, _, _| Ok(()));
+        a.expect_modsec_status()
+            .returning(hyperion_types::crs::ModsecStatus::default);
+        a.expect_nginx_write_htpasswd().returning(|_, _, _| Ok(()));
+        a.expect_nginx_delete_htpasswd().returning(|_| Ok(()));
+        a
+    }
+
+    /// Set up a source site with one of everything that should travel.
+    async fn carry_source(s: &HostingService<MockAdapterPort>, pool: &SqlitePool) -> HostingDetail {
+        s.create(req("shop.cz")).await.expect("create");
+        let sel = HostingSelector::Domain(Domain::parse("shop.cz").expect("parse"));
+        let detail = s.get(sel.clone()).await.expect("get");
+        let id = detail.id.as_str();
+
+        let mut l = s.get_limits(sel.clone()).await.expect("limits");
+        l.php_memory_mb = 768;
+        l.php_max_children = 14;
+        s.set_limits(sel.clone(), l).await.expect("limits");
+        for (k, v) in [
+            ("backup_at", "03:30"),
+            ("backup_cadence", "daily"),
+            ("php.mem_auto_max_mb", "1024"),
+            ("care_service_checks", "{\"2026-10\":[\"updates\"]}"),
+            ("dkim", "{\"selector\":\"h1\",\"enabled\":false}"),
+            ("gitsync_webhook_secret", "s3cr3t"),
+            ("gitsync_webhook", "1"),
+            ("backup_last_run_at", "123"),
+        ] {
+            hyperion_state::hosting_kv::set(pool, id, k, v, 1)
+                .await
+                .expect("kv");
+        }
+        s.quota_set(sel.clone(), 0, 0, 0, 0, 0, "suspend")
+            .await
+            .expect("quota");
+
+        let mut opts = detail.vhost_options.clone();
+        opts.noindex = true;
+        opts.force_https = true;
+        opts.canonical_host = "www".into();
+        opts.basic_auth_enabled = true;
+        opts.basic_auth_user = "preview".into();
+        opts.set_waf_level(hyperion_types::waf::WafLevel::Strict);
+        hyperion_state::hostings::set_vhost_options(
+            pool,
+            &detail.id,
+            &opts,
+            Some("$2b$10$hash"),
+            1,
+        )
+        .await
+        .expect("vhost");
+
+        let mut e = hyperion_types::HostingExpiry::defaults();
+        e.expires_at = Some(now_secs() + 40 * 86_400);
+        e.owner_email = Some("owner@shop.cz".into());
+        s.set_expiry(sel.clone(), e).await.expect("expiry");
+        s.monitor_set(
+            sel.clone(),
+            true,
+            Some("/health".into()),
+            Some(120),
+            Some(4),
+            Some("ops@shop.cz".into()),
+            None,
+            false,
+            None,
+        )
+        .await
+        .expect("monitor");
+        let pid = profiles::insert(
+            pool,
+            &profiles::NewProfile {
+                name: "Business".into(),
+                ..Default::default()
+            },
+            1,
+        )
+        .await
+        .expect("profile");
+        profiles::upsert_apply(
+            pool,
+            &detail.id,
+            Some(pid),
+            Some(49_900),
+            Some("CZK"),
+            Some("monthly"),
+            Some(1_900_000_000),
+            None,
+            None,
+            1_700_000_000,
+        )
+        .await
+        .expect("apply");
+        profiles::set_price(
+            pool,
+            &detail.id,
+            Some(39_900),
+            Some("CZK"),
+            Some("monthly"),
+            Some(1_900_000_000),
+            true,
+            1_700_000_000,
+        )
+        .await
+        .expect("price");
+        hyperion_state::packages::activate(
+            pool,
+            &hyperion_state::packages::NewActivation {
+                hosting_id: detail.id.clone(),
+                package_id: 3,
+                package_name: "Care Plus".into(),
+                price_minor: Some(99_000),
+                price_currency: Some("CZK".into()),
+                price_interval: Some("monthly".into()),
+                features: Default::default(),
+                next_billing_at: Some(1_900_000_000),
+                prior_state_json: Some("{}".into()),
+                letters_lang: "cs".into(),
+                check_items: String::new(),
+                report_omit: String::new(),
+                valid_from: None,
+                enforcement_started: true,
+            },
+            1_700_000_100,
+        )
+        .await
+        .expect("activate");
+        s.get(sel).await.expect("get")
+    }
+
+    /// Export → JSON → import, as a Move: every setting arrives on the new
+    /// hosting id, secrets and run state do not, and the report says so.
+    #[tokio::test]
+    async fn move_carries_settings_to_the_new_site() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), carry_mocks());
+        let src = carry_source(&s, &pool).await;
+        let settings = s.collect_carried_settings(&src).await;
+        // Through the wire format, as the bundle does.
+        let settings: hyperion_types::migration::HostingCarriedSettings =
+            serde_json::from_str(&serde_json::to_string(&settings).expect("ser")).expect("de");
+        assert!(
+            settings
+                .not_carried
+                .iter()
+                .any(|n| n.starts_with("Git deploy")),
+            "{:?}",
+            settings.not_carried
+        );
+
+        s.create(HostingCreateReq {
+            aliases: vec![Domain::parse("www.moved.cz").expect("alias")],
+            ..req("moved.cz")
+        })
+        .await
+        .expect("create target");
+        let tsel = HostingSelector::Domain(Domain::parse("moved.cz").expect("parse"));
+        let target = s.get(tsel.clone()).await.expect("get");
+        let report = s
+            .apply_carried_settings(&target, Some(&settings), false)
+            .await;
+        assert!(
+            report.iter().all(|l| !l.contains("NOT carried (")),
+            "{report:#?}"
+        );
+        let tid = target.id.as_str();
+
+        let l = s.get_limits(tsel.clone()).await.expect("limits");
+        assert_eq!((l.php_memory_mb, l.php_max_children), (768, 14));
+
+        let kv = |k: &'static str| {
+            let pool = pool.clone();
+            async move {
+                hyperion_state::hosting_kv::get(&pool, tid, k)
+                    .await
+                    .expect("kv")
+            }
+        };
+        assert_eq!(kv("backup_at").await.as_deref(), Some("03:30"));
+        assert_eq!(kv("backup_cadence").await.as_deref(), Some("daily"));
+        assert_eq!(kv("php.mem_auto_max_mb").await.as_deref(), Some("1024"));
+        assert!(
+            kv("care_service_checks").await.is_some(),
+            "move carries care state"
+        );
+        assert_eq!(kv("dkim").await, None);
+        assert_eq!(kv("gitsync_webhook_secret").await, None);
+        assert_eq!(kv("gitsync_webhook").await, None);
+        assert_eq!(kv("backup_last_run_at").await, None);
+
+        assert_eq!(s.hosting_quota_action(tid).await.as_str(), "suspend");
+
+        let t = s.get(tsel.clone()).await.expect("get");
+        assert!(t.vhost_options.noindex);
+        assert!(t.vhost_options.force_https);
+        assert_eq!(
+            t.vhost_options.canonical_host, "www",
+            "the target has the www alias"
+        );
+        assert_eq!(
+            t.vhost_options.effective_waf_level(),
+            hyperion_types::waf::WafLevel::Strict
+        );
+        assert!(t.vhost_options.basic_auth_enabled && t.vhost_options.basic_auth_set);
+        assert_eq!(
+            hyperion_state::hostings::get_basic_auth_hash(&pool, &t.id)
+                .await
+                .expect("hash"),
+            "$2b$10$hash"
+        );
+
+        let e = s.get_expiry(tsel.clone()).await.expect("expiry");
+        assert_eq!(e.owner_email.as_deref(), Some("owner@shop.cz"));
+        assert!(e.expires_at.is_some());
+        let m = hyperion_state::monitors::get(&pool, &t.id)
+            .await
+            .expect("monitor")
+            .expect("row");
+        assert!(m.enabled);
+        assert_eq!((m.url_path.as_str(), m.interval_secs), ("/health", 120));
+
+        let b = profiles::get_apply(&pool, &t.id)
+            .await
+            .expect("apply")
+            .expect("row");
+        assert!(b.profile_id.is_some(), "the profile exists on this node");
+        assert_eq!(b.price_minor, Some(39_900));
+        assert!(b.price_pinned);
+        assert_eq!(
+            b.next_billing_at,
+            Some(1_900_000_000),
+            "billing clock unchanged"
+        );
+
+        let plans = hyperion_state::packages::list_for_hosting(&pool, &t.id)
+            .await
+            .expect("plans");
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].package_name, "Care Plus");
+        assert_eq!(plans[0].prior_state_json.as_deref(), Some("{}"));
+        assert_eq!(plans[0].activated_at, 1_700_000_100);
+    }
+
+    /// A Copy is a new site: technical settings yes; billing, plans, expiry,
+    /// uptime alerts and care bookkeeping no — and the www redirect is
+    /// dropped because the copy has no www alias.
+    #[tokio::test]
+    async fn copy_leaves_billing_plans_and_alerts_behind() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), carry_mocks());
+        let src = carry_source(&s, &pool).await;
+        let settings = s.collect_carried_settings(&src).await;
+
+        s.create(req("copy.cz")).await.expect("create target");
+        let tsel = HostingSelector::Domain(Domain::parse("copy.cz").expect("parse"));
+        let target = s.get(tsel.clone()).await.expect("get");
+        let report = s
+            .apply_carried_settings(&target, Some(&settings), true)
+            .await;
+        let tid = target.id.as_str();
+
+        let l = s.get_limits(tsel.clone()).await.expect("limits");
+        assert_eq!(l.php_memory_mb, 768);
+        assert_eq!(
+            hyperion_state::hosting_kv::get(&pool, tid, "backup_at")
+                .await
+                .expect("kv")
+                .as_deref(),
+            Some("03:30")
+        );
+        assert_eq!(
+            hyperion_state::hosting_kv::get(&pool, tid, "care_service_checks")
+                .await
+                .expect("kv"),
+            None
+        );
+        let t = s.get(tsel.clone()).await.expect("get");
+        assert!(t.vhost_options.noindex);
+        assert_eq!(t.vhost_options.canonical_host, "");
+        assert!(
+            report.iter().any(|l| l.starts_with("canonical host www")),
+            "{report:#?}"
+        );
+        assert!(
+            report
+                .iter()
+                .any(|l| l.contains("a copy is a new site") && l.contains("care plans (1)")),
+            "{report:#?}"
+        );
+        assert_eq!(
+            profiles::get_apply(&pool, &t.id).await.expect("apply"),
+            None
+        );
+        assert!(hyperion_state::packages::list_for_hosting(&pool, &t.id)
+            .await
+            .expect("plans")
+            .is_empty());
+        // The copy keeps whatever monitoring a new site gets, not the
+        // original's alert settings.
+        assert!(!hyperion_state::monitors::get(&pool, &t.id)
+            .await
+            .expect("monitor")
+            .is_some_and(|m| m.url_path == "/health" || m.alert_email.is_some()));
+    }
+
+    /// Extra FTP logins travel as the name the operator chose and the
+    /// landing directory relative to the document root — the composed login
+    /// and the absolute path belong to the source.
+    #[tokio::test]
+    async fn ftp_logins_are_exported_by_name_and_relative_path() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), carry_mocks());
+        s.create(req("ftp.cz")).await.expect("create");
+        let d = s
+            .get(HostingSelector::Domain(
+                Domain::parse("ftp.cz").expect("parse"),
+            ))
+            .await
+            .expect("get");
+        hyperion_state::ftp_accounts::insert(
+            &pool,
+            &d.id,
+            "deploy.ftp.cz",
+            &format!("{}/wp-content/uploads", d.root_dir),
+            "agency",
+            "kevin",
+            1,
+        )
+        .await
+        .expect("ftp");
+        let got = s.collect_carried_settings(&d).await.ftp_logins;
+        assert_eq!(
+            got,
+            vec![hyperion_types::migration::CarriedFtpLogin {
+                name: "deploy".into(),
+                path: "wp-content/uploads".into(),
+                label: "agency".into(),
+            }]
+        );
+    }
+
+    /// A pasted-URL bundle loses its raw nginx snippet and says so; one
+    /// without a snippet (or without settings at all) is left untouched.
+    #[test]
+    fn raw_nginx_snippet_is_stripped_from_foreign_bundles() {
+        let mut v = serde_json::json!({
+            "domain": "x.cz",
+            "settings": {
+                "vhost_options": { "custom_nginx_snippet": "location /x { alias /etc/; }",
+                                   "noindex": true },
+                "not_carried": []
+            }
+        });
+        assert!(strip_raw_nginx_snippet_json(&mut v));
+        let st: hyperion_types::migration::HostingCarriedSettings =
+            serde_json::from_value(v["settings"].clone()).expect("still parses");
+        let o = st.vhost_options.expect("options");
+        assert_eq!(o.custom_nginx_snippet, "");
+        assert!(o.noindex, "the rest of the options stay");
+        assert!(st.not_carried[0].starts_with("Custom nginx snippet: dropped"));
+
+        let mut empty =
+            serde_json::json!({"settings": {"vhost_options": {"custom_nginx_snippet": ""}}});
+        assert!(!strip_raw_nginx_snippet_json(&mut empty));
+        let mut old = serde_json::json!({"domain": "x.cz"});
+        assert!(!strip_raw_nginx_snippet_json(&mut old));
+    }
+
+    /// Carried vhost options get the panel's validation: a bundle naming a
+    /// redirect target nginx would choke on (or worse) is refused, and the
+    /// site keeps the defaults it was created with.
+    #[tokio::test]
+    async fn carried_vhost_options_are_validated() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), carry_mocks());
+        s.create(req("val.cz")).await.expect("create");
+        let d = s
+            .get(HostingSelector::Domain(
+                Domain::parse("val.cz").expect("parse"),
+            ))
+            .await
+            .expect("get");
+        let mut opts = d.vhost_options.clone();
+        opts.redirect_url = "javascript:alert(1)".into();
+        opts.noindex = true;
+        let settings = hyperion_types::migration::HostingCarriedSettings {
+            vhost_options: Some(opts),
+            ..Default::default()
+        };
+        let report = s.apply_carried_settings(&d, Some(&settings), false).await;
+        assert!(
+            report
+                .iter()
+                .any(|l| l.starts_with("vhost options: NOT carried — refused")),
+            "{report:#?}"
+        );
+        let t = s.get(HostingSelector::Id(d.id.clone())).await.expect("get");
+        assert_eq!(t.vhost_options, d.vhost_options);
+    }
+
+    /// A bundle from before settings travelled is reported as such, never
+    /// as "nothing to carry".
+    #[tokio::test]
+    async fn old_bundle_reports_settings_not_carried() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), carry_mocks());
+        s.create(req("old.cz")).await.expect("create");
+        let d = s
+            .get(HostingSelector::Domain(
+                Domain::parse("old.cz").expect("parse"),
+            ))
+            .await
+            .expect("get");
+        let report = s.apply_carried_settings(&d, None, false).await;
+        assert_eq!(report.len(), 1);
+        assert!(report[0].starts_with("settings NOT carried"), "{report:?}");
+    }
+
+    /// A Move reaching a node without ModSecurity says the rule set did not
+    /// come along instead of rendering a vhost that pretends it did.
+    #[tokio::test]
+    async fn crs_without_modsecurity_is_reported() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), carry_mocks());
+        s.create(req("crs.cz")).await.expect("create");
+        let d = s
+            .get(HostingSelector::Domain(
+                Domain::parse("crs.cz").expect("parse"),
+            ))
+            .await
+            .expect("get");
+        let mut opts = d.vhost_options.clone();
+        opts.crs_mode = "block".into();
+        let settings = hyperion_types::migration::HostingCarriedSettings {
+            vhost_options: Some(opts),
+            ..Default::default()
+        };
+        let report = s.apply_carried_settings(&d, Some(&settings), false).await;
+        assert!(
+            report
+                .iter()
+                .any(|l| l.starts_with("OWASP Core Rule Set: NOT carried")),
+            "{report:#?}"
+        );
+        let t = s.get(HostingSelector::Id(d.id.clone())).await.expect("get");
+        assert_eq!(
+            t.vhost_options.crs_settings().mode,
+            hyperion_types::crs::CrsMode::Off
         );
     }
 }
