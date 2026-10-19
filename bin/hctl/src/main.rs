@@ -281,8 +281,9 @@ pub enum HostingCmd {
     /// target node out-of-band, then `hctl hosting import` there.
     Export { selector: String },
     /// Import a migration bundle produced by `hosting export` on
-    /// another node. The manifest's sibling archive.tar.gz must be
-    /// in the same directory. Re-creates the hosting from scratch
+    /// another node. The manifest's sibling archive.tar.gz (and
+    /// archive.sql, the database dump, for a site with a database)
+    /// must be in the same directory. Re-creates the hosting from scratch
     /// (re-issues the cert; never copies private keys across nodes)
     /// and restores the archive + DB dump.
     Import {
@@ -295,11 +296,12 @@ pub enum HostingCmd {
     /// from the source's `/api/migration/bundle/<id>` instead of
     /// requiring scp/rsync.
     ImportFromUrl {
-        /// Base URL printed by `hosting export` on the source.
+        /// Base URL shown on the panel's export result page (only the
+        /// panel can sign one — `hctl hosting export` prints none).
         #[arg(long = "base-url")]
         base_url: String,
-        /// Signed token from the source's export response. Expires
-        /// 1h after the export — re-export on the source if stale.
+        /// Signed token from the same export result page. Expires
+        /// 1h after the export — re-export from the panel if stale.
         #[arg(long)]
         token: String,
     },

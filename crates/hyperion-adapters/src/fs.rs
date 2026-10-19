@@ -195,6 +195,61 @@ pub fn truncate_no_follow(path: &Path) -> Result<(), AdapterError> {
         .map_err(|e| AdapterError::Other(format!("truncate {}: {e}", path.display())))
 }
 
+/// Rewrite a text file in place as root WITHOUT following a symlink and
+/// without creating it: `edit` gets the current content and returns the new
+/// one, or `None` to leave the file alone. Returns whether it was written.
+///
+/// For files in a tree the site user owns (wp-config.php after an import):
+/// opening by name with `tokio::fs::write` follows whatever link the tenant
+/// left there. The descriptor is opened O_NOFOLLOW, proven a single-linked
+/// regular file, and written through — owner and mode stay the tenant's.
+/// A missing file is `Ok(false)`.
+pub fn rewrite_no_follow(
+    path: &Path,
+    edit: impl FnOnce(&str) -> Option<String>,
+) -> Result<bool, AdapterError> {
+    use rustix::fs::{Mode, OFlags};
+    use std::io::{Read, Seek, Write};
+    use std::os::unix::fs::MetadataExt;
+
+    let fd = match rustix::fs::open(
+        path,
+        OFlags::RDWR | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
+        Mode::empty(),
+    ) {
+        Ok(fd) => fd,
+        Err(rustix::io::Errno::NOENT) => return Ok(false),
+        Err(rustix::io::Errno::LOOP) => {
+            return Err(AdapterError::Other(format!(
+                "{} is a symlink — refusing to rewrite through it as root",
+                path.display()
+            )))
+        }
+        Err(e) => return Err(AdapterError::Other(format!("open {}: {e}", path.display()))),
+    };
+    let mut file = std::fs::File::from(fd);
+    let md = file
+        .metadata()
+        .map_err(|e| AdapterError::Other(format!("stat {}: {e}", path.display())))?;
+    if !md.is_file() || md.nlink() != 1 {
+        return Err(AdapterError::Other(format!(
+            "{} is not a plain single-linked file — refusing to rewrite it",
+            path.display()
+        )));
+    }
+    let mut content = String::new();
+    file.read_to_string(&mut content)
+        .map_err(|e| AdapterError::Other(format!("read {}: {e}", path.display())))?;
+    let Some(new) = edit(&content) else {
+        return Ok(false);
+    };
+    file.set_len(0)
+        .and_then(|()| file.rewind())
+        .and_then(|()| file.write_all(new.as_bytes()))
+        .map_err(|e| AdapterError::Other(format!("write {}: {e}", path.display())))?;
+    Ok(true)
+}
+
 /// The last `lines` lines of a file, read safely as root.
 ///
 /// Replaces shelling out to `tail`, which takes a PATH and therefore resolves
@@ -520,6 +575,30 @@ fn with_extension(p: &Path, ext: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rewrite_no_follow_edits_in_place_and_refuses_links() {
+        let d = tempfile::tempdir().expect("tempdir");
+        let p = d.path().join("wp-config.php");
+        std::fs::write(&p, "old longer content").expect("write");
+        assert!(rewrite_no_follow(&p, |s| Some(s.replace("old longer ", "new "))).expect("ok"));
+        assert_eq!(std::fs::read_to_string(&p).expect("read"), "new content");
+        // `None` leaves it alone; a missing file is not an error.
+        assert!(!rewrite_no_follow(&p, |_| None).expect("ok"));
+        assert!(!rewrite_no_follow(&d.path().join("absent"), |_| Some("x".into())).expect("ok"));
+
+        // A symlink planted in place of the file is refused, target untouched.
+        let target = d.path().join("shadow");
+        std::fs::write(&target, "secret").expect("write");
+        let link = d.path().join("link.php");
+        std::os::unix::fs::symlink(&target, &link).expect("symlink");
+        assert!(rewrite_no_follow(&link, |_| Some("pwned".into())).is_err());
+        // So is a hard link to someone else's file.
+        let hard = d.path().join("hard.php");
+        std::fs::hard_link(&target, &hard).expect("hardlink");
+        assert!(rewrite_no_follow(&hard, |_| Some("pwned".into())).is_err());
+        assert_eq!(std::fs::read_to_string(&target).expect("read"), "secret");
+    }
 
     #[test]
     fn read_appended_follows_a_growing_log() {
