@@ -550,17 +550,20 @@ pub async fn post_job_retry(
             .await
         }
         "hosting_clone" => {
+            // The `www.` alias as the first run decided it. Replayed AS the
+            // domain so the retry decides the same: typed with its `www.`.
+            let www_alias = payload.get("www_alias").and_then(|v| v.as_str());
             let form = crate::handlers::hostings::HostingCloneForm {
                 selector: payload
                     .get("selector")
                     .and_then(|v| v.as_str())
                     .unwrap_or_default()
                     .to_string(),
-                new_domain: payload
-                    .get("new_domain")
-                    .and_then(|v| v.as_str())
+                new_domain: www_alias
+                    .or_else(|| payload.get("new_domain").and_then(|v| v.as_str()))
                     .unwrap_or_default()
                     .to_string(),
+                add_www: www_alias.is_some(),
                 target_node: payload
                     .get("target_node")
                     .and_then(|v| v.as_str())

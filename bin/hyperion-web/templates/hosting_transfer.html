@@ -173,6 +173,18 @@
       </select>
     </div>
     <label class="field-check" style="display:flex;gap:0.5rem;align-items:flex-start">
+      <input type="checkbox" name="add_www" value="true" checked style="margin-top:0.2rem">
+      <span>
+        Also answer on the <code>www.</code> address
+        <span class="text-soft small" style="display:block">
+          For a main domain like <code>example.cz</code>, or any name typed
+          with <code>www.</code> in front. A subdomain like
+          <code>staging.example.cz</code> gets none. The copy never takes the
+          source's own aliases.
+        </span>
+      </span>
+    </label>
+    <label class="field-check" style="display:flex;gap:0.5rem;align-items:flex-start">
       <input type="checkbox" name="issue_cert" value="true" checked style="margin-top:0.2rem">
       <span>
         Issue a TLS certificate automatically
