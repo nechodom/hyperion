@@ -1120,6 +1120,15 @@ pub enum Request {
         /// Likewise for aliases. Empty vec ⇒ use manifest aliases.
         #[serde(default)]
         override_aliases: Vec<String>,
+        /// True ONLY when the master's own copy/move job built `base_url`
+        /// to its own bundle endpoint: that address may be internal
+        /// (127.0.1.1 for the master's FQDN, a private cluster network),
+        /// so the agent skips the internal-address refusal. Never set for
+        /// a URL a person typed — the import form and hctl leave it false.
+        /// `#[serde(default)]`: an old master sends nothing ⇒ full guard;
+        /// an old agent ignores it ⇒ full guard (the pre-fix behaviour).
+        #[serde(default)]
+        master_minted: bool,
     },
     /// List installed WordPress plugins for `hosting`.
     WpPluginList {
@@ -2867,6 +2876,20 @@ mod tests {
         write_frame(&mut a, &req).await.expect("write");
         let got: Request = read_frame(&mut b).await.expect("read");
         assert_eq!(req, got);
+    }
+
+    /// An old master never sends `master_minted`; the agent must read that as
+    /// `false` (full SSRF guard), not refuse the request.
+    #[test]
+    fn import_from_url_without_master_minted_keeps_the_guard() {
+        let req: Request = serde_json::from_str(
+            r#"{"method":"hosting_import_from_url","params":{"base_url":"https://m/x","token":"t"}}"#,
+        )
+        .expect("old-shape request parses");
+        match req {
+            Request::HostingImportFromUrl { master_minted, .. } => assert!(!master_minted),
+            other => panic!("unexpected {other:?}"),
+        }
     }
 
     #[tokio::test]

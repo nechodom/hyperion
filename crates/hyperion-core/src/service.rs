@@ -16952,6 +16952,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         token: String,
         override_domain: Option<String>,
         override_aliases: Vec<String>,
+        master_minted: bool,
     ) -> Result<hyperion_types::HostingImportResult, RpcError> {
         // Validate the URL shape before shelling out — we'd rather
         // refuse `file://` or random garbage at the boundary than
@@ -16976,7 +16977,14 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // 127.0.0.1 admin APIs) before any curl runs. Both the manifest and the
         // archive live under `base`, so the same pins cover both fetches and
         // also defeat DNS rebinding between the two requests.
-        let resolve_pins = ssrf_guard_resolve(&base).await.map_err(|e| {
+        //
+        // `master_minted` lifts ONLY the internal-address refusal: the master's
+        // own copy/move job built this URL to its own bundle endpoint, and that
+        // address is legitimately internal — the master's FQDN resolves to
+        // 127.0.1.1 via Debian's /etc/hosts when the copy lands on the master
+        // itself, and a private-network cluster reaches it on 10.x. A URL a
+        // person typed (import form, hctl) always goes through the full guard.
+        let resolve_pins = resolve_url_pins(&base, !master_minted).await.map_err(|e| {
             tracing::warn!(error = %e, "import-from-url SSRF guard rejected base URL");
             RpcError::Validation {
                 message: "import URL points at a disallowed (internal) address".into(),
@@ -39097,6 +39105,14 @@ async fn http_post_json(url: &str, json_body: &str) -> Result<(), String> {
 /// pinned to the validated address (defeats DNS rebinding). SSRF guard for
 /// operator-supplied outbound URLs (e.g. alert webhooks).
 async fn ssrf_guard_resolve(url: &str) -> Result<Vec<String>, String> {
+    resolve_url_pins(url, true).await
+}
+
+/// [`ssrf_guard_resolve`] with the internal-address refusal optional. The
+/// scheme check, the single resolution and the `--resolve` pins stay on
+/// either way; only a URL the master minted for itself may pass
+/// `refuse_internal = false`.
+async fn resolve_url_pins(url: &str, refuse_internal: bool) -> Result<Vec<String>, String> {
     let parsed = url::Url::parse(url).map_err(|e| format!("invalid url: {e}"))?;
     match parsed.scheme() {
         "http" | "https" => {}
@@ -39118,7 +39134,7 @@ async fn ssrf_guard_resolve(url: &str) -> Result<Vec<String>, String> {
     if addrs.is_empty() {
         return Err(format!("{host} did not resolve"));
     }
-    for ip in &addrs {
+    for ip in addrs.iter().filter(|_| refuse_internal) {
         if is_internal_ip(ip) {
             return Err(format!(
                 "refusing outbound request to internal address {ip} ({host})"
@@ -43934,6 +43950,21 @@ mod tests {
             .await
             .expect("public ip ok");
         assert_eq!(pins, vec!["1.1.1.1:443:1.1.1.1".to_string()]);
+    }
+
+    /// A master-minted bundle URL may point at the master's own internal
+    /// address (Debian maps the FQDN to 127.0.1.1) — that copy used to die
+    /// with "disallowed (internal) address". Everything else still holds.
+    #[tokio::test]
+    async fn master_minted_url_may_be_internal_but_keeps_scheme_check() {
+        let pins = resolve_url_pins("https://127.0.1.1:8443/api/migration/bundle/x", false)
+            .await
+            .expect("internal allowed for a master-minted url");
+        assert_eq!(pins, vec!["127.0.1.1:8443:127.0.1.1".to_string()]);
+        assert!(resolve_url_pins("https://127.0.1.1:8443/x", true)
+            .await
+            .is_err());
+        assert!(resolve_url_pins("file:///etc/passwd", false).await.is_err());
     }
 
     // ============================================================

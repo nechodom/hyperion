@@ -307,6 +307,7 @@ pub async fn execute(socket: &Path, cmd: &Cmd) -> Result<Outcome> {
                 token: token.clone(),
                 override_domain: None,
                 override_aliases: Vec::new(),
+                master_minted: false,
             },
             HostingCmd::ImportPanel {
                 source,

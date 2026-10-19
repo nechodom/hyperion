@@ -992,9 +992,16 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             token,
             override_domain,
             override_aliases,
+            master_minted,
         } => {
             match api
-                .hosting_import_from_url(base_url, token, override_domain, override_aliases)
+                .hosting_import_from_url(
+                    base_url,
+                    token,
+                    override_domain,
+                    override_aliases,
+                    master_minted,
+                )
                 .await
             {
                 Ok(v) => Response::HostingImportFromUrl(v),
@@ -2946,6 +2953,7 @@ mod tests {
             _: String,
             _: Option<String>,
             _: Vec<String>,
+            _: bool,
         ) -> Result<hyperion_types::HostingImportResult, RpcError> {
             Ok(hyperion_types::HostingImportResult {
                 new_hosting_id: hyperion_types::HostingId("01J".into()),

@@ -223,6 +223,8 @@ pub async fn post_import_from_url(
             token,
             override_domain: None,
             override_aliases: Vec::new(),
+            // A pasted URL: keep the full SSRF guard.
+            master_minted: false,
         },
     )
     .await?;
