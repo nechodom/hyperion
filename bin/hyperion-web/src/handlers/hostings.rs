@@ -8015,6 +8015,75 @@ async fn carry_access_grants(state: &SharedState, from: &str, to: &str) -> Strin
     }
 }
 
+/// Master-side `hosting_kv` keys that describe the SITE and are keyed by its
+/// id on the master whichever node runs it: the operator's notes and tags,
+/// and the panel's copy of the `.user.ini` values (the file itself travels
+/// in the archive). Everything else in the master's kv is node state, which
+/// the bundle carries or deliberately leaves.
+fn is_master_site_kv(key: &str) -> bool {
+    // `php.mem_auto*` and `php.workers_full` share the prefix but are node
+    // state on the owning node; the bundle handles them.
+    matches!(key, "notes" | "tags")
+        || (key.starts_with("php.")
+            && !key.starts_with("php.mem_auto")
+            && key != "php.workers_full")
+}
+
+/// Give the hosting `to` the master-side notes, tags and PHP-ini copy `from`
+/// has — same reason as [`carry_access_grants`]: an import mints a new id,
+/// and these are keyed by it. One job-log line; never fatal.
+async fn carry_master_kv(state: &SharedState, from: &str, to: &str) -> String {
+    let pairs = match hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::HostingKvList {
+            hosting_id: from.to_string(),
+        },
+    )
+    .await
+    {
+        Ok(RpcResponse::HostingKvList(v)) => v,
+        Ok(RpcResponse::Error(e)) => {
+            return format!("notes, tags, PHP settings NOT carried: {e}\n")
+        }
+        Ok(_) => return "notes, tags, PHP settings NOT carried: unexpected response\n".into(),
+        Err(e) => return format!("notes, tags, PHP settings NOT carried: {e}\n"),
+    };
+    let mut carried = 0usize;
+    let mut failed = Vec::new();
+    for (key, value) in pairs.into_iter().filter(|(k, _)| is_master_site_kv(k)) {
+        let ok = matches!(
+            hyperion_rpc_client::call(
+                &state.agent_socket,
+                Request::HostingKvSet {
+                    hosting_id: to.to_string(),
+                    key: key.clone(),
+                    value,
+                },
+            )
+            .await,
+            Ok(RpcResponse::HostingKvSet)
+        );
+        if ok {
+            carried += 1;
+        } else {
+            failed.push(key);
+        }
+    }
+    match (carried, failed.is_empty()) {
+        (0, true) => String::new(),
+        (n, true) => format!("notes, tags, PHP settings carried: {n}\n"),
+        (n, false) => format!(
+            "notes, tags, PHP settings carried: {n} — FAILED for {}\n",
+            failed.join(", ")
+        ),
+    }
+}
+
+/// The importer's per-setting report as job-log lines.
+fn carry_report_text(lines: &[String]) -> String {
+    lines.iter().map(|l| format!("{l}\n")).collect()
+}
+
 /// The master's copy of a bundle pulled off a worker, removed when the job
 /// is done with it — success or failure. It is a real copy (the source's own
 /// export is a hardlink of its backup), so leaving it meant a week of master
@@ -13932,8 +14001,8 @@ async fn run_clone_job(
     };
     // The domain the target actually created — `create` folds a typed
     // `www.` into the bare name, so the cert and the final link use this.
-    let (new_id, new_domain) = match import {
-        RpcResponse::HostingImportFromUrl(r) => (r.new_hosting_id, r.domain),
+    let (new_id, new_domain, carry_report) = match import {
+        RpcResponse::HostingImportFromUrl(r) => (r.new_hosting_id, r.domain, r.carry_report),
         RpcResponse::Error(e) => {
             reporter
                 .finish(false, Some(format!("Target import failed: {e}")))
@@ -13949,8 +14018,13 @@ async fn run_clone_job(
     };
     let grants_note =
         carry_access_grants(&state, bundle.source_hosting_id.as_str(), new_id.as_str()).await;
+    let kv_note = carry_master_kv(&state, bundle.source_hosting_id.as_str(), new_id.as_str()).await;
     reporter
-        .step(&format!("Imported as {new_domain}"), 80, &grants_note)
+        .step(
+            &format!("Imported as {new_domain}"),
+            80,
+            &format!("{grants_note}{kv_note}{}", carry_report_text(&carry_report)),
+        )
         .await;
 
     tracing::info!(
@@ -15082,8 +15156,8 @@ async fn run_migration_job(
             return;
         }
     };
-    let new_id = match import {
-        RpcResponse::HostingImportFromUrl(r) => r.new_hosting_id,
+    let (new_id, carry_report) = match import {
+        RpcResponse::HostingImportFromUrl(r) => (r.new_hosting_id, r.carry_report),
         RpcResponse::Error(e) => {
             reporter
                 .finish(false, Some(format!("Target import failed: {e}")))
@@ -15099,11 +15173,16 @@ async fn run_migration_job(
     };
     let grants_note =
         carry_access_grants(&state, bundle.source_hosting_id.as_str(), new_id.as_str()).await;
+    let kv_note = carry_master_kv(&state, bundle.source_hosting_id.as_str(), new_id.as_str()).await;
     reporter
         .step(
             "Imported on target",
             85,
-            &format!("new_hosting_id={}\n{grants_note}", new_id.as_str()),
+            &format!(
+                "new_hosting_id={}\n{grants_note}{kv_note}{}",
+                new_id.as_str(),
+                carry_report_text(&carry_report)
+            ),
         )
         .await;
 
@@ -16065,6 +16144,31 @@ async fn run_wp_staging_push_job(
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Notes, tags and the panel's `.user.ini` copy follow the site to its
+    /// new id; the PHP-memory automation and worker state (same `php.`
+    /// prefix, node state) do not — the bundle carries those.
+    #[test]
+    fn master_site_kv_is_notes_tags_and_php_ini_only() {
+        for k in [
+            "notes",
+            "tags",
+            "php.memory_limit",
+            "php.upload_max_filesize",
+        ] {
+            assert!(is_master_site_kv(k), "{k}");
+        }
+        for k in [
+            "php.mem_auto",
+            "php.mem_auto_max_mb",
+            "php.mem_auto_state",
+            "php.workers_full",
+            "backup_at",
+            "dkim",
+            "staging_domain",
+        ] {
+            assert!(!is_master_site_kv(k), "{k}");
+        }
+    }
 
     #[test]
     fn backup_schedule_reads_custom_period_and_time() {
