@@ -806,6 +806,7 @@ pub trait AgentApi: Send + Sync + 'static {
         token: String,
         override_domain: Option<String>,
         override_aliases: Vec<String>,
+        master_minted: bool,
     ) -> Result<hyperion_types::HostingImportResult, RpcError>;
 
     /// List installed WordPress plugins for a hosting.

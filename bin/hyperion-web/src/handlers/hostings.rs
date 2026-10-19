@@ -13396,6 +13396,60 @@ pub struct HostingCloneForm {
     pub issue_cert: bool,
 }
 
+/// The copy's domain as typed → the bare lowercase domain the importer
+/// needs. Forgives what a paste from the address bar carries (`https://`,
+/// a trailing `/` or path, a `:port`) and refuses anything that still isn't
+/// a domain, with a message fit for the clone card.
+fn clone_domain_from_input(raw: &str) -> Result<String, String> {
+    let s = raw.trim();
+    let s = s
+        .strip_prefix("https://")
+        .or_else(|| s.strip_prefix("http://"))
+        .unwrap_or(s);
+    let host = s.split(['/', '?', '#']).next().unwrap_or_default();
+    let host = host.split(':').next().unwrap_or_default();
+    hyperion_validate::Domain::parse(host)
+        .map(|d| d.as_str().to_string())
+        .map_err(|_| format!("\"{}\" is not a valid domain for the copy.", raw.trim()))
+}
+
+#[cfg(test)]
+mod clone_domain_tests {
+    use super::clone_domain_from_input;
+
+    #[test]
+    fn strips_what_an_address_bar_paste_carries() {
+        for raw in [
+            "www.jtmotors.cz/",
+            " www.jtmotors.cz ",
+            "https://www.jtmotors.cz/",
+            "http://www.jtmotors.cz/some/page?x=1",
+            "WWW.JTMotors.cz",
+            "www.jtmotors.cz:443/",
+            "www.jtmotors.cz.",
+        ] {
+            assert_eq!(
+                clone_domain_from_input(raw).as_deref(),
+                Ok("www.jtmotors.cz"),
+                "{raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn refuses_what_is_still_not_a_domain() {
+        for raw in [
+            "/",
+            "https://",
+            "jtmotors",
+            "staging..jtmotors.cz",
+            "a b.cz",
+        ] {
+            assert!(clone_domain_from_input(raw).is_err(), "{raw}");
+        }
+    }
+}
+
 pub async fn post_hosting_clone(
     State(state): State<SharedState>,
     ctx: AuthCtx,
@@ -13416,15 +13470,28 @@ pub async fn post_hosting_clone(
     let sel_url = urlencoding(&form.selector);
 
     // ── Sanity gates ──
-    let new_domain = form.new_domain.trim().to_string();
-    if new_domain.is_empty() {
+    if form.new_domain.trim().is_empty() {
         return Ok(Redirect::to(&format!(
             "/hostings/{}?flash_error=Enter+a+domain+for+the+copy#clone",
             sel_url
         ))
         .into_response());
     }
-    if new_domain == form.selector.trim() {
+    // Refuse a bad domain HERE, before the job exports a multi-GB bundle —
+    // the agent only parses it after the export, and `www.example.cz/`
+    // pasted from the address bar used to ride all the way to the import.
+    let new_domain = match clone_domain_from_input(&form.new_domain) {
+        Ok(d) => d,
+        Err(msg) => {
+            return Ok(Redirect::to(&format!(
+                "/hostings/{}?flash_error={}#clone",
+                sel_url,
+                urlencoding(&msg)
+            ))
+            .into_response());
+        }
+    };
+    if new_domain.eq_ignore_ascii_case(form.selector.trim()) {
         return Ok(Redirect::to(&format!(
             "/hostings/{}?flash_error={}#clone",
             sel_url,
@@ -13639,7 +13706,7 @@ async fn run_clone_job(
         .step(
             &format!("Importing as {} on {}", new_domain, target_node),
             65,
-            &format!("override_domain={new_domain}\n"),
+            &format!("override_domain={new_domain}\nbase_url={base_url}\n"),
         )
         .await;
     let import = match crate::dispatcher::dispatch_to_node(
@@ -13650,6 +13717,8 @@ async fn run_clone_job(
             token: token.clone(),
             override_domain: Some(new_domain.clone()),
             override_aliases: Vec::new(),
+            // Built above from our own address to our own bundle endpoint.
+            master_minted: true,
         },
     )
     .await
@@ -14770,6 +14839,8 @@ async fn run_migration_job(
             token: token.clone(),
             override_domain: None,
             override_aliases: Vec::new(),
+            // Built above from our own address to our own bundle endpoint.
+            master_minted: true,
         },
     )
     .await

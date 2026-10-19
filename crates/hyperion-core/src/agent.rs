@@ -1094,9 +1094,16 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         token: String,
         override_domain: Option<String>,
         override_aliases: Vec<String>,
+        master_minted: bool,
     ) -> Result<hyperion_types::HostingImportResult, RpcError> {
         self.svc
-            .hosting_import_from_url(base_url, token, override_domain, override_aliases)
+            .hosting_import_from_url(
+                base_url,
+                token,
+                override_domain,
+                override_aliases,
+                master_minted,
+            )
             .await
     }
 
