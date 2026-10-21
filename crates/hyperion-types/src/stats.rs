@@ -1030,6 +1030,10 @@ pub struct BackupRemoteConfigView {
     /// default). Older agents send nothing.
     #[serde(default)]
     pub keep_latest: i64,
+    /// SFTP: the server's pinned host key (unpadded base64 SHA-256), empty
+    /// while none is pinned. Older agents send nothing.
+    #[serde(default)]
+    pub host_key_sha256: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -7625,6 +7625,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                         user: &remote.user,
                         password: &remote.password,
                         remote_dir: &hosting_dir,
+                        host_key_sha256: read_ftp_host_key(self.agent_config_path.as_deref()),
                     };
                     let archive_result =
                         hyperion_adapters::backup::upload_remote(&archive_path, &upload).await;
@@ -8431,6 +8432,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 user: &remote.user,
                 password: &remote.password,
                 remote_dir: hosting_dir,
+                host_key_sha256: read_ftp_host_key(self.agent_config_path.as_deref()),
             };
             asked += 1;
             match hyperion_adapters::backup::verify_remote(file, &upload).await {
@@ -12964,6 +12966,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 user: &remote.user,
                 password: &remote.password,
                 remote_dir: "",
+                host_key_sha256: read_ftp_host_key(self.agent_config_path.as_deref()),
             },
             dir,
         ))
@@ -24515,34 +24518,103 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             ok,
             message,
             put_latency_ms: latency,
+            ..Default::default()
         })
     }
 
     /// Connection check for the node's configured FTP/FTPS/SFTP off-site target
     /// (`[backup_remote]`): connect + log in + list the base directory. Lets the
     /// operator confirm the target works without running a whole backup.
+    ///
+    /// For SFTP this is also where the server's host key gets pinned: with no
+    /// key pinned yet, the key curl sees is fetched, the check runs against it,
+    /// and only a check that then succeeds writes it to agent.toml as
+    /// `host_key_sha256` (trust on first use — the save of a target triggers
+    /// this check on its own). A pinned key is never replaced here: a server
+    /// that presents a different one is refused, and the operator has to trust
+    /// the new key explicitly.
     pub async fn backup_remote_probe(&self) -> Result<hyperion_types::BackupTargetProbe, RpcError> {
         let Some(remote) = self.remote_backup.as_ref() else {
             return Ok(hyperion_types::BackupTargetProbe {
                 ok: false,
                 message: "no FTP/FTPS/SFTP off-site target is configured on this node".into(),
-                put_latency_ms: 0,
+                ..Default::default()
             });
         };
-        let upload = hyperion_adapters::backup::RemoteUpload {
+        let mut upload = hyperion_adapters::backup::RemoteUpload {
             scheme: &remote.scheme,
             host: &remote.host,
             port: remote.port,
             user: &remote.user,
             password: &remote.password,
             remote_dir: &remote.base_path,
+            host_key_sha256: read_ftp_host_key(self.agent_config_path.as_deref()),
         };
-        let (ok, message, latency_ms) = hyperion_adapters::backup::probe_remote(&upload).await;
+        let pin_now = remote.scheme == "sftp" && upload.host_key_sha256.is_empty();
+        if pin_now {
+            match hyperion_adapters::backup::fetch_sftp_host_key(&remote.host, remote.port).await {
+                Ok(key) => upload.host_key_sha256 = key,
+                Err(e) => {
+                    return Ok(hyperion_types::BackupTargetProbe {
+                        ok: false,
+                        message: format!("could not read the SFTP server's host key: {e}"),
+                        ..Default::default()
+                    })
+                }
+            }
+        }
+        let p = hyperion_adapters::backup::probe_remote(&upload).await;
+        let mut message = p.message;
+        if p.ok && pin_now {
+            message = match self.pin_ftp_host_key(&upload.host_key_sha256).await {
+                Ok(()) => format!(
+                    "{message}; pinned the server's host key SHA256:{} — a different key \
+                     from now on is refused",
+                    upload.host_key_sha256
+                ),
+                Err(e) => format!(
+                    "{message}, but the server's host key SHA256:{} could not be pinned: {e}",
+                    upload.host_key_sha256
+                ),
+            };
+        }
         Ok(hyperion_types::BackupTargetProbe {
-            ok,
+            ok: p.ok,
             message,
-            put_latency_ms: latency_ms as i64,
+            put_latency_ms: p.latency_ms as i64,
+            host_key_sha256: if remote.scheme == "sftp" && (p.ok || !pin_now) {
+                upload.host_key_sha256.clone()
+            } else {
+                String::new()
+            },
+            presented_host_key: p.presented_host_key.unwrap_or_default(),
         })
+    }
+
+    /// Write `[backup_remote] host_key_sha256` to this node's agent.toml.
+    /// No restart: every remote call reads the pin live.
+    async fn pin_ftp_host_key(&self, key: &str) -> Result<(), String> {
+        let path = self
+            .agent_config_path
+            .as_ref()
+            .ok_or("agent_config_path not wired")?;
+        crate::config_persist::set_many(
+            path,
+            "backup_remote",
+            &[(
+                "host_key_sha256",
+                crate::config_persist::FieldValue::Str(key.to_string()),
+            )],
+        )
+        .map_err(|e| e.to_string())?;
+        self.append_audit(
+            "backup_remote.host_key.pin",
+            None,
+            &serde_json::json!({"sha256": key}).to_string(),
+            "ok",
+        )
+        .await;
+        Ok(())
     }
 
     // ============================================================
@@ -31629,7 +31701,14 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .ok_or_else(|| RpcError::Validation {
                 message: "agent_config_path not wired — UI editing disabled".into(),
             })?;
-        let parsed = parse_agent_section_fields(&section, &fields)?;
+        let mut parsed = parse_agent_section_fields(&section, &fields)?;
+        if section == "backup_remote" {
+            if let Some(clear) =
+                host_key_pin_to_clear(&read_backup_remote_section(Some(path.as_path())), &fields)
+            {
+                parsed.push(clear);
+            }
+        }
         // Convert to the &[(&str, FieldValue)] shape the persist module
         // wants. Done in two steps so the &str references live long
         // enough for the slice.
@@ -41324,6 +41403,7 @@ pub(crate) fn read_backup_remote_section(
     v.password_set = !s("password").is_empty();
     v.base_path = s("base_path");
     v.keep_latest = read_ftp_keep_latest(cfg_path) as i64;
+    v.host_key_sha256 = read_ftp_host_key(cfg_path);
     v
 }
 
@@ -41576,6 +41656,23 @@ fn parse_agent_section_fields(
             | ("backup_remote", "password")
             | ("backup_remote", "base_path") => crate::config_persist::FieldValue::Str(v.clone()),
             ("backup_remote", "port") => crate::config_persist::FieldValue::Int(parse_int(v)?),
+            // The SFTP server's pinned host key. Empty clears the pin (the next
+            // Test pins whatever the server presents then). Anything else must
+            // be a SHA-256 in base64 — it goes into a curl config verbatim.
+            ("backup_remote", "host_key_sha256") => {
+                if v.trim().is_empty() {
+                    crate::config_persist::FieldValue::Str(String::new())
+                } else {
+                    let key =
+                        hyperion_adapters::backup::normalize_host_key(v).ok_or_else(|| {
+                            bad(format!(
+                                "host_key_sha256 must be a SHA-256 fingerprint in base64 \
+                             (SHA256:… as ssh-keygen -l prints it), got {v:?}"
+                            ))
+                        })?;
+                    crate::config_persist::FieldValue::Str(key)
+                }
+            }
             // 0 = off: the FTP target keeps everything, as it always has.
             ("backup_remote", "keep_latest") => {
                 let n = parse_int(v)?;
@@ -43009,6 +43106,45 @@ fn ftp_archives_beyond_keep<'a>(
         .filter(|n| *n != just_pushed)
         .map(str::to_string)
         .collect()
+}
+
+/// `[backup_remote] host_key_sha256`, read live so a pin made by the Test
+/// button (or a "trust the new key") applies to the next push without an
+/// agent restart. Empty = not pinned; a value that is not a SHA-256 in base64
+/// reads as not pinned too, which curl then refuses loudly rather than
+/// trusting anything.
+pub(crate) fn read_ftp_host_key(cfg_path: Option<&std::path::Path>) -> String {
+    read_agent_doc(cfg_path)
+        .as_ref()
+        .and_then(|d| d.get("backup_remote"))
+        .and_then(|s| s.get("host_key_sha256"))
+        .and_then(|v| v.as_str())
+        .and_then(hyperion_adapters::backup::normalize_host_key)
+        .unwrap_or_default()
+}
+
+/// A pinned SFTP host key belongs to one server. A save that points the
+/// target somewhere else (scheme, host or port) drops it, so the new server's
+/// key is pinned by the check that follows the save — instead of the new
+/// server being refused as "the key changed". A save that names the key
+/// itself (the "trust the new key" action) decides on its own.
+fn host_key_pin_to_clear(
+    current: &hyperion_types::BackupRemoteConfigView,
+    fields: &std::collections::BTreeMap<String, String>,
+) -> Option<(String, crate::config_persist::FieldValue)> {
+    if current.host_key_sha256.is_empty() || fields.contains_key("host_key_sha256") {
+        return None;
+    }
+    let differs = |k: &str, cur: &str| fields.get(k).is_some_and(|v| v.trim() != cur);
+    let moved = differs("scheme", &current.scheme)
+        || differs("host", &current.host)
+        || differs("port", &current.port.to_string());
+    moved.then(|| {
+        (
+            "host_key_sha256".to_string(),
+            crate::config_persist::FieldValue::Str(String::new()),
+        )
+    })
 }
 
 /// `[backup_remote] keep_latest`, read live: 0 (or missing, or not a whole
@@ -49011,6 +49147,78 @@ mod tests {
             .expect("disconnect");
         let v = s.agent_config_view("h", "v").await.expect("view");
         assert!(!v.slack.default_webhook_set);
+    }
+
+    /// `[backup_remote] host_key_sha256`: stored in one form whatever the
+    /// operator pasted, refused when it is not a SHA-256 (it goes into a curl
+    /// config), and dropped by a save that points the target at another
+    /// server — but never by a save of the same server, and never silently
+    /// replaced by a different key.
+    #[tokio::test]
+    async fn sftp_host_key_pin_parses_reads_back_and_follows_the_server() {
+        const KEY: &str = "Gjo4+v6WY/LpuOKaBteiqta5IP0Iks0DEqd1Q+Io0n0";
+        let dir = tempfile::tempdir().expect("dir");
+        let path = dir.path().join("agent.toml");
+        std::fs::write(
+            &path,
+            "[backup_remote]\nenabled = true\nscheme = \"sftp\"\nhost = \"bk.example\"\nport = 22\n",
+        )
+        .expect("seed");
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool, happy_mocks()).with_agent_config_path(path.clone());
+        let save = |pairs: Vec<(&str, String)>| {
+            let fields: std::collections::BTreeMap<String, String> =
+                pairs.into_iter().map(|(k, v)| (k.to_string(), v)).collect();
+            s.agent_config_update("backup_remote".to_string(), fields)
+        };
+        let pinned = || super::read_backup_remote_section(Some(&path)).host_key_sha256;
+
+        // Pasted the way ssh-keygen -l prints it: stored bare.
+        save(vec![("host_key_sha256", format!("SHA256:{KEY}"))])
+            .await
+            .expect("trust");
+        assert_eq!(pinned(), KEY);
+        assert_eq!(super::read_ftp_host_key(Some(&path)), KEY);
+        for bad in ["MD5:aa:bb", "x\"\ninsecure", &KEY[..40]] {
+            assert!(
+                save(vec![("host_key_sha256", bad.to_string())])
+                    .await
+                    .is_err(),
+                "{bad:?}"
+            );
+        }
+        assert_eq!(pinned(), KEY, "a refused value leaves the pin alone");
+
+        // The same server re-saved (the whole form posts again): kept.
+        save(vec![
+            ("scheme", "sftp".into()),
+            ("host", "bk.example".into()),
+            ("port", "22".into()),
+            ("user", "bk".into()),
+        ])
+        .await
+        .expect("same server");
+        assert_eq!(pinned(), KEY);
+
+        // Another port, then another host: the pin belonged to the old one.
+        save(vec![("port", "2222".into())]).await.expect("port");
+        assert_eq!(pinned(), "");
+        save(vec![("host_key_sha256", KEY.into())])
+            .await
+            .expect("re-pin");
+        save(vec![("host", "other.example".into())])
+            .await
+            .expect("host");
+        assert_eq!(pinned(), "");
+
+        // A form that names the key decides it, even alongside a move.
+        save(vec![
+            ("host", "third.example".into()),
+            ("host_key_sha256", KEY.into()),
+        ])
+        .await
+        .expect("explicit");
+        assert_eq!(pinned(), KEY);
     }
 
     /// The Settings form's round trip: a save lands in agent.toml under

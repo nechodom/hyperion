@@ -411,33 +411,23 @@ pub async fn post_node_backup_probe(
             Html("<span class=\"pill err\">invalid node id</span>".to_string()).into_response(),
         );
     }
-    let esc = |s: &str| askama_escape::escape(s, askama_escape::Html).to_string();
     let target = (!is_local(&q.node_id)).then_some(q.node_id.trim());
+    let trust = super::settings::HostKeyTrustForm {
+        action: "/install/node-settings",
+        hidden: vec![
+            ("_csrf", super::session_csrf_token(&state, &ctx)),
+            ("node_id", q.node_id.trim().to_string()),
+            ("section", "backup_remote".to_string()),
+        ],
+    };
     let html =
         match crate::dispatcher::dispatch_to_node(&state, target, Request::BackupRemoteProbe {})
             .await
         {
-            Ok(RpcResponse::BackupRemoteProbe(p)) => {
-                let cls = if p.ok { "pill ok" } else { "pill err" };
-                let latency = if p.ok && p.put_latency_ms > 0 {
-                    format!(" · {}ms", p.put_latency_ms)
-                } else {
-                    String::new()
-                };
-                format!(
-                    "<span class=\"{cls}\">{}{}</span>",
-                    esc(&p.message),
-                    latency
-                )
-            }
-            Ok(RpcResponse::Error(e)) => format!(
-                "<span class=\"pill err\">check failed: {}</span>",
-                esc(&e.to_string())
-            ),
-            Ok(_) => "<span class=\"pill err\">unexpected response</span>".into(),
+            Ok(resp) => super::settings::backup_remote_probe_html(resp, Some(&trust)),
             Err(e) => format!(
                 "<span class=\"pill err\">check failed: {}</span>",
-                esc(&e.to_string())
+                askama_escape::escape(&e.to_string(), askama_escape::Html)
             ),
         };
     Ok(Html(html).into_response())

@@ -223,7 +223,9 @@ pub async fn post_email_logo(
 
 /// POST /settings/backup-remote/probe — connection check for the configured
 /// FTP/FTPS/SFTP off-site target: connect, log in, list the directory. Returns
-/// an HTMX fragment shown next to the button.
+/// an HTMX fragment shown next to the button. For SFTP the master pins the
+/// server's host key here on first success; a changed key comes back with a
+/// "trust the new key" form (Owner only — it is a settings save).
 pub async fn post_backup_remote_probe(
     State(state): State<SharedState>,
     ctx: AuthCtx,
@@ -233,32 +235,99 @@ pub async fn post_backup_remote_probe(
             Html("<span class=\"pill err\">admin role required</span>".to_string()).into_response(),
         );
     }
-    let esc = |s: &str| askama_escape::escape(s, askama_escape::Html).to_string();
     let resp =
         hyperion_rpc_client::call(&state.agent_socket, Request::BackupRemoteProbe {}).await?;
-    let html = match resp {
-        RpcResponse::BackupRemoteProbe(p) => {
-            let cls = if p.ok { "pill ok" } else { "pill err" };
-            let latency = if p.ok && p.put_latency_ms > 0 {
-                format!(" · {}ms", p.put_latency_ms)
-            } else {
-                String::new()
-            };
-            format!(
-                "<span class=\"{cls}\">{}{}</span>",
-                esc(&p.message),
-                latency
-            )
-        }
+    // A good SFTP check may just have pinned the host key in the master's
+    // agent.toml; the other nodes push to the same server and need it.
+    if matches!(&resp, RpcResponse::BackupRemoteProbe(p) if p.ok && !p.host_key_sha256.is_empty()) {
+        state.cluster_sync.kick();
+    }
+    let trust = ctx.is_super_admin().then(|| HostKeyTrustForm {
+        action: "/settings/config",
+        hidden: vec![
+            ("_csrf", crate::handlers::session_csrf_token(&state, &ctx)),
+            ("section", "backup_remote".to_string()),
+            ("_return_tab", "offsite-ftp".to_string()),
+        ],
+    });
+    Ok(Html(backup_remote_probe_html(resp, trust.as_ref())).into_response())
+}
+
+/// Where a "trust the new key" form posts, and the routing fields it carries
+/// besides the key itself. It is an ordinary save of `[backup_remote]
+/// host_key_sha256`, so it goes through the same handler, permission check
+/// and settings sync as the form above it.
+pub(crate) struct HostKeyTrustForm {
+    pub action: &'static str,
+    pub hidden: Vec<(&'static str, String)>,
+}
+
+/// The FTP / SFTP Test result as an HTMX fragment — Settings → Backups and
+/// the per-node settings page both render it.
+pub(crate) fn backup_remote_probe_html(
+    resp: RpcResponse,
+    trust: Option<&HostKeyTrustForm>,
+) -> String {
+    let esc = |s: &str| askama_escape::escape(s, askama_escape::Html).to_string();
+    let p = match resp {
+        RpcResponse::BackupRemoteProbe(p) => p,
         RpcResponse::Error(e) => {
-            format!(
+            return format!(
                 "<span class=\"pill err\">check failed: {}</span>",
                 esc(&e.to_string())
             )
         }
-        _ => "<span class=\"pill err\">unexpected response</span>".into(),
+        _ => return "<span class=\"pill err\">unexpected response</span>".into(),
     };
-    Ok(Html(html).into_response())
+    let cls = if p.ok { "pill ok" } else { "pill err" };
+    let latency = if p.ok && p.put_latency_ms > 0 {
+        format!(" · {}ms", p.put_latency_ms)
+    } else {
+        String::new()
+    };
+    let mut html = format!(
+        "<span class=\"{cls}\">{}{}</span>",
+        esc(&p.message),
+        latency
+    );
+    if p.ok && !p.host_key_sha256.is_empty() && !p.message.contains("pinned") {
+        html.push_str(&format!(
+            "<div class=\"text-soft small\" style=\"margin-top:0.25rem\">Host key \
+             <code style=\"word-break:break-all\">SHA256:{}</code> pinned</div>",
+            esc(&p.host_key_sha256)
+        ));
+    }
+    // Trust exactly the key the server presented — the one the operator was
+    // shown — never "whatever it presents next time".
+    match (trust, p.presented_host_key.is_empty()) {
+        (Some(t), false) => {
+            let key = esc(&p.presented_host_key);
+            let hidden: String = t
+                .hidden
+                .iter()
+                .map(|(k, v)| format!("<input type=\"hidden\" name=\"{k}\" value=\"{}\">", esc(v)))
+                .collect();
+            html.push_str(&format!(
+                "<form method=\"post\" action=\"{action}\" style=\"margin:0.4rem 0 0\" \
+                 data-confirm-title=\"Trust the new SFTP host key?\" \
+                 data-confirm-body=\"Only if you know the server was reinstalled or its keys \
+                 were changed. Check that SHA256:{key} is what the server shows (ssh-keygen -lf \
+                 on its host key) — if it is not, someone may be intercepting the connection.\" \
+                 data-confirm-confirm-label=\"Trust this key\" \
+                 data-confirm-variant=\"danger\">{hidden}\
+                 <input type=\"hidden\" name=\"host_key_sha256\" value=\"{key}\">\
+                 <button class=\"btn small danger\" type=\"submit\">Trust the new key \
+                 SHA256:{key}</button></form>",
+                action = t.action,
+            ));
+        }
+        (None, false) => html.push_str(
+            "<div class=\"text-soft small\" style=\"margin-top:0.25rem\">An Owner can trust \
+             the new key from here.</div>",
+        ),
+        _ => {}
+    }
+    html
 }
 
 /// GET /settings/email-logo.img — the stored logo, for the settings preview.
@@ -2591,6 +2660,67 @@ pub async fn post_letters_import(
 #[cfg(test)]
 mod tests {
     use super::{flatten_toml_strings, synthesize_unchecked_checkboxes, toml_key, toml_value};
+
+    /// A changed SFTP host key comes back with a form that trusts exactly
+    /// the key the server presented — confirmed on the FORM (the driver reads
+    /// the submit event's target), and only for someone who may save.
+    #[test]
+    fn probe_fragment_offers_to_trust_exactly_the_presented_key() {
+        use super::{backup_remote_probe_html, HostKeyTrustForm};
+        use hyperion_rpc::codec::Response as RpcResponse;
+        const KEY: &str = "Gjo4+v6WY/LpuOKaBteiqta5IP0Iks0DEqd1Q+Io0n0";
+        let refused = || {
+            RpcResponse::BackupRemoteProbe(hyperion_types::BackupTargetProbe {
+                ok: false,
+                message: "REFUSED: <b>changed</b>".into(),
+                put_latency_ms: 0,
+                host_key_sha256: String::new(),
+                presented_host_key: KEY.into(),
+            })
+        };
+        let trust = HostKeyTrustForm {
+            action: "/settings/config",
+            hidden: vec![
+                ("_csrf", "tok\"x".into()),
+                ("section", "backup_remote".into()),
+            ],
+        };
+        let html = backup_remote_probe_html(refused(), Some(&trust));
+        assert!(
+            html.contains("REFUSED: &lt;b&gt;changed&lt;/b&gt;"),
+            "{html}"
+        );
+        assert!(html.contains(r#"<form method="post" action="/settings/config""#));
+        assert!(html.contains("data-confirm-title=\"Trust the new SFTP host key?\""));
+        assert!(html.contains(&format!(
+            r#"<input type="hidden" name="host_key_sha256" value="{KEY}">"#
+        )));
+        assert!(html.contains(r#"name="section" value="backup_remote""#));
+        assert!(
+            html.contains(r#"name="_csrf" value="tok&quot;x""#),
+            "{html}"
+        );
+
+        // Not allowed to save: told who can, no form.
+        let html = backup_remote_probe_html(refused(), None);
+        assert!(!html.contains("<form"), "{html}");
+        assert!(html.contains("An Owner can trust"));
+
+        // A good check against a pinned key says which key, and offers nothing.
+        let ok = RpcResponse::BackupRemoteProbe(hyperion_types::BackupTargetProbe {
+            ok: true,
+            message: "connected, logged in, and listed the target directory".into(),
+            put_latency_ms: 12,
+            host_key_sha256: KEY.into(),
+            presented_host_key: String::new(),
+        });
+        let html = backup_remote_probe_html(ok, Some(&trust));
+        assert!(
+            html.contains(&format!("SHA256:{KEY}</code> pinned")),
+            "{html}"
+        );
+        assert!(!html.contains("<form"));
+    }
 
     /// Each node's backups live on that node, so the sweep runs once per
     /// node and the job log says which node did what — a node that could

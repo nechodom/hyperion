@@ -406,6 +406,7 @@ mod tests {
             password_set: true,
             base_path: base.into(),
             keep_latest: 0,
+            host_key_sha256: String::new(),
         }
     }
 
@@ -575,7 +576,16 @@ mod tests {
     }
 
     fn render(can_edit: bool, can_targets: bool, s3: Vec<S3Row>, ftp: FtpRow) -> String {
-        let config = AgentConfigView::default();
+        render_cfg(can_edit, can_targets, s3, ftp, AgentConfigView::default())
+    }
+
+    fn render_cfg(
+        can_edit: bool,
+        can_targets: bool,
+        s3: Vec<S3Row>,
+        ftp: FtpRow,
+        config: AgentConfigView,
+    ) -> String {
         let active_targets = usize::from(ftp.active) + s3.iter().filter(|r| r.active).count();
         BackupsTpl {
             username: "kevin",
@@ -613,6 +623,27 @@ mod tests {
         }
         .render()
         .expect("renders")
+    }
+
+    /// The SFTP card says whether the server's host key is pinned, and which
+    /// one — the fingerprint an operator compares against the server's.
+    #[test]
+    fn sftp_card_shows_the_pinned_host_key_or_that_none_is() {
+        const KEY: &str = "Gjo4+v6WY/LpuOKaBteiqta5IP0Iks0DEqd1Q+Io0n0";
+        let r = remote(true, "sftp", "h", "u", "/b");
+        let mut config = AgentConfigView {
+            backup_remote: r.clone(),
+            ..Default::default()
+        };
+        let html = render_cfg(true, true, vec![], ftp_row(&r), config.clone());
+        assert!(html.contains("not pinned yet"), "unpinned");
+        config.backup_remote.host_key_sha256 = KEY.into();
+        let html = render_cfg(true, true, vec![], ftp_row(&r), config.clone());
+        assert!(html.contains(&format!("SHA256:{KEY}</code> (pinned)")));
+        // FTP has no host key to talk about.
+        config.backup_remote.scheme = "ftp".into();
+        let html = render_cfg(true, true, vec![], ftp_row(&r), config);
+        assert!(!html.contains("Server host key"));
     }
 
     /// An Administrator holds BackupTargets but is not an Owner: the S3

@@ -78,6 +78,9 @@ pub fn is_synced_key(section: &str, key: &str) -> bool {
                 | "password"
                 | "base_path"
                 | "keep_latest"
+                // Every node pushes to the same server, so they all pin the
+                // master's key. A node from before pinning ignores it.
+                | "host_key_sha256"
         ),
         "snapshots" => matches!(key, "keep_days" | "keep_last"),
         "protection" => key == "mode",
@@ -354,6 +357,7 @@ enabled = true
 host = "ftp.example.com"
 port = 21
 password = "s3cret"
+host_key_sha256 = "Gjo4+v6WY/LpuOKaBteiqta5IP0Iks0DEqd1Q+Io0n0"
 [cluster]
 mode = "master"
 "#;
@@ -367,6 +371,11 @@ mode = "master"
         );
         let remote = secs.iter().find(|s| s.section == "backup_remote").unwrap();
         assert_eq!(remote.fields.get("port").unwrap(), "21");
+        assert_eq!(
+            remote.fields.get("host_key_sha256").unwrap(),
+            "Gjo4+v6WY/LpuOKaBteiqta5IP0Iks0DEqd1Q+Io0n0",
+            "every node pins the master's SFTP host key"
+        );
         assert_eq!(remote.fields.get("enabled").unwrap(), "true");
         assert!(secs.iter().all(|s| s.section != "agent"));
         let cluster = secs.iter().find(|s| s.section == "cluster").unwrap();
