@@ -12978,10 +12978,15 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let Some(files) = listed else {
             return Ok(hyperion_types::OffsiteListing::default());
         };
+        // The remote folder is per SYSTEM USER, and hostings can share one —
+        // so it also holds the other sites' archives. Listed unfiltered, this
+        // site's card offered "Restore" on a sibling's backup, which would
+        // have put another domain's files and database over this one.
         Ok(hyperion_types::OffsiteListing {
             directory_exists: true,
             files: files
                 .into_iter()
+                .filter(|f| offsite_file_belongs(&detail.domain, &f.name))
                 .map(|f| hyperion_types::OffsiteFile {
                     name: f.name,
                     bytes: f.bytes as i64,
@@ -13101,10 +13106,36 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                         }
                     }
                 }
-                Err(_e) => {
-                    // FTP failed. Don't stamp the row failed yet — an S3 target
-                    // below may still take the copy; the drop gate is what
-                    // actually decides safety.
+                Err(e) => {
+                    // FTP failed. An S3 target below may still take the copy,
+                    // and the drop gate is what decides safety — but the FTP
+                    // record must not go on claiming what may no longer be
+                    // true. A re-push OVERWRITES the remote file, so one that
+                    // died half-way can leave a truncated archive behind a row
+                    // still reading "off-site ✓", and the off-site restore
+                    // would then fetch that. Look at what is there now and
+                    // record that; nothing at all was recorded before, so a
+                    // run that never made it off-site showed no reason why.
+                    let (state, _) = ftp_verify_run(&archive_path, dump_path.as_deref(), &up).await;
+                    let ftp_on_record = matches!(run.remote_state.as_str(), "ok" | "verified");
+                    if state == "failed" || (!ftp_on_record && state != "verified") {
+                        let why = if state == "failed" {
+                            format!(
+                                "off-site push failed: {e} — the remote copy is now missing or \
+                                 the wrong size"
+                            )
+                        } else {
+                            format!("off-site push failed: {e}")
+                        };
+                        let _ = hyperion_state::backups::set_remote(
+                            &self.pool,
+                            run.id,
+                            &run.remote_blob_key,
+                            "failed",
+                            &why,
+                        )
+                        .await;
+                    }
                 }
             }
         }
@@ -13454,25 +13485,68 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             });
         };
         up.remote_dir = &dir;
+        // The remote folder is shared by every hosting of this system user;
+        // only this site's own archives may be put back over it.
+        if !offsite_file_belongs(&detail.domain, &filename) || filename.ends_with(".sql") {
+            return Err(RpcError::Validation {
+                message: format!(
+                    "{filename:?} is not an off-site backup of {}",
+                    detail.domain
+                ),
+            });
+        }
         // Under the per-hosting incoming directory, which `backup_restore`
         // already allows and which keeps one site's fetched archive out of
-        // another's.
-        let dest_dir =
-            std::path::PathBuf::from("/var/lib/hyperion/backups/incoming").join(detail.id.as_str());
-        let dest = dest_dir.join(&filename);
+        // another's — and in a folder of its OWN inside it. With one shared
+        // folder, two restores of the same archive wrote the same path, and
+        // the second download truncated the file the first was extracting.
+        let dest_dir = std::path::PathBuf::from("/var/lib/hyperion/backups/incoming")
+            .join(detail.id.as_str())
+            .join(format!(
+                "offsite-{}",
+                chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+            ));
+        tokio::fs::create_dir_all(&dest_dir)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("create {}: {e}", dest_dir.display())))?;
+        // Whatever happens next, the fetched copy goes: it is still on the
+        // remote, and a multi-GB archive left here after every restore filled
+        // the node one restore at a time — nothing else ever cleans this
+        // folder.
+        let restored = self
+            .offsite_fetch_and_restore(sel, &detail, &up, &dest_dir, &filename, mode)
+            .await;
+        if let Err(e) = tokio::fs::remove_dir_all(&dest_dir).await {
+            tracing::warn!(dir = %dest_dir.display(), error = %e,
+                "off-site restore: could not remove the fetched copy");
+        }
+        restored
+    }
+
+    /// The body of [`Self::backup_offsite_restore`]: everything it fetches
+    /// lands in `dest_dir`, which the caller removes afterwards.
+    async fn offsite_fetch_and_restore(
+        &self,
+        sel: HostingSelector,
+        detail: &HostingDetail,
+        up: &hyperion_adapters::backup::RemoteUpload<'_>,
+        dest_dir: &std::path::Path,
+        filename: &str,
+        mode: hyperion_types::BackupRestoreMode,
+    ) -> Result<String, RpcError> {
+        let dest = dest_dir.join(filename);
         // Room for the archive, the dump beside it and the extraction to come.
         // A remote serving an endless stream must not be able to fill the node
         // and take every site on it down; unknown free space falls back to a
-        // fixed ceiling rather than to none.
-        let budget = fs_avail_bytes(&dest_dir)
+        // fixed ceiling rather than to none. Measured once the folder exists:
+        // `df` on a path that is not there fails, and every first restore of a
+        // site used to run on the fallback instead of the real number.
+        let mut budget = fs_avail_bytes(dest_dir)
             .await
             .map(|free| free.saturating_sub(free / 5))
             .unwrap_or(64 * 1024 * 1024 * 1024);
-        let bytes = hyperion_adapters::backup::download_remote(&filename, &dest, &up, budget)
-            .await
-            .map_err(|e| RpcError::Internal_with(format!("off-site download: {e}")))?;
 
-        // The DATABASE.
+        // The DATABASE — fetched FIRST.
         //
         // `backup_restore` finds the dump as a SIBLING of the archive — same
         // directory, same stem, `.sql` — so fetching only the tar meant the
@@ -13480,31 +13554,37 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // panel reported "files and database restored". A restore that says it
         // put the database back and did not is worse than one that refuses,
         // because the operator stops looking.
+        //
+        // First, because the refusal for a missing dump used to come only
+        // after the whole archive had crossed the wire — gigabytes downloaded
+        // to be thrown away. And only for a site that HAS a database: one
+        // without has nothing to put a dump into, and refusing it for a dump
+        // it does not need turned "files and database" into a dead button.
         let mut db_fetched = false;
-        if mode.restores_db() {
+        if mode.restores_db() && detail.database.is_some() {
             let dump_name = format!(
                 "{}.sql",
                 filename
                     .strip_suffix(".tar.gz")
                     .or_else(|| filename.strip_suffix(".tgz"))
-                    .unwrap_or(&filename)
+                    .unwrap_or(filename)
             );
             match hyperion_adapters::backup::download_remote(
                 &dump_name,
                 &dest_dir.join(&dump_name),
-                &up,
+                up,
                 budget,
             )
             .await
             {
                 Ok(n) => {
                     db_fetched = true;
+                    budget = budget.saturating_sub(n);
                     tracing::info!(domain=%detail.domain, file=%dump_name, bytes=n,
                         "off-site restore: database dump fetched");
                 }
                 Err(e) => {
                     // Refuse rather than silently degrade to files-only.
-                    let _ = tokio::fs::remove_file(&dest).await;
                     return Err(RpcError::Validation {
                         message: format!(
                             "the off-site copy of {filename} has no database dump beside it \
@@ -13515,6 +13595,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 }
             }
         }
+        let bytes = hyperion_adapters::backup::download_remote(filename, &dest, up, budget)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("off-site download: {e}")))?;
         tracing::info!(domain=%detail.domain, file=%filename, bytes,
             "off-site restore: archive fetched");
         // The restore runs FIRST; the audit row records what happened rather
@@ -42670,6 +42753,23 @@ fn manifest_path_for(archive: &std::path::Path) -> Option<std::path::PathBuf> {
     Some(archive.with_file_name(format!("{stem}.manifest.json")))
 }
 
+/// Is `name` one of `domain`'s own backup files on the off-site store?
+///
+/// The remote folder is per system user, and hostings can share one, so a
+/// listing of it holds every sibling site's archives too. `backup_run` names
+/// them `<domain>-<unix seconds>.tar.gz` (and `.sql` for the dump); the stamp
+/// must be all digits, so `a.cz` never claims `a.cz-shop.cz-…`.
+fn offsite_file_belongs(domain: &str, name: &str) -> bool {
+    let Some(rest) = name.strip_prefix(domain).and_then(|r| r.strip_prefix('-')) else {
+        return false;
+    };
+    let stamp = rest
+        .strip_suffix(".tar.gz")
+        .or_else(|| rest.strip_suffix(".tgz"))
+        .or_else(|| rest.strip_suffix(".sql"));
+    matches!(stamp, Some(t) if !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit()))
+}
+
 /// What an FTP push can honestly claim, from the size re-check of each file it
 /// sent: `(label, Some(true))` = listed back at the right size,
 /// `Some(false)` = we LOOKED and it is missing or the wrong size, `None` = we
@@ -46086,6 +46186,32 @@ mod tests {
         assert_eq!(manifest_path_for(Path::new("/")), None);
     }
 
+    /// The remote folder is per system user and hostings can share one, so
+    /// a site's card and restore must only ever see the site's own files.
+    #[test]
+    fn offsite_file_belongs_only_to_its_own_domain() {
+        use super::offsite_file_belongs;
+        assert!(offsite_file_belongs("a.cz", "a.cz-1700000000.tar.gz"));
+        assert!(offsite_file_belongs("a.cz", "a.cz-1700000000.tgz"));
+        assert!(offsite_file_belongs("a.cz", "a.cz-1700000000.sql"));
+        // A sibling site under the same system user.
+        assert!(!offsite_file_belongs("a.cz", "b.cz-1700000000.tar.gz"));
+        // A sibling whose name STARTS with this one — the stamp must be digits.
+        assert!(!offsite_file_belongs(
+            "a.cz",
+            "a.cz-shop.cz-1700000000.tar.gz"
+        ));
+        assert!(!offsite_file_belongs("shop.a.cz", "a.cz-1700000000.tar.gz"));
+        // Not a backup at all.
+        assert!(!offsite_file_belongs(
+            "a.cz",
+            "a.cz-1700000000.manifest.json"
+        ));
+        assert!(!offsite_file_belongs("a.cz", "a.cz-.tar.gz"));
+        assert!(!offsite_file_belongs("a.cz", "a.cz.tar.gz"));
+        assert!(!offsite_file_belongs("a.cz", "a.cz-17x.tar.gz"));
+    }
+
     /// "off-site ✓" must mean every file checked out — the same thing the
     /// drop step demands before it deletes.
     #[test]
@@ -46259,6 +46385,46 @@ mod tests {
             .await
             .expect_err("no target → must refuse");
         assert!(matches!(err, RpcError::Validation { .. }), "got: {err:?}");
+    }
+
+    /// The remote folder is per system user, so it can hold a sibling site's
+    /// archives. Restoring one of those over this site — another domain's
+    /// files and database — is refused before anything is downloaded, and so
+    /// is a bare database dump.
+    #[tokio::test]
+    async fn offsite_restore_refuses_a_file_that_is_not_this_sites() {
+        let pool = open_memory().await.expect("open");
+        let mut s = svc(pool.clone(), happy_mocks());
+        // Port 1 on loopback: any download attempt would fail as a transfer
+        // error, not as the validation refusal asserted below.
+        s.remote_backup = Some(RemoteBackupConfig {
+            scheme: "ftp".into(),
+            host: "127.0.0.1".into(),
+            port: 1,
+            user: "u".into(),
+            password: "p".into(),
+            base_path: "/backups".into(),
+        });
+        s.create(req("own.cz")).await.expect("create");
+        let sel = HostingSelector::Domain(Domain::parse("own.cz").unwrap());
+        for name in [
+            "sibling.cz-1700000000.tar.gz",
+            "own.cz-shop.cz-1700000000.tar.gz",
+            "own.cz-1700000000.sql",
+        ] {
+            let err = s
+                .backup_offsite_restore(
+                    sel.clone(),
+                    name.into(),
+                    hyperion_types::BackupRestoreMode::FilesOnly,
+                )
+                .await
+                .expect_err("a foreign file must be refused");
+            assert!(
+                matches!(&err, RpcError::Validation { message } if message.contains("not an off-site backup of own.cz")),
+                "{name}: {err:?}"
+            );
+        }
     }
 
     /// Pre-update backups live by their own rule: a clean one goes after

@@ -339,6 +339,9 @@ struct DetailTpl<'a> {
     csrf_cert_issue: String,
     csrf_cert_delete: String,
     csrf_restore: String,
+    /// The backups list restores a backup whose LOCAL copy is gone from the
+    /// FTP target, through the off-site card's route.
+    csrf_offsite_restore: String,
     csrf_restore_as_new: String,
     csrf_logs: String,
     csrf_cron: String,
@@ -1959,6 +1962,7 @@ pub async fn post_create(
                 csrf_cert_issue: csrf_token_for(&state, &ctx, "/hostings/cert/issue"),
                 csrf_cert_delete: csrf_token_for(&state, &ctx, "/hostings/cert/delete"),
                 csrf_restore: csrf_token_for(&state, &ctx, "/hostings/restore"),
+                csrf_offsite_restore: csrf_token_for(&state, &ctx, "/hostings/offsite-restore"),
                 csrf_restore_as_new: csrf_token_for(&state, &ctx, "/hostings/restore-as-new"),
                 csrf_logs: csrf_token_for(&state, &ctx, "/hostings/logs"),
                 csrf_cron: csrf_token_for(&state, &ctx, "/hostings/cron"),
@@ -3154,6 +3158,7 @@ pub async fn get_detail(
         csrf_cert_issue: csrf_token_for(&state, &ctx, "/hostings/cert/issue"),
         csrf_cert_delete: csrf_token_for(&state, &ctx, "/hostings/cert/delete"),
         csrf_restore: csrf_token_for(&state, &ctx, "/hostings/restore"),
+        csrf_offsite_restore: csrf_token_for(&state, &ctx, "/hostings/offsite-restore"),
         csrf_restore_as_new: csrf_token_for(&state, &ctx, "/hostings/restore-as-new"),
         csrf_logs: csrf_token_for(&state, &ctx, "/hostings/logs"),
         csrf_cron: csrf_token_for(&state, &ctx, "/hostings/cron"),

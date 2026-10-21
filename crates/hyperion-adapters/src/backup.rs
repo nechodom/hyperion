@@ -863,7 +863,13 @@ pub async fn download_remote(
         url = cmd::curl_config_quote(&url),
         local = cmd::curl_config_quote(local),
     );
-    cmd::curl_with_config(&config).await?;
+    if let Err(e) = cmd::curl_with_config(&config).await {
+        // `fail` stops curl on a server error, not on a transfer that dies
+        // half-way: what it wrote stays at `dest`, a truncated archive nobody
+        // will ever clean up — and one that looks like a backup.
+        let _ = tokio::fs::remove_file(dest).await;
+        return Err(e);
+    }
     let n = tokio::fs::metadata(dest)
         .await
         .map_err(|e| AdapterError::Other(format!("stat {}: {e}", dest.display())))?

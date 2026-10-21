@@ -3783,7 +3783,8 @@
             </td>
             <td class="right muted numeric">{{ crate::handlers::stats::fmt_bytes(b.bytes_total) }}</td>
             <td>
-              {% if let Some(p) = b.archive_path %}<code style="font-size:0.72rem">{{ p }}</code>{% endif %}
+              {% if let Some(p) = b.archive_path %}<code style="font-size:0.72rem">{{ p }}</code>
+              {% else if b.ftp_restore_name().is_some() %}<span class="text-soft small" title="The local copy was deleted; this backup is on the off-site FTP target">off-site only</span>{% endif %}
             </td>
             <td class="right">
               <div class="row-actions" style="flex-wrap:wrap">
@@ -3816,6 +3817,39 @@
                   </form>
                   {% endif %}
                   {% endif %}
+                  {#- The local copy is gone — dropped once it was verified
+                      off-site, by hand or by the "delete the local copy"
+                      setting — but the FTP target still has it. Restoring it
+                      meant scrolling to the Off-site copies card and finding
+                      the same archive by name; the row it belongs to offered
+                      nothing. Same route as that card: fetched back as a
+                      background job, then the ordinary restore. -#}
+                  {% if b.archive_path.is_none() %}{% if let Some(fname) = b.ftp_restore_name() %}
+                  <form method="post" action="/hostings/offsite-restore" style="display:inline"
+                        data-confirm-title="Restore from the off-site copy"
+                        data-confirm-body="Downloads {{ fname }} from the off-site FTP target and restores it over {{ detail.domain }}: its files are overwritten with the ones in the archive (files added since are left in place){% if detail.database.is_some() %} and its database is replaced{% endif %}. The download alone can take a long time on a large site. Runs as a background job."
+                        data-confirm-confirm-label="Download and restore"
+                        data-confirm-variant="danger">
+                    <input type="hidden" name="_csrf" value="{{ csrf_offsite_restore }}">
+                    <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
+                    <input type="hidden" name="filename" value="{{ fname }}">
+                    <input type="hidden" name="mode" value="{% if detail.database.is_some() %}files_and_db{% else %}files_only{% endif %}">
+                    <button class="btn small" type="submit" title="The local copy is gone — fetch this backup back from the off-site FTP target and restore it">Restore from off-site</button>
+                  </form>
+                  {% if detail.database.is_some() %}
+                  <form method="post" action="/hostings/offsite-restore" style="display:inline"
+                        data-confirm-title="Restore the files from the off-site copy"
+                        data-confirm-body="Downloads {{ fname }} from the off-site FTP target and restores ONLY its files over {{ detail.domain }} (files added since are left in place). The database is left untouched."
+                        data-confirm-confirm-label="Download and restore files"
+                        data-confirm-variant="danger">
+                    <input type="hidden" name="_csrf" value="{{ csrf_offsite_restore }}">
+                    <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
+                    <input type="hidden" name="filename" value="{{ fname }}">
+                    <input type="hidden" name="mode" value="files_only">
+                    <button class="btn small" type="submit" title="Restore the files only, from the off-site copy">Files only</button>
+                  </form>
+                  {% endif %}
+                  {% endif %}{% endif %}
                 {% endif %}
                 {% if b.state == "ok" && b.archive_path.is_some() && !b.no_offsite %}
                 {# Push THIS backup off-site, then delete the local copy — but
