@@ -2056,6 +2056,16 @@ pub fn notification_topic(kind: &str) -> (&'static str, &'static str) {
         .unwrap_or(("other", "Other"))
 }
 
+/// Whether a new alert of `kind` REPLACES the earlier card of the same kind
+/// instead of adding one. For alerts that restate one ongoing fact with a
+/// fresh count — `php_workers:<domain>` fires every few hours while the site
+/// keeps hitting its limit, and a card per firing buried the bell in copies
+/// of one site. Only per-subject kinds (`family:<subject>`) qualify, so two
+/// different sites never share a card.
+pub fn notification_replaces(kind: &str) -> bool {
+    matches!(kind.split_once(':'), Some(("php_workers", subject)) if !subject.is_empty())
+}
+
 /// One archive page plus everything the toolbar needs.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct NotificationSearchResult {
@@ -2996,7 +3006,7 @@ mod snapshot_retention_tests {
 
 #[cfg(test)]
 mod notification_topic_tests {
-    use super::notification_topic;
+    use super::{notification_replaces, notification_topic};
 
     #[test]
     fn every_emitted_kind_lands_in_its_topic() {
@@ -3019,6 +3029,7 @@ mod notification_topic_tests {
             ("wp_mail_failing", "mail"),
             ("php_mem_auto", "php"),
             ("php_workers", "php"),
+            ("php_workers:a.cz", "php"),
             ("quota.over:a.cz", "quota"),
             ("quota.resolved:a.cz", "quota"),
             ("system.rofs", "server"),
@@ -3029,5 +3040,14 @@ mod notification_topic_tests {
         ] {
             assert_eq!(notification_topic(kind).0, topic, "{kind}");
         }
+    }
+
+    #[test]
+    fn only_per_site_php_worker_alerts_replace_their_card() {
+        assert!(notification_replaces("php_workers:a.cz"));
+        assert!(!notification_replaces("php_workers"));
+        assert!(!notification_replaces("php_workers:"));
+        assert!(!notification_replaces("php_mem_auto"));
+        assert!(!notification_replaces("cert.renew_failed:a.cz"));
     }
 }

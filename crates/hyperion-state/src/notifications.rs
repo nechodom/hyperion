@@ -115,6 +115,94 @@ pub async fn insert_from_node(
     Ok(r.rows_affected() > 0)
 }
 
+/// Put `item` in this user's ONE card for `item.kind` (from `node_id`; ''
+/// = this box) instead of adding a card: the newest such row takes the new
+/// wording and time and turns unread again, and any older ones go. For an
+/// alert that repeats about the same thing — "site X ran out of PHP workers,
+/// N× today" — where a fresh card every few hours stacks up copies of one
+/// fact. A worker row (`origin_id` set) that was already collected is a
+/// no-op, as with [`insert_from_node`]. Returns whether anything changed.
+pub async fn replace(
+    pool: &SqlitePool,
+    user_id: i64,
+    node_id: &str,
+    origin_id: Option<i64>,
+    item: &OutboxRow,
+) -> Result<bool, StateError> {
+    let mut tx = pool.begin().await?;
+    if let Some(origin) = origin_id {
+        let seen: Option<(i64,)> = sqlx::query_as(
+            "SELECT id FROM notifications WHERE user_id = ? AND node_id = ? AND origin_id = ?",
+        )
+        .bind(user_id)
+        .bind(node_id)
+        .bind(origin)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if seen.is_some() {
+            return Ok(false);
+        }
+    }
+    let card: Option<(i64,)> = sqlx::query_as(
+        "SELECT id FROM notifications WHERE user_id = ? AND node_id = ? AND kind = ? \
+         ORDER BY id DESC LIMIT 1",
+    )
+    .bind(user_id)
+    .bind(node_id)
+    .bind(&item.kind)
+    .fetch_optional(&mut *tx)
+    .await?;
+    match card {
+        Some((id,)) => {
+            // origin_id moves forward with the card, so the node's cursor
+            // (MAX(origin_id)) still says how far its outbox was read.
+            sqlx::query(
+                "UPDATE notifications SET severity = ?, title = ?, body = ?, href = ?, \
+                 created_at = ?, read_at = NULL, origin_id = ? WHERE id = ?",
+            )
+            .bind(&item.severity)
+            .bind(&item.title)
+            .bind(&item.body)
+            .bind(&item.href)
+            .bind(item.created_at)
+            .bind(origin_id)
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                "DELETE FROM notifications \
+                 WHERE user_id = ? AND node_id = ? AND kind = ? AND id <> ?",
+            )
+            .bind(user_id)
+            .bind(node_id)
+            .bind(&item.kind)
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        }
+        None => {
+            sqlx::query(
+                "INSERT INTO notifications \
+                 (user_id, severity, title, body, href, kind, created_at, node_id, origin_id) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(user_id)
+            .bind(&item.severity)
+            .bind(&item.title)
+            .bind(&item.body)
+            .bind(&item.href)
+            .bind(&item.kind)
+            .bind(item.created_at)
+            .bind(node_id)
+            .bind(origin_id)
+            .execute(&mut *tx)
+            .await?;
+        }
+    }
+    tx.commit().await?;
+    Ok(true)
+}
+
 /// Highest outbox id already collected from `node_id`, for any user. The
 /// collector resumes after it, so a panel restart neither re-reads the
 /// whole outbox nor skips anything.
@@ -745,6 +833,76 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].node_id, "w1");
         assert_eq!(rows[0].created_at, 8, "keeps the time the node raised it");
+    }
+
+    #[tokio::test]
+    async fn replace_keeps_one_card_per_kind_and_node() {
+        let pool = fresh().await;
+        let row = |id: i64, body: &str, kind: &str, at: i64| OutboxRow {
+            id,
+            severity: "warn".into(),
+            title: "Site ran out of PHP workers".into(),
+            body: body.into(),
+            href: "/hostings/a.cz#limits".into(),
+            kind: kind.into(),
+            created_at: at,
+        };
+        // Master-local: second alert rewrites the first card, unread again.
+        assert!(
+            replace(&pool, 1, "", None, &row(0, "1x", "php_workers:a.cz", 10))
+                .await
+                .unwrap()
+        );
+        mark_all_read(&pool, 1, 11).await.unwrap();
+        assert!(
+            replace(&pool, 1, "", None, &row(0, "6x", "php_workers:a.cz", 20))
+                .await
+                .unwrap()
+        );
+        // Another site is its own card.
+        replace(&pool, 1, "", None, &row(0, "2x", "php_workers:b.cz", 30))
+            .await
+            .unwrap();
+        let rows = list_recent(&pool, 1, 10).await.unwrap();
+        assert_eq!(rows.len(), 2);
+        let a = rows.iter().find(|r| r.kind == "php_workers:a.cz").unwrap();
+        assert_eq!(a.body, "6x");
+        assert_eq!(a.created_at, 20);
+        assert_eq!(a.read_at, None, "a repeat is news again");
+
+        // From a worker: collected once, the card follows, cursor follows.
+        assert!(replace(
+            &pool,
+            1,
+            "w1",
+            Some(5),
+            &row(5, "1x", "php_workers:c.cz", 40)
+        )
+        .await
+        .unwrap());
+        assert!(!replace(
+            &pool,
+            1,
+            "w1",
+            Some(5),
+            &row(5, "1x", "php_workers:c.cz", 40)
+        )
+        .await
+        .unwrap());
+        assert!(replace(
+            &pool,
+            1,
+            "w1",
+            Some(9),
+            &row(9, "3x", "php_workers:c.cz", 50)
+        )
+        .await
+        .unwrap());
+        assert_eq!(node_cursor(&pool, "w1").await.unwrap(), 9);
+        let rows = list_recent(&pool, 1, 10).await.unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].body, "3x");
+        assert_eq!(rows[0].node_id, "w1");
     }
 
     #[tokio::test]
