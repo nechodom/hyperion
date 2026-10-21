@@ -70,7 +70,14 @@ pub fn is_synced_key(section: &str, key: &str) -> bool {
         }
         "backup_remote" => matches!(
             key,
-            "enabled" | "scheme" | "host" | "port" | "user" | "password" | "base_path"
+            "enabled"
+                | "scheme"
+                | "host"
+                | "port"
+                | "user"
+                | "password"
+                | "base_path"
+                | "keep_latest"
         ),
         "snapshots" => matches!(key, "keep_days" | "keep_last"),
         "protection" => key == "mode",

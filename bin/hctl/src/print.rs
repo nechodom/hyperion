@@ -921,7 +921,9 @@ pub fn print_pretty(resp: &Response) {
                 println!("  latest: ↓ {} B/s ↑ {} B/s", s.rx_bps, s.tx_bps);
             }
         }
-        Response::BackupOffsiteRestore(msg) => println!("✓ {msg}"),
+        Response::BackupOffsiteRestore(msg) | Response::BackupOffsiteDelete(msg) => {
+            println!("✓ {msg}")
+        }
         Response::BackupProgress(subs) => {
             if subs.is_empty() {
                 println!("(no sub-step progress reported)");

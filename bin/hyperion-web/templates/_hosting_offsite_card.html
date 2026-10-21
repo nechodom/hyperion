@@ -65,12 +65,21 @@
   {% else %}
     <div class="table-wrap" style="margin:0">
       <table class="table small" style="margin:0">
-        <thead><tr><th>Taken</th><th>Archive</th><th class="right">Size</th><th class="right">Restore</th></tr></thead>
+        <thead><tr><th>Taken</th><th>Archive</th><th class="right">Size</th><th class="right"><span class="sr-only">Actions</span></th></tr></thead>
         <tbody>
         {% for f in rows %}
           <tr>
             <td style="white-space:nowrap" title="{{ f.when_exact }}">{% if f.when.is_empty() %}<span class="text-soft">—</span>{% else %}{{ f.when }}{% endif %}</td>
-            <td><code style="font-size:0.74rem">{{ f.name }}</code></td>
+            <td>
+              <code style="font-size:0.74rem">{{ f.name }}</code>
+              {%- if let Some(here) = f.on_node %}
+              {%- if here %}
+              <span class="text-soft" style="display:block;font-size:0.65rem">also on this site's node</span>
+              {%- else %}
+              <span class="text-soft" style="display:block;font-size:0.65rem;color:var(--warn)" title="No local copy of this backup is left on the node: restoring it means fetching it from here">only off-site</span>
+              {%- endif %}
+              {%- endif %}
+            </td>
             <td class="right muted numeric">
               {{ crate::handlers::stats::fmt_bytes(f.bytes) }}
               {% if let Some(d) = f.dump_bytes %}<span class="text-soft" style="display:block;font-size:0.65rem">+ database {{ crate::handlers::stats::fmt_bytes(d) }}</span>{% endif %}
@@ -99,6 +108,18 @@
                 <span class="text-soft" style="font-size:0.7rem" title="{% if site_has_db %}No database dump was copied off-site with this archive{% else %}This site has no database{% endif %}">files only</span>
                 {% endif %}
                 <button class="btn ghost" type="submit" style="font-size:0.72rem;padding:0.15rem 0.45rem">Restore</button>
+              </form>
+              {% endif %}
+              {% if can_delete %}
+              <form method="post" action="/hostings/offsite-delete" style="margin:0;display:inline"
+                    data-confirm-title="Delete {{ f.name }} from the off-site server"
+                    data-confirm-body="The archive{% if f.dump_bytes.is_some() %} and its database dump are{% else %} is{% endif %} deleted from the off-site FTP target.{% match f.on_node %}{% when Some(true) %} The copy on this site's node stays and can still be restored.{% when Some(false) %} This backup is no longer on the site's node, so this is its last copy here: once deleted it cannot be restored (an S3 copy, if there is one, is not touched).{% when None %} A copy still on the node's disk is not touched; if there is none, this is the last copy and it cannot be restored afterwards.{% endmatch %}"
+                    data-confirm-confirm-label="Delete from the server"
+                    data-confirm-variant="danger">
+                <input type="hidden" name="_csrf" value="{{ csrf_offsite_delete }}">
+                <input type="hidden" name="selector" value="{{ selector }}">
+                <input type="hidden" name="filename" value="{{ f.name }}">
+                <button class="btn ghost danger" type="submit" style="font-size:0.72rem;padding:0.15rem 0.45rem">Delete</button>
               </form>
               {% endif %}
             </td>

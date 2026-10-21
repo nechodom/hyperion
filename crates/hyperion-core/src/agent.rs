@@ -2236,6 +2236,16 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
     ) -> Result<String, RpcError> {
         self.svc.backup_offsite_restore(sel, filename, mode).await
     }
+    async fn backup_offsite_delete(
+        &self,
+        sel: HostingSelector,
+        backup_id: Option<i64>,
+        filename: Option<String>,
+    ) -> Result<String, RpcError> {
+        self.svc
+            .backup_offsite_delete(sel, backup_id, filename)
+            .await
+    }
     async fn wp_registration_get(
         &self,
         sel: HostingSelector,

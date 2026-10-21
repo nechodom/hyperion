@@ -261,9 +261,15 @@
           {% endif %}
         </div>
       </div>
-      <div class="field">
-        <label for="bk_base">Base path on remote <span class="hint">per-hosting sub-directory is appended automatically</span></label>
-        <input id="bk_base" name="base_path" type="text" value="{{ config.backup_remote.base_path|e }}" placeholder="/hyperion-backups">
+      <div class="field-row">
+        <div class="field" style="flex:1">
+          <label for="bk_base">Base path on remote <span class="hint">per-hosting sub-directory is appended automatically</span></label>
+          <input id="bk_base" name="base_path" type="text" value="{{ config.backup_remote.base_path|e }}" placeholder="/hyperion-backups">
+        </div>
+        <div class="field" style="width:12rem">
+          <label for="bk_keep">Keep the newest <span class="hint">per site · 0 = all</span></label>
+          <input id="bk_keep" name="keep_latest" type="number" min="0" max="1000" step="1" value="{{ config.backup_remote.keep_latest }}">
+        </div>
       </div>
       <div class="item-actions"><button type="submit" class="btn primary">Save backup target</button></div>
     </form>

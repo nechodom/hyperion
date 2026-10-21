@@ -1766,6 +1766,15 @@ pub enum Request {
         filename: String,
         mode: hyperion_types::BackupRestoreMode,
     },
+    /// Delete one backup's archive + dump from the FTP/FTPS/SFTP target,
+    /// named by the site's backup row or by the file name on the server.
+    BackupOffsiteDelete {
+        sel: HostingSelector,
+        #[serde(default)]
+        backup_id: Option<i64>,
+        #[serde(default)]
+        filename: Option<String>,
+    },
     /// Does this WordPress site take public sign-ups, and as what role?
     WpRegistrationGet {
         sel: HostingSelector,
@@ -2689,6 +2698,7 @@ pub enum Response {
     /// Per-hosting push-then-maybe-drop summary (same shape as the backfill).
     BackupOffsitePushDrop(hyperion_types::OffsiteBackfillResult),
     BackupOffsiteRestore(String),
+    BackupOffsiteDelete(String),
     FtpAccountList(Vec<hyperion_types::FtpExtraAccount>),
     /// `(login, password)` — the password is shown once, and it is paired
     /// with the login it belongs to because the panel used to show a fresh

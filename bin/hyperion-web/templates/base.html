@@ -333,6 +333,17 @@
       <input id="app-modal-require-input" type="text" autocomplete="off" spellcheck="false"
              style="width:100%;font-family:ui-monospace,Menlo,Consolas,monospace">
     </div>
+    {# Optional choice inside the dialog: data-confirm-check="<label>" on the
+       form, written back into the form's field data-confirm-check-name as
+       "1" or "" when confirmed. data-confirm-body-checked and
+       data-confirm-confirm-label-checked replace the body and the button
+       while it is ticked, so what the dialog says is what will happen. #}
+    <div id="app-modal-check-row" style="display:none;padding:0 1.3rem 0.9rem">
+      <label class="field-checkbox" style="margin:0;font-weight:600">
+        <input type="checkbox" id="app-modal-check">
+        <span id="app-modal-check-label"></span>
+      </label>
+    </div>
     <div style="display:flex;gap:0.5rem;justify-content:flex-end;padding:0.85rem 1.3rem;background:var(--surface-2);border-top:1px solid var(--border)">
       <button type="button" id="app-modal-cancel" class="btn ghost">Cancel</button>
       <button type="button" id="app-modal-confirm" class="btn primary">Confirm</button>

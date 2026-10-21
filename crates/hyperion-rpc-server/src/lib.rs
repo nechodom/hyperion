@@ -1808,6 +1808,14 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(v) => Response::BackupOffsiteRestore(v),
             Err(e) => Response::Error(e),
         },
+        Request::BackupOffsiteDelete {
+            sel,
+            backup_id,
+            filename,
+        } => match api.backup_offsite_delete(sel, backup_id, filename).await {
+            Ok(v) => Response::BackupOffsiteDelete(v),
+            Err(e) => Response::Error(e),
+        },
         Request::WpRegistrationGet { sel } => match api.wp_registration_get(sel).await {
             Ok(v) => Response::WpRegistration(v),
             Err(e) => Response::Error(e),
@@ -3810,6 +3818,14 @@ mod tests {
             _: HostingSelector,
             _: String,
             _: hyperion_types::BackupRestoreMode,
+        ) -> Result<String, RpcError> {
+            Ok(String::new())
+        }
+        async fn backup_offsite_delete(
+            &self,
+            _: HostingSelector,
+            _: Option<i64>,
+            _: Option<String>,
         ) -> Result<String, RpcError> {
             Ok(String::new())
         }

@@ -1025,6 +1025,11 @@ pub struct BackupRemoteConfigView {
     /// True if a password is configured. We never echo the password.
     pub password_set: bool,
     pub base_path: String,
+    /// Keep this many of each site's newest archives on the FTP target and
+    /// delete older ones after each backup. 0 = keep everything (the
+    /// default). Older agents send nothing.
+    #[serde(default)]
+    pub keep_latest: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

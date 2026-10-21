@@ -975,6 +975,13 @@ pub trait AgentApi: Send + Sync + 'static {
         filename: String,
         mode: hyperion_types::BackupRestoreMode,
     ) -> Result<String, RpcError>;
+    /// Delete one backup's copy from the FTP/FTPS/SFTP target.
+    async fn backup_offsite_delete(
+        &self,
+        sel: HostingSelector,
+        backup_id: Option<i64>,
+        filename: Option<String>,
+    ) -> Result<String, RpcError>;
     /// Does this WordPress site take public sign-ups, and as what role?
     async fn wp_registration_get(
         &self,

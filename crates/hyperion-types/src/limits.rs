@@ -304,6 +304,21 @@ pub struct BackupRunWire {
     pub held: bool,
 }
 
+/// The archive's file name on the FTP/FTPS/SFTP target, from the URL the push
+/// recorded in `remote_blob_key`. `None` for anything else (an S3 key, empty).
+pub fn ftp_archive_name(remote_blob_key: &str) -> Option<&str> {
+    if !["ftp://", "ftps://", "sftp://"]
+        .iter()
+        .any(|s| remote_blob_key.starts_with(s))
+    {
+        return None;
+    }
+    remote_blob_key
+        .rsplit_once('/')
+        .map(|(_, name)| name)
+        .filter(|n| !n.is_empty() && !n.ends_with(".sql"))
+}
+
 impl BackupRunWire {
     /// Wording for the off-site column, and the pill class to draw it with.
     pub fn offsite_label(&self) -> (&'static str, &'static str) {
@@ -311,6 +326,9 @@ impl BackupRunWire {
             "verified" => ("off-site ✓", "pill ok"),
             "ok" => ("uploaded", "pill"),
             "failed" => ("off-site FAILED", "pill danger"),
+            // Deleted from the FTP target on purpose; an S3 copy, if any,
+            // still counts below.
+            "removed" if self.s3_ok_targets.is_empty() => ("removed off-site", "pill"),
             // No FTP state, but an S3 push completed: "uploaded", the same
             // claim strength as an FTP `ok` — the push succeeded, nobody
             // listed the copy back.
@@ -332,16 +350,14 @@ impl BackupRunWire {
         if !matches!(self.remote_state.as_str(), "ok" | "verified") {
             return None;
         }
-        let key = self.remote_blob_key.as_str();
-        if !["ftp://", "ftps://", "sftp://"]
-            .iter()
-            .any(|s| key.starts_with(s))
-        {
-            return None;
-        }
-        key.rsplit_once('/')
-            .map(|(_, name)| name)
-            .filter(|n| !n.is_empty() && !n.ends_with(".sql"))
+        ftp_archive_name(&self.remote_blob_key)
+    }
+
+    /// The FTP archive name whatever the state — a push whose dump failed is
+    /// `failed` but still left the archive on the server, and deleting the
+    /// backup "everywhere" has to reach it.
+    pub fn ftp_file_name(&self) -> Option<&str> {
+        ftp_archive_name(&self.remote_blob_key)
     }
 
     /// The S3 target names of `s3_ok_targets`, without the configuration

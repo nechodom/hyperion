@@ -7690,6 +7690,23 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                             // evidence supports.
                             _ => {}
                         }
+                        // The FTP keep-latest rule, only once THIS backup is
+                        // on the server: pruning after a push that did not
+                        // land would leave the site fewer copies than the
+                        // rule promises.
+                        if offsite_ok {
+                            let keep = read_ftp_keep_latest(self.agent_config_path.as_deref());
+                            match self
+                                .prune_ftp_keep_latest(&detail, &upload, keep, &archive_name)
+                                .await
+                            {
+                                Ok(0) => {}
+                                Ok(n) => tracing::info!(domain=%detail.domain, pruned=n, keep,
+                                    "remote backup: older off-site copies pruned"),
+                                Err(e) => tracing::warn!(domain=%detail.domain, error=%e,
+                                    "remote backup: keep-latest prune skipped"),
+                            }
+                        }
                     }
                     self.append_audit(
                         "hosting.backup.remote",
@@ -13521,6 +13538,187 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 "off-site restore: could not remove the fetched copy");
         }
         restored
+    }
+
+    /// Delete one backup's copy from the FTP/FTPS/SFTP target — the archive
+    /// and the database dump beside it.
+    ///
+    /// Named either by `backup_id` (a row of this site, whose recorded upload
+    /// URL gives the file) or by `filename` (the Off-site copies card, which
+    /// lists the server itself and may show files no row knows about any
+    /// more). Either way only this site's own files: the folder is shared by
+    /// every hosting of the system user.
+    ///
+    /// Rows that pointed at the file stop claiming it: a row with nothing
+    /// else left — no local archive, no S3 copy — is deleted, any other is
+    /// marked `removed` so the backfill does not send it straight back.
+    pub async fn backup_offsite_delete(
+        &self,
+        sel: HostingSelector,
+        backup_id: Option<i64>,
+        filename: Option<String>,
+    ) -> Result<String, RpcError> {
+        let detail = self.get(sel.clone()).await?;
+        let Some((mut up, dir)) = self.remote_upload_for(&detail) else {
+            return Err(RpcError::Validation {
+                message: "no FTP/SFTP off-site target is configured on this node".into(),
+            });
+        };
+        up.remote_dir = &dir;
+        let name = match (backup_id, filename) {
+            (Some(id), _) => {
+                let run = self.backup_owned_by(sel, id).await?;
+                hyperion_types::limits::ftp_archive_name(&run.remote_blob_key)
+                    .map(str::to_string)
+                    .ok_or_else(|| RpcError::Validation {
+                        message: "this backup has no copy on the FTP target".into(),
+                    })?
+            }
+            (None, Some(f)) => f.trim().to_string(),
+            (None, None) => {
+                return Err(RpcError::Validation {
+                    message: "name a backup or a file to delete".into(),
+                })
+            }
+        };
+        if !offsite_file_belongs(&detail.domain, &name) || name.ends_with(".sql") {
+            return Err(RpcError::Validation {
+                message: format!("{name:?} is not an off-site backup of {}", detail.domain),
+            });
+        }
+        let dump = format!("{}.sql", offsite_stem(&name));
+        let deleted =
+            hyperion_adapters::backup::delete_remote(&[name.as_str(), dump.as_str()], &up).await;
+        let (forgotten, rows_deleted) = if deleted.is_ok() {
+            self.forget_ftp_copies(
+                &detail,
+                std::slice::from_ref(&name),
+                "deleted from the off-site target",
+                backup_id,
+            )
+            .await
+        } else {
+            (0, 0)
+        };
+        self.append_audit(
+            "hosting.backup.offsite_delete",
+            Some(detail.id.as_str()),
+            &serde_json::json!({
+                "file": name,
+                "backup_id": backup_id,
+                "rows_marked": forgotten,
+                "rows_deleted": rows_deleted,
+                "error": deleted.as_ref().err().map(|e| e.to_string()),
+            })
+            .to_string(),
+            if deleted.is_ok() { "ok" } else { "failed" },
+        )
+        .await;
+        deleted.map_err(|e| RpcError::Internal_with(format!("off-site delete: {e}")))?;
+        Ok(format!(
+            "deleted {name} (and its database dump, if it had one) from the off-site target"
+        ))
+    }
+
+    /// Make this site's rows stop claiming FTP copies that are gone: delete a
+    /// row with nothing else left, mark any other `removed` with `why`.
+    /// `spare` is a row the caller deletes itself right after (the backups
+    /// list's "delete everywhere"): only marked, so the caller's own delete
+    /// still finds it rather than reporting "not found" for a delete that
+    /// worked. Returns `(marked, deleted)`.
+    async fn forget_ftp_copies(
+        &self,
+        detail: &HostingDetail,
+        names: &[String],
+        why: &str,
+        spare: Option<i64>,
+    ) -> (usize, usize) {
+        let Ok(rows) = hyperion_state::backups::list_for(&self.pool, &detail.id, 10_000).await
+        else {
+            return (0, 0);
+        };
+        let (mut marked, mut deleted) = (0, 0);
+        for r in rows {
+            let Some(n) = hyperion_types::limits::ftp_archive_name(&r.remote_blob_key) else {
+                continue;
+            };
+            if !names.iter().any(|x| x == n) {
+                continue;
+            }
+            if r.archive_path.is_none()
+                && r.s3_ok_targets.is_empty()
+                && r.state != "running"
+                && spare != Some(r.id)
+            {
+                if hyperion_state::backups::delete_by_id(&self.pool, r.id)
+                    .await
+                    .is_ok()
+                {
+                    deleted += 1;
+                }
+            } else if hyperion_state::backups::set_remote(&self.pool, r.id, "", "removed", why)
+                .await
+                .is_ok()
+            {
+                marked += 1;
+            }
+        }
+        (marked, deleted)
+    }
+
+    /// The FTP keep-latest rule: after a push, delete this site's archives on
+    /// the FTP target beyond the newest `keep`, with their dumps. `keep` 0 is
+    /// off. Never touches `just_pushed`, and never deletes on a listing it
+    /// could not read. Returns how many archives went.
+    async fn prune_ftp_keep_latest(
+        &self,
+        detail: &HostingDetail,
+        up: &hyperion_adapters::backup::RemoteUpload<'_>,
+        keep: usize,
+        just_pushed: &str,
+    ) -> Result<usize, String> {
+        if keep == 0 {
+            return Ok(0);
+        }
+        let Some(files) = hyperion_adapters::backup::list_remote(up)
+            .await
+            .map_err(|e| e.to_string())?
+        else {
+            return Ok(0);
+        };
+        let drop = ftp_archives_beyond_keep(
+            &detail.domain,
+            files.iter().map(|f| f.name.as_str()),
+            keep,
+            just_pushed,
+        );
+        if drop.is_empty() {
+            return Ok(0);
+        }
+        let dumps: Vec<String> = drop
+            .iter()
+            .map(|n| format!("{}.sql", offsite_stem(n)))
+            .collect();
+        let mut all: Vec<&str> = drop.iter().map(String::as_str).collect();
+        all.extend(dumps.iter().map(String::as_str));
+        hyperion_adapters::backup::delete_remote(&all, up)
+            .await
+            .map_err(|e| e.to_string())?;
+        self.forget_ftp_copies(
+            detail,
+            &drop,
+            &format!("deleted from the off-site target by its keep-newest-{keep} rule"),
+            None,
+        )
+        .await;
+        self.append_audit(
+            "hosting.backup.offsite_prune",
+            Some(detail.id.as_str()),
+            &serde_json::json!({ "keep": keep, "deleted": drop }).to_string(),
+            "ok",
+        )
+        .await;
+        Ok(drop.len())
     }
 
     /// The body of [`Self::backup_offsite_restore`]: everything it fetches
@@ -41125,6 +41323,7 @@ pub(crate) fn read_backup_remote_section(
     // The password itself never leaves the node. Only whether one is set.
     v.password_set = !s("password").is_empty();
     v.base_path = s("base_path");
+    v.keep_latest = read_ftp_keep_latest(cfg_path) as i64;
     v
 }
 
@@ -41377,6 +41576,14 @@ fn parse_agent_section_fields(
             | ("backup_remote", "password")
             | ("backup_remote", "base_path") => crate::config_persist::FieldValue::Str(v.clone()),
             ("backup_remote", "port") => crate::config_persist::FieldValue::Int(parse_int(v)?),
+            // 0 = off: the FTP target keeps everything, as it always has.
+            ("backup_remote", "keep_latest") => {
+                let n = parse_int(v)?;
+                if !(0..=1000).contains(&n) {
+                    return Err(bad(format!("keep_latest must be 0..=1000, got {n}")));
+                }
+                crate::config_persist::FieldValue::Int(n)
+            }
             // [backup_retention] — the same floors the agent applies at boot,
             // enforced where the value is typed rather than silently later.
             ("backup_retention", "max_age_days") => {
@@ -42768,6 +42975,53 @@ fn offsite_file_belongs(domain: &str, name: &str) -> bool {
         .or_else(|| rest.strip_suffix(".tgz"))
         .or_else(|| rest.strip_suffix(".sql"));
     matches!(stamp, Some(t) if !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// `<domain>-<ts>.tar.gz` → `<domain>-<ts>`: the stem the dump shares.
+fn offsite_stem(name: &str) -> &str {
+    name.strip_suffix(".tar.gz")
+        .or_else(|| name.strip_suffix(".tgz"))
+        .unwrap_or(name)
+}
+
+/// Which of `domain`'s archives on the FTP target fall outside the newest
+/// `keep` — by the unix time in the name, never the server's own dates, which
+/// an FTP listing gives to the minute at best. `just_pushed` is never one of
+/// them, whatever its stamp says.
+fn ftp_archives_beyond_keep<'a>(
+    domain: &str,
+    names: impl Iterator<Item = &'a str>,
+    keep: usize,
+    just_pushed: &str,
+) -> Vec<String> {
+    let mut archives: Vec<(i64, &str)> = names
+        .filter(|n| offsite_file_belongs(domain, n) && !n.ends_with(".sql"))
+        .filter_map(|n| {
+            let stamp = offsite_stem(n).rsplit('-').next()?.parse::<i64>().ok()?;
+            Some((stamp, n))
+        })
+        .collect();
+    archives.sort_by(|a, b| b.cmp(a));
+    archives
+        .into_iter()
+        .skip(keep.max(1))
+        .map(|(_, n)| n)
+        .filter(|n| *n != just_pushed)
+        .map(str::to_string)
+        .collect()
+}
+
+/// `[backup_remote] keep_latest`, read live: 0 (or missing, or not a whole
+/// number) is off — a typo must never be read as "keep nothing".
+pub(crate) fn read_ftp_keep_latest(cfg_path: Option<&std::path::Path>) -> usize {
+    read_agent_doc(cfg_path)
+        .as_ref()
+        .and_then(|d| d.get("backup_remote"))
+        .and_then(|s| s.get("keep_latest"))
+        .and_then(|v| v.as_integer())
+        .filter(|n| *n > 0)
+        .map(|n| n.min(1000) as usize)
+        .unwrap_or(0)
 }
 
 /// What an FTP push can honestly claim, from the size re-check of each file it
@@ -46558,6 +46812,281 @@ mod tests {
         assert!(!by(verified).local_note.is_empty());
         assert_eq!(by(local_only).local_kept, "");
         assert_eq!(by(dropped).local_kept, "");
+    }
+
+    /// The FTP keep-latest rule picks by the stamp in the name, only this
+    /// site's archives, never the copy just sent, and never a dump on its own.
+    #[test]
+    fn ftp_keep_latest_drops_only_this_sites_oldest_archives() {
+        use super::ftp_archives_beyond_keep;
+        let names = [
+            "a.cz-500.tar.gz",
+            "a.cz-500.sql",
+            "a.cz-400.tar.gz",
+            "a.cz-300.tar.gz",
+            "a.cz-100.tar.gz",
+            "b.cz-50.tar.gz",
+            "a.cz-shop.cz-10.tar.gz",
+            "notes.txt",
+        ];
+        assert_eq!(
+            ftp_archives_beyond_keep("a.cz", names.iter().copied(), 2, "a.cz-500.tar.gz"),
+            vec!["a.cz-300.tar.gz".to_string(), "a.cz-100.tar.gz".to_string()]
+        );
+        // A clock that went backwards: the copy just sent is still kept.
+        assert_eq!(
+            ftp_archives_beyond_keep("a.cz", names.iter().copied(), 3, "a.cz-100.tar.gz"),
+            Vec::<String>::new()
+        );
+        assert!(ftp_archives_beyond_keep("a.cz", names.iter().copied(), 10, "x").is_empty());
+    }
+
+    /// Missing, zero, negative or not a number is OFF — a typo must never
+    /// mean "keep nothing" on the off-site server.
+    #[test]
+    fn ftp_keep_latest_reads_only_a_positive_whole_number() {
+        use super::read_ftp_keep_latest;
+        let dir = tempfile::tempdir().expect("dir");
+        let cfg = dir.path().join("agent.toml");
+        for (body, want) in [
+            ("", 0),
+            ("[backup_remote]\nkeep_latest = 0\n", 0),
+            ("[backup_remote]\nkeep_latest = -3\n", 0),
+            ("[backup_remote]\nkeep_latest = \"5\"\n", 0),
+            ("[backup_remote]\nkeep_latest = 7\n", 7),
+        ] {
+            std::fs::write(&cfg, body).expect("cfg");
+            assert_eq!(read_ftp_keep_latest(Some(&cfg)), want, "{body:?}");
+        }
+        assert_eq!(read_ftp_keep_latest(None), 0);
+    }
+
+    /// Once an FTP copy is deleted, the rows stop claiming it: a row with
+    /// nothing else left goes, any other is `removed` — which the backfill
+    /// must not send back to the server it was just deleted from.
+    #[tokio::test]
+    async fn forgetting_an_ftp_copy_deletes_empty_rows_and_marks_the_rest() {
+        use hyperion_state::backups;
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), happy_mocks());
+        s.create(req("fg.cz")).await.expect("create");
+        let sel = HostingSelector::Domain(Domain::parse("fg.cz").unwrap());
+        let detail = s.get(sel.clone()).await.expect("get");
+        let mk = |at: i64| {
+            let pool = pool.clone();
+            let id = detail.id.clone();
+            async move {
+                let r = backups::start(&pool, &id, "local", at)
+                    .await
+                    .expect("start");
+                backups::mark_ok(&pool, r, &format!("/b/fg.cz-{at}.tar.gz"), None, 10, at + 1)
+                    .await
+                    .expect("ok");
+                backups::set_remote(
+                    &pool,
+                    r,
+                    &format!("ftp://h:21/b/u/fg.cz-{at}.tar.gz"),
+                    "verified",
+                    "",
+                )
+                .await
+                .expect("remote");
+                r
+            }
+        };
+        let only_ftp = mk(100).await;
+        backups::clear_local_paths(&pool, only_ftp)
+            .await
+            .expect("clear");
+        let with_local = mk(200).await;
+        let untouched = mk(300).await;
+
+        let (marked, deleted) = s
+            .forget_ftp_copies(
+                &detail,
+                &[
+                    "fg.cz-100.tar.gz".to_string(),
+                    "fg.cz-200.tar.gz".to_string(),
+                ],
+                "gone",
+                None,
+            )
+            .await;
+        assert_eq!((marked, deleted), (1, 1));
+        assert!(backups::get_by_id(&pool, only_ftp)
+            .await
+            .expect("get")
+            .is_none());
+        let r = backups::get_by_id(&pool, with_local)
+            .await
+            .expect("get")
+            .expect("row");
+        assert_eq!(r.remote_state, "removed");
+        assert_eq!(r.remote_blob_key, "");
+        assert_eq!(r.remote_error, "gone");
+        let r = backups::get_by_id(&pool, untouched)
+            .await
+            .expect("get")
+            .expect("row");
+        assert_eq!(r.remote_state, "verified");
+        // Not re-queued for an upload.
+        let queue = backups::list_needing_offsite(&pool, 100)
+            .await
+            .expect("queue");
+        assert!(queue.iter().all(|r| r.id != with_local), "{queue:?}");
+    }
+
+    /// The web layer reads "has no copy on the FTP target" as "nothing to do"
+    /// and goes on to delete the local copy, so that refusal must stay that
+    /// refusal — and come before anything is sent anywhere.
+    #[tokio::test]
+    async fn offsite_delete_of_a_backup_with_no_ftp_copy_says_so() {
+        use hyperion_state::backups;
+        let pool = open_memory().await.expect("open");
+        let mut s = svc(pool.clone(), happy_mocks());
+        s.remote_backup = Some(RemoteBackupConfig {
+            scheme: "ftp".into(),
+            host: "127.0.0.1".into(),
+            port: 1,
+            user: "u".into(),
+            password: "p".into(),
+            base_path: "/backups".into(),
+        });
+        s.create(req("nf.cz")).await.expect("create");
+        let sel = HostingSelector::Domain(Domain::parse("nf.cz").unwrap());
+        let detail = s.get(sel.clone()).await.expect("get");
+        let r = backups::start(&pool, &detail.id, "local", 5)
+            .await
+            .expect("start");
+        backups::mark_ok(&pool, r, "/b/nf.cz-5.tar.gz", None, 1, 6)
+            .await
+            .expect("ok");
+        let err = s
+            .backup_offsite_delete(sel.clone(), Some(r), None)
+            .await
+            .expect_err("no FTP copy");
+        assert!(
+            matches!(&err, RpcError::Validation { message } if message.contains("has no copy on the FTP target")),
+            "{err:?}"
+        );
+        let err = s
+            .backup_offsite_delete(sel, None, Some("other.cz-5.tar.gz".into()))
+            .await
+            .expect_err("foreign");
+        assert!(matches!(err, RpcError::Validation { .. }), "{err:?}");
+    }
+
+    /// Against a real FTP server (`HY_FTP_TEST=host:port:user:password:base`):
+    /// the card's delete takes the archive AND its dump off the server, and
+    /// the row that only had that copy goes with it. Run with `--ignored`.
+    #[tokio::test]
+    #[ignore]
+    async fn offsite_delete_against_a_real_ftp_server() {
+        use hyperion_state::backups;
+        let Ok(spec) = std::env::var("HY_FTP_TEST") else {
+            return;
+        };
+        let p: Vec<String> = spec.splitn(5, ':').map(str::to_string).collect();
+        let pool = open_memory().await.expect("open");
+        let mut s = svc(pool.clone(), happy_mocks());
+        s.remote_backup = Some(RemoteBackupConfig {
+            scheme: "ftp".into(),
+            host: p[0].clone(),
+            port: p[1].parse().expect("port"),
+            user: p[2].clone(),
+            password: p[3].clone(),
+            base_path: p[4].clone(),
+        });
+        s.create(req("e2e.cz")).await.expect("create");
+        let sel = HostingSelector::Domain(Domain::parse("e2e.cz").unwrap());
+        let detail = s.get(sel.clone()).await.expect("get");
+        let (mut up, dir) = s.remote_upload_for(&detail).expect("target");
+        up.remote_dir = &dir;
+        let tmp = tempfile::tempdir().expect("dir");
+        for n in ["e2e.cz-100.tar.gz", "e2e.cz-100.sql", "e2e.cz-200.tar.gz"] {
+            let f = tmp.path().join(n);
+            std::fs::write(&f, b"x").expect("write");
+            hyperion_adapters::backup::upload_remote(&f, &up)
+                .await
+                .expect("upload");
+        }
+        let r = backups::start(&pool, &detail.id, "local", 100)
+            .await
+            .expect("start");
+        backups::mark_ok(&pool, r, "/b/e2e.cz-100.tar.gz", None, 1, 101)
+            .await
+            .expect("ok");
+        backups::set_remote(
+            &pool,
+            r,
+            &format!("ftp://h/{dir}/e2e.cz-100.tar.gz"),
+            "verified",
+            "",
+        )
+        .await
+        .expect("remote");
+        backups::clear_local_paths(&pool, r).await.expect("clear");
+
+        let msg = s
+            .backup_offsite_delete(sel.clone(), None, Some("e2e.cz-100.tar.gz".into()))
+            .await
+            .expect("delete");
+        assert!(msg.contains("e2e.cz-100.tar.gz"), "{msg}");
+        let left = s.backup_offsite_list(sel.clone()).await.expect("list");
+        let names: Vec<&str> = left.files.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, vec!["e2e.cz-200.tar.gz"]);
+        assert!(backups::get_by_id(&pool, r).await.expect("get").is_none());
+
+        // The backups list's "delete everywhere": by row, and the row must
+        // still be there for the delete that follows — it used to be gone
+        // already, and the list reported "not found" for a delete that worked.
+        let r2 = backups::start(&pool, &detail.id, "local", 200)
+            .await
+            .expect("start");
+        backups::mark_ok(&pool, r2, "/b/e2e.cz-200.tar.gz", None, 1, 201)
+            .await
+            .expect("ok");
+        backups::set_remote(
+            &pool,
+            r2,
+            &format!("ftp://h/{dir}/e2e.cz-200.tar.gz"),
+            "verified",
+            "",
+        )
+        .await
+        .expect("remote");
+        backups::clear_local_paths(&pool, r2).await.expect("clear");
+        s.backup_offsite_delete(sel.clone(), Some(r2), None)
+            .await
+            .expect("delete by row");
+        s.backup_delete(sel.clone(), r2)
+            .await
+            .expect("row still there");
+        let left = s.backup_offsite_list(sel.clone()).await.expect("list");
+        assert!(left.files.is_empty(), "{:?}", left.files);
+
+        // The keep-latest rule, with the copy "just pushed" protected.
+        let kept = tmp.path().join("e2e.cz-300.tar.gz");
+        std::fs::write(&kept, b"x").expect("write");
+        hyperion_adapters::backup::upload_remote(&kept, &up)
+            .await
+            .expect("upload");
+        let older = tmp.path().join("e2e.cz-250.tar.gz");
+        std::fs::write(&older, b"x").expect("write");
+        hyperion_adapters::backup::upload_remote(&older, &up)
+            .await
+            .expect("upload");
+        let n = s
+            .prune_ftp_keep_latest(&detail, &up, 1, "e2e.cz-300.tar.gz")
+            .await
+            .expect("prune");
+        assert_eq!(n, 1);
+        let left = s.backup_offsite_list(sel.clone()).await.expect("list");
+        let names: Vec<&str> = left.files.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, vec!["e2e.cz-300.tar.gz"]);
+        s.backup_offsite_delete(sel, None, Some("e2e.cz-300.tar.gz".into()))
+            .await
+            .expect("cleanup");
     }
 
     /// The drop step with a destination it cannot reach: the local copy is
