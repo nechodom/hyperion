@@ -1,0 +1,44 @@
+{# Rows of the "Sent by Hyperion about this site" table, plus the "Load more"
+   row that fetches the next page and replaces itself with it. Shared by the
+   hosting detail page (first page) and /hostings/:sel/sent-mail (the rest). #}
+      {% for e in email_log %}
+        <tr>
+          <td class="muted numeric" title="{{ e.sent_at }}">{{ crate::handlers::stats::fmt_ago(e.sent_at) }}</td>
+          <td><span class="tag">{{ crate::handlers::emails::kind_label(e.kind) }}</span></td>
+          <td><code style="font-size:0.78rem">{{ e.to_address }}</code></td>
+          <td>
+            <strong>{{ e.subject }}</strong>
+            {% if !e.body_preview.is_empty() %}
+              <span class="cell-sub">{{ e.body_preview }}</span>
+            {% endif %}
+          </td>
+          <td>
+            {% if e.state == "ok" %}
+              <span class="pill ok">ok</span>
+            {% else %}
+              <span class="pill err">failed</span>
+            {% endif %}
+          </td>
+          <td>
+            {% if let Some(err) = e.error %}
+              <code class="muted" style="font-size:0.74rem;word-break:break-word">{{ err }}</code>
+            {% else if let Some(c) = e.smtp_code %}
+              <code class="muted" style="font-size:0.74rem">{{ crate::handlers::emails::smtp_reply(c).1 }}</code>
+            {% else %}
+              <span class="text-soft">—</span>
+            {% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+      {% if !sent_mail_error.is_empty() %}
+        <tr><td colspan="6" class="muted">Could not load older emails: {{ sent_mail_error }}</td></tr>
+      {% else if email_log_more %}
+        <tr id="sent-mail-more">
+          <td colspan="6" style="text-align:center">
+            <button type="button" class="btn small ghost"
+                    hx-get="/hostings/{{ hosting_id }}/sent-mail?shown={{ email_log_shown }}"
+                    hx-target="#sent-mail-more" hx-swap="outerHTML"
+                    hx-disabled-elt="this">Load more</button>
+          </td>
+        </tr>
+      {% endif %}

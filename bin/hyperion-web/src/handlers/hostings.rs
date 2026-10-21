@@ -472,10 +472,13 @@ struct DetailTpl<'a> {
     /// constants and changes nothing observable until that plugin exists, so
     /// the card offers to install it rather than leaving the gap in prose.
     redis_plugin_installed: bool,
-    /// Per-hosting email log — last 50 emails the agent sent on
-    /// behalf of this hosting (alerts, cert reminders, monitor
-    /// down/up, billing). Drives the new Emails tab.
+    /// Per-hosting email log — the newest `SENT_MAIL_PAGE` emails the agent
+    /// sent on behalf of this hosting (alerts, cert reminders, monitor
+    /// down/up, billing). Older ones load on demand via
+    /// `/hostings/:sel/sent-mail`.
     email_log: Vec<hyperion_types::EmailLogEntry>,
+    /// More rows exist past `email_log` — shows the "Load more" row.
+    email_log_more: bool,
     /// Last 50 outbound mails sent BY the hosted PHP site itself,
     /// captured by /usr/local/lib/hyperion/site-mail-wrapper into
     /// the per-user JSONL. Distinct from `email_log` above which
@@ -2037,6 +2040,7 @@ pub async fn post_create(
                 waf_rules,
                 redis_plugin_installed: true,
                 email_log: vec![],
+                email_log_more: false,
                 site_emails: vec![],
                 ftp_accounts: vec![],
                 ftp_extra: vec![],
@@ -2748,7 +2752,8 @@ pub async fn get_detail(
             target,
             Request::EmailLogList {
                 hosting_id: Some(detail.id.as_str().to_string()),
-                limit: 50,
+                // One past the page: its presence is what says "there is more".
+                limit: SENT_MAIL_PAGE as i64 + 1,
             },
         )
         .await
@@ -2911,7 +2916,7 @@ pub async fn get_detail(
     let cluster_cfg_fut = fetch_cluster_config(&state);
     let wp_assets_fut = fetch_wp_assets(&state);
     let (
-        (wp_lists, monitor_pair, email_log, site_emails, ftp_accounts, quota),
+        (wp_lists, monitor_pair, mut email_log, site_emails, ftp_accounts, quota),
         (
             (access_grants_for_detail, users_for_access_for_detail),
             owner_kv,
@@ -3276,6 +3281,11 @@ pub async fn get_detail(
         // wordpress.org slug and the folder name both.
         redis_plugin_installed: wp_plugins.plugins.iter().any(|p| p.slug == "redis-cache"),
         wp_plugins,
+        email_log_more: {
+            let more = email_log.len() > SENT_MAIL_PAGE;
+            email_log.truncate(SENT_MAIL_PAGE);
+            more
+        },
         email_log,
         site_emails,
         ftp_accounts,
@@ -10246,6 +10256,169 @@ pub async fn get_traffic_panel(
 #[derive(serde::Deserialize)]
 pub struct TrafficPanelQuery {
     pub hours: Option<i64>,
+}
+
+/// Rows per page of the "Sent by Hyperion about this site" table.
+const SENT_MAIL_PAGE: usize = 10;
+/// The node's `email_log::list` clamps its limit to 500; paging past that
+/// would silently return the same last page again.
+const SENT_MAIL_MAX: usize = 500;
+
+/// The next page of rows for the "Sent by Hyperion about this site" table:
+/// `<tr>`s that replace the "Load more" row they were requested from.
+#[derive(Template)]
+#[template(path = "_hosting_sent_mail_rows.html")]
+struct SentMailRowsTpl {
+    hosting_id: String,
+    email_log: Vec<hyperion_types::EmailLogEntry>,
+    email_log_more: bool,
+    /// Rows on screen once this page is in — the next request's `shown`.
+    email_log_shown: usize,
+    /// Why the page could not be read; empty when it was.
+    sent_mail_error: String,
+}
+
+#[derive(serde::Deserialize)]
+pub struct SentMailQuery {
+    pub shown: Option<usize>,
+}
+
+/// `GET /hostings/:selector/sent-mail?shown=N` — rows N.. N+10 of the site's
+/// Hyperion mail log, read from the OWNING node.
+///
+/// The RPC has a limit but no offset, so this asks for the first N+11 and
+/// drops the N already on screen — no wire change, and old nodes answer it.
+/// Failures render as a row with the reason: HTMX does not swap a non-2xx,
+/// which would leave the button looking dead.
+pub async fn get_sent_mail_rows(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Path(selector): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<SentMailQuery>,
+) -> Result<Response, AppError> {
+    let shown = q.shown.unwrap_or(0).min(SENT_MAIL_MAX);
+    let render = |hosting_id: String,
+                  rows: Vec<hyperion_types::EmailLogEntry>,
+                  more: bool,
+                  error: Option<String>| {
+        let email_log_shown = shown + rows.len();
+        Html(
+            SentMailRowsTpl {
+                hosting_id,
+                email_log: rows,
+                email_log_more: more,
+                email_log_shown,
+                sent_mail_error: error.unwrap_or_default(),
+            }
+            .render()
+            .unwrap_or_default(),
+        )
+        .into_response()
+    };
+    let sel = match parse_selector(&selector) {
+        Ok(s) => s,
+        Err(e) => {
+            return Ok(render(
+                String::new(),
+                vec![],
+                false,
+                Some(format!("could not read the selector: {e}")),
+            ))
+        }
+    };
+    let (detail, owner) = match find_hosting_anywhere(&state, sel).await {
+        Ok(v) => v,
+        Err(e) => {
+            return Ok(render(
+                String::new(),
+                vec![],
+                false,
+                Some(format!("could not look up this site: {e}")),
+            ))
+        }
+    };
+    if let Err(r) = require_hosting_access(
+        &state,
+        &ctx,
+        detail.id.as_str(),
+        false,
+        Capability::HostingView,
+    )
+    .await
+    {
+        return Ok(r);
+    }
+    let id = detail.id.as_str().to_string();
+    let limit = (shown + SENT_MAIL_PAGE + 1).min(SENT_MAIL_MAX);
+    match crate::dispatcher::dispatch_to_node(
+        &state,
+        owner.as_deref(),
+        Request::EmailLogList {
+            hosting_id: Some(id.clone()),
+            limit: limit as i64,
+        },
+    )
+    .await
+    {
+        Ok(RpcResponse::EmailLogList(rows)) => {
+            let (page, more) = sent_mail_page(rows, shown);
+            Ok(render(id, page, more, None))
+        }
+        Ok(RpcResponse::Error(e)) => Ok(render(id, vec![], false, Some(e.to_string()))),
+        Ok(_) => Ok(render(
+            id,
+            vec![],
+            false,
+            Some("unexpected response from the node".into()),
+        )),
+        Err(e) => Ok(render(id, vec![], false, Some(e.to_string()))),
+    }
+}
+
+/// Cut one page out of the first `shown + PAGE + 1` rows, newest first.
+/// `more` is true only when a row past the page came back AND the next page
+/// would still be inside the node's 500-row cap.
+fn sent_mail_page<T>(rows: Vec<T>, shown: usize) -> (Vec<T>, bool) {
+    let total = rows.len();
+    let page: Vec<T> = rows.into_iter().skip(shown).take(SENT_MAIL_PAGE).collect();
+    let more = total > shown + SENT_MAIL_PAGE && shown + SENT_MAIL_PAGE < SENT_MAIL_MAX;
+    (page, more)
+}
+
+#[cfg(test)]
+mod sent_mail_page_tests {
+    use super::{sent_mail_page, SENT_MAIL_MAX, SENT_MAIL_PAGE};
+
+    #[test]
+    fn first_page_with_more() {
+        let (page, more) = sent_mail_page((0..11).collect::<Vec<_>>(), 0);
+        assert_eq!(page, (0..10).collect::<Vec<_>>());
+        assert!(more);
+    }
+
+    #[test]
+    fn exact_page_has_no_more() {
+        let (page, more) = sent_mail_page((0..20).collect::<Vec<_>>(), 10);
+        assert_eq!(page, (10..20).collect::<Vec<_>>());
+        assert!(!more);
+    }
+
+    #[test]
+    fn short_tail() {
+        let (page, more) = sent_mail_page((0..13).collect::<Vec<_>>(), 10);
+        assert_eq!(page, vec![10, 11, 12]);
+        assert!(!more);
+    }
+
+    #[test]
+    fn stops_at_node_cap() {
+        // The node never returns more than 500 rows, so the page ending at
+        // 500 must not offer a button that would fetch the same rows again.
+        let shown = SENT_MAIL_MAX - SENT_MAIL_PAGE;
+        let (page, more) = sent_mail_page((0..SENT_MAIL_MAX + 1).collect::<Vec<_>>(), shown);
+        assert_eq!(page.len(), SENT_MAIL_PAGE);
+        assert!(!more);
+    }
 }
 
 pub async fn get_spf_panel(
