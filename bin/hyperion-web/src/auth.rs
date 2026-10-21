@@ -4,7 +4,7 @@ use crate::error::AppError;
 use crate::state::SharedState;
 use axum::body::Body;
 use axum::extract::{FromRequestParts, Request, State};
-use axum::http::{header, request::Parts, HeaderValue, StatusCode};
+use axum::http::{header, request::Parts, HeaderMap, HeaderValue, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Redirect, Response};
 use hyperion_auth::Session;
@@ -185,6 +185,60 @@ impl FromRequestParts<SharedState> for AuthCtx {
     }
 }
 
+/// Is this an htmx request (a poll or a fragment swap, not a navigation)?
+pub fn is_htmx(headers: &HeaderMap) -> bool {
+    headers
+        .get("HX-Request")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v == "true")
+}
+
+/// Path + query of the page the user is looking at, from htmx's
+/// `HX-Current-URL`. Only the path is kept, so it can go straight into
+/// `?next=` (the login form refuses anything that isn't a local path).
+fn htmx_current_path(headers: &HeaderMap) -> Option<String> {
+    let raw = headers.get("HX-Current-URL")?.to_str().ok()?;
+    let u = url::Url::parse(raw).ok()?;
+    let mut p = u.path().to_string();
+    if let Some(q) = u.query() {
+        p.push('?');
+        p.push_str(q);
+    }
+    Some(p)
+}
+
+/// The login page address for a request that has no session, with
+/// `?next=` pointing back at where the user was. For an htmx fragment
+/// that is the PAGE they are on, never the fragment URL itself — coming
+/// back from login to `/jobs/<id>/progress` would show a bare fragment.
+pub fn login_location(headers: &HeaderMap, uri: &str) -> String {
+    let back = if is_htmx(headers) {
+        htmx_current_path(headers).unwrap_or_else(|| "/".into())
+    } else {
+        uri.to_string()
+    };
+    let next_param = url::form_urlencoded::byte_serialize(back.as_bytes()).collect::<String>();
+    format!("/login?next={next_param}")
+}
+
+/// Send the browser to `location` as a whole-page navigation.
+///
+/// A plain 302 is wrong for htmx: the XHR follows it silently and the
+/// page it lands on is swapped INTO the polling element — a session that
+/// lapsed while a job page was open put the whole sign-in page inside the
+/// job's progress card. `HX-Redirect` makes htmx navigate the window
+/// instead; 204 means nothing is swapped even if the header were ignored.
+pub fn page_redirect(headers: &HeaderMap, location: &str) -> Response {
+    if is_htmx(headers) {
+        let mut resp = StatusCode::NO_CONTENT.into_response();
+        if let Ok(v) = HeaderValue::from_str(location) {
+            resp.headers_mut().insert("HX-Redirect", v);
+        }
+        return resp;
+    }
+    Redirect::to(location).into_response()
+}
+
 /// Middleware: redirect unauthenticated requests to `/login` (preserving
 /// the original target via `?next=`).
 pub async fn require_auth(
@@ -195,9 +249,8 @@ pub async fn require_auth(
     let (mut parts, body) = req.into_parts();
     let ctx = extract_auth(&mut parts, &state).await;
     if !ctx.is_authenticated() {
-        let uri = parts.uri.to_string();
-        let next_param = url::form_urlencoded::byte_serialize(uri.as_bytes()).collect::<String>();
-        return Redirect::to(&format!("/login?next={next_param}")).into_response();
+        let location = login_location(&parts.headers, &parts.uri.to_string());
+        return page_redirect(&parts.headers, &location);
     }
     // 2FA enforcement gate: an admin+ session that hasn't enrolled in 2FA
     // is authenticated but corralled to the enrolment card. Exempt the
@@ -219,7 +272,7 @@ pub async fn require_auth(
             || path == "/healthz"
             || path == "/readyz";
         if !exempt {
-            return Redirect::to("/profile?require_2fa=1").into_response();
+            return page_redirect(&parts.headers, "/profile?require_2fa=1");
         }
     }
     let req = Request::from_parts(parts, body);
