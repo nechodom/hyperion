@@ -215,10 +215,18 @@ pub struct LoginForm {
 pub async fn get_login(
     State(state): State<SharedState>,
     Query(q): Query<LoginQuery>,
+    headers: HeaderMap,
     ctx: AuthCtx,
 ) -> Result<Response, AppError> {
     if ctx.is_authenticated() {
         return Ok(Redirect::to(redirect_target(&q.next)).into_response());
+    }
+    // An htmx request only lands here by following a handler's 302 to
+    // /login. Rendering the page would swap the whole sign-in screen
+    // into whatever element asked; navigate the window instead.
+    if crate::auth::is_htmx(&headers) {
+        let location = crate::auth::login_location(&headers, "/");
+        return Ok(crate::auth::page_redirect(&headers, &location));
     }
     let _ = state;
     let error = known_code(q.error.as_deref(), LOGIN_ERRORS);

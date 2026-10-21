@@ -555,6 +555,53 @@ async fn unauthenticated_dashboard_redirects_to_login() {
     assert!(loc.to_str().expect("ascii").starts_with("/login"));
 }
 
+/// A job page's 2-second progress poll outliving the session used to get a
+/// 302 to /login, which the XHR followed — and htmx swapped the whole
+/// sign-in page into the progress card. htmx must get a whole-window
+/// navigation back to the PAGE (not the fragment) instead.
+#[tokio::test]
+async fn unauthenticated_htmx_poll_navigates_window_to_login() {
+    let admin = admin_user::create("kevin", "secret-pw-1").expect("create");
+    let (sock, _d) = start_agent().await;
+    let app = build_app(sock, admin);
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/jobs/01ABC/progress")
+                .header("HX-Request", "true")
+                .header("HX-Current-URL", "https://panel.example/jobs/01ABC?tab=log")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    assert!(resp.headers().get(header::LOCATION).is_none());
+    let to = resp.headers().get("HX-Redirect").expect("HX-Redirect");
+    assert_eq!(
+        to.to_str().expect("ascii"),
+        "/login?next=%2Fjobs%2F01ABC%3Ftab%3Dlog"
+    );
+
+    // A handler's own 302 to /login followed by the XHR: the login page
+    // must not render into the swap target either.
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/login")
+                .header("HX-Request", "true")
+                .header("HX-Current-URL", "https://panel.example/profile")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    let to = resp.headers().get("HX-Redirect").expect("HX-Redirect");
+    assert_eq!(to.to_str().expect("ascii"), "/login?next=%2Fprofile");
+}
+
 #[tokio::test]
 async fn bad_login_redirects_with_error() {
     let admin = admin_user::create("kevin", "good-pw").expect("create");
