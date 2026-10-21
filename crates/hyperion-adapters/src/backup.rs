@@ -447,6 +447,156 @@ pub struct RemoteUpload<'a> {
     pub password: &'a str,
     /// Path on the remote (the basename of the local file is appended).
     pub remote_dir: &'a str,
+    /// SFTP only: the server's pinned host key, as the unpadded base64
+    /// SHA-256 that `ssh-keygen -l` prints after `SHA256:`. Empty = not
+    /// pinned, and curl falls back to root's known_hosts — which on a fresh
+    /// node has nothing in it, so every call fails. See
+    /// [`fetch_sftp_host_key`]. Owned: it is read live from agent.toml (a
+    /// pin takes effect without an agent restart), not borrowed from config.
+    pub host_key_sha256: String,
+}
+
+/// The lines every remote curl config starts with: the credentials and, for
+/// SFTP with a pinned key, the key curl must see. With `hostpubsha256` set
+/// curl compares the key libssh2 negotiated against it and skips
+/// known_hosts entirely; a different key is refused with exit 60 before the
+/// password is sent.
+fn auth_lines(upload: &RemoteUpload<'_>) -> String {
+    let mut s = format!(
+        "user = \"{}:{}\"\n",
+        cmd::curl_config_quote(upload.user),
+        cmd::curl_config_quote(upload.password),
+    );
+    if upload.scheme == "sftp" && !upload.host_key_sha256.is_empty() {
+        s.push_str(&format!(
+            "hostpubsha256 = \"{}\"\n",
+            cmd::curl_config_quote(&upload.host_key_sha256)
+        ));
+    }
+    s
+}
+
+/// A host key fingerprint in the one form we store: unpadded base64 of a
+/// SHA-256, 43 characters. Accepts what an operator copies from
+/// `ssh-keygen -l` (`SHA256:` prefix) and curl's padded spelling (trailing
+/// `=`). `None` for anything that is not a SHA-256 in base64 — the value
+/// lands in a curl config, so nothing else may get through.
+pub fn normalize_host_key(raw: &str) -> Option<String> {
+    let s = raw.trim();
+    let s = s.strip_prefix("SHA256:").unwrap_or(s);
+    let s = s.trim_end_matches('=');
+    let ok = s.len() == 43
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/');
+    ok.then(|| s.to_string())
+}
+
+/// The key the server presented, out of curl's refusal of a pinned key it
+/// did not match: `Denied establishing ssh session: mismatch sha256
+/// fingerprint. Remote <b64> is not equal to <pinned>` (curl 7.80+, libssh2).
+pub fn parse_presented_host_key(stderr: &str) -> Option<String> {
+    let rest = stderr
+        .split("mismatch sha256 fingerprint. Remote ")
+        .nth(1)?;
+    let key = rest.split_whitespace().next()?;
+    normalize_host_key(key)
+}
+
+/// A pin no server can match: base64 of 32 zero bytes. Not a key — the
+/// question curl is being asked is "what key DO you see".
+const NO_KEY: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+
+/// Ask an SFTP server for its host key fingerprint, the way curl sees it.
+///
+/// Why not `ssh-keyscan`: a server has several keys (ed25519, ecdsa, rsa)
+/// and `hostpubsha256` matches only the ONE libssh2 negotiates, which is not
+/// necessarily the one OpenSSH would pick. Pinning anything but that key
+/// fails every call. So curl itself is asked, with a pin that cannot match:
+/// it connects, compares, and refuses with the key it saw in the message.
+/// The refusal happens before authentication, so no credentials go along.
+pub async fn fetch_sftp_host_key(host: &str, port: u16) -> Result<String, AdapterError> {
+    let url = format!("sftp://{host}:{port}/");
+    let config = format!(
+        concat!(
+            "url = \"{url}\"\n",
+            "hostpubsha256 = \"{pin}\"\n",
+            "silent\n",
+            "show-error\n",
+            "connect-timeout = 15\n",
+            "max-time = 30\n",
+        ),
+        url = cmd::curl_config_quote(&url),
+        pin = NO_KEY,
+    );
+    let (_stdout, stderr, code) = cmd::curl_with_config_capture(&config).await?;
+    if let Some(key) = parse_presented_host_key(&stderr) {
+        return Ok(key);
+    }
+    let why = match code {
+        6 => "could not resolve the host — check the hostname / DNS".to_string(),
+        7 => "could not connect — the port is closed or refused (firewall, or wrong port?)"
+            .to_string(),
+        28 => "timed out — the server did not respond (firewall, or wrong host/port?)".to_string(),
+        // An SFTP-less curl, or one built against libssh instead of libssh2,
+        // cannot check a pinned key at all.
+        1 | 2 | 4 | 48 => format!(
+            "this node's curl cannot check an SFTP host key (exit {code}: {}) — it needs \
+             curl 7.80 or newer built with libssh2",
+            stderr.trim()
+        ),
+        _ => format!(
+            "could not read the server's host key (curl exit {code}): {}",
+            stderr.trim()
+        ),
+    };
+    Err(AdapterError::Other(why))
+}
+
+/// Plain words for the two ways an SFTP host key stops a transfer, or `None`
+/// when `code` is not one of them. Shared by every remote call so a scheduled
+/// push fails with the same sentence the Test button shows.
+fn host_key_failure(upload: &RemoteUpload<'_>, code: i32, stderr: &str) -> Option<String> {
+    if upload.scheme != "sftp" {
+        return None;
+    }
+    if upload.host_key_sha256.is_empty() {
+        // No pin: curl asked root's known_hosts, which refused (60) or did
+        // not exist (2, "Failed initialization").
+        return matches!(code, 2 | 60).then(|| {
+            "the SFTP server's host key is not pinned yet — press Test on Settings → Backups \
+             → FTP / SFTP target to pin it"
+                .to_string()
+        });
+    }
+    (code == 60).then(|| match parse_presented_host_key(stderr) {
+        Some(seen) => format!(
+            "REFUSED: the SFTP server presented host key SHA256:{seen}, but SHA256:{} is \
+             pinned. Nothing was sent. If the server was reinstalled or its keys rotated, \
+             trust the new key on Settings → Backups; otherwise someone may be intercepting \
+             the connection",
+            upload.host_key_sha256
+        ),
+        None => format!(
+            "REFUSED: the SFTP server's host key does not match the pinned SHA256:{}",
+            upload.host_key_sha256
+        ),
+    })
+}
+
+/// [`cmd::curl_with_config`] with the host-key failures in plain words.
+async fn remote_curl(upload: &RemoteUpload<'_>, config: &str) -> Result<String, AdapterError> {
+    let (stdout, stderr, code) = cmd::curl_with_config_capture(config).await?;
+    if code == 0 {
+        return Ok(stdout);
+    }
+    if let Some(msg) = host_key_failure(upload, code, &stderr) {
+        return Err(AdapterError::Other(msg));
+    }
+    Err(AdapterError::Command {
+        cmd: "curl --config - (options withheld)".to_string(),
+        code,
+        stderr_tail: stderr,
+    })
 }
 
 /// Push a local file to a remote destination via curl. Returns the URL
@@ -481,7 +631,7 @@ pub async fn upload_remote(file: &Path, upload: &RemoteUpload<'_>) -> Result<Str
     // would otherwise close the value and be read as further directives.
     let config = format!(
         concat!(
-            "user = \"{user}:{password}\"\n",
+            "{auth}",
             "upload-file = \"{local}\"\n",
             "url = \"{url}\"\n",
             "fail\n",
@@ -502,26 +652,42 @@ pub async fn upload_remote(file: &Path, upload: &RemoteUpload<'_>) -> Result<Str
             // FTP: create missing remote directories.
             "ftp-create-dirs\n",
         ),
-        user = cmd::curl_config_quote(upload.user),
-        password = cmd::curl_config_quote(upload.password),
+        auth = auth_lines(upload),
         local = cmd::curl_config_quote(local),
         url = cmd::curl_config_quote(&url),
     );
-    cmd::curl_with_config(&config).await?;
+    remote_curl(upload, &config).await?;
     Ok(url)
+}
+
+/// What [`probe_remote`] found.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RemoteProbe {
+    pub ok: bool,
+    /// Plain words for the operator.
+    pub message: String,
+    pub latency_ms: u64,
+    /// SFTP with a pinned key the server no longer presents: the key it
+    /// presents instead. Set only for that refusal, so the caller can offer
+    /// to trust exactly this key and nothing else.
+    pub presented_host_key: Option<String>,
 }
 
 /// Connection check for the off-site target: connect, log in, and LIST the
 /// target directory — proving reachability + credentials + directory access
-/// without running a full backup. Returns `(ok, human message, latency_ms)`.
+/// without running a full backup.
 ///
 /// curl's exit code is the diagnosis here: the operator's actual failure was a
 /// (28) timeout with 0 bytes, which this turns into "the server did not
 /// respond" in 15s instead of after a 5-minute backup.
-pub async fn probe_remote(upload: &RemoteUpload<'_>) -> (bool, String, u64) {
+pub async fn probe_remote(upload: &RemoteUpload<'_>) -> RemoteProbe {
+    let fail = |message: String| RemoteProbe {
+        message,
+        ..RemoteProbe::default()
+    };
     let scheme = match upload.scheme {
         s @ ("ftp" | "ftps" | "sftp") => s,
-        other => return (false, format!("unsupported remote scheme: {other}"), 0),
+        other => return fail(format!("unsupported remote scheme: {other}")),
     };
     let dir = format!("/{}", upload.remote_dir.trim_matches('/'));
     // The trailing slash makes curl LIST the directory instead of trying to
@@ -533,7 +699,7 @@ pub async fn probe_remote(upload: &RemoteUpload<'_>) -> (bool, String, u64) {
     );
     let config = format!(
         concat!(
-            "user = \"{user}:{password}\"\n",
+            "{auth}",
             "url = \"{url}\"\n",
             "list-only\n",
             "fail\n",
@@ -542,32 +708,33 @@ pub async fn probe_remote(upload: &RemoteUpload<'_>) -> (bool, String, u64) {
             "connect-timeout = 15\n",
             "max-time = 30\n",
         ),
-        user = cmd::curl_config_quote(upload.user),
-        password = cmd::curl_config_quote(upload.password),
+        auth = auth_lines(upload),
         url = cmd::curl_config_quote(&url),
     );
     let start = std::time::Instant::now();
     let res = cmd::curl_with_config_capture(&config).await;
     let latency_ms = start.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
     match res {
-        Ok((_stdout, _stderr, 0)) => (
-            true,
-            "connected, logged in, and listed the target directory".to_string(),
+        Ok((_stdout, _stderr, 0)) => RemoteProbe {
+            ok: true,
+            message: "connected, logged in, and listed the target directory".to_string(),
             latency_ms,
-        ),
+            presented_host_key: None,
+        },
         Ok((_stdout, stderr, code)) => {
+            if let Some(message) = host_key_failure(upload, code, &stderr) {
+                return RemoteProbe {
+                    ok: false,
+                    message,
+                    latency_ms,
+                    presented_host_key: (code == 60 && !upload.host_key_sha256.is_empty())
+                        .then(|| parse_presented_host_key(&stderr))
+                        .flatten(),
+                };
+            }
             // Map the codes an operator actually hits to plain language; keep
             // the raw stderr for anything else.
             let msg = match code {
-                // libssh2 refuses a server whose key is not in root's
-                // known_hosts with exit 2 and the words "Failed
-                // initialization", which point everywhere but the cause.
-                2 if scheme == "sftp" => format!(
-                    "this node does not know the SFTP server's host key — on the node, as \
-                     root, check its fingerprint and add it: ssh-keyscan -p {} {} >> \
-                     /root/.ssh/known_hosts",
-                    upload.port, upload.host
-                ),
                 6 => "could not resolve the host — check the hostname / DNS".into(),
                 7 => "could not connect — the port is closed or refused (firewall, or wrong port?)"
                     .into(),
@@ -586,9 +753,15 @@ pub async fn probe_remote(upload: &RemoteUpload<'_>) -> (bool, String, u64) {
                     }
                 }
             };
-            (false, msg, latency_ms)
+            RemoteProbe {
+                latency_ms,
+                ..fail(msg)
+            }
         }
-        Err(e) => (false, format!("could not run the check: {e}"), latency_ms),
+        Err(e) => RemoteProbe {
+            latency_ms,
+            ..fail(format!("could not run the check: {e}"))
+        },
     }
 }
 
@@ -636,7 +809,7 @@ pub async fn verify_remote(
     // protocol-specific listing format.
     let config = format!(
         concat!(
-            "user = \"{user}:{password}\"\n",
+            "{auth}",
             "url = \"{url}\"\n",
             "head\n",
             "fail\n",
@@ -649,14 +822,13 @@ pub async fn verify_remote(
             "max-time = 60\n",
             "write-out = \"%{{size_download}} %{{size_upload}} %{{filename_effective}}\"\n",
         ),
-        user = cmd::curl_config_quote(upload.user),
-        password = cmd::curl_config_quote(upload.password),
+        auth = auth_lines(upload),
         url = cmd::curl_config_quote(&url),
     );
     // curl reports an FTP SIZE response in `Content-Length`, which it exposes
     // through the header block rather than through size_download on a HEAD.
     // Parse whichever of the two carries a number.
-    let out = cmd::curl_with_config(&config).await?;
+    let out = remote_curl(upload, &config).await?;
     // THREE answers, not two. `None` is "the server answered but not with a
     // size we could read" — plenty of FTP servers do that — and folding it
     // into `false` told the operator a perfectly good backup was missing.
@@ -724,15 +896,14 @@ pub async fn list_remote(
     );
     let config = format!(
         concat!(
-            "user = \"{user}:{password}\"\n",
+            "{auth}",
             "url = \"{url}\"\n",
             "fail\n",
             "silent\n",
             "show-error\n",
             "max-time = 120\n",
         ),
-        user = cmd::curl_config_quote(upload.user),
-        password = cmd::curl_config_quote(upload.password),
+        auth = auth_lines(upload),
         url = cmd::curl_config_quote(&url),
     );
     // Capture the exit code rather than treating every non-zero as a fault.
@@ -747,6 +918,9 @@ pub async fn list_remote(
     // `None` = no directory. `Some(vec![])` = the directory exists and is
     // empty, which is a different and more worrying answer.
     let (stdout, stderr, code) = cmd::curl_with_config_capture(&config).await?;
+    if let Some(msg) = host_key_failure(upload, code, &stderr) {
+        return Err(AdapterError::Other(msg));
+    }
     match code {
         0 => Ok(Some(parse_ftp_listing(&stdout))),
         // 78 is how SFTP says the same thing ("remote file not found").
@@ -863,7 +1037,7 @@ pub async fn delete_remote(
     );
     let mut config = format!(
         concat!(
-            "user = \"{user}:{password}\"\n",
+            "{auth}",
             "url = \"{url}\"\n",
             "list-only\n",
             "fail\n",
@@ -872,8 +1046,7 @@ pub async fn delete_remote(
             "connect-timeout = 15\n",
             "max-time = 120\n",
         ),
-        user = cmd::curl_config_quote(upload.user),
-        password = cmd::curl_config_quote(upload.password),
+        auth = auth_lines(upload),
         url = cmd::curl_config_quote(&url),
     );
     for name in filenames {
@@ -885,6 +1058,9 @@ pub async fn delete_remote(
     let (_stdout, stderr, code) = cmd::curl_with_config_capture(&config).await?;
     // 9 / 78 = the folder is not there (FTP / SFTP), so neither are the
     // files in it.
+    if let Some(msg) = host_key_failure(upload, code, &stderr) {
+        return Err(AdapterError::Other(msg));
+    }
     if !matches!(code, 0 | 9 | 78) {
         return Err(AdapterError::Command {
             cmd: "curl --config - (options withheld)".to_string(),
@@ -961,7 +1137,7 @@ pub async fn download_remote(
         .ok_or_else(|| AdapterError::Other("destination path not utf8".into()))?;
     let config = format!(
         concat!(
-            "user = \"{user}:{password}\"\n",
+            "{auth}",
             "url = \"{url}\"\n",
             "output = \"{local}\"\n",
             "fail\n",
@@ -983,12 +1159,11 @@ pub async fn download_remote(
             "max-filesize = {cap}\n",
         ),
         cap = max_bytes,
-        user = cmd::curl_config_quote(upload.user),
-        password = cmd::curl_config_quote(upload.password),
+        auth = auth_lines(upload),
         url = cmd::curl_config_quote(&url),
         local = cmd::curl_config_quote(local),
     );
-    if let Err(e) = cmd::curl_with_config(&config).await {
+    if let Err(e) = remote_curl(upload, &config).await {
         // `fail` stops curl on a server error, not on a transfer that dies
         // half-way: what it wrote stays at `dest`, a truncated archive nobody
         // will ever clean up — and one that looks like a backup.
@@ -1532,6 +1707,7 @@ mod tests {
             user: "u",
             password: "p",
             remote_dir: "/backups",
+            host_key_sha256: String::new(),
         };
         let dest = std::path::Path::new("/tmp/hyperion-test-never-written");
         // curl percent-DECODES the URL before asking the server for a path,
@@ -1610,6 +1786,7 @@ mod tests {
             user: "u",
             password: "p",
             remote_dir: "/b/u",
+            host_key_sha256: String::new(),
         };
         let err = delete_remote(&["../other/a.cz-1.tar.gz"], &up)
             .await
@@ -1638,6 +1815,7 @@ mod tests {
             user: p[2],
             password: p[3],
             remote_dir: p[4],
+            host_key_sha256: String::new(),
         };
         let dir = tempfile::tempdir().expect("dir");
         let a = dir.path().join("e2e.cz-100.tar.gz");
@@ -1669,6 +1847,213 @@ mod tests {
             .expect("list")
             .expect("dir")
             .is_empty());
+    }
+
+    /// The real refusal curl 8.14 (libssh2 1.11) prints for a pin that does
+    /// not match: the presented key comes back padded, the pin as given.
+    const CURL_MISMATCH: &str = "curl: (60) Denied establishing ssh session: mismatch sha256 \
+        fingerprint. Remote Gjo4+v6WY/LpuOKaBteiqta5IP0Iks0DEqd1Q+Io0n0= is not equal to \
+        AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\nMore details here: \
+        https://curl.se/docs/sslcerts.html\n";
+    const KEY: &str = "Gjo4+v6WY/LpuOKaBteiqta5IP0Iks0DEqd1Q+Io0n0";
+
+    #[test]
+    fn host_key_normalizes_to_unpadded_base64_and_refuses_anything_else() {
+        assert_eq!(normalize_host_key(KEY).as_deref(), Some(KEY));
+        // What ssh-keygen -l prints, and curl's padded spelling.
+        assert_eq!(
+            normalize_host_key(&format!("SHA256:{KEY}")).as_deref(),
+            Some(KEY)
+        );
+        assert_eq!(
+            normalize_host_key(&format!(" {KEY}=\n")).as_deref(),
+            Some(KEY)
+        );
+        // It lands in a curl config: a quote, a newline or a second
+        // directive must never get through, and neither may an MD5.
+        for bad in [
+            "",
+            "SHA256:",
+            &KEY[..42],
+            &format!("{KEY}A"),
+            &format!("{}\"", &KEY[..42]),
+            &format!("{}\n", &KEY[..42]),
+            "MD5:1d:2f:aa:bb:cc:dd:ee:ff:00:11:22:33:44:55:66:77",
+            "Gjo4+v6WY/LpuOKaBteiqta5IP0Iks0DEqd1Q+Io0n%",
+        ] {
+            assert_eq!(normalize_host_key(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn presented_key_is_read_from_curls_refusal() {
+        assert_eq!(
+            parse_presented_host_key(CURL_MISMATCH).as_deref(),
+            Some(KEY)
+        );
+        assert_eq!(
+            parse_presented_host_key("curl: (2) Failed initialization"),
+            None
+        );
+    }
+
+    fn sftp<'a>(key: &str, password: &'a str) -> RemoteUpload<'a> {
+        RemoteUpload {
+            scheme: "sftp",
+            host: "backup.example",
+            port: 22,
+            user: "bk",
+            password,
+            remote_dir: "/~/backups",
+            host_key_sha256: key.to_string(),
+        }
+    }
+
+    #[test]
+    fn curl_config_carries_the_pin_for_sftp_only() {
+        assert_eq!(
+            auth_lines(&sftp(KEY, "pw")),
+            format!("user = \"bk:pw\"\nhostpubsha256 = \"{KEY}\"\n")
+        );
+        // Not pinned: nothing to send, curl asks known_hosts.
+        assert_eq!(auth_lines(&sftp("", "pw")), "user = \"bk:pw\"\n");
+        // FTP has no host key; a stray value must not reach its config.
+        let ftp = RemoteUpload {
+            scheme: "ftp",
+            ..sftp(KEY, "pw")
+        };
+        assert!(!auth_lines(&ftp).contains("hostpubsha256"));
+        // The password is still escaped, so it cannot add a directive that
+        // would switch the check off.
+        let lines = auth_lines(&sftp(KEY, "p\"\ninsecure"));
+        assert_eq!(lines.lines().count(), 2, "{lines}");
+        assert!(
+            lines.starts_with("user = \"bk:p\\\"\\ninsecure\"\n"),
+            "{lines}"
+        );
+    }
+
+    #[test]
+    fn a_changed_key_is_a_refusal_never_a_generic_failure() {
+        let msg = host_key_failure(
+            &sftp("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "p"),
+            60,
+            CURL_MISMATCH,
+        )
+        .expect("mismatch is a host-key failure");
+        assert!(msg.starts_with("REFUSED"), "{msg}");
+        assert!(
+            msg.contains(&format!("SHA256:{KEY}")),
+            "names the new key: {msg}"
+        );
+        // Unpinned: known_hosts said no (60) or was missing (2).
+        for code in [2, 60] {
+            let msg = host_key_failure(&sftp("", "p"), code, "").expect("unpinned");
+            assert!(msg.contains("not pinned yet"), "{msg}");
+        }
+        // Other failures, and FTP, keep their own diagnosis.
+        assert_eq!(host_key_failure(&sftp(KEY, "p"), 67, ""), None);
+        let ftp = RemoteUpload {
+            scheme: "ftp",
+            ..sftp("", "p")
+        };
+        assert_eq!(host_key_failure(&ftp, 60, ""), None);
+    }
+
+    /// Against a real OpenSSH server, from a node whose root has NO
+    /// known_hosts entry for it: `HY_SFTP_TEST=host:port:user:password:dir`
+    /// (dir like `/~/backups`). Needs a Linux curl built with libssh2 — the
+    /// macOS one has no SFTP. Run with `--ignored`.
+    #[tokio::test]
+    #[ignore]
+    async fn sftp_pin_push_list_restore_delete_against_a_real_server() {
+        let Ok(spec) = std::env::var("HY_SFTP_TEST") else {
+            return;
+        };
+        let p: Vec<&str> = spec.splitn(5, ':').collect();
+        let port: u16 = p[1].parse().expect("port");
+        let mut up = RemoteUpload {
+            scheme: "sftp",
+            host: p[0],
+            port,
+            user: p[2],
+            password: p[3],
+            remote_dir: p[4],
+            host_key_sha256: String::new(),
+        };
+
+        // Before the pin: refused by known_hosts, in plain words.
+        let probe = probe_remote(&up).await;
+        assert!(!probe.ok);
+        assert!(
+            probe.message.contains("not pinned yet"),
+            "{}",
+            probe.message
+        );
+
+        // Pin what the server presents; everything works from then on.
+        let key = fetch_sftp_host_key(up.host, up.port).await.expect("key");
+        assert_eq!(normalize_host_key(&key).as_deref(), Some(key.as_str()));
+        up.host_key_sha256 = key.clone();
+
+        let dir = tempfile::tempdir().expect("dir");
+        let a = dir.path().join("e2e.cz-100.tar.gz");
+        let keep = dir.path().join("e2e.cz-200.tar.gz");
+        std::fs::write(&a, b"archive bytes").expect("write");
+        std::fs::write(&keep, b"x").expect("write");
+        // The first push creates the site's folder (`ftp-create-dirs`).
+        for f in [&a, &keep] {
+            upload_remote(f, &up).await.expect("upload");
+        }
+        let probe = probe_remote(&up).await;
+        assert!(probe.ok, "{}", probe.message);
+        let listed = list_remote(&up).await.expect("list").expect("dir");
+        assert!(
+            listed.contains(&RemoteEntry {
+                name: "e2e.cz-100.tar.gz".into(),
+                bytes: 13
+            }),
+            "{listed:?}"
+        );
+
+        let back = dir.path().join("restore/e2e.cz-100.tar.gz");
+        let n = download_remote("e2e.cz-100.tar.gz", &back, &up, 1 << 20)
+            .await
+            .expect("download");
+        assert_eq!(n, 13);
+        assert_eq!(std::fs::read(&back).expect("read"), b"archive bytes");
+
+        // A different pinned key: every call is refused before logging in,
+        // and the refusal names the key the server really has.
+        let wrong = RemoteUpload {
+            host_key_sha256: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into(),
+            ..up.clone()
+        };
+        let probe = probe_remote(&wrong).await;
+        assert!(!probe.ok);
+        assert!(probe.message.starts_with("REFUSED"), "{}", probe.message);
+        assert_eq!(probe.presented_host_key.as_deref(), Some(key.as_str()));
+        let other = dir.path().join("e2e.cz-300.tar.gz");
+        std::fs::write(&other, b"y").expect("write");
+        let err = upload_remote(&other, &wrong).await.expect_err("refused");
+        assert!(err.to_string().contains("REFUSED"), "{err}");
+        let err = list_remote(&wrong).await.expect_err("refused");
+        assert!(err.to_string().contains("REFUSED"), "{err}");
+
+        delete_remote(&["e2e.cz-100.tar.gz", "e2e.cz-200.tar.gz"], &up)
+            .await
+            .expect("delete");
+        let names: Vec<String> = list_remote(&up)
+            .await
+            .expect("list")
+            .expect("dir")
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        assert!(
+            !names.iter().any(|n| n.starts_with("e2e.cz-")),
+            "left behind, or the refused upload got through: {names:?}"
+        );
     }
 
     /// Build a plain `.tar` at `path` from `(name, kind, body_or_linktarget)`

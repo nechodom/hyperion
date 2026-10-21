@@ -1570,6 +1570,7 @@ async fn seed_demo_offsite(svc: &StubService) {
         user: &remote.user,
         password: &remote.password,
         remote_dir: &dir,
+        host_key_sha256: String::new(),
     };
     let now = hyperion_types::now_secs();
     let local = std::env::temp_dir().join("devserver-offsite");

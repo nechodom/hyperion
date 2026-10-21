@@ -290,6 +290,15 @@ pub struct BackupTargetProbe {
     /// Latency (ms) of the PUT round-trip. 0 when the probe
     /// short-circuited before the upload.
     pub put_latency_ms: i64,
+    /// SFTP only: the host key fingerprint (unpadded base64 SHA-256) the
+    /// check ran against — pinned before, or pinned by this check. Empty for
+    /// FTP, and from agents that predate pinning.
+    #[serde(default)]
+    pub host_key_sha256: String,
+    /// SFTP only: the server presented THIS key instead of the pinned one, and
+    /// was refused. The panel offers to trust exactly this key.
+    #[serde(default)]
+    pub presented_host_key: String,
 }
 
 /// Report of current vs policy. `current_usage_kib` reads from
