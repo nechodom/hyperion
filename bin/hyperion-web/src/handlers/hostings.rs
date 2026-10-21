@@ -1916,7 +1916,7 @@ pub async fn post_create(
             let waf_level = detail.vhost_options.effective_waf_level().as_str();
             let waf_rules = waf_rule_rows(&detail.vhost_options, detail.php_version.is_some());
             let protection_applies = protection_applies(&detail.kind);
-            let workers_full = PhpWorkersView::from_kv(&[], 0);
+            let workers_full = PhpWorkersView::from_kv(&[], 0, limits.php_max_children);
             let modsec = fetch_modsec_status(&state, target).await;
             let crs = crs_view(&detail.vhost_options);
             let tpl = DetailTpl {
@@ -2470,20 +2470,49 @@ pub struct PhpWorkersView {
     pub last_24h: i64,
     /// Last time; 0 = never seen.
     pub last_at: i64,
+    /// Automatic max_children switched on.
+    pub auto_enabled: bool,
+    /// The most workers the automation may give.
+    pub auto_max: i64,
+    /// The operator's own max_children, when the automation has the pool
+    /// above it.
+    pub auto_raised_from: Option<i64>,
+    /// The operator's own max_children — what the ceiling must be above.
+    pub auto_floor: i64,
 }
 
 impl PhpWorkersView {
-    fn from_kv(pairs: &[(String, String)], now: i64) -> Self {
+    fn from_kv(pairs: &[(String, String)], now: i64, current_children: i64) -> Self {
         use hyperion_types::phpworkers;
-        let st = pairs
-            .iter()
-            .find(|(k, _)| k == phpworkers::KV_STATE)
-            .and_then(|(_, v)| phpworkers::State::parse(v))
+        let get = |k: &str| {
+            pairs
+                .iter()
+                .find(|(key, _)| key == k)
+                .map(|(_, v)| v.as_str())
+        };
+        let st = get(phpworkers::KV_STATE)
+            .and_then(phpworkers::State::parse)
             .unwrap_or_default();
+        let auto_raised_from = get(phpworkers::KV_AUTO_STATE)
+            .and_then(phpworkers::AutoState::parse)
+            .map(|s| s.base)
+            .filter(|&b| b > 0 && b < current_children);
         PhpWorkersView {
             last_24h: st.hits_24h(now),
             last_at: st.last_at,
+            auto_enabled: get(phpworkers::KV_AUTO) == Some("on"),
+            auto_max: get(phpworkers::KV_AUTO_MAX)
+                .and_then(|v| v.trim().parse().ok())
+                .unwrap_or(phpworkers::DEFAULT_AUTO_MAX),
+            auto_raised_from,
+            auto_floor: auto_raised_from.unwrap_or(current_children),
         }
+    }
+
+    /// Switched on with a ceiling that leaves nothing to raise to.
+    pub fn auto_no_room(&self) -> bool {
+        self.auto_enabled
+            && hyperion_types::phpworkers::ceiling_leaves_no_room(self.auto_max, self.auto_floor)
     }
 }
 
@@ -2977,7 +3006,11 @@ pub async fn get_detail(
                 .map(|p| p.name.clone())
         });
     let mem_auto = PhpMemAutoView::from_kv(&owner_kv, limits.php_memory_mb);
-    let workers_full = PhpWorkersView::from_kv(&owner_kv, hyperion_types::now_secs());
+    let workers_full = PhpWorkersView::from_kv(
+        &owner_kv,
+        hyperion_types::now_secs(),
+        limits.php_max_children,
+    );
     let backup_schedule = BackupSchedule::from_kv(&owner_kv);
     // Last successful backup, as the OWNING node recorded it. Needed by the
     // health check below, which is why this is fetched here and not with the
@@ -5640,6 +5673,11 @@ pub struct SetLimitsForm {
     mem_auto: String,
     #[serde(default)]
     mem_auto_max_mb: String,
+    /// Checkbox: absent when unticked.
+    #[serde(default)]
+    workers_auto: String,
+    #[serde(default)]
+    workers_auto_max: String,
     #[serde(default)]
     target_node: String,
 }
@@ -6167,6 +6205,29 @@ pub async fn post_set_limits(
         },
     };
     let mem_auto_on = form.mem_auto.trim() == "on";
+    let workers_auto_max: i64 = match form.workers_auto_max.trim() {
+        "" => hyperion_types::phpworkers::DEFAULT_AUTO_MAX,
+        v => match v.parse::<i64>() {
+            Ok(n) if (1..=hyperion_types::phpworkers::AUTO_MAX_LIMIT).contains(&n) => n,
+            _ => {
+                let msg = format!(
+                    "Automatic max_children ceiling must be 1–{}.",
+                    hyperion_types::phpworkers::AUTO_MAX_LIMIT
+                );
+                return Ok(save_result(
+                    &headers,
+                    false,
+                    &msg,
+                    format!(
+                        "/hostings/{}?flash_error={}#limits",
+                        urlencoding(&form.selector),
+                        urlencoding(&msg)
+                    ),
+                ));
+            }
+        },
+    };
+    let workers_auto_on = form.workers_auto.trim() == "on";
     let target = node_target(&form.target_node);
     let hosting_id = find_hosting_anywhere(&state, sel.clone())
         .await?
@@ -6174,18 +6235,13 @@ pub async fn post_set_limits(
         .id
         .as_str()
         .to_string();
-    if mem_auto_on {
-        // A ceiling at or under the operator's own value gives the
-        // automation nothing to raise to — every out-of-memory would end as
-        // a daily "stuck at the ceiling" alert. Refuse it before anything is
-        // written. The floor is decided the way set_limits will decide it,
-        // from what the OWNING node has stored.
-        use hyperion_types::phpmem;
-        let stored = fetch_limits(&state, target, sel.clone())
-            .await
-            .ok()
-            .map(|l| l.php_memory_mb);
-        let st = match crate::dispatcher::dispatch_to_node(
+    // A ceiling at or under the operator's own value gives an automation
+    // nothing to raise to. Refuse it before anything is written. The floor
+    // is decided the way set_limits will decide it, from what the OWNING
+    // node has stored.
+    let (stored, owner_kv) = if mem_auto_on || workers_auto_on {
+        let stored = fetch_limits(&state, target, sel.clone()).await.ok();
+        let kv = match crate::dispatcher::dispatch_to_node(
             &state,
             target,
             Request::HostingKvList {
@@ -6194,12 +6250,50 @@ pub async fn post_set_limits(
         )
         .await
         {
-            Ok(RpcResponse::HostingKvList(v)) => v
-                .into_iter()
-                .find(|(k, _)| k == phpmem::KV_STATE)
-                .and_then(|(_, v)| phpmem::State::parse(&v)),
-            _ => None,
+            Ok(RpcResponse::HostingKvList(v)) => v,
+            _ => Vec::new(),
         };
+        (stored, kv)
+    } else {
+        (None, Vec::new())
+    };
+    if workers_auto_on {
+        use hyperion_types::phpworkers;
+        let st = owner_kv
+            .iter()
+            .find(|(k, _)| k == phpworkers::KV_AUTO_STATE)
+            .and_then(|(_, v)| phpworkers::AutoState::parse(v));
+        let floor = phpworkers::floor_after_save(
+            form.php_max_children,
+            stored.as_ref().map(|l| l.php_max_children),
+            st.as_ref(),
+        );
+        if phpworkers::ceiling_leaves_no_room(workers_auto_max, floor) {
+            let msg = format!(
+                "Automatic max_children ceiling ({workers_auto_max}) must be above the site's own \
+                 max_children ({floor}), or there is nothing to raise to."
+            );
+            return Ok(save_result(
+                &headers,
+                false,
+                &msg,
+                format!(
+                    "/hostings/{}?flash_error={}#limits",
+                    urlencoding(&form.selector),
+                    urlencoding(&msg)
+                ),
+            ));
+        }
+    }
+    if mem_auto_on {
+        // Out-of-memory at the ceiling would end as a daily "stuck at the
+        // ceiling" alert.
+        use hyperion_types::phpmem;
+        let stored = stored.as_ref().map(|l| l.php_memory_mb);
+        let st = owner_kv
+            .iter()
+            .find(|(k, _)| k == phpmem::KV_STATE)
+            .and_then(|(_, v)| phpmem::State::parse(v));
         let floor = phpmem::floor_after_save(form.php_memory_mb, stored, st.as_ref());
         if phpmem::ceiling_leaves_no_room(mem_auto_max, floor) {
             let msg = format!(
@@ -6238,6 +6332,14 @@ pub async fn post_set_limits(
                 if mem_auto_on { "on" } else { "off" }.to_string(),
             ),
             (hyperion_types::phpmem::KV_MAX_MB, mem_auto_max.to_string()),
+            (
+                hyperion_types::phpworkers::KV_AUTO,
+                if workers_auto_on { "on" } else { "off" }.to_string(),
+            ),
+            (
+                hyperion_types::phpworkers::KV_AUTO_MAX,
+                workers_auto_max.to_string(),
+            ),
         ] {
             match crate::dispatcher::dispatch_to_node(
                 &state,
@@ -8069,12 +8171,12 @@ async fn carry_access_grants(state: &SharedState, from: &str, to: &str) -> Strin
 /// in the archive). Everything else in the master's kv is node state, which
 /// the bundle carries or deliberately leaves.
 fn is_master_site_kv(key: &str) -> bool {
-    // `php.mem_auto*` and `php.workers_full` share the prefix but are node
+    // `php.mem_auto*` and `php.workers_*` share the prefix but are node
     // state on the owning node; the bundle handles them.
     matches!(key, "notes" | "tags")
         || (key.starts_with("php.")
             && !key.starts_with("php.mem_auto")
-            && key != "php.workers_full")
+            && !key.starts_with("php.workers_"))
 }
 
 /// Give the hosting `to` the master-side notes, tags and PHP-ini copy `from`
@@ -16359,6 +16461,9 @@ mod tests {
             "php.mem_auto_max_mb",
             "php.mem_auto_state",
             "php.workers_full",
+            "php.workers_auto",
+            "php.workers_auto_max",
+            "php.workers_auto_state",
             "backup_at",
             "dkim",
             "staging_domain",

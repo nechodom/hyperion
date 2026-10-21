@@ -1226,6 +1226,26 @@ pub static STRINGS: &[LetterString] = &[
         cs: "V logu pomalých požadavků se poslední dobou nejčastěji objevuje: {scripts}.",
     },
     LetterString {
+        id: "ops.php_workers_raised.title",
+        group: "Operator alerts — hostings",
+        note: "The automatic max_children gave a site more PHP workers.",
+        en: "PHP workers raised for a site",
+        cs: "Webu byl navýšen počet PHP procesů",
+    },
+    LetterString {
+        id: "ops.php_workers_raised.body",
+        group: "Operator alerts — hostings",
+        note: "Tokens: {domain} {from} {to} {ceiling} (max_children).",
+        en: "{domain} kept running out of PHP workers at {from}, so Hyperion raised its \
+             max_children to {to} (ceiling {ceiling}). It steps back down after two weeks \
+             without running out. If it keeps hitting the ceiling, look at \"PHP slow \
+             requests\" in the site's Logs.",
+        cs: "{domain} opakovaně docházely PHP procesy při {from}, takže Hyperion zvýšil \
+             max_children na {to} (strop {ceiling}). Po dvou týdnech bez nedostatku se sníží \
+             zpět. Pokud bude narážet na strop, podívejte se do „PHP slow requests“ v Logách \
+             webu.",
+    },
+    LetterString {
         id: "ops.php_mem_raised.title",
         group: "Operator alerts — hostings",
         note: "The automatic memory_limit raised a site's PHP memory.",

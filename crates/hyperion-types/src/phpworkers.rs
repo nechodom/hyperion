@@ -14,6 +14,12 @@
 //! its own, with the two ways out: more workers, or (usually) finding what
 //! keeps them busy in the slow-request log.
 //!
+//! Optionally the node also raises `pm.max_children` itself (see
+//! [`decide_auto`]): opt-in per site, bounded by the operator's ceiling and
+//! by the node's RAM, and stepped back down after a quiet fortnight. More
+//! workers only help when the box has room for them; when one slow script
+//! holds them all, more workers just queue on it too — hence opt-in.
+//!
 //! Pure: parsing and the per-hosting state. The node does the I/O. The
 //! state lives in the OWNING node's `hosting_kv`, like the pool.
 
@@ -199,23 +205,169 @@ pub fn slow_scripts_line(scripts: &[SlowScript]) -> String {
 /// `server reached pm.max_children` warnings in `text`, per pool name.
 /// The pool name is the site's system user.
 pub fn count_by_pool(text: &str) -> BTreeMap<String, i64> {
+    count_by_pool_and_limit(text)
+        .into_iter()
+        .map(|(pool, by_limit)| (pool, by_limit.values().sum()))
+        .collect()
+}
+
+/// [`count_by_pool`], split by the `max_children` each warning names
+/// (`setting (5)`); 0 when it names none. The automation must not count a
+/// warning written under a lower limit than the one now in force — a line
+/// from before its own raise.
+pub fn count_by_pool_and_limit(text: &str) -> BTreeMap<String, BTreeMap<i64, i64>> {
     const POOL: &str = "[pool ";
     const NEEDLE: &str = "server reached pm.max_children setting";
-    let mut out = BTreeMap::new();
+    let mut out: BTreeMap<String, BTreeMap<i64, i64>> = BTreeMap::new();
     for line in text.lines() {
         let Some(at) = line.find(POOL) else { continue };
         let rest = &line[at + POOL.len()..];
         let Some(end) = rest.find(']') else { continue };
-        if !rest[end..].contains(NEEDLE) {
+        let Some(n) = rest[end..].find(NEEDLE) else {
             continue;
-        }
+        };
         let pool = rest[..end].trim();
         if pool.is_empty() {
             continue;
         }
-        *out.entry(pool.to_string()).or_insert(0) += 1;
+        let after = rest[end + n + NEEDLE.len()..].trim_start();
+        let limit = after
+            .strip_prefix('(')
+            .and_then(|a| a.split_once(')'))
+            .and_then(|(v, _)| v.trim().parse::<i64>().ok())
+            .unwrap_or(0);
+        *out.entry(pool.to_string())
+            .or_default()
+            .entry(limit)
+            .or_insert(0) += 1;
     }
     out
+}
+
+/// Hits in `by_limit` written under a limit of at least `current`. A warning
+/// that names no limit counts: it cannot be told apart from a fresh one.
+pub fn hits_at_or_above(by_limit: &BTreeMap<i64, i64>, current: i64) -> i64 {
+    by_limit
+        .iter()
+        .filter(|&(&limit, _)| limit == 0 || limit >= current)
+        .map(|(_, &n)| n)
+        .sum()
+}
+
+/// `"on"` turns the automatic `max_children` on for a hosting.
+pub const KV_AUTO: &str = "php.workers_auto";
+/// The most workers the automation may give a hosting.
+pub const KV_AUTO_MAX: &str = "php.workers_auto_max";
+/// JSON-encoded [`AutoState`].
+pub const KV_AUTO_STATE: &str = "php.workers_auto_state";
+/// Ceiling when the operator has not set one.
+pub const DEFAULT_AUTO_MAX: i64 = 20;
+/// Highest ceiling the card accepts (the limits card's own max).
+pub const AUTO_MAX_LIMIT: i64 = 200;
+/// Workers one raise or one lowering adds or takes away.
+pub const AUTO_STEP: i64 = 4;
+/// Times the pool must run out (since the last change) before a raise: one
+/// burst of traffic is not a reason to keep more workers around.
+pub const RAISE_AFTER_HITS: i64 = 3;
+/// Minimum gap between two changes, so the next step is decided on what the
+/// NEW limit does.
+pub const AUTO_COOLDOWN_SECS: i64 = 30 * 60;
+/// Quiet period (no hit, no change) before one step back down.
+pub const AUTO_LOWER_AFTER_SECS: i64 = 14 * 86_400;
+
+/// What the node remembers per hosting for the automatic `max_children`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AutoState {
+    /// The operator's own `max_children` — the floor a lowering returns to.
+    /// Reset whenever someone sets it by hand.
+    pub base: i64,
+    /// Hits at the limit in force since the last change.
+    #[serde(default)]
+    pub pending_hits: i64,
+    /// Last hit at the limit in force.
+    #[serde(default)]
+    pub last_full_at: i64,
+    /// Last time the limit changed (by this automation or by hand).
+    #[serde(default)]
+    pub last_change_at: i64,
+}
+
+impl AutoState {
+    pub fn parse(s: &str) -> Option<AutoState> {
+        serde_json::from_str(s).ok()
+    }
+
+    pub fn to_json(&self) -> String {
+        serde_json::to_string(self).unwrap_or_default()
+    }
+}
+
+/// What the automatic `max_children` should do for one hosting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutoStep {
+    Nothing,
+    Raise { to: i64 },
+    Lower { to: i64 },
+}
+
+/// Decide one hosting's step. `ram_cap` is the most workers the node can
+/// afford at the site's memory_limit (`None` when its RAM could not be read).
+pub fn decide_auto(
+    now: i64,
+    current: i64,
+    ceiling: i64,
+    ram_cap: Option<i64>,
+    st: &AutoState,
+) -> AutoStep {
+    let base = st.base;
+    // The operator lowered the ceiling under a value this automation set.
+    // Never below their own base: that one is theirs.
+    let lower_bound = ceiling.max(base);
+    if current > lower_bound {
+        return AutoStep::Lower { to: lower_bound };
+    }
+    if st.pending_hits >= RAISE_AFTER_HITS {
+        let cap = ceiling.min(ram_cap.unwrap_or(i64::MAX));
+        if current >= cap || now - st.last_change_at < AUTO_COOLDOWN_SECS {
+            return AutoStep::Nothing;
+        }
+        return AutoStep::Raise {
+            to: (current + AUTO_STEP).min(cap),
+        };
+    }
+    let quiet_since = st.last_full_at.max(st.last_change_at);
+    if current > base && now - quiet_since >= AUTO_LOWER_AFTER_SECS {
+        return AutoStep::Lower {
+            to: (current - AUTO_STEP).max(base),
+        };
+    }
+    AutoStep::Nothing
+}
+
+/// Workers the node can afford: three quarters of its RAM, each worker
+/// allowed the site's whole memory_limit. The same bound the automatic
+/// memory_limit keeps from its side (`phpmem::ram_cap_mb`).
+pub fn ram_cap_children(mem_total_mb: i64, memory_mb: i64) -> Option<i64> {
+    if mem_total_mb <= 0 {
+        return None;
+    }
+    Some((mem_total_mb * 3 / 4 / memory_mb.max(1)).max(1))
+}
+
+/// The operator's own `max_children` once a limits-card save lands. Mirrors
+/// `set_limits`: a value different from the stored one becomes the new
+/// floor; resubmitting the stored (possibly raised) value keeps the floor
+/// already in `st`.
+pub fn floor_after_save(typed: i64, stored: Option<i64>, st: Option<&AutoState>) -> i64 {
+    match (stored, st) {
+        (Some(stored), Some(s)) if typed == stored && s.base > 0 => s.base,
+        _ => typed,
+    }
+}
+
+/// A ceiling at or under the floor leaves the automation nothing to raise to.
+pub fn ceiling_leaves_no_room(ceiling: i64, floor: i64) -> bool {
+    ceiling <= floor
 }
 
 #[cfg(test)]
@@ -318,5 +470,108 @@ script_filename = /opt/elsewhere/run.php
             "wp-cron.php 2× (curl_exec), /opt/elsewhere/run.php 1×"
         );
         assert!(slow_scripts("", "/x", 3).is_empty());
+    }
+
+    #[test]
+    fn hits_are_split_by_the_limit_they_were_written_under() {
+        let log = "\
+[06-Oct-2026 06:56:45] WARNING: [pool a_cz] server reached pm.max_children setting (10), consider raising it
+[06-Oct-2026 06:57:45] WARNING: [pool a_cz] server reached pm.max_children setting (14), consider raising it
+[06-Oct-2026 06:58:45] WARNING: [pool a_cz] server reached pm.max_children setting, consider raising it
+";
+        let by = count_by_pool_and_limit(log);
+        let a = &by["a_cz"];
+        assert_eq!(count_by_pool(log)["a_cz"], 3);
+        assert_eq!(
+            hits_at_or_above(a, 14),
+            2,
+            "the (10) line is from before the raise"
+        );
+        assert_eq!(hits_at_or_above(a, 10), 3);
+    }
+
+    #[test]
+    fn auto_raises_after_repeated_hits_within_bounds() {
+        let st = |pending: i64, change: i64| AutoState {
+            base: 10,
+            pending_hits: pending,
+            last_full_at: 1_000_000,
+            last_change_at: change,
+        };
+        let now = 1_000_000;
+        assert_eq!(decide_auto(now, 10, 20, None, &st(2, 0)), AutoStep::Nothing);
+        assert_eq!(
+            decide_auto(now, 10, 20, None, &st(3, 0)),
+            AutoStep::Raise { to: 14 }
+        );
+        // Ceiling and RAM both cap the step.
+        assert_eq!(
+            decide_auto(now, 18, 20, None, &st(3, 0)),
+            AutoStep::Raise { to: 20 }
+        );
+        assert_eq!(
+            decide_auto(now, 10, 20, Some(12), &st(3, 0)),
+            AutoStep::Raise { to: 12 }
+        );
+        assert_eq!(decide_auto(now, 20, 20, None, &st(9, 0)), AutoStep::Nothing);
+        assert_eq!(
+            decide_auto(now, 12, 20, Some(12), &st(9, 0)),
+            AutoStep::Nothing
+        );
+        // Cooldown.
+        assert_eq!(
+            decide_auto(now, 14, 20, None, &st(5, now - 60)),
+            AutoStep::Nothing
+        );
+    }
+
+    #[test]
+    fn auto_steps_back_after_a_quiet_fortnight_never_below_base() {
+        let now = 100 * 86_400;
+        let quiet = AutoState {
+            base: 10,
+            pending_hits: 0,
+            last_full_at: now - AUTO_LOWER_AFTER_SECS,
+            last_change_at: now - AUTO_LOWER_AFTER_SECS - 5,
+        };
+        assert_eq!(
+            decide_auto(now, 16, 20, None, &quiet),
+            AutoStep::Lower { to: 12 }
+        );
+        assert_eq!(
+            decide_auto(now, 12, 20, None, &quiet),
+            AutoStep::Lower { to: 10 }
+        );
+        assert_eq!(decide_auto(now, 10, 20, None, &quiet), AutoStep::Nothing);
+        let recent = AutoState {
+            last_full_at: now - 3600,
+            ..quiet.clone()
+        };
+        assert_eq!(decide_auto(now, 16, 20, None, &recent), AutoStep::Nothing);
+        // Ceiling lowered under a raised value: straight down to it.
+        assert_eq!(
+            decide_auto(now, 18, 12, None, &recent),
+            AutoStep::Lower { to: 12 }
+        );
+        // ...but never under the operator's own value.
+        assert_eq!(
+            decide_auto(now, 18, 8, None, &recent),
+            AutoStep::Lower { to: 10 }
+        );
+    }
+
+    #[test]
+    fn ram_cap_and_floor_helpers() {
+        assert_eq!(ram_cap_children(4096, 256), Some(12));
+        assert_eq!(ram_cap_children(0, 256), None);
+        assert_eq!(ram_cap_children(512, 1024), Some(1));
+        let st = AutoState {
+            base: 10,
+            ..Default::default()
+        };
+        assert_eq!(floor_after_save(14, Some(14), Some(&st)), 10);
+        assert_eq!(floor_after_save(12, Some(14), Some(&st)), 12);
+        assert_eq!(floor_after_save(14, None, None), 14);
+        assert!(ceiling_leaves_no_room(10, 10));
     }
 }

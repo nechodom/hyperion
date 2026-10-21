@@ -1598,7 +1598,7 @@ enum CarryScope {
 /// An allow-list rather than a deny-list so a key added later stays home
 /// until someone decides it should travel.
 fn carried_kv_scope(key: &str) -> Option<CarryScope> {
-    use hyperion_types::phpmem;
+    use hyperion_types::{phpmem, phpworkers};
     const ALWAYS: &[&str] = &[
         BACKUP_KV_CADENCE,
         BACKUP_KV_INTERVAL_DAYS,
@@ -1612,6 +1612,10 @@ fn carried_kv_scope(key: &str) -> Option<CarryScope> {
         // and without the floor the automation would adopt it as the
         // operator's own and never come back down.
         phpmem::KV_STATE,
+        // Same for the automatic max_children.
+        phpworkers::KV_AUTO,
+        phpworkers::KV_AUTO_MAX,
+        phpworkers::KV_AUTO_STATE,
         INTEGRITY_ENABLED_KV_KEY,
         PERM_AUTOHEAL_KV_KEY,
         WP_MAIL_AUTOFIX_KV_KEY,
@@ -4642,9 +4646,15 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let before = hyperion_state::limits::get(&self.pool, &detail.id)
             .await
             .ok()
-            .flatten()
-            .map(|r| r.php_memory_mb);
+            .flatten();
+        let before_children = before.as_ref().map(|r| r.php_max_children);
+        let before = before.map(|r| r.php_memory_mb);
         let limits = self.store_and_apply_limits(&detail, limits).await?;
+        // Same rule for the automatic max_children.
+        if before_children != Some(limits.php_max_children) {
+            self.php_workers_auto_rebase(detail.id.as_str(), limits.php_max_children)
+                .await;
+        }
         // A memory value typed by hand (or applied by a profile) is the new
         // floor for the automatic memory_limit. Saving the card UNCHANGED —
         // it shows the value the automation raised to — must not adopt that
@@ -4706,6 +4716,32 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             &self.pool,
             hosting_id,
             phpmem::KV_STATE,
+            &st.to_json(),
+            now,
+        )
+        .await;
+    }
+
+    /// Make `base` the floor of an existing automatic-max_children state.
+    async fn php_workers_auto_rebase(&self, hosting_id: &str, base: i64) {
+        use hyperion_types::phpworkers;
+        let Some(mut st) =
+            hyperion_state::hosting_kv::get(&self.pool, hosting_id, phpworkers::KV_AUTO_STATE)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|v| phpworkers::AutoState::parse(&v))
+        else {
+            return;
+        };
+        let now = now_secs();
+        st.base = base;
+        st.last_change_at = now;
+        st.pending_hits = 0;
+        let _ = hyperion_state::hosting_kv::set(
+            &self.pool,
+            hosting_id,
+            phpworkers::KV_AUTO_STATE,
             &st.to_json(),
             now,
         )
@@ -4907,6 +4943,207 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(acted)
     }
 
+    /// Feed this tick's hits to the automatic max_children, when it is on:
+    /// only those written under the limit now in force count (a line from
+    /// before the last raise is not a reason for another).
+    async fn php_workers_auto_note_hits(
+        &self,
+        detail: &HostingDetail,
+        by_limit: &std::collections::BTreeMap<i64, i64>,
+        now: i64,
+    ) {
+        use hyperion_types::phpworkers;
+        let id = detail.id.as_str();
+        let kv = |k: &'static str| async move {
+            hyperion_state::hosting_kv::get(&self.pool, id, k)
+                .await
+                .ok()
+                .flatten()
+        };
+        if kv(phpworkers::KV_AUTO).await.as_deref() != Some("on") {
+            return;
+        }
+        let current = hyperion_state::limits::get(&self.pool, &detail.id)
+            .await
+            .ok()
+            .flatten()
+            .map(|r| r.php_max_children)
+            .unwrap_or_else(|| hyperion_types::HostingLimits::defaults().php_max_children);
+        let fresh = phpworkers::hits_at_or_above(by_limit, current);
+        if fresh <= 0 {
+            return;
+        }
+        let mut st = kv(phpworkers::KV_AUTO_STATE)
+            .await
+            .and_then(|v| phpworkers::AutoState::parse(&v))
+            .unwrap_or_else(|| phpworkers::AutoState {
+                base: current,
+                ..Default::default()
+            });
+        st.pending_hits += fresh;
+        st.last_full_at = now;
+        let _ = hyperion_state::hosting_kv::set(
+            &self.pool,
+            id,
+            phpworkers::KV_AUTO_STATE,
+            &st.to_json(),
+            now,
+        )
+        .await;
+    }
+
+    /// Automatic `max_children` (see `hyperion_types::phpworkers`).
+    ///
+    /// For every live site with it on: after the pool ran out of workers
+    /// [`phpworkers::RAISE_AFTER_HITS`] times at the limit in force, raise
+    /// `max_children` one step — bounded by the site's ceiling and by what
+    /// the node's RAM affords at the site's memory_limit. A fortnight without
+    /// running out takes it one step back towards the operator's own value.
+    /// Turning it off puts the operator's value back. The hits themselves are
+    /// fed in by [`Self::php_workers_tick`].
+    ///
+    /// Returns how many pools it rewrote.
+    pub async fn php_workers_auto_tick(&self) -> Result<i64, RpcError> {
+        use hyperion_types::phpworkers::{self, AutoStep};
+        let mem_total_mb = read_mem_total_mb().await;
+        let mut acted = 0i64;
+        for s in self.list().await? {
+            let id = s.id.as_str().to_string();
+            let kv = |k: &'static str| {
+                let id = id.clone();
+                async move {
+                    hyperion_state::hosting_kv::get(&self.pool, &id, k)
+                        .await
+                        .ok()
+                        .flatten()
+                }
+            };
+            let enabled = kv(phpworkers::KV_AUTO).await.as_deref() == Some("on");
+            let stored = kv(phpworkers::KV_AUTO_STATE)
+                .await
+                .and_then(|v| phpworkers::AutoState::parse(&v));
+            if !enabled && stored.is_none() {
+                continue;
+            }
+            if s.state != HostingState::Active {
+                continue;
+            }
+            let Ok(detail) = self.get(HostingSelector::Id(s.id.clone())).await else {
+                continue;
+            };
+            if detail.php_version.is_none() || detail.system_user.trim().is_empty() {
+                continue;
+            }
+            let limits = hyperion_state::limits::get(&self.pool, &detail.id)
+                .await
+                .ok()
+                .flatten()
+                .map(row_to_limits)
+                .unwrap_or_else(hyperion_types::HostingLimits::defaults);
+            let current = limits.php_max_children;
+            let now = now_secs();
+
+            if !enabled {
+                // Turned off: hand back the operator's value, then forget.
+                let base = stored.map(|st| st.base).unwrap_or(current);
+                if base > 0 && base != current {
+                    let mut l = limits.clone();
+                    l.php_max_children = base;
+                    if let Err(e) = self.store_and_apply_limits(&detail, l).await {
+                        tracing::warn!(domain = %detail.domain, error = %e, "php workers auto: restoring the operator's max_children failed; will retry");
+                        continue;
+                    }
+                    acted += 1;
+                    self.append_audit(
+                        "php.workers_auto.restore",
+                        Some(&id),
+                        &serde_json::json!({"from": current, "to": base}).to_string(),
+                        "ok",
+                    )
+                    .await;
+                }
+                let _ =
+                    hyperion_state::hosting_kv::delete(&self.pool, &id, phpworkers::KV_AUTO_STATE)
+                        .await;
+                continue;
+            }
+
+            let mut st = stored.unwrap_or_else(|| phpworkers::AutoState {
+                base: current,
+                ..Default::default()
+            });
+            let before = st.clone();
+            let ceiling = kv(phpworkers::KV_AUTO_MAX)
+                .await
+                .and_then(|v| v.trim().parse::<i64>().ok())
+                .unwrap_or(phpworkers::DEFAULT_AUTO_MAX)
+                .clamp(1, phpworkers::AUTO_MAX_LIMIT);
+            let ram_cap =
+                mem_total_mb.and_then(|t| phpworkers::ram_cap_children(t, limits.php_memory_mb));
+            match phpworkers::decide_auto(now, current, ceiling, ram_cap, &st) {
+                AutoStep::Nothing => {}
+                AutoStep::Raise { to } | AutoStep::Lower { to } if to == current => {}
+                step @ (AutoStep::Raise { to } | AutoStep::Lower { to }) => {
+                    let raise = matches!(step, AutoStep::Raise { .. });
+                    let mut l = limits.clone();
+                    l.php_max_children = to;
+                    match self.store_and_apply_limits(&detail, l).await {
+                        Ok(_) => {
+                            st.last_change_at = now;
+                            st.pending_hits = 0;
+                            acted += 1;
+                            self.append_audit(
+                                if raise {
+                                    "php.workers_auto.raise"
+                                } else {
+                                    "php.workers_auto.lower"
+                                },
+                                Some(&id),
+                                &serde_json::json!({"from": current, "to": to, "ceiling": ceiling})
+                                    .to_string(),
+                                "ok",
+                            )
+                            .await;
+                            if raise {
+                                let (from_s, to_s, ceiling_s) =
+                                    (current.to_string(), to.to_string(), ceiling.to_string());
+                                // The site's one PHP-workers card: it now says
+                                // what was done about it.
+                                self.notify_admins_say(
+                                    "info",
+                                    "ops.php_workers_raised",
+                                    &[
+                                        ("domain", detail.domain.as_str()),
+                                        ("from", from_s.as_str()),
+                                        ("to", to_s.as_str()),
+                                        ("ceiling", ceiling_s.as_str()),
+                                    ],
+                                    &format!("/hostings/{}#limits", detail.domain),
+                                    &format!("php_workers:{}", detail.domain),
+                                )
+                                .await;
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(domain = %detail.domain, to, error = %e, "php workers auto: pool rewrite failed; will retry");
+                        }
+                    }
+                }
+            }
+            if st != before {
+                let _ = hyperion_state::hosting_kv::set(
+                    &self.pool,
+                    &id,
+                    phpworkers::KV_AUTO_STATE,
+                    &st.to_json(),
+                    now,
+                )
+                .await;
+            }
+        }
+        Ok(acted)
+    }
+
     /// The scripts that showed up most in this site's PHP-FPM slow-request
     /// log lately (root-owned, outside the site's tree). Empty when there is
     /// none or it cannot be read.
@@ -4941,7 +5178,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         cursors: &mut std::collections::HashMap<PhpVersion, (u64, u64)>,
     ) -> Result<i64, RpcError> {
         use hyperion_types::phpworkers;
-        let mut hits: std::collections::BTreeMap<String, i64> = Default::default();
+        let mut hits: std::collections::BTreeMap<String, std::collections::BTreeMap<i64, i64>> =
+            Default::default();
         for ver in PhpVersion::all() {
             let path = log_dir.join(format!("{}.log", ver.service_name()));
             if !path.exists() {
@@ -4954,8 +5192,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .await;
             match read {
                 Ok(Ok(a)) => {
-                    for (pool, n) in phpworkers::count_by_pool(&a.text) {
-                        *hits.entry(pool).or_insert(0) += n;
+                    for (pool, by_limit) in phpworkers::count_by_pool_and_limit(&a.text) {
+                        let e = hits.entry(pool).or_default();
+                        for (limit, n) in by_limit {
+                            *e.entry(limit).or_insert(0) += n;
+                        }
                     }
                     cursors.insert(*ver, (a.ino, a.offset));
                 }
@@ -4977,11 +5218,14 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             let Ok(detail) = self.get(HostingSelector::Id(s.id.clone())).await else {
                 continue;
             };
-            let Some(&n) = hits.get(detail.system_user.as_str()) else {
+            let Some(by_limit) = hits.get(detail.system_user.as_str()) else {
                 continue;
             };
+            let n: i64 = by_limit.values().sum();
             sites += 1;
             let id = detail.id.as_str().to_string();
+            self.php_workers_auto_note_hits(&detail, by_limit, now)
+                .await;
             let mut st = hyperion_state::hosting_kv::get(&self.pool, &id, phpworkers::KV_STATE)
                 .await
                 .ok()
@@ -52583,6 +52827,116 @@ mod tests {
         assert_eq!(s.php_mem_auto_tick().await.expect("tick"), 0);
     }
 
+    /// Repeated "server reached pm.max_children" raises the pool one step;
+    /// a line written under the old limit does not count again; a hand save
+    /// of the unchanged card keeps the floor, a changed value becomes it;
+    /// turning it off restores the floor.
+    #[tokio::test]
+    async fn php_workers_auto_raises_rebases_and_restores() {
+        use hyperion_types::phpworkers;
+        use std::io::Write;
+        let pool = open_memory().await.expect("open");
+        let mut a = happy_mocks();
+        a.expect_apply_php_limits()
+            .returning(|_, _, _, _, _, _, _| Ok(()));
+        let s = svc(pool.clone(), a);
+        s.create(req("ex.cz")).await.expect("create");
+        let sel = HostingSelector::Domain(Domain::parse("ex.cz").unwrap());
+        let d = s.get(sel.clone()).await.expect("get");
+        let id = d.id.as_str().to_string();
+        let children = || async {
+            s.get_limits(sel.clone())
+                .await
+                .expect("limits")
+                .php_max_children
+        };
+        let start = children().await;
+        hyperion_state::hosting_kv::set(&pool, &id, phpworkers::KV_AUTO, "on", 0)
+            .await
+            .expect("kv");
+        let state = || async {
+            phpworkers::AutoState::parse(
+                &hyperion_state::hosting_kv::get(&pool, &id, phpworkers::KV_AUTO_STATE)
+                    .await
+                    .expect("kv")
+                    .unwrap_or_default(),
+            )
+        };
+        let dir = tempfile::tempdir().expect("dir");
+        let log = dir.path().join("php8.3-fpm.log");
+        std::fs::write(&log, "").expect("write");
+        let mut cursors = std::collections::HashMap::new();
+        s.php_workers_tick(dir.path(), &mut cursors)
+            .await
+            .expect("tick");
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&log)
+            .expect("open");
+        let line = |limit: i64| {
+            format!(
+                "[06-Oct-2026 06:56:45] WARNING: [pool {}] server reached pm.max_children setting ({limit}), consider raising it\n",
+                d.system_user
+            )
+        };
+        let hit = |f: &mut std::fs::File, limit: i64, n: usize| {
+            for _ in 0..n {
+                f.write_all(line(limit).as_bytes()).expect("append");
+            }
+        };
+
+        // Two hits: not yet.
+        hit(&mut f, start, 2);
+        s.php_workers_tick(dir.path(), &mut cursors)
+            .await
+            .expect("tick");
+        assert_eq!(s.php_workers_auto_tick().await.expect("auto"), 0);
+        assert_eq!(state().await.expect("state").base, start);
+
+        // A third: one step up.
+        hit(&mut f, start, 1);
+        s.php_workers_tick(dir.path(), &mut cursors)
+            .await
+            .expect("tick");
+        assert_eq!(s.php_workers_auto_tick().await.expect("auto"), 1);
+        let raised = children().await;
+        assert!(raised > start && raised <= start + phpworkers::AUTO_STEP);
+        assert_eq!(state().await.expect("state").pending_hits, 0);
+
+        // Lines from before the raise (old limit) are not new hits.
+        hit(&mut f, start, 5);
+        s.php_workers_tick(dir.path(), &mut cursors)
+            .await
+            .expect("tick");
+        assert_eq!(state().await.expect("state").pending_hits, 0);
+
+        // Saving the card as shown keeps the operator's floor...
+        let mut l = s.get_limits(sel.clone()).await.expect("limits");
+        s.set_limits(sel.clone(), l.clone()).await.expect("set");
+        assert_eq!(state().await.expect("state").base, start);
+        // ...a value typed by hand becomes it.
+        l.php_max_children = start + 1;
+        s.set_limits(sel.clone(), l).await.expect("set");
+        assert_eq!(state().await.expect("state").base, start + 1);
+
+        // Raise once more, then switch off: the floor comes back.
+        let mut st = state().await.expect("state");
+        st.pending_hits = phpworkers::RAISE_AFTER_HITS;
+        st.last_change_at = 0;
+        hyperion_state::hosting_kv::set(&pool, &id, phpworkers::KV_AUTO_STATE, &st.to_json(), 0)
+            .await
+            .expect("kv");
+        assert_eq!(s.php_workers_auto_tick().await.expect("auto"), 1);
+        assert!(children().await > start + 1);
+        hyperion_state::hosting_kv::set(&pool, &id, phpworkers::KV_AUTO, "off", 0)
+            .await
+            .expect("kv");
+        assert_eq!(s.php_workers_auto_tick().await.expect("auto"), 1);
+        assert_eq!(children().await, start + 1);
+        assert!(state().await.is_none(), "state forgotten once off");
+        assert_eq!(s.php_workers_auto_tick().await.expect("auto"), 0);
+    }
+
     #[tokio::test]
     async fn set_limits_clamps_and_persists() {
         let pool = open_memory().await.expect("open");
@@ -56769,6 +57123,9 @@ HOME=/home/shop_cz
             "php.mem_auto",
             "php.mem_auto_max_mb",
             "php.mem_auto_state",
+            "php.workers_auto",
+            "php.workers_auto_max",
+            "php.workers_auto_state",
             "wp_auto_update",
             "regguard_enabled",
             "gitsync_repo",

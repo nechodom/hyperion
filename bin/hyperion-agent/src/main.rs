@@ -1148,6 +1148,12 @@ async fn main() -> anyhow::Result<()> {
                     Ok(_) => {}
                     Err(e) => tracing::warn!(error=%e, "php workers tick failed"),
                 }
+                // Automatic max_children, right after the hits it acts on.
+                match workers_svc.php_workers_auto_tick().await {
+                    Ok(n) if n > 0 => tracing::info!(pools = n, "php workers auto: rewrote pools"),
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!(error=%e, "php workers auto tick failed"),
+                }
             }
         });
     }

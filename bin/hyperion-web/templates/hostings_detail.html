@@ -2929,6 +2929,37 @@
        pm.max_children"). Memory is not what ran out here, so the automatic
        memory_limit below cannot help; the slow-request log says what holds
        the workers. #}
+    {# Automatic max_children: the owning node raises the pool by a few
+       workers after it ran out several times at the limit in force, up to
+       the ceiling and to what the node's RAM affords at this site's
+       memory_limit; two quiet weeks take it one step back. Unticking
+       restores the value above. #}
+    <div class="field-row">
+      <div class="field">
+        <label class="field-checkbox" style="margin-top:1.6rem">
+          <input id="workers_auto" type="checkbox" name="workers_auto" value="on"{% if workers_full.auto_enabled %} checked{% endif %}>
+          <span>Raise max_children automatically when the workers run out <span class="hint">— +4 per step, back down after 2 quiet weeks</span></span>
+        </label>
+      </div>
+      <div class="field">
+        <label for="workers_auto_max">Automatic ceiling <span class="hint">workers</span></label>
+        <input id="workers_auto_max" name="workers_auto_max" type="number" min="1" max="200"
+               value="{{ workers_full.auto_max }}">
+      </div>
+    </div>
+    {% if workers_full.auto_no_room() %}
+    <p class="note text-warn" style="margin:0 0 0.8rem">
+      The ceiling must be above the site's own max_children ({{ workers_full.auto_floor }}) — at or under it there is
+      nothing to raise to.
+    </p>
+    {% endif %}
+    {% if workers_full.auto_enabled %}
+    <p class="note" style="margin:0 0 0.8rem">
+      {% if let Some(from) = workers_full.auto_raised_from %}Raised automatically from your {{ from }} to {{ limits.php_max_children }} workers.{% else %}At your own value.{% endif %}
+      More workers only help while the server has memory for them; when one slow script holds them all, the
+      slow-request log is still the place to look.
+    </p>
+    {% endif %}
     {% if workers_full.last_at > 0 %}
     <p class="note{% if workers_full.last_24h > 0 %} text-warn{% endif %}" style="margin:0 0 0.8rem">
       {% if workers_full.last_24h > 0 %}All PHP workers were busy {{ workers_full.last_24h }}× in the last 24 hours{% else %}All PHP workers were last busy{% endif %}
