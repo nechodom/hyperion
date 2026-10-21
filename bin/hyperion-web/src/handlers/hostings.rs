@@ -2466,8 +2466,8 @@ impl PhpMemAutoView {
 /// "The pool ran out of PHP workers", as the OWNING node records it
 /// (`hyperion_types::phpworkers`).
 pub struct PhpWorkersView {
-    /// Times today (UTC) every worker was busy.
-    pub today: i64,
+    /// Times in the last 24 hours every worker was busy.
+    pub last_24h: i64,
     /// Last time; 0 = never seen.
     pub last_at: i64,
 }
@@ -2481,7 +2481,7 @@ impl PhpWorkersView {
             .and_then(|(_, v)| phpworkers::State::parse(v))
             .unwrap_or_default();
         PhpWorkersView {
-            today: st.hits_today(now),
+            last_24h: st.hits_24h(now),
             last_at: st.last_at,
         }
     }

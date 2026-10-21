@@ -4907,6 +4907,24 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(acted)
     }
 
+    /// The scripts that showed up most in this site's PHP-FPM slow-request
+    /// log lately (root-owned, outside the site's tree). Empty when there is
+    /// none or it cannot be read.
+    async fn php_slow_scripts(
+        &self,
+        detail: &HostingDetail,
+    ) -> Vec<hyperion_types::phpworkers::SlowScript> {
+        use hyperion_types::phpworkers;
+        if detail.system_user.trim().is_empty() {
+            return Vec::new();
+        }
+        let path = hyperion_adapters::phpfpm::slowlog_path(&detail.system_user);
+        match hyperion_adapters::fs::tail_lines(&path, 20 * phpworkers::SLOWLOG_ENTRIES).await {
+            Ok(text) => phpworkers::slow_scripts(&text, &detail.root_dir, 3),
+            Err(_) => Vec::new(),
+        }
+    }
+
     /// Notice pools that ran out of PHP workers.
     ///
     /// Reads what each PHP version's FPM log (`<log_dir>/php<ver>-fpm.log`)
@@ -4980,19 +4998,33 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     .map(|r| r.php_max_children)
                     .unwrap_or_else(|| hyperion_types::HostingLimits::defaults().php_max_children)
                     .to_string();
-                let today = st.hits_today(now).to_string();
+                let today = st.hits_24h(now).to_string();
+                let args = [
+                    ("domain", detail.domain.as_str()),
+                    ("children", children.as_str()),
+                    ("today", today.as_str()),
+                ];
+                let cat = self.operator_catalog();
+                let title = cat.render("ops.php_workers_full.title", &args);
+                let mut body = cat.render("ops.php_workers_full.body", &args);
+                // What held the workers, so the alert says where to look
+                // instead of only that there is somewhere to look.
+                let slow = self.php_slow_scripts(&detail).await;
+                if !slow.is_empty() {
+                    let line = phpworkers::slow_scripts_line(&slow);
+                    body.push(' ');
+                    body.push_str(
+                        &cat.render("ops.php_workers_full.slow", &[("scripts", line.as_str())]),
+                    );
+                }
                 // warn, not error: the site still serves, queued — see the
                 // severity rule on `notify_admins`. One card per site: the
                 // next alert rewrites it with the new count.
                 let kind = format!("php_workers:{}", detail.domain);
-                self.notify_admins_say(
+                self.notify_admins(
                     "warn",
-                    "ops.php_workers_full",
-                    &[
-                        ("domain", detail.domain.as_str()),
-                        ("children", children.as_str()),
-                        ("today", today.as_str()),
-                    ],
+                    &title,
+                    &body,
                     &format!("/hostings/{}#limits", detail.domain),
                     &kind,
                 )
@@ -52403,7 +52435,7 @@ mod tests {
                 .expect("state"),
         )
         .expect("parse");
-        assert_eq!(st.hits_today(st.last_at), 2);
+        assert_eq!(st.hits_24h(st.last_at), 2);
         assert_eq!(st.alerted_at, st.last_at, "first hit alerts");
 
         // Nothing new: nothing recorded.

@@ -2930,8 +2930,8 @@
        memory_limit below cannot help; the slow-request log says what holds
        the workers. #}
     {% if workers_full.last_at > 0 %}
-    <p class="note{% if workers_full.today > 0 %} text-warn{% endif %}" style="margin:0 0 0.8rem">
-      {% if workers_full.today > 0 %}All PHP workers were busy {{ workers_full.today }}× today{% else %}All PHP workers were last busy{% endif %}
+    <p class="note{% if workers_full.last_24h > 0 %} text-warn{% endif %}" style="margin:0 0 0.8rem">
+      {% if workers_full.last_24h > 0 %}All PHP workers were busy {{ workers_full.last_24h }}× in the last 24 hours{% else %}All PHP workers were last busy{% endif %}
       — most recently {{ crate::handlers::stats::fmt_ago(workers_full.last_at) }}. Visitors queue while that lasts and
       may get a 502 or 504. <a href="#logs">PHP slow requests</a> shows what keeps the workers busy; the page cache
       or a higher max_children gives more headroom.
