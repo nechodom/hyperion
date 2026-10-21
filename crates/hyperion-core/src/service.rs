@@ -4982,7 +4982,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     .to_string();
                 let today = st.hits_today(now).to_string();
                 // warn, not error: the site still serves, queued — see the
-                // severity rule on `notify_admins`.
+                // severity rule on `notify_admins`. One card per site: the
+                // next alert rewrites it with the new count.
+                let kind = format!("php_workers:{}", detail.domain);
                 self.notify_admins_say(
                     "warn",
                     "ops.php_workers_full",
@@ -4992,7 +4994,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                         ("today", today.as_str()),
                     ],
                     &format!("/hostings/{}#limits", detail.domain),
-                    "php_workers",
+                    &kind,
                 )
                 .await;
             }
@@ -33798,12 +33800,22 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 kind: truncate_chars(&it.kind, 200),
                 created_at: it.created_at,
             };
+            let replaces = hyperion_types::notification_replaces(&row.kind);
             for &uid in &admins {
-                match hyperion_state::notifications::insert_from_node(
-                    &self.pool, uid, node_id, &row,
-                )
-                .await
-                {
+                let put = if replaces {
+                    hyperion_state::notifications::replace(
+                        &self.pool,
+                        uid,
+                        node_id,
+                        Some(row.id),
+                        &row,
+                    )
+                    .await
+                } else {
+                    hyperion_state::notifications::insert_from_node(&self.pool, uid, node_id, &row)
+                        .await
+                };
+                match put {
                     Ok(true) => written += 1,
                     Ok(false) => {}
                     Err(e) => {
@@ -33883,6 +33895,17 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             }
             return;
         }
+        // A worker's repeats are folded when the master collects them.
+        let replaces = hyperion_types::notification_replaces(kind);
+        let card = hyperion_state::notifications::OutboxRow {
+            id: 0,
+            severity: severity.to_string(),
+            title: title.to_string(),
+            body: body.to_string(),
+            href: href.to_string(),
+            kind: kind.to_string(),
+            created_at: now,
+        };
         let users = match hyperion_state::web_users::list(&self.pool).await {
             Ok(u) => u,
             Err(e) => {
@@ -33898,11 +33921,18 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             ) {
                 continue;
             }
-            if let Err(e) = hyperion_state::notifications::insert(
-                &self.pool, u.id, severity, title, body, href, kind, now,
-            )
-            .await
-            {
+            let put = if replaces {
+                hyperion_state::notifications::replace(&self.pool, u.id, "", None, &card)
+                    .await
+                    .map(|_| ())
+            } else {
+                hyperion_state::notifications::insert(
+                    &self.pool, u.id, severity, title, body, href, kind, now,
+                )
+                .await
+                .map(|_| ())
+            };
+            if let Err(e) = put {
                 tracing::warn!(user = %u.username, error = %e, "notify_admins: insert failed");
             }
         }
@@ -48777,6 +48807,39 @@ mod tests {
             .iter()
             .all(|n| ["error", "warn", "info"].contains(&n.severity.as_str())));
         assert_eq!(s.notifications_feed(op, 10).await.unwrap().items.len(), 0);
+    }
+
+    /// A site that keeps running out of PHP workers is ONE card per admin,
+    /// rewritten with the latest count — raised here or collected from a
+    /// worker — not a new card every few hours.
+    #[tokio::test]
+    async fn repeated_php_worker_alerts_rewrite_one_card_per_site() {
+        use hyperion_state::web_users::WebRole;
+        let s = svc_with_state_file(None).await;
+        let me = seed_web_user(&s, "boss", WebRole::Admin).await;
+        s.notify_admins("warn", "full", "1x", "/", "php_workers:a.cz")
+            .await;
+        s.notify_admins("warn", "full", "6x", "/", "php_workers:a.cz")
+            .await;
+        s.notify_admins("warn", "full", "2x", "/", "php_workers:b.cz")
+            .await;
+        let item = |id: i64, body: &str| hyperion_types::NotificationOutboxItem {
+            id,
+            severity: "warn".into(),
+            title: "full".into(),
+            body: body.into(),
+            href: "/".into(),
+            kind: "php_workers:c.cz".into(),
+            created_at: 5,
+        };
+        s.notifications_ingest("w1", vec![item(1, "1x"), item(2, "22x")])
+            .await
+            .unwrap();
+        let feed = s.notifications_feed(me, 10).await.unwrap();
+        let bodies: Vec<_> = feed.items.iter().map(|n| n.body.as_str()).collect();
+        assert_eq!(feed.items.len(), 3, "{bodies:?}");
+        assert!(bodies.contains(&"6x") && bodies.contains(&"2x") && bodies.contains(&"22x"));
+        assert_eq!(s.notifications_node_cursor("w1").await.unwrap(), 2);
     }
 
     #[tokio::test]

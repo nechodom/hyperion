@@ -77,13 +77,13 @@ pub use sitecheck::{SiteCheckFinding, SiteCheckPage, SiteCheckReport};
 pub use spf::SpfCheckResult;
 pub use stats::{decode_mime_header, render_html_shell, CountryTraffic};
 pub use stats::{
-    notification_topic, AcmeConfigView, AgentConfigView, BackupConfigView, BackupRemoteConfigView,
-    BackupRetentionConfigView, BackupStorageRow, ClusterConfigView, ClusterStats,
-    CustomRoleSummary, DashboardAlert, EffectiveRoleWire, EmailConfigView, EmailLogEntry,
-    FirewallPort, FirewallView, FsDiagnostics, FsFixStep, FtpAccountSummary, FtpCheckItem,
-    FtpCheckReport, FtpExtraAccount, HostingFileContent, HostingFileEntry, HostingStats,
-    MonitorConfigView, MonitorHistory, MonitorOverviewItem, MonitorSamplePoint, MtaDiagnostics,
-    MtaPortProbe, NetHistory, NetSamplePoint, NodeEndpointReport, NodeMetricPoint,
+    notification_replaces, notification_topic, AcmeConfigView, AgentConfigView, BackupConfigView,
+    BackupRemoteConfigView, BackupRetentionConfigView, BackupStorageRow, ClusterConfigView,
+    ClusterStats, CustomRoleSummary, DashboardAlert, EffectiveRoleWire, EmailConfigView,
+    EmailLogEntry, FirewallPort, FirewallView, FsDiagnostics, FsFixStep, FtpAccountSummary,
+    FtpCheckItem, FtpCheckReport, FtpExtraAccount, HostingFileContent, HostingFileEntry,
+    HostingStats, MonitorConfigView, MonitorHistory, MonitorOverviewItem, MonitorSamplePoint,
+    MtaDiagnostics, MtaPortProbe, NetHistory, NetSamplePoint, NodeEndpointReport, NodeMetricPoint,
     NodeMetricsHistory, NodeStats, NodeSummary, NodeUpdateStatus, NotificationCounts,
     NotificationFeed, NotificationOutboxItem, NotificationSearchFilter, NotificationSearchResult,
     NotificationTemplatesView, NotificationTopicCount, NotificationView, OsPendingPackage,
