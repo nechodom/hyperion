@@ -1016,6 +1016,11 @@ pub fn build_router(state: SharedState) -> Router {
             get(handlers::hostings::get_letter_lang_panel),
         )
         .route(
+            // Next page of the hosting detail sent-by-Hyperion mail table.
+            "/hostings/:selector/sent-mail",
+            get(handlers::hostings::get_sent_mail_rows),
+        )
+        .route(
             "/hostings/:selector/spf-panel",
             get(handlers::hostings::get_spf_panel),
         )
