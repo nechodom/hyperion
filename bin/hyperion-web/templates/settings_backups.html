@@ -139,7 +139,7 @@
             <td>{% if ftp.address.is_empty() %}<span class="text-soft small">no host set</span>{% else %}<code style="word-break:break-all">{{ ftp.address }}</code>{% endif %}</td>
             <td>
               <span class="pill {{ ftp.encryption.cls }}" title="{{ ftp.encryption_note }}">{{ ftp.encryption.word }}</span>
-              <div class="text-soft small" style="margin-top:0.25rem">all kept, never pruned</div>
+              <div class="text-soft small" style="margin-top:0.25rem">{{ ftp.keep }}</div>
             </td>
             <td>
               <span class="pill {{ ftp.state.cls }}">{{ ftp.state.word }}</span>
@@ -223,7 +223,7 @@
         <li>Backups always land on local disk first. As soon as one finishes, the node{% if chrome.has_nodes %} that made it{% endif %} pushes it to the FTP / SFTP target and to every S3 target in use. A site pinned to one S3 target on its own Backups tab goes to that one only — and gets no S3 copy while that target cannot take it.</li>
         <li>Each site picks its schedule on its own Backups tab.</li>
         {% if chrome.has_nodes %}<li>The settings sync copies both kinds of target, credentials included, to every node, so every node must be able to reach them. Test runs from the master.</li>{% endif %}
-        <li>An S3 target keeps the newest copies set on it and prunes older ones after each upload. Hyperion never deletes anything on the FTP / SFTP server.</li>
+        <li>Each target keeps the newest copies per site set on it and prunes older ones after each upload; 0 keeps everything. A copy can also be deleted by hand from a site's Backups tab.</li>
         <li>To send backups made before a target was set up, use <a href="#offsite-backfill">Copy existing backups off-site</a>.</li>
       </ul>
     </details>
@@ -299,9 +299,15 @@
             {% endif %}
           </div>
         </div>
-        <div class="field">
-          <label for="bk_base">Base path <span class="hint">each site gets its own folder under it</span></label>
-          <input id="bk_base" name="base_path" type="text" autocapitalize="none" spellcheck="false" value="{{ config.backup_remote.base_path }}" placeholder="/hyperion-backups">
+        <div class="field-row">
+          <div class="field">
+            <label for="bk_base">Base path <span class="hint">each site gets its own folder under it</span></label>
+            <input id="bk_base" name="base_path" type="text" autocapitalize="none" spellcheck="false" value="{{ config.backup_remote.base_path }}" placeholder="/hyperion-backups">
+          </div>
+          <div class="field">
+            <label for="bk_keep">Keep the newest <span class="hint">per site on this server · 0 = all</span></label>
+            <input id="bk_keep" name="keep_latest" type="number" min="0" max="1000" step="1" value="{{ config.backup_remote.keep_latest }}">
+          </div>
         </div>
         <div class="item-actions"><button type="submit" class="btn primary">Save</button></div>
       </form>
@@ -331,7 +337,8 @@
       <ul>
         <li>Backups land on local disk first, under <code>/var/lib/hyperion/backups/local</code>, and are pushed here as soon as each one finishes.</li>
         <li>Test connects, logs in and lists the base path, using the target as <strong>saved</strong>{% if chrome.has_nodes %}, from the master{% endif %}. It runs on its own after each save.</li>
-        <li>Hyperion never prunes or deletes anything on this server: clean up old copies there.</li>
+        <li>With <strong>Keep the newest</strong> above 0, each site's older copies on this server are deleted after each of its backups lands there — the copy just sent never is. At 0 nothing is ever pruned here.</li>
+        <li>A single copy can be deleted by hand on the site's Backups tab, from its row or from <em>Off-site copies</em>. The account needs permission to delete files on this server.</li>
         <li>Plain FTP sends the password and every backup unencrypted. Prefer SFTP or FTPS.</li>
       </ul>
     </details>
@@ -504,7 +511,7 @@
         <li>A site's profile or care plan can set a longer history for that site.</li>
         <li>Before automatic WordPress updates, a full backup of the site is taken. Once every update in that run went in cleanly it is deleted after the days set above; if any update failed it is kept until you delete it. These backups are not counted among a site's newest ones.</li>
         <li>Snapshots follow this rule too until <a href="#snapshot-retention">Snapshot retention</a> has been saved once.</li>
-        <li>Off-site copies have their own rule: an S3 target keeps the newest copies set on it, and the FTP / SFTP server is never pruned. Deleted sites wait in <a href="#trash">Trash</a>.</li>
+        <li>Off-site copies have their own rule: each S3 target and the FTP / SFTP server keep the newest copies per site set on them under <a href="#offsite-targets">Off-site targets</a>. Deleted sites wait in <a href="#trash">Trash</a>.</li>
       </ul>
     </details>
     {% endif %}

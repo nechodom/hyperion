@@ -492,7 +492,7 @@
      operator looking in the wrong place. #}
   {% if let Some(e) = wp_error %}{% call flash("error", "WordPress action failed:", e) %}{% endif %}
   {% if let Some(m) = backup_flash %}{% call flash("success", "", m) %}{% endif %}
-  {% if let Some(e) = backup_error %}{% call flash("error", "Backup failed:", e) %}{% endif %}
+  {% if let Some(e) = backup_error %}{% call flash("error", "Not deleted:", e) %}{% endif %}
   {% if let Some(e) = backup_target_error %}{% call flash("error", "Off-site destination not changed:", e) %}{% endif %}
   {% if let Some(m) = expiry_flash %}{% call flash("success", "", m) %}{% endif %}
   {% if let Some(e) = expiry_error %}{% call flash("error", "", e) %}{% endif %}
@@ -3624,9 +3624,15 @@
      field that the handler splits. #}
   {% if !backups.is_empty() %}
   <form id="bulk-backup-form" method="post" action="/hostings/backups/delete-bulk"
-        data-confirm-title="Delete selected archives"
-        data-confirm-body="The selected archives are removed from this node's disk. An off-site copy of any of them, if there is one, is not touched. This cannot be undone."
-        data-confirm-confirm-label="Delete selected"
+        data-confirm-title="Delete selected backups"
+        data-confirm-body="The selected backups are removed from this node's disk. Their copies on the off-site targets stay and can still be restored. This cannot be undone."
+        data-confirm-confirm-label="Delete local copies"
+        {% if crate::handlers::hostings::any_ftp_copies(backups.as_slice()) %}
+        data-confirm-check="Also delete them from the off-site FTP target"
+        data-confirm-check-name="offsite"
+        data-confirm-body-checked="The selected backups are removed from this node's disk AND from the off-site FTP target (archive and database dump). Copies on S3 are not touched. This cannot be undone."
+        data-confirm-confirm-label-checked="Delete everywhere"
+        {% endif %}
         data-confirm-variant="danger"
         class="cluster" style="margin:0 0 0.6rem">
     <input type="hidden" name="_csrf" value="{{ csrf_token }}">
@@ -3695,7 +3701,7 @@
         if (!ids.length) return;
         document.getElementById('bulk-backup-ids').value = ids.join(',');
         var f = document.getElementById('bulk-backup-form');
-        f.dataset.confirmTitle = 'Delete ' + ids.length + ' archive'
+        f.dataset.confirmTitle = 'Delete ' + ids.length + ' backup'
           + (ids.length === 1 ? '' : 's');
         f.requestSubmit();
       };
@@ -3783,7 +3789,12 @@
             </td>
             <td class="right muted numeric">{{ crate::handlers::stats::fmt_bytes(b.bytes_total) }}</td>
             <td>
-              {% if let Some(p) = b.archive_path %}<code style="font-size:0.72rem">{{ p }}</code>{% endif %}
+              {#- The file name only: the folder is the same for every row
+                  and already named above the table, and the full path made
+                  every row two lines tall and pushed Restore and Delete off
+                  the right edge. Full path on hover. -#}
+              {% if let Some(p) = b.archive_path %}<code style="font-size:0.72rem;white-space:nowrap" title="{{ p }}">{{ p.rsplit('/').next().unwrap_or(p) }}</code>
+              {% else if b.ftp_restore_name().is_some() %}<span class="text-soft small" title="The local copy was deleted; this backup is on the off-site FTP target">off-site only</span>{% endif %}
             </td>
             <td class="right">
               <div class="row-actions" style="flex-wrap:wrap">
@@ -3816,6 +3827,39 @@
                   </form>
                   {% endif %}
                   {% endif %}
+                  {#- The local copy is gone — dropped once it was verified
+                      off-site, by hand or by the "delete the local copy"
+                      setting — but the FTP target still has it. Restoring it
+                      meant scrolling to the Off-site copies card and finding
+                      the same archive by name; the row it belongs to offered
+                      nothing. Same route as that card: fetched back as a
+                      background job, then the ordinary restore. -#}
+                  {% if b.archive_path.is_none() %}{% if let Some(fname) = b.ftp_restore_name() %}
+                  <form method="post" action="/hostings/offsite-restore" style="display:inline"
+                        data-confirm-title="Restore from the off-site copy"
+                        data-confirm-body="Downloads {{ fname }} from the off-site FTP target and restores it over {{ detail.domain }}: its files are overwritten with the ones in the archive (files added since are left in place){% if detail.database.is_some() %} and its database is replaced{% endif %}. The download alone can take a long time on a large site. Runs as a background job."
+                        data-confirm-confirm-label="Download and restore"
+                        data-confirm-variant="danger">
+                    <input type="hidden" name="_csrf" value="{{ csrf_offsite_restore }}">
+                    <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
+                    <input type="hidden" name="filename" value="{{ fname }}">
+                    <input type="hidden" name="mode" value="{% if detail.database.is_some() %}files_and_db{% else %}files_only{% endif %}">
+                    <button class="btn small" type="submit" title="The local copy is gone — fetch this backup back from the off-site FTP target and restore it">Restore from off-site</button>
+                  </form>
+                  {% if detail.database.is_some() %}
+                  <form method="post" action="/hostings/offsite-restore" style="display:inline"
+                        data-confirm-title="Restore the files from the off-site copy"
+                        data-confirm-body="Downloads {{ fname }} from the off-site FTP target and restores ONLY its files over {{ detail.domain }} (files added since are left in place). The database is left untouched."
+                        data-confirm-confirm-label="Download and restore files"
+                        data-confirm-variant="danger">
+                    <input type="hidden" name="_csrf" value="{{ csrf_offsite_restore }}">
+                    <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
+                    <input type="hidden" name="filename" value="{{ fname }}">
+                    <input type="hidden" name="mode" value="files_only">
+                    <button class="btn small" type="submit" title="Restore the files only, from the off-site copy">Files only</button>
+                  </form>
+                  {% endif %}
+                  {% endif %}{% endif %}
                 {% endif %}
                 {% if b.state == "ok" && b.archive_path.is_some() && !b.no_offsite %}
                 {# Push THIS backup off-site, then delete the local copy — but
@@ -3834,11 +3878,42 @@
                 </form>
                 {% endif %}
                 {% if b.state != "running" %}
+                {#- Where the backup lives decides what Delete can mean. With a
+                    copy on the FTP target the dialog asks whether that goes
+                    too — ticked by default only when it is the LAST copy, so a
+                    row with nothing local is never "deleted" while its archive
+                    quietly stays on the server. An S3 copy is never touched
+                    from here. -#}
+                {% if let Some(fname) = b.ftp_file_name() %}
+                {% if b.archive_path.is_some() %}
                 <form method="post" action="/hostings/backups/delete" style="display:inline"
-                      data-confirm-title="Delete this archive"
-                      data-confirm-body="The archive is removed from this node's disk. An off-site copy of it, if there is one, is not touched. This cannot be undone."
-                      data-confirm-confirm-label="Delete archive"
+                      data-confirm-title="Delete this backup"
+                      data-confirm-body="The archive{% if b.db_dump_path.is_some() %} and database dump are{% else %} is{% endif %} removed from this node's disk. The copy on the off-site FTP target ({{ fname }}) stays and can still be restored.{% if !b.s3_ok_targets.is_empty() %} The S3 copy is not touched either.{% endif %}"
+                      data-confirm-confirm-label="Delete local copy"
+                      data-confirm-check="Also delete it from the off-site FTP target"
+                      data-confirm-check-name="offsite"
+                      data-confirm-body-checked="The backup is deleted everywhere this panel can reach: from this node's disk AND from the off-site FTP target ({{ fname }} and its database dump).{% if !b.s3_ok_targets.is_empty() %} The S3 copy is not touched.{% endif %} This cannot be undone."
+                      data-confirm-confirm-label-checked="Delete everywhere"
                       data-confirm-variant="danger">
+                {% else %}
+                <form method="post" action="/hostings/backups/delete" style="display:inline"
+                      data-confirm-title="Delete this backup"
+                      data-confirm-body="Only the row is removed. The archive stays on the off-site FTP target ({{ fname }}) and is still listed — and restorable — under Off-site copies below."
+                      data-confirm-confirm-label="Remove the row only"
+                      data-confirm-check="Delete it from the off-site FTP target"
+                      data-confirm-check-name="offsite"
+                      data-confirm-check-default="on"
+                      data-confirm-body-checked="This backup is no longer on this node — the copy on the off-site FTP target ({{ fname }} and its database dump) is {% if b.s3_ok_targets.is_empty() %}its LAST copy{% else %}deleted; the S3 copy is not touched{% endif %}. It is deleted from the server and cannot be restored afterwards."
+                      data-confirm-confirm-label-checked="Delete from the FTP target"
+                      data-confirm-variant="danger">
+                {% endif %}
+                {% else %}
+                <form method="post" action="/hostings/backups/delete" style="display:inline"
+                      data-confirm-title="Delete this backup"
+                      data-confirm-body="{% if b.archive_path.is_some() %}The archive is removed from this node's disk.{% else %}Only the row is removed: this backup has no local copy.{% endif %}{% if !b.s3_ok_targets.is_empty() %} Its S3 copy is not touched.{% endif %} This cannot be undone."
+                      data-confirm-confirm-label="Delete"
+                      data-confirm-variant="danger">
+                {% endif %}
                   <input type="hidden" name="_csrf" value="{{ csrf_token }}">
                   <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
                   <input type="hidden" name="backup_id" value="{{ b.id }}">

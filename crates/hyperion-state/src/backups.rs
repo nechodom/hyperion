@@ -28,8 +28,10 @@ pub struct BackupRun {
     /// is known to exist.
     pub remote_blob_key: String,
     /// What we know about that copy: empty (never pushed), `pending`,
-    /// `ok`, `failed`, or `verified` — the last meaning the bytes were read
-    /// back and their size matched. `ok` and `verified` are deliberately
+    /// `ok`, `failed`, `verified` — the bytes were read back and their size
+    /// matched — or `removed`: deleted from the FTP target on purpose (by
+    /// hand, or by its keep-latest rule), so the backfill must not send it
+    /// back. `ok` and `verified` are deliberately
     /// different words: one is "the upload returned success", the other is
     /// "we looked".
     pub remote_state: String,
@@ -364,7 +366,7 @@ pub async fn list_needing_offsite(
           WHERE state = 'ok' \
             AND archive_path IS NOT NULL \
             AND no_offsite = 0 \
-            AND (remote_state IS NULL OR remote_state NOT IN ('ok', 'verified')) \
+            AND (remote_state IS NULL OR remote_state NOT IN ('ok', 'verified', 'removed')) \
             AND (s3_ok_targets IS NULL OR s3_ok_targets IN ('', '[]')) \
           ORDER BY started_at ASC \
           LIMIT ?"

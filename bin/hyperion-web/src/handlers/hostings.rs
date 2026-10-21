@@ -339,6 +339,9 @@ struct DetailTpl<'a> {
     csrf_cert_issue: String,
     csrf_cert_delete: String,
     csrf_restore: String,
+    /// The backups list restores a backup whose LOCAL copy is gone from the
+    /// FTP target, through the off-site card's route.
+    csrf_offsite_restore: String,
     csrf_restore_as_new: String,
     csrf_logs: String,
     csrf_cron: String,
@@ -1962,6 +1965,7 @@ pub async fn post_create(
                 csrf_cert_issue: csrf_token_for(&state, &ctx, "/hostings/cert/issue"),
                 csrf_cert_delete: csrf_token_for(&state, &ctx, "/hostings/cert/delete"),
                 csrf_restore: csrf_token_for(&state, &ctx, "/hostings/restore"),
+                csrf_offsite_restore: csrf_token_for(&state, &ctx, "/hostings/offsite-restore"),
                 csrf_restore_as_new: csrf_token_for(&state, &ctx, "/hostings/restore-as-new"),
                 csrf_logs: csrf_token_for(&state, &ctx, "/hostings/logs"),
                 csrf_cron: csrf_token_for(&state, &ctx, "/hostings/cron"),
@@ -3159,6 +3163,7 @@ pub async fn get_detail(
         csrf_cert_issue: csrf_token_for(&state, &ctx, "/hostings/cert/issue"),
         csrf_cert_delete: csrf_token_for(&state, &ctx, "/hostings/cert/delete"),
         csrf_restore: csrf_token_for(&state, &ctx, "/hostings/restore"),
+        csrf_offsite_restore: csrf_token_for(&state, &ctx, "/hostings/offsite-restore"),
         csrf_restore_as_new: csrf_token_for(&state, &ctx, "/hostings/restore-as-new"),
         csrf_logs: csrf_token_for(&state, &ctx, "/hostings/logs"),
         csrf_cron: csrf_token_for(&state, &ctx, "/hostings/cron"),
@@ -3575,6 +3580,12 @@ async fn fetch_expiry(
 /// has "Delete the local copy once it is verified off-site" switched off? The
 /// Archives card then says so once, above the table — "off-site ✓" next to a
 /// local path otherwise reads as a delete that silently failed.
+/// Does any listed backup have a copy on the FTP target? Decides whether the
+/// bulk delete asks about the off-site copies at all.
+pub(crate) fn any_ftp_copies(backups: &[hyperion_types::BackupRunWire]) -> bool {
+    backups.iter().any(|b| b.ftp_file_name().is_some())
+}
+
 pub(crate) fn backups_kept_by_setting(backups: &[hyperion_types::BackupRunWire]) -> bool {
     backups.iter().any(|b| b.local_kept == "setting_off")
 }
@@ -5658,6 +5669,47 @@ pub struct SetLimitsForm {
 pub struct BackupDeleteForm {
     selector: String,
     backup_id: i64,
+    /// "1" = also delete the copy on the FTP target (the confirm dialog's
+    /// checkbox writes it). Anything else leaves the off-site copy alone.
+    #[serde(default)]
+    offsite: String,
+}
+
+/// Delete a backup's FTP copy BEFORE its row and local files go, so a refusal
+/// leaves everything as it was and the operator can simply try again. `Ok(true)`
+/// = deleted, `Ok(false)` = the backup has no FTP copy (nothing to do),
+/// `Err` = it has one and it could not be deleted — or the node is too old to
+/// know how, which must stop the delete rather than report one that half
+/// happened.
+async fn delete_ftp_copy_first(
+    state: &SharedState,
+    node: Option<&str>,
+    sel: HostingSelector,
+    backup_id: i64,
+) -> Result<bool, String> {
+    match crate::dispatcher::dispatch_to_node(
+        state,
+        node,
+        Request::BackupOffsiteDelete {
+            sel,
+            backup_id: Some(backup_id),
+            filename: None,
+        },
+    )
+    .await
+    {
+        Ok(RpcResponse::BackupOffsiteDelete(_)) => Ok(true),
+        Ok(RpcResponse::Error(e)) => {
+            let msg = e.to_string();
+            if msg.contains("has no copy on the FTP target") {
+                Ok(false)
+            } else {
+                Err(msg)
+            }
+        }
+        Ok(_) => Err("unexpected agent response".into()),
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 /// POST /hostings/backups/delete — remove a single backup run + its
@@ -5686,6 +5738,23 @@ pub async fn post_backup_delete(
         .await
         .ok()
         .and_then(|(_d, n)| n);
+    let mut ftp_deleted = false;
+    if form.offsite == "1" {
+        match delete_ftp_copy_first(&state, target_owned.as_deref(), sel.clone(), form.backup_id)
+            .await
+        {
+            Ok(d) => ftp_deleted = d,
+            Err(e) => {
+                return Ok(Redirect::to(&format!(
+                    "/hostings/{sel_url}?backup_error={}#backups",
+                    urlencoding(&format!(
+                    "nothing was deleted — the copy on the off-site FTP target could not be: {e}"
+                ))
+                ))
+                .into_response())
+            }
+        }
+    }
     let resp = crate::dispatcher::dispatch_to_node(
         &state,
         target_owned.as_deref(),
@@ -5699,9 +5768,17 @@ pub async fn post_backup_delete(
     )
     .await?;
     match resp {
-        RpcResponse::BackupDelete => {
-            Ok(Redirect::to(&format!("/hostings/{sel_url}#backups")).into_response())
-        }
+        // Said out loud: a delete that answered with nothing left the
+        // operator scanning the list to see whether it had happened.
+        RpcResponse::BackupDelete => Ok(Redirect::to(&format!(
+            "/hostings/{sel_url}?backup_deleted={}#backups",
+            urlencoding(if ftp_deleted {
+                "Backup deleted, including its copy on the off-site FTP target."
+            } else {
+                "Backup deleted."
+            })
+        ))
+        .into_response()),
         // The agent deliberately refuses to delete a still-running
         // backup — surface that as a flash, not a full 502 page.
         RpcResponse::Error(e) => Ok(Redirect::to(&format!(
@@ -5723,6 +5800,9 @@ pub struct BackupDeleteBulkForm {
     /// (verified: it 422s with "expected a sequence").
     #[serde(default)]
     backup_ids: String,
+    /// "1" = also delete each one's copy on the FTP target.
+    #[serde(default)]
+    offsite: String,
 }
 
 impl BackupDeleteBulkForm {
@@ -5776,8 +5856,22 @@ pub async fn post_backup_delete_bulk(
 
     let mut deleted = 0usize;
     let mut failed = 0usize;
+    let mut ftp_deleted = 0usize;
     let mut first_error: Option<String> = None;
     for backup_id in ids {
+        if form.offsite == "1" {
+            match delete_ftp_copy_first(&state, target_owned.as_deref(), sel.clone(), backup_id)
+                .await
+            {
+                Ok(d) => ftp_deleted += d as usize,
+                // This one stays whole; the others go on.
+                Err(e) => {
+                    failed += 1;
+                    first_error.get_or_insert(format!("off-site delete failed: {e}"));
+                    continue;
+                }
+            }
+        }
         let resp = crate::dispatcher::dispatch_to_node(
             &state,
             target_owned.as_deref(),
@@ -5815,9 +5909,14 @@ pub async fn post_backup_delete_bulk(
         .into_response());
     }
     let mut summary = format!(
-        "{deleted} archive{} deleted",
+        "{deleted} backup{} deleted",
         if deleted == 1 { "" } else { "s" }
     );
+    if ftp_deleted > 0 {
+        summary.push_str(&format!(
+            " ({ftp_deleted} also from the off-site FTP target)"
+        ));
+    }
     if failed > 0 {
         summary.push_str(&format!(
             " · {failed} skipped ({})",
@@ -16587,6 +16686,7 @@ mod tests {
         BackupDeleteBulkForm {
             selector: "s".into(),
             backup_ids: ids.into(),
+            offsite: String::new(),
         }
         .ids()
     }
@@ -17205,6 +17305,10 @@ struct OffsiteCardTpl {
     directory_exists: bool,
     can_restore: bool,
     csrf_offsite_restore: String,
+    /// May delete backups of this site (the same permission as Delete on the
+    /// backups list).
+    can_delete: bool,
+    csrf_offsite_delete: String,
     error: Option<String>,
 }
 
@@ -17218,10 +17322,16 @@ pub struct OffsiteRow {
     pub when: String,
     pub when_exact: String,
     taken_at: i64,
+    /// Is this archive also on the node's disk? `None` = could not ask. The
+    /// difference between deleting a spare copy and deleting the last one.
+    pub on_node: Option<bool>,
 }
 
 /// Pair archives with their dumps and sort newest first.
-fn offsite_rows(files: &[hyperion_types::OffsiteFile]) -> Vec<OffsiteRow> {
+fn offsite_rows(
+    files: &[hyperion_types::OffsiteFile],
+    local: Option<&std::collections::HashSet<String>>,
+) -> Vec<OffsiteRow> {
     let mut rows: Vec<OffsiteRow> = files
         .iter()
         .filter(|f| !f.name.ends_with(".sql"))
@@ -17256,6 +17366,7 @@ fn offsite_rows(files: &[hyperion_types::OffsiteFile]) -> Vec<OffsiteRow> {
                     .map(|t| t.format("%Y-%m-%d %H:%M UTC").to_string())
                     .unwrap_or_default(),
                 taken_at,
+                on_node: local.map(|l| l.contains(&f.name)),
             }
         })
         .collect();
@@ -17281,7 +17392,10 @@ async fn render_offsite(
     let can_restore = require_manage_for_selector(state, ctx, &selector, Capability::BackupRestore)
         .await
         .is_ok();
-    let card = |files: Vec<hyperion_types::OffsiteFile>,
+    let can_delete = require_manage_for_selector(state, ctx, &selector, Capability::BackupRun)
+        .await
+        .is_ok();
+    let card = |rows: Vec<OffsiteRow>,
                 configured: bool,
                 directory_exists: bool,
                 detail_domain: String,
@@ -17291,12 +17405,14 @@ async fn render_offsite(
             OffsiteCardTpl {
                 selector: selector.clone(),
                 detail_domain,
-                rows: offsite_rows(&files),
+                rows,
                 site_has_db,
                 configured,
                 directory_exists,
                 can_restore,
                 csrf_offsite_restore: csrf_token_for(state, ctx, "/hostings/offsite-restore"),
+                can_delete,
+                csrf_offsite_delete: csrf_token_for(state, ctx, "/hostings/offsite-delete"),
                 error,
             }
             .render()
@@ -17350,21 +17466,37 @@ async fn render_offsite(
         ));
     }
     let site_has_db = detail.database.is_some();
+    let sel_for_rows = sel.clone();
     match crate::dispatcher::dispatch_to_node(
         state,
         owner.as_deref(),
-        Request::BackupOffsiteList { sel },
+        Request::BackupOffsiteList { sel: sel.clone() },
     )
     .await
     {
-        Ok(RpcResponse::BackupOffsiteList(listing)) => Ok(card(
-            listing.files,
-            true,
-            listing.directory_exists,
-            detail.domain,
-            site_has_db,
-            error,
-        )),
+        Ok(RpcResponse::BackupOffsiteList(listing)) => {
+            // Which of these are still on the node too — read from the
+            // node's own rows, by file name.
+            let local: Option<std::collections::HashSet<String>> =
+                fetch_backup_list(state, owner.as_deref(), sel_for_rows, 500)
+                    .await
+                    .ok()
+                    .map(|rows| {
+                        rows.iter()
+                            .filter_map(|b| b.archive_path.as_deref())
+                            .filter_map(|p| p.rsplit('/').next())
+                            .map(str::to_string)
+                            .collect()
+                    });
+            Ok(card(
+                offsite_rows(&listing.files, local.as_ref()),
+                true,
+                listing.directory_exists,
+                detail.domain,
+                site_has_db,
+                error,
+            ))
+        }
         // A validation error here is "no target configured", which is a
         // distinct state the card renders as advice rather than as a fault.
         Ok(RpcResponse::Error(e)) => {
@@ -17395,6 +17527,60 @@ async fn render_offsite(
             site_has_db,
             Some(e.to_string()),
         )),
+    }
+}
+
+#[derive(serde::Deserialize)]
+pub struct OffsiteDeleteForm {
+    pub selector: String,
+    pub filename: String,
+}
+
+/// POST /hostings/offsite-delete — delete one archive (and its dump) from the
+/// FTP target, from the Off-site copies card. Same permission as deleting a
+/// backup from the list; the node re-checks the file is this site's own.
+pub async fn post_offsite_delete(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<OffsiteDeleteForm>,
+) -> Result<Response, AppError> {
+    let sel = match require_manage_for_selector(&state, &ctx, &form.selector, Capability::BackupRun)
+        .await
+    {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
+    let sel_url = urlencoding(&form.selector);
+    let node: Option<String> = find_hosting_anywhere(&state, sel.clone())
+        .await
+        .ok()
+        .and_then(|(_d, n)| n);
+    let flash = match crate::dispatcher::dispatch_to_node(
+        &state,
+        node.as_deref(),
+        Request::BackupOffsiteDelete {
+            sel,
+            backup_id: None,
+            filename: Some(form.filename.trim().to_string()),
+        },
+    )
+    .await
+    {
+        Ok(RpcResponse::BackupOffsiteDelete(msg)) => {
+            format!("backup_deleted={}", urlencoding(&upper_first(&msg)))
+        }
+        Ok(RpcResponse::Error(e)) => format!("backup_error={}", urlencoding(&e.to_string())),
+        Ok(_) => format!("backup_error={}", urlencoding("unexpected agent response")),
+        Err(e) => format!("backup_error={}", urlencoding(&e.to_string())),
+    };
+    Ok(Redirect::to(&format!("/hostings/{sel_url}?{flash}#backups")).into_response())
+}
+
+fn upper_first(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        Some(f) => f.to_uppercase().chain(c).collect(),
+        None => String::new(),
     }
 }
 

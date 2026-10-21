@@ -559,6 +559,15 @@ pub async fn probe_remote(upload: &RemoteUpload<'_>) -> (bool, String, u64) {
             // Map the codes an operator actually hits to plain language; keep
             // the raw stderr for anything else.
             let msg = match code {
+                // libssh2 refuses a server whose key is not in root's
+                // known_hosts with exit 2 and the words "Failed
+                // initialization", which point everywhere but the cause.
+                2 if scheme == "sftp" => format!(
+                    "this node does not know the SFTP server's host key — on the node, as \
+                     root, check its fingerprint and add it: ssh-keyscan -p {} {} >> \
+                     /root/.ssh/known_hosts",
+                    upload.port, upload.host
+                ),
                 6 => "could not resolve the host — check the hostname / DNS".into(),
                 7 => "could not connect — the port is closed or refused (firewall, or wrong port?)"
                     .into(),
@@ -740,7 +749,8 @@ pub async fn list_remote(
     let (stdout, stderr, code) = cmd::curl_with_config_capture(&config).await?;
     match code {
         0 => Ok(Some(parse_ftp_listing(&stdout))),
-        9 => Ok(None),
+        // 78 is how SFTP says the same thing ("remote file not found").
+        9 | 78 => Ok(None),
         _ => Err(AdapterError::Command {
             cmd: "curl --config - (options withheld)".to_string(),
             code,
@@ -777,6 +787,129 @@ pub fn parse_ftp_listing(out: &str) -> Vec<RemoteEntry> {
     v
 }
 
+/// A backup file name safe to put in a remote URL or command: ASCII letters,
+/// digits, dot, dash and underscore, no `..`, not starting with `.` or `-`.
+///
+/// An allow-list, not a deny-list: a name from a listing is attacker-
+/// influenced if the remote store is, and curl PERCENT-DECODES a URL, so
+/// `%2e%2e%2f` would sail through a substring check and arrive as `../`.
+pub fn is_plain_backup_name(filename: &str) -> bool {
+    !filename.is_empty()
+        && filename.len() <= 255
+        && filename
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+        && !filename.contains("..")
+        && !filename.starts_with('.')
+        && !filename.starts_with('-')
+}
+
+/// The `quote` command that deletes `name` from `dir` once curl is in it.
+///
+/// FTP: `DELE` relative to the directory, because the leading `-` makes curl
+/// send it AFTER the transfer, when it has already changed into the URL's
+/// directory — exactly the directory the upload wrote to, however the server
+/// maps paths. SFTP has no current directory: `rm` takes the path the URL
+/// names, which for SFTP is absolute (`/~/x` is the home-relative spelling,
+/// and plain `x` is home-relative to the SFTP server). The `*` keeps going
+/// past a file that is already gone; the listing afterwards is what decides.
+fn delete_quote(scheme: &str, dir: &str, name: &str) -> String {
+    if scheme == "sftp" {
+        let path = match dir.strip_prefix("/~/") {
+            Some(rel) => format!("{}/{name}", rel.trim_end_matches('/')),
+            None => format!("{}/{name}", dir.trim_end_matches('/')),
+        };
+        format!("-*rm \"{}\"", path.replace('"', ""))
+    } else {
+        format!("-*DELE {name}")
+    }
+}
+
+/// Delete files from this site's folder on the remote, then LOOK.
+///
+/// Every name must pass [`is_plain_backup_name`]. Deleting a file that is
+/// already gone is not an error — the goal is "not there", and a missing
+/// folder means the same. What decides success is a listing taken afterwards:
+/// curl's exit code says the commands were sent, not that the server did
+/// them, and a delete reported done over a file that is still there is the
+/// one answer this must never give.
+pub async fn delete_remote(
+    filenames: &[&str],
+    upload: &RemoteUpload<'_>,
+) -> Result<(), AdapterError> {
+    if let Some(bad) = filenames.iter().find(|n| !is_plain_backup_name(n)) {
+        return Err(AdapterError::Other(format!(
+            "refusing a remote file name that is not a plain backup file name: {bad:?}"
+        )));
+    }
+    if filenames.is_empty() {
+        return Ok(());
+    }
+    let scheme = match upload.scheme {
+        "ftp" | "ftps" | "sftp" => upload.scheme,
+        other => {
+            return Err(AdapterError::Other(format!(
+                "unsupported remote scheme: {other}"
+            )))
+        }
+    };
+    let dir = format!("/{}", upload.remote_dir.trim_matches('/'));
+    // The trailing slash LISTs the directory, which is the transfer the
+    // post-quote commands ride on.
+    let url = format!(
+        "{scheme}://{host}:{port}{dir}/",
+        host = upload.host,
+        port = upload.port,
+    );
+    let mut config = format!(
+        concat!(
+            "user = \"{user}:{password}\"\n",
+            "url = \"{url}\"\n",
+            "list-only\n",
+            "fail\n",
+            "silent\n",
+            "show-error\n",
+            "connect-timeout = 15\n",
+            "max-time = 120\n",
+        ),
+        user = cmd::curl_config_quote(upload.user),
+        password = cmd::curl_config_quote(upload.password),
+        url = cmd::curl_config_quote(&url),
+    );
+    for name in filenames {
+        config.push_str(&format!(
+            "quote = \"{}\"\n",
+            cmd::curl_config_quote(&delete_quote(scheme, &dir, name))
+        ));
+    }
+    let (_stdout, stderr, code) = cmd::curl_with_config_capture(&config).await?;
+    // 9 / 78 = the folder is not there (FTP / SFTP), so neither are the
+    // files in it.
+    if !matches!(code, 0 | 9 | 78) {
+        return Err(AdapterError::Command {
+            cmd: "curl --config - (options withheld)".to_string(),
+            code,
+            stderr_tail: stderr,
+        });
+    }
+    let Some(left) = list_remote(upload).await? else {
+        return Ok(());
+    };
+    let still: Vec<&str> = filenames
+        .iter()
+        .copied()
+        .filter(|n| left.iter().any(|e| e.name == *n))
+        .collect();
+    if !still.is_empty() {
+        return Err(AdapterError::Other(format!(
+            "the remote server still lists {} after the delete — it may not allow this \
+             account to delete files",
+            still.join(", ")
+        )));
+    }
+    Ok(())
+}
+
 /// Fetch one file off the remote into `dest`.
 ///
 /// `dest` is chosen by the caller and must be somewhere the restore is allowed
@@ -799,15 +932,7 @@ pub async fn download_remote(
     // So the rule is an allow-list, not a deny-list. A backup file name is
     // ASCII letters, digits, dot, dash and underscore — anything else,
     // including a percent sign, is refused rather than reasoned about.
-    let plain = !filename.is_empty()
-        && filename.len() <= 255
-        && filename
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
-        && !filename.contains("..")
-        && !filename.starts_with('.')
-        && !filename.starts_with('-');
-    if !plain {
+    if !is_plain_backup_name(filename) {
         return Err(AdapterError::Other(format!(
             "refusing a remote file name that is not a plain backup file name: {filename:?}"
         )));
@@ -863,7 +988,13 @@ pub async fn download_remote(
         url = cmd::curl_config_quote(&url),
         local = cmd::curl_config_quote(local),
     );
-    cmd::curl_with_config(&config).await?;
+    if let Err(e) = cmd::curl_with_config(&config).await {
+        // `fail` stops curl on a server error, not on a transfer that dies
+        // half-way: what it wrote stays at `dest`, a truncated archive nobody
+        // will ever clean up — and one that looks like a backup.
+        let _ = tokio::fs::remove_file(dest).await;
+        return Err(e);
+    }
     let n = tokio::fs::metadata(dest)
         .await
         .map_err(|e| AdapterError::Other(format!("stat {}: {e}", dest.display())))?
@@ -1428,6 +1559,117 @@ mod tests {
         assert!(!dest.exists(), "a refused name still wrote something");
     }
     use super::*;
+
+    #[test]
+    fn plain_backup_names_only() {
+        assert!(is_plain_backup_name("a.cz-1700000000.tar.gz"));
+        assert!(is_plain_backup_name("xn--d-6ka.cz-1.sql"));
+        for bad in [
+            "",
+            "../x.tar.gz",
+            "a/b.tar.gz",
+            "a%2fb.tar.gz",
+            ".hidden",
+            "-rf",
+            "a b.tar.gz",
+            "a\"b",
+        ] {
+            assert!(!is_plain_backup_name(bad), "{bad:?}");
+        }
+    }
+
+    /// Verified against vsftpd and OpenSSH's sftp-server with curl 8.14:
+    /// FTP `DELE` is sent after the transfer, relative to the directory the
+    /// URL changed into; SFTP `rm` needs the path the URL names.
+    #[test]
+    fn delete_quote_matches_how_the_upload_addressed_the_file() {
+        assert_eq!(
+            delete_quote("ftp", "/backups/web1", "a.cz-1.tar.gz"),
+            "-*DELE a.cz-1.tar.gz"
+        );
+        assert_eq!(
+            delete_quote("ftps", "/backups/web1", "a.cz-1.sql"),
+            "-*DELE a.cz-1.sql"
+        );
+        assert_eq!(
+            delete_quote("sftp", "/srv/backups/web1", "a.cz-1.tar.gz"),
+            "-*rm \"/srv/backups/web1/a.cz-1.tar.gz\""
+        );
+        assert_eq!(
+            delete_quote("sftp", "/~/backups/web1", "a.cz-1.tar.gz"),
+            "-*rm \"backups/web1/a.cz-1.tar.gz\""
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_remote_refuses_a_name_that_is_not_plain() {
+        let up = RemoteUpload {
+            scheme: "ftp",
+            host: "127.0.0.1",
+            port: 1,
+            user: "u",
+            password: "p",
+            remote_dir: "/b/u",
+        };
+        let err = delete_remote(&["../other/a.cz-1.tar.gz"], &up)
+            .await
+            .expect_err("must refuse");
+        assert!(
+            err.to_string().contains("not a plain backup file name"),
+            "{err}"
+        );
+    }
+
+    /// Against a real FTP server: `HY_FTP_TEST=host:port:user:password:dir`.
+    /// Uploads two files, deletes them (plus one that was never there), and
+    /// checks the listing. Run with `--ignored`.
+    #[tokio::test]
+    #[ignore]
+    async fn delete_remote_against_a_real_ftp_server() {
+        let Ok(spec) = std::env::var("HY_FTP_TEST") else {
+            return;
+        };
+        let p: Vec<&str> = spec.splitn(5, ':').collect();
+        let port: u16 = p[1].parse().expect("port");
+        let up = RemoteUpload {
+            scheme: "ftp",
+            host: p[0],
+            port,
+            user: p[2],
+            password: p[3],
+            remote_dir: p[4],
+        };
+        let dir = tempfile::tempdir().expect("dir");
+        let a = dir.path().join("e2e.cz-100.tar.gz");
+        let d = dir.path().join("e2e.cz-100.sql");
+        let keep = dir.path().join("e2e.cz-200.tar.gz");
+        for f in [&a, &d, &keep] {
+            std::fs::write(f, b"x").expect("write");
+            upload_remote(f, &up).await.expect("upload");
+        }
+        delete_remote(
+            &["e2e.cz-100.tar.gz", "e2e.cz-100.sql", "e2e.cz-1.tar.gz"],
+            &up,
+        )
+        .await
+        .expect("delete");
+        let names: Vec<String> = list_remote(&up)
+            .await
+            .expect("list")
+            .expect("dir")
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        assert_eq!(names, vec!["e2e.cz-200.tar.gz".to_string()]);
+        delete_remote(&["e2e.cz-200.tar.gz"], &up)
+            .await
+            .expect("delete last");
+        assert!(list_remote(&up)
+            .await
+            .expect("list")
+            .expect("dir")
+            .is_empty());
+    }
 
     /// Build a plain `.tar` at `path` from `(name, kind, body_or_linktarget)`
     /// members. `kind` is "file" or "symlink".

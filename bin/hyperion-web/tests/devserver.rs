@@ -472,7 +472,7 @@ async fn start_agent_with_service() -> (PathBuf, tempfile::TempDir, Arc<StubServ
         permissions_autoheal: true,
         snapshots_enabled: false,
         protection_mode: hyperion_types::ProtectionMode::Both,
-        remote_backup: None,
+        remote_backup: devserver_ftp(),
         retention: hyperion_core::BackupRetention::default(),
         slack_default_webhook: None,
         acme_contact_email: "test@example.invalid".into(),
@@ -1529,6 +1529,126 @@ async fn seed_demo_waf(svc: &StubService, ids: &[String], now: i64) {
     .await;
 }
 
+/// `DEVSERVER_FTP=host:port:user:password:base_path`: a real FTP server as the
+/// off-site target (a throwaway vsftpd in Docker does), so the Off-site
+/// copies card, off-site restore and delete can be walked against the real
+/// thing.
+fn devserver_ftp() -> Option<hyperion_core::RemoteBackupConfig> {
+    let spec = std::env::var("DEVSERVER_FTP").ok()?;
+    let p: Vec<&str> = spec.splitn(5, ':').collect();
+    Some(hyperion_core::RemoteBackupConfig {
+        scheme: "ftp".into(),
+        host: p.first()?.to_string(),
+        port: p.get(1)?.parse().ok()?,
+        user: p.get(2)?.to_string(),
+        password: p.get(3)?.to_string(),
+        base_path: p.get(4)?.to_string(),
+    })
+}
+
+/// With `DEVSERVER_DEMO` and `DEVSERVER_FTP`: the first demo site gets a
+/// backup in every off-site state, and the FTP server gets the files to
+/// match — plus one the rows do not know about.
+async fn seed_demo_offsite(svc: &StubService) {
+    use hyperion_state::backups;
+    let detail = svc
+        .get(hyperion_rpc::wire::HostingSelector::Domain(
+            hyperion_validate::Domain::parse("studio-lumen.cz").expect("domain"),
+        ))
+        .await
+        .expect("demo site");
+    let remote = svc.remote_backup.as_ref().expect("ftp");
+    let dir = format!(
+        "{}/{}",
+        remote.base_path.trim_end_matches('/'),
+        detail.system_user
+    );
+    let up = hyperion_adapters::backup::RemoteUpload {
+        scheme: &remote.scheme,
+        host: &remote.host,
+        port: remote.port,
+        user: &remote.user,
+        password: &remote.password,
+        remote_dir: &dir,
+    };
+    let now = hyperion_types::now_secs();
+    let local = std::env::temp_dir().join("devserver-offsite");
+    std::fs::create_dir_all(&local).expect("dir");
+    let url = |n: &str| format!("ftp://{}:{}{}/{n}", remote.host, remote.port, dir);
+    // (age in hours, local copy, on FTP, dump on FTP, remote_state, note)
+    let rows: [(i64, bool, bool, bool, &str, &str); 5] = [
+        (1, true, true, true, "verified", ""),
+        (26, false, true, true, "verified", ""),
+        (50, true, false, false, "", ""),
+        (
+            74,
+            true,
+            true,
+            false,
+            "failed",
+            "archive pushed, database dump failed: curl (55)",
+        ),
+        (
+            98,
+            true,
+            false,
+            false,
+            "removed",
+            "deleted from the off-site target",
+        ),
+    ];
+    for (age, has_local, on_ftp, dump_on_ftp, state, note) in rows {
+        let at = now - age * 3600;
+        let name = format!("{}-{at}.tar.gz", detail.domain);
+        let dump = format!("{}-{at}.sql", detail.domain);
+        let a = local.join(&name);
+        let d = local.join(&dump);
+        std::fs::write(&a, vec![b'x'; 40_000 + age as usize * 1000]).expect("archive");
+        std::fs::write(&d, vec![b'y'; 9_000]).expect("dump");
+        if on_ftp {
+            hyperion_adapters::backup::upload_remote(&a, &up)
+                .await
+                .expect("upload archive");
+        }
+        if dump_on_ftp {
+            hyperion_adapters::backup::upload_remote(&d, &up)
+                .await
+                .expect("upload dump");
+        }
+        let r = backups::start(&svc.pool, &detail.id, "local", at)
+            .await
+            .expect("start");
+        backups::mark_ok(
+            &svc.pool,
+            r,
+            &a.display().to_string(),
+            Some(&d.display().to_string()),
+            49_000 + age * 1000,
+            at + 60,
+        )
+        .await
+        .expect("ok");
+        if !state.is_empty() {
+            let key = if on_ftp { url(&name) } else { String::new() };
+            backups::set_remote(&svc.pool, r, &key, state, note)
+                .await
+                .expect("remote");
+        }
+        if !has_local {
+            backups::clear_local_paths(&svc.pool, r)
+                .await
+                .expect("clear");
+        }
+    }
+    // On the server, unknown to every row: what is left after losing a node.
+    let at = now - 240 * 3600;
+    let orphan = local.join(format!("{}-{at}.tar.gz", detail.domain));
+    std::fs::write(&orphan, vec![b'z'; 33_000]).expect("orphan");
+    hyperion_adapters::backup::upload_remote(&orphan, &up)
+        .await
+        .expect("upload orphan");
+}
+
 /// `DEVSERVER_DEMO_NODES=1`: enroll three fake worker nodes so the Nodes
 /// page renders every row state — healthy, drained + test, and one that
 /// stopped checking in without pins. Kept apart from `DEVSERVER_DEMO`:
@@ -1696,6 +1816,9 @@ async fn devserver() {
     }
     if std::env::var_os("DEVSERVER_DEMO").is_some() {
         seed_demo_notifications(svc.pool.clone());
+    }
+    if std::env::var_os("DEVSERVER_DEMO").is_some() && svc.remote_backup.is_some() {
+        seed_demo_offsite(&svc).await;
     }
     let (router, _signer) =
         build_app_with_signer(sock, admin, Arc::new(SessionSigner::new_random()), setup);

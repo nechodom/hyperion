@@ -55,6 +55,8 @@ pub struct FtpRow {
     pub problem: String,
     /// It receives a copy of every backup.
     pub active: bool,
+    /// What stays on the server, in words (its keep-newest rule).
+    pub keep: String,
 }
 
 /// One S3 target, as a row of the targets table. Also carries what the
@@ -79,6 +81,15 @@ pub struct S3Row {
     /// Why it takes no copy; empty when it does or is simply switched off.
     pub problem: String,
     pub active: bool,
+}
+
+/// A target's keep-newest rule in words; 0 or less keeps everything.
+fn keep_words(n: i64) -> String {
+    if n <= 0 {
+        "all kept, never pruned".to_string()
+    } else {
+        format!("newest {n} per site")
+    }
 }
 
 /// The FTP target's row. Mirrors what the backup run does with
@@ -124,6 +135,7 @@ pub fn ftp_row(r: &BackupRemoteConfigView) -> FtpRow {
         (false, _) => (pill("muted", "off"), String::new(), false),
     };
     FtpRow {
+        keep: keep_words(r.keep_latest),
         shown: !host.is_empty() || r.enabled,
         protocol: scheme.to_ascii_uppercase(),
         address,
@@ -150,10 +162,7 @@ pub fn s3_row(t: BackupTargetView, secret_on_disk: bool) -> S3Row {
             "Stored readable by anyone who holds the bucket's keys",
         ),
     };
-    let keep = match t.retention_daily {
-        n if n <= 0 => "all kept, never pruned".to_string(),
-        n => format!("newest {n} per site"),
-    };
+    let keep = keep_words(t.retention_daily);
     let (state, problem, active) = if t.kind != "s3" {
         (
             pill("warn", "not used"),
@@ -396,6 +405,7 @@ mod tests {
             user: user.into(),
             password_set: true,
             base_path: base.into(),
+            keep_latest: 0,
         }
     }
 

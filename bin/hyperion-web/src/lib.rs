@@ -967,6 +967,10 @@ pub fn build_router(state: SharedState) -> Router {
             post(handlers::hostings::post_offsite_restore),
         )
         .route(
+            "/hostings/offsite-delete",
+            post(handlers::hostings::post_offsite_delete),
+        )
+        .route(
             "/hostings/snapshots/restore",
             post(handlers::hostings::post_snapshot_restore),
         )

@@ -304,6 +304,21 @@ pub struct BackupRunWire {
     pub held: bool,
 }
 
+/// The archive's file name on the FTP/FTPS/SFTP target, from the URL the push
+/// recorded in `remote_blob_key`. `None` for anything else (an S3 key, empty).
+pub fn ftp_archive_name(remote_blob_key: &str) -> Option<&str> {
+    if !["ftp://", "ftps://", "sftp://"]
+        .iter()
+        .any(|s| remote_blob_key.starts_with(s))
+    {
+        return None;
+    }
+    remote_blob_key
+        .rsplit_once('/')
+        .map(|(_, name)| name)
+        .filter(|n| !n.is_empty() && !n.ends_with(".sql"))
+}
+
 impl BackupRunWire {
     /// Wording for the off-site column, and the pill class to draw it with.
     pub fn offsite_label(&self) -> (&'static str, &'static str) {
@@ -311,6 +326,9 @@ impl BackupRunWire {
             "verified" => ("off-site ✓", "pill ok"),
             "ok" => ("uploaded", "pill"),
             "failed" => ("off-site FAILED", "pill danger"),
+            // Deleted from the FTP target on purpose; an S3 copy, if any,
+            // still counts below.
+            "removed" if self.s3_ok_targets.is_empty() => ("removed off-site", "pill"),
             // No FTP state, but an S3 push completed: "uploaded", the same
             // claim strength as an FTP `ok` — the push succeeded, nobody
             // listed the copy back.
@@ -320,6 +338,26 @@ impl BackupRunWire {
             // support.
             _ => ("—", "pill"),
         }
+    }
+
+    /// The file name to fetch back from the FTP/FTPS/SFTP target, when this
+    /// backup has a copy there on record (`ok` or `verified`).
+    ///
+    /// The last segment of `remote_blob_key`, which the push records as the
+    /// URL it uploaded to. `None` for an S3-only copy (encrypted with a key
+    /// that is deliberately not on the server) or a failed push.
+    pub fn ftp_restore_name(&self) -> Option<&str> {
+        if !matches!(self.remote_state.as_str(), "ok" | "verified") {
+            return None;
+        }
+        ftp_archive_name(&self.remote_blob_key)
+    }
+
+    /// The FTP archive name whatever the state — a push whose dump failed is
+    /// `failed` but still left the archive on the server, and deleting the
+    /// backup "everywhere" has to reach it.
+    pub fn ftp_file_name(&self) -> Option<&str> {
+        ftp_archive_name(&self.remote_blob_key)
     }
 
     /// The S3 target names of `s3_ok_targets`, without the configuration
@@ -576,6 +614,54 @@ pub struct NodeInviteMint {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ftp_restore_name_needs_an_ftp_copy_on_record() {
+        let run = |key: &str, state: &str| BackupRunWire {
+            id: 1,
+            hosting_id: crate::HostingId("h".into()),
+            target: "local".into(),
+            started_at: 0,
+            finished_at: None,
+            state: "ok".into(),
+            archive_path: None,
+            db_dump_path: None,
+            bytes_total: 0,
+            error_message: None,
+            sha256_hex: String::new(),
+            remote_blob_key: key.into(),
+            remote_state: state.into(),
+            remote_error: String::new(),
+            no_offsite: false,
+            local_kept: String::new(),
+            local_note: String::new(),
+            s3_ok_targets: vec![],
+            purpose: String::new(),
+            held: false,
+        };
+        let k = "ftp://vault:21/backups/web1/a.cz-1700000000.tar.gz";
+        assert_eq!(
+            run(k, "verified").ftp_restore_name(),
+            Some("a.cz-1700000000.tar.gz")
+        );
+        assert_eq!(
+            run(k, "ok").ftp_restore_name(),
+            Some("a.cz-1700000000.tar.gz")
+        );
+        assert_eq!(
+            run("sftp://h:22/b/u/a.cz-1.tar.gz", "verified").ftp_restore_name(),
+            Some("a.cz-1.tar.gz")
+        );
+        // A failed push, or none at all: nothing to fetch back.
+        assert_eq!(run(k, "failed").ftp_restore_name(), None);
+        assert_eq!(run("", "").ftp_restore_name(), None);
+        // An S3 copy is encrypted with a key that is not on the server.
+        assert_eq!(
+            run("s3://bucket/a.cz-1.tar.gz", "ok").ftp_restore_name(),
+            None
+        );
+        assert_eq!(run("ftp://vault/dir/", "verified").ftp_restore_name(), None);
+    }
 
     #[test]
     fn defaults_are_sane() {

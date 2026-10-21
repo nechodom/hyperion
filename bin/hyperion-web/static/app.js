@@ -679,8 +679,22 @@ function isShortcutContext(ev) {
   const requireRow = document.getElementById('app-modal-require-row');
   const requireTokenEl = document.getElementById('app-modal-require-token');
   const requireInput = document.getElementById('app-modal-require-input');
+  const checkRow = document.getElementById('app-modal-check-row');
+  const checkBox = document.getElementById('app-modal-check');
+  const checkLabel = document.getElementById('app-modal-check-label');
   if (!backdrop || !modal) return;
   let requireToken = null;
+  // The form field the dialog's checkbox writes to, or null when the form
+  // asks for no choice.
+  let checkName = null;
+  let plain = { body: '', label: '' };
+  let ticked = { body: '', label: '' };
+  function paintCheck() {
+    if (!checkName) return;
+    const on = checkBox.checked;
+    bodyEl.textContent = on ? ticked.body : plain.body;
+    confirmBtn.textContent = on ? ticked.label : plain.label;
+  }
 
   let pendingForm = null;
   let lastFocused = null;
@@ -695,6 +709,20 @@ function isShortcutContext(ev) {
     titleEl.textContent = title;
     bodyEl.textContent = body;
     confirmBtn.textContent = confirmLabel;
+    checkName = (checkRow && form.dataset.confirmCheck && form.dataset.confirmCheckName) || null;
+    if (checkName) {
+      plain = { body: body, label: confirmLabel };
+      ticked = {
+        body: form.dataset.confirmBodyChecked || body,
+        label: form.dataset.confirmConfirmLabelChecked || confirmLabel,
+      };
+      checkLabel.textContent = form.dataset.confirmCheck;
+      checkBox.checked = form.dataset.confirmCheckDefault === 'on';
+      checkRow.style.display = '';
+      paintCheck();
+    } else if (checkRow) {
+      checkRow.style.display = 'none';
+    }
     confirmBtn.classList.remove('danger', 'primary');
     confirmBtn.classList.add(variant === 'danger' ? 'danger' : 'primary');
     // Type-to-confirm gate. data-confirm-require="<token>" forces the
@@ -727,6 +755,7 @@ function isShortcutContext(ev) {
     document.body.style.overflow = 'hidden';
   }
 
+  if (checkBox) checkBox.addEventListener('change', paintCheck);
   requireInput.addEventListener('input', () => {
     if (!requireToken) return;
     const match = requireInput.value === requireToken;
@@ -757,6 +786,8 @@ function isShortcutContext(ev) {
   });
   confirmBtn.addEventListener('click', () => {
     const f = pendingForm;
+    const field = checkName;
+    const value = field && checkBox.checked ? '1' : '';
     close();
     if (!f) return;
     // Mark as confirmed so our submit handler lets it through.
@@ -769,7 +800,9 @@ function isShortcutContext(ev) {
     if (!f.isConnected) {
       const action = f.getAttribute('action');
       const hidden = {};
-      f.querySelectorAll('input[type=hidden]').forEach(i => { hidden[i.name] = i.value; });
+      f.querySelectorAll('input[type=hidden]').forEach(i => {
+        if (i.name !== field) hidden[i.name] = i.value;
+      });
       target = [...document.querySelectorAll(`form[action="${action}"]`)].find(g =>
         Object.entries(hidden).every(([n, v]) => {
           const el = g.querySelector(`input[name="${n}"]`);
@@ -778,6 +811,16 @@ function isShortcutContext(ev) {
       if (target) target.dataset.confirmed = '1';
     }
     if (!target) return;
+    if (field) {
+      let input = target.querySelector(`input[name="${field}"]`);
+      if (!input) {
+        input = document.createElement('input');
+        input.type = 'hidden';
+        input.name = field;
+        target.appendChild(input);
+      }
+      input.value = value;
+    }
     if (target.requestSubmit) {
       target.requestSubmit();
     } else {
