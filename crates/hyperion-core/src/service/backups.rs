@@ -1752,22 +1752,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 if sibling.exists() {
                     dump_found = true;
                     if let Some(db) = &detail.database {
-                        let restore = match db.engine {
-                            hyperion_types::DbProvision::MariaDB => {
-                                hyperion_adapters::backup::restore_mariadb_dump(
-                                    &db.db_name,
-                                    sibling,
-                                )
-                                .await
-                            }
-                            hyperion_types::DbProvision::Postgres => {
-                                hyperion_adapters::backup::restore_postgres_dump(
-                                    &db.db_name,
-                                    sibling,
-                                )
-                                .await
-                            }
-                        };
+                        let restore = self.restore_db_dump(&detail.id, db, sibling).await;
                         if let Err(e) = restore {
                             return Err(RpcError::ProvisioningFailed {
                                 stage: "db_restore".into(),

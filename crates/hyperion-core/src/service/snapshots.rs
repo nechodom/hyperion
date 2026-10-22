@@ -795,14 +795,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         mode: hyperion_types::BackupRestoreMode,
         kept_aside: Option<&str>,
     ) -> Result<(), RpcError> {
-        let imported = match db.engine {
-            hyperion_types::DbProvision::MariaDB => {
-                hyperion_adapters::backup::restore_mariadb_dump(&db.db_name, dump).await
-            }
-            hyperion_types::DbProvision::Postgres => {
-                hyperion_adapters::backup::restore_postgres_dump(&db.db_name, dump).await
-            }
-        };
+        let imported = self.restore_db_dump(&detail.id, db, dump).await;
         hyperion_adapters::restic::clear_db_stage(dump).await;
         let Err(e) = imported else {
             return Ok(());

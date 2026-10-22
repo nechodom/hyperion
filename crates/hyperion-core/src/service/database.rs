@@ -3,6 +3,59 @@
 use super::*;
 
 impl<A: AdapterPort + 'static> HostingService<A> {
+    /// The hosting's own database login — `(db_user, password)` — read from
+    /// the secrets store. Dumps are replayed as this account, never as the
+    /// database superuser (see `hyperion_adapters::backup::DbLogin`).
+    pub(super) async fn db_login(
+        &self,
+        hosting_id: &HostingId,
+    ) -> Result<(String, String), RpcError> {
+        let row = databases::get_for_hosting(&self.pool, hosting_id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("db lookup: {e}")))?
+            .ok_or(RpcError::NotFound {
+                kind: "database".into(),
+                id: hosting_id.as_str().to_string(),
+            })?;
+        let secret: serde_json::Value = self
+            .secrets
+            .get(&row.secret_id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("db secret: {e}")))?;
+        let password = secret
+            .get("password")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RpcError::Internal_with("db secret has no password".to_string()))?
+            .to_string();
+        Ok((row.db_user, password))
+    }
+
+    /// Replay a dump into the hosting's database as the hosting's own user.
+    pub(super) async fn restore_db_dump(
+        &self,
+        hosting_id: &HostingId,
+        db: &DbSummary,
+        dump: &std::path::Path,
+    ) -> Result<(), hyperion_adapters::AdapterError> {
+        match db.engine {
+            DbProvision::MariaDB => {
+                let (user, password) = self
+                    .db_login(hosting_id)
+                    .await
+                    .map_err(|e| hyperion_adapters::AdapterError::Other(e.to_string()))?;
+                let login = hyperion_adapters::backup::DbLogin {
+                    user: &user,
+                    password: &password,
+                };
+                hyperion_adapters::backup::restore_mariadb_dump(&db.db_name, &login, dump).await
+            }
+            DbProvision::Postgres => {
+                hyperion_adapters::backup::restore_postgres_dump(&db.db_name, &db.db_user, dump)
+                    .await
+            }
+        }
+    }
+
     /// Reset the DB password for a hosting, persisting the new secret.
     pub async fn db_reset_password(
         &self,

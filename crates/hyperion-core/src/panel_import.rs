@@ -413,20 +413,32 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 restored_dbs = 1;
                 match srcdb.engine {
                     IrDbEngine::Postgres => {
-                        hyperion_adapters::backup::restore_postgres_dump(&newdb.db_name, dump_path)
-                            .await
-                            .map_err(|e| RpcError::ProvisioningFailed {
-                                stage: "import_db_restore".into(),
-                                reason: e.to_string(),
-                            })?;
+                        hyperion_adapters::backup::restore_postgres_dump(
+                            &newdb.db_name,
+                            &newdb.db_user,
+                            dump_path,
+                        )
+                        .await
+                        .map_err(|e| RpcError::ProvisioningFailed {
+                            stage: "import_db_restore".into(),
+                            reason: e.to_string(),
+                        })?;
                     }
                     _ => {
-                        hyperion_adapters::backup::restore_mariadb_dump(&newdb.db_name, dump_path)
-                            .await
-                            .map_err(|e| RpcError::ProvisioningFailed {
-                                stage: "import_db_restore".into(),
-                                reason: e.to_string(),
-                            })?;
+                        let login = hyperion_adapters::backup::DbLogin {
+                            user: &newdb.db_user,
+                            password: &newdb.password,
+                        };
+                        hyperion_adapters::backup::restore_mariadb_dump(
+                            &newdb.db_name,
+                            &login,
+                            dump_path,
+                        )
+                        .await
+                        .map_err(|e| RpcError::ProvisioningFailed {
+                            stage: "import_db_restore".into(),
+                            reason: e.to_string(),
+                        })?;
                     }
                 }
             }

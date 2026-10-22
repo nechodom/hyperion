@@ -411,20 +411,95 @@ fn extract_archive_sandboxed<R: std::io::Read>(
     Ok(count)
 }
 
+/// The database account a dump is replayed AS.
+///
+/// Never root. A dump is data from somewhere else — a customer's old panel,
+/// another node, a backup a tenant's own site wrote into — and replaying it
+/// as the database superuser lets its SQL reach every other tenant's
+/// database (`USE other_db`, `CREATE USER … ; GRANT ALL ON *.*`). As the
+/// hosting's own user it can touch exactly the one database that user was
+/// granted, which is the database being restored.
+pub struct DbLogin<'a> {
+    pub user: &'a str,
+    pub password: &'a str,
+}
+
 /// Restore a `mariadb-dump` SQL dump file into the named DB. Drops +
 /// recreates objects (the dump includes DROP/CREATE if --add-drop-table
 /// is set; mariadb-dump default does).
-pub async fn restore_mariadb_dump(db_name: &str, sql_path: &Path) -> Result<(), AdapterError> {
+///
+/// `--binary-mode` turns off the client's own commands (`\!` runs a shell
+/// command, `source`, `tee`, `system`, …) for piped input. Without it a dump
+/// is a script for the CLIENT as well as SQL for the server, and the client
+/// runs as root here — one `\! …` line in an imported dump was a root shell.
+///
+/// The login travels in a 0600 option file, never on argv: `/proc/<pid>/
+/// cmdline` is world-readable to every tenant on the node.
+pub async fn restore_mariadb_dump(
+    db_name: &str,
+    login: &DbLogin<'_>,
+    sql_path: &Path,
+) -> Result<(), AdapterError> {
     if !sql_path.exists() {
         return Err(AdapterError::Other(format!(
             "sql dump not found: {}",
             sql_path.display()
         )));
     }
-    let sql_bytes = tokio::fs::read(sql_path).await?;
-    // `--` so a db name beginning with `-` can't become a mariadb client option.
-    crate::cmd::run_with_stdin("/usr/bin/mariadb", &["--", db_name], &sql_bytes).await?;
+    let sql_bytes = strip_definers(&tokio::fs::read(sql_path).await?);
+    let mut opt = tempfile::Builder::new()
+        .prefix("hyperion-dbrestore-")
+        .suffix(".cnf")
+        .tempfile()?;
+    {
+        use std::io::Write;
+        // tempfile creates 0600 with O_EXCL, so nothing else can read it or
+        // have pre-planted it.
+        opt.write_all(mariadb_option_file(login).as_bytes())?;
+        opt.flush()?;
+    }
+    let opt_arg = format!("--defaults-extra-file={}", opt.path().display());
+    // `--defaults-extra-file` must come first; `--` so a db name beginning
+    // with `-` can't become a mariadb client option.
+    crate::cmd::run_with_stdin(
+        "/usr/bin/mariadb",
+        &[&opt_arg, "--binary-mode", "--", db_name],
+        &sql_bytes,
+    )
+    .await?;
     Ok(())
+}
+
+/// `[client]` option-file body for `login`. Values are double-quoted with
+/// `\` and `"` escaped, so a password containing `#`, `;` or a quote is read
+/// back literally rather than truncated as a comment.
+pub(crate) fn mariadb_option_file(login: &DbLogin<'_>) -> String {
+    let q = |v: &str| v.replace('\\', "\\\\").replace('"', "\\\"");
+    format!(
+        "[client]\nuser=\"{}\"\npassword=\"{}\"\n",
+        q(login.user),
+        q(login.password)
+    )
+}
+
+/// Drop the `DEFINER=…` clauses mariadb-dump writes on views, triggers,
+/// routines and events. The restore runs as the hosting's own user, which
+/// may not create an object on behalf of a different account (that needs
+/// SUPER / SET USER) — and the definer of an imported dump is an account on
+/// the SOURCE server anyway. Without the clause the object is defined by the
+/// restoring user, which is the account that owns the database here.
+///
+/// Matched only where mariadb-dump puts it — right after a versioned
+/// comment opener or `CREATE ` — so row data mentioning the word is left
+/// alone.
+pub(crate) fn strip_definers(sql: &[u8]) -> Vec<u8> {
+    static RE: std::sync::OnceLock<regex::bytes::Regex> = std::sync::OnceLock::new();
+    let re = RE.get_or_init(|| {
+        #[allow(clippy::expect_used)]
+        regex::bytes::Regex::new(r"(/\*!5\d{4} |CREATE )DEFINER=`(?:[^`]|``)*`@`(?:[^`]|``)*` ?")
+            .expect("static regex")
+    });
+    re.replace_all(sql, &b"$1"[..]).into_owned()
 }
 
 /// Remote backup destination — FTP/FTPS/SFTP via curl.
@@ -1369,7 +1444,17 @@ pub fn s3_offsite_confirmed(remote: Option<u64>, local: u64, age_encrypted: bool
 }
 
 /// Restore a `pg_dump -Fc` archive (custom format) into `db_name`.
-pub async fn restore_postgres_dump(db_name: &str, dump_path: &Path) -> Result<(), AdapterError> {
+///
+/// Replayed with `--role=<db_user>`: pg_restore connects as `postgres` (peer
+/// auth) but every statement runs as the hosting's own role, so an archive
+/// cannot use superuser powers (`COPY … FROM PROGRAM`, `CREATE ROLE`, other
+/// databases). `--no-owner --no-privileges` because the archive's owners and
+/// grants name roles on the SOURCE server.
+pub async fn restore_postgres_dump(
+    db_name: &str,
+    db_user: &str,
+    dump_path: &Path,
+) -> Result<(), AdapterError> {
     if !dump_path.exists() {
         return Err(AdapterError::Other(format!(
             "pg dump not found: {}",
@@ -1377,6 +1462,7 @@ pub async fn restore_postgres_dump(db_name: &str, dump_path: &Path) -> Result<()
         )));
     }
     let dump_str = dump_path.display().to_string();
+    let role_arg = format!("--role={db_user}");
     cmd::run(
         "/usr/bin/sudo",
         &[
@@ -1385,6 +1471,9 @@ pub async fn restore_postgres_dump(db_name: &str, dump_path: &Path) -> Result<()
             "/usr/bin/pg_restore",
             "--clean",
             "--if-exists",
+            "--no-owner",
+            "--no-privileges",
+            &role_arg,
             "-d",
             db_name,
             &dump_str,
@@ -1403,6 +1492,32 @@ pub fn engine_str(engine: DbProvision) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn definers_are_stripped_where_mariadb_dump_writes_them() {
+        let dump = b"/*!50003 CREATE*/ /*!50017 DEFINER=`old_u`@`localhost`*/ /*!50003 TRIGGER t \
+            BEFORE INSERT ON x FOR EACH ROW SET NEW.a=1 */;;\n\
+            /*!50013 DEFINER=`root`@`%` SQL SECURITY DEFINER */\n\
+            CREATE DEFINER=`we``ird`@`localhost` PROCEDURE p() BEGIN END;;\n\
+            INSERT INTO posts VALUES ('How DEFINER=`a`@`b` works');\n";
+        let out = String::from_utf8(strip_definers(dump)).expect("utf8");
+        assert!(out.contains("/*!50017 */"), "{out}");
+        assert!(out.contains("/*!50013 SQL SECURITY DEFINER */"), "{out}");
+        assert!(out.contains("CREATE PROCEDURE p()"), "{out}");
+        // Row data is not where mariadb-dump puts a definer: left alone.
+        assert!(out.contains("'How DEFINER=`a`@`b` works'"), "{out}");
+    }
+
+    #[test]
+    fn option_file_quotes_the_password() {
+        let f = mariadb_option_file(&DbLogin {
+            user: "lm_abc_u",
+            password: r#"p#a;s"s\w"#,
+        });
+        assert_eq!(
+            f,
+            "[client]\nuser=\"lm_abc_u\"\npassword=\"p#a;s\\\"s\\\\w\"\n"
+        );
+    }
 
     /// A wrong size here would make a good backup look broken, so anything
     /// not recognised must yield None rather than a guess.
