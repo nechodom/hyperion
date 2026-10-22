@@ -30,6 +30,20 @@ pub async fn post_proxy_upstream(
         Err(r) => return Ok(r),
     };
     let sel_url = urlencoding(&form.selector);
+    let upstream = form.upstream_url.trim().to_string();
+    // Below cluster scope, refuse an upstream pointing at this machine or the
+    // private network (SSRF: nginx would fetch e.g. the cloud metadata
+    // endpoint and return it through the tenant's public site).
+    if !ctx.scope_all() {
+        if let Err(msg) = super::reject_internal_url(&upstream).await {
+            return Ok(Redirect::to(&format!(
+                "/hostings/{}?proxy_error={}",
+                sel_url,
+                urlencoding(&msg)
+            ))
+            .into_response());
+        }
+    }
     let target_owned: Option<String> = find_hosting_anywhere(&state, sel.clone())
         .await
         .ok()
@@ -39,7 +53,7 @@ pub async fn post_proxy_upstream(
         target_owned.as_deref(),
         Request::HostingSetProxyUpstream {
             sel,
-            upstream_url: form.upstream_url.trim().to_string(),
+            upstream_url: upstream,
         },
     )
     .await?;

@@ -24,6 +24,18 @@ pub async fn post_wp_staging_create(
         Err(r) => return Ok(r),
     };
     let sel_url = urlencoding(&form.selector);
+    // A staging copy is a NEW hosting the node provisions, so it needs the
+    // create capability, not just manage on the source — otherwise a customer
+    // with only per-hosting WpManage could spin up (unbilled) extra sites,
+    // the same bypass /hostings/transfer closes for Copy.
+    if !ctx.can(Capability::HostingCreate) {
+        return Ok(Redirect::to(&format!(
+            "/hostings/{}?error={}#staging",
+            sel_url,
+            urlencoding("creating a staging site needs the hosting-create permission")
+        ))
+        .into_response());
+    }
     // Effective staging hostname: the freshly-typed value wins; else the
     // saved per-hosting override; else None (the node uses staging.<domain>).
     let staging_override: Option<String> = match form

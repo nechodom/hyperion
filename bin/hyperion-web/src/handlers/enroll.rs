@@ -26,19 +26,9 @@ use std::net::SocketAddr;
 /// which is the safer-default failure mode (over-limit) than the
 /// alternative of no limit at all.
 fn effective_ip(headers: &HeaderMap, peer: SocketAddr) -> std::net::IpAddr {
-    if let Some(v) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-        if let Some(first) = v.split(',').next() {
-            if let Ok(ip) = first.trim().parse() {
-                return ip;
-            }
-        }
-    }
-    if let Some(v) = headers.get("x-real-ip").and_then(|v| v.to_str().ok()) {
-        if let Ok(ip) = v.trim().parse() {
-            return ip;
-        }
-    }
-    peer.ip()
+    // Trust `X-Real-IP` only from a loopback peer (the local nginx); never
+    // the client-appended `X-Forwarded-For`. See `auth::trusted_client_ip`.
+    crate::auth::trusted_client_ip(headers, peer)
 }
 
 /// Charset + length gate for the base64 key material a node reports

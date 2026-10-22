@@ -63,7 +63,9 @@ pub(crate) fn caller_ip(headers: &HeaderMap) -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
-/// Rate-limit bucket key — the REAL connection peer IP, never a header.
+/// Rate-limit bucket key — the real client IP (the loopback-trusted
+/// `X-Real-IP` behind nginx, else the TCP peer), never a client-supplied
+/// `X-Forwarded-For`.
 ///
 /// SECURITY (sec-findings #7): the throttle bucket must key on the immutable
 /// TCP peer, otherwise an attacker rotates `X-Forwarded-For` per request and
@@ -72,8 +74,8 @@ pub(crate) fn caller_ip(headers: &HeaderMap) -> String {
 /// XFF for the bucket; behind a reverse proxy this collapses all clients onto
 /// the proxy's IP — the safe (over-limit) failure mode, and the per-account 2FA
 /// counter in `web_verify_2fa` is the real backstop regardless of topology.
-pub(crate) fn throttle_key(peer: SocketAddr) -> String {
-    peer.ip().to_string()
+pub(crate) fn throttle_key(headers: &HeaderMap, peer: SocketAddr) -> String {
+    crate::auth::trusted_client_ip(headers, peer).to_string()
 }
 
 /// `None` when this peer may try again, else the seconds until its window
@@ -250,7 +252,7 @@ pub async fn post_login(
     // `ip` is the display/audit address; `tkey` is the spoof-proof rate-limit
     // bucket keyed on the real TCP peer (sec-findings #7).
     let ip = caller_ip(&headers);
-    let tkey = throttle_key(peer);
+    let tkey = throttle_key(&headers, peer);
     if let Some(wait) = throttle_wait(&tkey) {
         tracing::warn!(ip = %ip, peer = %tkey, "login throttled");
         // Defense in depth: an IP that keeps hammering AFTER the 429 is a
@@ -597,7 +599,7 @@ pub async fn post_login_2fa(
     // otherwise per-request XFF rotation defeats the limiter. The server-side
     // per-account counter in `web_verify_2fa` is the topology-independent
     // backstop.
-    let tkey = throttle_key(peer);
+    let tkey = throttle_key(&headers_in, peer);
     let backup = form.mode.as_deref() == Some("backup");
     if let Some(wait) = throttle_wait(&tkey) {
         tracing::warn!(peer = %tkey, "2fa verify throttled");
@@ -876,10 +878,16 @@ pub async fn post_logout(State(state): State<SharedState>, ctx: crate::auth::Aut
         )
         .await;
     }
-    let mut headers = HeaderMap::new();
-    headers.insert(header::SET_COOKIE, clear_cookie(&state));
     let mut resp = Redirect::to("/login?notice=signed_out").into_response();
-    resp.headers_mut().extend(headers);
+    // Two Set-Cookie headers: the session cookie and the remember-device
+    // cookie. `extend`/`insert` on a HeaderMap would collapse the second, so
+    // append both onto the response directly.
+    resp.headers_mut()
+        .append(header::SET_COOKIE, clear_cookie(&state));
+    resp.headers_mut().append(
+        header::SET_COOKIE,
+        crate::auth::clear_remember_device_cookie(&state),
+    );
     resp
 }
 

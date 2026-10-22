@@ -2287,19 +2287,30 @@ async fn api_v1_hostings_paginates_and_filters() {
 
 /// GET a /api/v1 path with a Bearer key AND an X-Forwarded-For (the real
 /// client IP behind the nginx panel vhost). Returns (status, body).
-async fn api_get_xff(app: &axum::Router, uri: &str, key: &str, xff: &str) -> (StatusCode, String) {
-    let resp = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri(uri)
-                .header(header::AUTHORIZATION, format!("Bearer {key}"))
-                .header("x-forwarded-for", xff)
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .expect("call");
+async fn api_get_real_ip(
+    app: &axum::Router,
+    uri: &str,
+    key: &str,
+    real_ip: Option<&str>,
+    xff: Option<&str>,
+) -> (StatusCode, String) {
+    let mut b = Request::builder()
+        .uri(uri)
+        .header(header::AUTHORIZATION, format!("Bearer {key}"));
+    if let Some(v) = real_ip {
+        b = b.header("x-real-ip", v);
+    }
+    if let Some(v) = xff {
+        b = b.header("x-forwarded-for", v);
+    }
+    let mut req = b.body(Body::empty()).unwrap();
+    // Production serves with into_make_service_with_connect_info, so every
+    // route sees a loopback peer (the local nginx). MockConnectInfo doesn't
+    // reach this merged sub-router, so set the extension on the request.
+    req.extensions_mut().insert(axum::extract::ConnectInfo(
+        "127.0.0.1:34567".parse::<std::net::SocketAddr>().unwrap(),
+    ));
+    let resp = app.clone().oneshot(req).await.expect("call");
     let status = resp.status();
     (status, body_string(resp).await)
 }
@@ -2317,18 +2328,38 @@ async fn api_v1_ip_allowlist_matches_client_ip() {
     // Key restricted to 10.0.0.0/8.
     let key = seed_key(&sock, owner_id, view, vec!["10.0.0.0/8".into()], 0).await;
 
-    // A client outside the range → 403 before the handler runs.
-    let (st, body) = api_get_xff(&app, "/api/v1/me", &key, "203.0.113.5").await;
+    // The peer is loopback (the local nginx), so the trusted client IP is
+    // X-Real-IP, which nginx sets to the genuine $remote_addr.
+    //
+    // Outside the range → 403 before the handler runs.
+    let (st, body) = api_get_real_ip(&app, "/api/v1/me", &key, Some("203.0.113.5"), None).await;
     assert_eq!(st, StatusCode::FORBIDDEN, "client outside allowlist → 403");
     assert!(body.contains("source IP not allowed"), "reason: {body}");
 
-    // A client inside the range → 200.
-    let (st, _b) = api_get_xff(&app, "/api/v1/me", &key, "10.1.2.3").await;
+    // Inside the range → 200.
+    let (st, _b) = api_get_real_ip(&app, "/api/v1/me", &key, Some("10.1.2.3"), None).await;
     assert_eq!(st, StatusCode::OK, "client inside allowlist → 200");
+
+    // X-Forwarded-For is NOT trusted: an allowlisted value there, with a
+    // non-allowlisted X-Real-IP, must still be refused — otherwise the
+    // allowlist is bypassable by a header anyone can send.
+    let (st, _b) = api_get_real_ip(
+        &app,
+        "/api/v1/me",
+        &key,
+        Some("203.0.113.5"),
+        Some("10.1.2.3"),
+    )
+    .await;
+    assert_eq!(
+        st,
+        StatusCode::FORBIDDEN,
+        "XFF must not satisfy the allowlist"
+    );
 
     // A key with no allowlist ignores the source IP entirely.
     let open = seed_key(&sock, owner_id, view, vec![], 0).await;
-    let (st, _b) = api_get_xff(&app, "/api/v1/me", &open, "203.0.113.5").await;
+    let (st, _b) = api_get_real_ip(&app, "/api/v1/me", &open, Some("203.0.113.5"), None).await;
     assert_eq!(st, StatusCode::OK, "no allowlist → any IP allowed");
 }
 

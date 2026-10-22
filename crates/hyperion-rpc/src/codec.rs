@@ -1291,9 +1291,13 @@ pub enum Request {
         code: String,
     },
     /// Disable 2FA on a user (admin override OR self-disable). Clears
-    /// the secret + enrollment marker + backup codes.
+    /// the secret + enrollment marker + backup codes. `current_password` is
+    /// `Some` for a self-disable and re-verified so a stolen session alone
+    /// cannot strip the second factor; `None` for an admin override.
     Web2faDisable {
         user_id: i64,
+        #[serde(default)]
+        current_password: Option<String>,
     },
     /// Grant a non-admin user access to one hosting at a specific
     /// level (`"read"` for viewer-style, `"manage"` for operator-style).

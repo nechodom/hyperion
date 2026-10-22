@@ -90,6 +90,21 @@ pub async fn post_monitor_set(
     } else {
         Some(form.alert_webhook_url.trim().to_string())
     };
+    // The node POSTs to this URL when the monitor fires. Below cluster scope,
+    // refuse an internal target so a customer cannot turn their own site's
+    // uptime check into a read of the metadata endpoint or an internal service.
+    if !ctx.scope_all() {
+        if let Some(u) = webhook.as_deref() {
+            if let Err(msg) = super::reject_internal_url(u).await {
+                return Ok(Redirect::to(&format!(
+                    "/hostings/{}?error={}#monitor",
+                    urlencoding(&form.selector),
+                    urlencoding(&msg)
+                ))
+                .into_response());
+            }
+        }
+    }
     let resp = crate::dispatcher::dispatch_to_node(
         &state,
         target,

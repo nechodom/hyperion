@@ -224,6 +224,87 @@ fn json_string(s: &str) -> String {
     out
 }
 
+/// Reject a user-supplied URL whose host is, or resolves to, an address on
+/// this machine or the private network — the classic SSRF target set, the
+/// cloud metadata endpoint (169.254.169.254) most of all. Used for the
+/// reverse-proxy upstream and the monitor alert webhook, which a non-admin
+/// customer controls and which make the node connect outward on their behalf.
+///
+/// Best-effort and set-time: it resolves the host now and refuses an internal
+/// result. A determined attacker can still rebind DNS afterwards, so this is
+/// a guard rail against the obvious metadata-credential grab, not a promise;
+/// the real containment is that admins are trusted and tenants are not, which
+/// is why it only applies below cluster scope.
+pub(crate) async fn reject_internal_url(url_str: &str) -> Result<(), String> {
+    let url = url::Url::parse(url_str).map_err(|_| "not a valid URL".to_string())?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err("URL must be http:// or https://".into());
+    }
+    let host = url.host_str().ok_or("URL has no host")?.to_string();
+    // A literal internal IP, or the loopback names, blocked without a lookup.
+    let lc = host.to_ascii_lowercase();
+    if lc == "localhost" || lc.ends_with(".localhost") || lc.ends_with(".internal") {
+        return Err("that host is not allowed (points at this machine)".into());
+    }
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        return if is_blocked_addr(&ip) {
+            Err("that address is not allowed (internal/loopback/link-local)".into())
+        } else {
+            Ok(())
+        };
+    }
+    // A name: resolve it and refuse if ANY answer is internal.
+    let port = url.port_or_known_default().unwrap_or(80);
+    match tokio::net::lookup_host((host.clone(), port)).await {
+        Ok(addrs) => {
+            let mut any = false;
+            for a in addrs {
+                any = true;
+                if is_blocked_addr(&a.ip()) {
+                    return Err(
+                        "that host resolves to an internal address and is not allowed".into(),
+                    );
+                }
+            }
+            if !any {
+                return Err("that host does not resolve".into());
+            }
+            Ok(())
+        }
+        // A name we cannot resolve now is not proof of safety, but blocking
+        // every transient DNS hiccup would be its own outage. Allow it; the
+        // agent-side request still runs under the operator's own network.
+        Err(_) => Ok(()),
+    }
+}
+
+/// Loopback, private (RFC1918 / ULA), link-local (incl. 169.254.0.0/16 and
+/// the IPv6 metadata forms), unspecified, or IPv4-mapped IPv6 of any of
+/// those.
+fn is_blocked_addr(ip: &std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                || v4.octets()[0] == 0
+        }
+        std::net::IpAddr::V6(v6) => {
+            if let Some(m) = v6.to_ipv4_mapped() {
+                return is_blocked_addr(&std::net::IpAddr::V4(m));
+            }
+            v6.is_loopback()
+                || v6.is_unspecified()
+                // ULA fc00::/7
+                || (v6.segments()[0] & 0xfe00) == 0xfc00
+                // link-local fe80::/10
+                || (v6.segments()[0] & 0xffc0) == 0xfe80
+        }
+    }
+}
+
 pub(crate) fn urlencoding(s: &str) -> String {
     url::form_urlencoded::byte_serialize(s.as_bytes()).collect()
 }

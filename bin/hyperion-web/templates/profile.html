@@ -156,6 +156,10 @@
             data-confirm-confirm-label="Turn off 2FA"
             data-confirm-variant="danger">
         <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <label class="field" style="margin:0 0 0.5rem">
+          <span>Confirm your password</span>
+          <input type="password" name="current_password" autocomplete="current-password" required>
+        </label>
         <button class="btn small" type="submit">Turn off 2FA</button>
       </form>
     {% else %}

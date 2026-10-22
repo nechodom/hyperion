@@ -557,6 +557,20 @@ pub fn clear_cookie(state: &SharedState) -> HeaderValue {
     HeaderValue::from_str(&s).unwrap_or(HeaderValue::from_static(""))
 }
 
+/// Expire the remember-device (`*_rd`) cookie — the 30-day token that lets a
+/// returning browser skip the TOTP prompt. Cleared on logout so signing out
+/// of a shared machine does not leave the second factor bypassable there.
+pub fn clear_remember_device_cookie(state: &SharedState) -> HeaderValue {
+    let mut s = format!(
+        "{}_rd=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0",
+        state.cookie_name()
+    );
+    if state.secure_cookies() {
+        s.push_str("; Secure");
+    }
+    HeaderValue::from_str(&s).unwrap_or(HeaderValue::from_static(""))
+}
+
 /// CSRF guard for POST requests. Returns 403 if missing/invalid token.
 ///
 /// The token is accepted from THREE places, in this priority order:
@@ -761,4 +775,72 @@ fn token_source(token: Option<&str>, parts: &Parts) -> &'static str {
         return "query";
     }
     "body"
+}
+
+/// The real client IP, usable for rate-limit buckets and IP allowlists.
+///
+/// hyperion-web listens on loopback behind the bundled nginx, which sets
+/// `X-Real-IP` to `$remote_addr` (the genuine peer) and only ever APPENDS to
+/// `X-Forwarded-For`, whose first element is therefore whatever the client
+/// sent. So trust `X-Real-IP` ONLY when the TCP peer is loopback (i.e. the
+/// request really did come through the local proxy); for any other peer —
+/// a direct connection, or a misconfigured deployment — use the peer address
+/// and ignore both headers. `X-Forwarded-For` is never trusted for a
+/// security decision: it is attacker-controlled on every hop.
+pub(crate) fn trusted_client_ip(
+    headers: &HeaderMap,
+    peer: std::net::SocketAddr,
+) -> std::net::IpAddr {
+    if peer.ip().is_loopback() {
+        if let Some(ip) = headers
+            .get("x-real-ip")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.trim().parse().ok())
+        {
+            return ip;
+        }
+    }
+    peer.ip()
+}
+
+#[cfg(test)]
+mod trusted_ip_tests {
+    use super::trusted_client_ip;
+    use axum::http::HeaderMap;
+    use std::net::SocketAddr;
+
+    fn hdrs(pairs: &[(&str, &str)]) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        for (k, v) in pairs {
+            h.insert(
+                axum::http::HeaderName::from_bytes(k.as_bytes()).unwrap(),
+                v.parse().unwrap(),
+            );
+        }
+        h
+    }
+
+    #[test]
+    fn loopback_peer_trusts_x_real_ip() {
+        let peer: SocketAddr = "127.0.0.1:5".parse().unwrap();
+        let h = hdrs(&[("x-real-ip", "10.1.2.3")]);
+        assert_eq!(trusted_client_ip(&h, peer).to_string(), "10.1.2.3");
+    }
+
+    #[test]
+    fn loopback_peer_ignores_x_forwarded_for() {
+        // XFF is attacker-appended; only X-Real-IP (nginx = $remote_addr) is
+        // trusted. With no X-Real-IP, fall back to the peer, never XFF.
+        let peer: SocketAddr = "127.0.0.1:5".parse().unwrap();
+        let h = hdrs(&[("x-forwarded-for", "10.1.2.3, 9.9.9.9")]);
+        assert_eq!(trusted_client_ip(&h, peer).to_string(), "127.0.0.1");
+    }
+
+    #[test]
+    fn non_loopback_peer_ignores_headers() {
+        // A direct (non-proxied) connection: trust nothing the client sent.
+        let peer: SocketAddr = "203.0.113.7:5".parse().unwrap();
+        let h = hdrs(&[("x-real-ip", "10.1.2.3"), ("x-forwarded-for", "10.0.0.1")]);
+        assert_eq!(trusted_client_ip(&h, peer).to_string(), "203.0.113.7");
+    }
 }

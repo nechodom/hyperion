@@ -1275,7 +1275,10 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
                 Err(e) => Response::Error(e),
             }
         }
-        Request::Web2faDisable { user_id } => match api.web_2fa_disable(user_id).await {
+        Request::Web2faDisable {
+            user_id,
+            current_password,
+        } => match api.web_2fa_disable(user_id, current_password).await {
             Ok(()) => Response::Web2faDisable,
             Err(e) => Response::Error(e),
         },
@@ -3235,7 +3238,7 @@ mod tests {
         async fn web_2fa_confirm_enroll(&self, _: i64, _: String) -> Result<bool, RpcError> {
             Ok(false)
         }
-        async fn web_2fa_disable(&self, _: i64) -> Result<(), RpcError> {
+        async fn web_2fa_disable(&self, _: i64, _: Option<String>) -> Result<(), RpcError> {
             Ok(())
         }
         async fn web_grant_hosting_access(

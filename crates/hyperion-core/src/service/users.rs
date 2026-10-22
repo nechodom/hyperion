@@ -1051,7 +1051,30 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .collect())
     }
 
-    pub async fn web_2fa_disable(&self, user_id: i64) -> Result<(), RpcError> {
+    pub async fn web_2fa_disable(
+        &self,
+        user_id: i64,
+        current_password: Option<String>,
+    ) -> Result<(), RpcError> {
+        // A self-service disable re-verifies the password: a stolen session
+        // must not be able to strip the second factor on its own. An admin
+        // override passes `None` (already authorized at the web layer).
+        if let Some(current) = current_password {
+            let user = hyperion_state::web_users::get_by_id(&self.pool, user_id)
+                .await
+                .map_err(|e| RpcError::Internal_with(format!("get user: {e}")))?
+                .ok_or_else(|| RpcError::NotFound {
+                    kind: "web_user".into(),
+                    id: user_id.to_string(),
+                })?;
+            let ok = hyperion_auth::verify_password(&current, &user.password_hash)
+                .map_err(|e| RpcError::Internal_with(format!("verify: {e}")))?;
+            if !ok {
+                return Err(RpcError::Validation {
+                    message: "current password is incorrect".into(),
+                });
+            }
+        }
         hyperion_state::web_users::set_totp(&self.pool, user_id, None, None, now_secs())
             .await
             .map_err(|e| RpcError::Internal_with(format!("disable: {e}")))?;
