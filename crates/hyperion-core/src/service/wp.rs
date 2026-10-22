@@ -697,7 +697,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         access: &std::path::Path,
         since: i64,
     ) {
-        let Ok(body) = tokio::fs::read_to_string(access).await else {
+        // The site user owns this log: read it no-follow, as a regular file,
+        // and only its last megabyte — a link to /dev/zero or a FIFO, or a
+        // log grown to gigabytes, must not take the protection tick down.
+        let Ok(body) = hyperion_adapters::fs::tail_lines(access, usize::MAX).await else {
             // Unreadable is not calm. It produces no message rather than a
             // reassuring one, and the brute-force coverage stamp above
             // already records what was and was not read.

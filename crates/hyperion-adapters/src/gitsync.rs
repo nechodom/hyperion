@@ -377,9 +377,9 @@ async fn prepare_auth(
             // ssh refuses a key without a trailing newline ("invalid format").
             let mut pem = pem.trim_end().to_string();
             pem.push('\n');
-            write_run_secret(&key, pem.as_bytes(), user).await?;
+            write_run_secret(&key, pem.as_bytes(), user, 0o600).await?;
             let known = format!("{run_dir}/known_hosts");
-            write_run_secret(&known, GITHUB_KNOWN_HOSTS.as_bytes(), user).await?;
+            write_run_secret(&known, GITHUB_KNOWN_HOSTS.as_bytes(), user, 0o600).await?;
             env.push((
                 "GIT_SSH_COMMAND".into(),
                 format!(
@@ -395,13 +395,10 @@ async fn prepare_auth(
             // constant `x-access-token` in the URL. The token reaches the
             // script through a 0600 file the site user owns, never argv.
             let tok_file = format!("{run_dir}/token");
-            write_run_secret(&tok_file, token.trim().as_bytes(), user).await?;
+            write_run_secret(&tok_file, token.trim().as_bytes(), user, 0o600).await?;
             let askpass = format!("{run_dir}/askpass");
             let script = format!("#!/bin/sh\nexec cat {tok_file}\n");
-            write_run_secret(&askpass, script.as_bytes(), user).await?;
-            set_mode(&askpass, 0o700)
-                .await
-                .map_err(|e| AdapterError::Other(format!("askpass mode: {e}")))?;
+            write_run_secret(&askpass, script.as_bytes(), user, 0o700).await?;
             env.push(("GIT_ASKPASS".into(), askpass));
             format!("https://x-access-token@github.com/{}.git", repo.slug())
         }
@@ -679,16 +676,31 @@ fn last_lines(s: &str, n: usize) -> String {
     }
 }
 
-/// Write a per-run secret file 0600 owned by the site user.
-async fn write_run_secret(path: &str, content: &[u8], user: &str) -> Result<(), AdapterError> {
-    tokio::fs::write(path, content)
-        .await
-        .map_err(|e| AdapterError::Other(format!("write run secret: {e}")))?;
-    set_mode(path, 0o600)
-        .await
-        .map_err(|e| AdapterError::Other(format!("run secret mode: {e}")))?;
-    cmd::run("/bin/chown", &["--", user, path]).await?;
-    Ok(())
+/// Write a per-run secret file owned by the site user.
+///
+/// The run directory belongs to the site user while their deploy runs, so
+/// they can place links in it. The file is created fresh (exclusive,
+/// no-follow) and owned and moded through its descriptor; writing it by
+/// name and then chown/chmod-ing that name would follow a link to any file
+/// on the box and hand it to the site user.
+async fn write_run_secret(
+    path: &str,
+    content: &[u8],
+    user: &str,
+    mode: u32,
+) -> Result<(), AdapterError> {
+    let info = crate::users::lookup_raw(user)
+        .await?
+        .ok_or_else(|| AdapterError::Other(format!("no such user: {user}")))?;
+    crate::fs::atomic_write_owned(
+        std::path::Path::new(path),
+        content,
+        mode,
+        info.uid,
+        info.gid,
+    )
+    .await
+    .map_err(|e| AdapterError::Other(format!("write run secret: {e}")))
 }
 
 /// `mkdir -p <dir>` as the site user (so the tree is site-owned from the top).

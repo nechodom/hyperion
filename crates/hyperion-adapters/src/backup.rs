@@ -37,10 +37,19 @@ pub struct BackupOutput {
 
 /// Produce a `tar -czf <archive_path> -C <source_root> <source_subdir>`
 /// archive. Used for htdocs + logs etc.
+///
+/// `run_as`: the account tar READS the tree as — the site's own user for a
+/// hosting backup. The tree belongs to that user, and tar as root would read
+/// through any link they placed in it (another tenant's files, /etc/shadow)
+/// into an archive they can then download. As the owner it reads exactly
+/// what the owner could. The archive itself is written by this process, so
+/// it stays root-owned in the backup root. `None` = this process's own
+/// account (tests, trees not owned by a tenant).
 pub async fn make_archive(
     source_root: &Path,
     source_subdir: &str,
     archive_path: &Path,
+    run_as: Option<&str>,
 ) -> Result<u64, AdapterError> {
     if let Some(parent) = archive_path.parent() {
         if !parent.as_os_str().is_empty() {
@@ -68,16 +77,35 @@ pub async fn make_archive(
     // one for a small one, which is exactly why backups "started failing when
     // the site got big". Treating it as failure threw away a perfectly good
     // archive and told the operator their backup was broken.
-    let out = tokio::process::Command::new("/usr/bin/tar")
-        .args([
-            "-czf",
-            &archive_str,
-            "-C",
-            &source_root_str,
-            "--",
-            source_subdir,
-        ])
-        .output()
+    let mut command = match run_as {
+        Some(user) => {
+            let mut c = tokio::process::Command::new("/usr/bin/sudo");
+            c.args(["-u", user, "--", "/usr/bin/tar"]);
+            // As the owner a stray file the owner cannot read (a root-only
+            // file left in the tree) is skipped with a warning instead of
+            // failing the whole backup. GNU-tar only, which is the deploy
+            // target; the warning is logged below.
+            c.arg("--ignore-failed-read");
+            c.args(["-czf", "-", "-C", &source_root_str, "--", source_subdir]);
+            c
+        }
+        None => {
+            let mut c = tokio::process::Command::new("/usr/bin/tar");
+            c.args(["-czf", "-", "-C", &source_root_str, "--", source_subdir]);
+            c
+        }
+    };
+    // spawn + wait, not `.output()`: that captures stdout itself, and the
+    // archive must stream into the file, not into this process's memory.
+    let out = command
+        // macOS bsdtar packs AppleDouble `._*` sidecars by default; harmless
+        // on the Linux deploy target (GNU tar ignores the var) but it keeps
+        // the archive to exactly the tree on dev machines too.
+        .env("COPYFILE_DISABLE", "1")
+        .stdout(std::fs::File::create(archive_path)?)
+        .stderr(std::process::Stdio::piped())
+        .spawn()?
+        .wait_with_output()
         .await?;
     let code = out.status.code().unwrap_or(-1);
     if code != 0 && code != 1 {
@@ -108,6 +136,17 @@ pub async fn make_archive(
                 .join("; "),
             "tar reported changed files during the archive — expected on a live site; \
              the archive is complete"
+        );
+    }
+    if code == 0 && !out.stderr.is_empty() {
+        tracing::warn!(
+            archive = %archive_str,
+            detail = %String::from_utf8_lossy(&out.stderr)
+                .lines()
+                .take(5)
+                .collect::<Vec<_>>()
+                .join("; "),
+            "tar skipped files it could not read as the site user"
         );
     }
     let meta = tokio::fs::metadata(archive_path).await?;
@@ -264,7 +303,8 @@ pub fn extract_tar_gz_sandboxed(archive: &Path, target_root: &Path) -> Result<u6
     let archive_len = std::fs::metadata(archive)?.len();
     let file = std::fs::File::open(archive)?;
     let gz = flate2::read::GzDecoder::new(file);
-    extract_archive_sandboxed(gz, target_root)?;
+    // A hosting backup only ever contains `htdocs/…`.
+    extract_archive_sandboxed(gz, target_root, Some("htdocs"))?;
     Ok(archive_len)
 }
 
@@ -275,7 +315,7 @@ pub fn extract_tar_gz_sandboxed(archive: &Path, target_root: &Path) -> Result<u6
 pub fn extract_tar_sandboxed(archive: &Path, target_root: &Path) -> Result<u64, AdapterError> {
     let archive_len = std::fs::metadata(archive)?.len();
     let file = std::fs::File::open(archive)?;
-    extract_archive_sandboxed(file, target_root)?;
+    extract_archive_sandboxed(file, target_root, None)?;
     Ok(archive_len)
 }
 
@@ -335,6 +375,7 @@ pub fn read_tar_member(archive: &Path, name: &str, max_bytes: u64) -> Option<Vec
 fn extract_archive_sandboxed<R: std::io::Read>(
     reader: R,
     target_root: &Path,
+    require_prefix: Option<&str>,
 ) -> Result<u64, AdapterError> {
     use std::path::Component;
 
@@ -373,11 +414,43 @@ fn extract_archive_sandboxed<R: std::io::Read>(
                 path.display()
             )));
         }
-        // Symlink/hardlink targets must also stay inside the root.
-        if matches!(
-            entry.header().entry_type(),
-            tar::EntryType::Symlink | tar::EntryType::Link
+        // A hosting backup only ever writes `htdocs/…`, so a restore has no
+        // business creating anything elsewhere in the tree. (The import
+        // bundle has many top-level dirs and passes `None`.) A member outside
+        // the allowed prefix is a crafted archive: refuse the whole thing.
+        if let Some(prefix) = require_prefix {
+            if path != Path::new(prefix) && !path.starts_with(format!("{prefix}/")) {
+                return Err(AdapterError::Other(format!(
+                    "refused archive member outside {prefix}/: {}",
+                    path.display()
+                )));
+            }
+        }
+        // Only regular files, directories and (contained) symlinks. A device,
+        // FIFO, socket or other special member would be CREATED BY ROOT here —
+        // a char/block device node in a tenant tree is a direct path to the
+        // raw disk. Hardlinks are refused outright: a link to a root-owned
+        // file outside the tree gives the tenant write access to it (perms are
+        // not preserved, but the content and inode are shared).
+        let etype = entry.header().entry_type();
+        if !matches!(
+            etype,
+            tar::EntryType::Regular
+                | tar::EntryType::Directory
+                | tar::EntryType::Symlink
+                | tar::EntryType::GNULongName
+                | tar::EntryType::GNULongLink
+                | tar::EntryType::XGlobalHeader
+                | tar::EntryType::XHeader
         ) {
+            return Err(AdapterError::Other(format!(
+                "refused non-regular archive member ({:?}): {}",
+                etype,
+                path.display()
+            )));
+        }
+        // Symlink targets must also stay inside the root.
+        if matches!(etype, tar::EntryType::Symlink | tar::EntryType::Link) {
             if let Ok(Some(link)) = entry.link_name() {
                 if unsafe_component(&link) {
                     return Err(AdapterError::Other(format!(
@@ -1919,6 +1992,66 @@ mod tests {
     }
 
     #[test]
+    fn restore_refuses_a_member_outside_htdocs() {
+        // A hosting restore (the gz path) accepts only `htdocs/…`. A crafted
+        // archive that also carries, say, `.ssh/authorized_keys` is refused
+        // whole, rather than quietly writing the extra member.
+        let d = tempfile::tempdir().expect("dir");
+        let tar = d.path().join("b.tar");
+        build_plain_tar(
+            &tar,
+            &[
+                ("htdocs/index.php", "file", "ok"),
+                (".ssh/authorized_keys", "file", "ssh-ed25519 AAA"),
+            ],
+        );
+        let gz = d.path().join("b.tar.gz");
+        {
+            use std::io::Write;
+            let mut e = flate2::write::GzEncoder::new(
+                std::fs::File::create(&gz).expect("gz"),
+                flate2::Compression::default(),
+            );
+            e.write_all(&std::fs::read(&tar).expect("read tar"))
+                .expect("w");
+            e.finish().expect("finish");
+        }
+        let dest = d.path().join("dest");
+        std::fs::create_dir_all(&dest).expect("dest");
+        let err = extract_tar_gz_sandboxed(&gz, &dest).unwrap_err();
+        assert!(
+            format!("{err:?}").contains("outside htdocs/"),
+            "got: {err:?}"
+        );
+        assert!(!dest.join(".ssh/authorized_keys").exists());
+    }
+
+    #[test]
+    fn restore_refuses_a_device_member() {
+        // A char/block device, FIFO or socket member would be a device node
+        // CREATED BY ROOT inside a tenant tree. Refused.
+        let d = tempfile::tempdir().expect("dir");
+        let tar = d.path().join("b.tar");
+        {
+            let mut b = tar::Builder::new(std::fs::File::create(&tar).expect("tar"));
+            let mut h = tar::Header::new_gnu();
+            h.set_entry_type(tar::EntryType::Char);
+            h.set_size(0);
+            h.set_mode(0o666);
+            h.set_device_major(1).ok();
+            h.set_device_minor(3).ok();
+            h.set_cksum();
+            b.append_data(&mut h, "htdocs/null", std::io::empty())
+                .expect("append");
+            b.finish().expect("finish");
+        }
+        let dest = d.path().join("dest");
+        std::fs::create_dir_all(&dest).expect("dest");
+        let err = extract_tar_sandboxed(&tar, &dest).unwrap_err();
+        assert!(format!("{err:?}").contains("non-regular"), "got: {err:?}");
+    }
+
+    #[test]
     fn extract_tar_sandboxed_rejects_absolute_symlink() {
         let d = tempfile::tempdir().expect("dir");
         let tar = d.path().join("bundle.tar");
@@ -1993,7 +2126,9 @@ mod tests {
         std::fs::create_dir_all(root.join("htdocs")).expect("mkdir");
         std::fs::write(root.join("htdocs/index.php"), b"<?php echo 'hi';").expect("write");
         let archive = d.path().join("out.tar.gz");
-        let bytes = make_archive(&root, "htdocs", &archive).await.expect("tar");
+        let bytes = make_archive(&root, "htdocs", &archive, None)
+            .await
+            .expect("tar");
         assert!(archive.exists());
         assert!(bytes > 0, "non-empty archive");
         let head = std::fs::read(&archive).expect("read")[..2].to_vec();
@@ -2018,7 +2153,7 @@ mod tests {
         std::fs::write(src.join("htdocs/index.php"), b"<?php echo 1;").expect("w");
         std::fs::write(src.join("htdocs/sub/a.txt"), b"hello").expect("w");
         let archive = d.path().join("b.tar.gz");
-        make_archive(&src, "htdocs", &archive)
+        make_archive(&src, "htdocs", &archive, None)
             .await
             .expect("archive");
 
@@ -2127,7 +2262,7 @@ mod large_backup_tests {
                 }
             })
         };
-        let res = make_archive(&src, "htdocs", &archive).await;
+        let res = make_archive(&src, "htdocs", &archive, None).await;
         let _ = changer.join();
 
         // Either tar won the race (exit 0) or it saw the change (exit 1 —
@@ -2151,7 +2286,7 @@ mod large_backup_tests {
     async fn a_missing_source_is_still_an_error() {
         let d = tempfile::tempdir().expect("tmp");
         let archive = d.path().join("out.tar.gz");
-        let err = make_archive(d.path(), "does-not-exist", &archive).await;
+        let err = make_archive(d.path(), "does-not-exist", &archive, None).await;
         assert!(
             err.is_err(),
             "tar failing to find its source must not be reported as a good backup"

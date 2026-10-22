@@ -392,21 +392,46 @@ pub(super) async fn repair_tree_permissions(
         ],
     )
     .await?;
+    // The mode passes run AS the site user, never as root. `chmod` resolves
+    // each name again when it runs, and the tree belongs to the tenant: as
+    // root, a directory swapped for a link between find's listing and the
+    // chmod would widen the modes of whatever the link points at — any file
+    // on the box. As the owner it can only change what the owner could have
+    // changed anyway. After the chown above the owner owns every entry.
     for (typ, mode) in [("d", "0755"), ("f", "0644")] {
-        run(
-            "/usr/bin/find",
-            vec![
-                dir_s.clone(),
-                "-type".into(),
-                typ.into(),
-                "-exec".into(),
-                "/usr/bin/chmod".into(),
-                mode.into(),
-                "{}".into(),
-                "+".into(),
-            ],
-        )
-        .await?;
+        let pass = || {
+            run(
+                "/usr/bin/sudo",
+                vec![
+                    "-u".into(),
+                    user.to_string(),
+                    "--".into(),
+                    "/usr/bin/find".into(),
+                    dir_s.clone(),
+                    "-type".into(),
+                    typ.into(),
+                    "-exec".into(),
+                    "/usr/bin/chmod".into(),
+                    mode.into(),
+                    "{}".into(),
+                    "+".into(),
+                ],
+            )
+        };
+        // A directory the owner cannot enter (0000, 0600 from an archive)
+        // only becomes enterable when the batch that chmods it runs, after
+        // find already failed to descend — so the directory pass repeats
+        // until a pass gets through. Each one opens at least one more level.
+        let mut result = pass().await;
+        if typ == "d" {
+            for _ in 0..8 {
+                if result.is_ok() {
+                    break;
+                }
+                result = pass().await;
+            }
+        }
+        result?;
     }
     hyperion_adapters::fs::ensure_ancestors_traversable(site_dir).await;
 

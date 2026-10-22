@@ -283,10 +283,14 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let host_root = std::path::PathBuf::from(&self.paths.home_root)
             .join(&detail.system_user)
             .join(&detail.domain);
-        let archive_bytes =
-            hyperion_adapters::backup::make_archive(&host_root, "htdocs", &files.archive)
-                .await
-                .map_err(|e| format!("archive: {e}"))?;
+        let archive_bytes = hyperion_adapters::backup::make_archive(
+            &host_root,
+            "htdocs",
+            &files.archive,
+            Some(&detail.system_user),
+        )
+        .await
+        .map_err(|e| format!("archive: {e}"))?;
         self.bump_substep(
             pj,
             subs,
