@@ -11,10 +11,14 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         req.domain = req.domain.without_www();
         let bare = req.domain.as_str().to_string();
         req.aliases.retain(|a| a.as_str() != bare);
-        let user = req
-            .system_user
-            .clone()
-            .or_else(|| SystemUserName::derive_from_domain(req.domain.as_str()).ok());
+        // A site shares an existing account ONLY when the caller named it.
+        // A derived name that is already taken is somebody else's account —
+        // two domains fold onto one name easily (`my-shop.cz`, `my.shop.cz`)
+        // — and attaching to it would run this site's PHP as that tenant.
+        if req.system_user.is_none() {
+            req.system_user = Some(self.free_system_user(&bare).await?);
+        }
+        let user = req.system_user.clone();
         let result = self.create_provision(req).await;
         // A create on an existing system user re-enables it once its row is in
         // (a new online site needs the account). If the create then failed and

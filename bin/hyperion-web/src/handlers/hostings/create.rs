@@ -569,8 +569,16 @@ async fn plan_create(
         "" => None,
         v => Some(DbProvision::from_str(v)?),
     };
+    // Naming the account puts the new site INTO it — same uid, same home,
+    // each able to rewrite the other's files. That is an admin decision:
+    // below admin the name could be any other tenant's.
     let system_user = match form.system_user.trim() {
         "" => None,
+        _ if !ctx.scope_all() => {
+            return Err(
+                "Only an administrator can put a new site into an existing system user.".into(),
+            )
+        }
         v => Some(SystemUserName::parse(v).map_err(|e| e.to_string())?),
     };
     // A "redirect" hosting has no distinct backend kind — it is provisioned

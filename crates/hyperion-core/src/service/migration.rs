@@ -443,11 +443,13 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     }
 
     /// A system user no site on this node has and no account in passwd
-    /// holds, for an imported site. See [`import_user_candidates`] for why
-    /// an import may not share: the account would be the source's (a Copy
-    /// on the same node) or an unrelated site's (a Move or a Copy whose name
-    /// folds onto one already here).
-    pub(super) async fn free_import_user(&self, domain: &str) -> Result<SystemUserName, RpcError> {
+    /// holds: the domain's derived name, or the first free `_<n>` variant.
+    /// Used for every site that did not ask for an account by name. See
+    /// [`import_user_candidates`] for why such a site may not share: the
+    /// account would be the source's (a Copy on the same node) or an
+    /// unrelated site's (any domain whose name folds onto one already here —
+    /// `my-shop.cz` and `my.shop.cz` both derive `my_shop_cz`).
+    pub(super) async fn free_system_user(&self, domain: &str) -> Result<SystemUserName, RpcError> {
         for name in import_user_candidates(domain)? {
             let known = system_users::get_by_name(&self.pool, name.as_str())
                 .await
@@ -1070,7 +1072,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .collect();
         // An account of its own, never whichever one the name folds onto.
         let system_user = self
-            .free_import_user(domain.clone().without_www().as_str())
+            .free_system_user(domain.clone().without_www().as_str())
             .await?;
         let create = HostingCreateReq {
             domain,

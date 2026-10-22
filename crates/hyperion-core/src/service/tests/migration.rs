@@ -158,7 +158,7 @@ async fn prune_migration_bundle_dir_respects_max_age() {
 
 /// The import skips a name a site on this node already has.
 #[tokio::test]
-async fn free_import_user_skips_a_taken_account() {
+async fn free_system_user_skips_a_taken_account() {
     let pool = open_memory().await.expect("open");
     let s = svc(pool.clone(), MockAdapterPort::new());
     system_users::insert(
@@ -171,9 +171,9 @@ async fn free_import_user_skips_a_taken_account() {
     )
     .await
     .expect("user");
-    let got = s.free_import_user("my.shop.cz").await.expect("free");
+    let got = s.free_system_user("my.shop.cz").await.expect("free");
     assert_eq!(got.as_str(), "my_shop_cz_2");
-    let got = s.free_import_user("other.cz").await.expect("free");
+    let got = s.free_system_user("other.cz").await.expect("free");
     assert_eq!(got.as_str(), "other_cz");
 }
 

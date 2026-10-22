@@ -683,6 +683,11 @@ pub async fn post_create(
     // `www.example.cz` is the alias of `example.cz`; normalise before the
     // duplicate guard so it sees the name the hosting will really get.
     body.req.domain = body.req.domain.without_www();
+    // Same rule as the wizard: naming an existing account shares its uid,
+    // which below cluster scope could be any other tenant's.
+    if body.req.system_user.is_some() && !ctx.scope_all() {
+        return validation("system_user may only be set by a cluster-wide key");
+    }
     let domain = body.req.domain.as_str().to_string();
     // Cluster-wide duplicate-domain guard: the same domain on ANOTHER node
     // would create a second vhost and collide in nginx. Mirrors the UI wizard.
