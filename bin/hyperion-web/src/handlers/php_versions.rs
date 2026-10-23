@@ -315,7 +315,8 @@ pub async fn post_php_uninstall(
     let target = node_target(&form.node);
     let prefix = match target.as_deref() {
         Some(id) => format!("node={}&", crate::handlers::jobs::urlencode(id)),
-        None => String::new(),
+        // Named, never bare: /services on a cluster is the overview.
+        None => format!("node={}&", crate::dispatcher::LOCAL_NODE_SENTINEL),
     };
     let resp = crate::dispatcher::dispatch_to_node(
         &state,

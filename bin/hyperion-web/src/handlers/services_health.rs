@@ -97,6 +97,9 @@ pub(crate) struct ServicesView {
     pub tone: &'static str,
     /// One line: "All 9 services running" / "nginx failed · postfix stopped".
     pub verdict: String,
+    /// The rest of the tally beside the verdict, without repeating it:
+    /// "7 running · 4 not installed". Empty when there is nothing to add.
+    pub counts: String,
     /// The probe answered with rows. False = the verdict is "Unknown".
     pub known: bool,
 }
@@ -260,6 +263,20 @@ pub(crate) fn build_view(h: &ServicesHealth, probe_failed: bool, now: i64) -> Se
             .collect::<Vec<_>>()
             .join(" · ");
     }
+    let mut counts = Vec::new();
+    if !problems.is_empty() {
+        let running = v
+            .core
+            .iter()
+            .chain(v.optional.iter())
+            .filter(|r| r.tone == "ok")
+            .count();
+        counts.push(format!("{running} running"));
+    }
+    if !v.not_installed.is_empty() {
+        counts.push(format!("{} not installed", v.not_installed.len()));
+    }
+    v.counts = counts.join(" · ");
     v
 }
 
@@ -1320,6 +1337,7 @@ mod tests {
         assert!(v.known);
         assert_eq!(v.tone, "ok");
         assert_eq!(v.verdict, "All 3 installed services running.");
+        assert_eq!(v.counts, "1 not installed");
         assert_eq!(v.core.len(), 2);
         assert_eq!(v.optional.len(), 1);
         assert_eq!(v.not_installed.len(), 1);
@@ -1339,6 +1357,8 @@ mod tests {
         );
         assert_eq!(v.tone, "err");
         assert_eq!(v.verdict, "nginx failed · postfix stopped");
+        // The tally adds what the verdict leaves out, never repeats it.
+        assert_eq!(v.counts, "1 running");
         // Problem rows float to the top of their group.
         assert_eq!(v.core[0].name, "nginx");
         assert_eq!(v.optional[0].tone, "warn");
@@ -1416,7 +1436,10 @@ mod tests {
         assert!(r.note.as_deref().unwrap().contains("No security fixes"));
         let r = row_for(&svc("php8.1-fpm", true, true, "active"), 0);
         assert!(r.note.as_deref().unwrap().contains("CVE-2026-109618"));
-        assert_eq!(row_for(&svc("php8.3-fpm", true, true, "active"), 0).note, None);
+        assert_eq!(
+            row_for(&svc("php8.3-fpm", true, true, "active"), 0).note,
+            None
+        );
     }
 
     #[test]

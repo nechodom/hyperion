@@ -822,6 +822,11 @@ details.item > summary::-webkit-details-marker { display: none; }
 .svc-verdict.warn .dot { background: var(--warn); }
 .svc-verdict.err .dot  { background: var(--danger); }
 .svc-verdict.err  { color: var(--danger); }
+.svc-verdict .svc-counts { color: var(--text-soft); font-weight: 400; }
+.svc-jump { display: flex; flex-wrap: wrap; gap: 0.2rem 0.9rem; margin-top: 0.4rem; }
+.svc-jump a { color: var(--text-dim); }
+.svc-jump a:hover { color: var(--text); }
+#php-versions, #mail-delivery, #troubleshooting, #svc-health-live { scroll-margin-top: 1rem; }
 details.svc-fold > summary { cursor: pointer; list-style: none; }
 details.svc-fold > summary::-webkit-details-marker { display: none; }
 details.svc-fold > summary::before { content: "▸"; margin-right: 0.2rem; }

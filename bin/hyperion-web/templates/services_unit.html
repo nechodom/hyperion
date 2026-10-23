@@ -12,22 +12,28 @@
   <input type="hidden" name="node" value="{{ current_node }}">
   <input type="hidden" name="action" value="{{ action }}">
   <input type="hidden" name="back" value="unit">
-  <button type="submit" class="btn small{% if variant == "danger" %} danger{% endif %}">{{ label }}</button>
+  <button type="submit" class="btn small{% if variant == "danger" %} danger{% else if action == "start" %} primary{% endif %}">{{ label }}</button>
 </form>
 {% endmacro %}
 
 {% block main %}
+{#- Same crumb trail as the hosting pages: where this unit sits, each step a
+    way back. "All nodes" only exists on a cluster. -#}
+<nav class="breadcrumbs" aria-label="Breadcrumb">
+  {% if clustered %}<a href="/services">Service health</a>
+  <span class="sep">›</span>
+  <a href="/services?node={% if current_node.is_empty() %}local{% else %}{{ current_node }}{% endif %}">{{ current_label }}</a>
+  {% else %}<a href="/services">Service health</a>{% endif %}
+  <span class="sep">›</span>
+  <span>{{ row.label }}</span>
+</nav>
+
 <div class="page-header">
   <div>
     <h1>{{ row.label }} <span class="text-soft" style="font-weight:400;font-size:0.7em">· {{ current_label }}</span></h1>
     <div class="subtitle"><code>{{ row.name }}</code></div>
   </div>
 </div>
-
-<nav class="node-chips" aria-label="Back">
-  {% if clustered %}<a href="/services">All nodes</a>{% endif %}
-  <a href="/services?node={% if current_node.is_empty() %}local{% else %}{{ current_node }}{% endif %}">← Services on {{ current_label }}</a>
-</nav>
 
 {% if let Some(m) = flash %}
   <div class="flash success">

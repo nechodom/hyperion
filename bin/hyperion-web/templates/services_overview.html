@@ -65,4 +65,16 @@
 <p class="text-soft small" style="margin-top:1rem">
   Refreshes every 15 s. Open a node to restart or install services there.
 </p>
+<script>
+(function () {
+  'use strict';
+  // A link to a section of one node's page (#mail-delivery, #php-versions…)
+  // that names no node lands here on a cluster — this overview has none of
+  // those sections. Such links meant the master; take the operator there.
+  var h = location.hash;
+  if (['#mail-delivery', '#php-versions', '#install-progress', '#troubleshooting'].indexOf(h) < 0) return;
+  var q = location.search.replace(/^\?/, '');
+  location.replace('/services?node=local' + (q ? '&' + q : '') + h);
+})();
+</script>
 {% endblock %}

@@ -13,8 +13,8 @@
     {% if let Some(n) = r.note %}<div class="text-soft small">{{ n }}</div>{% endif %}
   </div>
   <span class="pill {{ r.tone }}">{{ r.status }}</span>
-  {% if is_super_admin %}
   <div class="svc-actions">
+    {% if is_super_admin %}
     {% if r.can_start %}
     <form method="post" action="/services/control"
           data-confirm-title="Start {{ r.label }}"
@@ -52,8 +52,10 @@
       <button type="submit" class="btn small primary">Install</button>
     </form>
     {% endif %}
+    {% endif %}
+    {#- The unit page holds the rest: stop, start-at-boot, and the journal. -#}
+    {% if !r.can_install %}<a class="btn small ghost" href="/services/unit?node={{ current_node }}&name={{ r.name }}" aria-label="Details and log for {{ r.label }}">Details</a>{% endif %}
   </div>
-  {% endif %}
 </div>
 {% endmacro %}
 {% block main %}
@@ -61,6 +63,14 @@
   <div>
     <h1>Service health <span class="text-soft" style="font-weight:400;font-size:0.7em">· {{ current_label }}</span></h1>
     <div class="subtitle">systemd units Hyperion depends on, checked live.</div>
+    {#- The page is long — services, then PHP, mail and the rootfs tools.
+        Say what is further down instead of leaving it to be scrolled into. -#}
+    <nav class="svc-jump small" aria-label="On this page">
+      <a href="#svc-health-live">Services</a>
+      <a href="#php-versions">PHP versions</a>
+      <a href="#mail-delivery">Mail delivery</a>
+      {% if is_super_admin %}<a href="#troubleshooting">Troubleshooting</a>{% endif %}
+    </nav>
   </div>
 </div>
 
@@ -104,6 +114,7 @@
   <div class="svc-verdict {{ view.tone }}">
     <span class="dot"></span>
     <span>{{ view.verdict }}</span>
+    {% if view.known %}<span class="svc-counts small">{{ view.counts }}</span>{% endif %}
   </div>
 
   {% if view.known %}
@@ -240,10 +251,21 @@
 {% endif %}
 
 <p class="text-soft small" style="margin-top:1rem">
-  Refreshes every 15 s.
+  Service status refreshes every 15 s.
   {% if is_super_admin %}All actions are audited.{% else %}Restart and install need the super-admin role.{% endif %}
 </p>
 <script>
+(function () {
+  'use strict';
+  // The Troubleshooting fold is a <details>: a jump to it (the link up top,
+  // a bookmark) scrolls to a closed summary line. Open it on the way there.
+  function openFold() {
+    var el = location.hash === '#troubleshooting' && document.getElementById('troubleshooting');
+    if (el) el.open = true;
+  }
+  openFold();
+  window.addEventListener('hashchange', openFold);
+})();
 (function () {
   'use strict';
   // A Mail delivery or PHP versions action redirects to its group's anchor,
