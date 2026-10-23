@@ -8,7 +8,7 @@
 //! worker never starts answering DNS on its own.
 
 use hyperion_core::acme_dns_status::{self, Status};
-use hyperion_core::{acme_dns_answer, AcmeDnsZoneView};
+use hyperion_core::{acme_dns_answer, acme_dns_answer_tcp, AcmeDnsZoneView};
 use sqlx::SqlitePool;
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
@@ -23,12 +23,14 @@ const PORT: u16 = 53;
 const CONFIG_EVERY: Duration = Duration::from_secs(10);
 const ZONE_REFRESH: Duration = Duration::from_secs(1);
 const MAX_UDP: usize = 1232;
-const MAX_TCP: usize = 65535;
 const TCP_MAX_CONNS: usize = 32;
 const TCP_READ_TIMEOUT: Duration = Duration::from_secs(5);
 const RATE_QPS: f64 = 20.0;
 const RATE_BURST: f64 = 40.0;
-/// Past this many tracked sources, idle (already full) buckets are dropped.
+/// Hard cap on tracked sources. At the cap, idle (already full) buckets
+/// are dropped; if that frees too little (a spoofed-source flood), the map
+/// is cleared. Either way the next prune is at least a quarter of the cap
+/// of new sources away, so memory is bounded and the cost O(1) amortised.
 const RATE_MAX_SOURCES: usize = 10_000;
 
 pub fn spawn(pool: SqlitePool) {
@@ -163,6 +165,9 @@ impl RateLimiter {
             self.buckets.retain(|_, (tokens, last)| {
                 *tokens + now.saturating_duration_since(*last).as_secs_f64() * RATE_QPS < RATE_BURST
             });
+            if self.buckets.len() > RATE_MAX_SOURCES * 3 / 4 {
+                self.buckets.clear();
+            }
         }
         let (tokens, last) = self.buckets.entry(ip).or_insert((RATE_BURST, now));
         let refill = now.saturating_duration_since(*last).as_secs_f64() * RATE_QPS;
@@ -317,7 +322,7 @@ async fn serve_tcp_conn(mut stream: TcpStream, ip: IpAddr, shared: &Shared) {
             return;
         }
         let view = shared.view().await;
-        let Some(reply) = acme_dns_answer(&buf[..n], &view, MAX_TCP) else {
+        let Some(reply) = acme_dns_answer_tcp(&buf[..n], &view) else {
             return;
         };
         let Ok(rlen) = u16::try_from(reply.len()) else {
@@ -423,7 +428,7 @@ mod tests {
     }
 
     /// A responder whose zone serves one label with one value; returns the label.
-    async fn seeded_shared() -> (Arc<Shared>, String) {
+    async fn seeded_shared(values: &[String]) -> (Arc<Shared>, String) {
         let pool = hyperion_state::open_memory().await.expect("db");
         let label = hyperion_state::acme_dns::label_ensure(&pool, "example.com", None, 1)
             .await
@@ -431,7 +436,7 @@ mod tests {
         hyperion_state::acme_dns::values_set(
             &pool,
             &label.label,
-            &["challenge-value-1".into()],
+            values,
             hyperion_types::now_secs() + 600,
         )
         .await
@@ -447,7 +452,7 @@ mod tests {
 
     #[tokio::test]
     async fn udp_loop_answers_on_an_ephemeral_port() {
-        let (shared, label) = seeded_shared().await;
+        let (shared, label) = seeded_shared(&["challenge-value-1".into()]).await;
         let sock = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
         let addr = sock.local_addr().expect("addr");
         tokio::spawn(serve_udp(sock, shared));
@@ -477,7 +482,10 @@ mod tests {
 
     #[tokio::test]
     async fn tcp_loop_answers_with_length_framing() {
-        let (shared, label) = seeded_shared().await;
+        // Twenty 43-char values: well over 512 bytes, which is why the
+        // client came over TCP — the reply must not be truncated again.
+        let values: Vec<String> = (0..20).map(|i| format!("{i:0>43}")).collect();
+        let (shared, label) = seeded_shared(&values).await;
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().expect("addr");
         tokio::spawn(serve_tcp(listener, shared));
@@ -491,8 +499,22 @@ mod tests {
         s.read_exact(&mut len).await.expect("reply len");
         let mut reply = vec![0u8; u16::from_be_bytes(len) as usize];
         s.read_exact(&mut reply).await.expect("reply");
-        assert!(reply
-            .windows(b"challenge-value-1".len())
-            .any(|w| w == b"challenge-value-1"));
+        assert!(reply.len() > 512, "{} bytes", reply.len());
+        assert_eq!(reply[2] & 0x02, 0, "TC is clear");
+        assert_eq!(u16::from_be_bytes([reply[6], reply[7]]), 20, "every value");
+        for v in &values {
+            assert!(reply.windows(v.len()).any(|w| w == v.as_bytes()), "{v}");
+        }
+    }
+
+    #[test]
+    fn rate_limiter_map_stays_capped_under_a_source_flood() {
+        let mut l = RateLimiter::new();
+        let t0 = Instant::now();
+        for i in 0..(2 * RATE_MAX_SOURCES as u32) {
+            let ip = IpAddr::V4(std::net::Ipv4Addr::from(0x0a00_0000 + i));
+            assert!(l.allow(ip, t0), "a new source gets its burst");
+            assert!(l.buckets.len() <= RATE_MAX_SOURCES);
+        }
     }
 }

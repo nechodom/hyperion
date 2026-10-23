@@ -50,7 +50,7 @@ pub use hyperion_adapters::fs::ensure_ancestors_traversable;
 
 // The acme-dns responder's packet logic, for the agent's socket loop.
 pub use hyperion_adapters::dns_responder::{
-    answer as acme_dns_answer, ZoneView as AcmeDnsZoneView,
+    answer as acme_dns_answer, answer_tcp as acme_dns_answer_tcp, ZoneView as AcmeDnsZoneView,
 };
 
 // Same pattern — agent calls this at startup to ensure /run/php/<ver>/

@@ -64,6 +64,27 @@ struct Question {
 /// bytes. `max_udp` caps both. A reply over the limit is cut to the header
 /// and question with `tc=1`.
 pub fn answer(query: &[u8], zone: &ZoneView, max_udp: usize) -> Option<Vec<u8>> {
+    answer_on(query, zone, Transport::Udp { max: max_udp })
+}
+
+/// [`answer`] for a query that came over TCP: the 512 / EDNS payload limits
+/// are UDP-only, so the reply may use the whole 2-byte TCP frame. This is
+/// where a client retries after `tc=1`, so clamping here would truncate it
+/// again and resolution would fail.
+pub fn answer_tcp(query: &[u8], zone: &ZoneView) -> Option<Vec<u8>> {
+    answer_on(query, zone, Transport::Tcp)
+}
+
+#[derive(Clone, Copy)]
+enum Transport {
+    Udp { max: usize },
+    Tcp,
+}
+
+/// The UDP payload size a TCP reply's OPT record advertises.
+const TCP_OPT_PAYLOAD: usize = 1232;
+
+fn answer_on(query: &[u8], zone: &ZoneView, transport: Transport) -> Option<Vec<u8>> {
     if query.len() < 12 {
         return None;
     }
@@ -87,10 +108,20 @@ pub fn answer(query: &[u8], zone: &ZoneView, max_udp: usize) -> Option<Vec<u8>> 
     };
 
     let edns = query_opt_payload(query, &q);
-    let limit = edns.map_or(512, |p| p.max(512)).min(max_udp);
-    let lim = Limit {
-        bytes: limit,
-        opt: edns.is_some(),
+    let lim = match transport {
+        Transport::Udp { max } => {
+            let limit = edns.map_or(512, |p| p.max(512)).min(max);
+            Limit {
+                bytes: limit,
+                opt: edns.is_some(),
+                opt_payload: limit,
+            }
+        }
+        Transport::Tcp => Limit {
+            bytes: u16::MAX as usize,
+            opt: edns.is_some(),
+            opt_payload: TCP_OPT_PAYLOAD,
+        },
     };
 
     let Some(rel) = relative(&q.name, &zone.zone) else {
@@ -149,6 +180,8 @@ pub fn answer(query: &[u8], zone: &ZoneView, max_udp: usize) -> Option<Vec<u8>> 
 struct Limit {
     bytes: usize,
     opt: bool,
+    /// What our OPT record advertises (our own UDP payload size).
+    opt_payload: usize,
 }
 
 /// The UDP payload size from the query's OPT record, if it has one.
@@ -310,7 +343,7 @@ fn finish(
         // OPT: root owner, our payload size, extended rcode/version/flags 0.
         out.push(0);
         out.extend_from_slice(&T_OPT.to_be_bytes());
-        out.extend_from_slice(&(lim.bytes.min(u16::MAX as usize) as u16).to_be_bytes());
+        out.extend_from_slice(&(lim.opt_payload.min(u16::MAX as usize) as u16).to_be_bytes());
         out.extend_from_slice(&0u32.to_be_bytes());
         out.extend_from_slice(&0u16.to_be_bytes());
     }
@@ -577,6 +610,24 @@ mod tests {
         let n = query.len();
         query[n - 8..n - 6].copy_from_slice(&payload.to_be_bytes());
         query
+    }
+
+    #[test]
+    fn tcp_reply_is_not_capped_at_512() {
+        let query = without_opt(q("abc123.acme.example.net", T_TXT, false));
+        let r = answer_tcp(&query, &big_view()).unwrap();
+        let p = parse_reply(&r).unwrap();
+        assert!(!p.tc);
+        assert_eq!(p.answers.len(), 20);
+        assert!(r.len() > 512);
+        assert_eq!(count(&r, 3), 0, "no OPT for a non-EDNS client");
+
+        // A tiny advertised payload does not limit TCP either; OPT is echoed.
+        let tiny = with_payload(q("abc123.acme.example.net", T_TXT, false), 100);
+        let r = answer_tcp(&tiny, &big_view()).unwrap();
+        assert!(!parse_reply(&r).unwrap().tc);
+        assert_eq!(count(&r, 3), 1);
+        assert_eq!(&r[r.len() - 8..r.len() - 6], &1232u16.to_be_bytes());
     }
 
     #[test]

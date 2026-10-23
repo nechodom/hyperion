@@ -33528,12 +33528,29 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 }
             }
         }
-        self.acme_dns_config_save(zone, ns_host, public_ipv4, public_ipv6, enabled, &ss)
-            .await
+        let firewall = |open: bool| async move {
+            if open {
+                self.firewall_apply_template("acme-dns").await
+            } else {
+                self.firewall_remove_template("acme-dns").await
+            }
+        };
+        self.acme_dns_config_save(
+            zone,
+            ns_host,
+            public_ipv4,
+            public_ipv6,
+            enabled,
+            &ss,
+            firewall,
+        )
+        .await
     }
 
-    /// [`Self::acme_dns_config_set`] with the `ss` listing passed in.
-    async fn acme_dns_config_save(
+    /// [`Self::acme_dns_config_set`] with the `ss` listing and the firewall
+    /// step (`true` = open the `acme-dns` preset, `false` = close it, as
+    /// `firewall_apply_template` / `firewall_remove_template` answer) passed in.
+    async fn acme_dns_config_save<F, Fut>(
         &self,
         zone: Option<String>,
         ns_host: String,
@@ -33541,7 +33558,12 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         public_ipv6: Option<String>,
         enabled: bool,
         ss: &str,
-    ) -> Result<hyperion_types::AcmeDnsConfig, RpcError> {
+        firewall: F,
+    ) -> Result<hyperion_types::AcmeDnsConfig, RpcError>
+    where
+        F: FnOnce(bool) -> Fut,
+        Fut: std::future::Future<Output = Result<(bool, String, String), RpcError>>,
+    {
         let invalid = |message: String| RpcError::Validation { message };
         let blank = |v: Option<String>| v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
         let zone = match blank(zone) {
@@ -33611,17 +33633,32 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             ns_host,
             public_ipv4,
             public_ipv6,
-            enabled: enabled && holders.is_empty(),
+            // Stored enabled only once the firewall is open: the responder
+            // loop starts from this row.
+            enabled: false,
             check_token,
             listening: Vec::new(),
             last_error: None,
         };
-        hyperion_state::acme_dns::config_put(&self.pool, &cfg)
-            .await
-            .map_err(|e| RpcError::Internal_with(format!("acme-dns config: {e}")))?;
+        let save = |cfg: &hyperion_types::AcmeDnsConfig| {
+            let cfg = cfg.clone();
+            async move {
+                hyperion_state::acme_dns::config_put(&self.pool, &cfg)
+                    .await
+                    .map_err(|e| RpcError::Internal_with(format!("acme-dns config: {e}")))
+            }
+        };
+        save(&cfg).await?;
+        let firewall_error = |r: Result<(bool, String, String), RpcError>| match r {
+            Ok((true, _, _)) => None,
+            Ok((false, _, err)) => Some(err),
+            Err(e) => Some(e.to_string()),
+        };
         if !holders.is_empty() {
             if prev.is_some_and(|p| p.enabled) {
-                let _ = self.firewall_remove_template("acme-dns").await;
+                if let Some(e) = firewall_error(firewall(false).await) {
+                    tracing::warn!(error = %e, "acme-dns: closing port 53 failed");
+                }
             }
             return Err(invalid(format!(
                 "port 53 is already in use ({}); saved the zone with the responder off. \
@@ -33629,13 +33666,20 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 holders.join(", ")
             )));
         }
-        let (ok, _, err) = if cfg.enabled {
-            self.firewall_apply_template("acme-dns").await?
-        } else {
-            self.firewall_remove_template("acme-dns").await?
-        };
-        if !ok {
-            tracing::warn!(error = %err, enabled = cfg.enabled, "acme-dns: firewall preset change failed");
+        if enabled {
+            if let Some(e) = firewall_error(firewall(true).await) {
+                return Err(RpcError::Internal_with(format!(
+                    "could not open port 53 in the firewall ({e}); saved the zone with the \
+                     responder off"
+                )));
+            }
+            cfg.enabled = true;
+            save(&cfg).await?;
+        } else if let Some(e) = firewall_error(firewall(false).await) {
+            return Err(RpcError::Internal_with(format!(
+                "the responder is off, but closing port 53 in the firewall failed, so it \
+                 may still be open: {e}"
+            )));
         }
         let status = crate::acme_dns_status::get();
         cfg.listening = status.listening;
@@ -38718,6 +38762,19 @@ mod acme_dns_tests {
         HostingService::new(pool, Arc::new(MockAdapterPort::new()), secrets)
     }
 
+    /// A firewall step that succeeds (`ok`) or fails like nft does.
+    fn fw(
+        ok: bool,
+    ) -> impl FnOnce(bool) -> std::future::Ready<Result<(bool, String, String), RpcError>> {
+        move |_| {
+            std::future::ready(Ok(if ok {
+                (true, "1 rule(s) added".into(), String::new())
+            } else {
+                (false, String::new(), "nft: Operation not permitted".into())
+            }))
+        }
+    }
+
     const NAMED: &str = "UNCONN 0 0 203.0.113.5:53 0.0.0.0:* users:((\"named\",pid=1,fd=5))\n";
 
     #[tokio::test]
@@ -38731,6 +38788,7 @@ mod acme_dns_tests {
                 None,
                 true,
                 NAMED,
+                fw(true),
             )
             .await
             .expect_err("port 53 is held by named");
@@ -38753,6 +38811,7 @@ mod acme_dns_tests {
                     None,
                     true,
                     "",
+                    fw(true),
                 )
                 .await
                 .expect_err("ns inside the zone");
@@ -38770,7 +38829,7 @@ mod acme_dns_tests {
     async fn check_token_is_generated_once() {
         let s = svc().await;
         let a = s
-            .acme_dns_config_save(None, String::new(), None, None, false, "")
+            .acme_dns_config_save(None, String::new(), None, None, false, "", fw(true))
             .await
             .expect("save");
         let b = s
@@ -38781,11 +38840,58 @@ mod acme_dns_tests {
                 None,
                 false,
                 "",
+                fw(true),
             )
             .await
             .expect("save");
         assert_eq!(a.check_token.len(), 32);
         assert_eq!(a.check_token, b.check_token);
+    }
+
+    async fn save(
+        s: &HostingService<MockAdapterPort>,
+        enabled: bool,
+        firewall_ok: bool,
+    ) -> Result<hyperion_types::AcmeDnsConfig, RpcError> {
+        s.acme_dns_config_save(
+            Some("acme.panel.example".into()),
+            "ns-acme.panel.example".into(),
+            None,
+            None,
+            enabled,
+            "",
+            fw(firewall_ok),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn enable_succeeds_once_the_firewall_is_open() {
+        let s = svc().await;
+        assert!(save(&s, true, true).await.expect("enable").enabled);
+        assert!(s.acme_dns_config_get().await.expect("get").enabled);
+    }
+
+    #[tokio::test]
+    async fn enable_fails_closed_when_the_firewall_preset_fails() {
+        let s = svc().await;
+        let err = save(&s, true, false).await.expect_err("nft failed");
+        assert!(err.to_string().contains("Operation not permitted"), "{err}");
+        assert!(!s.acme_dns_config_get().await.expect("get").enabled);
+    }
+
+    #[tokio::test]
+    async fn disable_reports_a_failed_firewall_removal() {
+        let s = svc().await;
+        save(&s, true, true).await.expect("enable");
+        let err = save(&s, false, false).await.expect_err("nft failed");
+        let msg = err.to_string();
+        assert!(msg.contains("may still be open"), "{msg}");
+        assert!(msg.contains("Operation not permitted"), "{msg}");
+        assert!(
+            !s.acme_dns_config_get().await.expect("get").enabled,
+            "the responder is off even though the port could not be closed"
+        );
     }
 
     #[test]
