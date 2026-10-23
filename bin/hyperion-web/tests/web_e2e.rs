@@ -5000,6 +5000,89 @@ async fn acme_dns_settings_forbidden_for_customer() {
     }
 }
 
+/// A custom role with every hosting's certificates but no global
+/// settings may not change the delegated zone either: the zone lives on
+/// Settings -> HTTPS, which needs `SettingsManage`.
+#[tokio::test]
+async fn acme_dns_settings_need_settings_manage() {
+    use hyperion_rpc::codec::{Request as RpcReq, Response as RpcResp};
+    use hyperion_state::capabilities::Capability;
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d) = start_agent().await;
+    let app = build_app(sock.clone(), admin);
+    let role_id = match hyperion_rpc_client::call(
+        &sock,
+        RpcReq::RoleCreate {
+            name: "cert-only".into(),
+            capabilities: Capability::CertManage.bit() | Capability::HostingView.bit(),
+            scope_all: true,
+        },
+    )
+    .await
+    .expect("role")
+    {
+        RpcResp::RoleCreate { id } => id,
+        other => panic!("unexpected role create: {other:?}"),
+    };
+    let user_id = match hyperion_rpc_client::call(
+        &sock,
+        RpcReq::WebUserCreate {
+            username: "certs".into(),
+            email: "certs@example.invalid".into(),
+            password: "certs-pw-12345".into(),
+            role: "operator".into(),
+        },
+    )
+    .await
+    .expect("user")
+    {
+        RpcResp::WebUserCreate { id } => id,
+        other => panic!("unexpected user create: {other:?}"),
+    };
+    match hyperion_rpc_client::call(
+        &sock,
+        RpcReq::WebUserSetCustomRole {
+            user_id,
+            custom_role_id: role_id,
+        },
+    )
+    .await
+    .expect("assign")
+    {
+        RpcResp::WebUserSetCustomRole => {}
+        other => panic!("unexpected assign: {other:?}"),
+    }
+    let cookie = acme_dns_login(&app, "certs", "certs-pw-12345").await;
+    let (_, profile) = acme_dns_get(&app, &cookie, "/profile").await;
+    let csrf = extract_csrf(&profile);
+    for uri in ["/settings/https/acme-dns", "/settings/https/acme-dns/check"] {
+        let resp = acme_dns_post(
+            &app,
+            &cookie,
+            uri,
+            format!(
+                "_csrf={}&zone=acme.example.com&ns_host=ns.example.com",
+                enc(&csrf)
+            ),
+        )
+        .await;
+        let status = resp.status();
+        let body = body_string(resp).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{uri}: {body}");
+        assert!(
+            !body.contains("CSRF check failed"),
+            "{uri}: refused by CSRF"
+        );
+    }
+    match hyperion_rpc_client::call(&sock, RpcReq::AcmeDnsConfigGet)
+        .await
+        .expect("config")
+    {
+        RpcResp::AcmeDnsConfig(c) => assert_eq!(c.zone, None, "the zone was saved"),
+        other => panic!("unexpected config: {other:?}"),
+    }
+}
+
 // ─── Automatic wildcard renewal from the SSL tab ────────────────────────
 
 /// Seed one hosting through the agent and return its id.

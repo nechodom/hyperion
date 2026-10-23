@@ -19,9 +19,10 @@ use std::time::Duration;
 const CHECK_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// May this user see and change the delegated zone? Tenant roles hold
-/// `CertManage` for their own hostings, hence the all-hostings scope.
+/// `CertManage` for their own hostings, hence the all-hostings scope; the
+/// zone is a global setting on Settings -> HTTPS, hence `SettingsManage`.
 pub fn allowed(ctx: &AuthCtx) -> bool {
-    ctx.can(Capability::CertManage) && ctx.scope_all()
+    ctx.can(Capability::CertManage) && ctx.scope_all() && ctx.can(Capability::SettingsManage)
 }
 
 /// One DNS record the operator adds in the parent zone.
