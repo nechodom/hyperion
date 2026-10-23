@@ -162,17 +162,23 @@ keep using HTTP-01.
 
 ### One-time setup (per cluster)
 
-1. Settings → HTTPS → **Automatic wildcard renewal**: enter the zone
-   (default suggestion `acme.<panel domain>`) and enable it.
-2. At the DNS provider of the parent zone add the records the card shows:
+1. Settings → HTTPS → **Automatic wildcard renewal** (admin only, since it
+   affects all hostings): enter the zone (default suggestion
+   `acme.<panel host>`) and enable it.
+2. Add the records the card shows. Each record goes in the DNS zone its own
+   name belongs to, so for a panel at `panel.example.com`:
    ```
-   acme.panel.example.      NS    ns-acme.panel.example.
-   ns-acme.panel.example.   A     <master public IPv4>
-   ns-acme.panel.example.   AAAA  <master public IPv6>   ; only if the master has one
+   acme.panel.example.com.   NS    ns-acme.example.com.      ; in the zone that serves panel.example.com
+   ns-acme.example.com.      A     <master public IPv4>      ; in the zone example.com
+   ns-acme.example.com.      AAAA  <master public IPv6>      ; only if the master has one
    ```
-3. Press **Check**. States: *not set up*, *delegation missing* (the zone is
-   not delegated to this panel yet), *points elsewhere* (it is delegated to
-   another panel or server), *working*.
+   The NS host is `ns-acme.<parent of the panel host>`, so the NS record and
+   the glue A/AAAA can live in different zones, possibly at different DNS
+   providers.
+3. Press **Check delegation**. States: *not set up*, *delegation missing*
+   (the zone is not delegated to this panel yet), *points elsewhere* (it is
+   delegated to another panel or server), *could not be checked* (the lookup
+   itself failed; retry), *working*.
 
 Enabling starts the responder on the master only and opens port 53 udp+tcp in
 the firewall; disabling closes both. Worker nodes never serve DNS. The
@@ -181,7 +187,7 @@ everything else, and rate-limits per source address.
 
 ### Per wildcard
 
-1. Hosting → SSL tab → **Set up automatic renewal**. The panel shows the
+1. Hosting → **Domains & SSL** tab → **Wildcard renewal** block → **Set up automatic renewal**. The panel shows the
    challenge name and the CNAME target; give that record to the customer.
 2. Once the CNAME is seen, issuing the wildcard is one button (no TXT
    copying) and renewal is automatic from then on.
@@ -194,14 +200,15 @@ standing permission for the panel to obtain certificates for that name.
 
 ### Troubleshooting
 
-- **Port 53 is held.** Enabling fails and names the process holding it
-  (bind9, dnsmasq, unbound, ...). Stop it, or bind it to loopback only. The
+- **Port 53 is held.** The zone is saved but the responder stays off, and the
+  message names the process holding the port (`named` for BIND, dnsmasq,
+  unbound, ...). Stop it, or bind it to loopback only, then enable again. The
   responder binds each non-loopback address, not `0.0.0.0`, so
   systemd-resolved's stub on 127.0.0.53 does not conflict.
 - **"delegation missing" / "points elsewhere".** The NS or glue record at the
   parent zone is absent, wrong, or not propagated yet. Re-check with
   `dig NS <zone>` and the staging checklist below.
-- **CNAME problems.** The SSL tab states what it saw: CNAME missing, CNAME
+- **CNAME problems.** The Wildcard renewal block states what it saw: CNAME missing, CNAME
   points elsewhere (wrong label), or a plain TXT left over from manual
   issuance at the name (replace it with the CNAME). Before every order the
   master re-probes the CNAME and skips the order if it is wrong, so a removed
@@ -214,8 +221,7 @@ standing permission for the panel to obtain certificates for that name.
 - **Alerts.** An automatic attempt that fails alerts with the reason (zone
   delegation broken, CNAME missing, Let's Encrypt error). A broken zone
   (daily self-check) raises one admin alert, since it breaks every delegated
-  wildcard at once. A wildcard with 14 days or fewer left always alerts,
-  whatever its state.
+  wildcard at once. A wildcard with 14 days or fewer left always alerts.
 - **Stale values.** TXT values are cleared after each attempt and expire on
   their own after 24 h, so a crash cannot leave them served forever.
 - **Removing a hosting.** Purging a hosting deletes its label and the
@@ -223,7 +229,7 @@ standing permission for the panel to obtain certificates for that name.
   Trash keeps the label so a restore keeps working. Suspended hostings renew
   too and stay suspended.
 
-### Verify on staging before relying on it
+### Verify DNS before relying on it
 
 With `<master-ip>`, `<zone>`, `<label>` and `<base>` filled in:
 
@@ -234,6 +240,9 @@ dig +norec @<master-ip> TXT example.org          # status: REFUSED (out of zone)
 dig +tcp @<master-ip> TXT <label>.<zone>         # TCP works; NOERROR, empty between renewals
 dig TXT _acme-challenge.<base>                   # public resolver follows the CNAME into <zone>
 ```
+
+An end-to-end issuance against Let's Encrypt staging on a test domain is still
+recommended before relying on it in production.
 
 ## Logs
 
