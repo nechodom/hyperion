@@ -96,7 +96,7 @@ pub fn suggested_ns_host(panel_host: &str) -> String {
     format!("ns-acme.{parent}")
 }
 
-/// The records that delegate `zone` to this server: NS at the zone, glue
+/// The records that delegate `zone` to this server: NS at the zone, address
 /// A/AAAA for the NS host. Empty until both names are known.
 pub fn records(zone: &str, ns_host: &str, v4: &str, v6: &str) -> Vec<AcmeRecord> {
     let (zone, ns_host) = (zone.trim(), ns_host.trim());

@@ -172,9 +172,10 @@ keep using HTTP-01.
    ns-acme.example.com.      A     <master public IPv4>      ; in the zone example.com
    ns-acme.example.com.      AAAA  <master public IPv6>      ; only if the master has one
    ```
-   The NS host is `ns-acme.<parent of the panel host>`, so the NS record and
-   the glue A/AAAA can live in different zones, possibly at different DNS
-   providers.
+   The NS host is `ns-acme.<parent of the panel host>`, outside the
+   delegated zone, so its A/AAAA are ordinary address records (not glue):
+   the NS record and the address records can live in different zones,
+   possibly at different DNS providers.
 3. Press **Check delegation**. States: *not set up*, *delegation missing*
    (the zone is not delegated to this panel yet), *points elsewhere* (it is
    delegated to another panel or server), *could not be checked* (the lookup
@@ -205,9 +206,10 @@ standing permission for the panel to obtain certificates for that name.
   unbound, ...). Stop it, or bind it to loopback only, then enable again. The
   responder binds each non-loopback address, not `0.0.0.0`, so
   systemd-resolved's stub on 127.0.0.53 does not conflict.
-- **"delegation missing" / "points elsewhere".** The NS or glue record at the
-  parent zone is absent, wrong, or not propagated yet. Re-check with
-  `dig NS <zone>` and the staging checklist below.
+- **"delegation missing" / "points elsewhere".** The NS record at the
+  parent zone, or the NS host's address records, are absent, wrong, or not
+  propagated yet. Re-check with `dig NS <zone>` and the steps under "Verify
+  DNS before relying on it" below.
 - **CNAME problems.** The Wildcard renewal block states what it saw: CNAME missing, CNAME
   points elsewhere (wrong label), or a plain TXT left over from manual
   issuance at the name (replace it with the CNAME). Before every order the
