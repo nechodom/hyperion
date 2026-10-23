@@ -8,8 +8,9 @@
 //! master's responder, wait until the public resolvers see them, then
 //! finish fail-closed. The values are withdrawn whatever happens.
 //!
-//! Only the master runs this: it holds the responder and the labels, and
-//! it is the only node that can sign RPCs to the workers.
+//! Only the panel box runs this (a master, or a standalone panel with no
+//! nodes yet): it holds the responder and the labels, and it is the only
+//! node that can sign RPCs to the workers.
 
 use crate::dispatcher::{DispatchError, LOCAL_NODE_SENTINEL};
 use crate::state::SharedState;
@@ -92,12 +93,19 @@ fn local_or(node: Option<&str>) -> Option<String> {
         .map(str::to_string)
 }
 
+/// The panel box: a master, or a standalone panel (no nodes yet), which
+/// holds the responder and the labels all the same. Anything else (a
+/// worker) never renews.
+fn panel_box(mode: &str) -> bool {
+    matches!(mode, "master" | "standalone")
+}
+
 /// One daily pass: every due delegated wildcard, then the delegated flag on
 /// each cert brought in line with its label. Returns `(domain, outcome)`
-/// per renewal attempted. Does nothing off the master or with the zone
+/// per renewal attempted. Does nothing off the panel box or with the zone
 /// disabled.
 pub async fn run_once(state: &SharedState) -> Vec<(String, Result<(), String>)> {
-    if state.deployment_mode.read().await.as_str() != "master" {
+    if !panel_box(state.deployment_mode.read().await.as_str()) {
         return Vec::new();
     }
     run_once_with(&Live(state)).await
@@ -107,12 +115,12 @@ pub async fn run_once(state: &SharedState) -> Vec<(String, Result<(), String>)> 
 /// disabled), prove the zone delegation, then CNAME check, begin, publish,
 /// wait for public visibility, strict finish, withdraw, report. Ignores
 /// the renewal window, so it also serves a first issuance. Refused off the
-/// master, and while another renewal of the same label is running. Once
+/// panel box, and while another renewal of the same label is running. Once
 /// the pre-flight passed, the outcome is reported to the master agent
 /// (audit, and an alert on failure) as well as returned.
 pub async fn renew_one(state: &SharedState, due: &DueCert) -> Result<(), String> {
-    if state.deployment_mode.read().await.as_str() != "master" {
-        return Err("automatic wildcard renewal runs on the master only".into());
+    if !panel_box(state.deployment_mode.read().await.as_str()) {
+        return Err("automatic wildcard renewal runs on the panel only".into());
     }
     renew_one_with(&Live(state), due, None).await
 }
@@ -934,6 +942,16 @@ mod tests {
             not_after: chrono::Utc::now().timestamp() + 90 * 86400,
             fingerprint_sha256: "ff".into(),
         }
+    }
+
+    #[test]
+    fn runs_on_a_standalone_panel_as_on_a_master() {
+        // A panel with no nodes records `standalone`; it holds the
+        // responder and the labels just the same.
+        assert!(panel_box("standalone"));
+        assert!(panel_box("master"));
+        assert!(!panel_box("worker"));
+        assert!(!panel_box(""));
     }
 
     #[test]
