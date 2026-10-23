@@ -101,15 +101,50 @@ pub async fn run_once(state: &SharedState) -> Vec<(String, Result<(), String>)> 
     run_once_with(&Live(state)).await
 }
 
-/// Renew one delegated wildcard now (steps: CNAME check, begin, publish,
-/// wait for public visibility, strict finish, withdraw, report). Ignores
-/// the renewal window, so it also serves a first issuance. `zone` is the
-/// configured acme zone (`AcmeDnsConfig::zone`). The outcome is reported
-/// to the master agent (audit, and an alert on failure) as well as
-/// returned.
-pub async fn renew_one(state: &SharedState, zone: &str, due: &DueCert) -> Result<(), String> {
-    renew_one_with(&Live(state), zone, due).await
+/// Renew one delegated wildcard now: read the acme-dns config (refused when
+/// disabled), prove the zone delegation, then CNAME check, begin, publish,
+/// wait for public visibility, strict finish, withdraw, report. Ignores
+/// the renewal window, so it also serves a first issuance. Refused off the
+/// master, and while another renewal of the same label is running. Once
+/// the pre-flight passed, the outcome is reported to the master agent
+/// (audit, and an alert on failure) as well as returned.
+pub async fn renew_one(state: &SharedState, due: &DueCert) -> Result<(), String> {
+    if state.deployment_mode.read().await.as_str() != "master" {
+        return Err("automatic wildcard renewal runs on the master only".into());
+    }
+    renew_one_with(&Live(state), due, None).await
 }
+
+/// Labels with a renewal in progress. `AcmeDnsValuesSet` replaces a
+/// label's values and `AcmeDnsValuesClear` drops them, so two orders on one
+/// label would withdraw each other's values while the CA validates.
+#[derive(Default)]
+struct InFlight(std::sync::Mutex<std::collections::HashSet<String>>);
+
+/// Holds one label in [`InFlight`] until dropped.
+struct Claim<'a> {
+    set: &'a InFlight,
+    key: String,
+}
+
+impl InFlight {
+    fn claim(&self, key: &str) -> Option<Claim<'_>> {
+        let mut set = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        set.insert(key.to_string()).then(|| Claim {
+            set: self,
+            key: key.to_string(),
+        })
+    }
+}
+
+impl Drop for Claim<'_> {
+    fn drop(&mut self) {
+        let mut set = self.set.0.lock().unwrap_or_else(|p| p.into_inner());
+        set.remove(&self.key);
+    }
+}
+
+static IN_FLIGHT: std::sync::LazyLock<InFlight> = std::sync::LazyLock::new(InFlight::default);
 
 /// First run 10 minutes after start, then daily.
 pub fn spawn(state: SharedState) {
@@ -141,6 +176,7 @@ trait Backend: Send + Sync {
     async fn cname(&self, name: &str, target: &str) -> Result<(), CnameProblem>;
     async fn txt_visible(&self, name: &str, values: &[String]) -> Result<(), String>;
     async fn pause(&self, d: Duration);
+    fn in_flight(&self) -> &InFlight;
 }
 
 struct Live<'a>(&'a SharedState);
@@ -171,6 +207,27 @@ impl Backend for Live<'_> {
     async fn pause(&self, d: Duration) {
         tokio::time::sleep(d).await;
     }
+    fn in_flight(&self) -> &InFlight {
+        &IN_FLIGHT
+    }
+}
+
+/// Send a master-local side-effect request; `Err` carries why it did not
+/// take, already logged.
+async fn confirm<B: Backend>(b: &B, req: Request, ok: fn(&Response) -> bool) -> Result<(), String> {
+    let what = <&'static str>::from(&req);
+    let outcome = match b.dispatch(None, req).await {
+        Ok(r) if ok(&r) => return Ok(()),
+        Ok(Response::Error(e)) => e.to_string(),
+        Ok(other) => format!("unexpected answer {other:?}"),
+        Err(e) => e.to_string(),
+    };
+    tracing::warn!(
+        request = what,
+        error = outcome,
+        "acme-dns: master agent did not apply"
+    );
+    Err(outcome)
 }
 
 /// Every cert in the cluster, tagged with its owning node (`None` = the
@@ -196,32 +253,46 @@ async fn gather<B: Backend>(b: &B) -> Vec<(Option<String>, CertOverviewItem)> {
             Ok(Response::CertOverview(items)) => {
                 all.extend(items.into_iter().map(|i| (Some(id.clone()), i)))
             }
-            Ok(other) => tracing::debug!(node = id, ?other, "acme-dns: cert overview refused"),
-            Err(e) => tracing::debug!(node = id, error = %e, "acme-dns: cert overview failed"),
+            Ok(other) => tracing::warn!(node = id, ?other, "acme-dns: cert overview refused"),
+            Err(e) => tracing::warn!(node = id, error = %e, "acme-dns: cert overview failed"),
         }
     }
     all
 }
 
-async fn run_once_with<B: Backend>(b: &B) -> Vec<(String, Result<(), String>)> {
+/// The configured zone and its check token; `None` while acme-dns is
+/// disabled.
+async fn enabled_zone<B: Backend>(b: &B) -> Result<Option<(String, String)>, String> {
     let config = match b.dispatch(None, Request::AcmeDnsConfigGet).await {
         Ok(Response::AcmeDnsConfig(c)) => c,
-        other => {
-            tracing::warn!(?other, "acme-dns: config not readable");
+        Ok(Response::Error(e)) => return Err(format!("reading the acme-dns config: {e}")),
+        Ok(other) => {
+            return Err(format!(
+                "reading the acme-dns config: unexpected answer {other:?}"
+            ))
+        }
+        Err(e) => return Err(format!("reading the acme-dns config: {e}")),
+    };
+    match config.zone {
+        Some(z) if config.enabled && !z.is_empty() => Ok(Some((z, config.check_token))),
+        _ => Ok(None),
+    }
+}
+
+async fn run_once_with<B: Backend>(b: &B) -> Vec<(String, Result<(), String>)> {
+    let (zone, check_token) = match enabled_zone(b).await {
+        Ok(Some(z)) => z,
+        Ok(None) => return Vec::new(),
+        Err(e) => {
+            tracing::warn!(error = e, "acme-dns: renewal skipped");
             return Vec::new();
         }
     };
-    let zone = match config.zone {
-        Some(z) if config.enabled && !z.is_empty() => z,
-        _ => return Vec::new(),
-    };
-    if let Err(detail) = b.zone_delegated(&zone, &config.check_token).await {
-        if let Err(e) = b
-            .dispatch(None, Request::AcmeDnsZoneBroken { detail })
-            .await
-        {
-            tracing::warn!(error = %e, "acme-dns: zone alert not delivered");
-        }
+    if let Err(detail) = b.zone_delegated(&zone, &check_token).await {
+        let _ = confirm(b, Request::AcmeDnsZoneBroken { detail }, |r| {
+            matches!(r, Response::AcmeDnsZoneBroken)
+        })
+        .await;
         return Vec::new();
     }
     let items = gather(b).await;
@@ -233,7 +304,7 @@ async fn run_once_with<B: Backend>(b: &B) -> Vec<(String, Result<(), String>)> {
     );
     let mut results = Vec::with_capacity(due.len());
     for d in &due {
-        results.push((d.domain.clone(), renew_one_with(b, &zone, d).await));
+        results.push((d.domain.clone(), renew_one_with(b, d, Some(&zone)).await));
     }
     // The CNAME checks above moved some labels' verified stamps.
     sync_delegated(b, &items, &labels_after(b, due.is_empty(), labels).await).await;
@@ -292,7 +363,7 @@ async fn sync_delegated<B: Backend>(
                 .await
             {
                 Ok(Response::CertSetDelegated) => {}
-                other => tracing::debug!(
+                other => tracing::warn!(
                     ?node,
                     domain = item.domain,
                     ?other,
@@ -303,9 +374,22 @@ async fn sync_delegated<B: Backend>(
     }
 }
 
-async fn renew_one_with<B: Backend>(b: &B, zone: &str, due: &DueCert) -> Result<(), String> {
-    let outcome = attempt(b, zone, due).await;
-    let (ok, detail, days_left) = match &outcome {
+/// One cert, end to end. `verified_zone` = the zone this run already
+/// proved delegated; `None` reads the config and probes it first.
+async fn renew_one_with<B: Backend>(
+    b: &B,
+    due: &DueCert,
+    verified_zone: Option<&str>,
+) -> Result<(), String> {
+    let Some(_claim) = b.in_flight().claim(&due.label.label) else {
+        return Err(format!("a renewal for {} is already running", due.domain));
+    };
+    let zone = match verified_zone {
+        Some(z) => z.to_string(),
+        None => preflight(b).await?,
+    };
+    let (outcome, not_withdrawn) = attempt(b, &zone, due).await;
+    let (ok, mut detail, days_left) = match &outcome {
         Ok(Some(days)) => (
             true,
             "renewed over the delegated acme zone".to_string(),
@@ -318,6 +402,9 @@ async fn renew_one_with<B: Backend>(b: &B, zone: &str, due: &DueCert) -> Result<
         ),
         Err(e) => (false, e.clone(), due.days_left),
     };
+    if let Some(why) = not_withdrawn {
+        detail.push_str(&format!(" (TXT values not withdrawn: {why})"));
+    }
     let report = Request::AcmeDnsRenewReport {
         domain: due.domain.clone(),
         node_id: due.node_id.clone().unwrap_or_default(),
@@ -325,16 +412,85 @@ async fn renew_one_with<B: Backend>(b: &B, zone: &str, due: &DueCert) -> Result<
         detail,
         days_left,
     };
-    if let Err(e) = b.dispatch(None, report).await {
-        tracing::warn!(domain = due.domain, error = %e, "acme-dns: renewal report not delivered");
-    }
+    let _ = confirm(b, report, |r| matches!(r, Response::AcmeDnsRenewReport)).await;
     outcome.map(|_| ())
+}
+
+/// No order unless acme-dns is enabled and its zone provably delegated to
+/// this panel. Returns the zone.
+async fn preflight<B: Backend>(b: &B) -> Result<String, String> {
+    let (zone, check_token) = enabled_zone(b)
+        .await?
+        .ok_or("the delegated acme zone is not enabled")?;
+    b.zone_delegated(&zone, &check_token)
+        .await
+        .map_err(|e| format!("the delegated acme zone does not resolve to this panel: {e}"))?;
+    Ok(zone)
 }
 
 /// The renewal itself. `Ok(Some(days))` = new cert, `days` until it
 /// expires; `Ok(None)` = the CA issued at once (authorizations still
-/// valid), so nothing was published.
-async fn attempt<B: Backend>(b: &B, zone: &str, due: &DueCert) -> Result<Option<i64>, String> {
+/// valid), so nothing was published. The second half is why the TXT
+/// values could not be withdrawn, if they could not.
+async fn attempt<B: Backend>(
+    b: &B,
+    zone: &str,
+    due: &DueCert,
+) -> (Result<Option<i64>, String>, Option<String>) {
+    match order(b, zone, due).await {
+        Order::Done(outcome) => (outcome, None),
+        Order::Published(outcome) => {
+            // Withdraw the values on every path once they may have been served.
+            let clear = Request::AcmeDnsValuesClear {
+                label: due.label.label.clone(),
+            };
+            let cleared = confirm(b, clear, |r| matches!(r, Response::AcmeDnsValuesClear)).await;
+            (outcome.map(Some), cleared.err())
+        }
+    }
+}
+
+enum Order {
+    /// Ended before any value was handed to the responder.
+    Done(Result<Option<i64>, String>),
+    /// Values were (or may have been) published; they must be withdrawn.
+    Published(Result<i64, String>),
+}
+
+async fn order<B: Backend>(b: &B, zone: &str, due: &DueCert) -> Order {
+    match begin(b, zone, due).await {
+        Ok(Begun::Issued) => Order::Done(Ok(None)),
+        Ok(Begun::Publish {
+            challenge,
+            values,
+            finish,
+        }) => Order::Published(
+            publish_and_finish(
+                b,
+                due.node_id.as_deref(),
+                &due.label.label,
+                &challenge,
+                values,
+                *finish,
+            )
+            .await,
+        ),
+        Err(e) => Order::Done(Err(e)),
+    }
+}
+
+enum Begun {
+    Issued,
+    Publish {
+        challenge: String,
+        values: Vec<String>,
+        finish: Box<Request>,
+    },
+}
+
+/// CNAME check, then start the order on the owning node and vet the TXT
+/// records it asks for.
+async fn begin<B: Backend>(b: &B, zone: &str, due: &DueCert) -> Result<Begun, String> {
     let challenge = due.label.challenge_name();
     let base = Domain::parse(&due.label.base).map_err(|e| e.to_string())?;
     let cname = b.cname(&challenge, &due.label.target(zone)).await;
@@ -343,9 +499,7 @@ async fn attempt<B: Backend>(b: &B, zone: &str, due: &DueCert) -> Result<Option<
         ok: cname.is_ok(),
         error: cname.as_ref().err().map(CnameProblem::to_string),
     };
-    if let Err(e) = b.dispatch(None, mark).await {
-        tracing::warn!(domain = due.domain, error = %e, "acme-dns: label mark not saved");
-    }
+    let _ = confirm(b, mark, |r| matches!(r, Response::AcmeDnsLabelMark)).await;
     if let Err(problem) = cname {
         return Err(format!("{challenge}: {problem}"));
     }
@@ -371,7 +525,7 @@ async fn attempt<B: Backend>(b: &B, zone: &str, due: &DueCert) -> Result<Option<
             | Response::CertDns01BeginDomain {
                 completed: true, ..
             },
-        ) => return Ok(None),
+        ) => return Ok(Begun::Issued),
         Ok(
             Response::CertDns01Begin { records, .. }
             | Response::CertDns01BeginDomain { records, .. },
@@ -395,15 +549,11 @@ async fn attempt<B: Backend>(b: &B, zone: &str, due: &DueCert) -> Result<Option<
         },
         None => Request::CertDns01FinishDomainStrict { domain: domain()? },
     };
-    let outcome = publish_and_finish(b, node, &due.label.label, &challenge, values, finish).await;
-    // Withdraw the values on every path once they may have been served.
-    let clear = Request::AcmeDnsValuesClear {
-        label: due.label.label.clone(),
-    };
-    if let Err(e) = b.dispatch(None, clear).await {
-        tracing::warn!(domain = due.domain, error = %e, "acme-dns: values not cleared");
-    }
-    outcome.map(Some)
+    Ok(Begun::Publish {
+        challenge,
+        values,
+        finish: Box::new(finish),
+    })
 }
 
 async fn publish_and_finish<B: Backend>(
@@ -536,6 +686,8 @@ mod tests {
         txt: Result<(), String>,
         records: Vec<(String, String)>,
         finish: Option<Answer>,
+        clear_fails: bool,
+        in_flight: InFlight,
     }
 
     impl Fake {
@@ -557,6 +709,8 @@ mod tests {
                     ("_acme-challenge.example.com".into(), "v2".into()),
                 ],
                 finish: None,
+                clear_fails: false,
+                in_flight: InFlight::default(),
             }
         }
 
@@ -637,6 +791,11 @@ mod tests {
                 },
                 Request::AcmeDnsLabelMark { .. } => Response::AcmeDnsLabelMark,
                 Request::AcmeDnsValuesSet { .. } => Response::AcmeDnsValuesSet,
+                Request::AcmeDnsValuesClear { .. } if self.clear_fails => {
+                    Response::Error(RpcError::Internal {
+                        message: "database is locked".into(),
+                    })
+                }
                 Request::AcmeDnsValuesClear { .. } => Response::AcmeDnsValuesClear,
                 Request::AcmeDnsRenewReport { .. } => Response::AcmeDnsRenewReport,
                 Request::AcmeDnsZoneBroken { .. } => Response::AcmeDnsZoneBroken,
@@ -662,6 +821,9 @@ mod tests {
         }
         async fn pause(&self, _d: Duration) {
             *self.pauses.lock().unwrap() += 1;
+        }
+        fn in_flight(&self) -> &InFlight {
+            &self.in_flight
         }
     }
 
@@ -931,6 +1093,84 @@ mod tests {
                 (Some("node_1".into()), "example.com".into(), true),
                 (None, "gone.com".into(), false),
             ]
+        );
+    }
+
+    fn due() -> DueCert {
+        DueCert {
+            node_id: None,
+            domain: "example.com".into(),
+            hosting_id: Some("h1".into()),
+            label: label("example.com"),
+            days_left: 60,
+        }
+    }
+
+    #[tokio::test]
+    async fn renew_one_probes_the_zone_before_ordering() {
+        let mut fake = Fake::new();
+        fake.zone = Err("_hyperion-check.acme.panel.example: NXDOMAIN".into());
+        let err = renew_one_with(&fake, &due(), None).await.unwrap_err();
+        assert!(err.contains("NXDOMAIN"), "{err}");
+        let kinds = fake.kinds();
+        assert!(!kinds.contains(&"CertDns01Begin"));
+        assert!(!kinds.contains(&"AcmeDnsValuesSet"));
+    }
+
+    #[tokio::test]
+    async fn renew_one_refuses_while_acme_dns_is_disabled() {
+        let mut fake = Fake::new();
+        fake.enabled = false;
+        let err = renew_one_with(&fake, &due(), None).await.unwrap_err();
+        assert!(err.contains("not enabled"), "{err}");
+        assert_eq!(fake.kinds(), vec!["AcmeDnsConfigGet"]);
+    }
+
+    #[tokio::test]
+    async fn renew_one_outside_the_window_orders_after_the_preflight() {
+        let fake = Fake::new();
+        assert_eq!(renew_one_with(&fake, &due(), None).await, Ok(()));
+        let kinds = fake.kinds();
+        assert_eq!(kinds[0], "AcmeDnsConfigGet");
+        assert!(kinds.contains(&"CertDns01FinishStrict"));
+    }
+
+    #[tokio::test]
+    async fn a_second_renewal_of_the_same_label_fails_fast() {
+        let fake = Fake::new();
+        let held = fake.in_flight.claim("abcd1234abcd1234");
+        assert!(held.is_some());
+        let err = renew_one_with(&fake, &due(), None).await.unwrap_err();
+        assert_eq!(err, "a renewal for example.com is already running");
+        assert!(fake.kinds().is_empty());
+        drop(held);
+        // Released on drop: the next one runs.
+        assert_eq!(renew_one_with(&fake, &due(), None).await, Ok(()));
+        assert!(fake.in_flight.claim("abcd1234abcd1234").is_some());
+    }
+
+    #[tokio::test]
+    async fn a_failed_renewal_releases_the_label() {
+        let mut fake = Fake::new();
+        fake.cname = Err(CnameProblem::Missing);
+        assert!(renew_one_with(&fake, &due(), None).await.is_err());
+        assert!(fake.in_flight.claim("abcd1234abcd1234").is_some());
+    }
+
+    #[tokio::test]
+    async fn values_left_behind_are_named_in_the_report() {
+        let mut fake = Fake::new();
+        fake.clear_fails = true;
+        let out = run_once_with(&fake).await;
+        assert_eq!(out, vec![("example.com".to_string(), Ok(()))]);
+        let reports = fake.reports();
+        assert!(reports[0].0);
+        assert!(
+            reports[0]
+                .1
+                .contains("(TXT values not withdrawn: internal error: database is locked)"),
+            "{}",
+            reports[0].1
         );
     }
 }

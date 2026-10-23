@@ -360,6 +360,8 @@ fn timeout_for_request(req: &Request) -> u64 {
         // with 15/30/60 s backoff. A "retry" after a false timeout burns
         // Let's Encrypt's failed-validation limit on a working order.
         Request::CertIssueAcme { .. }
+        | Request::CertDns01Begin { .. }
+        | Request::CertDns01BeginDomain { .. }
         | Request::CertDns01Finish { .. }
         | Request::CertDns01FinishStrict { .. }
         | Request::CertDns01FinishDomain { .. }
