@@ -148,6 +148,9 @@ pub(super) struct DetailTpl<'a> {
     pub(super) db_flash: Option<String>,
     pub(super) profile_error: Option<String>,
     pub(super) profile_flash: Option<String>,
+    /// Monitor tab: outcome of a save refusal or an import from a profile.
+    pub(super) monitor_error: Option<String>,
+    pub(super) monitor_flash: Option<String>,
     pub(super) ftp_error: Option<String>,
     pub(super) ftp_flash: Option<String>,
     pub(super) just_created: Option<HostingCreated>,
@@ -469,6 +472,8 @@ impl<'a> DetailTpl<'a> {
             db_flash: None,
             profile_error: None,
             profile_flash: None,
+            monitor_error: None,
+            monitor_flash: None,
             ftp_error: None,
             ftp_flash: None,
             just_created: None,
@@ -1395,6 +1400,10 @@ pub async fn get_detail(
         db_flash: q.db.map(|_| "Database password reset.".into()),
         profile_error: q.profile_error,
         profile_flash: q.profile.map(|_| "Profile applied.".into()),
+        monitor_error: q.monitor_error,
+        monitor_flash: q
+            .monitor_imported
+            .map(|n| format!("Alert channels imported from the {n} profile. Review them below.")),
         ftp_error: q.ftp_error,
         ftp_flash: q.ftp.map(|s| {
             if s == "disabled" {
@@ -1963,6 +1972,12 @@ pub struct DetailQuery {
     pub profile: Option<String>,
     #[serde(default)]
     pub profile_error: Option<String>,
+    /// Name of the profile whose alert channels were just copied onto the
+    /// monitor (`/hostings/monitor/from-profile`).
+    #[serde(default)]
+    pub monitor_imported: Option<String>,
+    #[serde(default)]
+    pub monitor_error: Option<String>,
     #[serde(default)]
     pub ftp: Option<String>,
     #[serde(default)]

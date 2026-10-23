@@ -576,6 +576,10 @@ pub fn build_router(state: SharedState) -> Router {
             post(handlers::hostings::post_monitor_set),
         )
         .route(
+            "/hostings/monitor/from-profile",
+            post(handlers::hostings::post_monitor_from_profile),
+        )
+        .route(
             "/hostings/monitor/probe",
             post(handlers::hostings::post_monitor_probe),
         )
