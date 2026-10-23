@@ -2189,7 +2189,8 @@ pub enum Request {
         enabled: bool,
     },
     /// The delegation label for `base`, minted on first use. `hosting_id`
-    /// is `None` for a preview base. Master-local.
+    /// is `None` for a preview base; a different `Some` re-points an
+    /// existing label (label and verification kept). Master-local.
     AcmeDnsLabelEnsure {
         base: Domain,
         hosting_id: Option<String>,

@@ -102,15 +102,26 @@ pub async fn label_get(pool: &SqlitePool, base: &str) -> Result<Option<AcmeDnsLa
     Ok(row.map(label_from))
 }
 
-/// The label for `base`, minting one on first use. Idempotent: an existing
-/// row is returned untouched (its hosting_id is not rewritten).
+/// The label for `base`, minting one on first use. An existing row keeps
+/// its label, `created_at` and verification; a different `Some(hosting_id)`
+/// re-points it (Move/Copy gives the base a new hosting id, and the old id
+/// is purged later, which must not take the customer's CNAME target with
+/// it). `None` never strips an owner.
 pub async fn label_ensure(
     pool: &SqlitePool,
     base: &str,
     hosting_id: Option<&str>,
     now: i64,
 ) -> Result<AcmeDnsLabel, StateError> {
-    if let Some(existing) = label_get(pool, base).await? {
+    if let Some(mut existing) = label_get(pool, base).await? {
+        if let Some(h) = hosting_id.filter(|h| existing.hosting_id.as_deref() != Some(*h)) {
+            sqlx::query("UPDATE acme_dns_labels SET hosting_id = ? WHERE base = ?")
+                .bind(h)
+                .bind(base)
+                .execute(pool)
+                .await?;
+            existing.hosting_id = Some(h.to_string());
+        }
         return Ok(existing);
     }
     // A UNIQUE collision on a random 16-char label is vanishingly unlikely;
@@ -265,6 +276,40 @@ mod tests {
                 .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()));
         }
         assert_eq!(labels_all(&pool).await.expect("all").len(), 2);
+    }
+
+    #[tokio::test]
+    async fn label_ensure_repoints_a_moved_base_to_its_new_hosting() {
+        let pool = open_memory().await.expect("open");
+        let first = label_ensure(&pool, "example.com", Some("h1"), 10)
+            .await
+            .expect("h1");
+        label_mark(&pool, "example.com", true, None, 20)
+            .await
+            .expect("mark");
+        // Move/Copy: the same base now belongs to a new hosting id.
+        let moved = label_ensure(&pool, "example.com", Some("h2"), 99)
+            .await
+            .expect("h2");
+        assert_eq!(moved.hosting_id.as_deref(), Some("h2"));
+        assert_eq!(moved.label, first.label, "the customer's CNAME must hold");
+        assert_eq!(moved.created_at, 10);
+        assert_eq!(moved.verified_at, Some(20));
+        // Purging the source hosting no longer takes the label with it.
+        assert_eq!(
+            labels_delete_for_hosting(&pool, "h1").await.expect("del"),
+            0
+        );
+        let left = label_get(&pool, "example.com")
+            .await
+            .expect("get")
+            .expect("survives");
+        assert_eq!(left.hosting_id.as_deref(), Some("h2"));
+        // A preview-style ensure (no hosting) never strips an owner.
+        let again = label_ensure(&pool, "example.com", None, 100)
+            .await
+            .expect("none");
+        assert_eq!(again.hosting_id.as_deref(), Some("h2"));
     }
 
     #[tokio::test]
