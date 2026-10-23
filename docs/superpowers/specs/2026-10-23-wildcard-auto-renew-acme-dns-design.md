@@ -126,7 +126,11 @@ the master and only when the feature is enabled.
   fails with a message naming the holder.
 - Answers only names at or under the configured zone:
   - zone apex: SOA and NS (the `ns-acme` name), `aa` set.
-  - `ns-acme.<zone>`: A/AAAA of the master.
+  - (the NS host `ns-acme.<parent>` lives in the PARENT zone with the
+    operator's A/AAAA glue; the responder does not serve it.)
+  - `_hyperion-check.<zone>` TXT: a per-install token, so the Check button
+    can prove through public resolvers that the delegation reaches THIS
+    master.
   - `<label>.<zone>` TXT: every value currently stored for that label (0, 1
     or 2+ values); NOERROR with empty answer when the label exists but has no
     value right now; NXDOMAIN for unknown labels.
