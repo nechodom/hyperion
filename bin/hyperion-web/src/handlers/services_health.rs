@@ -1141,7 +1141,7 @@ fn render_fs_diagnostics(d: &hyperion_types::FsDiagnostics) -> Response {
     let pill_class = match d.final_state.as_str() {
         "fixed" | "no-fix-needed" => "ok",
         "dry-run" => "info",
-        "image-immutable" | "still-broken" => "err",
+        "image-immutable" | "still-broken" | "agent-sandbox" => "err",
         _ => "warn",
     };
     let mut html = String::with_capacity(2048);

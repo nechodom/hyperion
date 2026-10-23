@@ -20,6 +20,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 message: "/usr is already writable — no remount needed".into(),
             });
         }
+        if usr_ro_cause().await == UsrRoCause::Sandbox {
+            return Err(RpcError::Conflict {
+                message: usr_not_writable_message("Read-only file system", &UsrRoCause::Sandbox),
+            });
+        }
         let out = tokio::process::Command::new("/bin/mount")
             .args(["-o", "remount,rw", "/"])
             .output()
@@ -175,6 +180,18 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 return false;
             }
         };
+        // /proc/mounts is this unit's view, so a sandboxed /usr looks
+        // exactly like a disk that flipped ro. Repairing it would burn the
+        // attempts and end in a "failing storage" alert about a healthy disk.
+        if gathered.final_state == "agent-sandbox" {
+            if alert_due() {
+                tracing::error!(
+                    "rofs watchdog: {}",
+                    gathered.recommendations.first().map_or("", String::as_str)
+                );
+            }
+            return false;
+        }
         if gathered.image_kind != "standard" && gathered.image_kind != "unknown" {
             if alert_due() {
                 tracing::error!(
@@ -353,6 +370,17 @@ impl<A: AdapterPort + 'static> HostingService<A> {
 
         // Image-kind heuristic.
         d.image_kind = classify_image_kind(&d.root_fstype, &d.usr_fstype);
+
+        // The sandbox case has nothing to remount: every step below would
+        // fail against a healthy disk and read like a dying one.
+        if !d.usr_writable_now && usr_ro_cause().await == UsrRoCause::Sandbox {
+            d.final_state = "agent-sandbox".to_string();
+            d.recommendations.push(usr_not_writable_message(
+                "Read-only file system",
+                &UsrRoCause::Sandbox,
+            ));
+            return Ok(d);
+        }
 
         // ── early-out: writable + dry-run / writable in general ──
         if d.usr_writable_now {
@@ -575,19 +603,187 @@ pub(super) fn classify_image_kind(root_fstype: &str, usr_fstype: &str) -> String
 ///
 /// Returns `None` when writable (good); `Some(message)` with a
 /// clear actionable error for the operator otherwise.
-pub(super) async fn check_usr_writable() -> Option<String> {
+pub async fn check_usr_writable() -> Option<String> {
     let sentinel = std::path::Path::new("/usr/lib/.hyperion-rw-check");
     match tokio::fs::write(sentinel, b"ok").await {
         Ok(_) => {
             let _ = tokio::fs::remove_file(sentinel).await;
             None
         }
-        Err(e) => Some(format!(
-            "/usr is not writable ({e}). apt-get cannot install packages — the most likely \
-             cause is the rootfs being mounted read-only (snap-managed images, immutable VPS \
-             flavours, or a noexec/ro mount in /etc/fstab). Run `mount | grep ' /usr '` and \
-             `mount | grep ' / '` to verify; if you see `ro,` you'll need to remount RW \
-             (`mount -o remount,rw /` then retry) or pick a different base image."
+        Err(e) => Some(usr_not_writable_message(
+            &e.to_string(),
+            &usr_ro_cause().await,
         )),
+    }
+}
+
+/// Why `/usr` refused a write, as far as the mount tables can tell.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum UsrRoCause {
+    /// Read-only in THIS process's mount namespace only — systemd's
+    /// `ProtectSystem=` without `ReadWritePaths=/usr`. The host's /usr
+    /// is writable, so the operator's shell shows `rw` and remounting
+    /// changes nothing.
+    Sandbox,
+    /// Read-only on the host as well: a real `ro` mount at this point.
+    Host(String),
+    /// No mount says `ro` (immutable attribute, an LSM), or the host's
+    /// table could not be read to tell the two apart.
+    Unknown,
+}
+
+/// Classify by comparing this process's `/proc/self/mountinfo` with PID
+/// 1's, which is the host's view (or the container init's — the same
+/// thing for this question). Agreement means the disk; disagreement
+/// means the sandbox.
+pub(super) async fn usr_ro_cause() -> UsrRoCause {
+    let own = tokio::fs::read_to_string("/proc/self/mountinfo")
+        .await
+        .unwrap_or_default();
+    let host = tokio::fs::read_to_string("/proc/1/mountinfo").await.ok();
+    classify_usr_ro(&own, host.as_deref())
+}
+
+/// Pure core of [`usr_ro_cause`].
+pub(super) fn classify_usr_ro(own: &str, host: Option<&str>) -> UsrRoCause {
+    match (ro_mount_covering_usr(own), host.map(ro_mount_covering_usr)) {
+        (_, Some(Some(mp))) => UsrRoCause::Host(mp),
+        (Some(_), Some(None)) => UsrRoCause::Sandbox,
+        _ => UsrRoCause::Unknown,
+    }
+}
+
+const SANDBOX_FIX: &str = "hyperion-agent's unit is missing ReadWritePaths=/usr (shipped \
+     since v0.15.1). Run packaging/install/update.sh on this node, or add \
+     `ReadWritePaths=/usr` under [Service] in /etc/systemd/system/hyperion-agent.service, \
+     then `systemctl daemon-reload && systemctl restart hyperion-agent`. `systemctl cat \
+     hyperion-agent` shows whether a drop-in overrides it.";
+
+/// The operator-facing sentence for a failed `/usr` write. The sandbox
+/// case must never suggest a remount: the disk is healthy, and an
+/// operator told "remount rw" goes looking for a fault that isn't there.
+pub(super) fn usr_not_writable_message(err: &str, cause: &UsrRoCause) -> String {
+    match cause {
+        UsrRoCause::Sandbox => format!(
+            "/usr is read-only for hyperion-agent only ({err}). This is systemd's \
+             ProtectSystem= sandbox, NOT the disk: the host's /usr is writable, which is why \
+             `mount` in your shell shows rw — do not remount anything. {SANDBOX_FIX}"
+        ),
+        UsrRoCause::Host(mp) => format!(
+            "/usr is not writable ({err}): {mp} is mounted read-only on this server, so \
+             apt-get cannot install packages. Usual causes: ext4 remounted itself ro after \
+             disk errors (`dmesg -T | grep -i 'i/o error'`), an `ro` entry in /etc/fstab, or \
+             an immutable image (snap-managed, ostree). Verify with `mount | grep ' {mp} '`; \
+             if it is not immutable, `mount -o remount,rw {mp}` then retry, otherwise pick a \
+             different base image."
+        ),
+        UsrRoCause::Unknown => format!(
+            "/usr is not writable ({err}), though no mount this agent can see explains it. \
+             Check the agent's sandbox first: `systemctl show hyperion-agent -p ProtectSystem \
+             -p ReadWritePaths` must list /usr. After that: `lsattr -d /usr` (an `i` flag \
+             blocks writes; `chattr -i /usr` clears it), AppArmor/SELinux denials in \
+             `journalctl -k`, and `mount | grep ' / '` for a read-only root."
+        ),
+    }
+}
+
+/// The mount point covering `/usr`, if its options say `ro`.
+///
+/// The longest matching mount point wins, which is how the kernel
+/// resolves it: a read-only `/` covers `/usr` unless a separate `/usr`
+/// mount is stacked on top — and under `ProtectSystem=` that stacked
+/// read-only `/usr` is exactly what exists, over a perfectly healthy
+/// read-write root.
+///
+/// Options are compared as whole comma-separated tokens, never by
+/// substring: nearly every Debian root carries `errors=remount-ro`, which
+/// CONTAINS "ro" and describes a healthy filesystem.
+pub(super) fn ro_mount_covering_usr(mountinfo: &str) -> Option<String> {
+    let mut best: Option<(usize, bool, String)> = None;
+    for line in mountinfo.lines() {
+        // mountinfo fields: id parent major:minor root MOUNTPOINT options ...
+        let mut f = line.split_whitespace();
+        let (mount_point, opts) = match (f.nth(4), f.next()) {
+            (Some(m), Some(o)) => (m, o),
+            _ => continue,
+        };
+        let covers = mount_point == "/"
+            || mount_point == "/usr"
+            || "/usr".starts_with(&format!("{mount_point}/"));
+        if !covers {
+            continue;
+        }
+        let ro = opts.split(',').any(|o| o == "ro");
+        // Longer mount point = more specific = the one that applies.
+        if best
+            .as_ref()
+            .map_or(true, |(len, _, _)| mount_point.len() >= *len)
+        {
+            best = Some((mount_point.len(), ro, mount_point.to_string()));
+        }
+    }
+    match best {
+        Some((_, true, mp)) => Some(mp),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod mountinfo_tests {
+    use super::*;
+
+    const SANDBOX: &str = "22 1 8:1 / / rw,relatime - ext4 /dev/sda1 rw\n\
+                           180 22 8:1 /usr /usr ro,nosuid - ext4 /dev/sda1 rw\n";
+    const HEALTHY: &str = "22 1 8:1 / / rw,relatime - ext4 /dev/sda1 rw\n";
+    const DEAD: &str = "22 1 8:1 / / ro,relatime - ext4 /dev/sda1 ro\n";
+
+    /// The four shapes that matter, including the one that fooled a real
+    /// diagnosis: the sandbox mounts /usr read-only over a healthy rw
+    /// root, so the operator's shell and the agent disagree.
+    #[test]
+    fn sandbox_healthy_and_dead_roots_are_told_apart() {
+        assert_eq!(ro_mount_covering_usr(SANDBOX), Some("/usr".to_string()));
+        assert_eq!(ro_mount_covering_usr(HEALTHY), None);
+        // A genuinely remounted-ro root still reports.
+        assert_eq!(ro_mount_covering_usr(DEAD), Some("/".to_string()));
+
+        // `errors=remount-ro` is on nearly every Debian root and CONTAINS
+        // "ro" — substring matching would flag every healthy machine.
+        let tricky = "22 1 8:1 / / rw,relatime,errors=remount-ro - ext4 /dev/sda1 rw\n";
+        assert_eq!(ro_mount_covering_usr(tricky), None);
+    }
+
+    /// The disagreement between the agent and PID 1 IS the diagnosis.
+    #[test]
+    fn the_host_view_decides_sandbox_versus_disk() {
+        assert_eq!(classify_usr_ro(SANDBOX, Some(HEALTHY)), UsrRoCause::Sandbox);
+        assert_eq!(
+            classify_usr_ro(DEAD, Some(DEAD)),
+            UsrRoCause::Host("/".into())
+        );
+        // A dead host root wins even through a sandbox's extra /usr mount.
+        assert_eq!(
+            classify_usr_ro(SANDBOX, Some(DEAD)),
+            UsrRoCause::Host("/".into())
+        );
+        // Without the host's table nothing can be claimed either way.
+        assert_eq!(classify_usr_ro(SANDBOX, None), UsrRoCause::Unknown);
+        // Both rw but the write failed: chattr +i, an LSM.
+        assert_eq!(classify_usr_ro(HEALTHY, Some(HEALTHY)), UsrRoCause::Unknown);
+    }
+
+    /// The message that sent an operator to remount a healthy disk:
+    /// the sandbox answer must name the unit fix and never a remount.
+    #[test]
+    fn the_sandbox_message_never_suggests_a_remount() {
+        let msg =
+            usr_not_writable_message("Read-only file system (os error 30)", &UsrRoCause::Sandbox);
+        assert!(msg.contains("ReadWritePaths=/usr"), "{msg}");
+        assert!(!msg.contains("remount,rw"), "{msg}");
+        let host = usr_not_writable_message("x", &UsrRoCause::Host("/".into()));
+        assert!(host.contains("mount -o remount,rw /"), "{host}");
+        let unknown = usr_not_writable_message("x", &UsrRoCause::Unknown);
+        let sandbox = unknown.find("ProtectSystem").expect("names the sandbox");
+        assert!(sandbox < unknown.find("lsattr").unwrap(), "{unknown}");
     }
 }
