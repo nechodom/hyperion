@@ -208,20 +208,27 @@ log()  { printf '\033[36m[hyperion]\033[0m %s\n' "$*"; }
 warn() { printf '\033[33m[warn]\033[0m %s\n' "$*"; }
 
 # --- Live status for the panel's "updating" page --------------------------
-# From the moment hyperion-web is stopped, anyone with the panel open is looking
-# at the static page nginx serves in its place. That page polls this file (the
-# panel vhost serves it at /_hyperion/update-status), so it can say which step
-# we're on — and, crucially, tell "building from source, 10 more minutes" and
-# "the update died" apart from "back in a moment". Only a step name and epoch
-# timestamps go in: the URL needs no login.
+# The panel vhost serves this file at /_hyperion/update-status, straight from
+# disk. Two readers poll it:
+#   - the panel itself (app.js), while hyperion-web still serves — fetch,
+#     download/build and the job wait take minutes and the panel stays up for
+#     all of them, so open tabs show an "update in progress" banner and move
+#     onto the updating page the moment the panel goes down;
+#   - the static updating page nginx serves while hyperion-web is stopped, so
+#     it can tell "building from source, 10 more minutes" and "the update
+#     died" apart from "back in a moment".
+# Only step names and epoch timestamps go in: the URL needs no login.
+# `offline` is when the panel was stopped — the page's "Offline for" clock —
+# and absent while it still serves.
 #
-# Written only on a box that runs the panel, only once the services are down,
-# and removed again as soon as the panel is serving (404 = nothing running).
-# Every write is best-effort — a status file must never fail an update.
+# Written only on a box that runs the panel, from the first step, and removed
+# again as soon as the panel is serving (404 = nothing running). Every write is
+# best-effort — a status file must never fail an update.
 # >>> update-status
 STATUS_FILE="${HYPERION_UPDATE_STATUS_FILE:-/var/lib/hyperion/maintenance/panel-update.json}"
 STATUS_ON="${HYPERION_UPDATE_STATUS:-0}"   # inherited across the re-exec
 STATUS_STARTED="${HYPERION_UPDATE_STARTED:-0}"
+STATUS_OFFLINE="${HYPERION_UPDATE_OFFLINE:-0}"
 STATUS_STEP=""
 STATUS_STEP_STARTED=0
 
@@ -242,10 +249,15 @@ status() {
     STATUS_STEP="$step"
     STATUS_STEP_STARTED="$now"
   fi
+  if [[ "$step" == stop ]] && (( STATUS_OFFLINE == 0 )); then
+    STATUS_OFFLINE="$now"
+    export HYPERION_UPDATE_OFFLINE="$now"
+  fi
   tmp="$STATUS_FILE.tmp.$$"
   {
     printf '{"v":1,"state":"%s","step":"%s","started":%s,"step_started":%s,"updated":%s' \
       "$state" "$step" "$STATUS_STARTED" "$STATUS_STEP_STARTED" "$now"
+    (( STATUS_OFFLINE > 0 )) && printf ',"offline":%s' "$STATUS_OFFLINE"
     [[ "$pct" =~ ^[0-9]+$ ]] && printf ',"progress":%s' "$pct"
     printf '}\n'
   } > "$tmp" 2>/dev/null && chmod 0644 "$tmp" 2>/dev/null && mv -f "$tmp" "$STATUS_FILE" 2>/dev/null \
@@ -579,6 +591,7 @@ wait_for_running_work() {
 # run, so a failure here (no network, a GitHub hiccup, a build error) costs
 # nothing, and the downtime shrinks to install + configure + restart instead
 # of including a multi-minute cargo build.
+(( HAVE_WEB )) && status_begin
 status running fetch
 cd "$INSTALL_DIR"
 PREV_LOCAL=$(git rev-parse --short HEAD)
@@ -904,6 +917,7 @@ fi
 #-------- 3. Wait for running jobs, then stop ------------------------------
 # Checked as late as possible — right before the stop — so work that started
 # during a long build is seen too.
+status running wait
 wait_for_running_work
 
 # Snapshot the binaries that are running now, before anything replaces them:
@@ -912,10 +926,7 @@ wait_for_running_work
 if (( DO_BUILD )); then
   snapshot_binaries
 fi
-if (( HAVE_WEB )); then
-  status_begin
-  status running stop
-fi
+status running stop
 (( HAVE_AGENT || HAVE_WEB )) && SERVICES_STOPPED=1
 (( HAVE_WEB ))   && { log "Stopping hyperion-web ...";   systemctl stop hyperion-web   || true; }
 (( HAVE_AGENT )) && { log "Stopping hyperion-agent ..."; systemctl stop hyperion-agent || true; }

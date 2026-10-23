@@ -184,6 +184,9 @@ document.addEventListener('click', function (ev) {
 
   // Auto-surface HTMX errors as red toasts.
   document.addEventListener('htmx:responseError', (ev) => {
+    // nginx's "updating" page answering for a stopped panel — the update
+    // banner below handles that, a "Request failed (503)" would only alarm.
+    if (ev.detail?.xhr?.getResponseHeader('X-Hyperion-Maintenance')) return;
     const code = ev.detail?.xhr?.status ?? '???';
     window.toast(`Request failed (${code}). Try again, or check the audit log for details.`, 'error');
   });
@@ -1103,6 +1106,149 @@ function isShortcutContext(ev) {
   // Coming back to a tab is exactly when a session has most likely
   // lapsed, so check then rather than waiting out the interval.
   document.addEventListener('visibilitychange', () => { if (!document.hidden) check(); });
+})();
+
+// ============================================================
+//  Update in progress. update.sh writes a small status file from
+//  its first step and the panel vhost serves it from disk at
+//  /_hyperion/update-status (404 = no update running). Fetching and
+//  building take minutes while the panel keeps serving, so without
+//  this an open tab looked perfectly normal right up to the moment
+//  its next click hit the 503 — and the "updating" page was only
+//  ever seen by whoever happened to load a page in that window.
+//
+//  Now: a banner says an update is running and which step; once the
+//  panel is actually down (nginx tags its stand-in page with
+//  X-Hyperion-Maintenance) the tab moves onto the updating page,
+//  which brings it back when the new version answers. A tab with a
+//  half-filled form stays put and says so instead — navigating would
+//  throw the typing away.
+// ============================================================
+(function () {
+  'use strict';
+  const main = document.querySelector('main.content');
+  if (!main) return;
+  const STATUS_URL = '/_hyperion/update-status';
+  const POLL_MS = 15_000;
+  const FAST_MS = 3_000;            // once the stop is near
+  const STALE_SECS = 2 * 3600;      // a leftover file, not an update
+  const STEP = {
+    fetch: 'fetching the new version',
+    download: 'downloading the new version',
+    build: 'building from source',
+    wait: 'waiting for running jobs to finish',
+    stop: 'stopping the panel',
+    install: 'installing the new version',
+    configure: 'refreshing configuration',
+    migrate: 'checking database migrations',
+    start: 'starting the panel',
+    rollback: 'restoring the previous version',
+  };
+  // From here on the panel is down or about to be.
+  const OFFLINE = new Set(['stop', 'install', 'configure', 'migrate', 'start', 'rollback']);
+
+  let banner = null;
+  let seen = false;     // this tab saw an update running
+  let done = false;     // navigated away, or no status endpoint here
+  let dirty = false;
+  let timer = null;
+  document.addEventListener('input', (e) => {
+    if (e.target instanceof Element && e.target.closest('form')) dirty = true;
+  }, true);
+  document.addEventListener('submit', () => { dirty = false; }, true);
+
+  function show(kind, html) {
+    if (!banner) {
+      banner = document.createElement('div');
+      banner.setAttribute('role', 'status');
+      main.prepend(banner);
+    }
+    banner.className = 'alert alert-' + kind;
+    if (banner.innerHTML !== html) banner.innerHTML = html;
+  }
+  function hide() { banner?.remove(); banner = null; }
+
+  // The panel is down once `/` is answered by nginx's stand-in page.
+  async function panelDown() {
+    try {
+      const r = await fetch('/', { method: 'HEAD', cache: 'no-store', redirect: 'manual', credentials: 'same-origin' });
+      return !!r.headers.get('X-Hyperion-Maintenance');
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function schedule(ms) {
+    clearTimeout(timer);
+    if (!done) timer = setTimeout(check, ms);
+  }
+
+  async function check() {
+    if (done) return;
+    if (document.hidden) { schedule(POLL_MS); return; }
+    let r;
+    try {
+      r = await fetch(STATUS_URL, { cache: 'no-store', redirect: 'manual', credentials: 'same-origin' });
+    } catch (_) {
+      schedule(POLL_MS);
+      return;
+    }
+    // A redirect means hyperion-web answered (the panel is reached without
+    // the vhost that serves the file): there is nothing to poll here.
+    if (r.type === 'opaqueredirect') { done = true; return; }
+    let st = null;
+    if (r.ok && (r.headers.get('Content-Type') || '').includes('json')) {
+      try { st = await r.json(); } catch (_) { st = null; }
+    }
+    const date = Date.parse(r.headers.get('Date') || '');
+    const now = Math.floor((isNaN(date) ? Date.now() : date) / 1000);
+    const live = st && st.state === 'running' && typeof st.updated === 'number'
+      && now - st.updated < STALE_SECS;
+
+    if (!live) {
+      if (seen && r.status === 404) {
+        show('ok', '<strong>Hyperion was updated.</strong> '
+          + '<a href="" data-update-reload>Reload</a> to use the new version.');
+      } else if (!seen) {
+        hide();
+      }
+      schedule(POLL_MS);
+      return;
+    }
+
+    seen = true;
+    const step = STEP[st.step] || 'updating';
+    const pct = st.step === 'build' && typeof st.progress === 'number' ? ' · ' + st.progress + '%' : '';
+    if (OFFLINE.has(st.step) && await panelDown()) {
+      if (!dirty) {
+        done = true;
+        // replace(), not reload(): never re-POST what rendered this page.
+        location.replace(location.href);
+        return;
+      }
+      show('warn', '<strong>The panel is offline while the update installs</strong> (' + step + '). '
+        + 'Your unsaved changes are still on this page — submit them once the update has finished.');
+      schedule(FAST_MS);
+      return;
+    }
+    show('info', '<strong>Hyperion is updating</strong> — ' + step + pct + '. '
+      + 'The panel keeps working until the new version is installed, then goes offline '
+      + 'for a moment; this page reconnects by itself.');
+    schedule(OFFLINE.has(st.step) || st.step === 'wait' ? FAST_MS : POLL_MS);
+  }
+
+  main.addEventListener('click', (e) => {
+    if (e.target instanceof Element && e.target.closest('[data-update-reload]')) {
+      e.preventDefault();
+      location.replace(location.href);
+    }
+  });
+  // A request that landed on the stand-in page: look now, not in 15s.
+  document.addEventListener('htmx:responseError', (ev) => {
+    if (ev.detail?.xhr?.getResponseHeader('X-Hyperion-Maintenance')) schedule(0);
+  });
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) schedule(0); });
+  check();
 })();
 
 // ============================================================
