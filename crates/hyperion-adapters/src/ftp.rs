@@ -124,6 +124,13 @@ pub async fn set_user_web_root(user: &str, web_root: &str) -> Result<(), Adapter
     tokio::fs::create_dir_all(VSFTPD_USER_CONF_DIR)
         .await
         .map_err(|e| AdapterError::Other(format!("mkdir {VSFTPD_USER_CONF_DIR}: {e}")))?;
+    // One directive per line: a newline (or any control character) in the
+    // path would add directives of its own to this login's config.
+    if web_root.is_empty() || web_root.chars().any(char::is_control) || !web_root.starts_with('/') {
+        return Err(AdapterError::Other(format!(
+            "refusing FTP root {web_root:?}: must be an absolute path without control characters"
+        )));
+    }
     let path = format!("{VSFTPD_USER_CONF_DIR}/{user}");
     let body = format!("local_root={web_root}\nwrite_enable=YES\n");
     atomic_write(Path::new(&path), body.as_bytes(), 0o644)

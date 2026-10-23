@@ -810,6 +810,7 @@ pub async fn execute(socket: &Path, cmd: &Cmd) -> Result<Outcome> {
                 reason: None,
             },
             UserCmd::Disable2fa { user } => Request::Web2faDisable {
+                current_password: None,
                 user_id: a.user_id(user).await?,
             },
             UserCmd::Delete { user, yes } => {
@@ -1119,7 +1120,10 @@ mod tests {
             Request::WebUserSetPassword { user_id: 7, current_password: None, new_password }
                 if new_password.len() == 24
         ));
-        assert!(matches!(&seen[3], Request::Web2faDisable { user_id: 1 }));
+        assert!(matches!(
+            &seen[3],
+            Request::Web2faDisable { user_id: 1, .. }
+        ));
     }
 
     #[tokio::test]

@@ -1115,7 +1115,11 @@ pub trait AgentApi: Send + Sync + 'static {
         user_id: i64,
     ) -> Result<hyperion_types::Web2faEnrollment, RpcError>;
     async fn web_2fa_confirm_enroll(&self, user_id: i64, code: String) -> Result<bool, RpcError>;
-    async fn web_2fa_disable(&self, user_id: i64) -> Result<(), RpcError>;
+    async fn web_2fa_disable(
+        &self,
+        user_id: i64,
+        current_password: Option<String>,
+    ) -> Result<(), RpcError>;
 
     /// Grant a user access to one hosting. `level` is "read" or "manage".
     /// Idempotent — re-granting upserts the level.

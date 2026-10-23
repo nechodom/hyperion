@@ -170,7 +170,7 @@ pub struct PortTemplate {
     pub description: &'static str,
     pub snippet: &'static str,
     /// Id sent to the agent. Must match `firewall_template_commands()` in
-    /// hyperion-core/src/service.rs, except for snippet-only presets.
+    /// hyperion-core/src/service/firewall.rs, except for snippet-only presets.
     pub apply_id: &'static str,
     /// `false` ⇒ snippet only (worker_rpc needs the master's IP).
     pub applyable: bool,

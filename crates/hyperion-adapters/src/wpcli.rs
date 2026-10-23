@@ -264,13 +264,14 @@ pub async fn install_wordpress(
     // reading another site's file, so 0644 hands over a working database
     // credential for a @localhost grant. 0640 is enough: PHP runs as the
     // owner.
+    //
+    // Through a no-follow descriptor, and only for a regular file with one
+    // link: htdocs belongs to the site user, so a chmod by name would follow
+    // a link (or hit a hard link) they put at wp-config.php.
     {
-        use std::os::unix::fs::PermissionsExt;
         let cfg = format!("{htdocs}/wp-config.php");
-        if tokio::fs::metadata(&cfg).await.is_ok() {
-            if let Err(e) =
-                tokio::fs::set_permissions(&cfg, std::fs::Permissions::from_mode(0o640)).await
-            {
+        if tokio::fs::symlink_metadata(&cfg).await.is_ok() {
+            if let Err(e) = chmod_sole_regular_file(std::path::Path::new(&cfg), 0o640) {
                 tracing::warn!(error = %e, path = %cfg, "could not tighten wp-config.php");
             }
         }
@@ -2084,4 +2085,21 @@ mod core_update_tests {
     fn a_versionless_row_is_dropped() {
         assert!(parse_core_updates(r#"[{"update_type":"minor"}]"#).is_empty());
     }
+}
+
+/// fchmod `path` if it is a regular file with exactly one link, never
+/// following a symlink at the name.
+fn chmod_sole_regular_file(path: &std::path::Path, mode: u32) -> Result<(), AdapterError> {
+    use std::os::unix::fs::MetadataExt;
+    use std::os::unix::fs::PermissionsExt;
+    let f = crate::fs::open_path_no_follow(path)?;
+    let md = f.metadata()?;
+    if !md.is_file() || md.nlink() != 1 {
+        return Err(AdapterError::Other(format!(
+            "{} is not a single-link regular file",
+            path.display()
+        )));
+    }
+    f.set_permissions(std::fs::Permissions::from_mode(mode))?;
+    Ok(())
 }

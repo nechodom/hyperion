@@ -15,14 +15,19 @@ use std::path::{Component, Path, PathBuf};
 pub const MAX_INLINE_BYTES: u64 = 1024 * 1024; // 1 MiB
 
 /// Reject any path component that's empty, `.`, `..`, or contains
-/// `/` (already split, but defensive) or NUL.
+/// `/` (already split, but defensive), NUL or another control character.
+///
+/// Control characters too: resolved paths end up in generated config
+/// (an extra FTP login's `local_root=` line in its vsftpd user file), where
+/// a newline in a directory name the site user created would start a
+/// directive of their choosing.
 fn safe_component(c: &str) -> bool {
     !c.is_empty()
         && c != "."
         && c != ".."
         && !c.contains('/')
         && !c.contains('\\')
-        && !c.contains('\0')
+        && !c.chars().any(char::is_control)
 }
 
 /// Join `rel_path` under `jail`, refusing anything that escapes
@@ -204,18 +209,13 @@ pub async fn write_file_in_jail(
             )));
         }
     }
-    // Atomic write — write to .tmp sibling, then rename.
-    let tmp = abs.with_extension(format!(
-        "{}.tmp",
-        abs.extension().and_then(|s| s.to_str()).unwrap_or("")
-    ));
-    tokio::fs::write(&tmp, bytes)
+    // Atomic write through a fresh, exclusive, no-follow temp file. The
+    // directory belongs to the site user: a predictable `<name>.tmp` opened
+    // by path was a place to plant a symlink and have root write these
+    // bytes wherever it pointed.
+    crate::fs::atomic_write(&abs, bytes, 0o644)
         .await
-        .map_err(|e| AdapterError::Other(format!("write: {e}")))?;
-    tokio::fs::rename(&tmp, &abs)
-        .await
-        .map_err(|e| AdapterError::Other(format!("rename: {e}")))?;
-    Ok(())
+        .map_err(|e| AdapterError::Other(format!("write: {e}")))
 }
 
 /// Chown a path inside the jail to `owner:owner`. Called after the

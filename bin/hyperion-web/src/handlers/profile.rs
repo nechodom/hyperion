@@ -547,9 +547,16 @@ pub async fn post_2fa_confirm(
 
 /// POST /profile/2fa/disable — clears the secret + backup codes after
 /// the user explicitly confirms.
+#[derive(serde::Deserialize)]
+pub struct Disable2faForm {
+    #[serde(default)]
+    pub current_password: String,
+}
+
 pub async fn post_2fa_disable(
     State(state): State<SharedState>,
     ctx: AuthCtx,
+    Form(form): Form<Disable2faForm>,
 ) -> Result<Response, AppError> {
     let Some(session) = ctx.session.clone() else {
         return Ok(Redirect::to("/login").into_response());
@@ -558,6 +565,10 @@ pub async fn post_2fa_disable(
         &state.agent_socket,
         Request::Web2faDisable {
             user_id: session.user_id,
+            // Re-authenticate: turning off the second factor from a live
+            // session must still prove the password, like a password change
+            // does — otherwise a stolen cookie alone strips 2FA.
+            current_password: Some(form.current_password),
         },
     )
     .await

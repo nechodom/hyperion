@@ -1405,8 +1405,11 @@ pub async fn post_wp_install_from_asset(
     ctx: AuthCtx,
     Form(form): Form<WpInstallFromAssetForm>,
 ) -> Result<Response, AppError> {
-    let sel = super::hostings::parse_selector_public(&form.selector)?;
     let sel_url = urlencoding(&form.selector);
+    // ProfilesManage says the operator may touch the asset LIBRARY; installing
+    // onto a specific hosting also needs manage access to THAT hosting, or a
+    // custom role scoped to its own sites could push a library plugin onto any
+    // site in the cluster. The node comes from the hosting, not the form.
     if !ctx.can(Capability::ProfilesManage) {
         return Ok(Redirect::to(&format!(
             "/hostings/{}?wp_error={}#wordpress",
@@ -1415,17 +1418,25 @@ pub async fn post_wp_install_from_asset(
         ))
         .into_response());
     }
-    let activate = matches!(form.activate.as_deref(), Some("on" | "true" | "1"));
-    let target = if form.target_node.is_empty()
-        || form.target_node == crate::dispatcher::LOCAL_NODE_SENTINEL
+    let sel = match super::hostings::require_manage_for_selector(
+        &state,
+        &ctx,
+        &form.selector,
+        Capability::WpManage,
+    )
+    .await
     {
-        None
-    } else {
-        Some(form.target_node.as_str())
+        Ok(s) => s,
+        Err(r) => return Ok(r),
     };
+    let activate = matches!(form.activate.as_deref(), Some("on" | "true" | "1"));
+    let target_owned: Option<String> = super::hostings::find_hosting_anywhere(&state, sel.clone())
+        .await
+        .ok()
+        .and_then(|(_d, n)| n);
     let resp = crate::dispatcher::dispatch_to_node(
         &state,
-        target,
+        target_owned.as_deref(),
         Request::WpInstallFromAsset {
             sel,
             asset_id: form.asset_id,

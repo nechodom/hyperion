@@ -303,6 +303,7 @@ pub struct AccessForm {
 pub async fn post_access(
     State(state): State<SharedState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: axum::http::HeaderMap,
     Form(form): Form<AccessForm>,
 ) -> Result<Response, AppError> {
     let file = ensure_active(&state)?;
@@ -319,7 +320,7 @@ pub async fn post_access(
         Ok((status, Html(tpl.render()?)).into_response())
     };
     // Same per-peer bucket as the sign-in form: a setup code is a credential.
-    let tkey = login::throttle_key(peer);
+    let tkey = login::throttle_key(&headers, peer);
     if let Some(wait) = login::throttle_wait(&tkey) {
         let m = login::wait_minutes(wait);
         return render(

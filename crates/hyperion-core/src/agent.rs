@@ -1496,8 +1496,12 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
     async fn web_2fa_confirm_enroll(&self, user_id: i64, code: String) -> Result<bool, RpcError> {
         self.svc.web_2fa_confirm_enroll(user_id, code).await
     }
-    async fn web_2fa_disable(&self, user_id: i64) -> Result<(), RpcError> {
-        self.svc.web_2fa_disable(user_id).await
+    async fn web_2fa_disable(
+        &self,
+        user_id: i64,
+        current_password: Option<String>,
+    ) -> Result<(), RpcError> {
+        self.svc.web_2fa_disable(user_id, current_password).await
     }
 
     async fn web_grant_hosting_access(

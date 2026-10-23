@@ -3015,7 +3015,7 @@ mod notification_topic_tests {
 
     #[test]
     fn every_emitted_kind_lands_in_its_topic() {
-        // The kinds the agent emits today (service.rs `notify_admins*`).
+        // The kinds the agent emits today (service/notify.rs `notify_admins*`).
         for (kind, topic) in [
             ("monitor.down:a.cz", "uptime"),
             ("monitor.up:a.cz", "uptime"),

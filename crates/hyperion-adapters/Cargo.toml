@@ -32,8 +32,9 @@ zip.workspace = true
 flate2.workspace = true
 rustix = { version = "1.1.4", features = ["fs", "process"] }
 url.workspace = true
+# 0600 O_EXCL option files for credentials that must not go on argv.
+tempfile.workspace = true
 
 [dev-dependencies]
-tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt"] }
 mockall.workspace = true
