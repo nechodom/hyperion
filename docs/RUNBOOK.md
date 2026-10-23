@@ -150,6 +150,91 @@ hctl hosting delete example.com
   changed this, the mariadb adapter will fail; add an entry to
   `/root/.my.cnf` with credentials.
 
+## Automatic wildcard renewal
+
+A wildcard certificate can only be validated over DNS-01, and Hyperion holds
+no DNS credentials. Instead the master answers DNS for one delegated zone
+(for example `acme.panel.example`). The customer adds a permanent
+`_acme-challenge.<base> CNAME <label>.<zone>` record, and from then on the
+master publishes each challenge TXT value under its own zone and renews the
+wildcard on its daily tick, with nobody touching it. Non-wildcard certificates
+keep using HTTP-01.
+
+### One-time setup (per cluster)
+
+1. Settings → HTTPS → **Automatic wildcard renewal**: enter the zone
+   (default suggestion `acme.<panel domain>`) and enable it.
+2. At the DNS provider of the parent zone add the records the card shows:
+   ```
+   acme.panel.example.      NS    ns-acme.panel.example.
+   ns-acme.panel.example.   A     <master public IPv4>
+   ns-acme.panel.example.   AAAA  <master public IPv6>   ; only if the master has one
+   ```
+3. Press **Check**. States: *not set up*, *delegation missing* (the zone is
+   not delegated to this panel yet), *points elsewhere* (it is delegated to
+   another panel or server), *working*.
+
+Enabling starts the responder on the master only and opens port 53 udp+tcp in
+the firewall; disabling closes both. Worker nodes never serve DNS. The
+responder answers only names inside the zone, never recurses, refuses
+everything else, and rate-limits per source address.
+
+### Per wildcard
+
+1. Hosting → SSL tab → **Set up automatic renewal**. The panel shows the
+   challenge name and the CNAME target; give that record to the customer.
+2. Once the CNAME is seen, issuing the wildcard is one button (no TXT
+   copying) and renewal is automatic from then on.
+3. Preview wildcards (`*.<base>` on test nodes) are set up the same way in
+   Settings → HTTPS → Preview certificates.
+
+Admins and operators (with access to the hosting) can set this up and see the
+CNAME target. Customers only see "automatic renewal: on / off". The CNAME is
+standing permission for the panel to obtain certificates for that name.
+
+### Troubleshooting
+
+- **Port 53 is held.** Enabling fails and names the process holding it
+  (bind9, dnsmasq, unbound, ...). Stop it, or bind it to loopback only. The
+  responder binds each non-loopback address, not `0.0.0.0`, so
+  systemd-resolved's stub on 127.0.0.53 does not conflict.
+- **"delegation missing" / "points elsewhere".** The NS or glue record at the
+  parent zone is absent, wrong, or not propagated yet. Re-check with
+  `dig NS <zone>` and the staging checklist below.
+- **CNAME problems.** The SSL tab states what it saw: CNAME missing, CNAME
+  points elsewhere (wrong label), or a plain TXT left over from manual
+  issuance at the name (replace it with the CNAME). Before every order the
+  master re-probes the CNAME and skips the order if it is wrong, so a removed
+  CNAME never costs a failed validation.
+- **"node <id> needs an update for automatic wildcard renewal".** The node
+  that owns the certificate runs an older agent without the strict DNS-01
+  RPCs. Update that node and retry.
+- **"a renewal for <domain> is already running".** One renewal per domain at a
+  time; wait for the running job (see /jobs) to finish.
+- **Alerts.** An automatic attempt that fails alerts with the reason (zone
+  delegation broken, CNAME missing, Let's Encrypt error). A broken zone
+  (daily self-check) raises one admin alert, since it breaks every delegated
+  wildcard at once. A wildcard with 14 days or fewer left always alerts,
+  whatever its state.
+- **Stale values.** TXT values are cleared after each attempt and expire on
+  their own after 24 h, so a crash cannot leave them served forever.
+- **Removing a hosting.** Purging a hosting deletes its label and the
+  responder stops answering for it; the customer can then delete the CNAME.
+  Trash keeps the label so a restore keeps working. Suspended hostings renew
+  too and stay suspended.
+
+### Verify on staging before relying on it
+
+With `<master-ip>`, `<zone>`, `<label>` and `<base>` filled in:
+
+```bash
+dig @<master-ip> SOA <zone>                      # answers, aa flag set
+dig @<master-ip> TXT _hyperion-check.<zone>      # the per-install token
+dig +norec @<master-ip> TXT example.org          # status: REFUSED (out of zone)
+dig +tcp @<master-ip> TXT <label>.<zone>         # TCP works; NOERROR, empty between renewals
+dig TXT _acme-challenge.<base>                   # public resolver follows the CNAME into <zone>
+```
+
 ## Logs
 
 - Structured agent log: `/var/log/hyperion/agent.log` (JSON Lines).
