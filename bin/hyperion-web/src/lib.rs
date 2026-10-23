@@ -185,6 +185,19 @@ pub fn build_router(state: SharedState) -> Router {
             "/hostings/cert/dns01/finish",
             post(handlers::hostings::post_cert_dns01_finish),
         )
+        // Automatic wildcard renewal over the delegated acme zone.
+        .route(
+            "/hostings/:selector/cert/acme-dns/setup",
+            post(handlers::acme_dns_ssl::post_hosting_setup),
+        )
+        .route(
+            "/hostings/:selector/cert/acme-dns/check",
+            post(handlers::acme_dns_ssl::post_hosting_check),
+        )
+        .route(
+            "/hostings/:selector/cert/dns01/auto",
+            post(handlers::acme_dns_ssl::post_hosting_auto),
+        )
         .route(
             // multipart/form-data upload of a custom PEM cert; 1 MiB is
             // ample for a leaf + chain + key.
@@ -376,6 +389,18 @@ pub fn build_router(state: SharedState) -> Router {
         .route(
             "/settings/https/acme-dns/check",
             post(handlers::settings::post_acme_dns_check),
+        )
+        .route(
+            "/settings/https/preview/:node/acme-dns/setup",
+            post(handlers::acme_dns_ssl::post_preview_setup),
+        )
+        .route(
+            "/settings/https/preview/:node/acme-dns/check",
+            post(handlers::acme_dns_ssl::post_preview_check),
+        )
+        .route(
+            "/settings/https/preview/:node/acme-dns/auto",
+            post(handlers::acme_dns_ssl::post_preview_auto),
         )
         .route(
             "/settings/https/preview-dns",

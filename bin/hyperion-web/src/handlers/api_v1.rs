@@ -610,6 +610,13 @@ pub async fn delete_hosting(
             .await;
             match resp {
                 Ok(RpcResponse::HostingDelete) => {
+                    // Gone for good (not trashed): its acme-dns labels go too.
+                    crate::handlers::acme_dns_ssl::forget_hosting_if_gone(
+                        &job_state,
+                        job_node.as_deref(),
+                        &job_hid,
+                    )
+                    .await;
                     reporter
                         .step("Hosting deleted.", 100, "✓ hosting removed")
                         .await;

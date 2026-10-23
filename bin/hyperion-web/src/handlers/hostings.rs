@@ -414,6 +414,8 @@ struct DetailTpl<'a> {
     proxy_error: Option<String>,
     cert_error: Option<String>,
     cert_flash: Option<String>,
+    /// The wildcard's automatic renewal over the delegated acme zone.
+    acme_ssl: super::acme_dns_ssl::AcmeSslBlock,
     restore_error: Option<String>,
     restore_flash: Option<String>,
     cron_error: Option<String>,
@@ -1925,7 +1927,10 @@ pub async fn post_create(
             let workers_full = PhpWorkersView::from_kv(&[], 0);
             let modsec = fetch_modsec_status(&state, target).await;
             let crs = crs_view(&detail.vhost_options);
+            let acme_ssl =
+                super::acme_dns_ssl::load_for_hosting(&state, &ctx, &detail, target).await;
             let tpl = DetailTpl {
+                acme_ssl,
                 username: &ctx.username,
                 user_initial: super::user_initial(&ctx.username),
                 active: "hostings",
@@ -3137,7 +3142,10 @@ pub async fn get_detail(
     // Computed before `detail` moves into the template struct.
     let ftp_login_example = ftp_login_example(&detail.domain);
     let ftp_login_qualifiers = hyperion_validate::ftplogin::login_qualifiers(&detail.domain);
+    let acme_ssl =
+        super::acme_dns_ssl::load_for_hosting(&state, &ctx, &detail, owner_node.as_deref()).await;
     let tpl = DetailTpl {
+        acme_ssl,
         username: &ctx.username,
         user_initial: super::user_initial(&ctx.username),
         active: "hostings",
@@ -4409,6 +4417,8 @@ pub async fn post_delete(
                     "",
                 )
                 .await;
+            let hosting_id =
+                super::acme_dns_ssl::hosting_id_of(&job_state, target_owned.as_deref(), &sel).await;
             let resp = crate::dispatcher::dispatch_to_node(
                 &job_state,
                 target_owned.as_deref(),
@@ -4417,6 +4427,15 @@ pub async fn post_delete(
             .await;
             match resp {
                 Ok(RpcResponse::HostingDelete) => {
+                    // Gone for good (not trashed): its acme-dns labels go too.
+                    if let Some(id) = hosting_id {
+                        super::acme_dns_ssl::forget_hosting_if_gone(
+                            &job_state,
+                            target_owned.as_deref(),
+                            &id,
+                        )
+                        .await;
+                    }
                     reporter
                         .step("Hosting deleted.", 100, "✓ hosting removed")
                         .await;
@@ -13601,10 +13620,10 @@ async fn run_bulk_job(
         };
         // Land each action on the node that owns the hosting (backups are
         // stored per node, and an action on the master NotFounds a worker row).
-        let target_owned: Option<String> = find_hosting_anywhere(&state, sel.clone())
-            .await
-            .ok()
-            .and_then(|(_d, n)| n);
+        let (target_owned, hosting_id) = match find_hosting_anywhere(&state, sel.clone()).await {
+            Ok((d, n)) => (n, Some(d.id.as_str().to_string())),
+            Err(_) => (None, None),
+        };
         let req = match action.as_str() {
             "suspend" => Request::HostingSuspend {
                 sel,
@@ -13640,7 +13659,18 @@ async fn run_bulk_job(
         };
         match crate::dispatcher::dispatch_to_node(&state, target_owned.as_deref(), req).await {
             Ok(RpcResponse::Error(e)) => errs.push(format!("{sel_str}: {e}")),
-            Ok(_) => ok += 1,
+            Ok(_) => {
+                ok += 1;
+                // A delete that did not land in the trash takes its labels.
+                if let ("delete", Some(id)) = (action.as_str(), hosting_id.as_deref()) {
+                    super::acme_dns_ssl::forget_hosting_if_gone(
+                        &state,
+                        target_owned.as_deref(),
+                        id,
+                    )
+                    .await;
+                }
+            }
             Err(e) => errs.push(format!("{sel_str}: {e}")),
         }
     }

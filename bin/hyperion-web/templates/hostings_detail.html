@@ -1411,9 +1411,10 @@
         validate. Requires control of the domain's DNS.
       </p>
       <p class="note boxed" style="margin-top:0.5rem">
-        <strong>This certificate will not renew itself.</strong> A wildcard can only be validated
+        <strong>Issued this way, it will not renew itself.</strong> A wildcard can only be validated
         over DNS, and Hyperion holds no DNS credentials — so every renewal needs you to publish a
-        fresh <code>TXT</code> record by hand, roughly every 60 days. You'll be reminded 30, 14 and 7
+        fresh <code>TXT</code> record by hand, roughly every 60 days, unless
+        <a href="#acme-ssl">automatic renewal</a> is set up. You'll be reminded 30, 14 and 7
         days before it expires. If you only need <code>{{ detail.domain }}</code> and its aliases, use
         <em>Issue HTTPS certificate</em> above instead.
       </p>
@@ -1432,6 +1433,19 @@
       </form>
     </div>
   </details>
+</div>
+
+{# Automatic wildcard renewal: one CNAME into the panel's delegated acme
+   zone. The block is shared with Settings → HTTPS and swaps itself on its
+   own buttons; a customer gets only its on/off line. #}
+<div class="card" id="acme-ssl-card">
+  <div class="card-head">
+    <h2>
+      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+      Wildcard renewal
+    </h2>
+  </div>
+  {% include "_acme_dns_ssl_block.html" %}
 </div>
 
 <div class="panel-group">Advanced</div>

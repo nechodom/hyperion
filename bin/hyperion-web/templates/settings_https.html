@@ -308,6 +308,16 @@
         </tbody>
       </table>
     </div>
+    {% if !preview_acme.is_empty() %}
+    <h4 style="margin:1.2rem 0 0.4rem">Automatic renewal</h4>
+    <p class="text-soft small" style="margin:0 0 0.6rem">
+      With one CNAME into the <a href="#acme-dns">delegated acme zone</a>, a preview
+      wildcard renews by itself instead of by hand.
+    </p>
+    {% for acme_ssl in preview_acme %}
+    <div style="margin:0 0 0.9rem">{% include "_acme_dns_ssl_block.html" %}</div>
+    {% endfor %}
+    {% endif %}
     {% endif %}
     <details class="howto">
       <summary>Before you issue</summary>
@@ -319,8 +329,8 @@
           previews reachable.</li>
         <li>Issuing shows the TXT records to publish at your DNS provider, then validates them over DNS-01.
           Keep that page open until the certificate is issued.</li>
-        <li>This server holds no DNS credentials, so a wildcard cannot renew itself: renew it here
-          roughly every 60 days. The status column says when each one expires; reload after a
+        <li>This server holds no DNS credentials, so without automatic renewal a wildcard cannot
+          renew itself: renew it here roughly every 60 days. The status column says when each one expires; reload after a
           validation and its status reads <em>valid</em>.</li>
         <li>Every certificate on every node is listed on <a href="/certs">Certificates</a>.</li>
       </ul>

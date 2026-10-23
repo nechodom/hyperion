@@ -1941,7 +1941,7 @@ struct NodeWildcardDns01Tpl<'a> {
 /// "test" to get at it would make the create wizard refuse production
 /// domains there. The master is addressed by the `local` sentinel, which
 /// the dispatcher already normalises.
-async fn resolve_node_wildcard_base(
+pub(crate) async fn resolve_node_wildcard_base(
     state: &SharedState,
     node_id: &str,
 ) -> Option<(String, String)> {

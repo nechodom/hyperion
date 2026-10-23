@@ -52,6 +52,9 @@ struct HttpsTpl<'a> {
     /// one server, so all but one of them cannot serve their previews.
     shared_base: Option<String>,
     acme: super::page_acme_dns::AcmeCard,
+    /// Each preview wildcard's automatic renewal; empty for anybody who may
+    /// not set it up.
+    preview_acme: Vec<crate::handlers::acme_dns_ssl::AcmeSslBlock>,
 }
 
 /// One node's preview wildcard certificate, as the table shows it.
@@ -194,8 +197,15 @@ pub async fn render_page(
         }
     };
     let acme = super::page_acme_dns::load(state, ctx, &panel_host, acme_form, acme_error).await;
+    let preview_rows: Vec<(String, String, String)> = wildcard_rows
+        .iter()
+        .map(|r| (r.node_id.clone(), r.label.clone(), r.base.clone()))
+        .collect();
+    let preview_acme =
+        crate::handlers::acme_dns_ssl::load_previews(state, ctx, &preview_rows).await;
     let tpl = HttpsTpl {
         acme,
+        preview_acme,
         username: &ctx.username,
         user_initial: crate::handlers::user_initial(&ctx.username),
         active: "settings",

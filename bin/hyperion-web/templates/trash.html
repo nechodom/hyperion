@@ -84,7 +84,7 @@
               </form>
               <form method="post" action="/trash/purge" style="display:inline;margin:0"
                     data-confirm-title="Permanently delete {{ e.domain }}"
-                    data-confirm-body="Files, database, system user, and certificates will be removed now, skipping the retention window. This cannot be undone. Type the domain to confirm."
+                    data-confirm-body="Files, database, system user, and certificates will be removed now, skipping the retention window. This cannot be undone. If {{ e.domain }} had automatic wildcard renewal, the customer can now remove its _acme-challenge CNAME. Type the domain to confirm."
                     data-confirm-confirm-label="Delete permanently"
                     data-confirm-variant="danger"
                     data-confirm-require="{{ e.domain }}">

@@ -4999,3 +4999,413 @@ async fn acme_dns_settings_forbidden_for_customer() {
         assert_eq!(resp.status(), StatusCode::FORBIDDEN, "{uri}");
     }
 }
+
+// ─── Automatic wildcard renewal from the SSL tab ────────────────────────
+
+/// Seed one hosting through the agent and return its id.
+async fn acme_ssl_hosting(sock: &std::path::Path, domain: &str) -> String {
+    use hyperion_rpc::codec::{Request as RpcReq, Response as RpcResp};
+    match hyperion_rpc_client::call(
+        sock,
+        RpcReq::HostingCreate(hyperion_rpc::wire::HostingCreateReq {
+            domain: hyperion_validate::Domain::parse(domain).expect("domain"),
+            aliases: vec![],
+            php_version: None,
+            database: None,
+            system_user: None,
+            kind: "php".into(),
+            proxy_upstream_url: None,
+        }),
+    )
+    .await
+    .expect("seed hosting")
+    {
+        RpcResp::HostingCreate(_) => {}
+        other => panic!("unexpected create: {other:?}"),
+    }
+    match hyperion_rpc_client::call(
+        sock,
+        RpcReq::HostingGet(hyperion_rpc::wire::HostingSelector::Domain(
+            hyperion_validate::Domain::parse(domain).expect("domain"),
+        )),
+    )
+    .await
+    .expect("get hosting")
+    {
+        RpcResp::HostingGet(d) => d.id.as_str().to_string(),
+        other => panic!("unexpected get: {other:?}"),
+    }
+}
+
+/// Save a delegated zone (responder off: nothing binds port 53 in tests).
+async fn acme_ssl_zone(sock: &std::path::Path) {
+    match hyperion_rpc_client::call(
+        sock,
+        hyperion_rpc::codec::Request::AcmeDnsConfigSet {
+            zone: Some("acme.panel.example.com".into()),
+            ns_host: "ns-acme.example.com".into(),
+            public_ipv4: Some("203.0.113.9".into()),
+            public_ipv6: None,
+            enabled: false,
+        },
+    )
+    .await
+    .expect("zone")
+    {
+        hyperion_rpc::codec::Response::AcmeDnsConfig(_) => {}
+        other => panic!("unexpected zone save: {other:?}"),
+    }
+}
+
+async fn acme_ssl_labels(sock: &std::path::Path) -> Vec<hyperion_types::AcmeDnsLabel> {
+    match hyperion_rpc_client::call(sock, hyperion_rpc::codec::Request::AcmeDnsLabels)
+        .await
+        .expect("labels")
+    {
+        hyperion_rpc::codec::Response::AcmeDnsLabels(l) => l,
+        other => panic!("unexpected labels: {other:?}"),
+    }
+}
+
+/// A customer with manage access to `hosting_id`; returns their cookie.
+async fn acme_ssl_customer(app: &axum::Router, sock: &std::path::Path, hosting_id: &str) -> String {
+    use hyperion_rpc::codec::{Request as RpcReq, Response as RpcResp};
+    let user_id = match hyperion_rpc_client::call(
+        sock,
+        RpcReq::WebUserCreate {
+            username: "ssl-cust".into(),
+            email: "ssl-cust@example.invalid".into(),
+            password: "customer-pw-1".into(),
+            role: "customer".into(),
+        },
+    )
+    .await
+    .expect("create customer")
+    {
+        RpcResp::WebUserCreate { id } => id,
+        other => panic!("unexpected create: {other:?}"),
+    };
+    match hyperion_rpc_client::call(
+        sock,
+        RpcReq::WebGrantHostingAccess {
+            user_id,
+            hosting_id: hosting_id.to_string(),
+            level: "manage".into(),
+            granted_by: None,
+        },
+    )
+    .await
+    .expect("grant")
+    {
+        RpcResp::WebGrantHostingAccess => {}
+        other => panic!("unexpected grant: {other:?}"),
+    }
+    acme_dns_login(app, "ssl-cust", "customer-pw-1").await
+}
+
+/// Wait for a background job to finish; returns its final state.
+async fn acme_ssl_wait_job(sock: &std::path::Path, location: &str) -> String {
+    let id = location.trim_start_matches("/jobs/").to_string();
+    for _ in 0..200 {
+        if let Ok(hyperion_rpc::codec::Response::JobGet(Some(j))) = hyperion_rpc_client::call(
+            sock,
+            hyperion_rpc::codec::Request::JobGet { id: id.clone() },
+        )
+        .await
+        {
+            if j.is_terminal() {
+                return j.state;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("job {id} did not finish");
+}
+
+/// The session-wide CSRF token (valid at any path), from /profile.
+async fn acme_ssl_csrf(app: &axum::Router, cookie: &str) -> String {
+    let (_, profile) = acme_dns_get(app, cookie, "/profile").await;
+    extract_csrf(&profile)
+}
+
+#[tokio::test]
+async fn ssl_tab_shows_cname_block_to_operator() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d) = start_agent().await;
+    let app = build_app(sock.clone(), admin);
+    let id = acme_ssl_hosting(&sock, "acmessl-e2e.cz").await;
+    acme_ssl_zone(&sock).await;
+    let cookie = acme_dns_login(&app, "kevin", "good-pw").await;
+
+    // Before setup: an offer to set it up, no target yet.
+    let (status, page) = acme_dns_get(&app, &cookie, &format!("/hostings/{id}")).await;
+    assert_eq!(status, StatusCode::OK);
+    let setup = format!("/hostings/{id}/cert/acme-dns/setup");
+    assert!(page.contains(&setup), "setup form missing");
+
+    let csrf = acme_ssl_csrf(&app, &cookie).await;
+    let resp = acme_dns_post(&app, &cookie, &setup, format!("_csrf={}", enc(&csrf))).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let block = body_string(resp).await;
+    let label = acme_ssl_labels(&sock).await;
+    assert_eq!(label.len(), 1);
+    assert_eq!(label[0].hosting_id.as_deref(), Some(id.as_str()));
+    let target = format!("{}.acme.panel.example.com", label[0].label);
+    assert!(block.contains("_acme-challenge.acmessl-e2e.cz"), "{block}");
+    assert!(block.contains(&target), "target missing: {block}");
+    assert!(block.contains(&format!("/hostings/{id}/cert/acme-dns/check")));
+
+    // The tab now carries the block on every render.
+    let (_, page) = acme_dns_get(&app, &cookie, &format!("/hostings/{id}")).await;
+    assert!(page.contains("_acme-challenge.acmessl-e2e.cz"));
+    assert!(page.contains(&target));
+    assert!(
+        page.contains("until it is removed"),
+        "consent sentence missing"
+    );
+    // Not verified (no such CNAME exists): no one-click issue yet.
+    assert!(!page.contains(&format!("/hostings/{id}/cert/dns01/auto")));
+}
+
+#[tokio::test]
+async fn ssl_tab_shows_only_state_to_customer() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d) = start_agent().await;
+    let app = build_app(sock.clone(), admin);
+    let id = acme_ssl_hosting(&sock, "acmessl-cust.cz").await;
+    acme_ssl_zone(&sock).await;
+    hyperion_rpc_client::call(
+        &sock,
+        hyperion_rpc::codec::Request::AcmeDnsLabelEnsure {
+            base: hyperion_validate::Domain::parse("acmessl-cust.cz").expect("domain"),
+            hosting_id: Some(id.clone()),
+        },
+    )
+    .await
+    .expect("label");
+    let cookie = acme_ssl_customer(&app, &sock, &id).await;
+    let (status, page) = acme_dns_get(&app, &cookie, &format!("/hostings/{id}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(page.contains("Automatic renewal"), "state line missing");
+    assert!(
+        page.contains("acme-ssl-state\">off<"),
+        "state should be off"
+    );
+    assert!(
+        !page.contains(".acme."),
+        "CNAME target leaked to a customer"
+    );
+    assert!(!page.contains("/cert/acme-dns/"), "setup/check form leaked");
+    assert!(!page.contains("/cert/dns01/auto"), "issue button leaked");
+}
+
+#[tokio::test]
+async fn acme_dns_setup_forbidden_for_customer() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d) = start_agent().await;
+    let app = build_app(sock.clone(), admin);
+    let id = acme_ssl_hosting(&sock, "acmessl-forbid.cz").await;
+    let cookie = acme_ssl_customer(&app, &sock, &id).await;
+    let csrf = acme_ssl_csrf(&app, &cookie).await;
+    for uri in [
+        format!("/hostings/{id}/cert/acme-dns/setup"),
+        format!("/hostings/{id}/cert/acme-dns/check"),
+        format!("/hostings/{id}/cert/dns01/auto"),
+        "/settings/https/preview/local/acme-dns/setup".to_string(),
+        "/settings/https/preview/local/acme-dns/check".to_string(),
+        "/settings/https/preview/local/acme-dns/auto".to_string(),
+    ] {
+        let resp = acme_dns_post(&app, &cookie, &uri, format!("_csrf={}", enc(&csrf))).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "{uri}");
+        let body = body_string(resp).await;
+        assert!(
+            !body.contains("CSRF check failed"),
+            "{uri}: refused by CSRF, not authz"
+        );
+    }
+    assert!(
+        acme_ssl_labels(&sock).await.is_empty(),
+        "a label was minted"
+    );
+}
+
+#[tokio::test]
+async fn setup_is_idempotent_label_unchanged() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d) = start_agent().await;
+    let app = build_app(sock.clone(), admin);
+    let id = acme_ssl_hosting(&sock, "acmessl-idem.cz").await;
+    let cookie = acme_dns_login(&app, "kevin", "good-pw").await;
+    let csrf = acme_ssl_csrf(&app, &cookie).await;
+    let uri = format!("/hostings/{id}/cert/acme-dns/setup");
+    let mut seen = Vec::new();
+    for _ in 0..2 {
+        let resp = acme_dns_post(&app, &cookie, &uri, format!("_csrf={}", enc(&csrf))).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let labels = acme_ssl_labels(&sock).await;
+        assert_eq!(labels.len(), 1);
+        seen.push(labels[0].label.clone());
+    }
+    assert_eq!(seen[0], seen[1], "setup minted a second label");
+}
+
+#[tokio::test]
+async fn auto_issue_starts_a_job() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d) = start_agent().await;
+    let app = build_app(sock.clone(), admin);
+    let id = acme_ssl_hosting(&sock, "acmessl-auto.cz").await;
+    let cookie = acme_dns_login(&app, "kevin", "good-pw").await;
+    let csrf = acme_ssl_csrf(&app, &cookie).await;
+    let resp = acme_dns_post(
+        &app,
+        &cookie,
+        &format!("/hostings/{id}/cert/acme-dns/setup"),
+        format!("_csrf={}", enc(&csrf)),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let resp = acme_dns_post(
+        &app,
+        &cookie,
+        &format!("/hostings/{id}/cert/dns01/auto"),
+        format!("_csrf={}", enc(&csrf)),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let to = location(&resp);
+    assert!(to.starts_with("/jobs/"), "{to}");
+    // The zone is not enabled here, so the renewal refuses — as a job failure.
+    assert_eq!(acme_ssl_wait_job(&sock, &to).await, "failed");
+}
+
+#[tokio::test]
+async fn purge_deletes_acme_labels() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d, _cfg) = start_agent_with_toml("[cluster]\ntrash_enabled = true\n").await;
+    let app = build_app(sock.clone(), admin);
+    let id = acme_ssl_hosting(&sock, "acmessl-purge.cz").await;
+    let cookie = acme_dns_login(&app, "kevin", "good-pw").await;
+    let csrf = acme_ssl_csrf(&app, &cookie).await;
+    acme_dns_post(
+        &app,
+        &cookie,
+        &format!("/hostings/{id}/cert/acme-dns/setup"),
+        format!("_csrf={}", enc(&csrf)),
+    )
+    .await;
+    assert_eq!(acme_ssl_labels(&sock).await.len(), 1);
+
+    let resp = acme_dns_post(
+        &app,
+        &cookie,
+        "/hostings/delete",
+        format!("_csrf={}&selector={id}", enc(&csrf)),
+    )
+    .await;
+    assert_eq!(acme_ssl_wait_job(&sock, &location(&resp)).await, "done");
+    let (_, trash) = acme_dns_get(&app, &cookie, "/trash").await;
+    assert!(
+        trash.contains("customer can now remove"),
+        "purge dialog should mention the CNAME"
+    );
+    let resp = acme_dns_post(
+        &app,
+        &cookie,
+        "/trash/purge",
+        format!("_csrf={}&selector=acmessl-purge.cz", enc(&csrf)),
+    )
+    .await;
+    assert!(location(&resp).contains("flash="), "{}", location(&resp));
+    assert!(acme_ssl_labels(&sock).await.is_empty(), "labels survived");
+}
+
+#[tokio::test]
+async fn trash_keeps_acme_labels() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d, _cfg) = start_agent_with_toml("[cluster]\ntrash_enabled = true\n").await;
+    let app = build_app(sock.clone(), admin);
+    let id = acme_ssl_hosting(&sock, "acmessl-trash.cz").await;
+    let cookie = acme_dns_login(&app, "kevin", "good-pw").await;
+    let csrf = acme_ssl_csrf(&app, &cookie).await;
+    acme_dns_post(
+        &app,
+        &cookie,
+        &format!("/hostings/{id}/cert/acme-dns/setup"),
+        format!("_csrf={}", enc(&csrf)),
+    )
+    .await;
+    assert_eq!(acme_ssl_labels(&sock).await.len(), 1);
+    let resp = acme_dns_post(
+        &app,
+        &cookie,
+        "/hostings/delete",
+        format!("_csrf={}&selector={id}", enc(&csrf)),
+    )
+    .await;
+    assert_eq!(acme_ssl_wait_job(&sock, &location(&resp)).await, "done");
+    assert_eq!(
+        acme_ssl_labels(&sock).await.len(),
+        1,
+        "trash dropped the label"
+    );
+}
+
+#[tokio::test]
+async fn final_delete_deletes_acme_labels() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d) = start_agent().await;
+    let app = build_app(sock.clone(), admin);
+    let id = acme_ssl_hosting(&sock, "acmessl-final.cz").await;
+    let cookie = acme_dns_login(&app, "kevin", "good-pw").await;
+    let csrf = acme_ssl_csrf(&app, &cookie).await;
+    acme_dns_post(
+        &app,
+        &cookie,
+        &format!("/hostings/{id}/cert/acme-dns/setup"),
+        format!("_csrf={}", enc(&csrf)),
+    )
+    .await;
+    assert_eq!(acme_ssl_labels(&sock).await.len(), 1);
+    let resp = acme_dns_post(
+        &app,
+        &cookie,
+        "/hostings/delete",
+        format!("_csrf={}&selector={id}", enc(&csrf)),
+    )
+    .await;
+    assert_eq!(acme_ssl_wait_job(&sock, &location(&resp)).await, "done");
+    assert!(acme_ssl_labels(&sock).await.is_empty(), "labels survived");
+}
+
+#[tokio::test]
+async fn preview_wildcard_sets_up_automatic_renewal() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d, _cfg) =
+        start_agent_with_toml("[cluster]\ntest_domain_template = \"{name}.preview.example.com\"\n")
+            .await;
+    let app = build_app(sock.clone(), admin);
+    acme_ssl_zone(&sock).await;
+    let cookie = acme_dns_login(&app, "kevin", "good-pw").await;
+    let (status, page) = acme_dns_get(&app, &cookie, "/settings/https").await;
+    assert_eq!(status, StatusCode::OK);
+    let setup = "/settings/https/preview/local/acme-dns/setup";
+    assert!(page.contains(setup), "preview setup form missing");
+
+    let csrf = acme_ssl_csrf(&app, &cookie).await;
+    let resp = acme_dns_post(&app, &cookie, setup, format!("_csrf={}", enc(&csrf))).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let block = body_string(resp).await;
+    let labels = acme_ssl_labels(&sock).await;
+    assert_eq!(labels.len(), 1);
+    assert_eq!(labels[0].base, "preview.example.com");
+    assert_eq!(labels[0].hosting_id, None, "a preview label has no hosting");
+    assert!(
+        block.contains("_acme-challenge.preview.example.com"),
+        "{block}"
+    );
+    assert!(
+        block.contains("id=\"acme-ssl-local\""),
+        "swap target id missing"
+    );
+}

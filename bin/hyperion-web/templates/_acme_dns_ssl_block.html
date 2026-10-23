@@ -1,0 +1,72 @@
+{#- One wildcard's automatic renewal (handlers/acme_dns_ssl.rs). Included by
+    the hosting SSL tab and the HTTPS settings page, and rendered on its own
+    as the htmx answer of its setup and check buttons, which swap it whole.
+    A customer gets the state line only: no CNAME target, no forms. -#}
+<div class="acme-ssl" id="{{ acme_ssl.dom_id }}">
+{%- if acme_ssl.admin %}
+  <div class="row" style="align-items:center;gap:0.6rem;flex-wrap:wrap">
+    {% if !acme_ssl.heading.is_empty() %}<strong>{{ acme_ssl.heading }}</strong> <code>*.{{ acme_ssl.base }}</code>{% endif %}
+    <span class="pill {{ acme_ssl.tone() }}">{{ acme_ssl.verdict() }}</span>
+    {% if acme_ssl.auto_on() %}<span class="pill ok">renews itself</span>{% endif %}
+  </div>
+  {% if !acme_ssl.note().is_empty() %}<p class="text-soft small" style="margin:0.3rem 0 0">{{ acme_ssl.note() }}</p>{% endif %}
+  {% if acme_ssl.unreadable.is_some() %}
+  {% else if acme_ssl.zone.is_none() %}
+  <p class="text-soft small" style="margin:0.5rem 0 0">
+    Set up the delegated acme zone under
+    <a href="/settings/https#acme-dns">Settings → HTTPS</a> first.
+  </p>
+  {% else if acme_ssl.label.is_none() %}
+  <p class="text-soft small" style="margin:0.5rem 0 0.6rem">
+    Gives <code>{{ acme_ssl.base }}</code> one fixed DNS record to create,
+    once. After that its wildcard certificate renews without a TXT record by hand.
+  </p>
+  <form hx-post="{{ acme_ssl.setup_url }}" hx-target="#{{ acme_ssl.dom_id }}" hx-swap="outerHTML">
+    <input type="hidden" name="_csrf" value="{{ acme_ssl.csrf }}">
+    <button class="btn small" type="submit">Set up automatic renewal</button>
+  </form>
+  {% else %}
+  <p class="text-soft small" style="margin:0.5rem 0 0.4rem">
+    Create this CNAME record at the DNS provider of <code>{{ acme_ssl.base }}</code>:
+  </p>
+  <div class="copy-grid">
+    <div class="copy-field" data-copy="{{ acme_ssl.challenge() }}" title="Copy the name">
+      <span class="copy-label">Name</span>
+      <span class="copy-value">{{ acme_ssl.challenge() }}</span>
+      <span class="copy-hint">click to copy</span>
+    </div>
+    <div class="copy-field" data-copy="{{ acme_ssl.target() }}." title="Copy the target">
+      <span class="copy-label">CNAME</span>
+      <span class="copy-value">{{ acme_ssl.target() }}.</span>
+      <span class="copy-hint">click to copy</span>
+    </div>
+  </div>
+  <p class="text-soft small" style="margin:0.5rem 0 0">
+    The CNAME lets this panel obtain certificates for <code>{{ acme_ssl.base }}</code> until it is removed.
+  </p>
+  {% if acme_ssl.verified() && !acme_ssl.enabled %}
+  <p class="chk-note tone-warn" style="margin:0.5rem 0 0">
+    The delegated zone is off: turn it on under <a href="/settings/https#acme-dns">Settings → HTTPS</a>.
+  </p>
+  {% endif %}
+  <div style="margin:0.7rem 0 0;display:flex;align-items:center;gap:0.6rem;flex-wrap:wrap">
+    <form hx-post="{{ acme_ssl.check_url }}" hx-target="#{{ acme_ssl.dom_id }}" hx-swap="outerHTML" style="margin:0">
+      <input type="hidden" name="_csrf" value="{{ acme_ssl.csrf }}">
+      <button class="btn small" type="submit">Check the CNAME</button>
+    </form>
+    {% if acme_ssl.can_issue() %}
+    <form method="post" action="{{ acme_ssl.auto_url }}" style="margin:0"
+          data-confirm-title="Issue *.{{ acme_ssl.base }} now"
+          data-confirm-body="Hyperion requests a wildcard certificate for {{ acme_ssl.base }} and *.{{ acme_ssl.base }} from Let's Encrypt, validated through the delegated zone. Nothing to publish by hand."
+          data-confirm-confirm-label="Issue certificate"
+          data-confirm-variant="primary">
+      <input type="hidden" name="_csrf" value="{{ acme_ssl.csrf }}">
+      <button class="btn small primary" type="submit">Issue the wildcard now</button>
+    </form>
+    {% endif %}
+  </div>
+  {% endif %}
+{%- else %}
+  <p style="margin:0">Automatic renewal: <strong class="acme-ssl-state">{% if acme_ssl.auto_on() %}on{% else %}off{% endif %}</strong></p>
+{%- endif %}
+</div>
