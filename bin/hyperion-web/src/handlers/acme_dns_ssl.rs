@@ -657,16 +657,12 @@ async fn start_issue(
     Ok(Ok(job))
 }
 
-/// A hosting is gone for good: drop its delegation labels on the master.
-/// Never fails the caller; a leftover label only lists a dead domain.
+/// A hosting is gone for good: drop its delegation labels on the master,
+/// unless another hosting now serves the base (the source of a Move/Copy),
+/// which takes the label over. Never fails the caller; a leftover label
+/// only lists a dead domain.
 pub async fn forget_hosting(state: &SharedState, hosting_id: &str) {
-    let req = Request::AcmeDnsLabelsDeleteForHosting {
-        hosting_id: hosting_id.to_string(),
-    };
-    match crate::dispatcher::dispatch_to_node(state, None, req).await {
-        Ok(RpcResponse::AcmeDnsLabelsDeleteForHosting) => {}
-        other => tracing::warn!(hosting_id, ?other, "acme-dns: labels not deleted"),
-    }
+    crate::acme_dns_renew::forget_labels(state, hosting_id).await
 }
 
 /// After a delete that may only have moved the hosting to the trash:

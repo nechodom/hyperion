@@ -331,23 +331,28 @@ async fn labels<B: Backend>(b: &B) -> Vec<AcmeDnsLabel> {
     }
 }
 
-/// Drop the labels of hostings no node has any more (a trash purge by the
-/// node's own retention sweep never passes through the panel). A label is
-/// only dropped when EVERY node answered and none knows the hosting; a
-/// node that did not answer keeps it. Returns the labels left.
+/// The master (`None`) and every worker that is not the master's own
+/// hostname: the nodes to ask whether a hosting exists.
+async fn every_node<B: Backend>(b: &B) -> Result<Vec<Option<String>>, String> {
+    let mut nodes: Vec<Option<String>> = vec![None];
+    for id in b.remote_nodes().await? {
+        if !b.is_master_hostname(&id).await {
+            nodes.push(Some(id));
+        }
+    }
+    Ok(nodes)
+}
+
+/// Settle the labels of hostings no node has any more (a trash purge by
+/// the node's own retention sweep never passes through the panel). A
+/// label is only touched when EVERY node answered and none knows the
+/// hosting; a node that did not answer keeps it. Returns the labels left.
 async fn sweep_orphans<B: Backend>(b: &B, labels: Vec<AcmeDnsLabel>) -> Vec<AcmeDnsLabel> {
     if labels.iter().all(|l| l.hosting_id.is_none()) {
         return labels;
     }
-    let mut nodes: Vec<Option<String>> = vec![None];
-    match b.remote_nodes().await {
-        Ok(ids) => {
-            for id in ids {
-                if !b.is_master_hostname(&id).await {
-                    nodes.push(Some(id));
-                }
-            }
-        }
+    let nodes = match every_node(b).await {
+        Ok(n) => n,
         Err(e) => {
             tracing::debug!(
                 error = e,
@@ -355,9 +360,9 @@ async fn sweep_orphans<B: Backend>(b: &B, labels: Vec<AcmeDnsLabel>) -> Vec<Acme
             );
             return labels;
         }
-    }
+    };
     let mut kept = Vec::with_capacity(labels.len());
-    for label in labels {
+    for mut label in labels {
         let Some(hosting_id) = label.hosting_id.clone() else {
             kept.push(label);
             continue;
@@ -366,24 +371,123 @@ async fn sweep_orphans<B: Backend>(b: &B, labels: Vec<AcmeDnsLabel>) -> Vec<Acme
             kept.push(label);
             continue;
         }
-        let Ok(base) = Domain::parse(&label.base) else {
-            kept.push(label);
-            continue;
-        };
-        match confirm(b, Request::AcmeDnsLabelDelete { base }, |r| {
-            matches!(r, Response::AcmeDnsLabelDelete)
-        })
-        .await
-        {
-            Ok(()) => tracing::info!(
-                base = label.base,
-                hosting_id,
-                "acme-dns: label of a deleted hosting dropped"
-            ),
-            Err(_) => kept.push(label),
+        match settle_orphan(b, &nodes, &label).await {
+            Fate::Dropped => {}
+            Fate::Kept => kept.push(label),
+            Fate::Moved(to) => {
+                label.hosting_id = Some(to);
+                kept.push(label);
+            }
         }
     }
     kept
+}
+
+/// The delegation labels of a hosting that is gone for good (purged, or
+/// finally deleted): each is dropped, or re-pointed when another hosting
+/// now serves its base (the source of a Move/Copy). Never fails the
+/// caller; a label left behind only lists a dead domain.
+pub async fn forget_labels(state: &SharedState, hosting_id: &str) {
+    forget_labels_with(&Live(state), hosting_id).await
+}
+
+async fn forget_labels_with<B: Backend>(b: &B, hosting_id: &str) {
+    let owned: Vec<AcmeDnsLabel> = labels(b)
+        .await
+        .into_iter()
+        .filter(|l| l.hosting_id.as_deref() == Some(hosting_id))
+        .collect();
+    if owned.is_empty() {
+        return;
+    }
+    let nodes = match every_node(b).await {
+        Ok(n) => n,
+        Err(e) => {
+            tracing::warn!(
+                hosting_id,
+                error = e,
+                "acme-dns: labels kept, node list failed"
+            );
+            return;
+        }
+    };
+    for label in &owned {
+        settle_orphan(b, &nodes, label).await;
+    }
+}
+
+/// What became of a label whose hosting is gone.
+enum Fate {
+    Kept,
+    /// Re-pointed at this hosting id, which serves the base now.
+    Moved(String),
+    Dropped,
+}
+
+/// A label whose hosting no node has. Labels are keyed by base, so when
+/// any node serves the base under another id (Move/Copy minted it), the
+/// label follows that hosting: the customer's CNAME stays valid. Dropped
+/// only when every node answered that no hosting has the base.
+async fn settle_orphan<B: Backend>(b: &B, nodes: &[Option<String>], label: &AcmeDnsLabel) -> Fate {
+    let Ok(base) = Domain::parse(&label.base) else {
+        return Fate::Kept;
+    };
+    let mut definite = true;
+    for node in nodes {
+        let sel = HostingSelector::Domain(base.clone());
+        match b.dispatch(node.as_deref(), Request::HostingGet(sel)).await {
+            Ok(Response::HostingGet(d)) => {
+                let to = d.id.as_str().to_string();
+                if label.hosting_id.as_deref() == Some(to.as_str()) {
+                    return Fate::Kept;
+                }
+                let ensure = Request::AcmeDnsLabelEnsure {
+                    base,
+                    hosting_id: Some(to.clone()),
+                };
+                return match confirm(b, ensure, |r| matches!(r, Response::AcmeDnsLabel(_))).await {
+                    Ok(()) => {
+                        tracing::info!(
+                            base = label.base,
+                            from = ?label.hosting_id,
+                            to,
+                            "acme-dns: label follows its base to another hosting"
+                        );
+                        Fate::Moved(to)
+                    }
+                    Err(_) => Fate::Kept,
+                };
+            }
+            Ok(Response::Error(hyperion_rpc::RpcError::NotFound { .. })) => {}
+            other => {
+                tracing::debug!(
+                    ?node,
+                    base = label.base,
+                    ?other,
+                    "acme-dns: label kept, node gave no definite answer"
+                );
+                definite = false;
+            }
+        }
+    }
+    if !definite {
+        return Fate::Kept;
+    }
+    match confirm(b, Request::AcmeDnsLabelDelete { base }, |r| {
+        matches!(r, Response::AcmeDnsLabelDelete)
+    })
+    .await
+    {
+        Ok(()) => {
+            tracing::info!(
+                base = label.base,
+                hosting_id = ?label.hosting_id,
+                "acme-dns: label of a deleted hosting dropped"
+            );
+            Fate::Dropped
+        }
+        Err(_) => Fate::Kept,
+    }
 }
 
 /// Every node said "no such hosting". Any other answer, or none, is a no.
@@ -783,8 +887,11 @@ mod tests {
         records: Vec<(String, String)>,
         finish: Option<Answer>,
         clear_fails: bool,
-        /// HostingGet answers per target; a target not listed says NotFound.
+        /// HostingGet-by-id answers per target; a target not listed says
+        /// NotFound.
         hostings: Vec<(Option<&'static str>, Answer)>,
+        /// HostingGet-by-domain answers per target; NotFound when not listed.
+        by_domain: Vec<(Option<&'static str>, Answer)>,
         in_flight: InFlight,
     }
 
@@ -809,6 +916,7 @@ mod tests {
                 finish: None,
                 clear_fails: false,
                 hostings: Vec::new(),
+                by_domain: Vec::new(),
                 in_flight: InFlight::default(),
             }
         }
@@ -900,13 +1008,25 @@ mod tests {
                 Request::AcmeDnsZoneBroken { .. } => Response::AcmeDnsZoneBroken,
                 Request::CertSetDelegated { .. } => Response::CertSetDelegated,
                 Request::AcmeDnsLabelDelete { .. } => Response::AcmeDnsLabelDelete,
-                Request::HostingGet(_) => match self.hostings.iter().find(|(n, _)| *n == node) {
-                    Some((_, f)) => return f(),
-                    None => Response::Error(RpcError::NotFound {
-                        kind: "hosting".into(),
-                        id: "h-gone".into(),
-                    }),
-                },
+                Request::HostingGet(sel) => {
+                    let answers = match sel {
+                        HostingSelector::Id(_) => &self.hostings,
+                        HostingSelector::Domain(_) => &self.by_domain,
+                    };
+                    match answers.iter().find(|(n, _)| *n == node) {
+                        Some((_, f)) => return f(),
+                        None => Response::Error(RpcError::NotFound {
+                            kind: "hosting".into(),
+                            id: "h-gone".into(),
+                        }),
+                    }
+                }
+                Request::AcmeDnsLabelEnsure { base, hosting_id } => {
+                    Response::AcmeDnsLabel(AcmeDnsLabel {
+                        hosting_id,
+                        ..label(base.as_str())
+                    })
+                }
                 other => panic!("unexpected dispatch {}", <&'static str>::from(&other)),
             })
         }
@@ -1267,10 +1387,107 @@ mod tests {
         let asked: Vec<Option<String>> = fake
             .sent()
             .into_iter()
-            .filter(|(_, r)| matches!(r, Request::HostingGet(_)))
+            .filter(|(_, r)| matches!(r, Request::HostingGet(HostingSelector::Id(_))))
             .map(|(n, _)| n)
             .collect();
         assert_eq!(asked, vec![None, Some("node_1".into())]);
+    }
+
+    fn detail(id: &str, domain: &str) -> hyperion_types::HostingDetail {
+        hyperion_types::HostingDetail {
+            id: HostingId::from(id.to_string()),
+            domain: domain.into(),
+            aliases: Vec::new(),
+            state: hyperion_types::HostingState::Active,
+            system_user: "u".into(),
+            php_version: None,
+            root_dir: String::new(),
+            database: None,
+            cert: None,
+            created_at: 0,
+            updated_at: 0,
+            acme_contact_email: None,
+            kind: "php".into(),
+            proxy_upstream_url: None,
+            node_id: None,
+            vhost_options: Default::default(),
+            wp_extras: Default::default(),
+            cert_path: None,
+            cert_key_path: None,
+        }
+    }
+
+    fn ensures(fake: &Fake) -> Vec<(String, Option<String>)> {
+        fake.sent()
+            .into_iter()
+            .filter_map(|(_, r)| match r {
+                Request::AcmeDnsLabelEnsure { base, hosting_id } => {
+                    Some((base.as_str().to_string(), hosting_id))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn sweep_repoints_a_label_whose_base_moved_to_another_hosting() {
+        let mut fake = Fake::new();
+        fake.nodes = vec!["node_1".into()];
+        fake.labels = vec![orphan()];
+        // Move/Copy: h-gone is gone, but node_1 now serves the base as h-new.
+        fake.by_domain = vec![(Some("node_1"), || {
+            Ok(Response::HostingGet(detail("h-new", "gone.example")))
+        })];
+        run_once_with(&fake).await;
+        assert!(
+            label_deletes(&fake).is_empty(),
+            "the live site lost its label"
+        );
+        assert_eq!(
+            ensures(&fake),
+            vec![("gone.example".to_string(), Some("h-new".to_string()))]
+        );
+    }
+
+    #[tokio::test]
+    async fn sweep_keeps_a_label_when_the_base_lookup_is_not_definite() {
+        let mut fake = Fake::new();
+        fake.nodes = vec!["node_1".into()];
+        fake.labels = vec![orphan()];
+        fake.by_domain = vec![(Some("node_1"), || {
+            Err(DispatchError::Remote(RemoteClientError::HttpError {
+                code: Some(7),
+                stderr: "connection refused".into(),
+            }))
+        })];
+        run_once_with(&fake).await;
+        assert!(label_deletes(&fake).is_empty());
+        assert!(ensures(&fake).is_empty());
+    }
+
+    #[tokio::test]
+    async fn forgetting_a_moved_source_keeps_the_label() {
+        let mut fake = Fake::new();
+        fake.labels = vec![orphan(), label("example.com")];
+        fake.by_domain = vec![(None, || {
+            Ok(Response::HostingGet(detail("h-new", "gone.example")))
+        })];
+        forget_labels_with(&fake, "h-gone").await;
+        assert!(label_deletes(&fake).is_empty());
+        assert_eq!(
+            ensures(&fake),
+            vec![("gone.example".to_string(), Some("h-new".to_string()))]
+        );
+    }
+
+    #[tokio::test]
+    async fn forgetting_a_purged_hosting_drops_only_its_labels() {
+        let mut fake = Fake::new();
+        fake.nodes = vec!["node_1".into()];
+        fake.labels = vec![orphan(), label("example.com")];
+        forget_labels_with(&fake, "h-gone").await;
+        assert_eq!(label_deletes(&fake), vec!["gone.example".to_string()]);
+        assert!(ensures(&fake).is_empty());
     }
 
     #[tokio::test]
