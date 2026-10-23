@@ -208,20 +208,27 @@ log()  { printf '\033[36m[hyperion]\033[0m %s\n' "$*"; }
 warn() { printf '\033[33m[warn]\033[0m %s\n' "$*"; }
 
 # --- Live status for the panel's "updating" page --------------------------
-# From the moment hyperion-web is stopped, anyone with the panel open is looking
-# at the static page nginx serves in its place. That page polls this file (the
-# panel vhost serves it at /_hyperion/update-status), so it can say which step
-# we're on — and, crucially, tell "building from source, 10 more minutes" and
-# "the update died" apart from "back in a moment". Only a step name and epoch
-# timestamps go in: the URL needs no login.
+# The panel vhost serves this file at /_hyperion/update-status, straight from
+# disk. Two readers poll it:
+#   - the panel itself (app.js), while hyperion-web still serves — fetch,
+#     download/build and the job wait take minutes and the panel stays up for
+#     all of them, so open tabs show an "update in progress" banner and move
+#     onto the updating page the moment the panel goes down;
+#   - the static updating page nginx serves while hyperion-web is stopped, so
+#     it can tell "building from source, 10 more minutes" and "the update
+#     died" apart from "back in a moment".
+# Only step names and epoch timestamps go in: the URL needs no login.
+# `offline` is when the panel was stopped — the page's "Offline for" clock —
+# and absent while it still serves.
 #
-# Written only on a box that runs the panel, only once the services are down,
-# and removed again as soon as the panel is serving (404 = nothing running).
-# Every write is best-effort — a status file must never fail an update.
+# Written only on a box that runs the panel, from the first step, and removed
+# again as soon as the panel is serving (404 = nothing running). Every write is
+# best-effort — a status file must never fail an update.
 # >>> update-status
 STATUS_FILE="${HYPERION_UPDATE_STATUS_FILE:-/var/lib/hyperion/maintenance/panel-update.json}"
 STATUS_ON="${HYPERION_UPDATE_STATUS:-0}"   # inherited across the re-exec
 STATUS_STARTED="${HYPERION_UPDATE_STARTED:-0}"
+STATUS_OFFLINE="${HYPERION_UPDATE_OFFLINE:-0}"
 STATUS_STEP=""
 STATUS_STEP_STARTED=0
 
@@ -242,10 +249,15 @@ status() {
     STATUS_STEP="$step"
     STATUS_STEP_STARTED="$now"
   fi
+  if [[ "$step" == stop ]] && (( STATUS_OFFLINE == 0 )); then
+    STATUS_OFFLINE="$now"
+    export HYPERION_UPDATE_OFFLINE="$now"
+  fi
   tmp="$STATUS_FILE.tmp.$$"
   {
     printf '{"v":1,"state":"%s","step":"%s","started":%s,"step_started":%s,"updated":%s' \
       "$state" "$step" "$STATUS_STARTED" "$STATUS_STEP_STARTED" "$now"
+    (( STATUS_OFFLINE > 0 )) && printf ',"offline":%s' "$STATUS_OFFLINE"
     [[ "$pct" =~ ^[0-9]+$ ]] && printf ',"progress":%s' "$pct"
     printf '}\n'
   } > "$tmp" 2>/dev/null && chmod 0644 "$tmp" 2>/dev/null && mv -f "$tmp" "$STATUS_FILE" 2>/dev/null \
@@ -367,56 +379,86 @@ apt_install() {
   DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "$@"
 }
 
-# Run `cargo "$@"` with a live progress bar driven by the number of compiled
-# crates vs a total remembered from the previous successful build (so a from-
-# source build shows real progress instead of a silent multi-minute hang).
-# Purely cosmetic: returns cargo's real exit status, and rustc diagnostics still
-# print (they go to stderr; only the JSON artifact stream on stdout is counted).
+# "3m 12s" / "48s" for a duration in seconds.
+fmt_duration() {
+  local s=$1
+  if (( s >= 60 )); then printf '%dm %02ds' $(( s / 60 )) $(( s % 60 )); else printf '%ds' "$s"; fi
+}
+
+# Run `cargo "$@"` behind ONE live progress line, driven by the number of
+# compiled crates vs a total remembered from the previous successful build (so
+# a from-source build shows real progress instead of a silent multi-minute
+# hang). cargo's own status lines and progress bar are silenced — they used to
+# interleave with ours into an unreadable wall — and rustc's rendered
+# diagnostics go to a log file: on failure the errors are printed, on success
+# only a warning count. Returns cargo's real exit status.
 build_with_progress() {
   local tgt="${CARGO_TARGET_DIR:-target}"
   local total_file="$tgt/.hyperion_build_units"
+  local build_log="$tgt/hyperion-build.log"
   local count_file; count_file="$(mktemp)"
   local total=0
   [[ -r "$total_file" ]] && total="$(cat "$total_file" 2>/dev/null || echo 0)"
   [[ "$total" =~ ^[0-9]+$ ]] || total=0
   printf 0 > "$count_file"
-  local width=34 tty=0
-  [[ -t 2 ]] && tty=1
+  mkdir -p "$tgt"
+  local width=30 tty=0 started=$SECONDS
+  [[ -t 1 ]] && tty=1
 
   # Capture cargo's REAL exit via a file: the brace group records $? right after
   # cargo, before the pipe to the counter closes (PIPESTATUS is unreliable across
   # the `local` that follows). stdout = JSON artifacts (counted); stderr =
-  # rendered rustc diagnostics, which flow straight to the operator's terminal.
+  # rendered rustc diagnostics, kept in $build_log.
   local rc_file; rc_file="$(mktemp)"
   printf 1 > "$rc_file"
-  { cargo "$@" --message-format=json-render-diagnostics; printf '%s' "$?" > "$rc_file"; } \
+  { CARGO_TERM_PROGRESS_WHEN=never cargo "$@" --quiet --message-format=json-render-diagnostics \
+      2> "$build_log"; printf '%s' "$?" > "$rc_file"; } \
     | while IFS= read -r line; do
         [[ "$line" == *'"reason":"compiler-artifact"'* ]] || continue
         local n; n=$(( $(cat "$count_file") + 1 )); printf '%s' "$n" > "$count_file"
+        local name=""
+        [[ "$line" =~ \"target\":\{[^}]*\"name\":\"([^\"]+)\" ]] && name="${BASH_REMATCH[1]}"
+        (( ${#name} > 28 )) && name="${name:0:27}…"
+        local took; took="$(fmt_duration $(( SECONDS - started )))"
         if (( total > 0 )); then
-          local pct=$(( n * 100 / total )); (( pct > 100 )) && pct=100
+          local pct=$(( n * 100 / total )); (( pct > 99 )) && pct=99
           # The panel's "updating" page shows this; one write per percent.
-          if [[ "$pct" != "${last_pct:-}" ]]; then status running build "$pct"; last_pct="$pct"; fi
-          local fill=$(( pct * width / 100 ))
-          local bar; bar="$(printf '%*s' "$fill" '' | tr ' ' '=')$(printf '%*s' $(( width - fill )) '')"
+          if [[ "$pct" != "${last_pct:-}" ]]; then
+            status running build "$pct"
+            (( tty )) || (( pct / 10 == ${last_pct:--1} / 10 )) \
+              || printf '[hyperion]   compiling %3d%%  (%d/%d crates, %s)\n' "$pct" "$n" "$total" "$took"
+            last_pct="$pct"
+          fi
           if (( tty )); then
-            printf '\r\033[36m[hyperion]\033[0m building [%s] %3d%% (%d/%d)' "$bar" "$pct" "$n" "$total" >&2
-          elif (( n % 25 == 0 )); then
-            printf '[hyperion] building … %d%% (%d/%d)\n' "$pct" "$n" "$total" >&2
+            local fill=$(( pct * width / 100 ))
+            local bar; bar="$(printf '%*s' "$fill" '' | sed 's/ /█/g')$(printf '%*s' $(( width - fill )) '' | sed 's/ /░/g')"
+            printf '\r\033[K\033[36m[hyperion]\033[0m   %s %3d%%  \033[2m%d/%d · %s · %s\033[0m' \
+              "$bar" "$pct" "$n" "$total" "$took" "$name"
           fi
         elif (( tty )); then
-          printf '\r\033[36m[hyperion]\033[0m building … %d crate(s) compiled' "$n" >&2
-        elif (( n % 25 == 0 )); then
-          printf '[hyperion] building … %d crate(s) compiled\n' "$n" >&2
+          printf '\r\033[K\033[36m[hyperion]\033[0m   compiling  \033[2m%d crates · %s · %s\033[0m' "$n" "$took" "$name"
+        elif (( n % 50 == 0 )); then
+          printf '[hyperion]   compiling  (%d crates, %s)\n' "$n" "$took"
         fi
       done
   local rc; rc="$(cat "$rc_file" 2>/dev/null || echo 1)"; [[ "$rc" =~ ^[0-9]+$ ]] || rc=1
   local final; final="$(cat "$count_file" 2>/dev/null || echo 0)"
   rm -f "$count_file" "$rc_file"
-  (( tty )) && printf '\n' >&2
-  # Remember the unit count for the next run's denominator (success only).
-  if (( rc == 0 )) && [[ "$final" =~ ^[0-9]+$ ]] && (( final > 0 )); then
-    printf '%s' "$final" > "$total_file" 2>/dev/null || true
+  (( tty )) && printf '\r\033[K'
+  local took; took="$(fmt_duration $(( SECONDS - started )))"
+  if (( rc == 0 )); then
+    log "  Compiled ${final} crates in ${took}."
+    # One per diagnostic — not the "generated N warnings" summary lines.
+    local warns; warns="$(grep -E '^warning' "$build_log" 2>/dev/null \
+      | grep -Evc 'generated [0-9]+ warnings?|warnings? emitted' || true)"
+    [[ "$warns" =~ ^[0-9]+$ ]] && (( warns > 0 )) \
+      && log "  ${warns} compiler warning(s) — see $INSTALL_DIR/$build_log"
+    # Remember the unit count for the next run's denominator.
+    [[ "$final" =~ ^[0-9]+$ ]] && (( final > 0 )) \
+      && { printf '%s' "$final" > "$total_file" 2>/dev/null || true; }
+  else
+    warn "Compilation failed after ${took}. Last lines of $INSTALL_DIR/$build_log:"
+    tail -n 40 "$build_log" 2>/dev/null | sed 's/^/    /'
   fi
   return "$rc"
 }
@@ -549,6 +591,7 @@ wait_for_running_work() {
 # run, so a failure here (no network, a GitHub hiccup, a build error) costs
 # nothing, and the downtime shrinks to install + configure + restart instead
 # of including a multi-minute cargo build.
+(( HAVE_WEB )) && status_begin
 status running fetch
 cd "$INSTALL_DIR"
 PREV_LOCAL=$(git rev-parse --short HEAD)
@@ -588,11 +631,11 @@ case "$1" in
 esac
 AP
   chmod 0700 "$GIT_ASKPASS"
-  git -c core.askPass="$GIT_ASKPASS" fetch --prune --tags --force origin "$FETCH_SPEC" \
+  git -c core.askPass="$GIT_ASKPASS" fetch -q --prune --tags --force origin "$FETCH_SPEC" \
     || fail "git fetch failed — nothing was stopped or changed. Check the network / token and re-run."
 else
   log "Fetching origin ..."
-  git fetch --prune --tags --force origin "$FETCH_SPEC" \
+  git fetch -q --prune --tags --force origin "$FETCH_SPEC" \
     || fail "git fetch failed — nothing was stopped or changed. Check the network and re-run."
 fi
 
@@ -667,9 +710,8 @@ if (( DO_BUILD && PREFER_PREBUILT )); then
     warn "  Can't confirm the pre-built binaries match your source — proceeding with them."
     warn "  Re-run once CI has republished, or pass --from-source to build locally instead."
   elif [[ "$REL_VERSION" != "$HEAD_FULL" ]]; then
-    log "Release @$RELEASE_TAG is at ${REL_VERSION:0:12}; your source is at ${HEAD_FULL:0:12}."
-    log "  Pre-built binaries aren't built from your checkout (CI still building, or the"
-    log "  release lagged) — building from source so the install matches your HEAD."
+    log "Release @$RELEASE_TAG is at ${REL_VERSION:0:8}, behind your source (${HEAD_FULL:0:8}) — CI is"
+    log "  still publishing it. Building from source so the install matches your checkout."
     PREFER_PREBUILT=0
   else
     log "Release @$RELEASE_TAG matches your source (${HEAD_FULL:0:12}) — using pre-built binaries."
@@ -788,7 +830,7 @@ if (( DO_BUILD && PREBUILT_OK == 0 )); then
     fail "cargo not found and no usable pre-built release — nothing was stopped or changed.
        Re-run once the release is published, or install Rust (re-run install-master.sh)."
   fi
-  log "Building release binaries from source (the panel keeps running meanwhile) ..."
+  log "Building from source — the panel keeps serving meanwhile ..."
   status running build
 
   # On small (1–2 GB) master nodes the from-source build can be OOM-killed
@@ -875,6 +917,7 @@ fi
 #-------- 3. Wait for running jobs, then stop ------------------------------
 # Checked as late as possible — right before the stop — so work that started
 # during a long build is seen too.
+status running wait
 wait_for_running_work
 
 # Snapshot the binaries that are running now, before anything replaces them:
@@ -883,10 +926,7 @@ wait_for_running_work
 if (( DO_BUILD )); then
   snapshot_binaries
 fi
-if (( HAVE_WEB )); then
-  status_begin
-  status running stop
-fi
+status running stop
 (( HAVE_AGENT || HAVE_WEB )) && SERVICES_STOPPED=1
 (( HAVE_WEB ))   && { log "Stopping hyperion-web ...";   systemctl stop hyperion-web   || true; }
 (( HAVE_AGENT )) && { log "Stopping hyperion-agent ..."; systemctl stop hyperion-agent || true; }

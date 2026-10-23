@@ -35,7 +35,7 @@ run() {
   local active="$1" snippet="$2"
   (
     export HYPERION_UPDATE_STATUS_FILE="${STATUS_OVERRIDE:-$STATUS}"
-    unset HYPERION_UPDATE_STATUS HYPERION_UPDATE_STARTED
+    unset HYPERION_UPDATE_STATUS HYPERION_UPDATE_STARTED HYPERION_UPDATE_OFFLINE
     systemctl() { [[ "$active" == 1 ]]; }
     # shellcheck disable=SC1091
     source "$TMP/block.sh"
@@ -77,6 +77,14 @@ out="$(run 0 'status_begin; status running build 1; a=$STATUS_STEP_STARTED; slee
 read -r a b c <<<"$out"
 if [[ "$a" == "$b" && "$c" -gt "$b" ]]; then ok "step clock: same step holds, new step restarts"
 else bad "step clock: same step holds, new step restarts" "$out"; fi
+
+# 4b. "offline" appears at the stop and keeps the stop's time; not before.
+rm -rf "$TMP/m"
+out="$(run 0 'status_begin; status running build 5; grep -c offline "$HYPERION_UPDATE_STATUS_FILE" || true; status running stop; o=$STATUS_OFFLINE; sleep 1; status running install; echo "$o"')"
+pre="$(sed -n 1p <<<"$out")"; o="$(sed -n 2p <<<"$out")"
+if [[ "$pre" == 0 && "$o" =~ ^[0-9]+$ && "$(field offline)" == "$o" && "$(field step)" == install ]]; then
+  ok "offline is stamped at the stop and held after it"
+else bad "offline is stamped at the stop and held after it" "$out / $(cat "$STATUS")"; fi
 
 # 5. The re-exec'd copy inherits "on" and the original start time.
 rm -rf "$TMP/m"

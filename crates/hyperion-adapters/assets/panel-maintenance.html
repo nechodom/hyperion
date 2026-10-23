@@ -136,8 +136,9 @@
     <p class="lede" id="lede">The control panel is offline while a new version is installed. This page reconnects by itself as soon as it's back — nothing you need to do.</p>
 
     <ol class="steps" id="steps" hidden aria-label="Update progress">
-      <li data-step="stop"><span class="mark"></span><span class="label">Stop the panel</span><span class="meta"></span></li>
       <li data-step="fetch"><span class="mark"></span><span class="label">Fetch the new version</span><span class="meta"></span></li>
+      <li data-step="prepare"><span class="mark"></span><span class="label">Download or build the new version</span><span class="meta"></span></li>
+      <li data-step="stop"><span class="mark"></span><span class="label">Stop the panel</span><span class="meta"></span></li>
       <li data-step="install"><span class="mark"></span><span class="label">Install the new version</span><span class="meta"></span></li>
       <li data-step="configure"><span class="mark"></span><span class="label">Refresh configuration</span><span class="meta"></span></li>
       <li data-step="migrate"><span class="mark"></span><span class="label">Check database migrations</span><span class="meta"></span></li>
@@ -170,11 +171,15 @@
     // Still here this long after the panel answered = its page is slow to
     // load; say so instead of looking stuck.
     var SLOW_BACK_SECS = 15;
-    var ORDER = ["stop", "fetch", "install", "configure", "migrate", "start"];
-    var ROW_OF = { download: "install", build: "install" };
+    // update.sh's order: everything up to "stop" runs while the panel still
+    // serves (the panel shows its own banner then); this page normally
+    // appears at "stop", with the rows above it already done.
+    var ORDER = ["fetch", "prepare", "stop", "install", "configure", "migrate", "start"];
+    var ROW_OF = { download: "prepare", build: "prepare", wait: "prepare" };
     var VERB = {
       stop: "stopping the panel", fetch: "fetching the new version",
       download: "downloading the new version", build: "building from source",
+      wait: "waiting for running jobs to finish",
       install: "installing the new version", configure: "refreshing configuration",
       migrate: "checking database migrations", start: "starting the panel",
       rollback: "restoring the previous version"
@@ -236,10 +241,11 @@
         } else if (pos === idx) {
           cls = failed ? "failed" : "current";
         }
-        if (key === "install") {
+        if (key === "prepare") {
           setTextIn(li, ".label", st.step === "build" ? "Build from source"
                                 : st.step === "download" ? "Download the new version"
-                                : "Install the new version");
+                                : st.step === "wait" ? "Wait for running jobs"
+                                : "Download or build the new version");
         }
         if (cls === "current" && stepSince) meta = dur(nowServer() - stepSince);
         if (cls === "current" && st.step === "build" && typeof st.progress === "number") {
@@ -383,7 +389,10 @@
         var s = res[1], st = s.st, n = nowServer();
         if (s.kind === "status" && st && typeof st.started === "number" && n - (st.updated || st.started) < STALE_SECS) {
           last = st;
-          since = st.started;
+          // `offline` = when update.sh stopped the panel. Without it the panel
+          // went down on its own mid-update (it is meant to serve until
+          // "stop"), so time it from when this tab first saw the outage.
+          since = typeof st.offline === "number" ? st.offline : firstSeen();
           stepSince = typeof st.step_started === "number" ? st.step_started : st.started;
           mode = st.state === "failed" ? "failed" : "update";
         } else {
