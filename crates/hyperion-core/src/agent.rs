@@ -806,6 +806,14 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
     ) -> Result<hyperion_types::ServiceInstallStatus, RpcError> {
         self.svc.service_install_status().await
     }
+    async fn php_runtimes(
+        &self,
+    ) -> Result<Vec<hyperion_types::php_security::PhpRuntime>, RpcError> {
+        self.svc.php_runtimes().await
+    }
+    async fn php_uninstall(&self, branch: String) -> Result<(), RpcError> {
+        self.svc.php_uninstall(branch).await
+    }
     async fn wp_asset_upload(
         &self,
         kind: String,

@@ -42,6 +42,18 @@ impl PhpVersion {
         &[Self::V8_1, Self::V8_2, Self::V8_3, Self::V8_4]
     }
 
+    /// Where code written for an older PHP lands: the oldest supported
+    /// version that still gets security fixes. 8.1 is older, but it is past
+    /// end of life with known remote-code-execution holes that will never be
+    /// closed (see `php_security`), so nothing is put there by default.
+    pub fn legacy_landing() -> Self {
+        Self::all()
+            .iter()
+            .copied()
+            .find(|v| !crate::php_security::branch_unfixable(v.as_str()))
+            .unwrap_or(Self::V8_4)
+    }
+
     /// The supported version closest to what another panel reported.
     ///
     /// [`FromStr`] is an exact allow-list and must stay one — it guards every
@@ -58,7 +70,7 @@ impl PhpVersion {
     /// reported as successful.
     ///
     /// Returns the version and whether it had to be substituted, so the
-    /// caller can tell the operator that a 7.4 site is now on 8.1 and its
+    /// caller can tell the operator that a 7.4 site is now on 8.2 and its
     /// code may need attention. `None` only when nothing numeric is there at
     /// all.
     pub fn nearest_supported(raw: &str) -> Option<(Self, bool)> {
@@ -80,10 +92,11 @@ impl PhpVersion {
             return Some((v, false));
         }
         // Older than anything supported — 5.x, 7.x, 8.0 — lands on the
-        // lowest supported version, which is the least disruptive place for
-        // legacy code. Newer than we know lands on the highest.
+        // oldest version that still gets security fixes, the least
+        // disruptive SAFE place for legacy code. Newer than we know lands on
+        // the highest.
         Some(if (major, minor) < (8, 1) {
-            (Self::V8_1, true)
+            (Self::legacy_landing(), true)
         } else {
             (Self::V8_4, true)
         })
@@ -170,12 +183,12 @@ mod nearest_tests {
     /// The whole reason this exists: the boxes people migrate off run old
     /// PHP. Refusing them created a site with no PHP at all.
     #[test]
-    fn an_old_version_lands_on_the_lowest_supported_one() {
+    fn an_old_version_lands_on_the_oldest_one_with_security_fixes() {
         for raw in ["5.6", "7.0", "7.4", "8.0", "8.0.30", "8"] {
             assert_eq!(
                 PhpVersion::nearest_supported(raw),
-                Some((PhpVersion::V8_1, true)),
-                "{raw} should land on 8.1 and be marked substituted"
+                Some((PhpVersion::V8_2, true)),
+                "{raw} should land on 8.2 (8.1 gets no fixes) and be marked substituted"
             );
         }
     }

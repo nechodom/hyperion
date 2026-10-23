@@ -467,6 +467,12 @@ pub trait AgentApi: Send + Sync + 'static {
     async fn service_install_status(
         &self,
     ) -> Result<hyperion_types::ServiceInstallStatus, RpcError>;
+    /// Installed PHP branches with their sites (see `Request::PhpRuntimes`).
+    async fn php_runtimes(&self)
+        -> Result<Vec<hyperion_types::php_security::PhpRuntime>, RpcError>;
+    /// Purge one PHP branch. Returns once started; poll
+    /// `service_install_status`.
+    async fn php_uninstall(&self, branch: String) -> Result<(), RpcError>;
     /// Upload a WP plugin / theme ZIP into the master's asset
     /// library. Returns the row id (newly-inserted or existing if
     /// dedupe matched on SHA-256).

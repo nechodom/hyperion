@@ -1903,6 +1903,10 @@ pub struct ServiceInstallStatus {
     /// Final non-zero exit code on failure (0 on success / still
     /// running).
     pub exit_code: i32,
+    /// "install" or "uninstall" (a PHP branch purge shares this slot).
+    /// Empty from an agent that predates uninstalls — that was an install.
+    #[serde(default)]
+    pub action: String,
 }
 
 /// One component of the setup wizard's software install and where it stands.

@@ -126,6 +126,51 @@ pub async fn record_component(component: &str) -> Result<(), AdapterError> {
     Ok(())
 }
 
+/// `content` without `component` — the inverse of [`with_component`].
+pub fn without_component(content: &str, component: &str) -> String {
+    let names: Vec<&str> = content
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#') && *l != component)
+        .collect();
+    let mut s = names.join("\n");
+    if !s.is_empty() {
+        s.push('\n');
+    }
+    s
+}
+
+/// Drop a component the operator removed (a PHP branch uninstalled from the
+/// Services page), so `update.sh` does not heal it straight back. A missing
+/// file is the legacy heal path, which never reinstalls a PHP branch while
+/// another one is present — nothing to record there.
+pub async fn forget_component(component: &str) -> Result<(), AdapterError> {
+    let path = Path::new(SELECTION_FILE);
+    let current = match tokio::fs::read_to_string(path).await {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
+    let next = without_component(&current, component);
+    if next != current {
+        let tmp = path.with_extension("tmp");
+        tokio::fs::write(&tmp, next.as_bytes()).await?;
+        tokio::fs::rename(&tmp, path).await?;
+    }
+    Ok(())
+}
+
+/// Write this binary's `phpmyadmin.sh` where root alone can read it and
+/// return its path. Run it to move phpMyAdmin's pool onto whichever PHP is
+/// installed now — the script picks the version itself.
+pub async fn materialize_phpmyadmin_script() -> Result<PathBuf, AdapterError> {
+    let dir = job_dir();
+    create_private_dir(&dir).await?;
+    let path = dir.join("phpmyadmin.sh");
+    write_private(&path, PHPMYADMIN_SH.as_bytes()).await?;
+    Ok(path)
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct JobSpec {
     pub started_at: i64,
@@ -349,6 +394,16 @@ mod tests {
             with_component("# chosen in setup\n\nphp8.3\n", "redis"),
             "php8.3\nredis\n"
         );
+    }
+
+    #[test]
+    fn a_forgotten_component_leaves_the_rest() {
+        assert_eq!(
+            without_component("mariadb\nphp8.1\nphp8.3\n", "php8.1"),
+            "mariadb\nphp8.3\n"
+        );
+        assert_eq!(without_component("php8.1\n", "php8.1"), "");
+        assert_eq!(without_component("php8.3\n", "php8.1"), "php8.3\n");
     }
 
     #[test]

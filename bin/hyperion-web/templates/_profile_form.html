@@ -180,7 +180,7 @@
         <select id="p_default_php_version" name="default_php_version">
           <option value="">No preference</option>
           {% for v in hyperion_types::PhpVersion::all() %}
-          <option value="{{ v.as_str() }}"{% if profile.default_php_version.as_deref() == Some(v.as_str()) %} selected{% endif %}>PHP {{ v.as_str() }}</option>
+          <option value="{{ v.as_str() }}"{% if profile.default_php_version.as_deref() == Some(v.as_str()) %} selected{% endif %}>PHP {{ v.as_str() }}{% if hyperion_types::php_security::branch_unfixable(v.as_str()) %} — no security fixes{% endif %}</option>
           {% endfor %}
         </select>
       </div>

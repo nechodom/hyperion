@@ -1,0 +1,63 @@
+{#- Body of Service health → PHP versions, swapped into #php-versions-body.
+    One row per PHP branch on the node: its build checked against the
+    advisories this panel knows, the sites set to it, and the uninstall. -#}
+<div class="svc-verdict {{ view.tone }}">
+  <span class="dot"></span>
+  <span>{% if let Some(e) = error %}PHP versions unknown{% else %}{{ view.verdict }}{% endif %}</span>
+</div>
+<div class="group">
+  <div class="ghead">PHP versions · security</div>
+  {% if let Some(e) = error %}
+  <div class="item"><span class="text-soft small">{{ e }}</span></div>
+  {% endif %}
+  {% for r in view.rows %}
+  <div class="svc-row php-row" data-php-branch="{{ r.branch }}">
+    <div class="svc-main">
+      <div class="svc-title">
+        <strong>PHP {{ r.branch }}</strong>
+        {% if !r.build.is_empty() %}<code class="text-soft">{{ r.build }}</code>{% endif %}
+        {% if r.pma %}<span class="text-soft small">· runs phpMyAdmin</span>{% endif %}
+      </div>
+      <div class="text-soft small">{{ r.note }}</div>
+      {% if !r.advisories.is_empty() %}
+      <div class="small php-advisories">
+        {% for a in r.advisories %}
+        <a href="{{ a.url }}" target="_blank" rel="noopener noreferrer">{{ a.cve }}</a> {{ a.title }}{% if !loop.last %} · {% endif %}
+        {% endfor %}
+      </div>
+      {% endif %}
+      {% if r.site_count > 0 %}
+      <div class="small php-sites">
+        <span class="text-soft">{{ r.site_count }} site{% if r.site_count != 1 %}s{% endif %} on it:</span>
+        {% for s in r.sites %}
+        <a href="/hostings/{{ s.domain }}">{{ s.domain }}</a>{% if s.trashed %} <span class="text-soft">(in trash)</span>{% endif %}{% if !loop.last || r.more_sites > 0 %},{% endif %}
+        {% endfor %}
+        {% if r.more_sites > 0 %}<span class="text-soft">and {{ r.more_sites }} more</span>{% endif %}
+      </div>
+      {% endif %}
+      {% if is_super_admin %}{% if let Some(why) = r.blocked %}{% if r.status != "Not installed" %}
+      <div class="small php-blocked-why"><strong>Uninstall:</strong> {{ why }}{% if r.unfixable %} Each site switches on its own PHP tab — try old code on its staging copy first.{% endif %}</div>
+      {% endif %}{% endif %}{% endif %}
+    </div>
+    <span class="pill {{ r.tone }}">{{ r.status }}</span>
+    {% if is_super_admin %}
+    <div class="svc-actions">
+      {% if let Some(why) = r.blocked %}
+      <span class="text-soft small php-blocked" title="{{ why }}">{% if r.site_count > 0 %}in use{% else %}kept{% endif %}</span>
+      {% else %}
+      <form method="post" action="/services/php-uninstall"
+            data-confirm-title="Uninstall PHP {{ r.branch }}"
+            data-confirm-body="Runs apt-get purge on every php{{ r.branch }} package on this node and stops its PHP-FPM. No site uses it.{% if r.pma %} phpMyAdmin moves to another installed PHP.{% endif %} Installing it back later is one click in the list above."
+            data-confirm-confirm-label="Uninstall"
+            data-confirm-variant="danger">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <input type="hidden" name="branch" value="{{ r.branch }}">
+        <input type="hidden" name="node" value="{{ node }}">
+        <button type="submit" class="btn small{% if r.unfixable %} danger{% endif %}">Uninstall</button>
+      </form>
+      {% endif %}
+    </div>
+    {% endif %}
+  </div>
+  {% endfor %}
+</div>

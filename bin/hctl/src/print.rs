@@ -2015,6 +2015,24 @@ pub fn print_pretty(resp: &Response) {
                 }
             }
         }
+        Response::PhpRuntimes(v) => {
+            for r in v {
+                let b = hyperion_types::php_security::parse_branch(&r.branch);
+                let state = b.map(|b| {
+                    hyperion_types::php_security::verdict(b, &r.package_version).state
+                });
+                println!(
+                    "PHP {:<5} {:<40} fpm={} sites={} pma={} {:?}",
+                    r.branch,
+                    r.package_version,
+                    r.fpm,
+                    r.sites.len(),
+                    r.pma,
+                    state
+                );
+            }
+        }
+        Response::PhpUninstall => println!("php uninstall started"),
         Response::SetupStackStart { started_at } => {
             println!("setup software install started: unix:{started_at}");
         }

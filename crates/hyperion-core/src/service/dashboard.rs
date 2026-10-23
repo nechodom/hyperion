@@ -236,6 +236,12 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             out.extend(os_update_alerts(&os, now, dpkg_changed));
         }
 
+        // PHP builds with published remote-code-execution holes — a branch
+        // that will never be fixed, or a build behind its fix.
+        if let Ok(runtimes) = self.php_runtimes().await {
+            out.extend(super::php_runtimes::php_alerts(&runtimes));
+        }
+
         // Severity sort: error first, then warn, then info.
         out.sort_by_key(|a| match a.severity.as_str() {
             "error" => 0,

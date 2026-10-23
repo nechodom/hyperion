@@ -671,6 +671,14 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(s) => Response::ServiceInstallStatus(s),
             Err(e) => Response::Error(e),
         },
+        Request::PhpRuntimes => match api.php_runtimes().await {
+            Ok(v) => Response::PhpRuntimes(v),
+            Err(e) => Response::Error(e),
+        },
+        Request::PhpUninstall { branch } => match api.php_uninstall(branch).await {
+            Ok(()) => Response::PhpUninstall,
+            Err(e) => Response::Error(e),
+        },
         Request::WpAssetUpload {
             kind,
             original_name,
@@ -2749,6 +2757,14 @@ mod tests {
             &self,
         ) -> Result<hyperion_types::ServiceInstallStatus, RpcError> {
             Ok(hyperion_types::ServiceInstallStatus::default())
+        }
+        async fn php_runtimes(
+            &self,
+        ) -> Result<Vec<hyperion_types::php_security::PhpRuntime>, RpcError> {
+            Ok(Vec::new())
+        }
+        async fn php_uninstall(&self, _: String) -> Result<(), RpcError> {
+            Ok(())
         }
         async fn wp_asset_upload(
             &self,

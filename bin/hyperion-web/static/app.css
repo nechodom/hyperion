@@ -829,6 +829,10 @@ details.svc-fold[open] > summary::before { content: "▾"; }
 details.svc-fold:not([open]) > summary { border-bottom: none; }
 details.svc-fold .svc-row .pill.muted { display: none; }
 #svc-health-live > .group + .group { margin-top: var(--group-gap); }
+.php-row { align-items: flex-start; }
+.php-row .pill { margin-top: 0.15rem; }
+.php-row .php-advisories, .php-row .php-sites, .php-row .php-blocked-why { margin-top: 0.3rem; line-height: 1.5; }
+.php-row .php-blocked-why { color: var(--text-dim); }
 #svc-health-live + .group, #svc-health-live + details.group { margin-top: var(--group-gap); }
 @media (max-width: 640px) {
   .group > .svc-row { flex-wrap: wrap; }
@@ -4967,6 +4971,8 @@ summary.btn::marker { content: ""; }
 .meta-chip.copy-field .copy-value { font-size: 0.74rem; overflow: hidden; text-overflow: ellipsis; max-width: 11rem; }
 .meta-chip.copy-field .copy-hint { font-size: 0.64rem; }
 .meta-chip.kind strong { letter-spacing: 0.01em; }
+.meta-chip.danger { border-color: var(--danger); background: var(--danger-soft); color: var(--danger); }
+.meta-chip.danger strong { color: var(--danger); }
 .site-meta .meta-sep { color: var(--text-soft); opacity: 0.6; }
 
 /* ── Shell: nav + section ─────────────────────────────────────── */

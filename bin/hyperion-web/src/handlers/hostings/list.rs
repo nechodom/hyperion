@@ -114,6 +114,13 @@ impl ListRow {
         if s.last_backup_ok == Some(false) {
             attention.push("last backup failed");
         }
+        // A branch with published holes that will never be fixed (8.1): the
+        // site is exposed whatever its node runs.
+        if s.php_version
+            .is_some_and(|v| hyperion_types::php_security::branch_unfixable(v.as_str()))
+        {
+            attention.push("PHP without security fixes");
+        }
         Self {
             s,
             is_test,
@@ -400,6 +407,14 @@ mod list_row_tests {
         );
         assert_eq!(r.cert_class, "err");
         assert_eq!(r.cert_label, "expired");
+    }
+
+    #[test]
+    fn a_site_on_an_unfixable_php_needs_attention() {
+        let mut s = summary();
+        s.php_version = Some(hyperion_types::PhpVersion::V8_1);
+        let r = ListRow::new(s, false, false, NOW);
+        assert_eq!(r.attention, vec!["PHP without security fixes"]);
     }
 
     #[test]

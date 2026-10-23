@@ -264,8 +264,12 @@ pub async fn post_plan(
                         .and_then(hyperion_types::PhpVersion::nearest_supported)
                         .map(|(v, sub)| (v.as_str().to_string(), sub))
                         // Nothing reported: the import gives a php site the
-                        // lowest supported version rather than none at all.
-                        .unwrap_or_else(|| ("8.1".to_string(), true));
+                        // oldest version still getting security fixes rather
+                        // than none at all.
+                        .unwrap_or_else(|| {
+                            let v = hyperion_types::PhpVersion::legacy_landing();
+                            (v.as_str().to_string(), true)
+                        });
                     PlanRow {
                         action: action_str(&i.action).into(),
                         domain: i.domain.clone(),
