@@ -14,6 +14,7 @@
 #![allow(clippy::cmp_owned)]
 #![forbid(unsafe_code)]
 
+pub mod acme_dns_renew;
 pub mod admin_user;
 pub mod auth;
 pub mod cluster_sync;
@@ -183,6 +184,19 @@ pub fn build_router(state: SharedState) -> Router {
         .route(
             "/hostings/cert/dns01/finish",
             post(handlers::hostings::post_cert_dns01_finish),
+        )
+        // Automatic wildcard renewal over the delegated acme zone.
+        .route(
+            "/hostings/:selector/cert/acme-dns/setup",
+            post(handlers::acme_dns_ssl::post_hosting_setup),
+        )
+        .route(
+            "/hostings/:selector/cert/acme-dns/check",
+            post(handlers::acme_dns_ssl::post_hosting_check),
+        )
+        .route(
+            "/hostings/:selector/cert/dns01/auto",
+            post(handlers::acme_dns_ssl::post_hosting_auto),
         )
         .route(
             // multipart/form-data upload of a custom PEM cert; 1 MiB is
@@ -384,6 +398,26 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/settings", get(handlers::settings::get_overview))
         .route("/settings/panel", get(handlers::settings::get_panel))
         .route("/settings/https", get(handlers::settings::get_https))
+        .route(
+            "/settings/https/acme-dns",
+            post(handlers::settings::post_acme_dns),
+        )
+        .route(
+            "/settings/https/acme-dns/check",
+            post(handlers::settings::post_acme_dns_check),
+        )
+        .route(
+            "/settings/https/preview/:node/acme-dns/setup",
+            post(handlers::acme_dns_ssl::post_preview_setup),
+        )
+        .route(
+            "/settings/https/preview/:node/acme-dns/check",
+            post(handlers::acme_dns_ssl::post_preview_check),
+        )
+        .route(
+            "/settings/https/preview/:node/acme-dns/auto",
+            post(handlers::acme_dns_ssl::post_preview_auto),
+        )
         .route(
             "/settings/https/preview-dns",
             get(handlers::settings::get_preview_dns),

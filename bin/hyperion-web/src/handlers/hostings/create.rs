@@ -945,6 +945,8 @@ async fn finish_create(
     let preview_domain = compute_preview_domain(state, target, &detail.domain).await;
     let modsec = fetch_modsec_status(state, target).await;
     let wp_assets = fetch_wp_assets(state).await.unwrap_or_default();
+    let acme_ssl =
+        crate::handlers::acme_dns_ssl::load_for_hosting(state, ctx, &detail, target).await;
     let base = DetailTpl::base(
         state,
         ctx,
@@ -956,6 +958,7 @@ async fn finish_create(
         wp_assets,
     );
     let tpl = DetailTpl {
+        acme_ssl,
         wp_error: wp_install_error,
         wp_flash: wp_install_job_id.as_ref().map(|_| {
             "Post-create setup kicked off in the background — live status above.".to_string()

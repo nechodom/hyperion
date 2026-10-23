@@ -138,6 +138,8 @@ pub(super) struct DetailTpl<'a> {
     pub(super) proxy_error: Option<String>,
     pub(super) cert_error: Option<String>,
     pub(super) cert_flash: Option<String>,
+    /// The wildcard's automatic renewal over the delegated acme zone.
+    pub(super) acme_ssl: crate::handlers::acme_dns_ssl::AcmeSslBlock,
     pub(super) restore_error: Option<String>,
     pub(super) restore_flash: Option<String>,
     pub(super) cron_error: Option<String>,
@@ -458,6 +460,7 @@ impl<'a> DetailTpl<'a> {
             proxy_error: None,
             cert_error: None,
             cert_flash: None,
+            acme_ssl: Default::default(),
             restore_error: None,
             restore_flash: None,
             cron_error: None,
@@ -1304,6 +1307,13 @@ pub async fn get_detail(
             .or(q.wp_error),
         _ => q.wp_error,
     };
+    let acme_ssl = crate::handlers::acme_dns_ssl::load_for_hosting(
+        &state,
+        &ctx,
+        &detail,
+        owner_node.as_deref(),
+    )
+    .await;
     let base = DetailTpl::base(
         &state,
         &ctx,
@@ -1315,6 +1325,7 @@ pub async fn get_detail(
         wp_assets.unwrap_or_default(),
     );
     let tpl = DetailTpl {
+        acme_ssl,
         mem_auto,
         workers_full,
         wp_status,

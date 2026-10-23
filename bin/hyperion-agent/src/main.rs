@@ -8,6 +8,7 @@ use clap::Parser;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+mod acme_dns;
 mod boot;
 mod config;
 mod enroll;

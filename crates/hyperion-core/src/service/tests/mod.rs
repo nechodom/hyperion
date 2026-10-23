@@ -1169,6 +1169,18 @@ async fn carry_source(s: &HostingService<MockAdapterPort>, pool: &SqlitePool) ->
     s.get(sel).await.expect("get")
 }
 
+/// Every notification kind in `me`'s feed.
+async fn manual_kinds(s: &HostingService<MockAdapterPort>, me: i64) -> Vec<String> {
+    s.notifications_feed(me, 50)
+        .await
+        .expect("feed")
+        .items
+        .into_iter()
+        .map(|n| n.kind)
+        .collect()
+}
+
+mod acme_dns;
 mod auth;
 mod backups;
 mod billing;

@@ -154,6 +154,7 @@ async fn serve(cfg: Config) -> anyhow::Result<()> {
         caches: Default::default(),
         setup,
         cluster_sync: Default::default(),
+        dns_probe: Default::default(),
     });
     // Spawn a background refresher that polls the agent for the
     // current `cluster.panel_hostname` every 30 s. The host-enforce
@@ -187,6 +188,7 @@ async fn serve(cfg: Config) -> anyhow::Result<()> {
         });
     }
     hyperion_web::notify_collector::spawn(state.clone());
+    hyperion_web::acme_dns_renew::spawn(state.clone());
     hyperion_web::wp_library::spawn(state.clone());
     hyperion_web::cluster_sync::spawn(state.clone());
     let pma_state = state.clone();

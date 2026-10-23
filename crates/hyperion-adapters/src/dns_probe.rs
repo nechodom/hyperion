@@ -18,14 +18,14 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 
 const T_A: u16 = 1;
-const T_NS: u16 = 2;
+pub(crate) const T_NS: u16 = 2;
 const T_CNAME: u16 = 5;
-const T_TXT: u16 = 16;
+pub(crate) const T_TXT: u16 = 16;
 const T_AAAA: u16 = 28;
-const T_OPT: u16 = 41;
+pub(crate) const T_OPT: u16 = 41;
 
-const RCODE_NOERROR: u8 = 0;
-const RCODE_NXDOMAIN: u8 = 3;
+pub(crate) const RCODE_NOERROR: u8 = 0;
+pub(crate) const RCODE_NXDOMAIN: u8 = 3;
 
 const QUERY_TIMEOUT: Duration = Duration::from_secs(3);
 const ATTEMPTS: u32 = 2;
@@ -41,7 +41,7 @@ const PUBLIC_RESOLVERS: [IpAddr; 2] = [
 const MAX_CNAME_HOPS: usize = 5;
 
 #[derive(Debug, Clone, PartialEq)]
-enum RData {
+pub(crate) enum RData {
     /// NS / CNAME target.
     Name(String),
     /// One TXT record, its character-strings joined.
@@ -52,26 +52,45 @@ enum RData {
 }
 
 #[derive(Debug, Clone)]
-struct Rr {
-    name: String,
-    rtype: u16,
-    data: RData,
+pub(crate) struct Rr {
+    pub(crate) name: String,
+    pub(crate) rtype: u16,
+    pub(crate) data: RData,
 }
 
 #[derive(Debug, Clone)]
-struct Reply {
-    id: u16,
-    rcode: u8,
-    aa: bool,
-    tc: bool,
-    answers: Vec<Rr>,
+pub(crate) struct Reply {
+    pub(crate) id: u16,
+    pub(crate) rcode: u8,
+    pub(crate) aa: bool,
+    pub(crate) tc: bool,
+    pub(crate) answers: Vec<Rr>,
 }
 
 fn norm(name: &str) -> String {
     name.trim_end_matches('.').to_ascii_lowercase()
 }
 
-fn build_query(id: u16, name: &str, qtype: u16, recursion: bool) -> Result<Vec<u8>, String> {
+/// Uncompressed wire form of a name (lowercased, trailing dot ignored).
+pub(crate) fn encode_name(name: &str) -> Result<Vec<u8>, String> {
+    let mut out = Vec::with_capacity(name.len() + 2);
+    for label in norm(name).split('.').filter(|l| !l.is_empty()) {
+        if label.len() > 63 {
+            return Err(format!("label too long in {name}"));
+        }
+        out.push(label.len() as u8);
+        out.extend_from_slice(label.as_bytes());
+    }
+    out.push(0);
+    Ok(out)
+}
+
+pub(crate) fn build_query(
+    id: u16,
+    name: &str,
+    qtype: u16,
+    recursion: bool,
+) -> Result<Vec<u8>, String> {
     let mut q = Vec::with_capacity(64);
     q.extend_from_slice(&id.to_be_bytes());
     q.push(if recursion { 0x01 } else { 0x00 }); // QR=0 OPCODE=0 RD
@@ -80,14 +99,7 @@ fn build_query(id: u16, name: &str, qtype: u16, recursion: bool) -> Result<Vec<u
     q.extend_from_slice(&0u16.to_be_bytes()); // ANCOUNT
     q.extend_from_slice(&0u16.to_be_bytes()); // NSCOUNT
     q.extend_from_slice(&1u16.to_be_bytes()); // ARCOUNT (EDNS0 OPT)
-    for label in norm(name).split('.').filter(|l| !l.is_empty()) {
-        if label.len() > 63 {
-            return Err(format!("label too long in {name}"));
-        }
-        q.push(label.len() as u8);
-        q.extend_from_slice(label.as_bytes());
-    }
-    q.push(0);
+    q.extend_from_slice(&encode_name(name)?);
     q.extend_from_slice(&qtype.to_be_bytes());
     q.extend_from_slice(&1u16.to_be_bytes()); // IN
                                               // OPT: root owner, 1232-byte payload, no flags, no options.
@@ -99,7 +111,7 @@ fn build_query(id: u16, name: &str, qtype: u16, recursion: bool) -> Result<Vec<u
     Ok(q)
 }
 
-fn read_u16(buf: &[u8], pos: usize) -> Result<u16, String> {
+pub(crate) fn read_u16(buf: &[u8], pos: usize) -> Result<u16, String> {
     buf.get(pos..pos + 2)
         .map(|b| u16::from_be_bytes([b[0], b[1]]))
         .ok_or_else(|| "truncated DNS message".to_string())
@@ -107,7 +119,7 @@ fn read_u16(buf: &[u8], pos: usize) -> Result<u16, String> {
 
 /// Decode a (possibly compressed) name at `pos`; returns it and the offset
 /// just past it in the original stream.
-fn read_name(buf: &[u8], mut pos: usize) -> Result<(String, usize), String> {
+pub(crate) fn read_name(buf: &[u8], mut pos: usize) -> Result<(String, usize), String> {
     let mut labels: Vec<String> = Vec::new();
     let mut end: Option<usize> = None;
     let mut jumps = 0;
@@ -136,7 +148,7 @@ fn read_name(buf: &[u8], mut pos: usize) -> Result<(String, usize), String> {
     }
 }
 
-fn parse_reply(buf: &[u8]) -> Result<Reply, String> {
+pub(crate) fn parse_reply(buf: &[u8]) -> Result<Reply, String> {
     if buf.len() < 12 {
         return Err("short DNS reply".into());
     }
@@ -360,7 +372,13 @@ pub struct NsAnswer {
     pub seen: Seen,
 }
 
-fn interpret(name: &str, reply: &Reply) -> Seen {
+pub(crate) fn interpret(name: &str, reply: &Reply) -> Seen {
+    interpret_as(name, reply, true)
+}
+
+/// [`interpret`], optionally accepting a recursor's (never authoritative)
+/// answer.
+fn interpret_as(name: &str, reply: &Reply, require_aa: bool) -> Seen {
     let name = norm(name);
     if reply.rcode == RCODE_NXDOMAIN {
         return Seen::NxDomain;
@@ -368,7 +386,7 @@ fn interpret(name: &str, reply: &Reply) -> Seen {
     if reply.rcode != RCODE_NOERROR {
         return Seen::Unreachable(format!("rcode {}", reply.rcode));
     }
-    if !reply.aa {
+    if require_aa && !reply.aa {
         return Seen::Unreachable("answer was not authoritative".into());
     }
     if let Some(target) = reply.answers.iter().find_map(|rr| match &rr.data {
@@ -566,6 +584,168 @@ pub async fn check_txt_published(records: &[(String, String)]) -> Result<(), Pro
     }
 }
 
+/// Why the customer's `_acme-challenge` CNAME is not (yet) right.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CnameProblem {
+    Missing,
+    PointsElsewhere(String),
+    PlainTxtPresent,
+    NoResolver(String),
+    Other(String),
+}
+
+impl std::fmt::Display for CnameProblem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Missing => write!(f, "the CNAME record does not exist yet"),
+            Self::PointsElsewhere(t) => {
+                write!(f, "the CNAME points to {t}, not to the expected target")
+            }
+            Self::PlainTxtPresent => write!(
+                f,
+                "a TXT record sits at that name; replace it with the CNAME"
+            ),
+            Self::NoResolver(e) => write!(f, "no DNS resolver reachable: {e}"),
+            Self::Other(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+/// Pure verdict over what each authoritative server said about `name`.
+/// The first server that disagrees decides the problem, wrong target
+/// before stray TXT before nothing at all.
+fn cname_verdict(expected_target: &str, answers: &[NsAnswer]) -> Result<(), CnameProblem> {
+    let expected = norm(expected_target);
+    let mut elsewhere = None;
+    let (mut txt, mut missing, mut answered) = (false, false, 0);
+    for a in answers {
+        match &a.seen {
+            Seen::Cname(t) => {
+                answered += 1;
+                if norm(t) != expected && elsewhere.is_none() {
+                    elsewhere = Some(norm(t));
+                }
+            }
+            Seen::Values(v) if !v.is_empty() => {
+                answered += 1;
+                txt = true;
+            }
+            Seen::Values(_) | Seen::NxDomain => {
+                answered += 1;
+                missing = true;
+            }
+            Seen::Unreachable(_) => {}
+        }
+    }
+    if answered == 0 {
+        let why: Vec<String> = answers
+            .iter()
+            .map(|a| match &a.seen {
+                Seen::Unreachable(e) => format!("{}: {e}", a.server),
+                _ => a.server.clone(),
+            })
+            .collect();
+        return Err(CnameProblem::Other(format!(
+            "no authoritative nameserver answered ({})",
+            why.join("; ")
+        )));
+    }
+    if let Some(t) = elsewhere {
+        Err(CnameProblem::PointsElsewhere(t))
+    } else if txt {
+        Err(CnameProblem::PlainTxtPresent)
+    } else if missing {
+        Err(CnameProblem::Missing)
+    } else {
+        Ok(())
+    }
+}
+
+/// `name` must be a CNAME to `expected_target` on the authoritative
+/// nameservers of its zone (recursion off, so no cache can lie).
+pub async fn check_cname(name: &str, expected_target: &str) -> Result<(), CnameProblem> {
+    let resolvers = recursors();
+    match ask_authorities(&resolvers, name).await {
+        Ok((_, answers)) => cname_verdict(expected_target, &answers),
+        Err(e) if e.starts_with("no DNS resolver answered") => Err(CnameProblem::NoResolver(e)),
+        Err(e) => Err(CnameProblem::Other(e)),
+    }
+}
+
+/// `Ok` only when a TXT answer is exactly the install's check token, so a
+/// zone delegated to another panel (or not at all) is refused.
+fn delegation_verdict(zone: &str, check_token: &str, seen: &Seen) -> Result<(), String> {
+    match seen {
+        Seen::Values(v) if v.iter().any(|t| t == check_token) => Ok(()),
+        Seen::Values(v) if v.is_empty() => Err(format!(
+            "_hyperion-check.{zone} has no TXT record: the zone is not delegated to this panel"
+        )),
+        Seen::Values(_) => Err(format!(
+            "_hyperion-check.{zone} answers with a different token: the zone is delegated to another panel"
+        )),
+        Seen::NxDomain => Err(format!(
+            "_hyperion-check.{zone} does not exist: the zone is not delegated to this panel"
+        )),
+        Seen::Cname(t) => Err(format!("_hyperion-check.{zone} is a CNAME to {t}")),
+        Seen::Unreachable(e) => Err(format!("_hyperion-check.{zone}: {e}")),
+    }
+}
+
+/// Prove from outside (public recursors, recursion on) that `zone` is
+/// delegated to this install's responder.
+pub async fn check_zone_delegated(zone: &str, check_token: &str) -> Result<(), String> {
+    let name = format!("_hyperion-check.{}", norm(zone));
+    let reply = recursive(&PUBLIC_RESOLVERS, &name, T_TXT).await?;
+    delegation_verdict(
+        &norm(zone),
+        check_token,
+        &interpret_as(&name, &reply, false),
+    )
+}
+
+/// One step of the public TXT walk: finished, or follow a CNAME.
+#[derive(Debug, PartialEq)]
+enum PublicStep {
+    Done(Result<(), String>),
+    Follow(String),
+}
+
+fn public_step(name: &str, values: &[String], seen: &Seen, hops: usize) -> PublicStep {
+    match seen {
+        Seen::Cname(t) if hops < MAX_CNAME_HOPS => PublicStep::Follow(norm(t)),
+        Seen::Cname(_) => PublicStep::Done(Err(format!("{name}: too many CNAME hops"))),
+        Seen::Values(have) => {
+            let missing: Vec<&str> = values
+                .iter()
+                .filter(|v| !have.contains(v))
+                .map(String::as_str)
+                .collect();
+            PublicStep::Done(if missing.is_empty() {
+                Ok(())
+            } else {
+                Err(format!("{name}: missing {}", missing.join(", ")))
+            })
+        }
+        Seen::NxDomain => PublicStep::Done(Err(format!("{name}: NXDOMAIN"))),
+        Seen::Unreachable(e) => PublicStep::Done(Err(format!("{name}: {e}"))),
+    }
+}
+
+/// Every one of `values` must be visible at `name` through the public
+/// recursors, CNAMEs followed like Let's Encrypt does.
+pub async fn txt_visible_via_public(name: &str, values: &[String]) -> Result<(), String> {
+    let mut current = norm(name);
+    for hops in 0..=MAX_CNAME_HOPS {
+        let reply = recursive(&PUBLIC_RESOLVERS, &current, T_TXT).await?;
+        let seen = interpret_as(&current, &reply, false);
+        match public_step(&current, values, &seen, hops) {
+            PublicStep::Done(r) => return r,
+            PublicStep::Follow(next) => current = next,
+        }
+    }
+    Err(format!("{current}: too many CNAME hops"))
+}
+
 #[derive(Debug, Clone)]
 pub enum ProbeError {
     /// The authoritative servers don't (all) serve the values yet.
@@ -676,6 +856,75 @@ mod tests {
             server: server.into(),
             seen,
         }
+    }
+
+    #[test]
+    fn cname_to_expected_target_is_ok() {
+        let a = [ns("a", Seen::Cname("x.acme.example.net".into()))];
+        assert_eq!(cname_verdict("x.acme.example.net", &a), Ok(()));
+    }
+
+    #[test]
+    fn cname_case_and_trailing_dot_are_normalised() {
+        let a = [ns("a", Seen::Cname("X.Acme.Example.NET.".into()))];
+        assert_eq!(cname_verdict("x.acme.example.net.", &a), Ok(()));
+    }
+
+    #[test]
+    fn cname_elsewhere_is_reported_with_target() {
+        let a = [ns("a", Seen::Cname("other.example.org".into()))];
+        assert_eq!(
+            cname_verdict("x.acme.example.net", &a),
+            Err(CnameProblem::PointsElsewhere("other.example.org".into()))
+        );
+    }
+
+    #[test]
+    fn txt_instead_of_cname_is_reported() {
+        let a = [ns("a", Seen::Values(vec!["old".into()]))];
+        let e = cname_verdict("x.acme.example.net", &a).unwrap_err();
+        assert_eq!(e, CnameProblem::PlainTxtPresent);
+        assert!(e.to_string().contains("replace it with the CNAME"));
+    }
+
+    #[test]
+    fn nxdomain_is_missing() {
+        let a = [ns("a", Seen::NxDomain)];
+        assert_eq!(cname_verdict("t", &a), Err(CnameProblem::Missing));
+        let none = [ns("a", Seen::Unreachable("timeout".into()))];
+        assert!(matches!(
+            cname_verdict("t", &none),
+            Err(CnameProblem::Other(_))
+        ));
+    }
+
+    #[test]
+    fn wrong_token_is_refused() {
+        let ok = Seen::Values(vec!["stale".into(), "mine".into()]);
+        assert_eq!(delegation_verdict("z.com", "mine", &ok), Ok(()));
+        let other = Seen::Values(vec!["theirs".into()]);
+        assert!(delegation_verdict("z.com", "mine", &other).is_err());
+        assert!(delegation_verdict("z.com", "mine", &Seen::NxDomain).is_err());
+    }
+
+    #[test]
+    fn public_walk_follows_cnames_and_needs_every_value() {
+        let want = vec!["a".to_string(), "b".to_string()];
+        assert_eq!(
+            public_step("n", &want, &Seen::Cname("T.Zone.".into()), 0),
+            PublicStep::Follow("t.zone".into())
+        );
+        assert!(matches!(
+            public_step("n", &want, &Seen::Cname("t".into()), MAX_CNAME_HOPS),
+            PublicStep::Done(Err(_))
+        ));
+        let one = Seen::Values(vec!["a".into()]);
+        assert!(matches!(
+            public_step("n", &want, &one, 1),
+            PublicStep::Done(Err(_))
+        ));
+        let both = Seen::Values(vec!["b".into(), "a".into()]);
+        assert_eq!(public_step("n", &want, &both, 1), PublicStep::Done(Ok(())));
     }
 
     #[test]

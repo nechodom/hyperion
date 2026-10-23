@@ -263,6 +263,23 @@ fn port_templates() -> Vec<PortTemplate> {
             ),
         },
         PortTemplate {
+            name: "acme-dns responder",
+            apply_id: "acme-dns",
+            // Opened and closed with the responder in Settings → HTTPS.
+            applyable: false,
+            tags: &["acme-dns", "acme-dns-tcp"],
+            ports_summary: "53 udp + tcp",
+            description: "The master's authoritative-only DNS for the delegated \
+                          _acme-challenge zone (wildcard renewals). Managed by \
+                          Settings → HTTPS; open it by hand only if another \
+                          firewall drops port 53.",
+            snippet: concat!(
+                snippet_header!(),
+                "sudo nft add rule inet hyperion input udp dport 53 accept comment '\"hyperion:acme-dns\"'\n",
+                "sudo nft add rule inet hyperion input tcp dport 53 accept comment '\"hyperion:acme-dns-tcp\"'"
+            ),
+        },
+        PortTemplate {
             name: "Worker RPC from the master only",
             apply_id: "worker_rpc",
             applyable: false,

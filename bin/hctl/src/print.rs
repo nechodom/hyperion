@@ -1301,6 +1301,50 @@ pub fn print_pretty(resp: &Response) {
                 }
             }
         }
+        Response::AcmeDnsConfig(c) => {
+            println!("zone:      {}", c.zone.as_deref().unwrap_or("(none)"));
+            println!("ns host:   {}", c.ns_host);
+            println!("enabled:   {}", c.enabled);
+            println!(
+                "listening: {}",
+                if c.listening.is_empty() {
+                    "(not listening)".to_string()
+                } else {
+                    c.listening.join(", ")
+                }
+            );
+            if let Some(e) = &c.last_error {
+                println!("error:     {e}");
+            }
+        }
+        Response::AcmeDnsLabel(l) => {
+            println!("{}  ->  {}", l.challenge_name(), l.label);
+        }
+        Response::AcmeDnsLabels(ls) => {
+            if ls.is_empty() {
+                println!("(no acme-dns labels)");
+            }
+            for l in ls {
+                println!(
+                    "{}  {}  {}",
+                    l.base,
+                    l.label,
+                    if l.verified_at.is_some() {
+                        "verified"
+                    } else {
+                        "unverified"
+                    }
+                );
+            }
+        }
+        Response::AcmeDnsLabelMark
+        | Response::AcmeDnsLabelDelete
+        | Response::AcmeDnsLabelsDeleteForHosting
+        | Response::AcmeDnsValuesSet
+        | Response::AcmeDnsValuesClear
+        | Response::AcmeDnsRenewReport
+        | Response::AcmeDnsZoneBroken
+        | Response::CertSetDelegated => println!("ok"),
         Response::Error(e) => {
             eprintln!("ERROR: {e}");
         }

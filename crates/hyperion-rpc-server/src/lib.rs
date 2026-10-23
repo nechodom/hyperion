@@ -527,6 +527,10 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(v) => Response::CertDns01Finish(v),
             Err(e) => Response::Error(e),
         },
+        Request::CertDns01FinishStrict { sel } => match api.cert_dns01_finish_strict(sel).await {
+            Ok(v) => Response::CertDns01Finish(v),
+            Err(e) => Response::Error(e),
+        },
         Request::CertDns01BeginDomain {
             domain,
             email,
@@ -537,6 +541,12 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
         },
         Request::CertDns01FinishDomain { domain } => {
             match api.cert_dns01_finish_domain(domain).await {
+                Ok(v) => Response::CertDns01FinishDomain(v),
+                Err(e) => Response::Error(e),
+            }
+        }
+        Request::CertDns01FinishDomainStrict { domain } => {
+            match api.cert_dns01_finish_domain_strict(domain).await {
                 Ok(v) => Response::CertDns01FinishDomain(v),
                 Err(e) => Response::Error(e),
             }
@@ -2139,6 +2149,83 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
                 Err(e) => Response::Error(e),
             }
         }
+        Request::AcmeDnsConfigGet => match api.acme_dns_config_get().await {
+            Ok(v) => Response::AcmeDnsConfig(v),
+            Err(e) => Response::Error(e),
+        },
+        Request::AcmeDnsConfigSet {
+            zone,
+            ns_host,
+            public_ipv4,
+            public_ipv6,
+            enabled,
+        } => match api
+            .acme_dns_config_set(zone, ns_host, public_ipv4, public_ipv6, enabled)
+            .await
+        {
+            Ok(v) => Response::AcmeDnsConfig(v),
+            Err(e) => Response::Error(e),
+        },
+        Request::AcmeDnsLabelEnsure { base, hosting_id } => {
+            match api.acme_dns_label_ensure(base, hosting_id).await {
+                Ok(v) => Response::AcmeDnsLabel(v),
+                Err(e) => Response::Error(e),
+            }
+        }
+        Request::AcmeDnsLabels => match api.acme_dns_labels().await {
+            Ok(v) => Response::AcmeDnsLabels(v),
+            Err(e) => Response::Error(e),
+        },
+        Request::AcmeDnsLabelMark { base, ok, error } => {
+            match api.acme_dns_label_mark(base, ok, error).await {
+                Ok(()) => Response::AcmeDnsLabelMark,
+                Err(e) => Response::Error(e),
+            }
+        }
+        Request::AcmeDnsLabelDelete { base } => match api.acme_dns_label_delete(base).await {
+            Ok(()) => Response::AcmeDnsLabelDelete,
+            Err(e) => Response::Error(e),
+        },
+        Request::AcmeDnsLabelsDeleteForHosting { hosting_id } => {
+            match api.acme_dns_labels_delete_for_hosting(hosting_id).await {
+                Ok(()) => Response::AcmeDnsLabelsDeleteForHosting,
+                Err(e) => Response::Error(e),
+            }
+        }
+        Request::AcmeDnsValuesSet { label, values } => {
+            match api.acme_dns_values_set(label, values).await {
+                Ok(()) => Response::AcmeDnsValuesSet,
+                Err(e) => Response::Error(e),
+            }
+        }
+        Request::AcmeDnsValuesClear { label } => match api.acme_dns_values_clear(label).await {
+            Ok(()) => Response::AcmeDnsValuesClear,
+            Err(e) => Response::Error(e),
+        },
+        Request::AcmeDnsRenewReport {
+            domain,
+            node_id,
+            ok,
+            detail,
+            days_left,
+            has_hosting,
+        } => match api
+            .acme_dns_renew_report(domain, node_id, ok, detail, days_left, has_hosting)
+            .await
+        {
+            Ok(()) => Response::AcmeDnsRenewReport,
+            Err(e) => Response::Error(e),
+        },
+        Request::AcmeDnsZoneBroken { detail } => match api.acme_dns_zone_broken(detail).await {
+            Ok(()) => Response::AcmeDnsZoneBroken,
+            Err(e) => Response::Error(e),
+        },
+        Request::CertSetDelegated { domain, delegated } => {
+            match api.cert_set_delegated(domain, delegated).await {
+                Ok(()) => Response::CertSetDelegated,
+                Err(e) => Response::Error(e),
+            }
+        }
     }
 }
 
@@ -2623,6 +2710,16 @@ mod tests {
             })
         }
         async fn cert_dns01_finish(&self, _: HostingSelector) -> Result<CertInfo, RpcError> {
+            Err(RpcError::Internal {
+                message: "not supported by this agent".into(),
+            })
+        }
+        async fn cert_dns01_finish_strict(&self, _: HostingSelector) -> Result<CertInfo, RpcError> {
+            Err(RpcError::Internal {
+                message: "not supported by this agent".into(),
+            })
+        }
+        async fn cert_dns01_finish_domain_strict(&self, _: Domain) -> Result<CertInfo, RpcError> {
             Err(RpcError::Internal {
                 message: "not supported by this agent".into(),
             })
@@ -4074,6 +4171,90 @@ mod tests {
             _: i64,
             _: i64,
         ) -> Result<hyperion_rpc::codec::CareReportMail, RpcError> {
+            Err(RpcError::Internal {
+                message: "not supported by this agent".into(),
+            })
+        }
+        async fn acme_dns_config_get(&self) -> Result<hyperion_types::AcmeDnsConfig, RpcError> {
+            Err(RpcError::Internal {
+                message: "not supported by this agent".into(),
+            })
+        }
+        async fn acme_dns_config_set(
+            &self,
+            _: Option<String>,
+            _: String,
+            _: Option<String>,
+            _: Option<String>,
+            _: bool,
+        ) -> Result<hyperion_types::AcmeDnsConfig, RpcError> {
+            Err(RpcError::Internal {
+                message: "not supported by this agent".into(),
+            })
+        }
+        async fn acme_dns_label_ensure(
+            &self,
+            _: Domain,
+            _: Option<String>,
+        ) -> Result<hyperion_types::AcmeDnsLabel, RpcError> {
+            Err(RpcError::Internal {
+                message: "not supported by this agent".into(),
+            })
+        }
+        async fn acme_dns_labels(&self) -> Result<Vec<hyperion_types::AcmeDnsLabel>, RpcError> {
+            Err(RpcError::Internal {
+                message: "not supported by this agent".into(),
+            })
+        }
+        async fn acme_dns_label_mark(
+            &self,
+            _: Domain,
+            _: bool,
+            _: Option<String>,
+        ) -> Result<(), RpcError> {
+            Err(RpcError::Internal {
+                message: "not supported by this agent".into(),
+            })
+        }
+        async fn acme_dns_label_delete(&self, _: Domain) -> Result<(), RpcError> {
+            Err(RpcError::Internal {
+                message: "not supported by this agent".into(),
+            })
+        }
+        async fn acme_dns_labels_delete_for_hosting(&self, _: String) -> Result<(), RpcError> {
+            Err(RpcError::Internal {
+                message: "not supported by this agent".into(),
+            })
+        }
+        async fn acme_dns_values_set(&self, _: String, _: Vec<String>) -> Result<(), RpcError> {
+            Err(RpcError::Internal {
+                message: "not supported by this agent".into(),
+            })
+        }
+        async fn acme_dns_values_clear(&self, _: String) -> Result<(), RpcError> {
+            Err(RpcError::Internal {
+                message: "not supported by this agent".into(),
+            })
+        }
+        async fn acme_dns_renew_report(
+            &self,
+            _: String,
+            _: String,
+            _: bool,
+            _: String,
+            _: i64,
+            _: bool,
+        ) -> Result<(), RpcError> {
+            Err(RpcError::Internal {
+                message: "not supported by this agent".into(),
+            })
+        }
+        async fn acme_dns_zone_broken(&self, _: String) -> Result<(), RpcError> {
+            Err(RpcError::Internal {
+                message: "not supported by this agent".into(),
+            })
+        }
+        async fn cert_set_delegated(&self, _: Domain, _: bool) -> Result<(), RpcError> {
             Err(RpcError::Internal {
                 message: "not supported by this agent".into(),
             })

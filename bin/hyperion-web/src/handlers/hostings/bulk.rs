@@ -194,10 +194,10 @@ pub(super) async fn run_bulk_job(
         };
         // Land each action on the node that owns the hosting (backups are
         // stored per node, and an action on the master NotFounds a worker row).
-        let target_owned: Option<String> = find_hosting_anywhere(&state, sel.clone())
-            .await
-            .ok()
-            .and_then(|(_d, n)| n);
+        let (target_owned, hosting_id) = match find_hosting_anywhere(&state, sel.clone()).await {
+            Ok((d, n)) => (n, Some(d.id.as_str().to_string())),
+            Err(_) => (None, None),
+        };
         let req = match action.as_str() {
             "suspend" => Request::HostingSuspend {
                 sel,
@@ -233,7 +233,18 @@ pub(super) async fn run_bulk_job(
         };
         match crate::dispatcher::dispatch_to_node(&state, target_owned.as_deref(), req).await {
             Ok(RpcResponse::Error(e)) => errs.push(format!("{sel_str}: {e}")),
-            Ok(_) => ok += 1,
+            Ok(_) => {
+                ok += 1;
+                // A delete that did not land in the trash takes its labels.
+                if let ("delete", Some(id)) = (action.as_str(), hosting_id.as_deref()) {
+                    crate::handlers::acme_dns_ssl::forget_hosting_if_gone(
+                        &state,
+                        target_owned.as_deref(),
+                        id,
+                    )
+                    .await;
+                }
+            }
             Err(e) => errs.push(format!("{sel_str}: {e}")),
         }
     }

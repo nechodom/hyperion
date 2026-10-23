@@ -25,10 +25,17 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .map(|h| h.domain)
             .collect();
         let now = now_secs();
-        Ok(rows
-            .into_iter()
-            .filter(|r| !trashed.contains(&r.domain))
-            .map(|r| {
+        let mut items = Vec::with_capacity(rows.len());
+        for r in rows.into_iter().filter(|r| !trashed.contains(&r.domain)) {
+            let wildcard = certificates::is_wildcard(&self.pool, &r.domain)
+                .await
+                .unwrap_or(false);
+            let hosting_id = hostings::get_by_domain(&self.pool, &r.domain)
+                .await
+                .ok()
+                .flatten()
+                .map(|h| h.id.to_string());
+            items.push({
                 let days_left = (r.not_after - now) / 86400;
                 let band = if r.not_after <= now {
                     "expired"
@@ -49,9 +56,14 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     // Local agent — handler fills this when fanning
                     // out across nodes.
                     node_id: String::new(),
+                    wildcard,
+                    renewal_type: r.renewal_type,
+                    hosting_id,
+                    delegated: r.dns01_delegated,
                 }
-            })
-            .collect())
+            });
+        }
+        Ok(items)
     }
 
     // ================================================================
@@ -705,14 +717,49 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         &self,
         sel: HostingSelector,
     ) -> Result<hyperion_types::CertInfo, RpcError> {
-        let detail = self.get(sel).await?;
-        let cert = hyperion_adapters::acme::dns01_finish(&detail.domain, "/etc/hyperion/certs")
-            .await
-            .map_err(|e| RpcError::ProvisioningFailed {
-                stage: "acme_dns01_finish".into(),
-                reason: e.to_string(),
-            })?;
+        self.cert_dns01_finish_with(sel, false).await
+    }
 
+    /// Fail-closed [`Self::cert_dns01_finish`]: never asks Let's Encrypt
+    /// without a passing DNS pre-flight (unattended renewal).
+    pub async fn cert_dns01_finish_strict(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<hyperion_types::CertInfo, RpcError> {
+        self.cert_dns01_finish_with(sel, true).await
+    }
+
+    async fn cert_dns01_finish_with(
+        &self,
+        sel: HostingSelector,
+        strict: bool,
+    ) -> Result<hyperion_types::CertInfo, RpcError> {
+        let detail = self.get(sel).await?;
+        let cert = hyperion_adapters::acme::dns01_finish_with(
+            &detail.domain,
+            "/etc/hyperion/certs",
+            strict,
+        )
+        .await
+        .map_err(|e| RpcError::ProvisioningFailed {
+            stage: "acme_dns01_finish".into(),
+            reason: e.to_string(),
+        })?;
+
+        self.install_dns01_cert(&detail, &cert).await?;
+        Ok(cert)
+    }
+
+    /// Persist a freshly issued DNS-01 wildcard cert for a hosting and make
+    /// nginx pick it up. A suspended or trashed site is re-applied through
+    /// its suspended vhost, with the SAME notice it is already showing:
+    /// `nginx_write_vhost` renders the serving vhost and would silently
+    /// un-suspend the site (same reasoning as `cert_renew_tick`).
+    pub(super) async fn install_dns01_cert(
+        &self,
+        detail: &HostingDetail,
+        cert: &hyperion_types::CertInfo,
+    ) -> Result<(), RpcError> {
         let cert_path = format!("/etc/hyperion/certs/{}/fullchain.pem", detail.domain);
         let key_path = format!("/etc/hyperion/certs/{}/privkey.pem", detail.domain);
         let _ = certificates::upsert(
@@ -728,15 +775,26 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // Mark it wildcard so the renewal sweep uses DNS-01, not HTTP-01.
         let _ = certificates::set_wildcard(&self.pool, &detail.domain, true).await;
 
-        let new_detail = HostingDetail {
-            cert: Some(cert.clone()),
-            // Per-hosting wildcard cert lives at the per-domain default
-            // path; clear any inherited shared-cert override.
-            cert_path: None,
-            cert_key_path: None,
-            ..detail.clone()
+        let applied = if matches!(
+            detail.state,
+            HostingState::Suspended | HostingState::Trashed
+        ) {
+            let reason = self.suspended_notice(&detail.id, detail.state).await;
+            self.adapters
+                .nginx_apply_suspended(&detail.domain, detail.aliases.clone(), reason)
+                .await
+        } else {
+            let new_detail = HostingDetail {
+                cert: Some(cert.clone()),
+                // Per-hosting wildcard cert lives at the per-domain default
+                // path; clear any inherited shared-cert override.
+                cert_path: None,
+                cert_key_path: None,
+                ..detail.clone()
+            };
+            self.adapters.nginx_write_vhost(&new_detail).await
         };
-        if let Err(e) = self.adapters.nginx_write_vhost(&new_detail).await {
+        if let Err(e) = applied {
             return Err(RpcError::ProvisioningFailed {
                 stage: "nginx_reload".into(),
                 reason: e.to_string(),
@@ -750,7 +808,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             "ok",
         )
         .await;
-        Ok(cert)
+        Ok(())
     }
 
     /// DNS-01 issuance for a bare domain that is NOT tied to a hosting —
@@ -801,15 +859,35 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         &self,
         domain: &str,
     ) -> Result<hyperion_types::CertInfo, RpcError> {
+        self.cert_dns01_finish_domain_with(domain, false).await
+    }
+
+    /// Fail-closed [`Self::cert_dns01_finish_domain`].
+    pub async fn cert_dns01_finish_domain_strict(
+        &self,
+        domain: &str,
+    ) -> Result<hyperion_types::CertInfo, RpcError> {
+        self.cert_dns01_finish_domain_with(domain, true).await
+    }
+
+    async fn cert_dns01_finish_domain_with(
+        &self,
+        domain: &str,
+        strict: bool,
+    ) -> Result<hyperion_types::CertInfo, RpcError> {
         let base = Domain::parse(domain).map_err(|e| RpcError::Validation {
             message: format!("invalid domain {domain}: {e}"),
         })?;
-        let cert = hyperion_adapters::acme::dns01_finish(base.as_str(), "/etc/hyperion/certs")
-            .await
-            .map_err(|e| RpcError::ProvisioningFailed {
-                stage: "acme_dns01_finish".into(),
-                reason: e.to_string(),
-            })?;
+        let cert = hyperion_adapters::acme::dns01_finish_with(
+            base.as_str(),
+            "/etc/hyperion/certs",
+            strict,
+        )
+        .await
+        .map_err(|e| RpcError::ProvisioningFailed {
+            stage: "acme_dns01_finish".into(),
+            reason: e.to_string(),
+        })?;
         let cert_path = format!("/etc/hyperion/certs/{}/fullchain.pem", base.as_str());
         let key_path = format!("/etc/hyperion/certs/{}/privkey.pem", base.as_str());
         let _ = certificates::upsert(
@@ -1009,9 +1087,18 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let is_wild = certificates::is_wildcard(&self.pool, &domain_str)
             .await
             .unwrap_or(false);
+        // A wildcard whose `_acme-challenge` is CNAME-delegated to the
+        // panel's acme zone is renewed by the master, not by this tick.
+        let delegated = is_wild && cert.dns01_delegated;
         let outcome = match Domain::parse(&domain_str) {
             Err(e) => CertRenewOutcome::Failed {
                 error: format!("invalid stored domain {domain_str}: {e}"),
+            },
+            Ok(_) if delegated => CertRenewOutcome::Skipped {
+                reason: self
+                    .operator_catalog()
+                    .get("ops.cert_wildcard_delegated_skip")
+                    .to_string(),
             },
             Ok(_) if is_wild => CertRenewOutcome::Skipped {
                 reason: format!(
@@ -1090,8 +1177,12 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let trashed = hosting_row
             .as_ref()
             .is_some_and(|r| r.state == HostingState::Trashed);
-        if !trashed {
-            let days_left = (cert.not_after - now) / 86400;
+        let days_left = (cert.not_after - now) / 86400;
+        // Delegated: the master renews it. Only nag once that has had its
+        // chance and the margin is thin.
+        let master_renews =
+            delegated && matches!(outcome, CertRenewOutcome::Skipped { .. }) && days_left > 14;
+        if !trashed && !master_renews {
             let href = cert_alert_href(&domain_str, hosting_row.is_some(), is_wild);
             self.notify_renew_outcome(&domain_str, &outcome, days_left, &href)
                 .await;

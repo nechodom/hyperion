@@ -181,14 +181,21 @@ pub async fn post_trash_purge(
     } else {
         Some(form.target_node.as_str())
     };
+    // The id names the hosting's acme-dns labels; the row is gone after.
+    let hosting_id = crate::handlers::acme_dns_ssl::hosting_id_of(&state, target, &sel).await;
     let resp =
         crate::dispatcher::dispatch_to_node(&state, target, Request::TrashPurge(sel)).await?;
     match resp {
-        RpcResponse::TrashPurge => Ok(Redirect::to(&format!(
-            "/trash?flash=Permanently+deleted+{}",
-            urlencode(&form.selector)
-        ))
-        .into_response()),
+        RpcResponse::TrashPurge => {
+            if let Some(id) = hosting_id {
+                crate::handlers::acme_dns_ssl::forget_hosting(&state, &id).await;
+            }
+            Ok(Redirect::to(&format!(
+                "/trash?flash=Permanently+deleted+{}",
+                urlencode(&form.selector)
+            ))
+            .into_response())
+        }
         RpcResponse::Error(e) => Ok(Redirect::to(&format!(
             "/trash?error={}",
             urlencode(&e.to_string())

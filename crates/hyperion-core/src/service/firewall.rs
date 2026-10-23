@@ -720,7 +720,8 @@ pub(super) fn sshd_ports_from(body: &str) -> Vec<u16> {
 /// Preset ids `firewall_template_commands` knows, in the order the boot
 /// re-apply walks them. "worker_rpc" is snippet-only in the UI (it needs the
 /// master's IP) and deliberately absent.
-pub(super) const FIREWALL_TEMPLATE_IDS: [&str; 5] = ["web", "mail", "hyperion", "ssh", "ftp"];
+pub(super) const FIREWALL_TEMPLATE_IDS: [&str; 6] =
+    ["web", "mail", "hyperion", "ssh", "ftp", "acme-dns"];
 
 /// One port the operator opened from the panel, outside the presets. Travels
 /// as a preset id — `custom:<proto>:<port>[:<source>]` — so apply, remove,
@@ -1016,6 +1017,47 @@ pub(super) fn hyperion_listen_ports_from_ss(out: &str) -> Vec<u16> {
     ports
 }
 
+/// Whoever, besides hyperion-agent itself, holds port 53 on an address the
+/// acme-dns responder would bind, from `ss -Hlunp` + `ss -Hltnp`, as
+/// `"<process> on <addr>:53"`. Loopback (systemd-resolved's 127.0.0.53/54)
+/// and IPv6 link-local are not bound by the responder, so they never clash.
+pub(super) fn port_53_holders_from_ss(out: &str) -> Vec<String> {
+    let mut holders: Vec<String> = out
+        .lines()
+        .filter_map(|l| {
+            // State Recv-Q Send-Q Local:Port Peer:Port Process
+            let local = l.split_whitespace().nth(3)?;
+            let (addr, port) = local.rsplit_once(':')?;
+            if port != "53" {
+                return None;
+            }
+            let bare = addr.split('%').next().unwrap_or(addr);
+            let bare = bare.trim_start_matches('[').trim_end_matches(']');
+            let lower = bare.to_ascii_lowercase();
+            if lower.starts_with("127.")
+                || lower == "::1"
+                || lower == "localhost"
+                || lower.starts_with("fe8")
+                || lower.starts_with("fe9")
+                || lower.starts_with("fea")
+                || lower.starts_with("feb")
+            {
+                return None;
+            }
+            let process = l
+                .split_once("((\"")
+                .and_then(|(_, r)| r.split_once('"'))
+                .map(|(name, _)| name.to_string());
+            if process.as_deref() == Some("hyperion-agent") {
+                return None;
+            }
+            let who = process.unwrap_or_else(|| "an unknown process".into());
+            Some(format!("{who} on {addr}:53"))
+        })
+        .collect();
+    holders.dedup();
+    holders
+}
 /// Open ports from a ruleset dump, decorated for the /firewall table.
 ///
 /// nft: an `accept` rule with a `tcp|udp dport` match, single port, range or
@@ -1255,6 +1297,36 @@ pub(super) fn firewall_template_commands(id: &str) -> Option<Vec<Vec<String>>> {
                 "accept",
                 "comment",
                 "\"hyperion:ftp-passive\"",
+            ],
+        ],
+        // Opened and closed by Settings → HTTPS with the acme-dns responder,
+        // not toggled by hand.
+        "acme-dns" => vec![
+            vec![
+                "add",
+                "rule",
+                "inet",
+                "hyperion",
+                "input",
+                "udp",
+                "dport",
+                "53",
+                "accept",
+                "comment",
+                "\"hyperion:acme-dns\"",
+            ],
+            vec![
+                "add",
+                "rule",
+                "inet",
+                "hyperion",
+                "input",
+                "tcp",
+                "dport",
+                "53",
+                "accept",
+                "comment",
+                "\"hyperion:acme-dns-tcp\"",
             ],
         ],
         // "worker_rpc" needs <MASTER_IP> substitution which we

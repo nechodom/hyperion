@@ -30,6 +30,7 @@ use sqlx::SqlitePool;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+mod acme_dns;
 mod audit;
 mod auth;
 mod backups;

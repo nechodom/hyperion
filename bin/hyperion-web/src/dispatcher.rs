@@ -360,8 +360,12 @@ fn timeout_for_request(req: &Request) -> u64 {
         // with 15/30/60 s backoff. A "retry" after a false timeout burns
         // Let's Encrypt's failed-validation limit on a working order.
         Request::CertIssueAcme { .. }
+        | Request::CertDns01Begin { .. }
+        | Request::CertDns01BeginDomain { .. }
         | Request::CertDns01Finish { .. }
-        | Request::CertDns01FinishDomain { .. } => 600,
+        | Request::CertDns01FinishStrict { .. }
+        | Request::CertDns01FinishDomain { .. }
+        | Request::CertDns01FinishDomainStrict { .. } => 600,
         // Enabling quotas apt-installs `quota` and runs quotacheck, which
         // the node itself allows 240 s; QuotaSet enables them inline.
         Request::QuotaEnableKernel { .. } | Request::QuotaSet { .. } => 600,

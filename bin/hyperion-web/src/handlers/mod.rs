@@ -1,3 +1,4 @@
+pub mod acme_dns_ssl;
 pub mod api_docs;
 pub mod api_keys;
 pub mod api_v1;
@@ -386,7 +387,7 @@ fn port_from_listen(listen: &str) -> Option<u16> {
 /// and the caller handles it. A failure is remembered for a minute, so a
 /// box that cannot reach ipify does not stall every /install render on a
 /// fresh 4-second curl.
-async fn cached_public_ip() -> Option<String> {
+pub(crate) async fn cached_public_ip() -> Option<String> {
     use crate::ttl_cache::TtlCell;
     use std::time::{Duration, Instant};
     static IP: TtlCell<String> = TtlCell::new(Duration::from_secs(3600));

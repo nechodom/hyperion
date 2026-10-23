@@ -48,6 +48,9 @@ pub(crate) fn spawn_all(svc: &Svc, cert_renewal_window_days: i64) {
     spawn_php_mem_auto(svc);
     spawn_php_workers(svc);
     spawn_site_check(svc);
+    // acme-dns responder: idle unless the master's operator enabled it in
+    // Settings → HTTPS (the row is never synced to workers).
+    crate::acme_dns::spawn(svc.pool.clone());
     spawn_cert_renewal(svc, cert_renewal_window_days.max(1));
     spawn_wp_defender(svc);
     spawn_wp_integrity(svc);

@@ -71,6 +71,12 @@ pub async fn post_delete(
                     "",
                 )
                 .await;
+            let hosting_id = crate::handlers::acme_dns_ssl::hosting_id_of(
+                &job_state,
+                target_owned.as_deref(),
+                &sel,
+            )
+            .await;
             let resp = crate::dispatcher::dispatch_to_node(
                 &job_state,
                 target_owned.as_deref(),
@@ -79,6 +85,15 @@ pub async fn post_delete(
             .await;
             match resp {
                 Ok(RpcResponse::HostingDelete) => {
+                    // Gone for good (not trashed): its acme-dns labels go too.
+                    if let Some(id) = hosting_id {
+                        crate::handlers::acme_dns_ssl::forget_hosting_if_gone(
+                            &job_state,
+                            target_owned.as_deref(),
+                            &id,
+                        )
+                        .await;
+                    }
                     reporter
                         .step("Hosting deleted.", 100, "✓ hosting removed")
                         .await;

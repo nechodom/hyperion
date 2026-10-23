@@ -304,3 +304,145 @@ async fn cert_renew_tick_with_no_certs_returns_empty() {
     let r = s.cert_renew_tick(now_secs(), 30).await.expect("tick");
     assert!(r.is_empty());
 }
+
+/// DNS-01 finish must not turn a suspended site back into a serving one:
+/// `nginx_write_vhost` renders the live vhost.
+#[tokio::test]
+async fn dns01_install_keeps_a_suspended_site_suspended() {
+    let pool = open_memory().await.expect("open");
+    let s = svc(pool.clone(), suspend_mocks());
+    s.create(req("paused.cz")).await.expect("create");
+    let sel = HostingSelector::Domain(Domain::parse("paused.cz").unwrap());
+    s.suspend(
+        sel.clone(),
+        hyperion_types::SuspendReason::Manual {
+            message: Some("Unpaid invoice".into()),
+        },
+    )
+    .await
+    .expect("suspend");
+    let detail = s.get(sel.clone()).await.expect("get");
+
+    // Fresh service over the same pool: the serving vhost is forbidden,
+    // the suspended re-apply must carry the stored notice + aliases.
+    let mut m = MockAdapterPort::new();
+    m.expect_nginx_write_vhost().times(0);
+    let aliases = detail.aliases.clone();
+    m.expect_nginx_apply_suspended()
+        .times(1)
+        .withf(move |d, a, reason| {
+            d == "paused.cz" && *a == aliases && reason.as_deref() == Some("Unpaid invoice")
+        })
+        .returning(|_, _, _| Ok(()));
+    let s = svc(pool.clone(), m);
+    s.install_dns01_cert(&detail, &cert_for("paused.cz"))
+        .await
+        .expect("install");
+    assert_eq!(s.get(sel).await.unwrap().state, HostingState::Suspended);
+    assert!(certificates::is_wildcard(&pool, "paused.cz").await.unwrap());
+}
+
+#[tokio::test]
+async fn dns01_install_rewrites_the_serving_vhost_for_an_active_site() {
+    let pool = open_memory().await.expect("open");
+    let s = svc(pool.clone(), happy_mocks());
+    s.create(req("live.cz")).await.expect("create");
+    let sel = HostingSelector::Domain(Domain::parse("live.cz").unwrap());
+    let detail = s.get(sel).await.expect("get");
+
+    let mut m = MockAdapterPort::new();
+    m.expect_nginx_apply_suspended().times(0);
+    m.expect_nginx_write_vhost().times(1).returning(|_| Ok(()));
+    let s = svc(pool.clone(), m);
+    s.install_dns01_cert(&detail, &cert_for("live.cz"))
+        .await
+        .expect("install");
+    assert!(certificates::is_wildcard(&pool, "live.cz").await.unwrap());
+}
+
+/// A wildcard LE cert, `days` from expiry at the returned `now`.
+async fn seed_wildcard(
+    s: &HostingService<MockAdapterPort>,
+    domain: &str,
+    days: i64,
+    delegated: bool,
+) -> i64 {
+    let now = now_secs();
+    certificates::upsert(
+        &s.pool,
+        domain,
+        now - 60 * 86_400,
+        now + days * 86_400 + 3_600,
+        "/c/f.pem",
+        "/c/k.pem",
+        "letsencrypt",
+    )
+    .await
+    .expect("upsert");
+    certificates::set_wildcard(&s.pool, domain, true)
+        .await
+        .expect("flag");
+    if delegated {
+        certificates::set_delegated(&s.pool, domain, true)
+            .await
+            .expect("delegate");
+    }
+    now
+}
+
+#[tokio::test]
+async fn delegated_wildcard_is_skipped_without_manual_alert() {
+    use hyperion_state::web_users::WebRole;
+    let pool = open_memory().await.expect("open");
+    let s = svc(pool, happy_mocks());
+    let me = seed_web_user(&s, "boss", WebRole::Admin).await;
+    let now = seed_wildcard(&s, "base.cz", 25, true).await;
+    let r = s
+        .cert_renew_tick(now, CERT_RENEWAL_WINDOW_DAYS)
+        .await
+        .expect("tick");
+    let CertRenewOutcome::Skipped { reason } = &r[0].outcome else {
+        panic!("expected skipped: {:?}", r[0].outcome)
+    };
+    assert!(reason.contains("delegated"), "{reason}");
+    let kinds = manual_kinds(&s, me).await;
+    assert!(
+        !kinds.iter().any(|k| k.starts_with("cert.wildcard_manual:")),
+        "{kinds:?}"
+    );
+}
+
+#[tokio::test]
+async fn delegated_wildcard_alerts_at_14_days() {
+    use hyperion_state::web_users::WebRole;
+    let pool = open_memory().await.expect("open");
+    let s = svc(pool, happy_mocks());
+    let me = seed_web_user(&s, "boss", WebRole::Admin).await;
+    let now = seed_wildcard(&s, "base.cz", 10, true).await;
+    s.cert_renew_tick(now, CERT_RENEWAL_WINDOW_DAYS)
+        .await
+        .expect("tick");
+    assert!(manual_kinds(&s, me)
+        .await
+        .contains(&"cert.wildcard_manual:base.cz".to_string()));
+}
+
+#[tokio::test]
+async fn undelegated_wildcard_still_alerts() {
+    use hyperion_state::web_users::WebRole;
+    let pool = open_memory().await.expect("open");
+    let s = svc(pool, happy_mocks());
+    let me = seed_web_user(&s, "boss", WebRole::Admin).await;
+    let now = seed_wildcard(&s, "base.cz", 25, false).await;
+    let r = s
+        .cert_renew_tick(now, CERT_RENEWAL_WINDOW_DAYS)
+        .await
+        .expect("tick");
+    let CertRenewOutcome::Skipped { reason } = &r[0].outcome else {
+        panic!("expected skipped: {:?}", r[0].outcome)
+    };
+    assert!(!reason.contains("delegated"), "{reason}");
+    assert!(manual_kinds(&s, me)
+        .await
+        .contains(&"cert.wildcard_manual:base.cz".to_string()));
+}

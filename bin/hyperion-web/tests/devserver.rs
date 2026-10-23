@@ -567,6 +567,7 @@ fn build_app_with_signer(
         caches: Default::default(),
         setup,
         cluster_sync: Default::default(),
+        dns_probe: Default::default(),
     });
     // The login/2FA + enroll handlers extract `ConnectInfo<SocketAddr>` (real
     // peer IP for the rate-limit bucket). `.oneshot()` doesn't go through

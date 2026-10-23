@@ -589,6 +589,45 @@ pub async fn dns01_begin(
 /// poll, finalize and write the cert to `<certs_root>/<domain>/`.
 /// The session file is removed on success.
 pub async fn dns01_finish(domain: &str, certs_root: &str) -> Result<CertInfo, AdapterError> {
+    dns01_finish_with(domain, certs_root, false).await
+}
+
+/// The pre-flight's decision. `strict` (unattended renewal) refuses when no
+/// resolver is reachable, so Let's Encrypt is never told "ready" without a
+/// passing check; lenient lets it decide, as an operator-driven finish does.
+fn preflight_verdict(
+    result: Result<(), crate::dns_probe::ProbeError>,
+    strict: bool,
+) -> Result<(), String> {
+    match result {
+        Ok(()) => Ok(()),
+        Err(crate::dns_probe::ProbeError::NotVisible(report)) => Err(format!(
+            "{}: {report}. Let's Encrypt was NOT asked to \
+             validate, so the pending order and its TXT values are \
+             unchanged — publish them (both values when two share one \
+             name), wait for the DNS provider, and validate again.",
+            hyperion_types::DNS01_NOT_READY
+        )),
+        // Outbound DNS blocked on this node: the check can't run, which
+        // says nothing about the record.
+        Err(crate::dns_probe::ProbeError::NoResolver(e)) if strict => Err(format!(
+            "{}: the DNS pre-flight could not run ({e}). Let's Encrypt was \
+             NOT asked to validate; the pending order is unchanged.",
+            hyperion_types::DNS01_NOT_READY
+        )),
+        Err(crate::dns_probe::ProbeError::NoResolver(e)) => {
+            tracing::warn!(error = %e, "DNS-01 pre-flight skipped");
+            Ok(())
+        }
+    }
+}
+
+/// [`dns01_finish`] with the pre-flight policy chosen by the caller.
+pub async fn dns01_finish_with(
+    domain: &str,
+    certs_root: &str,
+    strict: bool,
+) -> Result<CertInfo, AdapterError> {
     use instant_acme::{Account, AuthorizationStatus, ChallengeType, OrderStatus, RetryPolicy};
     install_crypto_provider();
 
@@ -631,23 +670,8 @@ pub async fn dns01_finish(domain: &str, certs_root: &str) -> Result<CertInfo, Ad
             .iter()
             .map(|r| (r.name.clone(), r.value.clone()))
             .collect();
-        match crate::dns_probe::check_txt_published(&pairs).await {
-            Ok(()) => {}
-            Err(crate::dns_probe::ProbeError::NotVisible(report)) => {
-                return Err(AdapterError::Acme(format!(
-                    "{}: {report}. Let's Encrypt was NOT asked to \
-                     validate, so the pending order and its TXT values are \
-                     unchanged — publish them (both values when two share one \
-                     name), wait for the DNS provider, and validate again.",
-                    hyperion_types::DNS01_NOT_READY
-                )));
-            }
-            // Outbound DNS blocked on this node: the check can't run, which
-            // says nothing about the record. Let Let's Encrypt decide.
-            Err(crate::dns_probe::ProbeError::NoResolver(e)) => {
-                tracing::warn!(domain, error = %e, "DNS-01 pre-flight skipped");
-            }
-        }
+        preflight_verdict(crate::dns_probe::check_txt_published(&pairs).await, strict)
+            .map_err(AdapterError::Acme)?;
     }
 
     {
@@ -851,6 +875,27 @@ fn parse_not_after(pem: &str) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dns_probe::ProbeError;
+
+    #[test]
+    fn strict_preflight_refuses_when_no_resolver() {
+        let r = preflight_verdict(Err(ProbeError::NoResolver("blocked".into())), true);
+        assert!(r.unwrap_err().contains(hyperion_types::DNS01_NOT_READY));
+    }
+
+    #[test]
+    fn lenient_preflight_proceeds_when_no_resolver() {
+        assert!(preflight_verdict(Err(ProbeError::NoResolver("blocked".into())), false).is_ok());
+    }
+
+    #[test]
+    fn preflight_refuses_not_visible_either_way() {
+        for strict in [true, false] {
+            let r = preflight_verdict(Err(ProbeError::NotVisible("nx".into())), strict);
+            assert!(r.unwrap_err().contains("NOT asked"));
+        }
+        assert!(preflight_verdict(Ok(()), true).is_ok());
+    }
 
     #[test]
     fn cert_info_builder_round_trip_through_serde() {

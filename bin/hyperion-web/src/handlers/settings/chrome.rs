@@ -111,6 +111,7 @@ pub const CARDS: &[(&str, &str)] = &[
     ("panel-domain", "panel"),
     ("updates", "panel"),
     ("acme", "https"),
+    ("acme-dns", "https"),
     ("preview-address", "https"),
     ("preview-wildcard", "https"),
     ("smtp-relay", "mail"),

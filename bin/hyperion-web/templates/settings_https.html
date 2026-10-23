@@ -56,6 +56,111 @@
 </fieldset>
 
 <fieldset class="group"{{ chrome.ro() }}{% if config_error.is_some() %} disabled{% endif %}>
+  <div class="ghead">Automatic wildcard renewal<span class="scope-tag" title="The responder runs on the master">Master only</span></div>
+  <div class="item" id="acme-dns">
+    <div class="row" style="align-items:center;gap:0.6rem;flex-wrap:wrap">
+      <h3 style="margin:0">Delegated acme zone</h3>
+      {% if acme.allowed %}
+      {% if acme.enabled && acme.configured %}<span class="pill ok">on</span>
+      {% else if acme.configured %}<span class="pill muted">off</span>
+      {% else %}<span class="pill muted">not set up</span>{% endif %}
+      {% endif %}
+    </div>
+    {% if !acme.allowed %}
+    <p class="text-soft small" style="margin:0.3rem 0 0">Only an administrator can set up automatic wildcard renewal.</p>
+    {% else %}
+    <p class="text-soft small" style="margin:0.3rem 0 0.8rem">
+      Delegate one small DNS zone to this server and wildcard certificates
+      renew by themselves: each domain publishes one fixed CNAME,
+      <code>_acme-challenge</code>, into that zone, once. Without it a wildcard
+      needs a TXT record by hand every time.
+    </p>
+    {% if let Some(e) = acme.unreadable %}
+    <p class="chk-note tone-warn">The setting could not be read ({{ e }}).</p>
+    {% endif %}
+    {% if let Some(e) = acme.error %}
+    <div class="alert alert-warn" role="alert" style="margin:0 0 0.8rem"><strong>Not saved.</strong> {{ e }}</div>
+    {% endif %}
+    {% if let Some(e) = acme.last_error %}
+    <p class="chk-note tone-warn">The responder reports: {{ e }}</p>
+    {% endif %}
+    {% if acme.enabled && acme.configured %}
+    <p class="text-soft small" style="margin:0 0 0.8rem">
+      {% if acme.listening.is_empty() %}The responder is not listening.
+      {% else %}Listening on {% for a in acme.listening %}<code>{{ a }}</code>{% if !loop.last %}, {% endif %}{% endfor %}.{% endif %}
+    </p>
+    {% endif %}
+    <form method="post" action="/settings/https/acme-dns" autocomplete="off">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <div class="field">
+        <label for="acme_dns_zone">Zone <span class="hint">delegated to this server; by default a name under the panel's own</span></label>
+        <input id="acme_dns_zone" name="zone" type="text" autocomplete="off" autocapitalize="none" spellcheck="false"
+               value="{{ acme.zone }}" placeholder="acme.panel.example.com">
+      </div>
+      <div class="field">
+        <label for="acme_dns_ns">Name server host <span class="hint">outside the zone, in the parent zone</span></label>
+        <input id="acme_dns_ns" name="ns_host" type="text" autocomplete="off" autocapitalize="none" spellcheck="false"
+               value="{{ acme.ns_host }}" placeholder="ns-acme.example.com">
+      </div>
+      <div class="field">
+        <label for="acme_dns_v4">Public IPv4 <span class="hint">the address of this server</span></label>
+        <input id="acme_dns_v4" name="public_ipv4" type="text" autocomplete="off" spellcheck="false"
+               value="{{ acme.public_ipv4 }}" placeholder="203.0.113.10">
+      </div>
+      <div class="field">
+        <label for="acme_dns_v6">Public IPv6 <span class="hint">optional</span></label>
+        <input id="acme_dns_v6" name="public_ipv6" type="text" autocomplete="off" spellcheck="false"
+               value="{{ acme.public_ipv6 }}" placeholder="2001:db8::10">
+      </div>
+      <label class="field-checkbox">
+        <input type="checkbox" name="enabled" value="on"{% if acme.enabled %} checked{% endif %}>
+        <span><strong>Answer for this zone</strong> (opens port 53 in the firewall)</span>
+      </label>
+      <div class="item-actions"><button type="submit" class="btn primary">Save</button></div>
+    </form>
+    {% if !acme.records.is_empty() %}
+    <p class="text-soft small" style="margin:1rem 0 0.4rem">Add these records at the DNS provider of the parent zone:</p>
+    <div class="copy-grid">
+      {% for r in acme.records %}
+      <div class="copy-field" data-copy="{{ r.line() }}" title="Copy the record">
+        <span class="copy-label">{{ r.kind }}</span>
+        <span class="copy-value">{{ r.line() }}</span>
+        <span class="copy-hint">click to copy</span>
+      </div>
+      {% endfor %}
+    </div>
+    {% endif %}
+    <form hx-post="/settings/https/acme-dns/check" hx-target="#acme-dns-check" hx-swap="innerHTML"
+          style="margin:0.8rem 0 0;display:flex;align-items:center;gap:0.6rem;flex-wrap:wrap">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <button class="btn small" type="submit"{% if !acme.configured %} disabled{% endif %}>Check delegation</button>
+      <span id="acme-dns-check" aria-live="polite"></span>
+    </form>
+    <h4 style="margin:1.2rem 0 0.4rem">Delegated wildcards</h4>
+    {% if let Some(e) = acme.labels_error %}
+    <p class="chk-note tone-warn" style="margin:0">Could not load the delegated wildcards: {{ e }}</p>
+    {% else if acme.labels.is_empty() %}
+    <p class="text-soft small" style="margin:0">None yet. A domain appears here once its wildcard certificate is set to use the delegated zone.</p>
+    {% else %}
+    <div class="table-wrap inset">
+      <table>
+        <thead><tr><th>Domain</th><th>State</th></tr></thead>
+        <tbody>
+        {% for l in acme.labels %}
+          <tr>
+            <td><code>{{ l.base }}</code></td>
+            <td><span class="pill {{ l.tone }}">{{ l.verdict }}</span>{% if !l.note.is_empty() %}<span class="cell-sub">{{ l.note }}</span>{% endif %}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
+    {% endif %}
+  </div>
+</fieldset>
+
+<fieldset class="group"{{ chrome.ro() }}{% if config_error.is_some() %} disabled{% endif %}>
   <div class="ghead">Previews{% if chrome.has_nodes %}<span class="scope-tag" title="Set here, copied to every node by the settings sync">All nodes</span>{% endif %}</div>
   <div class="item" id="preview-address">
     <div class="row" style="align-items:center;gap:0.6rem;flex-wrap:wrap">
@@ -203,6 +308,16 @@
         </tbody>
       </table>
     </div>
+    {% if !preview_acme.is_empty() %}
+    <h4 style="margin:1.2rem 0 0.4rem">Automatic renewal</h4>
+    <p class="text-soft small" style="margin:0 0 0.6rem">
+      With one CNAME into the <a href="#acme-dns">delegated acme zone</a>, a preview
+      wildcard renews by itself instead of by hand.
+    </p>
+    {% for acme_ssl in preview_acme %}
+    <div style="margin:0 0 0.9rem">{% include "_acme_dns_ssl_block.html" %}</div>
+    {% endfor %}
+    {% endif %}
     {% endif %}
     <details class="howto">
       <summary>Before you issue</summary>
@@ -214,8 +329,8 @@
           previews reachable.</li>
         <li>Issuing shows the TXT records to publish at your DNS provider, then validates them over DNS-01.
           Keep that page open until the certificate is issued.</li>
-        <li>This server holds no DNS credentials, so a wildcard cannot renew itself: renew it here
-          roughly every 60 days. The status column says when each one expires; reload after a
+        <li>This server holds no DNS credentials, so without automatic renewal a wildcard cannot
+          renew itself: renew it here roughly every 60 days. The status column says when each one expires; reload after a
           validation and its status reads <em>valid</em>.</li>
         <li>Every certificate on every node is listed on <a href="/certs">Certificates</a>.</li>
       </ul>
