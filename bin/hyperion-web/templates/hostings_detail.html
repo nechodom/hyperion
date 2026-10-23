@@ -512,6 +512,8 @@
   {% if let Some(e) = cron_error %}{% call flash("error", "Crontab error:", e) %}{% endif %}
   {% if let Some(m) = profile_flash %}{% call flash("success", "", m) %}{% endif %}
   {% if let Some(e) = profile_error %}{% call flash("error", "Profile apply failed:", e) %}{% endif %}
+  {% if let Some(m) = monitor_flash %}{% call flash("success", "", m) %}{% endif %}
+  {% if let Some(e) = monitor_error %}{% call flash("error", "Monitoring:", e) %}{% endif %}
   {% if let Some(m) = db_flash %}{% call flash("success", "", m) %}{% endif %}
   {% if let Some(e) = db_error %}{% call flash("error", "Database:", e) %}{% endif %}
   {% if let Some(m) = ftp_flash %}{% call flash("success", "", m) %}{% endif %}
@@ -4575,6 +4577,20 @@
     <p class="note" style="margin:0 0 1rem">No samples yet. Save your settings and wait one interval, or use <em>Probe now</em>.</p>
   {% endif %}
 
+  {#- The import picker sits among the alert channels below but submits this
+      form (via the form= attribute), since forms cannot nest. Server-side:
+      a profile's Slack webhook is a secret and never reaches the browser. -#}
+  {% if can_set_price && !profiles.is_empty() %}
+  <form id="monitor-from-profile" method="post" action="/hostings/monitor/from-profile"
+        data-confirm-title="Import alert channels from a profile"
+        data-confirm-body="The profile's alert e-mails are added to the ones already here.{% if monitor_config.alert_slack_webhook_set %} If the profile has a Slack webhook, it replaces the one this monitor uses now.{% else %} Its Slack webhook, if it has one, becomes this monitor's.{% endif %} Interval, path and the JSON webhook stay as they are."
+        data-confirm-confirm-label="Import"
+        data-confirm-variant="primary">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
+  </form>
+  {% endif %}
+
   <form method="post" action="/hostings/monitor/set" autocomplete="off">
     <input type="hidden" name="_csrf" value="{{ csrf_token }}">
     <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
@@ -4611,6 +4627,24 @@
       webhook (<a href="/settings/alerts#slack">Settings → Alerts → Slack</a>); the wording of every send
       comes from <a href="/settings/alerts#alert-templates">Settings → Alerts → Wording</a>. Email requires <code>[email]</code> configured in agent.toml.
     </p>
+    {% if can_set_price && !profiles.is_empty() %}
+    <div class="field">
+      <label for="m_from_profile">Import from profile <span class="hint">copies its Slack webhook and alert e-mails</span></label>
+      <div class="cluster">
+        <select id="m_from_profile" name="profile_id" form="monitor-from-profile" required>
+          {% for p in profiles %}
+            {%- let has_slack = p.slack_webhook.is_some() -%}
+            {%- let has_mail = !p.alert_emails.trim().is_empty() -%}
+            <option value="{{ p.id }}" {% if !has_slack && !has_mail %}disabled{% endif %}>
+              {{ p.name }} — {% if has_slack && has_mail %}Slack + e-mails{% else if has_slack %}Slack{% else if has_mail %}e-mails{% else %}no alert channels{% endif %}
+            </option>
+          {% endfor %}
+        </select>
+        <button type="submit" class="btn small" form="monitor-from-profile">Import</button>
+      </div>
+      <span class="help">Anything you typed below and have not saved is lost — save first.</span>
+    </div>
+    {% endif %}
     <div class="field">
       <label for="m_email">Email recipients <span class="hint">comma-separated</span></label>
       <input id="m_email" name="alert_email" type="text"

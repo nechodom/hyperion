@@ -97,7 +97,7 @@ pub async fn post_monitor_set(
         if let Some(u) = webhook.as_deref() {
             if let Err(msg) = super::reject_internal_url(u).await {
                 return Ok(Redirect::to(&format!(
-                    "/hostings/{}?error={}#monitor",
+                    "/hostings/{}?monitor_error={}#monitor",
                     urlencoding(&form.selector),
                     urlencoding(&msg)
                 ))
@@ -129,6 +129,147 @@ pub async fn post_monitor_set(
         .into_response()),
         RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),
         _ => Err(AppError::Internal("unexpected response".into())),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct MonitorFromProfileForm {
+    pub selector: String,
+    pub profile_id: i64,
+}
+
+/// Copy a profile's alert channels — its Slack webhook and its "also e-mail
+/// alerts to" list — onto this site's uptime monitor.
+///
+/// Server-side on purpose: the profile's webhook is a bearer credential and
+/// never reaches the browser, so the form cannot simply prefill it. Everything
+/// else on the monitor (on/off, path, interval, threshold, JSON webhook) is
+/// re-sent unchanged, because `MonitorSet` writes every column it is given.
+/// E-mail addresses are merged into the ones already there rather than
+/// replacing them: an import must not quietly stop someone getting alerts.
+pub async fn post_monitor_from_profile(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<MonitorFromProfileForm>,
+) -> Result<Response, AppError> {
+    let sel = parse_selector(&form.selector)?;
+    let (detail, owner_node) = find_hosting_anywhere(&state, sel.clone()).await?;
+    let target = owner_node.as_deref();
+    if let Err(r) = require_hosting_access(
+        &state,
+        &ctx,
+        detail.id.as_str(),
+        true,
+        Capability::MonitoringManage,
+    )
+    .await
+    {
+        return Ok(r);
+    }
+    let back = |key: &str, val: &str| -> Response {
+        Redirect::to(&format!(
+            "/hostings/{}?{key}={}#monitor",
+            urlencoding(&form.selector),
+            urlencoding(val)
+        ))
+        .into_response()
+    };
+    // Profiles are cluster-wide and carry other clients' webhooks; reading one
+    // is the profiles permission, same as applying one.
+    if !ctx.can(Capability::ProfilesManage) {
+        return Ok(back(
+            "monitor_error",
+            "Importing from a profile needs the profiles permission.",
+        ));
+    }
+    let profiles = fetch_all_profiles(&state).await?;
+    let Some(profile) = profiles.into_iter().find(|p| p.id == form.profile_id) else {
+        return Ok(back("monitor_error", "That profile no longer exists."));
+    };
+    let profile_slack = profile
+        .slack_webhook
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let profile_emails = recipient_list(&profile.alert_emails);
+    if profile_slack.is_none() && profile_emails.is_empty() {
+        return Ok(back(
+            "monitor_error",
+            &format!(
+                "The {} profile has no Slack webhook or alert e-mails to import.",
+                profile.name
+            ),
+        ));
+    }
+    // The current config, read from the owning node. A failed read must not
+    // fall back to defaults — saving those would wipe the monitor.
+    let current = match crate::dispatcher::dispatch_to_node(
+        &state,
+        target,
+        Request::MonitorGet { sel: sel.clone() },
+    )
+    .await?
+    {
+        RpcResponse::MonitorGet { config, .. } => config,
+        RpcResponse::Error(e) => return Err(AppError::Rpc(e.to_string())),
+        _ => return Err(AppError::Internal("unexpected response".into())),
+    };
+    let mut emails = recipient_list(current.alert_email.as_deref().unwrap_or(""));
+    for e in profile_emails {
+        if !emails.iter().any(|x| x.eq_ignore_ascii_case(&e)) {
+            emails.push(e);
+        }
+    }
+    let resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        target,
+        Request::MonitorSet {
+            sel,
+            enabled: current.enabled,
+            url_path: Some(current.url_path),
+            interval_secs: Some(current.interval_secs),
+            alert_after_fails: Some(current.alert_after_fails),
+            alert_email: (!emails.is_empty()).then(|| emails.join(",")),
+            // None = keep whatever webhook the monitor already has.
+            alert_slack_webhook: profile_slack,
+            clear_slack_webhook: false,
+            alert_webhook_url: current.alert_webhook_url,
+        },
+    )
+    .await?;
+    match resp {
+        RpcResponse::MonitorSet => Ok(back("monitor_imported", &profile.name)),
+        RpcResponse::Error(e) => Ok(back("monitor_error", &e.to_string())),
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
+}
+
+/// Split a comma/semicolon/newline-separated address list, dropping blanks
+/// and case-insensitive duplicates while keeping the order.
+fn recipient_list(raw: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for part in raw.split([',', ';', '\n', '\r']) {
+        let a = part.trim();
+        if a.is_empty() || out.iter().any(|x| x.eq_ignore_ascii_case(a)) {
+            continue;
+        }
+        out.push(a.to_string());
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::recipient_list;
+
+    #[test]
+    fn recipient_list_splits_trims_and_dedupes() {
+        assert_eq!(
+            recipient_list(" ops@a.cz, OPS@a.cz;\nsre@a.cz ,, "),
+            vec!["ops@a.cz".to_string(), "sre@a.cz".to_string()]
+        );
+        assert!(recipient_list("  ").is_empty());
     }
 }
 
