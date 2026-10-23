@@ -1437,7 +1437,9 @@
 
 {# Automatic wildcard renewal: one CNAME into the panel's delegated acme
    zone. The block is shared with Settings → HTTPS and swaps itself on its
-   own buttons; a customer gets only its on/off line. #}
+   own buttons; a customer gets only its on/off line, and only when the
+   site has a wildcard or a label. #}
+{% if acme_ssl.shown() %}
 <div class="card" id="acme-ssl-card">
   <div class="card-head">
     <h2>
@@ -1447,6 +1449,7 @@
   </div>
   {% include "_acme_dns_ssl_block.html" %}
 </div>
+{% endif %}
 
 <div class="panel-group">Advanced</div>
 

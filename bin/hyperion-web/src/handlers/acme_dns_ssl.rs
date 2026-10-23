@@ -131,9 +131,18 @@ pub struct AcmeSslBlock {
     pub label: Option<AcmeDnsLabel>,
     /// The zone or the labels could not be read from the agent.
     pub unreadable: Option<String>,
+    /// The hosting's certificate covers `*.<base>`.
+    pub wildcard: bool,
 }
 
 impl AcmeSslBlock {
+    /// Worth drawing: always for an administrator (the setup offer); for
+    /// anyone else only once there is a wildcard or a label to speak of,
+    /// rather than an "off" line on every site.
+    pub fn shown(&self) -> bool {
+        self.admin || self.wildcard || self.label.is_some()
+    }
+
     /// The last CNAME check passed.
     pub fn verified(&self) -> bool {
         self.label.as_ref().is_some_and(label_verified)
@@ -298,7 +307,15 @@ pub async fn load_for_hosting(
         domain: detail.domain.clone(),
         node: owner_of(state, node.map(str::to_string)).await,
     };
-    load(state, ctx, &subject).await
+    let mut block = load(state, ctx, &subject).await;
+    block.wildcard = has_wildcard(detail.cert.as_ref(), &detail.domain);
+    block
+}
+
+/// `cert` names `*.<domain>` among its SANs.
+fn has_wildcard(cert: Option<&hyperion_types::CertInfo>, domain: &str) -> bool {
+    let star = format!("*.{domain}");
+    cert.is_some_and(|c| c.sans.iter().any(|s| s.eq_ignore_ascii_case(&star)))
 }
 
 /// The blocks for every preview row of the HTTPS page, from one read of
@@ -763,6 +780,43 @@ mod tests {
         );
         assert_eq!(block(None, true, None).verdict(), "no delegated zone");
         assert_eq!(block(Some("z.example"), true, None).verdict(), "not set up");
+    }
+
+    #[test]
+    fn a_customer_sees_the_block_only_for_a_wildcard_or_a_label() {
+        let customer = |wildcard: bool, l: Option<AcmeDnsLabel>| AcmeSslBlock {
+            wildcard,
+            ..block(Some("z.example"), true, l)
+        };
+        assert!(!customer(false, None).shown(), "nothing to say");
+        assert!(customer(true, None).shown());
+        assert!(customer(false, Some(label(None, None))).shown());
+        let admin = AcmeSslBlock {
+            admin: true,
+            ..customer(false, None)
+        };
+        assert!(admin.shown(), "the admin gets the setup offer");
+    }
+
+    #[test]
+    fn a_wildcard_is_a_star_san_of_the_domain() {
+        let cert = |sans: &[&str]| hyperion_types::CertInfo {
+            domain: "example.com".into(),
+            sans: sans.iter().map(|s| s.to_string()).collect(),
+            issuer: "letsencrypt".into(),
+            not_after: 0,
+            fingerprint_sha256: String::new(),
+        };
+        assert!(has_wildcard(
+            Some(&cert(&["example.com", "*.Example.com"])),
+            "example.com"
+        ));
+        assert!(!has_wildcard(
+            Some(&cert(&["example.com", "www.example.com"])),
+            "example.com"
+        ));
+        assert!(!has_wildcard(Some(&cert(&["*.other.com"])), "example.com"));
+        assert!(!has_wildcard(None, "example.com"));
     }
 
     #[test]

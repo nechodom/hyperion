@@ -5335,6 +5335,22 @@ async fn ssl_tab_shows_only_state_to_customer() {
     assert!(!page.contains("/cert/dns01/auto"), "issue button leaked");
 }
 
+/// No wildcard and no label: the customer has nothing to read about
+/// automatic renewal, so no "off" line on every site.
+#[tokio::test]
+async fn ssl_tab_hides_renewal_from_customer_without_a_wildcard() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d) = start_agent().await;
+    let app = build_app(sock.clone(), admin);
+    let id = acme_ssl_hosting(&sock, "acmessl-plain.cz").await;
+    acme_ssl_zone(&sock).await;
+    let cookie = acme_ssl_customer(&app, &sock, &id).await;
+    let (status, page) = acme_dns_get(&app, &cookie, &format!("/hostings/{id}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!page.contains("acme-ssl-card"), "renewal card shown");
+    assert!(!page.contains("Automatic renewal"), "state line shown");
+}
+
 #[tokio::test]
 async fn acme_dns_setup_forbidden_for_customer() {
     let admin = admin_user::create("kevin", "good-pw").expect("create");
