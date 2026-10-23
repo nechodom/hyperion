@@ -1412,11 +1412,11 @@ mod tests {
 
     #[test]
     fn an_end_of_life_php_row_says_it_gets_no_fixes() {
-        let r = row_for(&svc("php8.1-fpm", false, false, "inactive"));
+        let r = row_for(&svc("php8.1-fpm", false, false, "inactive"), 0);
         assert!(r.note.as_deref().unwrap().contains("No security fixes"));
-        let r = row_for(&svc("php8.1-fpm", true, true, "active"));
+        let r = row_for(&svc("php8.1-fpm", true, true, "active"), 0);
         assert!(r.note.as_deref().unwrap().contains("CVE-2026-109618"));
-        assert_eq!(row_for(&svc("php8.3-fpm", true, true, "active")).note, None);
+        assert_eq!(row_for(&svc("php8.3-fpm", true, true, "active"), 0).note, None);
     }
 
     #[test]
