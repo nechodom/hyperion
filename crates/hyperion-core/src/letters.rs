@@ -1479,6 +1479,43 @@ pub static STRINGS: &[LetterString] = &[
         cs: "{domain} — {reason} (do vypršení zbývá dnů: {days})",
     },
     LetterString {
+        id: "ops.cert_wildcard_delegated_skip",
+        group: "Operator alerts — certificates",
+        note: "The renewal tick's skip reason for a delegated wildcard (no tokens).",
+        en: "wildcard cert with a delegated _acme-challenge — the master renews it over the \
+             panel's acme zone, nothing to do here",
+        cs: "wildcard certifikát s delegovaným _acme-challenge — obnovuje ho master přes \
+             acme zónu panelu, tady není co dělat",
+    },
+    LetterString {
+        id: "ops.cert_wildcard_auto_failed.title",
+        group: "Operator alerts — certificates",
+        note: "Automatic wildcard renewal over the delegated acme zone failed.",
+        en: "Automatic wildcard renewal failed",
+        cs: "Automatická obnova wildcard certifikátu selhala",
+    },
+    LetterString {
+        id: "ops.cert_wildcard_auto_failed.body",
+        group: "Operator alerts — certificates",
+        note: "Tokens: {domain} {reason} {days}.",
+        en: "{domain} — {reason} ({days} day(s) until expiry)",
+        cs: "{domain} — {reason} (do vypršení zbývá dnů: {days})",
+    },
+    LetterString {
+        id: "ops.acme_dns_zone_broken.title",
+        group: "Operator alerts — certificates",
+        note: "The delegated acme zone no longer reaches the responder.",
+        en: "Delegated acme zone is not reachable",
+        cs: "Delegovaná acme zóna není dostupná",
+    },
+    LetterString {
+        id: "ops.acme_dns_zone_broken.body",
+        group: "Operator alerts — certificates",
+        note: "Token: {reason}.",
+        en: "Automatic wildcard renewal is paused: {reason}",
+        cs: "Automatická obnova wildcard certifikátů je pozastavena: {reason}",
+    },
+    LetterString {
         id: "ops.rofs_by_design.title",
         group: "Operator alerts — this server",
         note: "The node runs an immutable image; hyperion cannot manage packages on it.",
@@ -1890,6 +1927,21 @@ mod tests {
             }
             assert!(!s.note.trim().is_empty(), "{} has no note", s.id);
             assert!(!s.group.trim().is_empty(), "{} has no group", s.id);
+        }
+    }
+
+    #[test]
+    fn letters_have_cs_for_new_keys() {
+        for id in [
+            "ops.cert_wildcard_auto_failed.title",
+            "ops.cert_wildcard_auto_failed.body",
+            "ops.acme_dns_zone_broken.title",
+            "ops.acme_dns_zone_broken.body",
+            "ops.cert_wildcard_delegated_skip",
+        ] {
+            let s = lookup(id).unwrap_or_else(|| panic!("{id} missing"));
+            assert!(!s.en.is_empty() && !s.cs.is_empty(), "{id}");
+            assert_ne!(s.en, s.cs, "{id} cs looks untranslated");
         }
     }
 

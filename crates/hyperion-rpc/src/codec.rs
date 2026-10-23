@@ -2188,6 +2188,59 @@ pub enum Request {
         public_ipv6: Option<String>,
         enabled: bool,
     },
+    /// The delegation label for `base`, minted on first use. `hosting_id`
+    /// is `None` for a preview base. Master-local.
+    AcmeDnsLabelEnsure {
+        base: Domain,
+        hosting_id: Option<String>,
+    },
+    /// Every delegation label. Master-local.
+    AcmeDnsLabels,
+    /// Record the outcome of a CNAME check; `ok = false` clears the
+    /// verified stamp. Master-local.
+    AcmeDnsLabelMark {
+        base: Domain,
+        ok: bool,
+        error: Option<String>,
+    },
+    /// Forget the label of one base. Master-local.
+    AcmeDnsLabelDelete {
+        base: Domain,
+    },
+    /// Forget every label a hosting owns. Master-local.
+    AcmeDnsLabelsDeleteForHosting {
+        hosting_id: String,
+    },
+    /// Publish the TXT values the responder serves under `label`. They
+    /// expire after a day. Master-local.
+    AcmeDnsValuesSet {
+        label: String,
+        values: Vec<String>,
+    },
+    /// Stop serving the TXT values of `label`. Master-local.
+    AcmeDnsValuesClear {
+        label: String,
+    },
+    /// A node's delegated renewal of `domain` finished. Audited; a failure
+    /// raises the operator alert. Master-local.
+    AcmeDnsRenewReport {
+        domain: String,
+        node_id: String,
+        ok: bool,
+        detail: String,
+        days_left: i64,
+    },
+    /// The delegated zone stopped resolving to the responder. One admin
+    /// alert. Master-local.
+    AcmeDnsZoneBroken {
+        detail: String,
+    },
+    /// Mark the cert of `domain` as renewed over the delegated acme zone
+    /// (or clear it). Sent to the node that owns the cert.
+    CertSetDelegated {
+        domain: Domain,
+        delegated: bool,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2804,6 +2857,16 @@ pub enum Response {
     /// A one-off, custom-range report, as sent.
     CareReportSendRange(CareReportMail),
     AcmeDnsConfig(hyperion_types::AcmeDnsConfig),
+    AcmeDnsLabel(hyperion_types::AcmeDnsLabel),
+    AcmeDnsLabels(Vec<hyperion_types::AcmeDnsLabel>),
+    AcmeDnsLabelMark,
+    AcmeDnsLabelDelete,
+    AcmeDnsLabelsDeleteForHosting,
+    AcmeDnsValuesSet,
+    AcmeDnsValuesClear,
+    AcmeDnsRenewReport,
+    AcmeDnsZoneBroken,
+    CertSetDelegated,
     Error(RpcError),
 }
 
@@ -2963,6 +3026,113 @@ mod tests {
         });
         let s = serde_json::to_string(&resp).expect("ser");
         assert_eq!(serde_json::from_str::<Response>(&s).expect("de"), resp);
+    }
+
+    #[test]
+    fn acme_dns_label_and_value_rpcs_round_trip() {
+        let d = || Domain::parse("example.cz").expect("domain");
+        let reqs = [
+            (
+                Request::AcmeDnsLabelEnsure {
+                    base: d(),
+                    hosting_id: Some("h1".into()),
+                },
+                "acme_dns_label_ensure",
+            ),
+            (Request::AcmeDnsLabels, "acme_dns_labels"),
+            (
+                Request::AcmeDnsLabelMark {
+                    base: d(),
+                    ok: false,
+                    error: Some("no cname".into()),
+                },
+                "acme_dns_label_mark",
+            ),
+            (
+                Request::AcmeDnsLabelDelete { base: d() },
+                "acme_dns_label_delete",
+            ),
+            (
+                Request::AcmeDnsLabelsDeleteForHosting {
+                    hosting_id: "h1".into(),
+                },
+                "acme_dns_labels_delete_for_hosting",
+            ),
+            (
+                Request::AcmeDnsValuesSet {
+                    label: "abcd".into(),
+                    values: vec!["v1".into(), "v2".into()],
+                },
+                "acme_dns_values_set",
+            ),
+            (
+                Request::AcmeDnsValuesClear {
+                    label: "abcd".into(),
+                },
+                "acme_dns_values_clear",
+            ),
+            (
+                Request::AcmeDnsRenewReport {
+                    domain: "*.example.cz".into(),
+                    node_id: "n1".into(),
+                    ok: true,
+                    detail: "renewed".into(),
+                    days_left: 20,
+                },
+                "acme_dns_renew_report",
+            ),
+            (
+                Request::AcmeDnsZoneBroken {
+                    detail: "NS gone".into(),
+                },
+                "acme_dns_zone_broken",
+            ),
+            (
+                Request::CertSetDelegated {
+                    domain: d(),
+                    delegated: true,
+                },
+                "cert_set_delegated",
+            ),
+        ];
+        for (req, method) in reqs {
+            let s = serde_json::to_string(&req).expect("ser");
+            assert!(s.contains(&format!(r#""method":"{method}""#)), "{s}");
+            assert_eq!(serde_json::from_str::<Request>(&s).expect("de"), req);
+        }
+        let label = hyperion_types::AcmeDnsLabel {
+            base: "example.cz".into(),
+            label: "abcd1234abcd1234".into(),
+            hosting_id: None,
+            created_at: 1,
+            verified_at: None,
+            last_check_error: None,
+        };
+        for resp in [
+            Response::AcmeDnsLabel(label.clone()),
+            Response::AcmeDnsLabels(vec![label]),
+            Response::AcmeDnsLabelMark,
+            Response::AcmeDnsLabelDelete,
+            Response::AcmeDnsLabelsDeleteForHosting,
+            Response::AcmeDnsValuesSet,
+            Response::AcmeDnsValuesClear,
+            Response::AcmeDnsRenewReport,
+            Response::AcmeDnsZoneBroken,
+            Response::CertSetDelegated,
+        ] {
+            let s = serde_json::to_string(&resp).expect("ser");
+            assert_eq!(serde_json::from_str::<Response>(&s).expect("de"), resp);
+        }
+    }
+
+    #[test]
+    fn cert_overview_item_old_json_still_parses() {
+        let old = r#"{"domain":"a.cz","issuer":"le","issued_at":1,"not_after":2,
+            "days_left":3,"band":"ok","node_id":""}"#;
+        let item: hyperion_types::CertOverviewItem = serde_json::from_str(old).expect("old json");
+        assert!(!item.wildcard && !item.delegated);
+        assert_eq!(item.renewal_type, "");
+        assert_eq!(item.hosting_id, None);
     }
 
     #[test]

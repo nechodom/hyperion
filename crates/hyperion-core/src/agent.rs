@@ -2377,6 +2377,60 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
             .acme_dns_config_set(zone, ns_host, public_ipv4, public_ipv6, enabled)
             .await
     }
+    async fn acme_dns_label_ensure(
+        &self,
+        base: Domain,
+        hosting_id: Option<String>,
+    ) -> Result<hyperion_types::AcmeDnsLabel, RpcError> {
+        self.svc.acme_dns_label_ensure(base, hosting_id).await
+    }
+    async fn acme_dns_labels(&self) -> Result<Vec<hyperion_types::AcmeDnsLabel>, RpcError> {
+        self.svc.acme_dns_labels().await
+    }
+    async fn acme_dns_label_mark(
+        &self,
+        base: Domain,
+        ok: bool,
+        error: Option<String>,
+    ) -> Result<(), RpcError> {
+        self.svc.acme_dns_label_mark(base, ok, error).await
+    }
+    async fn acme_dns_label_delete(&self, base: Domain) -> Result<(), RpcError> {
+        self.svc.acme_dns_label_delete(base).await
+    }
+    async fn acme_dns_labels_delete_for_hosting(&self, hosting_id: String) -> Result<(), RpcError> {
+        self.svc
+            .acme_dns_labels_delete_for_hosting(hosting_id)
+            .await
+    }
+    async fn acme_dns_values_set(
+        &self,
+        label: String,
+        values: Vec<String>,
+    ) -> Result<(), RpcError> {
+        self.svc.acme_dns_values_set(label, values).await
+    }
+    async fn acme_dns_values_clear(&self, label: String) -> Result<(), RpcError> {
+        self.svc.acme_dns_values_clear(label).await
+    }
+    async fn acme_dns_renew_report(
+        &self,
+        domain: String,
+        node_id: String,
+        ok: bool,
+        detail: String,
+        days_left: i64,
+    ) -> Result<(), RpcError> {
+        self.svc
+            .acme_dns_renew_report(domain, node_id, ok, detail, days_left)
+            .await
+    }
+    async fn acme_dns_zone_broken(&self, detail: String) -> Result<(), RpcError> {
+        self.svc.acme_dns_zone_broken(detail).await
+    }
+    async fn cert_set_delegated(&self, domain: Domain, delegated: bool) -> Result<(), RpcError> {
+        self.svc.cert_set_delegated(domain, delegated).await
+    }
 }
 
 #[cfg(test)]

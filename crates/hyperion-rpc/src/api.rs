@@ -1551,6 +1551,40 @@ pub trait AgentApi: Send + Sync + 'static {
         public_ipv6: Option<String>,
         enabled: bool,
     ) -> Result<hyperion_types::AcmeDnsConfig, RpcError>;
+    /// The delegation label of `base`, minted on first use.
+    async fn acme_dns_label_ensure(
+        &self,
+        base: Domain,
+        hosting_id: Option<String>,
+    ) -> Result<hyperion_types::AcmeDnsLabel, RpcError>;
+    /// Every delegation label.
+    async fn acme_dns_labels(&self) -> Result<Vec<hyperion_types::AcmeDnsLabel>, RpcError>;
+    /// Record a CNAME check result for `base`.
+    async fn acme_dns_label_mark(
+        &self,
+        base: Domain,
+        ok: bool,
+        error: Option<String>,
+    ) -> Result<(), RpcError>;
+    async fn acme_dns_label_delete(&self, base: Domain) -> Result<(), RpcError>;
+    async fn acme_dns_labels_delete_for_hosting(&self, hosting_id: String) -> Result<(), RpcError>;
+    /// Publish TXT values under `label` (they expire after a day).
+    async fn acme_dns_values_set(&self, label: String, values: Vec<String>)
+        -> Result<(), RpcError>;
+    async fn acme_dns_values_clear(&self, label: String) -> Result<(), RpcError>;
+    /// A node's delegated renewal finished; audit it, alert on failure.
+    async fn acme_dns_renew_report(
+        &self,
+        domain: String,
+        node_id: String,
+        ok: bool,
+        detail: String,
+        days_left: i64,
+    ) -> Result<(), RpcError>;
+    /// The delegated zone stopped resolving; raise the admin alert.
+    async fn acme_dns_zone_broken(&self, detail: String) -> Result<(), RpcError>;
+    /// Flag (or clear) a cert as renewed over the delegated acme zone.
+    async fn cert_set_delegated(&self, domain: Domain, delegated: bool) -> Result<(), RpcError>;
 
     /// Reset the WordPress admin password (wp user update --user_pass).
     /// Returns the new password (the caller usually shows it to the

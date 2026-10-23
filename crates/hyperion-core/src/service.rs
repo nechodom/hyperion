@@ -23606,10 +23606,17 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .map(|h| h.domain)
             .collect();
         let now = now_secs();
-        Ok(rows
-            .into_iter()
-            .filter(|r| !trashed.contains(&r.domain))
-            .map(|r| {
+        let mut items = Vec::with_capacity(rows.len());
+        for r in rows.into_iter().filter(|r| !trashed.contains(&r.domain)) {
+            let wildcard = certificates::is_wildcard(&self.pool, &r.domain)
+                .await
+                .unwrap_or(false);
+            let hosting_id = hostings::get_by_domain(&self.pool, &r.domain)
+                .await
+                .ok()
+                .flatten()
+                .map(|h| h.id.to_string());
+            items.push({
                 let days_left = (r.not_after - now) / 86400;
                 let band = if r.not_after <= now {
                     "expired"
@@ -23630,9 +23637,14 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     // Local agent — handler fills this when fanning
                     // out across nodes.
                     node_id: String::new(),
+                    wildcard,
+                    renewal_type: r.renewal_type,
+                    hosting_id,
+                    delegated: r.dns01_delegated,
                 }
-            })
-            .collect())
+            });
+        }
+        Ok(items)
     }
 
     /// Toggle a node's drain flag. Drained nodes are skipped by
@@ -26923,9 +26935,18 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             let is_wild = certificates::is_wildcard(&self.pool, &domain_str)
                 .await
                 .unwrap_or(false);
+            // A wildcard whose `_acme-challenge` is CNAME-delegated to the
+            // panel's acme zone is renewed by the master, not by this tick.
+            let delegated = is_wild && cert.dns01_delegated;
             let outcome = match Domain::parse(&domain_str) {
                 Err(e) => CertRenewOutcome::Failed {
                     error: format!("invalid stored domain {domain_str}: {e}"),
+                },
+                Ok(_) if delegated => CertRenewOutcome::Skipped {
+                    reason: self
+                        .operator_catalog()
+                        .get("ops.cert_wildcard_delegated_skip")
+                        .to_string(),
                 },
                 Ok(_) if is_wild => CertRenewOutcome::Skipped {
                     reason: format!(
@@ -27138,6 +27159,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     )
                     .await;
                 }
+                // Delegated: the master renews it. Only nag once that has had
+                // its chance and the margin is thin.
+                CertRenewOutcome::Skipped { .. } if delegated && days_left > 14 => {}
                 CertRenewOutcome::Skipped { reason } => {
                     // Wildcard cert we can't auto-renew (no DNS
                     // token) — nag the operator to re-run DNS-01 before it
@@ -33545,6 +33569,143 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             firewall,
         )
         .await
+    }
+
+    /// The delegation label of `base`, minted on first use.
+    pub async fn acme_dns_label_ensure(
+        &self,
+        base: Domain,
+        hosting_id: Option<String>,
+    ) -> Result<hyperion_types::AcmeDnsLabel, RpcError> {
+        hyperion_state::acme_dns::label_ensure(
+            &self.pool,
+            base.as_str(),
+            hosting_id.as_deref(),
+            now_secs(),
+        )
+        .await
+        .map_err(|e| RpcError::Internal_with(format!("acme-dns label ensure: {e}")))
+    }
+
+    pub async fn acme_dns_labels(&self) -> Result<Vec<hyperion_types::AcmeDnsLabel>, RpcError> {
+        hyperion_state::acme_dns::labels_all(&self.pool)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("acme-dns labels: {e}")))
+    }
+
+    pub async fn acme_dns_label_mark(
+        &self,
+        base: Domain,
+        ok: bool,
+        error: Option<String>,
+    ) -> Result<(), RpcError> {
+        hyperion_state::acme_dns::label_mark(
+            &self.pool,
+            base.as_str(),
+            ok,
+            error.as_deref(),
+            now_secs(),
+        )
+        .await
+        .map_err(|e| RpcError::Internal_with(format!("acme-dns label mark: {e}")))
+    }
+
+    pub async fn acme_dns_label_delete(&self, base: Domain) -> Result<(), RpcError> {
+        hyperion_state::acme_dns::label_delete(&self.pool, base.as_str())
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("acme-dns label delete: {e}")))
+    }
+
+    pub async fn acme_dns_labels_delete_for_hosting(
+        &self,
+        hosting_id: String,
+    ) -> Result<(), RpcError> {
+        hyperion_state::acme_dns::labels_delete_for_hosting(&self.pool, &hosting_id)
+            .await
+            .map(|_| ())
+            .map_err(|e| RpcError::Internal_with(format!("acme-dns labels delete: {e}")))
+    }
+
+    /// Publish TXT values under `label`. They lapse after a day, so a
+    /// renewal that dies half-way cannot leave a stale challenge served.
+    pub async fn acme_dns_values_set(
+        &self,
+        label: String,
+        values: Vec<String>,
+    ) -> Result<(), RpcError> {
+        hyperion_state::acme_dns::values_set(&self.pool, &label, &values, now_secs() + 86_400)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("acme-dns values set: {e}")))
+    }
+
+    pub async fn acme_dns_values_clear(&self, label: String) -> Result<(), RpcError> {
+        hyperion_state::acme_dns::values_clear(&self.pool, &label)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("acme-dns values clear: {e}")))
+    }
+
+    /// A node finished (or failed) a delegated renewal. Always audited; a
+    /// failure also tells the operators, per domain.
+    pub async fn acme_dns_renew_report(
+        &self,
+        domain: String,
+        node_id: String,
+        ok: bool,
+        detail: String,
+        days_left: i64,
+    ) -> Result<(), RpcError> {
+        self.append_audit(
+            "cert.renew.dns01_delegated",
+            None,
+            &serde_json::json!({
+                "domain": &domain,
+                "node_id": &node_id,
+                "detail": &detail,
+                "days_left": days_left,
+            })
+            .to_string(),
+            if ok { "ok" } else { "failed" },
+        )
+        .await;
+        if !ok {
+            self.notify_admins_say(
+                if days_left <= 0 { "error" } else { "warn" },
+                "ops.cert_wildcard_auto_failed",
+                &[
+                    ("domain", &domain),
+                    ("reason", &detail),
+                    ("days", &days_left.to_string()),
+                ],
+                &cert_alert_href(&domain, false, true),
+                &format!("cert.wildcard_auto_failed:{domain}"),
+            )
+            .await;
+        }
+        Ok(())
+    }
+
+    /// The delegated zone stopped resolving to the responder.
+    pub async fn acme_dns_zone_broken(&self, detail: String) -> Result<(), RpcError> {
+        self.notify_admins_say(
+            "warn",
+            "ops.acme_dns_zone_broken",
+            &[("reason", &detail)],
+            "/settings/https",
+            "acme_dns.zone_broken",
+        )
+        .await;
+        Ok(())
+    }
+
+    /// Flag (or clear) a cert as renewed over the delegated acme zone.
+    pub async fn cert_set_delegated(
+        &self,
+        domain: Domain,
+        delegated: bool,
+    ) -> Result<(), RpcError> {
+        certificates::set_delegated(&self.pool, domain.as_str(), delegated)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("cert set delegated: {e}")))
     }
 
     /// [`Self::acme_dns_config_set`] with the `ss` listing and the firewall
@@ -54846,6 +55007,183 @@ mod tests {
             !domains.contains(&"a.base.cz"),
             "reuse reference must be skipped: {domains:?}"
         );
+    }
+
+    /// A wildcard LE cert, `days` from expiry at the returned `now`.
+    async fn seed_wildcard(
+        s: &HostingService<MockAdapterPort>,
+        domain: &str,
+        days: i64,
+        delegated: bool,
+    ) -> i64 {
+        let now = now_secs();
+        certificates::upsert(
+            &s.pool,
+            domain,
+            now - 60 * 86_400,
+            now + days * 86_400 + 3_600,
+            "/c/f.pem",
+            "/c/k.pem",
+            "letsencrypt",
+        )
+        .await
+        .expect("upsert");
+        certificates::set_wildcard(&s.pool, domain, true)
+            .await
+            .expect("flag");
+        if delegated {
+            certificates::set_delegated(&s.pool, domain, true)
+                .await
+                .expect("delegate");
+        }
+        now
+    }
+
+    async fn manual_kinds(s: &HostingService<MockAdapterPort>, me: i64) -> Vec<String> {
+        s.notifications_feed(me, 50)
+            .await
+            .expect("feed")
+            .items
+            .into_iter()
+            .map(|n| n.kind)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn delegated_wildcard_is_skipped_without_manual_alert() {
+        use hyperion_state::web_users::WebRole;
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool, happy_mocks());
+        let me = seed_web_user(&s, "boss", WebRole::Admin).await;
+        let now = seed_wildcard(&s, "base.cz", 25, true).await;
+        let r = s
+            .cert_renew_tick(now, CERT_RENEWAL_WINDOW_DAYS)
+            .await
+            .expect("tick");
+        let CertRenewOutcome::Skipped { reason } = &r[0].outcome else {
+            panic!("expected skipped: {:?}", r[0].outcome)
+        };
+        assert!(reason.contains("delegated"), "{reason}");
+        let kinds = manual_kinds(&s, me).await;
+        assert!(
+            !kinds.iter().any(|k| k.starts_with("cert.wildcard_manual:")),
+            "{kinds:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn delegated_wildcard_alerts_at_14_days() {
+        use hyperion_state::web_users::WebRole;
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool, happy_mocks());
+        let me = seed_web_user(&s, "boss", WebRole::Admin).await;
+        let now = seed_wildcard(&s, "base.cz", 10, true).await;
+        s.cert_renew_tick(now, CERT_RENEWAL_WINDOW_DAYS)
+            .await
+            .expect("tick");
+        assert!(manual_kinds(&s, me)
+            .await
+            .contains(&"cert.wildcard_manual:base.cz".to_string()));
+    }
+
+    #[tokio::test]
+    async fn undelegated_wildcard_still_alerts() {
+        use hyperion_state::web_users::WebRole;
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool, happy_mocks());
+        let me = seed_web_user(&s, "boss", WebRole::Admin).await;
+        let now = seed_wildcard(&s, "base.cz", 25, false).await;
+        let r = s
+            .cert_renew_tick(now, CERT_RENEWAL_WINDOW_DAYS)
+            .await
+            .expect("tick");
+        let CertRenewOutcome::Skipped { reason } = &r[0].outcome else {
+            panic!("expected skipped: {:?}", r[0].outcome)
+        };
+        assert!(!reason.contains("delegated"), "{reason}");
+        assert!(manual_kinds(&s, me)
+            .await
+            .contains(&"cert.wildcard_manual:base.cz".to_string()));
+    }
+
+    #[tokio::test]
+    async fn renew_report_failure_raises_auto_failed_alert() {
+        use hyperion_state::web_users::WebRole;
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool, happy_mocks());
+        let me = seed_web_user(&s, "boss", WebRole::Admin).await;
+        s.acme_dns_renew_report("base.cz".into(), "n1".into(), true, "renewed".into(), 20)
+            .await
+            .expect("ok report");
+        assert!(manual_kinds(&s, me).await.is_empty(), "success is silent");
+        s.acme_dns_renew_report(
+            "base.cz".into(),
+            "n1".into(),
+            false,
+            "txt mismatch".into(),
+            9,
+        )
+        .await
+        .expect("failed report");
+        let feed = s.notifications_feed(me, 10).await.expect("feed");
+        assert_eq!(feed.items.len(), 1);
+        assert_eq!(feed.items[0].kind, "cert.wildcard_auto_failed:base.cz");
+        assert_eq!(feed.items[0].severity, "warn");
+        assert!(feed.items[0].body.contains("txt mismatch"));
+        s.acme_dns_renew_report("base.cz".into(), "n1".into(), false, "x".into(), 0)
+            .await
+            .expect("expired report");
+        let feed = s.notifications_feed(me, 10).await.expect("feed");
+        assert!(feed.items.iter().any(|n| n.severity == "error"));
+    }
+
+    #[tokio::test]
+    async fn zone_broken_raises_one_alert_kind() {
+        use hyperion_state::web_users::WebRole;
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool, happy_mocks());
+        let me = seed_web_user(&s, "boss", WebRole::Admin).await;
+        s.acme_dns_zone_broken("NS does not resolve".into())
+            .await
+            .expect("report");
+        assert_eq!(manual_kinds(&s, me).await, ["acme_dns.zone_broken"]);
+    }
+
+    #[tokio::test]
+    async fn label_and_value_rpcs_drive_the_state_tables() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool, happy_mocks());
+        let base = Domain::parse("example.cz").expect("domain");
+        let l = s
+            .acme_dns_label_ensure(base.clone(), Some("h1".into()))
+            .await
+            .expect("ensure");
+        assert_eq!(
+            s.acme_dns_labels().await.expect("all"),
+            std::slice::from_ref(&l)
+        );
+        s.acme_dns_label_mark(base.clone(), true, None)
+            .await
+            .expect("mark");
+        assert!(s.acme_dns_labels().await.expect("all")[0]
+            .verified_at
+            .is_some());
+        let before = now_secs();
+        s.acme_dns_values_set(l.label.clone(), vec!["v".into()])
+            .await
+            .expect("set");
+        let vals = hyperion_state::acme_dns::values_live(&s.pool, before)
+            .await
+            .expect("values");
+        assert_eq!(vals.get(&l.label).map(Vec::len), Some(1));
+        s.acme_dns_values_clear(l.label.clone())
+            .await
+            .expect("clear");
+        s.acme_dns_labels_delete_for_hosting("h1".into())
+            .await
+            .expect("del hosting");
+        assert!(s.acme_dns_labels().await.expect("all").is_empty());
+        s.acme_dns_label_delete(base).await.expect("delete");
     }
 
     #[test]

@@ -546,6 +546,7 @@ mod tests {
             days_left,
             band: band.into(),
             node_id: String::new(),
+            ..Default::default()
         }
     }
 

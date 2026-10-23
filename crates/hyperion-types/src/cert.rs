@@ -20,6 +20,19 @@ pub struct CertOverviewItem {
     pub band: String,
     /// Node id this cert lives on. Empty string ⇒ master.
     pub node_id: String,
+    /// Issued as a DNS-01 wildcard (`*.domain`).
+    #[serde(default)]
+    pub wildcard: bool,
+    /// `"auto"` (ACME-managed) or `"manual"` (operator-uploaded).
+    #[serde(default)]
+    pub renewal_type: String,
+    /// The hosting whose domain is this cert's domain, if any.
+    #[serde(default)]
+    pub hosting_id: Option<String>,
+    /// `_acme-challenge` is CNAME-delegated to the panel's acme zone, so the
+    /// master renews it unattended.
+    #[serde(default)]
+    pub delegated: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
