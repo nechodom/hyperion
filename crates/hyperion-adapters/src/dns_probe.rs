@@ -22,7 +22,7 @@ pub(crate) const T_NS: u16 = 2;
 const T_CNAME: u16 = 5;
 pub(crate) const T_TXT: u16 = 16;
 const T_AAAA: u16 = 28;
-const T_OPT: u16 = 41;
+pub(crate) const T_OPT: u16 = 41;
 
 pub(crate) const RCODE_NOERROR: u8 = 0;
 pub(crate) const RCODE_NXDOMAIN: u8 = 3;

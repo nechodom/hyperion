@@ -9,7 +9,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::dns_probe::{encode_name, read_name, T_NS, T_TXT};
+use crate::dns_probe::{encode_name, read_name, T_NS, T_OPT, T_TXT};
 
 const T_SOA: u16 = 6;
 const CLASS_IN: u16 = 1;
@@ -51,10 +51,18 @@ struct Question {
     name: String,
     qtype: u16,
     qclass: u16,
+    /// Offset just past the question section.
+    end: usize,
 }
 
 /// The reply to `query`, or `None` to drop it silently (unparseable, or a
 /// response packet — answering those is how reflection loops start).
+///
+/// The size limit follows EDNS0: a query with an OPT record may be answered
+/// up to its advertised payload size (never below 512), and the reply then
+/// carries an OPT record of its own; a query without one gets at most 512
+/// bytes. `max_udp` caps both. A reply over the limit is cut to the header
+/// and question with `tc=1`.
 pub fn answer(query: &[u8], zone: &ZoneView, max_udp: usize) -> Option<Vec<u8>> {
     if query.len() < 12 {
         return None;
@@ -78,11 +86,18 @@ pub fn answer(query: &[u8], zone: &ZoneView, max_udp: usize) -> Option<Vec<u8>> 
         return Some(header(id, rd, false, false, RCODE_FORMERR, 0, [0; 3]));
     };
 
+    let edns = query_opt_payload(query, &q);
+    let limit = edns.map_or(512, |p| p.max(512)).min(max_udp);
+    let lim = Limit {
+        bytes: limit,
+        opt: edns.is_some(),
+    };
+
     let Some(rel) = relative(&q.name, &zone.zone) else {
-        return Some(finish(id, rd, false, RCODE_REFUSED, &q, &[], &[], max_udp));
+        return Some(finish(id, rd, false, RCODE_REFUSED, &q, &[], &[], lim));
     };
     if q.qclass != CLASS_IN {
-        return Some(finish(id, rd, false, RCODE_REFUSED, &q, &[], &[], max_udp));
+        return Some(finish(id, rd, false, RCODE_REFUSED, &q, &[], &[], lim));
     }
 
     let soa = soa_record(zone);
@@ -126,9 +141,36 @@ pub fn answer(query: &[u8], zone: &ZoneView, max_udp: usize) -> Option<Vec<u8>> 
     } else {
         Vec::new()
     };
-    Some(finish(
-        id, rd, true, rcode, &q, &answers, &authority, max_udp,
-    ))
+    Some(finish(id, rd, true, rcode, &q, &answers, &authority, lim))
+}
+
+/// The reply size limit and whether to echo an OPT record.
+#[derive(Clone, Copy)]
+struct Limit {
+    bytes: usize,
+    opt: bool,
+}
+
+/// The UDP payload size from the query's OPT record, if it has one.
+fn query_opt_payload(buf: &[u8], q: &Question) -> Option<usize> {
+    let count = |i: usize| u16::from_be_bytes([buf[i], buf[i + 1]]) as usize;
+    let mut pos = q.end;
+    for _ in 0..count(6) + count(8) {
+        let (_, p) = read_name(buf, pos).ok()?;
+        let rdlen = u16::from_be_bytes(buf.get(p + 8..p + 10)?.try_into().ok()?) as usize;
+        pos = p + 10 + rdlen;
+    }
+    for _ in 0..count(10) {
+        let (name, p) = read_name(buf, pos).ok()?;
+        let rtype = u16::from_be_bytes(buf.get(p..p + 2)?.try_into().ok()?);
+        let class = u16::from_be_bytes(buf.get(p + 2..p + 4)?.try_into().ok()?);
+        let rdlen = u16::from_be_bytes(buf.get(p + 8..p + 10)?.try_into().ok()?) as usize;
+        if rtype == T_OPT && name.is_empty() {
+            return Some(class as usize);
+        }
+        pos = p + 10 + rdlen;
+    }
+    None
 }
 
 /// `Some("")` for the apex, `Some(label...)` below it, `None` outside.
@@ -161,6 +203,7 @@ fn parse_question(buf: &[u8]) -> Option<Question> {
         name,
         qtype: u16::from_be_bytes([tail[0], tail[1]]),
         qclass: u16::from_be_bytes([tail[2], tail[3]]),
+        end: pos + 4,
     })
 }
 
@@ -242,7 +285,7 @@ fn finish(
     q: &Question,
     answers: &[Vec<u8>],
     authority: &[Vec<u8>],
-    max_udp: usize,
+    lim: Limit,
 ) -> Vec<u8> {
     let mut out = header(
         id,
@@ -251,7 +294,11 @@ fn finish(
         false,
         rcode,
         1,
-        [answers.len() as u16, authority.len() as u16, 0],
+        [
+            answers.len() as u16,
+            authority.len() as u16,
+            u16::from(lim.opt),
+        ],
     );
     out.extend_from_slice(&q.raw);
     out.extend_from_slice(&q.qtype.to_be_bytes());
@@ -259,8 +306,20 @@ fn finish(
     for r in answers.iter().chain(authority) {
         out.extend_from_slice(r);
     }
-    if out.len() > max_udp {
-        return header(id, rd, aa, true, rcode, 0, [0; 3]);
+    if lim.opt {
+        // OPT: root owner, our payload size, extended rcode/version/flags 0.
+        out.push(0);
+        out.extend_from_slice(&T_OPT.to_be_bytes());
+        out.extend_from_slice(&(lim.bytes.min(u16::MAX as usize) as u16).to_be_bytes());
+        out.extend_from_slice(&0u32.to_be_bytes());
+        out.extend_from_slice(&0u16.to_be_bytes());
+    }
+    if out.len() > lim.bytes {
+        let mut tc = header(id, rd, aa, true, rcode, 1, [0; 3]);
+        tc.extend_from_slice(&q.raw);
+        tc.extend_from_slice(&q.qtype.to_be_bytes());
+        tc.extend_from_slice(&q.qclass.to_be_bytes());
+        return tc;
     }
     out
 }
@@ -391,7 +450,7 @@ mod tests {
         assert_eq!(p.answers.len(), 1);
         assert_eq!(p.answers[0].rtype, 6);
         // mname, rname, then serial/refresh/retry/expire/minimum.
-        let tail = &r[r.len() - 20..];
+        let tail = &r[r.len() - 31..r.len() - 11]; // before the echoed OPT
         let n = |i: usize| u32::from_be_bytes(tail[i * 4..i * 4 + 4].try_into().unwrap());
         assert_eq!(
             [n(0), n(1), n(2), n(3), n(4)],
@@ -439,10 +498,15 @@ mod tests {
     #[test]
     fn oversize_reply_sets_tc() {
         let r = answer(&q("abc123.acme.example.net", T_TXT, false), &view(), 40).unwrap();
-        assert_eq!(r.len(), 12);
         let p = parse_reply(&r).unwrap();
         assert!(p.tc);
+        assert!(p.aa);
         assert!(p.answers.is_empty());
+        assert_eq!(count(&r, 0), 1);
+        assert_eq!(count(&r, 1), 0);
+        let query = q("abc123.acme.example.net", T_TXT, false);
+        assert_eq!(&r[12..], &query[12..12 + (r.len() - 12)], "question echoed");
+        assert_eq!(r.len(), 12 + 25 + 4);
     }
 
     #[test]
@@ -491,5 +555,65 @@ mod tests {
         }];
         let expected = vec!["tokenone".to_string(), "tokentwo".to_string()];
         assert_eq!(verdict(name, &expected, &answers), Ok(()));
+    }
+
+    /// A zone with enough values that the full reply exceeds 512 bytes.
+    fn big_view() -> ZoneView {
+        let mut v = view();
+        v.txt.insert(
+            "abc123".to_string(),
+            (0..20).map(|i| format!("{i:0>43}")).collect(),
+        );
+        v
+    }
+
+    fn without_opt(mut query: Vec<u8>) -> Vec<u8> {
+        query.truncate(query.len() - 11);
+        query[11] = 0; // ARCOUNT
+        query
+    }
+
+    fn with_payload(mut query: Vec<u8>, payload: u16) -> Vec<u8> {
+        let n = query.len();
+        query[n - 8..n - 6].copy_from_slice(&payload.to_be_bytes());
+        query
+    }
+
+    #[test]
+    fn non_edns_query_is_capped_at_512() {
+        let query = without_opt(q("abc123.acme.example.net", T_TXT, false));
+        let r = answer(&query, &big_view(), 1232).unwrap();
+        assert!(parse_reply(&r).unwrap().tc);
+        assert!(r.len() <= 512);
+        assert_eq!(count(&r, 3), 0, "no OPT for a non-EDNS client");
+    }
+
+    #[test]
+    fn edns_query_gets_full_reply_with_opt_echoed() {
+        let query = q("abc123.acme.example.net", T_TXT, false);
+        let r = answer(&query, &big_view(), 1232).unwrap();
+        let p = parse_reply(&r).unwrap();
+        assert!(!p.tc);
+        assert_eq!(p.answers.len(), 20);
+        assert!(r.len() > 512 && r.len() <= 1232);
+        assert_eq!(count(&r, 3), 1);
+        assert_eq!(
+            &r[r.len() - 11..],
+            &[0, 0, 41, 0x04, 0xD0, 0, 0, 0, 0, 0, 0]
+        );
+    }
+
+    #[test]
+    fn advertised_payload_is_capped_by_max_udp_and_floored_at_512() {
+        let big = with_payload(q("abc123.acme.example.net", T_TXT, false), 4096);
+        let r = answer(&big, &big_view(), 1232).unwrap();
+        assert!(!parse_reply(&r).unwrap().tc);
+        assert_eq!(&r[r.len() - 8..r.len() - 6], &1232u16.to_be_bytes());
+        assert!(answer(&big, &big_view(), 600).unwrap().len() <= 600);
+
+        let tiny = with_payload(q("abc123.acme.example.net", T_TXT, false), 100);
+        let r = answer(&tiny, &big_view(), 1232).unwrap();
+        assert!(parse_reply(&r).unwrap().tc);
+        assert!(r.len() <= 512);
     }
 }
