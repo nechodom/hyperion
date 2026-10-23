@@ -370,6 +370,14 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/settings/panel", get(handlers::settings::get_panel))
         .route("/settings/https", get(handlers::settings::get_https))
         .route(
+            "/settings/https/acme-dns",
+            post(handlers::settings::post_acme_dns),
+        )
+        .route(
+            "/settings/https/acme-dns/check",
+            post(handlers::settings::post_acme_dns_check),
+        )
+        .route(
             "/settings/https/preview-dns",
             get(handlers::settings::get_preview_dns),
         )

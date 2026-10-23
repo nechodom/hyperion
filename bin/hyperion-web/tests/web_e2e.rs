@@ -4830,3 +4830,172 @@ async fn hosting_price_is_set_on_the_detail_page_and_only_by_admins() {
     .await;
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 }
+
+/// Log in as `user` (created via RPC when not the bootstrap admin) and
+/// return the session cookie.
+async fn acme_dns_login(app: &axum::Router, user: &str, pw: &str) -> String {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/login")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(format!("username={user}&password={pw}&next=/")))
+                .unwrap(),
+        )
+        .await
+        .expect("login");
+    extract_cookie(&resp)
+}
+
+async fn acme_dns_post(
+    app: &axum::Router,
+    cookie: &str,
+    uri: &str,
+    body: String,
+) -> axum::response::Response {
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(uri)
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header(header::COOKIE, cookie)
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .expect("call")
+}
+
+async fn acme_dns_get(app: &axum::Router, cookie: &str, uri: &str) -> (StatusCode, String) {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(uri)
+                .header(header::COOKIE, cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    let status = resp.status();
+    (status, body_string(resp).await)
+}
+
+#[tokio::test]
+async fn acme_dns_card_renders_records_for_admin() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d) = start_agent().await;
+    let app = build_app(sock.clone(), admin);
+    let cookie = acme_dns_login(&app, "kevin", "good-pw").await;
+    let (status, page) = acme_dns_get(&app, &cookie, "/settings/https").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(page.contains("id=\"acme-dns\""), "card missing");
+    assert!(page.contains("Delegated acme zone"));
+    assert!(page.contains("/settings/https/acme-dns/check"));
+    // The deep link resolves through CARDS.
+    assert_eq!(
+        hyperion_web::handlers::settings::chrome::card_url("acme-dns", ""),
+        "/settings/https#acme-dns"
+    );
+
+    // Save a zone (responder off) and the records to add appear.
+    let csrf = extract_csrf(&page);
+    let resp = acme_dns_post(
+        &app,
+        &cookie,
+        "/settings/https/acme-dns",
+        format!(
+            "_csrf={csrf}&zone=acme.panel.example.com&ns_host=ns-acme.example.com\
+             &public_ipv4=203.0.113.9&public_ipv6=2001%3Adb8%3A%3A9"
+        ),
+    )
+    .await;
+    let to = resp
+        .headers()
+        .get(header::LOCATION)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        to.starts_with("/settings/https?flash=") && to.ends_with("#acme-dns"),
+        "{to}"
+    );
+    let (_, page) = acme_dns_get(&app, &cookie, "/settings/https").await;
+    for line in [
+        "acme.panel.example.com NS ns-acme.example.com.",
+        "ns-acme.example.com A 203.0.113.9",
+        "ns-acme.example.com AAAA 2001:db8::9",
+    ] {
+        assert!(page.contains(line), "missing record {line}");
+    }
+    // Saved but not delegated anywhere: the check never claims it works.
+    let csrf = extract_csrf(&page);
+    let resp = acme_dns_post(
+        &app,
+        &cookie,
+        "/settings/https/acme-dns/check",
+        format!("_csrf={csrf}"),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let cell = body_string(resp).await;
+    assert!(cell.contains("pill") && !cell.contains("working"), "{cell}");
+}
+
+#[tokio::test]
+async fn acme_dns_save_refusal_rerenders_in_place() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d) = start_agent().await;
+    let app = build_app(sock, admin);
+    let cookie = acme_dns_login(&app, "kevin", "good-pw").await;
+    let (_, page) = acme_dns_get(&app, &cookie, "/settings/https").await;
+    let csrf = extract_csrf(&page);
+    let resp = acme_dns_post(
+        &app,
+        &cookie,
+        "/settings/https/acme-dns",
+        format!("_csrf={csrf}&zone=not+a+zone%21&ns_host=ns.example.com&public_ipv4="),
+    )
+    .await;
+    // No redirect: the card comes back with the message and what was typed.
+    assert_eq!(resp.status(), StatusCode::OK);
+    let page = body_string(resp).await;
+    assert!(page.contains("Not saved."), "no refusal shown");
+    assert!(page.contains("zone:"), "agent's message missing");
+    assert!(page.contains("value=\"not a zone!\""), "input not kept");
+}
+
+#[tokio::test]
+async fn acme_dns_settings_forbidden_for_customer() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d) = start_agent().await;
+    let app = build_app(sock.clone(), admin);
+    hyperion_rpc_client::call(
+        &sock,
+        hyperion_rpc::codec::Request::WebUserCreate {
+            username: "acme-cust".into(),
+            email: "acme-cust@example.invalid".into(),
+            password: "customer-pw-1".into(),
+            role: "customer".into(),
+        },
+    )
+    .await
+    .expect("create customer");
+    let cookie = acme_dns_login(&app, "acme-cust", "customer-pw-1").await;
+    let (_, profile) = acme_dns_get(&app, &cookie, "/profile").await;
+    let csrf = extract_csrf(&profile);
+    for uri in ["/settings/https/acme-dns", "/settings/https/acme-dns/check"] {
+        let resp = acme_dns_post(
+            &app,
+            &cookie,
+            uri,
+            format!("_csrf={csrf}&zone=acme.example.com&ns_host=ns.example.com"),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "{uri}");
+    }
+}

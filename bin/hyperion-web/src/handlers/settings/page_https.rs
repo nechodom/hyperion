@@ -51,6 +51,7 @@ struct HttpsTpl<'a> {
     /// A base two or more nodes share. One wildcard DNS record points at
     /// one server, so all but one of them cannot serve their previews.
     shared_base: Option<String>,
+    acme: super::page_acme_dns::AcmeCard,
 }
 
 /// One node's preview wildcard certificate, as the table shows it.
@@ -161,7 +162,19 @@ pub async fn get_https(
     if !ctx.can(Capability::SettingsManage) {
         return Ok(Redirect::to("/").into_response());
     }
-    let (chrome, nodes) = chrome::chrome(&state, &ctx, "https", &q).await;
+    Ok(Html(render_page(&state, &ctx, None, None, &q).await?).into_response())
+}
+
+/// The whole page. `acme_form`/`acme_error` re-render the delegated-zone
+/// card in place after a refused save.
+pub async fn render_page(
+    state: &SharedState,
+    ctx: &AuthCtx,
+    acme_form: Option<&super::page_acme_dns::AcmeForm>,
+    acme_error: Option<String>,
+    q: &PageQuery,
+) -> Result<String, AppError> {
+    let (chrome, nodes) = chrome::chrome(state, ctx, "https", q).await;
     let (config, config_error) = super::config_or_default(
         hyperion_rpc_client::call(&state.agent_socket, Request::AgentConfigView).await,
     );
@@ -171,15 +184,25 @@ pub async fn get_https(
         .and_then(|b| ClusterConfigView::preview_subdomain("mysite.com", b))
         .unwrap_or_default();
     let mut wildcard_rows = wildcard_rows(&config.cluster, &config.hostname, &nodes);
-    fill_cert_states(&state, &mut wildcard_rows).await;
+    fill_cert_states(state, &mut wildcard_rows).await;
+    let panel_host = {
+        let live = state.panel_hostname.read().await.clone();
+        if live.trim().is_empty() {
+            config.hostname.clone()
+        } else {
+            live
+        }
+    };
+    let acme = super::page_acme_dns::load(state, ctx, &panel_host, acme_form, acme_error).await;
     let tpl = HttpsTpl {
+        acme,
         username: &ctx.username,
         user_initial: crate::handlers::user_initial(&ctx.username),
         active: "settings",
         css_version: crate::handlers::css_version(),
         htmx_version: crate::handlers::htmx_version(),
         chrome,
-        csrf_token: crate::handlers::session_csrf_token(&state, &ctx),
+        csrf_token: crate::handlers::session_csrf_token(state, ctx),
         wildcard_summary: summary(&wildcard_rows),
         shared_base: shared_base(&wildcard_rows),
         wildcard_rows,
@@ -191,7 +214,7 @@ pub async fn get_https(
         config,
         config_error,
     };
-    Ok(Html(tpl.render()?).into_response())
+    Ok(tpl.render()?)
 }
 
 /// The master's preview base. Its node id is its hostname here, the same
