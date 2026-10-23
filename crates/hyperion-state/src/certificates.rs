@@ -15,6 +15,9 @@ pub struct CertRow {
     /// `"auto"` (ACME-managed, eligible for the renewal sweep) or
     /// `"manual"` (operator-uploaded — the sweep must not touch it).
     pub renewal_type: String,
+    /// True when `_acme-challenge` is CNAME-delegated to the panel's own
+    /// DNS responder, so DNS-01 renewal needs no operator action.
+    pub dns01_delegated: bool,
 }
 
 pub async fn upsert(
@@ -82,6 +85,21 @@ pub async fn set_renewal_type(
     Ok(())
 }
 
+/// Flag (or clear) a cert as renewed through acme-dns CNAME delegation.
+/// Separate from `upsert` so the flag survives a re-issue.
+pub async fn set_delegated(
+    pool: &SqlitePool,
+    domain: &str,
+    delegated: bool,
+) -> Result<(), StateError> {
+    sqlx::query("UPDATE certificates SET dns01_delegated = ? WHERE domain = ?")
+        .bind(delegated as i64)
+        .bind(domain)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 /// True when the cert for `domain` was issued as a DNS-01 wildcard.
 /// Unknown domain ⇒ false (treated as a normal HTTP-01 cert).
 pub async fn is_wildcard(pool: &SqlitePool, domain: &str) -> Result<bool, StateError> {
@@ -94,15 +112,15 @@ pub async fn is_wildcard(pool: &SqlitePool, domain: &str) -> Result<bool, StateE
 }
 
 pub async fn get(pool: &SqlitePool, domain: &str) -> Result<Option<CertRow>, StateError> {
-    let row: Option<(i64, String, i64, i64, String, String, String, String)> = sqlx::query_as(
-        "SELECT id, domain, issued_at, not_after, cert_path, key_path, issuer, renewal_type
+    let row: Option<(i64, String, i64, i64, String, String, String, String, i64)> = sqlx::query_as(
+        "SELECT id, domain, issued_at, not_after, cert_path, key_path, issuer, renewal_type, dns01_delegated
          FROM certificates WHERE domain = ?",
     )
     .bind(domain)
     .fetch_optional(pool)
     .await?;
     Ok(row.map(
-        |(id, domain, issued_at, not_after, cert_path, key_path, issuer, renewal_type)| CertRow {
+        |(
             id,
             domain,
             issued_at,
@@ -111,6 +129,17 @@ pub async fn get(pool: &SqlitePool, domain: &str) -> Result<Option<CertRow>, Sta
             key_path,
             issuer,
             renewal_type,
+            dns01_delegated,
+        )| CertRow {
+            id,
+            domain,
+            issued_at,
+            not_after,
+            cert_path,
+            key_path,
+            issuer,
+            renewal_type,
+            dns01_delegated: dns01_delegated != 0,
         },
     ))
 }
@@ -128,8 +157,8 @@ pub async fn delete(pool: &SqlitePool, domain: &str) -> Result<(), StateError> {
 /// screen with "everything that's signed by us, when does each
 /// expire, who's at risk".
 pub async fn list_all(pool: &SqlitePool) -> Result<Vec<CertRow>, StateError> {
-    let rows: Vec<(i64, String, i64, i64, String, String, String, String)> = sqlx::query_as(
-        r#"SELECT id, domain, issued_at, not_after, cert_path, key_path, issuer, renewal_type
+    let rows: Vec<(i64, String, i64, i64, String, String, String, String, i64)> = sqlx::query_as(
+        r#"SELECT id, domain, issued_at, not_after, cert_path, key_path, issuer, renewal_type, dns01_delegated
              FROM certificates
             ORDER BY not_after ASC"#,
     )
@@ -138,7 +167,17 @@ pub async fn list_all(pool: &SqlitePool) -> Result<Vec<CertRow>, StateError> {
     Ok(rows
         .into_iter()
         .map(
-            |(id, domain, issued_at, not_after, cert_path, key_path, issuer, renewal_type)| {
+            |(
+                id,
+                domain,
+                issued_at,
+                not_after,
+                cert_path,
+                key_path,
+                issuer,
+                renewal_type,
+                dns01_delegated,
+            )| {
                 CertRow {
                     id,
                     domain,
@@ -148,6 +187,7 @@ pub async fn list_all(pool: &SqlitePool) -> Result<Vec<CertRow>, StateError> {
                     key_path,
                     issuer,
                     renewal_type,
+                    dns01_delegated: dns01_delegated != 0,
                 }
             },
         )
@@ -160,8 +200,8 @@ pub async fn find_expiring_within(
     horizon_secs: i64,
 ) -> Result<Vec<CertRow>, StateError> {
     let cutoff = now + horizon_secs;
-    let rows: Vec<(i64, String, i64, i64, String, String, String, String)> = sqlx::query_as(
-        "SELECT id, domain, issued_at, not_after, cert_path, key_path, issuer, renewal_type
+    let rows: Vec<(i64, String, i64, i64, String, String, String, String, i64)> = sqlx::query_as(
+        "SELECT id, domain, issued_at, not_after, cert_path, key_path, issuer, renewal_type, dns01_delegated
          FROM certificates WHERE not_after <= ? ORDER BY not_after",
     )
     .bind(cutoff)
@@ -170,7 +210,17 @@ pub async fn find_expiring_within(
     Ok(rows
         .into_iter()
         .map(
-            |(id, domain, issued_at, not_after, cert_path, key_path, issuer, renewal_type)| {
+            |(
+                id,
+                domain,
+                issued_at,
+                not_after,
+                cert_path,
+                key_path,
+                issuer,
+                renewal_type,
+                dns01_delegated,
+            )| {
                 CertRow {
                     id,
                     domain,
@@ -180,6 +230,7 @@ pub async fn find_expiring_within(
                     key_path,
                     issuer,
                     renewal_type,
+                    dns01_delegated: dns01_delegated != 0,
                 }
             },
         )
@@ -228,6 +279,52 @@ mod tests {
             .await
             .expect("clear");
         assert!(!is_wildcard(&pool, "example.cz").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn delegated_flag_round_trips() {
+        let pool = open_memory().await.expect("open");
+        upsert(&pool, "example.cz", 1, 1000, "/c/f", "/c/p", "letsencrypt")
+            .await
+            .expect("upsert");
+        assert!(
+            !get(&pool, "example.cz")
+                .await
+                .unwrap()
+                .unwrap()
+                .dns01_delegated
+        );
+        set_delegated(&pool, "example.cz", true).await.expect("set");
+        assert!(
+            get(&pool, "example.cz")
+                .await
+                .unwrap()
+                .unwrap()
+                .dns01_delegated
+        );
+        assert!(list_all(&pool).await.unwrap()[0].dns01_delegated);
+        assert!(find_expiring_within(&pool, 0, 5000).await.unwrap()[0].dns01_delegated);
+        // A re-issue keeps the flag.
+        upsert(&pool, "example.cz", 2, 2000, "/c/f", "/c/p", "letsencrypt")
+            .await
+            .expect("re-upsert");
+        assert!(
+            get(&pool, "example.cz")
+                .await
+                .unwrap()
+                .unwrap()
+                .dns01_delegated
+        );
+        set_delegated(&pool, "example.cz", false)
+            .await
+            .expect("clear");
+        assert!(
+            !get(&pool, "example.cz")
+                .await
+                .unwrap()
+                .unwrap()
+                .dns01_delegated
+        );
     }
 
     #[tokio::test]

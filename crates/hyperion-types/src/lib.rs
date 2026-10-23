@@ -13,6 +13,7 @@
 )]
 #![forbid(unsafe_code)]
 
+pub mod acme_dns;
 pub mod care_check;
 pub mod cert;
 pub mod clock;
@@ -42,6 +43,7 @@ pub mod stats;
 pub mod waf;
 pub mod wp;
 
+pub use acme_dns::{AcmeDnsConfig, AcmeDnsLabel};
 pub use cert::{CertInfo, CertOverviewItem, CertRenewOutcome, CertRenewResult, PanelCertProgress};
 pub use db::{DbProvision, DbSummary};
 pub use dkim::DkimStatus;

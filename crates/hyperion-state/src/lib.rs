@@ -8,6 +8,7 @@
 #![allow(clippy::type_complexity, clippy::too_many_arguments)]
 #![forbid(unsafe_code)]
 
+pub mod acme_dns;
 pub mod api_keys;
 pub mod audit;
 pub mod backup_targets;
