@@ -175,6 +175,109 @@ async fn node_stats_counts_untracked_backup_files() {
     );
 }
 
+/// "Delete untracked" removes exactly the files the row reported: this
+/// domain's, named like ours, that no record names and no running backup is
+/// writing. Everything else in the directory stays.
+#[tokio::test]
+async fn backup_untracked_delete_removes_only_unrecorded_files_of_the_domain() {
+    use hyperion_state::backups;
+    let pool = open_memory().await.expect("open");
+    let root = tempfile::tempdir().expect("dir");
+    let s = svc(pool.clone(), happy_mocks()).with_paths(HostingPaths {
+        backup_root: root.path().display().to_string(),
+        ..HostingPaths::default()
+    });
+    s.create(req("bk.cz")).await.expect("create");
+    let sel = HostingSelector::Domain(Domain::parse("bk.cz").unwrap());
+    let detail = s.get(sel).await.expect("get");
+    let user = root.path().join(&detail.system_user);
+    std::fs::create_dir_all(&user).expect("mkdir");
+    let write = |name: &str, len: usize| {
+        std::fs::write(user.join(name), vec![0u8; len]).expect("write");
+    };
+    write("bk.cz-100.tar.gz", 300);
+    write("bk.cz-100.manifest.json", 30);
+    let id = backups::start(&pool, &detail.id, "local", 100)
+        .await
+        .expect("start");
+    let archive = user.join("bk.cz-100.tar.gz").display().to_string();
+    backups::mark_ok(&pool, id, &archive, None, 300, 200)
+        .await
+        .expect("ok");
+    write("bk.cz-50.tar.gz", 1000);
+    write("bk.cz-50.sql", 200);
+    write("bk.cz-50.manifest.json", 20);
+    backups::start(&pool, &detail.id, "local", 900)
+        .await
+        .expect("running");
+    write("bk.cz-901.tar.gz", 4000);
+    write("other.cz-50.tar.gz", 70);
+    write("notes.txt", 7);
+
+    let (files, bytes) = s.backup_untracked_delete("bk.cz").await.expect("delete");
+    assert_eq!((files, bytes), (3, 1220));
+    let left: std::collections::BTreeSet<String> = std::fs::read_dir(&user)
+        .expect("ls")
+        .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
+        .collect();
+    let want: std::collections::BTreeSet<String> = [
+        "bk.cz-100.tar.gz",
+        "bk.cz-100.manifest.json",
+        "bk.cz-901.tar.gz",
+        "other.cz-50.tar.gz",
+        "notes.txt",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect();
+    assert_eq!(left, want);
+    assert!(s.backup_untracked_delete("").await.is_err());
+}
+
+/// A run the agent died in the middle of is reaped as failed AND its
+/// half-written files go: nothing else ever names them, and retention later
+/// deletes the failed row without touching them (an 18 GiB archive lived on
+/// that way). A recorded run's files a second later are left alone.
+#[tokio::test]
+async fn reaping_a_dead_backup_run_removes_its_files() {
+    use hyperion_state::backups;
+    let pool = open_memory().await.expect("open");
+    let root = tempfile::tempdir().expect("dir");
+    let s = svc(pool.clone(), happy_mocks()).with_paths(HostingPaths {
+        backup_root: root.path().display().to_string(),
+        ..HostingPaths::default()
+    });
+    s.create(req("bk.cz")).await.expect("create");
+    let sel = HostingSelector::Domain(Domain::parse("bk.cz").unwrap());
+    let detail = s.get(sel).await.expect("get");
+    let user = root.path().join(&detail.system_user);
+    std::fs::create_dir_all(&user).expect("mkdir");
+    let t = 1_000_000;
+    // Dead run: row at t, files stamped a second later (the old naming).
+    backups::start(&pool, &detail.id, "local", t)
+        .await
+        .expect("dead");
+    let dead = user.join(format!("bk.cz-{}.tar.gz", t + 1));
+    let dead_manifest = user.join(format!("bk.cz-{}.manifest.json", t + 1));
+    std::fs::write(&dead, b"partial").expect("write");
+    std::fs::write(&dead_manifest, b"{}").expect("write");
+    // A recorded run two seconds after it, inside the name window.
+    let kept = user.join(format!("bk.cz-{}.tar.gz", t + 2));
+    std::fs::write(&kept, b"real").expect("write");
+    let ok = backups::start(&pool, &detail.id, "local", t + 2)
+        .await
+        .expect("ok");
+    backups::mark_ok(&pool, ok, &kept.display().to_string(), None, 4, t + 3)
+        .await
+        .expect("mark ok");
+
+    let n = s.backups_reap_stale(3600).await.expect("reap");
+    assert_eq!(n, 1);
+    assert!(!dead.exists(), "the dead run's archive is removed");
+    assert!(!dead_manifest.exists(), "and its manifest");
+    assert!(kept.exists(), "a recorded run's file is never touched");
+}
+
 #[test]
 fn parse_backup_file_name_reads_only_our_names() {
     use super::parse_backup_file_name as p;

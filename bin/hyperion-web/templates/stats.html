@@ -54,6 +54,12 @@
    mid-selection isn't clobbered. #}
 <div id="stats-live" data-live-refresh="10">
 
+{% if !flash.is_empty() %}
+  <div class="flash success"><div class="flash-body">{{ flash }}</div></div>
+{% endif %}
+{% if !flash_error.is_empty() %}
+  <div class="flash error"><div class="flash-body">{{ flash_error }}</div></div>
+{% endif %}
 {% if let Some(e) = error %}
   <div class="flash error">
     <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
@@ -409,7 +415,7 @@
           </tr>
         </thead>
         <tbody>
-          {% for b in backup_storage %}
+          {% for row in backup_storage %}{% let b = row.r.clone() %}
           <tr>
             <td>
               {% if b.hosting_id.as_str().is_empty() %}
@@ -426,6 +432,19 @@
                   <div class="small tone-warn" title="Files in the backup directory that no backup record names — the panel cannot restore or download them, and retention never removes them">
                     {{ crate::handlers::stats::fmt_bytes(b.untracked_bytes) }} untracked{% if b.untracked_count > 0 %} · {{ b.untracked_count }} archive{% if b.untracked_count != 1 %}s{% endif %}{% endif %}
                   </div>
+                  {% if can_clean_backups && !b.domain.ends_with('/') %}
+                  <form method="post" action="/stats/backups/untracked/delete" style="margin:0.3rem 0 0"
+                        data-confirm-title="Delete untracked backup files of {{ b.domain }}"
+                        data-confirm-body="Removes {{ crate::handlers::stats::fmt_bytes(b.untracked_bytes) }} of backup files on this server that no backup record names. The panel cannot restore them, so check you do not need them first. Recorded backups and any backup still running are not touched."
+                        data-confirm-confirm-label="Delete files"
+                        data-confirm-variant="danger">
+                    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+                    <input type="hidden" name="node_id" value="{{ row.node_id }}">
+                    <input type="hidden" name="domain" value="{{ b.domain }}">
+                    <input type="hidden" name="back" value="{{ current_node }}">
+                    <button class="btn small danger" type="submit">Delete untracked</button>
+                  </form>
+                  {% endif %}
                 {% endif %}
               {% else %}
                 <span class="text-soft">—</span>

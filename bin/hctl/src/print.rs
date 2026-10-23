@@ -1345,6 +1345,9 @@ pub fn print_pretty(resp: &Response) {
         | Response::AcmeDnsRenewReport
         | Response::AcmeDnsZoneBroken
         | Response::CertSetDelegated => println!("ok"),
+        Response::BackupUntrackedDelete { files, bytes } => {
+            println!("removed {files} file(s), {bytes} bytes");
+        }
         Response::Error(e) => {
             eprintln!("ERROR: {e}");
         }

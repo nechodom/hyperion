@@ -88,7 +88,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             && (self.remote_backup.is_some() || !s3_targets.is_empty());
         let mut subs = backup_substeps(detail.database.is_some(), will_offsite);
         self.publish_backup_progress(pj, &subs).await;
-        let run_id = hyperion_state::backups::start(&self.pool, &detail.id, "local", now_secs())
+        // One stamp for the row AND the file names, so a run that dies
+        // leaves files [`Self::remove_dead_run_files`] can find from the row.
+        let started = now_secs();
+        let run_id = hyperion_state::backups::start(&self.pool, &detail.id, "local", started)
             .await
             .map_err(|e| RpcError::Internal_with(format!("backup start: {e}")))?;
         // A rollback snapshot exists to be a LOCAL copy to roll back to. Mark
@@ -107,7 +110,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 .await
                 .map_err(|e| RpcError::Internal_with(format!("backup purpose: {e}")))?;
         }
-        let files = BackupFiles::new(&backup_root, &detail, now_secs());
+        let files = BackupFiles::new(&backup_root, &detail, started);
         // This run's archive is busy until its own push is done: a backup of
         // the same site finishing meanwhile must not drop it from under the
         // upload. Released just before this run's own drop step below.
@@ -420,6 +423,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         if let Some(p) = files.dump.as_ref() {
             let _ = tokio::fs::remove_file(p).await;
         }
+        let _ = tokio::fs::remove_file(&files.manifest).await;
         if let Err(e) =
             hyperion_state::backups::mark_failed(&self.pool, run_id, &trimmed, now_secs()).await
         {
@@ -1607,7 +1611,14 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // up zombie entries). Track outcomes for audit.
         let mut disk_removed = 0u8;
         let mut disk_errors: Vec<String> = Vec::new();
-        for p in [row.archive_path.clone(), row.db_dump_path.clone()]
+        // The manifest beside the archive goes with it — no column names it,
+        // so leaving it was a stray file per deleted backup.
+        let manifest = row
+            .archive_path
+            .as_deref()
+            .and_then(|p| manifest_path_for(std::path::Path::new(p)))
+            .map(|m| m.display().to_string());
+        for p in [row.archive_path.clone(), row.db_dump_path.clone(), manifest]
             .into_iter()
             .flatten()
         {
@@ -2250,6 +2261,60 @@ pub(super) fn backup_substeps(has_db: bool, will_offsite: bool) -> Vec<hyperion_
         ));
     }
     subs
+}
+
+impl<A: AdapterPort + 'static> HostingService<A> {
+    /// Remove what a run that died mid-backup left on disk: its archive, dump
+    /// and manifest, found by the name [`BackupFiles`] gives them. Runs since
+    /// the row and the names share one stamp match exactly; older ones took
+    /// the stamp a moment after the row, so a few seconds after it are tried
+    /// too. A file a push or restore holds is kept. Best-effort: a hosting
+    /// that is gone leaves its files to the untracked-files cleanup.
+    pub(super) async fn remove_dead_run_files(&self, hosting_id: &str, started_at: i64) {
+        let Ok(detail) = self
+            .get(HostingSelector::Id(HostingId(hosting_id.to_string())))
+            .await
+        else {
+            return;
+        };
+        // A file another row names is that run's, not this one's — two runs
+        // of a site a second apart would otherwise share a candidate name.
+        let Ok((claimed, _)) = hyperion_state::backups::claimed_local_files(&self.pool).await
+        else {
+            return;
+        };
+        let mut removed = 0u32;
+        for ts in started_at..=started_at + 5 {
+            let files = BackupFiles::new(&self.paths.backup_root, &detail, ts);
+            let names = [Some(files.archive), files.dump, Some(files.manifest)];
+            if names
+                .iter()
+                .flatten()
+                .any(|p| claimed.iter().any(|c| std::path::Path::new(c) == p))
+            {
+                continue;
+            }
+            for p in names.into_iter().flatten() {
+                if archive_in_use(&p) {
+                    continue;
+                }
+                // Regular files only: never follow a link out of the
+                // backup directory.
+                let is_file = tokio::fs::symlink_metadata(&p)
+                    .await
+                    .is_ok_and(|m| m.is_file());
+                if is_file && tokio::fs::remove_file(&p).await.is_ok() {
+                    removed += 1;
+                }
+            }
+        }
+        if removed > 0 {
+            tracing::warn!(
+                domain = %detail.domain, started_at, files = removed,
+                "removed the files a crashed backup run left behind"
+            );
+        }
+    }
 }
 
 /// Where one backup run's files go: `<backup_root>/<user>/<domain>-<ts>.*`.

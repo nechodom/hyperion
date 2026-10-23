@@ -2277,6 +2277,13 @@ pub enum Request {
         domain: Domain,
         delegated: bool,
     },
+    /// Delete the backup files of `domain` that sit in this node's backup
+    /// directory with no backup record naming them — the "untracked" bytes
+    /// of Statistics → Backups by site. The node takes the list afresh; a
+    /// file a record names, or one a run in progress is writing, stays.
+    BackupUntrackedDelete {
+        domain: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2909,6 +2916,11 @@ pub enum Response {
     AcmeDnsRenewReport,
     AcmeDnsZoneBroken,
     CertSetDelegated,
+    /// Answer to `BackupUntrackedDelete`: files removed and bytes freed.
+    BackupUntrackedDelete {
+        files: u64,
+        bytes: i64,
+    },
     Error(RpcError),
 }
 
@@ -3101,6 +3113,12 @@ mod tests {
                 "acme_dns_labels_delete_for_hosting",
             ),
             (
+                Request::BackupUntrackedDelete {
+                    domain: "a.cz".into(),
+                },
+                "backup_untracked_delete",
+            ),
+            (
                 Request::AcmeDnsValuesSet {
                     label: "abcd".into(),
                     values: vec!["v1".into(), "v2".into()],
@@ -3162,6 +3180,10 @@ mod tests {
             Response::AcmeDnsRenewReport,
             Response::AcmeDnsZoneBroken,
             Response::CertSetDelegated,
+            Response::BackupUntrackedDelete {
+                files: 2,
+                bytes: 10,
+            },
         ] {
             let s = serde_json::to_string(&resp).expect("ser");
             assert_eq!(serde_json::from_str::<Response>(&s).expect("de"), resp);

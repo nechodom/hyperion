@@ -221,10 +221,19 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// Mark backup runs stuck in `running` past `stale_secs` as failed. A run
     /// that crashed mid-backup (OOM, restart) otherwise sits `running` forever —
     /// blocking retry and showing a permanent spinner. Nothing will finish it.
+    ///
+    /// The dead run's half-written files go too. Nothing else would ever
+    /// remove them: no row names them, and retention deletes the failed row
+    /// without touching its files — an 18 GiB archive sat on a node that way,
+    /// reported as "0 B on server".
     pub async fn backups_reap_stale(&self, stale_secs: i64) -> Result<u64, RpcError> {
-        let n = hyperion_state::backups::reap_stale(&self.pool, now_secs(), stale_secs)
+        let reaped = hyperion_state::backups::reap_stale(&self.pool, now_secs(), stale_secs)
             .await
             .map_err(|e| RpcError::Internal_with(format!("backups_reap_stale: {e}")))?;
+        let n = reaped.len() as u64;
+        for (hosting_id, started_at) in reaped {
+            self.remove_dead_run_files(&hosting_id, started_at).await;
+        }
         if n > 0 {
             tracing::warn!(
                 rows = n,
