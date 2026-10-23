@@ -136,9 +136,10 @@
 </div>
 
 <p class="text-soft small" style="margin-top:1rem">
-  Every node sweeps its own sites each night, and a few minutes after its
-  agent starts: it takes a snapshot, applies minor and patch updates where
-  auto-update is on, and alerts you once about each new major. A plugin whose
+  Every node sweeps its own sites once a night, between 02:00 and 06:00
+  server time. Where auto-update is on and an update is waiting, it takes a
+  full backup and then applies the minor and patch updates; it alerts you
+  once about each new major. A plugin whose
   update keeps failing — usually one that needs a licence key — is paused for
   30 days. Opening a site's WordPress tab checks it again on the spot, and
   that is also where auto-update is switched.

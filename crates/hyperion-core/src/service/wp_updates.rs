@@ -454,6 +454,44 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(new_majors)
     }
 
+    /// [`wp_vuln_scan_tick`](Self::wp_vuln_scan_tick) once a night, in the
+    /// node's local [`WP_DEFENDER_WINDOW_START_MIN`] window. `None` = not
+    /// due, `Some(new majors)` = swept.
+    ///
+    /// The last run is stamped in `node_kv` BEFORE the sweep, so neither a
+    /// restart (every deploy restarts the agent) nor a sweep that dies half
+    /// way runs it again the same night. Each run can take a full backup of
+    /// every site with a pending update; it used to fire a few minutes after
+    /// every agent start, which on a busy deploy day meant several of them,
+    /// with the updates going in mid-afternoon.
+    pub async fn wp_defender_tick(&self) -> Result<Option<i64>, RpcError> {
+        self.wp_defender_tick_at(&chrono::Local, now_secs()).await
+    }
+
+    pub(super) async fn wp_defender_tick_at<Tz: chrono::TimeZone>(
+        &self,
+        tz: &Tz,
+        now: i64,
+    ) -> Result<Option<i64>, RpcError> {
+        // A read that failed is not "never ran": sweeping on it could repeat
+        // the night's backups, so it waits for the next tick instead.
+        let last_run = match hyperion_state::node_kv::get(&self.pool, WP_DEFENDER_LAST_RUN_KV).await
+        {
+            Ok(v) => v.and_then(|s| s.trim().parse::<i64>().ok()).unwrap_or(0),
+            Err(e) => {
+                tracing::warn!(error = %e, "wp defender: last run unreadable — skipping");
+                return Ok(None);
+            }
+        };
+        if !wp_defender_due(tz, last_run, now) {
+            return Ok(None);
+        }
+        hyperion_state::node_kv::set(&self.pool, WP_DEFENDER_LAST_RUN_KV, &now.to_string(), now)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("wp defender: stamp last run: {e}")))?;
+        self.wp_vuln_scan_tick().await.map(Some)
+    }
+
     /// Only WordPress hostings — skip static / proxy sites.
     ///
     /// The `wordpress` row is written when HYPERION installs WordPress, so
@@ -932,4 +970,26 @@ pub(super) struct AutoUpdateBatch {
     failed: bool,
     /// The backup taken before the batch, held until it went in cleanly.
     pre_update_run: Option<i64>,
+}
+
+/// `node_kv` key: unix seconds the nightly defender sweep last started.
+pub(super) const WP_DEFENDER_LAST_RUN_KV: &str = "wp_defender_last_run_at";
+
+/// The defender sweep's window opens at this many minutes past local
+/// midnight (02:00 server time) and stays open for
+/// [`WP_DEFENDER_WINDOW_SECS`]. At night because the sweep applies updates
+/// and backs up every site it touches; four hours so a node that boots or
+/// deploys inside the window still gets its night.
+pub(super) const WP_DEFENDER_WINDOW_START_MIN: u32 = 2 * 60;
+pub(super) const WP_DEFENDER_WINDOW_SECS: i64 = 4 * 3600;
+
+/// Whether the defender sweep should start at `now`: inside tonight's
+/// window, and not already started since it opened. A node that is down
+/// for the whole window skips that night rather than updating during the
+/// day.
+pub(super) fn wp_defender_due<Tz: chrono::TimeZone>(tz: &Tz, last_run: i64, now: i64) -> bool {
+    let Some(opens) = local_slot(tz, now, 0, WP_DEFENDER_WINDOW_START_MIN) else {
+        return false;
+    };
+    now >= opens && now < opens + WP_DEFENDER_WINDOW_SECS && last_run < opens
 }
