@@ -33645,7 +33645,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     }
 
     /// A node finished (or failed) a delegated renewal. Always audited; a
-    /// failure also tells the operators, per domain.
+    /// failure also tells the operators, per domain, linking to the
+    /// hosting when one owns the cert (`has_hosting`), else the preview.
     pub async fn acme_dns_renew_report(
         &self,
         domain: String,
@@ -33653,6 +33654,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         ok: bool,
         detail: String,
         days_left: i64,
+        has_hosting: bool,
     ) -> Result<(), RpcError> {
         self.append_audit(
             "cert.renew.dns01_delegated",
@@ -33676,7 +33678,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     ("reason", &detail),
                     ("days", &days_left.to_string()),
                 ],
-                &cert_alert_href(&domain, false, true),
+                &cert_alert_href(&domain, has_hosting, true),
                 &format!("cert.wildcard_auto_failed:{domain}"),
             )
             .await;
@@ -55112,9 +55114,16 @@ mod tests {
         let pool = open_memory().await.expect("open");
         let s = svc(pool, happy_mocks());
         let me = seed_web_user(&s, "boss", WebRole::Admin).await;
-        s.acme_dns_renew_report("base.cz".into(), "n1".into(), true, "renewed".into(), 20)
-            .await
-            .expect("ok report");
+        s.acme_dns_renew_report(
+            "base.cz".into(),
+            "n1".into(),
+            true,
+            "renewed".into(),
+            20,
+            true,
+        )
+        .await
+        .expect("ok report");
         assert!(manual_kinds(&s, me).await.is_empty(), "success is silent");
         s.acme_dns_renew_report(
             "base.cz".into(),
@@ -55122,6 +55131,7 @@ mod tests {
             false,
             "txt mismatch".into(),
             9,
+            true,
         )
         .await
         .expect("failed report");
@@ -55130,11 +55140,26 @@ mod tests {
         assert_eq!(feed.items[0].kind, "cert.wildcard_auto_failed:base.cz");
         assert_eq!(feed.items[0].severity, "warn");
         assert!(feed.items[0].body.contains("txt mismatch"));
-        s.acme_dns_renew_report("base.cz".into(), "n1".into(), false, "x".into(), 0)
-            .await
-            .expect("expired report");
+        // A hosting's wildcard links to the hosting, not the preview page.
+        assert_eq!(feed.items[0].href, "/hostings/base.cz");
+        s.acme_dns_renew_report(
+            "preview.cz".into(),
+            "n1".into(),
+            false,
+            "x".into(),
+            0,
+            false,
+        )
+        .await
+        .expect("expired report");
         let feed = s.notifications_feed(me, 10).await.expect("feed");
-        assert!(feed.items.iter().any(|n| n.severity == "error"));
+        let preview = feed
+            .items
+            .iter()
+            .find(|n| n.kind == "cert.wildcard_auto_failed:preview.cz")
+            .expect("preview alert");
+        assert_eq!(preview.severity, "error");
+        assert_eq!(preview.href, "/settings/https#preview-wildcard");
     }
 
     #[tokio::test]

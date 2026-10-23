@@ -2420,9 +2420,10 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         ok: bool,
         detail: String,
         days_left: i64,
+        has_hosting: bool,
     ) -> Result<(), RpcError> {
         self.svc
-            .acme_dns_renew_report(domain, node_id, ok, detail, days_left)
+            .acme_dns_renew_report(domain, node_id, ok, detail, days_left, has_hosting)
             .await
     }
     async fn acme_dns_zone_broken(&self, detail: String) -> Result<(), RpcError> {

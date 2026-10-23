@@ -2189,8 +2189,9 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             ok,
             detail,
             days_left,
+            has_hosting,
         } => match api
-            .acme_dns_renew_report(domain, node_id, ok, detail, days_left)
+            .acme_dns_renew_report(domain, node_id, ok, detail, days_left, has_hosting)
             .await
         {
             Ok(()) => Response::AcmeDnsRenewReport,
@@ -4209,6 +4210,7 @@ mod tests {
             _: bool,
             _: String,
             _: i64,
+            _: bool,
         ) -> Result<(), RpcError> {
             Err(RpcError::Internal {
                 message: "not supported by this agent".into(),

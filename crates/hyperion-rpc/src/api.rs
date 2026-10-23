@@ -1580,6 +1580,7 @@ pub trait AgentApi: Send + Sync + 'static {
         ok: bool,
         detail: String,
         days_left: i64,
+        has_hosting: bool,
     ) -> Result<(), RpcError>;
     /// The delegated zone stopped resolving; raise the admin alert.
     async fn acme_dns_zone_broken(&self, detail: String) -> Result<(), RpcError>;

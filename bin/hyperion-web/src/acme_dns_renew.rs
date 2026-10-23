@@ -610,6 +610,7 @@ async fn renew_one_with<B: Backend>(
             ok,
             detail,
             days_left,
+            has_hosting: due.hosting_id.is_some(),
         };
         let _ = confirm(b, report, |r| matches!(r, Response::AcmeDnsRenewReport)).await;
     }
@@ -1297,6 +1298,26 @@ mod tests {
         assert!(kinds.contains(&"CertDns01BeginDomain"));
         assert!(kinds.contains(&"CertDns01FinishDomainStrict"));
         assert!(!kinds.contains(&"CertDns01Begin"));
+    }
+
+    #[tokio::test]
+    async fn the_report_says_whether_a_hosting_owns_the_cert() {
+        let has_hosting = |fake: &Fake| -> Vec<bool> {
+            fake.sent()
+                .into_iter()
+                .filter_map(|(_, r)| match r {
+                    Request::AcmeDnsRenewReport { has_hosting, .. } => Some(has_hosting),
+                    _ => None,
+                })
+                .collect()
+        };
+        let fake = Fake::new();
+        run_once_with(&fake).await;
+        assert_eq!(has_hosting(&fake), vec![true]);
+        let mut fake = Fake::new();
+        fake.overview = vec![(None, item("example.com", "letsencrypt", "auto", true, 3))];
+        run_once_with(&fake).await;
+        assert_eq!(has_hosting(&fake), vec![false]);
     }
 
     #[tokio::test]

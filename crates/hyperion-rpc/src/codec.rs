@@ -2230,6 +2230,11 @@ pub enum Request {
         ok: bool,
         detail: String,
         days_left: i64,
+        /// The cert belongs to a hosting (the alert links to it) rather
+        /// than being a node's preview wildcard. Absent from an older
+        /// sender: read as a preview.
+        #[serde(default)]
+        has_hosting: bool,
     },
     /// The delegated zone stopped resolving to the responder. One admin
     /// alert. Master-local.
@@ -3079,6 +3084,7 @@ mod tests {
                     ok: true,
                     detail: "renewed".into(),
                     days_left: 20,
+                    has_hosting: true,
                 },
                 "acme_dns_renew_report",
             ),
@@ -3124,6 +3130,23 @@ mod tests {
             let s = serde_json::to_string(&resp).expect("ser");
             assert_eq!(serde_json::from_str::<Response>(&s).expect("de"), resp);
         }
+    }
+
+    /// A report from before `has_hosting` reads as a hosting-less cert.
+    #[test]
+    fn acme_dns_renew_report_parses_without_has_hosting() {
+        let req: Request = serde_json::from_str(
+            r#"{"method":"acme_dns_renew_report","params":{"domain":"a.cz",
+                "node_id":"","ok":false,"detail":"x","days_left":3}}"#,
+        )
+        .expect("old json");
+        assert!(matches!(
+            req,
+            Request::AcmeDnsRenewReport {
+                has_hosting: false,
+                ..
+            }
+        ));
     }
 
     #[test]
