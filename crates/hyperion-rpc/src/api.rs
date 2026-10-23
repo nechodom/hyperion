@@ -373,6 +373,11 @@ pub trait AgentApi: Send + Sync + 'static {
         &self,
         sel: crate::wire::HostingSelector,
     ) -> Result<CertInfo, RpcError>;
+    /// [`Self::cert_dns01_finish`] that refuses unless the DNS pre-flight passed.
+    async fn cert_dns01_finish_strict(
+        &self,
+        sel: crate::wire::HostingSelector,
+    ) -> Result<CertInfo, RpcError>;
     /// DNS-01 phase 1 for a bare domain (test node `*.<base>` wildcard).
     async fn cert_dns01_begin_domain(
         &self,
@@ -382,6 +387,8 @@ pub trait AgentApi: Send + Sync + 'static {
     ) -> Result<(bool, Vec<(String, String)>), RpcError>;
     /// DNS-01 phase 2 for a bare (hosting-less) domain.
     async fn cert_dns01_finish_domain(&self, domain: Domain) -> Result<CertInfo, RpcError>;
+    /// Fail-closed [`Self::cert_dns01_finish_domain`].
+    async fn cert_dns01_finish_domain_strict(&self, domain: Domain) -> Result<CertInfo, RpcError>;
     /// Install an operator-supplied certificate (non-ACME). Validates the
     /// PEM, that the key matches the cert, and that the cert covers the
     /// hosting's domain + aliases; marks it `renewal_type = "manual"`.

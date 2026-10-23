@@ -679,6 +679,16 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.cert_dns01_finish(sel).await
     }
 
+    async fn cert_dns01_finish_strict(&self, sel: HostingSelector) -> Result<CertInfo, RpcError> {
+        self.svc.cert_dns01_finish_strict(sel).await
+    }
+
+    async fn cert_dns01_finish_domain_strict(&self, domain: Domain) -> Result<CertInfo, RpcError> {
+        self.svc
+            .cert_dns01_finish_domain_strict(domain.as_str())
+            .await
+    }
+
     async fn cert_dns01_begin_domain(
         &self,
         domain: Domain,

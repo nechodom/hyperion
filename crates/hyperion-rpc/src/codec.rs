@@ -369,6 +369,13 @@ pub enum Request {
     CertDns01Finish {
         sel: HostingSelector,
     },
+    /// [`Request::CertDns01Finish`] that fails closed: refuses (leaving the
+    /// order pending) unless the DNS pre-flight actually passed. A separate
+    /// variant, not a flag, so an older node rejects it instead of silently
+    /// running the lenient path.
+    CertDns01FinishStrict {
+        sel: HostingSelector,
+    },
     /// DNS-01 phase 1 for a bare domain NOT tied to a hosting — a test
     /// node's `*.<base>` wildcard, issued once and reused by every
     /// auto-subdomain. `email` falls back to the agent `[acme]` default
@@ -381,6 +388,10 @@ pub enum Request {
     },
     /// DNS-01 phase 2 for a bare (hosting-less) domain.
     CertDns01FinishDomain {
+        domain: Domain,
+    },
+    /// Fail-closed [`Request::CertDns01FinishDomain`].
+    CertDns01FinishDomainStrict {
         domain: Domain,
     },
     /// Install an operator-supplied certificate (non-ACME: private CA,
@@ -2909,6 +2920,29 @@ where
 mod tests {
     use super::*;
     use tokio::io::duplex;
+
+    #[test]
+    fn cert_dns01_finish_strict_round_trips() {
+        let req = Request::CertDns01FinishStrict {
+            sel: HostingSelector::Domain(Domain::parse("example.cz").expect("domain")),
+        };
+        let s = serde_json::to_string(&req).expect("ser");
+        assert!(s.contains(r#""method":"cert_dns01_finish_strict""#), "{s}");
+        assert_eq!(serde_json::from_str::<Request>(&s).expect("de"), req);
+    }
+
+    #[test]
+    fn cert_dns01_finish_domain_strict_round_trips() {
+        let req = Request::CertDns01FinishDomainStrict {
+            domain: Domain::parse("example.cz").expect("domain"),
+        };
+        let s = serde_json::to_string(&req).expect("ser");
+        assert!(
+            s.contains(r#""method":"cert_dns01_finish_domain_strict""#),
+            "{s}"
+        );
+        assert_eq!(serde_json::from_str::<Request>(&s).expect("de"), req);
+    }
 
     #[tokio::test]
     async fn request_round_trip_through_duplex() {

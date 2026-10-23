@@ -26549,13 +26549,34 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         &self,
         sel: HostingSelector,
     ) -> Result<hyperion_types::CertInfo, RpcError> {
+        self.cert_dns01_finish_with(sel, false).await
+    }
+
+    /// Fail-closed [`Self::cert_dns01_finish`]: never asks Let's Encrypt
+    /// without a passing DNS pre-flight (unattended renewal).
+    pub async fn cert_dns01_finish_strict(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<hyperion_types::CertInfo, RpcError> {
+        self.cert_dns01_finish_with(sel, true).await
+    }
+
+    async fn cert_dns01_finish_with(
+        &self,
+        sel: HostingSelector,
+        strict: bool,
+    ) -> Result<hyperion_types::CertInfo, RpcError> {
         let detail = self.get(sel).await?;
-        let cert = hyperion_adapters::acme::dns01_finish(&detail.domain, "/etc/hyperion/certs")
-            .await
-            .map_err(|e| RpcError::ProvisioningFailed {
-                stage: "acme_dns01_finish".into(),
-                reason: e.to_string(),
-            })?;
+        let cert = hyperion_adapters::acme::dns01_finish_with(
+            &detail.domain,
+            "/etc/hyperion/certs",
+            strict,
+        )
+        .await
+        .map_err(|e| RpcError::ProvisioningFailed {
+            stage: "acme_dns01_finish".into(),
+            reason: e.to_string(),
+        })?;
 
         self.install_dns01_cert(&detail, &cert).await?;
         Ok(cert)
@@ -26670,15 +26691,35 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         &self,
         domain: &str,
     ) -> Result<hyperion_types::CertInfo, RpcError> {
+        self.cert_dns01_finish_domain_with(domain, false).await
+    }
+
+    /// Fail-closed [`Self::cert_dns01_finish_domain`].
+    pub async fn cert_dns01_finish_domain_strict(
+        &self,
+        domain: &str,
+    ) -> Result<hyperion_types::CertInfo, RpcError> {
+        self.cert_dns01_finish_domain_with(domain, true).await
+    }
+
+    async fn cert_dns01_finish_domain_with(
+        &self,
+        domain: &str,
+        strict: bool,
+    ) -> Result<hyperion_types::CertInfo, RpcError> {
         let base = Domain::parse(domain).map_err(|e| RpcError::Validation {
             message: format!("invalid domain {domain}: {e}"),
         })?;
-        let cert = hyperion_adapters::acme::dns01_finish(base.as_str(), "/etc/hyperion/certs")
-            .await
-            .map_err(|e| RpcError::ProvisioningFailed {
-                stage: "acme_dns01_finish".into(),
-                reason: e.to_string(),
-            })?;
+        let cert = hyperion_adapters::acme::dns01_finish_with(
+            base.as_str(),
+            "/etc/hyperion/certs",
+            strict,
+        )
+        .await
+        .map_err(|e| RpcError::ProvisioningFailed {
+            stage: "acme_dns01_finish".into(),
+            reason: e.to_string(),
+        })?;
         let cert_path = format!("/etc/hyperion/certs/{}/fullchain.pem", base.as_str());
         let key_path = format!("/etc/hyperion/certs/{}/privkey.pem", base.as_str());
         let _ = certificates::upsert(

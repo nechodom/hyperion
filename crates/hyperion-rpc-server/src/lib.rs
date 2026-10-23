@@ -527,6 +527,10 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(v) => Response::CertDns01Finish(v),
             Err(e) => Response::Error(e),
         },
+        Request::CertDns01FinishStrict { sel } => match api.cert_dns01_finish_strict(sel).await {
+            Ok(v) => Response::CertDns01Finish(v),
+            Err(e) => Response::Error(e),
+        },
         Request::CertDns01BeginDomain {
             domain,
             email,
@@ -537,6 +541,12 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
         },
         Request::CertDns01FinishDomain { domain } => {
             match api.cert_dns01_finish_domain(domain).await {
+                Ok(v) => Response::CertDns01FinishDomain(v),
+                Err(e) => Response::Error(e),
+            }
+        }
+        Request::CertDns01FinishDomainStrict { domain } => {
+            match api.cert_dns01_finish_domain_strict(domain).await {
                 Ok(v) => Response::CertDns01FinishDomain(v),
                 Err(e) => Response::Error(e),
             }
@@ -2604,6 +2614,16 @@ mod tests {
             })
         }
         async fn cert_dns01_finish(&self, _: HostingSelector) -> Result<CertInfo, RpcError> {
+            Err(RpcError::Internal {
+                message: "not supported by this agent".into(),
+            })
+        }
+        async fn cert_dns01_finish_strict(&self, _: HostingSelector) -> Result<CertInfo, RpcError> {
+            Err(RpcError::Internal {
+                message: "not supported by this agent".into(),
+            })
+        }
+        async fn cert_dns01_finish_domain_strict(&self, _: Domain) -> Result<CertInfo, RpcError> {
             Err(RpcError::Internal {
                 message: "not supported by this agent".into(),
             })
