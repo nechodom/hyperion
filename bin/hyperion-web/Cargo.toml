@@ -22,6 +22,8 @@ hyperion-state = { path = "../../crates/hyperion-state" }
 # Needed for master_rpc::MasterRpcSigner (master→node RPC signing
 # key loaded at startup, used by dispatcher::dispatch_to_node).
 hyperion-core = { path = "../../crates/hyperion-core" }
+# The DNS probes the acme-dns renewal loop runs from the master.
+hyperion-adapters = { path = "../../crates/hyperion-adapters" }
 tokio = { workspace = true }
 anyhow.workspace = true
 tracing.workspace = true
@@ -72,7 +74,6 @@ tempfile.workspace = true
 # The resume tests hash a payload to drive the digest contract end to end.
 sha2.workspace = true
 async-trait.workspace = true
-hyperion-adapters = { path = "../../crates/hyperion-adapters" }
 hyperion-state = { path = "../../crates/hyperion-state" }
 hyperion-rpc-server = { path = "../../crates/hyperion-rpc-server" }
 rand.workspace = true

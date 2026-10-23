@@ -14,6 +14,7 @@
 #![allow(clippy::cmp_owned)]
 #![forbid(unsafe_code)]
 
+pub mod acme_dns_renew;
 pub mod admin_user;
 pub mod auth;
 pub mod cluster_sync;
