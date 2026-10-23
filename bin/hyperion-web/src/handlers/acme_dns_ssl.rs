@@ -28,10 +28,17 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(20);
 /// How long the preview issuance waits for the node's certificate list.
 const CERT_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// May this user see the CNAME and act on it? Tenant roles hold
-/// `CertManage` for their own hostings, hence the all-hostings scope.
+/// May this user set up a preview wildcard's renewal? Previews are
+/// per node, not per hosting, so a tenant-scoped role never may.
 pub fn allowed(ctx: &AuthCtx) -> bool {
     ctx.can(Capability::CertManage) && ctx.scope_all()
+}
+
+/// May this user see a hosting's CNAME and act on it? Admins and
+/// operators may (operators only on hostings they can manage, checked per
+/// route); a customer sees at most whether renewal is on.
+pub fn hosting_allowed(ctx: &AuthCtx) -> bool {
+    ctx.can(Capability::CertManage) && !ctx.is_customer()
 }
 
 /// Whose wildcard a block is about.
@@ -247,7 +254,10 @@ fn find_label(labels: &[AcmeDnsLabel], base: &str) -> Option<AcmeDnsLabel> {
 fn shell(state: &SharedState, ctx: &AuthCtx, subject: &Subject) -> AcmeSslBlock {
     let route = subject.route();
     AcmeSslBlock {
-        admin: allowed(ctx),
+        admin: match subject {
+            Subject::Hosting { .. } => hosting_allowed(ctx),
+            Subject::Preview { .. } => allowed(ctx),
+        },
         dom_id: subject.dom_id(),
         base: subject.base().to_string(),
         setup_url: format!("{route}/setup"),
@@ -403,21 +413,34 @@ async fn owner_of(state: &SharedState, node: Option<String>) -> Option<String> {
     }
 }
 
-/// The hosting behind a route selector, and its certificate's days left.
-async fn hosting_subject(state: &SharedState, selector: &str) -> Result<(Subject, i64), AppError> {
-    let sel = crate::handlers::hostings::parse_selector_public(selector)?;
+/// The hosting behind a route selector, once the user may manage its
+/// certificate: the role gate, then the same per-hosting access check the
+/// DNS-01 issuance uses. `Err` is the refusal to send.
+async fn hosting_subject(
+    state: &SharedState,
+    ctx: &AuthCtx,
+    selector: &str,
+) -> Result<Result<Subject, Response>, AppError> {
+    if !hosting_allowed(ctx) {
+        return Ok(Err(forbidden()));
+    }
+    let sel = match crate::handlers::hostings::require_manage_for_selector(
+        state,
+        ctx,
+        selector,
+        Capability::CertManage,
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err(r) => return Ok(Err(r)),
+    };
     let (detail, node) = crate::handlers::hostings::find_hosting_anywhere(state, sel).await?;
-    let days_left = detail
-        .cert
-        .as_ref()
-        .map(|c| (c.not_after - hyperion_types::now_secs()).div_euclid(86_400))
-        .unwrap_or(0);
-    let subject = Subject::Hosting {
+    Ok(Ok(Subject::Hosting {
         id: detail.id.as_str().to_string(),
         domain: detail.domain.clone(),
         node: owner_of(state, node).await,
-    };
-    Ok((subject, days_left))
+    }))
 }
 
 /// The preview base of the route's node.
@@ -457,10 +480,10 @@ pub async fn post_hosting_setup(
     ctx: AuthCtx,
     Path(selector): Path<String>,
 ) -> Result<Response, AppError> {
-    if !allowed(&ctx) {
-        return Ok(forbidden());
-    }
-    let (subject, _) = hosting_subject(&state, &selector).await?;
+    let subject = match hosting_subject(&state, &ctx, &selector).await? {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
     setup(&state, &ctx, &subject).await
 }
 
@@ -470,10 +493,10 @@ pub async fn post_hosting_check(
     ctx: AuthCtx,
     Path(selector): Path<String>,
 ) -> Result<Response, AppError> {
-    if !allowed(&ctx) {
-        return Ok(forbidden());
-    }
-    let (subject, _) = hosting_subject(&state, &selector).await?;
+    let subject = match hosting_subject(&state, &ctx, &selector).await? {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
     probe_and_render(&state, &ctx, &subject).await
 }
 
@@ -484,10 +507,11 @@ pub async fn post_hosting_auto(
     ctx: AuthCtx,
     Path(selector): Path<String>,
 ) -> Result<Response, AppError> {
-    if !allowed(&ctx) {
-        return Ok(forbidden());
-    }
-    let (subject, days_left) = hosting_subject(&state, &selector).await?;
+    let subject = match hosting_subject(&state, &ctx, &selector).await? {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
+    let days_left = wildcard_days_left(&state, &subject).await;
     let back = |msg: &str| {
         Redirect::to(&format!(
             "/hostings/{}?cert_error={}#ssl",
@@ -539,7 +563,7 @@ pub async fn post_preview_auto(
         return Ok(forbidden());
     }
     let subject = preview_subject(&state, &node).await?;
-    let days_left = preview_days_left(&state, &subject).await;
+    let days_left = wildcard_days_left(&state, &subject).await;
     match start_issue(&state, &ctx, &subject, days_left).await? {
         Ok(job) => Ok(Redirect::to(&format!("/jobs/{job}")).into_response()),
         Err(msg) => Ok(super::settings::chrome::back_with_error(
@@ -549,8 +573,10 @@ pub async fn post_preview_auto(
     }
 }
 
-/// Days left on the node's `*.<base>` certificate; 0 when unknown.
-async fn preview_days_left(state: &SharedState, subject: &Subject) -> i64 {
+/// Days left on the owning node's `*.<base>` wildcard; `None` when it has
+/// none yet (or did not answer), so a failed first issuance raises no
+/// expiry alert for a certificate that does not exist.
+async fn wildcard_days_left(state: &SharedState, subject: &Subject) -> Option<i64> {
     let res = tokio::time::timeout(
         CERT_TIMEOUT,
         crate::dispatcher::dispatch_to_node(state, subject.owner(), Request::CertOverview),
@@ -559,9 +585,9 @@ async fn preview_days_left(state: &SharedState, subject: &Subject) -> i64 {
     match res {
         Ok(Ok(RpcResponse::CertOverview(items))) => items
             .iter()
-            .find(|c| c.domain.eq_ignore_ascii_case(subject.base()))
-            .map_or(0, |c| c.days_left),
-        _ => 0,
+            .find(|c| c.wildcard && c.domain.eq_ignore_ascii_case(subject.base()))
+            .map(|c| c.days_left),
+        _ => None,
     }
 }
 
@@ -572,7 +598,7 @@ async fn start_issue(
     state: &SharedState,
     ctx: &AuthCtx,
     subject: &Subject,
-    days_left: i64,
+    days_left: Option<i64>,
 ) -> Result<Result<String, String>, AppError> {
     let label = match labels(state).await {
         Ok(l) => find_label(&l, subject.base()),

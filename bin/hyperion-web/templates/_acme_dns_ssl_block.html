@@ -21,7 +21,8 @@
     Gives <code>{{ acme_ssl.base }}</code> one fixed DNS record to create,
     once. After that its wildcard certificate renews without a TXT record by hand.
   </p>
-  <form hx-post="{{ acme_ssl.setup_url }}" hx-target="#{{ acme_ssl.dom_id }}" hx-swap="outerHTML">
+  <form hx-post="{{ acme_ssl.setup_url }}" hx-target="#{{ acme_ssl.dom_id }}" hx-swap="outerHTML"
+        hx-disabled-elt="find button">
     <input type="hidden" name="_csrf" value="{{ acme_ssl.csrf }}">
     <button class="btn small" type="submit">Set up automatic renewal</button>
   </form>
@@ -50,7 +51,8 @@
   </p>
   {% endif %}
   <div style="margin:0.7rem 0 0;display:flex;align-items:center;gap:0.6rem;flex-wrap:wrap">
-    <form hx-post="{{ acme_ssl.check_url }}" hx-target="#{{ acme_ssl.dom_id }}" hx-swap="outerHTML" style="margin:0">
+    <form hx-post="{{ acme_ssl.check_url }}" hx-target="#{{ acme_ssl.dom_id }}" hx-swap="outerHTML"
+          hx-disabled-elt="find button" style="margin:0">
       <input type="hidden" name="_csrf" value="{{ acme_ssl.csrf }}">
       <button class="btn small" type="submit">Check the CNAME</button>
     </form>

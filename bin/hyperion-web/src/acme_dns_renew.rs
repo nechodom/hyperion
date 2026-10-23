@@ -39,7 +39,9 @@ pub struct DueCert {
     /// `None` = a preview base, issued through the bare-domain RPCs.
     pub hosting_id: Option<String>,
     pub label: AcmeDnsLabel,
-    pub days_left: i64,
+    /// Days left on the wildcard now; `None` = there is none yet (a first
+    /// issuance), so a failure has no expiry to alert about.
+    pub days_left: Option<i64>,
 }
 
 /// LE-issued (issuer starts with "letsencrypt", staging included),
@@ -77,7 +79,7 @@ pub fn select_due(
             domain: item.domain.clone(),
             hosting_id: item.hosting_id.clone(),
             label: label.clone(),
-            days_left: item.days_left,
+            days_left: Some(item.days_left),
         });
     }
     due
@@ -296,7 +298,7 @@ async fn run_once_with<B: Backend>(b: &B) -> Vec<(String, Result<(), String>)> {
         return Vec::new();
     }
     let items = gather(b).await;
-    let labels = labels(b).await;
+    let labels = sweep_orphans(b, labels(b).await).await;
     let due = select_due(
         &items,
         &labels,
@@ -319,6 +321,87 @@ async fn labels<B: Backend>(b: &B) -> Vec<AcmeDnsLabel> {
             Vec::new()
         }
     }
+}
+
+/// Drop the labels of hostings no node has any more (a trash purge by the
+/// node's own retention sweep never passes through the panel). A label is
+/// only dropped when EVERY node answered and none knows the hosting; a
+/// node that did not answer keeps it. Returns the labels left.
+async fn sweep_orphans<B: Backend>(b: &B, labels: Vec<AcmeDnsLabel>) -> Vec<AcmeDnsLabel> {
+    if labels.iter().all(|l| l.hosting_id.is_none()) {
+        return labels;
+    }
+    let mut nodes: Vec<Option<String>> = vec![None];
+    match b.remote_nodes().await {
+        Ok(ids) => {
+            for id in ids {
+                if !b.is_master_hostname(&id).await {
+                    nodes.push(Some(id));
+                }
+            }
+        }
+        Err(e) => {
+            tracing::debug!(
+                error = e,
+                "acme-dns: orphan sweep skipped, node list failed"
+            );
+            return labels;
+        }
+    }
+    let mut kept = Vec::with_capacity(labels.len());
+    for label in labels {
+        let Some(hosting_id) = label.hosting_id.clone() else {
+            kept.push(label);
+            continue;
+        };
+        if !hosting_gone_everywhere(b, &nodes, &hosting_id).await {
+            kept.push(label);
+            continue;
+        }
+        let Ok(base) = Domain::parse(&label.base) else {
+            kept.push(label);
+            continue;
+        };
+        match confirm(b, Request::AcmeDnsLabelDelete { base }, |r| {
+            matches!(r, Response::AcmeDnsLabelDelete)
+        })
+        .await
+        {
+            Ok(()) => tracing::info!(
+                base = label.base,
+                hosting_id,
+                "acme-dns: label of a deleted hosting dropped"
+            ),
+            Err(_) => kept.push(label),
+        }
+    }
+    kept
+}
+
+/// Every node said "no such hosting". Any other answer, or none, is a no.
+async fn hosting_gone_everywhere<B: Backend>(
+    b: &B,
+    nodes: &[Option<String>],
+    hosting_id: &str,
+) -> bool {
+    for node in nodes {
+        let sel = HostingSelector::Id(HostingId::from(hosting_id.to_string()));
+        match b.dispatch(node.as_deref(), Request::HostingGet(sel)).await {
+            Ok(Response::Error(hyperion_rpc::RpcError::NotFound { .. })) => {}
+            other => {
+                if !matches!(other, Ok(Response::HostingGet(_))) {
+                    tracing::debug!(
+                        ?node,
+                        hosting_id,
+                        ?other,
+                        "acme-dns: label kept, node gave no definite answer"
+                    );
+                }
+                return false;
+            }
+        }
+    }
+    true
 }
 
 /// The labels again, unless nothing was checked since they were read.
@@ -393,7 +476,7 @@ async fn renew_one_with<B: Backend>(
         Ok(Some(days)) => (
             true,
             "renewed over the delegated acme zone".to_string(),
-            *days,
+            Some(*days),
         ),
         Ok(None) => (
             true,
@@ -405,14 +488,19 @@ async fn renew_one_with<B: Backend>(
     if let Some(why) = not_withdrawn {
         detail.push_str(&format!(" (TXT values not withdrawn: {why})"));
     }
-    let report = Request::AcmeDnsRenewReport {
-        domain: due.domain.clone(),
-        node_id: due.node_id.clone().unwrap_or_default(),
-        ok,
-        detail,
-        days_left,
-    };
-    let _ = confirm(b, report, |r| matches!(r, Response::AcmeDnsRenewReport)).await;
+    // No expiry known (a first issuance that failed): the agent would alert
+    // "0 days left" on a certificate that does not exist. The caller's job
+    // carries the failure instead.
+    if let Some(days_left) = days_left {
+        let report = Request::AcmeDnsRenewReport {
+            domain: due.domain.clone(),
+            node_id: due.node_id.clone().unwrap_or_default(),
+            ok,
+            detail,
+            days_left,
+        };
+        let _ = confirm(b, report, |r| matches!(r, Response::AcmeDnsRenewReport)).await;
+    }
     outcome.map(|_| ())
 }
 
@@ -687,6 +775,8 @@ mod tests {
         records: Vec<(String, String)>,
         finish: Option<Answer>,
         clear_fails: bool,
+        /// HostingGet answers per target; a target not listed says NotFound.
+        hostings: Vec<(Option<&'static str>, Answer)>,
         in_flight: InFlight,
     }
 
@@ -710,6 +800,7 @@ mod tests {
                 ],
                 finish: None,
                 clear_fails: false,
+                hostings: Vec::new(),
                 in_flight: InFlight::default(),
             }
         }
@@ -800,6 +891,14 @@ mod tests {
                 Request::AcmeDnsRenewReport { .. } => Response::AcmeDnsRenewReport,
                 Request::AcmeDnsZoneBroken { .. } => Response::AcmeDnsZoneBroken,
                 Request::CertSetDelegated { .. } => Response::CertSetDelegated,
+                Request::AcmeDnsLabelDelete { .. } => Response::AcmeDnsLabelDelete,
+                Request::HostingGet(_) => match self.hostings.iter().find(|(n, _)| *n == node) {
+                    Some((_, f)) => return f(),
+                    None => Response::Error(RpcError::NotFound {
+                        kind: "hosting".into(),
+                        id: "h-gone".into(),
+                    }),
+                },
                 other => panic!("unexpected dispatch {}", <&'static str>::from(&other)),
             })
         }
@@ -871,7 +970,7 @@ mod tests {
                 domain: "good.com".into(),
                 hosting_id: Some("h9".into()),
                 label: label("good.com"),
-                days_left: 30,
+                days_left: Some(30),
             }]
         );
     }
@@ -1102,8 +1201,87 @@ mod tests {
             domain: "example.com".into(),
             hosting_id: Some("h1".into()),
             label: label("example.com"),
-            days_left: 60,
+            days_left: Some(60),
         }
+    }
+
+    #[tokio::test]
+    async fn a_failed_first_issuance_sends_no_report() {
+        let mut fake = Fake::new();
+        fake.cname = Err(CnameProblem::Missing);
+        let first = DueCert {
+            days_left: None,
+            ..due()
+        };
+        assert!(renew_one_with(&fake, &first, None).await.is_err());
+        assert!(fake.reports().is_empty(), "a 0-days alert for no cert");
+        // With an expiry known, the same failure is reported.
+        assert!(renew_one_with(&fake, &due(), None).await.is_err());
+        assert_eq!(fake.reports().len(), 1);
+    }
+
+    fn orphan() -> AcmeDnsLabel {
+        AcmeDnsLabel {
+            base: "gone.example".into(),
+            label: "zzzz1234zzzz1234".into(),
+            hosting_id: Some("h-gone".into()),
+            ..label("gone.example")
+        }
+    }
+
+    fn label_deletes(fake: &Fake) -> Vec<String> {
+        fake.sent()
+            .into_iter()
+            .filter_map(|(_, r)| match r {
+                Request::AcmeDnsLabelDelete { base } => Some(base.as_str().to_string()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn orphan_label_is_dropped_when_every_node_says_gone() {
+        let mut fake = Fake::new();
+        fake.nodes = vec!["s4".into(), "node_1".into()];
+        fake.labels = vec![label("example.com"), orphan()];
+        run_once_with(&fake).await;
+        assert_eq!(label_deletes(&fake), vec!["gone.example".to_string()]);
+        let asked: Vec<Option<String>> = fake
+            .sent()
+            .into_iter()
+            .filter(|(_, r)| matches!(r, Request::HostingGet(_)))
+            .map(|(n, _)| n)
+            .collect();
+        assert_eq!(asked, vec![None, Some("node_1".into())]);
+    }
+
+    #[tokio::test]
+    async fn orphan_label_is_kept_when_a_node_is_unreachable() {
+        let mut fake = Fake::new();
+        fake.nodes = vec!["node_1".into()];
+        fake.labels = vec![orphan()];
+        fake.hostings = vec![(Some("node_1"), || {
+            Err(DispatchError::Remote(RemoteClientError::HttpError {
+                code: Some(7),
+                stderr: "connection refused".into(),
+            }))
+        })];
+        run_once_with(&fake).await;
+        assert!(label_deletes(&fake).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_label_whose_hosting_lives_on_is_kept() {
+        let mut fake = Fake::new();
+        fake.nodes = vec!["node_1".into()];
+        fake.labels = vec![orphan()];
+        fake.hostings = vec![(Some("node_1"), || {
+            Ok(Response::Error(RpcError::Internal {
+                message: "database is locked".into(),
+            }))
+        })];
+        run_once_with(&fake).await;
+        assert!(label_deletes(&fake).is_empty());
     }
 
     #[tokio::test]

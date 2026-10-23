@@ -5069,14 +5069,26 @@ async fn acme_ssl_labels(sock: &std::path::Path) -> Vec<hyperion_types::AcmeDnsL
 
 /// A customer with manage access to `hosting_id`; returns their cookie.
 async fn acme_ssl_customer(app: &axum::Router, sock: &std::path::Path, hosting_id: &str) -> String {
+    acme_ssl_user(app, sock, "customer", Some(hosting_id)).await
+}
+
+/// A `role` user (named `ssl-<role>`), with manage access to `hosting_id`
+/// when given; returns their cookie.
+async fn acme_ssl_user(
+    app: &axum::Router,
+    sock: &std::path::Path,
+    role: &str,
+    hosting_id: Option<&str>,
+) -> String {
     use hyperion_rpc::codec::{Request as RpcReq, Response as RpcResp};
+    let username = format!("ssl-{role}");
     let user_id = match hyperion_rpc_client::call(
         sock,
         RpcReq::WebUserCreate {
-            username: "ssl-cust".into(),
-            email: "ssl-cust@example.invalid".into(),
-            password: "customer-pw-1".into(),
-            role: "customer".into(),
+            username: username.clone(),
+            email: format!("{username}@example.invalid"),
+            password: "role-pw-12345".into(),
+            role: role.into(),
         },
     )
     .await
@@ -5085,22 +5097,24 @@ async fn acme_ssl_customer(app: &axum::Router, sock: &std::path::Path, hosting_i
         RpcResp::WebUserCreate { id } => id,
         other => panic!("unexpected create: {other:?}"),
     };
-    match hyperion_rpc_client::call(
-        sock,
-        RpcReq::WebGrantHostingAccess {
-            user_id,
-            hosting_id: hosting_id.to_string(),
-            level: "manage".into(),
-            granted_by: None,
-        },
-    )
-    .await
-    .expect("grant")
-    {
-        RpcResp::WebGrantHostingAccess => {}
-        other => panic!("unexpected grant: {other:?}"),
+    if let Some(hosting_id) = hosting_id {
+        match hyperion_rpc_client::call(
+            sock,
+            RpcReq::WebGrantHostingAccess {
+                user_id,
+                hosting_id: hosting_id.to_string(),
+                level: "manage".into(),
+                granted_by: None,
+            },
+        )
+        .await
+        .expect("grant")
+        {
+            RpcResp::WebGrantHostingAccess => {}
+            other => panic!("unexpected grant: {other:?}"),
+        }
     }
-    acme_dns_login(app, "ssl-cust", "customer-pw-1").await
+    acme_dns_login(app, &username, "role-pw-12345").await
 }
 
 /// Wait for a background job to finish; returns its final state.
@@ -5135,7 +5149,8 @@ async fn ssl_tab_shows_cname_block_to_operator() {
     let app = build_app(sock.clone(), admin);
     let id = acme_ssl_hosting(&sock, "acmessl-e2e.cz").await;
     acme_ssl_zone(&sock).await;
-    let cookie = acme_dns_login(&app, "kevin", "good-pw").await;
+    // A built-in operator (tenant-scoped) with access to this hosting.
+    let cookie = acme_ssl_user(&app, &sock, "operator", Some(&id)).await;
 
     // Before setup: an offer to set it up, no target yet.
     let (status, page) = acme_dns_get(&app, &cookie, &format!("/hostings/{id}")).await;
@@ -5154,6 +5169,8 @@ async fn ssl_tab_shows_cname_block_to_operator() {
     assert!(block.contains("_acme-challenge.acmessl-e2e.cz"), "{block}");
     assert!(block.contains(&target), "target missing: {block}");
     assert!(block.contains(&format!("/hostings/{id}/cert/acme-dns/check")));
+    // A second click cannot start a parallel probe.
+    assert!(block.contains("hx-disabled-elt=\"find button\""));
 
     // The tab now carries the block on every render.
     let (_, page) = acme_dns_get(&app, &cookie, &format!("/hostings/{id}")).await;
@@ -5221,6 +5238,40 @@ async fn acme_dns_setup_forbidden_for_customer() {
         assert!(
             !body.contains("CSRF check failed"),
             "{uri}: refused by CSRF, not authz"
+        );
+    }
+    assert!(
+        acme_ssl_labels(&sock).await.is_empty(),
+        "a label was minted"
+    );
+}
+
+#[tokio::test]
+async fn operator_without_access_cannot_touch_the_cname() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d) = start_agent().await;
+    let app = build_app(sock.clone(), admin);
+    let id = acme_ssl_hosting(&sock, "acmessl-other.cz").await;
+    acme_ssl_zone(&sock).await;
+    let cookie = acme_ssl_user(&app, &sock, "operator", None).await;
+    let csrf = acme_ssl_csrf(&app, &cookie).await;
+    for uri in [
+        format!("/hostings/{id}/cert/acme-dns/setup"),
+        format!("/hostings/{id}/cert/acme-dns/check"),
+        format!("/hostings/{id}/cert/dns01/auto"),
+        // A tenant-scoped role never sets up a node's preview wildcard.
+        "/settings/https/preview/local/acme-dns/setup".to_string(),
+    ] {
+        let resp = acme_dns_post(&app, &cookie, &uri, format!("_csrf={}", enc(&csrf))).await;
+        let status = resp.status();
+        assert!(
+            status == StatusCode::FORBIDDEN || status == StatusCode::NOT_FOUND,
+            "{uri}: {status}"
+        );
+        let body = body_string(resp).await;
+        assert!(
+            !body.contains("CSRF check failed"),
+            "{uri}: refused by CSRF"
         );
     }
     assert!(
