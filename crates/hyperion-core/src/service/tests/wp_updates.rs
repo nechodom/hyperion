@@ -169,3 +169,80 @@ async fn the_sweep_alerts_a_new_major_once_even_though_the_scan_saves_itself() {
     assert_eq!(list[0].findings.len(), 1);
     assert_eq!(list[0].failed_at, 0, "the sweep worked");
 }
+
+/// The sweep runs once a night, inside the window, and nowhere else. It
+/// used to fire a few minutes after every agent start, so each deploy took
+/// another full pre-update backup and applied updates mid-afternoon.
+#[test]
+fn the_defender_runs_once_a_night_inside_the_window() {
+    use super::wp_defender_due;
+    use chrono::{FixedOffset, TimeZone};
+    let tz = FixedOffset::east_opt(2 * 3600).unwrap();
+    let at = |d: u32, h: u32, m: u32| {
+        tz.with_ymd_and_hms(2026, 10, d, h, m, 0)
+            .unwrap()
+            .timestamp()
+    };
+    // Never ran: waits for the window, not for the agent to start.
+    assert!(!wp_defender_due(&tz, 0, at(23, 12, 14)));
+    assert!(!wp_defender_due(&tz, 0, at(23, 1, 59)));
+    assert!(wp_defender_due(&tz, 0, at(23, 2, 0)));
+    assert!(wp_defender_due(&tz, 0, at(23, 5, 59)));
+    assert!(!wp_defender_due(&tz, 0, at(23, 6, 0)));
+    // Ran tonight: a restart later in the same window does not run it again.
+    assert!(!wp_defender_due(&tz, at(23, 2, 4), at(23, 3, 30)));
+    // Ran last night: due again from 02:00, not 24h after the last start.
+    assert!(!wp_defender_due(&tz, at(22, 2, 40), at(22, 17, 37)));
+    assert!(!wp_defender_due(&tz, at(22, 2, 40), at(23, 1, 50)));
+    assert!(wp_defender_due(&tz, at(22, 2, 40), at(23, 2, 5)));
+    // Ran during the day before this change: still waits for the night.
+    assert!(!wp_defender_due(&tz, at(22, 17, 37), at(23, 12, 14)));
+    assert!(wp_defender_due(&tz, at(22, 17, 37), at(23, 2, 0)));
+}
+
+/// The stamp is persisted, so the decision survives the restart that used
+/// to trigger a second sweep.
+#[tokio::test]
+async fn the_defender_tick_stamps_its_night_and_skips_the_rest_of_it() {
+    use chrono::{FixedOffset, TimeZone};
+    let tz = FixedOffset::east_opt(2 * 3600).unwrap();
+    let at = |d: u32, h: u32, m: u32| {
+        tz.with_ymd_and_hms(2026, 10, d, h, m, 0)
+            .unwrap()
+            .timestamp()
+    };
+    let pool = open_memory().await.expect("open");
+    let s = svc(
+        pool.clone(),
+        wp_scan_mocks(vec![wp_plugin("woocommerce", "8.7.0", "9.0.1")], vec![]),
+    );
+    let site = hosting_for_packages(&s, "kos.cz").await;
+    wordpress::record_install(&pool, &site.id, "https://kos.cz", "6.5.3", "h", 1)
+        .await
+        .expect("wp row");
+
+    assert_eq!(
+        s.wp_defender_tick_at(&tz, at(23, 12, 14))
+            .await
+            .expect("tick"),
+        None,
+        "midday is not the window"
+    );
+    assert_eq!(
+        s.wp_defender_tick_at(&tz, at(24, 2, 4))
+            .await
+            .expect("tick"),
+        Some(1),
+        "the night sweep runs"
+    );
+    // A second service over the same database = the agent after a restart.
+    let again = svc(pool.clone(), package_mocks());
+    assert_eq!(
+        again
+            .wp_defender_tick_at(&tz, at(24, 3, 0))
+            .await
+            .expect("tick"),
+        None,
+        "already swept tonight"
+    );
+}

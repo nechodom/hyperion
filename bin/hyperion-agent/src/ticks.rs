@@ -431,16 +431,22 @@ fn spawn_cert_renewal(svc: &Svc, threshold: i64) {
     });
 }
 
-/// WordPress defender sweep — once per day. Scans every active WP
+/// WordPress defender sweep — once a night. Scans every active WP
 /// hosting for outdated plugins/themes (keyless — via wp-cli's own
-/// update status), auto-applies safe minor/patch updates when enabled,
-/// stores the result for the cluster dashboard, and notifies admins
-/// about NEW major updates needing manual review.
+/// update status), auto-applies safe minor/patch updates when enabled
+/// (each batch behind a full backup), stores the result for the cluster
+/// dashboard, and notifies admins about NEW major updates needing manual
+/// review.
+///
+/// Checked every 10 minutes; `wp_defender_tick` decides, from a persisted
+/// stamp, whether tonight's window is open and still unswept. A plain
+/// "4 min after boot, then daily" ran it after every deploy.
 fn spawn_wp_defender(svc: &Svc) {
-    every(svc, 4 * MIN, DAY, |svc| async move {
-        match svc.wp_vuln_scan_tick().await {
-            Ok(n) if n > 0 => tracing::info!(new_majors = n, "wp defender tick"),
-            Ok(_) => tracing::debug!("wp defender tick: no new major updates"),
+    every(svc, 4 * MIN, 10 * MIN, |svc| async move {
+        match svc.wp_defender_tick().await {
+            Ok(Some(n)) if n > 0 => tracing::info!(new_majors = n, "wp defender tick"),
+            Ok(Some(_)) => tracing::debug!("wp defender tick: no new major updates"),
+            Ok(None) => {}
             Err(e) => tracing::warn!(error=%e, "wp defender tick failed"),
         }
     });
