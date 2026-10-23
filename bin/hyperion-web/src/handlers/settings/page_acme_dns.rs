@@ -67,6 +67,8 @@ pub struct AcmeCard {
     pub unreadable: Option<String>,
     pub records: Vec<AcmeRecord>,
     pub labels: Vec<LabelRow>,
+    /// The labels could not be read; the list must not read as empty.
+    pub labels_error: Option<String>,
 }
 
 /// `acme.<panel hostname>`; empty while the panel has no hostname.
@@ -145,6 +147,16 @@ pub fn label_row(l: &AcmeDnsLabel) -> LabelRow {
     }
 }
 
+/// The delegated-wildcard rows from the agent's answer, or why there are none.
+pub fn labels_from(res: Result<RpcResponse, String>) -> (Vec<LabelRow>, Option<String>) {
+    match res {
+        Ok(RpcResponse::AcmeDnsLabels(l)) => (l.iter().map(label_row).collect(), None),
+        Ok(RpcResponse::Error(e)) => (Vec::new(), Some(e.to_string())),
+        Ok(_) => (Vec::new(), Some("unexpected answer".into())),
+        Err(e) => (Vec::new(), Some(e)),
+    }
+}
+
 /// Fill the card from the agent. `form` overrides the saved values when a
 /// refused save re-renders the card with what the operator typed.
 pub async fn load(
@@ -181,11 +193,13 @@ pub async fn load(
     card.configured = saved.zone.is_some();
     card.listening = saved.listening.clone();
     card.last_error = saved.last_error.clone();
-    card.labels =
-        match crate::dispatcher::dispatch_to_node(state, None, Request::AcmeDnsLabels).await {
-            Ok(RpcResponse::AcmeDnsLabels(l)) => l.iter().map(label_row).collect(),
-            _ => Vec::new(),
-        };
+    let (labels, labels_error) = labels_from(
+        crate::dispatcher::dispatch_to_node(state, None, Request::AcmeDnsLabels)
+            .await
+            .map_err(|e| e.to_string()),
+    );
+    card.labels = labels;
+    card.labels_error = labels_error;
     let pick = |typed: Option<&str>, saved: &str, suggestion: String| -> String {
         match typed {
             Some(t) => t.trim().to_string(),
@@ -417,6 +431,15 @@ mod tests {
             "points elsewhere"
         );
         assert_eq!(classify_check_error("timeout").1, "could not be checked");
+    }
+
+    #[test]
+    fn a_failed_labels_read_is_an_error_not_an_empty_list() {
+        let (rows, err) = labels_from(Err("agent down".into()));
+        assert!(rows.is_empty());
+        assert_eq!(err.as_deref(), Some("agent down"));
+        let (rows, err) = labels_from(Ok(RpcResponse::AcmeDnsLabels(vec![])));
+        assert!(rows.is_empty() && err.is_none());
     }
 
     #[test]

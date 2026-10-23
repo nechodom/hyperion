@@ -137,7 +137,9 @@
       <span id="acme-dns-check" aria-live="polite"></span>
     </form>
     <h4 style="margin:1.2rem 0 0.4rem">Delegated wildcards</h4>
-    {% if acme.labels.is_empty() %}
+    {% if let Some(e) = acme.labels_error %}
+    <p class="chk-note tone-warn" style="margin:0">Could not load the delegated wildcards: {{ e }}</p>
+    {% else if acme.labels.is_empty() %}
     <p class="text-soft small" style="margin:0">None yet. A domain appears here once its wildcard certificate is set to use the delegated zone.</p>
     {% else %}
     <div class="table-wrap inset">
