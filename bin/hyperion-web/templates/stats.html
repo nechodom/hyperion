@@ -389,7 +389,9 @@
      Answers "where are my backups?": bytes on THIS node's disk vs recorded
      off-site. A site whose local copies were dropped after an off-site push
      shows bytes under Off-site only, and the local total matches the
-     "Backups on disk" figure above (both count only archives still on disk). #}
+     "Backups on disk" figure above. Both are what the backup directory really
+     holds: files no backup record names (a deleted or moved site's archives,
+     a run that died unrecorded) are counted and called out, never hidden. #}
   {% if !backup_storage.is_empty() %}
   <div class="group">
     <div class="ghead">
@@ -402,18 +404,29 @@
         <thead>
           <tr>
             <th>Site</th>
-            <th class="right" title="Archives still on the node's disk">On server</th>
+            <th class="right" title="What the node's backup directory holds for the site, including files no backup record names">On server</th>
             <th class="right" title="Every copy the node recorded as uploaded or verified off-site">Off-site</th>
           </tr>
         </thead>
         <tbody>
           {% for b in backup_storage %}
           <tr>
-            <td><a href="/hostings/{{ b.hosting_id.as_str()|e }}#backups">{{ b.domain }}</a></td>
+            <td>
+              {% if b.hosting_id.as_str().is_empty() %}
+                {{ b.domain }} <span class="text-soft small">· no such site on this server</span>
+              {% else %}
+                <a href="/hostings/{{ b.hosting_id.as_str()|e }}#backups">{{ b.domain }}</a>
+              {% endif %}
+            </td>
             <td class="right numeric">
-              {% if b.local_count > 0 %}
-                {{ crate::handlers::stats::fmt_bytes(b.local_bytes) }}
-                <span class="text-soft small">· {{ b.local_count }}</span>
+              {% if b.local_count > 0 || b.untracked_bytes > 0 %}
+                {{ crate::handlers::stats::fmt_bytes(b.local_bytes + b.untracked_bytes) }}
+                {% if b.local_count > 0 %}<span class="text-soft small">· {{ b.local_count }}</span>{% endif %}
+                {% if b.untracked_bytes > 0 %}
+                  <div class="small tone-warn" title="Files in the backup directory that no backup record names — the panel cannot restore or download them, and retention never removes them">
+                    {{ crate::handlers::stats::fmt_bytes(b.untracked_bytes) }} untracked{% if b.untracked_count > 0 %} · {{ b.untracked_count }} archive{% if b.untracked_count != 1 %}s{% endif %}{% endif %}
+                  </div>
+                {% endif %}
               {% else %}
                 <span class="text-soft">—</span>
               {% endif %}

@@ -459,6 +459,34 @@ pub async fn hostings_with_offsite_local_copies(
     Ok(rows.into_iter().map(|(h,)| HostingId(h)).collect())
 }
 
+/// What the backup table still accounts for on the local disk: every file a
+/// row names (`archive_path`, `db_dump_path`, any state), plus
+/// `(hosting_id, started_at)` of every run still in progress — its files are
+/// being written and no row names them yet.
+///
+/// The disk scan behind "Backups by site" subtracts these from what is really
+/// in the backup directory; whatever is left is on disk with no record.
+pub async fn claimed_local_files(
+    pool: &SqlitePool,
+) -> Result<(Vec<String>, Vec<(String, i64)>), StateError> {
+    let rows: Vec<(String, String, i64, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT hosting_id, state, started_at, archive_path, db_dump_path FROM backup_runs \
+          WHERE archive_path IS NOT NULL OR db_dump_path IS NOT NULL OR state = 'running'",
+    )
+    .fetch_all(pool)
+    .await?;
+    let mut paths = Vec::new();
+    let mut running = Vec::new();
+    for (hid, state, started_at, archive, dump) in rows {
+        paths.extend(archive);
+        paths.extend(dump);
+        if state == "running" {
+            running.push((hid, started_at));
+        }
+    }
+    Ok((paths, running))
+}
+
 pub async fn delete_by_id(pool: &SqlitePool, id: i64) -> Result<(), StateError> {
     sqlx::query("DELETE FROM backup_runs WHERE id = ?")
         .bind(id)

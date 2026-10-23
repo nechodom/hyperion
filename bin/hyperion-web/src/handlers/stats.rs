@@ -418,8 +418,8 @@ pub async fn get_stats(
                 })
                 .unwrap_or_default();
             v.sort_by(|a, b| {
-                b.local_bytes
-                    .cmp(&a.local_bytes)
+                (b.local_bytes + b.untracked_bytes)
+                    .cmp(&(a.local_bytes + a.untracked_bytes))
                     .then(b.offsite_bytes.cmp(&a.offsite_bytes))
             });
             v

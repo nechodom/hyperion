@@ -54,7 +54,9 @@ pub struct NodeStats {
     #[serde(default)]
     pub hostings_disk_bytes: i64,
     /// Bytes this node's LOCAL backup archives occupy, summed over the
-    /// successful runs still on disk. Distinct from `hostings_disk_bytes`:
+    /// successful runs still on disk PLUS the untracked backup files found in
+    /// the backup directory (see `BackupStorageRow::untracked_bytes`), so it
+    /// is what the disk really holds. Distinct from `hostings_disk_bytes`:
     /// backups live outside the sites' home directories, so a node can be
     /// short of space for a reason no per-site figure explains — which is
     /// exactly the case an operator wants to see before a backup starts
@@ -119,6 +121,12 @@ pub struct NodeStats {
 /// whether or not the local copy was since dropped. A backup pushed off-site
 /// and then dropped locally therefore shows under off-site only — which is how
 /// "I deleted it locally and it's on FTP" reads correctly.
+///
+/// `untracked_*` is what the node found in its backup directory that NO row
+/// names — archives of hostings deleted or moved away, a run that died before
+/// it was recorded, leftover manifests. Without it the panel said "0 B on
+/// server" over tens of GiB of real files. A row made only of such files has
+/// an empty `hosting_id` when no hosting on the node has that domain.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BackupStorageRow {
     pub hosting_id: crate::HostingId,
@@ -127,6 +135,13 @@ pub struct BackupStorageRow {
     pub local_count: i64,
     pub offsite_bytes: i64,
     pub offsite_count: i64,
+    /// Bytes of backup files on disk that no backup record names.
+    #[serde(default)]
+    pub untracked_bytes: i64,
+    /// How many of those are archives (`.tar.gz`) — dumps and manifests add
+    /// bytes but are not counted as separate backups.
+    #[serde(default)]
+    pub untracked_count: i64,
 }
 
 /// Operator-facing alert surfaced on the dashboard. Computed from
