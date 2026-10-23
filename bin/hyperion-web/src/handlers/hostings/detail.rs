@@ -336,6 +336,27 @@ pub(super) struct DetailTpl<'a> {
 }
 
 impl<'a> DetailTpl<'a> {
+    /// A PHP branch that will never get a fix for a known hole (8.1 for the
+    /// 2026-10 RCE advisories). The template warns on the site and marks the
+    /// branch in every version picker.
+    pub(super) fn php_unfixable(&self, branch: &str) -> bool {
+        hyperion_types::php_security::branch_unfixable(branch)
+    }
+
+    pub(super) fn php_unfixable_cves(&self, branch: &str) -> String {
+        hyperion_types::php_security::unfixable_cves(branch)
+    }
+
+    /// Where a site with old code should land: the oldest version that still
+    /// gets security fixes.
+    pub(super) fn php_legacy_pick(&self) -> &str {
+        PHP_VERSION_OPTIONS
+            .iter()
+            .copied()
+            .find(|v| !hyperion_types::php_security::branch_unfixable(v))
+            .unwrap_or("8.3")
+    }
+
     /// The page with every CSRF token minted and every per-tab field at its
     /// "nothing known yet" value. The detail GET and the create response
     /// both start here and override only what they actually fetched, so a

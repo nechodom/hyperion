@@ -303,6 +303,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 state: "running".into(),
                 log_tail: String::new(),
                 exit_code: 0,
+                action: "install".into(),
             };
         }
         // Audit-log the START. The finish state is audited separately
@@ -783,6 +784,86 @@ impl<A: AdapterPort + 'static> HostingService<A> {
 /// hitting their unauthenticated rate limit (60 req/hour/IP).
 pub const UPDATE_CHECK_TTL_SECS: i64 = 3600;
 
+/// How much of a service job's output the status slot keeps.
+const LOG_TAIL_BYTES: usize = 8 * 1024;
+
+/// Append one line to a service job's log tail, keeping the newest
+/// `LOG_TAIL_BYTES`.
+pub(super) async fn append_line(
+    slot: &std::sync::Arc<tokio::sync::Mutex<hyperion_types::ServiceInstallStatus>>,
+    line: &str,
+) {
+    let mut g = slot.lock().await;
+    g.log_tail.push_str(line);
+    g.log_tail.push('\n');
+    if g.log_tail.len() > LOG_TAIL_BYTES {
+        let drop = g.log_tail.len() - LOG_TAIL_BYTES;
+        let mut cut = drop;
+        while !g.log_tail.is_char_boundary(cut) && cut < g.log_tail.len() {
+            cut += 1;
+        }
+        g.log_tail.drain(..cut);
+    }
+}
+
+/// Run one command of a service job, streaming its output into the slot.
+/// Returns the exit code (127 = could not spawn).
+pub(super) async fn run_one(
+    slot: &std::sync::Arc<tokio::sync::Mutex<hyperion_types::ServiceInstallStatus>>,
+    label: &str,
+    cmd: &str,
+    args: &[&str],
+) -> i32 {
+    use tokio::io::AsyncBufReadExt;
+    append_line(
+        slot,
+        &format!("──── {label}: {cmd} {} ────", args.join(" ")),
+    )
+    .await;
+    let mut child = match tokio::process::Command::new(cmd)
+        .args(args)
+        .env("DEBIAN_FRONTEND", "noninteractive")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            append_line(slot, &format!("spawn {cmd} failed: {e}")).await;
+            return 127;
+        }
+    };
+    if let Some(stdout) = child.stdout.take() {
+        let s = slot.clone();
+        let label = label.to_string();
+        tokio::spawn(async move {
+            let r = tokio::io::BufReader::new(stdout);
+            let mut lines = r.lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                append_line(&s, &format!("[{label}] {line}")).await;
+            }
+        });
+    }
+    if let Some(stderr) = child.stderr.take() {
+        let s = slot.clone();
+        let label = label.to_string();
+        tokio::spawn(async move {
+            let r = tokio::io::BufReader::new(stderr);
+            let mut lines = r.lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                append_line(&s, &format!("[{label}!] {line}")).await;
+            }
+        });
+    }
+    match child.wait().await {
+        Ok(status) => status.code().unwrap_or(-1),
+        Err(e) => {
+            append_line(slot, &format!("wait {label} failed: {e}")).await;
+            -1
+        }
+    }
+}
+
 /// Drive a service-install job (apt-get install + systemctl
 /// enable --now) and stream output into the shared status slot.
 ///
@@ -801,81 +882,6 @@ pub(super) async fn run_service_install(
     service_name: String,
     pkg: String,
 ) {
-    use tokio::io::AsyncBufReadExt;
-    const LOG_TAIL_BYTES: usize = 8 * 1024;
-
-    async fn append_line(
-        slot: &std::sync::Arc<tokio::sync::Mutex<hyperion_types::ServiceInstallStatus>>,
-        line: &str,
-    ) {
-        let mut g = slot.lock().await;
-        g.log_tail.push_str(line);
-        g.log_tail.push('\n');
-        if g.log_tail.len() > LOG_TAIL_BYTES {
-            let drop = g.log_tail.len() - LOG_TAIL_BYTES;
-            let mut cut = drop;
-            while !g.log_tail.is_char_boundary(cut) && cut < g.log_tail.len() {
-                cut += 1;
-            }
-            g.log_tail.drain(..cut);
-        }
-    }
-
-    async fn run_one(
-        slot: &std::sync::Arc<tokio::sync::Mutex<hyperion_types::ServiceInstallStatus>>,
-        label: &str,
-        cmd: &str,
-        args: &[&str],
-    ) -> i32 {
-        append_line(
-            slot,
-            &format!("──── {label}: {cmd} {} ────", args.join(" ")),
-        )
-        .await;
-        let mut child = match tokio::process::Command::new(cmd)
-            .args(args)
-            .env("DEBIAN_FRONTEND", "noninteractive")
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-        {
-            Ok(c) => c,
-            Err(e) => {
-                append_line(slot, &format!("spawn {cmd} failed: {e}")).await;
-                return 127;
-            }
-        };
-        if let Some(stdout) = child.stdout.take() {
-            let s = slot.clone();
-            let label = label.to_string();
-            tokio::spawn(async move {
-                let r = tokio::io::BufReader::new(stdout);
-                let mut lines = r.lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    append_line(&s, &format!("[{label}] {line}")).await;
-                }
-            });
-        }
-        if let Some(stderr) = child.stderr.take() {
-            let s = slot.clone();
-            let label = label.to_string();
-            tokio::spawn(async move {
-                let r = tokio::io::BufReader::new(stderr);
-                let mut lines = r.lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    append_line(&s, &format!("[{label}!] {line}")).await;
-                }
-            });
-        }
-        match child.wait().await {
-            Ok(status) => status.code().unwrap_or(-1),
-            Err(e) => {
-                append_line(slot, &format!("wait {label} failed: {e}")).await;
-                -1
-            }
-        }
-    }
-
     // Per-package debconf preseeding — without this, packages with
     // interactive postinst questions (postfix's "type of mail server",
     // "mailname", iptables-persistent, mariadb-server root password,

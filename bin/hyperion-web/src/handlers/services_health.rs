@@ -126,6 +126,21 @@ fn row_for(s: &hyperion_types::ServiceHealth) -> SvcRow {
     } else {
         None
     };
+    // A PHP branch past end of life: say so on its row, installed or not —
+    // installing it is one click away in the "Not installed" fold.
+    let unfixable = s
+        .name
+        .strip_prefix("php")
+        .and_then(|r| r.strip_suffix("-fpm"))
+        .filter(|b| hyperion_types::php_security::branch_unfixable(b));
+    let note = match unfixable {
+        Some(b) => Some(format!(
+            "No security fixes: PHP {b} is past end of life and its known \
+             remote-code-execution holes ({}) will never be closed. See PHP versions below.",
+            hyperion_types::php_security::unfixable_cves(b)
+        )),
+        None => note,
+    };
     let own = s.name == "hyperion-agent" || s.name == "hyperion-web";
     SvcRow {
         name: s.name.clone(),
@@ -471,16 +486,20 @@ fn render_install_status(s: &hyperion_types::ServiceInstallStatus) -> String {
     if s.started_at == 0 {
         return "<div class=\"text-soft small\">no service install has run on this node yet — click <strong>Install</strong> on a row above</div>".to_string();
     }
-    let pill = match s.state.as_str() {
-        "running" => "<span class=\"pill warn pulse\">installing…</span>",
-        "succeeded" => "<span class=\"pill ok\">installed</span>",
-        "failed" => "<span class=\"pill err\">failed</span>",
+    let removing = s.action == "uninstall";
+    let pill = match (s.state.as_str(), removing) {
+        ("running", false) => "<span class=\"pill warn pulse\">installing…</span>",
+        ("running", true) => "<span class=\"pill warn pulse\">uninstalling…</span>",
+        ("succeeded", false) => "<span class=\"pill ok\">installed</span>",
+        ("succeeded", true) => "<span class=\"pill ok\">uninstalled</span>",
+        ("failed", _) => "<span class=\"pill err\">failed</span>",
         _ => "<span class=\"pill\">unknown</span>",
     };
     let mut out = format!(
         "<div style=\"display:flex;gap:0.6rem;align-items:center;flex-wrap:wrap\">\
-            {pill} <strong>{}</strong> <span class=\"text-soft small\">(apt pkg <code>{}</code>)</span>",
+            {pill} <strong>{}</strong> <span class=\"text-soft small\">({} <code>{}</code>)</span>",
         escape(&s.service_name),
+        if removing { "apt purge" } else { "apt pkg" },
         escape(&s.pkg),
     );
     if s.state == "failed" {
@@ -874,6 +893,15 @@ mod tests {
         assert_eq!(r("mariadb").note.as_deref(), Some("Won't start at boot."));
         assert_eq!(r("nginx").status, "restarting…");
         assert_eq!(v.tone, "ok");
+    }
+
+    #[test]
+    fn an_end_of_life_php_row_says_it_gets_no_fixes() {
+        let r = row_for(&svc("php8.1-fpm", false, false, "inactive"));
+        assert!(r.note.as_deref().unwrap().contains("No security fixes"));
+        let r = row_for(&svc("php8.1-fpm", true, true, "active"));
+        assert!(r.note.as_deref().unwrap().contains("CVE-2026-109618"));
+        assert_eq!(row_for(&svc("php8.3-fpm", true, true, "active")).note, None);
     }
 
     #[test]

@@ -490,6 +490,17 @@ pub enum Request {
     /// Read the state of the most-recent / in-progress
     /// service-install job. Empty when no install has ever run.
     ServiceInstallStatus,
+    /// Every PHP branch installed on this node: its build, whether FPM is
+    /// there, the sites set to it and whether phpMyAdmin runs on it. Raw
+    /// facts — the master judges them against its advisory table.
+    PhpRuntimes,
+    /// `apt-get purge` every `php<branch>*` package. Refused while any site
+    /// on the node (trashed ones included) is set to the branch, or while
+    /// phpMyAdmin runs on it with nowhere else to go. Runs in the
+    /// background on the service-install slot; poll `ServiceInstallStatus`.
+    PhpUninstall {
+        branch: String,
+    },
     /// Setup wizard: install the chosen server software (PHP, databases,
     /// FTP, phpMyAdmin, Redis) as the transient unit
     /// `hyperion-setup-stack.service`. `components` is checked against an
@@ -2305,6 +2316,8 @@ pub enum Response {
     /// Current state of the most-recent / in-progress
     /// service-install job + log tail.
     ServiceInstallStatus(hyperion_types::ServiceInstallStatus),
+    PhpRuntimes(Vec<hyperion_types::php_security::PhpRuntime>),
+    PhpUninstall,
     SetupStackStart {
         started_at: i64,
     },

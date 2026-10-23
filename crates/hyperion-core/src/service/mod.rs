@@ -67,6 +67,7 @@ mod offsite;
 mod os_updates;
 mod panel;
 mod permissions;
+mod php_runtimes;
 mod protection;
 mod provision;
 mod quota;

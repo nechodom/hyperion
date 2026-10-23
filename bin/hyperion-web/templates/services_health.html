@@ -120,6 +120,23 @@
 </details>
 {% endif %}
 
+{#- PHP versions: every branch on this node checked against the published
+    advisories this panel knows, the sites on each, and the uninstall for a
+    branch nothing needs. Lazy (`intersect once`, it asks the node for its
+    packages) and outside the live region for the same reason as Mail
+    delivery. Dashboard alerts and site pages link to #php-versions. -#}
+<div id="php-versions" style="margin-top:var(--group-gap)">
+  <div id="php-versions-body"
+       hx-get="/services/php?node={{ current_node }}"
+       hx-trigger="intersect once"
+       hx-swap="innerHTML">
+    <div class="group">
+      <div class="ghead">PHP versions · security</div>
+      <div class="item"><span class="text-soft small">Checking installed PHP builds…</span></div>
+    </div>
+  </div>
+</div>
+
 {#- Mail delivery: this node's postfix — how it sends, what stands in its
     way, and the fixes (Settings → Mail only configures the relay). Lazy,
     `intersect once`: the diagnosis runs DNS lookups and port probes. Kept
@@ -221,13 +238,15 @@
 <script>
 (function () {
   'use strict';
-  // A Mail delivery action redirects to #mail-delivery, which scrolls past
-  // the flash printed at the top of the page: carry it to that group, where
+  // A Mail delivery or PHP versions action redirects to its group's anchor,
+  // which scrolls past the flash printed at the top of the page: carry it to
+  // that group, where
   // the operator is looking — above the group's body, which the lazy load
   // and Re-check replace. Without JS it stays at the top.
-  if (location.hash !== '#mail-delivery') return;
-  var box = document.getElementById('mail-delivery');
-  var body = document.getElementById('mail-delivery-body');
+  var hash = location.hash;
+  if (hash !== '#mail-delivery' && hash !== '#php-versions') return;
+  var box = document.getElementById(hash.slice(1));
+  var body = document.getElementById(hash.slice(1) + '-body');
   var flashes = document.querySelectorAll('[data-svc-flash]');
   if (!box || !body || !flashes.length) return;
   flashes.forEach(function (f) { box.insertBefore(f, body); });

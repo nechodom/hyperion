@@ -415,7 +415,11 @@
     {% endif %}
   </span>
   {% if let Some(v) = detail.php_version %}
+  {% if self.php_unfixable(v.as_str()) %}
+  <span class="meta-chip danger" title="PHP {{ v }} has known remote-code-execution holes ({{ self.php_unfixable_cves(v.as_str()) }}) and gets no security fixes — switch it on the Overview tab">PHP <strong>{{ v }}</strong> · unsafe</span>
+  {% else %}
   <span class="meta-chip" title="PHP-FPM pool version — change it on the Overview tab">PHP <strong>{{ v }}</strong></span>
+  {% endif %}
   {% endif %}
   {% if let Some(n) = detail.node_id.as_ref() %}
   {# Where the hosting actually lives — loud enough that the operator can
@@ -963,13 +967,29 @@
               <select name="php_version" aria-label="New PHP version">
                 {%- for opt in php_options %}
                 <option value="{{ opt }}"{% if opt == v.as_str() %} selected{% endif %}>
-                  PHP {{ opt }}{% if opt == v.as_str() %} (current){% endif %}
+                  PHP {{ opt }}{% if opt == v.as_str() %} (current){% endif %}{% if self.php_unfixable(opt) %} — no security fixes{% endif %}
                 </option>
                 {%- endfor %}
               </select>
               <button type="submit" class="btn small">Switch</button>
             </form>
           </div>
+          {% if self.php_unfixable(v.as_str()) %}
+          {#- The branch is past end of life and a published hole will never be
+              closed on it — the site is exposed whatever the node runs. -#}
+          <div class="flash error" style="margin:0.5rem 0 0.4rem;padding:0.6rem 0.75rem;font-size:0.84rem" data-php-unfixable>
+            <div class="flash-body">
+              <strong>PHP {{ v }} is not safe.</strong>
+              It has known remote-code-execution holes
+              ({{ self.php_unfixable_cves(v.as_str()) }}) and, being past end of
+              life, will never get a fix. Switch this site to PHP 8.3 or 8.4
+              above — old code is likelier to run on {{ self.php_legacy_pick() }}
+              if 8.3 breaks it. Then uninstall {{ v }} from
+              <a href="/services{% if !target_node.is_empty() && target_node != "local" %}?node={{ target_node }}{% endif %}#php-versions" style="color:inherit;text-decoration:underline">Services → PHP versions</a>
+              once no site needs it.
+            </div>
+          </div>
+          {% endif %}
           <span class="fact-sub">Socket <code>/run/php/{{ v }}/{{ detail.system_user }}.sock</code></span>
         {% else %}
           {# kind "php" with NO version is what the importer produces when the
@@ -986,8 +1006,9 @@
                 <strong>WordPress {{ w.wp_version }} is installed here, but this
                 hosting has no PHP.</strong>
                 Nothing will run and every WordPress action answers “requires a
-                PHP hosting” until you turn PHP on below. <strong>8.1</strong> is
-                preselected as the least disruptive landing spot for an imported site.
+                PHP hosting” until you turn PHP on below. <strong>{{ self.php_legacy_pick() }}</strong> is
+                preselected: the oldest PHP that still gets security fixes, so the
+                likeliest to run an imported site's code.
               </div>
             </div>
             {% endif %}
@@ -1007,10 +1028,11 @@
               <input type="hidden" name="target_node" value="{{ target_node }}">
               <select name="php_version" aria-label="PHP version">
                 {%- for opt in php_options %}
-                {#- Preselect the lowest supported version when WordPress is
-                    already on disk: such a site arrived from somewhere else
-                    and its code is likelier to predate 8.3 than to need it. -#}
-                <option value="{{ opt }}"{% if wp_status.is_some() && opt == "8.1" %} selected{% endif %}>PHP {{ opt }}</option>
+                {#- Preselect the oldest version that still gets security
+                    fixes when WordPress is already on disk: such a site
+                    arrived from somewhere else and its code is likelier to
+                    predate 8.3 than to need it. -#}
+                <option value="{{ opt }}"{% if wp_status.is_some() && opt == self.php_legacy_pick() %} selected{% endif %}>PHP {{ opt }}{% if self.php_unfixable(opt) %} — no security fixes{% endif %}</option>
                 {%- endfor %}
               </select>
               <button type="submit" class="btn small">Convert to PHP</button>
