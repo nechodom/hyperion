@@ -26557,6 +26557,20 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 reason: e.to_string(),
             })?;
 
+        self.install_dns01_cert(&detail, &cert).await?;
+        Ok(cert)
+    }
+
+    /// Persist a freshly issued DNS-01 wildcard cert for a hosting and make
+    /// nginx pick it up. A suspended or trashed site is re-applied through
+    /// its suspended vhost, with the SAME notice it is already showing:
+    /// `nginx_write_vhost` renders the serving vhost and would silently
+    /// un-suspend the site (same reasoning as `cert_renew_tick`).
+    async fn install_dns01_cert(
+        &self,
+        detail: &HostingDetail,
+        cert: &hyperion_types::CertInfo,
+    ) -> Result<(), RpcError> {
         let cert_path = format!("/etc/hyperion/certs/{}/fullchain.pem", detail.domain);
         let key_path = format!("/etc/hyperion/certs/{}/privkey.pem", detail.domain);
         let _ = certificates::upsert(
@@ -26572,15 +26586,26 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // Mark it wildcard so the renewal sweep uses DNS-01, not HTTP-01.
         let _ = certificates::set_wildcard(&self.pool, &detail.domain, true).await;
 
-        let new_detail = HostingDetail {
-            cert: Some(cert.clone()),
-            // Per-hosting wildcard cert lives at the per-domain default
-            // path; clear any inherited shared-cert override.
-            cert_path: None,
-            cert_key_path: None,
-            ..detail.clone()
+        let applied = if matches!(
+            detail.state,
+            HostingState::Suspended | HostingState::Trashed
+        ) {
+            let reason = self.suspended_notice(&detail.id, detail.state).await;
+            self.adapters
+                .nginx_apply_suspended(&detail.domain, detail.aliases.clone(), reason)
+                .await
+        } else {
+            let new_detail = HostingDetail {
+                cert: Some(cert.clone()),
+                // Per-hosting wildcard cert lives at the per-domain default
+                // path; clear any inherited shared-cert override.
+                cert_path: None,
+                cert_key_path: None,
+                ..detail.clone()
+            };
+            self.adapters.nginx_write_vhost(&new_detail).await
         };
-        if let Err(e) = self.adapters.nginx_write_vhost(&new_detail).await {
+        if let Err(e) = applied {
             return Err(RpcError::ProvisioningFailed {
                 stage: "nginx_reload".into(),
                 reason: e.to_string(),
@@ -26594,7 +26619,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             "ok",
         )
         .await;
-        Ok(cert)
+        Ok(())
     }
 
     /// DNS-01 issuance for a bare domain that is NOT tied to a hosting —
@@ -54121,6 +54146,61 @@ mod tests {
             ),
             other => panic!("expected an attempt, got {other:?}"),
         }
+    }
+
+    /// DNS-01 finish must not turn a suspended site back into a serving one:
+    /// `nginx_write_vhost` renders the live vhost.
+    #[tokio::test]
+    async fn dns01_install_keeps_a_suspended_site_suspended() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), suspend_mocks());
+        s.create(req("paused.cz")).await.expect("create");
+        let sel = HostingSelector::Domain(Domain::parse("paused.cz").unwrap());
+        s.suspend(
+            sel.clone(),
+            hyperion_types::SuspendReason::Manual {
+                message: Some("Unpaid invoice".into()),
+            },
+        )
+        .await
+        .expect("suspend");
+        let detail = s.get(sel.clone()).await.expect("get");
+
+        // Fresh service over the same pool: the serving vhost is forbidden,
+        // the suspended re-apply must carry the stored notice + aliases.
+        let mut m = MockAdapterPort::new();
+        m.expect_nginx_write_vhost().times(0);
+        let aliases = detail.aliases.clone();
+        m.expect_nginx_apply_suspended()
+            .times(1)
+            .withf(move |d, a, reason| {
+                d == "paused.cz" && *a == aliases && reason.as_deref() == Some("Unpaid invoice")
+            })
+            .returning(|_, _, _| Ok(()));
+        let s = svc(pool.clone(), m);
+        s.install_dns01_cert(&detail, &cert_for("paused.cz"))
+            .await
+            .expect("install");
+        assert_eq!(s.get(sel).await.unwrap().state, HostingState::Suspended);
+        assert!(certificates::is_wildcard(&pool, "paused.cz").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn dns01_install_rewrites_the_serving_vhost_for_an_active_site() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), happy_mocks());
+        s.create(req("live.cz")).await.expect("create");
+        let sel = HostingSelector::Domain(Domain::parse("live.cz").unwrap());
+        let detail = s.get(sel).await.expect("get");
+
+        let mut m = MockAdapterPort::new();
+        m.expect_nginx_apply_suspended().times(0);
+        m.expect_nginx_write_vhost().times(1).returning(|_| Ok(()));
+        let s = svc(pool.clone(), m);
+        s.install_dns01_cert(&detail, &cert_for("live.cz"))
+            .await
+            .expect("install");
+        assert!(certificates::is_wildcard(&pool, "live.cz").await.unwrap());
     }
 
     /// A SUSPENDED site still renews. Its vhost serves the ACME challenge
