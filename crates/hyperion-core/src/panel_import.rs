@@ -267,16 +267,16 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         };
         // A php site with no version is a half-built hosting: create() writes
         // the row and skips the FPM pool, and nothing ever repairs it. Give it
-        // the lowest supported version rather than that.
+        // the oldest version that still gets security fixes rather than that.
         let php_version = match (h.kind, php_version) {
             (IrSiteKind::Static, v) => v,
             (_, None) => {
-                notes.push(
-                    "the source reported no PHP version — imported on 8.1, change it on the \
-                     hosting if the site needs another"
-                        .into(),
-                );
-                Some(hyperion_types::PhpVersion::V8_1)
+                let landing = hyperion_types::PhpVersion::legacy_landing();
+                notes.push(format!(
+                    "the source reported no PHP version — imported on {landing}, change it \
+                     on the hosting if the site needs another"
+                ));
+                Some(landing)
             }
             (_, some) => some,
         };
@@ -413,20 +413,32 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 restored_dbs = 1;
                 match srcdb.engine {
                     IrDbEngine::Postgres => {
-                        hyperion_adapters::backup::restore_postgres_dump(&newdb.db_name, dump_path)
-                            .await
-                            .map_err(|e| RpcError::ProvisioningFailed {
-                                stage: "import_db_restore".into(),
-                                reason: e.to_string(),
-                            })?;
+                        hyperion_adapters::backup::restore_postgres_dump(
+                            &newdb.db_name,
+                            &newdb.db_user,
+                            dump_path,
+                        )
+                        .await
+                        .map_err(|e| RpcError::ProvisioningFailed {
+                            stage: "import_db_restore".into(),
+                            reason: e.to_string(),
+                        })?;
                     }
                     _ => {
-                        hyperion_adapters::backup::restore_mariadb_dump(&newdb.db_name, dump_path)
-                            .await
-                            .map_err(|e| RpcError::ProvisioningFailed {
-                                stage: "import_db_restore".into(),
-                                reason: e.to_string(),
-                            })?;
+                        let login = hyperion_adapters::backup::DbLogin {
+                            user: &newdb.db_user,
+                            password: &newdb.password,
+                        };
+                        hyperion_adapters::backup::restore_mariadb_dump(
+                            &newdb.db_name,
+                            &login,
+                            dump_path,
+                        )
+                        .await
+                        .map_err(|e| RpcError::ProvisioningFailed {
+                            stage: "import_db_restore".into(),
+                            reason: e.to_string(),
+                        })?;
                     }
                 }
             }

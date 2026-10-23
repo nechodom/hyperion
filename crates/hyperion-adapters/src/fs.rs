@@ -5,19 +5,102 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use tokio::fs;
 
-/// Atomic file write: write to `<path>.tmp`, set mode, rename to target.
-/// Caller owns the bytes; parent dir is created if missing.
+/// Atomic file write: write a fresh temp file beside `path`, set its mode,
+/// rename it over the target. Caller owns the bytes; parent dir is created
+/// if missing.
+///
+/// The temp file is created with `O_CREAT|O_EXCL|O_NOFOLLOW` under an
+/// unpredictable name, with `mode` applied at creation and again through
+/// the open descriptor. Several callers write into directories a site user
+/// can write (`~/.ssh`, a site's own tree): a fixed `<path>.tmp` name opened
+/// by path let that user plant a symlink there and have root write — and
+/// later chmod/chown — whatever it pointed at. A secret is also never
+/// readable at the default mode in the moment before a chmod.
 pub async fn atomic_write(path: &Path, bytes: &[u8], mode: u32) -> Result<(), AdapterError> {
+    write_then_rename(path, bytes, mode, None).await
+}
+
+/// [`atomic_write`], also handing the file to `uid:gid` — through the open
+/// descriptor, before it gets its final name. A path-based `chown` after the
+/// rename would follow whatever the directory's owner swapped in.
+pub async fn atomic_write_owned(
+    path: &Path,
+    bytes: &[u8],
+    mode: u32,
+    uid: u32,
+    gid: u32,
+) -> Result<(), AdapterError> {
+    write_then_rename(path, bytes, mode, Some((uid, gid))).await
+}
+
+async fn write_then_rename(
+    path: &Path,
+    bytes: &[u8],
+    mode: u32,
+    owner: Option<(u32, u32)>,
+) -> Result<(), AdapterError> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             fs::create_dir_all(parent).await?;
         }
     }
-    let tmp = with_extension(path, "tmp");
-    fs::write(&tmp, bytes).await?;
-    fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode)).await?;
-    fs::rename(&tmp, path).await?;
-    Ok(())
+    let path = path.to_path_buf();
+    let bytes = bytes.to_vec();
+    tokio::task::spawn_blocking(move || write_then_rename_blocking(&path, &bytes, mode, owner))
+        .await
+        .map_err(|e| AdapterError::Other(format!("atomic write task: {e}")))?
+}
+
+fn write_then_rename_blocking(
+    path: &Path,
+    bytes: &[u8],
+    mode: u32,
+    owner: Option<(u32, u32)>,
+) -> Result<(), AdapterError> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let tmp = unique_temp_sibling(path)?;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(mode)
+        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
+        .open(&tmp)?;
+    let result = (|| -> Result<(), AdapterError> {
+        f.write_all(bytes)?;
+        if let Some((uid, gid)) = owner {
+            rustix::fs::fchown(
+                &f,
+                Some(rustix::fs::Uid::from_raw(uid)),
+                Some(rustix::fs::Gid::from_raw(gid)),
+            )
+            .map_err(|e| AdapterError::Other(format!("fchown {}: {e}", tmp.display())))?;
+        }
+        // Again through the fd: the umask may have narrowed it at creation,
+        // and fchown clears setuid bits a caller might have asked for.
+        f.set_permissions(std::fs::Permissions::from_mode(mode))?;
+        f.sync_all()?;
+        std::fs::rename(&tmp, path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
+}
+
+/// `<dir>/.<name>.<random>.tmp` — beside `path` so the rename stays on one
+/// filesystem, and unguessable so nobody can occupy the name in advance.
+fn unique_temp_sibling(path: &Path) -> Result<PathBuf, AdapterError> {
+    use rand::Rng;
+    let name = path
+        .file_name()
+        .ok_or_else(|| AdapterError::Other(format!("no file name in {}", path.display())))?;
+    let tag: u64 = rand::thread_rng().gen();
+    let mut tmp_name = std::ffi::OsString::from(".");
+    tmp_name.push(name);
+    tmp_name.push(format!(".{tag:016x}.tmp"));
+    Ok(path.with_file_name(tmp_name))
 }
 
 /// Idempotent directory creation. Refuses to use symlinks (TOCTOU-safe).
@@ -131,8 +214,9 @@ pub fn open_path_no_follow(path: &Path) -> Result<std::fs::File, AdapterError> {
     let fd = rustix::fs::open(
         path,
         // RDONLY, not PATH: an O_PATH descriptor cannot be fchmod-ed, and
-        // read-only opens work for directories as well as files.
-        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        // read-only opens work for directories as well as files. NONBLOCK so
+        // a FIFO planted at the name cannot hang the open.
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
         Mode::empty(),
     )
     .map_err(|e| {
@@ -523,58 +607,102 @@ pub async fn ancestors_traversable(leaf: &Path) -> bool {
     true
 }
 
+/// OR the traverse bits (0o011) into `leaf` and every ancestor up to `/`,
+/// so nginx — running as another user — can path-resolve down to it.
+///
+/// Callers hand in paths inside site trees, whose directories the site user
+/// can replace. So a path that does not resolve to itself (some component is
+/// a symlink) is left alone entirely, and each directory is changed through
+/// a descriptor opened with `O_NOFOLLOW|O_DIRECTORY`: a chmod by name would
+/// follow a link swapped in after the check and widen whatever directory it
+/// pointed at.
 pub async fn ensure_ancestors_traversable(leaf: &Path) {
+    let leaf = leaf.to_path_buf();
+    let _ = tokio::task::spawn_blocking(move || ensure_ancestors_traversable_blocking(&leaf)).await;
+}
+
+fn ensure_ancestors_traversable_blocking(leaf: &Path) {
+    use rustix::fs::{Mode, OFlags};
+    match std::fs::canonicalize(leaf) {
+        Ok(c) if c == leaf => {}
+        Ok(c) => {
+            tracing::warn!(
+                path = %leaf.display(),
+                resolves_to = %c.display(),
+                "not making ancestors traversable: the path goes through a symlink"
+            );
+            return;
+        }
+        Err(_) => return, // missing or unreadable: nothing to do
+    }
     let mut current: Option<&Path> = Some(leaf);
     while let Some(p) = current {
-        match fs::metadata(p).await {
-            Ok(md) if md.is_dir() => {
-                let mode = md.permissions().mode() & 0o777;
-                let new_mode = mode | 0o011;
-                if new_mode != mode {
-                    if let Err(e) =
-                        fs::set_permissions(p, std::fs::Permissions::from_mode(new_mode)).await
-                    {
-                        tracing::warn!(
-                            path = %p.display(),
-                            old_mode = format!("{:o}", mode),
-                            new_mode = format!("{:o}", new_mode),
-                            error = %e,
-                            "could not OR traverse bits into ancestor; nginx may 404 on ACME challenges"
-                        );
-                    } else {
-                        tracing::info!(
-                            path = %p.display(),
-                            old_mode = format!("{:o}", mode),
-                            new_mode = format!("{:o}", new_mode),
-                            "made ancestor world-traversable for ACME challenges"
-                        );
-                    }
-                }
+        let Ok(fd) = rustix::fs::open(
+            p,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        ) else {
+            break; // not a directory (or a link now): can't traverse further sensibly
+        };
+        let Ok(st) = rustix::fs::fstat(&fd) else {
+            break;
+        };
+        let mode = st.st_mode & 0o777;
+        let new_mode = mode | 0o011;
+        if new_mode != mode {
+            match rustix::fs::fchmod(&fd, Mode::from_raw_mode(new_mode as _)) {
+                Err(e) => tracing::warn!(
+                    path = %p.display(),
+                    old_mode = format!("{:o}", mode),
+                    new_mode = format!("{:o}", new_mode),
+                    error = %e,
+                    "could not OR traverse bits into ancestor; nginx may 404 on ACME challenges"
+                ),
+                Ok(()) => tracing::info!(
+                    path = %p.display(),
+                    old_mode = format!("{:o}", mode),
+                    new_mode = format!("{:o}", new_mode),
+                    "made ancestor world-traversable for ACME challenges"
+                ),
             }
-            Ok(_) => break,  // not a dir → can't traverse further sensibly
-            Err(_) => break, // path missing or unreadable
         }
         current = p.parent();
         // Stop at filesystem root.
-        if matches!(current.map(|c| c.as_os_str().is_empty()), Some(true)) {
-            break;
-        }
-        if current == Some(Path::new("/")) {
+        if matches!(current.map(|c| c.as_os_str().is_empty()), Some(true))
+            || current == Some(Path::new("/"))
+        {
             break;
         }
     }
 }
 
-fn with_extension(p: &Path, ext: &str) -> PathBuf {
-    let mut s = p.as_os_str().to_owned();
-    s.push(".");
-    s.push(ext);
-    PathBuf::from(s)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A link already sitting at the target name is REPLACED, never written
+    /// through, and nothing is left behind but the file itself.
+    #[tokio::test]
+    async fn atomic_write_replaces_a_planted_link_instead_of_following_it() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let victim = dir.path().join("victim");
+        std::fs::write(&victim, b"untouched").expect("victim");
+        let target = dir.path().join("authorized_keys");
+        std::os::unix::fs::symlink(&victim, &target).expect("link");
+
+        atomic_write(&target, b"new", 0o600).await.expect("write");
+
+        assert_eq!(std::fs::read(&victim).expect("read"), b"untouched");
+        let md = std::fs::symlink_metadata(&target).expect("stat");
+        assert!(md.file_type().is_file());
+        assert_eq!(md.permissions().mode() & 0o7777, 0o600);
+        assert_eq!(std::fs::read(&target).expect("read"), b"new");
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("ls")
+            .map(|e| e.expect("entry").file_name())
+            .collect();
+        assert_eq!(names.len(), 2, "temp file left behind: {names:?}");
+    }
 
     #[test]
     fn rewrite_no_follow_edits_in_place_and_refuses_links() {
@@ -717,7 +845,10 @@ mod tests {
     #[tokio::test]
     async fn ensure_ancestors_traversable_adds_world_x() {
         let root = tempfile::tempdir().expect("tempdir");
-        let mid = root.path().join("hyperion"); // simulate /var/lib/hyperion
+        // Canonical: the helper refuses a path that goes through a link,
+        // and a temp dir often does (macOS /var -> /private/var).
+        let base = std::fs::canonicalize(root.path()).expect("canon");
+        let mid = base.join("hyperion"); // simulate /var/lib/hyperion
         let leaf = mid.join("acme-challenges"); // simulate the subdir
         std::fs::create_dir_all(&leaf).expect("mkdir");
         std::fs::set_permissions(&mid, std::fs::Permissions::from_mode(0o700))
@@ -752,7 +883,10 @@ mod tests {
     #[tokio::test]
     async fn ensure_ancestors_traversable_is_idempotent() {
         let root = tempfile::tempdir().expect("tempdir");
-        let p = root.path().join("a/b/c");
+        // Canonical: the helper refuses a path that goes through a link,
+        // and a temp dir often does (macOS /var -> /private/var).
+        let base = std::fs::canonicalize(root.path()).expect("canon");
+        let p = base.join("a/b/c");
         std::fs::create_dir_all(&p).expect("mkdir");
         std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o700)).expect("c 0700");
         std::fs::set_permissions(p.parent().unwrap(), std::fs::Permissions::from_mode(0o700))
@@ -772,7 +906,10 @@ mod tests {
     #[tokio::test]
     async fn ensure_ancestors_traversable_preserves_owner_group_bits() {
         let root = tempfile::tempdir().expect("tempdir");
-        let p = root.path().join("d");
+        // Canonical: the helper refuses a path that goes through a link,
+        // and a temp dir often does (macOS /var -> /private/var).
+        let base = std::fs::canonicalize(root.path()).expect("canon");
+        let p = base.join("d");
         std::fs::create_dir_all(&p).expect("mkdir");
         // 0o740: owner=rwx, group=r, others=---
         std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o740)).expect("chmod");
@@ -788,6 +925,27 @@ mod tests {
             "owner stays rwx, group adds x (so it can traverse too), others adds x. got {:o}",
             m
         );
+    }
+    /// A path through a symlink is left alone: the directories at the far
+    /// end are not ours to widen.
+    #[tokio::test]
+    async fn ensure_ancestors_traversable_refuses_a_path_through_a_link() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let base = std::fs::canonicalize(root.path()).expect("canon");
+        let elsewhere = base.join("elsewhere");
+        std::fs::create_dir_all(elsewhere.join("leaf")).expect("mkdir");
+        std::fs::set_permissions(&elsewhere, std::fs::Permissions::from_mode(0o700))
+            .expect("chmod");
+        std::os::unix::fs::symlink(&elsewhere, base.join("site")).expect("link");
+
+        ensure_ancestors_traversable(&base.join("site/leaf")).await;
+
+        let m = std::fs::metadata(&elsewhere)
+            .expect("md")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(m, 0o700, "a directory reached through a link was changed");
     }
 
     #[tokio::test]

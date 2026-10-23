@@ -467,6 +467,10 @@ pub trait AgentApi: Send + Sync + 'static {
 
     /// Restart a whitelisted systemd unit.
     async fn service_restart(&self, name: String) -> Result<(), RpcError>;
+    /// start / stop / enable / disable a whitelisted unit.
+    async fn service_control(&self, name: String, action: String) -> Result<(), RpcError>;
+    /// Recent journal lines for a whitelisted unit.
+    async fn service_journal(&self, name: String, lines: u32) -> Result<String, RpcError>;
     /// apt-install + enable a whitelisted unit. Returns immediately;
     /// poll `service_install_status` for the log tail.
     async fn service_install(&self, name: String) -> Result<(), RpcError>;
@@ -474,6 +478,12 @@ pub trait AgentApi: Send + Sync + 'static {
     async fn service_install_status(
         &self,
     ) -> Result<hyperion_types::ServiceInstallStatus, RpcError>;
+    /// Installed PHP branches with their sites (see `Request::PhpRuntimes`).
+    async fn php_runtimes(&self)
+        -> Result<Vec<hyperion_types::php_security::PhpRuntime>, RpcError>;
+    /// Purge one PHP branch. Returns once started; poll
+    /// `service_install_status`.
+    async fn php_uninstall(&self, branch: String) -> Result<(), RpcError>;
     /// Upload a WP plugin / theme ZIP into the master's asset
     /// library. Returns the row id (newly-inserted or existing if
     /// dedupe matched on SHA-256).
@@ -1122,7 +1132,11 @@ pub trait AgentApi: Send + Sync + 'static {
         user_id: i64,
     ) -> Result<hyperion_types::Web2faEnrollment, RpcError>;
     async fn web_2fa_confirm_enroll(&self, user_id: i64, code: String) -> Result<bool, RpcError>;
-    async fn web_2fa_disable(&self, user_id: i64) -> Result<(), RpcError>;
+    async fn web_2fa_disable(
+        &self,
+        user_id: i64,
+        current_password: Option<String>,
+    ) -> Result<(), RpcError>;
 
     /// Grant a user access to one hosting. `level` is "read" or "manage".
     /// Idempotent — re-granting upserts the level.

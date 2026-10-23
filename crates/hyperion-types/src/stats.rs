@@ -326,6 +326,26 @@ pub struct ServiceHealth {
     /// "restarting" badge instead of green "running".
     #[serde(default)]
     pub transient: bool,
+    // ---- Detail facts. All optional: an older agent sends none of them and
+    // the page simply leaves the detail line out. ----
+    /// Unix seconds when the unit entered its current state — up since when
+    /// running, down since when stopped or failed.
+    #[serde(default)]
+    pub since: Option<i64>,
+    /// `MemoryCurrent` (bytes); absent when accounting is off.
+    #[serde(default)]
+    pub memory_bytes: Option<u64>,
+    #[serde(default)]
+    pub main_pid: Option<u32>,
+    /// systemd's automatic restarts (`NRestarts`). Non-zero = crash loop.
+    #[serde(default)]
+    pub restarts: Option<u32>,
+    /// systemd `Result` when not `success` — `oom-kill`, `exit-code`, …
+    #[serde(default)]
+    pub result: Option<String>,
+    /// Installed package version, upstream part only (`1.26.3`).
+    #[serde(default)]
+    pub version: Option<String>,
 }
 
 /// Bundle of all service-health rows.
@@ -1903,6 +1923,10 @@ pub struct ServiceInstallStatus {
     /// Final non-zero exit code on failure (0 on success / still
     /// running).
     pub exit_code: i32,
+    /// "install" or "uninstall" (a PHP branch purge shares this slot).
+    /// Empty from an agent that predates uninstalls — that was an install.
+    #[serde(default)]
+    pub action: String,
 }
 
 /// One component of the setup wizard's software install and where it stands.
@@ -3015,7 +3039,7 @@ mod notification_topic_tests {
 
     #[test]
     fn every_emitted_kind_lands_in_its_topic() {
-        // The kinds the agent emits today (service.rs `notify_admins*`).
+        // The kinds the agent emits today (service/notify.rs `notify_admins*`).
         for (kind, topic) in [
             ("monitor.down:a.cz", "uptime"),
             ("monitor.up:a.cz", "uptime"),

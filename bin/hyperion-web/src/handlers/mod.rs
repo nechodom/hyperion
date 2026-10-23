@@ -27,6 +27,7 @@ pub mod monitoring;
 pub mod node_settings;
 pub mod notifications;
 pub mod packages;
+pub mod php_versions;
 pub mod pma;
 pub mod profile;
 pub mod profiles;

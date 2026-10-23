@@ -114,32 +114,18 @@ fn rate_limited() -> Response {
     r
 }
 
-/// The client's effective source IP for allowlist matching. hyperion-web
-/// normally sits behind nginx, so the connection peer is the proxy — the
-/// real client arrives in `X-Forwarded-For` (first hop) / `X-Real-IP`.
-/// Mirrors the enroll/heartbeat rate-limit bucketing so an allowlist means
-/// the same address in both places. Falls back to the connection peer.
+/// The client's effective source IP for allowlist matching — the loopback-
+/// trusted `X-Real-IP` behind nginx, otherwise the TCP peer. Never a
+/// client-supplied `X-Forwarded-For` (an allowlist a forged header can pass
+/// is no allowlist). `None` when no peer was recorded.
 fn client_ip(parts: &Parts) -> Option<IpAddr> {
-    if let Some(v) = parts
-        .headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-    {
-        if let Some(first) = v.split(',').next() {
-            if let Ok(ip) = first.trim().parse::<IpAddr>() {
-                return Some(ip);
-            }
-        }
-    }
-    if let Some(v) = parts.headers.get("x-real-ip").and_then(|v| v.to_str().ok()) {
-        if let Ok(ip) = v.trim().parse::<IpAddr>() {
-            return Some(ip);
-        }
-    }
+    // Only the TCP peer, with `X-Real-IP` trusted when that peer is loopback
+    // (the local nginx). A key's IP allowlist is a security control, so it
+    // must never be satisfiable with a forged `X-Forwarded-For`.
     parts
         .extensions
         .get::<ConnectInfo<SocketAddr>>()
-        .map(|ci| ci.0.ip())
+        .map(|ci| crate::auth::trusted_client_ip(&parts.headers, ci.0))
 }
 
 /// True iff `ip` falls within the CIDR (or bare IP) `entry`. A bare
@@ -690,6 +676,11 @@ pub async fn post_create(
     // `www.example.cz` is the alias of `example.cz`; normalise before the
     // duplicate guard so it sees the name the hosting will really get.
     body.req.domain = body.req.domain.without_www();
+    // Same rule as the wizard: naming an existing account shares its uid,
+    // which below cluster scope could be any other tenant's.
+    if body.req.system_user.is_some() && !ctx.scope_all() {
+        return validation("system_user may only be set by a cluster-wide key");
+    }
     let domain = body.req.domain.as_str().to_string();
     // Cluster-wide duplicate-domain guard: the same domain on ANOTHER node
     // would create a second vhost and collide in nginx. Mirrors the UI wizard.

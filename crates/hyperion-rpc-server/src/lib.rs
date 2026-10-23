@@ -673,12 +673,28 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(()) => Response::ServiceRestart,
             Err(e) => Response::Error(e),
         },
+        Request::ServiceControl { name, action } => match api.service_control(name, action).await {
+            Ok(()) => Response::ServiceControl,
+            Err(e) => Response::Error(e),
+        },
+        Request::ServiceJournal { name, lines } => match api.service_journal(name, lines).await {
+            Ok(text) => Response::ServiceJournal { text },
+            Err(e) => Response::Error(e),
+        },
         Request::ServiceInstall { name } => match api.service_install(name).await {
             Ok(()) => Response::ServiceInstall,
             Err(e) => Response::Error(e),
         },
         Request::ServiceInstallStatus => match api.service_install_status().await {
             Ok(s) => Response::ServiceInstallStatus(s),
+            Err(e) => Response::Error(e),
+        },
+        Request::PhpRuntimes => match api.php_runtimes().await {
+            Ok(v) => Response::PhpRuntimes(v),
+            Err(e) => Response::Error(e),
+        },
+        Request::PhpUninstall { branch } => match api.php_uninstall(branch).await {
+            Ok(()) => Response::PhpUninstall,
             Err(e) => Response::Error(e),
         },
         Request::WpAssetUpload {
@@ -1285,7 +1301,10 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
                 Err(e) => Response::Error(e),
             }
         }
-        Request::Web2faDisable { user_id } => match api.web_2fa_disable(user_id).await {
+        Request::Web2faDisable {
+            user_id,
+            current_password,
+        } => match api.web_2fa_disable(user_id, current_password).await {
             Ok(()) => Response::Web2faDisable,
             Err(e) => Response::Error(e),
         },
@@ -2810,6 +2829,12 @@ mod tests {
         async fn service_restart(&self, _: String) -> Result<(), RpcError> {
             Ok(())
         }
+        async fn service_control(&self, _: String, _: String) -> Result<(), RpcError> {
+            Ok(())
+        }
+        async fn service_journal(&self, _: String, _: u32) -> Result<String, RpcError> {
+            Ok(String::new())
+        }
         async fn node_update_run(&self, _: bool, _: bool, _: bool) -> Result<i64, RpcError> {
             Ok(0)
         }
@@ -2843,6 +2868,14 @@ mod tests {
             &self,
         ) -> Result<hyperion_types::ServiceInstallStatus, RpcError> {
             Ok(hyperion_types::ServiceInstallStatus::default())
+        }
+        async fn php_runtimes(
+            &self,
+        ) -> Result<Vec<hyperion_types::php_security::PhpRuntime>, RpcError> {
+            Ok(Vec::new())
+        }
+        async fn php_uninstall(&self, _: String) -> Result<(), RpcError> {
+            Ok(())
         }
         async fn wp_asset_upload(
             &self,
@@ -3332,7 +3365,7 @@ mod tests {
         async fn web_2fa_confirm_enroll(&self, _: i64, _: String) -> Result<bool, RpcError> {
             Ok(false)
         }
-        async fn web_2fa_disable(&self, _: i64) -> Result<(), RpcError> {
+        async fn web_2fa_disable(&self, _: i64, _: Option<String>) -> Result<(), RpcError> {
             Ok(())
         }
         async fn web_grant_hosting_access(

@@ -346,6 +346,14 @@ pub fn build_router(state: SharedState) -> Router {
             post(handlers::services_health::post_service_install),
         )
         .route(
+            "/services/control",
+            post(handlers::services_health::post_service_control),
+        )
+        .route(
+            "/services/unit",
+            get(handlers::services_health::get_service_unit),
+        )
+        .route(
             "/services/remount-usr-rw",
             post(handlers::services_health::post_remount_usr_rw),
         )
@@ -356,6 +364,14 @@ pub fn build_router(state: SharedState) -> Router {
         .route(
             "/services/install-status",
             get(handlers::services_health::get_service_install_status),
+        )
+        .route(
+            "/services/php",
+            get(handlers::php_versions::get_php_versions),
+        )
+        .route(
+            "/services/php-uninstall",
+            post(handlers::php_versions::post_php_uninstall),
         )
         // Mail delivery on Service health: a node's postfix and its fixes.
         .route(

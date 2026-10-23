@@ -286,17 +286,41 @@ pub(crate) struct NodeAlert {
     pub message: String,
     pub hosting: Option<String>,
     pub node: Option<String>,
+    /// `(href, label)` for an alert fixed on a page other than a site's.
+    pub link: Option<(String, String)>,
 }
 
 impl NodeAlert {
-    fn from_agent(a: DashboardAlert, node: Option<String>) -> Self {
+    /// `node_id` = the enrolled id the alert came from, `None` for the master.
+    fn from_agent(a: DashboardAlert, node: Option<String>, node_id: Option<&str>) -> Self {
+        let link = alert_link(&a.kind, node_id);
         NodeAlert {
             kind: a.kind,
             severity: a.severity,
             message: a.message,
             hosting: a.hosting,
             node,
+            link,
         }
+    }
+}
+
+/// Where an alert that is not about one site gets fixed.
+fn alert_link(kind: &str, node_id: Option<&str>) -> Option<(String, String)> {
+    match kind {
+        // Both are about a PHP branch on one node — the Services page for
+        // that node lists its sites and has the uninstall.
+        "php_unfixable" | "php_outdated" => Some((
+            match node_id {
+                Some(id) => format!(
+                    "/services?node={}#php-versions",
+                    crate::handlers::jobs::urlencode(id)
+                ),
+                None => "/services?node=local#php-versions".to_string(),
+            },
+            "Review PHP versions".to_string(),
+        )),
+        _ => None,
     }
 }
 
@@ -370,14 +394,14 @@ fn merge_alerts(
     use crate::dispatcher::DispatchError;
     let mut out: Vec<NodeAlert> = local
         .into_iter()
-        .map(|a| NodeAlert::from_agent(a, None))
+        .map(|a| NodeAlert::from_agent(a, None, None))
         .collect();
     for (n, alerts) in answered {
         let name = node_name(&n);
         out.extend(
             alerts
                 .into_iter()
-                .map(|a| NodeAlert::from_agent(a, Some(name.clone()))),
+                .map(|a| NodeAlert::from_agent(a, Some(name.clone()), Some(&n.node_id))),
         );
     }
     for (n, e) in failed {
@@ -401,6 +425,7 @@ fn merge_alerts(
             ),
             hosting: None,
             node: Some(node_name(n)),
+            link: None,
         });
     }
     out.sort_by_key(|a| severity_rank(&a.severity));

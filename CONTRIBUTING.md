@@ -36,9 +36,14 @@ bin/
 └── hctl/                  # CLI
 ```
 
-The orchestrator lives in `hyperion-core/src/service.rs` — that's
-where every public RPC method has its happy path + rollback. Big
-file, but `grep "pub async fn"` gives you an index.
+The orchestrator lives in `hyperion-core/src/service/` — that's
+where every public RPC method has its happy path + rollback.
+`mod.rs` holds `HostingService`, the `AdapterPort` trait and the
+builder; each domain (backups, certs, firewall, care packages, …)
+is its own file with an `impl HostingService` block plus the free
+helpers only it uses. Put new methods in the file of their domain,
+not in `mod.rs`. The web handlers for one hosting follow the same
+layout under `hyperion-web/src/handlers/hostings/`.
 
 ## House style
 

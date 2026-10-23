@@ -198,6 +198,25 @@ pub async fn list_trashed_expired(
     Ok(out)
 }
 
+/// `(id, domain, php_version, trashed)` for every site with a PHP version,
+/// trashed ones included — a trashed site still needs its branch to come
+/// back. Read raw, without the allow-list parse: a row on a branch the panel
+/// no longer offers must still show up, not fail the whole list.
+pub async fn list_php_sites(
+    pool: &SqlitePool,
+) -> Result<Vec<(String, String, String, bool)>, StateError> {
+    let rows: Vec<(String, String, String, String)> = sqlx::query_as(
+        "SELECT id, domain, php_version, state FROM hostings \
+          WHERE php_version IS NOT NULL AND php_version != '' ORDER BY domain",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, domain, php, state)| (id, domain, php, state == "trashed"))
+        .collect())
+}
+
 /// All currently-trashed hostings (any age). Used by the
 /// /trash page UI.
 pub async fn list_trashed(pool: &SqlitePool) -> Result<Vec<HostingRow>, StateError> {

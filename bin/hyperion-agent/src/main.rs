@@ -5,14 +5,15 @@
 #![allow(clippy::doc_lazy_continuation)]
 
 use clap::Parser;
-use hyperion_core::AdapterPort;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 mod acme_dns;
+mod boot;
 mod config;
 mod enroll;
 mod inbound_rpc;
+mod ticks;
 
 fn hostname_or_unknown() -> String {
     std::process::Command::new("hostname")
@@ -337,132 +338,16 @@ async fn main() -> anyhow::Result<()> {
     } else {
         Some(cfg.email.default_to.clone())
     };
-    // Postfix self-heal. Postfix is always brought to one of two
-    // known-good states at boot (idempotent):
-    //
-    //   (A) Smart-host mode — when [email] is enabled AND has a
-    //       non-empty smtp_host. Site mail() and Hyperion's own
-    //       outbound share the same authenticated SMTP relay.
-    //
-    //   (B) Direct-MX mode — when [email] is empty / disabled.
-    //       Postfix does its own MX lookup and SMTPs the recipient
-    //       directly from this node's IP. Works fine for operators
-    //       who handle their own PTR / SPF / DKIM and aren't behind
-    //       a port-25-blocked provider. We harden the defaults:
-    //       myhostname = `hostname -f`, smtp_helo_name = $myhostname,
-    //       myorigin = $myhostname, inet_interfaces = loopback-only
-    //       (the public port 25 listener stays closed so this box
-    //       can never accidentally be an open relay).
-    //
-    // The two modes share a single marker file so a future operator
-    // can `cat /etc/postfix/hyperion-relay.marker` to see which one
-    // the agent picked.
-    {
-        let email_cfg_for_postfix = email_cfg.clone();
-        let agent_hostname = hostname_or_unknown();
-        tokio::spawn(async move {
-            if !hyperion_core::postfix_is_installed().await {
-                tracing::debug!("boot: postfix not installed — skipping mail config");
-                return;
-            }
-            // This node's own FQDN — the yardstick for spotting a
-            // self-referential "relay" AND postfix's `myhostname` in
-            // direct-MX mode. Resolve it ONCE via `hostname -f` (fall back
-            // to the short hostname). The smart-host guard below MUST use
-            // the FQDN, not the short name: with the short name a relay set
-            // to the node's OWN fqdn (e.g. `s4.example.com` on host `s4`)
-            // slips past `host_is_local` into `relayhost=`, reintroducing
-            // the "loops back to myself" self-relay loop. This mirrors the
-            // runtime `mta_reconfigure` path, whose `fqdn` is already `-f`.
-            let fqdn = match tokio::process::Command::new("/bin/hostname")
-                .arg("-f")
-                .output()
-                .await
-            {
-                Ok(o) if o.status.success() => {
-                    let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                    if s.is_empty() {
-                        agent_hostname.clone()
-                    } else {
-                        s
-                    }
-                }
-                _ => agent_hostname.clone(),
-            };
-            match email_cfg_for_postfix {
-                // A relay host that points at THIS node (localhost / loopback /
-                // our own hostname) can't be a smart-host — postfix would loop
-                // back to itself ("mail for localhost loops back to myself").
-                // Fall through to direct-MX in that case, same as the reconfigure
-                // RPC path does.
-                Some(cfg)
-                    if !cfg.smtp_host.trim().is_empty()
-                        && !hyperion_core::postfix_host_is_local(&cfg.smtp_host, &fqdn) =>
-                {
-                    match hyperion_core::postfix_ensure_relay_config(&cfg).await {
-                        Ok(()) => {
-                            tracing::info!(
-                                relay = %cfg.smtp_host,
-                                port = cfg.smtp_port,
-                                "boot: postfix configured as smart-host via [email] relay"
-                            );
-                        }
-                        Err(e) => {
-                            tracing::error!(
-                                error = %e,
-                                "boot: postfix smart-host config FAILED — PHP mail() will \
-                                 not deliver. Fix the error and restart hyperion-agent."
-                            );
-                        }
-                    }
-                }
-                _ => {
-                    // Direct-MX mode. `fqdn` was resolved above (from
-                    // `hostname -f`, falling back to the short hostname if
-                    // the box has no configured DNS domain — the operator
-                    // can still send, just from an unqualified HELO, which
-                    // many receivers reject, so we log a warning).
-                    if !fqdn.contains('.') {
-                        tracing::warn!(
-                            hostname = %fqdn,
-                            "boot: postfix direct-MX configured with a non-FQDN HELO — \
-                             most receivers will reject mail. Set a proper FQDN with \
-                             `hostnamectl set-hostname <name>.<domain>` and ensure the IP's \
-                             PTR record matches."
-                        );
-                    }
-                    let direct_opts = hyperion_core::PostfixDirectDeliveryOpts {
-                        // Blank ⇒ the adapter's defaults (ipv4, kernel's
-                        // choice of source address), so a node whose
-                        // agent.toml predates these keys still gets the
-                        // deliverability-safe policy.
-                        inet_protocols: Some(cfg.email.inet_protocols.clone())
-                            .filter(|s| !s.trim().is_empty()),
-                        bind_address: Some(cfg.email.bind_address.clone())
-                            .filter(|s| !s.trim().is_empty()),
-                    };
-                    match hyperion_core::postfix_ensure_direct_delivery_config(&fqdn, &direct_opts)
-                        .await
-                    {
-                        Ok(()) => {
-                            tracing::info!(
-                                myhostname = %fqdn,
-                                "boot: postfix configured for direct MX delivery — \
-                                 operator handles PTR / SPF / DKIM"
-                            );
-                        }
-                        Err(e) => {
-                            tracing::error!(
-                                error = %e,
-                                "boot: postfix direct-MX config FAILED — PHP mail() may not \
-                                 deliver. Fix the error and restart hyperion-agent."
-                            );
-                        }
-                    }
-                }
-            }
-        });
-    }
+    // Blank ⇒ the adapter's defaults (ipv4, kernel's choice of source
+    // address), so a node whose agent.toml predates these keys still gets
+    // the deliverability-safe policy.
+    boot::spawn_postfix_config(
+        email_cfg.clone(),
+        hyperion_core::PostfixDirectDeliveryOpts {
+            inet_protocols: Some(cfg.email.inet_protocols.clone()).filter(|s| !s.trim().is_empty()),
+            bind_address: Some(cfg.email.bind_address.clone()).filter(|s| !s.trim().is_empty()),
+        },
+    );
     // Master-RPC signing key — auto-generated on first start, mode
     // 0600. Only the master node really needs it (it's the one
     // that ACKs enrollments and heartbeats), but on a worker the
@@ -530,7 +415,7 @@ async fn main() -> anyhow::Result<()> {
     // signal (workers have the file → hyperion-web is a non-issue;
     // master doesn't → hyperion-web is critical). Same path used by
     // the heartbeat loop + AgentImpl::with_state_file below.
-    let state_file_for_svc = cfg
+    let state_file = cfg
         .enrollment
         .state_file
         .clone()
@@ -564,959 +449,17 @@ async fn main() -> anyhow::Result<()> {
         .with_permissions_autoheal(cfg.permissions.enabled)
         .with_snapshots(cfg.snapshots.enabled)
         .with_agent_config_path(cli.config.clone())
-        .with_node_state_file(state_file_for_svc)
+        .with_node_state_file(state_file.clone())
         .with_git_sha(env!("HYPERION_GIT_SHA"));
     if let Some(signer) = master_rpc_signer {
         builder = builder.with_master_rpc_signer(signer);
     }
     let svc = Arc::new(builder);
 
-    // Self-heal: re-render every Active hosting's FPM pool with the
-    // detected nginx user. Old pool files on disk may still encode a
-    // stale `listen.owner` (e.g. www-data when nginx now runs as
-    // `vito`). Without this an in-place upgrade via update.sh wouldn't
-    // unbreak existing 502'ing hostings.
-    {
-        // Refresh the WordPress preview shim for every hosting. The
-        // agent's mu-plugin PHP can change between releases while the
-        // preview vhost on disk does not, and update.sh never rewrites
-        // vhosts — so without this a corrected shim would not land until
-        // each site was re-saved by hand. Shim-only: no nginx touch.
-        {
-            let shim_svc = svc.clone();
-            let shim_adapter = adapter_for_shims.clone();
-            tokio::spawn(async move {
-                let hostings = match shim_svc.list().await {
-                    Ok(v) => v,
-                    Err(_) => return,
-                };
-                let mut n = 0u32;
-                for h in hostings {
-                    if let Ok(d) = shim_svc
-                        .get(hyperion_rpc::wire::HostingSelector::Id(h.id.clone()))
-                        .await
-                    {
-                        shim_adapter
-                            .reconcile_preview_shim(&d.domain, &d.root_dir, &d.system_user)
-                            .await;
-                        n += 1;
-                    }
-                }
-                if n > 0 {
-                    tracing::info!(count = n, "boot: refreshed WordPress preview shims");
-                }
-            });
-        }
-        let rerender_svc = svc.clone();
-        tokio::spawn(async move {
-            let n = rerender_svc.rerender_fpm_pools().await;
-            if n > 0 {
-                tracing::info!(
-                    count = n,
-                    "boot: re-rendered FPM pools with current nginx user"
-                );
-            }
-            // After the pools, so a vhost never points at a socket whose
-            // pool is still being rewritten.
-            let n = rerender_svc.rerender_stale_vhosts().await;
-            if n > 0 {
-                tracing::info!(count = n, "boot: rolled the current vhost template out");
-            }
-            rerender_svc.ensure_redis_memory_policy().await;
-            // The OWASP Core Rule Set is loaded at http level only while a
-            // site on this node uses it; re-assert that after an update (or
-            // after the package was removed by hand).
-            match rerender_svc.crs_sync().await {
-                Ok(true) => {
-                    tracing::info!("boot: ModSecurity rule set loaded/unloaded to match sites")
-                }
-                Ok(false) => {}
-                Err(e) => tracing::warn!(error = %e, "boot: ModSecurity rule set sync failed"),
-            }
-        });
-    }
-    // Self-heal / upgrade: re-assert the master panel vhost so template changes
-    // take effect after an in-place update — notably the upstream-down
-    // "updating" page that replaces a bare 502 while update.sh has hyperion-web
-    // stopped. No-op unless a panel hostname + cert are already present.
-    {
-        let panel_svc = svc.clone();
-        tokio::spawn(async move {
-            match panel_svc.ensure_panel_vhost().await {
-                Ok(true) => tracing::info!("boot: re-asserted master panel vhost"),
-                Ok(false) => tracing::debug!("boot: no panel vhost to assert"),
-                Err(e) => tracing::warn!(error=%e, "boot: panel vhost re-assert failed"),
-            }
-        });
-    }
-    // Auto-update, when the operator has opted in. Hourly probe, but the
-    // release check itself is cached agent-side for an hour, so this costs
-    // one HTTP request a day in the common case and applies a new release
-    // within the hour otherwise.
-    {
-        let au_svc = svc.clone();
-        tokio::spawn(async move {
-            // Not at boot: an update that restarts the agent, at the moment
-            // the agent starts, is a loop waiting to happen if anything goes
-            // wrong. Give the box time to prove it is healthy first.
-            tokio::time::sleep(std::time::Duration::from_secs(15 * 60)).await;
-            let mut tick = tokio::time::interval(std::time::Duration::from_secs(3600));
-            tick.tick().await;
-            loop {
-                if au_svc.auto_update_tick().await {
-                    tracing::info!("auto-update started — this process may be replaced");
-                }
-                tick.tick().await;
-            }
-        });
-    }
+    boot::spawn_repairs(&svc, adapter_for_shims);
+    ticks::spawn_all(&svc, cfg.acme.renewal_window_days);
 
-    // Read-only rootfs watchdog. ext4 remounts itself ro on I/O errors,
-    // and from that moment the panel the operator would use to fix it may
-    // itself be broken — so this cannot wait for a click. One-minute
-    // cadence: the check is a read of /proc/mounts, and every minute a box
-    // spends read-only is a minute of failed writes for every site on it.
-    // The tick carries its own guard rails (attempt cap, immutable-image
-    // refusal, loud notifications) — see rofs_watchdog_tick.
-    {
-        let rofs_svc = svc.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_secs(90)).await;
-            let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
-            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            loop {
-                tick.tick().await;
-                rofs_svc.rofs_watchdog_tick().await;
-            }
-        });
-    }
-
-    // Record what this box IS, once, so it is a literal in agent.toml rather
-    // than something inferred on every read. An install that predates the key
-    // gets the right answer here with no operator action.
-    {
-        let mode_svc = svc.clone();
-        tokio::spawn(async move {
-            if let Err(e) = mode_svc.backfill_deployment_mode().await {
-                tracing::warn!(error=%e, "boot: could not record the deployment mode");
-            }
-        });
-    }
-    // Self-heal: scan every enabled nginx vhost for `ssl_certificate`
-    // paths that no longer exist on disk. For each missing cert we
-    // generate a self-signed bootstrap so `nginx -t` passes — without
-    // this a single deleted cert dir bricks the WHOLE nginx process
-    // and every hosting create/update/delete fails with `nginx -t`
-    // exit 1. (Real LE cert gets reissued on the next renewal tick.)
-    {
-        let repair_svc = svc.clone();
-        tokio::spawn(async move {
-            // ALSO heal missing log dirs in the same pass. nginx opens
-            // every access_log / error_log file at startup; a missing
-            // parent dir produces the same emerg-exit as a missing
-            // cert. We do this BEFORE the cert sweep so a node whose
-            // certs AND log dirs are both broken can recover in one
-            // nginx_reload at the end.
-            let log_dirs = repair_svc.adapters.ensure_vhost_log_dirs().await;
-            let mut need_reload = false;
-            match log_dirs {
-                Ok((0, _)) => tracing::debug!("boot: vhost log dir sweep clean"),
-                Ok((created, scanned)) => {
-                    tracing::warn!(
-                        created,
-                        scanned,
-                        "boot: created missing nginx log dirs — will reload"
-                    );
-                    need_reload = true;
-                }
-                Err(e) => tracing::error!(error = %e, "boot: vhost log dir sweep failed"),
-            }
-            match repair_svc.adapters.repair_orphan_certs().await {
-                Ok((0, _scanned)) => {
-                    tracing::debug!("boot: orphan cert sweep clean");
-                    if need_reload {
-                        let _ = repair_svc.adapters.nginx_reload().await;
-                    }
-                }
-                Ok((repaired, scanned)) => {
-                    tracing::warn!(
-                        repaired,
-                        scanned,
-                        "boot: regenerated self-signed certs for orphan vhosts — \
-                         reloading nginx to recover"
-                    );
-                    // Best-effort reload. If nginx was already down
-                    // because of this exact issue, `reload` will
-                    // auto-promote to `start` (see nginx::reload
-                    // self-heal). On reload failure the operator will
-                    // see the error in journalctl and can investigate.
-                    if let Err(e) = repair_svc.adapters.nginx_reload().await {
-                        tracing::error!(
-                            error = %e,
-                            "boot: nginx reload after cert repair failed — \
-                             manual `systemctl restart nginx` may be needed"
-                        );
-                    }
-                }
-                Err(e) => {
-                    tracing::error!(
-                        error = %e,
-                        "boot: orphan cert sweep failed"
-                    );
-                }
-            }
-        });
-    }
-    // Self-heal: scan every PHP-FPM pool file for `user` /
-    // `listen.owner` references to Unix users that no longer exist.
-    // A single such pool makes php<ver>-fpm exit 78 EX_CONFIG on
-    // start, systemd gives up after 5 retries, and EVERY hosting on
-    // that PHP version starts returning 502. We quarantine the bad
-    // file (rename → `.conf.hyperion-quarantined-<ts>`) and restart
-    // FPM so healthy pools can serve again. Operator can inspect or
-    // recover the quarantined file under /etc/php/<ver>/fpm/pool.d/.
-    {
-        let repair_svc = svc.clone();
-        tokio::spawn(async move {
-            match repair_svc.adapters.repair_orphan_fpm_pools().await {
-                Ok((0, _scanned)) => {
-                    tracing::debug!("boot: orphan FPM pool sweep clean");
-                }
-                Ok((quarantined, scanned)) => {
-                    tracing::warn!(
-                        quarantined,
-                        scanned,
-                        "boot: quarantined FPM pools that referenced missing Unix users — \
-                         restarting affected php<ver>-fpm services"
-                    );
-                    // We don't know which PHP versions had a bad
-                    // pool, but the cost of restarting all four is
-                    // tiny (~50ms each) and idempotent for healthy
-                    // versions (`reset-failed` + `start` is a no-op
-                    // on a running service).
-                    for ver in hyperion_types::PhpVersion::all() {
-                        if let Err(e) = repair_svc.adapters.fpm_restart(*ver).await {
-                            // Most likely the version isn't installed
-                            // on this node — log at debug to keep the
-                            // boot output clean.
-                            tracing::debug!(
-                                version = %ver,
-                                error = %e,
-                                "boot: FPM restart after quarantine returned non-zero \
-                                 (often means this version isn't installed)"
-                            );
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::error!(
-                        error = %e,
-                        "boot: orphan FPM pool sweep failed"
-                    );
-                }
-            }
-            // Belt-and-braces: regardless of what the quarantine
-            // pass did, walk every installed php<ver>-fpm service
-            // and recover any in "failed" state. This handles the
-            // exact stav scenario: an older boot wrote a broken
-            // pool, FPM died, systemd marked it failed after 5
-            // retries. A later boot fixed the pool (via rerender)
-            // but never reset the failed flag — so the service
-            // stays dead until we explicitly reset-failed + start.
-            // Idempotent for healthy services: is-failed returns
-            // false → we skip them.
-            match repair_svc.adapters.fpm_recover_failed().await {
-                Ok(0) => {
-                    tracing::debug!("boot: no FPM services in failed state");
-                }
-                Ok(n) => {
-                    tracing::warn!(recovered = n, "boot: kicked failed FPM services back up");
-                }
-                Err(e) => {
-                    tracing::error!(
-                        error = %e,
-                        "boot: FPM failed-state recovery sweep errored"
-                    );
-                }
-            }
-        });
-    }
-    // One-shot backfill: tag every hostings row that has NULL node_id
-    // with this node's identifier. Pre-migration-016 rows still show
-    // "—" in the UI until this completes — usually within a second of
-    // boot — and after that every list/detail render carries a real
-    // node chip.
-    {
-        let backfill_svc = svc.clone();
-        tokio::spawn(async move {
-            match backfill_svc.backfill_local_node_id().await {
-                Ok(0) => {}
-                Ok(n) => tracing::info!(rows = n, "boot: backfilled node_id on legacy rows"),
-                Err(e) => tracing::warn!(error = %e, "boot: node_id backfill failed"),
-            }
-        });
-    }
-    // Background scheduler: fire scheduler_tick (expiry sweep) every 5 minutes.
-    {
-        let tick_svc = svc.clone();
-        tokio::spawn(async move {
-            // Reap orphaned jobs ONCE at startup: background-job closures
-            // run in the hyperion-web process, so a web restart/redeploy
-            // (or a panicking closure / failed JobFinish) leaves the row
-            // stuck in `running` forever — the /jobs card spins, the
-            // sidebar badge over-counts, and retry is permanently blocked
-            // ("job is still running"). The reaper marks rows whose
-            // updated_at is older than the stale threshold as failed.
-            // JobReporter::step bumps updated_at, so a genuinely-live job
-            // is never reaped.
-            const JOB_STALE_SECS: i64 = 3600; // 1h with no progress update
-            if let Ok(n) = tick_svc.jobs_reap_stale(JOB_STALE_SECS).await {
-                if n > 0 {
-                    tracing::warn!(rows = n, "startup: reaped stale jobs");
-                }
-            }
-            // A backup run is `running` only during the local tar+hash (state
-            // flips to `ok` before the off-site push), which even on a big site
-            // is under an hour — so a run still `running` after 6h is a crash,
-            // not a slow backup. Reap it so it stops spinning forever.
-            const BACKUP_STALE_SECS: i64 = 6 * 3600;
-            if let Ok(n) = tick_svc.backups_reap_stale(BACKUP_STALE_SECS).await {
-                if n > 0 {
-                    tracing::warn!(rows = n, "startup: reaped stale backup runs");
-                }
-            }
-            // Rebuild hyperion's firewall chain (presets, confirmed
-            // default-drop) BEFORE the bans: nft rules do not survive a
-            // reboot, and the ban infra would otherwise create the chain
-            // first as plain accept.
-            match tick_svc.firewall_reapply_on_boot().await {
-                Ok(s) if !s.is_empty() => tracing::info!(what=%s, "startup: firewall re-applied"),
-                Ok(_) => {}
-                Err(e) => tracing::warn!(error=%e, "startup: firewall re-apply failed"),
-            }
-            // Re-apply persisted IP bans to nftables ONCE at startup —
-            // nft sets are in-memory and lost across reboots.
-            match tick_svc.bans_reapply_on_boot().await {
-                Ok(n) if n > 0 => tracing::info!(bans = n, "startup: re-applied IP bans"),
-                Ok(_) => {}
-                Err(e) => tracing::warn!(error=%e, "startup: ban re-apply failed"),
-            }
-            // Re-push stored disk caps into the kernel ONCE at startup. A cap
-            // saved while quotas needed a reboot to activate is otherwise never
-            // written: the reboot brings the subsystem up (fstab) but the
-            // per-user setquota limit was never applied. This delivers on the
-            // "enforced after the node reboots" promise.
-            match tick_svc.quotas_reapply_on_boot().await {
-                Ok(n) if n > 0 => tracing::info!(quotas = n, "startup: re-applied disk caps"),
-                Ok(_) => {}
-                Err(e) => tracing::warn!(error=%e, "startup: quota re-apply failed"),
-            }
-            // Re-assert Redis ACLs at startup. The rule set is only written
-            // at enable/rotate, so a site keeps whatever rules were current
-            // the day Redis was switched on — and when a missing grant is
-            // what breaks the site, every existing site stays broken until
-            // someone thinks to rotate the password.
-            match tick_svc.redis_acl_reassert_on_boot().await {
-                Ok(n) if n > 0 => tracing::info!(sites = n, "startup: re-asserted Redis ACLs"),
-                Ok(_) => {}
-                Err(e) => tracing::warn!(error=%e, "startup: Redis ACL re-assert failed"),
-            }
-            // Disable the logins of sites that are suspended or in the trash.
-            // Versions before this locked only the site user's password, which
-            // left extra FTP logins and SFTP keys working on an offline site.
-            match tick_svc.offline_logins_lock_on_boot().await {
-                Ok(n) if n > 0 => tracing::info!(
-                    sites = n,
-                    "startup: disabled every login of offline sites locked by an older version"
-                ),
-                Ok(_) => {}
-                Err(e) => tracing::warn!(error=%e, "startup: offline login lock failed"),
-            }
-            // Repoint any stale vsftpd local_root ONCE at startup, before the
-            // loop. The loop skips its first tick, so without this an FTP
-            // population broken by a bug the deploy just fixed would stay
-            // broken for another five minutes after the upgrade.
-            match tick_svc.ftp_autoheal_tick().await {
-                Ok(n) if n > 0 => tracing::info!(healed = n, "startup: repaired FTP roots"),
-                Ok(_) => {}
-                Err(e) => tracing::warn!(error=%e, "startup: FTP autoheal failed"),
-            }
-            // The firewall's default-drop rollback runs on its OWN loop, and a
-            // tight one. The deadline is measured in minutes and the operator
-            // is, by construction, possibly locked out while it runs — a
-            // five-minute scheduler tick could hold a closed box shut for five
-            // minutes longer than promised. Checked once immediately too: an
-            // agent that restarted between arming and confirming would
-            // otherwise leave the policy dropping with nobody watching, which
-            // is the exact state the deadline exists to prevent.
-            let fw_svc = tick_svc.clone();
-            tokio::spawn(async move {
-                fw_svc.firewall_rollback_tick().await;
-                let mut fw = tokio::time::interval(std::time::Duration::from_secs(15));
-                loop {
-                    fw.tick().await;
-                    fw_svc.firewall_rollback_tick().await;
-                }
-            });
-
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(5 * 60));
-            interval.tick().await; // skip the immediate first tick
-            loop {
-                interval.tick().await;
-                match tick_svc.scheduler_tick().await {
-                    Ok(n) if n > 0 => tracing::info!(processed = n, "scheduler tick"),
-                    Ok(_) => tracing::debug!("scheduler tick: nothing due"),
-                    Err(e) => tracing::warn!(error=%e, "scheduler tick failed"),
-                }
-                // Also sweep stale jobs each tick (cheap UPDATE).
-                if let Ok(n) = tick_svc.jobs_reap_stale(JOB_STALE_SECS).await {
-                    if n > 0 {
-                        tracing::warn!(rows = n, "reaped stale jobs");
-                    }
-                }
-                // …and stuck backup runs (crashed mid-tar), same cheap UPDATE.
-                if let Ok(n) = tick_svc.backups_reap_stale(BACKUP_STALE_SECS).await {
-                    if n > 0 {
-                        tracing::warn!(rows = n, "reaped stale backup runs");
-                    }
-                }
-                // Brute-force scan + auto-ban each tick.
-                match tick_svc.fail2ban_tick().await {
-                    Ok(n) if n > 0 => tracing::info!(banned = n, "fail2ban: new bans"),
-                    Ok(_) => {}
-                    Err(e) => tracing::warn!(error=%e, "fail2ban tick failed"),
-                }
-                // Enforce per-hosting disk-overage policy (notify / suspend +
-                // auto-resume) for sites that crossed their disk hard cap.
-                match tick_svc.quota_enforce_tick().await {
-                    Ok(n) if n > 0 => tracing::info!(acted = n, "quota enforce: acted on sites"),
-                    Ok(_) => {}
-                    Err(e) => tracing::warn!(error=%e, "quota enforce tick failed"),
-                }
-                // Self-heal trees nginx cannot read (archive modes from an
-                // import, a root-shell unzip). Probe is a few stats per
-                // site; the chown/chmod runs only when it fires.
-                match tick_svc.permissions_autoheal_tick().await {
-                    Ok(n) if n > 0 => {
-                        tracing::warn!(healed = n, "permissions autoheal: repaired site trees")
-                    }
-                    Ok(_) => {}
-                    Err(e) => tracing::warn!(error=%e, "permissions autoheal tick failed"),
-                }
-                // Repoint a stale vsftpd local_root, fix web-root ownership
-                // and ancestor traversal. Never touches the daemon, a
-                // node-wide file, or any password state — see the doc comment
-                // on ftp_autoheal_tick for why those are operator decisions.
-                // Keep every WordPress site's sender pinned to its own
-                // domain, and record the sends that fail. Silent when it
-                // works; only mail that is STILL failing after Hyperion
-                // took it over reaches the notification centre.
-                match tick_svc.wp_mail_tick().await {
-                    Ok(n) if n > 0 => {
-                        tracing::info!(configured = n, "wp mail: wrote configuration")
-                    }
-                    Ok(_) => {}
-                    Err(e) => tracing::warn!(error=%e, "wp mail tick failed"),
-                }
-                // The one Hyperion plugin every WordPress site carries: old
-                // single-file copies moved into it, the loader and spam
-                // guard kept current, and the wp-admin status page told what
-                // this node last saw.
-                match tick_svc.wp_plugin_tick().await {
-                    Ok(n) if n > 0 => {
-                        tracing::info!(sites = n, "wp plugin: wrote plugin files")
-                    }
-                    Ok(_) => {}
-                    Err(e) => tracing::warn!(error=%e, "wp plugin tick failed"),
-                }
-                match tick_svc.ftp_autoheal_tick().await {
-                    Ok(n) if n > 0 => {
-                        tracing::warn!(healed = n, "ftp autoheal: repaired FTP roots")
-                    }
-                    Ok(_) => {}
-                    Err(e) => tracing::warn!(error=%e, "ftp autoheal tick failed"),
-                }
-                // Finish any unlock of a returned site's logins that did not
-                // complete — without this a login whose restore failed once
-                // stayed disabled on a live site with nothing to retry it.
-                match tick_svc.offline_logins_reconcile().await {
-                    Ok(n) if n > 0 => {
-                        tracing::warn!(accounts = n, "re-enabled logins of sites back online")
-                    }
-                    Ok(_) => {}
-                    Err(e) => tracing::warn!(error=%e, "login reconcile tick failed"),
-                }
-            }
-        });
-    }
-    // Background stats sampler: fire stats_tick every 5 minutes. Offset
-    // by 30s so it doesn't collide with the scheduler tick.
-    {
-        let stats_svc = svc.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(5 * 60));
-            interval.tick().await; // immediate first tick now that we're past the offset
-            loop {
-                match stats_svc.stats_tick().await {
-                    Ok(n) => tracing::info!(sampled = n, "stats tick"),
-                    Err(e) => tracing::warn!(error=%e, "stats tick failed"),
-                }
-                interval.tick().await;
-            }
-        });
-    }
-    // Dedicated high-resolution network sampler. Separate from the 5-minute
-    // stats sampler (which also runs a per-hosting `du` and must stay coarse):
-    // this only diffs /proc/net/dev, so it can tick every few seconds to feed
-    // the realtime rx/tx sparkline. `prev` holds the last counters+time so the
-    // delta is over real elapsed wall-clock; the tick prunes its own ring.
-    {
-        let net_svc = svc.clone();
-        tokio::spawn(async move {
-            let mut prev: hyperion_core::NetSamplerState = None;
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(15));
-            loop {
-                interval.tick().await;
-                if let Err(e) = net_svc.net_sample_tick(&mut prev).await {
-                    tracing::debug!(error=%e, "net sample tick failed");
-                }
-            }
-        });
-    }
-    // Background per-hosting HTTP monitor: every 60s the tick walks all
-    // enabled hostings whose `monitor_interval_secs` has elapsed since
-    // the last sample, probes each, records, and dispatches alerts.
-    // 60s is a fine outer cadence because the per-hosting interval
-    // gates work; we just want enough resolution that a 60s interval
-    // (the minimum) actually fires every minute.
-    {
-        let monitor_svc = svc.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_secs(45)).await;
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
-            interval.tick().await; // immediate-first-tick consumption
-            loop {
-                match monitor_svc.monitor_tick().await {
-                    Ok(0) => tracing::debug!("monitor tick: nothing due"),
-                    Ok(n) => tracing::info!(sampled = n, "monitor tick"),
-                    Err(e) => tracing::warn!(error=%e, "monitor tick failed"),
-                }
-                interval.tick().await;
-            }
-        });
-    }
-    // Automatic PHP memory_limit: answer "Allowed memory size … exhausted" in
-    // a site's error.log by raising its pool one step (bounded), and step it
-    // back down after a quiet fortnight. Its own two-minute task: a site
-    // erroring out should not wait for the five-minute loop, and reading
-    // tenant logs must never hold fail2ban or quota enforcement up.
-    {
-        let mem_svc = svc.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_secs(90)).await;
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(120));
-            loop {
-                interval.tick().await;
-                match mem_svc.php_mem_auto_tick().await {
-                    Ok(n) if n > 0 => tracing::info!(pools = n, "php mem auto: rewrote pools"),
-                    Ok(_) => {}
-                    Err(e) => tracing::warn!(error=%e, "php mem auto tick failed"),
-                }
-            }
-        });
-    }
-    // PHP-FPM pools that ran out of workers ("server reached
-    // pm.max_children"): read from each version's FPM log, recorded per site
-    // for its limits card, and reported. Own one-minute task for the same
-    // reason as the memory automation above; the read positions live here,
-    // so a restart starts at the end of each log rather than re-reporting.
-    {
-        let workers_svc = svc.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-            let mut cursors = std::collections::HashMap::new();
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
-            loop {
-                interval.tick().await;
-                match workers_svc
-                    .php_workers_tick(std::path::Path::new("/var/log"), &mut cursors)
-                    .await
-                {
-                    Ok(n) if n > 0 => {
-                        tracing::info!(sites = n, "php workers: pools at their limit")
-                    }
-                    Ok(_) => {}
-                    Err(e) => tracing::warn!(error=%e, "php workers tick failed"),
-                }
-            }
-        });
-    }
-    // The weekly page walk. On its OWN task, not in the five-minute loop:
-    // one pass fetches up to eight pages plus forty links PER SITE, each
-    // with a 20-second ceiling, so on a node with a few dozen care-plan
-    // sites a bad week could hold the shared loop for longer than its own
-    // period — and everything behind it (fail2ban bans, quota enforcement,
-    // permission repair) would stop running while it waited on somebody
-    // else's slow site.
-    //
-    // Hourly outer cadence; the per-site weekly interval is enforced inside
-    // the tick from each report's own timestamp, so this only decides how
-    // promptly a site that has become due is picked up.
-    {
-        let site_svc = svc.clone();
-        tokio::spawn(async move {
-            // Well clear of boot: the first pass would otherwise compete
-            // with provisioning and the initial stats sample.
-            tokio::time::sleep(std::time::Duration::from_secs(300)).await;
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
-            interval.tick().await; // immediate-first-tick consumption
-            loop {
-                match site_svc.site_check_tick().await {
-                    Ok(n) if n > 0 => tracing::info!(sites = n, "site check: walked sites"),
-                    Ok(_) => {}
-                    Err(e) => tracing::warn!(error=%e, "site check tick failed"),
-                }
-                interval.tick().await;
-            }
-        });
-    }
-    // acme-dns responder: idle unless the master's operator enabled it in
-    // Settings → HTTPS (the row is never synced to workers).
-    acme_dns::spawn(svc.pool.clone());
-    // Cert renewal — every 24h, sweep certificates for LE certs whose
-    // `not_after` is within `renewal_window_days` (default 30) and
-    // re-issue. Without this tick every LE cert silently expires at
-    // day 90. Daily cadence is fine: LE certs are 90-day-lived and
-    // the renewal window gives 30 days of retry headroom; an
-    // operator restart never lengthens that window because the next
-    // tick lines up within 24h of boot.
-    {
-        let renew_svc = svc.clone();
-        let threshold = cfg.acme.renewal_window_days.max(1);
-        tokio::spawn(async move {
-            // 3-minute offset so we don't collide with scheduler /
-            // stats / monitor ticks at boot.
-            tokio::time::sleep(std::time::Duration::from_secs(180)).await;
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(24 * 3600));
-            interval.tick().await; // immediate-first-tick consumption
-            loop {
-                let now = hyperion_types::now_secs();
-                match renew_svc.cert_renew_tick(now, threshold).await {
-                    Ok(results) if !results.is_empty() => {
-                        let renewed = results
-                            .iter()
-                            .filter(|r| {
-                                matches!(
-                                    r.outcome,
-                                    hyperion_types::CertRenewOutcome::Renewed { .. }
-                                )
-                            })
-                            .count();
-                        let failed = results
-                            .iter()
-                            .filter(|r| {
-                                matches!(r.outcome, hyperion_types::CertRenewOutcome::Failed { .. })
-                            })
-                            .count();
-                        tracing::info!(due = results.len(), renewed, failed, "cert renewal tick");
-                    }
-                    Ok(_) => tracing::debug!("cert renewal tick: nothing due"),
-                    Err(e) => tracing::warn!(error=%e, "cert renewal tick failed"),
-                }
-                interval.tick().await;
-            }
-        });
-    }
-    // WordPress defender sweep — once per day. Scans every active WP
-    // hosting for outdated plugins/themes (keyless — via wp-cli's own
-    // update status), auto-applies safe minor/patch updates when enabled,
-    // stores the result for the cluster dashboard, and notifies admins
-    // about NEW major updates needing manual review.
-    {
-        let vuln_svc = svc.clone();
-        tokio::spawn(async move {
-            // 4-minute offset so it doesn't collide with the cert-renew
-            // tick (3 min) or the boot ticks.
-            tokio::time::sleep(std::time::Duration::from_secs(240)).await;
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(24 * 3600));
-            interval.tick().await; // immediate-first-tick consumption
-            loop {
-                match vuln_svc.wp_vuln_scan_tick().await {
-                    Ok(n) if n > 0 => tracing::info!(new_majors = n, "wp defender tick"),
-                    Ok(_) => tracing::debug!("wp defender tick: no new major updates"),
-                    Err(e) => tracing::warn!(error=%e, "wp defender tick failed"),
-                }
-                interval.tick().await;
-            }
-        });
-    }
-    // WordPress integrity sweep — once per day. The other half of the
-    // defender: verifies core + plugin files against the checksums
-    // WordPress.org publishes and (where clamscan exists) sweeps each
-    // docroot, then notifies admins about NEWLY-appeared findings.
-    {
-        let integrity_svc = svc.clone();
-        tokio::spawn(async move {
-            // 6-minute offset: the vuln sweep (4 min) shells out to wp-cli
-            // for every site too, and running both at once would double
-            // the load on the same hostings at the same moment.
-            tokio::time::sleep(std::time::Duration::from_secs(360)).await;
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(24 * 3600));
-            interval.tick().await; // immediate-first-tick consumption
-            loop {
-                match integrity_svc.wp_integrity_scan_tick().await {
-                    Ok(n) if n > 0 => tracing::warn!(flagged = n, "wp integrity tick"),
-                    Ok(_) => tracing::debug!("wp integrity tick: no new findings"),
-                    Err(e) => tracing::warn!(error=%e, "wp integrity tick failed"),
-                }
-                interval.tick().await;
-            }
-        });
-    }
-    // Billing sweep — once per hour. Sends Slack reminders for hostings
-    // with next_billing_at <= now + 3d.
-    {
-        let bs = svc.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_secs(120)).await;
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
-            interval.tick().await;
-            loop {
-                match bs.billing_sweep().await {
-                    Ok(n) if n > 0 => tracing::info!(notified = n, "billing sweep"),
-                    Ok(_) => tracing::debug!("billing sweep: nothing due"),
-                    Err(e) => tracing::warn!(error=%e, "billing sweep failed"),
-                }
-                interval.tick().await;
-            }
-        });
-    }
-    // Care-package drift enforcement — hourly. Re-asserts the features
-    // every ACTIVE package promises, so a paid capability someone switched
-    // off comes back instead of quietly staying off until the customer
-    // notices. Cheap when idle: it reads state and only writes where
-    // something actually moved, and returns immediately on a node with no
-    // activations at all.
-    {
-        let pk = svc.clone();
-        tokio::spawn(async move {
-            // 7-minute offset — clear of the vuln (4 min) and integrity
-            // (6 min) sweeps, which are the two ticks that hammer wp-cli.
-            tokio::time::sleep(std::time::Duration::from_secs(420)).await;
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
-            interval.tick().await;
-            loop {
-                match pk.package_enforce_tick().await {
-                    Ok(n) if n > 0 => tracing::info!(corrected = n, "care package enforce tick"),
-                    Ok(_) => tracing::debug!("care package enforce tick: nothing drifted"),
-                    Err(e) => tracing::warn!(error=%e, "care package enforce tick failed"),
-                }
-                interval.tick().await;
-            }
-        });
-    }
-    // Care reports — hourly check of which LOCAL hostings are due their
-    // periodic report to the customer. The sibling of the drift tick and
-    // the other half of the same feature: that one keeps the paid work
-    // happening, this one is the only part the person paying ever sees.
-    //
-    // Runs on EVERY node, and must: every metric behind a report (bans,
-    // usage buckets, monitor samples, backup runs, the audit log, the
-    // stored integrity scan) lives on the node that owns the hosting. The
-    // same sweep on the master would truthfully report "not measured" for
-    // a worker's site — honest, and worthless.
-    //
-    // Hourly is the CHECK cadence, not the send cadence: the tick sends
-    // only once a full weekly/monthly/quarterly period has elapsed since
-    // the last report, and it returns immediately on a node with no
-    // activations at all.
-    {
-        let cr = svc.clone();
-        tokio::spawn(async move {
-            // 9-minute offset — clear of the package drift tick (7 min),
-            // which walks the same activation rows.
-            tokio::time::sleep(std::time::Duration::from_secs(540)).await;
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
-            interval.tick().await;
-            loop {
-                match cr.care_report_tick().await {
-                    Ok(n) if n > 0 => tracing::info!(sent = n, "care report tick"),
-                    Ok(_) => tracing::debug!("care report tick: nothing due"),
-                    Err(e) => tracing::warn!(error=%e, "care report tick failed"),
-                }
-                interval.tick().await;
-            }
-        });
-    }
-    // Scheduled backups — checks every 5 minutes which LOCAL hostings are due
-    // per their backup_cadence (off by default) and optional time of day, and
-    // runs backup_now for each. Five minutes, not an hour, so "at 03:00" starts
-    // close to 03:00; the check itself is a few hosting_kv reads per site.
-    // Runs on every node since backups are node-local.
-    {
-        let bk = svc.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_secs(300)).await;
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
-            // A sweep that ran long backups must not be followed by a burst of
-            // catch-up ticks.
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            interval.tick().await;
-            loop {
-                match bk.scheduled_backups_tick().await {
-                    Ok(n) if n > 0 => tracing::info!(started = n, "scheduled backups tick"),
-                    Ok(_) => tracing::debug!("scheduled backups tick: nothing due"),
-                    Err(e) => tracing::warn!(error=%e, "scheduled backups tick failed"),
-                }
-                interval.tick().await;
-            }
-        });
-    }
-    // Snapshot retention — daily. Deletes snapshots older than `[snapshots]
-    // keep_days` (keeping the newest `keep_last`) on every site that has a
-    // repository. Retention also runs after each new snapshot, but a site
-    // with nothing to update takes none, and without this sweep its old
-    // snapshots were never deleted at all.
-    {
-        let sr = svc.clone();
-        tokio::spawn(async move {
-            // 13 minutes in: clear of the wp-cli sweeps and the OS update
-            // check, which is also where restic spends its disk time.
-            tokio::time::sleep(std::time::Duration::from_secs(780)).await;
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(24 * 3600));
-            loop {
-                interval.tick().await;
-                match sr.snapshot_retention_tick().await {
-                    Ok(n) if n > 0 => tracing::info!(deleted = n, "snapshot retention sweep"),
-                    Ok(_) => tracing::debug!("snapshot retention sweep: nothing old enough"),
-                    Err(e) => tracing::warn!(error=%e, "snapshot retention sweep failed"),
-                }
-            }
-        });
-    }
-    // Operating-system updates — every 6 hours, refresh the apt index and
-    // record what is waiting (and whether a reboot is owed) in node_kv, so the
-    // Nodes page can say how far behind this machine is without running apt
-    // on a page load. Read-only: it never installs anything.
-    //
-    // Runs on every node, because every node has its own packages. The first
-    // check comes 11 minutes after start — clear of the wp-cli sweeps — so a
-    // freshly updated agent has a real answer within the hour instead of
-    // "never checked" for six.
-    {
-        let ou = svc.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_secs(660)).await;
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(6 * 3600));
-            loop {
-                interval.tick().await;
-                match ou.os_updates_check(true).await {
-                    Ok(s) if !s.error.is_empty() => {
-                        tracing::warn!(error = %s.error, "os updates check: incomplete")
-                    }
-                    Ok(s) => tracing::debug!(
-                        pending = s.pending.len(),
-                        security = s.security_count,
-                        reboot = s.reboot_required,
-                        "os updates check"
-                    ),
-                    Err(e) => tracing::warn!(error=%e, "os updates check failed"),
-                }
-            }
-        });
-    }
-    // One-shot enrollment with the master, if configured and not yet done.
-    let state_file = cfg
-        .enrollment
-        .state_file
-        .clone()
-        .unwrap_or_else(|| PathBuf::from("/etc/hyperion/node-id.json"));
-    if !cfg.enrollment.master_url.is_empty() && !cfg.enrollment.invite_token.is_empty() {
-        let enr = enroll::EnrollmentConfig {
-            master_url: cfg.enrollment.master_url.clone(),
-            token: cfg.enrollment.invite_token.clone(),
-            label: if cfg.enrollment.node_label.is_empty() {
-                hostname_or_unknown()
-            } else {
-                cfg.enrollment.node_label.clone()
-            },
-            state_file: state_file.clone(),
-            verify_tls: cfg.enrollment.verify_tls,
-            config_file: Some(cli.config.clone()),
-            advertise_addr: {
-                let a = cfg.remote_rpc.advertise_addr.trim();
-                (!a.is_empty()).then(|| a.to_string())
-            },
-            resp_pubkey: resp_pubkey.clone(),
-            rpc_port: enroll::rpc_port_from_bind(cfg.remote_rpc.enabled, &cfg.remote_rpc.bind),
-        };
-        // Outer loop — if the 5-attempt inner burst (~9 min) doesn't
-        // succeed, sleep 30 min and try the burst again, indefinitely.
-        // This is a daemon — there's no reason to ever give up. Without
-        // this, a master that's unreachable for the first 10 min after
-        // install leaves the node in a permanent zombie state until the
-        // operator restarts hyperion-agent.
-        //
-        // Loop exits cleanly once we're enrolled AND no fresh invite_token
-        // remains. A non-blank token on an already-enrolled node is the
-        // Block B re-enroll trigger (see ensure_enrolled) — let it through
-        // so enroll_now can present our existing identity for id reuse.
-        tokio::spawn(async move {
-            let mut consecutive_failures = 0u32;
-            loop {
-                if enr.state_file.exists() && enr.token.trim().is_empty() {
-                    if consecutive_failures > 0 {
-                        tracing::info!("enrollment succeeded out-of-band, exiting retry loop");
-                    }
-                    return;
-                }
-                match enroll::ensure_enrolled(enr.clone()).await {
-                    Ok(()) => return,
-                    Err(e) => {
-                        consecutive_failures += 1;
-                        tracing::warn!(
-                            error = %e,
-                            failure_streak = consecutive_failures,
-                            "enrollment burst exhausted — sleeping 30 min before next burst"
-                        );
-                        tokio::time::sleep(std::time::Duration::from_secs(30 * 60)).await;
-                    }
-                }
-            }
-        });
-    }
-    // Periodic heartbeat (60s interval). No-op until enrolled.
-    {
-        let path = state_file.clone();
-        let verify = cfg.enrollment.verify_tls;
-        // Same cert the inbound listener serves — the heartbeat reports
-        // its SPKI pin so the master can detect cert changes (Block C).
-        let inbound_cert = cfg.remote_rpc.tls_cert_file.clone();
-        // Response-signing pubkey, re-advertised every tick. Nodes that
-        // were enrolled before this existed get pinned on their next
-        // heartbeat without needing a re-enrollment.
-        let hb_resp_pubkey = resp_pubkey.clone();
-        // Re-reported every tick so a changed bind port reaches the master
-        // without a re-enrollment.
-        let rpc_port = enroll::rpc_port_from_bind(cfg.remote_rpc.enabled, &cfg.remote_rpc.bind);
-        let advertise = {
-            let a = cfg.remote_rpc.advertise_addr.trim();
-            (!a.is_empty()).then(|| a.to_string())
-        };
-        tokio::spawn(async move {
-            enroll::heartbeat_loop(
-                path,
-                60,
-                verify,
-                inbound_cert,
-                hb_resp_pubkey,
-                rpc_port,
-                advertise,
-            )
-            .await;
-        });
-    }
+    spawn_cluster_link(&cfg, &cli.config, &state_file, resp_pubkey);
 
     // `with_version` stamps the build-time git SHA (see agent_version) so
     // /install + the connectivity test see the actual deployed revision.
@@ -1561,6 +504,102 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("ready");
     server.run().await?;
     Ok(())
+}
+
+/// Join the cluster: the one-shot enrollment with the master (if configured
+/// and not yet done) and the periodic heartbeat (60s, a no-op until
+/// enrolled).
+fn spawn_cluster_link(
+    cfg: &config::Config,
+    config_path: &std::path::Path,
+    state_file: &std::path::Path,
+    resp_pubkey: Option<String>,
+) {
+    if !cfg.enrollment.master_url.is_empty() && !cfg.enrollment.invite_token.is_empty() {
+        let enr = enroll::EnrollmentConfig {
+            master_url: cfg.enrollment.master_url.clone(),
+            token: cfg.enrollment.invite_token.clone(),
+            label: if cfg.enrollment.node_label.is_empty() {
+                hostname_or_unknown()
+            } else {
+                cfg.enrollment.node_label.clone()
+            },
+            state_file: state_file.to_path_buf(),
+            verify_tls: cfg.enrollment.verify_tls,
+            config_file: Some(config_path.to_path_buf()),
+            advertise_addr: {
+                let a = cfg.remote_rpc.advertise_addr.trim();
+                (!a.is_empty()).then(|| a.to_string())
+            },
+            resp_pubkey: resp_pubkey.clone(),
+            rpc_port: enroll::rpc_port_from_bind(cfg.remote_rpc.enabled, &cfg.remote_rpc.bind),
+        };
+        // Outer loop — if the 5-attempt inner burst (~9 min) doesn't
+        // succeed, sleep 30 min and try the burst again, indefinitely.
+        // This is a daemon — there's no reason to ever give up. Without
+        // this, a master that's unreachable for the first 10 min after
+        // install leaves the node in a permanent zombie state until the
+        // operator restarts hyperion-agent.
+        //
+        // Loop exits cleanly once we're enrolled AND no fresh invite_token
+        // remains. A non-blank token on an already-enrolled node is the
+        // Block B re-enroll trigger (see ensure_enrolled) — let it through
+        // so enroll_now can present our existing identity for id reuse.
+        tokio::spawn(async move {
+            let mut consecutive_failures = 0u32;
+            loop {
+                if enr.state_file.exists() && enr.token.trim().is_empty() {
+                    if consecutive_failures > 0 {
+                        tracing::info!("enrollment succeeded out-of-band, exiting retry loop");
+                    }
+                    return;
+                }
+                match enroll::ensure_enrolled(enr.clone()).await {
+                    Ok(()) => return,
+                    Err(e) => {
+                        consecutive_failures += 1;
+                        tracing::warn!(
+                            error = %e,
+                            failure_streak = consecutive_failures,
+                            "enrollment burst exhausted — sleeping 30 min before next burst"
+                        );
+                        tokio::time::sleep(std::time::Duration::from_secs(30 * 60)).await;
+                    }
+                }
+            }
+        });
+    }
+    // Periodic heartbeat (60s interval). No-op until enrolled.
+    {
+        let path = state_file.to_path_buf();
+        let verify = cfg.enrollment.verify_tls;
+        // Same cert the inbound listener serves — the heartbeat reports
+        // its SPKI pin so the master can detect cert changes (Block C).
+        let inbound_cert = cfg.remote_rpc.tls_cert_file.clone();
+        // Response-signing pubkey, re-advertised every tick. Nodes that
+        // were enrolled before this existed get pinned on their next
+        // heartbeat without needing a re-enrollment.
+        let hb_resp_pubkey = resp_pubkey;
+        // Re-reported every tick so a changed bind port reaches the master
+        // without a re-enrollment.
+        let rpc_port = enroll::rpc_port_from_bind(cfg.remote_rpc.enabled, &cfg.remote_rpc.bind);
+        let advertise = {
+            let a = cfg.remote_rpc.advertise_addr.trim();
+            (!a.is_empty()).then(|| a.to_string())
+        };
+        tokio::spawn(async move {
+            enroll::heartbeat_loop(
+                path,
+                60,
+                verify,
+                inbound_cert,
+                hb_resp_pubkey,
+                rpc_port,
+                advertise,
+            )
+            .await;
+        });
+    }
 }
 
 /// The mount point covering `/usr` if it is read-only IN THIS PROCESS'S

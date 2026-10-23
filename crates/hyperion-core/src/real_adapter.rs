@@ -1997,7 +1997,11 @@ mod tests {
         let root = tempfile::tempdir().expect("tempdir");
         // Simulate the 0700 home: <root>/home_user, with the hosting
         // tree under it.
-        let home = root.path().join("home_user");
+        // Canonical base: ensure_ancestors_traversable refuses a path that
+        // goes through a symlink, and a macOS tempdir is one (/var ->
+        // /private/var).
+        let base = std::fs::canonicalize(root.path()).unwrap();
+        let home = base.join("home_user");
         let htdocs = home.join("site.cz").join("htdocs");
         std::fs::create_dir_all(&htdocs).unwrap();
         std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();

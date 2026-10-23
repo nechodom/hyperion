@@ -101,7 +101,7 @@
                 the jump, so it is a choice and not an announcement. -#}
             <select name="php__{{ r.domain }}" aria-label="PHP version for {{ r.domain }}" class="import-php">
               {%- for opt in php_options %}
-              <option value="{{ opt }}"{% if opt.as_str() == r.php_target.as_str() %} selected{% endif %}>{{ opt }}</option>
+              <option value="{{ opt }}"{% if opt.as_str() == r.php_target.as_str() %} selected{% endif %}>{{ opt }}{% if hyperion_types::php_security::branch_unfixable(opt) %} — no security fixes{% endif %}</option>
               {%- endfor %}
             </select>
             {% if r.php_substituted %}

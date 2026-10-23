@@ -501,6 +501,32 @@ pub enum Request {
     /// Read the state of the most-recent / in-progress
     /// service-install job. Empty when no install has ever run.
     ServiceInstallStatus,
+    /// `systemctl <action> <name>` for `action` in start | stop | enable |
+    /// disable, on the same whitelist as restart. Stop and disable are
+    /// refused for the panel's core units (nginx, hyperion-web,
+    /// hyperion-agent): either one cuts the operator off from the panel
+    /// with no way back short of SSH.
+    ServiceControl {
+        name: String,
+        action: String,
+    },
+    /// Last `lines` journal lines of a whitelisted unit (capped at 500).
+    /// Read-only, so the agent's own unit is allowed.
+    ServiceJournal {
+        name: String,
+        lines: u32,
+    },
+    /// Every PHP branch installed on this node: its build, whether FPM is
+    /// there, the sites set to it and whether phpMyAdmin runs on it. Raw
+    /// facts — the master judges them against its advisory table.
+    PhpRuntimes,
+    /// `apt-get purge` every `php<branch>*` package. Refused while any site
+    /// on the node (trashed ones included) is set to the branch, or while
+    /// phpMyAdmin runs on it with nowhere else to go. Runs in the
+    /// background on the service-install slot; poll `ServiceInstallStatus`.
+    PhpUninstall {
+        branch: String,
+    },
     /// Setup wizard: install the chosen server software (PHP, databases,
     /// FTP, phpMyAdmin, Redis) as the transient unit
     /// `hyperion-setup-stack.service`. `components` is checked against an
@@ -1302,9 +1328,13 @@ pub enum Request {
         code: String,
     },
     /// Disable 2FA on a user (admin override OR self-disable). Clears
-    /// the secret + enrollment marker + backup codes.
+    /// the secret + enrollment marker + backup codes. `current_password` is
+    /// `Some` for a self-disable and re-verified so a stolen session alone
+    /// cannot strip the second factor; `None` for an admin override.
     Web2faDisable {
         user_id: i64,
+        #[serde(default)]
+        current_password: Option<String>,
     },
     /// Grant a non-admin user access to one hosting at a specific
     /// level (`"read"` for viewer-style, `"manage"` for operator-style).
@@ -2381,9 +2411,15 @@ pub enum Response {
     SlackSendTest,
     ServiceRestart,
     ServiceInstall,
+    ServiceControl,
+    ServiceJournal {
+        text: String,
+    },
     /// Current state of the most-recent / in-progress
     /// service-install job + log tail.
     ServiceInstallStatus(hyperion_types::ServiceInstallStatus),
+    PhpRuntimes(Vec<hyperion_types::php_security::PhpRuntime>),
+    PhpUninstall,
     SetupStackStart {
         started_at: i64,
     },

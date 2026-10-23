@@ -31,6 +31,7 @@ pub mod migration;
 pub mod package;
 pub mod perf;
 pub mod php;
+pub mod php_security;
 pub mod phpmem;
 pub mod phpworkers;
 pub mod pma;

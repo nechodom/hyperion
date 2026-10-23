@@ -328,6 +328,8 @@ fn every_page_is_reachable_from_the_nav() {
         "/settings/mail/health",
         // Lazy fragment: the Mail delivery group's body on Service health.
         "/services/mail-diagnostics",
+        // Lazy fragment: the PHP versions group's body on Service health.
+        "/services/php",
         // Retired page; a redirect to the profile's device list so old
         // bookmarks still land.
         "/settings/sessions",
@@ -365,7 +367,7 @@ fn every_page_is_reachable_from_the_nav() {
         "certs.html",
         "jobs_list.html",
         "profile.html",
-        "services.html",
+        "services_health.html",
         "stats.html",
         "audit.html",
         "install.html",

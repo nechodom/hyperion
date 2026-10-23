@@ -79,6 +79,9 @@
       {% if let Some(h) = a.hosting %}
         — <a href="/hostings/{{ h }}" style="color:inherit;text-decoration:underline">Open {{ h }}</a>
       {% endif %}
+      {% if let Some((href, label)) = a.link %}
+        — <a href="{{ href }}" style="color:inherit;text-decoration:underline">{{ label }}</a>
+      {% endif %}
     </div>
   </div>
   {% if loop.last && alerts.len() > 3 %}</details>{% endif %}

@@ -143,8 +143,14 @@ pub async fn enable_sftp(user: &str, home_dir: &str, keys: &[String]) -> Result<
     // customer "owns" their key list.
     let ssh_dir = format!("{home_dir}/.ssh");
     crate::fs::ensure_dir(Path::new(&ssh_dir), 0o700).await?;
-    cmd::run("/usr/bin/chown", &[&format!("{user}:{user}"), &ssh_dir]).await?;
-    cmd::run("/usr/bin/chmod", &["0700", &ssh_dir]).await?;
+    // `-h`: never follow a link. The home is root-owned from here on, so
+    // nothing can swap `.ssh` now — but `ensure_dir` is the only thing that
+    // looked, and the chown must not be the second.
+    cmd::run(
+        "/usr/bin/chown",
+        &["-h", &format!("{user}:{user}"), &ssh_dir],
+    )
+    .await?;
 
     let ak = format!("{ssh_dir}/authorized_keys");
     let body = if keys.is_empty() {
@@ -152,10 +158,20 @@ pub async fn enable_sftp(user: &str, home_dir: &str, keys: &[String]) -> Result<
     } else {
         format!("{}\n", keys.join("\n"))
     };
-    crate::fs::atomic_write(Path::new(&ak), body.as_bytes(), 0o600).await?;
-    cmd::run("/usr/bin/chown", &[&format!("{user}:{user}"), &ak]).await?;
-    cmd::run("/usr/bin/chmod", &["0600", &ak]).await?;
+    // `.ssh` belongs to the site user, who can place anything in it. The
+    // file is created fresh (no-follow, exclusive) and handed over through
+    // its descriptor; a chown/chmod by NAME afterwards would follow a link
+    // the user put at `authorized_keys` and give them that file instead.
+    let (uid, gid) = user_ids(user).await?;
+    crate::fs::atomic_write_owned(Path::new(&ak), body.as_bytes(), 0o600, uid, gid).await?;
     Ok(())
+}
+
+async fn user_ids(user: &str) -> Result<(u32, u32), AdapterError> {
+    let info = crate::users::lookup_raw(user)
+        .await?
+        .ok_or_else(|| AdapterError::Other(format!("no such user: {user}")))?;
+    Ok((info.uid, info.gid))
 }
 
 /// Disable SFTP: drop the user from the group and clear their keys. The
@@ -165,9 +181,9 @@ pub async fn disable_sftp(user: &str, home_dir: &str) -> Result<(), AdapterError
     // gpasswd -d fails if the user isn't a member; treat that as success.
     let _ = cmd::run("/usr/bin/gpasswd", &["-d", user, SFTP_GROUP]).await;
     let ak = format!("{home_dir}/.ssh/authorized_keys");
-    if Path::new(&ak).exists() {
-        crate::fs::atomic_write(Path::new(&ak), b"", 0o600).await?;
-        let _ = cmd::run("/usr/bin/chown", &[&format!("{user}:{user}"), &ak]).await;
+    if tokio::fs::symlink_metadata(&ak).await.is_ok() {
+        let (uid, gid) = user_ids(user).await?;
+        crate::fs::atomic_write_owned(Path::new(&ak), b"", 0o600, uid, gid).await?;
     }
     Ok(())
 }

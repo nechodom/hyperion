@@ -169,7 +169,7 @@ const LEGACY: &[(&str, &str)] = &[
     // Cards that left Settings or were folded into another.
     ("https-howto", "/settings/https"),
     ("mail-howto", "/settings/mail"),
-    ("local-mta", "/services#mail-delivery"),
+    ("local-mta", "/services?node=local#mail-delivery"),
     ("default_to", "/settings/alerts#alert-recipients"),
     ("multinode-tips", "/settings/cluster"),
     ("api", "/admin/api-keys"),

@@ -808,6 +808,12 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
     async fn service_restart(&self, name: String) -> Result<(), RpcError> {
         self.svc.service_restart(name).await
     }
+    async fn service_control(&self, name: String, action: String) -> Result<(), RpcError> {
+        self.svc.service_control(name, action).await
+    }
+    async fn service_journal(&self, name: String, lines: u32) -> Result<String, RpcError> {
+        self.svc.service_journal(name, lines).await
+    }
     async fn service_install(&self, name: String) -> Result<(), RpcError> {
         self.svc.service_install(name).await
     }
@@ -815,6 +821,14 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         &self,
     ) -> Result<hyperion_types::ServiceInstallStatus, RpcError> {
         self.svc.service_install_status().await
+    }
+    async fn php_runtimes(
+        &self,
+    ) -> Result<Vec<hyperion_types::php_security::PhpRuntime>, RpcError> {
+        self.svc.php_runtimes().await
+    }
+    async fn php_uninstall(&self, branch: String) -> Result<(), RpcError> {
+        self.svc.php_uninstall(branch).await
     }
     async fn wp_asset_upload(
         &self,
@@ -1506,8 +1520,12 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
     async fn web_2fa_confirm_enroll(&self, user_id: i64, code: String) -> Result<bool, RpcError> {
         self.svc.web_2fa_confirm_enroll(user_id, code).await
     }
-    async fn web_2fa_disable(&self, user_id: i64) -> Result<(), RpcError> {
-        self.svc.web_2fa_disable(user_id).await
+    async fn web_2fa_disable(
+        &self,
+        user_id: i64,
+        current_password: Option<String>,
+    ) -> Result<(), RpcError> {
+        self.svc.web_2fa_disable(user_id, current_password).await
     }
 
     async fn web_grant_hosting_access(
