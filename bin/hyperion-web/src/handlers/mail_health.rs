@@ -43,20 +43,16 @@ fn urlencode(s: &str) -> String {
     url::form_urlencoded::byte_serialize(s.as_bytes()).collect()
 }
 
-/// `/services?node=<id>&<query>#mail-delivery` — the master gets no `node=`.
+/// `/services?node=<id>&<query>#mail-delivery`. The master is `node=local`,
+/// never a bare `/services`: on a cluster that is the all-nodes overview,
+/// which has no Mail delivery group to land on.
 pub(crate) fn services_url(target: Option<&str>, query: &str) -> String {
-    let mut q: Vec<String> = Vec::new();
-    if let Some(id) = target {
-        q.push(format!("node={}", urlencode(id)));
-    }
+    let node = target.unwrap_or(crate::dispatcher::LOCAL_NODE_SENTINEL);
+    let mut q = vec![format!("node={}", urlencode(node))];
     if !query.is_empty() {
         q.push(query.to_string());
     }
-    if q.is_empty() {
-        "/services#mail-delivery".to_string()
-    } else {
-        format!("/services?{}#mail-delivery", q.join("&"))
-    }
+    format!("/services?{}#mail-delivery", q.join("&"))
 }
 
 fn back_with_flash(target: Option<&str>, msg: &str) -> Response {
@@ -636,10 +632,11 @@ mod tests {
 
     #[test]
     fn redirects_return_to_the_mail_group_and_keep_the_node() {
-        assert_eq!(services_url(None, ""), "/services#mail-delivery");
+        // The master is named: a bare /services is the cluster overview.
+        assert_eq!(services_url(None, ""), "/services?node=local#mail-delivery");
         assert_eq!(
             services_url(None, "flash=ok"),
-            "/services?flash=ok#mail-delivery"
+            "/services?node=local&flash=ok#mail-delivery"
         );
         assert_eq!(
             services_url(Some("node_01 x"), "flash=ok"),

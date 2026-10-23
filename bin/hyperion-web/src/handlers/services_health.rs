@@ -67,10 +67,24 @@ pub(crate) struct SvcRow {
     pub status: String,
     /// Extra fact shown only when it matters ("won't start at boot").
     pub note: Option<String>,
+    /// Detail facts in reading order: "up 3d 4h", "142.0 MiB", "PID 1234",
+    /// "1.26.3" — or "down 12m", "oom-kill". Empty from an older agent.
+    pub facts: Vec<String>,
+    /// Why systemd says it stopped (`oom-kill`, `exit-code`…) — the overview
+    /// shows it next to the problem pill.
+    pub cause: Option<String>,
+    /// systemd restarted it on its own — "restarted 4×". Shown in warn colour.
+    pub restarts: Option<String>,
     /// Counts against health — sorts first and lands in the verdict.
     pub problem: bool,
     pub can_restart: bool,
     pub can_install: bool,
+    pub can_start: bool,
+    /// Stop / disable are never offered for core units: the agent refuses
+    /// them (it would lock the operator out of the panel).
+    pub can_stop: bool,
+    pub can_enable: bool,
+    pub can_disable: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -83,11 +97,44 @@ pub(crate) struct ServicesView {
     pub tone: &'static str,
     /// One line: "All 9 services running" / "nginx failed · postfix stopped".
     pub verdict: String,
+    /// The rest of the tally beside the verdict, without repeating it:
+    /// "7 running · 4 not installed". Empty when there is nothing to add.
+    pub counts: String,
     /// The probe answered with rows. False = the verdict is "Unknown".
     pub known: bool,
 }
 
-fn row_for(s: &hyperion_types::ServiceHealth) -> SvcRow {
+fn facts_for(s: &hyperion_types::ServiceHealth, now: i64) -> Vec<String> {
+    let mut f = Vec::new();
+    if !s.present {
+        return f;
+    }
+    let age = s
+        .since
+        .map(|t| super::stats::fmt_uptime(&(now - t).max(60)));
+    if s.active {
+        if let Some(a) = age {
+            f.push(format!("up {a}"));
+        }
+        if let Some(m) = s.memory_bytes {
+            f.push(super::stats::fmt_bytes(&(m.min(i64::MAX as u64) as i64)));
+        }
+        if let Some(p) = s.main_pid {
+            f.push(format!("PID {p}"));
+        }
+    } else if let Some(a) = age {
+        f.push(format!("down {a}"));
+    }
+    if let Some(r) = &s.result {
+        f.push(r.clone());
+    }
+    if let Some(v) = &s.version {
+        f.push(v.clone());
+    }
+    f
+}
+
+fn row_for(s: &hyperion_types::ServiceHealth, now: i64) -> SvcRow {
     let core = CORE_UNITS.contains(&s.name.as_str());
     let masked = s.sub_state == "masked";
     let (tone, status, problem) = if !s.present {
@@ -142,23 +189,34 @@ fn row_for(s: &hyperion_types::ServiceHealth) -> SvcRow {
         None => note,
     };
     let own = s.name == "hyperion-agent" || s.name == "hyperion-web";
+    let controllable = s.present && !masked && s.name != "hyperion-agent";
     SvcRow {
         name: s.name.clone(),
         label: s.label.clone(),
         tone,
         status,
         note,
+        facts: facts_for(s, now),
+        cause: s.result.clone().filter(|_| s.present),
+        restarts: s
+            .restarts
+            .filter(|n| *n > 0 && s.present)
+            .map(|n| format!("restarted {n}×")),
         problem,
         // Restarting the agent would cut the very RPC pipe carrying the order.
-        can_restart: s.present && s.name != "hyperion-agent",
+        can_restart: s.present && s.active && s.name != "hyperion-agent",
         // The panel's own units are this binary — nothing for apt to install.
         can_install: !s.present && !own,
+        can_start: controllable && !s.active,
+        can_stop: controllable && s.active && !core,
+        can_enable: controllable && !s.enabled,
+        can_disable: controllable && s.enabled && !core,
     }
 }
 
 /// Reduce the agent's rows to the page: core vs optional, problems first,
 /// absent optional units folded away, and a verdict that names what is wrong.
-pub(crate) fn build_view(h: &ServicesHealth, probe_failed: bool) -> ServicesView {
+pub(crate) fn build_view(h: &ServicesHealth, probe_failed: bool, now: i64) -> ServicesView {
     if probe_failed || h.services.is_empty() {
         return ServicesView {
             tone: "muted",
@@ -171,7 +229,7 @@ pub(crate) fn build_view(h: &ServicesHealth, probe_failed: bool) -> ServicesView
         ..Default::default()
     };
     for s in &h.services {
-        let row = row_for(s);
+        let row = row_for(s, now);
         if CORE_UNITS.contains(&s.name.as_str()) {
             v.core.push(row);
         } else if !s.present {
@@ -205,6 +263,20 @@ pub(crate) fn build_view(h: &ServicesHealth, probe_failed: bool) -> ServicesView
             .collect::<Vec<_>>()
             .join(" · ");
     }
+    let mut counts = Vec::new();
+    if !problems.is_empty() {
+        let running = v
+            .core
+            .iter()
+            .chain(v.optional.iter())
+            .filter(|r| r.tone == "ok")
+            .count();
+        counts.push(format!("{running} running"));
+    }
+    if !v.not_installed.is_empty() {
+        counts.push(format!("{} not installed", v.not_installed.len()));
+    }
+    v.counts = counts.join(" · ");
     v
 }
 
@@ -223,6 +295,133 @@ pub(crate) fn install_flags(
     let rofs = s.state == "failed"
         && (s.log_tail.contains("Read-only file system") || s.log_tail.contains("not writable"));
     (show, rofs)
+}
+
+#[derive(Template)]
+#[template(path = "services_overview.html")]
+struct ServicesOverviewTpl<'a> {
+    username: &'a str,
+    user_initial: char,
+    active: &'static str,
+    css_version: &'static str,
+    htmx_version: &'static str,
+    cards: Vec<NodeCard>,
+    /// `ok` / `warn` / `err` — colours the cluster verdict.
+    tone: &'static str,
+    verdict: String,
+    flash: Option<String>,
+    flash_error: Option<String>,
+    node_auth_warning: Option<String>,
+}
+
+/// Why a node has no rows on the overview.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum NodeProbeFail {
+    /// Plain downtime — the reason is already IP-free.
+    Unreachable(String),
+    /// The node answered but the master could not authenticate the answer.
+    /// Must not read as downtime: it may be a forged response.
+    AuthFailed,
+}
+
+/// One node on the all-nodes overview: its verdict and only the units that
+/// need a look. Healthy units collapse into a count.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NodeCard {
+    /// Value for `?node=` — `local` for the master.
+    pub param: String,
+    pub label: String,
+    pub ip: Option<String>,
+    pub tone: &'static str,
+    pub verdict: String,
+    pub attention: Vec<SvcRow>,
+    pub healthy: usize,
+    pub fail: Option<NodeProbeFail>,
+}
+
+impl NodeCard {
+    fn rank(&self) -> u8 {
+        match (&self.fail, self.tone) {
+            (Some(NodeProbeFail::AuthFailed), _) => 0,
+            (Some(_), _) => 1,
+            (None, "err") => 2,
+            (None, "warn") => 3,
+            (None, "muted") => 4,
+            _ => 5,
+        }
+    }
+    pub fn auth_failed(&self) -> bool {
+        matches!(self.fail, Some(NodeProbeFail::AuthFailed))
+    }
+    pub fn unreachable_reason(&self) -> Option<&str> {
+        match &self.fail {
+            Some(NodeProbeFail::Unreachable(r)) => Some(r.as_str()),
+            _ => None,
+        }
+    }
+}
+
+pub(crate) fn node_card(
+    param: String,
+    label: String,
+    ip: Option<String>,
+    probe: Result<&ServicesHealth, NodeProbeFail>,
+) -> NodeCard {
+    match probe {
+        Err(fail) => NodeCard {
+            param,
+            label,
+            ip,
+            tone: "err",
+            verdict: match &fail {
+                NodeProbeFail::AuthFailed => {
+                    "Answer failed signature check — discarded, status not shown.".into()
+                }
+                NodeProbeFail::Unreachable(_) => "Unreachable, status unknown:".into(),
+            },
+            attention: Vec::new(),
+            healthy: 0,
+            fail: Some(fail),
+        },
+        Ok(h) => {
+            let v = build_view(h, false, hyperion_types::now_secs());
+            let (attention, healthy): (Vec<SvcRow>, Vec<SvcRow>) = v
+                .core
+                .into_iter()
+                .chain(v.optional)
+                .partition(|r| r.problem || r.tone == "warn");
+            NodeCard {
+                param,
+                label,
+                ip,
+                tone: v.tone,
+                verdict: v.verdict,
+                attention,
+                healthy: healthy.len(),
+                fail: None,
+            }
+        }
+    }
+}
+
+/// Order cards worst-first and phrase the cluster-wide verdict.
+pub(crate) fn overview_verdict(cards: &mut [NodeCard]) -> (&'static str, String) {
+    cards.sort_by(|a, b| a.rank().cmp(&b.rank()).then_with(|| a.label.cmp(&b.label)));
+    let n = cards.len();
+    let bad = cards.iter().filter(|c| c.tone != "ok").count();
+    let core_bad = cards.iter().any(|c| c.tone == "err");
+    let nodes = if n == 1 { "node" } else { "nodes" };
+    if bad == 0 {
+        (
+            "ok",
+            format!("{n} {nodes} · every installed service running."),
+        )
+    } else {
+        (
+            if core_bad { "err" } else { "warn" },
+            format!("{bad} of {n} {nodes} need attention."),
+        )
+    }
 }
 
 #[derive(Deserialize, Default)]
@@ -247,6 +446,12 @@ pub async fn get_services_health(
     if !ctx.can(Capability::ServicesView) {
         return Ok(Redirect::to("/?flash_error=admin+role+required").into_response());
     }
+    let nodes = fetch_node_list(&state).await.unwrap_or_default();
+    // Multi-node cluster with no node picked: the all-nodes overview.
+    // Single-node setups go straight to the one detail page, as before.
+    if q.node.is_none() && !nodes.is_empty() {
+        return overview(&state, &ctx, nodes, q).await;
+    }
     let target = q.node.as_deref();
     let (dispatch, install) = tokio::join!(
         crate::dispatcher::dispatch_to_node(&state, target, Request::ServicesHealth),
@@ -270,7 +475,6 @@ pub async fn get_services_health(
         ),
         Err(e) => (ServicesHealth::default(), Some(e.to_string())),
     };
-    let nodes = fetch_node_list(&state).await.unwrap_or_default();
     let current_node = match target {
         None | Some("") | Some("local") => String::new(),
         Some(s) => s.to_string(),
@@ -283,7 +487,7 @@ pub async fn get_services_health(
         active: "services",
         css_version: super::css_version(),
         htmx_version: super::htmx_version(),
-        view: build_view(&health, error.is_some()),
+        view: build_view(&health, error.is_some(), now),
         error,
         flash: q.flash,
         flash_error: q.flash_error,
@@ -294,6 +498,96 @@ pub async fn get_services_health(
         current_label,
         show_install,
         rofs_suspected,
+    };
+    Ok(Html(tpl.render()?).into_response())
+}
+
+async fn overview(
+    state: &SharedState,
+    ctx: &AuthCtx,
+    nodes: Vec<NodeSummary>,
+    q: ServicesQuery,
+) -> Result<Response, AppError> {
+    // The master answers over the local socket; workers fan out in
+    // parallel, so the page waits for the slowest node, not the sum.
+    let (local, (answered, failed)) = tokio::join!(
+        crate::dispatcher::dispatch_to_node(state, None, Request::ServicesHealth),
+        crate::dispatcher::fan_out_reporting(state, nodes, Request::ServicesHealth),
+    );
+    let node_auth_warning = super::node_auth_warning(&failed);
+    let mut cards = Vec::with_capacity(answered.len() + failed.len() + 1);
+    let master_label = "master (this node)".to_string();
+    let master_param = crate::dispatcher::LOCAL_NODE_SENTINEL.to_string();
+    cards.push(match local {
+        Ok(RpcResponse::ServicesHealth(h)) => node_card(master_param, master_label, None, Ok(&h)),
+        Ok(_) => node_card(
+            master_param,
+            master_label,
+            None,
+            Err(NodeProbeFail::Unreachable("unexpected agent answer".into())),
+        ),
+        Err(_) => node_card(
+            master_param,
+            master_label,
+            None,
+            Err(NodeProbeFail::Unreachable(
+                "local agent did not answer".into(),
+            )),
+        ),
+    });
+    for (n, resp) in answered {
+        let label = if n.label.is_empty() {
+            n.node_id.clone()
+        } else {
+            n.label.clone()
+        };
+        cards.push(match resp {
+            RpcResponse::ServicesHealth(h) => node_card(n.node_id, label, n.public_ip, Ok(&h)),
+            RpcResponse::Error(e) => node_card(
+                n.node_id,
+                label,
+                n.public_ip,
+                Err(NodeProbeFail::Unreachable(format!("agent error: {e}"))),
+            ),
+            _ => node_card(
+                n.node_id,
+                label,
+                n.public_ip,
+                Err(NodeProbeFail::Unreachable("unexpected agent answer".into())),
+            ),
+        });
+    }
+    for (n, e) in failed {
+        let label = if n.label.is_empty() {
+            n.node_id.clone()
+        } else {
+            n.label.clone()
+        };
+        // Only the pre-scrubbed `kind` is shown: a raw transport error can
+        // carry the worker's IP.
+        let fail = match e {
+            crate::dispatcher::DispatchError::ResponseAuthFailed { .. }
+            | crate::dispatcher::DispatchError::CertPinMissing { .. } => NodeProbeFail::AuthFailed,
+            crate::dispatcher::DispatchError::NodeUnreachable { kind, .. } => {
+                NodeProbeFail::Unreachable(kind)
+            }
+            _ => NodeProbeFail::Unreachable("no answer to the probe".into()),
+        };
+        cards.push(node_card(n.node_id, label, n.public_ip, Err(fail)));
+    }
+    let (tone, verdict) = overview_verdict(&mut cards);
+    let tpl = ServicesOverviewTpl {
+        username: &ctx.username,
+        user_initial: super::user_initial(&ctx.username),
+        active: "services",
+        css_version: super::css_version(),
+        htmx_version: super::htmx_version(),
+        cards,
+        tone,
+        verdict,
+        flash: q.flash,
+        flash_error: q.flash_error,
+        node_auth_warning,
     };
     Ok(Html(tpl.render()?).into_response())
 }
@@ -326,6 +620,9 @@ fn label_for_node(current: &str, nodes: &[NodeSummary]) -> String {
 #[derive(Deserialize)]
 pub struct ServiceActionForm {
     pub name: String,
+    /// "unit" to come back to the unit page, else the list.
+    #[serde(default)]
+    pub back: String,
     /// Target node ("" / "local" / node_id). Same convention as
     /// the GET handler.
     #[serde(default)]
@@ -355,6 +652,11 @@ pub async fn post_service_restart(
     )
     .await?;
     let dest = match resp {
+        RpcResponse::ServiceRestart if form.back == "unit" => format!(
+            "/services/unit?{}name={}&flash=Service+restarted",
+            query_node_prefix(target),
+            urlencode(&form.name),
+        ),
         RpcResponse::ServiceRestart => format!(
             "/services?{}flash=Service+{}+restarted",
             query_node_prefix(target),
@@ -366,6 +668,221 @@ pub async fn post_service_restart(
             urlencode(&e.to_string()),
         ),
         _ => return Err(AppError::Internal("unexpected response".into())),
+    };
+    Ok(Redirect::to(&dest).into_response())
+}
+
+#[derive(Template)]
+#[template(path = "services_unit.html")]
+struct ServiceUnitTpl<'a> {
+    username: &'a str,
+    user_initial: char,
+    active: &'static str,
+    css_version: &'static str,
+    htmx_version: &'static str,
+    row: SvcRow,
+    /// Journal tail; `Err` carries why it could not be read.
+    journal: Result<String, String>,
+    lines: u32,
+    flash: Option<String>,
+    flash_error: Option<String>,
+    is_super_admin: bool,
+    csrf_token: String,
+    current_node: String,
+    current_label: String,
+    /// Whether the cluster has workers (shows the "All nodes" crumb).
+    clustered: bool,
+}
+
+#[derive(Deserialize, Default)]
+pub struct UnitQuery {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    node: Option<String>,
+    #[serde(default)]
+    lines: Option<u32>,
+    #[serde(default)]
+    flash: Option<String>,
+    #[serde(default)]
+    flash_error: Option<String>,
+}
+
+/// Phrase an agent error for the operator; an agent from before this RPC
+/// existed rejects the method name, which reads as gibberish otherwise.
+fn agent_error_text(e: &str) -> String {
+    if e.contains("unknown variant") {
+        "This node's agent is too old for that — update the node first.".into()
+    } else {
+        e.to_string()
+    }
+}
+
+/// GET /services/unit?node=…&name=… — one unit: status, every control,
+/// and the journal tail.
+pub async fn get_service_unit(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Query(q): Query<UnitQuery>,
+) -> Result<Response, AppError> {
+    if !ctx.can(Capability::ServicesView) {
+        return Ok(Redirect::to("/?flash_error=admin+role+required").into_response());
+    }
+    let target = match q.node.as_deref() {
+        None | Some("") | Some("local") => None,
+        Some(s) => Some(s),
+    };
+    let lines = q.lines.unwrap_or(100).clamp(20, 500);
+    // Journals can carry anything a service logs; keep them to the role that
+    // can also act on the unit.
+    let want_journal = ctx.is_super_admin();
+    let journal_req = Request::ServiceJournal {
+        name: q.name.clone(),
+        lines,
+    };
+    let (health, journal, nodes) = tokio::join!(
+        crate::dispatcher::dispatch_to_node(&state, target, Request::ServicesHealth),
+        async {
+            if want_journal {
+                Some(crate::dispatcher::dispatch_to_node(&state, target, journal_req).await)
+            } else {
+                None
+            }
+        },
+        fetch_node_list(&state),
+    );
+    let nodes = nodes.unwrap_or_default();
+    let back = format!(
+        "/services?{}",
+        query_node_prefix(target).trim_end_matches('&')
+    );
+    let health = match health {
+        Ok(RpcResponse::ServicesHealth(h)) => h,
+        Ok(RpcResponse::Error(e)) => {
+            return Ok(
+                Redirect::to(&format!("{back}&flash_error={}", urlencode(&e.to_string())))
+                    .into_response(),
+            )
+        }
+        Ok(_) => return Err(AppError::Internal("unexpected response".into())),
+        Err(e) => {
+            return Ok(
+                Redirect::to(&format!("{back}&flash_error={}", urlencode(&e.to_string())))
+                    .into_response(),
+            )
+        }
+    };
+    let now = hyperion_types::now_secs();
+    let Some(row) = health
+        .services
+        .iter()
+        .find(|s| s.name == q.name)
+        .map(|s| row_for(s, now))
+    else {
+        return Ok(Redirect::to(&format!(
+            "{back}&flash_error={}",
+            urlencode(&format!("No service `{}` is tracked on that node.", q.name))
+        ))
+        .into_response());
+    };
+    let journal = match journal {
+        None => Err("Logs are visible to super-admins only.".into()),
+        Some(Ok(RpcResponse::ServiceJournal { text })) => Ok(text),
+        Some(Ok(RpcResponse::Error(e))) => Err(agent_error_text(&e.to_string())),
+        Some(Ok(_)) => Err("unexpected agent response".into()),
+        Some(Err(e)) => Err(agent_error_text(&e.to_string())),
+    };
+    let current_node = match target {
+        None => String::new(),
+        Some(s) => s.to_string(),
+    };
+    let current_label = label_for_node(&current_node, &nodes);
+    let tpl = ServiceUnitTpl {
+        username: &ctx.username,
+        user_initial: super::user_initial(&ctx.username),
+        active: "services",
+        css_version: super::css_version(),
+        htmx_version: super::htmx_version(),
+        row,
+        journal,
+        lines,
+        flash: q.flash,
+        flash_error: q.flash_error,
+        is_super_admin: ctx.is_super_admin(),
+        csrf_token: super::session_csrf_token(&state, &ctx),
+        current_node,
+        current_label,
+        clustered: !nodes.is_empty(),
+    };
+    Ok(Html(tpl.render()?).into_response())
+}
+
+#[derive(Deserialize)]
+pub struct ServiceControlForm {
+    pub name: String,
+    #[serde(default)]
+    pub node: String,
+    /// start | stop | enable | disable — the agent re-checks.
+    pub action: String,
+    /// "unit" to come back to the unit page, else the list.
+    #[serde(default)]
+    pub back: String,
+}
+
+/// POST /services/control — super_admin only.
+pub async fn post_service_control(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<ServiceControlForm>,
+) -> Result<Response, AppError> {
+    if !ctx.is_super_admin() {
+        return Ok(Redirect::to("/").into_response());
+    }
+    let target = if form.node.is_empty() || form.node == crate::dispatcher::LOCAL_NODE_SENTINEL {
+        None
+    } else {
+        Some(form.node.as_str())
+    };
+    let resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        target,
+        Request::ServiceControl {
+            name: form.name.clone(),
+            action: form.action.clone(),
+        },
+    )
+    .await;
+    let base = if form.back == "unit" {
+        format!(
+            "/services/unit?{}name={}&",
+            query_node_prefix(target),
+            urlencode(&form.name)
+        )
+    } else {
+        format!("/services?{}", query_node_prefix(target))
+    };
+    let done = match form.action.as_str() {
+        "start" => "started",
+        "stop" => "stopped",
+        "enable" => "set+to+start+at+boot",
+        "disable" => "set+not+to+start+at+boot",
+        _ => "updated",
+    };
+    let dest = match resp {
+        Ok(RpcResponse::ServiceControl) => {
+            format!("{base}flash=Service+{}+{done}", urlencode(&form.name))
+        }
+        Ok(RpcResponse::Error(e)) => format!(
+            "{base}flash_error={}",
+            urlencode(&agent_error_text(&e.to_string()))
+        ),
+        // A worker on an older agent can reject the unknown method before
+        // it reaches the dispatcher; land on the page with the reason.
+        Err(e) => format!(
+            "{base}flash_error={}",
+            urlencode(&agent_error_text(&e.to_string()))
+        ),
+        Ok(_) => return Err(AppError::Internal("unexpected response".into())),
     };
     Ok(Redirect::to(&dest).into_response())
 }
@@ -525,13 +1042,14 @@ fn escape(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
-/// Render `node=<id>&` for redirects, or empty for the master so
-/// the URL stays clean. Always include the trailing `&` because
+/// Render `node=<id>&` for redirects (`node=local&` for the master). Always include the trailing `&` because
 /// the callers chain `flash=` after it.
 fn query_node_prefix(target: Option<&str>) -> String {
+    // The master gets an explicit `node=local`: a bare /services is the
+    // all-nodes overview on a cluster, which is not where the operator was.
     match target {
         Some(id) if !id.is_empty() => format!("node={}&", urlencode(id)),
-        _ => String::new(),
+        _ => format!("node={}&", crate::dispatcher::LOCAL_NODE_SENTINEL),
     }
 }
 
@@ -788,6 +1306,12 @@ mod tests {
             severity: String::new(),
             active_state: active_state.into(),
             transient: false,
+            since: None,
+            memory_bytes: None,
+            main_pid: None,
+            restarts: None,
+            result: None,
+            version: None,
         }
     }
 
@@ -808,10 +1332,12 @@ mod tests {
                 svc("vsftpd", false, false, "inactive"),
             ]),
             false,
+            0,
         );
         assert!(v.known);
         assert_eq!(v.tone, "ok");
         assert_eq!(v.verdict, "All 3 installed services running.");
+        assert_eq!(v.counts, "1 not installed");
         assert_eq!(v.core.len(), 2);
         assert_eq!(v.optional.len(), 1);
         assert_eq!(v.not_installed.len(), 1);
@@ -827,9 +1353,12 @@ mod tests {
                 svc("postfix", true, false, "inactive"),
             ]),
             false,
+            0,
         );
         assert_eq!(v.tone, "err");
         assert_eq!(v.verdict, "nginx failed · postfix stopped");
+        // The tally adds what the verdict leaves out, never repeats it.
+        assert_eq!(v.counts, "1 running");
         // Problem rows float to the top of their group.
         assert_eq!(v.core[0].name, "nginx");
         assert_eq!(v.optional[0].tone, "warn");
@@ -843,13 +1372,18 @@ mod tests {
                 svc("postfix", true, false, "inactive"),
             ]),
             false,
+            0,
         );
         assert_eq!(v.tone, "warn");
     }
 
     #[test]
     fn missing_core_unit_stays_in_main_list_as_failure() {
-        let v = build_view(&health(vec![svc("nginx", false, false, "inactive")]), false);
+        let v = build_view(
+            &health(vec![svc("nginx", false, false, "inactive")]),
+            false,
+            0,
+        );
         assert_eq!(v.core.len(), 1);
         assert!(v.not_installed.is_empty());
         assert_eq!(v.core[0].status, "missing");
@@ -864,6 +1398,7 @@ mod tests {
                 svc("hyperion-web", false, false, "inactive"),
             ]),
             false,
+            0,
         );
         let agent = v.core.iter().find(|r| r.name == "hyperion-agent").unwrap();
         let web = v.core.iter().find(|r| r.name == "hyperion-web").unwrap();
@@ -879,7 +1414,7 @@ mod tests {
         off_at_boot.enabled = false;
         let mut restarting = svc("nginx", true, true, "activating");
         restarting.transient = true;
-        let v = build_view(&health(vec![masked, off_at_boot, restarting]), false);
+        let v = build_view(&health(vec![masked, off_at_boot, restarting]), false, 0);
         let r = |n: &str| {
             v.core
                 .iter()
@@ -897,17 +1432,20 @@ mod tests {
 
     #[test]
     fn an_end_of_life_php_row_says_it_gets_no_fixes() {
-        let r = row_for(&svc("php8.1-fpm", false, false, "inactive"));
+        let r = row_for(&svc("php8.1-fpm", false, false, "inactive"), 0);
         assert!(r.note.as_deref().unwrap().contains("No security fixes"));
-        let r = row_for(&svc("php8.1-fpm", true, true, "active"));
+        let r = row_for(&svc("php8.1-fpm", true, true, "active"), 0);
         assert!(r.note.as_deref().unwrap().contains("CVE-2026-109618"));
-        assert_eq!(row_for(&svc("php8.3-fpm", true, true, "active")).note, None);
+        assert_eq!(
+            row_for(&svc("php8.3-fpm", true, true, "active"), 0).note,
+            None
+        );
     }
 
     #[test]
     fn failed_probe_or_empty_answer_is_unknown_not_healthy() {
-        assert!(!build_view(&health(vec![]), false).known);
-        let v = build_view(&health(vec![svc("nginx", true, true, "active")]), true);
+        assert!(!build_view(&health(vec![]), false, 0).known);
+        let v = build_view(&health(vec![svc("nginx", true, true, "active")]), true, 0);
         assert!(!v.known);
         assert_eq!(v.tone, "muted");
     }
@@ -928,5 +1466,149 @@ mod tests {
             (false, true)
         );
         assert_eq!(install_flags(None, 0), (false, false));
+    }
+    #[test]
+    fn detail_facts_running_and_failed() {
+        let mut up = svc("nginx", true, true, "active");
+        up.since = Some(10_000 - 3 * 86_400 - 4 * 3600);
+        up.memory_bytes = Some(148_897_792);
+        up.main_pid = Some(1234);
+        up.restarts = Some(4);
+        up.version = Some("1.26.3".into());
+        let mut down = svc("postfix", true, false, "failed");
+        down.since = Some(10_000 - 720);
+        down.result = Some("oom-kill".into());
+        down.memory_bytes = Some(1);
+        let v = build_view(&health(vec![up, down]), false, 10_000);
+        assert_eq!(
+            v.core[0].facts,
+            ["up 3d 4h", "142.0 MiB", "PID 1234", "1.26.3"]
+        );
+        assert_eq!(v.core[0].restarts.as_deref(), Some("restarted 4×"));
+        // Memory/PID are running-only facts.
+        assert_eq!(v.optional[0].facts, ["down 12m", "oom-kill"]);
+    }
+
+    #[test]
+    fn old_agent_rows_have_no_detail_line() {
+        let v = build_view(
+            &health(vec![svc("nginx", true, true, "active")]),
+            false,
+            10_000,
+        );
+        assert!(v.core[0].facts.is_empty());
+        assert!(v.core[0].restarts.is_none());
+        // And an old agent's JSON (no detail keys) still deserializes.
+        let json = r#"{"name":"nginx","label":"nginx","active":true,"enabled":true,
+            "present":true,"sub_state":"running","severity":"ok"}"#;
+        let h: ServiceHealth = serde_json::from_str(json).unwrap();
+        assert_eq!(h.since, None);
+        assert_eq!(h.version, None);
+    }
+
+    fn card(label: &str, probe: Result<&ServicesHealth, NodeProbeFail>) -> NodeCard {
+        node_card(label.into(), label.into(), None, probe)
+    }
+
+    #[test]
+    fn node_card_names_only_units_needing_a_look() {
+        let h = health(vec![
+            svc("nginx", true, true, "active"),
+            svc("postfix", true, false, "inactive"),
+            svc("mariadb", true, true, "active"),
+            svc("vsftpd", false, false, "inactive"),
+        ]);
+        let c = card("w1", Ok(&h));
+        assert_eq!(c.tone, "warn");
+        assert_eq!(c.attention.len(), 1);
+        assert_eq!(c.attention[0].name, "postfix");
+        // Not-installed optional units are neither healthy nor attention.
+        assert_eq!(c.healthy, 2);
+    }
+
+    #[test]
+    fn overview_sorts_worst_first_and_auth_failure_is_distinct() {
+        let ok = health(vec![svc("nginx", true, true, "active")]);
+        let down = health(vec![svc("nginx", true, false, "failed")]);
+        let mut cards = vec![
+            card("a-ok", Ok(&ok)),
+            card("b-down", Ok(&down)),
+            card(
+                "c-gone",
+                Err(NodeProbeFail::Unreachable("Timed out".into())),
+            ),
+            card("d-forged", Err(NodeProbeFail::AuthFailed)),
+        ];
+        let (tone, verdict) = overview_verdict(&mut cards);
+        let order: Vec<&str> = cards.iter().map(|c| c.label.as_str()).collect();
+        assert_eq!(order, ["d-forged", "c-gone", "b-down", "a-ok"]);
+        assert_eq!(tone, "err");
+        assert_eq!(verdict, "3 of 4 nodes need attention.");
+        assert!(cards[0].auth_failed());
+        assert!(cards[0].verdict.contains("signature"));
+        assert_eq!(cards[1].unreachable_reason(), Some("Timed out"));
+    }
+
+    #[test]
+    fn overview_all_healthy() {
+        let ok = health(vec![svc("nginx", true, true, "active")]);
+        let mut cards = vec![card("a", Ok(&ok)), card("b", Ok(&ok))];
+        assert_eq!(
+            overview_verdict(&mut cards),
+            (
+                "ok",
+                "2 nodes · every installed service running.".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn master_redirects_name_the_master_explicitly() {
+        // A bare /services is the overview on a cluster; the master's own
+        // actions must land back on the master's detail page.
+        assert_eq!(query_node_prefix(None), "node=local&");
+        assert_eq!(query_node_prefix(Some("w1")), "node=w1&");
+    }
+    #[test]
+    fn control_buttons_follow_state_and_protect_core_units() {
+        let mut stopped = svc("postfix", true, false, "inactive");
+        stopped.enabled = false;
+        let running = svc("mariadb", true, true, "active");
+        let nginx = svc("nginx", true, true, "active");
+        let agent = svc("hyperion-agent", true, true, "active");
+        let mut masked = svc("redis-server", true, false, "inactive");
+        masked.sub_state = "masked".into();
+        let v = build_view(
+            &health(vec![stopped, running, nginx, agent, masked]),
+            false,
+            0,
+        );
+        let r = |n: &str| {
+            v.core
+                .iter()
+                .chain(v.optional.iter())
+                .find(|r| r.name == n)
+                .unwrap()
+                .clone()
+        };
+        let p = r("postfix");
+        assert!(p.can_start && p.can_enable && !p.can_stop && !p.can_restart);
+        let m = r("mariadb");
+        assert!(m.can_stop && m.can_restart && m.can_disable && !m.can_start);
+        let n = r("nginx");
+        assert!(n.can_restart && !n.can_stop && !n.can_disable);
+        let a = r("hyperion-agent");
+        assert!(!a.can_restart && !a.can_stop && !a.can_start && !a.can_disable);
+        let rd = r("redis-server");
+        assert!(!rd.can_start && !rd.can_enable);
+    }
+
+    #[test]
+    fn old_agent_rejection_reads_as_update_hint() {
+        assert!(
+            agent_error_text("invalid request: unknown variant `service_control`")
+                .contains("update the node")
+        );
+        assert_eq!(agent_error_text("boom"), "boom");
     }
 }

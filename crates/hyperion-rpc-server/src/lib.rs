@@ -663,6 +663,14 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(()) => Response::ServiceRestart,
             Err(e) => Response::Error(e),
         },
+        Request::ServiceControl { name, action } => match api.service_control(name, action).await {
+            Ok(()) => Response::ServiceControl,
+            Err(e) => Response::Error(e),
+        },
+        Request::ServiceJournal { name, lines } => match api.service_journal(name, lines).await {
+            Ok(text) => Response::ServiceJournal { text },
+            Err(e) => Response::Error(e),
+        },
         Request::ServiceInstall { name } => match api.service_install(name).await {
             Ok(()) => Response::ServiceInstall,
             Err(e) => Response::Error(e),
@@ -2723,6 +2731,12 @@ mod tests {
         }
         async fn service_restart(&self, _: String) -> Result<(), RpcError> {
             Ok(())
+        }
+        async fn service_control(&self, _: String, _: String) -> Result<(), RpcError> {
+            Ok(())
+        }
+        async fn service_journal(&self, _: String, _: u32) -> Result<String, RpcError> {
+            Ok(String::new())
         }
         async fn node_update_run(&self, _: bool, _: bool, _: bool) -> Result<i64, RpcError> {
             Ok(0)

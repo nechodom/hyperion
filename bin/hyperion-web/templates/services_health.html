@@ -3,12 +3,31 @@
 {% macro svc_row(r) %}
 <div class="svc-row">
   <div class="svc-main">
-    <div class="svc-title"><strong>{{ r.label }}</strong> <code class="text-soft">{{ r.name }}</code></div>
+    <div class="svc-title">{% if r.can_install %}<strong>{{ r.label }}</strong>{% else %}<a class="svc-link" href="/services/unit?node={{ current_node }}&name={{ r.name }}"><strong>{{ r.label }}</strong></a>{% endif %} <code class="text-soft">{{ r.name }}</code></div>
+    {% if !r.facts.is_empty() || r.restarts.is_some() %}
+    <div class="svc-facts small">
+      {% for f in r.facts %}<span>{{ f }}</span>{% endfor %}
+      {% if let Some(rs) = r.restarts %}<span class="warn" title="systemd restarted it on its own (NRestarts)">{{ rs }}</span>{% endif %}
+    </div>
+    {% endif %}
     {% if let Some(n) = r.note %}<div class="text-soft small">{{ n }}</div>{% endif %}
   </div>
   <span class="pill {{ r.tone }}">{{ r.status }}</span>
-  {% if is_super_admin %}
   <div class="svc-actions">
+    {% if is_super_admin %}
+    {% if r.can_start %}
+    <form method="post" action="/services/control"
+          data-confirm-title="Start {{ r.label }}"
+          data-confirm-body="Runs systemctl start {{ r.name }} on {{ current_label }}."
+          data-confirm-confirm-label="Start"
+          data-confirm-variant="primary">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="name" value="{{ r.name }}">
+      <input type="hidden" name="node" value="{{ current_node }}">
+      <input type="hidden" name="action" value="start">
+      <button type="submit" class="btn small primary">Start</button>
+    </form>
+    {% endif %}
     {% if r.can_restart %}
     <form method="post" action="/services/restart"
           data-confirm-title="Restart {{ r.label }}"
@@ -33,8 +52,10 @@
       <button type="submit" class="btn small primary">Install</button>
     </form>
     {% endif %}
+    {% endif %}
+    {#- The unit page holds the rest: stop, start-at-boot, and the journal. -#}
+    {% if !r.can_install %}<a class="btn small ghost" href="/services/unit?node={{ current_node }}&name={{ r.name }}" aria-label="Details and log for {{ r.label }}">Details</a>{% endif %}
   </div>
-  {% endif %}
 </div>
 {% endmacro %}
 {% block main %}
@@ -42,30 +63,27 @@
   <div>
     <h1>Service health <span class="text-soft" style="font-weight:400;font-size:0.7em">· {{ current_label }}</span></h1>
     <div class="subtitle">systemd units Hyperion depends on, checked live.</div>
+    {#- The page is long — services, then PHP, mail and the rootfs tools.
+        Say what is further down instead of leaving it to be scrolled into. -#}
+    <nav class="svc-jump small" aria-label="On this page">
+      <a href="#svc-health-live">Services</a>
+      <a href="#php-versions">PHP versions</a>
+      <a href="#mail-delivery">Mail delivery</a>
+      {% if is_super_admin %}<a href="#troubleshooting">Troubleshooting</a>{% endif %}
+    </nav>
   </div>
-  {% if !nodes.is_empty() %}
-  <span class="grow"></span>
-  <div class="actions">
-    {# Node switcher — navigate to /services?node=<id>. JS-free
-       fallback uses a tiny form; with JS the change handler fires
-       immediately so the operator doesn't have to click "Go". #}
-    <form method="get" action="/services" class="m-wrap" style="display:flex;gap:0.4rem;align-items:center">
-      <label for="node-switcher" class="text-soft small">View on node:</label>
-      <select id="node-switcher" name="node"
-              onchange="this.form.submit()"
-              style="min-width:14rem">
-        <option value="" {% if current_node.is_empty() %}selected{% endif %}>master (this node)</option>
-        {% for n in nodes %}
-        <option value="{{ n.node_id }}" {% if current_node == n.node_id %}selected{% endif %}>
-          {{ n.label }}{% if let Some(ip) = n.public_ip.as_ref() %} — {{ ip }}{% endif %}
-        </option>
-        {% endfor %}
-      </select>
-      <noscript><button class="btn small" type="submit">View node</button></noscript>
-    </form>
-  </div>
-  {% endif %}
 </div>
+
+{% if !nodes.is_empty() %}
+{# Cluster: back to the overview, or hop straight to another node. #}
+<nav class="node-chips" aria-label="Nodes">
+  <a href="/services">← All nodes</a>
+  <a href="/services?node=local" {% if current_node.is_empty() %}class="on" aria-current="page"{% endif %}>master</a>
+  {% for n in nodes %}
+  <a href="/services?node={{ n.node_id }}" {% if current_node == n.node_id %}class="on" aria-current="page"{% endif %}>{{ n.label }}</a>
+  {% endfor %}
+</nav>
+{% endif %}
 
 {% if let Some(e) = error %}
   <div class="flash error">
@@ -96,6 +114,7 @@
   <div class="svc-verdict {{ view.tone }}">
     <span class="dot"></span>
     <span>{{ view.verdict }}</span>
+    {% if view.known %}<span class="svc-counts small">{{ view.counts }}</span>{% endif %}
   </div>
 
   {% if view.known %}
@@ -232,10 +251,21 @@
 {% endif %}
 
 <p class="text-soft small" style="margin-top:1rem">
-  Refreshes every 15 s.
+  Service status refreshes every 15 s.
   {% if is_super_admin %}All actions are audited.{% else %}Restart and install need the super-admin role.{% endif %}
 </p>
 <script>
+(function () {
+  'use strict';
+  // The Troubleshooting fold is a <details>: a jump to it (the link up top,
+  // a bookmark) scrolls to a closed summary line. Open it on the way there.
+  function openFold() {
+    var el = location.hash === '#troubleshooting' && document.getElementById('troubleshooting');
+    if (el) el.open = true;
+  }
+  openFold();
+  window.addEventListener('hashchange', openFold);
+})();
 (function () {
   'use strict';
   // A Mail delivery or PHP versions action redirects to its group's anchor,

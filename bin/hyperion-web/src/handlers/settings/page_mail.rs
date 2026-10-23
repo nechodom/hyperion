@@ -226,7 +226,7 @@ mod tests {
             is_master,
             picker: picker(&nodes, selected),
             test_to: crate::handlers::mail_health::first_address(&email.default_to),
-            services_href: "/services#mail-delivery".into(),
+            services_href: "/services?node=local#mail-delivery".into(),
             email,
             email_error,
         }

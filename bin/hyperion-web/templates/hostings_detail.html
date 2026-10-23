@@ -985,7 +985,7 @@
               life, will never get a fix. Switch this site to PHP 8.3 or 8.4
               above — old code is likelier to run on {{ self.php_legacy_pick() }}
               if 8.3 breaks it. Then uninstall {{ v }} from
-              <a href="/services{% if !target_node.is_empty() && target_node != "local" %}?node={{ target_node }}{% endif %}#php-versions" style="color:inherit;text-decoration:underline">Services → PHP versions</a>
+              <a href="/services?node={% if target_node.is_empty() %}local{% else %}{{ target_node }}{% endif %}#php-versions" style="color:inherit;text-decoration:underline">Services → PHP versions</a>
               once no site needs it.
             </div>
           </div>

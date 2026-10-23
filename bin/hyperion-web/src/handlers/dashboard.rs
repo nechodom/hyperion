@@ -316,7 +316,7 @@ fn alert_link(kind: &str, node_id: Option<&str>) -> Option<(String, String)> {
                     "/services?node={}#php-versions",
                     crate::handlers::jobs::urlencode(id)
                 ),
-                None => "/services#php-versions".to_string(),
+                None => "/services?node=local#php-versions".to_string(),
             },
             "Review PHP versions".to_string(),
         )),
