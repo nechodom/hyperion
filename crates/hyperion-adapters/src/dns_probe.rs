@@ -18,14 +18,14 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 
 const T_A: u16 = 1;
-const T_NS: u16 = 2;
+pub(crate) const T_NS: u16 = 2;
 const T_CNAME: u16 = 5;
-const T_TXT: u16 = 16;
+pub(crate) const T_TXT: u16 = 16;
 const T_AAAA: u16 = 28;
 const T_OPT: u16 = 41;
 
-const RCODE_NOERROR: u8 = 0;
-const RCODE_NXDOMAIN: u8 = 3;
+pub(crate) const RCODE_NOERROR: u8 = 0;
+pub(crate) const RCODE_NXDOMAIN: u8 = 3;
 
 const QUERY_TIMEOUT: Duration = Duration::from_secs(3);
 const ATTEMPTS: u32 = 2;
@@ -41,7 +41,7 @@ const PUBLIC_RESOLVERS: [IpAddr; 2] = [
 const MAX_CNAME_HOPS: usize = 5;
 
 #[derive(Debug, Clone, PartialEq)]
-enum RData {
+pub(crate) enum RData {
     /// NS / CNAME target.
     Name(String),
     /// One TXT record, its character-strings joined.
@@ -52,26 +52,45 @@ enum RData {
 }
 
 #[derive(Debug, Clone)]
-struct Rr {
-    name: String,
-    rtype: u16,
-    data: RData,
+pub(crate) struct Rr {
+    pub(crate) name: String,
+    pub(crate) rtype: u16,
+    pub(crate) data: RData,
 }
 
 #[derive(Debug, Clone)]
-struct Reply {
-    id: u16,
-    rcode: u8,
-    aa: bool,
-    tc: bool,
-    answers: Vec<Rr>,
+pub(crate) struct Reply {
+    pub(crate) id: u16,
+    pub(crate) rcode: u8,
+    pub(crate) aa: bool,
+    pub(crate) tc: bool,
+    pub(crate) answers: Vec<Rr>,
 }
 
 fn norm(name: &str) -> String {
     name.trim_end_matches('.').to_ascii_lowercase()
 }
 
-fn build_query(id: u16, name: &str, qtype: u16, recursion: bool) -> Result<Vec<u8>, String> {
+/// Uncompressed wire form of a name (lowercased, trailing dot ignored).
+pub(crate) fn encode_name(name: &str) -> Result<Vec<u8>, String> {
+    let mut out = Vec::with_capacity(name.len() + 2);
+    for label in norm(name).split('.').filter(|l| !l.is_empty()) {
+        if label.len() > 63 {
+            return Err(format!("label too long in {name}"));
+        }
+        out.push(label.len() as u8);
+        out.extend_from_slice(label.as_bytes());
+    }
+    out.push(0);
+    Ok(out)
+}
+
+pub(crate) fn build_query(
+    id: u16,
+    name: &str,
+    qtype: u16,
+    recursion: bool,
+) -> Result<Vec<u8>, String> {
     let mut q = Vec::with_capacity(64);
     q.extend_from_slice(&id.to_be_bytes());
     q.push(if recursion { 0x01 } else { 0x00 }); // QR=0 OPCODE=0 RD
@@ -80,14 +99,7 @@ fn build_query(id: u16, name: &str, qtype: u16, recursion: bool) -> Result<Vec<u
     q.extend_from_slice(&0u16.to_be_bytes()); // ANCOUNT
     q.extend_from_slice(&0u16.to_be_bytes()); // NSCOUNT
     q.extend_from_slice(&1u16.to_be_bytes()); // ARCOUNT (EDNS0 OPT)
-    for label in norm(name).split('.').filter(|l| !l.is_empty()) {
-        if label.len() > 63 {
-            return Err(format!("label too long in {name}"));
-        }
-        q.push(label.len() as u8);
-        q.extend_from_slice(label.as_bytes());
-    }
-    q.push(0);
+    q.extend_from_slice(&encode_name(name)?);
     q.extend_from_slice(&qtype.to_be_bytes());
     q.extend_from_slice(&1u16.to_be_bytes()); // IN
                                               // OPT: root owner, 1232-byte payload, no flags, no options.
@@ -99,7 +111,7 @@ fn build_query(id: u16, name: &str, qtype: u16, recursion: bool) -> Result<Vec<u
     Ok(q)
 }
 
-fn read_u16(buf: &[u8], pos: usize) -> Result<u16, String> {
+pub(crate) fn read_u16(buf: &[u8], pos: usize) -> Result<u16, String> {
     buf.get(pos..pos + 2)
         .map(|b| u16::from_be_bytes([b[0], b[1]]))
         .ok_or_else(|| "truncated DNS message".to_string())
@@ -107,7 +119,7 @@ fn read_u16(buf: &[u8], pos: usize) -> Result<u16, String> {
 
 /// Decode a (possibly compressed) name at `pos`; returns it and the offset
 /// just past it in the original stream.
-fn read_name(buf: &[u8], mut pos: usize) -> Result<(String, usize), String> {
+pub(crate) fn read_name(buf: &[u8], mut pos: usize) -> Result<(String, usize), String> {
     let mut labels: Vec<String> = Vec::new();
     let mut end: Option<usize> = None;
     let mut jumps = 0;
@@ -136,7 +148,7 @@ fn read_name(buf: &[u8], mut pos: usize) -> Result<(String, usize), String> {
     }
 }
 
-fn parse_reply(buf: &[u8]) -> Result<Reply, String> {
+pub(crate) fn parse_reply(buf: &[u8]) -> Result<Reply, String> {
     if buf.len() < 12 {
         return Err("short DNS reply".into());
     }
@@ -360,7 +372,7 @@ pub struct NsAnswer {
     pub seen: Seen,
 }
 
-fn interpret(name: &str, reply: &Reply) -> Seen {
+pub(crate) fn interpret(name: &str, reply: &Reply) -> Seen {
     let name = norm(name);
     if reply.rcode == RCODE_NXDOMAIN {
         return Seen::NxDomain;
