@@ -46,6 +46,7 @@ mod dkim;
 mod files;
 mod firewall;
 mod fs_health;
+pub use fs_health::check_usr_writable;
 mod fs_util;
 mod ftp;
 mod geoip;
@@ -99,6 +100,7 @@ pub(crate) use config::*;
 use cron::*;
 use dashboard::*;
 use firewall::*;
+#[cfg(test)]
 use fs_health::*;
 use fs_util::*;
 use git_sync::*;
