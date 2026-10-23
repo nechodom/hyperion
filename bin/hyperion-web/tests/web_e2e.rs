@@ -20,6 +20,33 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use tower::ServiceExt;
 
+/// Stands in for public DNS: nothing is delegated and no CNAME exists,
+/// and no test sends a query off the machine.
+struct OfflineDns;
+
+const OFFLINE_DNS: &str = "offline test resolver";
+
+#[async_trait]
+impl hyperion_web::acme_dns_renew::DnsProbe for OfflineDns {
+    async fn zone_delegated(&self, zone: &str, _check_token: &str) -> Result<(), String> {
+        Err(format!(
+            "_hyperion-check.{zone} does not exist: the zone is not delegated to this panel ({OFFLINE_DNS})"
+        ))
+    }
+    async fn cname(
+        &self,
+        _name: &str,
+        _target: &str,
+    ) -> Result<(), hyperion_adapters::dns_probe::CnameProblem> {
+        Err(hyperion_adapters::dns_probe::CnameProblem::Other(
+            OFFLINE_DNS.into(),
+        ))
+    }
+    async fn txt_visible(&self, _name: &str, _values: &[String]) -> Result<(), String> {
+        Err(OFFLINE_DNS.into())
+    }
+}
+
 struct StubAdapters {
     uid_seq: AtomicU32,
 }
@@ -396,6 +423,7 @@ fn test_state_with_setup(
         caches: Default::default(),
         setup,
         cluster_sync: Default::default(),
+        dns_probe: hyperion_web::acme_dns_renew::DnsProbes::new(Arc::new(OfflineDns)),
     })
 }
 
@@ -4944,6 +4972,8 @@ async fn acme_dns_card_renders_records_for_admin() {
     assert_eq!(resp.status(), StatusCode::OK);
     let cell = body_string(resp).await;
     assert!(cell.contains("pill") && !cell.contains("working"), "{cell}");
+    assert!(cell.contains("delegation missing"), "{cell}");
+    assert!(cell.contains(OFFLINE_DNS), "public DNS was asked: {cell}");
 }
 
 #[tokio::test]
@@ -5254,6 +5284,12 @@ async fn ssl_tab_shows_cname_block_to_operator() {
     assert!(block.contains(&format!("/hostings/{id}/cert/acme-dns/check")));
     // A second click cannot start a parallel probe.
     assert!(block.contains("hx-disabled-elt=\"find button\""));
+    // The CNAME check ran, against the offline resolver.
+    assert!(block.contains(OFFLINE_DNS), "public DNS was asked: {block}");
+    assert_eq!(
+        acme_ssl_labels(&sock).await[0].last_check_error.as_deref(),
+        Some(OFFLINE_DNS)
+    );
 
     // The tab now carries the block on every render.
     let (_, page) = acme_dns_get(&app, &cookie, &format!("/hostings/{id}")).await;
@@ -5542,4 +5578,5 @@ async fn preview_wildcard_sets_up_automatic_renewal() {
         block.contains("id=\"acme-ssl-local\""),
         "swap target id missing"
     );
+    assert!(block.contains(OFFLINE_DNS), "public DNS was asked: {block}");
 }

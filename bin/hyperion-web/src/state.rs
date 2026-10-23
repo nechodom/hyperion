@@ -84,6 +84,10 @@ pub struct AppState {
     /// The master → node settings sync loop: kick it after a save, read
     /// which nodes are in step. See [`crate::cluster_sync`].
     pub cluster_sync: Arc<crate::cluster_sync::SyncCtl>,
+    /// Public-DNS lookups of the delegated acme zone (the delegation proof
+    /// and the customer's CNAME). Public DNS by default; tests swap in a
+    /// fake. See [`crate::acme_dns_renew::DnsProbe`].
+    pub dns_probe: crate::acme_dns_renew::DnsProbes,
 }
 
 impl AppState {

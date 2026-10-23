@@ -174,6 +174,56 @@ pub fn spawn(state: SharedState) {
     });
 }
 
+/// The public-DNS lookups the delegated renewal relies on: the zone
+/// delegation proof, the customer's CNAME, and TXT visibility. Behind a
+/// trait so the web tests never send a query off the machine.
+#[async_trait]
+pub trait DnsProbe: Send + Sync {
+    async fn zone_delegated(&self, zone: &str, check_token: &str) -> Result<(), String>;
+    async fn cname(&self, name: &str, target: &str) -> Result<(), CnameProblem>;
+    async fn txt_visible(&self, name: &str, values: &[String]) -> Result<(), String>;
+}
+
+/// The real lookups, over the public resolvers and the zones'
+/// authoritative servers.
+pub struct PublicDns;
+
+#[async_trait]
+impl DnsProbe for PublicDns {
+    async fn zone_delegated(&self, zone: &str, check_token: &str) -> Result<(), String> {
+        dns_probe::check_zone_delegated(zone, check_token).await
+    }
+    async fn cname(&self, name: &str, target: &str) -> Result<(), CnameProblem> {
+        dns_probe::check_cname(name, target).await
+    }
+    async fn txt_visible(&self, name: &str, values: &[String]) -> Result<(), String> {
+        dns_probe::txt_visible_via_public(name, values).await
+    }
+}
+
+/// The panel's [`DnsProbe`]; public DNS unless a test swaps it.
+#[derive(Clone)]
+pub struct DnsProbes(std::sync::Arc<dyn DnsProbe>);
+
+impl DnsProbes {
+    pub fn new(probe: std::sync::Arc<dyn DnsProbe>) -> Self {
+        Self(probe)
+    }
+}
+
+impl Default for DnsProbes {
+    fn default() -> Self {
+        Self(std::sync::Arc::new(PublicDns))
+    }
+}
+
+impl std::ops::Deref for DnsProbes {
+    type Target = dyn DnsProbe;
+    fn deref(&self) -> &Self::Target {
+        &*self.0
+    }
+}
+
 /// Everything the renewal touches outside this module, so the tests run
 /// without sockets or DNS.
 #[async_trait]
@@ -206,13 +256,13 @@ impl Backend for Live<'_> {
         crate::dispatcher::is_master_hostname(self.0, node_id).await
     }
     async fn zone_delegated(&self, zone: &str, check_token: &str) -> Result<(), String> {
-        dns_probe::check_zone_delegated(zone, check_token).await
+        self.0.dns_probe.zone_delegated(zone, check_token).await
     }
     async fn cname(&self, name: &str, target: &str) -> Result<(), CnameProblem> {
-        dns_probe::check_cname(name, target).await
+        self.0.dns_probe.cname(name, target).await
     }
     async fn txt_visible(&self, name: &str, values: &[String]) -> Result<(), String> {
-        dns_probe::txt_visible_via_public(name, values).await
+        self.0.dns_probe.txt_visible(name, values).await
     }
     async fn pause(&self, d: Duration) {
         tokio::time::sleep(d).await;

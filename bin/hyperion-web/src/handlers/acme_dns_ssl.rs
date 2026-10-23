@@ -15,7 +15,7 @@ use askama::Template;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Redirect, Response};
-use hyperion_adapters::dns_probe::{self, CnameProblem};
+use hyperion_adapters::dns_probe::CnameProblem;
 use hyperion_rpc::codec::{Request, Response as RpcResponse};
 use hyperion_rpc::wire::HostingSelector;
 use hyperion_state::capabilities::Capability;
@@ -348,7 +348,9 @@ async fn probe(state: &SharedState, subject: &Subject, label: &AcmeDnsLabel, zon
     let was = label_verified(label);
     let outcome = match tokio::time::timeout(
         PROBE_TIMEOUT,
-        dns_probe::check_cname(&label.challenge_name(), &label.target(zone)),
+        state
+            .dns_probe
+            .cname(&label.challenge_name(), &label.target(zone)),
     )
     .await
     {

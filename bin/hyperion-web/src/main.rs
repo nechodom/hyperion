@@ -154,6 +154,7 @@ async fn serve(cfg: Config) -> anyhow::Result<()> {
         caches: Default::default(),
         setup,
         cluster_sync: Default::default(),
+        dns_probe: Default::default(),
     });
     // Spawn a background refresher that polls the agent for the
     // current `cluster.panel_hostname` every 30 s. The host-enforce

@@ -366,7 +366,7 @@ pub async fn post_acme_dns_check(State(state): State<SharedState>, ctx: AuthCtx)
     };
     let body = match tokio::time::timeout(
         CHECK_TIMEOUT,
-        hyperion_adapters::dns_probe::check_zone_delegated(zone, &config.check_token),
+        state.dns_probe.zone_delegated(zone, &config.check_token),
     )
     .await
     {
