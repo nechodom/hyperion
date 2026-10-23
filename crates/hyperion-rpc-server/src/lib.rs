@@ -2130,6 +2130,23 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
                 Err(e) => Response::Error(e),
             }
         }
+        Request::AcmeDnsConfigGet => match api.acme_dns_config_get().await {
+            Ok(v) => Response::AcmeDnsConfig(v),
+            Err(e) => Response::Error(e),
+        },
+        Request::AcmeDnsConfigSet {
+            zone,
+            ns_host,
+            public_ipv4,
+            public_ipv6,
+            enabled,
+        } => match api
+            .acme_dns_config_set(zone, ns_host, public_ipv4, public_ipv6, enabled)
+            .await
+        {
+            Ok(v) => Response::AcmeDnsConfig(v),
+            Err(e) => Response::Error(e),
+        },
     }
 }
 
@@ -4061,6 +4078,23 @@ mod tests {
             _: i64,
             _: i64,
         ) -> Result<hyperion_rpc::codec::CareReportMail, RpcError> {
+            Err(RpcError::Internal {
+                message: "not supported by this agent".into(),
+            })
+        }
+        async fn acme_dns_config_get(&self) -> Result<hyperion_types::AcmeDnsConfig, RpcError> {
+            Err(RpcError::Internal {
+                message: "not supported by this agent".into(),
+            })
+        }
+        async fn acme_dns_config_set(
+            &self,
+            _: Option<String>,
+            _: String,
+            _: Option<String>,
+            _: Option<String>,
+            _: bool,
+        ) -> Result<hyperion_types::AcmeDnsConfig, RpcError> {
             Err(RpcError::Internal {
                 message: "not supported by this agent".into(),
             })

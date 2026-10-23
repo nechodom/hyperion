@@ -17,6 +17,7 @@
 )]
 #![forbid(unsafe_code)]
 
+pub mod acme_dns_status;
 pub mod agent;
 pub mod cluster_sync;
 pub mod config_persist;
@@ -46,6 +47,11 @@ pub use hyperion_adapters::email::EmailConfig;
 // Re-export the path-traversability self-heal so the agent's main()
 // can call it at startup without adding a hyperion-adapters dep.
 pub use hyperion_adapters::fs::ensure_ancestors_traversable;
+
+// The acme-dns responder's packet logic, for the agent's socket loop.
+pub use hyperion_adapters::dns_responder::{
+    answer as acme_dns_answer, ZoneView as AcmeDnsZoneView,
+};
 
 // Same pattern — agent calls this at startup to ensure /run/php/<ver>/
 // exists for every supported PHP version. Without it nginx 502s on

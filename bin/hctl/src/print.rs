@@ -1301,6 +1301,22 @@ pub fn print_pretty(resp: &Response) {
                 }
             }
         }
+        Response::AcmeDnsConfig(c) => {
+            println!("zone:      {}", c.zone.as_deref().unwrap_or("(none)"));
+            println!("ns host:   {}", c.ns_host);
+            println!("enabled:   {}", c.enabled);
+            println!(
+                "listening: {}",
+                if c.listening.is_empty() {
+                    "(not listening)".to_string()
+                } else {
+                    c.listening.join(", ")
+                }
+            );
+            if let Some(e) = &c.last_error {
+                println!("error:     {e}");
+            }
+        }
         Response::Error(e) => {
             eprintln!("ERROR: {e}");
         }

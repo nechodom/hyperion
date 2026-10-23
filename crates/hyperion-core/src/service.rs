@@ -33477,6 +33477,172 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok((applied, out, err))
     }
 
+    /// The acme-dns config with the responder's runtime status. A node that
+    /// was never configured answers an empty, disabled config.
+    pub async fn acme_dns_config_get(&self) -> Result<hyperion_types::AcmeDnsConfig, RpcError> {
+        let mut cfg = hyperion_state::acme_dns::config_get(&self.pool)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("acme-dns config: {e}")))?
+            .unwrap_or_else(|| hyperion_types::AcmeDnsConfig {
+                zone: None,
+                ns_host: String::new(),
+                public_ipv4: None,
+                public_ipv6: None,
+                enabled: false,
+                check_token: String::new(),
+                listening: Vec::new(),
+                last_error: None,
+            });
+        let status = crate::acme_dns_status::get();
+        cfg.listening = status.listening;
+        cfg.last_error = status.last_error;
+        Ok(cfg)
+    }
+
+    /// Save the acme-dns config. Enabling checks nothing else holds port 53
+    /// first; the agent's responder loop picks the change up on its own.
+    pub async fn acme_dns_config_set(
+        &self,
+        zone: Option<String>,
+        ns_host: String,
+        public_ipv4: Option<String>,
+        public_ipv6: Option<String>,
+        enabled: bool,
+    ) -> Result<hyperion_types::AcmeDnsConfig, RpcError> {
+        let mut ss = String::new();
+        if enabled {
+            for flags in ["-Hlunp", "-Hltnp"] {
+                match tokio::process::Command::new("/usr/bin/ss")
+                    .arg(flags)
+                    .output()
+                    .await
+                {
+                    Ok(o) if o.status.success() => {
+                        ss.push_str(&String::from_utf8_lossy(&o.stdout));
+                    }
+                    _ => {
+                        return Err(RpcError::Internal_with(
+                            "could not run ss to check port 53 is free".into(),
+                        ))
+                    }
+                }
+            }
+        }
+        self.acme_dns_config_save(zone, ns_host, public_ipv4, public_ipv6, enabled, &ss)
+            .await
+    }
+
+    /// [`Self::acme_dns_config_set`] with the `ss` listing passed in.
+    async fn acme_dns_config_save(
+        &self,
+        zone: Option<String>,
+        ns_host: String,
+        public_ipv4: Option<String>,
+        public_ipv6: Option<String>,
+        enabled: bool,
+        ss: &str,
+    ) -> Result<hyperion_types::AcmeDnsConfig, RpcError> {
+        let invalid = |message: String| RpcError::Validation { message };
+        let blank = |v: Option<String>| v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+        let zone = match blank(zone) {
+            Some(z) => Some(
+                Domain::parse(&z)
+                    .map_err(|e| invalid(format!("zone: {e}")))?
+                    .as_str()
+                    .to_string(),
+            ),
+            None => None,
+        };
+        let ns_host = match blank(Some(ns_host)) {
+            Some(n) => Domain::parse(&n)
+                .map_err(|e| invalid(format!("NS host: {e}")))?
+                .as_str()
+                .to_string(),
+            None => String::new(),
+        };
+        let public_ipv4 = blank(public_ipv4);
+        if let Some(ip) = &public_ipv4 {
+            ip.parse::<std::net::Ipv4Addr>()
+                .map_err(|_| invalid(format!("not an IPv4 address: {ip}")))?;
+        }
+        let public_ipv6 = blank(public_ipv6);
+        if let Some(ip) = &public_ipv6 {
+            ip.parse::<std::net::Ipv6Addr>()
+                .map_err(|_| invalid(format!("not an IPv6 address: {ip}")))?;
+        }
+        if enabled {
+            let Some(z) = &zone else {
+                return Err(invalid("set the delegated zone before enabling".into()));
+            };
+            if ns_host.is_empty() {
+                return Err(invalid("set the NS host name before enabling".into()));
+            }
+            // The NS host's address record lives in the PARENT zone; one
+            // inside the delegated zone could never be resolved (the
+            // responder only serves TXT, NS and SOA).
+            if ns_host == *z || ns_host.ends_with(&format!(".{z}")) {
+                return Err(invalid(format!(
+                    "the NS host {ns_host} must be outside the zone {z}"
+                )));
+            }
+        }
+        let prev = hyperion_state::acme_dns::config_get(&self.pool)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("acme-dns config: {e}")))?;
+        let check_token = prev
+            .as_ref()
+            .map(|p| p.check_token.clone())
+            .filter(|t| !t.is_empty())
+            .unwrap_or_else(|| {
+                use rand::Rng;
+                const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
+                let mut rng = rand::thread_rng();
+                (0..32)
+                    .map(|_| ALPHABET[rng.gen_range(0..ALPHABET.len())] as char)
+                    .collect()
+            });
+        let holders = if enabled {
+            port_53_holders_from_ss(ss)
+        } else {
+            Vec::new()
+        };
+        let mut cfg = hyperion_types::AcmeDnsConfig {
+            zone,
+            ns_host,
+            public_ipv4,
+            public_ipv6,
+            enabled: enabled && holders.is_empty(),
+            check_token,
+            listening: Vec::new(),
+            last_error: None,
+        };
+        hyperion_state::acme_dns::config_put(&self.pool, &cfg)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("acme-dns config: {e}")))?;
+        if !holders.is_empty() {
+            if prev.is_some_and(|p| p.enabled) {
+                let _ = self.firewall_remove_template("acme-dns").await;
+            }
+            return Err(invalid(format!(
+                "port 53 is already in use ({}); saved the zone with the responder off. \
+                 Stop that DNS server or bind it to loopback only, then enable again.",
+                holders.join(", ")
+            )));
+        }
+        let (ok, _, err) = if cfg.enabled {
+            self.firewall_apply_template("acme-dns").await?
+        } else {
+            self.firewall_remove_template("acme-dns").await?
+        };
+        if !ok {
+            tracing::warn!(error = %err, enabled = cfg.enabled, "acme-dns: firewall preset change failed");
+        }
+        let status = crate::acme_dns_status::get();
+        cfg.listening = status.listening;
+        cfg.last_error = status.last_error;
+        Ok(cfg)
+    }
+
     /// Rebuild hyperion's chain from the recorded state. Called once at agent
     /// start, BEFORE bans are re-applied.
     ///
@@ -37896,7 +38062,7 @@ mod sshd_ports_tests {
 /// Preset ids `firewall_template_commands` knows, in the order the boot
 /// re-apply walks them. "worker_rpc" is snippet-only in the UI (it needs the
 /// master's IP) and deliberately absent.
-const FIREWALL_TEMPLATE_IDS: [&str; 5] = ["web", "mail", "hyperion", "ssh", "ftp"];
+const FIREWALL_TEMPLATE_IDS: [&str; 6] = ["web", "mail", "hyperion", "ssh", "ftp", "acme-dns"];
 
 /// One port the operator opened from the panel, outside the presets. Travels
 /// as a preset id — `custom:<proto>:<port>[:<source>]` — so apply, remove,
@@ -38190,6 +38356,48 @@ fn hyperion_listen_ports_from_ss(out: &str) -> Vec<u16> {
     ports.sort_unstable();
     ports.dedup();
     ports
+}
+
+/// Whoever, besides hyperion-agent itself, holds port 53 on an address the
+/// acme-dns responder would bind, from `ss -Hlunp` + `ss -Hltnp`, as
+/// `"<process> on <addr>:53"`. Loopback (systemd-resolved's 127.0.0.53/54)
+/// and IPv6 link-local are not bound by the responder, so they never clash.
+fn port_53_holders_from_ss(out: &str) -> Vec<String> {
+    let mut holders: Vec<String> = out
+        .lines()
+        .filter_map(|l| {
+            // State Recv-Q Send-Q Local:Port Peer:Port Process
+            let local = l.split_whitespace().nth(3)?;
+            let (addr, port) = local.rsplit_once(':')?;
+            if port != "53" {
+                return None;
+            }
+            let bare = addr.split('%').next().unwrap_or(addr);
+            let bare = bare.trim_start_matches('[').trim_end_matches(']');
+            let lower = bare.to_ascii_lowercase();
+            if lower.starts_with("127.")
+                || lower == "::1"
+                || lower == "localhost"
+                || lower.starts_with("fe8")
+                || lower.starts_with("fe9")
+                || lower.starts_with("fea")
+                || lower.starts_with("feb")
+            {
+                return None;
+            }
+            let process = l
+                .split_once("((\"")
+                .and_then(|(_, r)| r.split_once('"'))
+                .map(|(name, _)| name.to_string());
+            if process.as_deref() == Some("hyperion-agent") {
+                return None;
+            }
+            let who = process.unwrap_or_else(|| "an unknown process".into());
+            Some(format!("{who} on {addr}:53"))
+        })
+        .collect();
+    holders.dedup();
+    holders
 }
 
 /// Open ports from a ruleset dump, decorated for the /firewall table.
@@ -38497,6 +38705,129 @@ table ip nat {
     }
 }
 
+#[cfg(test)]
+mod acme_dns_tests {
+    use super::*;
+    use crate::secrets::SecretsStore;
+    use hyperion_state::db::open_memory;
+
+    async fn svc() -> HostingService<MockAdapterPort> {
+        let pool = open_memory().await.expect("memory db");
+        let secrets_dir = tempfile::tempdir().expect("dir");
+        let secrets = Arc::new(SecretsStore::new(secrets_dir.keep()));
+        HostingService::new(pool, Arc::new(MockAdapterPort::new()), secrets)
+    }
+
+    const NAMED: &str = "UNCONN 0 0 203.0.113.5:53 0.0.0.0:* users:((\"named\",pid=1,fd=5))\n";
+
+    #[tokio::test]
+    async fn enable_refuses_when_port_53_is_taken() {
+        let s = svc().await;
+        let err = s
+            .acme_dns_config_save(
+                Some("acme.panel.example".into()),
+                "ns-acme.panel.example".into(),
+                Some("203.0.113.5".into()),
+                None,
+                true,
+                NAMED,
+            )
+            .await
+            .expect_err("port 53 is held by named");
+        assert!(err.to_string().contains("named"), "{err}");
+        let cfg = s.acme_dns_config_get().await.expect("get");
+        assert!(!cfg.enabled);
+        assert_eq!(cfg.zone.as_deref(), Some("acme.panel.example"));
+        assert_eq!(cfg.check_token.len(), 32);
+    }
+
+    #[tokio::test]
+    async fn enable_rejects_ns_host_inside_zone() {
+        let s = svc().await;
+        for ns in ["ns.acme.panel.example", "acme.panel.example"] {
+            let err = s
+                .acme_dns_config_save(
+                    Some("acme.panel.example".into()),
+                    ns.into(),
+                    None,
+                    None,
+                    true,
+                    "",
+                )
+                .await
+                .expect_err("ns inside the zone");
+            assert!(matches!(err, RpcError::Validation { .. }), "{err}");
+        }
+        assert!(s
+            .acme_dns_config_get()
+            .await
+            .expect("get")
+            .check_token
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn check_token_is_generated_once() {
+        let s = svc().await;
+        let a = s
+            .acme_dns_config_save(None, String::new(), None, None, false, "")
+            .await
+            .expect("save");
+        let b = s
+            .acme_dns_config_save(
+                Some("acme.panel.example".into()),
+                "ns-acme.panel.example".into(),
+                None,
+                None,
+                false,
+                "",
+            )
+            .await
+            .expect("save");
+        assert_eq!(a.check_token.len(), 32);
+        assert_eq!(a.check_token, b.check_token);
+    }
+
+    #[test]
+    fn port_53_holders_skip_loopback_and_the_agent() {
+        let ss =
+            "UNCONN 0 0 127.0.0.53%lo:53 0.0.0.0:* users:((\"systemd-resolve\",pid=9,fd=13))\n\
+                  UNCONN 0 0 127.0.0.54:53 0.0.0.0:* users:((\"systemd-resolve\",pid=9,fd=15))\n\
+                  LISTEN 0 4096 [::1]:53 [::]:* users:((\"unbound\",pid=3,fd=4))\n\
+                  UNCONN 0 0 [fe80::1]%eth0:53 [::]:* users:((\"dnsmasq\",pid=4,fd=4))\n\
+                  UNCONN 0 0 203.0.113.5:53 0.0.0.0:* users:((\"hyperion-agent\",pid=2,fd=30))\n\
+                  UNCONN 0 0 0.0.0.0:5353 0.0.0.0:* users:((\"avahi-daemon\",pid=5,fd=12))\n";
+        assert!(port_53_holders_from_ss(ss).is_empty());
+        let ss = "LISTEN 0 10 *:53 *:* users:((\"pdns_server\",pid=7,fd=6))\n\
+                  UNCONN 0 0 [::]:53 [::]:*\n";
+        assert_eq!(
+            port_53_holders_from_ss(ss),
+            vec![
+                "pdns_server on *:53".to_string(),
+                "an unknown process on [::]:53".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn acme_dns_firewall_template_has_udp_and_tcp_53() {
+        let cmds = firewall_template_commands("acme-dns").expect("known preset");
+        let joined: Vec<String> = cmds.iter().map(|c| c[5..].join(" ")).collect();
+        assert_eq!(
+            joined,
+            vec![
+                "udp dport 53 accept comment \"hyperion:acme-dns\"",
+                "tcp dport 53 accept comment \"hyperion:acme-dns-tcp\"",
+            ]
+        );
+        assert_eq!(
+            firewall_template_tags("acme-dns").expect("tags"),
+            vec!["acme-dns", "acme-dns-tcp"]
+        );
+        assert!(FIREWALL_TEMPLATE_IDS.contains(&"acme-dns"));
+    }
+}
+
 /// nft argv sequences for each firewall preset. Returns `None` for an
 /// unknown id. Each rule's last argument is its `"hyperion:<tag>"` comment —
 /// the tag is how a preset is detected, re-applied idempotently and removed.
@@ -38617,6 +38948,36 @@ fn firewall_template_commands(id: &str) -> Option<Vec<Vec<String>>> {
                 "accept",
                 "comment",
                 "\"hyperion:ftp-passive\"",
+            ],
+        ],
+        // Opened and closed by Settings → HTTPS with the acme-dns responder,
+        // not toggled by hand.
+        "acme-dns" => vec![
+            vec![
+                "add",
+                "rule",
+                "inet",
+                "hyperion",
+                "input",
+                "udp",
+                "dport",
+                "53",
+                "accept",
+                "comment",
+                "\"hyperion:acme-dns\"",
+            ],
+            vec![
+                "add",
+                "rule",
+                "inet",
+                "hyperion",
+                "input",
+                "tcp",
+                "dport",
+                "53",
+                "accept",
+                "comment",
+                "\"hyperion:acme-dns-tcp\"",
             ],
         ],
         // "worker_rpc" needs <MASTER_IP> substitution which we

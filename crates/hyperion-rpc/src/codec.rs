@@ -2175,6 +2175,19 @@ pub enum Request {
         from: i64,
         to: i64,
     },
+    /// The delegated acme-dns zone config, with the responder's runtime
+    /// status (`listening`, `last_error`). Master-local.
+    AcmeDnsConfigGet,
+    /// Save the acme-dns config. `enabled = true` validates the zone,
+    /// refuses when something else holds port 53 (saving it disabled) and
+    /// opens the `acme-dns` firewall preset; `false` closes it.
+    AcmeDnsConfigSet {
+        zone: Option<String>,
+        ns_host: String,
+        public_ipv4: Option<String>,
+        public_ipv6: Option<String>,
+        enabled: bool,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2790,6 +2803,7 @@ pub enum Response {
     CareReportPreviewRange(CareReportMail),
     /// A one-off, custom-range report, as sent.
     CareReportSendRange(CareReportMail),
+    AcmeDnsConfig(hyperion_types::AcmeDnsConfig),
     Error(RpcError),
 }
 
@@ -2920,6 +2934,36 @@ where
 mod tests {
     use super::*;
     use tokio::io::duplex;
+
+    #[test]
+    fn acme_dns_config_rpcs_round_trip() {
+        let get = Request::AcmeDnsConfigGet;
+        let s = serde_json::to_string(&get).expect("ser");
+        assert!(s.contains(r#""method":"acme_dns_config_get""#), "{s}");
+        assert_eq!(serde_json::from_str::<Request>(&s).expect("de"), get);
+        let set = Request::AcmeDnsConfigSet {
+            zone: Some("acme.panel.example".into()),
+            ns_host: "ns-acme.example".into(),
+            public_ipv4: Some("192.0.2.1".into()),
+            public_ipv6: None,
+            enabled: true,
+        };
+        let s = serde_json::to_string(&set).expect("ser");
+        assert!(s.contains(r#""method":"acme_dns_config_set""#), "{s}");
+        assert_eq!(serde_json::from_str::<Request>(&s).expect("de"), set);
+        let resp = Response::AcmeDnsConfig(hyperion_types::AcmeDnsConfig {
+            zone: None,
+            ns_host: String::new(),
+            public_ipv4: None,
+            public_ipv6: None,
+            enabled: false,
+            check_token: "t".into(),
+            listening: vec!["192.0.2.1:53".into()],
+            last_error: None,
+        });
+        let s = serde_json::to_string(&resp).expect("ser");
+        assert_eq!(serde_json::from_str::<Response>(&s).expect("de"), resp);
+    }
 
     #[test]
     fn cert_dns01_finish_strict_round_trips() {

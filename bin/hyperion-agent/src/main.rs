@@ -9,6 +9,7 @@ use hyperion_core::AdapterPort;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+mod acme_dns;
 mod config;
 mod enroll;
 mod inbound_rpc;
@@ -1180,6 +1181,9 @@ async fn main() -> anyhow::Result<()> {
             }
         });
     }
+    // acme-dns responder: idle unless the master's operator enabled it in
+    // Settings → HTTPS (the row is never synced to workers).
+    acme_dns::spawn(svc.pool.clone());
     // Cert renewal — every 24h, sweep certificates for LE certs whose
     // `not_after` is within `renewal_window_days` (default 30) and
     // re-issue. Without this tick every LE cert silently expires at

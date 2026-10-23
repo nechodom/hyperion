@@ -1540,6 +1540,17 @@ pub trait AgentApi: Send + Sync + 'static {
         from: i64,
         to: i64,
     ) -> Result<crate::codec::CareReportMail, RpcError>;
+    /// The acme-dns zone config plus the responder's runtime status.
+    async fn acme_dns_config_get(&self) -> Result<hyperion_types::AcmeDnsConfig, RpcError>;
+    /// Save the acme-dns config; see [`crate::codec::Request::AcmeDnsConfigSet`].
+    async fn acme_dns_config_set(
+        &self,
+        zone: Option<String>,
+        ns_host: String,
+        public_ipv4: Option<String>,
+        public_ipv6: Option<String>,
+        enabled: bool,
+    ) -> Result<hyperion_types::AcmeDnsConfig, RpcError>;
 
     /// Reset the WordPress admin password (wp user update --user_pass).
     /// Returns the new password (the caller usually shows it to the

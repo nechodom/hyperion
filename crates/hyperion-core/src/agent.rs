@@ -2362,6 +2362,21 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
     ) -> Result<hyperion_rpc::codec::CareReportMail, RpcError> {
         self.svc.care_report_send_range(sel, from, to).await
     }
+    async fn acme_dns_config_get(&self) -> Result<hyperion_types::AcmeDnsConfig, RpcError> {
+        self.svc.acme_dns_config_get().await
+    }
+    async fn acme_dns_config_set(
+        &self,
+        zone: Option<String>,
+        ns_host: String,
+        public_ipv4: Option<String>,
+        public_ipv6: Option<String>,
+        enabled: bool,
+    ) -> Result<hyperion_types::AcmeDnsConfig, RpcError> {
+        self.svc
+            .acme_dns_config_set(zone, ns_host, public_ipv4, public_ipv6, enabled)
+            .await
+    }
 }
 
 #[cfg(test)]

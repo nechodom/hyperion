@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AcmeDnsConfig {
     /// Delegated zone, e.g. `acme.panel.example` (lowercase, no trailing dot).
     pub zone: Option<String>,
@@ -21,7 +21,7 @@ pub struct AcmeDnsConfig {
     pub last_error: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AcmeDnsLabel {
     /// Base domain, e.g. `example.com`.
     pub base: String,
