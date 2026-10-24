@@ -71,7 +71,9 @@ pub(super) async fn pull_bundle_from_worker(
     // path can never steer a root filesystem operation. The download route and
     // the Drop guard enforce the same shape; see `is_bundle_id`.
     if !is_bundle_id(bundle_id) {
-        return Err(format!("worker returned an invalid bundle id {bundle_id:?}"));
+        return Err(format!(
+            "worker returned an invalid bundle id {bundle_id:?}"
+        ));
     }
     let root = std::path::Path::new("/var/lib/hyperion/migration");
     let local_dir = root.join(bundle_id);
@@ -1603,7 +1605,7 @@ mod bundle_id_tests {
     #[test]
     fn accepts_only_mig_plus_26_alnum() {
         assert!(is_bundle_id("mig_0123456789abcdefghijklmnop")); // 4 + 26
-        // Wrong length, prefix, traversal, path/extension chars: all out.
+                                                                 // Wrong length, prefix, traversal, path/extension chars: all out.
         assert!(!is_bundle_id("mig_0123456789abcdefghijklmno")); // 25
         assert!(!is_bundle_id("mig_0123456789abcdefghijklmnopq")); // 27
         assert!(!is_bundle_id("bun_0123456789abcdefghijklmnop"));
