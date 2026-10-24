@@ -324,6 +324,10 @@ pub fn build_router(state: SharedState) -> Router {
         )
         .route("/hostings/bulk", post(handlers::hostings::post_bulk))
         .route("/stats", get(handlers::stats::get_stats))
+        .route(
+            "/stats/backups/untracked/delete",
+            post(handlers::stats::post_backup_untracked_delete),
+        )
         .route("/monitoring", get(handlers::monitoring::get_monitoring))
         .route("/trash", get(handlers::trash::get_trash))
         .route("/trash/restore", post(handlers::trash::post_trash_restore))

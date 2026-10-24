@@ -87,7 +87,13 @@ struct StatsTpl<'a> {
     /// Per-hosting backup footprint across every node that answered — on this
     /// node's disk vs recorded off-site. Biggest local footprint first. Drives
     /// the "Backups by site" review that answers "where are my backups?".
-    backup_storage: Vec<hyperion_types::BackupStorageRow>,
+    backup_storage: Vec<BackupSiteRow>,
+    /// May this user delete untracked backup files (the row's button)?
+    can_clean_backups: bool,
+    csrf_token: String,
+    /// Outcome of a cleanup, echoed from the redirect.
+    flash: String,
+    flash_error: String,
     /// Σ of `backup_storage` off-site bytes — the header total for the review.
     backup_offsite_bytes_total: i64,
     /// The node selected via `?node=<id>`; defaults to the first node
@@ -151,10 +157,21 @@ struct StatsTpl<'a> {
     history_matches_totals: bool,
 }
 
+/// One "Backups by site" row and the node it was read from — the untracked
+/// cleanup must go to THAT node, the one whose disk holds the files.
+pub struct BackupSiteRow {
+    pub node_id: String,
+    pub r: hyperion_types::BackupStorageRow,
+}
+
 #[derive(Deserialize, Default)]
 pub struct StatsQuery {
     #[serde(default)]
     node: String,
+    #[serde(default)]
+    flash: String,
+    #[serde(default)]
+    flash_error: String,
     /// Per-site table sort column. Server-side on purpose: the table
     /// lives inside the 30 s live-refresh region, and client-side sorting
     /// would be undone by every swap.
@@ -408,22 +425,31 @@ pub async fn get_stats(
             // Concatenate every answering node's per-hosting rows, then re-sort
             // across nodes so the biggest LOCAL footprint leads regardless of
             // which node it is on.
-            let mut v: Vec<hyperion_types::BackupStorageRow> = cluster
+            let mut v: Vec<BackupSiteRow> = cluster
                 .as_ref()
                 .map(|c| {
                     c.nodes
                         .iter()
-                        .flat_map(|n| n.backup_storage.iter().cloned())
+                        .flat_map(|n| {
+                            n.backup_storage.iter().map(|r| BackupSiteRow {
+                                node_id: n.node_id.clone(),
+                                r: r.clone(),
+                            })
+                        })
                         .collect()
                 })
                 .unwrap_or_default();
             v.sort_by(|a, b| {
-                b.local_bytes
-                    .cmp(&a.local_bytes)
-                    .then(b.offsite_bytes.cmp(&a.offsite_bytes))
+                (b.r.local_bytes + b.r.untracked_bytes)
+                    .cmp(&(a.r.local_bytes + a.r.untracked_bytes))
+                    .then(b.r.offsite_bytes.cmp(&a.r.offsite_bytes))
             });
             v
         },
+        can_clean_backups: can_clean_backups(&ctx),
+        csrf_token: super::session_csrf_token(&state, &ctx),
+        flash: query.flash.clone(),
+        flash_error: query.flash_error.clone(),
         backup_offsite_bytes_total: cluster
             .as_ref()
             .map(|c| {
@@ -1787,4 +1813,90 @@ mod tests {
         assert_eq!(v.issues.len(), 1);
         assert_eq!(v.tone(), "err");
     }
+}
+
+/// Deleting untracked backup files touches every tenant's backup directory on
+/// a node, so it takes what the page itself takes (all-hostings monitoring)
+/// plus the right to manage backups.
+fn can_clean_backups(ctx: &AuthCtx) -> bool {
+    ctx.can(Capability::MonitoringView) && ctx.scope_all() && ctx.can(Capability::BackupRun)
+}
+
+#[derive(Deserialize)]
+pub struct UntrackedDeleteForm {
+    /// The node whose disk holds the files ("local" for the master).
+    #[serde(default)]
+    node_id: String,
+    domain: String,
+    /// The stats view to return to.
+    #[serde(default)]
+    back: String,
+}
+
+/// POST /stats/backups/untracked/delete — remove one domain's untracked
+/// backup files on one node. The node re-lists them itself; nothing about
+/// which files go comes from the form beyond the domain.
+pub async fn post_backup_untracked_delete(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    axum::Form(form): axum::Form<UntrackedDeleteForm>,
+) -> Result<Response, AppError> {
+    use axum::response::Redirect;
+    let back = match form.back.trim() {
+        "" | "cluster" => "cluster".to_string(),
+        n => n.to_string(),
+    };
+    let page =
+        |key: &str, msg: &str| format!("/stats?node={}&{key}={}", urlencode(&back), urlencode(msg));
+    if !can_clean_backups(&ctx) {
+        return Ok(Redirect::to("/").into_response());
+    }
+    let domain = form.domain.trim().to_string();
+    if domain.is_empty() || domain.contains('/') {
+        return Ok(Redirect::to(&page("flash_error", "no such site")).into_response());
+    }
+    let node = form.node_id.trim();
+    let target =
+        (!node.is_empty() && node != crate::dispatcher::LOCAL_NODE_SENTINEL).then_some(node);
+    let resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        target,
+        Request::BackupUntrackedDelete {
+            domain: domain.clone(),
+        },
+    )
+    .await;
+    let dest = match resp {
+        Ok(RpcResponse::BackupUntrackedDelete { files, bytes }) if files > 0 => page(
+            "flash",
+            &format!(
+                "{domain}: removed {files} untracked file{} — {} freed",
+                if files == 1 { "" } else { "s" },
+                fmt_bytes(&bytes)
+            ),
+        ),
+        Ok(RpcResponse::BackupUntrackedDelete { .. }) => page(
+            "flash",
+            &format!("{domain}: nothing to remove — no untracked files left"),
+        ),
+        Ok(RpcResponse::Error(e)) => page("flash_error", &e.to_string()),
+        Ok(_) => page("flash_error", "unexpected agent response"),
+        // An agent from before this action cannot decode it.
+        Err(e) => page(
+            "flash_error",
+            &format!("the node could not do it ({e}) — update it first if it runs an older agent"),
+        ),
+    };
+    Ok(Redirect::to(&dest).into_response())
+}
+
+fn urlencode(s: &str) -> String {
+    s.bytes()
+        .map(|b| match b {
+            b' ' => "+".to_string(),
+            b'-' | b'.' | b'_' | b'~' => (b as char).to_string(),
+            b if b.is_ascii_alphanumeric() => (b as char).to_string(),
+            b => format!("%{:02X}", b),
+        })
+        .collect()
 }

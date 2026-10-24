@@ -2192,6 +2192,12 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
                 Err(e) => Response::Error(e),
             }
         }
+        Request::BackupUntrackedDelete { domain } => {
+            match api.backup_untracked_delete(domain).await {
+                Ok((files, bytes)) => Response::BackupUntrackedDelete { files, bytes },
+                Err(e) => Response::Error(e),
+            }
+        }
         Request::AcmeDnsValuesSet { label, values } => {
             match api.acme_dns_values_set(label, values).await {
                 Ok(()) => Response::AcmeDnsValuesSet,
@@ -4222,6 +4228,11 @@ mod tests {
             })
         }
         async fn acme_dns_labels_delete_for_hosting(&self, _: String) -> Result<(), RpcError> {
+            Err(RpcError::Internal {
+                message: "not supported by this agent".into(),
+            })
+        }
+        async fn backup_untracked_delete(&self, _: String) -> Result<(u64, i64), RpcError> {
             Err(RpcError::Internal {
                 message: "not supported by this agent".into(),
             })

@@ -232,21 +232,31 @@ pub async fn mark_failed(
 /// otherwise sits `running` forever, blocking retry and confusing the operator.
 /// Keyed on `started_at` because a run has no progress heartbeat; the threshold
 /// is set well above any real local backup.
-pub async fn reap_stale(pool: &SqlitePool, now: i64, stale_secs: i64) -> Result<u64, StateError> {
+///
+/// Returns `(hosting_id, started_at)` of every run it failed: the dead run's
+/// half-written archive and dump are still on disk and no row names them, so
+/// the caller removes them — left alone they were never cleaned up by anything
+/// (retention deletes a failed row without touching files it never named).
+pub async fn reap_stale(
+    pool: &SqlitePool,
+    now: i64,
+    stale_secs: i64,
+) -> Result<Vec<(String, i64)>, StateError> {
     let cutoff = now - stale_secs;
-    let res = sqlx::query(
+    let rows: Vec<(String, i64)> = sqlx::query_as(
         r#"UPDATE backup_runs
               SET state='failed',
                   error_message='the agent stopped before this backup finished (crash or restart mid-run)',
                   finished_at=?
             WHERE state='running'
-              AND started_at < ?"#,
+              AND started_at < ?
+        RETURNING hosting_id, started_at"#,
     )
     .bind(now)
     .bind(cutoff)
-    .execute(pool)
+    .fetch_all(pool)
     .await?;
-    Ok(res.rows_affected())
+    Ok(rows)
 }
 
 pub async fn list_for(
@@ -459,6 +469,34 @@ pub async fn hostings_with_offsite_local_copies(
     Ok(rows.into_iter().map(|(h,)| HostingId(h)).collect())
 }
 
+/// What the backup table still accounts for on the local disk: every file a
+/// row names (`archive_path`, `db_dump_path`, any state), plus
+/// `(hosting_id, started_at)` of every run still in progress — its files are
+/// being written and no row names them yet.
+///
+/// The disk scan behind "Backups by site" subtracts these from what is really
+/// in the backup directory; whatever is left is on disk with no record.
+pub async fn claimed_local_files(
+    pool: &SqlitePool,
+) -> Result<(Vec<String>, Vec<(String, i64)>), StateError> {
+    let rows: Vec<(String, String, i64, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT hosting_id, state, started_at, archive_path, db_dump_path FROM backup_runs \
+          WHERE archive_path IS NOT NULL OR db_dump_path IS NOT NULL OR state = 'running'",
+    )
+    .fetch_all(pool)
+    .await?;
+    let mut paths = Vec::new();
+    let mut running = Vec::new();
+    for (hid, state, started_at, archive, dump) in rows {
+        paths.extend(archive);
+        paths.extend(dump);
+        if state == "running" {
+            running.push((hid, started_at));
+        }
+    }
+    Ok((paths, running))
+}
+
 pub async fn delete_by_id(pool: &SqlitePool, id: i64) -> Result<(), StateError> {
     sqlx::query("DELETE FROM backup_runs WHERE id = ?")
         .bind(id)
@@ -579,7 +617,11 @@ mod tests {
 
         // now=1000, stale=500 → cutoff=500: only `old` (started 100) qualifies.
         let n = reap_stale(&pool, 1000, 500).await.expect("reap");
-        assert_eq!(n, 1, "exactly the one old running run");
+        assert_eq!(
+            n,
+            vec![(h.as_str().to_string(), 100)],
+            "exactly the one old running run"
+        );
 
         assert_eq!(
             get_by_id(&pool, old).await.unwrap().unwrap().state,

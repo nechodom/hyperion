@@ -1582,6 +1582,8 @@ pub trait AgentApi: Send + Sync + 'static {
     ) -> Result<(), RpcError>;
     async fn acme_dns_label_delete(&self, base: Domain) -> Result<(), RpcError>;
     async fn acme_dns_labels_delete_for_hosting(&self, hosting_id: String) -> Result<(), RpcError>;
+    /// Delete `domain`'s untracked backup files; `(files, bytes)` removed.
+    async fn backup_untracked_delete(&self, domain: String) -> Result<(u64, i64), RpcError>;
     /// Publish TXT values under `label` (they expire after a day).
     async fn acme_dns_values_set(&self, label: String, values: Vec<String>)
         -> Result<(), RpcError>;

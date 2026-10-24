@@ -2421,6 +2421,9 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
             .acme_dns_labels_delete_for_hosting(hosting_id)
             .await
     }
+    async fn backup_untracked_delete(&self, domain: String) -> Result<(u64, i64), RpcError> {
+        self.svc.backup_untracked_delete(&domain).await
+    }
     async fn acme_dns_values_set(
         &self,
         label: String,

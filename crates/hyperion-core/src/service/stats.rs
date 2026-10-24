@@ -414,16 +414,26 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                             local_count: lc,
                             offsite_bytes: ob,
                             offsite_count: oc,
+                            untracked_bytes: 0,
+                            untracked_count: 0,
                         })
                         .collect();
+                    // The rows only know what was RECORDED. What the backup
+                    // directory really holds can be far more: archives of
+                    // hostings since deleted or moved away, a run that died
+                    // before it was recorded. Reporting only the records said
+                    // "0 B on server" over 24 GiB of real files.
+                    let untracked = self.untracked_backup_files(&summaries).await;
+                    let untracked_total: i64 = untracked.iter().map(|u| u.bytes).sum();
+                    merge_untracked(&mut storage, untracked, &summaries);
                     // Biggest local footprint first — that is the row an
                     // operator hunting for disk is looking for.
                     storage.sort_by(|a, b| {
-                        b.local_bytes
-                            .cmp(&a.local_bytes)
+                        (b.local_bytes + b.untracked_bytes)
+                            .cmp(&(a.local_bytes + a.untracked_bytes))
                             .then(b.offsite_bytes.cmp(&a.offsite_bytes))
                     });
-                    (total_bytes, total_count, storage)
+                    (total_bytes + untracked_total, total_count, storage)
                 }
                 Err(e) => {
                     tracing::debug!(error=%e, "could not total backup sizes");
@@ -575,6 +585,253 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             total_requests_24h: n.total_requests_24h,
             nodes: vec![n],
         })
+    }
+}
+
+/// Backup files of one domain that are on disk but named by no backup record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct UntrackedBackups {
+    pub(super) domain: String,
+    pub(super) bytes: i64,
+    /// `.tar.gz` archives among them.
+    pub(super) archives: i64,
+}
+
+/// One file in the backup directory that no backup record names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct UntrackedFile {
+    /// The domain from its name, or `<user>/` when the name is not one of
+    /// ours (such a file is reported, never offered for deletion).
+    pub(super) key: String,
+    /// True when the name parsed as a backup file of `key`.
+    pub(super) ours: bool,
+    pub(super) path: std::path::PathBuf,
+    pub(super) bytes: i64,
+    pub(super) is_archive: bool,
+}
+
+impl<A: AdapterPort + 'static> HostingService<A> {
+    /// Per domain, every file in the backup directory that no backup row
+    /// accounts for. See [`Self::untracked_backup_file_list`].
+    async fn untracked_backup_files(&self, summaries: &[HostingSummary]) -> Vec<UntrackedBackups> {
+        let mut by_domain: std::collections::BTreeMap<String, (i64, i64)> =
+            std::collections::BTreeMap::new();
+        for f in self.untracked_backup_file_list(summaries).await {
+            let e = by_domain.entry(f.key).or_insert((0, 0));
+            e.0 += f.bytes;
+            e.1 += f.is_archive as i64;
+        }
+        by_domain
+            .into_iter()
+            .map(|(domain, (bytes, archives))| UntrackedBackups {
+                domain,
+                bytes,
+                archives,
+            })
+            .collect()
+    }
+
+    /// Walk `<backup_root>/<user>/` and list every file that no backup row
+    /// accounts for. A failed read of the table or the directory yields
+    /// nothing rather than a guess: claiming files are untracked when the
+    /// claim list is unknown would be its own lie — and the delete action
+    /// acts on this list.
+    async fn untracked_backup_file_list(&self, summaries: &[HostingSummary]) -> Vec<UntrackedFile> {
+        let (paths, running) = match hyperion_state::backups::claimed_local_files(&self.pool).await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::debug!(error = %e, "could not list recorded backup files");
+                return Vec::new();
+            }
+        };
+        let mut claimed: std::collections::HashSet<std::path::PathBuf> =
+            std::collections::HashSet::new();
+        for p in paths {
+            let p = std::path::PathBuf::from(p);
+            // The manifest is written beside the archive and no column names it.
+            if let Some(m) = super::offsite::manifest_path_for(&p) {
+                claimed.insert(m);
+            }
+            claimed.insert(p);
+        }
+        let domain_of: std::collections::HashMap<&str, &str> = summaries
+            .iter()
+            .map(|s| (s.id.as_str(), s.domain.as_str()))
+            .collect();
+        let running: Vec<(String, i64)> = running
+            .into_iter()
+            .filter_map(|(hid, at)| domain_of.get(hid.as_str()).map(|d| (d.to_string(), at)))
+            .collect();
+        let root = std::path::PathBuf::from(&self.paths.backup_root);
+        tokio::task::spawn_blocking(move || scan_untracked_backups(&root, &claimed, &running))
+            .await
+            .unwrap_or_default()
+    }
+
+    /// Delete the untracked backup files of one domain — the ones "Backups by
+    /// site" reports as untracked. The list is taken afresh here, never from
+    /// the page: a file a backup record has claimed since, or one a run in
+    /// progress is writing, is not on it. Only files whose name is one of ours
+    /// for exactly `domain` go; anything else in the directory is left alone.
+    /// Returns `(files removed, bytes freed)`.
+    pub async fn backup_untracked_delete(&self, domain: &str) -> Result<(u64, i64), RpcError> {
+        let domain = domain.trim();
+        if domain.is_empty() {
+            return Err(RpcError::Validation {
+                message: "no domain given".into(),
+            });
+        }
+        let summaries = self.list().await?;
+        let files: Vec<UntrackedFile> = self
+            .untracked_backup_file_list(&summaries)
+            .await
+            .into_iter()
+            .filter(|f| f.ours && f.key == domain)
+            .collect();
+        let mut removed = 0u64;
+        let mut freed = 0i64;
+        let mut errors: Vec<String> = Vec::new();
+        for f in &files {
+            // A push or restore reading it right now keeps it.
+            if super::offsite::archive_in_use(&f.path) {
+                continue;
+            }
+            match tokio::fs::remove_file(&f.path).await {
+                Ok(()) => {
+                    removed += 1;
+                    freed += f.bytes;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => errors.push(format!("{}: {e}", f.path.display())),
+            }
+        }
+        self.append_audit(
+            "backup.untracked.delete",
+            None,
+            &serde_json::json!({
+                "domain": domain,
+                "files_removed": removed,
+                "bytes_freed": freed,
+                "errors": errors,
+            })
+            .to_string(),
+            if errors.is_empty() { "ok" } else { "partial" },
+        )
+        .await;
+        if removed == 0 && !errors.is_empty() {
+            return Err(RpcError::Internal_with(errors.join("; ")));
+        }
+        Ok((removed, freed))
+    }
+}
+
+/// The blocking half of [`HostingService::untracked_backup_file_list`]: one
+/// level of per-user directories under `root`, regular files only (a symlink
+/// is never followed or counted). `running` holds `(domain, started_at)` of
+/// runs in progress — their files exist before any row names them, so a file
+/// of that domain stamped at or after the start (less a minute of clock slack
+/// between the row and the file name) is skipped.
+pub(super) fn scan_untracked_backups(
+    root: &std::path::Path,
+    claimed: &std::collections::HashSet<std::path::PathBuf>,
+    running: &[(String, i64)],
+) -> Vec<UntrackedFile> {
+    let mut out = Vec::new();
+    let Ok(users) = std::fs::read_dir(root) else {
+        return out;
+    };
+    for user in users.flatten() {
+        let Ok(ft) = user.file_type() else { continue };
+        if !ft.is_dir() {
+            continue;
+        }
+        let Ok(files) = std::fs::read_dir(user.path()) else {
+            continue;
+        };
+        for f in files.flatten() {
+            let path = f.path();
+            let Ok(meta) = std::fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if !meta.is_file() || claimed.contains(&path) {
+                continue;
+            }
+            let name = f.file_name().to_string_lossy().into_owned();
+            let parsed = parse_backup_file_name(&name);
+            if let Some((domain, ts, _)) = parsed {
+                if running
+                    .iter()
+                    .any(|(d, at)| d == domain && ts >= at.saturating_sub(60))
+                {
+                    continue;
+                }
+            }
+            // A file that is not one of ours by name still sits in the
+            // backup directory and still takes the space: count it under
+            // its directory (the system user) rather than drop it.
+            let (key, ours, is_archive) = match parsed {
+                Some((domain, _, ext)) => (domain.to_string(), true, ext == "tar.gz"),
+                None => (
+                    format!("{}/", user.file_name().to_string_lossy()),
+                    false,
+                    false,
+                ),
+            };
+            out.push(UntrackedFile {
+                key,
+                ours,
+                path,
+                bytes: meta.len() as i64,
+                is_archive,
+            });
+        }
+    }
+    out
+}
+
+/// `<domain>-<unix secs>.<tar.gz|sql|manifest.json>`, the names `BackupFiles`
+/// gives a run's files, into `(domain, stamp, extension)`.
+pub(super) fn parse_backup_file_name(name: &str) -> Option<(&str, i64, &'static str)> {
+    let (stem, ext) = ["tar.gz", "sql", "manifest.json"]
+        .into_iter()
+        .find_map(|ext| Some((name.strip_suffix(ext)?.strip_suffix('.')?, ext)))?;
+    let (domain, ts) = stem.rsplit_once('-')?;
+    if domain.is_empty() || ts.is_empty() || !ts.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    Some((domain, ts.parse().ok()?, ext))
+}
+
+/// Fold the untracked files into the per-site rows: onto the site's own row
+/// when it has one, else a new row — linked to the hosting when one on this
+/// node has the domain, unlinked (empty id) when none does.
+pub(super) fn merge_untracked(
+    storage: &mut Vec<hyperion_types::BackupStorageRow>,
+    untracked: Vec<UntrackedBackups>,
+    summaries: &[HostingSummary],
+) {
+    for u in untracked {
+        if let Some(row) = storage.iter_mut().find(|r| r.domain == u.domain) {
+            row.untracked_bytes += u.bytes;
+            row.untracked_count += u.archives;
+            continue;
+        }
+        let hosting_id = summaries
+            .iter()
+            .find(|s| s.domain == u.domain)
+            .map(|s| s.id.clone())
+            .unwrap_or_else(|| hyperion_types::HostingId(String::new()));
+        storage.push(hyperion_types::BackupStorageRow {
+            hosting_id,
+            domain: u.domain,
+            local_bytes: 0,
+            local_count: 0,
+            offsite_bytes: 0,
+            offsite_count: 0,
+            untracked_bytes: u.bytes,
+            untracked_count: u.archives,
+        });
     }
 }
 
