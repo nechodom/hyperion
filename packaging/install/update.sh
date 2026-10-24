@@ -718,6 +718,28 @@ if (( DO_BUILD && PREFER_PREBUILT )); then
   fi
 fi
 
+#-------- 1c. Cap the from-source incremental cache ------------------------
+# Cargo reuses target/ across updates but never bounds target/*/release/
+# incremental: every update bakes a new HYPERION_GIT_SHA (and RUSTFLAGS shifts
+# once on linker adoption), so cargo keeps minting fresh per-crate session dirs
+# and never reclaims the old ones — observed at 43 GiB on a long-lived node.
+# This runs on EVERY update, not just the from-source path, so a node that
+# built from source once and now installs pre-built releases still reclaims the
+# space. Pure cache: over the cap we wipe the whole tree; a later from-source
+# build pays the one-time full-incremental cost (the compiled rlibs/bins in
+# target/release are untouched, so it is not a clean rebuild), then normal
+# update-to-update reuse resumes under the cap.
+INCR_CAP_MB="${HYPERION_INCR_CAP_MB:-4096}"
+for _incr in "$INSTALL_DIR"/target/release/incremental \
+             "$INSTALL_DIR"/target/*/release/incremental; do
+  [ -d "$_incr" ] || continue
+  _incr_mb="$(du -sm "$_incr" 2>/dev/null | cut -f1)"
+  if [ -n "$_incr_mb" ] && (( _incr_mb > INCR_CAP_MB )); then
+    log "Incremental cache $_incr is ${_incr_mb} MiB (> ${INCR_CAP_MB} MiB cap) — clearing it."
+    rm -rf -- "$_incr"
+  fi
+done
+
 #-------- 2. Get the new binaries — prefer GitHub release, else build -------
 # Only PREPARES them (download + verify, or compile); nothing is installed
 # until the services are stopped in step 4.
