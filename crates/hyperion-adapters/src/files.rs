@@ -35,6 +35,37 @@ fn safe_component(c: &str) -> bool {
 /// absolute path inside the jail. `rel_path` is treated as forward-
 /// slash separated for portability with UI-supplied values.
 pub async fn resolve_inside_jail(jail: &Path, rel_path: &str) -> Result<PathBuf, AdapterError> {
+    // The jail path itself lives under tenant-owned directories
+    // (`/home/<user>/<domain>/htdocs`): the site user owns its home, so it can
+    // replace `htdocs` — or the `<domain>` directory — with a symlink. The
+    // `canonicalize(jail)` below follows links, which would relocate the whole
+    // jail to an attacker-chosen tree (e.g. `/`), and every containment check
+    // afterwards is then measured against that followed root. The per-component
+    // walk further down only covers segments *below* the jail, so it never
+    // sees this. Refuse a symlink at any component of the jail path first.
+    //
+    // This closes the demonstrated jail-root swap. The deeper fix — returning a
+    // verified O_DIRECTORY|O_NOFOLLOW descriptor and performing every read/
+    // write/chown/rename openat2-relative to it, instead of handing back a path
+    // string the sinks re-open by name — is tracked separately; the check-then-
+    // use window on the returned path remains until that refactor lands.
+    //
+    // We lstat the two tenant-ownable components — the jail itself (`htdocs`)
+    // and its parent (`<domain>`) — rather than every ancestor: system
+    // ancestors above the home are root-controlled and are not the swap
+    // vector, and walking them would trip over legitimately symlinked system
+    // directories (e.g. `/var` on some platforms).
+    for p in [Some(jail), jail.parent()].into_iter().flatten() {
+        let md = tokio::fs::symlink_metadata(p)
+            .await
+            .map_err(|e| AdapterError::Other(format!("jail not accessible: {e}")))?;
+        if md.file_type().is_symlink() {
+            return Err(AdapterError::Other(
+                "refusing jail: jail root or its parent is a symlink".into(),
+            ));
+        }
+    }
+
     let jail_canon = tokio::fs::canonicalize(jail)
         .await
         .map_err(|e| AdapterError::Other(format!("jail not accessible: {e}")))?;
@@ -446,6 +477,34 @@ mod tests {
         std::os::unix::fs::symlink(&target, &link).expect("symlink");
         let r = resolve_inside_jail(d.path(), "evil.txt").await;
         assert!(r.is_err());
+    }
+
+    #[tokio::test]
+    async fn refuses_jail_root_symlink() {
+        // The site user owns its home and can replace `htdocs` (the jail root)
+        // with a symlink; canonicalize would then follow it out of the tree.
+        let base = tempfile::tempdir().expect("tmp");
+        let real = base.path().join("real_htdocs");
+        std::fs::create_dir(&real).expect("mkdir");
+        std::fs::write(real.join("f.txt"), "x").expect("write");
+        let jail = base.path().join("htdocs");
+        std::os::unix::fs::symlink(&real, &jail).expect("symlink");
+        let r = resolve_inside_jail(&jail, "f.txt").await;
+        assert!(r.is_err(), "a symlinked jail root must be refused");
+    }
+
+    #[tokio::test]
+    async fn refuses_jail_parent_symlink() {
+        // The `<domain>` directory (the jail's parent) is equally swappable.
+        let base = tempfile::tempdir().expect("tmp");
+        let real_domain = base.path().join("real_domain");
+        std::fs::create_dir(&real_domain).expect("mkdir");
+        std::fs::create_dir(real_domain.join("htdocs")).expect("mkdir htdocs");
+        let domain_link = base.path().join("domain");
+        std::os::unix::fs::symlink(&real_domain, &domain_link).expect("symlink");
+        let jail = domain_link.join("htdocs");
+        let r = resolve_inside_jail(&jail, "").await;
+        assert!(r.is_err(), "a symlinked jail parent must be refused");
     }
 
     #[test]

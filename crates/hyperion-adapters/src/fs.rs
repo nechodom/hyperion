@@ -676,9 +676,134 @@ fn ensure_ancestors_traversable_blocking(leaf: &Path) {
     }
 }
 
+/// Tighten `logs/` and `tmp/` under a hosting's site directory
+/// (`/home/<user>/<domain>`) to mode 0750 owned by the site user, following no
+/// tenant-planted symlink at the `<domain>` component or at either leaf.
+///
+/// The site user owns its home, so `<domain>` — and the two leaf directories —
+/// can be swapped for symlinks between a path-based check and a path-based
+/// chmod/chown. The old repair opened only the leaf `O_NOFOLLOW` and then ran
+/// `chown -R <user> <site_dir>/<leaf>`, so a `<domain>` symlink steered both
+/// the chmod and the *recursive* chown onto an arbitrary directory (e.g.
+/// `/tmp`) as root. Here `<domain>` is opened `O_DIRECTORY|O_NOFOLLOW` once and
+/// every chmod/chown is performed `*at()`-relative on that one descriptor — no
+/// recursion, and no component re-resolved by name after the check.
+///
+/// Returns the leaf names that were present and repaired.
+pub async fn repair_site_dirs_no_follow(
+    site_dir: &Path,
+    uid: u32,
+    gid: u32,
+) -> Result<Vec<&'static str>, AdapterError> {
+    let site_dir = site_dir.to_path_buf();
+    tokio::task::spawn_blocking(move || repair_site_dirs_no_follow_blocking(&site_dir, uid, gid))
+        .await
+        .map_err(|e| AdapterError::Other(format!("join: {e}")))?
+}
+
+fn repair_site_dirs_no_follow_blocking(
+    site_dir: &Path,
+    uid: u32,
+    gid: u32,
+) -> Result<Vec<&'static str>, AdapterError> {
+    use rustix::fs::{Gid, Mode, OFlags, Uid};
+    // Open `<domain>` itself without following a link — this is the component
+    // the tenant can swap. A symlink here (or a non-directory) is refused, so
+    // the leaf opens below can only land inside the real site directory.
+    let site = rustix::fs::open(
+        site_dir,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|e| {
+        if e == rustix::io::Errno::LOOP || e == rustix::io::Errno::NOTDIR {
+            AdapterError::Other("site directory is not a real directory".into())
+        } else {
+            AdapterError::Other(format!("open {}: {e}", site_dir.display()))
+        }
+    })?;
+    let mut done = Vec::new();
+    for name in ["logs", "tmp"] {
+        let fd = match rustix::fs::openat(
+            &site,
+            name,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        ) {
+            Ok(f) => f,
+            Err(rustix::io::Errno::NOENT) => continue, // leaf absent: nothing to do
+            Err(rustix::io::Errno::LOOP) | Err(rustix::io::Errno::NOTDIR) => {
+                return Err(AdapterError::Other(format!(
+                    "{name} is not a real directory — refusing to repair it"
+                )));
+            }
+            Err(e) => return Err(AdapterError::Other(format!("open {name}: {e}"))),
+        };
+        rustix::fs::fchmod(&fd, Mode::from_raw_mode(0o750))
+            .map_err(|e| AdapterError::Other(format!("chmod {name}: {e}")))?;
+        rustix::fs::fchown(&fd, Some(Uid::from_raw(uid)), Some(Gid::from_raw(gid)))
+            .map_err(|e| AdapterError::Other(format!("chown {name}: {e}")))?;
+        done.push(name);
+    }
+    Ok(done)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// logs/ and tmp/ under a real site dir are tightened to 0750 and the
+    /// present leaves are reported. chown targets the current uid/gid so the
+    /// test needs no privilege.
+    #[tokio::test]
+    async fn repair_site_dirs_tightens_present_leaves() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let site = tempfile::tempdir().expect("tmp");
+        for name in ["logs", "tmp"] {
+            let d = site.path().join(name);
+            std::fs::create_dir(&d).expect("mkdir");
+            std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o700)).expect("chmod");
+        }
+        // chown to the dir's existing owner so the fchown is a privilege-free
+        // no-op (the test does not run as root); the chmod is what we assert.
+        let md = std::fs::metadata(site.path()).expect("stat");
+        let done = repair_site_dirs_no_follow(site.path(), md.uid(), md.gid())
+            .await
+            .expect("repair");
+        assert_eq!(done, vec!["logs", "tmp"]);
+        for name in ["logs", "tmp"] {
+            let m = std::fs::metadata(site.path().join(name)).expect("stat");
+            assert_eq!(m.permissions().mode() & 0o777, 0o750, "{name}");
+        }
+    }
+
+    /// A `<domain>` swapped for a symlink is refused: the site dir is opened
+    /// O_NOFOLLOW, so root never chmods/chowns through the link.
+    #[tokio::test]
+    async fn repair_site_dirs_refuses_swapped_domain() {
+        let base = tempfile::tempdir().expect("tmp");
+        let real = base.path().join("real_domain");
+        std::fs::create_dir(&real).expect("mkdir");
+        std::fs::create_dir(real.join("tmp")).expect("mkdir tmp");
+        let link = base.path().join("domain");
+        std::os::unix::fs::symlink(&real, &link).expect("symlink");
+        let uid = rustix::process::getuid().as_raw();
+        let r = repair_site_dirs_no_follow(&link, uid, uid).await;
+        assert!(r.is_err(), "a symlinked site dir must be refused");
+    }
+
+    /// A missing leaf is simply skipped, not an error.
+    #[tokio::test]
+    async fn repair_site_dirs_skips_absent_leaves() {
+        use std::os::unix::fs::MetadataExt;
+        let site = tempfile::tempdir().expect("tmp");
+        std::fs::create_dir(site.path().join("logs")).expect("mkdir");
+        let md = std::fs::metadata(site.path()).expect("stat");
+        let done = repair_site_dirs_no_follow(site.path(), md.uid(), md.gid())
+            .await
+            .expect("repair");
+        assert_eq!(done, vec!["logs"]);
+    }
 
     /// A link already sitting at the target name is REPLACED, never written
     /// through, and nothing is left behind but the file itself.

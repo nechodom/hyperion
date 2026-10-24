@@ -534,9 +534,17 @@ pub async fn restore_mariadb_dump(
     let opt_arg = format!("--defaults-extra-file={}", opt.path().display());
     // `--defaults-extra-file` must come first; `--` so a db name beginning
     // with `-` can't become a mariadb client option.
+    //
+    // `--local-infile=0` refuses server-driven `LOAD DATA LOCAL INFILE`
+    // requests. The client runs as root; without this pin a `LOAD DATA LOCAL`
+    // line in an imported dump makes the root client read an arbitrary local
+    // path and ship it into the tenant's database. The server default is
+    // `local_infile=1`, so the refusal has to live on the client. It is also
+    // set in the `[client]` option file (mariadb_option_file) as defense in
+    // depth; the argv pin wins regardless of the file.
     crate::cmd::run_with_stdin(
         "/usr/bin/mariadb",
-        &[&opt_arg, "--binary-mode", "--", db_name],
+        &[&opt_arg, "--local-infile=0", "--binary-mode", "--", db_name],
         &sql_bytes,
     )
     .await?;
@@ -548,8 +556,10 @@ pub async fn restore_mariadb_dump(
 /// back literally rather than truncated as a comment.
 pub(crate) fn mariadb_option_file(login: &DbLogin<'_>) -> String {
     let q = |v: &str| v.replace('\\', "\\\\").replace('"', "\\\"");
+    // `local-infile=0`: defense in depth against server-driven LOAD DATA LOCAL
+    // reads by the root restore client (the argv pin is authoritative).
     format!(
-        "[client]\nuser=\"{}\"\npassword=\"{}\"\n",
+        "[client]\nuser=\"{}\"\npassword=\"{}\"\nlocal-infile=0\n",
         q(login.user),
         q(login.password)
     )
@@ -1588,7 +1598,22 @@ mod tests {
         });
         assert_eq!(
             f,
-            "[client]\nuser=\"lm_abc_u\"\npassword=\"p#a;s\\\"s\\\\w\"\n"
+            "[client]\nuser=\"lm_abc_u\"\npassword=\"p#a;s\\\"s\\\\w\"\nlocal-infile=0\n"
+        );
+    }
+
+    /// The root restore client must never serve a server-driven
+    /// `LOAD DATA LOCAL INFILE`: the option file pins it off (defense in
+    /// depth behind the authoritative `--local-infile=0` argv).
+    #[test]
+    fn option_file_pins_local_infile_off() {
+        let f = mariadb_option_file(&DbLogin {
+            user: "lm_abc_u",
+            password: "pw",
+        });
+        assert!(
+            f.contains("\nlocal-infile=0\n"),
+            "option file must disable LOCAL INFILE: {f}"
         );
     }
 

@@ -565,24 +565,28 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 "wp-config.php is now 0640 — readable by the site user only".to_string()
             }
             "site_dirs" => {
-                let mut done = Vec::new();
-                for name in ["logs", "tmp"] {
-                    let p = site_dir.join(name);
-                    if tokio::fs::metadata(&p).await.is_ok() {
-                        chmod_path(&p.display().to_string(), 0o750)
-                            .await
-                            .map_err(|e| RpcError::Validation { message: e })?;
-                        // tmp holds PHP sessions; it must be owned by the
-                        // site user or PHP cannot write there at all.
-                        let _ = hyperion_adapters::ftp::ensure_web_root_owned(
-                            &user,
-                            &p.display().to_string(),
-                        )
-                        .await;
-                        done.push(name);
-                    }
+                // `site_dir` is `/home/<user>/<domain>`, whose components the
+                // site user owns and can replace with symlinks. Resolve the
+                // repair through a descriptor opened O_DIRECTORY|O_NOFOLLOW on
+                // `<domain>` and chmod/chown logs/ and tmp/ fd-relative — never
+                // a path-based chmod + `chown -R`, which a swapped `<domain>`
+                // symlink would redirect onto a system directory as root.
+                let Some(uid) = uid_of_user(&user).await else {
+                    return Err(RpcError::Validation {
+                        message: format!("no such system user {user}"),
+                    });
+                };
+                let gid = gid_of_user(&user).await.unwrap_or(uid);
+                let done = hyperion_adapters::fs::repair_site_dirs_no_follow(&site_dir, uid, gid)
+                    .await
+                    .map_err(|e| RpcError::Validation {
+                        message: e.to_string(),
+                    })?;
+                if done.is_empty() {
+                    "no logs/ or tmp/ directory to repair".to_string()
+                } else {
+                    format!("{} set to 0750", done.join(" and "))
                 }
-                format!("{} set to 0750", done.join(" and "))
             }
             other => {
                 return Err(RpcError::Validation {

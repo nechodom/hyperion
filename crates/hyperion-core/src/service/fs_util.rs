@@ -147,6 +147,18 @@ pub(super) async fn uid_of_user(user: &str) -> Option<u32> {
     out.split(':').nth(2)?.trim().parse().ok()
 }
 
+/// The numeric primary gid of `user` (passwd field 4), or `None` when there is
+/// no such account. Used to fchown a site directory to the right group.
+pub(super) async fn gid_of_user(user: &str) -> Option<u32> {
+    if user.is_empty() || user.contains([':', '\n', '\r', '\0']) {
+        return None;
+    }
+    let out = hyperion_adapters::cmd::run("/usr/bin/getent", &["passwd", user])
+        .await
+        .ok()?;
+    out.split(':').nth(3)?.trim().parse().ok()
+}
+
 /// `chmod` a directory, as a hard error.
 ///
 /// Every caller here is protecting a plaintext copy of a customer's data on a
