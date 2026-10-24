@@ -64,6 +64,15 @@ pub(super) async fn pull_bundle_from_worker(
     bundle_id: &str,
 ) -> Result<std::path::PathBuf, String> {
     use std::os::unix::fs::PermissionsExt;
+    // The bundle id comes back from the (possibly compromised) source worker
+    // and is joined onto a root path that is then create_dir_all'd, chmod'd
+    // 0700, written into and, on failure, remove_dir_all'd. Validate its shape
+    // here, before any of those sinks, so a reply like "../.." or an absolute
+    // path can never steer a root filesystem operation. The download route and
+    // the Drop guard enforce the same shape; see `is_bundle_id`.
+    if !is_bundle_id(bundle_id) {
+        return Err(format!("worker returned an invalid bundle id {bundle_id:?}"));
+    }
     let root = std::path::Path::new("/var/lib/hyperion/migration");
     let local_dir = root.join(bundle_id);
     tokio::fs::create_dir_all(&local_dir)
@@ -213,14 +222,22 @@ pub(super) fn carry_report_text(lines: &[String]) -> String {
 /// disk holding the site's data; a retry exports a fresh bundle anyway.
 pub(super) struct PulledBundle(pub(super) String);
 
+/// A legal migration bundle id: `mig_` followed by a 26-char alphanumeric
+/// ULID. The id is attacker-influenced (a worker reply, a request path), so
+/// every site that joins it onto `/var/lib/hyperion/migration` as root must
+/// gate on this first. Shared by `pull_bundle_from_worker`, the download
+/// route (migration.rs) and the `PulledBundle` Drop guard.
+pub(super) fn is_bundle_id(id: &str) -> bool {
+    id.len() == 4 + 26
+        && id.starts_with("mig_")
+        && id[4..].chars().all(|c| c.is_ascii_alphanumeric())
+}
+
 impl Drop for PulledBundle {
     fn drop(&mut self) {
         let id = std::mem::take(&mut self.0);
         // Same shape check as the download route: never join an arbitrary id.
-        if id.len() == 4 + 26
-            && id.starts_with("mig_")
-            && id[4..].chars().all(|c| c.is_ascii_alphanumeric())
-        {
+        if is_bundle_id(&id) {
             let dir = std::path::Path::new("/var/lib/hyperion/migration").join(id);
             let _ = std::fs::remove_dir_all(dir);
         }
@@ -1576,5 +1593,23 @@ mod clone_domain_tests {
         ] {
             assert!(clone_domain_from_input(raw).is_err(), "{raw}");
         }
+    }
+}
+
+#[cfg(test)]
+mod bundle_id_tests {
+    use super::is_bundle_id;
+
+    #[test]
+    fn accepts_only_mig_plus_26_alnum() {
+        assert!(is_bundle_id("mig_0123456789abcdefghijklmnop")); // 4 + 26
+        // Wrong length, prefix, traversal, path/extension chars: all out.
+        assert!(!is_bundle_id("mig_0123456789abcdefghijklmno")); // 25
+        assert!(!is_bundle_id("mig_0123456789abcdefghijklmnopq")); // 27
+        assert!(!is_bundle_id("bun_0123456789abcdefghijklmnop"));
+        assert!(!is_bundle_id(""));
+        assert!(!is_bundle_id("mig_../../../../etc/passwd"));
+        assert!(!is_bundle_id("mig_0123456789abcdefghijklmn.p"));
+        assert!(!is_bundle_id("mig_0123456789abcdefghijklmn/p"));
     }
 }
