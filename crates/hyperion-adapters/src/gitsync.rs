@@ -5,7 +5,7 @@
 //! same dropped-privilege sandbox wp-cli and the Lighthouse runner use — a
 //! symlink a hostile tenant plants in the webroot then reaches only what that
 //! tenant already can. Credentials never touch a command line: a deploy key is
-//! handed to `ssh` with `-i <file>`, a token is fed through `GIT_ASKPASS`, and
+//! handed to `ssh` with `-i <file>`, a token is read by a credential helper, and
 //! both live in a per-run directory that is removed afterwards. `.git` is never
 //! copied into the webroot — the repo is cloned to a sibling directory and the
 //! tree (or a sub-directory of it) is rsynced across, so the source history is
@@ -391,19 +391,38 @@ async fn prepare_auth(
             repo.ssh_url()
         }
         Auth::Pat(token) => {
-            // GIT_ASKPASS prints the token as the password; the username is the
-            // constant `x-access-token` in the URL. The token reaches the
-            // script through a 0600 file the site user owns, never argv.
+            // The token reaches git through a 0600 file the site user owns,
+            // never argv; the username is the constant `x-access-token`.
             let tok_file = format!("{run_dir}/token");
             write_run_secret(&tok_file, token.trim().as_bytes(), user, 0o600).await?;
-            let askpass = format!("{run_dir}/askpass");
-            let script = format!("#!/bin/sh\nexec cat {tok_file}\n");
-            write_run_secret(&askpass, script.as_bytes(), user, 0o700).await?;
-            env.push(("GIT_ASKPASS".into(), askpass));
+            env.extend(pat_credential_env(&tok_file));
             format!("https://x-access-token@github.com/{}.git", repo.slug())
         }
     };
     Ok((url, env))
+}
+
+/// The environment that hands git the token in `tok_file` as an inline shell
+/// credential helper (`GIT_CONFIG_COUNT`, git ≥ 2.31; Debian 12 ships 2.39).
+///
+/// NOT a `GIT_ASKPASS` script in the run directory: git `exec`s an askpass
+/// program, and Debian mounts `/run` `noexec`, so every token deploy died
+/// with "cannot exec '…/askpass': Permission denied". A `!` helper is run by
+/// `/bin/sh`, which only READS the token file. The empty first entry drops
+/// any helper the site user's own gitconfig configures, so ours is the only
+/// one asked and nothing gets to `store` the token.
+fn pat_credential_env(tok_file: &str) -> Vec<(String, String)> {
+    let helper = format!(
+        "!f() {{ if [ \"$1\" = get ]; then \
+         printf 'username=x-access-token\\npassword=%s\\n' \"$(cat '{tok_file}')\"; fi; }}; f"
+    );
+    vec![
+        ("GIT_CONFIG_COUNT".into(), "2".into()),
+        ("GIT_CONFIG_KEY_0".into(), "credential.helper".into()),
+        ("GIT_CONFIG_VALUE_0".into(), String::new()),
+        ("GIT_CONFIG_KEY_1".into(), "credential.helper".into()),
+        ("GIT_CONFIG_VALUE_1".into(), helper),
+    ]
 }
 
 async fn sync_inner(
@@ -871,6 +890,57 @@ mod tests {
                 String::new()
             )
         );
+    }
+
+    /// The helper must work through a real git: `credential fill` is exactly
+    /// what `git fetch` asks before it sends the password.
+    #[test]
+    fn the_token_helper_answers_git_without_exec_from_the_run_dir() {
+        let git = [
+            "/usr/bin/git",
+            "/usr/local/bin/git",
+            "/opt/homebrew/bin/git",
+        ]
+        .into_iter()
+        .find(|p| std::path::Path::new(p).exists());
+        let Some(git) = git else { return };
+        let dir = std::env::temp_dir().join(format!("gitsync-test-{}", random_tag()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let tok = dir.join("token");
+        std::fs::write(&tok, "ghp_secret123").unwrap();
+        let env = pat_credential_env(tok.to_str().unwrap());
+        assert!(env
+            .iter()
+            .all(|(k, v)| k != "GIT_ASKPASS" && !v.contains("ghp_")));
+
+        use std::io::Write;
+        let mut child = std::process::Command::new(git)
+            .args(["credential", "fill"])
+            .env("HOME", &dir)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .envs(env)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"protocol=https\nhost=github.com\nusername=x-access-token\n\n")
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(stdout.contains("username=x-access-token\n"), "{stdout}");
+        assert!(stdout.contains("password=ghp_secret123\n"), "{stdout}");
     }
 
     #[test]

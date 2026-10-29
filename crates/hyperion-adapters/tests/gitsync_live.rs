@@ -5,7 +5,8 @@
 //! github.com. Run it in a container:
 //!
 //! ```text
-//! docker run --rm -v "$PWD":/src:ro -w /src rust:1-bookworm sh -c '
+//! docker run --rm --tmpfs /run:rw,nosuid,nodev,noexec \
+//!   -v "$PWD":/src:ro -w /src rust:1-bookworm sh -c '
 //!   apt-get update -qq && apt-get install -y -qq git rsync sudo openssh-client >/dev/null &&
 //!   mkdir -p /run/hyperion &&
 //!   cargo test -p hyperion-adapters --test gitsync_live -- --ignored --test-threads=1'
@@ -14,6 +15,10 @@
 //! Public repositories only — a deploy key that GitHub does not know still
 //! proves the ssh path (host-key pinning, the key reaching ssh, the refusal
 //! being explained), without any credential in the test.
+//!
+//! `/run` is a `noexec` tmpfs above because that is how Debian mounts it on a
+//! real node — a token deploy that tried to exec a helper from the run
+//! directory failed there and nowhere else.
 
 use hyperion_adapters::gitsync::{self, Auth, SyncParams};
 use std::path::Path;
@@ -198,6 +203,14 @@ async fn deploys_switches_repo_and_branch_and_explains_failures() {
     .await
     .unwrap_err();
     assert!(msg.contains("token"), "{msg} / {detail}");
+    // …and refused BY GITHUB: the token was handed over. "Could not read
+    // Password" (or "cannot exec") is the same sentence above but means git
+    // never got the token at all.
+    let lc = detail.to_ascii_lowercase();
+    assert!(
+        !lc.contains("cannot exec") && !lc.contains("could not read password"),
+        "{detail}"
+    );
 
     // 8. The access check touches nothing and finds the branch.
     let c = gitsync::check(params(
