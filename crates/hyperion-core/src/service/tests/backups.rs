@@ -182,7 +182,10 @@ async fn prune_gives_pre_update_backups_their_own_retention() {
     let pruned = s.prune_old_backups(&detail.id).await.expect("prune");
     let kept = left().await;
     assert_eq!(pruned, 3, "left: {kept:?}");
-    assert!(kept.contains(&current), "the newest one, before its delete_at");
+    assert!(
+        kept.contains(&current),
+        "the newest one, before its delete_at"
+    );
     assert!(kept.contains(&failed_new), "a failed run is listed for 24h");
     assert!(!kept.contains(&older_held), "only one is kept, held or not");
     assert!(!kept.contains(&older_clean), "only one is kept");
@@ -209,12 +212,18 @@ async fn prune_gives_pre_update_backups_their_own_retention() {
     assert_eq!(s.pre_update_backups_expire_tick().await.expect("tick"), 1);
     let kept = left().await;
     assert!(!kept.contains(&current), "deleted at its delete_at");
-    assert!(kept.contains(&ord_d), "the sweep leaves ordinary backups alone");
+    assert!(
+        kept.contains(&ord_d),
+        "the sweep leaves ordinary backups alone"
+    );
     assert!(kept.contains(&failed_new), "still inside its 24h");
 
     // The newest one held: never by age.
     let held = mk(100 * day, pu, true, true).await;
-    assert_eq!(s.prune_pre_update_backups(&detail.id).await.expect("held"), 0);
+    assert_eq!(
+        s.prune_pre_update_backups(&detail.id).await.expect("held"),
+        0
+    );
     assert!(left().await.contains(&held));
 }
 
@@ -229,16 +238,38 @@ fn pre_update_delete_at_falls_back_to_finish_plus_a_day() {
         purpose: PURPOSE_PRE_UPDATE.into(),
         ..super::bk_run(1, "ok", true, "", true)
     };
-    assert_eq!(base.pre_update_delete_at(), Some(1_500 + PRE_UPDATE_KEEP_SECS));
-    let set = BackupRun { delete_at: 9_999, ..base.clone() };
+    assert_eq!(
+        base.pre_update_delete_at(),
+        Some(1_500 + PRE_UPDATE_KEEP_SECS)
+    );
+    let set = BackupRun {
+        delete_at: 9_999,
+        ..base.clone()
+    };
     assert_eq!(set.pre_update_delete_at(), Some(9_999));
-    let held = BackupRun { held: true, ..base.clone() };
+    let held = BackupRun {
+        held: true,
+        ..base.clone()
+    };
     assert_eq!(held.pre_update_delete_at(), None);
-    let failed = BackupRun { state: "failed".into(), held: true, ..base.clone() };
-    assert_eq!(failed.pre_update_delete_at(), Some(1_000 + PRE_UPDATE_KEEP_SECS));
-    let running = BackupRun { state: "running".into(), ..base.clone() };
+    let failed = BackupRun {
+        state: "failed".into(),
+        held: true,
+        ..base.clone()
+    };
+    assert_eq!(
+        failed.pre_update_delete_at(),
+        Some(1_000 + PRE_UPDATE_KEEP_SECS)
+    );
+    let running = BackupRun {
+        state: "running".into(),
+        ..base.clone()
+    };
     assert_eq!(running.pre_update_delete_at(), None);
-    let ordinary = BackupRun { purpose: String::new(), ..base };
+    let ordinary = BackupRun {
+        purpose: String::new(),
+        ..base
+    };
     assert_eq!(ordinary.pre_update_delete_at(), None);
 }
 
