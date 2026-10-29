@@ -280,6 +280,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         .await
         .map_err(|e| RpcError::Internal_with(format!("apply: {e}")))?;
 
+        self.apply_profile_alert_channels(&detail.id, &p).await;
+
         // Install WP plugins + themes from the profile, if any.
         // Best-effort: a failure here logs + appends an audit
         // entry but doesn't roll back the limits/expiry/price
@@ -336,6 +338,68 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             applied_at: now,
             price_pinned: price_kept,
         })
+    }
+
+    /// Put the profile's alert channels on the site's uptime monitor — the
+    /// one place this site's DOWN alerts are addressed from. Same rules as the
+    /// monitor card's "Import from profile": e-mails are added to the ones
+    /// already there (never replaced — an apply must not quietly stop someone
+    /// getting alerts), and a profile webhook replaces the monitor's. A profile
+    /// with neither leaves the monitor alone. Best-effort: logged, never fails
+    /// the apply.
+    async fn apply_profile_alert_channels(
+        &self,
+        id: &HostingId,
+        p: &hyperion_types::HostingProfile,
+    ) {
+        let slack = p
+            .slack_webhook
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let add = super::notify::parse_recipient_list(&p.alert_emails);
+        if slack.is_none() && add.is_empty() {
+            return;
+        }
+        let current = match hyperion_state::monitors::get(&self.pool, id).await {
+            Ok(Some(c)) => c,
+            Ok(None) => return,
+            Err(e) => {
+                tracing::warn!(hosting_id = %id.as_str(), error = %e,
+                    "profile apply: monitor read failed; alert channels not copied");
+                return;
+            }
+        };
+        let emails = merge_alert_emails(current.alert_email.as_deref().unwrap_or(""), &add);
+        let slack_field = match slack {
+            Some(v) => hyperion_state::monitors::SecretField::Set(v),
+            None => hyperion_state::monitors::SecretField::Keep,
+        };
+        if let Err(e) = hyperion_state::monitors::set_alert_channels(
+            &self.pool,
+            id,
+            emails.as_deref(),
+            slack_field,
+            now_secs(),
+        )
+        .await
+        {
+            tracing::warn!(hosting_id = %id.as_str(), error = %e,
+                "profile apply: alert channels not copied onto the monitor");
+            return;
+        }
+        self.append_audit(
+            "monitor.alerts.from_profile",
+            Some(id.as_str()),
+            &serde_json::json!({
+                "profile_id": p.id,
+                "emails_added": add.len(),
+                "slack": slack.is_some(),
+            })
+            .to_string(),
+            "ok",
+        )
+        .await;
     }
 
     /// Walk a profile's wp_plugins + wp_themes text fields and
@@ -508,6 +572,19 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             price_pinned: r.price_pinned,
         }))
     }
+}
+
+/// The monitor's e-mail list with `add` appended — order kept, case-insensitive
+/// duplicates dropped. `None` when the result is empty (the column is NULL
+/// then, as the monitor card saves it).
+pub(super) fn merge_alert_emails(current: &str, add: &[String]) -> Option<String> {
+    let mut out = super::notify::parse_recipient_list(current);
+    for a in add {
+        if !out.iter().any(|e| e.eq_ignore_ascii_case(a)) {
+            out.push(a.clone());
+        }
+    }
+    (!out.is_empty()).then(|| out.join(","))
 }
 
 pub(super) fn validate_profile(mut p: ProfileInput) -> Result<ProfileInput, RpcError> {
