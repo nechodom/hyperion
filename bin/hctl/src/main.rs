@@ -530,6 +530,14 @@ pub enum WpCmd {
     IntegrityScan { selector: String },
     /// Re-download WordPress core files over the existing ones.
     CoreRepair { selector: String },
+    /// Update WordPress core to a release the site is offered (backup first).
+    CoreUpdate {
+        selector: String,
+        /// The release to install, e.g. 6.7.1 — must be one `wp core
+        /// check-update` offers the site.
+        #[arg(long)]
+        version: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]

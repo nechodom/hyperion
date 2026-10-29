@@ -246,3 +246,58 @@ async fn the_defender_tick_stamps_its_night_and_skips_the_rest_of_it() {
         "already swept tonight"
     );
 }
+
+/// The form's version is a request: a release wp-cli does not offer the
+/// site right now — a stale page, or a hand-made POST asking for an older
+/// one — is refused before anything is backed up or touched.
+#[tokio::test]
+async fn a_core_update_to_a_release_the_site_is_not_offered_changes_nothing() {
+    let pool = open_memory().await.expect("open");
+    let s = svc(
+        pool.clone(),
+        wp_scan_mocks(
+            vec![],
+            vec![hyperion_types::WpCoreUpdate {
+                version: "6.7.1".into(),
+                update_type: "major".into(),
+            }],
+        ),
+    );
+    let site = hosting_for_packages(&s, "kos.cz").await;
+
+    for asked in ["6.4.0", "6.6.2"] {
+        let err = s
+            .wp_core_update(HostingSelector::Id(site.id.clone()), asked.into())
+            .await
+            .expect_err("not offered");
+        let msg = err.to_string();
+        assert!(msg.contains("not offered"), "{msg}");
+        assert!(msg.contains("6.7.1"), "names what IS offered: {msg}");
+    }
+    let err = s
+        .wp_core_update(HostingSelector::Id(site.id.clone()), "latest".into())
+        .await
+        .expect_err("not a release number");
+    assert!(err.to_string().contains("release number"), "{err}");
+
+    let runs = hyperion_state::backups::list_for(&pool, &site.id, 50)
+        .await
+        .expect("runs");
+    assert!(
+        runs.is_empty(),
+        "a refused update takes no backup: {runs:?}"
+    );
+}
+
+/// An up-to-date site is told so rather than handed an empty list.
+#[tokio::test]
+async fn a_core_update_on_an_up_to_date_site_says_so() {
+    let pool = open_memory().await.expect("open");
+    let s = svc(pool.clone(), wp_scan_mocks(vec![], vec![]));
+    let site = hosting_for_packages(&s, "kos.cz").await;
+    let err = s
+        .wp_core_update(HostingSelector::Id(site.id.clone()), "6.7.1".into())
+        .await
+        .expect_err("nothing offered");
+    assert!(err.to_string().contains("already up to date"), "{err}");
+}

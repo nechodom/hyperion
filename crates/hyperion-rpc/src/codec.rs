@@ -1898,6 +1898,13 @@ pub enum Request {
     WpCoreRepair {
         sel: HostingSelector,
     },
+    /// Update WordPress core to `version`, which must be a release wp-cli
+    /// offers the site right now. Takes a pre-update backup first; no
+    /// backup, no update.
+    WpCoreUpdate {
+        sel: HostingSelector,
+        version: String,
+    },
     /// Park or restore `wp-content/object-cache.php` directly on disk. The
     /// escape hatch for a site whose Redis drop-in stops WordPress booting,
     /// which also stops every wp-cli remedy.
@@ -2838,6 +2845,7 @@ pub enum Response {
     WpPermCheck(hyperion_types::FtpCheckReport),
     WpPermRepair(String),
     WpCoreRepair(String),
+    WpCoreUpdate(String),
     WpDropinSet(String),
     WpReinstall(String),
     FtpSetFtps(String),

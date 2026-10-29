@@ -461,3 +461,48 @@ fn fix_outcome_renders_in_the_card() {
     assert!(failed.contains("Fix failed: download failed"));
     assert!(failed.contains("tone-err"));
 }
+
+/// Each core release on the Updates row gets its own update button; a major
+/// says what can break before anything runs, and a panel with no core
+/// release renders no button block at all.
+#[test]
+fn the_updates_row_offers_core_releases_by_hand() {
+    let scan = |core_updates| hyperion_types::WpVulnScanResult {
+        checked: 4,
+        core_version: "6.5.3".into(),
+        core_checked: true,
+        core_updates,
+        ..Default::default()
+    };
+    let html = wp_updates::VulnPanelTpl::new(
+        scan(vec![
+            hyperion_types::WpCoreUpdate {
+                version: "6.7.1".into(),
+                update_type: "major".into(),
+            },
+            hyperion_types::WpCoreUpdate {
+                version: "6.5.5".into(),
+                update_type: "minor".into(),
+            },
+        ]),
+        "kos.cz".into(),
+        true,
+        "tok".into(),
+    )
+    .render()
+    .expect("render");
+    assert_eq!(
+        html.matches(r#"action="/hostings/wp/core-update""#).count(),
+        2
+    );
+    assert!(html.contains(r#"name="version" value="6.7.1""#), "{html}");
+    assert!(html.contains(r#"name="version" value="6.5.5""#), "{html}");
+    assert!(html.contains("is a major release"), "{html}");
+    assert!(html.contains("Update WordPress to 6.7.1"), "{html}");
+
+    let none = wp_updates::VulnPanelTpl::new(scan(vec![]), "kos.cz".into(), true, "tok".into())
+        .render()
+        .expect("render");
+    assert!(!none.contains("core-update"), "{none}");
+    assert!(!none.contains("chk-fixes"), "{none}");
+}
