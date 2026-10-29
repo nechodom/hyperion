@@ -445,6 +445,12 @@ pub enum WpPluginAction {
     /// service layer (drops the slug from the per-hosting skip-list). Used by
     /// the "Resume" button after a licensed plugin's key has been added.
     ResumeAutoUpdate,
+    /// Re-download the version that is ALREADY installed from wordpress.org
+    /// and replace the plugin's directory with it — the fix for a plugin
+    /// that failed checksum verification. Same version on purpose: a repair
+    /// that silently upgrades is a different operation with different
+    /// consequences. Activation state lives in the database and survives.
+    Reinstall,
 }
 
 /// Outcome of a `WpPluginAction`. `output_tail` carries the last

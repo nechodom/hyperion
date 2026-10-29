@@ -292,6 +292,14 @@ pub fn build_router(state: SharedState) -> Router {
             "/hostings/integrity/scan",
             post(handlers::hostings::post_integrity_scan),
         )
+        .route(
+            "/hostings/integrity/repair-core",
+            post(handlers::hostings::post_integrity_repair_core),
+        )
+        .route(
+            "/hostings/integrity/reinstall-plugin",
+            post(handlers::hostings::post_integrity_reinstall_plugin),
+        )
         .route("/hostings/ban", post(handlers::hostings::post_ban))
         .route(
             "/hostings/:selector/bans-panel",

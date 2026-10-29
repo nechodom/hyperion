@@ -1009,6 +1009,25 @@ pub async fn plugin_action(
                 "ResumeAutoUpdate is service-handled, not a wp-cli action".into(),
             ));
         }
+        // `--force` makes wp-cli clear the destination first, so a file an
+        // attacker ADDED to the plugin goes too — not only the ones they
+        // changed. Pinned to the installed version: without `--version`,
+        // install fetches the latest and the "repair" becomes an upgrade.
+        hyperion_types::WpPluginAction::Reinstall => {
+            let raw = run(user, htdocs, &["plugin", "get", slug, "--field=version"]).await?;
+            let version = parse_plugin_version(&raw).ok_or_else(|| {
+                AdapterError::Other(format!(
+                    "couldn't read the installed version of {slug}, so it was not reinstalled"
+                ))
+            })?;
+            vec![
+                "plugin".into(),
+                "install".into(),
+                slug.into(),
+                format!("--version={version}"),
+                "--force".into(),
+            ]
+        }
     };
     let args_refs: Vec<&str> = args_owned.iter().map(|s| s.as_str()).collect();
     let argv = build_argv(user, htdocs, &args_refs);
@@ -1348,6 +1367,22 @@ fn short_summary(out: &str) -> String {
         .unwrap_or_else(|| out.lines().next().unwrap_or("").trim().to_string())
 }
 
+/// The version out of `wp plugin get <slug> --field=version`.
+///
+/// wp-cli prints PHP notices to STDOUT, so the answer is the LAST non-empty
+/// line, and it must look like a version — a stray warning on its own must
+/// never end up as `--version=Warning:` (or worse, as a version wp-cli then
+/// happily resolves to something else).
+fn parse_plugin_version(stdout: &str) -> Option<String> {
+    let line = stdout.lines().map(str::trim).rfind(|l| !l.is_empty())?;
+    let ok = line.len() <= 64
+        && line.starts_with(|c: char| c.is_ascii_digit())
+        && line
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-'));
+    ok.then(|| line.to_string())
+}
+
 /// Convert "akismet-anti-spam" → "Akismet Anti Spam" for the UI when
 /// we don't have the plugin's display name (wp-cli's `plugin list`
 /// doesn't return it without an extra `plugin get` call per row).
@@ -1508,6 +1543,29 @@ fn parse_wp_json<T: serde::de::DeserializeOwned>(
 
 #[cfg(test)]
 mod tests {
+    /// The reinstall repair pins `--version=` to this, so anything that
+    /// isn't a version must come back as None rather than reach wp-cli.
+    #[test]
+    fn plugin_version_is_last_line_and_must_look_like_one() {
+        use super::parse_plugin_version as p;
+        assert_eq!(p("6.4.2\n").as_deref(), Some("6.4.2"));
+        assert_eq!(p("2.0.0-beta1").as_deref(), Some("2.0.0-beta1"));
+        assert_eq!(
+            p("PHP Notice: something in foo.php on line 3\n3.5.1\n\n").as_deref(),
+            Some("3.5.1")
+        );
+        for bad in [
+            "",
+            "\n\n",
+            "Warning: nope",
+            "1.0 --activate",
+            "v1.0",
+            "1.0;rm",
+        ] {
+            assert_eq!(p(bad), None, "{bad:?}");
+        }
+    }
+
     fn mk_site(dir: &std::path::Path, plugins: &[&str]) -> String {
         let root = dir.join("htdocs");
         for p in plugins {

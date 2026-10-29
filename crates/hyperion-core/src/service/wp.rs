@@ -1025,6 +1025,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             }
             // Handled + returned above; never reaches the adapter path.
             hyperion_types::WpPluginAction::ResumeAutoUpdate => "resume_auto_update",
+            hyperion_types::WpPluginAction::Reinstall => "reinstall",
         };
         self.append_audit(
             "wp.plugin.action",

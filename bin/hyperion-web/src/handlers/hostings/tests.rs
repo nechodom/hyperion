@@ -282,6 +282,7 @@ fn render_integrity(scan: hyperion_types::WpIntegrityScanResult) -> String {
         scan,
         selector: "example.com".into(),
         csrf_token: "t".into(),
+        notice: None,
     }
     .render()
     .expect("integrity card renders")
@@ -391,4 +392,72 @@ fn findings_are_listed_with_their_paths() {
     assert!(html.contains("akismet.php"));
     assert!(html.contains("Php.Trojan.Webshell-1"));
     assert!(!html.contains("Clean —"));
+}
+
+/// A core finding the repair can actually fix gets the button; a plugin
+/// that failed verification gets its own reinstall, carrying its slug.
+#[test]
+fn fixable_findings_offer_a_fix() {
+    let html = render_integrity(hyperion_types::WpIntegrityScanResult {
+        wp_cli_ok: true,
+        core_missing: vec!["license.txt".into(), "readme.html".into()],
+        plugins_failed: vec![hyperion_types::WpIntegrityPluginResult {
+            slug: "akismet".into(),
+            issues: vec![hyperion_types::WpIntegrityFileIssue {
+                path: "akismet.php".into(),
+                message: "Checksum does not match".into(),
+            }],
+        }],
+        scanned_at: 1_700_000_000,
+        ..Default::default()
+    });
+    assert!(html.contains(r#"hx-post="/hostings/integrity/repair-core""#));
+    assert!(html.contains(r#"hx-post="/hostings/integrity/reinstall-plugin""#));
+    assert!(html.contains(r#"name="slug" value="akismet""#));
+    // Confirm attributes ride on the form, where the driver reads them.
+    assert!(html.contains(r#"data-confirm-title="Repair WordPress core files""#));
+}
+
+/// The core repair puts official files back; it does not delete anything.
+/// A card offering "Repair" for a file that SHOULDN'T exist would promise a
+/// fix that leaves the dropper exactly where it was.
+#[test]
+fn unexpected_core_files_get_no_repair_button() {
+    let html = render_integrity(hyperion_types::WpIntegrityScanResult {
+        wp_cli_ok: true,
+        core_unexpected: vec!["wp-includes/x.php".into()],
+        scanned_at: 1_700_000_000,
+        ..Default::default()
+    });
+    assert!(!html.contains("/hostings/integrity/repair-core"));
+    assert!(html.contains("aren't removed by any fix here"));
+}
+
+/// The outcome of a fix renders inside the row (HTMX won't swap an error
+/// status), worded so a failure can't be read as success.
+#[test]
+fn fix_outcome_renders_in_the_card() {
+    let ok = IntegrityCardTpl {
+        scan: hyperion_types::WpIntegrityScanResult {
+            wp_cli_ok: true,
+            core_ok: true,
+            ..Default::default()
+        },
+        selector: "example.com".into(),
+        csrf_token: "t".into(),
+        notice: Some((true, "WordPress 6.4.2 core files replaced.".into())),
+    }
+    .render()
+    .expect("renders");
+    assert!(ok.contains("Fixed: WordPress 6.4.2 core files replaced."));
+    let failed = IntegrityCardTpl {
+        scan: integrity_not_checked("x".into()),
+        selector: "example.com".into(),
+        csrf_token: "t".into(),
+        notice: Some((false, "download failed".into())),
+    }
+    .render()
+    .expect("renders");
+    assert!(failed.contains("Fix failed: download failed"));
+    assert!(failed.contains("tone-err"));
 }
