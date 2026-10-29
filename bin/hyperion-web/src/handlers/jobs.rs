@@ -129,6 +129,7 @@ pub fn job_kind_label(kind: &str) -> String {
         "modsec_install" => "Install ModSecurity + OWASP CRS",
         "wp_reinstall" => "Reinstall WordPress core",
         "wp_reinstall_all" => "Reinstall WordPress core everywhere",
+        "wp_core_update" => "Update WordPress core",
         "profile_apply" => "Apply profile",
         "profile_reapply_all" => "Re-apply profile to all hostings",
         "rofs_fix" => "Fix read-only filesystem",

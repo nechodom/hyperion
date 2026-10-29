@@ -578,6 +578,10 @@ pub async fn execute(socket: &Path, cmd: &Cmd) -> Result<Outcome> {
             WpCmd::CoreRepair { selector } => Request::WpCoreRepair {
                 sel: parse_selector(selector)?,
             },
+            WpCmd::CoreUpdate { selector, version } => Request::WpCoreUpdate {
+                sel: parse_selector(selector)?,
+                version: version.clone(),
+            },
         },
 
         // ── db ─────────────────────────────────────────────────────────

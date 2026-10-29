@@ -1073,6 +1073,10 @@ pub fn build_router(state: SharedState) -> Router {
             post(handlers::hostings::post_wp_core_repair),
         )
         .route(
+            "/hostings/wp/core-update",
+            post(handlers::hostings::post_wp_core_update),
+        )
+        .route(
             "/hostings/wp/reinstall",
             post(handlers::hostings::post_wp_reinstall),
         )

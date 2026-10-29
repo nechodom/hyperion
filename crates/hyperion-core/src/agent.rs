@@ -1392,6 +1392,14 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.wp_core_repair(sel).await
     }
 
+    async fn wp_core_update(
+        &self,
+        sel: HostingSelector,
+        version: String,
+    ) -> Result<String, RpcError> {
+        self.svc.wp_core_update(sel, version).await
+    }
+
     async fn wp_dropin_set(&self, sel: HostingSelector, enabled: bool) -> Result<String, RpcError> {
         self.svc.wp_dropin_set(sel, enabled).await
     }

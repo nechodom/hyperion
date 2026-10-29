@@ -14,6 +14,9 @@ pub(super) struct VulnPanelTpl {
     pub(super) comps: Vec<crate::handlers::vulns::CompRow>,
     /// Of `comps`, how many wait for a person.
     pub(super) waiting: usize,
+    /// Of `comps`, whether any is a core release — each gets an update
+    /// button.
+    pub(super) has_core: bool,
     pub(super) selector: String,
     pub(super) auto_update_enabled: bool,
     pub(super) csrf_token: String,
@@ -32,10 +35,12 @@ impl VulnPanelTpl {
             hyperion_types::now_secs(),
         );
         let waiting = comps.iter().filter(|c| c.state.needs_you()).count();
+        let has_core = comps.iter().any(|c| c.kind == "core");
         Self {
             scan,
             comps,
             waiting,
+            has_core,
             selector,
             auto_update_enabled,
             csrf_token,
@@ -178,4 +183,82 @@ pub async fn post_wp_auto_update(
         urlencoding(&msg)
     ))
     .into_response())
+}
+
+#[derive(Deserialize)]
+pub struct WpCoreUpdateForm {
+    pub selector: String,
+    /// The release the Updates row offered. The node accepts it only if
+    /// wp-cli still offers it to this site.
+    pub version: String,
+}
+
+/// POST /hostings/wp/core-update — update WordPress core to the release the
+/// Updates row offered, major or minor. A background job: the node takes a
+/// full pre-update backup first, which is minutes on a big site, and an
+/// update cut off by a closed tab is exactly the half-done state the backup
+/// exists for.
+pub async fn post_wp_core_update(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<WpCoreUpdateForm>,
+) -> Result<Response, AppError> {
+    let sel = match require_manage_for_selector(&state, &ctx, &form.selector, Capability::WpManage)
+        .await
+    {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
+    let sel_url = urlencoding(&form.selector);
+    let node = match find_hosting_anywhere(&state, sel.clone()).await {
+        Ok((_d, n)) => n,
+        Err(e) => {
+            let token = stash_error(&state, &e.to_string()).await;
+            return Ok(Redirect::to(&format!(
+                "/hostings/{sel_url}?wp_error_ref={token}#wordpress"
+            ))
+            .into_response());
+        }
+    };
+    let version = form.version.trim().to_string();
+    let actor_uid = ctx.session.as_ref().map(|s| s.user_id).unwrap_or(0);
+    let job_state = state.clone();
+    let job_id = crate::handlers::jobs::spawn_job(
+        state.clone(),
+        "wp_core_update",
+        Some(&form.selector),
+        &serde_json::json!({ "version": version }).to_string(),
+        &ctx.username,
+        actor_uid,
+        move |reporter| async move {
+            reporter
+                .step(
+                    &format!("Backing up files + database, then updating WordPress to {version}…"),
+                    10,
+                    "",
+                )
+                .await;
+            match crate::dispatcher::dispatch_to_node(
+                &job_state,
+                node.as_deref(),
+                Request::WpCoreUpdate { sel, version },
+            )
+            .await
+            {
+                Ok(RpcResponse::WpCoreUpdate(m)) => {
+                    reporter.step(&m, 100, "").await;
+                    reporter.finish(true, None).await;
+                }
+                Ok(RpcResponse::Error(e)) => reporter.finish(false, Some(e.to_string())).await,
+                Ok(_) => {
+                    reporter
+                        .finish(false, Some("unexpected response from the node".into()))
+                        .await
+                }
+                Err(e) => reporter.finish(false, Some(e.to_string())).await,
+            }
+        },
+    )
+    .await?;
+    Ok(Redirect::to(&format!("/jobs/{job_id}")).into_response())
 }

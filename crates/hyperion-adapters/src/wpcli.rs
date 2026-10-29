@@ -690,6 +690,42 @@ pub async fn core_update_minor(user: &str, htdocs: &str) -> Result<String, Adapt
     Ok(format!("{}\n{}", out.trim(), db_out.trim()))
 }
 
+/// A WordPress release number as wp-cli offers one: `6.7` or `6.6.2`.
+/// Nothing else reaches `--version=` — not `latest`, not `nightly`, not a
+/// URL — so an operator's update can only land on a release the site was
+/// offered.
+pub fn is_core_release(v: &str) -> bool {
+    let parts: Vec<&str> = v.split('.').collect();
+    (2..=3).contains(&parts.len())
+        && parts
+            .iter()
+            .all(|p| !p.is_empty() && p.len() <= 4 && p.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// Update core to exactly `version` — minor or major, the operator's call —
+/// then bring the database with it, for the same reason
+/// [`core_update_minor`] does.
+pub async fn core_update_to(
+    user: &str,
+    htdocs: &str,
+    version: &str,
+) -> Result<String, AdapterError> {
+    if !is_core_release(version) {
+        return Err(AdapterError::Other(format!(
+            "not a WordPress release number: {version:?}"
+        )));
+    }
+    ensure_wp_cli_present().await?;
+    let version_arg = format!("--version={version}");
+    let args: [&str; 3] = ["core", "update", &version_arg];
+    let argv = build_argv(user, htdocs, &args);
+    let out = cmd::run("/usr/bin/sudo", &argv_as_refs(&argv)).await?;
+    let db_args: [&str; 2] = ["core", "update-db"];
+    let db_argv = build_argv(user, htdocs, &db_args);
+    let db_out = cmd::run("/usr/bin/sudo", &argv_as_refs(&db_argv)).await?;
+    Ok(format!("{}\n{}", out.trim(), db_out.trim()))
+}
+
 /// List installed WP plugins via `wp plugin list --format=json` and
 /// `wp core version`. Both calls run under `system_user` against
 /// `htdocs`. Returns the parsed plugin table + wp version string.
@@ -2142,6 +2178,27 @@ mod core_update_tests {
     #[test]
     fn a_versionless_row_is_dropped() {
         assert!(parse_core_updates(r#"[{"update_type":"minor"}]"#).is_empty());
+    }
+
+    #[test]
+    fn only_a_release_number_is_a_core_release() {
+        for ok in ["6.7", "6.6.2", "10.0.11"] {
+            assert!(is_core_release(ok), "{ok}");
+        }
+        for bad in [
+            "",
+            "6",
+            "latest",
+            "nightly",
+            "6.7-RC1",
+            "6..2",
+            "6.6.2.1",
+            "6.6.2 --allow-root",
+            "--version=6.6",
+            "https://wordpress.org/wordpress-6.6.zip",
+        ] {
+            assert!(!is_core_release(bad), "{bad:?}");
+        }
     }
 }
 

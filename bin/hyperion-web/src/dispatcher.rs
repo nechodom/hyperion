@@ -355,6 +355,8 @@ fn timeout_for_request(req: &Request) -> u64 {
         Request::WpStagingCreate { .. }
         | Request::WpStagingPush { .. }
         | Request::WpReinstall { .. }
+        // A full pre-update backup (sized by the site) before the update.
+        | Request::WpCoreUpdate { .. }
         | Request::TrashPurge { .. } => 3600,
         // ACME: an order is ~25 s on a good day, and the adapter retries
         // with 15/30/60 s backoff. A "retry" after a false timeout burns

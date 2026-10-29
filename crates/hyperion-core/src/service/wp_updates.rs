@@ -801,6 +801,151 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         }
     }
 
+    /// Update WordPress core to `version` because a person asked to — the
+    /// release a major the sweep leaves alone, or a minor applied now rather
+    /// than tonight.
+    ///
+    /// Only a release wp-cli offers this site RIGHT NOW is accepted: the
+    /// form's version is a request, not an instruction, so a stale page or a
+    /// hand-made POST cannot walk a site onto a release it was not offered,
+    /// or back onto an older one.
+    ///
+    /// Same promise as the sweep: one pre-update backup first, no backup no
+    /// update, released 24 hours after a clean update and held after a
+    /// failed one.
+    pub async fn wp_core_update(
+        &self,
+        sel: HostingSelector,
+        version: String,
+    ) -> Result<String, RpcError> {
+        let detail = self.get(sel).await?;
+        if detail.state != HostingState::Active {
+            return Err(RpcError::Conflict {
+                message: "hosting must be active to update WordPress".into(),
+            });
+        }
+        let (user, root) = (
+            detail.system_user.trim().to_string(),
+            detail.root_dir.trim().to_string(),
+        );
+        if user.is_empty() || root.is_empty() {
+            return Err(RpcError::Validation {
+                message: "this hosting has no system user or document root".into(),
+            });
+        }
+        let version = version.trim().to_string();
+        if !hyperion_adapters::wpcli::is_core_release(&version) {
+            return Err(RpcError::Validation {
+                message: format!("not a WordPress release number: {version:?}"),
+            });
+        }
+        let offered = self
+            .adapters
+            .wp_core_check_update(&user, &root)
+            .await
+            .map_err(|e| RpcError::Validation {
+                message: format!(
+                    "could not ask WordPress which releases this site is offered, so \
+                     nothing was updated: {e}"
+                ),
+            })?;
+        if !offered.iter().any(|u| u.version == version) {
+            let list: Vec<&str> = offered.iter().map(|u| u.version.as_str()).collect();
+            return Err(RpcError::Validation {
+                message: if list.is_empty() {
+                    format!(
+                        "WordPress {version} is not offered to this site — it is already \
+                         up to date. Nothing was changed."
+                    )
+                } else {
+                    format!(
+                        "WordPress {version} is not offered to this site (offered: {}). \
+                         Nothing was changed.",
+                        list.join(", ")
+                    )
+                },
+            });
+        }
+        let from = detect_wp_install_on_disk(&root).await.unwrap_or_default();
+
+        let run_id =
+            self.pre_update_backup(&detail.id)
+                .await
+                .map_err(|e| RpcError::Validation {
+                    message: format!(
+                        "the backup before the update failed, so WordPress was NOT updated: {e}"
+                    ),
+                })?;
+
+        match hyperion_adapters::wpcli::core_update_to(&user, &root, &version).await {
+            Ok(out) => {
+                let delete_at = now_secs() + hyperion_state::backups::PRE_UPDATE_KEEP_SECS;
+                if let Err(e) =
+                    hyperion_state::backups::release_pre_update(&self.pool, run_id, delete_at).await
+                {
+                    tracing::warn!(error = %e, "pre-update backup: release failed");
+                }
+                let tail: String = {
+                    let rev: String = out.chars().rev().take(400).collect();
+                    rev.chars().rev().collect()
+                };
+                self.append_audit(
+                    "wp.core.update",
+                    Some(detail.id.as_str()),
+                    &serde_json::json!({
+                        "from": from,
+                        "version": version,
+                        "run_id": run_id,
+                        "output_tail": tail,
+                    })
+                    .to_string(),
+                    "ok",
+                )
+                .await;
+                self.purge_page_cache_after(detail.id.as_str(), "wp.core.update")
+                    .await;
+                // Saves itself: the cluster page and the Updates row stop
+                // listing the release that just went in.
+                let _ = self
+                    .wp_vuln_scan(HostingSelector::Id(detail.id.clone()))
+                    .await;
+                Ok(format!(
+                    "WordPress updated{} to {version}. The backup taken before it is kept \
+                     for 24 hours.",
+                    if from.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" from {from}")
+                    }
+                ))
+            }
+            Err(e) => {
+                // The backup stays held — it is the copy from before whatever
+                // the half-applied update left behind.
+                self.append_audit(
+                    "wp.core.update",
+                    Some(detail.id.as_str()),
+                    &serde_json::json!({
+                        "from": from,
+                        "version": version,
+                        "run_id": run_id,
+                        "error": e.to_string(),
+                    })
+                    .to_string(),
+                    "failed",
+                )
+                .await;
+                Err(RpcError::Validation {
+                    message: format!(
+                        "WordPress {version} did not install: {e}\n\nThe backup taken just \
+                         before it is kept (Backups tab, \"before update\") until the next \
+                         update replaces it."
+                    ),
+                })
+            }
+        }
+    }
+
     /// Notify about each major update that was not in the previous scan.
     pub(super) async fn notify_new_majors(
         &self,

@@ -754,6 +754,22 @@ hctl wp core-repair example.com
 Replaces modified or missing core files with clean ones of the same version.
 `wp-content` and `wp-config.php` are not touched.
 
+### hctl wp core-update
+
+Update WordPress core to a release the site is offered.
+
+**Options:** `SELECTOR`, `--version <VERSION>`
+
+```bash
+hctl wp core-update example.com --version 6.7.1
+```
+
+Minor or major — the operator's call; the nightly sweep only applies minors by
+itself. The version must be one `wp core check-update` offers the site right
+now, so a typo or an older release is refused before anything changes. A full
+pre-update backup runs first (no backup, no update) and is kept 24 hours after
+a clean update, or until the next update after a failed one.
+
 ## Databases
 
 ### hctl db reset-password
