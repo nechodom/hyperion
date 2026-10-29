@@ -2016,7 +2016,9 @@ pub fn print_pretty(resp: &Response) {
             }
             println!(
                 "  malware    : {}",
-                if !r.clamav_available {
+                if !r.clamav_available && r.clamav_installed {
+                    "not scanned yet (clamav installed; see error)".to_string()
+                } else if !r.clamav_available {
                     "not scanned (clamav not installed)".to_string()
                 } else if r.malware.is_empty() {
                     "no signatures matched".to_string()

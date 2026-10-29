@@ -321,6 +321,31 @@ fn verified_without_clamav_is_not_clean() {
     assert!(!html.contains("Clean —"));
 }
 
+/// ClamAV IS installed but this site has no pass yet — the node's one
+/// scanner slot was busy, or clamscan could not finish. That must not be
+/// rendered as "isn't installed": the operator who just added ClamAV
+/// would go looking for a problem on the Services page that isn't there.
+#[test]
+fn installed_clamav_without_a_pass_is_not_called_missing() {
+    let html = render_integrity(hyperion_types::WpIntegrityScanResult {
+        core_ok: true,
+        wp_cli_ok: true,
+        clamav_available: false,
+        clamav_installed: true,
+        plugins_checked: 3,
+        plugins_total: 3,
+        error: Some("malware scan skipped: another scan is already running on this node".into()),
+        scanned_at: 1_700_000_000,
+        ..Default::default()
+    });
+    assert!(html.contains(r#"data-verdict="partial""#));
+    assert!(html.contains("malware not scanned"));
+    assert!(!html.contains("ClamAV isn't installed"));
+    assert!(html.contains("ClamAV is installed"));
+    assert!(html.contains("another scan is already running"));
+    assert!(!html.contains("Clean —"));
+}
+
 /// Both signals ran and both came back empty — the only state allowed
 /// to say so.
 #[test]

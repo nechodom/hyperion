@@ -341,10 +341,18 @@ pub struct WpIntegrityScanResult {
     /// is false — which means "not scanned", not "clean".
     #[serde(default)]
     pub malware: Vec<WpMalwareHit>,
-    /// Whether `clamscan` exists on the node. False is a normal, expected
-    /// state (clamd is heavy for a shared host) — never an error.
+    /// Whether a ClamAV pass over this docroot actually ran, i.e. whether
+    /// `malware` means anything. False is a normal, expected state (clamd
+    /// is heavy for a shared host) — never an error.
     #[serde(default)]
     pub clamav_available: bool,
+    /// Whether `clamscan` exists on the node, separately from whether it
+    /// ran for this site. An installed scanner still produces no pass when
+    /// the node's one scan slot is busy or clamscan cannot finish, and the
+    /// UI must not tell the operator to install what is already there.
+    /// Absent (false) from nodes older than this field.
+    #[serde(default)]
+    pub clamav_installed: bool,
     /// Whether wp-cli was able to run the checksum comparison at all.
     /// False for a broken install, a missing wp-cli, or a WordPress.org
     /// lookup that failed.

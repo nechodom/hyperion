@@ -170,6 +170,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             plugins_listed,
         );
         result.scanned_at = now;
+        result.clamav_installed = integrity::clamav_available();
         result.error = (!errors.is_empty()).then(|| errors.join("; "));
 
         // Store when at least one signal actually ran — or when this
@@ -473,6 +474,9 @@ pub(super) fn assemble_integrity_result(
         plugins_unknown,
         malware,
         clamav_available,
+        // The caller's to fill: whether a scanner exists is a node fact,
+        // not something the probe outcomes can tell us.
+        clamav_installed: false,
         wp_cli_ok: core_checked && plugins_ok,
         plugins_checked,
         plugins_total,
