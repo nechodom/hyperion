@@ -11,6 +11,11 @@ pub(super) struct IntegrityCardTpl {
     pub(super) scan: hyperion_types::WpIntegrityScanResult,
     pub(super) selector: String,
     pub(super) csrf_token: String,
+    /// Outcome of a fix the operator just ran from this card, shown above
+    /// the fresh scan. `(ok, text)`. Rendered inside the row because HTMX
+    /// does not swap a non-2xx response — an error status would leave the
+    /// operator watching a spinner.
+    pub(super) notice: Option<(bool, String)>,
 }
 
 /// A result meaning "nothing was checked", carrying why.
@@ -74,6 +79,7 @@ pub async fn get_integrity_panel(
             scan,
             selector,
             csrf_token,
+            notice: None,
         }
         .render()?,
     )
@@ -116,8 +122,110 @@ pub async fn post_integrity_scan(
             scan,
             selector: form.selector,
             csrf_token,
+            notice: None,
         }
         .render()?,
     )
     .into_response())
+}
+
+/// Run a fix on the owning node, then re-scan and render the card with the
+/// fix's outcome on top. The re-scan is the proof: "repaired" is only worth
+/// saying next to a scan that no longer lists the file.
+///
+/// The fix is idempotent (it re-downloads the release the site already
+/// runs), so a dropped connection mid-way means "click it again", not a
+/// half-done site — which is why it stays inline rather than a job.
+async fn integrity_fix(
+    state: SharedState,
+    ctx: AuthCtx,
+    selector: String,
+    fix: impl FnOnce(HostingSelector) -> Request,
+) -> Result<Response, AppError> {
+    let sel = match require_manage_for_selector(&state, &ctx, &selector, Capability::WpManage).await
+    {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
+    let csrf_token = crate::handlers::session_csrf_token(&state, &ctx);
+    // Same explicit owner resolution as "Scan now": falling back to the
+    // master would rewrite core on a box that doesn't hold the site.
+    let (notice, scan) = match find_hosting_anywhere(&state, sel.clone()).await {
+        Ok((_detail, owner_node)) => {
+            let owner = owner_node.as_deref();
+            let notice =
+                match crate::dispatcher::dispatch_to_node(&state, owner, fix(sel.clone())).await {
+                    Ok(RpcResponse::WpCoreRepair(m)) => (true, m),
+                    Ok(RpcResponse::WpPluginAction(r)) => {
+                        let ok = r.state == "ok" || r.state == "noop";
+                        let text = if ok || r.output_tail.trim().is_empty() {
+                            r.message
+                        } else {
+                            format!("{}\n\n{}", r.message, r.output_tail)
+                        };
+                        (ok, text)
+                    }
+                    Ok(RpcResponse::Error(e)) => (false, e.to_string()),
+                    Ok(_) => (false, "unexpected response from the node".into()),
+                    Err(e) => (false, e.to_string()),
+                };
+            (
+                Some(notice),
+                integrity_scan_on_node(&state, owner, sel).await,
+            )
+        }
+        Err(e) => (None, integrity_not_checked(e.to_string())),
+    };
+    Ok(Html(
+        IntegrityCardTpl {
+            scan,
+            selector,
+            csrf_token,
+            notice,
+        }
+        .render()?,
+    )
+    .into_response())
+}
+
+/// POST /hostings/integrity/repair-core — put back the official core files
+/// of the version the site already runs. Fixes "modified" and "missing";
+/// a file that "shouldn't exist" is left where it is (see the card).
+pub async fn post_integrity_repair_core(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<IntegrityScanForm>,
+) -> Result<Response, AppError> {
+    integrity_fix(state, ctx, form.selector, |sel| Request::WpCoreRepair {
+        sel,
+    })
+    .await
+}
+
+#[derive(Deserialize)]
+pub struct IntegrityReinstallPluginForm {
+    pub selector: String,
+    pub slug: String,
+}
+
+/// POST /hostings/integrity/reinstall-plugin — replace one plugin that
+/// failed verification with a clean copy of the same version from
+/// wordpress.org. The slug is validated again in the adapter.
+pub async fn post_integrity_reinstall_plugin(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<IntegrityReinstallPluginForm>,
+) -> Result<Response, AppError> {
+    let slug = form.slug.trim().to_string();
+    if slug.is_empty() {
+        return Err(AppError::BadRequest("missing plugin slug".into()));
+    }
+    integrity_fix(state, ctx, form.selector, move |sel| {
+        Request::WpPluginAction {
+            hosting: sel,
+            slug,
+            action: hyperion_types::WpPluginAction::Reinstall,
+        }
+    })
+    .await
 }

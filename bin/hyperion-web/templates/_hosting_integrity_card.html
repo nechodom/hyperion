@@ -43,6 +43,11 @@
   </div>
 
   <div class="chk-body">
+    {# Outcome of a fix just run from this card. The scan below is the fresh
+       one taken right after it, so the two can be read against each other. #}
+    {% if let Some((ok, text)) = notice %}
+    <p class="chk-note {% if ok %}tone-ok{% else %}tone-err{% endif %}" style="white-space:pre-line">{% if ok %}Fixed: {% else %}Fix failed: {% endif %}{{ text }}</p>
+    {% endif %}
     {% if scan.total_findings() > 0 %}
     <p class="chk-note tone-err">
       Modified core files and files that shouldn't exist are how a backdoor
@@ -86,7 +91,29 @@
       {% endif %}{% endfor %}
     </ul>
     {% if scan.core_modified.len() > 50 || scan.core_unexpected.len() > 50 || scan.core_missing.len() > 50 %}
-    <p class="chk-note">Only the first 50 files of each kind are listed. Repairing core files (Tools → Repair or reinstall) restores every official file, but won't remove a dropper.</p>
+    <p class="chk-note">Only the first 50 files of each kind are listed. Repairing core files restores every official file, but won't remove a dropper.</p>
+    {% endif %}
+    {% if !scan.core_modified.is_empty() || !scan.core_missing.is_empty() %}
+    <div class="chk-fixes">
+      {# Confirm attributes on the <form>: the driver reads them off the
+         submit event's target, a <button> carrying them is never asked. #}
+      <form hx-post="/hostings/integrity/repair-core" hx-target="#integrity-card" hx-swap="outerHTML"
+            hx-indicator="#integrity-spinner" hx-disabled-elt="find button"
+            data-confirm-title="Repair WordPress core files"
+            data-confirm-body="Re-downloads the WordPress version this site already runs from WordPress.org and overwrites the core files with clean copies, putting back any that are missing. wp-content (plugins, themes, uploads), wp-config.php and the database are left alone. The site is scanned again right after.{% if !scan.core_unexpected.is_empty() %} Files that shouldn't exist are NOT removed — look at those by hand.{% endif %}"
+            data-confirm-confirm-label="Repair core files">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <input type="hidden" name="selector" value="{{ selector }}">
+        <button class="btn primary small" type="submit">Repair core files</button>
+      </form>
+    </div>
+    {% endif %}
+    {% if !scan.core_unexpected.is_empty() %}
+    {# Deliberately no button: a stray file in wp-admin/ or wp-includes/ is
+       either a leftover from an old release or the dropper itself, and only
+       a person who has looked at it can tell which. Deleting it blind also
+       deletes the evidence. #}
+    <p class="chk-note">Files that shouldn't exist aren't removed by any fix here — open each one, then delete it over SFTP or the file manager once you know what it is.</p>
     {% endif %}
     {% endif %}
 
@@ -104,6 +131,18 @@
     {% if pl.issues.len() > 25 %}
     <p class="chk-note">Showing 25 of {{ pl.issues.len() }} files. Re-installing this plugin from wordpress.org overwrites every one of them.</p>
     {% endif %}
+    <div class="chk-fixes">
+      <form hx-post="/hostings/integrity/reinstall-plugin" hx-target="#integrity-card" hx-swap="outerHTML"
+            hx-indicator="#integrity-spinner" hx-disabled-elt="find button"
+            data-confirm-title="Reinstall {{ pl.slug }}"
+            data-confirm-body="Downloads the version of {{ pl.slug }} this site already runs from wordpress.org and replaces the plugin's whole folder with it — changed files are overwritten and files that were added are removed. Its settings are in the database and stay, and an active plugin stays active. Anything someone saved inside the plugin's own folder is lost. The site is scanned again right after."
+            data-confirm-confirm-label="Reinstall plugin">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <input type="hidden" name="selector" value="{{ selector }}">
+        <input type="hidden" name="slug" value="{{ pl.slug }}">
+        <button class="btn primary small" type="submit">Reinstall {{ pl.slug }}</button>
+      </form>
+    </div>
     {% endfor %}
 
     {# ── ClamAV ──────────────────────────────────────────────────────── #}
