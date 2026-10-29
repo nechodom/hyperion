@@ -1446,3 +1446,89 @@ async fn two_plans_send_every_section_either_includes() {
         "left out only where every report-selling plan leaves it out"
     );
 }
+
+/// A plan selling the Core Rule Set on a node without ModSecurity installs
+/// the engine itself — the card promises the rule set comes back on its own,
+/// and without an engine no enforcement pass could ever keep that promise.
+/// Only when a plan in force wants it, only while the engine is missing, and
+/// at most once per retry window.
+#[tokio::test]
+async fn crs_plan_installs_the_missing_engine_rate_limited() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let pool = open_memory().await.expect("open");
+    let mut mocks = package_mocks();
+    let engine = std::sync::Arc::new(AtomicBool::new(false));
+    let e = engine.clone();
+    mocks.expect_modsec_status().returning(move || {
+        let on = e.load(Ordering::SeqCst);
+        hyperion_types::crs::ModsecStatus {
+            module: on,
+            crs: on,
+            ..Default::default()
+        }
+    });
+    // Reached only where /usr is writable (root); elsewhere the install is
+    // refused before apt. Either way the attempt is what's under test.
+    mocks
+        .expect_modsec_install()
+        .times(0..=2)
+        .returning(|| Ok(()));
+    mocks.expect_modsec_sync_http().returning(|_| Ok(true));
+    let s = svc(pool.clone(), mocks);
+    let stamp = || {
+        let pool = pool.clone();
+        async move {
+            hyperion_state::node_kv::get(&pool, PACKAGE_MODSEC_AUTO_KV)
+                .await
+                .expect("read")
+                .and_then(|v| v.parse::<i64>().ok())
+        }
+    };
+
+    // No plan sells it: nothing is installed.
+    let detail = hosting_for_packages(&s, "crs-auto.cz").await;
+    assert!(!s.package_crs_engine_ensure().await);
+    assert_eq!(stamp().await, None);
+
+    let def = s
+        .package_create(care_input(
+            "CRS",
+            PackageFeatures {
+                crs: CrsPin::Detect,
+                ..Default::default()
+            },
+        ))
+        .await
+        .expect("define");
+    s.package_activate(HostingSelector::Id(detail.id.clone()), def.id, None, None)
+        .await
+        .expect("activate");
+
+    // Wanted and missing: an attempt, stamped.
+    s.package_crs_engine_ensure().await;
+    assert!(stamp().await.is_some(), "the attempt is recorded");
+
+    // A recent attempt holds the next one off.
+    let recent = now_secs() - 60;
+    hyperion_state::node_kv::set(&pool, PACKAGE_MODSEC_AUTO_KV, &recent.to_string(), recent)
+        .await
+        .expect("seed");
+    assert!(!s.package_crs_engine_ensure().await);
+    assert_eq!(stamp().await, Some(recent));
+
+    // Past the window it tries again.
+    let old = now_secs() - PACKAGE_MODSEC_AUTO_RETRY_SECS - 1;
+    hyperion_state::node_kv::set(&pool, PACKAGE_MODSEC_AUTO_KV, &old.to_string(), old)
+        .await
+        .expect("seed");
+    s.package_crs_engine_ensure().await;
+    assert!(stamp().await.expect("stamp") > old);
+
+    // Engine present: nothing to do, however old the stamp.
+    engine.store(true, Ordering::SeqCst);
+    hyperion_state::node_kv::set(&pool, PACKAGE_MODSEC_AUTO_KV, &old.to_string(), old)
+        .await
+        .expect("seed");
+    assert!(!s.package_crs_engine_ensure().await);
+    assert_eq!(stamp().await, Some(old));
+}

@@ -278,6 +278,9 @@ fn timeout_for_request(req: &Request) -> u64 {
         // apt-get update + install of the connector and the rule set, then
         // an nginx -t and a reload.
         Request::ModsecInstall => 900,
+        // "Switch on now" runs the node's whole drift pass inline; each site
+        // it corrects can mean a vhost rewrite and an nginx reload.
+        Request::PackageEnforceTick => 120,
         // Move a bundle / install WordPress.
         Request::BackupFetchChunk { .. }
         | Request::HostingMigrationFetchBundleFile { .. }

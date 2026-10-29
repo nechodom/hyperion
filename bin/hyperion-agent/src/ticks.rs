@@ -497,6 +497,12 @@ fn spawn_billing_sweep(svc: &Svc) {
 /// activations at all.
 fn spawn_package_enforce(svc: &Svc) {
     every(svc, 7 * MIN, HOUR, |svc| async move {
+        // A plan selling the Core Rule Set on a node without ModSecurity
+        // would otherwise wait forever; this installs it (rate-limited) so
+        // the pass below can switch the rule set on.
+        if svc.package_crs_engine_ensure().await {
+            tracing::info!("care package: ModSecurity installed for the Core Rule Set");
+        }
         match svc.package_enforce_tick().await {
             Ok(n) if n > 0 => tracing::info!(corrected = n, "care package enforce tick"),
             Ok(_) => tracing::debug!("care package enforce tick: nothing drifted"),

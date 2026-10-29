@@ -1288,6 +1288,51 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(corrected)
     }
 
+    /// Install the ModSecurity engine when a care plan in force here sells
+    /// the Core Rule Set and the node has none. The card promises the rule
+    /// set "will be switched back on automatically"; without an engine the
+    /// drift tick can never keep that promise, so it waited forever for
+    /// someone to find the install button.
+    ///
+    /// Scheduled path only (the hourly tick calls this right before
+    /// [`Self::package_enforce_tick`]): apt takes minutes, which no RPC
+    /// caller of the enforce tick budgets for. At most one attempt per
+    /// [`PACKAGE_MODSEC_AUTO_RETRY_SECS`]. Returns whether it installed.
+    pub async fn package_crs_engine_ensure(&self) -> bool {
+        let wanted = match packages::list_all_in_force(&self.pool).await {
+            Ok(rows) => rows
+                .iter()
+                .any(|r| matches!(r.features.crs, CrsPin::Detect | CrsPin::Block)),
+            Err(e) => {
+                tracing::warn!(error = %e, "package: read activations for ModSecurity failed");
+                return false;
+            }
+        };
+        if !wanted || self.adapters.modsec_status().await.available() {
+            return false;
+        }
+        let now = now_secs();
+        let last = hyperion_state::node_kv::get(&self.pool, PACKAGE_MODSEC_AUTO_KV)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|v| v.trim().parse::<i64>().ok());
+        if last.is_some_and(|t| now.saturating_sub(t) < PACKAGE_MODSEC_AUTO_RETRY_SECS) {
+            return false;
+        }
+        let _ =
+            hyperion_state::node_kv::set(&self.pool, PACKAGE_MODSEC_AUTO_KV, &now.to_string(), now)
+                .await;
+        tracing::info!("care package sells the Core Rule Set: installing ModSecurity on this node");
+        match self.modsec_install().await {
+            Ok(_) => true,
+            Err(e) => {
+                tracing::warn!(error = %e, "care package: automatic ModSecurity install failed — retrying later");
+                false
+            }
+        }
+    }
+
     /// Is the protection a plan sells actually running on this site? A
     /// package can force the per-site switches, but two things it cannot
     /// force live on the NODE: the brute-force scanner (`[fail2ban] enabled`,
@@ -1533,9 +1578,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         }
         // The Core Rule Set tier of the same firewall. Switching it ON needs
         // the ModSecurity engine on this node (the vhost path refuses
-        // otherwise), so without one the push waits quietly — the protection
-        // check tells the operator — and lands on the first tick after the
-        // engine is installed.
+        // otherwise), so without one the push waits — the protection check
+        // tells the operator, the scheduled tick installs the engine itself
+        // (`package_crs_engine_ensure`) — and lands on the first pass after.
         if let Some(mode) = want.crs.forces() {
             let needs_engine = mode != hyperion_types::crs::CrsMode::Off
                 && live.crs == hyperion_types::crs::CrsMode::Off;
@@ -2136,3 +2181,13 @@ pub(super) fn activation_row_to_wire(
 /// told the operator about for a site (`hosting_kv`). Empty = nothing
 /// outstanding. Lets the check alert once per change instead of every tick.
 pub(super) const PACKAGE_PROTECTION_WARNED_KV: &str = "package_protection_warned";
+
+/// When this node last tried, on its own, to install the ModSecurity engine a
+/// care plan's Core Rule Set needs (`node_kv`, unix seconds). Written BEFORE
+/// the attempt, so an install that dies half-way is not retried every tick.
+pub(super) const PACKAGE_MODSEC_AUTO_KV: &str = "package_modsec_auto_install_at";
+
+/// How long a failed automatic install waits before the next one. apt on a
+/// broken mirror or a read-only /usr fails the same way every time; the
+/// operator's alert already says ModSecurity is missing.
+pub(super) const PACKAGE_MODSEC_AUTO_RETRY_SECS: i64 = 6 * 3600;
