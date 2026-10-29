@@ -28,16 +28,23 @@ fn sh(cmd: &str) {
     assert!(ok.success(), "setup failed: {cmd}");
 }
 
-/// A site laid out like Hyperion lays one out: the user's home, the site
-/// directory and its htdocs all owned by the site user.
+/// A site laid out like Hyperion lays one out: the user's home and the
+/// htdocs owned by the site user, the site directory between them ROOT's
+/// (`ensure_dirs` creates it as root and chowns only htdocs/logs/tmp). A
+/// user-owned site directory here is what hid the first-deploy
+/// "mkdir … Permission denied" on every real node.
 fn site() {
     sh(&format!(
         "id {USER} >/dev/null 2>&1 || useradd -m -d {HOME} -s /usr/sbin/nologin {USER}; \
-         rm -rf {HOME}/example.test; mkdir -p {HTDOCS}; \
+         rm -rf {HOME}/example.test {HOME}/.hyperion-gitsync; mkdir -p {HTDOCS}; \
          echo 'placeholder' > {HTDOCS}/index.html; \
-         chown -R {USER}:{USER} {HOME}; mkdir -p /run/hyperion"
+         chown -R {USER}:{USER} {HOME}; chown root:root {HOME}/example.test; \
+         chmod 0755 {HOME}/example.test; mkdir -p /run/hyperion"
     ));
 }
+
+const SITE_KEY: &str = "01a1873b-6223-73e2-a29a-45c86c38b7c0";
+const CHECKOUT: &str = "/home/gslive/.hyperion-gitsync/01a1873b-6223-73e2-a29a-45c86c38b7c0";
 
 fn params<'a>(repo: &'a str, branch: &'a str, subdir: &'a str, auth: Auth) -> SyncParams<'a> {
     SyncParams {
@@ -47,6 +54,7 @@ fn params<'a>(repo: &'a str, branch: &'a str, subdir: &'a str, auth: Auth) -> Sy
         htdocs: HTDOCS,
         run_as: USER,
         home_dir: HOME,
+        site_key: SITE_KEY,
         auth,
     }
 }
@@ -82,7 +90,16 @@ async fn deploys_switches_repo_and_branch_and_explains_failures() {
         .unwrap()
         .contains("placeholder"));
     assert!(!exists(".git"), ".git must never reach the webroot");
-    assert!(Path::new("/home/gslive/example.test/.hyperion-gitsync/.git").exists());
+    assert!(Path::new(&format!("{CHECKOUT}/repo/.git")).exists());
+    // The checkout holds the whole branch: other local users must not read it.
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata("/home/gslive/.hyperion-gitsync")
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o700);
+    }
     let uid = Command::new("id").args(["-u", USER]).output().unwrap();
     let uid: u32 = String::from_utf8_lossy(&uid.stdout).trim().parse().unwrap();
     assert_eq!(owner_uid("index.html"), uid);
@@ -228,7 +245,7 @@ async fn deploys_switches_repo_and_branch_and_explains_failures() {
     assert!(leftovers.is_empty(), "{leftovers:?}");
 
     // 10. Disconnect removes the checkout, keeps the site.
-    gitsync::remove_checkout(HTDOCS, USER, HOME).await;
-    assert!(!Path::new("/home/gslive/example.test/.hyperion-gitsync").exists());
+    gitsync::remove_checkout(HTDOCS, USER, HOME, SITE_KEY).await;
+    assert!(!Path::new(CHECKOUT).exists());
     assert!(exists("macOS.gitignore"));
 }

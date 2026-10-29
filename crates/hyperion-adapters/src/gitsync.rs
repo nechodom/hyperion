@@ -191,23 +191,58 @@ pub struct SyncParams<'a> {
     pub htdocs: &'a str,
     /// The site's unix user; git and rsync run as this user.
     pub run_as: &'a str,
-    /// The site user's home, for git's HOME.
+    /// The site user's own home (`/home/<user>`), which they own. The
+    /// checkout and git's HOME live under it, never in the site directory:
+    /// that one (`/home/<user>/<domain>`) is root's, so the site user cannot
+    /// create anything there.
     pub home_dir: &'a str,
+    /// Names this site's work directory (the hosting id): one system user can
+    /// own several sites, each with its own checkout.
+    pub site_key: &'a str,
     pub auth: Auth,
 }
 
-/// Where the checkout lives: a sibling of the webroot, never inside it.
-pub fn checkout_dir(htdocs: &str) -> Option<String> {
-    let htdocs = htdocs.trim().trim_end_matches('/');
-    let parent = std::path::Path::new(htdocs).parent()?;
-    if parent.as_os_str().is_empty() || parent == std::path::Path::new("/") {
-        return None;
-    }
-    Some(format!("{}/.hyperion-gitsync", parent.display()))
+/// This site's git work directory: `<home>/.hyperion-gitsync/<site_key>`.
+/// Outside the webroot, so `.git` and files outside a deployed sub-directory
+/// are never served.
+fn work_dir(home_dir: &str, site_key: &str) -> String {
+    format!("{}/{WORK_ROOT}/{site_key}", home_dir.trim_end_matches('/'))
 }
 
-fn git_home(home_dir: &str) -> String {
-    format!("{}/.hyperion-gitsync-home", home_dir.trim_end_matches('/'))
+const WORK_ROOT: &str = ".hyperion-gitsync";
+
+/// Where the checkout lives.
+pub fn checkout_dir(home_dir: &str, site_key: &str) -> String {
+    format!("{}/repo", work_dir(home_dir, site_key))
+}
+
+/// git's HOME for this site.
+fn git_home(home_dir: &str, site_key: &str) -> String {
+    format!("{}/home", work_dir(home_dir, site_key))
+}
+
+/// Make this site's work directory as the site user. The shared parent is
+/// 0700: the home is traversable by everyone (nginx has to reach the
+/// webroot), and a checkout holds the WHOLE branch — files a sub-directory
+/// deploy keeps out of the webroot included.
+async fn ensure_work_dir(
+    user: &str,
+    home_dir: &str,
+    site_key: &str,
+) -> Result<String, AdapterError> {
+    let home = git_home(home_dir, site_key);
+    site_mkdir(user, &home).await?;
+    let root = format!("{}/{WORK_ROOT}", home_dir.trim_end_matches('/'));
+    run_site(
+        user,
+        "/",
+        &[],
+        "/bin/chmod",
+        &["0700", "--", &root],
+        LOCAL_TIMEOUT,
+    )
+    .await?;
+    Ok(home)
 }
 
 /// Everything about the inputs that can be refused before running anything.
@@ -222,6 +257,20 @@ fn validate(p: &SyncParams<'_>) -> Result<RepoRef, AdapterError> {
             "not a webroot sub-directory: {:?}",
             p.subdir
         )));
+    }
+    if p.site_key.is_empty()
+        || !p
+            .site_key
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    {
+        return Err(AdapterError::Other(format!(
+            "not a site key: {:?}",
+            p.site_key
+        )));
+    }
+    if p.home_dir.trim().trim_end_matches('/').is_empty() {
+        return Err(AdapterError::Other("the site user has no home".into()));
     }
     if p.run_as.trim().is_empty()
         || p.run_as == "root"
@@ -257,8 +306,7 @@ pub async fn check(p: SyncParams<'_>) -> GitSyncCheck {
         let repo = &repo;
         async move {
             let (url, env) = prepare_auth(&p.auth, repo, &run_dir, p.run_as).await?;
-            let home = git_home(p.home_dir);
-            site_mkdir(p.run_as, &home).await?;
+            let home = ensure_work_dir(p.run_as, p.home_dir, p.site_key).await?;
             let refname = format!("refs/heads/{}", p.branch.trim());
             run_site(
                 p.run_as,
@@ -309,7 +357,7 @@ pub async fn check(p: SyncParams<'_>) -> GitSyncCheck {
     }
 }
 
-/// Deploy: clone-or-update the repo in a sibling of the webroot, then mirror
+/// Deploy: clone-or-update the repo in the site's work directory, then mirror
 /// the tree (or `subdir`) into the webroot. Returns the deployed commit; on
 /// failure the error is already explained for the operator (see
 /// [`explain`]) and carried as `(message, detail)`.
@@ -412,12 +460,10 @@ async fn sync_inner(
     run_dir: &str,
 ) -> Result<GitSyncLast, AdapterError> {
     let htdocs = p.htdocs.trim().trim_end_matches('/');
-    let repo_dir = checkout_dir(htdocs)
-        .ok_or_else(|| AdapterError::Other(format!("webroot has no parent: {htdocs}")))?;
+    let repo_dir = checkout_dir(p.home_dir, p.site_key);
     let branch = p.branch.trim();
-    let home = git_home(p.home_dir);
     let (url, env) = prepare_auth(&p.auth, repo, run_dir, p.run_as).await?;
-    site_mkdir(p.run_as, &home).await?;
+    let home = ensure_work_dir(p.run_as, p.home_dir, p.site_key).await?;
 
     let git = |args: Vec<String>, timeout: Duration| {
         let env = env.clone();
@@ -550,11 +596,24 @@ async fn sync_inner(
 
 /// Remove the checkout and git's private HOME (on disconnect). Runs as the
 /// site user — both live in their tree. The webroot is left as deployed.
-pub async fn remove_checkout(htdocs: &str, run_as: &str, home_dir: &str) {
-    let home = git_home(home_dir);
-    let mut targets = vec![home.clone()];
-    if let Some(d) = checkout_dir(htdocs) {
-        targets.push(d);
+/// Also clears where releases before the move to `home_dir` kept them (beside
+/// the webroot), on a node whose site directory happened to be writable.
+pub async fn remove_checkout(htdocs: &str, run_as: &str, home_dir: &str, site_key: &str) {
+    if site_key.is_empty()
+        || !site_key
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    {
+        return;
+    }
+    let mut targets = vec![work_dir(home_dir, site_key)];
+    let htdocs = htdocs.trim().trim_end_matches('/');
+    if let Some(parent) = std::path::Path::new(htdocs).parent() {
+        if !parent.as_os_str().is_empty() && parent != std::path::Path::new("/") {
+            let parent = parent.display();
+            targets.push(format!("{parent}/.hyperion-gitsync"));
+            targets.push(format!("{parent}/.hyperion-gitsync-home"));
+        }
     }
     for t in targets {
         let _ = run_site(
@@ -798,17 +857,16 @@ mod tests {
     }
 
     #[test]
-    fn checkout_is_a_sibling_of_the_webroot() {
+    fn checkout_is_per_site_under_the_users_home() {
+        // Never in the site directory: root owns /home/<user>/<domain>.
         assert_eq!(
-            checkout_dir("/home/u/example.com/htdocs").as_deref(),
-            Some("/home/u/example.com/.hyperion-gitsync")
+            checkout_dir("/home/u", "01a1873b-6223"),
+            "/home/u/.hyperion-gitsync/01a1873b-6223/repo"
         );
         assert_eq!(
-            checkout_dir("/home/u/example.com/htdocs/").as_deref(),
-            Some("/home/u/example.com/.hyperion-gitsync")
+            git_home("/home/u/", "01a1873b-6223"),
+            "/home/u/.hyperion-gitsync/01a1873b-6223/home"
         );
-        assert_eq!(checkout_dir("/htdocs"), None);
-        assert_eq!(checkout_dir("htdocs"), None);
     }
 
     fn cmd_err(tail: &str) -> AdapterError {
