@@ -208,6 +208,37 @@ pub async fn set_config(
     Ok(())
 }
 
+/// Write only the alert channels — the e-mail list and (unless `Keep`) the
+/// Slack webhook — and leave every other monitor column alone. Profile apply
+/// uses this, so it never re-sends on/off, path or interval it did not read.
+pub async fn set_alert_channels(
+    pool: &SqlitePool,
+    id: &HostingId,
+    alert_email: Option<&str>,
+    alert_slack_webhook: SecretField<'_>,
+    now: i64,
+) -> Result<(), StateError> {
+    let slack_sql = match alert_slack_webhook {
+        SecretField::Keep => "",
+        _ => "monitor_alert_slack_webhook = ?,",
+    };
+    let sql = format!(
+        "UPDATE hostings
+         SET monitor_alert_email = ?,
+             {slack_sql}
+             updated_at = ?
+         WHERE id = ?"
+    );
+    let mut q = sqlx::query(&sql).bind(alert_email);
+    match alert_slack_webhook {
+        SecretField::Keep => {}
+        SecretField::Clear => q = q.bind(None::<&str>),
+        SecretField::Set(v) => q = q.bind(Some(v)),
+    }
+    q.bind(now).bind(id.as_str()).execute(pool).await?;
+    Ok(())
+}
+
 /// Bump the consecutive-failure counter. Returns the new value.
 pub async fn record_fail(pool: &SqlitePool, id: &HostingId) -> Result<i64, StateError> {
     sqlx::query(
