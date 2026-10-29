@@ -121,6 +121,12 @@
                 <strong style="font-size:0.88rem">{{ f.label }}</strong>
                 {% if f.status == "pending" %}
                   <span class="text-soft small">— switched on from the start date</span>
+                {% else if f.needs_engine %}
+                  {# The rule set runs on ModSecurity; with none on the node no
+                     pass can switch it on. The hourly pass installs it itself
+                     (rate-limited), so "automatically" stays true — but the
+                     reason it is off right now is worth saying. #}
+                  <span class="text-soft small">— {{ f.live_label }}; ModSecurity, which it runs on, isn't installed on this server yet. It is installed automatically on the next hourly pass, then switched on</span>
                 {% else if f.status == "inactive" %}
                   <span class="text-soft small">— {{ f.live_label }}; it will be switched back on automatically</span>
                 {% else if f.status == "unknown" %}
@@ -136,6 +142,31 @@
             </li>
             {% endfor %}
           </ul>
+          {% if can_manage && (p.can_switch_now || (p.needs_engine && can_install_modsec)) %}
+          <div style="margin-top:0.6rem;display:flex;gap:0.5rem;flex-wrap:wrap" data-require-caps="profiles_manage">
+            {% if p.can_switch_now %}
+            {# The node's drift pass, now instead of within the hour. #}
+            <form hx-post="/hostings/packages/enforce" hx-target="#packages-card" hx-swap="outerHTML">
+              <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+              <input type="hidden" name="selector" value="{{ selector }}">
+              <button class="btn small primary" type="submit">Switch on now</button>
+            </form>
+            {% endif %}
+            {% if p.needs_engine && can_install_modsec %}
+            {# apt on the node — a background job, so a plain POST that lands
+               on the job page. The job runs the drift pass when it finishes,
+               which is what switches the rule set on. #}
+            <form method="post" action="/hostings/modsec-install"
+                  data-confirm-title="Install ModSecurity on this site's node?"
+                  data-confirm-body="Installs the Debian packages libnginx-mod-http-modsecurity and modsecurity-crs on the node that serves this site and checks that nginx still loads its configuration. Then the Core Rule Set is switched on for every site whose care plan includes it."
+                  data-confirm-confirm-label="Install">
+              <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+              <input type="hidden" name="selector" value="{{ selector }}">
+              <button class="btn small primary" type="submit">Install ModSecurity now</button>
+            </form>
+            {% endif %}
+          </div>
+          {% endif %}
         {% endif %}
 
         {% if can_manage %}

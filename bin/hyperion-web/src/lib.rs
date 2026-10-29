@@ -711,6 +711,11 @@ pub fn build_router(state: SharedState) -> Router {
             "/hostings/packages/cancel",
             post(handlers::packages::post_cancel),
         )
+        // "Switch on now" — the owning node's drift pass, run immediately.
+        .route(
+            "/hostings/packages/enforce",
+            post(handlers::packages::post_enforce),
+        )
         // When an activation's term begins — see `post_valid_from`.
         .route(
             "/hostings/packages/valid-from",

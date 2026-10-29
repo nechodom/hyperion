@@ -63,7 +63,7 @@ pub(super) fn crs_view(opts: &hyperion_types::VhostOptions) -> CrsView {
 
 /// Ask the owning node about its ModSecurity engine. `None` when it cannot
 /// say (an older node does not know the request).
-pub(super) async fn fetch_modsec_status(
+pub(crate) async fn fetch_modsec_status(
     state: &SharedState,
     node: Option<&str>,
 ) -> Option<hyperion_types::crs::ModsecStatus> {
@@ -758,7 +758,28 @@ pub async fn post_modsec_install(
                             st.crs_version.as_str()
                         }
                     );
-                    reporter.step("Installed.", 100, &log).await;
+                    // Sites whose care plan sells the rule set were waiting
+                    // for exactly this; switch them on now rather than at the
+                    // next hourly pass.
+                    reporter
+                        .step("Switching on what care plans include…", 90, &log)
+                        .await;
+                    let plans = match crate::dispatcher::dispatch_to_node(
+                        &job_state,
+                        owner.as_deref(),
+                        Request::PackageEnforceTick,
+                    )
+                    .await
+                    {
+                        Ok(RpcResponse::PackageEnforceTick { corrected }) if corrected > 0 => {
+                            format!(
+                                "Care plans: {corrected} setting{} switched on.\n",
+                                if corrected == 1 { "" } else { "s" }
+                            )
+                        }
+                        _ => String::new(),
+                    };
+                    reporter.step("Installed.", 100, &plans).await;
                     reporter.finish(true, None).await;
                 }
                 Ok(RpcResponse::Error(e)) => reporter.finish(false, Some(e.to_string())).await,

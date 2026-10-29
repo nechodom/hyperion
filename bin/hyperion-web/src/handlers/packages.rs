@@ -1120,6 +1120,10 @@ struct PackagesCardTpl {
     /// would refuse. The template also carries `data-require-caps`, but
     /// that is only for the customer's benefit, not the boundary.
     can_manage: bool,
+    /// May this session install ModSecurity on the owning node? Same gate
+    /// as `post_modsec_install` (administrators only — it is a node-wide
+    /// package install, not a setting of this site).
+    can_install_modsec: bool,
     /// True when at least one held package sells a periodic care report —
     /// the only thing that makes the preview / send-now controls
     /// meaningful, so they are absent otherwise.
@@ -1287,6 +1291,12 @@ struct HeldPackage {
     /// empty. Read from the activation's own snapshot, which is what the
     /// letter is rendered from.
     sections_note: String,
+    /// Some line is not what was sold and an enforcement pass can fix it
+    /// now — the "Switch on now" button. Set by `render_card`, after the
+    /// engine check below has had its say.
+    can_switch_now: bool,
+    /// The Core Rule Set waits for ModSecurity on the owning node.
+    needs_engine: bool,
 }
 
 /// One capability a package promises, and whether the site is keeping it.
@@ -1302,6 +1312,11 @@ struct IncludedFeature {
     status: &'static str,
     /// What the site is doing instead, when it isn't what was bought.
     live_label: String,
+    /// The Core Rule Set line is off because the owning node has no
+    /// ModSecurity engine, so no enforcement pass can switch it on until one
+    /// is installed. `included_features` only proposes it; `render_card`
+    /// keeps it only once the node has confirmed the engine is missing.
+    needs_engine: bool,
 }
 
 struct Offerable {
@@ -1492,6 +1507,64 @@ pub async fn post_cancel(
                 if a.package_name.is_empty() { "Package".into() } else { a.package_name }
             )),
             None,
+        ),
+        Ok(RpcResponse::Error(e)) => (None, Some(e.to_string())),
+        Ok(_) => (None, Some("unexpected response".into())),
+        Err(e) => (None, Some(e.to_string())),
+    };
+    render_card(&state, &ctx, form.selector, flash, error, None).await
+}
+
+#[derive(Deserialize)]
+pub struct EnforceForm {
+    pub selector: String,
+}
+
+/// POST /hostings/packages/enforce — "Switch on now".
+///
+/// Runs the owning node's drift pass immediately instead of waiting up to an
+/// hour for the scheduled one. The pass is node-wide and idempotent (it
+/// writes only where something drifted), which is exactly what the hourly
+/// tick already does — so there is nothing here this site could do to its
+/// neighbours that the clock wouldn't. It never installs ModSecurity (that
+/// is apt, minutes, a background job — `post_modsec_install`).
+pub async fn post_enforce(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<EnforceForm>,
+) -> Result<Response, AppError> {
+    if let Err(r) = super::hostings::require_manage_for_selector(
+        &state,
+        &ctx,
+        &form.selector,
+        Capability::ProfilesManage,
+    )
+    .await
+    {
+        return Ok(r);
+    }
+    let owner = owner_node(&state, &form.selector).await;
+    let resp =
+        crate::dispatcher::dispatch_to_node(&state, owner.as_deref(), Request::PackageEnforceTick)
+            .await;
+    let (flash, error) = match resp {
+        Ok(RpcResponse::PackageEnforceTick { corrected }) if corrected > 0 => (
+            Some(format!(
+                "Applied what the plan sells — {corrected} setting{} switched back.",
+                if corrected == 1 { "" } else { "s" }
+            )),
+            None,
+        ),
+        // Nothing moved, yet the card said something was off: the setter
+        // refused (the node logs why). Say so rather than flash a success
+        // over a line that is still amber.
+        Ok(RpcResponse::PackageEnforceTick { .. }) => (
+            None,
+            Some(
+                "Nothing could be switched on. The server refused the change — its log \
+                 has the reason (look for \"could not apply a paid feature\")."
+                    .into(),
+            ),
         ),
         Ok(RpcResponse::Error(e)) => (None, Some(e.to_string())),
         Ok(_) => (None, Some("unexpected response".into())),
@@ -2005,6 +2078,24 @@ async fn render_card(
             build_held(a, def, live.as_ref(), &delivery, now)
         })
         .collect();
+    // A Core Rule Set line that is off on a node with no ModSecurity can't
+    // come back on any pass until the engine is installed — say so, and offer
+    // the install, rather than "it will be switched back on automatically".
+    // Only a node that ANSWERS "no engine" counts; one that can't say keeps
+    // the ordinary wording.
+    let mut held = held;
+    let engine_missing = if held
+        .iter()
+        .flat_map(|h| &h.included)
+        .any(|l| l.needs_engine)
+    {
+        super::hostings::fetch_modsec_status(state, owner.as_deref())
+            .await
+            .is_some_and(|st| !st.available())
+    } else {
+        false
+    };
+    mark_fixable(&mut held, engine_missing);
     // Don't offer what the site already holds: the partial unique index
     // rejects a second active row for the same package, so the only
     // thing that picker entry could produce is an error message.
@@ -2111,6 +2202,7 @@ async fn render_card(
         held,
         offerable,
         can_manage,
+        can_install_modsec: ctx.is_admin_or_higher(),
         sells_report,
         preview,
         today: date_input(chrono::Utc::now().timestamp()),
@@ -2352,6 +2444,25 @@ fn build_held(
         next_billing_at: a.next_billing_at,
         included,
         orphaned: def.is_none(),
+        can_switch_now: false,
+        needs_engine: false,
+    }
+}
+
+/// Which buttons each held package gets: "Switch on now" where a pass can
+/// fix a line, the ModSecurity install where the Core Rule Set waits for the
+/// engine. `engine_missing` must be the node's own answer — a node that
+/// could not say keeps the ordinary "switched back on automatically".
+fn mark_fixable(held: &mut [HeldPackage], engine_missing: bool) {
+    for h in held {
+        for line in &mut h.included {
+            line.needs_engine &= engine_missing;
+        }
+        h.needs_engine = h.included.iter().any(|l| l.needs_engine);
+        h.can_switch_now = h
+            .included
+            .iter()
+            .any(|l| l.status == "inactive" && !l.needs_engine);
     }
 }
 
@@ -2431,6 +2542,7 @@ fn included_features(f: &PackageFeatures, live: Option<&LiveFeatureState>) -> Ve
                 .to_string(),
             status,
             live_label,
+            needs_engine: false,
         });
     }
     if let Some(want) = f.crs.forces() {
@@ -2455,6 +2567,10 @@ fn included_features(f: &PackageFeatures, live: Option<&LiveFeatureState>) -> Ve
                 .to_string(),
             status,
             live_label,
+            // Switching it ON from off is the only move that needs the engine.
+            needs_engine: want != CrsMode::Off
+                && status == "inactive"
+                && live.map(|l| l.crs) == Some(CrsMode::Off),
         });
     }
     out.extend(bool_feature(
@@ -2500,6 +2616,7 @@ fn included_features(f: &PackageFeatures, live: Option<&LiveFeatureState>) -> Ve
                 .to_string(),
             status,
             live_label,
+            needs_engine: false,
         });
     }
     out
@@ -2529,6 +2646,7 @@ fn bool_feature(
         detail: detail.to_string(),
         status,
         live_label,
+        needs_engine: false,
     })
 }
 
@@ -2589,6 +2707,7 @@ fn report_feature(
         detail: report_detail(omit),
         status,
         live_label,
+        needs_engine: false,
     })
 }
 
@@ -2920,6 +3039,7 @@ mod tests {
             in_force_count: 1,
             offerable: Vec::new(),
             can_manage: true,
+            can_install_modsec: false,
             sells_report: true,
             report_to: "zakaznik@pece.cz".into(),
             preview,
@@ -3032,6 +3152,34 @@ mod tests {
         assert_eq!(lines[0].live_label, "currently off");
         assert_eq!(lines[1].status, "inactive");
         assert_eq!(lines[1].live_label, "currently weekly");
+        assert!(lines.iter().all(|l| !l.needs_engine));
+    }
+
+    /// A Core Rule Set line that is off may be waiting for ModSecurity —
+    /// the card then offers the install instead of promising a pass that
+    /// cannot switch it on. Only switching ON from off needs the engine.
+    #[test]
+    fn crs_off_but_sold_may_need_the_engine() {
+        use hyperion_types::crs::CrsMode;
+        let f = PackageFeatures {
+            crs: CrsPin::Detect,
+            ..Default::default()
+        };
+        let mut l = live(true, BackupCadence::Off);
+        let lines = included_features(&f, Some(&l));
+        assert_eq!(lines[0].status, "inactive");
+        assert!(lines[0].needs_engine);
+
+        // Blocking instead of detecting: the engine is there, a pass fixes it.
+        l.crs = CrsMode::Block;
+        let lines = included_features(&f, Some(&l));
+        assert_eq!(lines[0].status, "inactive");
+        assert!(!lines[0].needs_engine);
+
+        // Unreadable node: "couldn't check", never an install offer.
+        let lines = included_features(&f, None);
+        assert_eq!(lines[0].status, "unknown");
+        assert!(!lines[0].needs_engine);
     }
 
     /// The create form is pre-filled with the built-ins. Saved untouched,
@@ -3344,6 +3492,96 @@ mod tests {
         assert_eq!(date_input(1_788_220_800 + 86_399), "2026-09-01");
         assert!(parse_date_input("1.9.2026").is_err());
         assert!(parse_date_input("2026-13-40").is_err());
+    }
+
+    /// The two fixes the card offers for a plan that isn't what was sold:
+    /// "Switch on now" when a pass can do it, the ModSecurity install when
+    /// the Core Rule Set waits for an engine the node doesn't have — and
+    /// never "switched back on automatically" over a line no pass can fix.
+    #[test]
+    fn card_offers_the_fix_that_can_actually_switch_it_on() {
+        let a = HostingPackage {
+            id: 9,
+            hosting_id: hyperion_types::HostingId("h1".into()),
+            package_id: Some(1),
+            package_name: "Security".into(),
+            letters_lang: String::new(),
+            check_items: String::new(),
+            report_omit: String::new(),
+            valid_from: None,
+            enforcement_started: true,
+            price_minor: None,
+            price_currency: None,
+            price_interval: None,
+            next_billing_at: None,
+            state: hyperion_types::PackageState::Active,
+            activated_at: 1,
+            cancelled_at: None,
+            prior_state_json: None,
+        };
+        let def = pkg_with(
+            PackageFeatures {
+                crs: CrsPin::Detect,
+                ..Default::default()
+            },
+            "",
+        );
+        let render = |engine_missing: bool, admin: bool| {
+            let mut held = vec![build_held(
+                &a,
+                Some(&def),
+                Some(&live(true, BackupCadence::Off)),
+                &ReportDelivery::NotScheduled,
+                1_000_000_000,
+            )];
+            mark_fixable(&mut held, engine_missing);
+            PackagesCardTpl {
+                selector: "id:abc".into(),
+                csrf_token: "tok".into(),
+                held,
+                in_force_count: 1,
+                offerable: Vec::new(),
+                can_manage: true,
+                can_install_modsec: admin,
+                sells_report: false,
+                report_to: String::new(),
+                preview: None,
+                today: "2026-10-05".into(),
+                flash: None,
+                error: None,
+                check_period: "2026-10".into(),
+                check_period_label: String::new(),
+                checks: Vec::new(),
+                checks_done: 0,
+                checks_total: 0,
+                prev_period_label: String::new(),
+                prev_outstanding: 0,
+                prev_total: 0,
+                show_checks: false,
+            }
+            .render()
+            .expect("render")
+        };
+
+        // Engine there: a pass fixes it, so offer the pass.
+        let html = render(false, true);
+        assert!(html.contains("/hostings/packages/enforce"), "{html}");
+        assert!(html.contains("switched back on automatically"));
+        assert!(!html.contains("/hostings/modsec-install"));
+
+        // No engine: the install, not a pass that would change nothing.
+        let html = render(true, true);
+        assert!(html.contains("/hostings/modsec-install"), "{html}");
+        assert!(
+            html.contains("isn&#x27;t installed on this server")
+                || html.contains("isn't installed on this server"),
+            "{html}"
+        );
+        assert!(!html.contains("/hostings/packages/enforce"));
+
+        // …and only for someone allowed to install packages on a node.
+        let html = render(true, false);
+        assert!(!html.contains("/hostings/modsec-install"));
     }
 
     #[test]
