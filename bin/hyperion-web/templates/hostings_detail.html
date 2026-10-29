@@ -3803,12 +3803,24 @@
               {% if b.state == "ok" %}<span class="pill ok">{{ b.state }}</span>
               {% else if b.state == "failed" %}<span class="pill err">{{ b.state }}</span>
               {% else %}<span class="pill warn pulse">{{ b.state }}</span>{% endif %}
-              {#- The backup taken before an automatic update batch. Held =
-                  the batch did not go in cleanly: kept until deleted by hand
-                  rather than aged out with the rest. -#}
+              {#- The backup taken before an automatic update batch: a site
+                  keeps one. Clean batch = deleted 24h after the updates
+                  (delete_at); held = they did not all go in, kept until the
+                  next one replaces it. delete_at 0 + not held = an older node
+                  that does not say. -#}
               {%- if b.purpose == "pre-update" %}
-              <span class="cell-sub" style="font-size:0.6rem{% if b.held %};color:var(--warn){% endif %}"
-                    title="{% if b.held %}Taken before automatic updates that did not all go in cleanly — kept until you delete it{% else %}Taken before automatic updates — deleted after the pre-update retention set in Settings → Backups{% endif %}">before updates{% if b.held %} · kept{% endif %}</span>
+              <br><span class="pill neutral small" style="margin-top:0.2rem"
+                    title="Full backup taken automatically before this site's automatic updates. A site keeps only one: the next one replaces it.">before update</span>
+              {%- if b.state == "failed" && b.delete_at > 0 %}
+              <span class="cell-sub" style="font-size:0.6rem"
+                    title="This backup failed, so the updates were skipped. The row is cleared {{ crate::handlers::stats::fmt_day_time(b.delete_at) }}.">cleared {{ crate::handlers::stats::fmt_until(b.delete_at) }}</span>
+              {%- else if b.state == "ok" && b.held %}
+              <span class="cell-sub" style="font-size:0.6rem;color:var(--warn)"
+                    title="Not every update went in cleanly (or they are still running), so this backup has no deletion time. It stays until the next backup before updates replaces it, or until you delete it.">kept until replaced</span>
+              {%- else if b.state == "ok" && b.delete_at > 0 %}
+              <span class="cell-sub" style="font-size:0.6rem"
+                    title="Every update went in cleanly. Kept for 24 hours after the updates, then deleted: {{ crate::handlers::stats::fmt_day_time(b.delete_at) }}.">deleted {{ crate::handlers::stats::fmt_until(b.delete_at) }}</span>
+              {%- endif %}
               {%- endif %}
             </td>
             {#- What is known about the copy that is NOT on this box. "uploaded"

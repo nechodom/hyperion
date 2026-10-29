@@ -282,6 +282,7 @@ fn bk_run(
         s3_ok_targets: Vec::new(),
         purpose: String::new(),
         held: false,
+        delete_at: 0,
     }
 }
 

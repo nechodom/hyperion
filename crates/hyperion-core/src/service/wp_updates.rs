@@ -564,14 +564,18 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     Err(e) => rescan_error = Some(e.to_string()),
                 }
             }
-            // Release the pre-update backup to its retention only when the
-            // whole batch went in cleanly. Anything else keeps it held — it
-            // is the last copy from before whatever went wrong.
+            // Release the pre-update backup only when the whole batch went
+            // in cleanly: it stays 24 hours from now, when the updates are
+            // done, then goes. Anything else keeps it held — it is the last
+            // copy from before whatever went wrong — until the next
+            // pre-update backup of the site replaces it.
             if let Some(run_id) = batch.pre_update_run {
                 let clean = !batch.failed && rescan_error.is_none();
+                let delete_at = now_secs() + hyperion_state::backups::PRE_UPDATE_KEEP_SECS;
                 if clean {
                     if let Err(e) =
-                        hyperion_state::backups::set_held(&self.pool, run_id, false).await
+                        hyperion_state::backups::release_pre_update(&self.pool, run_id, delete_at)
+                            .await
                     {
                         tracing::warn!(error = %e, "pre-update backup: release failed");
                     }
@@ -583,6 +587,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                         "run_id": run_id,
                         "updated": auto_updated,
                         "held": !clean,
+                        "delete_at": if clean { delete_at } else { 0 },
                     })
                     .to_string(),
                     "ok",
@@ -944,21 +949,25 @@ pub(super) struct StoredVulnScan {
     pub(super) error: String,
 }
 
-/// Whether a PRE-UPDATE backup has outlived its own retention: its batch went
-/// in cleanly (not held) and it started before `cutoff`. Always false for an
-/// ordinary backup, which the archive rule decides about. A failed pre-update
-/// run is due like a clean one — there is nothing in it to roll back to.
+/// Whether a PRE-UPDATE backup is to be deleted now. A site keeps ONE: any
+/// run older than its newest successful pre-update backup goes, held or not
+/// (`superseded`). The newest one stays while held — its batch did not go in
+/// cleanly, or is still going — and once released goes at its `delete_at`,
+/// 24 hours after the updates. A failed run (nothing in it to roll back to)
+/// stays listed for 24 hours. Always false for an ordinary backup, which the
+/// archive rule decides about.
 pub(crate) fn pre_update_due_for_prune(
     r: &hyperion_state::backups::BackupRun,
-    cutoff: i64,
+    superseded: bool,
+    now: i64,
 ) -> bool {
-    if !r.is_pre_update() {
+    if !r.is_pre_update() || r.state == "running" {
         return false;
     }
-    if r.state == "failed" {
-        return r.started_at < cutoff;
+    if superseded {
+        return true;
     }
-    !r.held && r.started_at < cutoff
+    r.pre_update_delete_at().is_some_and(|t| t <= now)
 }
 
 /// What one auto-update batch did.

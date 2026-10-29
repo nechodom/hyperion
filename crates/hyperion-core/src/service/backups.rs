@@ -7,9 +7,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// The full backup taken before an automatic update batch. Local only
     /// (a rollback copy, never pushed off-site or dropped), marked
     /// `pre-update` and HELD from the moment it exists: the sweep releases it
-    /// to `[backup_retention] pre_update_keep_days` only once every update in
-    /// the batch went in cleanly, so a failed batch — or an agent that died
-    /// half-way — keeps it until somebody deletes it by hand.
+    /// only once every update in the batch went in cleanly, and it is deleted
+    /// 24 hours after that. A failed batch — or an agent that died half-way —
+    /// keeps it until the next pre-update backup of the site replaces it: a
+    /// site keeps only one (see `pre_update_due_for_prune`).
     ///
     /// Returns the run id; an error means no usable backup exists and the
     /// caller must not update.
@@ -1240,8 +1241,46 @@ impl<A: AdapterPort + 'static> HostingService<A> {
 
     /// Drop backup archives older than `retention.max_age_days` from disk
     /// AND from the backup_runs table, keeping the newest
-    /// `retention.keep_latest_n` per hosting regardless of age.
+    /// `retention.keep_latest_n` per hosting regardless of age. Pre-update
+    /// backups go by their own rule — see [`pre_update_due_for_prune`].
     pub(crate) async fn prune_old_backups(&self, hosting_id: &HostingId) -> Result<u64, RpcError> {
+        self.prune_backups(hosting_id, false).await
+    }
+
+    /// Only the pre-update rule of [`Self::prune_old_backups`]: what the
+    /// expiry sweep runs, so a clean pre-update backup goes 24 hours after its
+    /// updates whether or not the site takes another backup by then — and
+    /// without moving when its ordinary backups age out.
+    pub(crate) async fn prune_pre_update_backups(
+        &self,
+        hosting_id: &HostingId,
+    ) -> Result<u64, RpcError> {
+        self.prune_backups(hosting_id, true).await
+    }
+
+    /// Every site's pre-update backups past their deadline, plus all but the
+    /// newest one of each site. Run by the agent's five-minute scheduler.
+    pub async fn pre_update_backups_expire_tick(&self) -> Result<u64, RpcError> {
+        let ids = hyperion_state::backups::hostings_with_pre_update(&self.pool)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("pre-update expiry: {e}")))?;
+        let mut pruned = 0;
+        for id in ids {
+            match self.prune_pre_update_backups(&id).await {
+                Ok(n) => pruned += n,
+                Err(e) => {
+                    tracing::warn!(hosting_id = %id.as_str(), error = %e, "pre-update expiry failed")
+                }
+            }
+        }
+        Ok(pruned)
+    }
+
+    async fn prune_backups(
+        &self,
+        hosting_id: &HostingId,
+        pre_update_only: bool,
+    ) -> Result<u64, RpcError> {
         let rows = hyperion_state::backups::list_for(&self.pool, hosting_id, 1000)
             .await
             .map_err(|e| RpcError::Internal_with(format!("list_for: {e}")))?;
@@ -1284,18 +1323,12 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         };
         let now = now_secs();
         let cutoff = now - retention.max_age_days.max(1) * 24 * 3600;
-        // Pre-update backups live by their own rule, read live like the rest.
-        let pre_update_cutoff = now
-            - match self.agent_config_path.as_deref() {
-                Some(path) => read_backup_retention_section(Some(path)).pre_update_keep_days,
-                None => hyperion_types::DEFAULT_PRE_UPDATE_KEEP_DAYS,
-            }
-            .max(1)
-                * 24
-                * 3600;
         let keep = retention.keep_latest_n.max(1) as usize;
         let mut pruned = 0u64;
         let mut good_kept = 0usize;
+        // A newer successful pre-update backup has been seen: every older
+        // one is superseded, held or not — a site keeps exactly one.
+        let mut newer_pre_update = false;
         // Newest first. The newest N GOOD backups are kept however old. Failed
         // and running rows used to count towards N, so a run of failures pushed
         // the last good archives past the floor and they were deleted — the
@@ -1308,9 +1341,15 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 // Its own rule, and never one of the site's newest N: a
                 // nightly update batch must not push the real scheduled
                 // backups past the floor.
-                if !pre_update_due_for_prune(&r, pre_update_cutoff) {
+                let superseded = newer_pre_update;
+                if r.state == "ok" {
+                    newer_pre_update = true;
+                }
+                if !pre_update_due_for_prune(&r, superseded, now) {
                     continue;
                 }
+            } else if pre_update_only {
+                continue;
             } else {
                 if r.state == "ok" && good_kept < keep {
                     good_kept += 1;
@@ -2022,6 +2061,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
 }
 
 pub(super) fn run_to_wire(r: hyperion_state::backups::BackupRun) -> hyperion_types::BackupRunWire {
+    let delete_at = r.pre_update_delete_at().unwrap_or(0);
     hyperion_types::BackupRunWire {
         sha256_hex: r.sha256_hex,
         remote_blob_key: r.remote_blob_key,
@@ -2032,6 +2072,7 @@ pub(super) fn run_to_wire(r: hyperion_state::backups::BackupRun) -> hyperion_typ
         local_kept: String::new(),
         local_note: String::new(),
         s3_ok_targets: r.s3_ok_targets,
+        delete_at,
         purpose: r.purpose,
         held: r.held,
         id: r.id,

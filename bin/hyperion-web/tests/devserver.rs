@@ -964,6 +964,21 @@ async fn seed_demo(svc: &StubService) {
         .await
         .expect("backup");
     }
+    // Backups taken before automatic updates: one whose batch went in
+    // cleanly (deleted 24h after the updates), one held (it did not).
+    sqlx::query(
+        "UPDATE backup_runs SET purpose = 'pre-update', held = 0, delete_at = ? WHERE hosting_id = ?",
+    )
+    .bind(now + 18 * 3600 + 600)
+    .bind(&ids[0])
+    .execute(pool)
+    .await
+    .expect("pre-update released");
+    sqlx::query("UPDATE backup_runs SET purpose = 'pre-update', held = 1 WHERE hosting_id = ?")
+        .bind(&ids[1])
+        .execute(pool)
+        .await
+        .expect("pre-update held");
     sqlx::query("UPDATE hostings SET maintenance_mode = 1 WHERE id = ?")
         .bind(&ids[2])
         .execute(pool)

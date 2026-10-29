@@ -298,10 +298,15 @@ pub struct BackupRunWire {
     /// batch; empty for every ordinary backup. Older nodes send nothing.
     #[serde(default)]
     pub purpose: String,
-    /// Kept until deleted by hand: a pre-update backup whose batch did not
-    /// go in cleanly. Never pruned by age.
+    /// No deadline: a pre-update backup whose batch did not go in cleanly
+    /// (or is still running). Stays until the next pre-update backup of the
+    /// site replaces it — only one is kept.
     #[serde(default)]
     pub held: bool,
+    /// When this pre-update backup is deleted, unix seconds; 0 = no deadline
+    /// (an ordinary backup, a held one, or an older node that sends nothing).
+    #[serde(default)]
+    pub delete_at: i64,
 }
 
 /// The archive's file name on the FTP/FTPS/SFTP target, from the URL the push
@@ -638,6 +643,7 @@ mod tests {
             s3_ok_targets: vec![],
             purpose: String::new(),
             held: false,
+            delete_at: 0,
         };
         let k = "ftp://vault:21/backups/web1/a.cz-1700000000.tar.gz";
         assert_eq!(
