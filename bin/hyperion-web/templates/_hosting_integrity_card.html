@@ -68,7 +68,7 @@
       Checksums:
       {% if scan.wp_cli_ok %}core + {{ scan.plugins_checked }} of {{ scan.plugins_total }} plugin(s){% else %}<span class="tone-warn">not verified</span>{% endif %}
       · Malware:
-      {% if scan.clamav_available %}ClamAV scanned the site's files{% else %}<span class="tone-warn">not scanned</span> — ClamAV isn't installed on this node; add it on the <a href="/services">Services page</a> to look inside <code>uploads/</code>{% endif %}
+      {% if scan.clamav_available %}ClamAV scanned the site's files{% else if scan.clamav_installed %}<span class="tone-warn">not scanned</span> — ClamAV is installed, but it hasn't checked this site's files yet; Scan now again in a few minutes{% else %}<span class="tone-warn">not scanned</span> — ClamAV isn't installed on this node; add it on the <a href="/services">Services page</a> to look inside <code>uploads/</code>{% endif %}
       {% if scan.scanned_at == 0 %}· never run{% endif %}
       {% if scan.wp_cli_ok %}{% if let Some(e) = scan.error %}· {{ e }}{% endif %}{% endif %}
     </p>
