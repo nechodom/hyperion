@@ -832,15 +832,6 @@ async fn rollback_and_log(stack: &mut RollbackStack) {
     }
 }
 
-/// A writable HOME/cache base for a site user, beside its htdocs. `root_dir`
-/// IS the htdocs; its parent is the site tree, owned by the user.
-fn home_dir_for(detail: &HostingDetail) -> String {
-    std::path::Path::new(detail.root_dir.trim())
-        .parent()
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|| format!("/home/{}", detail.system_user))
-}
-
 // ===== Internal-error helper =====
 trait InternalWith {
     fn internal_with(msg: String) -> Self;

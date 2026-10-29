@@ -266,7 +266,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             });
         }
         let auth = self.git_sync_auth(id, &config.auth).await?;
-        let home = home_dir_for(&detail);
+        let home = self.home_dir_for(detail.system_user.as_str());
         Ok(g::check(g::SyncParams {
             repo: &config.repo,
             branch: config.effective_branch(),
@@ -274,6 +274,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             htdocs: detail.root_dir.trim(),
             run_as: detail.system_user.as_str(),
             home_dir: &home,
+            site_key: detail.id.as_str(),
             auth,
         })
         .await)
@@ -338,7 +339,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             match self.git_sync_auth(id, &config.auth).await {
                 Err(e) => Err((e.to_string(), String::new())),
                 Ok(auth) => {
-                    let home = home_dir_for(&detail);
+                    let home = self.home_dir_for(detail.system_user.as_str());
                     g::sync(g::SyncParams {
                         repo: &config.repo,
                         branch: config.effective_branch(),
@@ -346,6 +347,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                         htdocs: detail.root_dir.trim(),
                         run_as: detail.system_user.as_str(),
                         home_dir: &home,
+                        site_key: detail.id.as_str(),
                         auth,
                     })
                     .await
@@ -423,12 +425,6 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         };
         let repo = self.kvs(detail.id.as_str(), "gitsync_repo").await;
         self.git_sync_forget(&detail).await;
-        hyperion_adapters::gitsync::remove_checkout(
-            detail.root_dir.trim(),
-            detail.system_user.as_str(),
-            &home_dir_for(&detail),
-        )
-        .await;
         self.append_audit(
             "hosting.gitsync.disconnect",
             Some(detail.id.as_str()),
@@ -439,8 +435,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(())
     }
 
-    /// Drop every git-deploy key and secret of a site. Shared by disconnect
-    /// and hosting delete — a deleted site's deploy key must not outlive it.
+    /// Drop every git-deploy key and secret of a site, and its checkout.
+    /// Shared by disconnect and hosting delete — a deleted site's deploy key
+    /// must not outlive it, and the checkout lives in the user's home, which
+    /// outlives the site when the user owns other sites too.
     pub(super) async fn git_sync_forget(&self, detail: &HostingDetail) {
         let id = detail.id.as_str();
         for k in GITSYNC_KV_KEYS {
@@ -448,6 +446,13 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         }
         let _ = tokio::fs::remove_file(gitsync_key_path(id)).await;
         let _ = tokio::fs::remove_file(gitsync_pat_path(id)).await;
+        hyperion_adapters::gitsync::remove_checkout(
+            detail.root_dir.trim(),
+            detail.system_user.as_str(),
+            &self.home_dir_for(detail.system_user.as_str()),
+            id,
+        )
+        .await;
     }
 }
 

@@ -154,7 +154,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     &url,
                     strategy,
                     &detail.system_user,
-                    &home_dir_for(&detail),
+                    &self.home_dir_for(detail.system_user.as_str()),
                 )
                 .await
             }
