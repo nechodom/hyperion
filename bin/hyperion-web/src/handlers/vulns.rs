@@ -217,6 +217,8 @@ pub fn needs_you_sites(rows: &[HostingVulnSummary], now: i64) -> usize {
 
 pub struct CompRow {
     pub name: String,
+    /// The plugin/theme slug the update button sends; empty for core.
+    pub slug: String,
     /// "plugin" | "theme" | "core"
     pub kind: &'static str,
     pub from: String,
@@ -232,6 +234,9 @@ pub struct CompRow {
 
 pub struct SiteRow {
     pub hosting_id: String,
+    /// What the update buttons send as `selector`: the id, or the domain
+    /// when a row has none.
+    pub upd_sel: String,
     pub domain: String,
     pub node: String,
     pub bucket: Bucket,
@@ -320,6 +325,7 @@ fn comp_rows(s: &HostingVulnSummary, now: i64) -> Vec<CompRow> {
                 } else {
                     f.name.clone()
                 },
+                slug: f.slug.clone(),
                 kind: kind_static(&f.kind),
                 from: f.installed_version.clone(),
                 to: f.patched_version.clone(),
@@ -334,6 +340,7 @@ fn comp_rows(s: &HostingVulnSummary, now: i64) -> Vec<CompRow> {
         let state = core_state(&u.update_type, s.auto_update);
         rows.push(CompRow {
             name: "WordPress".into(),
+            slug: String::new(),
             kind: "core",
             from: s.core_version.clone(),
             to: u.version.clone(),
@@ -455,6 +462,11 @@ pub fn site_row(s: &HostingVulnSummary, now: i64) -> SiteRow {
     }
     SiteRow {
         hosting_id: s.hosting_id.clone(),
+        upd_sel: if s.hosting_id.is_empty() {
+            s.domain.clone()
+        } else {
+            s.hosting_id.clone()
+        },
         domain: s.domain.clone(),
         node: s.node_id.clone(),
         bucket,
@@ -635,6 +647,11 @@ struct VulnsTpl<'a> {
     node_auth_warning: Option<String>,
     /// Nodes that did not answer at all; their sites are missing.
     unreachable: Vec<String>,
+    /// Each outdated row gets an update button for a viewer who may use it.
+    can_manage: bool,
+    csrf_token: String,
+    /// Plugin/theme updates started here come back here.
+    upd_back: &'static str,
 }
 
 #[derive(Deserialize, Default)]
@@ -805,6 +822,9 @@ pub async fn get_vulns(
         groups,
         node_auth_warning,
         unreachable,
+        can_manage: ctx.can(Capability::WpManage) && !ctx.is_read_only(),
+        csrf_token: super::session_csrf_token(&state, &ctx),
+        upd_back: "vulns",
     };
     Ok(Html(tpl.render()?).into_response())
 }
@@ -1051,5 +1071,79 @@ mod tests {
             "/vulns?show=needs&node=node+2&q=a%26b"
         );
         assert_eq!(vulns_href("", "", ""), "/vulns");
+    }
+
+    fn page(rows: Vec<SiteRow>, can_manage: bool) -> String {
+        VulnsTpl {
+            username: "kevin",
+            user_initial: 'K',
+            active: "vulns",
+            css_version: "",
+            htmx_version: "",
+            fleet_empty: false,
+            verdict: String::new(),
+            verdict_tone: "ok",
+            q: String::new(),
+            node_filter: String::new(),
+            show: String::new(),
+            nodes: vec![],
+            all_count: rows.len(),
+            all_href: "/vulns".into(),
+            segments: vec![],
+            groups: vec![GroupView {
+                bucket: rows[0].bucket,
+                rows,
+            }],
+            node_auth_warning: None,
+            unreachable: vec![],
+            can_manage,
+            csrf_token: "tok".into(),
+            upd_back: "vulns",
+        }
+        .render()
+        .expect("render")
+    }
+
+    /// The cluster page offers the same "update now" buttons as the site's
+    /// Updates row: core as a job, plugins/themes by slug with `back=vulns`
+    /// so a success returns here — and none to a viewer who cannot use them.
+    #[test]
+    fn the_page_offers_each_update_by_hand() {
+        let mut s = site(
+            vec![
+                finding("woocommerce", "8.7.0", "9.0.1"),
+                WpVulnFinding {
+                    kind: "theme".into(),
+                    ..finding("astra", "4.6.1", "4.6.9")
+                },
+            ],
+            Some(false),
+        );
+        s.core_updates = vec![WpCoreUpdate {
+            version: "6.7.1".into(),
+            update_type: "major".into(),
+        }];
+        let html = page(vec![site_row(&s, NOW)], true);
+        assert!(
+            html.contains(r#"action="/hostings/wp/core-update""#),
+            "{html}"
+        );
+        assert!(html.contains(r#"name="version" value="6.7.1""#), "{html}");
+        assert!(html.contains(r#"name="selector" value="h1""#), "{html}");
+        assert!(
+            html.contains(r#"name="slug" value="woocommerce""#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"action="/hostings/wp/theme-action""#),
+            "{html}"
+        );
+        assert!(html.contains(r#"name="slug" value="astra""#), "{html}");
+        assert_eq!(html.matches(r#"name="back" value="vulns""#).count(), 2);
+        assert!(html.contains("/hostings/kos.cz#wp-updates"), "{html}");
+
+        let viewer = page(vec![site_row(&s, NOW)], false);
+        assert!(viewer.contains("woocommerce"), "{viewer}");
+        assert!(!viewer.contains("upd-act"), "{viewer}");
     }
 }

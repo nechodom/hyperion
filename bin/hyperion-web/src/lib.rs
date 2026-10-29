@@ -1244,6 +1244,10 @@ pub fn build_router(state: SharedState) -> Router {
             post(handlers::api_v1::post_wp_install),
         )
         .route(
+            "/api/v1/hostings/:id/wp/core-update",
+            post(handlers::api_v1::post_wp_core_update),
+        )
+        .route(
             "/api/v1/hostings/:id/restore",
             post(handlers::api_v1::post_restore),
         )

@@ -1,0 +1,39 @@
+{# "Update this now" for one outdated row — the site's Updates row and the
+   cluster /vulns fold both include it, so the two never offer different
+   things. In scope: `c` (vulns::CompRow), `upd_sel` (hosting selector),
+   `upd_back` ("" = back to the site, "vulns" = back to /vulns) and
+   `csrf_token`.
+
+   Core runs as a job (the node backs the site up first); a plugin or theme
+   is one `wp <kind> update <slug>` on the owning node. #}
+<span class="upd-act">
+{% if c.kind == "core" %}
+<form method="post" action="/hostings/wp/core-update"
+      data-confirm-title="Update WordPress to {{ c.to }}"
+      {% if c.update_type == "major" %}
+      data-confirm-body="WordPress {{ c.to }} is a major release. Themes and plugins written for {{ c.from }} can stop working after it — check the site right after. A full backup (files + database) is taken first; if it fails, nothing is updated. The backup is kept 24 hours after a clean update, or until the next update after a failed one."
+      {% else %}
+      data-confirm-body="Updates WordPress {{ c.from }} to {{ c.to }} now instead of in tonight's sweep. A full backup (files + database) is taken first; if it fails, nothing is updated."
+      {% endif %}
+      data-confirm-confirm-label="Back up &amp; update">
+  <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+  <input type="hidden" name="selector" value="{{ upd_sel }}">
+  <input type="hidden" name="version" value="{{ c.to }}">
+  <button class="btn small{% if c.state.needs_you() %} primary{% endif %}" type="submit">Update to {{ c.to }}</button>
+</form>
+{% else if !c.slug.is_empty() %}
+<form method="post" action="/hostings/wp/{{ c.kind }}-action"
+      {% if c.update_type == "major" %}
+      data-confirm-title="Update {{ c.name }} to {{ c.to }}"
+      data-confirm-body="{{ c.to }} is a major release of this {{ c.kind }} and can change how the site behaves — check the site right after. No backup is taken for a single {{ c.kind }} update."
+      data-confirm-confirm-label="Update"
+      {% endif %}>
+  <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+  <input type="hidden" name="selector" value="{{ upd_sel }}">
+  <input type="hidden" name="slug" value="{{ c.slug }}">
+  <input type="hidden" name="action" value="update">
+  {% if !upd_back.is_empty() %}<input type="hidden" name="back" value="{{ upd_back }}">{% endif %}
+  <button class="btn small{% if c.state.needs_you() %} primary{% else %} ghost{% endif %}" type="submit">Update</button>
+</form>
+{% endif %}
+</span>

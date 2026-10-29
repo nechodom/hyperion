@@ -462,35 +462,52 @@ fn fix_outcome_renders_in_the_card() {
     assert!(failed.contains("tone-err"));
 }
 
-/// Each core release on the Updates row gets its own update button; a major
-/// says what can break before anything runs, and a panel with no core
-/// release renders no button block at all.
+/// Every outdated row on the Updates row gets its own update button: each
+/// core release (a major says what can break before anything runs), and each
+/// plugin and theme by slug. A viewer without WpManage sees the rows but no
+/// button the POST would refuse, and an up-to-date site names its release.
 #[test]
-fn the_updates_row_offers_core_releases_by_hand() {
-    let scan = |core_updates| hyperion_types::WpVulnScanResult {
+fn the_updates_row_offers_every_update_by_hand() {
+    let scan = |core_updates, findings| hyperion_types::WpVulnScanResult {
         checked: 4,
         core_version: "6.5.3".into(),
         core_checked: true,
         core_updates,
+        findings,
         ..Default::default()
     };
-    let html = wp_updates::VulnPanelTpl::new(
-        scan(vec![
-            hyperion_types::WpCoreUpdate {
-                version: "6.7.1".into(),
-                update_type: "major".into(),
-            },
-            hyperion_types::WpCoreUpdate {
-                version: "6.5.5".into(),
-                update_type: "minor".into(),
-            },
-        ]),
-        "kos.cz".into(),
-        true,
-        "tok".into(),
-    )
-    .render()
-    .expect("render");
+    let finding =
+        |slug: &str, kind: &str, from: &str, to: &str, major: bool| hyperion_types::WpVulnFinding {
+            slug: slug.into(),
+            name: slug.into(),
+            kind: kind.into(),
+            installed_version: from.into(),
+            patched_version: to.into(),
+            update_type: if major { "major" } else { "minor" }.into(),
+            auto_updatable: !major,
+            ..Default::default()
+        };
+    let full = || {
+        scan(
+            vec![
+                hyperion_types::WpCoreUpdate {
+                    version: "6.7.1".into(),
+                    update_type: "major".into(),
+                },
+                hyperion_types::WpCoreUpdate {
+                    version: "6.5.5".into(),
+                    update_type: "minor".into(),
+                },
+            ],
+            vec![
+                finding("woocommerce", "plugin", "8.9.1", "9.4.0", true),
+                finding("astra", "theme", "4.6.1", "4.6.9", false),
+            ],
+        )
+    };
+    let html = wp_updates::VulnPanelTpl::new(full(), "kos.cz".into(), true, "tok".into(), true)
+        .render()
+        .expect("render");
     assert_eq!(
         html.matches(r#"action="/hostings/wp/core-update""#).count(),
         2
@@ -498,11 +515,54 @@ fn the_updates_row_offers_core_releases_by_hand() {
     assert!(html.contains(r#"name="version" value="6.7.1""#), "{html}");
     assert!(html.contains(r#"name="version" value="6.5.5""#), "{html}");
     assert!(html.contains("is a major release"), "{html}");
-    assert!(html.contains("Update WordPress to 6.7.1"), "{html}");
+    assert!(html.contains("Update to 6.7.1"), "{html}");
+    // Plugin and theme by slug, through the existing action endpoints.
+    assert!(
+        html.contains(r#"action="/hostings/wp/plugin-action""#),
+        "{html}"
+    );
+    assert!(
+        html.contains(r#"name="slug" value="woocommerce""#),
+        "{html}"
+    );
+    assert!(
+        html.contains(r#"action="/hostings/wp/theme-action""#),
+        "{html}"
+    );
+    assert!(html.contains(r#"name="slug" value="astra""#), "{html}");
+    assert_eq!(html.matches(r#"name="action" value="update""#).count(), 2);
+    // The site's own row returns to the site, never to /vulns.
+    assert!(!html.contains(r#"name="back""#), "{html}");
+    // A major plugin release confirms first; a minor one does not.
+    assert!(
+        html.contains(r#"data-confirm-title="Update woocommerce to 9.4.0""#),
+        "{html}"
+    );
+    assert!(
+        !html.contains(r#"data-confirm-title="Update astra"#),
+        "{html}"
+    );
 
-    let none = wp_updates::VulnPanelTpl::new(scan(vec![]), "kos.cz".into(), true, "tok".into())
+    let viewer = wp_updates::VulnPanelTpl::new(full(), "kos.cz".into(), true, "tok".into(), false)
         .render()
         .expect("render");
+    assert!(viewer.contains("woocommerce"), "{viewer}");
+    assert!(!viewer.contains("upd-act"), "{viewer}");
+    assert!(!viewer.contains("core-update"), "{viewer}");
+
+    let none = wp_updates::VulnPanelTpl::new(
+        scan(vec![], vec![]),
+        "kos.cz".into(),
+        true,
+        "tok".into(),
+        true,
+    )
+    .render()
+    .expect("render");
     assert!(!none.contains("core-update"), "{none}");
-    assert!(!none.contains("chk-fixes"), "{none}");
+    assert!(!none.contains("upd-act"), "{none}");
+    assert!(
+        none.contains("WordPress 6.5.3 is the latest release"),
+        "{none}"
+    );
 }

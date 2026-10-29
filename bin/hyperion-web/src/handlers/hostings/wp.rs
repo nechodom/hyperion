@@ -777,6 +777,10 @@ pub struct WpPluginActionForm {
     pub action: String,
     #[serde(default)]
     pub source: String,
+    /// "vulns" when the update button on /vulns sent it — a successful
+    /// update goes back there. Anything else returns to the site.
+    #[serde(default)]
+    pub back: String,
 }
 
 #[derive(Deserialize)]
@@ -791,6 +795,24 @@ pub struct WpThemeActionForm {
     /// page's JS shim) so the dispatch lands on the right agent.
     #[serde(default)]
     pub target_node: String,
+    /// Same as [`WpPluginActionForm::back`].
+    #[serde(default)]
+    pub back: String,
+}
+
+/// A plugin/theme update started from /vulns goes back there. That page
+/// reads the STORED scans, so re-scan the site first (the scan saves itself)
+/// — otherwise the row would still list the update just applied.
+async fn back_to_vulns(
+    state: &SharedState,
+    target: Option<&str>,
+    sel: HostingSelector,
+    flash: &str,
+) -> Response {
+    let _ =
+        crate::dispatcher::dispatch_to_node(state, target, Request::WpVulnScan { hosting: sel })
+            .await;
+    Redirect::to(&format!("/vulns?flash={}", urlencoding(flash))).into_response()
 }
 
 /// POST /hostings/wp/theme-action — single endpoint for every
@@ -840,17 +862,26 @@ pub async fn post_wp_theme_action(
             s
         }
     };
-    let target = if form.target_node.is_empty()
-        || form.target_node == crate::dispatcher::LOCAL_NODE_SENTINEL
-    {
+    // The detail page's shim names the node; a form without it (the /vulns
+    // update button) is routed to the hosting's owner like the plugin path.
+    let target: Option<String> = if form.target_node == crate::dispatcher::LOCAL_NODE_SENTINEL {
         None
+    } else if form.target_node.is_empty() {
+        find_hosting_anywhere(&state, sel.clone())
+            .await
+            .ok()
+            .and_then(|(_d, n)| n)
     } else {
-        Some(form.target_node.as_str())
+        Some(form.target_node.clone())
     };
     let resp = crate::dispatcher::dispatch_to_node(
         &state,
-        target,
-        Request::WpThemeAction { sel, slug, action },
+        target.as_deref(),
+        Request::WpThemeAction {
+            sel: sel.clone(),
+            slug,
+            action,
+        },
     )
     .await?;
     match resp {
@@ -868,6 +899,10 @@ pub async fn post_wp_theme_action(
                     "/hostings/{sel_url}?wp_error_ref={token}#wordpress"
                 ))
                 .into_response());
+            }
+            if form.back == "vulns" {
+                let msg = format!("Theme {}: {}", r.state, r.message);
+                return Ok(back_to_vulns(&state, target.as_deref(), sel, &msg).await);
             }
             let msg = urlencoding(&format!("Theme {}: {}", r.state, r.message));
             Ok(
@@ -959,7 +994,7 @@ pub async fn post_wp_plugin_action(
         &state,
         target_owned.as_deref(),
         Request::WpPluginAction {
-            hosting: sel,
+            hosting: sel.clone(),
             slug,
             action,
         },
@@ -968,6 +1003,10 @@ pub async fn post_wp_plugin_action(
     match resp {
         RpcResponse::WpPluginAction(r) => {
             let ok = r.state == "ok" || r.state == "noop";
+            if ok && form.back == "vulns" {
+                let msg = format!("Plugin {}: {}", r.state, r.message);
+                return Ok(back_to_vulns(&state, target_owned.as_deref(), sel, &msg).await);
+            }
             if ok {
                 // Success stays a short query-string flash — there is nothing
                 // to read.

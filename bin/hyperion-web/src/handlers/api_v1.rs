@@ -1224,6 +1224,76 @@ pub async fn post_wp_install(
         .into_response()
 }
 
+/// Body for `POST /api/v1/hostings/:id/wp/core-update`.
+#[derive(Deserialize)]
+pub struct WpCoreUpdateBody {
+    /// The release to update to. The node accepts it only if
+    /// `wp core check-update` still offers it to this site.
+    pub version: String,
+}
+
+/// `POST /api/v1/hostings/:id/wp/core-update` — update WordPress core to an
+/// offered release, major or minor. Cap WpManage → 202. Same job as the
+/// panel's button: a full pre-update backup first, no backup no update.
+#[utoipa::path(
+    post, path = "/api/v1/hostings/{id}/wp/core-update", tag = "hostings",
+    params(("id" = String, Path, description = "Hosting id or domain")),
+    request_body(content_type = "application/json", description =
+        "{ version } — a release `wp core check-update` offers this site"),
+    responses(
+        (status = 202, description = "Accepted — { job_id, status }; poll GET /api/v1/jobs/{job_id}. A version the site is not offered fails the job before anything is backed up or touched."),
+        (status = 400, description = "Invalid body"),
+        (status = 403, description = "Key lacks the WpManage capability"),
+        (status = 404, description = "No such hosting"),
+    ),
+    security(("bearer" = []))
+)]
+pub async fn post_wp_core_update(
+    State(state): State<SharedState>,
+    ApiAuth(ctx): ApiAuth,
+    Path(id): Path<String>,
+    body: Result<Json<WpCoreUpdateBody>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let Json(b) = match body {
+        Ok(b) => b,
+        Err(e) => return validation(&e.body_text()),
+    };
+    let version = b.version.trim().to_string();
+    if version.is_empty() {
+        return validation("version is required");
+    }
+    let (detail, node) = match resolve_manage(&state, &ctx, &id, Capability::WpManage).await {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let sel = HostingSelector::Id(detail.id.clone());
+    let actor_label = format!("apikey:{}", ctx.username);
+    let job_state = state.clone();
+    let job_id = match crate::handlers::jobs::spawn_job(
+        state.clone(),
+        "wp_core_update",
+        Some(detail.id.as_str()),
+        &json!({ "version": version }).to_string(),
+        &actor_label,
+        0,
+        move |reporter| {
+            crate::handlers::hostings::run_wp_core_update_job(
+                reporter, job_state, node, sel, version,
+            )
+        },
+    )
+    .await
+    {
+        Ok(id) => id,
+        Err(e) => return upstream(&e.to_string()),
+    };
+    (
+        StatusCode::ACCEPTED,
+        Json(json!({ "job_id": job_id, "status": "accepted" })),
+    )
+        .into_response()
+}
+
 /// Body for `POST /api/v1/hostings/:id/restore`.
 #[derive(Deserialize)]
 pub struct RestoreBody {
