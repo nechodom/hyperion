@@ -123,3 +123,63 @@ async fn wp_status_filesystem_fallback_self_heals() {
     let second = second.expect("DB row must survive disk removal");
     assert_eq!(second.wp_version, "6.4.2");
 }
+
+/// The recorded version is the install-time one; core updates after that
+/// (WordPress's own updater, wp-admin, the sweep) must reach the row the
+/// hostings list reads — the list showed "WordPress 7.1" for sites long on
+/// 7.1.4. An unreadable version.php never overwrites a real version.
+#[tokio::test]
+async fn recorded_wp_version_follows_the_files_on_disk() {
+    let pool = open_memory().await.expect("open");
+    let s = svc(pool.clone(), happy_mocks());
+    s.create(req("wpver.cz")).await.expect("create");
+    let sel = HostingSelector::Domain(Domain::parse("wpver.cz").unwrap());
+    let detail = s.get(sel.clone()).await.expect("get");
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path();
+    std::fs::write(root.join("wp-config.php"), b"<?php ?>").unwrap();
+    std::fs::create_dir_all(root.join("wp-includes")).unwrap();
+    let write_version = |v: &str| {
+        std::fs::write(
+            root.join("wp-includes/version.php"),
+            format!("<?php\n$wp_version = '{v}';\n"),
+        )
+        .unwrap()
+    };
+    write_version("7.1");
+    sqlx::query("UPDATE hostings SET root_dir = ? WHERE id = ?")
+        .bind(root.to_str().unwrap())
+        .bind(detail.id.as_str())
+        .execute(&pool)
+        .await
+        .expect("repoint root_dir");
+    wordpress::record_install(&pool, &detail.id, "https://wpver.cz", "7.1", "h", 1)
+        .await
+        .expect("wp row");
+    let recorded = |pool: SqlitePool, id: HostingId| async move {
+        wordpress::get_install(&pool, &id)
+            .await
+            .expect("get")
+            .expect("row")
+            .wp_version
+    };
+
+    // Updated behind the panel's back: the tick picks it up.
+    write_version("7.1.4");
+    assert_eq!(s.wp_version_refresh_tick().await.expect("tick"), 1);
+    assert_eq!(recorded(pool.clone(), detail.id.clone()).await, "7.1.4");
+    assert_eq!(s.wp_version_refresh_tick().await.expect("again"), 0);
+
+    // ...and so does a page load of the site.
+    write_version("7.2");
+    let st = s.wp_status(sel.clone()).await.expect("status").expect("wp");
+    assert_eq!(st.wp_version, "7.2");
+    assert_eq!(recorded(pool.clone(), detail.id.clone()).await, "7.2");
+
+    // A version.php that is not a plain file is "unknown" — never written.
+    std::fs::remove_file(root.join("wp-includes/version.php")).unwrap();
+    std::os::unix::fs::symlink("/etc/hostname", root.join("wp-includes/version.php")).unwrap();
+    assert_eq!(s.wp_version_refresh_tick().await.expect("tick"), 0);
+    let st = s.wp_status(sel).await.expect("status").expect("wp");
+    assert_eq!(st.wp_version, "7.2");
+}

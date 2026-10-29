@@ -803,10 +803,15 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .await
             .map_err(|e| RpcError::Internal_with(format!("wp lookup: {e}")))?
         {
+            // The recorded version is the one it was installed with; what
+            // is on disk now is the truth (one small file read).
+            let wp_version = self
+                .refresh_wp_version(&detail.id, &detail.root_dir, &row.wp_version)
+                .await;
             return Ok(Some(WpInstallStatus {
                 hosting_id: row.hosting_id,
                 site_url: row.site_url,
-                wp_version: row.wp_version,
+                wp_version,
                 installed_at: row.installed_at,
                 last_pack_hash: row.last_pack_hash,
             }));
@@ -869,6 +874,61 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             installed_at: now,
             last_pack_hash: pack_hash,
         }))
+    }
+
+    /// Bring a recorded install's version in line with
+    /// `wp-includes/version.php`, returning the version to show.
+    ///
+    /// Core updates happen behind the panel's back — WordPress's own
+    /// background updater, wp-admin, the nightly sweep — so a version
+    /// written once at install goes stale with the first one. An unreadable
+    /// or unparseable file never overwrites a real version with "unknown".
+    pub(crate) async fn refresh_wp_version(
+        &self,
+        id: &HostingId,
+        root_dir: &str,
+        recorded: &str,
+    ) -> String {
+        if root_dir.trim().is_empty() {
+            return recorded.to_string();
+        }
+        let Some(on_disk) = detect_wp_install_on_disk(root_dir).await else {
+            return recorded.to_string();
+        };
+        if on_disk == "unknown" || on_disk == recorded {
+            return recorded.to_string();
+        }
+        match wordpress::set_version(&self.pool, id, &on_disk).await {
+            Ok(true) => tracing::info!(
+                hosting_id = %id.as_str(),
+                from = %recorded,
+                to = %on_disk,
+                "wp version: recorded version corrected from disk"
+            ),
+            Ok(false) => {}
+            Err(e) => tracing::warn!(
+                hosting_id = %id.as_str(),
+                error = %e,
+                "wp version: could not record the version on disk"
+            ),
+        }
+        on_disk
+    }
+
+    /// Re-read every recorded install's version from disk, so the hostings
+    /// list shows the release each site runs now rather than the one it was
+    /// installed with. Returns how many rows changed.
+    pub async fn wp_version_refresh_tick(&self) -> Result<usize, RpcError> {
+        let rows = wordpress::list_install_roots(&self.pool)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("wp installs: {e}")))?;
+        let mut changed = 0;
+        for (id, root, recorded) in rows {
+            if self.refresh_wp_version(&id, &root, &recorded).await != recorded {
+                changed += 1;
+            }
+        }
+        Ok(changed)
     }
 
     /// List installed WordPress plugins for a hosting. Returns the
@@ -1445,12 +1505,31 @@ pub(crate) async fn detect_wp_install_on_disk(root_dir: &str) -> Option<String> 
     }
     // wp-includes/version.php — has the version string.
     let version_php = root.join("wp-includes").join("version.php");
-    let Ok(body) = tokio::fs::read_to_string(&version_php).await else {
+    if tokio::fs::symlink_metadata(&version_php).await.is_err() {
         // wp-config exists but core is missing — this is a partial
         // install. Treat as "no WP" rather than fake a version,
         // so the operator's install button stays available to
         // recover it.
         return None;
+    }
+    // Root reads a file the SITE USER owns, now every few minutes for every
+    // site (the version refresh): no symlinks or hard links (open_no_follow,
+    // which also refuses a FIFO without blocking) and a bounded read, so a
+    // version.php pointed at /dev/zero or grown to gigabytes cannot stall or
+    // exhaust the agent. A real one is ~1 KiB. Present but unreadable is
+    // still WordPress, just of unknown version.
+    let body = tokio::task::spawn_blocking(move || {
+        use std::io::Read;
+        let f = hyperion_adapters::fs::open_no_follow(&version_php).ok()?;
+        let mut buf = Vec::new();
+        f.take(64 * 1024).read_to_end(&mut buf).ok()?;
+        Some(String::from_utf8_lossy(&buf).into_owned())
+    })
+    .await
+    .ok()
+    .flatten();
+    let Some(body) = body else {
+        return Some("unknown".to_string());
     };
     // Parse `$wp_version = '<x.y.z>'` (single or double quotes,
     // any amount of whitespace around the `=`). Defensive: only
