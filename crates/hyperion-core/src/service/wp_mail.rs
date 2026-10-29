@@ -346,6 +346,19 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 .last()
                 .is_some_and(|l| wpmail::is_local_transport_failure(l));
         let since_takeover = forced_at.map_or(0, |at| wpmail::failures_since(&lines, at));
+        // When sends fail on the server's side, ask the server why: the
+        // failure log only ever holds PHPMailer's one-line summary.
+        let probe = if local || since_takeover > 0 {
+            Some(wp_mail_transport_probe(&detail).await)
+        } else {
+            None
+        };
+        // Postfix refused the newest one for its size. The path works; the
+        // message was bigger than this node takes, and the fix is the limit.
+        let too_big = probe
+            .as_ref()
+            .and_then(|p| p.stderr.last())
+            .is_some_and(|l| wpmail::is_size_refusal(l));
 
         // Which plugin, if any, has taken `wp_mail()` over. Listed rather
         // than judged: one with working credentials is the owner's choice.
@@ -402,7 +415,17 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                  Most recent: {}",
                 lines.last().cloned().unwrap_or_default()
             );
-            let (label, detail_text) = if local {
+            let (label, detail_text) = if local && too_big {
+                (
+                    "Messages from this site are too big for this server",
+                    format!(
+                        "\"Could not instantiate mail function\" here is sendmail refusing a \
+                         message larger than postfix on this server accepts (\"message file too \
+                         big\" below). The mail path itself works — smaller messages from this \
+                         site go out. {counts}"
+                    ),
+                )
+            } else if local {
                 (
                     "PHP mail() on this server is failing",
                     format!(
@@ -439,10 +462,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             );
         }
 
-        // When sends fail on the server's side, say what the server says:
-        // the failure log only ever holds PHPMailer's one-line summary.
-        if local || since_takeover > 0 {
-            let probe = wp_mail_transport_probe(&detail).await;
+        if let Some(probe) = probe {
             let said = probe
                 .stderr
                 .last()
@@ -455,6 +475,24 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     "error",
                     format!("{}.{said}", probe.problems.join("; ")),
                     if probe.fixable() { "site_repair" } else { "" },
+                );
+            } else if too_big {
+                let limit = hyperion_adapters::postfix::message_size_limit().await;
+                push(
+                    "wp_mail_transport",
+                    "A message was over this server's size limit",
+                    "error",
+                    format!(
+                        "Postfix here takes messages up to {}, counted after encoding, so \
+                         attachments get about three quarters of that; this site sent a bigger \
+                         one — almost always a form with an attachment. Raise the limit under \
+                         Settings → Mail → Largest message for this node (25 MB is what most \
+                         receivers accept), or cap the form's upload size. A limit raised after \
+                         that send does not clear this at once: the failures above age out, and \
+                         a new one means the message was bigger still.{said}",
+                        describe_size_limit(limit)
+                    ),
+                    "mail_size",
                 );
             } else if !said.is_empty() {
                 push(
@@ -774,6 +812,21 @@ const POSTDROP_BIN: &str = "/usr/sbin/postdrop";
 const POSTFIX_BIN: &str = "/usr/sbin/postfix";
 /// Where Debian's PHP-FPM writes `php<ver>-fpm.log`.
 const FPM_LOG_DIR: &str = "/var/log";
+
+/// Postfix's `message_size_limit` in the words the mail card uses. The
+/// panel's MB are MiB, like the Settings field that sets it.
+pub(super) fn describe_size_limit(bytes: Option<u64>) -> String {
+    const MIB: u64 = 1024 * 1024;
+    match bytes {
+        None => "a limit postconf would not report".into(),
+        Some(0) => "any size (no limit is set)".into(),
+        Some(b) if b == hyperion_adapters::postfix::DEFAULT_MESSAGE_SIZE_LIMIT => {
+            "about 10 MB (postfix's default)".into()
+        }
+        Some(b) if b % MIB == 0 => format!("{} MB", b / MIB),
+        Some(b) => format!("{:.1} MB", b as f64 / MIB as f64),
+    }
+}
 
 /// Where the server's half of one site's mail stands: what PHP's `mail()`
 /// runs when the site sends.

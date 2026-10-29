@@ -1041,6 +1041,11 @@ pub struct EmailConfigView {
     pub from_name: String,
     pub security: String,
     pub default_to: String,
+    /// `[email] message_size_limit_mb` — postfix's `message_size_limit` in
+    /// MiB as the panel set it. 0 = not set: postfix keeps its own value
+    /// (10 MB unless changed by hand). Older agents send nothing.
+    #[serde(default)]
+    pub message_size_limit_mb: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -2711,6 +2716,11 @@ impl FtpCheckReport {
     }
     pub fn has_node_repair(&self) -> bool {
         self.items.iter().any(|i| i.fix == "node_config")
+    }
+    /// True when a finding is fixed by raising the node's postfix message
+    /// size limit (Settings → Mail → Largest message), not by a repair.
+    pub fn has_mail_size_fix(&self) -> bool {
+        self.items.iter().any(|i| i.fix == "mail_size")
     }
     /// True when a finding is fixed by tightening wp-config.php.
     pub fn has_config_fix(&self) -> bool {

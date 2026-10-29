@@ -65,9 +65,11 @@ pub use hyperion_adapters::phpfpm::ensure_socket_dirs as ensure_phpfpm_socket_di
 // or via direct MX with hardened defaults when it isn't).
 pub use hyperion_adapters::postfix::{
     ensure_direct_delivery_config as postfix_ensure_direct_delivery_config,
+    ensure_message_size_limit as postfix_ensure_message_size_limit,
     ensure_relay_config as postfix_ensure_relay_config, host_is_local as postfix_host_is_local,
     is_installed as postfix_is_installed, rollback_relay_config as postfix_rollback_relay_config,
     DirectDeliveryOpts as PostfixDirectDeliveryOpts,
+    MAX_MESSAGE_SIZE_MB as POSTFIX_MAX_MESSAGE_SIZE_MB,
 };
 
 // Re-export profile types via hyperion_types — they live there.

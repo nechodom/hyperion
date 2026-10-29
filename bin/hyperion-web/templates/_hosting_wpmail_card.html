@@ -38,6 +38,13 @@
       </li>
       {% endif %}{% endfor %}
     </ul>
+    {% if let Some(href) = size_href %}
+    <div class="chk-fixes">
+      {#- A link, not a button: the limit is the node's setting, shared by
+          every site on it, and is changed where the other mail settings are. -#}
+      <a class="btn primary small" href="{{ href }}">Raise the size limit</a>
+    </div>
+    {% endif %}
     {% if report.has_site_repair() %}
     <div class="chk-fixes">
       <form hx-post="/hostings/wp/mail-repair" hx-target="#wpmail-panel" hx-swap="outerHTML"

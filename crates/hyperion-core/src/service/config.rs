@@ -292,6 +292,17 @@ pub(super) fn parse_agent_section_fields(
             | ("email", "bind_address")
             | ("email", "default_to") => crate::config_persist::FieldValue::Str(v.clone()),
             ("email", "smtp_port") => crate::config_persist::FieldValue::Int(parse_int(v)?),
+            // 0 = leave postfix's own limit alone (see the adapter).
+            ("email", "message_size_limit_mb") => {
+                let n = parse_int(v)?;
+                let max = i64::from(hyperion_adapters::postfix::MAX_MESSAGE_SIZE_MB);
+                if !(0..=max).contains(&n) {
+                    return Err(bad(format!(
+                        "message_size_limit_mb must be 0..={max}, got {n}"
+                    )));
+                }
+                crate::config_persist::FieldValue::Int(n)
+            }
             // [slack]
             ("slack", "default_webhook") => crate::config_persist::FieldValue::Str(v.clone()),
             // [backup_remote]

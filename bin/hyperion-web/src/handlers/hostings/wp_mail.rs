@@ -19,6 +19,9 @@ pub(super) struct WpMailCardTpl {
     pub(super) csrf_autofix: String,
     pub(super) csrf_override: String,
     pub(super) error: Option<String>,
+    /// Settings → Mail → Largest message on the site's node, when a finding
+    /// is fixed there and the viewer may change settings.
+    pub(super) size_href: Option<String>,
 }
 
 /// The mail card's switches. Absent keys read as the node's own defaults.
@@ -64,7 +67,21 @@ pub async fn get_wpmail_panel(
     ctx: AuthCtx,
     Path(selector): Path<String>,
 ) -> Result<Response, AppError> {
-    let card = |report, switches: WpMailSwitches, error: Option<String>| {
+    // The node the site lives on, once known: the size limit is that
+    // node's setting, not the master's.
+    let site_node = std::sync::OnceLock::<String>::new();
+    let card = |report: hyperion_types::FtpCheckReport,
+                switches: WpMailSwitches,
+                error: Option<String>| {
+        let size_href = match site_node.get() {
+            Some(node) if report.has_mail_size_fix() && ctx.can(Capability::SettingsManage) => {
+                Some(format!(
+                    "/settings/mail?node={}#mail-size",
+                    urlencoding(node)
+                ))
+            }
+            _ => None,
+        };
         Html(
             WpMailCardTpl {
                 report,
@@ -74,6 +91,7 @@ pub async fn get_wpmail_panel(
                 csrf_autofix: csrf_token_for(&state, &ctx, "/hostings/wp/mail-autofix"),
                 csrf_override: csrf_token_for(&state, &ctx, "/hostings/wp/mail-override"),
                 error,
+                size_href,
             }
             .render()
             .unwrap_or_default(),
@@ -118,6 +136,11 @@ pub async fn get_wpmail_panel(
             Some("You do not have access to this hosting.".into()),
         ));
     }
+    let _ = site_node.set(
+        owner
+            .clone()
+            .unwrap_or_else(|| crate::dispatcher::LOCAL_NODE_SENTINEL.to_string()),
+    );
     // Absent or unreadable ⇒ the defaults, matching what the node answers.
     let switches = match crate::dispatcher::dispatch_to_node(
         &state,
@@ -283,9 +306,43 @@ mod wpmail_card_tests {
             csrf_autofix: "a".into(),
             csrf_override: "o".into(),
             error: None,
+            size_href: None,
         }
         .render()
         .expect("render")
+    }
+
+    /// A size refusal sends the operator to the node's Largest message
+    /// setting — never to the repair, which cannot change the limit.
+    #[test]
+    fn size_refusal_links_to_the_nodes_limit_not_the_repair() {
+        let report = hyperion_types::FtpCheckReport {
+            items: vec![hyperion_types::FtpCheckItem {
+                id: "wp_mail_transport".into(),
+                label: "A message was over this server's size limit".into(),
+                severity: "error".into(),
+                detail: String::new(),
+                fix: "mail_size".into(),
+            }],
+            ..Default::default()
+        };
+        let html = WpMailCardTpl {
+            report,
+            selector: "mail.cz".into(),
+            switches: WpMailSwitches::default(),
+            csrf_repair: "r".into(),
+            csrf_autofix: "a".into(),
+            csrf_override: "o".into(),
+            error: None,
+            size_href: Some("/settings/mail?node=node_a#mail-size".into()),
+        }
+        .render()
+        .expect("render");
+        assert!(html.contains(r#"href="/settings/mail?node=node_a#mail-size""#));
+        assert!(
+            !html.contains("/hostings/wp/mail-repair\""),
+            "no repair button"
+        );
     }
 
     /// The default says out loud that Hyperion rewrites the sender, and

@@ -697,6 +697,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .agent_config_path
             .as_ref()
             .map(|p| load_email_section(p));
+        // Applies in either mode; read before `disk` is consumed below.
+        let size_limit_mb = disk.as_ref().map_or(0, |e| e.message_size_limit_mb);
         // Read before `disk` is consumed by the match below. These two
         // apply to direct-MX delivery and are independent of whether a
         // relay is configured at all.
@@ -761,6 +763,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .map(|c| !hyperion_adapters::postfix::host_is_local(&c.smtp_host, &fqdn))
             .unwrap_or(false);
 
+        hyperion_adapters::postfix::ensure_message_size_limit(size_limit_mb)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("postfix message size: {e}")))?;
         match relay_cfg.as_ref() {
             Some(cfg) if use_smart_host => {
                 hyperion_adapters::postfix::ensure_relay_config(cfg)
@@ -1539,6 +1544,8 @@ pub(super) struct EmailTomlView {
     pub(super) default_to: String,
     pub(super) inet_protocols: String,
     pub(super) bind_address: String,
+    /// `message_size_limit_mb`; 0 when absent = postfix's own value.
+    pub(super) message_size_limit_mb: u32,
 }
 
 /// Read the `[email]` section straight from agent.toml so callers see the
@@ -1579,6 +1586,11 @@ pub(super) fn read_email_section(path: &std::path::Path) -> Option<EmailTomlView
         default_to: s("default_to"),
         inet_protocols: s("inet_protocols"),
         bind_address: s("bind_address"),
+        message_size_limit_mb: t
+            .and_then(|x| x.get("message_size_limit_mb"))
+            .and_then(|v| v.as_integer())
+            .and_then(|n| u32::try_from(n).ok())
+            .unwrap_or(0),
     })
 }
 
@@ -1610,6 +1622,7 @@ pub(super) fn email_view_from_toml(e: EmailTomlView) -> hyperion_types::EmailCon
             e.security
         },
         default_to: e.default_to,
+        message_size_limit_mb: e.message_size_limit_mb,
     }
 }
 

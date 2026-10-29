@@ -297,6 +297,13 @@ pub struct EmailSection {
     /// the kernel can otherwise pick one whose PTR does not match the
     /// HELO name and which no SPF record lists.
     pub bind_address: String,
+    /// Postfix `message_size_limit`, in MiB. `0` (default) leaves postfix's
+    /// own value alone — 10 MB unless somebody changed it by hand.
+    ///
+    /// The limit is on the queued message, after base64, so attachments
+    /// can be about three quarters of it. Postfix's 10 MB refuses a contact
+    /// form carrying a couple of phone photos with "message file too big".
+    pub message_size_limit_mb: u32,
 }
 
 impl Default for EmailSection {
@@ -313,6 +320,7 @@ impl Default for EmailSection {
             default_to: String::new(),
             inet_protocols: "ipv4".into(),
             bind_address: String::new(),
+            message_size_limit_mb: 0,
         }
     }
 }

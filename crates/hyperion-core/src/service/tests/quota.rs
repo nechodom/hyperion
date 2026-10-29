@@ -402,6 +402,29 @@ async fn email_save_leaves_keys_it_did_not_post_alone() {
         doc["email"]["from_address"].as_str(),
         Some("noreply@example.cz")
     );
+
+    // The size form (Settings → Mail → Largest message): one integer key,
+    // nothing else touched, and the ceiling refused before it is written.
+    save(vec![("message_size_limit_mb", "25")])
+        .await
+        .expect("size save");
+    let doc = read();
+    assert_eq!(doc["email"]["message_size_limit_mb"].as_integer(), Some(25));
+    assert_eq!(doc["email"]["smtp_password"].as_str(), Some("s3cret"));
+    assert_eq!(doc["email"]["default_to"].as_str(), Some("ops@example.cz"));
+    let err = save(vec![("message_size_limit_mb", "101")])
+        .await
+        .expect_err("over the ceiling");
+    assert!(err.to_string().contains("message_size_limit_mb"), "{err}");
+    assert_eq!(
+        read()["email"]["message_size_limit_mb"].as_integer(),
+        Some(25)
+    );
+    // And it is what the Settings page reads back.
+    assert_eq!(
+        super::email_view_from_toml(super::load_email_section(&path)).message_size_limit_mb,
+        25
+    );
 }
 
 #[test]

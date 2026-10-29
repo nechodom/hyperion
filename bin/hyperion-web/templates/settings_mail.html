@@ -134,6 +134,44 @@
       </ul>
     </details>
   </div>
+
+  <div class="item" id="mail-size">
+    <div class="row" style="align-items:center;gap:0.6rem;flex-wrap:wrap">
+      <h3 style="margin:0">Largest message</h3>
+      {% if email_error.is_some() %}
+      {% else if email.message_size_limit_mb > 0 %}<span class="pill ok">{{ email.message_size_limit_mb }} MB</span>
+      {% else %}<span class="pill">postfix's own</span>{% endif %}
+    </div>
+    {% if email_error.is_some() %}
+    <p class="text-soft small" style="margin:0.4rem 0 0">Not available while {% if is_master %}the agent{% else %}{{ node_label }}{% endif %} does not answer.</p>
+    {% else %}
+    <p class="text-soft small" style="margin:0.4rem 0 0">
+      Postfix on {{ node_label }} refuses any message bigger than this, and the
+      site's <code>mail()</code> fails with <q>message file too big</q> — typically
+      a contact form with an attachment. The limit counts the encoded message,
+      so attachments get about three quarters of it. Most receivers{% if email.enabled %},
+      and most relays,{% endif %} take up to 25 MB; above that the refusal only
+      moves to them, as a bounce.
+    </p>
+    <form method="post" action="/settings/config" style="margin-top:1rem">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="section" value="email">
+      <input type="hidden" name="target_node" value="{{ node }}">
+      <input type="hidden" name="_return_tab" value="mail-size">
+      <div class="field" style="max-width:18rem">
+        <label for="message_size_limit_mb">Limit in MB <span class="hint">0 = leave postfix's own (10 MB unless changed by hand)</span></label>
+        <input id="message_size_limit_mb" name="message_size_limit_mb" type="number"
+               min="0" max="{{ max_message_size_mb }}" step="1" required
+               value="{{ email.message_size_limit_mb }}" placeholder="25">
+      </div>
+      <div class="item-actions"><button type="submit" class="btn primary">Save</button></div>
+    </form>
+    <p class="text-soft small" style="margin:0.6rem 0 0">
+      Hyperion applies it right away and on every agent start. Setting 0 later
+      does not undo a raised limit — set 10 to go back to postfix's default.
+    </p>
+    {% endif %}
+  </div>
 </fieldset>
 
 <div class="group">

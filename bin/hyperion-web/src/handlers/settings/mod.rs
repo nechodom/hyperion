@@ -138,6 +138,11 @@ pub(crate) fn email_view_from_masked_toml(
             security
         },
         default_to: text("default_to"),
+        message_size_limit_mb: e
+            .and_then(|t| t.get("message_size_limit_mb"))
+            .and_then(|v| v.as_integer())
+            .and_then(|n| u32::try_from(n).ok())
+            .unwrap_or(0),
     })
 }
 
@@ -1253,6 +1258,7 @@ fn card_label(anchor: &str) -> Option<&'static str> {
         "customer-letters" => Some("Letters"),
         "letter-language" => Some("Letter languages"),
         "letter-wording" => Some("Sentences"),
+        "mail-size" => Some("Largest message"),
         _ => None,
     }
 }
@@ -3354,6 +3360,7 @@ from_address = "ops@example.cz"
             "customer-letters",
             "letter-language",
             "letter-wording",
+            "mail-size",
         ] {
             assert!(card_label(anchor).is_some(), "{anchor} has no label");
             assert!(

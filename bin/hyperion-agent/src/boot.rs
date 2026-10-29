@@ -285,6 +285,7 @@ fn spawn_node_id_backfill(svc: &Svc) {
 pub(crate) fn spawn_postfix_config(
     email_cfg: Option<hyperion_core::EmailConfig>,
     direct_opts: hyperion_core::PostfixDirectDeliveryOpts,
+    message_size_limit_mb: u32,
 ) {
     let agent_hostname = crate::hostname_or_unknown();
     tokio::spawn(async move {
@@ -377,6 +378,17 @@ pub(crate) fn spawn_postfix_config(
                     }
                 }
             }
+        }
+        // Independent of the mode: the limit applies to every message this
+        // node queues, relayed or not. 0 = leave postfix's own value.
+        if let Err(e) =
+            hyperion_core::postfix_ensure_message_size_limit(message_size_limit_mb).await
+        {
+            tracing::error!(
+                error = %e,
+                mb = message_size_limit_mb,
+                "boot: postfix message_size_limit not applied"
+            );
         }
     });
 }

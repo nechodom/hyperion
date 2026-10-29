@@ -182,3 +182,18 @@ async fn php_mail_failing_is_reported_as_the_servers_path_not_a_repair() {
     // put back (postfix stopped, postdrop permissions) — never for nothing.
     assert_eq!(report.has_site_repair(), transport.fix == "site_repair");
 }
+
+/// The size card names the limit the way the Settings field sets it (MB =
+/// MiB), and never passes an unreadable limit off as the default.
+#[test]
+fn size_limit_is_described_in_settings_units() {
+    use super::super::wp_mail::describe_size_limit;
+    assert_eq!(
+        describe_size_limit(Some(10_240_000)),
+        "about 10 MB (postfix's default)"
+    );
+    assert_eq!(describe_size_limit(Some(25 * 1024 * 1024)), "25 MB");
+    assert_eq!(describe_size_limit(Some(15_000_000)), "14.3 MB");
+    assert!(describe_size_limit(Some(0)).contains("no limit"));
+    assert!(!describe_size_limit(None).contains("default"));
+}
