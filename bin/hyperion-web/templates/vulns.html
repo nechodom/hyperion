@@ -4,7 +4,8 @@
    needs, site + node, the first component that matters, when it was checked
    and whether auto-update is on); the fold lists every component with what
    happens to it. The bucket and every sentence come from handlers::vulns —
-   the template only lays them out. #}
+   the template only lays them out. Every outdated component carries the
+   same "update now" button as the site's own Updates row. #}
 {% macro site_row(r) %}
 <details class="upd-row" id="upd-{{ r.hosting_id }}" data-bucket="{{ r.bucket.key() }}">
   <summary>
@@ -31,6 +32,7 @@
         <span class="upd-comp-name"><strong>{{ c.name }}</strong> <span class="text-soft small">{{ c.kind }}</span></span>
         <span class="upd-comp-ver"><code>{{ c.from }}</code> → <code>{{ c.to }}</code> <span class="text-soft">{{ c.update_type }}</span></span>
         <span class="upd-comp-what">{{ c.what }}{% if !c.error.is_empty() %}<span class="upd-comp-err">{{ c.error }}</span>{% endif %}</span>
+        {% if can_manage %}{% let upd_sel = r.upd_sel.as_str() %}{% include "_wp_update_button.html" %}{% endif %}
       </li>
       {% endfor %}
     </ul>
@@ -41,7 +43,7 @@
       {% if !r.core_line.is_empty() %}<span>{{ r.core_line }}</span>{% endif %}
       {% if !r.facts.is_empty() %}<span>{{ r.facts }}</span>{% endif %}
       {% if r.auto_update == Some(false) %}<span>auto-update is off — switch it on in the WordPress tab</span>{% endif %}
-      <a class="upd-open" href="/hostings/{{ r.domain }}#wordpress">Open WordPress tab →</a>
+      <a class="upd-open" href="/hostings/{{ r.domain }}#wp-updates">Open the site's Updates →</a>
     </div>
   </div>
 </details>
@@ -55,7 +57,7 @@
       Every WordPress site in the cluster and what its plugins, themes and
       core need. Minor and patch updates apply themselves overnight on sites
       with auto-update on; majors, and anything auto-update can't do, wait
-      here for you.
+      here for you — open a site's row to update any of them now.
     </div>
   </div>
 </div>

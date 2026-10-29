@@ -1022,6 +1022,11 @@ details.howto ul { padding-left: 1.2rem; }
 .chk-list.chk-files li { grid-template-columns: 6px minmax(0, max-content) minmax(0, 1fr); }
 .chk-list.chk-files code { word-break: break-all; }
 .chk-detail { color: var(--text-soft); word-break: break-word; }
+/* Updates row: a fourth column holds each row's "update now" button. */
+.chk-list.upd-list li { grid-template-columns: 6px calc(var(--chk-name-w, 11.5rem) - 6px - var(--chk-gap, 0.75rem)) minmax(0, 1fr) auto; align-items: center; }
+.upd-act { display: flex; justify-content: flex-end; }
+.upd-act form { margin: 0; }
+.upd-act .btn { white-space: nowrap; }
 .chk-fixes { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; }
 .chk-fixes form { margin: 0; }
 .chk-fold > summary { display: inline-block; cursor: pointer; list-style: none; font-size: 0.8rem; color: var(--text-soft); }
@@ -1086,6 +1091,9 @@ details.howto ul { padding-left: 1.2rem; }
   .chk-body { margin-left: 0; }
   .chk-list li, .chk-list.chk-files li { grid-template-columns: 6px minmax(0, 1fr); }
   .chk-list li > :nth-child(3) { grid-column: 2; }
+  .chk-list.upd-list li { grid-template-columns: 6px minmax(0, 1fr); }
+  .chk-list.upd-list li > :nth-child(4) { grid-column: 2; }
+  .upd-act { justify-content: flex-start; margin-top: 0.3rem; }
 }
 
 /* A group header that carries actions on the right (WordPress plugins and
@@ -1592,7 +1600,7 @@ details.pkg-new .pkg-fs:first-of-type { padding-top: 0; }
 .upd-comps { list-style: none; margin: 0 0 0.6rem; padding: 0; display: flex; flex-direction: column; gap: 0.45rem; }
 .upd-comps li {
   display: grid;
-  grid-template-columns: 8px minmax(10rem, 1.2fr) minmax(9rem, 1fr) 2fr;
+  grid-template-columns: 8px minmax(10rem, 1.2fr) minmax(9rem, 1fr) 2fr auto;
   align-items: baseline;
   gap: 0.75rem;
 }

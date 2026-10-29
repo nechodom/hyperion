@@ -14,10 +14,14 @@ pub(super) struct VulnPanelTpl {
     pub(super) comps: Vec<crate::handlers::vulns::CompRow>,
     /// Of `comps`, how many wait for a person.
     pub(super) waiting: usize,
-    /// Of `comps`, whether any is a core release — each gets an update
-    /// button.
-    pub(super) has_core: bool,
     pub(super) selector: String,
+    /// The shared update button's selector (same as `selector`).
+    pub(super) upd_sel: String,
+    /// The update buttons return to the site, not to /vulns.
+    pub(super) upd_back: &'static str,
+    /// Whether the viewer may update — WpVulnView alone sees the rows but
+    /// gets no buttons the POST would refuse.
+    pub(super) can_manage: bool,
     pub(super) auto_update_enabled: bool,
     pub(super) csrf_token: String,
 }
@@ -28,6 +32,7 @@ impl VulnPanelTpl {
         selector: String,
         auto_update_enabled: bool,
         csrf_token: String,
+        can_manage: bool,
     ) -> Self {
         let comps = crate::handlers::vulns::scan_comp_rows(
             &scan,
@@ -35,12 +40,13 @@ impl VulnPanelTpl {
             hyperion_types::now_secs(),
         );
         let waiting = comps.iter().filter(|c| c.state.needs_you()).count();
-        let has_core = comps.iter().any(|c| c.kind == "core");
         Self {
             scan,
             comps,
             waiting,
-            has_core,
+            upd_sel: selector.clone(),
+            upd_back: "",
+            can_manage,
             selector,
             auto_update_enabled,
             csrf_token,
@@ -85,6 +91,7 @@ pub async fn get_vuln_panel(
         _ => true,
     };
     let csrf_token = crate::handlers::session_csrf_token(&state, &ctx);
+    let can_manage = ctx.can(Capability::WpManage) && !ctx.is_read_only();
     let resp = crate::dispatcher::dispatch_to_node(
         &state,
         owner_node.as_deref(),
@@ -92,9 +99,14 @@ pub async fn get_vuln_panel(
     )
     .await;
     let html = match resp {
-        Ok(RpcResponse::WpVulnScan(scan)) => {
-            VulnPanelTpl::new(scan, selector.clone(), auto_update_enabled, csrf_token).render()?
-        }
+        Ok(RpcResponse::WpVulnScan(scan)) => VulnPanelTpl::new(
+            scan,
+            selector.clone(),
+            auto_update_enabled,
+            csrf_token,
+            can_manage,
+        )
+        .render()?,
         // On any failure render the "couldn't check" state rather than
         // a blank corner — the operator should know the scan didn't run.
         _ => VulnPanelTpl::new(
@@ -105,6 +117,7 @@ pub async fn get_vuln_panel(
             selector.clone(),
             auto_update_enabled,
             csrf_token,
+            can_manage,
         )
         .render()?,
     };
@@ -230,35 +243,45 @@ pub async fn post_wp_core_update(
         &serde_json::json!({ "version": version }).to_string(),
         &ctx.username,
         actor_uid,
-        move |reporter| async move {
-            reporter
-                .step(
-                    &format!("Backing up files + database, then updating WordPress to {version}…"),
-                    10,
-                    "",
-                )
-                .await;
-            match crate::dispatcher::dispatch_to_node(
-                &job_state,
-                node.as_deref(),
-                Request::WpCoreUpdate { sel, version },
-            )
-            .await
-            {
-                Ok(RpcResponse::WpCoreUpdate(m)) => {
-                    reporter.step(&m, 100, "").await;
-                    reporter.finish(true, None).await;
-                }
-                Ok(RpcResponse::Error(e)) => reporter.finish(false, Some(e.to_string())).await,
-                Ok(_) => {
-                    reporter
-                        .finish(false, Some("unexpected response from the node".into()))
-                        .await
-                }
-                Err(e) => reporter.finish(false, Some(e.to_string())).await,
-            }
-        },
+        move |reporter| run_wp_core_update_job(reporter, job_state, node, sel, version),
     )
     .await?;
     Ok(Redirect::to(&format!("/jobs/{job_id}")).into_response())
+}
+
+/// The `wp_core_update` job body — the web button and
+/// `POST /api/v1/hostings/:id/wp/core-update` run the same thing.
+pub(crate) async fn run_wp_core_update_job(
+    reporter: crate::handlers::jobs::JobReporter,
+    job_state: SharedState,
+    node: Option<String>,
+    sel: HostingSelector,
+    version: String,
+) {
+    reporter
+        .step(
+            &format!("Backing up files + database, then updating WordPress to {version}…"),
+            10,
+            "",
+        )
+        .await;
+    match crate::dispatcher::dispatch_to_node(
+        &job_state,
+        node.as_deref(),
+        Request::WpCoreUpdate { sel, version },
+    )
+    .await
+    {
+        Ok(RpcResponse::WpCoreUpdate(m)) => {
+            reporter.step(&m, 100, "").await;
+            reporter.finish(true, None).await;
+        }
+        Ok(RpcResponse::Error(e)) => reporter.finish(false, Some(e.to_string())).await,
+        Ok(_) => {
+            reporter
+                .finish(false, Some("unexpected response from the node".into()))
+                .await
+        }
+        Err(e) => reporter.finish(false, Some(e.to_string())).await,
+    }
 }

@@ -2458,6 +2458,7 @@ async fn api_v1_openapi_spec_and_docs_are_served() {
         "/api/v1/hostings/{id}",
         "/api/v1/hostings/{id}/suspend",
         "/api/v1/hostings/{id}/resume",
+        "/api/v1/hostings/{id}/wp/core-update",
         "/api/v1/nodes",
         "/api/v1/jobs/{id}",
     ] {
@@ -2789,6 +2790,28 @@ async fn api_v1_ops_completion_endpoints() {
     let (st, body) = api_send(&app, Method::POST, &format!("{base}/wp/install"), &key, wp).await;
     assert_eq!(st, StatusCode::ACCEPTED, "wp install → 202: {body}");
 
+    // WordPress core update → 202 job; the node judges the version.
+    let (st, body) = api_send(
+        &app,
+        Method::POST,
+        &format!("{base}/wp/core-update"),
+        &key,
+        r#"{"version":"6.7.1"}"#,
+    )
+    .await;
+    assert_eq!(st, StatusCode::ACCEPTED, "wp core-update → 202: {body}");
+
+    // …without a version → 400, before any job exists.
+    let (st, _b) = api_send(
+        &app,
+        Method::POST,
+        &format!("{base}/wp/core-update"),
+        &key,
+        r#"{"version":" "}"#,
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "empty version → 400");
+
     // Restore → 202 job.
     let (st, body) = api_send(
         &app,
@@ -2826,6 +2849,19 @@ async fn api_v1_ops_completion_endpoints() {
     .await;
     let (st, _b) = api_send(&app, Method::POST, &format!("{base}/wp/install"), &weak, wp).await;
     assert_eq!(st, StatusCode::FORBIDDEN, "no WpManage cap → 403");
+    let (st, _b) = api_send(
+        &app,
+        Method::POST,
+        &format!("{base}/wp/core-update"),
+        &weak,
+        r#"{"version":"6.7.1"}"#,
+    )
+    .await;
+    assert_eq!(
+        st,
+        StatusCode::FORBIDDEN,
+        "no WpManage cap → 403 on core update"
+    );
 }
 
 /// /stats must carry a per-site breakdown, not just cluster + node cards.

@@ -1,8 +1,10 @@
 {# WordPress updates ("defender") — one row of the WordPress tab's Updates &
    integrity group, lazily swapped in via hx-get="/hostings/:sel/vuln-panel".
    Keyless: flags outdated plugins/themes/core from wp-cli's own update status
-   (no external feed) and auto-applies safe minor/patch updates daily; core
-   releases also get a by-hand update button. #}
+   (no external feed) and auto-applies safe minor/patch updates daily. Every
+   outdated row also gets an "update now" button (_wp_update_button.html),
+   and the installed core release is always named, so "is WordPress itself
+   current?" has an answer even when nothing is outdated. #}
 <div class="chk-row" id="vuln-panel">
   <div class="chk-head">
     {% if scan.feed_unavailable %}<span class="chk-dot warn"></span>
@@ -12,7 +14,7 @@
     <h3 class="chk-name">Updates</h3>
     <span class="chk-sum">
       {% if scan.feed_unavailable %}Couldn't read plugins and themes — not a clean result
-      {% else if comps.is_empty() %}Everything up to date · {{ scan.checked }} plugins &amp; themes checked{% if !scan.core_checked %} · core not checked{% endif %}
+      {% else if comps.is_empty() %}Everything up to date · {% if scan.core_checked && !scan.core_version.is_empty() %}WordPress {{ scan.core_version }} is the latest release{% else if scan.core_checked %}core current{% else %}core not checked{% endif %} · {{ scan.checked }} plugins &amp; themes checked
       {% else %}{{ comps.len() }} update{% if comps.len() != 1 %}s{% endif %} available{% if waiting > 0 %} · {{ waiting }} wait{% if waiting == 1 %}s{% endif %} for you{% else %} · all applied by the next sweep{% endif %}{% endif %}
     </span>
     <div class="chk-actions">
@@ -40,30 +42,10 @@
           <code>{{ c.from }}</code> → <code>{{ c.to }}</code>
           · {{ c.update_type }} · {{ c.what }}{% if !c.error.is_empty() %} · <span class="text-soft">{{ c.error }}</span>{% endif %}
         </span>
+        {% if can_manage %}{% include "_wp_update_button.html" %}{% endif %}
       </li>
       {% endfor %}
     </ul>
-    {# Core by hand: the major the sweep leaves to a person, or a minor now
-       rather than tonight. A job — the node backs the site up first. #}
-    {% if has_core %}
-    <div class="chk-fixes">
-      {% for c in comps %}{% if c.kind == "core" %}
-      <form method="post" action="/hostings/wp/core-update"
-            data-confirm-title="Update WordPress to {{ c.to }}"
-            {% if c.update_type == "major" %}
-            data-confirm-body="WordPress {{ c.to }} is a major release. Themes and plugins written for {{ c.from }} can stop working after it — check the site right after. A full backup (files + database) is taken first; if it fails, nothing is updated. The backup is kept 24 hours after a clean update, or until the next update after a failed one."
-            {% else %}
-            data-confirm-body="Updates WordPress {{ c.from }} to {{ c.to }} now instead of in tonight's sweep. A full backup (files + database) is taken first; if it fails, nothing is updated."
-            {% endif %}
-            data-confirm-confirm-label="Back up &amp; update">
-        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-        <input type="hidden" name="selector" value="{{ selector }}">
-        <input type="hidden" name="version" value="{{ c.to }}">
-        <button class="btn small{% if c.state.needs_you() %} primary{% endif %}" type="submit">Update WordPress to {{ c.to }}</button>
-      </form>
-      {% endif %}{% endfor %}
-    </div>
-    {% endif %}
     {% endif %}
 
     {# Auto-update toggle — submits the OPPOSITE of the current state. #}

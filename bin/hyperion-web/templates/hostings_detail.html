@@ -399,7 +399,7 @@
   <span class="meta-chip kind">
     {% if wp_status.is_some() %}
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20l9-5-9-5-9 5 9 5z"/><path d="M12 12l9-5-9-5-9 5 9 5z"/></svg>
-      <strong>WordPress</strong>{% if let Some(wp) = wp_status %} {{ wp.wp_version }}{% endif %}
+      <strong>WordPress</strong>{% if let Some(wp) = wp_status %} {{ wp.wp_version }} · <a href="#wp-updates">updates</a>{% endif %}
     {% else if detail.kind == "reverse_proxy" %}
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>
       <strong>Reverse proxy</strong>
@@ -1573,6 +1573,7 @@
   <h2>WordPress</h2>
   <div class="panel-links">
     {% if wp_status.is_some() %}<a href="https://{{ detail.domain }}/wp-admin" target="_blank" rel="noopener noreferrer">wp-admin ↗</a>{% endif %}
+    {% if wp_status.is_some() %}<a href="#wp-updates">Update WordPress ↓</a>{% endif %}
     <a href="/vulns" data-role-min="admin">Updates across the cluster →</a>
   </div>
   <p>
@@ -1655,8 +1656,28 @@
 {# Checks: one row each, every one lazy (`intersect once`, not `load` — a
    hidden tab must not pay for a probe or a wp-cli run the operator never
    looks at). Each partial renders a whole `.chk-row` carrying the same id as
-   its placeholder, and re-renders itself by that id. Site health leads:
-   when the site is down with a fatal, everything else here is secondary. #}
+   its placeholder, and re-renders itself by that id. Updates lead the tab —
+   "update WordPress" is what most visits here are for, and the head links
+   to it; in the checks group site health leads: when the site is down with
+   a fatal, everything else there is secondary. #}
+{% if wp_status.is_some() %}
+{# Updates ("is anything outdated?") and integrity ("has anything been
+   changed?") — lazy for the same reason, only more so: the integrity scan
+   hashes every core and plugin file against wordpress.org. #}
+<div class="group wp-checks" id="wp-updates">
+  <div class="ghead">Updates &amp; integrity</div>
+  <div class="chk-row" id="vuln-panel"
+       hx-get="/hostings/{{ detail.id.as_str() }}/vuln-panel"
+       hx-trigger="intersect once" hx-swap="outerHTML">
+    <div class="chk-head"><span class="chk-dot"></span><h3 class="chk-name">Updates</h3><span class="chk-sum"><span class="spinner-inline"></span> Checking…</span></div>
+  </div>
+  <div class="chk-row" id="integrity-card"
+       hx-get="/hostings/{{ detail.id.as_str() }}/integrity-panel"
+       hx-trigger="intersect once" hx-swap="outerHTML">
+    <div class="chk-head"><span class="chk-dot"></span><h3 class="chk-name">Integrity &amp; malware</h3><span class="chk-sum"><span class="spinner-inline"></span> Verifying files…</span></div>
+  </div>
+</div>
+
 <div class="group wp-checks" id="wp-checks">
   <div class="ghead">Health &amp; checks <span class="ghead-note">each re-checks on demand</span></div>
   <div class="chk-row" id="fatal-card"
@@ -1685,24 +1706,6 @@
        hx-get="/hostings/{{ detail.id.as_str() }}/regguard-panel"
        hx-trigger="intersect once" hx-swap="outerHTML">
     <div class="chk-head"><span class="chk-dot"></span><h3 class="chk-name">Sign-up spam guard</h3><span class="chk-sum"><span class="spinner-inline"></span> Reading…</span></div>
-  </div>
-</div>
-
-{% if wp_status.is_some() %}
-{# Updates ("is anything outdated?") and integrity ("has anything been
-   changed?") — lazy for the same reason, only more so: the integrity scan
-   hashes every core and plugin file against wordpress.org. #}
-<div class="group wp-checks" id="wp-updates">
-  <div class="ghead">Updates &amp; integrity</div>
-  <div class="chk-row" id="vuln-panel"
-       hx-get="/hostings/{{ detail.id.as_str() }}/vuln-panel"
-       hx-trigger="intersect once" hx-swap="outerHTML">
-    <div class="chk-head"><span class="chk-dot"></span><h3 class="chk-name">Updates</h3><span class="chk-sum"><span class="spinner-inline"></span> Checking…</span></div>
-  </div>
-  <div class="chk-row" id="integrity-card"
-       hx-get="/hostings/{{ detail.id.as_str() }}/integrity-panel"
-       hx-trigger="intersect once" hx-swap="outerHTML">
-    <div class="chk-head"><span class="chk-dot"></span><h3 class="chk-name">Integrity &amp; malware</h3><span class="chk-sum"><span class="spinner-inline"></span> Verifying files…</span></div>
   </div>
 </div>
 
