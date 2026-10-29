@@ -204,6 +204,37 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         self.wp_mail_self_check(sel).await
     }
 
+    /// Record the `message_size_limit` postfix runs with now (`limit`, from
+    /// postconf) and return when it last went up, if it ever did.
+    /// `None` from postconf is not a limit and changes nothing.
+    pub(super) async fn note_size_limit(&self, limit: Option<u64>) -> Option<i64> {
+        let prev: Option<SizeLimitSeen> =
+            hyperion_state::node_kv::get(&self.pool, MAIL_SIZE_LIMIT_SEEN_KV)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|raw| serde_json::from_str(&raw).ok());
+        let seen = match limit.and_then(|b| size_limit_seen_next(prev, b, now_secs())) {
+            Some(next) => {
+                if let Ok(json) = serde_json::to_string(&next) {
+                    if let Err(e) = hyperion_state::node_kv::set(
+                        &self.pool,
+                        MAIL_SIZE_LIMIT_SEEN_KV,
+                        &json,
+                        now_secs(),
+                    )
+                    .await
+                    {
+                        tracing::warn!(error = %e, "mail: size limit change not recorded");
+                    }
+                }
+                Some(next)
+            }
+            None => prev,
+        };
+        seen.map(|s| s.raised_at).filter(|&at| at > 0)
+    }
+
     /// Everything we can say about one site's outgoing mail.
     ///
     /// Reads only — the repair is [`Self::wp_mail_repair`]. Reported through
@@ -359,6 +390,22 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .as_ref()
             .and_then(|p| p.stderr.last())
             .is_some_and(|l| wpmail::is_size_refusal(l));
+        let limit = if too_big {
+            hyperion_adapters::postfix::message_size_limit().await
+        } else {
+            None
+        };
+        // The limit went up after every failure counted above: those
+        // messages were refused at the old limit, and nothing since says the
+        // new one is too small. Re-check reads the same logs, so without this
+        // the card could not tell "raised, done" from "still too big".
+        let raised_after = if too_big {
+            self.note_size_limit(limit)
+                .await
+                .filter(|&at| wpmail::failures_since(&lines, at) == 0)
+        } else {
+            None
+        };
 
         // Which plugin, if any, has taken `wp_mail()` over. Listed rather
         // than judged: one with working credentials is the owner's choice.
@@ -415,7 +462,16 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                  Most recent: {}",
                 lines.last().cloned().unwrap_or_default()
             );
-            let (label, detail_text) = if local && too_big {
+            let (label, detail_text) = if local && raised_after.is_some() {
+                (
+                    "Earlier messages were too big for this server",
+                    format!(
+                        "These sends were refused for their size before this server's limit \
+                         was raised, and none has failed since. The messages themselves were \
+                         not delivered — whoever filled in the form has to send again. {counts}"
+                    ),
+                )
+            } else if local && too_big {
                 (
                     "Messages from this site are too big for this server",
                     format!(
@@ -456,7 +512,13 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             push(
                 "wp_mail_failures",
                 label,
-                if recent > 0 { "error" } else { "warn" },
+                if raised_after.is_some() {
+                    "info"
+                } else if recent > 0 {
+                    "error"
+                } else {
+                    "warn"
+                },
                 detail_text,
                 if takeover_pending { "site_repair" } else { "" },
             );
@@ -476,8 +538,25 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     format!("{}.{said}", probe.problems.join("; ")),
                     if probe.fixable() { "site_repair" } else { "" },
                 );
+            } else if let Some(at) = raised_after {
+                push(
+                    "wp_mail_transport",
+                    "The size limit was raised after these refusals",
+                    "info",
+                    format!(
+                        "Postfix here now takes messages up to {}. Hyperion saw the limit go up \
+                         at {}, after the last refusal above, and nothing has been refused \
+                         since. To confirm, send the form again with the same attachment: a new \
+                         refusal would mean the message is bigger still (attachments get about \
+                         three quarters of the limit).{said}",
+                        describe_size_limit(limit),
+                        chrono::DateTime::from_timestamp(at, 0)
+                            .map(|t| t.format("%Y-%m-%d %H:%M UTC").to_string())
+                            .unwrap_or_else(|| at.to_string())
+                    ),
+                    "",
+                );
             } else if too_big {
-                let limit = hyperion_adapters::postfix::message_size_limit().await;
                 push(
                     "wp_mail_transport",
                     "A message was over this server's size limit",
@@ -487,9 +566,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                          attachments get about three quarters of that; this site sent a bigger \
                          one — almost always a form with an attachment. Raise the limit under \
                          Settings → Mail → Largest message for this node (25 MB is what most \
-                         receivers accept), or cap the form's upload size. A limit raised after \
-                         that send does not clear this at once: the failures above age out, and \
-                         a new one means the message was bigger still.{said}",
+                         receivers accept), or cap the form's upload size. Once the limit is \
+                         raised these refusals are reported as dealt with; a new one after that \
+                         means the message was bigger still.{said}",
                         describe_size_limit(limit)
                     ),
                     "mail_size",
@@ -801,6 +880,50 @@ pub(super) const WP_MAIL_OVERRIDE_KV_KEY: &str = "wp_mail_override";
 /// operator just dealt with, and counting them took mail straight back off
 /// the SMTP plugin on the next tick after it was handed back.
 pub(super) const WP_MAIL_OVERRIDE_CHANGED_KV_KEY: &str = "wp_mail_override_changed_at";
+/// `node_kv` key: postfix's `message_size_limit` as this node last saw it,
+/// and when it last went UP ([`SizeLimitSeen`], JSON). A size refusal
+/// recorded before that is one the operator has already dealt with; without
+/// the time the card had no way to tell it from a message that is still too
+/// big, and kept the raised limit's "fix" red for a week.
+pub(super) const MAIL_SIZE_LIMIT_SEEN_KV: &str = "mail_size_limit_seen";
+
+/// What [`MAIL_SIZE_LIMIT_SEEN_KV`] holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(super) struct SizeLimitSeen {
+    /// `message_size_limit` in bytes, `0` = unlimited.
+    pub(super) bytes: u64,
+    /// Unix seconds it was first seen higher than before; `0` = never raised
+    /// (or lowered since, which makes every refusal relevant again).
+    pub(super) raised_at: i64,
+}
+
+/// The next [`SizeLimitSeen`] after looking at the limit postfix runs with
+/// now, or `None` when nothing changed and nothing needs writing.
+///
+/// "Seen" rather than "set": the panel's save notes it at once, but a limit
+/// raised by hand, or applied at agent start, is only noticed the next time
+/// somebody looks — and dated then, which is never EARLIER than the change,
+/// so a refusal is never written off by a raise that came after it.
+///
+/// The first look on a node has nothing to compare with. A limit above
+/// postfix's default was raised by somebody at some point before now, so it
+/// is dated now; the default itself was never raised.
+pub(super) fn size_limit_seen_next(
+    prev: Option<SizeLimitSeen>,
+    bytes: u64,
+    now: i64,
+) -> Option<SizeLimitSeen> {
+    // Unlimited is the largest limit there is.
+    let rank = |b: u64| if b == 0 { u64::MAX } else { b };
+    let raised_at = match prev {
+        Some(p) if p.bytes == bytes => return None,
+        Some(p) if rank(bytes) > rank(p.bytes) => now,
+        Some(_) => 0,
+        None if rank(bytes) > hyperion_adapters::postfix::DEFAULT_MESSAGE_SIZE_LIMIT => now,
+        None => 0,
+    };
+    Some(SizeLimitSeen { bytes, raised_at })
+}
 
 /// The shim every PHP-FPM pool has as its `sendmail_path`. The mail test
 /// runs through it when present so the diagnostic and production share a

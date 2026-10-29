@@ -197,3 +197,74 @@ fn size_limit_is_described_in_settings_units() {
     assert!(describe_size_limit(Some(0)).contains("no limit"));
     assert!(!describe_size_limit(None).contains("default"));
 }
+
+/// A raise is dated when it is seen; a lowering makes every refusal count
+/// again; looking twice at the same limit writes nothing.
+#[test]
+fn size_limit_raise_is_dated_and_a_lowering_undoes_it() {
+    use super::super::wp_mail::{size_limit_seen_next, SizeLimitSeen};
+    const MIB: u64 = 1024 * 1024;
+    let at = |bytes, raised_at| SizeLimitSeen { bytes, raised_at };
+    // First look: the default was never raised, anything above it was.
+    assert_eq!(
+        size_limit_seen_next(None, 10_240_000, 100),
+        Some(at(10_240_000, 0))
+    );
+    assert_eq!(
+        size_limit_seen_next(None, 30 * MIB, 100),
+        Some(at(30 * MIB, 100))
+    );
+    assert_eq!(
+        size_limit_seen_next(None, 0, 100),
+        Some(at(0, 100)),
+        "unlimited"
+    );
+    // Unchanged: nothing to write, the old date stands.
+    assert_eq!(
+        size_limit_seen_next(Some(at(30 * MIB, 100)), 30 * MIB, 500),
+        None
+    );
+    // Up, including to unlimited: dated now.
+    assert_eq!(
+        size_limit_seen_next(Some(at(10_240_000, 0)), 30 * MIB, 500),
+        Some(at(30 * MIB, 500))
+    );
+    assert_eq!(
+        size_limit_seen_next(Some(at(30 * MIB, 100)), 0, 500),
+        Some(at(0, 500))
+    );
+    // Down, including from unlimited: no raise to write refusals off with.
+    assert_eq!(
+        size_limit_seen_next(Some(at(30 * MIB, 100)), 20 * MIB, 500),
+        Some(at(20 * MIB, 0))
+    );
+    assert_eq!(
+        size_limit_seen_next(Some(at(0, 100)), 50 * MIB, 500),
+        Some(at(50 * MIB, 0))
+    );
+}
+
+/// The stamp survives in `node_kv`: a later look at the same limit keeps the
+/// date of the raise, and postconf failing to answer changes nothing.
+#[tokio::test]
+async fn size_limit_raise_is_remembered_on_the_node() {
+    let pool = open_memory().await.expect("memory db");
+    let s = svc(pool.clone(), MockAdapterPort::new());
+    assert_eq!(s.note_size_limit(Some(10_240_000)).await, None, "default");
+    assert_eq!(s.note_size_limit(None).await, None, "unreadable");
+    let raised = s
+        .note_size_limit(Some(30 * 1024 * 1024))
+        .await
+        .expect("raised");
+    assert!(raised > 0);
+    assert_eq!(
+        s.note_size_limit(Some(30 * 1024 * 1024)).await,
+        Some(raised)
+    );
+    assert_eq!(s.note_size_limit(None).await, Some(raised));
+    assert_eq!(
+        s.note_size_limit(Some(20 * 1024 * 1024)).await,
+        None,
+        "lowered"
+    );
+}

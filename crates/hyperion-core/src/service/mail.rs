@@ -766,6 +766,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         hyperion_adapters::postfix::ensure_message_size_limit(size_limit_mb)
             .await
             .map_err(|e| RpcError::Internal_with(format!("postfix message size: {e}")))?;
+        // Dated now, while the operator's save is what changed it: the mail
+        // card writes off size refusals recorded before a raise.
+        self.note_size_limit(hyperion_adapters::postfix::message_size_limit().await)
+            .await;
         match relay_cfg.as_ref() {
             Some(cfg) if use_smart_host => {
                 hyperion_adapters::postfix::ensure_relay_config(cfg)
