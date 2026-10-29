@@ -660,6 +660,68 @@ pub fn smtp_plugins_in(active: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// The message part of one failure-log line (`<ts>\t<to>\t<message>`).
+pub fn failure_message(line: &str) -> &str {
+    line.splitn(3, '\t').nth(2).unwrap_or("").trim()
+}
+
+/// Did PHP's `mail()` itself refuse this send?
+///
+/// "Could not instantiate mail function" is PHPMailer's text for `mail()`
+/// returning false: PHP ran `sendmail_path` (the Hyperion wrapper, then
+/// sendmail, then postfix) and got a failure back. That is the SERVER's
+/// half of the chain. Rewriting the plugin does not touch it, and taking
+/// mail off an SMTP plugin sends through exactly this path — so a card that
+/// offers either as the fix for it offers a button that does nothing.
+pub fn is_local_transport_failure(line: &str) -> bool {
+    failure_message(line)
+        .to_ascii_lowercase()
+        .contains("could not instantiate mail function")
+}
+
+/// What one pool's workers wrote to stderr from the mail chain, newest last.
+///
+/// PHP's `mail()` only learns sendmail's exit code; the REASON — postdrop
+/// refusing the queue, postfix being down, the wrapper missing — goes to
+/// the worker's stderr, which FPM (`catch_workers_output = yes`) logs as
+/// `[date] WARNING: [pool <name>] child <pid> said into stderr: "<text>"`.
+/// Only lines from the mail chain are kept: a site's own stderr is not
+/// evidence about its mail.
+pub fn sendmail_stderr_for_pool(fpm_log: &str, pool: &str, limit: usize) -> Vec<String> {
+    const CHAIN: &[&str] = &[
+        "sendmail",
+        "postdrop",
+        "postfix",
+        "site-mail-wrapper",
+        "mail_queue_enter",
+        "maildrop",
+    ];
+    let tag = format!("[pool {pool}] ");
+    let lines: Vec<String> = fpm_log
+        .lines()
+        .filter(|l| l.contains(&tag) && l.contains("said into stderr"))
+        .filter(|l| {
+            let lower = l.to_ascii_lowercase();
+            CHAIN.iter().any(|w| lower.contains(w))
+        })
+        .map(|l| l.trim().to_string())
+        .collect();
+    let skip = lines.len().saturating_sub(limit);
+    lines.into_iter().skip(skip).collect()
+}
+
+/// The last `max` bytes of a root-owned log, or `None` when it cannot be
+/// read. Opened without following links like every other log read here.
+pub fn log_tail(path: &Path, max: u64) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = crate::fs::open_no_follow(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    file.seek(SeekFrom::Start(len.saturating_sub(max))).ok()?;
+    let mut buf = Vec::new();
+    file.take(max).read_to_end(&mut buf).ok()?;
+    Some(String::from_utf8_lossy(&buf).into_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -968,5 +1030,56 @@ mod failure_log_tests {
         assert_eq!(got, FailureLog::Unreadable);
         assert!(!got.is_read());
         assert!(got.lines().is_empty());
+    }
+
+    /// "Could not instantiate mail function" is PHP's own mail() failing —
+    /// the server's path — and is told apart from an SMTP plugin's refusal.
+    #[test]
+    fn instantiate_failures_are_the_servers_path() {
+        let local = "2026-10-29T12:49:22+00:00\tsponzoring@example.cz\tCould not instantiate mail function.";
+        assert!(is_local_transport_failure(local));
+        assert_eq!(
+            failure_message(local),
+            "Could not instantiate mail function."
+        );
+        let smtp = "2026-10-29T12:49:22+00:00\ta@example.cz\tSMTP Error: Could not authenticate.";
+        assert!(!is_local_transport_failure(smtp));
+        // A recipient that merely contains the words is not the message.
+        assert!(!is_local_transport_failure(
+            "2026-10-29T12:49:22+00:00\tCould not instantiate mail function\tboom"
+        ));
+        assert!(!is_local_transport_failure("garbage"));
+    }
+
+    /// Only this pool's lines, only from the mail chain, newest last — a
+    /// pool whose name is a prefix of another must not borrow its lines.
+    #[test]
+    fn sendmail_stderr_is_this_pools_mail_chain_only() {
+        let log = "\
+[29-Oct-2026 12:49:22] WARNING: [pool web_a] child 11 said into stderr: \"postdrop: warning: mail_queue_enter: create file maildrop/1.2: Permission denied\"
+[29-Oct-2026 12:49:23] WARNING: [pool web_ab] child 12 said into stderr: \"sendmail: fatal: no recipients\"
+[29-Oct-2026 12:49:24] WARNING: [pool web_a] child 11 said into stderr: \"PHP Notice: something else\"
+[29-Oct-2026 12:49:25] NOTICE: [pool web_a] child 13 started
+[29-Oct-2026 12:50:00] WARNING: [pool web_a] child 11 said into stderr: \"sendmail: fatal: web_a(5001): queue file write error\"
+";
+        let got = sendmail_stderr_for_pool(log, "web_a", 5);
+        assert_eq!(got.len(), 2, "{got:?}");
+        assert!(got[0].contains("postdrop"));
+        assert!(got[1].contains("queue file write error"));
+        assert_eq!(sendmail_stderr_for_pool(log, "web_a", 1).len(), 1);
+        assert!(sendmail_stderr_for_pool(log, "web_a", 1)[0].contains("12:50:00"));
+    }
+
+    #[test]
+    fn log_tail_reads_only_the_end() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let p = dir.path().join("php8.3-fpm.log");
+        std::fs::write(&p, "first line\nsecond line\n").expect("write");
+        assert_eq!(log_tail(&p, 12).as_deref(), Some("second line\n"));
+        assert_eq!(
+            log_tail(&p, 4096).as_deref(),
+            Some("first line\nsecond line\n")
+        );
+        assert_eq!(log_tail(&dir.path().join("missing.log"), 10), None);
     }
 }

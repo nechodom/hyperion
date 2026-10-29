@@ -100,3 +100,85 @@ async fn wp_mail_override_switch_rewrites_the_module() {
         .await
         .is_err());
 }
+
+/// A site whose PHP `mail()` itself fails ("Could not instantiate mail
+/// function") while Hyperion already sends in the SMTP plugin's place: the
+/// plugin is current and the takeover is done, so "Configure" has nothing
+/// left to do about those failures. The card must say where the failure is
+/// — the server's mail path — and not offer a button that re-renders the
+/// same card.
+#[tokio::test]
+async fn php_mail_failing_is_reported_as_the_servers_path_not_a_repair() {
+    use hyperion_adapters::wpmail;
+    let pool = open_memory().await.expect("memory db");
+    let s = svc(pool.clone(), MockAdapterPort::new());
+    let site = tempfile::tempdir().expect("tmp");
+    let root = site.path().join("htdocs");
+    std::fs::create_dir_all(root.join("wp-content")).expect("wp-content");
+    std::fs::create_dir_all(site.path().join("logs")).expect("logs");
+    let suid = system_users::insert(
+        &pool,
+        "web_spol_cz",
+        5002,
+        "/home/web_spol_cz",
+        "/bin/bash",
+        now_secs(),
+    )
+    .await
+    .expect("user");
+    let id = HostingId::new_v7();
+    hostings::insert(
+        &pool,
+        &id,
+        "spol.cz",
+        suid,
+        None,
+        &root.to_string_lossy(),
+        now_secs(),
+        None,
+    )
+    .await
+    .expect("hosting");
+    let sel = HostingSelector::Id(id.clone());
+    let taken_over = now_secs() - 3_600;
+    hyperion_state::hosting_kv::set(
+        &pool,
+        id.as_str(),
+        WP_MAIL_FORCE_LOCAL_KV_KEY,
+        &taken_over.to_string(),
+        taken_over,
+    )
+    .await
+    .expect("kv");
+    let ts = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S+00:00");
+    std::fs::write(
+        wpmail::failure_log_path(&root.to_string_lossy()).expect("log path"),
+        format!("{ts}\tsponzoring@spol.cz\tCould not instantiate mail function.\n"),
+    )
+    .expect("log");
+
+    let report = s.wp_mail_repair(sel).await.expect("repair");
+    let failures = report
+        .items
+        .iter()
+        .find(|i| i.id == "wp_mail_failures")
+        .expect("failures item");
+    assert_eq!(failures.severity, "error", "{failures:?}");
+    assert!(failures.label.contains("PHP mail()"), "{failures:?}");
+    assert!(
+        failures.detail.contains("same path"),
+        "the takeover is named as no help: {failures:?}"
+    );
+    assert_eq!(
+        failures.fix, "",
+        "the repair cannot change PHP's mail(), so it must not be offered for it"
+    );
+    let transport = report
+        .items
+        .iter()
+        .find(|i| i.id == "wp_mail_transport")
+        .expect("the server's mail path is probed");
+    // The button shows only when the probe found something the repair can
+    // put back (postfix stopped, postdrop permissions) — never for nothing.
+    assert_eq!(report.has_site_repair(), transport.fix == "site_repair");
+}

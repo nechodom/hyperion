@@ -339,6 +339,34 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let week = now_secs() - 7 * 86_400;
         let recent = wpmail::failures_since(&lines, day);
         let weekly = wpmail::failures_since(&lines, week);
+        // PHP's own mail() refused the newest one: the server's path, which
+        // neither the plugin nor a takeover changes.
+        let local = weekly > 0
+            && lines
+                .last()
+                .is_some_and(|l| wpmail::is_local_transport_failure(l));
+        let since_takeover = forced_at.map_or(0, |at| wpmail::failures_since(&lines, at));
+
+        // Which plugin, if any, has taken `wp_mail()` over. Listed rather
+        // than judged: one with working credentials is the owner's choice.
+        let active: Vec<String> =
+            match hyperion_adapters::wpcli::plugin_list(detail.system_user.trim(), &root).await {
+                Ok((plugins, _)) => plugins
+                    .into_iter()
+                    .filter(|p| p.status.starts_with("active"))
+                    .map(|p| p.slug)
+                    .collect(),
+                // wp-cli failing is its own problem and is reported by the other
+                // WordPress cards; here it only means we cannot name the plugin.
+                Err(_) => Vec::new(),
+            };
+        let smtp = wpmail::smtp_plugins_in(&active);
+        // The one thing the repair can do about failures themselves: take
+        // mail off a failing SMTP plugin. Offering the button for anything
+        // else is a button that re-renders the same card — which is how
+        // "Configure" came to look broken on a site whose mail() was failing.
+        let takeover_pending =
+            weekly > 0 && !local && forced_at.is_none() && policy.pins_from() && !smtp.is_empty();
         if matches!(log, wpmail::FailureLog::Unreadable) {
             // "We could not read the record" is not "nothing has failed".
             // Rendering the second for the first is how a site whose log we
@@ -369,33 +397,91 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 "",
             );
         } else {
+            let counts = format!(
+                "{weekly} failed send(s) in the last 7 days ({recent} in the last 24 h). \
+                 Most recent: {}",
+                lines.last().cloned().unwrap_or_default()
+            );
+            let (label, detail_text) = if local {
+                (
+                    "PHP mail() on this server is failing",
+                    format!(
+                        "\"Could not instantiate mail function\" means PHP handed the message to \
+                         this server's sendmail and got a failure back — the server's mail path \
+                         (Hyperion's wrapper, sendmail, postfix), not the site or an SMTP plugin, \
+                         so rewriting the mail plugin cannot fix it{}; what the server itself \
+                         says is below. {counts}",
+                        if forced_at.is_some() {
+                            ", and Hyperion sending in the plugin's place goes through that same path"
+                        } else {
+                            ""
+                        }
+                    ),
+                )
+            } else if since_takeover > 0 {
+                (
+                    "WordPress could not send",
+                    format!(
+                        "{since_takeover} of these since Hyperion took sending over from the SMTP \
+                         plugin, so the plugin's credentials are not the cause — this server's own \
+                         mail path is; what the server itself says is below. {counts}"
+                    ),
+                )
+            } else {
+                ("WordPress could not send", counts)
+            };
             push(
                 "wp_mail_failures",
-                "WordPress could not send",
+                label,
                 if recent > 0 { "error" } else { "warn" },
-                format!(
-                    "{weekly} failed send(s) in the last 7 days ({recent} in the last 24 h). \
-                     Most recent: {}",
-                    lines.last().cloned().unwrap_or_default()
-                ),
-                "site_repair",
+                detail_text,
+                if takeover_pending { "site_repair" } else { "" },
             );
         }
 
-        // Which plugin, if any, has taken `wp_mail()` over. Listed rather
-        // than judged: one with working credentials is the owner's choice.
-        let active: Vec<String> =
-            match hyperion_adapters::wpcli::plugin_list(detail.system_user.trim(), &root).await {
-                Ok((plugins, _)) => plugins
-                    .into_iter()
-                    .filter(|p| p.status.starts_with("active"))
-                    .map(|p| p.slug)
-                    .collect(),
-                // wp-cli failing is its own problem and is reported by the other
-                // WordPress cards; here it only means we cannot name the plugin.
-                Err(_) => Vec::new(),
-            };
-        let smtp = wpmail::smtp_plugins_in(&active);
+        // When sends fail on the server's side, say what the server says:
+        // the failure log only ever holds PHPMailer's one-line summary.
+        if local || since_takeover > 0 {
+            let probe = wp_mail_transport_probe(&detail).await;
+            let said = probe
+                .stderr
+                .last()
+                .map(|l| format!(" Last thing the mail chain said for this site: {l}"))
+                .unwrap_or_default();
+            if !probe.problems.is_empty() {
+                push(
+                    "wp_mail_transport",
+                    "This server's mail path is broken",
+                    "error",
+                    format!("{}.{said}", probe.problems.join("; ")),
+                    if probe.fixable() { "site_repair" } else { "" },
+                );
+            } else if !said.is_empty() {
+                push(
+                    "wp_mail_transport",
+                    "Sendmail refused this site's mail",
+                    "warn",
+                    format!(
+                        "The wrapper and sendmail are installed and postfix is running.{said} \
+                         Postfix's own log (`journalctl -u postfix@-`) has the rest."
+                    ),
+                    "",
+                );
+            } else {
+                push(
+                    "wp_mail_transport",
+                    "This server's mail path is in place",
+                    "info",
+                    "The wrapper and sendmail are installed, postdrop can queue, and postfix is \
+                     running, and nothing from the mail chain is in this site's PHP-FPM log. If \
+                     the failures above are older than a fix, they age out; if new ones appear, \
+                     send a test from Settings → Mail and read `journalctl -u postfix@-`."
+                        .into(),
+                    "",
+                );
+            }
+        }
+
         if !smtp.is_empty() {
             push(
                 "wp_mail_smtp_plugin",
@@ -419,7 +505,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                         String::new()
                     }
                 ),
-                if weekly > 0 { "site_repair" } else { "" },
+                if takeover_pending { "site_repair" } else { "" },
             );
         }
         if let Some(at) = forced_at {
@@ -460,7 +546,41 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     ) -> Result<hyperion_types::FtpCheckReport, RpcError> {
         let detail = self.get(sel.clone()).await?;
         self.wp_mail_apply(&detail).await?;
+        self.wp_mail_transport_heal(&detail).await;
         self.wp_mail_self_check(sel).await
+    }
+
+    /// Put back the two pieces of the server's mail path a repair can put
+    /// back without guessing: postfix stopped, and postdrop without the
+    /// setgid bit that lets a site user queue mail. Anything else the
+    /// self-check names for a person to fix.
+    ///
+    /// Only from the operator's click, never the five-minute tick: starting
+    /// a stopped MTA is a node-wide act, and somebody may have stopped it.
+    async fn wp_mail_transport_heal(&self, detail: &HostingDetail) {
+        let probe = wp_mail_transport_probe(detail).await;
+        let mut done: Vec<&str> = Vec::new();
+        if probe.postdrop_perms {
+            match hyperion_adapters::cmd::run(POSTFIX_BIN, &["set-permissions"]).await {
+                Ok(_) => done.push("postfix set-permissions"),
+                Err(e) => tracing::warn!(error = %e, "wp mail: postfix set-permissions failed"),
+            }
+        }
+        if probe.postfix_down {
+            match hyperion_adapters::cmd::run("systemctl", &["start", "postfix"]).await {
+                Ok(_) => done.push("systemctl start postfix"),
+                Err(e) => tracing::warn!(error = %e, "wp mail: postfix did not start"),
+            }
+        }
+        if !done.is_empty() {
+            self.append_audit(
+                "hosting.wp_mail.transport_heal",
+                Some(detail.id.as_str()),
+                &serde_json::json!({ "domain": detail.domain, "ran": done }).to_string(),
+                "ok",
+            )
+            .await;
+        }
     }
 
     /// The repair itself, against a detail we already hold. Returns whether
@@ -495,7 +615,14 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let since = (now_secs() - 7 * 86_400).max(changed_at);
         // Unreadable is not "failing": taking mail off a working SMTP plugin
         // because we could not open a log file would be acting on nothing.
-        let failing = wpmail::failures_since(failures.lines(), since) > 0;
+        let failing = wpmail::failures_since(failures.lines(), since) > 0
+            // PHP's own mail() failing is not the SMTP plugin's doing, and the
+            // takeover sends through that same mail(): overriding the owner's
+            // choice — and alerting about it — would change nothing.
+            && !failures
+                .lines()
+                .last()
+                .is_some_and(|l| wpmail::is_local_transport_failure(l));
         // Never while rewriting is switched off: that site chose its SMTP
         // server, and its failures are for the card to report.
         if failing && forced_at.is_none() && policy.pins_from() {
@@ -641,3 +768,98 @@ pub(super) const WP_MAIL_OVERRIDE_CHANGED_KV_KEY: &str = "wp_mail_override_chang
 /// runs through it when present so the diagnostic and production share a
 /// code path.
 pub(super) const SITE_MAIL_WRAPPER: &str = "/usr/local/lib/hyperion/site-mail-wrapper";
+
+const SENDMAIL_BIN: &str = "/usr/sbin/sendmail";
+const POSTDROP_BIN: &str = "/usr/sbin/postdrop";
+const POSTFIX_BIN: &str = "/usr/sbin/postfix";
+/// Where Debian's PHP-FPM writes `php<ver>-fpm.log`.
+const FPM_LOG_DIR: &str = "/var/log";
+
+/// Where the server's half of one site's mail stands: what PHP's `mail()`
+/// runs when the site sends.
+pub(super) struct MailTransportProbe {
+    /// What is wrong, in the operator's words. Empty ⇒ in place.
+    pub(super) problems: Vec<String>,
+    /// postfix is installed and not running — the repair starts it.
+    pub(super) postfix_down: bool,
+    /// postdrop lost its setgid bit — the repair runs `postfix set-permissions`.
+    pub(super) postdrop_perms: bool,
+    /// The mail chain's own words from this pool's FPM log, newest last.
+    pub(super) stderr: Vec<String>,
+}
+
+impl MailTransportProbe {
+    /// Is there something here the repair button can actually do?
+    pub(super) fn fixable(&self) -> bool {
+        self.postfix_down || self.postdrop_perms
+    }
+}
+
+/// Look at the server's mail path the way the site's PHP uses it, without
+/// sending anything.
+pub(super) async fn wp_mail_transport_probe(detail: &HostingDetail) -> MailTransportProbe {
+    use std::os::unix::fs::PermissionsExt;
+    let mut probe = MailTransportProbe {
+        problems: Vec::new(),
+        postfix_down: false,
+        postdrop_perms: false,
+        stderr: Vec::new(),
+    };
+    let mode = |p: &'static str| async move {
+        tokio::fs::metadata(p)
+            .await
+            .ok()
+            .map(|m| m.permissions().mode())
+    };
+    match mode(SITE_MAIL_WRAPPER).await {
+        None => probe.problems.push(format!(
+            "{SITE_MAIL_WRAPPER}, which every site's PHP runs as its sendmail, is missing — \
+             update.sh reinstalls it"
+        )),
+        Some(m) if m & 0o111 == 0 => probe.problems.push(format!(
+            "{SITE_MAIL_WRAPPER} is not executable, so PHP cannot run it — update.sh \
+             reinstalls it"
+        )),
+        Some(_) => {}
+    }
+    if mode(SENDMAIL_BIN).await.is_none() {
+        probe.problems.push(format!(
+            "postfix is not installed ({SENDMAIL_BIN} is missing)"
+        ));
+    } else {
+        if mode(POSTDROP_BIN).await.is_some_and(|m| m & 0o2000 == 0) {
+            probe.postdrop_perms = true;
+            probe.problems.push(format!(
+                "{POSTDROP_BIN} has lost its setgid bit, so a site user cannot put mail in the \
+                 queue"
+            ));
+        }
+        if let Ok(out) = tokio::process::Command::new(POSTFIX_BIN)
+            .arg("status")
+            .output()
+            .await
+        {
+            if !out.status.success() {
+                probe.postfix_down = true;
+                let said = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                probe.problems.push(if said.is_empty() {
+                    "postfix is not running".to_string()
+                } else {
+                    format!("postfix is not running ({said})")
+                });
+            }
+        }
+    }
+    if let Some(ver) = detail.php_version {
+        let path = std::path::Path::new(FPM_LOG_DIR).join(format!("{}.log", ver.service_name()));
+        let pool = detail.system_user.trim().to_string();
+        if let Ok(Some(text)) = tokio::task::spawn_blocking(move || {
+            hyperion_adapters::wpmail::log_tail(&path, 512 * 1024)
+        })
+        .await
+        {
+            probe.stderr = hyperion_adapters::wpmail::sendmail_stderr_for_pool(&text, &pool, 3);
+        }
+    }
+    probe
+}

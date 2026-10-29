@@ -42,7 +42,7 @@
     <div class="chk-fixes">
       <form hx-post="/hostings/wp/mail-repair" hx-target="#wpmail-panel" hx-swap="outerHTML"
             data-confirm-title="Configure WordPress mail"
-            data-confirm-body="Installs the Hyperion mail plugin, which records any send that fails and — unless rewriting is switched off below — keeps the From address on this domain. If mail has actually been failing and an SMTP plugin is handling it, Hyperion also takes sending back — and tells you it did."
+            data-confirm-body="Installs the Hyperion mail plugin, which records any send that fails and — unless rewriting is switched off below — keeps the From address on this domain. If mail has actually been failing and an SMTP plugin is handling it, Hyperion also takes sending back — and tells you it did. If this server's postfix is stopped, or site users have lost the right to queue mail, that is put back too."
             data-confirm-confirm-label="Configure">
         <input type="hidden" name="_csrf" value="{{ csrf_repair }}">
         <input type="hidden" name="selector" value="{{ selector }}">
