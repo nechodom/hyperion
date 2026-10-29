@@ -1,0 +1,13 @@
+-- 087_backup_pre_update_delete_at.sql
+--
+-- A pre-update backup (migration 083) whose batch went in cleanly is kept for
+-- 24 hours AFTER the updates finished, then deleted — not for a number of days
+-- counted from when the backup started. The backup list shows that moment, so
+-- it is stored rather than derived.
+--
+--   delete_at  unix seconds the run is deleted at; 0 = no deadline (every
+--              ordinary backup, and a pre-update backup that is still held).
+--
+-- Rows released before this column existed read 0 with held = 0; the code
+-- treats those as due 24 hours after they finished.
+ALTER TABLE backup_runs ADD COLUMN delete_at INTEGER NOT NULL DEFAULT 0;

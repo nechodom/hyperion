@@ -195,6 +195,14 @@ async fn scheduler_pass(svc: &Svc) {
             tracing::warn!(rows = n, "reaped stale backup runs");
         }
     }
+    // Backups taken before automatic updates: gone 24h after a clean
+    // batch, one per site. Here and not only after a backup, so the 24h
+    // holds on a site that takes no other backup by then.
+    match svc.pre_update_backups_expire_tick().await {
+        Ok(n) if n > 0 => tracing::info!(pruned = n, "pre-update backups expired"),
+        Ok(_) => {}
+        Err(e) => tracing::warn!(error=%e, "pre-update backup expiry failed"),
+    }
     // Brute-force scan + auto-ban each tick.
     match svc.fail2ban_tick().await {
         Ok(n) if n > 0 => tracing::info!(banned = n, "fail2ban: new bans"),

@@ -78,11 +78,6 @@ pub(crate) fn read_backup_retention_section(
             .get("keep_latest_n")
             .and_then(|x| x.as_integer())
             .unwrap_or(d.keep_latest_n),
-        pre_update_keep_days: sec
-            .get("pre_update_keep_days")
-            .and_then(|x| x.as_integer())
-            .filter(|n| *n > 0)
-            .unwrap_or(d.pre_update_keep_days),
     }
 }
 
@@ -328,15 +323,6 @@ pub(super) fn parse_agent_section_fields(
                 let n = parse_int(v)?;
                 if !(1..=1000).contains(&n) {
                     return Err(bad(format!("keep_latest_n must be 1..=1000, got {n}")));
-                }
-                crate::config_persist::FieldValue::Int(n)
-            }
-            ("backup_retention", "pre_update_keep_days") => {
-                let n = parse_int(v)?;
-                if !(1..=3650).contains(&n) {
-                    return Err(bad(format!(
-                        "pre_update_keep_days must be 1..=3650, got {n}"
-                    )));
                 }
                 crate::config_persist::FieldValue::Int(n)
             }

@@ -1337,6 +1337,21 @@ pub fn fmt_future(ts: &i64) -> String {
     }
 }
 
+/// Time left until `ts`, in the trash's words: "in 23h 10m", "in 2d 4h".
+/// Once past, "any minute now" — what acts on it runs every five minutes.
+pub fn fmt_until(ts: &i64) -> String {
+    let left = *ts - hyperion_types::now_secs();
+    if left <= 0 {
+        return "any minute now".into();
+    }
+    format!("in {}", crate::handlers::trash::fmt_remaining(&left))
+}
+
+/// `ts` as a day and clock time in the panel host's zone: "30 Oct 03:12".
+pub fn fmt_day_time(ts: &i64) -> String {
+    crate::handlers::jobs::fmt_local(*ts, "%-d %b %H:%M")
+}
+
 /// Truncate a long opaque ID to the first 10 chars + ellipsis. Used for
 /// hosting IDs in the activity feed where a full ULID/UUIDv7 line-wraps
 /// ugly. Caller is expected to put the full ID in a `title="…"`.

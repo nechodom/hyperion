@@ -96,10 +96,11 @@ fn backup_due_at_holds_the_time_of_day() {
     ));
 }
 
-/// Pre-update backups live by their own rule: a clean one goes after
-/// `pre_update_keep_days`, a held one never by age, and none of them is
-/// one of the site's newest N — so a nightly update batch cannot push a
-/// real scheduled backup past the floor.
+/// Pre-update backups live by their own rule: a site keeps ONE (every run
+/// older than the newest successful one goes, held or not), a clean one goes
+/// at its `delete_at` — 24 hours after its updates — a held one never by age,
+/// and none of them is one of the site's newest N, so a nightly update batch
+/// cannot push a real scheduled backup past the floor.
 #[tokio::test]
 async fn prune_gives_pre_update_backups_their_own_retention() {
     use hyperion_state::backups;
@@ -109,7 +110,7 @@ async fn prune_gives_pre_update_backups_their_own_retention() {
     let cfg = dir.path().join("agent.toml");
     std::fs::write(
         &cfg,
-        "[backup_retention]\nmax_age_days = 30\nkeep_latest_n = 2\npre_update_keep_days = 14\n",
+        "[backup_retention]\nmax_age_days = 30\nkeep_latest_n = 2\n",
     )
     .expect("cfg");
     s.agent_config_path = Some(cfg);
@@ -118,26 +119,34 @@ async fn prune_gives_pre_update_backups_their_own_retention() {
         .get(HostingSelector::Domain(Domain::parse("pre.cz").unwrap()))
         .await
         .expect("get");
-    let day = 86_400;
+    let hour = 3_600;
+    let day = 24 * hour;
     let now = now_secs();
-    let mk = |age_days: i64, purpose: &'static str, held: bool| {
+    // A run started `age` seconds ago: ok (or failed), with a purpose.
+    let mk = |age: i64, purpose: &'static str, held: bool, ok: bool| {
         let pool = pool.clone();
         let id = detail.id.clone();
         async move {
-            let at = now - age_days * day;
+            let at = now - age;
             let r = backups::start(&pool, &id, "local", at)
                 .await
                 .expect("start");
-            backups::mark_ok(
-                &pool,
-                r,
-                &format!("/nonexistent/pre.cz-{at}.tar.gz"),
-                None,
-                1,
-                at + 1,
-            )
-            .await
-            .expect("ok");
+            if ok {
+                backups::mark_ok(
+                    &pool,
+                    r,
+                    &format!("/nonexistent/pre.cz-{at}.tar.gz"),
+                    None,
+                    1,
+                    at + 1,
+                )
+                .await
+                .expect("ok");
+            } else {
+                backups::mark_failed(&pool, r, "disk full", at + 1)
+                    .await
+                    .expect("failed");
+            }
             if !purpose.is_empty() {
                 backups::set_purpose(&pool, r, purpose, held)
                     .await
@@ -146,41 +155,122 @@ async fn prune_gives_pre_update_backups_their_own_retention() {
             r
         }
     };
+    let left = || {
+        let pool = pool.clone();
+        let id = detail.id.clone();
+        async move {
+            backups::list_for(&pool, &id, 100)
+                .await
+                .expect("list")
+                .into_iter()
+                .map(|r| r.id)
+                .collect::<std::collections::HashSet<i64>>()
+        }
+    };
     let pu = backups::PURPOSE_PRE_UPDATE;
-    let fresh_clean = mk(1, pu, false).await;
-    let old_held = mk(100, pu, true).await;
-    let old_clean = mk(20, pu, false).await;
-    let ord_a = mk(40, "", false).await;
-    let ord_b = mk(41, "", false).await;
-    let ord_c = mk(42, "", false).await;
-
-    let pruned = s.prune_old_backups(&detail.id).await.expect("prune");
-    let left: std::collections::HashSet<i64> = backups::list_for(&pool, &detail.id, 100)
-        .await
-        .expect("list")
-        .into_iter()
-        .map(|r| r.id)
-        .collect();
-    assert_eq!(pruned, 2, "left: {left:?}");
-    assert!(left.contains(&fresh_clean), "clean, within 14 days");
-    assert!(left.contains(&old_held), "held: never by age");
-    assert!(!left.contains(&old_clean), "clean, past 14 days");
-    assert!(
-        left.contains(&ord_a) && left.contains(&ord_b),
-        "the newest 2 ORDINARY backups"
-    );
-    assert!(!left.contains(&ord_c), "third ordinary, past 30 days");
-
-    // Read back what the sweep writes, through the same row the list sees.
-    backups::set_held(&pool, old_held, false)
+    let failed_new = mk(hour, pu, false, false).await;
+    let current = mk(2 * hour, pu, true, true).await;
+    backups::release_pre_update(&pool, current, now + hour)
         .await
         .expect("release");
-    let row = backups::get_by_id(&pool, old_held)
+    let older_held = mk(3 * day, pu, true, true).await;
+    let older_clean = mk(5 * day, pu, false, true).await;
+    let ord_a = mk(40 * day, "", false, true).await;
+    let ord_b = mk(41 * day, "", false, true).await;
+    let ord_c = mk(42 * day, "", false, true).await;
+
+    let pruned = s.prune_old_backups(&detail.id).await.expect("prune");
+    let kept = left().await;
+    assert_eq!(pruned, 3, "left: {kept:?}");
+    assert!(
+        kept.contains(&current),
+        "the newest one, before its delete_at"
+    );
+    assert!(kept.contains(&failed_new), "a failed run is listed for 24h");
+    assert!(!kept.contains(&older_held), "only one is kept, held or not");
+    assert!(!kept.contains(&older_clean), "only one is kept");
+    assert!(
+        kept.contains(&ord_a) && kept.contains(&ord_b),
+        "the newest 2 ORDINARY backups"
+    );
+    assert!(!kept.contains(&ord_c), "third ordinary, past 30 days");
+
+    // The list says when it goes.
+    let row = backups::get_by_id(&pool, current)
         .await
         .expect("get")
         .expect("row");
     assert!(row.is_pre_update() && !row.held);
-    assert_eq!(s.prune_old_backups(&detail.id).await.expect("prune 2"), 1);
+    assert_eq!(row.pre_update_delete_at(), Some(now + hour));
+
+    // Past its delete_at, the expiry sweep takes it — and only it: an
+    // ordinary backup past the age rule waits for the site's next backup.
+    let ord_d = mk(50 * day, "", false, true).await;
+    backups::release_pre_update(&pool, current, now - 1)
+        .await
+        .expect("release past");
+    assert_eq!(s.pre_update_backups_expire_tick().await.expect("tick"), 1);
+    let kept = left().await;
+    assert!(!kept.contains(&current), "deleted at its delete_at");
+    assert!(
+        kept.contains(&ord_d),
+        "the sweep leaves ordinary backups alone"
+    );
+    assert!(kept.contains(&failed_new), "still inside its 24h");
+
+    // The newest one held: never by age.
+    let held = mk(100 * day, pu, true, true).await;
+    assert_eq!(
+        s.prune_pre_update_backups(&detail.id).await.expect("held"),
+        0
+    );
+    assert!(left().await.contains(&held));
+}
+
+/// A pre-update row released before `delete_at` existed (0) goes 24 hours
+/// after it finished; a failed run 24 hours after it started.
+#[test]
+fn pre_update_delete_at_falls_back_to_finish_plus_a_day() {
+    use hyperion_state::backups::{BackupRun, PRE_UPDATE_KEEP_SECS, PURPOSE_PRE_UPDATE};
+    let base = BackupRun {
+        started_at: 1_000,
+        finished_at: Some(1_500),
+        purpose: PURPOSE_PRE_UPDATE.into(),
+        ..super::bk_run(1, "ok", true, "", true)
+    };
+    assert_eq!(
+        base.pre_update_delete_at(),
+        Some(1_500 + PRE_UPDATE_KEEP_SECS)
+    );
+    let set = BackupRun {
+        delete_at: 9_999,
+        ..base.clone()
+    };
+    assert_eq!(set.pre_update_delete_at(), Some(9_999));
+    let held = BackupRun {
+        held: true,
+        ..base.clone()
+    };
+    assert_eq!(held.pre_update_delete_at(), None);
+    let failed = BackupRun {
+        state: "failed".into(),
+        held: true,
+        ..base.clone()
+    };
+    assert_eq!(
+        failed.pre_update_delete_at(),
+        Some(1_000 + PRE_UPDATE_KEEP_SECS)
+    );
+    let running = BackupRun {
+        state: "running".into(),
+        ..base.clone()
+    };
+    assert_eq!(running.pre_update_delete_at(), None);
+    let ordinary = BackupRun {
+        purpose: String::new(),
+        ..base
+    };
+    assert_eq!(ordinary.pre_update_delete_at(), None);
 }
 
 /// The Backups card's reason comes from the OWNING node's policy: with the

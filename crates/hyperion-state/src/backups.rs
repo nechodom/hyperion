@@ -56,19 +56,47 @@ pub struct BackupRun {
     /// [`PURPOSE_PRE_UPDATE`] for the copy taken before an automatic update
     /// batch (migration 083). Such a run has its own retention.
     pub purpose: String,
-    /// Keep until deleted by hand (migration 083). Set on a pre-update backup
-    /// whose batch did not finish cleanly — see the migration.
+    /// No deadline (migration 083). Set on a pre-update backup from the
+    /// moment it exists and cleared once its batch went in cleanly; one whose
+    /// batch did not stays until the next pre-update backup replaces it.
     pub held: bool,
+    /// When a released pre-update backup is deleted, unix seconds (migration
+    /// 087). 0 = no deadline on record — see [`BackupRun::pre_update_delete_at`].
+    pub delete_at: i64,
 }
 
 /// `backup_runs.purpose` of the full backup taken before an update batch.
 pub const PURPOSE_PRE_UPDATE: &str = "pre-update";
+
+/// How long a pre-update backup stays once every update in its batch went in
+/// cleanly, counted from when the batch finished. Also how long a FAILED
+/// pre-update run stays listed.
+pub const PRE_UPDATE_KEEP_SECS: i64 = 24 * 3600;
 
 impl BackupRun {
     /// Taken before an automatic update batch (own retention, never counted
     /// among a site's newest backups).
     pub fn is_pre_update(&self) -> bool {
         self.purpose == PURPOSE_PRE_UPDATE
+    }
+
+    /// When this pre-update backup is deleted: `None` for an ordinary backup,
+    /// a running one, and a held one (no deadline). A row released before
+    /// `delete_at` existed is due [`PRE_UPDATE_KEEP_SECS`] after it finished.
+    pub fn pre_update_delete_at(&self) -> Option<i64> {
+        if !self.is_pre_update() || self.state == "running" {
+            return None;
+        }
+        if self.state == "failed" {
+            return Some(self.started_at + PRE_UPDATE_KEEP_SECS);
+        }
+        if self.held {
+            return None;
+        }
+        if self.delete_at > 0 {
+            return Some(self.delete_at);
+        }
+        Some(self.finished_at.unwrap_or(self.started_at) + PRE_UPDATE_KEEP_SECS)
     }
 
     /// Is there a record that this run has an off-site copy: the FTP push
@@ -115,6 +143,8 @@ struct BackupRunRow {
     purpose: Option<String>,
     #[sqlx(default)]
     held: Option<i64>,
+    #[sqlx(default)]
+    delete_at: Option<i64>,
 }
 
 impl From<BackupRunRow> for BackupRun {
@@ -139,6 +169,7 @@ impl From<BackupRunRow> for BackupRun {
             s3_ok_targets: parse_target_list(r.s3_ok_targets.as_deref()),
             purpose: r.purpose.unwrap_or_default(),
             held: r.held.unwrap_or(0) != 0,
+            delete_at: r.delete_at.unwrap_or(0),
         }
     }
 }
@@ -146,7 +177,7 @@ impl From<BackupRunRow> for BackupRun {
 const SELECT_COLS: &str = "id, hosting_id, target, started_at, finished_at, state, \
      sha256_hex, remote_blob_key, remote_state, remote_error, archive_path, \
      db_dump_path, bytes_total, error_message, no_offsite, local_note, s3_ok_targets, \
-     purpose, held";
+     purpose, held, delete_at";
 
 /// The stored JSON array of S3 target names, sorted and deduplicated. Anything
 /// unreadable is "none on record" — the safe reading, since this list can only
@@ -351,7 +382,7 @@ pub async fn set_purpose(
     Ok(())
 }
 
-/// Hold a run (keep until deleted by hand) or release it to its retention.
+/// Hold a run (no deadline) or release it to its retention.
 pub async fn set_held(pool: &SqlitePool, id: i64, held: bool) -> Result<(), StateError> {
     sqlx::query("UPDATE backup_runs SET held = ? WHERE id = ?")
         .bind(held as i64)
@@ -359,6 +390,34 @@ pub async fn set_held(pool: &SqlitePool, id: i64, held: bool) -> Result<(), Stat
         .execute(pool)
         .await?;
     Ok(())
+}
+
+/// Release a pre-update backup whose batch went in cleanly: no longer held,
+/// deleted at `delete_at` (migration 087).
+pub async fn release_pre_update(
+    pool: &SqlitePool,
+    id: i64,
+    delete_at: i64,
+) -> Result<(), StateError> {
+    sqlx::query("UPDATE backup_runs SET held = 0, delete_at = ? WHERE id = ?")
+        .bind(delete_at)
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Hostings with at least one pre-update backup on record — what the expiry
+/// sweep walks, so a released one goes on time even on a site that takes no
+/// other backup.
+pub async fn hostings_with_pre_update(pool: &SqlitePool) -> Result<Vec<HostingId>, StateError> {
+    let rows: Vec<(String,)> = sqlx::query_as(
+        "SELECT DISTINCT hosting_id FROM backup_runs WHERE purpose = ? ORDER BY hosting_id",
+    )
+    .bind(PURPOSE_PRE_UPDATE)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(|(h,)| HostingId(h)).collect())
 }
 
 /// Successful local backups with no off-site copy on record (no FTP `ok` /
