@@ -29,6 +29,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     from_name: cfg.from_name.clone(),
                     security: cfg.security.clone(),
                     default_to: self.email_default_to.clone().unwrap_or_default(),
+                    // Not in the boot copy; 0 = postfix's own value.
+                    message_size_limit_mb: 0,
                 },
                 None => hyperion_types::EmailConfigView {
                     default_to: self.email_default_to.clone().unwrap_or_default(),

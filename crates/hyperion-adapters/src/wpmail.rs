@@ -679,6 +679,19 @@ pub fn is_local_transport_failure(line: &str) -> bool {
         .contains("could not instantiate mail function")
 }
 
+/// Did postfix refuse this message for its size?
+///
+/// `sendmail: fatal: <user>(<uid>): message file too big` is postfix's
+/// sendmail hitting `message_size_limit` (it caps its own file size at that
+/// limit, so the write fails with EFBIG). Nothing on the path is broken —
+/// this one message was larger than the server accepts, almost always a
+/// form with an attachment — so it must not be reported as a broken mail
+/// chain, and the fix is the limit, not a repair.
+pub fn is_size_refusal(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    lower.contains("message file too big") || lower.contains("file too large")
+}
+
 /// What one pool's workers wrote to stderr from the mail chain, newest last.
 ///
 /// PHP's `mail()` only learns sendmail's exit code; the REASON — postdrop
@@ -1068,6 +1081,23 @@ mod failure_log_tests {
         assert!(got[1].contains("queue file write error"));
         assert_eq!(sendmail_stderr_for_pool(log, "web_a", 1).len(), 1);
         assert!(sendmail_stderr_for_pool(log, "web_a", 1)[0].contains("12:50:00"));
+    }
+
+    /// The shape of a real refusal: a contact form with an
+    /// attachment over postfix's 10 MB default.
+    #[test]
+    fn size_refusal_is_told_apart_from_a_broken_chain() {
+        assert!(is_size_refusal(
+            "[29-Oct-2026 13:49:22] WARNING: [pool web_spol_cz] child 1836860 said into \
+             stderr: \"sendmail: fatal: web_spol_cz(1012): message file too big\""
+        ));
+        assert!(is_size_refusal("postdrop: fatal: write: File too large"));
+        assert!(!is_size_refusal(
+            "sendmail: fatal: web_a(5001): queue file write error"
+        ));
+        assert!(!is_size_refusal(
+            "postdrop: warning: mail_queue_enter: create file maildrop/1.2: Permission denied"
+        ));
     }
 
     #[test]

@@ -119,6 +119,14 @@ waf_threshold  = 20   # ban-counted WAF refusals (per site; 3..=1000)
 #   kernel can otherwise send from an address whose PTR does not match the
 #   HELO name and which no SPF record lists.
 #
+# message_size_limit_mb = 0
+#   postfix `message_size_limit`, in MiB, relay or direct. 0 (default)
+#   leaves postfix's own value alone (10 MB unless changed by hand). Sites
+#   whose forms send attachments hit 10 MB fast — the limit counts the
+#   encoded message, so attachments get about three quarters of it — and
+#   PHP's mail() fails with "sendmail: fatal: ... message file too big".
+#   25 matches what most receivers accept. Max 100.
+#
 # What Hyperion CANNOT do for you, and what direct delivery depends on:
 #   - The PTR (reverse DNS) for this node's IP must equal its `myhostname`.
 #     It is set wherever the IP is managed (the provider's console), not

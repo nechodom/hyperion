@@ -335,6 +335,7 @@ async fn main() -> anyhow::Result<()> {
             inet_protocols: Some(cfg.email.inet_protocols.clone()).filter(|s| !s.trim().is_empty()),
             bind_address: Some(cfg.email.bind_address.clone()).filter(|s| !s.trim().is_empty()),
         },
+        cfg.email.message_size_limit_mb,
     );
     // Master-RPC signing key — auto-generated on first start, mode
     // 0600. Only the master node really needs it (it's the one

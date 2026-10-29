@@ -516,6 +516,76 @@ pub async fn ensure_sender_canonical(
     Ok(())
 }
 
+/// The largest `[email] message_size_limit_mb` accepted. Receivers stop
+/// well before this (Gmail and most others at 25 MB), so a bigger limit
+/// only moves the refusal from this server to theirs, as a bounce.
+pub const MAX_MESSAGE_SIZE_MB: u32 = 100;
+
+/// Postfix's built-in `message_size_limit` (10 240 000 bytes), what a node
+/// runs with until somebody changes it.
+pub const DEFAULT_MESSAGE_SIZE_LIMIT: u64 = 10_240_000;
+
+/// Set postfix's `message_size_limit` to `mb` MiB.
+///
+/// `0` leaves main.cf alone: whatever the node runs with — postfix's 10 MB
+/// default, or a value an operator set by hand — stays. This runs on every
+/// agent start, so "not set in the panel" must never mean "reset", or an
+/// upgrade would quietly undo a limit raised on the command line.
+///
+/// Postfix sizes the message as it sits in the queue, after encoding, so
+/// attachments grow by about a third before they meet this limit.
+///
+/// `mailbox_size_limit` and `virtual_mailbox_limit` are raised alongside
+/// when they are set and smaller: local(8) and virtual(8) refuse to start
+/// with a mailbox limit below the message limit, which would turn a bigger
+/// message limit into no local delivery at all. `0` there means unlimited
+/// and is left alone.
+pub async fn ensure_message_size_limit(mb: u32) -> Result<(), AdapterError> {
+    if mb == 0 {
+        return Ok(());
+    }
+    if mb > MAX_MESSAGE_SIZE_MB {
+        return Err(AdapterError::Other(format!(
+            "postfix message_size_limit: {mb} MB is over the {MAX_MESSAGE_SIZE_MB} MB ceiling"
+        )));
+    }
+    let bytes = u64::from(mb) * 1024 * 1024;
+    cmd::run(
+        "/usr/sbin/postconf",
+        &["-e", &format!("message_size_limit={bytes}")],
+    )
+    .await?;
+    for key in ["mailbox_size_limit", "virtual_mailbox_limit"] {
+        if let Some(cur) = postconf_bytes(key).await {
+            if cur != 0 && cur < bytes {
+                cmd::run("/usr/sbin/postconf", &["-e", &format!("{key}={bytes}")]).await?;
+            }
+        }
+    }
+    // A reload is enough: sendmail and postdrop read main.cf on every
+    // invocation, and the daemons pick the new limit up on reload.
+    cmd::run("/usr/bin/systemctl", &["reload", "postfix"]).await?;
+    Ok(())
+}
+
+/// The `message_size_limit` postfix runs with now, in bytes (`0` =
+/// unlimited). `None` when postconf could not be asked — which is not the
+/// default, and must not be shown as one.
+pub async fn message_size_limit() -> Option<u64> {
+    postconf_bytes("message_size_limit").await
+}
+
+/// One numeric main.cf parameter, as postfix resolves it (default included).
+async fn postconf_bytes(key: &str) -> Option<u64> {
+    let out = tokio::process::Command::new("/usr/sbin/postconf")
+        .args(["-h", key])
+        .output()
+        .await
+        .ok()
+        .filter(|o| o.status.success())?;
+    String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+}
+
 /// Undo `ensure_relay_config`. Called when `[email] enabled = false`
 /// in agent.toml — we leave postfix running in default-Internet-Site
 /// mode rather than tearing it down completely, so the operator can
@@ -593,6 +663,17 @@ mod tests {
             .await
             .expect_err("must reject");
         assert!(format!("{e}").contains("invalid chars"), "{e}");
+    }
+
+    /// Zero is "leave main.cf alone", and the ceiling is checked before
+    /// postconf is run — neither may touch a machine running the tests.
+    #[tokio::test]
+    async fn message_size_limit_zero_is_a_no_op_and_the_ceiling_holds() {
+        ensure_message_size_limit(0).await.expect("0 = untouched");
+        let e = ensure_message_size_limit(MAX_MESSAGE_SIZE_MB + 1)
+            .await
+            .expect_err("must reject");
+        assert!(format!("{e}").contains("ceiling"), "{e}");
     }
 
     /// A map line is parsed by postfix on whitespace, so anything that

@@ -55,6 +55,8 @@ struct PageTpl<'a> {
     test_to: String,
     /// The node's Mail delivery group on Service health.
     services_href: String,
+    /// Ceiling for the Largest message field; the agent refuses above it.
+    max_message_size_mb: u32,
 }
 
 /// The picker: the master first, then the workers as the Nodes page lists
@@ -132,6 +134,7 @@ pub async fn get_mail(
         picker: picker(&nodes, target.as_deref()),
         test_to: mail_health::first_address(&email.default_to),
         services_href: mail_health::services_url(target.as_deref(), ""),
+        max_message_size_mb: hyperion_core::POSTFIX_MAX_MESSAGE_SIZE_MB,
         email,
         email_error,
     };
@@ -227,6 +230,7 @@ mod tests {
             picker: picker(&nodes, selected),
             test_to: crate::handlers::mail_health::first_address(&email.default_to),
             services_href: "/services?node=local#mail-delivery".into(),
+            max_message_size_mb: 100,
             email,
             email_error,
         }
@@ -248,7 +252,7 @@ mod tests {
         assert!(!html.contains("email-autodetect"));
         assert!(html.contains("no answer within 4 s"));
         // Every card is still there for links and save redirects to land on.
-        for id in ["smtp-relay", "mail-test", "mail-health"] {
+        for id in ["smtp-relay", "mail-size", "mail-test", "mail-health"] {
             assert!(html.contains(&format!("id=\"{id}\"")), "{id}");
         }
 
@@ -266,6 +270,27 @@ mod tests {
         assert!(html.contains("name=\"target_node\" value=\"local\""));
         // The recipients belong to Alerts; this form must not post them.
         assert!(!html.contains("name=\"default_to\""));
+        // The size limit is its own form, posting only its own key to the
+        // shown node and returning to its own card.
+        let size = html
+            .split("<form")
+            .find(|f| f.contains("name=\"message_size_limit_mb\""))
+            .and_then(|f| f.split("</form>").next())
+            .expect("size form");
+        assert!(size.contains("name=\"target_node\" value=\"local\""));
+        assert!(size.contains("name=\"_return_tab\" value=\"mail-size\""));
+        assert!(!size.contains("name=\"smtp_host\""));
+        assert!(!size.contains("name=\"enabled\""));
+        assert!(html.contains("postfix's own"));
+        let raised = render(
+            true,
+            EmailConfigView {
+                message_size_limit_mb: 25,
+                ..off.clone()
+            },
+            None,
+        );
+        assert!(raised.contains(">25 MB<"));
 
         // A worker with its relay on: the test, aimed at that worker, and
         // no probe of the master's localhost.

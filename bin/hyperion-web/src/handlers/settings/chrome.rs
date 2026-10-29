@@ -115,6 +115,7 @@ pub const CARDS: &[(&str, &str)] = &[
     ("preview-address", "https"),
     ("preview-wildcard", "https"),
     ("smtp-relay", "mail"),
+    ("mail-size", "mail"),
     ("mail-test", "mail"),
     ("mail-health", "mail"),
     ("slack", "alerts"),
