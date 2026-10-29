@@ -1445,7 +1445,21 @@ pub(crate) async fn detect_wp_install_on_disk(root_dir: &str) -> Option<String> 
     }
     // wp-includes/version.php — has the version string.
     let version_php = root.join("wp-includes").join("version.php");
-    let Ok(body) = tokio::fs::read_to_string(&version_php).await else {
+    // Root reading inside the tenant's tree: never through a symlink, only a
+    // regular file, and only its head. `/dev/zero` or a FIFO linked in here
+    // would otherwise grow or hang the read in the root agent.
+    let read = tokio::task::spawn_blocking(move || {
+        use std::io::Read;
+        let mut body = String::new();
+        hyperion_adapters::fs::open_no_follow(&version_php)
+            .ok()?
+            .take(64 * 1024)
+            .read_to_string(&mut body)
+            .ok()?;
+        Some(body)
+    })
+    .await;
+    let Ok(Some(body)) = read else {
         // wp-config exists but core is missing — this is a partial
         // install. Treat as "no WP" rather than fake a version,
         // so the operator's install button stays available to

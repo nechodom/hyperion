@@ -2312,8 +2312,9 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
     async fn wp_mail_repair(
         &self,
         sel: HostingSelector,
+        heal_transport: bool,
     ) -> Result<hyperion_types::FtpCheckReport, RpcError> {
-        self.svc.wp_mail_repair(sel).await
+        self.svc.wp_mail_repair(sel, heal_transport).await
     }
     async fn wp_mail_autofix_set(
         &self,

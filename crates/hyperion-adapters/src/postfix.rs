@@ -563,8 +563,11 @@ pub async fn ensure_message_size_limit(mb: u32) -> Result<(), AdapterError> {
         }
     }
     // A reload is enough: sendmail and postdrop read main.cf on every
-    // invocation, and the daemons pick the new limit up on reload.
-    cmd::run("/usr/bin/systemctl", &["reload", "postfix"]).await?;
+    // invocation, and the daemons pick the new limit up on reload. `try-`:
+    // a stopped postfix reads it when it starts, and a plain reload of an
+    // inactive unit fails — which ended the node's whole mail reconfigure
+    // before the relay settings saved beside it were applied.
+    cmd::run("/usr/bin/systemctl", &["try-reload-or-restart", "postfix"]).await?;
     Ok(())
 }
 

@@ -97,7 +97,8 @@ fn backup_due_at_holds_the_time_of_day() {
 }
 
 /// Pre-update backups live by their own rule: a site keeps ONE (every run
-/// older than the newest successful one goes, held or not), a clean one goes
+/// older than the newest successful one goes — except the oldest held one,
+/// which outlives a later clean batch by a week), a clean one goes
 /// at its `delete_at` — 24 hours after its updates — a held one never by age,
 /// and none of them is one of the site's newest N, so a nightly update batch
 /// cannot push a real scheduled backup past the floor.
@@ -181,13 +182,16 @@ async fn prune_gives_pre_update_backups_their_own_retention() {
 
     let pruned = s.prune_old_backups(&detail.id).await.expect("prune");
     let kept = left().await;
-    assert_eq!(pruned, 3, "left: {kept:?}");
+    assert_eq!(pruned, 2, "left: {kept:?}");
     assert!(
         kept.contains(&current),
         "the newest one, before its delete_at"
     );
     assert!(kept.contains(&failed_new), "a failed run is listed for 24h");
-    assert!(!kept.contains(&older_held), "only one is kept, held or not");
+    assert!(
+        kept.contains(&older_held),
+        "the copy from before a failed batch, inside its week"
+    );
     assert!(!kept.contains(&older_clean), "only one is kept");
     assert!(
         kept.contains(&ord_a) && kept.contains(&ord_b),
@@ -225,6 +229,94 @@ async fn prune_gives_pre_update_backups_their_own_retention() {
         0
     );
     assert!(left().await.contains(&held));
+}
+
+/// The site's oldest HELD pre-update backup is the last copy from before an
+/// update went wrong. A newer pre-update backup — a batch retried on the
+/// broken site, or a second update started while the first still runs — is a
+/// copy of what that update left, and must not replace it. Held copies in
+/// between are copies of the broken site and go; the oldest goes only once a
+/// later batch went in cleanly and a week has passed.
+#[tokio::test]
+async fn oldest_held_pre_update_backup_is_not_replaced_by_a_copy_of_the_broken_site() {
+    use hyperion_state::backups;
+    let pool = open_memory().await.expect("open");
+    let s = svc(pool.clone(), happy_mocks());
+    s.create(req("held.cz")).await.expect("create");
+    let detail = s
+        .get(HostingSelector::Domain(Domain::parse("held.cz").unwrap()))
+        .await
+        .expect("get");
+    let day = 24 * 3_600;
+    let now = now_secs();
+    let mk = |age: i64, held: bool| {
+        let pool = pool.clone();
+        let id = detail.id.clone();
+        async move {
+            let at = now - age;
+            let r = backups::start(&pool, &id, "local", at)
+                .await
+                .expect("start");
+            backups::mark_ok(
+                &pool,
+                r,
+                &format!("/nonexistent/held-{at}.tar.gz"),
+                None,
+                1,
+                at + 1,
+            )
+            .await
+            .expect("ok");
+            backups::set_purpose(&pool, r, backups::PURPOSE_PRE_UPDATE, held)
+                .await
+                .expect("purpose");
+            r
+        }
+    };
+    let left = || {
+        let pool = pool.clone();
+        let id = detail.id.clone();
+        async move {
+            backups::list_for(&pool, &id, 100)
+                .await
+                .expect("list")
+                .into_iter()
+                .map(|r| r.id)
+                .collect::<std::collections::HashSet<i64>>()
+        }
+    };
+
+    // Night 1 failed (held); night 2 retried on the broken site (held too).
+    let before_failure = mk(2 * day, true).await;
+    let broken_copy = mk(day, true).await;
+    s.prune_pre_update_backups(&detail.id).await.expect("prune");
+    let kept = left().await;
+    assert!(
+        kept.contains(&before_failure),
+        "never replaced by a held copy"
+    );
+    assert!(kept.contains(&broken_copy), "the newest one");
+
+    // Night 3 went in cleanly: the copy in between goes, the one from
+    // before the failure stays for its week.
+    let clean = mk(3_600, true).await;
+    backups::release_pre_update(&pool, clean, now + day)
+        .await
+        .expect("release");
+    s.prune_pre_update_backups(&detail.id).await.expect("prune");
+    let kept = left().await;
+    assert!(kept.contains(&before_failure), "inside its week");
+    assert!(!kept.contains(&broken_copy), "a copy of the broken site");
+    assert!(kept.contains(&clean));
+
+    // A week after it: superseded like any other.
+    let old_failure = mk(8 * day, true).await;
+    s.prune_pre_update_backups(&detail.id).await.expect("prune");
+    let kept = left().await;
+    assert!(
+        !kept.contains(&old_failure),
+        "past its week, after a clean batch"
+    );
 }
 
 /// A pre-update row released before `delete_at` existed (0) goes 24 hours

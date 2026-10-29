@@ -57,8 +57,11 @@ pub struct BackupRun {
     /// batch (migration 083). Such a run has its own retention.
     pub purpose: String,
     /// No deadline (migration 083). Set on a pre-update backup from the
-    /// moment it exists and cleared once its batch went in cleanly; one whose
-    /// batch did not stays until the next pre-update backup replaces it.
+    /// moment it exists and cleared once its batch went in cleanly. The
+    /// site's OLDEST held one — the last copy from before an update went
+    /// wrong — is never replaced by a newer pre-update backup (that one is a
+    /// copy of the broken site) until a later batch went in cleanly and
+    /// [`HELD_PRE_UPDATE_MIN_KEEP_SECS`] passed.
     pub held: bool,
     /// When a released pre-update backup is deleted, unix seconds (migration
     /// 087). 0 = no deadline on record — see [`BackupRun::pre_update_delete_at`].
@@ -72,6 +75,11 @@ pub const PURPOSE_PRE_UPDATE: &str = "pre-update";
 /// cleanly, counted from when the batch finished. Also how long a FAILED
 /// pre-update run stays listed.
 pub const PRE_UPDATE_KEEP_SECS: i64 = 24 * 3600;
+
+/// How long a site's oldest HELD pre-update backup — its batch failed, or is
+/// still going — outlives a later clean batch: time for somebody to notice
+/// the failure and roll back to the copy from before it.
+pub const HELD_PRE_UPDATE_MIN_KEEP_SECS: i64 = 7 * 24 * 3600;
 
 impl BackupRun {
     /// Taken before an automatic update batch (own retention, never counted

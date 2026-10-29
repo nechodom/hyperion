@@ -309,7 +309,9 @@ pub async fn install_wordpress(
 /// itself — which would surface in the locale_regex_* tests below.
 /// `unwrap_or_else(|_| unreachable!(...))` documents that intent.
 static SLUG_RX: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
-    regex::Regex::new(r"^[a-zA-Z0-9_\-]{1,80}$")
+    // Not starting with `-`: the slug is a positional wp-cli argument, and
+    // one like `--skip-plugins` would be read as a flag.
+    regex::Regex::new(r"^[a-zA-Z0-9_][a-zA-Z0-9_\-]{0,79}$")
         .unwrap_or_else(|e| panic!("BUG: SLUG_RX failed to compile: {e}"))
 });
 
@@ -1049,8 +1051,25 @@ pub async fn plugin_action(
         // attacker ADDED to the plugin goes too — not only the ones they
         // changed. Pinned to the installed version: without `--version`,
         // install fetches the latest and the "repair" becomes an upgrade.
+        //
+        // `--skip-plugins --skip-themes` on both: the plugin being repaired
+        // is exactly the code that may now fatal on load (a botched
+        // backdoor), and without them wp-cli boots it and dies before it can
+        // read the version or put the folder back.
         hyperion_types::WpPluginAction::Reinstall => {
-            let raw = run(user, htdocs, &["plugin", "get", slug, "--field=version"]).await?;
+            let raw = run(
+                user,
+                htdocs,
+                &[
+                    "plugin",
+                    "get",
+                    slug,
+                    "--field=version",
+                    "--skip-plugins",
+                    "--skip-themes",
+                ],
+            )
+            .await?;
             let version = parse_plugin_version(&raw).ok_or_else(|| {
                 AdapterError::Other(format!(
                     "couldn't read the installed version of {slug}, so it was not reinstalled"
@@ -1062,6 +1081,8 @@ pub async fn plugin_action(
                 slug.into(),
                 format!("--version={version}"),
                 "--force".into(),
+                "--skip-plugins".into(),
+                "--skip-themes".into(),
             ]
         }
     };

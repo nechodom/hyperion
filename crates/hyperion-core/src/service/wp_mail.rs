@@ -207,14 +207,18 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// Record the `message_size_limit` postfix runs with now (`limit`, from
     /// postconf) and return when it last went up, if it ever did.
     /// `None` from postconf is not a limit and changes nothing.
-    pub(super) async fn note_size_limit(&self, limit: Option<u64>) -> Option<i64> {
+    ///
+    /// `witnessed` is true only when the caller watched the limit go up just
+    /// now (the Settings save); see [`size_limit_seen_next`] for why nothing
+    /// else may date a raise.
+    pub(super) async fn note_size_limit(&self, limit: Option<u64>, witnessed: bool) -> Option<i64> {
         let prev: Option<SizeLimitSeen> =
             hyperion_state::node_kv::get(&self.pool, MAIL_SIZE_LIMIT_SEEN_KV)
                 .await
                 .ok()
                 .flatten()
                 .and_then(|raw| serde_json::from_str(&raw).ok());
-        let seen = match limit.and_then(|b| size_limit_seen_next(prev, b, now_secs())) {
+        let seen = match limit.and_then(|b| size_limit_seen_next(prev, b, now_secs(), witnessed)) {
             Some(next) => {
                 if let Ok(json) = serde_json::to_string(&next) {
                     if let Err(e) = hyperion_state::node_kv::set(
@@ -400,7 +404,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // new one is too small. Re-check reads the same logs, so without this
         // the card could not tell "raised, done" from "still too big".
         let raised_after = if too_big {
-            self.note_size_limit(limit)
+            self.note_size_limit(limit, false)
                 .await
                 .filter(|&at| wpmail::failures_since(&lines, at) == 0)
         } else {
@@ -657,13 +661,19 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     ///    way: take `wp_mail()` back. This one overrides a choice the site
     ///    owner made, so it needs evidence rather than a hunch, and it is
     ///    announced (`notify_admins`) rather than done quietly.
+    ///
+    /// `heal_transport` adds [`Self::wp_mail_transport_heal`]: the caller
+    /// may change this node's settings, not just this one site.
     pub async fn wp_mail_repair(
         &self,
         sel: HostingSelector,
+        heal_transport: bool,
     ) -> Result<hyperion_types::FtpCheckReport, RpcError> {
         let detail = self.get(sel.clone()).await?;
         self.wp_mail_apply(&detail).await?;
-        self.wp_mail_transport_heal(&detail).await;
+        if heal_transport {
+            self.wp_mail_transport_heal(&detail).await;
+        }
         self.wp_mail_self_check(sel).await
     }
 
@@ -672,8 +682,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// setgid bit that lets a site user queue mail. Anything else the
     /// self-check names for a person to fix.
     ///
-    /// Only from the operator's click, never the five-minute tick: starting
-    /// a stopped MTA is a node-wide act, and somebody may have stopped it.
+    /// Only from the operator's click, never the five-minute tick, and only
+    /// for a caller who may change the node's settings: starting a stopped
+    /// MTA is a node-wide act, and somebody may have stopped it on purpose
+    /// (a spam incident), which a site's own tenant must not undo.
     async fn wp_mail_transport_heal(&self, detail: &HostingDetail) {
         let probe = wp_mail_transport_probe(detail).await;
         let mut done: Vec<&str> = Vec::new();
@@ -900,28 +912,24 @@ pub(super) struct SizeLimitSeen {
 /// The next [`SizeLimitSeen`] after looking at the limit postfix runs with
 /// now, or `None` when nothing changed and nothing needs writing.
 ///
-/// "Seen" rather than "set": the panel's save notes it at once, but a limit
-/// raised by hand, or applied at agent start, is only noticed the next time
-/// somebody looks — and dated then, which is never EARLIER than the change,
-/// so a refusal is never written off by a raise that came after it.
-///
-/// The first look on a node has nothing to compare with. A limit above
-/// postfix's default was raised by somebody at some point before now, so it
-/// is dated now; the default itself was never raised.
+/// Only a raise the caller `witnessed` — it read the limit, applied the
+/// panel's value and read it again higher — is dated. A raise merely
+/// noticed later (a hand edit, a value applied at agent start, the first
+/// look on a node) happened at some unknown time BEFORE it was seen, and
+/// dating it "now" would write off refusals made at the new limit in
+/// between. Those are stored undated, which keeps every refusal counting
+/// until it ages out: the card stays red a little longer, never wrongly
+/// green.
 pub(super) fn size_limit_seen_next(
     prev: Option<SizeLimitSeen>,
     bytes: u64,
     now: i64,
+    witnessed: bool,
 ) -> Option<SizeLimitSeen> {
-    // Unlimited is the largest limit there is.
-    let rank = |b: u64| if b == 0 { u64::MAX } else { b };
-    let raised_at = match prev {
-        Some(p) if p.bytes == bytes => return None,
-        Some(p) if rank(bytes) > rank(p.bytes) => now,
-        Some(_) => 0,
-        None if rank(bytes) > hyperion_adapters::postfix::DEFAULT_MESSAGE_SIZE_LIMIT => now,
-        None => 0,
-    };
+    if prev.is_some_and(|p| p.bytes == bytes) {
+        return None;
+    }
+    let raised_at = if witnessed { now } else { 0 };
     Some(SizeLimitSeen { bytes, raised_at })
 }
 

@@ -1023,10 +1023,12 @@ pub trait AgentApi: Send + Sync + 'static {
         &self,
         sel: HostingSelector,
     ) -> Result<hyperion_types::FtpCheckReport, RpcError>;
-    /// Configure it, repair it, then re-check.
+    /// Configure it, repair it, then re-check. `heal_transport` also fixes
+    /// the node's own mail path (node-wide; settings-level callers only).
     async fn wp_mail_repair(
         &self,
         sel: HostingSelector,
+        heal_transport: bool,
     ) -> Result<hyperion_types::FtpCheckReport, RpcError>;
     /// Per-site switch for the automatic repair. Default ON.
     async fn wp_mail_autofix_set(

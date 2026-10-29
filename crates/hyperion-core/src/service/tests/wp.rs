@@ -42,6 +42,21 @@ async fn detect_wp_install_on_disk_returns_none_on_partial_install() {
     assert_eq!(got, None);
 }
 
+/// version.php replaced by a symlink — to another tenant's install, or to
+/// `/dev/zero` to grow root's read without end — is not read through.
+#[tokio::test]
+async fn detect_wp_install_on_disk_does_not_follow_a_symlinked_version_file() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path();
+    std::fs::write(root.join("wp-config.php"), b"<?php ?>").unwrap();
+    std::fs::create_dir_all(root.join("wp-includes")).unwrap();
+    let elsewhere = root.join("elsewhere.php");
+    std::fs::write(&elsewhere, b"<?php\n$wp_version = '6.4.2';\n").unwrap();
+    std::os::unix::fs::symlink(&elsewhere, root.join("wp-includes/version.php")).unwrap();
+    let got = super::detect_wp_install_on_disk(root.to_str().unwrap()).await;
+    assert_eq!(got, None);
+}
+
 /// version.php exists but $wp_version line is missing /
 /// malformed → return Some("unknown") to honestly reflect
 /// "WP is here but we can't tell which version".

@@ -1095,8 +1095,10 @@ pub(super) struct StoredVulnScan {
 }
 
 /// Whether a PRE-UPDATE backup is to be deleted now. A site keeps ONE: any
-/// run older than its newest successful pre-update backup goes, held or not
-/// (`superseded`). The newest one stays while held — its batch did not go in
+/// run older than its newest successful pre-update backup goes
+/// (`superseded`) — except the site's oldest held one, which the caller
+/// does not call superseded until a later batch went in cleanly and
+/// `HELD_PRE_UPDATE_MIN_KEEP_SECS` passed. The newest one stays while held — its batch did not go in
 /// cleanly, or is still going — and once released goes at its `delete_at`,
 /// 24 hours after the updates. A failed run (nothing in it to roll back to)
 /// stays listed for 24 hours. Always false for an ordinary backup, which the

@@ -281,6 +281,11 @@ fn timeout_for_request(req: &Request) -> u64 {
         // "Switch on now" runs the node's whole drift pass inline; each site
         // it corrects can mean a vhost rewrite and an nginx reload.
         Request::PackageEnforceTick => 120,
+        // An update or a reinstall downloads and unpacks the plugin and
+        // boots WordPress around it. On the default 30s a big plugin was
+        // reported as failed while the node kept replacing the folder, and
+        // the re-scan right after read it half-replaced.
+        Request::WpPluginAction { .. } => 300,
         // Move a bundle / install WordPress.
         Request::BackupFetchChunk { .. }
         | Request::HostingMigrationFetchBundleFile { .. }

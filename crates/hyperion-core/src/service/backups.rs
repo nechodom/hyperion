@@ -9,8 +9,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// `pre-update` and HELD from the moment it exists: the sweep releases it
     /// only once every update in the batch went in cleanly, and it is deleted
     /// 24 hours after that. A failed batch — or an agent that died half-way —
-    /// keeps it until the next pre-update backup of the site replaces it: a
-    /// site keeps only one (see `pre_update_due_for_prune`).
+    /// keeps it; a site keeps one pre-update backup plus its oldest held one,
+    /// which only a clean batch and a week replace (see
+    /// `pre_update_due_for_prune`).
     ///
     /// Returns the run id; an error means no usable backup exists and the
     /// caller must not update.
@@ -1326,9 +1327,21 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let keep = retention.keep_latest_n.max(1) as usize;
         let mut pruned = 0u64;
         let mut good_kept = 0usize;
-        // A newer successful pre-update backup has been seen: every older
-        // one is superseded, held or not — a site keeps exactly one.
+        // A newer successful pre-update backup has been seen: older ones are
+        // superseded — a site keeps one, plus the oldest held one below.
         let mut newer_pre_update = false;
+        // ...and one of those newer ones went in cleanly (released).
+        let mut newer_released = false;
+        // The last copy from before an update went wrong (or before one that
+        // is still running). A newer pre-update backup of the same site is a
+        // copy of whatever that update left behind — a nightly batch retried
+        // on a broken site, or a second update clicked while the first is
+        // still going — and must not take its place.
+        let oldest_held = rows
+            .iter()
+            .rev()
+            .find(|r| r.is_pre_update() && r.state == "ok" && r.held)
+            .map(|r| r.id);
         // Newest first. The newest N GOOD backups are kept however old. Failed
         // and running rows used to count towards N, so a run of failures pushed
         // the last good archives past the floor and they were deleted — the
@@ -1341,9 +1354,14 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 // Its own rule, and never one of the site's newest N: a
                 // nightly update batch must not push the real scheduled
                 // backups past the floor.
-                let superseded = newer_pre_update;
+                let superseded = newer_pre_update
+                    && (Some(r.id) != oldest_held
+                        || (newer_released
+                            && r.finished_at.unwrap_or(r.started_at)
+                                <= now - hyperion_state::backups::HELD_PRE_UPDATE_MIN_KEEP_SECS));
                 if r.state == "ok" {
                     newer_pre_update = true;
+                    newer_released |= !r.held;
                 }
                 if !pre_update_due_for_prune(&r, superseded, now) {
                     continue;
@@ -1361,13 +1379,16 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             }
             // A restore (or a push) is reading it right now: pruning it would
             // pull the database dump out from under the restore. The next
-            // prune gets it.
-            if r.archive_path
-                .as_deref()
-                .is_some_and(|p| archive_in_use(std::path::Path::new(p)))
-            {
-                continue;
-            }
+            // prune gets it. Reserved, not just checked, and held until the
+            // row is gone: a restore that starts between a check and the
+            // delete would otherwise lose its dump half-way.
+            let _reservation = match r.archive_path.as_deref() {
+                Some(p) => match try_reserve_drop(std::path::Path::new(p), 0) {
+                    Some(res) => Some(res),
+                    None => continue,
+                },
+                None => None,
+            };
             if let Some(p) = r.archive_path.as_deref() {
                 let _ = tokio::fs::remove_file(p).await;
                 // The run's manifest sits beside its archive and was never

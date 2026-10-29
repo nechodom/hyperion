@@ -157,7 +157,7 @@ async fn php_mail_failing_is_reported_as_the_servers_path_not_a_repair() {
     )
     .expect("log");
 
-    let report = s.wp_mail_repair(sel).await.expect("repair");
+    let report = s.wp_mail_repair(sel, false).await.expect("repair");
     let failures = report
         .items
         .iter()
@@ -198,48 +198,61 @@ fn size_limit_is_described_in_settings_units() {
     assert!(!describe_size_limit(None).contains("default"));
 }
 
-/// A raise is dated when it is seen; a lowering makes every refusal count
-/// again; looking twice at the same limit writes nothing.
+/// Only a raise the caller watched happen is dated; one merely noticed
+/// later (or the first look on a node) is stored undated, since dating it
+/// "now" would write off refusals made at the new limit before it was seen.
+/// A lowering makes every refusal count again; looking twice at the same
+/// limit writes nothing.
 #[test]
-fn size_limit_raise_is_dated_and_a_lowering_undoes_it() {
+fn size_limit_raise_is_dated_only_when_witnessed() {
     use super::super::wp_mail::{size_limit_seen_next, SizeLimitSeen};
     const MIB: u64 = 1024 * 1024;
     let at = |bytes, raised_at| SizeLimitSeen { bytes, raised_at };
-    // First look: the default was never raised, anything above it was.
+    // First look: whatever the limit, nobody saw it go up.
     assert_eq!(
-        size_limit_seen_next(None, 10_240_000, 100),
+        size_limit_seen_next(None, 10_240_000, 100, false),
         Some(at(10_240_000, 0))
     );
     assert_eq!(
-        size_limit_seen_next(None, 30 * MIB, 100),
-        Some(at(30 * MIB, 100))
+        size_limit_seen_next(None, 30 * MIB, 100, false),
+        Some(at(30 * MIB, 0)),
+        "raised at some unknown time before the first look"
     );
+    // The Settings save watched it go up: dated now.
     assert_eq!(
-        size_limit_seen_next(None, 0, 100),
-        Some(at(0, 100)),
-        "unlimited"
+        size_limit_seen_next(None, 30 * MIB, 100, true),
+        Some(at(30 * MIB, 100))
     );
     // Unchanged: nothing to write, the old date stands.
     assert_eq!(
-        size_limit_seen_next(Some(at(30 * MIB, 100)), 30 * MIB, 500),
+        size_limit_seen_next(Some(at(30 * MIB, 100)), 30 * MIB, 500, false),
         None
     );
-    // Up, including to unlimited: dated now.
     assert_eq!(
-        size_limit_seen_next(Some(at(10_240_000, 0)), 30 * MIB, 500),
+        size_limit_seen_next(Some(at(30 * MIB, 100)), 30 * MIB, 500, true),
+        None
+    );
+    // Up, including to unlimited: dated only when witnessed.
+    assert_eq!(
+        size_limit_seen_next(Some(at(10_240_000, 0)), 30 * MIB, 500, true),
         Some(at(30 * MIB, 500))
     );
     assert_eq!(
-        size_limit_seen_next(Some(at(30 * MIB, 100)), 0, 500),
+        size_limit_seen_next(Some(at(30 * MIB, 100)), 0, 500, true),
         Some(at(0, 500))
+    );
+    assert_eq!(
+        size_limit_seen_next(Some(at(10_240_000, 0)), 30 * MIB, 500, false),
+        Some(at(30 * MIB, 0)),
+        "a hand edit noticed later"
     );
     // Down, including from unlimited: no raise to write refusals off with.
     assert_eq!(
-        size_limit_seen_next(Some(at(30 * MIB, 100)), 20 * MIB, 500),
+        size_limit_seen_next(Some(at(30 * MIB, 100)), 20 * MIB, 500, false),
         Some(at(20 * MIB, 0))
     );
     assert_eq!(
-        size_limit_seen_next(Some(at(0, 100)), 50 * MIB, 500),
+        size_limit_seen_next(Some(at(0, 100)), 50 * MIB, 500, false),
         Some(at(50 * MIB, 0))
     );
 }
@@ -250,21 +263,30 @@ fn size_limit_raise_is_dated_and_a_lowering_undoes_it() {
 async fn size_limit_raise_is_remembered_on_the_node() {
     let pool = open_memory().await.expect("memory db");
     let s = svc(pool.clone(), MockAdapterPort::new());
-    assert_eq!(s.note_size_limit(Some(10_240_000)).await, None, "default");
-    assert_eq!(s.note_size_limit(None).await, None, "unreadable");
+    assert_eq!(
+        s.note_size_limit(Some(10_240_000), false).await,
+        None,
+        "default"
+    );
+    assert_eq!(s.note_size_limit(None, false).await, None, "unreadable");
     let raised = s
-        .note_size_limit(Some(30 * 1024 * 1024))
+        .note_size_limit(Some(30 * 1024 * 1024), true)
         .await
         .expect("raised");
     assert!(raised > 0);
     assert_eq!(
-        s.note_size_limit(Some(30 * 1024 * 1024)).await,
+        s.note_size_limit(Some(30 * 1024 * 1024), false).await,
         Some(raised)
     );
-    assert_eq!(s.note_size_limit(None).await, Some(raised));
+    assert_eq!(s.note_size_limit(None, false).await, Some(raised));
     assert_eq!(
-        s.note_size_limit(Some(20 * 1024 * 1024)).await,
+        s.note_size_limit(Some(20 * 1024 * 1024), false).await,
         None,
         "lowered"
+    );
+    assert_eq!(
+        s.note_size_limit(Some(40 * 1024 * 1024), false).await,
+        None,
+        "raised by hand, noticed later: not dated"
     );
 }

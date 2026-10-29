@@ -1859,7 +1859,10 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(r) => Response::WpMailSelfCheck(r),
             Err(e) => Response::Error(e),
         },
-        Request::WpMailRepair { sel } => match api.wp_mail_repair(sel).await {
+        Request::WpMailRepair {
+            sel,
+            heal_transport,
+        } => match api.wp_mail_repair(sel, heal_transport).await {
             Ok(r) => Response::WpMailRepair(r),
             Err(e) => Response::Error(e),
         },
@@ -4106,6 +4109,7 @@ mod tests {
         async fn wp_mail_repair(
             &self,
             _: HostingSelector,
+            _: bool,
         ) -> Result<hyperion_types::FtpCheckReport, RpcError> {
             Ok(Default::default())
         }
