@@ -1834,6 +1834,12 @@ pub enum Request {
     /// take `wp_mail()` back off an SMTP plugin. Re-checks and returns.
     WpMailRepair {
         sel: HostingSelector,
+        /// Also put the node's mail path back (start a stopped postfix,
+        /// `postfix set-permissions`). Node-wide acts, so only for a caller
+        /// allowed to change the node's settings — never a site's tenant.
+        /// `#[serde(default)]`: a pre-field master asks for the site part only.
+        #[serde(default)]
+        heal_transport: bool,
     },
     /// Per-site switch for the automatic version of the above.
     WpMailAutofixSet {

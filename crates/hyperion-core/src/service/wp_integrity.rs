@@ -107,6 +107,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             return Ok(hyperion_types::WpIntegrityScanResult {
                 error: Some(INTEGRITY_ERR_NOT_WORDPRESS.to_string()),
                 scanned_at: now,
+                // A node fact, true or not for this site: left at false the
+                // card would send the operator to install ClamAV again.
+                clamav_installed: integrity::clamav_available(),
                 ..Default::default()
             });
         }

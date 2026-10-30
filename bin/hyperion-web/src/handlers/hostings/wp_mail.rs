@@ -70,9 +70,20 @@ pub async fn get_wpmail_panel(
     // The node the site lives on, once known: the size limit is that
     // node's setting, not the master's.
     let site_node = std::sync::OnceLock::<String>::new();
-    let card = |report: hyperion_types::FtpCheckReport,
+    let card = |mut report: hyperion_types::FtpCheckReport,
                 switches: WpMailSwitches,
                 error: Option<String>| {
+        // The server's mail path is the node's, not the site's: the repair
+        // only puts it back for somebody who may change the node's settings
+        // (see `post_wpmail_repair`), so nobody else is offered a button
+        // that would write the site's half and leave the error standing.
+        if !ctx.can(Capability::SettingsManage) {
+            for item in report.items.iter_mut() {
+                if item.id == "wp_mail_transport" {
+                    item.fix.clear();
+                }
+            }
+        }
         let size_href = match site_node.get() {
             Some(node) if report.has_mail_size_fix() && ctx.can(Capability::SettingsManage) => {
                 Some(format!(
@@ -198,7 +209,12 @@ pub async fn post_wpmail_repair(
     let _ = crate::dispatcher::dispatch_to_node(
         &state,
         owner.as_deref(),
-        Request::WpMailRepair { sel },
+        Request::WpMailRepair {
+            sel,
+            // Starting postfix / fixing postdrop is node-wide: a tenant's
+            // "Configure now" gets its own site's half only.
+            heal_transport: ctx.can(Capability::SettingsManage),
+        },
     )
     .await;
     // Re-render from the node rather than reporting success: a repair the

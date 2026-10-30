@@ -231,8 +231,21 @@ async fn ensure_work_dir(
     site_key: &str,
 ) -> Result<String, AdapterError> {
     let home = git_home(home_dir, site_key);
-    site_mkdir(user, &home).await?;
     let root = format!("{}/{WORK_ROOT}", home_dir.trim_end_matches('/'));
+    // The parent is made 0700 by the mkdir itself and before anything goes
+    // below it. Made 0755 and chmod-ed a step later, another tenant could
+    // `cd` into a site directory in between and keep reading the checkout
+    // from there: a later chmod of the parent does not re-check a cwd.
+    run_site(
+        user,
+        "/",
+        &[],
+        "/bin/mkdir",
+        &["-p", "-m", "0700", "--", &root],
+        LOCAL_TIMEOUT,
+    )
+    .await?;
+    // One an older version made 0755.
     run_site(
         user,
         "/",
@@ -242,6 +255,7 @@ async fn ensure_work_dir(
         LOCAL_TIMEOUT,
     )
     .await?;
+    site_mkdir(user, &home).await?;
     Ok(home)
 }
 
@@ -506,9 +520,7 @@ async fn sync_inner(
     // and the "new" settings would keep deploying the old repository). The
     // URL is rebuilt from the parsed owner/name, so it can never start with
     // `-` and be read as an option.
-    let has_git = tokio::fs::try_exists(format!("{repo_dir}/.git"))
-        .await
-        .unwrap_or(false);
+    let has_git = site_path_is(p.run_as, &home, "-e", &format!("{repo_dir}/.git")).await;
     if !has_git {
         // A half-made checkout (an interrupted first clone) would make every
         // later clone fail with "destination path already exists". Remove it
@@ -568,10 +580,7 @@ async fn sync_inner(
     } else {
         format!("{repo_dir}/{sub}/")
     };
-    if !tokio::fs::try_exists(src.trim_end_matches('/'))
-        .await
-        .unwrap_or(false)
-    {
+    if !site_path_is(p.run_as, &home, "-d", src.trim_end_matches('/')).await {
         return Err(AdapterError::Other(format!(
             "NO_SUBDIR: the branch has no directory {sub:?} to deploy"
         )));
@@ -793,6 +802,23 @@ async fn site_mkdir(user: &str, dir: &str) -> Result<(), AdapterError> {
     )
     .await
     .map(|_| ())
+}
+
+/// `test <test> <path>` as the site user. The checkout is the tenant's tree,
+/// and the repository's own content: root stat-ing a path there follows a
+/// symlink anywhere on the node and tells the tenant, through the deploy's
+/// answer, whether something exists in a directory only root can read.
+async fn site_path_is(user: &str, home: &str, test: &str, path: &str) -> bool {
+    run_site(
+        user,
+        home,
+        &[],
+        "/usr/bin/test",
+        &[test, path],
+        LOCAL_TIMEOUT,
+    )
+    .await
+    .is_ok()
 }
 
 /// `sudo -H -u <user> /usr/bin/env HOME=<home> <env…> <program> <args…>` — the

@@ -763,13 +763,17 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .map(|c| !hyperion_adapters::postfix::host_is_local(&c.smtp_host, &fqdn))
             .unwrap_or(false);
 
+        let before = hyperion_adapters::postfix::message_size_limit().await;
         hyperion_adapters::postfix::ensure_message_size_limit(size_limit_mb)
             .await
             .map_err(|e| RpcError::Internal_with(format!("postfix message size: {e}")))?;
-        // Dated now, while the operator's save is what changed it: the mail
-        // card writes off size refusals recorded before a raise.
-        self.note_size_limit(hyperion_adapters::postfix::message_size_limit().await)
-            .await;
+        // Dated now only when this save is what raised it: the mail card
+        // writes off size refusals recorded before a raise, and a save that
+        // left the limit where it was (a relay change, say) raised nothing.
+        let after = hyperion_adapters::postfix::message_size_limit().await;
+        let rank = |b: u64| if b == 0 { u64::MAX } else { b };
+        let witnessed = matches!((before, after), (Some(b), Some(a)) if rank(a) > rank(b));
+        self.note_size_limit(after, witnessed).await;
         match relay_cfg.as_ref() {
             Some(cfg) if use_smart_host => {
                 hyperion_adapters::postfix::ensure_relay_config(cfg)
