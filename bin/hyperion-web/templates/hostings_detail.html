@@ -3336,9 +3336,9 @@
   </div>
   <p class="card-desc">
     {% if let Some(name) = applied_profile_name %}
-      Currently applied: <strong>{{ name }}</strong>. Re-applying refreshes the limits, expiry policy{% if price_pinned %} — but not the price, which is set on this hosting{% else %} and pricing snapshot{% endif %}.
+      Currently applied: <strong>{{ name }}</strong>. Re-applying refreshes the limits, expiry policy, alert channels{% if price_pinned %} — but not the price, which is set on this hosting{% else %} and pricing snapshot{% endif %}.
     {% else %}
-      Pick a profile to push limits, expiry policy and pricing in one step.
+      Pick a profile to push limits, expiry policy, pricing and alert channels in one step.
     {% endif %}
     <a href="/profiles">Manage profiles →</a>
   </p>
@@ -3347,7 +3347,7 @@
   {% else %}
     <form method="post" action="/profiles/apply"
           data-confirm-title="Apply hosting profile"
-          data-confirm-body="The current limits{% if price_pinned %} and expiry policy for {{ detail.domain }} will be overwritten by the chosen profile. The price set on this hosting stays.{% else %}, expiry policy and price snapshot for {{ detail.domain }} will be overwritten by the chosen profile.{% endif %}"
+          data-confirm-body="The current limits{% if price_pinned %} and expiry policy for {{ detail.domain }} will be overwritten by the chosen profile. The price set on this hosting stays.{% else %}, expiry policy and price snapshot for {{ detail.domain }} will be overwritten by the chosen profile.{% endif %} Its alert e-mails are added to the monitor's, and its Slack webhook, if it has one, becomes the monitor's."
           data-confirm-confirm-label="Apply profile"
           data-confirm-variant="primary">
       <input type="hidden" name="_csrf" value="{{ csrf_profile_apply }}">
@@ -3370,6 +3370,7 @@
               data-db="{% if let Some(e) = p.default_db_engine %}{{ e }}{% endif %}"
               data-plugins="{{ p.plugin_count() }}"
               data-themes="{{ p.theme_count() }}"
+              data-alerts="{%- let has_slack = p.slack_webhook.is_some() -%}{%- let has_mail = !p.alert_emails.trim().is_empty() -%}{% if has_slack && has_mail %}Slack + e-mails{% else if has_slack %}Slack{% else if has_mail %}e-mails{% endif %}"
               data-price="{{ p.pretty_price() }}">
               {{ p.name }}{% if !p.description.is_empty() %} — {{ p.description }}{% endif %} ({{ p.pretty_price() }})
             </option>
@@ -3387,6 +3388,23 @@
         </button>
       </div>
     </form>
+    {#- Alert channels alone, for a site that should keep its limits and price:
+        the same server-side import as the Monitoring tab's picker (the
+        profile's Slack webhook is a secret and never reaches the browser).
+        profile_id follows the select above via hyperionApplyPreview. -#}
+    {% if can_set_price %}
+    <form method="post" action="/hostings/monitor/from-profile" class="cluster" style="margin-top:0.6rem"
+          data-confirm-title="Import alert channels from a profile"
+          data-confirm-body="Only the profile's alert channels are copied onto this site's monitor: its e-mails are added to the ones already there{% if monitor_config.alert_slack_webhook_set %}, and its Slack webhook, if it has one, replaces the current one{% else %}, and its Slack webhook, if it has one, becomes the monitor's{% endif %}. Limits, expiry and price stay as they are."
+          data-confirm-confirm-label="Import"
+          data-confirm-variant="primary">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
+      <input type="hidden" name="profile_id" id="apply_alerts_profile" value="{% if let Some(p) = profiles.first() %}{{ p.id }}{% endif %}">
+      <button class="btn small" type="submit" id="apply_alerts_btn">Import only Slack + e-mails</button>
+      <span class="text-soft small" id="apply_alerts_note">from the profile picked above, onto the <a href="#monitor">monitor</a></span>
+    </form>
+    {% endif %}
     <script>
       function hyperionApplyPreview() {
         var sel = document.getElementById('apply_profile');
@@ -3409,6 +3427,14 @@
         if (d.db) parts.push('DB <b>' + d.db + '</b>');
         if (d.plugins && d.plugins !== '0') parts.push('<b>' + d.plugins + '</b> plugin(s)');
         if (d.themes && d.themes !== '0') parts.push('<b>' + d.themes + '</b> theme(s)');
+        if (d.alerts) parts.push('alerts <b>' + d.alerts + '</b> → monitor');
+        var ap = document.getElementById('apply_alerts_profile');
+        var ab = document.getElementById('apply_alerts_btn');
+        if (ap) ap.value = o.value;
+        if (ab) {
+          ab.disabled = !d.alerts;
+          ab.title = d.alerts ? '' : 'This profile has no Slack webhook or alert e-mails';
+        }
         if ({% if price_pinned %}true{% else %}false{% endif %}) parts.push('price <b>kept</b> (set on this hosting)');
         else if (d.price && d.price !== '—') parts.push('price <b>' + d.price + '</b>');
         box.innerHTML = 'Will set: ' + parts.join(' · ') + '. <span style="color:var(--warn)">Overwrites the current values.</span>';

@@ -208,6 +208,48 @@ pub async fn record_install(
     Ok(())
 }
 
+/// Correct the recorded WordPress version to what is on disk now.
+///
+/// `record_install` writes the version once — at install or adoption — and
+/// nothing else did, so every core update afterwards (the nightly sweep,
+/// WordPress's own background updater, an update from wp-admin) left the
+/// hostings list showing the release the site was installed with. Touches
+/// only `wp_version`; `installed_at` keeps meaning "installed". Returns
+/// whether the row changed.
+pub async fn set_version(
+    pool: &SqlitePool,
+    id: &HostingId,
+    wp_version: &str,
+) -> Result<bool, StateError> {
+    let r = sqlx::query(
+        "UPDATE wp_installs SET wp_version = ? WHERE hosting_id = ? AND wp_version <> ?",
+    )
+    .bind(wp_version)
+    .bind(id.as_str())
+    .bind(wp_version)
+    .execute(pool)
+    .await?;
+    Ok(r.rows_affected() > 0)
+}
+
+/// `(hosting_id, root_dir, recorded wp_version)` of every recorded
+/// WordPress install on this node, for the version refresh.
+pub async fn list_install_roots(
+    pool: &SqlitePool,
+) -> Result<Vec<(HostingId, String, String)>, StateError> {
+    let rows: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT w.hosting_id, h.root_dir, w.wp_version
+         FROM wp_installs w JOIN hostings h ON h.id = w.hosting_id
+         ORDER BY w.hosting_id",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, root, v)| (HostingId(id), root, v))
+        .collect())
+}
+
 /// Hosting ids of every recorded WordPress install on this node.
 pub async fn list_install_ids(pool: &SqlitePool) -> Result<Vec<String>, StateError> {
     let rows: Vec<(String,)> =
@@ -363,6 +405,30 @@ mod tests {
             .expect("present");
         assert_eq!(got.wp_version, "6.5.3");
         assert_eq!(got.last_pack_hash, "hash2");
+    }
+
+    /// A core update after install must reach the row the hostings list
+    /// reads, without pretending the site was re-installed.
+    #[tokio::test]
+    async fn set_version_follows_core_updates() {
+        let pool = open_memory().await.expect("open");
+        let id = fixture(&pool).await;
+        record_install(&pool, &id, "https://example.cz", "7.1", "h", 100)
+            .await
+            .expect("install");
+        assert!(set_version(&pool, &id, "7.1.4").await.expect("set"));
+        assert!(!set_version(&pool, &id, "7.1.4").await.expect("same"));
+        let got = get_install(&pool, &id).await.expect("get").expect("row");
+        assert_eq!(got.wp_version, "7.1.4");
+        assert_eq!(got.installed_at, 100);
+        let roots = list_install_roots(&pool).await.expect("roots");
+        assert_eq!(
+            roots,
+            vec![(id.clone(), "/r".to_string(), "7.1.4".to_string())]
+        );
+        // No row, nothing to correct.
+        let other = HostingId::new_v7();
+        assert!(!set_version(&pool, &other, "7.1.4").await.expect("none"));
     }
 
     /// The WordPress-updates page lists every install, including ones the

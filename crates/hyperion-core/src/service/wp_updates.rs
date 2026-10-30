@@ -904,6 +904,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 .await;
                 self.purge_page_cache_after(detail.id.as_str(), "wp.core.update")
                     .await;
+                // The hostings list reads the recorded version.
+                let _ = self.refresh_wp_version(&detail.id, &root, "").await;
                 // Saves itself: the cluster page and the Updates row stop
                 // listing the release that just went in.
                 let _ = self

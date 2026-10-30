@@ -53,6 +53,7 @@ pub(crate) fn spawn_all(svc: &Svc, cert_renewal_window_days: i64) {
     crate::acme_dns::spawn(svc.pool.clone());
     spawn_cert_renewal(svc, cert_renewal_window_days.max(1));
     spawn_wp_defender(svc);
+    spawn_wp_version_refresh(svc);
     spawn_wp_integrity(svc);
     spawn_billing_sweep(svc);
     spawn_package_enforce(svc);
@@ -459,6 +460,22 @@ fn spawn_wp_defender(svc: &Svc) {
             Ok(Some(_)) => tracing::debug!("wp defender tick: no new major updates"),
             Ok(None) => {}
             Err(e) => tracing::warn!(error=%e, "wp defender tick failed"),
+        }
+    });
+}
+
+/// WordPress version refresh — every 10 minutes, re-read each recorded
+/// install's `wp-includes/version.php` and correct the version the hostings
+/// list shows. Core updates mostly happen outside the panel (WordPress's
+/// own background updater, wp-admin), so without this the list showed the
+/// release each site was installed with, forever. One small file read per
+/// site; no wp-cli.
+fn spawn_wp_version_refresh(svc: &Svc) {
+    every(svc, 2 * MIN, 10 * MIN, |svc| async move {
+        match svc.wp_version_refresh_tick().await {
+            Ok(n) if n > 0 => tracing::info!(corrected = n, "wp version refresh"),
+            Ok(_) => {}
+            Err(e) => tracing::warn!(error=%e, "wp version refresh failed"),
         }
     });
 }
