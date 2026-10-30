@@ -1524,6 +1524,17 @@ async fn crs_plan_installs_the_missing_engine_rate_limited() {
     s.package_crs_engine_ensure().await;
     assert!(stamp().await.expect("stamp") > old);
 
+    // Three failures in a row (no root here, so each attempt above was
+    // refused): no more unattended apt runs, however old the stamp.
+    hyperion_state::node_kv::set(&pool, PACKAGE_MODSEC_AUTO_FAILS_KV, "3", old)
+        .await
+        .expect("seed");
+    hyperion_state::node_kv::set(&pool, PACKAGE_MODSEC_AUTO_KV, &old.to_string(), old)
+        .await
+        .expect("seed");
+    assert!(!s.package_crs_engine_ensure().await);
+    assert_eq!(stamp().await, Some(old), "no attempt after the cap");
+
     // Engine present: nothing to do, however old the stamp.
     engine.store(true, Ordering::SeqCst);
     hyperion_state::node_kv::set(&pool, PACKAGE_MODSEC_AUTO_KV, &old.to_string(), old)

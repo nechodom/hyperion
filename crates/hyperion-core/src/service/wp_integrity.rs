@@ -155,7 +155,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
 
         // 3. ClamAV over the docroot — the only signal that looks inside
         //    `wp-content/uploads`, which core verification skips by design.
-        let (clamav_available, malware, clamav_at) = integrity_malware_pass(
+        let (clamav_available, malware, clamav_at, clamav_failed_at) = integrity_malware_pass(
             &detail,
             now,
             self.malware_scan_niceness(),
@@ -187,6 +187,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 &StoredIntegrityScan {
                     scanned_at: now,
                     clamav_at,
+                    clamav_failed_at,
                     result: result.clone(),
                 },
             )
@@ -359,6 +360,19 @@ pub(super) const INTEGRITY_ERR_NOT_WORDPRESS: &str = "hosting has no WordPress i
 /// cadence to every other night.
 pub(super) const CLAMAV_MIN_INTERVAL_SECS: i64 = 20 * 3600;
 
+/// Minimum gap before retrying a ClamAV pass that failed.
+pub(super) const CLAMAV_FAILED_RETRY_SECS: i64 = 3600;
+
+/// Is a ClamAV pass over this docroot held off right now — a good one is
+/// recent enough, or the last attempt failed recently?
+pub(super) fn clamav_pass_held_off(prior: Option<&StoredIntegrityScan>, now: i64) -> bool {
+    prior.is_some_and(|p| {
+        (p.clamav_at > 0 && now.saturating_sub(p.clamav_at) < CLAMAV_MIN_INTERVAL_SECS)
+            || (p.clamav_failed_at > 0
+                && now.saturating_sub(p.clamav_failed_at) < CLAMAV_FAILED_RETRY_SECS)
+    })
+}
+
 /// Node-wide gate: at most one `clamscan` at a time on this machine.
 /// It reads an entire docroot, so two concurrent passes turn a shared
 /// host's IO into a queue for every site on it. Callers `try_lock` and
@@ -380,6 +394,13 @@ pub(super) struct StoredIntegrityScan {
     /// original age instead of looking freshly confirmed.
     #[serde(default)]
     pub(super) clamav_at: i64,
+    /// Unix seconds of the last ClamAV pass that FAILED (clamscan exit ≥ 2,
+    /// e.g. no signature database yet); 0 = none since the last good one.
+    /// Holds the next attempt off for [`CLAMAV_FAILED_RETRY_SECS`]: the card
+    /// scans lazily on view, and a failure that repeats otherwise re-walked
+    /// the whole docroot on every page load.
+    #[serde(default)]
+    pub(super) clamav_failed_at: i64,
     pub(super) result: hyperion_types::WpIntegrityScanResult,
 }
 
@@ -403,25 +424,32 @@ pub(super) async fn integrity_malware_pass(
     scan_niceness: i32,
     prior: Option<&StoredIntegrityScan>,
     errors: &mut Vec<String>,
-) -> (bool, Vec<hyperion_types::WpMalwareHit>, i64) {
+) -> (bool, Vec<hyperion_types::WpMalwareHit>, i64, i64) {
     // No scanner installed. A normal state on a shared host — never an
     // error, and explicitly NOT a clean bill of health (the caller renders
     // `clamav_available = false` as "not scanned").
     if !integrity::clamav_available() {
-        return (false, Vec::new(), 0);
+        return (false, Vec::new(), 0, 0);
     }
     let carry = || match prior {
         Some(p) => (
             p.result.clamav_available,
             p.result.malware.clone(),
             p.clamav_at,
+            p.clamav_failed_at,
         ),
-        None => (false, Vec::new(), 0),
+        None => (false, Vec::new(), 0, 0),
     };
-    if let Some(p) = prior {
-        if p.clamav_at > 0 && now.saturating_sub(p.clamav_at) < CLAMAV_MIN_INTERVAL_SECS {
-            return carry();
+    if clamav_pass_held_off(prior, now) {
+        if let Some(p) = prior.filter(|p| p.clamav_failed_at > 0) {
+            errors.push(format!(
+                "malware scan failed at its last attempt; next try after {} UTC",
+                chrono::DateTime::from_timestamp(p.clamav_failed_at + CLAMAV_FAILED_RETRY_SECS, 0)
+                    .map(|t| t.format("%H:%M").to_string())
+                    .unwrap_or_default()
+            ));
         }
+        return carry();
     }
     let Ok(_gate) = CLAMAV_GATE.try_lock() else {
         errors.push("malware scan skipped: another scan is already running on this node".into());
@@ -432,13 +460,14 @@ pub(super) async fn integrity_malware_pass(
             scan.available,
             scan.hits,
             if scan.available { now } else { 0 },
+            0,
         ),
         // clamscan exited ≥ 2: part of the tree could not be read, so this
         // pass proves nothing. "Couldn't check" — we never build a pass on
         // top of a partial walk.
         Err(e) => {
             errors.push(format!("malware scan failed: {e}"));
-            (false, Vec::new(), 0)
+            (false, Vec::new(), 0, now)
         }
     }
 }

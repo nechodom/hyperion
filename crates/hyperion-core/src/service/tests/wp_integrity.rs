@@ -25,6 +25,7 @@ async fn integrity_scan_storage_round_trips() {
     let stored = StoredIntegrityScan {
         scanned_at: 1_700_000_000,
         clamav_at: 1_699_990_000,
+        clamav_failed_at: 0,
         result: result.clone(),
     };
     s.set_stored_integrity_scan("H1", &stored).await;
@@ -268,6 +269,7 @@ async fn a_trashed_site_leaves_no_nameless_row_on_the_cluster_lists() {
     let integrity = serde_json::to_string(&StoredIntegrityScan {
         scanned_at: 1,
         clamav_at: 0,
+        clamav_failed_at: 0,
         result: hyperion_types::WpIntegrityScanResult::default(),
     })
     .expect("encode integrity");
@@ -310,4 +312,39 @@ async fn a_trashed_site_leaves_no_nameless_row_on_the_cluster_lists() {
             .is_some(),
         "the stored scan must not be deleted, only hidden"
     );
+}
+
+/// A failed ClamAV pass holds the next one off for an hour — the card scans
+/// on view, and a failure that repeats otherwise re-walked the whole docroot
+/// on every page load — and a good one for the usual daily cadence.
+#[test]
+fn clamav_pass_backs_off_after_a_failure() {
+    use super::super::wp_integrity::{
+        clamav_pass_held_off, CLAMAV_FAILED_RETRY_SECS, CLAMAV_MIN_INTERVAL_SECS,
+    };
+    let now = 1_700_000_000;
+    let rec = |clamav_at, clamav_failed_at| StoredIntegrityScan {
+        scanned_at: now,
+        clamav_at,
+        clamav_failed_at,
+        result: Default::default(),
+    };
+    assert!(!clamav_pass_held_off(None, now), "never ran");
+    assert!(!clamav_pass_held_off(Some(&rec(0, 0)), now));
+    assert!(
+        clamav_pass_held_off(Some(&rec(now - 60, 0)), now),
+        "fresh pass"
+    );
+    assert!(!clamav_pass_held_off(
+        Some(&rec(now - CLAMAV_MIN_INTERVAL_SECS, 0)),
+        now
+    ));
+    assert!(
+        clamav_pass_held_off(Some(&rec(0, now - 60)), now),
+        "just failed"
+    );
+    assert!(!clamav_pass_held_off(
+        Some(&rec(0, now - CLAMAV_FAILED_RETRY_SECS)),
+        now
+    ));
 }

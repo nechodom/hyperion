@@ -803,17 +803,38 @@ pub struct WpThemeActionForm {
 /// A plugin/theme update started from /vulns goes back there. That page
 /// reads the STORED scans, so re-scan the site first (the scan saves itself)
 /// — otherwise the row would still list the update just applied.
+///
+/// The scan runs in its own task and the redirect waits for it only
+/// [`VULNS_RESCAN_WAIT`]: on a slow site wp-cli's three listings could
+/// outlast the proxy, and the operator saw an error for an update that had
+/// gone in. A scan that takes longer still finishes and saves itself.
 async fn back_to_vulns(
     state: &SharedState,
     target: Option<&str>,
     sel: HostingSelector,
     flash: &str,
 ) -> Response {
-    let _ =
-        crate::dispatcher::dispatch_to_node(state, target, Request::WpVulnScan { hosting: sel })
+    let scan = {
+        let state = state.clone();
+        let target = target.map(str::to_string);
+        tokio::spawn(async move {
+            let _ = crate::dispatcher::dispatch_to_node(
+                &state,
+                target.as_deref(),
+                Request::WpVulnScan { hosting: sel },
+            )
             .await;
-    Redirect::to(&format!("/vulns?flash={}", urlencoding(flash))).into_response()
+        })
+    };
+    let flash = match tokio::time::timeout(VULNS_RESCAN_WAIT, scan).await {
+        Ok(_) => flash.to_string(),
+        Err(_) => format!("{flash} The site is still being re-checked; reload in a minute."),
+    };
+    Redirect::to(&format!("/vulns?flash={}", urlencoding(&flash))).into_response()
 }
+
+/// How long the redirect back to /vulns waits for the re-scan.
+const VULNS_RESCAN_WAIT: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// POST /hostings/wp/theme-action — single endpoint for every
 /// whitelisted theme verb. Mirrors post_wp_plugin_action but
