@@ -470,20 +470,28 @@ async fn prepare_auth(
 /// NOT a `GIT_ASKPASS` script in the run directory: git `exec`s an askpass
 /// program, and Debian mounts `/run` `noexec`, so every token deploy died
 /// with "cannot exec '…/askpass': Permission denied". A `!` helper is run by
-/// `/bin/sh`, which only READS the token file. The empty first entry drops
-/// any helper the site user's own gitconfig configures, so ours is the only
-/// one asked and nothing gets to `store` the token.
+/// `/bin/sh`, which only READS the token file. The empty entries drop any
+/// helper the site user's own gitconfig configures, so ours is the only one
+/// asked and nothing gets to `store` the token.
+///
+/// Scoped to `https://github.com`: the token is answered for GitHub only. The
+/// site user controls git's HOME and the checkout's `.git/config`, so a
+/// `url.<evil>.insteadOf` there would otherwise send the token — which may be
+/// an operator's, not the tenant's — to whatever host it names.
 fn pat_credential_env(tok_file: &str) -> Vec<(String, String)> {
     let helper = format!(
         "!f() {{ if [ \"$1\" = get ]; then \
          printf 'username=x-access-token\\npassword=%s\\n' \"$(cat '{tok_file}')\"; fi; }}; f"
     );
+    const SCOPED: &str = "credential.https://github.com.helper";
     vec![
-        ("GIT_CONFIG_COUNT".into(), "2".into()),
+        ("GIT_CONFIG_COUNT".into(), "3".into()),
         ("GIT_CONFIG_KEY_0".into(), "credential.helper".into()),
         ("GIT_CONFIG_VALUE_0".into(), String::new()),
-        ("GIT_CONFIG_KEY_1".into(), "credential.helper".into()),
-        ("GIT_CONFIG_VALUE_1".into(), helper),
+        ("GIT_CONFIG_KEY_1".into(), SCOPED.into()),
+        ("GIT_CONFIG_VALUE_1".into(), String::new()),
+        ("GIT_CONFIG_KEY_2".into(), SCOPED.into()),
+        ("GIT_CONFIG_VALUE_2".into(), helper),
     ]
 }
 
@@ -998,24 +1006,32 @@ mod tests {
             .all(|(k, v)| k != "GIT_ASKPASS" && !v.contains("ghp_")));
 
         use std::io::Write;
-        let mut child = std::process::Command::new(git)
-            .args(["credential", "fill"])
-            .env("HOME", &dir)
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .envs(env)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .unwrap();
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(b"protocol=https\nhost=github.com\nusername=x-access-token\n\n")
-            .unwrap();
-        let out = child.wait_with_output().unwrap();
+        let fill = |host: &str| {
+            let mut child = std::process::Command::new(git)
+                .args(["credential", "fill"])
+                .env("HOME", &dir)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .env("GIT_ASKPASS", "/bin/false")
+                .env("SSH_ASKPASS", "/bin/false")
+                .envs(env.clone())
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(
+                    format!("protocol=https\nhost={host}\nusername=x-access-token\n\n").as_bytes(),
+                )
+                .unwrap();
+            child.wait_with_output().unwrap()
+        };
+        let out = fill("github.com");
+        let other = fill("evil.example");
         let _ = std::fs::remove_dir_all(&dir);
         let stdout = String::from_utf8_lossy(&out.stdout);
         assert!(
@@ -1025,6 +1041,12 @@ mod tests {
         );
         assert!(stdout.contains("username=x-access-token\n"), "{stdout}");
         assert!(stdout.contains("password=ghp_secret123\n"), "{stdout}");
+        // Redirected elsewhere (an `insteadOf` in the tenant's gitconfig):
+        // no token for that host.
+        assert!(
+            !String::from_utf8_lossy(&other.stdout).contains("ghp_secret123"),
+            "the token must be answered for github.com only"
+        );
     }
 
     #[test]

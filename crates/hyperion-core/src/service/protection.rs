@@ -325,6 +325,15 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         )
         .await;
         res.map_err(|e| RpcError::Internal_with(e.to_string()))?;
+        // Installed, so a care plan's automatic install may try again should
+        // the engine ever go missing.
+        let _ = hyperion_state::node_kv::set(
+            &self.pool,
+            super::care_packages::PACKAGE_MODSEC_AUTO_FAILS_KV,
+            "0",
+            now_secs(),
+        )
+        .await;
         self.crs_sync().await?;
         self.modsec_status().await
     }

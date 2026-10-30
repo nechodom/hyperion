@@ -686,10 +686,23 @@ pub async fn core_update_minor(user: &str, htdocs: &str) -> Result<String, Adapt
     let args: [&str; 3] = ["core", "update", "--minor"];
     let argv = build_argv(user, htdocs, &args);
     let out = cmd::run("/usr/bin/sudo", &argv_as_refs(&argv)).await?;
+    let db_out = core_update_db(user, htdocs).await?;
+    Ok(format!("{}\n{}", out.trim(), db_out.trim()))
+}
+
+/// Starts the error of a core update whose FILES went in but whose
+/// `wp core update-db` failed: the site now runs the new release on the old
+/// schema, which is not the same as "did not install" and must not be
+/// reported as such.
+pub const CORE_DB_UPDATE_FAILED: &str = "the new files went in, but `wp core update-db` failed: ";
+
+/// `wp core update-db`, its failure marked [`CORE_DB_UPDATE_FAILED`].
+async fn core_update_db(user: &str, htdocs: &str) -> Result<String, AdapterError> {
     let db_args: [&str; 2] = ["core", "update-db"];
     let db_argv = build_argv(user, htdocs, &db_args);
-    let db_out = cmd::run("/usr/bin/sudo", &argv_as_refs(&db_argv)).await?;
-    Ok(format!("{}\n{}", out.trim(), db_out.trim()))
+    cmd::run("/usr/bin/sudo", &argv_as_refs(&db_argv))
+        .await
+        .map_err(|e| AdapterError::Other(format!("{CORE_DB_UPDATE_FAILED}{e}")))
 }
 
 /// A WordPress release number as wp-cli offers one: `6.7` or `6.6.2`.
@@ -722,9 +735,7 @@ pub async fn core_update_to(
     let args: [&str; 3] = ["core", "update", &version_arg];
     let argv = build_argv(user, htdocs, &args);
     let out = cmd::run("/usr/bin/sudo", &argv_as_refs(&argv)).await?;
-    let db_args: [&str; 2] = ["core", "update-db"];
-    let db_argv = build_argv(user, htdocs, &db_args);
-    let db_out = cmd::run("/usr/bin/sudo", &argv_as_refs(&db_argv)).await?;
+    let db_out = core_update_db(user, htdocs).await?;
     Ok(format!("{}\n{}", out.trim(), db_out.trim()))
 }
 

@@ -853,9 +853,13 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             let list: Vec<&str> = offered.iter().map(|u| u.version.as_str()).collect();
             return Err(RpcError::Validation {
                 message: if list.is_empty() {
+                    // Also what an answer wp-cli printed but nobody could
+                    // read looks like (parse_core_updates fails safe to
+                    // "none"), so don't promise the site is current.
                     format!(
                         "WordPress {version} is not offered to this site — it is already \
-                         up to date. Nothing was changed."
+                         up to date, or WordPress's answer could not be read. Nothing was \
+                         changed."
                     )
                 } else {
                     format!(
@@ -937,13 +941,32 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     "failed",
                 )
                 .await;
-                Err(RpcError::Validation {
-                    message: format!(
-                        "WordPress {version} did not install: {e}\n\nThe backup taken just \
-                         before it is kept (Backups tab, \"before update\") until the next \
-                         update replaces it."
+                let msg = e.to_string();
+                let message = match msg
+                    .split_once(hyperion_adapters::wpcli::CORE_DB_UPDATE_FAILED)
+                    .map(|(_, why)| why)
+                {
+                    // The files went in; the schema did not follow. "Did not
+                    // install" would send the operator to retry an update
+                    // that is already on disk.
+                    Some(why) => format!(
+                        "WordPress {version} was installed, but its database update \
+                         (`wp core update-db`) failed: {why}\n\nThe site may show \
+                         \"Database Update Required\" until it runs — open wp-admin, or \
+                         restore the backup taken just before it (Backups tab, \"before \
+                         update\"), which is kept."
                     ),
-                })
+                    None => format!(
+                        "WordPress {version} did not install: {e}\n\nThe backup taken just \
+                         before it is kept (Backups tab, \"before update\")."
+                    ),
+                };
+                if msg.contains(hyperion_adapters::wpcli::CORE_DB_UPDATE_FAILED) {
+                    // The hostings list reads the recorded version, and the
+                    // files on disk are the new release.
+                    let _ = self.refresh_wp_version(&detail.id, &root, "").await;
+                }
+                Err(RpcError::Validation { message })
             }
         }
     }

@@ -1547,30 +1547,17 @@ pub async fn post_enforce(
     let resp =
         crate::dispatcher::dispatch_to_node(&state, owner.as_deref(), Request::PackageEnforceTick)
             .await;
-    let (flash, error) = match resp {
-        Ok(RpcResponse::PackageEnforceTick { corrected }) if corrected > 0 => (
-            Some(format!(
-                "Applied what the plan sells — {corrected} setting{} switched back.",
-                if corrected == 1 { "" } else { "s" }
-            )),
-            None,
-        ),
-        // Nothing moved, yet the card said something was off: the setter
-        // refused (the node logs why). Say so rather than flash a success
-        // over a line that is still amber.
-        Ok(RpcResponse::PackageEnforceTick { .. }) => (
-            None,
-            Some(
-                "Nothing could be switched on. The server refused the change — its log \
-                 has the reason (look for \"could not apply a paid feature\")."
-                    .into(),
-            ),
-        ),
-        Ok(RpcResponse::Error(e)) => (None, Some(e.to_string())),
-        Ok(_) => (None, Some("unexpected response".into())),
-        Err(e) => (None, Some(e.to_string())),
+    // The outcome is read off this site's own lines after the pass (see
+    // `render_card_inner`), never from the pass's node-wide count: that
+    // counted other sites' fixes as this one's, and called a suspended site
+    // (which the pass skips) a refusal.
+    let error = match resp {
+        Ok(RpcResponse::PackageEnforceTick { .. }) => None,
+        Ok(RpcResponse::Error(e)) => Some(e.to_string()),
+        Ok(_) => Some("unexpected response".into()),
+        Err(e) => Some(e.to_string()),
     };
-    render_card(&state, &ctx, form.selector, flash, error, None).await
+    render_card_inner(&state, &ctx, form.selector, None, error, None, true).await
 }
 
 #[derive(Deserialize)]
@@ -1987,6 +1974,22 @@ async fn render_card(
     error: Option<String>,
     preview: Option<ReportPreview>,
 ) -> Result<Response, AppError> {
+    render_card_inner(state, ctx, selector, flash, error, preview, false).await
+}
+
+/// [`render_card`], plus — when `after_enforce` — the outcome of a "Switch on
+/// now" pass for THIS site, judged from the card's own lines once they are
+/// re-read: the pass is node-wide, so its count of corrected settings says
+/// nothing about this site.
+async fn render_card_inner(
+    state: &SharedState,
+    ctx: &AuthCtx,
+    selector: String,
+    mut flash: Option<String>,
+    mut error: Option<String>,
+    preview: Option<ReportPreview>,
+    after_enforce: bool,
+) -> Result<Response, AppError> {
     let sel = super::hostings::parse_selector_public(&selector)?;
     let (detail, owner) = super::hostings::find_hosting_anywhere(state, sel.clone()).await?;
     // Reading the card is ordinary hosting-detail access — the customer
@@ -2096,6 +2099,24 @@ async fn render_card(
         false
     };
     mark_fixable(&mut held, engine_missing);
+    if after_enforce && error.is_none() {
+        let still_off = held.iter().any(|h| h.can_switch_now);
+        if detail.state != hyperion_types::HostingState::Active {
+            error = Some(
+                "This site is not active, so the pass leaves it alone; what the plan sells \
+                 is switched on once the site is active again."
+                    .into(),
+            );
+        } else if still_off {
+            error = Some(
+                "Some of it is still off. The server refused the change — its log has the \
+                 reason (look for \"could not apply a paid feature\")."
+                    .into(),
+            );
+        } else {
+            flash = Some("Everything this plan sells is switched on.".into());
+        }
+    }
     // Don't offer what the site already holds: the partial unique index
     // rejects a second active row for the same package, so the only
     // thing that picker entry could produce is an error message.

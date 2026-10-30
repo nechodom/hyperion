@@ -1297,7 +1297,12 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// Scheduled path only (the hourly tick calls this right before
     /// [`Self::package_enforce_tick`]): apt takes minutes, which no RPC
     /// caller of the enforce tick budgets for. At most one attempt per
-    /// [`PACKAGE_MODSEC_AUTO_RETRY_SECS`]. Returns whether it installed.
+    /// [`PACKAGE_MODSEC_AUTO_RETRY_SECS`], and none after
+    /// [`PACKAGE_MODSEC_AUTO_MAX_FAILS`] failed ones in a row: a failure that
+    /// repeats (an nginx that is not Debian's refuses the module, a broken
+    /// mirror) would otherwise run dpkg/apt unattended every few hours
+    /// forever. The manual install on the Protection page still works and
+    /// resets the count. Returns whether it installed.
     pub async fn package_crs_engine_ensure(&self) -> bool {
         let wanted = match packages::list_all_in_force(&self.pool).await {
             Ok(rows) => rows
@@ -1309,6 +1314,15 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             }
         };
         if !wanted || self.adapters.modsec_status().await.available() {
+            return false;
+        }
+        let fails = hyperion_state::node_kv::get(&self.pool, PACKAGE_MODSEC_AUTO_FAILS_KV)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|v| v.trim().parse::<u32>().ok())
+            .unwrap_or(0);
+        if fails >= PACKAGE_MODSEC_AUTO_MAX_FAILS {
             return false;
         }
         let now = now_secs();
@@ -1324,13 +1338,21 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             hyperion_state::node_kv::set(&self.pool, PACKAGE_MODSEC_AUTO_KV, &now.to_string(), now)
                 .await;
         tracing::info!("care package sells the Core Rule Set: installing ModSecurity on this node");
-        match self.modsec_install().await {
-            Ok(_) => true,
+        let (installed, fails) = match self.modsec_install().await {
+            Ok(_) => (true, 0),
             Err(e) => {
-                tracing::warn!(error = %e, "care package: automatic ModSecurity install failed — retrying later");
-                false
+                tracing::warn!(error = %e, attempt = fails + 1, "care package: automatic ModSecurity install failed");
+                (false, fails + 1)
             }
-        }
+        };
+        let _ = hyperion_state::node_kv::set(
+            &self.pool,
+            PACKAGE_MODSEC_AUTO_FAILS_KV,
+            &fails.to_string(),
+            now,
+        )
+        .await;
+        installed
     }
 
     /// Is the protection a plan sells actually running on this site? A
@@ -2191,3 +2213,11 @@ pub(super) const PACKAGE_MODSEC_AUTO_KV: &str = "package_modsec_auto_install_at"
 /// broken mirror or a read-only /usr fails the same way every time; the
 /// operator's alert already says ModSecurity is missing.
 pub(super) const PACKAGE_MODSEC_AUTO_RETRY_SECS: i64 = 6 * 3600;
+
+/// Automatic installs that failed in a row (`node_kv`). Reset by any install
+/// that works, the manual one included.
+pub(super) const PACKAGE_MODSEC_AUTO_FAILS_KV: &str = "package_modsec_auto_install_fails";
+
+/// After this many failed automatic installs in a row the node stops trying
+/// on its own; the operator's alert says the engine is missing.
+pub(super) const PACKAGE_MODSEC_AUTO_MAX_FAILS: u32 = 3;
