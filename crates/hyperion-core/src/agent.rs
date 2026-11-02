@@ -724,6 +724,13 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.hosting_stats_all().await
     }
 
+    async fn hosting_usage_range(
+        &self,
+        window_secs: i64,
+    ) -> Result<Vec<hyperion_types::HostingUsageRange>, RpcError> {
+        self.svc.hosting_usage_range(window_secs).await
+    }
+
     async fn node_stats(&self) -> Result<NodeStats, RpcError> {
         self.svc.node_stats(&self.hostname, &self.version).await
     }

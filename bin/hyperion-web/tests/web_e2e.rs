@@ -309,6 +309,7 @@ async fn start_agent_with(toml: Option<&str>) -> (PathBuf, tempfile::TempDir, sq
         paths: hyperion_core::HostingPaths::default(),
         permissions_autoheal: true,
         snapshots_enabled: false,
+        cpu_tracker: Default::default(),
         protection_mode: hyperion_types::ProtectionMode::Both,
         remote_backup: None,
         retention: hyperion_core::BackupRetention::default(),
@@ -2980,6 +2981,7 @@ async fn stats_page_lists_sites_and_honours_sort() {
 
     // Sorting is server-side: ?sort=cpu changes the rendered order.
     let resp = app
+        .clone()
         .oneshot(
             Request::builder()
                 .uri("/stats?sort=cpu")
@@ -2999,6 +3001,31 @@ async fn stats_page_lists_sites_and_honours_sort() {
         sorted.contains("th-sort active"),
         "active column header should be marked"
     );
+    assert!(
+        sorted.contains("CPU now") && !sorted.contains("CPU peak"),
+        "the default view is live, where a peak means nothing"
+    );
+
+    // The range picker is a server-side round trip too, and the sort survives it.
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/stats?sort=cpu&range=6h")
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let ranged = body_string(resp).await;
+    assert!(ranged.contains("CPU avg") && ranged.contains("CPU peak"));
+    assert!(ranged.contains("over the last 6 h"));
+    assert!(
+        ranged.contains("sort=cpu&amp;range=30m"),
+        "picking another range must keep the sort"
+    );
+    assert!(ranged.contains("range=live"), "live stays reachable");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

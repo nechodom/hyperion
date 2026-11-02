@@ -310,3 +310,124 @@ fn human_bytes_picks_right_unit() {
     assert_eq!(human_bytes(2_500_000_000), "2.3 GiB");
     assert_eq!(human_bytes(2 * 1024i64.pow(4)), "2.0 TiB");
 }
+
+fn cpu_proc(uid: i64, jiffies: i64) -> crate::ProcSample {
+    crate::ProcSample {
+        ppid: 1,
+        uid,
+        class: crate::CpuClass::Other,
+        start_ticks: 1,
+        self_jiffies: jiffies,
+        child_jiffies: 0,
+        rss_bytes: 1_048_576,
+    }
+}
+
+fn cpu_snap(total: i64, procs: &[(i64, i64, i64)]) -> crate::ProcSnapshot {
+    crate::ProcSnapshot {
+        busy_jiffies: total / 4,
+        total_jiffies: total,
+        cores: 4,
+        procs: procs
+            .iter()
+            .map(|(pid, uid, j)| (*pid, cpu_proc(*uid, *j)))
+            .collect(),
+    }
+}
+
+async fn activate(pool: &SqlitePool, id: &HostingId) {
+    hostings::set_state(pool, id, HostingState::Active, now_secs())
+        .await
+        .expect("activate");
+}
+
+/// A site's figures must follow its REAL system user. Deriving the name from
+/// the domain missed every imported site: `du` and the logs pointed at nothing,
+/// so it stayed "not sampled yet" forever and its CPU never left zero.
+#[tokio::test]
+async fn stats_tick_samples_a_site_whose_user_is_not_derived_from_its_domain() {
+    let pool = open_memory().await.expect("open");
+    let uid = 2345;
+    let su = system_users::insert(&pool, "imported-user", uid, "/home/imported-user", "/x", 1)
+        .await
+        .expect("user");
+    let id = HostingId::new_v7();
+    hostings::insert(
+        &pool,
+        &id,
+        "septiky-zumpy.cz",
+        su,
+        None,
+        "/home/imported-user/septiky-zumpy.cz/htdocs",
+        1,
+        None,
+    )
+    .await
+    .expect("hosting");
+    activate(&pool, &id).await;
+
+    let home = tempfile::tempdir().expect("home");
+    std::fs::create_dir_all(home.path().join("imported-user/septiky-zumpy.cz")).expect("root");
+    let mut s = svc(pool.clone(), happy_mocks());
+    s.paths.home_root = home.path().display().to_string();
+
+    let now = now_secs();
+    s.cpu_tracker
+        .observe(now - 10, cpu_snap(0, &[(10, uid, 0)]));
+    s.cpu_tracker
+        .observe(now, cpu_snap(4_000, &[(10, uid, 80)]));
+    s.stats_tick().await.expect("tick");
+
+    let rows = s.hosting_usage_range(30 * 60).await.expect("range");
+    let row = rows.iter().find(|r| r.hosting_id == id).expect("listed");
+    assert!(row.has_samples, "the site must not be skipped");
+    assert_eq!(row.cpu_pct_x100, Some(200), "80 of 4000 jiffies = 2%");
+    assert_eq!(row.cpu_peak_x100, Some(200));
+    assert_eq!(row.mem_peak_bytes, 1_048_576);
+    assert!(row.last_at >= now, "stamped with the real sample time");
+
+    // Drained: the next tick must not count the same jiffies again.
+    let again = s.cpu_tracker.take_interval();
+    assert_eq!(again.total, 0);
+}
+
+#[tokio::test]
+async fn usage_range_live_reads_the_sampler_and_flags_a_shared_user() {
+    let pool = open_memory().await.expect("open");
+    let uid = 3456;
+    let su = system_users::insert(&pool, "shared", uid, "/home/shared", "/x", 1)
+        .await
+        .expect("user");
+    for domain in ["one.test", "two.test"] {
+        let id = HostingId::new_v7();
+        hostings::insert(&pool, &id, domain, su, None, "/x", 1, None)
+            .await
+            .expect("hosting");
+        activate(&pool, &id).await;
+    }
+    let s = svc(pool.clone(), happy_mocks());
+
+    // Before the sampler has two reads: unknown, never a confident 0%.
+    let rows = s.hosting_usage_range(0).await.expect("live");
+    assert!(rows.iter().all(|r| r.cpu_pct_x100.is_none()));
+
+    let now = now_secs();
+    s.cpu_tracker
+        .observe(now - 10, cpu_snap(0, &[(10, uid, 0)]));
+    s.cpu_tracker
+        .observe(now, cpu_snap(4_000, &[(10, uid, 400)]));
+    let rows = s.hosting_usage_range(0).await.expect("live");
+    assert_eq!(rows.len(), 2);
+    for r in &rows {
+        assert_eq!(r.cpu_pct_x100, Some(1_000));
+        assert_eq!(r.cpu_peak_x100, None, "a peak needs a period");
+        assert_eq!(r.cpu_cores, 4);
+        assert_eq!(r.shared_user_sites, 2, "the page must count this user once");
+    }
+    let ns = s.node_stats("s4", "dev").await.expect("stats");
+    assert_eq!(ns.cpu_pct_x100, 2_500);
+    assert_eq!(ns.cpu_cores, 4);
+    let split = ns.cpu_breakdown.expect("breakdown");
+    assert_eq!(split.sites_x100, 1_000);
+    assert_eq!(split.other_x100, 1_500);
+}

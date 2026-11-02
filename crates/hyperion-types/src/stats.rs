@@ -30,9 +30,66 @@ pub struct HostingStats {
     /// overcounts shared pages across php-fpm workers. 0 if not yet sampled.
     #[serde(default)]
     pub mem_rss_bytes: i64,
-    /// Latest CPU busy % × 100 attributed to the site's user.
+    /// Share of the whole node's CPU × 100 charged to the site's user: the
+    /// last minute when `cpu_live`, otherwise the latest stored reading.
     #[serde(default)]
     pub cpu_pct_x100: i64,
+    /// True when `cpu_pct_x100` is a current reading. False from an older node
+    /// and in the seconds after an agent restart.
+    #[serde(default)]
+    pub cpu_live: bool,
+    /// Average and highest one-minute CPU over the last 24 h. `None` until
+    /// history exists, and from an older node.
+    #[serde(default)]
+    pub cpu_avg_24h_x100: Option<i64>,
+    #[serde(default)]
+    pub cpu_peak_24h_x100: Option<i64>,
+    /// Cores on the node, so a share can be read as cores. 0 = unknown.
+    #[serde(default)]
+    pub cpu_cores: i64,
+}
+
+/// One site's usage over a chosen window: the /stats range picker's row.
+///
+/// CPU and memory belong to the site's system user, and sites can share one.
+/// `shared_user_sites` says how many do, so a total counts that user once.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HostingUsageRange {
+    pub hosting_id: HostingId,
+    pub domain: String,
+    pub disk_bytes: i64,
+    /// Share of the node × 100: the last minute in the live view, the average
+    /// over the window otherwise. `None` = not measured, which is not idle.
+    pub cpu_pct_x100: Option<i64>,
+    /// Highest one-minute average in the window. `None` in the live view.
+    pub cpu_peak_x100: Option<i64>,
+    /// Cores on the node. 0 = unknown.
+    pub cpu_cores: i64,
+    /// RSS now in the live view, otherwise average and peak over the window.
+    pub mem_avg_bytes: i64,
+    pub mem_peak_bytes: i64,
+    pub bw_in_bytes: i64,
+    pub bw_out_bytes: i64,
+    pub requests: i64,
+    /// Oldest and newest sample in the window, 0 when there is none. Lets the
+    /// page say the history does not reach back as far as was asked.
+    pub first_at: i64,
+    pub last_at: i64,
+    /// False until the sampler has written anything at all for this site.
+    pub has_samples: bool,
+    pub shared_user_sites: i64,
+}
+
+/// Where a node's busy CPU went. Each figure is a share of the whole node × 100
+/// and together they add up to its busy figure.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CpuBreakdown {
+    pub window_secs: i64,
+    pub sites_x100: i64,
+    pub database_x100: i64,
+    pub web_x100: i64,
+    pub panel_x100: i64,
+    pub other_x100: i64,
 }
 
 /// Latest snapshot for an agent node — cluster-wide or single-node.
@@ -83,6 +140,12 @@ pub struct NodeStats {
     /// agent that doesn't send it still deserializes (shows 0).
     #[serde(default)]
     pub cpu_pct_x100: i64,
+    /// Cores on the node. 0 from an older agent.
+    #[serde(default)]
+    pub cpu_cores: i64,
+    /// `None` from an older agent and just after a restart.
+    #[serde(default)]
+    pub cpu_breakdown: Option<CpuBreakdown>,
     #[serde(default)]
     pub swap_total_kib: i64,
     #[serde(default)]
@@ -2603,6 +2666,10 @@ mod tests {
             sampled_at: 1_700_000_500,
             mem_rss_bytes: 67_108_864,
             cpu_pct_x100: 875,
+            cpu_live: true,
+            cpu_avg_24h_x100: Some(120),
+            cpu_peak_24h_x100: Some(4_000),
+            cpu_cores: 4,
         };
         let j = serde_json::to_string(&s).expect("ser");
         let back: HostingStats = serde_json::from_str(&j).expect("de");

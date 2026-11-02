@@ -41,7 +41,7 @@ pub struct Sparkline {
 
 /// One line of the per-site breakdown table.
 ///
-/// [`hyperion_types::HostingStats`] carries no `node_id` — attribution
+/// [`hyperion_types::HostingUsageRange`] carries no `node_id` — attribution
 /// comes from *which node answered* — so the node's display label is
 /// stapled on here as the rows are collected.
 #[derive(Debug, Clone)]
@@ -51,23 +51,187 @@ pub struct SiteRow {
     /// Display label of the node this site lives on. Only rendered in
     /// the cluster view; in a single-node view the column is dropped.
     pub node_label: String,
-    pub cpu_pct_x100: i64,
-    pub mem_rss_bytes: i64,
+    /// Share of the site's own node × 100: the last minute when live, the
+    /// average otherwise. `None` = not measured, which is not idle.
+    pub cpu_pct_x100: Option<i64>,
+    /// Highest one-minute average in the range. `None` when live.
+    pub cpu_peak_x100: Option<i64>,
+    /// Cores on the site's node, 0 when unknown.
+    pub cpu_cores: i64,
+    /// RAM now when live, otherwise the peak in the range.
+    pub mem_bytes: i64,
+    pub mem_avg_bytes: i64,
     pub disk_bytes: i64,
-    /// `bw_in + bw_out` over the last 24 h — what the Traffic column sorts on.
-    pub bw_bytes_24h: i64,
-    pub bw_in_bytes_24h: i64,
-    pub bw_out_bytes_24h: i64,
-    pub requests_24h: i64,
-    pub sampled_at: i64,
-    /// False when the sampler has not written a usage row for this site
-    /// yet. The row still renders, with zeros — "not measured yet" is not
-    /// an error, and dropping the row would make a fresh site look missing.
+    /// `bw_in + bw_out` over the range — what the Traffic column sorts on.
+    pub bw_bytes: i64,
+    pub bw_in_bytes: i64,
+    pub bw_out_bytes: i64,
+    pub requests: i64,
+    pub first_at: i64,
+    pub last_at: i64,
+    /// False when the sampler has not written anything for this site yet.
+    /// The row still renders — "not measured yet" is not an error, and
+    /// dropping the row would make a fresh site look missing.
     pub has_samples: bool,
+    /// Sites on this system user, this one included. CPU and memory can only
+    /// be measured per user, so each of them shows the user's whole figure.
+    pub shared_user_sites: i64,
+    /// Answered by a node too old for usage over time: only disk and RAM mean
+    /// anything on this row.
+    pub legacy: bool,
     /// Width % of the share bar drawn in the ACTIVE sort column, relative
     /// to the heaviest row. 0 when that column is all zeros (or when
     /// sorting by domain, where a bar would mean nothing).
     pub bar_pct: i64,
+}
+
+impl SiteRow {
+    /// Why this row's figures may be old, or `""`. A site the sampler keeps
+    /// skipping must not read as a quiet site.
+    pub fn stale_note(&self) -> String {
+        if self.legacy || !self.has_samples {
+            return String::new();
+        }
+        if self.last_at == 0 {
+            return "no sample in this period".into();
+        }
+        if hyperion_types::now_secs() - self.last_at > 15 * 60 {
+            return format!("last sampled {}", fmt_ago(&self.last_at));
+        }
+        String::new()
+    }
+
+    /// The tooltip on a CPU cell: the share read as cores.
+    pub fn cpu_hint(&self, pct_x100: &i64) -> String {
+        if self.cpu_cores <= 0 {
+            return "Share of everything this site's node can do".into();
+        }
+        format!(
+            "About {} of this node's {} cores",
+            fmt_cores(&(pct_x100 * self.cpu_cores / 100)),
+            self.cpu_cores
+        )
+    }
+}
+
+/// One choice in the per-site table's range picker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UsageRange {
+    pub key: &'static str,
+    pub label: &'static str,
+    /// 0 = live.
+    pub secs: i64,
+}
+
+impl UsageRange {
+    pub fn is_live(&self) -> bool {
+        self.secs == 0
+    }
+    /// What the Traffic and Requests columns cover.
+    pub fn traffic_label(&self) -> &'static str {
+        if self.is_live() {
+            "5 min"
+        } else {
+            self.label
+        }
+    }
+}
+
+pub const USAGE_RANGES: [UsageRange; 6] = [
+    UsageRange {
+        key: "live",
+        label: "Live",
+        secs: 0,
+    },
+    UsageRange {
+        key: "30m",
+        label: "30 min",
+        secs: 30 * 60,
+    },
+    UsageRange {
+        key: "6h",
+        label: "6 h",
+        secs: 6 * 3600,
+    },
+    UsageRange {
+        key: "12h",
+        label: "12 h",
+        secs: 12 * 3600,
+    },
+    UsageRange {
+        key: "24h",
+        label: "24 h",
+        secs: 24 * 3600,
+    },
+    UsageRange {
+        key: "2d",
+        label: "2 days",
+        secs: 48 * 3600,
+    },
+];
+
+/// Map `?range=` onto a choice. Anything unrecognised is live.
+pub fn normalize_usage_range(s: &str) -> UsageRange {
+    USAGE_RANGES
+        .iter()
+        .find(|r| r.key == s)
+        .copied()
+        .unwrap_or(USAGE_RANGES[0])
+}
+
+/// One stretch of the "Where the CPU goes" bar.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CpuSplitPart {
+    pub label: &'static str,
+    pub hint: &'static str,
+    /// Fill colour class. Empty for idle, which shows as the bar's track.
+    pub viz: &'static str,
+    pub pct_x100: i64,
+}
+
+/// The bar's stretches in a fixed order, so a colour always means the same
+/// thing. That order keeps magenta and aqua apart: side by side they are nearly
+/// indistinguishable for deuteranopes.
+pub fn cpu_split_parts(b: &hyperion_types::CpuBreakdown) -> Vec<CpuSplitPart> {
+    let busy = b.sites_x100 + b.database_x100 + b.web_x100 + b.panel_x100 + b.other_x100;
+    vec![
+        CpuSplitPart {
+            label: "Sites",
+            hint: "PHP and cron of every site: the total of the table below",
+            viz: "viz-blue",
+            pct_x100: b.sites_x100,
+        },
+        CpuSplitPart {
+            label: "Database",
+            hint: "MariaDB and Redis. Shared by all sites, so not part of any site's figure",
+            viz: "viz-magenta",
+            pct_x100: b.database_x100,
+        },
+        CpuSplitPart {
+            label: "Web server",
+            hint: "nginx and the PHP-FPM master process",
+            viz: "viz-violet",
+            pct_x100: b.web_x100,
+        },
+        CpuSplitPart {
+            label: "Panel",
+            hint: "Hyperion itself",
+            viz: "viz-aqua",
+            pct_x100: b.panel_x100,
+        },
+        CpuSplitPart {
+            label: "Other",
+            hint: "The operating system and everything else, backups included",
+            viz: "viz-other",
+            pct_x100: b.other_x100,
+        },
+        CpuSplitPart {
+            label: "Idle",
+            hint: "Not used",
+            viz: "",
+            pct_x100: (10_000 - busy).max(0),
+        },
+    ]
 }
 
 #[derive(Template)]
@@ -132,14 +296,29 @@ struct StatsTpl<'a> {
     /// sorted heaviest-first by `sort`.
     sites: Vec<SiteRow>,
     /// Canonical sort key echoed back so the column headers can mark the
-    /// active one. One of disk|cpu|ram|traffic|requests|domain.
+    /// active one. One of disk|cpu|peak|ram|traffic|requests|domain.
     sort: &'static str,
+    /// The range picker's choice, and every choice it offers.
+    range: UsageRange,
+    ranges: &'static [UsageRange],
+    /// Oldest sample behind the table when the history does not reach back as
+    /// far as the range asks, else 0.
+    history_since: i64,
+    /// Newest sample behind the table, for the freshness note. 0 when none.
+    newest_sample: i64,
+    /// True once any row spans more than one node, where percentages of
+    /// different-sized boxes cannot be added.
+    sites_multi_node: bool,
+    /// The selected node's CPU, split by what is using it.
+    cpu_split: Vec<CpuSplitPart>,
+    spark_cpu: Sparkline,
     /// True in the cluster view only — the Node column is dead weight
     /// when every row belongs to the same node.
     show_node_col: bool,
     /// Column totals, so each cell can show its share via `fmt_percent`
-    /// and the table can foot with a Σ row.
-    sites_total_cpu_x100: i64,
+    /// and the table can foot with a Σ row. CPU is already formatted: it is a
+    /// percentage on one node and a core count across several.
+    sites_total_cpu: String,
     sites_total_mem: i64,
     sites_total_disk: i64,
     sites_total_bw: i64,
@@ -177,6 +356,9 @@ pub struct StatsQuery {
     /// would be undone by every swap.
     #[serde(default)]
     sort: String,
+    /// Per-site table range: live|30m|6h|12h|24h|2d.
+    #[serde(default)]
+    range: String,
 }
 
 pub async fn get_stats(
@@ -265,6 +447,7 @@ pub async fn get_stats(
     // cluster" don't have a single agent-level meaning. Operators
     // who want a node-specific history switch the dropdown.
     let history_target = if is_cluster_view { None } else { target };
+    let range = normalize_usage_range(&query.range);
     // The per-site breakdown is its own fan-out round. Run it CONCURRENTLY
     // with the history fetch — serialising a third cluster-wide round trip
     // would add a whole RPC latency to every /stats load on a multi-node
@@ -283,7 +466,14 @@ pub async fn get_stats(
             history_target,
             Request::NetHistory { limit: 240 }
         ),
-        collect_site_rows(&state, target, is_cluster_view, &all_nodes, &current_label),
+        collect_site_rows(
+            &state,
+            target,
+            is_cluster_view,
+            &all_nodes,
+            &current_label,
+            range.secs,
+        ),
     );
 
     // A node whose sites were discarded for a bad signature must be
@@ -292,11 +482,19 @@ pub async fn get_stats(
 
     let sort = normalize_site_sort(&query.sort);
     sort_site_rows(&mut sites, sort);
-    let sites_total_cpu_x100 = sites.iter().map(|r| r.cpu_pct_x100).sum();
-    let sites_total_mem = sites.iter().map(|r| r.mem_rss_bytes).sum();
+    let sites_multi_node = sites.iter().any(|r| r.node_label != sites[0].node_label);
+    let sites_total_cpu = fmt_sites_total_cpu(&sites);
+    // CPU and memory belong to the system user, so a user behind several rows
+    // counts once.
+    let sites_total_mem = sites
+        .iter()
+        .map(|r| r.mem_bytes / r.shared_user_sites.max(1))
+        .sum();
     let sites_total_disk = sites.iter().map(|r| r.disk_bytes).sum();
-    let sites_total_bw = sites.iter().map(|r| r.bw_bytes_24h).sum();
-    let sites_total_reqs = sites.iter().map(|r| r.requests_24h).sum();
+    let sites_total_bw = sites.iter().map(|r| r.bw_bytes).sum();
+    let sites_total_reqs = sites.iter().map(|r| r.requests).sum();
+    let newest_sample = sites.iter().map(|r| r.last_at).max().unwrap_or(0);
+    let history_since = history_since(&sites, range, hyperion_types::now_secs());
 
     let history: NodeMetricsHistory = match history_res {
         Ok(RpcResponse::NodeMetricsHistory(h)) => h,
@@ -333,6 +531,19 @@ pub async fn get_stats(
         0
     };
 
+    let spark_cpu = build_sparkline(
+        history
+            .samples
+            .iter()
+            .map(|s| (s.at, s.cpu_pct_x100 as f64 / 100.0)),
+        "cpu",
+        |v| format!("{v:.1}%"),
+    );
+    let cpu_split = selected_node
+        .as_ref()
+        .and_then(|n| n.cpu_breakdown.as_ref())
+        .map(cpu_split_parts)
+        .unwrap_or_default();
     let spark_load = build_sparkline(
         history
             .samples
@@ -462,6 +673,8 @@ pub async fn get_stats(
             .unwrap_or(0),
         cluster,
         selected_node,
+        spark_cpu,
+        cpu_split,
         spark_load,
         spark_mem,
         spark_bw,
@@ -478,8 +691,13 @@ pub async fn get_stats(
         node_auth_warning,
         sites,
         sort,
+        range,
+        ranges: &USAGE_RANGES,
+        history_since,
+        newest_sample,
+        sites_multi_node,
         show_node_col: is_cluster_view,
-        sites_total_cpu_x100,
+        sites_total_cpu,
         sites_total_mem,
         sites_total_disk,
         sites_total_bw,
@@ -505,62 +723,165 @@ async fn collect_site_rows(
     is_cluster_view: bool,
     all_nodes: &[hyperion_types::NodeSummary],
     single_node_label: &str,
+    window_secs: i64,
 ) -> (Vec<SiteRow>, Option<String>) {
     let mut rows: Vec<SiteRow> = Vec::new();
+    let request = Request::HostingUsageRange { window_secs };
     if !is_cluster_view {
         // Single node: one dispatch. A failure here is already spelled out
         // by the ClusterStats round's error banner, so stay quiet.
-        if let Ok(RpcResponse::HostingStatsAll(v)) =
-            crate::dispatcher::dispatch_to_node(state, target, Request::HostingStatsAll).await
-        {
-            push_site_rows(&mut rows, v, single_node_label);
+        match crate::dispatcher::dispatch_to_node(state, target, request).await {
+            Ok(RpcResponse::HostingUsageRange(v)) => {
+                push_site_rows(&mut rows, v, single_node_label)
+            }
+            Ok(_) | Err(crate::dispatcher::DispatchError::Remote(_)) => {
+                push_legacy_rows(&mut rows, state, target, single_node_label).await
+            }
+            Err(_) => {}
         }
         return (rows, None);
     }
 
     // Master first, then every enrolled node through the shared fan-out.
-    if let Ok(RpcResponse::HostingStatsAll(v)) =
-        crate::dispatcher::dispatch_to_node(state, None, Request::HostingStatsAll).await
-    {
-        // Just "master" — this label sits in a per-row tag in a table that
-        // is already tight on width; the long form belongs in the node
-        // switcher and the node detail card, not on every line.
-        push_site_rows(&mut rows, v, "master");
+    // Just "master" — this label sits in a per-row tag in a table that is
+    // already tight on width; the long form belongs in the node switcher and
+    // the node detail card, not on every line.
+    match crate::dispatcher::dispatch_to_node(state, None, request.clone()).await {
+        Ok(RpcResponse::HostingUsageRange(v)) => push_site_rows(&mut rows, v, "master"),
+        // The master answers through its own socket, which during an update
+        // can briefly be an older agent.
+        Ok(_) | Err(crate::dispatcher::DispatchError::Remote(_)) => {
+            push_legacy_rows(&mut rows, state, None, "master").await
+        }
+        Err(_) => {}
     }
+    let label_of = |n: &hyperion_types::NodeSummary| {
+        if n.label.is_empty() {
+            n.node_id.clone()
+        } else {
+            n.label.clone()
+        }
+    };
     let (answered, failed) =
-        crate::dispatcher::fan_out_reporting(state, all_nodes.to_vec(), Request::HostingStatsAll)
-            .await;
+        crate::dispatcher::fan_out_reporting(state, all_nodes.to_vec(), request).await;
     for (n, resp) in answered {
-        if let RpcResponse::HostingStatsAll(v) = resp {
-            let label = if n.label.is_empty() {
-                n.node_id.clone()
-            } else {
-                n.label.clone()
-            };
-            push_site_rows(&mut rows, v, &label);
+        if let RpcResponse::HostingUsageRange(v) = resp {
+            push_site_rows(&mut rows, v, &label_of(&n));
+        } else {
+            push_legacy_rows(&mut rows, state, Some(&n.node_id), &label_of(&n)).await;
+        }
+    }
+    for (n, e) in &failed {
+        // An older agent can't decode the request and answers 400.
+        if matches!(e, crate::dispatcher::DispatchError::Remote(_)) {
+            push_legacy_rows(&mut rows, state, Some(&n.node_id), &label_of(n)).await;
         }
     }
     (rows, crate::handlers::node_auth_warning(&failed))
 }
 
-/// Convert one node's `HostingStats` batch into table rows, stamping the
-/// node label the answer arrived from.
-fn push_site_rows(out: &mut Vec<SiteRow>, stats: Vec<hyperion_types::HostingStats>, node: &str) {
+/// Convert one node's batch into table rows, stamping the node label the
+/// answer arrived from.
+fn push_site_rows(
+    out: &mut Vec<SiteRow>,
+    stats: Vec<hyperion_types::HostingUsageRange>,
+    node: &str,
+) {
     out.extend(stats.into_iter().map(|s| SiteRow {
         hosting_id: s.hosting_id.0,
         domain: s.domain,
         node_label: node.to_string(),
         cpu_pct_x100: s.cpu_pct_x100,
-        mem_rss_bytes: s.mem_rss_bytes,
+        cpu_peak_x100: s.cpu_peak_x100,
+        cpu_cores: s.cpu_cores,
+        mem_bytes: s.mem_peak_bytes,
+        mem_avg_bytes: s.mem_avg_bytes,
         disk_bytes: s.disk_bytes,
-        bw_bytes_24h: s.bw_in_bytes_24h.saturating_add(s.bw_out_bytes_24h),
-        bw_in_bytes_24h: s.bw_in_bytes_24h,
-        bw_out_bytes_24h: s.bw_out_bytes_24h,
-        requests_24h: s.requests_24h,
-        sampled_at: s.sampled_at,
-        has_samples: s.last_request_at.is_some(),
+        bw_bytes: s.bw_in_bytes.saturating_add(s.bw_out_bytes),
+        bw_in_bytes: s.bw_in_bytes,
+        bw_out_bytes: s.bw_out_bytes,
+        requests: s.requests,
+        first_at: s.first_at,
+        last_at: s.last_at,
+        has_samples: s.has_samples,
+        shared_user_sites: s.shared_user_sites.max(1),
+        legacy: false,
         bar_pct: 0,
     }));
+}
+
+/// A node too old for `HostingUsageRange` still has rows to show: asked the old
+/// way, with its CPU left blank because that figure is the 200 ms snapshot this
+/// page no longer trusts, and its traffic left blank because it covers 24 h
+/// whatever the range says.
+async fn push_legacy_rows(
+    out: &mut Vec<SiteRow>,
+    state: &SharedState,
+    target: Option<&str>,
+    node: &str,
+) {
+    if let Ok(RpcResponse::HostingStatsAll(v)) =
+        crate::dispatcher::dispatch_to_node(state, target, Request::HostingStatsAll).await
+    {
+        out.extend(v.into_iter().map(|s| legacy_row(s, node)));
+    }
+}
+
+fn legacy_row(s: hyperion_types::HostingStats, node: &str) -> SiteRow {
+    SiteRow {
+        hosting_id: s.hosting_id.0,
+        domain: s.domain,
+        node_label: node.to_string(),
+        cpu_pct_x100: None,
+        cpu_peak_x100: None,
+        cpu_cores: 0,
+        mem_bytes: s.mem_rss_bytes,
+        mem_avg_bytes: s.mem_rss_bytes,
+        disk_bytes: s.disk_bytes,
+        bw_bytes: 0,
+        bw_in_bytes: 0,
+        bw_out_bytes: 0,
+        requests: 0,
+        first_at: 0,
+        last_at: 0,
+        has_samples: s.last_request_at.is_some(),
+        shared_user_sites: 1,
+        legacy: true,
+        bar_pct: 0,
+    }
+}
+
+/// The CPU column's footer. On one node the shares add up to a share of that
+/// node. Across nodes they do not — 50% of a 2-core box and 50% of a 32-core
+/// box are not 100% of anything — so the total is in cores. A system user
+/// behind several rows counts once.
+pub fn fmt_sites_total_cpu(rows: &[SiteRow]) -> String {
+    if rows.iter().all(|r| r.cpu_pct_x100.is_none()) {
+        return "—".into();
+    }
+    let pct = |r: &SiteRow| r.cpu_pct_x100.unwrap_or(0) / r.shared_user_sites.max(1);
+    let multi_node = rows.iter().any(|r| r.node_label != rows[0].node_label);
+    if multi_node {
+        let cores_x100: i64 = rows.iter().map(|r| pct(r) * r.cpu_cores / 100).sum();
+        fmt_cores(&cores_x100)
+    } else {
+        fmt_cpu(&rows.iter().map(pct).sum())
+    }
+}
+
+/// When the samples start, if that is later than the range asks for: for the
+/// first two days after an update the "2 days" view has less to show, and the
+/// page must say so rather than present it as two days. One tick of slack,
+/// since the oldest sample can only ever be that close to the edge.
+pub fn history_since(rows: &[SiteRow], range: UsageRange, now: i64) -> i64 {
+    if range.is_live() {
+        return 0;
+    }
+    let oldest = rows.iter().map(|r| r.first_at).filter(|t| *t > 0).min();
+    match oldest {
+        Some(t) if t > now - range.secs + 10 * 60 => t,
+        _ => 0,
+    }
 }
 
 /// Map `?sort=` onto a canonical column key. Anything unrecognised
@@ -571,6 +892,7 @@ fn push_site_rows(out: &mut Vec<SiteRow>, stats: Vec<hyperion_types::HostingStat
 pub fn normalize_site_sort(s: &str) -> &'static str {
     match s {
         "cpu" => "cpu",
+        "peak" => "peak",
         "ram" | "mem" => "ram",
         "traffic" | "bw" => "traffic",
         "requests" | "reqs" => "requests",
@@ -582,10 +904,11 @@ pub fn normalize_site_sort(s: &str) -> &'static str {
 /// The numeric value the given column sorts on. `domain` has none.
 fn site_sort_key(r: &SiteRow, sort: &str) -> i64 {
     match sort {
-        "cpu" => r.cpu_pct_x100,
-        "ram" => r.mem_rss_bytes,
-        "traffic" => r.bw_bytes_24h,
-        "requests" => r.requests_24h,
+        "cpu" => r.cpu_pct_x100.unwrap_or(0),
+        "peak" => r.cpu_peak_x100.unwrap_or(0),
+        "ram" => r.mem_bytes,
+        "traffic" => r.bw_bytes,
+        "requests" => r.requests,
         _ => r.disk_bytes,
     }
 }
@@ -898,6 +1221,8 @@ fn offline_placeholder(node_id: &str) -> hyperion_types::NodeStats {
         agent_version: String::new(),
         agent_online: false,
         cpu_pct_x100: 0,
+        cpu_cores: 0,
+        cpu_breakdown: None,
         swap_total_kib: 0,
         swap_used_kib: 0,
         psi_cpu_x100: 0,
@@ -1248,6 +1573,25 @@ pub fn fmt_pct_x100(v: &i64) -> String {
     format!("{:.1}%", *v as f64 / 100.0)
 }
 
+/// A site's CPU share. A site that used anything at all never reads as zero:
+/// `<0.1%` on a big box is a different statement from `0%`.
+pub fn fmt_cpu(v: &i64) -> String {
+    match *v {
+        v if v <= 0 => "0%".into(),
+        v if v < 10 => "<0.1%".into(),
+        v => format!("{:.1}%", v as f64 / 100.0),
+    }
+}
+
+/// Cores in use from the stored × 100 integer: `34` → `0.34 cores`.
+pub fn fmt_cores(v: &i64) -> String {
+    match *v {
+        v if v <= 0 => "0 cores".into(),
+        100 => "1 core".into(),
+        v => format!("{:.2} cores", v as f64 / 100.0),
+    }
+}
+
 /// Bytes/sec → human rate, e.g. `1.2 MB/s`.
 pub fn fmt_rate(bps: &i64) -> String {
     format!("{}/s", fmt_bytes(bps))
@@ -1517,15 +1861,21 @@ mod tests {
             hosting_id: format!("id-{domain}"),
             domain: domain.to_string(),
             node_label: "n1".into(),
-            cpu_pct_x100: cpu,
-            mem_rss_bytes: mem,
+            cpu_pct_x100: Some(cpu),
+            cpu_peak_x100: Some(cpu * 2),
+            cpu_cores: 4,
+            mem_bytes: mem,
+            mem_avg_bytes: mem / 2,
             disk_bytes: disk,
-            bw_bytes_24h: bw,
-            bw_in_bytes_24h: bw / 2,
-            bw_out_bytes_24h: bw - bw / 2,
-            requests_24h: reqs,
-            sampled_at: 1_700_000_000,
+            bw_bytes: bw,
+            bw_in_bytes: bw / 2,
+            bw_out_bytes: bw - bw / 2,
+            requests: reqs,
+            first_at: 1_700_000_000,
+            last_at: 1_700_000_000,
             has_samples: true,
+            shared_user_sites: 1,
+            legacy: false,
             bar_pct: 0,
         }
     }
@@ -1569,6 +1919,7 @@ mod tests {
         ];
         for (sort, want_first) in [
             ("cpu", "a.test"),
+            ("peak", "a.test"),
             ("ram", "b.test"),
             ("disk", "b.test"),
             ("traffic", "b.test"),
@@ -1597,28 +1948,34 @@ mod tests {
         assert_eq!(rows[1].domain, "b.test");
     }
 
+    fn usage(domain: &str) -> hyperion_types::HostingUsageRange {
+        hyperion_types::HostingUsageRange {
+            hosting_id: hyperion_types::HostingId("h1".into()),
+            domain: domain.into(),
+            disk_bytes: 0,
+            cpu_pct_x100: None,
+            cpu_peak_x100: None,
+            cpu_cores: 0,
+            mem_avg_bytes: 0,
+            mem_peak_bytes: 0,
+            bw_in_bytes: 0,
+            bw_out_bytes: 0,
+            requests: 0,
+            first_at: 0,
+            last_at: 0,
+            has_samples: false,
+            shared_user_sites: 1,
+        }
+    }
+
     #[test]
     fn push_site_rows_keeps_unsampled_sites_with_zeros() {
         let mut out = Vec::new();
-        push_site_rows(
-            &mut out,
-            vec![hyperion_types::HostingStats {
-                hosting_id: hyperion_types::HostingId("h1".into()),
-                domain: "fresh.test".into(),
-                disk_bytes: 0,
-                bw_in_bytes_24h: 0,
-                bw_out_bytes_24h: 0,
-                requests_24h: 0,
-                last_request_at: None,
-                sampled_at: 1_700_000_000,
-                mem_rss_bytes: 0,
-                cpu_pct_x100: 0,
-            }],
-            "worker-2",
-        );
+        push_site_rows(&mut out, vec![usage("fresh.test")], "worker-2");
         assert_eq!(out.len(), 1, "a never-sampled site must still get a row");
         assert!(!out[0].has_samples);
-        // HostingStats carries no node_id — attribution comes from the
+        assert_eq!(out[0].cpu_pct_x100, None, "unmeasured must not read as 0%");
+        // The wire type carries no node_id — attribution comes from the
         // node that answered, and must survive the conversion.
         assert_eq!(out[0].node_label, "worker-2");
     }
@@ -1626,11 +1983,21 @@ mod tests {
     #[test]
     fn push_site_rows_traffic_is_in_plus_out() {
         let mut out = Vec::new();
-        push_site_rows(
-            &mut out,
-            vec![hyperion_types::HostingStats {
+        let mut u = usage("busy.test");
+        u.bw_in_bytes = 300;
+        u.bw_out_bytes = 700;
+        u.has_samples = true;
+        push_site_rows(&mut out, vec![u], "master (this node)");
+        assert_eq!(out[0].bw_bytes, 1_000);
+        assert!(out[0].has_samples);
+    }
+
+    #[test]
+    fn an_older_nodes_row_leaves_out_what_it_cannot_answer() {
+        let row = legacy_row(
+            hyperion_types::HostingStats {
                 hosting_id: hyperion_types::HostingId("h1".into()),
-                domain: "busy.test".into(),
+                domain: "old.test".into(),
                 disk_bytes: 10,
                 bw_in_bytes_24h: 300,
                 bw_out_bytes_24h: 700,
@@ -1639,11 +2006,110 @@ mod tests {
                 sampled_at: 1_700_000_000,
                 mem_rss_bytes: 5,
                 cpu_pct_x100: 250,
-            }],
-            "master (this node)",
+                cpu_live: false,
+                cpu_avg_24h_x100: None,
+                cpu_peak_24h_x100: None,
+                cpu_cores: 0,
+            },
+            "old-node",
         );
-        assert_eq!(out[0].bw_bytes_24h, 1_000);
-        assert!(out[0].has_samples);
+        assert!(row.legacy);
+        assert_eq!((row.disk_bytes, row.mem_bytes), (10, 5));
+        assert_eq!(row.cpu_pct_x100, None, "its 2.5% is a 200 ms snapshot");
+        assert_eq!(row.requests, 0, "its 42 cover 24 h whatever the range says");
+        assert!(row.stale_note().is_empty());
+    }
+
+    #[test]
+    fn range_picker_defaults_to_live_and_knows_every_choice() {
+        assert!(normalize_usage_range("").is_live());
+        assert!(normalize_usage_range("nonsense").is_live());
+        let keys: Vec<_> = USAGE_RANGES.iter().map(|r| r.key).collect();
+        assert_eq!(keys, ["live", "30m", "6h", "12h", "24h", "2d"]);
+        assert_eq!(normalize_usage_range("30m").secs, 1800);
+        assert_eq!(normalize_usage_range("2d").secs, 172_800);
+        assert_eq!(normalize_site_sort("peak"), "peak");
+    }
+
+    #[test]
+    fn total_cpu_is_a_percentage_on_one_node_and_cores_across_several() {
+        let mut a = site("a.test", 1_000, 0, 0, 0, 0); // 10% of 4 cores
+        let b = site("b.test", 500, 0, 0, 0, 0); // 5% of 4 cores
+        assert_eq!(fmt_sites_total_cpu(&[a.clone(), b.clone()]), "15.0%");
+
+        // 10% of 4 cores + 5% of 32 cores is not 15% of anything.
+        a.node_label = "n2".into();
+        a.cpu_cores = 4;
+        let mut big = b;
+        big.cpu_cores = 32;
+        assert_eq!(fmt_sites_total_cpu(&[a, big]), "2.00 cores");
+    }
+
+    #[test]
+    fn total_cpu_counts_a_shared_user_once() {
+        let mut a = site("a.test", 1_000, 0, 0, 0, 0);
+        let mut b = site("b.test", 1_000, 0, 0, 0, 0);
+        a.shared_user_sites = 2;
+        b.shared_user_sites = 2;
+        assert_eq!(fmt_sites_total_cpu(&[a, b]), "10.0%");
+    }
+
+    #[test]
+    fn total_cpu_is_blank_when_nothing_was_measured() {
+        let mut a = site("a.test", 0, 0, 0, 0, 0);
+        a.cpu_pct_x100 = None;
+        assert_eq!(fmt_sites_total_cpu(&[a]), "—");
+    }
+
+    #[test]
+    fn history_note_only_when_samples_stop_short_of_the_range() {
+        let now = 1_700_000_000;
+        let day = normalize_usage_range("24h");
+        let mut r = site("a.test", 0, 0, 0, 0, 0);
+        r.first_at = now - 3 * 3600;
+        assert_eq!(history_since(&[r.clone()], day, now), now - 3 * 3600);
+        r.first_at = now - 24 * 3600 + 200;
+        assert_eq!(history_since(&[r.clone()], day, now), 0, "within one tick");
+        r.first_at = now - 60;
+        assert_eq!(history_since(&[r], normalize_usage_range("live"), now), 0);
+    }
+
+    #[test]
+    fn a_site_the_sampler_skips_does_not_read_as_quiet() {
+        let now = hyperion_types::now_secs();
+        let mut r = site("a.test", 0, 0, 0, 0, 0);
+        r.last_at = now - 60;
+        assert_eq!(r.stale_note(), "");
+        r.last_at = now - 2 * 3600;
+        assert!(r.stale_note().starts_with("last sampled 2h"));
+        r.last_at = 0;
+        assert_eq!(r.stale_note(), "no sample in this period");
+        r.has_samples = false;
+        assert_eq!(r.stale_note(), "", "a brand new site has its own label");
+    }
+
+    #[test]
+    fn fmt_cpu_never_rounds_real_use_down_to_nothing() {
+        assert_eq!(fmt_cpu(&0), "0%");
+        assert_eq!(fmt_cpu(&3), "<0.1%");
+        assert_eq!(fmt_cpu(&850), "8.5%");
+        assert_eq!(fmt_cores(&34), "0.34 cores");
+        assert_eq!(fmt_cores(&100), "1 core");
+    }
+
+    #[test]
+    fn cpu_split_adds_up_to_the_whole_node() {
+        let parts = cpu_split_parts(&hyperion_types::CpuBreakdown {
+            window_secs: 60,
+            sites_x100: 850,
+            database_x100: 1_200,
+            web_x100: 100,
+            panel_x100: 50,
+            other_x100: 300,
+        });
+        assert_eq!(parts.iter().map(|p| p.pct_x100).sum::<i64>(), 10_000);
+        assert_eq!(parts.last().map(|p| p.label), Some("Idle"));
+        assert_eq!(parts.last().map(|p| p.pct_x100), Some(7_500));
     }
 
     #[test]

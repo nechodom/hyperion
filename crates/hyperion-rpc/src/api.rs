@@ -409,6 +409,11 @@ pub trait AgentApi: Send + Sync + 'static {
     /// one query. Feeds the /stats per-site breakdown, which would
     /// otherwise need one round-trip per site.
     async fn hosting_stats_all(&self) -> Result<Vec<HostingStats>, RpcError>;
+    /// Every active hosting's usage over the last `window_secs`; 0 = live.
+    async fn hosting_usage_range(
+        &self,
+        window_secs: i64,
+    ) -> Result<Vec<hyperion_types::HostingUsageRange>, RpcError>;
     /// Latest snapshot for this agent (single-node = this box).
     async fn node_stats(&self) -> Result<NodeStats, RpcError>;
     /// Cluster-wide aggregate. Single-node today = wraps node_stats.
