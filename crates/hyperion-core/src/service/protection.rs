@@ -671,6 +671,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
 
         // Per-hosting HTTP brute force (wp-login / xmlrpc POST floods).
         let summaries = self.list().await?;
+        let users = hyperion_state::hostings::system_users_by_hosting(&self.pool)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("hosting system users: {e}")))?;
         for s in &summaries {
             if s.state != HostingState::Active {
                 continue;
@@ -690,24 +693,23 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 .await;
                 continue;
             }
-            let Some(user) = derive_user_from_summary(s) else {
+            // `system_user_id` is NOT NULL, so only a site deleted since
+            // `list` above has no entry here.
+            let Some((user, _)) = users.get(s.id.as_str()) else {
                 continue;
             };
             let access = std::path::PathBuf::from(&self.paths.home_root)
-                .join(&user)
+                .join(user)
                 .join(&s.domain)
                 .join("logs")
                 .join("access.log");
-            // Stamp only AFTER the log has actually been opened. `user` is a
-            // GUESS derived from the domain and it succeeds for almost any
-            // domain, so an imported or renamed site sails past the check
-            // above and points at a path that does not exist. Stamping
-            // before the read would mark such a site "watched since" forever
-            // while its log was never read once — and its letter would say
-            // "0 attacks, protection ran for the whole period" beside a
-            // traffic section that correctly says "not measured", because
-            // `stats_tick` skips the very same site for the very same wrong
-            // path. One letter, two sections, opposite claims.
+            // Stamp only AFTER the log has actually been opened. Stamping
+            // before the read would mark a site whose log is missing "watched
+            // since" forever while its log was never read once — and its
+            // letter would say "0 attacks, protection ran for the whole
+            // period" beside a traffic section that correctly says "not
+            // measured", because `stats_tick` skips a site with no such path
+            // too. One letter, two sections, opposite claims.
             if !tokio::fs::try_exists(&access).await.unwrap_or(false) {
                 continue;
             }
