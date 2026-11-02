@@ -1183,8 +1183,9 @@
       <div class="u-value">{% if s.mem_rss_bytes > 0 %}{{ crate::handlers::stats::fmt_bytes(s.mem_rss_bytes) }}{% else %}—{% endif %}</div>
     </div>
     <div>
-      <div class="u-label" title="CPU attributed to this site's user over the last sample window">CPU</div>
-      <div class="u-value">{{ crate::handlers::stats::fmt_pct_x100(s.cpu_pct_x100) }}</div>
+      <div class="u-label" title="Share of everything this node can do, charged to this site's PHP and cron. Its database queries and nginx run in shared processes and are not included.">CPU · last minute</div>
+      <div class="u-value">{% if s.cpu_live %}{{ crate::handlers::stats::fmt_cpu(s.cpu_pct_x100) }}{% else %}—{% endif %}</div>
+      {% if let Some(avg) = s.cpu_avg_24h_x100.as_ref() %}<div class="text-soft small">24 h avg {{ crate::handlers::stats::fmt_cpu(avg) }}{% if let Some(peak) = s.cpu_peak_24h_x100.as_ref() %} · peak {{ crate::handlers::stats::fmt_cpu(peak) }}{% endif %}</div>{% endif %}
     </div>
   </div>
   <dl class="facts" style="margin-top:0.9rem;flex-direction:row;flex-wrap:wrap;gap:0.6rem 1.5rem">
@@ -1194,7 +1195,7 @@
   </dl>
   <p class="note" style="margin-top:0.8rem">
     Sparklines normalise each metric to its own 48-hour max — shape, not scale.
-    Numbers come from the agent's 5-minute sampler.
+    Disk and traffic come from the agent's 5-minute sampler, CPU from one that reads every 10 seconds.
   </p>
 </div>
 {% endif %}

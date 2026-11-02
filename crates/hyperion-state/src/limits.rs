@@ -322,6 +322,25 @@ pub async fn upsert_usage_traffic(
     Ok(())
 }
 
+/// Traffic already recorded for one bucket: `(in, out, requests)`, zeros when
+/// there is no row. The stats tick diffs against this to get what arrived since
+/// its last pass.
+pub async fn usage_traffic_at(
+    pool: &SqlitePool,
+    hosting_id: &HostingId,
+    period: &str,
+) -> Result<(i64, i64, i64), StateError> {
+    let row: Option<(i64, i64, i64)> = sqlx::query_as(
+        "SELECT bw_in_bytes, bw_out_bytes, php_requests FROM hosting_usage
+         WHERE hosting_id = ? AND period = ?",
+    )
+    .bind(hosting_id.as_str())
+    .bind(period)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.unwrap_or((0, 0, 0)))
+}
+
 #[allow(clippy::type_complexity)] // positional row tuple; mirrors the table
 pub async fn usage_for(
     pool: &SqlitePool,

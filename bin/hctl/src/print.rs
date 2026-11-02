@@ -644,6 +644,29 @@ pub fn print_pretty(resp: &Response) {
             }
             println!("{} hostings", rows.len());
         }
+        Response::HostingUsageRange(rows) => {
+            println!(
+                "{:<32} {:>14} {:>13} {:>14} {:>10} {:>13} {:>7} {:>7}",
+                "DOMAIN", "DISK", "BW_IN", "BW_OUT", "REQS", "MEM_PEAK", "CPU%", "PEAK%"
+            );
+            let pct = |v: Option<i64>| {
+                v.map_or("-".to_string(), |v| format!("{:.2}", v as f64 / 100.0))
+            };
+            for s in rows {
+                println!(
+                    "{:<32} {:>14} {:>13} {:>14} {:>10} {:>13} {:>7} {:>7}",
+                    s.domain,
+                    s.disk_bytes,
+                    s.bw_in_bytes,
+                    s.bw_out_bytes,
+                    s.requests,
+                    s.mem_peak_bytes,
+                    pct(s.cpu_pct_x100),
+                    pct(s.cpu_peak_x100),
+                );
+            }
+            println!("{} hostings", rows.len());
+        }
         Response::NodeStats(n) => {
             println!("{} ({})", n.label, n.node_id);
             println!(
