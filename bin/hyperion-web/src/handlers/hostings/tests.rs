@@ -1,4 +1,40 @@
 use super::*;
+
+/// "Check DNS" and the banner at the top of the page answer the same
+/// question, so a check has to carry the banner with it — one saying
+/// "matches" under the other saying "DNS mismatch" is the bug this pins.
+#[test]
+fn dns_check_answer_refreshes_the_page_banner() {
+    let check = |matches: bool| DnsCheckResult {
+        domain: "example.cz".into(),
+        resolved_a: vec!["192.0.2.1".into()],
+        resolved_aaaa: vec![],
+        our_public_ipv4: Some("192.0.2.1".into()),
+        our_public_ipv6: None,
+        matches,
+        note: "note".into(),
+        proxied: false,
+        origin_cert_self_signed: false,
+    };
+    let oob = r#"<div id="dns-banner" hx-swap-oob="innerHTML">"#;
+
+    let html = render_dns_check_with_banner(check(true)).unwrap();
+    assert!(html.contains("matches ✓"), "{html}");
+    assert!(html.contains(oob), "{html}");
+    assert!(html.contains("DNS OK"), "{html}");
+    assert!(!html.contains("DNS mismatch"), "{html}");
+
+    let html = render_dns_check_with_banner(check(false)).unwrap();
+    assert!(html.contains("no match ✗"), "{html}");
+    assert!(html.contains(oob), "{html}");
+    assert!(html.contains("DNS mismatch"), "{html}");
+    assert!(!html.contains("DNS OK"), "{html}");
+
+    // The swap only lands if the page has a target that survives the lazy load.
+    let page = include_str!("../../../templates/hostings_detail.html");
+    assert!(page.contains(r#"<div id="dns-banner" hx-get="#));
+}
+
 /// Notes, tags and the panel's `.user.ini` copy follow the site to its
 /// new id; the PHP-memory automation and worker state (same `php.`
 /// prefix, node state) do not — the bundle carries those.

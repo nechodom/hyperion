@@ -459,11 +459,12 @@
 {# ───────────────────────────── Page-level alerts ───────────────────────
    Things that are wrong with the site as a whole, whichever section is
    open. The DNS preflight loads lazily so the dig/curl round-trips on the
-   agent never block the first paint; an empty response just removes the
-   placeholder. #}
+   agent never block the first paint; an empty response leaves the
+   placeholder empty. It stays in the page because "Check DNS" swaps a fresh
+   banner into it (render_dns_check_with_banner). #}
 <div class="site-alerts">
-  <div hx-get="/hostings/{{ detail.id.as_str() }}/dns-panel"
-       hx-trigger="load" hx-swap="outerHTML"></div>
+  <div id="dns-banner" hx-get="/hostings/{{ detail.id.as_str() }}/dns-panel"
+       hx-trigger="load" hx-swap="innerHTML"></div>
 
   {#- Names this site serves that its certificate does not carry. A STATE,
       not a flash: adding an alias starts serving that name immediately over a

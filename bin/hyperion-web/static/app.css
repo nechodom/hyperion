@@ -5886,6 +5886,8 @@ td .cell-sub code { font-size: 0.74rem; }
 .site-alerts .flash { margin: 0 !important; }
 .site-alerts:not(:has(.flash)) { display: none; }
 .site-alerts > [hx-get]:empty { display: none; }
+/* No box of its own: its banners keep the column's gap. */
+#dns-banner { display: contents; }
 
 /* A plain text disclosure inside a card: "Reset the password…". */
 details.disclosure > summary {
