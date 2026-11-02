@@ -117,6 +117,23 @@ pub async fn aliases(pool: &SqlitePool, hosting_id: &HostingId) -> Result<Vec<St
     Ok(rows.into_iter().map(|(s,)| s).collect())
 }
 
+/// Every hosting's real system user: `hosting id → (name, uid)`. A name derived
+/// from the domain is only a guess, and an imported or renamed site defeats it.
+pub async fn system_users_by_hosting(
+    pool: &SqlitePool,
+) -> Result<std::collections::HashMap<String, (String, i64)>, StateError> {
+    let rows: Vec<(String, String, i64)> = sqlx::query_as(
+        "SELECT h.id, u.name, u.uid FROM hostings h
+         JOIN system_users u ON u.id = h.system_user_id",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, name, uid)| (id, (name, uid)))
+        .collect())
+}
+
 /// Active hostings with the OWASP Core Rule Set on — whether this node
 /// needs the rule set loaded at all (it costs memory in every nginx
 /// process). Trashed hostings never count.
