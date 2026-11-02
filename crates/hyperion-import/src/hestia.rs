@@ -277,9 +277,10 @@ async fn read_db_configs(runner: &Runner, docroot: &str) -> String {
 }
 
 /// Database names `config` mentions, in the order it first mentions them.
+/// `-` is part of a token: Hestia allows it in user and database names.
 fn named_databases<'a>(config: &str, dbs: &'a [IrDatabase]) -> Vec<&'a str> {
     let mut out: Vec<&str> = Vec::new();
-    for tok in config.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')) {
+    for tok in config.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-')) {
         if let Some(db) = dbs.iter().find(|d| d.name == tok) {
             if !out.contains(&db.name.as_str()) {
                 out.push(db.name.as_str());
@@ -583,6 +584,54 @@ mod tests {
             named_databases("DB_DATABASE=admin_wp\nOTHER=1", &dbs),
             ["admin_wp"]
         );
+    }
+
+    /// Hestia allows `-` in user and database names, so it is part of a token:
+    /// `foo-bar_wp` is one name, and neither half of it may claim the config.
+    #[test]
+    fn hyphenated_database_names_are_one_token() {
+        let dbs = vec![db("foo-bar_wp"), db("foo"), db("bar_wp")];
+        assert_eq!(
+            named_databases("define('DB_NAME', 'foo-bar_wp');", &dbs),
+            ["foo-bar_wp"]
+        );
+        assert_eq!(
+            named_databases("DB_DATABASE=foo-bar_wp\nOTHER=1", &dbs),
+            ["foo-bar_wp"]
+        );
+
+        // The prefix of a longer name is not a mention of it.
+        let dbs = vec![db("admin_shop"), db("admin_shop-old")];
+        assert_eq!(
+            named_databases(&wp("admin_shop-old"), &dbs),
+            ["admin_shop-old"]
+        );
+    }
+
+    #[test]
+    fn a_hyphenated_users_databases_follow_each_sites_config() {
+        let domains = vec!["blog.cz".to_string(), "shop.cz".to_string()];
+        let configs = vec![wp("foo-bar_b1"), wp("foo-bar_s1")];
+        let (per_site, notes) = assign_databases(
+            "foo-bar",
+            &domains,
+            &configs,
+            vec![db("foo-bar_s1"), db("foo-bar_b1")],
+        );
+        assert_eq!(names(&per_site[0]), ["foo-bar_b1"]);
+        assert_eq!(names(&per_site[1]), ["foo-bar_s1"]);
+        assert!(notes.is_empty(), "{notes:?}");
+
+        // One site: the database its config names is first, so it is restored.
+        let domains = vec!["shop.cz".to_string()];
+        let configs = vec![wp("foo-bar_new")];
+        let (per_site, _) = assign_databases(
+            "foo-bar",
+            &domains,
+            &configs,
+            vec![db("foo-bar_old"), db("foo-bar_new")],
+        );
+        assert_eq!(names(&per_site[0]), ["foo-bar_new", "foo-bar_old"]);
     }
 
     #[test]
