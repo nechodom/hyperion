@@ -25,7 +25,7 @@
 # Invoked as:
 #   site-mail-wrapper -u <system_user> [other-sendmail-flags...]
 #
-# We validate `<system_user>` matches `^[a-z][a-z0-9_]{0,31}$` and
+# We validate `<system_user>` matches `^[a-z][a-z0-9_-]{0,31}$` and
 # refuse anything else — defence in depth so a misconfigured pool
 # (or a path-traversal attempt via -u) can't write outside the
 # expected directory.
@@ -85,7 +85,7 @@ if [ "$SAW_T" -eq 0 ]; then
 fi
 
 # Validate the user arg shape.
-if ! [[ "$USER_ARG" =~ ^[a-z][a-z0-9_]{0,31}$ ]]; then
+if ! [[ "$USER_ARG" =~ ^[a-z][a-z0-9_-]{0,31}$ ]]; then
     # Fall through silently — log a stderr breadcrumb but still
     # forward so we don't break email for misconfigured pools.
     echo "site-mail-wrapper: refusing bad -u value: $USER_ARG" >&2
