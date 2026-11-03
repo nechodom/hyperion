@@ -627,6 +627,7 @@ async fn deleting_a_suspended_site_but_keeping_its_user_re_enables_the_user() {
             keep_user: true,
             keep_database: false,
             delete_offsite_backups: false,
+            delete_local_backups: false,
         },
     )
     .await

@@ -130,8 +130,8 @@ pub(super) struct DetailTpl<'a> {
     pub(super) csrf_price_set: String,
     /// Only a user who may apply profiles may change what a site costs.
     pub(super) can_set_price: bool,
-    /// May delete off-site copies, so the delete dialog can offer it.
-    pub(super) can_delete_offsite: bool,
+    /// May delete backups, so the delete form can offer to take them along.
+    pub(super) can_delete_backups: bool,
     /// The price form's amount, prefilled from the snapshot ("2400.00").
     pub(super) price_major: String,
     /// The price was set on this hosting and outlives a profile re-apply.
@@ -460,7 +460,7 @@ impl<'a> DetailTpl<'a> {
             price_error: None,
             price_flash: None,
             csrf_price_set: csrf("/hostings/price/set"),
-            can_delete_offsite: ctx.can(Capability::BackupRun),
+            can_delete_backups: ctx.can(Capability::BackupRun),
             can_set_price: ctx.can(Capability::ProfilesManage),
             price_major: String::new(),
             price_pinned: false,

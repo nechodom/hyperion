@@ -1190,6 +1190,7 @@ fn dead_ftp() -> RemoteBackupConfig {
 fn with_ftp_backups() -> hyperion_rpc::wire::DeleteOpts {
     hyperion_rpc::wire::DeleteOpts {
         delete_offsite_backups: true,
+        delete_local_backups: false,
         ..Default::default()
     }
 }

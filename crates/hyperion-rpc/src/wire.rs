@@ -105,6 +105,10 @@ pub struct DeleteOpts {
     /// target. With the trash on, they go when the site leaves the trash.
     #[serde(default)]
     pub delete_offsite_backups: bool,
+    /// Also delete this site's archives and dumps from this node's backup
+    /// directory. With the trash on, they go when the site leaves the trash.
+    #[serde(default)]
+    pub delete_local_backups: bool,
 }
 
 #[cfg(test)]

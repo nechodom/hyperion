@@ -135,6 +135,13 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         )
         .await
         .map_err(|e| RpcError::Internal_with(format!("forget choice: {e}")))?;
+        hyperion_state::hosting_kv::delete(
+            &self.pool,
+            detail.id.as_str(),
+            DELETE_LOCAL_ON_PURGE_KV,
+        )
+        .await
+        .map_err(|e| RpcError::Internal_with(format!("forget choice: {e}")))?;
         self.append_audit(
             "hosting.trash.restore",
             Some(detail.id.as_str()),
@@ -243,6 +250,25 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     "purge: no off-site target is configured any more — the site's backups on it, if any, stay there"
                 );
             }
+        }
+        // After the off-site step, whose likely failure is a network one: an
+        // unreachable target refuses before any local copy is gone.
+        let remembered = hyperion_state::hosting_kv::get(
+            &self.pool,
+            detail.id.as_str(),
+            DELETE_LOCAL_ON_PURGE_KV,
+        )
+        .await
+        .map_err(|e| RpcError::Internal_with(format!("read choice: {e}")))?
+        .is_some();
+        if opts.delete_local_backups || remembered {
+            self.delete_all_local_copies(&detail).await.map_err(|e| {
+                tracing::error!(
+                    error = %e, domain = %detail.domain,
+                    "purge: the site's local backups could not be deleted — it stays in place"
+                );
+                e
+            })?;
         }
         hostings::set_state(&self.pool, &detail.id, HostingState::Deleting, now_secs())
             .await
@@ -416,6 +442,13 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 .into_iter()
                 .map(|(id, _)| id)
                 .collect();
+        let delete_local: std::collections::HashSet<String> =
+            hyperion_state::hosting_kv::list_by_key(&self.pool, DELETE_LOCAL_ON_PURGE_KV)
+                .await
+                .map_err(|e| RpcError::Internal_with(format!("list choices: {e}")))?
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect();
         Ok(rows
             .into_iter()
             .map(|r| {
@@ -423,6 +456,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 let purge_at = trashed_at + retention_secs;
                 let secs_remaining = (purge_at - now).max(0);
                 let delete_offsite_backups = delete_offsite.contains(r.id.as_str());
+                let delete_local_backups = delete_local.contains(r.id.as_str());
                 hyperion_types::TrashEntry {
                     id: r.id.as_str().to_string(),
                     domain: r.domain,
@@ -431,6 +465,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     seconds_remaining: secs_remaining,
                     node_id: r.node_id.unwrap_or_default(),
                     delete_offsite_backups,
+                    delete_local_backups,
                 }
             })
             .collect())

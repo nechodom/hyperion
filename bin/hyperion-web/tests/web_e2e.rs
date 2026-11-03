@@ -5766,6 +5766,18 @@ async fn hosting_delete_with_ftp_backups_needs_backup_run() {
     )
     .await;
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    // The local copies are behind the same capability, and the box that asks
+    // for them is not offered to a role that could not use it.
+    let resp = acme_dns_post(
+        &app,
+        &cookie,
+        "/hostings/delete",
+        format!("_csrf={}&selector={id}&local_backups=on", enc(&csrf)),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    let (_, page) = acme_dns_get(&app, &cookie, &format!("/hostings/{id}")).await;
+    assert!(!page.contains("name=\"local_backups\""));
     match hyperion_rpc_client::call(
         &sock,
         RpcReq::HostingGet(hyperion_rpc::wire::HostingSelector::Domain(
@@ -5805,7 +5817,7 @@ async fn hosting_delete_with_ftp_backups_fails_the_job_without_a_target() {
     // No backup has an FTP copy, so the dialog does not offer the box at all.
     let (_, page) = acme_dns_get(&app, &cookie, &format!("/hostings/{id}")).await;
     assert!(page.contains("action=\"/hostings/delete\""), "{page}");
-    assert!(!page.contains("Also delete this site"));
+    assert!(!page.contains("data-confirm-check-name=\"offsite\""));
 
     let resp = acme_dns_post(
         &app,
@@ -5863,4 +5875,40 @@ async fn trash_page_warns_about_a_pending_ftp_delete() {
         trash.contains("off-site FTP target are deleted too"),
         "{trash}"
     );
+}
+
+/// The delete form offers to take the local copies, and its dialog says which
+/// way that goes; a trashed site that will take them says so on /trash.
+#[tokio::test]
+async fn delete_form_offers_local_backups_and_the_trash_warns_about_them() {
+    const WARNING: &str = "Backups on this node are deleted with it";
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d, pool) = start_agent_with(Some("[cluster]\ntrash_enabled = true\n")).await;
+    let app = build_app(sock.clone(), admin);
+    let id = acme_ssl_hosting(&sock, "local-trash.cz").await;
+    let cookie = acme_dns_login(&app, "kevin", "good-pw").await;
+    let (_, page) = acme_dns_get(&app, &cookie, &format!("/hostings/{id}")).await;
+    assert!(page.contains("name=\"local_backups\""), "no checkbox");
+    assert!(
+        page.contains("data-confirm-note-field=\"local_backups\""),
+        "the dialog must follow the checkbox"
+    );
+
+    let csrf = acme_ssl_csrf(&app, &cookie).await;
+    let resp = acme_dns_post(
+        &app,
+        &cookie,
+        "/hostings/delete",
+        format!("_csrf={}&selector={id}&local_backups=on", enc(&csrf)),
+    )
+    .await;
+    assert_eq!(acme_ssl_wait_job(&sock, &location(&resp)).await, "done");
+
+    let chosen = hyperion_state::hosting_kv::get(&pool, &id, "trash.delete_local_backups")
+        .await
+        .expect("kv");
+    assert!(chosen.is_some(), "the form field must reach the service");
+    let (_, trash) = acme_dns_get(&app, &cookie, "/trash").await;
+    assert!(trash.contains(WARNING), "{trash}");
+    assert!(trash.contains("on this node are deleted too"), "{trash}");
 }
