@@ -1360,10 +1360,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 }
                 // The first fatal line is the readable part; the trace
                 // below it is noise at panel level.
-                if let Some(line) = text
-                    .lines()
-                    .find(|l| l.contains("Fatal error") || l.contains("PHP Fatal"))
-                {
+                if let Some(line) = hyperion_adapters::wpcli::boot_error_line(&text) {
                     report.error_excerpt = line.chars().take(300).collect();
                 }
             }
