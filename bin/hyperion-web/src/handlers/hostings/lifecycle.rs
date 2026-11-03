@@ -13,6 +13,9 @@ pub struct DeleteForm {
     /// from the off-site FTP target was ticked.
     #[serde(default)]
     pub(super) offsite: String,
+    /// The form's box to also delete the site's backups from this node.
+    #[serde(default)]
+    pub(super) local_backups: Option<String>,
     /// Which node owns this hosting. Filled by the listing template
     /// from the aggregated HostingSummary.node_id field. Empty /
     /// "local" → master itself. Missing field defaults to master
@@ -37,10 +40,11 @@ pub async fn post_delete(
         keep_user: form.keep_user.as_deref() == Some("on"),
         keep_database: form.keep_db.as_deref() == Some("on"),
         delete_offsite_backups: form.offsite == "1",
+        delete_local_backups: form.local_backups.as_deref() == Some("on"),
     };
-    // Deleting off-site copies is gated on BackupRun everywhere else; holding
+    // Deleting backups is gated on BackupRun everywhere else; holding
     // HostingDelete must not be a way around that.
-    if opts.delete_offsite_backups {
+    if opts.delete_offsite_backups || opts.delete_local_backups {
         if let Err(r) =
             require_manage_for_selector(&state, &ctx, &form.selector, Capability::BackupRun).await
         {
@@ -65,6 +69,7 @@ pub async fn post_delete(
         "keep_user": opts.keep_user,
         "keep_database": opts.keep_database,
         "delete_offsite_backups": opts.delete_offsite_backups,
+        "delete_local_backups": opts.delete_local_backups,
         "target_node": form.target_node,
     });
     let actor_label = ctx.username.clone();

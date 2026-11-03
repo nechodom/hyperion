@@ -2046,6 +2046,9 @@ pub struct TrashEntry {
     /// The purge also deletes the site's backups from the FTP/SFTP target.
     #[serde(default)]
     pub delete_offsite_backups: bool,
+    /// The purge also deletes the site's backups from this node.
+    #[serde(default)]
+    pub delete_local_backups: bool,
 }
 
 /// One notification surfaced in the bell-icon dropdown.

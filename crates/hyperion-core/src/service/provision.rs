@@ -917,6 +917,17 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 .await
                 .map_err(|e| RpcError::Internal_with(format!("remember choice: {e}")))?;
             }
+            if opts.delete_local_backups {
+                hyperion_state::hosting_kv::set(
+                    &self.pool,
+                    detail.id.as_str(),
+                    DELETE_LOCAL_ON_PURGE_KV,
+                    "1",
+                    now_secs(),
+                )
+                .await
+                .map_err(|e| RpcError::Internal_with(format!("remember choice: {e}")))?;
+            }
             return self.trash_hosting(detail).await;
         }
         self.hard_delete_internal(detail, opts).await

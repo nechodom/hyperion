@@ -219,6 +219,7 @@ pub(super) async fn run_bulk_job(
                     keep_user: false,
                     keep_database: false,
                     delete_offsite_backups: false,
+                    delete_local_backups: false,
                 },
             },
             "install_asset" => Request::WpInstallFromAsset {

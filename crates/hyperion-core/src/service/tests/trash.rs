@@ -291,6 +291,7 @@ async fn delete_keeping_user_and_database_removes_everything_else() {
             keep_user: true,
             keep_database: true,
             delete_offsite_backups: false,
+            delete_local_backups: false,
         },
     )
     .await
@@ -329,4 +330,292 @@ async fn roll_back_created_is_a_full_hard_delete_with_the_trash_on() {
         .expect("query")
         .is_none());
     assert_eq!(site_residue(&pool, &site.id).await, PURGED);
+}
+
+/// A service whose backup directory is a temp dir the test can look into.
+fn with_backup_root(
+    service: HostingService<MockAdapterPort>,
+) -> (HostingService<MockAdapterPort>, tempfile::TempDir) {
+    let root = tempfile::tempdir().expect("tmp");
+    let paths = HostingPaths {
+        backup_root: root.path().display().to_string(),
+        ..HostingPaths::default()
+    };
+    (service.with_paths(paths), root)
+}
+
+/// One finished local backup of a site: its archive, dump and manifest, and
+/// the row naming the first two. Returns all three paths.
+async fn recorded_backup(
+    pool: &sqlx::SqlitePool,
+    root: &std::path::Path,
+    site: &HostingId,
+    user: &str,
+    domain: &str,
+    ts: i64,
+) -> Vec<std::path::PathBuf> {
+    let dir = root.join(user);
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    let files: Vec<_> = ["tar.gz", "sql", "manifest.json"]
+        .iter()
+        .map(|ext| dir.join(format!("{domain}-{ts}.{ext}")))
+        .collect();
+    for f in &files {
+        std::fs::write(f, "x").expect("write");
+    }
+    let run = hyperion_state::backups::start(pool, site, "local", ts)
+        .await
+        .expect("start");
+    hyperion_state::backups::mark_ok(
+        pool,
+        run,
+        files[0].to_str().expect("utf8"),
+        Some(files[1].to_str().expect("utf8")),
+        1,
+        ts,
+    )
+    .await
+    .expect("mark ok");
+    files
+}
+
+fn delete_local() -> DeleteOpts {
+    DeleteOpts {
+        delete_local_backups: true,
+        ..DeleteOpts::default()
+    }
+}
+
+fn hard_delete_mocks() -> MockAdapterPort {
+    let mut mocks = create_and_teardown_mocks();
+    mocks.expect_db_drop().returning(|_, _, _| Ok(()));
+    mocks.expect_delete_user().returning(|_| Ok(()));
+    mocks
+}
+
+/// Hard delete, trash on: what moving to the trash and restoring also need.
+fn trash_cycle_mocks() -> MockAdapterPort {
+    let mut mocks = hard_delete_mocks();
+    mocks
+        .expect_nginx_apply_suspended()
+        .returning(|_, _, _| Ok(()));
+    mocks.expect_db_lock().returning(|_, _| Ok(()));
+    mocks.expect_db_unlock().returning(|_, _| Ok(()));
+    mocks.expect_linux_lock_login().returning(|_| Ok(()));
+    mocks
+        .expect_apply_php_limits()
+        .returning(|_, _, _, _, _, _, _| Ok(()));
+    mocks
+}
+
+/// Local archives can be the last copy of a site, so nothing removes them
+/// unless the operator asked.
+#[tokio::test]
+async fn delete_without_the_opt_in_keeps_local_backups() {
+    let pool = open_memory().await.expect("open");
+    let (s, root) = with_backup_root(svc(pool.clone(), hard_delete_mocks()));
+    let site = s.create(req("kept-copy.cz")).await.expect("create");
+    let user = s
+        .get(HostingSelector::Id(site.id.clone()))
+        .await
+        .expect("get")
+        .system_user;
+    let files = recorded_backup(
+        &pool,
+        root.path(),
+        &site.id,
+        user.as_str(),
+        "kept-copy.cz",
+        100,
+    )
+    .await;
+
+    s.delete(HostingSelector::Id(site.id.clone()), DeleteOpts::default())
+        .await
+        .expect("delete");
+
+    assert!(files.iter().all(|f| f.exists()), "{files:?}");
+}
+
+/// With the box ticked, everything of this site goes, whether or not a row
+/// names it; nothing of anybody else's does, even in the same directory.
+#[tokio::test]
+async fn delete_with_the_opt_in_removes_only_this_sites_local_backups() {
+    let pool = open_memory().await.expect("open");
+    let (s, root) = with_backup_root(svc(pool.clone(), hard_delete_mocks()));
+    let site = s.create(req("gone.cz")).await.expect("create");
+    let sel = HostingSelector::Id(site.id.clone());
+    let user = s.get(sel.clone()).await.expect("get").system_user;
+    let dir = root.path().join(user.as_str());
+    let mut ours =
+        recorded_backup(&pool, root.path(), &site.id, user.as_str(), "gone.cz", 100).await;
+    ours.push(dir.join("gone.cz-50.tar.gz"));
+    let other_users_dir = root.path().join("former-user");
+    std::fs::create_dir_all(&other_users_dir).expect("mkdir");
+    ours.push(other_users_dir.join("gone.cz-40.sql"));
+    let theirs = [
+        dir.join("sibling.cz-100.tar.gz"),
+        dir.join("gone.cz-shop.cz-100.tar.gz"),
+        dir.join("gone.cz-notes.txt"),
+    ];
+    for f in ours.iter().chain(&theirs) {
+        std::fs::write(f, "x").expect("write");
+    }
+
+    s.delete(sel, delete_local()).await.expect("delete");
+
+    let left: Vec<_> = ours.iter().filter(|f| f.exists()).collect();
+    assert!(left.is_empty(), "left behind: {left:?}");
+    for f in &theirs {
+        assert!(f.exists(), "not this site's: {}", f.display());
+    }
+    let audited = hyperion_state::audit::list(&pool, 100)
+        .await
+        .expect("audit")
+        .into_iter()
+        .any(|e| {
+            e.action == "hosting.backup.local_delete_all"
+                && e.target.as_deref() == Some(site.id.as_str())
+                && e.result == "ok"
+        });
+    assert!(audited, "removing backups must leave a trace");
+}
+
+/// The trash is where a change of mind still costs nothing, so the files
+/// wait for the purge, and the trash list says they are going.
+#[tokio::test]
+async fn the_opt_in_waits_for_the_purge_when_the_trash_is_on() {
+    let pool = open_memory().await.expect("open");
+    let (s, _dir) = with_trash_on(svc(pool.clone(), trash_cycle_mocks()));
+    let (s, root) = with_backup_root(s);
+    let site = s.create(req("later.cz")).await.expect("create");
+    let sel = HostingSelector::Id(site.id.clone());
+    let user = s.get(sel.clone()).await.expect("get").system_user;
+    let files = recorded_backup(&pool, root.path(), &site.id, user.as_str(), "later.cz", 100).await;
+
+    s.delete(sel.clone(), delete_local()).await.expect("trash");
+
+    assert!(files.iter().all(|f| f.exists()), "still in the trash");
+    assert!(s.list_trash().await.expect("list")[0].delete_local_backups);
+
+    s.purge_from_trash(sel).await.expect("purge");
+    let left: Vec<_> = files.iter().filter(|f| f.exists()).collect();
+    assert!(left.is_empty(), "left behind: {left:?}");
+}
+
+/// Restoring takes the choice back: a later purge asks nothing of the files.
+#[tokio::test]
+async fn restoring_from_the_trash_forgets_the_opt_in() {
+    let pool = open_memory().await.expect("open");
+    let (s, _dir) = with_trash_on(svc(pool.clone(), trash_cycle_mocks()));
+    let (s, root) = with_backup_root(s);
+    let site = s.create(req("back.cz")).await.expect("create");
+    let sel = HostingSelector::Id(site.id.clone());
+    let user = s.get(sel.clone()).await.expect("get").system_user;
+    let files = recorded_backup(&pool, root.path(), &site.id, user.as_str(), "back.cz", 100).await;
+
+    s.delete(sel.clone(), delete_local()).await.expect("trash");
+    s.restore_from_trash(sel.clone()).await.expect("restore");
+    s.delete(sel.clone(), DeleteOpts::default())
+        .await
+        .expect("trash again");
+
+    assert!(!s.list_trash().await.expect("list")[0].delete_local_backups);
+    s.purge_from_trash(sel).await.expect("purge");
+    assert!(files.iter().all(|f| f.exists()), "{files:?}");
+}
+
+/// A run in progress has files no row names yet, and would finish after the
+/// delete: the promise to remove everything could not be kept.
+#[tokio::test]
+async fn the_opt_in_refuses_while_a_backup_is_running_and_leaves_the_site() {
+    let pool = open_memory().await.expect("open");
+    let (s, root) = with_backup_root(svc(pool.clone(), hard_delete_mocks()));
+    let site = s.create(req("busy.cz")).await.expect("create");
+    let sel = HostingSelector::Id(site.id.clone());
+    let user = s.get(sel.clone()).await.expect("get").system_user;
+    let files = recorded_backup(&pool, root.path(), &site.id, user.as_str(), "busy.cz", 100).await;
+    hyperion_state::backups::start(&pool, &site.id, "local", 200)
+        .await
+        .expect("running");
+
+    let err = s
+        .delete(sel.clone(), delete_local())
+        .await
+        .expect_err("refused");
+
+    assert!(matches!(err, RpcError::Conflict { .. }), "{err:?}");
+    assert_eq!(
+        s.get(sel).await.expect("still there").state,
+        HostingState::Active
+    );
+    assert!(files.iter().all(|f| f.exists()), "{files:?}");
+}
+
+/// A restore or a push reading an archive keeps it, and so keeps the site:
+/// nothing has been removed by the time the answer is no.
+#[tokio::test]
+async fn the_opt_in_refuses_while_an_archive_is_in_use_and_removes_nothing() {
+    let pool = open_memory().await.expect("open");
+    let (s, root) = with_backup_root(svc(pool.clone(), hard_delete_mocks()));
+    let site = s.create(req("read.cz")).await.expect("create");
+    let sel = HostingSelector::Id(site.id.clone());
+    let user = s.get(sel.clone()).await.expect("get").system_user;
+    let older = recorded_backup(&pool, root.path(), &site.id, user.as_str(), "read.cz", 100).await;
+    let newer = recorded_backup(&pool, root.path(), &site.id, user.as_str(), "read.cz", 200).await;
+    let _reading = ArchiveInUse::try_claim(&newer[0]).expect("claim");
+
+    let err = s
+        .delete(sel.clone(), delete_local())
+        .await
+        .expect_err("refused");
+
+    assert!(matches!(err, RpcError::Conflict { .. }), "{err:?}");
+    assert_eq!(
+        s.get(sel).await.expect("still there").state,
+        HostingState::Active
+    );
+    let left = older.iter().chain(&newer).all(|f| f.exists());
+    assert!(left, "a refusal must remove nothing");
+}
+
+/// A file that cannot be removed fails the delete with the site still there,
+/// and the rows stop claiming the files that did go.
+#[tokio::test]
+async fn a_failed_removal_leaves_the_site_and_only_the_true_rows() {
+    let pool = open_memory().await.expect("open");
+    let (s, root) = with_backup_root(svc(pool.clone(), hard_delete_mocks()));
+    let site = s.create(req("stuck.cz")).await.expect("create");
+    let sel = HostingSelector::Id(site.id.clone());
+    let user = s.get(sel.clone()).await.expect("get").system_user;
+    recorded_backup(&pool, root.path(), &site.id, user.as_str(), "stuck.cz", 100).await;
+    // remove_file refuses a directory for root too, so this holds in CI.
+    let stuck = root.path().join(user.as_str()).join("stuck.cz-200.tar.gz");
+    std::fs::create_dir_all(&stuck).expect("mkdir");
+    let run = hyperion_state::backups::start(&pool, &site.id, "local", 200)
+        .await
+        .expect("start");
+    hyperion_state::backups::mark_ok(&pool, run, stuck.to_str().expect("utf8"), None, 1, 200)
+        .await
+        .expect("mark ok");
+
+    s.delete(sel.clone(), delete_local())
+        .await
+        .expect_err("refused");
+
+    assert_eq!(
+        s.get(sel).await.expect("still there").state,
+        HostingState::Active
+    );
+    let rows = hyperion_state::backups::list_for(&pool, &site.id, 10)
+        .await
+        .expect("rows");
+    let claiming: Vec<_> = rows.iter().filter_map(|r| r.archive_path.clone()).collect();
+    assert_eq!(claiming, vec![stuck.display().to_string()]);
+    let audited = hyperion_state::audit::list(&pool, 100)
+        .await
+        .expect("audit")
+        .into_iter()
+        .any(|e| e.action == "hosting.backup.local_delete_all" && e.result == "failed");
+    assert!(audited, "a failure must leave a trace");
 }

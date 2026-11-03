@@ -289,7 +289,7 @@
               <a class="btn small" href="/hostings/{{ r.s.id.as_str() }}">Open</a>
               <form method="post" action="/hostings/delete" class="inline-form"
                     data-confirm-title="Delete {{ r.s.domain }}"
-                    data-confirm-body="Files, database, system user, and nginx vhost will be removed. This is permanent — type the domain to confirm. External DNS records are not touched."
+                    data-confirm-body="Files, database, system user, snapshots and nginx vhost will be removed. This is permanent — type the domain to confirm. External DNS records are not touched."
                     data-confirm-confirm-label="Delete permanently"
                     data-confirm-variant="danger"
                     data-confirm-require="{{ r.s.domain }}">
