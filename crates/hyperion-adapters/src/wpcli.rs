@@ -158,6 +158,41 @@ pub async fn ensure_wp_cli_present() -> Result<(), AdapterError> {
     Ok(())
 }
 
+/// Theme to install when `wp option get template` gives no usable answer.
+const BASE_THEME_FALLBACK: &str = "twentytwentyfive";
+
+/// Pick the base theme from `wp option get template` output. `wp core install`
+/// stores the default theme of the core version it installed there, even with
+/// no theme on disk, so an older pinned version gets a theme that runs on it.
+/// The value is the last line because wp-cli prints PHP warnings on stdout.
+fn base_theme_slug(option_output: &str) -> &str {
+    option_output
+        .lines()
+        .map(str::trim)
+        .rfind(|l| !l.is_empty())
+        .filter(|l| SLUG_RX.is_match(l))
+        .unwrap_or(BASE_THEME_FALLBACK)
+}
+
+/// Install and activate the theme the site is configured for. A site whose
+/// option names a theme wordpress.org does not have (a deleted premium one)
+/// gets the fallback instead. Returns the slug that was installed.
+pub async fn install_base_theme(user: &str, htdocs: &str) -> Result<String, AdapterError> {
+    let configured = run(user, htdocs, &["option", "get", "template"])
+        .await
+        .unwrap_or_default();
+    let theme = base_theme_slug(&configured);
+    match install_item(user, htdocs, "theme", theme, true).await {
+        Ok(()) => Ok(theme.to_string()),
+        Err(e) if theme == BASE_THEME_FALLBACK => Err(e),
+        Err(e) => {
+            tracing::warn!(theme, error = %e, "configured theme failed, trying the fallback");
+            install_item(user, htdocs, "theme", BASE_THEME_FALLBACK, true).await?;
+            Ok(BASE_THEME_FALLBACK.to_string())
+        }
+    }
+}
+
 /// Install WordPress into `htdocs` running as `user`.
 ///
 /// Pipeline:
@@ -166,6 +201,7 @@ pub async fn ensure_wp_cli_present() -> Result<(), AdapterError> {
 ///   2. `wp config create --dbname --dbuser --dbpass-from-stdin --dbhost --force`
 ///   3. `wp core install --url --title --admin_user --admin_email
 ///                       --prompt=admin_password`  (admin_password via stdin)
+///   4. `wp theme install <core's default theme> --activate`
 ///
 /// Both DB password and admin password go through stdin via wp-cli's
 /// `--prompt` mechanism so they never appear on argv (and thus never in
@@ -277,7 +313,18 @@ pub async fn install_wordpress(
         }
     }
 
-    // 4. Optional: flip blog_public off when the caller asked for
+    // 4. Base theme. `--skip-content` above leaves wp-content/themes empty,
+    // and WordPress with no theme answers every page with HTTP 200 and an
+    // empty body. Not best-effort: reporting success here would hand over a
+    // blank site.
+    install_base_theme(user, htdocs).await.map_err(|e| {
+        AdapterError::Other(format!(
+            "WordPress is installed, but its base theme is not, so the site shows \
+             a blank page until a theme is added: {e}"
+        ))
+    })?;
+
+    // 5. Optional: flip blog_public off when the caller asked for
     // a no-index install (test-node WP preset). Best-effort —
     // failure here doesn't roll back the install (the operator
     // can flip it manually in WP admin → Reading).
@@ -289,7 +336,7 @@ pub async fn install_wordpress(
         }
     }
 
-    // 5. What core version did we end up with?
+    // 6. What core version did we end up with?
     let v_args: [&str; 2] = ["core", "version"];
     let v_argv = build_argv(user, htdocs, &v_args);
     let v = cmd::run("/usr/bin/sudo", &argv_as_refs(&v_argv)).await?;
@@ -1813,6 +1860,25 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn base_theme_is_the_one_core_just_configured() {
+        assert_eq!(base_theme_slug("twentytwentyfive\n"), "twentytwentyfive");
+    }
+
+    #[test]
+    fn base_theme_ignores_php_noise_before_the_value() {
+        // wp-cli prints PHP warnings on stdout, above the real answer.
+        let out = "PHP Warning:  Undefined array key in /x/wp-config.php\ntwentytwentysix\n";
+        assert_eq!(base_theme_slug(out), "twentytwentysix");
+    }
+
+    #[test]
+    fn base_theme_falls_back_when_the_answer_is_unusable() {
+        for out in ["", "\n", "--skip-plugins", "not a slug", "../../evil"] {
+            assert_eq!(base_theme_slug(out), BASE_THEME_FALLBACK, "output: {out:?}");
+        }
+    }
 
     #[test]
     fn validate_args_accepts_typical_wp_inputs() {

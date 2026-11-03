@@ -414,6 +414,14 @@ pub trait AdapterPort: Send + Sync {
         htdocs: &str,
     ) -> Result<(Vec<hyperion_types::WpTheme>, String), AdapterError>;
 
+    /// Install and activate the theme the site is configured for, falling
+    /// back to a current default. Returns the slug that was installed.
+    async fn wp_install_base_theme(
+        &self,
+        system_user: &str,
+        htdocs: &str,
+    ) -> Result<String, AdapterError>;
+
     /// `wp core check-update` — core releases on offer, newest first. An
     /// error means "not checked", which callers must never read as current.
     async fn wp_core_check_update(
