@@ -338,6 +338,23 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok("vsftpd configuration checked and repaired".into())
     }
 
+    /// Pin vsftpd's passive range once at agent start, so a node installed
+    /// before the range was part of the config stops hanging on data
+    /// connections after the update. Reloads vsftpd, never restarts it: no
+    /// transfer in progress is cut.
+    pub async fn ftp_pin_passive_range_on_boot(&self) -> Result<bool, RpcError> {
+        let pinned = hyperion_adapters::ftp::pin_passive_range()
+            .await
+            .map_err(|e| RpcError::Internal {
+                message: e.to_string(),
+            })?;
+        if pinned {
+            self.append_audit("node.ftp.pin_passive_range", None, "{}", "ok")
+                .await;
+        }
+        Ok(pinned)
+    }
+
     /// Turn FTPS on or off for this node.
     ///
     /// Never called from a tick and never implied by another action: it
@@ -1064,9 +1081,17 @@ pub(super) async fn ftp_node_items(ftp_intended: bool, listen_port: u16) -> Vec<
         None => check_item(
             "pasv_range",
             "Passive data ports",
-            if ftps_on { "error" } else { "info" },
-            "no passive range is pinned — vsftpd will pick arbitrary high ports, \
-             which no firewall rule can match"
+            if ftps_on {
+                "error"
+            } else if ftp_intended {
+                "warn"
+            } else {
+                "info"
+            },
+            "no passive range is pinned — vsftpd picks any high port, which no \
+             firewall rule can match. Behind a firewall most transfers and \
+             listings hang until the client times out, so FTP looks extremely \
+             slow."
                 .into(),
             "node_config",
         ),

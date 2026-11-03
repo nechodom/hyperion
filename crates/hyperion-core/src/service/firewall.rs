@@ -176,6 +176,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             let ftp_port = hyperion_adapters::ftp::read_listen_port().await.to_string();
             rules.push(rule(&["tcp", "dport", &ftp_port, "accept"], "keep-ftp"));
             opened.push(format!("{ftp_port} (FTP control)"));
+            // Pin first: an unpinned vsftpd picks ports no rule can match, so
+            // this branch would open nothing and every listing would hang.
+            if let Err(e) = hyperion_adapters::ftp::pin_passive_range().await {
+                tracing::warn!(error = %e, "firewall: could not pin the FTP passive range");
+            }
             if let Some((lo, hi)) = hyperion_adapters::ftp::passive_range().await {
                 let range = format!("{lo}-{hi}");
                 rules.push(rule(
@@ -1485,6 +1490,19 @@ table ip nat {
                  \t\ttcp dport 22 accept comment \"hyperion:ssh\" # handle 9\n";
         let tags = firewall_template_tags("web").unwrap();
         assert_eq!(nft_handles_for_tags(l, &tags), vec!["4", "7"]);
+    }
+
+    /// The preset and vsftpd have to agree on the passive range. When they
+    /// did not, most data connections hung until the client timed out.
+    #[test]
+    fn ftp_preset_opens_the_range_vsftpd_is_pinned_to() {
+        let range = format!(
+            "{}-{}",
+            hyperion_adapters::ftp::PASV_MIN,
+            hyperion_adapters::ftp::PASV_MAX
+        );
+        let cmds = firewall_template_commands("ftp").unwrap();
+        assert!(cmds.iter().flatten().any(|arg| *arg == range), "{range}");
     }
 
     #[test]
