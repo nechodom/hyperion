@@ -571,6 +571,8 @@ pub async fn pin_passive_range() -> Result<bool, AdapterError> {
     let Some(body) = with_pinned_passive_range(&current) else {
         return Ok(false);
     };
+    // The file `rollback_or_report` sends the operator to if the rollback fails.
+    let _ = tokio::fs::write(format!("{VSFTPD_CONF}.hyperion-pre-ftps"), &current).await;
     atomic_write(Path::new(VSFTPD_CONF), body.as_bytes(), 0o644)
         .await
         .map_err(|e| AdapterError::Other(format!("write {VSFTPD_CONF}: {e}")))?;
