@@ -34,6 +34,7 @@ async fn once_migrated_a_missing_record_never_unlocks_a_password() {
         hyperion_rpc::wire::DeleteOpts {
             keep_user: true,
             keep_database: false,
+            delete_offsite_backups: false,
         },
     )
     .await

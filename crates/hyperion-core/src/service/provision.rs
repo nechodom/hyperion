@@ -895,8 +895,28 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // destroy the DB/user the operator asked to keep, weeks later.
         // When either keep flag is set we hard-delete now (honouring
         // opts) instead of trashing.
+        //
+        // Asked up front so the answer is the same with the trash on or off:
+        // otherwise a node with no target would only say so weeks later, at
+        // the purge, when there is nobody left to tell.
+        if opts.delete_offsite_backups && self.remote_backup.is_none() {
+            return Err(RpcError::Validation {
+                message: NO_REMOTE_TARGET.into(),
+            });
+        }
         let cluster_cfg = read_cluster_section(self.agent_config_path.as_deref());
         if cluster_cfg.trash_enabled && !opts.keep_user && !opts.keep_database {
+            if opts.delete_offsite_backups {
+                hyperion_state::hosting_kv::set(
+                    &self.pool,
+                    detail.id.as_str(),
+                    DELETE_OFFSITE_ON_PURGE_KV,
+                    "1",
+                    now_secs(),
+                )
+                .await
+                .map_err(|e| RpcError::Internal_with(format!("remember choice: {e}")))?;
+            }
             return self.trash_hosting(detail).await;
         }
         self.delete_now(detail, opts).await
@@ -920,6 +940,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         detail: HostingDetail,
         opts: DeleteOpts,
     ) -> Result<(), RpcError> {
+        // First, while a refusal still leaves the site as it was: the operator
+        // asked for both, and can retry or untick the box.
+        if opts.delete_offsite_backups {
+            self.delete_all_offsite_copies(&detail).await?;
+        }
         hostings::set_state(&self.pool, &detail.id, HostingState::Deleting, now_secs())
             .await
             .map_err(|e| RpcError::Internal_with(format!("set deleting: {e}")))?;

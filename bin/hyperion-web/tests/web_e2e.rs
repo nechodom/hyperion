@@ -5693,3 +5693,167 @@ async fn preview_wildcard_sets_up_automatic_renewal() {
     );
     assert!(block.contains(OFFLINE_DNS), "public DNS was asked: {block}");
 }
+
+/// Deleting off-site copies takes `BackupRun` everywhere else, so a role that
+/// may delete hostings must not reach them by ticking the box in the delete
+/// dialog — and the refusal must leave the site alone.
+#[tokio::test]
+async fn hosting_delete_with_ftp_backups_needs_backup_run() {
+    use hyperion_rpc::codec::{Request as RpcReq, Response as RpcResp};
+    use hyperion_state::capabilities::Capability;
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d) = start_agent().await;
+    let app = build_app(sock.clone(), admin);
+    let id = acme_ssl_hosting(&sock, "offsite-gate.cz").await;
+    let role_id = match hyperion_rpc_client::call(
+        &sock,
+        RpcReq::RoleCreate {
+            name: "site-deleter".into(),
+            capabilities: Capability::HostingDelete.bit() | Capability::HostingView.bit(),
+            scope_all: true,
+        },
+    )
+    .await
+    .expect("role")
+    {
+        RpcResp::RoleCreate { id } => id,
+        other => panic!("unexpected role create: {other:?}"),
+    };
+    let user_id = match hyperion_rpc_client::call(
+        &sock,
+        RpcReq::WebUserCreate {
+            username: "deleter".into(),
+            email: "deleter@example.invalid".into(),
+            password: "deleter-pw-12345".into(),
+            role: "operator".into(),
+        },
+    )
+    .await
+    .expect("user")
+    {
+        RpcResp::WebUserCreate { id } => id,
+        other => panic!("unexpected user create: {other:?}"),
+    };
+    match hyperion_rpc_client::call(
+        &sock,
+        RpcReq::WebUserSetCustomRole {
+            user_id,
+            custom_role_id: role_id,
+        },
+    )
+    .await
+    .expect("assign")
+    {
+        RpcResp::WebUserSetCustomRole => {}
+        other => panic!("unexpected assign: {other:?}"),
+    }
+    let cookie = acme_dns_login(&app, "deleter", "deleter-pw-12345").await;
+    let (_, profile) = acme_dns_get(&app, &cookie, "/profile").await;
+    let csrf = extract_csrf(&profile);
+
+    let resp = acme_dns_post(
+        &app,
+        &cookie,
+        "/hostings/delete",
+        format!("_csrf={}&selector={id}&offsite=1", enc(&csrf)),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    match hyperion_rpc_client::call(
+        &sock,
+        RpcReq::HostingGet(hyperion_rpc::wire::HostingSelector::Domain(
+            hyperion_validate::Domain::parse("offsite-gate.cz").expect("domain"),
+        )),
+    )
+    .await
+    .expect("get")
+    {
+        RpcResp::HostingGet(_) => {}
+        other => panic!("the site should still be there: {other:?}"),
+    }
+
+    // Without the box the same role deletes as before.
+    let resp = acme_dns_post(
+        &app,
+        &cookie,
+        "/hostings/delete",
+        format!("_csrf={}&selector={id}", enc(&csrf)),
+    )
+    .await;
+    assert_eq!(acme_ssl_wait_job(&sock, &location(&resp)).await, "done");
+}
+
+/// The node has no FTP target: the box must fail the job, not delete the site
+/// and quietly leave the backups the operator asked to have removed.
+#[tokio::test]
+async fn hosting_delete_with_ftp_backups_fails_the_job_without_a_target() {
+    use hyperion_rpc::codec::{Request as RpcReq, Response as RpcResp};
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d) = start_agent().await;
+    let app = build_app(sock.clone(), admin);
+    let id = acme_ssl_hosting(&sock, "offsite-notarget.cz").await;
+    let cookie = acme_dns_login(&app, "kevin", "good-pw").await;
+    let csrf = acme_ssl_csrf(&app, &cookie).await;
+
+    // No backup has an FTP copy, so the dialog does not offer the box at all.
+    let (_, page) = acme_dns_get(&app, &cookie, &format!("/hostings/{id}")).await;
+    assert!(page.contains("action=\"/hostings/delete\""), "{page}");
+    assert!(!page.contains("Also delete this site"));
+
+    let resp = acme_dns_post(
+        &app,
+        &cookie,
+        "/hostings/delete",
+        format!("_csrf={}&selector={id}&offsite=1", enc(&csrf)),
+    )
+    .await;
+    assert_eq!(acme_ssl_wait_job(&sock, &location(&resp)).await, "failed");
+    match hyperion_rpc_client::call(
+        &sock,
+        RpcReq::HostingGet(hyperion_rpc::wire::HostingSelector::Domain(
+            hyperion_validate::Domain::parse("offsite-notarget.cz").expect("domain"),
+        )),
+    )
+    .await
+    .expect("get")
+    {
+        RpcResp::HostingGet(_) => {}
+        other => panic!("the site should still be there: {other:?}"),
+    }
+}
+
+/// A trashed site whose purge will also delete its FTP backups says so on the
+/// row and in the purge dialog; one without the choice says neither.
+#[tokio::test]
+async fn trash_page_warns_about_a_pending_ftp_delete() {
+    const WARNING: &str = "FTP backups are deleted with it";
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d, pool) = start_agent_with(Some("[cluster]\ntrash_enabled = true\n")).await;
+    let app = build_app(sock.clone(), admin);
+    let id = acme_ssl_hosting(&sock, "offsite-trash.cz").await;
+    let cookie = acme_dns_login(&app, "kevin", "good-pw").await;
+    let csrf = acme_ssl_csrf(&app, &cookie).await;
+    let resp = acme_dns_post(
+        &app,
+        &cookie,
+        "/hostings/delete",
+        format!("_csrf={}&selector={id}", enc(&csrf)),
+    )
+    .await;
+    assert_eq!(acme_ssl_wait_job(&sock, &location(&resp)).await, "done");
+    let (_, trash) = acme_dns_get(&app, &cookie, "/trash").await;
+    assert!(trash.contains("offsite-trash.cz"), "row missing: {trash}");
+    assert!(!trash.contains(WARNING));
+
+    // What deleting with the box ticked records; the agent here has no target
+    // to tick it against.
+    hyperion_state::hosting_kv::set(&pool, &id, "trash.delete_offsite_backups", "1", 1)
+        .await
+        .expect("kv");
+    let (_, trash) = acme_dns_get(&app, &cookie, "/trash").await;
+    assert!(trash.contains(WARNING), "{trash}");
+    assert!(
+        trash.contains("off-site FTP target are deleted too"),
+        "{trash}"
+    );
+}

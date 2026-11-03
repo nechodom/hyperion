@@ -5148,8 +5148,14 @@
 
   <form method="post" action="/hostings/delete" class="danger-row"
         data-confirm-title="Delete {{ detail.domain }}"
-        data-confirm-body="The files, database, system user and nginx vhost are removed. This is permanent — recovery is only possible from a backup. External DNS records are not touched. Type the domain to confirm."
+        data-confirm-body="The files, database, system user and nginx vhost are removed. This is permanent — recovery is only possible from a backup. Backups stay on this node and on the off-site targets. External DNS records are not touched. Type the domain to confirm."
         data-confirm-confirm-label="Delete permanently"
+        {% if can_delete_offsite && crate::handlers::hostings::any_ftp_copies(backups.as_slice()) %}
+        data-confirm-check="Also delete this site's backups from the off-site FTP target"
+        data-confirm-check-name="offsite"
+        data-confirm-body-checked="The files, database, system user and nginx vhost are removed, AND every backup of this site on the off-site FTP target (archives and database dumps). If they cannot be deleted, the hosting stays. With the trash on, they go when the site leaves the trash, not before. Backups on this node and on S3 are not touched. External DNS records are not touched. Type the domain to confirm."
+        data-confirm-confirm-label-checked="Delete with FTP backups"
+        {% endif %}
         data-confirm-variant="danger"
         data-confirm-require="{{ detail.domain }}">
     <input type="hidden" name="_csrf" value="{{ csrf_delete }}">
