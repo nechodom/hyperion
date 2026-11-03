@@ -64,8 +64,8 @@ pub use limits::next_anniversary;
 pub use limits::{
     BackupRestoreMode, BackupRunWire, ExpiringHosting, HostingExpiry, HostingLimits,
     HostingUsageBucket, IpBanWire, JobSubstep, NodeInviteMint, NodeInviteSummary,
-    OffsiteBackfillResult, OffsiteFile, OffsiteListing, OverBwPolicy, ProtectionMode,
-    SuspendReason,
+    OffsiteBackfillResult, OffsiteFile, OffsiteFolderListing, OffsiteListing, OffsiteOrphanCensus,
+    OverBwPolicy, ProtectionMode, SuspendReason,
 };
 pub use migration::{HostingImportResult, HostingMigrationBundle, HostingMigrationManifest};
 pub use package::{

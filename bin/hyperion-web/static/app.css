@@ -1955,6 +1955,8 @@ details.pkg-new .pkg-fs:first-of-type { padding-top: 0; }
 
 .stats-paused-note { display: none; color: var(--text-soft); font-size: 0.8rem; font-weight: 400; }
 #stats-live[data-paused="1"] .stats-paused-note { display: inline; }
+/* Delayed, so a quick in-place switch never flashes. */
+#stats-live[aria-busy="true"] { opacity: 0.55; transition: opacity 0.15s 0.15s; }
 
 .group > .ghead .ghead-note {
   text-transform: none;

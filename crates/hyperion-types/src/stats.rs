@@ -353,14 +353,23 @@ pub struct NodeMetricsHistory {
     pub samples: Vec<NodeMetricPoint>,
 }
 
-/// One high-resolution network sample: rx/tx bytes/sec at `at` (unix secs).
-/// Fed by the dedicated net sampler (seconds-scale), separate from the
-/// 5-minute `NodeMetricPoint` history.
+/// One high-resolution sample: rx/tx bytes/sec at `at` (unix secs), plus the
+/// node's gauges. Fed by the dedicated net sampler (seconds-scale), separate
+/// from the 5-minute `NodeMetricPoint` history. An older node sends no gauges,
+/// which reads as `mem_total_kib` 0.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct NetSamplePoint {
     pub at: i64,
     pub rx_bps: i64,
     pub tx_bps: i64,
+    #[serde(default)]
+    pub cpu_pct_x100: i64,
+    #[serde(default)]
+    pub loadavg_1m_x100: i64,
+    #[serde(default)]
+    pub mem_used_kib: i64,
+    #[serde(default)]
+    pub mem_total_kib: i64,
 }
 
 /// Short rolling window of high-resolution network samples, oldest → newest.

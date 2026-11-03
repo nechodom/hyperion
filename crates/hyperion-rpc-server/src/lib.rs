@@ -1851,6 +1851,27 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(v) => Response::BackupOffsiteDelete(v),
             Err(e) => Response::Error(e),
         },
+        Request::BackupOrphanCensus {} => match api.backup_orphan_census().await {
+            Ok(v) => Response::BackupOrphanCensus(v),
+            Err(e) => Response::Error(e),
+        },
+        Request::BackupOrphanList {} => match api.backup_orphan_list().await {
+            Ok(v) => Response::BackupOrphanList(v),
+            Err(e) => Response::Error(e),
+        },
+        Request::BackupOrphanDelete {
+            target,
+            folder,
+            file,
+            actor_uid,
+            actor_label,
+        } => match api
+            .backup_orphan_delete(target, folder, file, actor_uid, actor_label)
+            .await
+        {
+            Ok(v) => Response::BackupOrphanDelete(v),
+            Err(e) => Response::Error(e),
+        },
         Request::WpRegistrationGet { sel } => match api.wp_registration_get(sel).await {
             Ok(v) => Response::WpRegistration(v),
             Err(e) => Response::Error(e),
@@ -3986,6 +4007,26 @@ mod tests {
             _: HostingSelector,
             _: Option<i64>,
             _: Option<String>,
+        ) -> Result<String, RpcError> {
+            Ok(String::new())
+        }
+        async fn backup_orphan_census(
+            &self,
+        ) -> Result<hyperion_types::OffsiteOrphanCensus, RpcError> {
+            Ok(Default::default())
+        }
+        async fn backup_orphan_list(
+            &self,
+        ) -> Result<Vec<hyperion_types::OffsiteFolderListing>, RpcError> {
+            Ok(Vec::new())
+        }
+        async fn backup_orphan_delete(
+            &self,
+            _: String,
+            _: String,
+            _: String,
+            _: i64,
+            _: String,
         ) -> Result<String, RpcError> {
             Ok(String::new())
         }

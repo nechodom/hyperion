@@ -1400,3 +1400,271 @@ async fn delete_with_ftp_backups_against_a_real_ftp_server() {
         ["gone-e2e.cz-shop.cz-100.tar.gz", "other.cz-100.tar.gz"]
     );
 }
+
+fn ftp_target(base_path: &str) -> RemoteBackupConfig {
+    RemoteBackupConfig {
+        scheme: "ftp".into(),
+        host: "FTP.Example.cz".into(),
+        port: 21,
+        user: "bk".into(),
+        password: "pw-never-shown".into(),
+        base_path: base_path.into(),
+    }
+}
+
+#[test]
+fn a_target_reads_the_same_on_every_node_and_never_holds_the_password() {
+    use super::offsite_target_key;
+    let key = offsite_target_key(&ftp_target("/backups/"));
+    assert_eq!(key, "ftp://bk@ftp.example.cz:21/backups");
+    assert_eq!(offsite_target_key(&ftp_target("backups")), key);
+    assert_ne!(offsite_target_key(&ftp_target("/other")), key);
+    let mut other_login = ftp_target("/backups");
+    other_login.user = "bk2".into();
+    assert_ne!(
+        offsite_target_key(&other_login),
+        key,
+        "a relative path is another folder for another login"
+    );
+}
+
+/// A site in the trash can still come back, and an alias is a name the site
+/// answers to: neither may read as unused.
+#[tokio::test]
+async fn the_census_counts_trashed_sites_and_aliases_and_names_the_target() {
+    let pool = open_memory().await.expect("open");
+    let mut s = svc(pool.clone(), happy_mocks());
+    let empty = s.backup_orphan_census().await.expect("census");
+    assert!(empty.domains.is_empty());
+    assert_eq!(empty.target, None, "no target is not an error");
+
+    s.remote_backup = Some(ftp_target("/backups"));
+    s.create(req("site.cz")).await.expect("create");
+    assert_eq!(
+        s.backup_orphan_census().await.expect("census").domains,
+        ["site.cz"]
+    );
+    let site = s
+        .get(HostingSelector::Domain(Domain::parse("site.cz").unwrap()))
+        .await
+        .expect("get");
+    hyperion_state::hostings::mark_trashed(&pool, &site.id, 1)
+        .await
+        .expect("trash");
+    assert_eq!(
+        s.backup_orphan_census().await.expect("census").domains,
+        ["site.cz"],
+        "still there in the trash"
+    );
+    sqlx::query("INSERT INTO hosting_aliases (hosting_id, alias_domain) VALUES (?, ?)")
+        .bind(site.id.as_str())
+        .bind("alias.cz")
+        .execute(&pool)
+        .await
+        .expect("alias");
+
+    let c = s.backup_orphan_census().await.expect("census");
+    let mut domains = c.domains.clone();
+    domains.sort();
+    assert_eq!(domains, ["alias.cz", "site.cz"]);
+    let target = c.target.expect("target");
+    assert_eq!(target, "ftp://bk@ftp.example.cz:21/backups");
+    assert!(!target.contains("pw-never-shown"));
+}
+
+/// Nothing here reaches a server: every one of these is refused first, and
+/// every refusal is on the audit log under the name of who asked.
+#[tokio::test]
+async fn an_orphan_delete_refuses_what_this_node_can_see_is_wrong() {
+    let pool = open_memory().await.expect("open");
+    let mut s = svc(pool.clone(), happy_mocks());
+    let key = "ftp://bk@ftp.example.cz:21/backups".to_string();
+    let err = s
+        .backup_orphan_delete(
+            key.clone(),
+            "web1".into(),
+            "gone.cz-100.tar.gz".into(),
+            7,
+            "kevin".into(),
+        )
+        .await
+        .expect_err("no target");
+    assert!(matches!(err, RpcError::Validation { .. }), "{err:?}");
+
+    s.remote_backup = Some(ftp_target("/backups"));
+    s.create(req("live.cz")).await.expect("create");
+    let cases = [
+        // The target changed since the panel looked.
+        (
+            "ftp://bk@elsewhere:21/backups",
+            "web1",
+            "gone.cz-100.tar.gz",
+        ),
+        // Out of the target by way of the folder.
+        (key.as_str(), "..", "gone.cz-100.tar.gz"),
+        (key.as_str(), "a/b", "gone.cz-100.tar.gz"),
+        (key.as_str(), "%2e%2e", "gone.cz-100.tar.gz"),
+        (key.as_str(), "", "gone.cz-100.tar.gz"),
+        // Not a name a backup run writes.
+        (key.as_str(), "web1", "notes.txt"),
+        (key.as_str(), "web1", "../gone.cz-100.tar.gz"),
+        (key.as_str(), "web1", "gone.cz-%2e%2e.tar.gz"),
+        // A site on this very node.
+        (key.as_str(), "web1", "live.cz-100.tar.gz"),
+    ];
+    for (t, d, f) in cases {
+        let err = s
+            .backup_orphan_delete(t.into(), d.into(), f.into(), 7, "kevin".into())
+            .await
+            .expect_err(f);
+        assert!(
+            matches!(err, RpcError::Validation { .. }),
+            "{t} {d} {f}: {err:?}"
+        );
+    }
+
+    let rows: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT actor_label, action, result FROM audit_log \
+         WHERE action = 'backup.offsite_orphan_delete'",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("audit");
+    assert_eq!(rows.len(), cases.len() + 1, "every attempt is on the log");
+    assert!(rows.iter().all(|(a, _, r)| a == "kevin" && r == "failed"));
+}
+
+/// Against a real FTP server (`HY_FTP_TEST=host:port:user:password:base`):
+/// the search reaches every per-user folder from the base path alone, and a
+/// delete takes exactly the named file. Run with `--ignored --test-threads=1`:
+/// run side by side, the real-server tests fail their uploads with curl (56)
+/// against a vsftpd in Docker.
+#[tokio::test]
+#[ignore]
+async fn orphan_list_and_delete_against_a_real_ftp_server() {
+    let Ok(spec) = std::env::var("HY_FTP_TEST") else {
+        return;
+    };
+    let p: Vec<String> = spec.splitn(5, ':').map(str::to_string).collect();
+    let pool = open_memory().await.expect("open");
+    let mut s = svc(pool.clone(), happy_mocks());
+    // A folder of its own under the base, so a rerun or another test's files
+    // do not get in the way.
+    let base = format!(
+        "{}/orphans-{}",
+        p[4].trim_end_matches('/'),
+        hyperion_types::now_secs()
+    );
+    s.remote_backup = Some(RemoteBackupConfig {
+        scheme: "ftp".into(),
+        host: p[0].clone(),
+        port: p[1].parse().expect("port"),
+        user: p[2].clone(),
+        password: p[3].clone(),
+        base_path: base.clone(),
+    });
+    s.create(req("live.cz")).await.expect("create");
+    let remote = s.remote_backup.clone().expect("target");
+    let tmp = tempfile::tempdir().expect("dir");
+    for (folder, name) in [
+        ("web1", "gone.cz-100.tar.gz"),
+        ("web1", "gone.cz-100.sql"),
+        ("web1", "a.cz-shop.cz-100.tar.gz"),
+        ("web1", "live.cz-100.tar.gz"),
+        ("web2", "notes.txt"),
+    ] {
+        let f = tmp.path().join(name);
+        std::fs::write(&f, b"hello").expect("write");
+        let dir = format!("{base}/{folder}");
+        let up = hyperion_adapters::backup::RemoteUpload {
+            scheme: &remote.scheme,
+            host: &remote.host,
+            port: remote.port,
+            user: &remote.user,
+            password: &remote.password,
+            remote_dir: &dir,
+        };
+        hyperion_adapters::backup::upload_remote(&f, &up)
+            .await
+            .expect("upload");
+    }
+
+    let names = |listing: &[hyperion_types::OffsiteFolderListing], folder: &str| {
+        let mut v: Vec<String> = listing
+            .iter()
+            .find(|f| f.name == folder)
+            .map(|f| f.files.iter().map(|x| x.name.clone()).collect())
+            .unwrap_or_default();
+        v.sort();
+        v
+    };
+    let listing = s.backup_orphan_list().await.expect("list");
+    assert_eq!(listing.len(), 2, "{listing:?}");
+    assert_eq!(
+        names(&listing, "web1"),
+        [
+            "a.cz-shop.cz-100.tar.gz",
+            "gone.cz-100.sql",
+            "gone.cz-100.tar.gz",
+            "live.cz-100.tar.gz",
+        ]
+    );
+    assert_eq!(names(&listing, "web2"), ["notes.txt"]);
+    let size = |l: &[hyperion_types::OffsiteFolderListing]| {
+        l.iter().flat_map(|f| &f.files).map(|f| f.bytes).max()
+    };
+    assert_eq!(size(&listing), Some(5));
+
+    let key = s
+        .backup_orphan_census()
+        .await
+        .expect("census")
+        .target
+        .expect("key");
+    let msg = s
+        .backup_orphan_delete(
+            key.clone(),
+            "web1".into(),
+            "gone.cz-100.tar.gz".into(),
+            1,
+            "kevin".into(),
+        )
+        .await
+        .expect("delete");
+    assert!(msg.contains("web1/gone.cz-100.tar.gz"), "{msg}");
+
+    // Only what was named: the dump beside it stays until it is asked for.
+    let listing = s.backup_orphan_list().await.expect("list");
+    assert_eq!(
+        names(&listing, "web1"),
+        [
+            "a.cz-shop.cz-100.tar.gz",
+            "gone.cz-100.sql",
+            "live.cz-100.tar.gz",
+        ]
+    );
+
+    // Refused without touching the server, and still there.
+    s.backup_orphan_delete(
+        key.clone(),
+        "web1".into(),
+        "live.cz-100.tar.gz".into(),
+        1,
+        "kevin".into(),
+    )
+    .await
+    .expect_err("a site here");
+    let listing = s.backup_orphan_list().await.expect("list");
+    assert!(names(&listing, "web1").contains(&"live.cz-100.tar.gz".to_string()));
+
+    // A delete that already happened is still "not there".
+    s.backup_orphan_delete(
+        key,
+        "web1".into(),
+        "gone.cz-100.tar.gz".into(),
+        1,
+        "kevin".into(),
+    )
+    .await
+    .expect("gone already");
+}

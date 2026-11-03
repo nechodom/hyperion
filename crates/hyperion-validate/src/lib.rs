@@ -6,11 +6,13 @@
 pub mod certname;
 pub mod domain;
 pub mod ftplogin;
+pub mod offsite;
 pub mod sysuser;
 
 pub use certname::{name_matches, uncovered_names};
 pub use domain::Domain;
 pub use ftplogin::{compose_extra_login, validate_login_name};
+pub use offsite::{parse_offsite_backup_name, OffsiteBackupName};
 pub use sysuser::SystemUserName;
 
 #[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]

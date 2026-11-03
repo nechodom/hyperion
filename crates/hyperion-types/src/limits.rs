@@ -504,6 +504,28 @@ pub struct OffsiteListing {
     pub files: Vec<OffsiteFile>,
 }
 
+/// What one node says for the search for backups left by deleted sites.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OffsiteOrphanCensus {
+    /// Every domain this node's hostings use: primary names and aliases,
+    /// trashed sites included.
+    pub domains: Vec<String>,
+    /// This node's FTP/SFTP target (`sftp://user@host:22/base`), `None` when
+    /// it has none. The same string on two nodes is the same place on the same
+    /// server. It never carries the password.
+    pub target: Option<String>,
+}
+
+/// One per-system-user folder under the target's base path.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OffsiteFolderListing {
+    pub name: String,
+    pub files: Vec<OffsiteFile>,
+    /// This folder could not be listed. The others still can be, so it does
+    /// not fail the search, and it is shown rather than read as empty.
+    pub error: Option<String>,
+}
+
 /// What a backfill actually did.
 ///
 /// Four numbers rather than one, because they call for different actions.

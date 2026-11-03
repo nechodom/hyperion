@@ -1333,18 +1333,45 @@ async fn seed_demo(svc: &Arc<StubService>) {
         .expect("email_log");
     }
 
-    // The 15 s network sampler, last hour.
-    for k in 0..240i64 {
-        let i = (240 - k) as f64;
+    // The 15 s sampler, last hour, and it keeps ticking so the graphs move.
+    let ring_row = move |pool: sqlx::SqlitePool, at: i64, i: f64| async move {
         let tx = (210_000.0 + 140_000.0 * wave(i, 4.0, 15.0)).max(15_000.0);
-        sqlx::query("INSERT INTO net_samples (at, rx_bps, tx_bps) VALUES (?,?,?)")
-            .bind(now - k * 15)
-            .bind((tx * 0.28) as i64)
-            .bind(tx as i64)
-            .execute(pool)
-            .await
-            .expect("net_samples");
+        let load = (0.45 + 0.35 * wave(i, 3.0, 11.0)).max(0.05);
+        let mem = 0.52 + 0.06 * wave(i, 5.0, 17.0);
+        sqlx::query(
+            "INSERT INTO net_samples (at, rx_bps, tx_bps, cpu_pct_x100, loadavg_1m_x100, \
+             mem_used_kib, mem_total_kib) VALUES (?,?,?,?,?,?,?)",
+        )
+        .bind(at)
+        .bind((tx * 0.28) as i64)
+        .bind(tx as i64)
+        .bind(((load * 22.0).min(100.0) * 100.0) as i64)
+        .bind((load * 100.0) as i64)
+        .bind((mem * mem_total as f64) as i64)
+        .bind(mem_total)
+        .execute(&pool)
+        .await
+        .expect("net_samples");
+    };
+    for k in 0..240i64 {
+        ring_row(pool.clone(), now - k * 15, (240 - k) as f64).await;
     }
+    let ring_pool = pool.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+        interval.tick().await;
+        let mut i = 240.0;
+        loop {
+            interval.tick().await;
+            i += 1.0;
+            let at = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64;
+            ring_row(ring_pool.clone(), at, i).await;
+            let _ = hyperion_state::net_samples::prune_older_than(&ring_pool, at - 3600).await;
+        }
+    });
 
     // Audit log: sign-ins (one failed), settings and cert changes, a node
     // event, spread over a few days. Appended through the real chain so
@@ -1808,6 +1835,30 @@ async fn seed_demo_offsite(svc: &StubService) {
     hyperion_adapters::backup::upload_remote(&orphan, &up)
         .await
         .expect("upload orphan");
+    // Left by sites that no longer exist, for Settings -> Backups -> Leftover
+    // backups, beside a file no backup run would have named.
+    for (folder, name, bytes) in [
+        ("old_shop", format!("old-shop.cz-{at}.tar.gz"), 48_000_000),
+        ("old_shop", format!("old-shop.cz-{at}.sql"), 2_400_000),
+        ("old_shop", "notes-from-2023.txt".to_string(), 900),
+        ("old_shop", format!("a.cz-shop.cz-{at}.tgz"), 310_000),
+        (
+            detail.system_user.as_str(),
+            format!("sibling.cz-{at}.tar.gz"),
+            1_200_000,
+        ),
+    ] {
+        let dir = format!("{}/{folder}", remote.base_path.trim_end_matches('/'));
+        let file = local.join(&name);
+        std::fs::write(&file, vec![b'o'; bytes]).expect("leftover");
+        let up = hyperion_adapters::backup::RemoteUpload {
+            remote_dir: &dir,
+            ..up.clone()
+        };
+        hyperion_adapters::backup::upload_remote(&file, &up)
+            .await
+            .expect("upload leftover");
+    }
 }
 
 /// `DEVSERVER_DEMO_NODES=1`: enroll three fake worker nodes so the Nodes

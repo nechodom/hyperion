@@ -10,22 +10,27 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         detail: &HostingDetail,
     ) -> Option<(hyperion_adapters::backup::RemoteUpload<'_>, String)> {
         let remote = self.remote_backup.as_ref()?;
-        let dir = format!(
-            "{}/{}",
-            remote.base_path.trim_end_matches('/'),
-            detail.system_user
-        );
         Some((
-            hyperion_adapters::backup::RemoteUpload {
-                scheme: &remote.scheme,
-                host: &remote.host,
-                port: remote.port,
-                user: &remote.user,
-                password: &remote.password,
-                remote_dir: "",
-            },
-            dir,
+            self.remote_upload_base()?,
+            format!(
+                "{}/{}",
+                remote.base_path.trim_end_matches('/'),
+                detail.system_user
+            ),
         ))
+    }
+
+    /// The FTP destination with no folder chosen yet.
+    fn remote_upload_base(&self) -> Option<hyperion_adapters::backup::RemoteUpload<'_>> {
+        let remote = self.remote_backup.as_ref()?;
+        Some(hyperion_adapters::backup::RemoteUpload {
+            scheme: &remote.scheme,
+            host: &remote.host,
+            port: remote.port,
+            user: &remote.user,
+            password: &remote.password,
+            remote_dir: "",
+        })
     }
 
     /// What this site actually has on the off-site store.
@@ -677,6 +682,172 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(format!(
             "deleted {name} (and its database dump, if it had one) from the off-site target"
         ))
+    }
+
+    /// This node's half of the search for backups left by deleted sites: the
+    /// domains its hostings use and the target it pushes to. Whether a file on
+    /// the target is orphaned takes every node's answer, because several nodes
+    /// can share a target and a site can have moved, so that call is the
+    /// panel's.
+    pub async fn backup_orphan_census(
+        &self,
+    ) -> Result<hyperion_types::OffsiteOrphanCensus, RpcError> {
+        let domains = hyperion_state::hostings::all_domains(&self.pool)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("reading the hostings: {e}")))?;
+        Ok(hyperion_types::OffsiteOrphanCensus {
+            domains,
+            target: self.remote_backup.as_ref().map(offsite_target_key),
+        })
+    }
+
+    /// Every per-system-user folder on this node's FTP/SFTP target, with what
+    /// is in it. One folder at a time: FTP servers limit connections per
+    /// address. A folder that cannot be listed is reported and the rest still
+    /// are, unless they keep failing: a server that has gone away would
+    /// otherwise cost the full timeout once per folder.
+    pub async fn backup_orphan_list(
+        &self,
+    ) -> Result<Vec<hyperion_types::OffsiteFolderListing>, RpcError> {
+        const GIVE_UP_AFTER_FAILURES_IN_A_ROW: usize = 5;
+        let (Some(remote), Some(mut up)) = (self.remote_backup.as_ref(), self.remote_upload_base())
+        else {
+            return Err(RpcError::Validation {
+                message: NO_REMOTE_TARGET.into(),
+            });
+        };
+        let base = remote.base_path.trim_end_matches('/');
+        up.remote_dir = base;
+        let folders = hyperion_adapters::backup::list_remote_folders(&up)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("off-site list: {e}")))?
+            .unwrap_or_default();
+        let mut out = Vec::new();
+        let mut failures_in_a_row = 0;
+        for name in folders
+            .into_iter()
+            .filter(|n| hyperion_adapters::backup::is_plain_backup_name(n))
+        {
+            let dir = format!("{base}/{name}");
+            let folder = hyperion_adapters::backup::RemoteUpload {
+                remote_dir: &dir,
+                ..up.clone()
+            };
+            match hyperion_adapters::backup::list_remote(&folder).await {
+                Ok(files) => {
+                    failures_in_a_row = 0;
+                    out.push(hyperion_types::OffsiteFolderListing {
+                        name,
+                        files: files
+                            .unwrap_or_default()
+                            .into_iter()
+                            .map(|f| hyperion_types::OffsiteFile {
+                                name: f.name,
+                                bytes: f.bytes as i64,
+                            })
+                            .collect(),
+                        error: None,
+                    });
+                }
+                Err(e) => {
+                    failures_in_a_row += 1;
+                    if failures_in_a_row >= GIVE_UP_AFTER_FAILURES_IN_A_ROW {
+                        return Err(RpcError::Internal_with(format!(
+                            "off-site list: gave up after {failures_in_a_row} folders in a row \
+                             could not be listed: {e}"
+                        )));
+                    }
+                    out.push(hyperion_types::OffsiteFolderListing {
+                        name,
+                        files: Vec::new(),
+                        error: Some(e.to_string()),
+                    });
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Delete one file left by a deleted site from this node's FTP/SFTP
+    /// target, and audit the attempt whatever came of it.
+    pub async fn backup_orphan_delete(
+        &self,
+        target: String,
+        folder: String,
+        file: String,
+        actor_uid: i64,
+        actor_label: String,
+    ) -> Result<String, RpcError> {
+        let outcome = self
+            .backup_orphan_delete_checked(&target, &folder, &file)
+            .await;
+        self.append_audit_as(
+            actor_uid,
+            &actor_label,
+            "backup.offsite_orphan_delete",
+            hyperion_validate::parse_offsite_backup_name(&file)
+                .as_ref()
+                .map(|p| p.domain.as_str()),
+            &serde_json::json!({
+                "target": target,
+                "folder": folder,
+                "file": file,
+                "error": outcome.as_ref().err().map(|e| e.to_string()),
+            })
+            .to_string(),
+            if outcome.is_ok() { "ok" } else { "failed" },
+        )
+        .await;
+        outcome.map(|()| format!("deleted {folder}/{file} from the off-site target"))
+    }
+
+    /// The refusals, then the delete. Whether the file is orphaned was decided
+    /// by the panel over every node; what is checked here is what this node
+    /// can see for itself, so a mistake up there cannot take a backup of a site
+    /// that is plainly here.
+    async fn backup_orphan_delete_checked(
+        &self,
+        target: &str,
+        folder: &str,
+        file: &str,
+    ) -> Result<(), RpcError> {
+        let (Some(remote), Some(mut up)) = (self.remote_backup.as_ref(), self.remote_upload_base())
+        else {
+            return Err(RpcError::Validation {
+                message: NO_REMOTE_TARGET.into(),
+            });
+        };
+        if offsite_target_key(remote) != target {
+            return Err(RpcError::Validation {
+                message: format!("this node's off-site target is no longer {target}"),
+            });
+        }
+        if !hyperion_adapters::backup::is_plain_backup_name(folder) {
+            return Err(RpcError::Validation {
+                message: format!("{folder:?} is not a folder of the off-site target"),
+            });
+        }
+        let Some(parsed) = hyperion_validate::parse_offsite_backup_name(file) else {
+            return Err(RpcError::Validation {
+                message: format!("{file:?} is not a backup file name"),
+            });
+        };
+        let domains = hyperion_state::hostings::all_domains(&self.pool)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("reading the hostings: {e}")))?;
+        if domains.iter().any(|d| d == parsed.domain.as_str()) {
+            return Err(RpcError::Validation {
+                message: format!(
+                    "{} is a site on this node, so {file} is not left over",
+                    parsed.domain.as_str()
+                ),
+            });
+        }
+        let dir = format!("{}/{folder}", remote.base_path.trim_end_matches('/'));
+        up.remote_dir = &dir;
+        hyperion_adapters::backup::delete_remote(&[file], &up)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("off-site delete: {e}")))
     }
 
     /// Delete every archive and dump of this site from the FTP/SFTP target, on
@@ -1441,6 +1612,21 @@ pub(super) fn manifest_path_for(archive: &std::path::Path) -> Option<std::path::
         return None;
     }
     Some(archive.with_file_name(format!("{stem}.manifest.json")))
+}
+
+/// One FTP/SFTP target as a string: the same on every node that pushes to the
+/// same place, because `/backups` and `backups/` are the same folder and host
+/// names are not case-sensitive. The login is part of it, since a relative base
+/// path means another folder for another login. Never the password.
+pub(super) fn offsite_target_key(r: &crate::RemoteBackupConfig) -> String {
+    format!(
+        "{}://{}@{}:{}/{}",
+        r.scheme.trim().to_ascii_lowercase(),
+        r.user.trim(),
+        r.host.trim().to_ascii_lowercase(),
+        r.port,
+        r.base_path.trim().trim_matches('/'),
+    )
 }
 
 /// Is `name` one of `domain`'s own backup files on the off-site store?

@@ -2,7 +2,7 @@
 {% block title %}Stats · Hyperion{% endblock %}
 {% block main %}
 <div class="page-header">
-  <div>
+  <div id="stats-head">
     <h1>Stats <span class="text-soft" style="font-weight:400;font-size:0.7em">· {{ current_label }}</span></h1>
     <div class="subtitle">
       How hard each node is working, and what every site costs it.
@@ -16,9 +16,9 @@
     {% if !all_nodes.is_empty() %}
     {# Switching nodes re-runs the cluster_stats + history RPCs on the chosen
        node, so the charts reflect that node's /proc data. #}
-    <form method="get" action="/stats" class="m-wrap">
+    <form method="get" action="/stats" class="m-wrap" id="stats-node-form">
       <label for="node-switcher" class="text-soft small">Node</label>
-      <select id="node-switcher" name="node" onchange="this.form.submit()">
+      <select id="node-switcher" name="node" onchange="this.form.requestSubmit()">
         <option value="" {% if current_node.is_empty() || current_node == "cluster" %}selected{% endif %}>All nodes</option>
         <option value="local" {% if current_node == "local" %}selected{% endif %}>master (this node)</option>
         {% for n in all_nodes %}
@@ -204,10 +204,10 @@
         <div class="stat-meta"><i class="viz-key out" aria-hidden="true"></i>{{ crate::handlers::stats::fmt_rate(net_out_now) }} out{% if spark_net.has_data %} · peak {{ spark_net.in_peak }} / {{ spark_net.out_peak }}{% endif %}</div>
         {% if spark_net.has_data %}
         <div class="stat-chart">
-          <svg class="spark-svg" viewBox="0 0 600 60" preserveAspectRatio="none" aria-hidden="true">
+          <svg class="spark-svg" viewBox="0 0 600 60" preserveAspectRatio="none" aria-hidden="true" data-points='{{ spark_net.points_json|safe }}' data-spark-mount>
             <defs><linearGradient id="grad-net" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="currentColor" stop-opacity="0.22"/><stop offset="100%" stop-color="currentColor" stop-opacity="0"/></linearGradient></defs>
-            <path d="{{ spark_net.area_in }}" fill="url(#grad-net)"/>
-            <path d="{{ spark_net.path_in }}" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke"/>
+            <path class="spark-area" d="{{ spark_net.area_in }}" fill="url(#grad-net)"/>
+            <path class="spark-line" d="{{ spark_net.path_in }}" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke"/>
             <path class="spark-out" d="{{ spark_net.path_out }}" fill="none" stroke-width="1.4" stroke-dasharray="4 3" stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke"/>
           </svg>
         </div>
@@ -329,7 +329,7 @@
      "Which site is eating the box?" — one row per active hosting, heaviest
      first. Sorting and the range are server-side round trips on purpose: this
      table sits inside #stats-live, so client-side state would be thrown away
-     by the next swap. #}
+     by the next swap. They still swap in place: see the script below. #}
   <div class="group">
     <div class="ghead">
       Per-site usage
@@ -572,6 +572,71 @@
   }
   apply(parseInt(sel.value, 10) || 0, false);
   sel.addEventListener('change', () => apply(parseInt(sel.value, 10) || 0, true));
+})();
+
+// Period, sort and node change the URL but swap only what they change, the same
+// way the live refresh does, so scroll and the refresh picker stay put. Anything
+// that does not come back as this page (signed out, an error) is left to a real
+// navigation, which shows it properly.
+(function () {
+  'use strict';
+  const region = document.getElementById('stats-live');
+  const head = document.getElementById('stats-head');
+  const form = document.getElementById('stats-node-form');
+  if (!region || !head) return;
+  let pending = null;
+
+  async function show(url, push) {
+    if (pending) pending.abort();
+    const mine = pending = new AbortController();
+    region.setAttribute('aria-busy', 'true');
+    try {
+      const r = await fetch(url, { credentials: 'same-origin', cache: 'no-store', signal: mine.signal });
+      const doc = new DOMParser().parseFromString(await r.text(), 'text/html');
+      const fresh = r.ok ? doc.getElementById('stats-live') : null;
+      if (mine !== pending) return;
+      if (!fresh) { location.assign(url); return; }
+      if (push) history.pushState(null, '', url);
+      const focused = region.contains(document.activeElement) && document.activeElement.getAttribute('href');
+      region.innerHTML = fresh.innerHTML;
+      head.innerHTML = doc.getElementById('stats-head').innerHTML;
+      // The picker itself stays, it may hold focus; the server's normalised
+      // sort and range must reach its hidden fields or the next switch loses them.
+      const freshForm = doc.getElementById('stats-node-form');
+      if (form && freshForm) {
+        for (const name of ['node', 'sort', 'range']) form.elements[name].value = freshForm.elements[name].value;
+      }
+      if (focused) {
+        const link = [...region.querySelectorAll('a[href]')].find((a) => a.getAttribute('href') === focused);
+        if (link) link.focus({ preventScroll: true });
+      }
+      document.dispatchEvent(new CustomEvent('live-refresh-swapped'));
+    } catch (e) {
+      if (mine === pending && e.name !== 'AbortError') location.assign(url);
+    } finally {
+      if (mine === pending) { pending = null; region.removeAttribute('aria-busy'); }
+    }
+  }
+
+  region.addEventListener('click', (ev) => {
+    if (ev.defaultPrevented || ev.button !== 0 || ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey) return;
+    const a = ev.target.closest('a[href]');
+    if (!a || a.target) return;
+    const url = new URL(a.href);
+    if (url.origin !== location.origin || url.pathname !== location.pathname) return;
+    ev.preventDefault();
+    if (a.classList.contains('seg')) {
+      a.parentElement.querySelectorAll('.seg').forEach((s) => s.classList.toggle('active', s === a));
+    }
+    show(url.href, true);
+  });
+  if (form) {
+    form.addEventListener('submit', (ev) => {
+      ev.preventDefault();
+      show('/stats?' + new URLSearchParams(new FormData(form)), true);
+    });
+  }
+  window.addEventListener('popstate', () => show(location.href, false));
 })();
 </script>
 {% endblock %}

@@ -143,6 +143,8 @@ pub fn job_kind_label(kind: &str) -> String {
         "cwv_measure" => "Measure Core Web Vitals",
         "normalize_www" => "Normalize www redirect",
         "bulk" => "Bulk action",
+        "offsite-orphan-scan" => "Search for leftover backups",
+        "offsite-orphan-delete" => "Delete leftover backups",
         other => return crate::handlers::stats::fmt_action_label(other),
     }
     .to_string()
@@ -938,10 +940,14 @@ fn format_elapsed(j: &hyperion_types::JobView) -> String {
 pub struct JobReporter {
     pub id: String,
     pub state: SharedState,
+    /// What the last step set the bar to, for [`Self::heartbeat`].
+    last_pct: std::sync::Arc<std::sync::atomic::AtomicI64>,
 }
 
 impl JobReporter {
     pub async fn step(&self, label: &str, pct: i64, log_append: &str) {
+        self.last_pct
+            .store(pct, std::sync::atomic::Ordering::Relaxed);
         let r = hyperion_rpc_client::call(
             &self.state.agent_socket,
             Request::JobProgress {
@@ -955,6 +961,20 @@ impl JobReporter {
         if let Err(e) = r {
             tracing::warn!(error=%e, id=%self.id, "job_progress RPC failed");
         }
+    }
+
+    /// Touch the job row every two minutes until the handle is aborted, so a
+    /// long RPC is not reaped as stale mid-flight. Keeps the bar where the
+    /// last step left it.
+    pub fn heartbeat(&self, label: &'static str) -> tokio::task::JoinHandle<()> {
+        let reporter = self.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(120)).await;
+                let pct = reporter.last_pct.load(std::sync::atomic::Ordering::Relaxed);
+                reporter.step(label, pct, "").await;
+            }
+        })
     }
 
     pub async fn finish(&self, ok: bool, error: Option<String>) {
@@ -1041,6 +1061,7 @@ where
     let reporter = JobReporter {
         id: id.clone(),
         state: state.clone(),
+        last_pct: Default::default(),
     };
     tokio::spawn(work(reporter));
     Ok(id)

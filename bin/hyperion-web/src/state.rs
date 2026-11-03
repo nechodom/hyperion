@@ -131,6 +131,12 @@ pub struct PanelCaches {
     /// Monitors down + certificates expiring cluster-wide, behind the
     /// sidebar's monitoring and certificate dots (two fan-outs).
     pub nav_dots: crate::ttl_cache::TtlCell<crate::handlers::jobs::NavDots>,
+    /// The last search for leftover backups on the off-site targets. Not a
+    /// cache in the sense of the others: it never expires and a write does not
+    /// drop it. The delete asks every node again, so an old one cannot do
+    /// harm, and after a restart the page just offers the search again.
+    pub orphan_report:
+        std::sync::Mutex<Option<crate::handlers::settings::page_orphans::OrphanReport>>,
 }
 
 impl PanelCaches {
@@ -185,6 +191,7 @@ impl Default for PanelCaches {
             trash_count: crate::ttl_cache::TtlCell::new(Self::TRASH_TTL),
             needs_you: crate::ttl_cache::TtlCell::new(Self::NEEDS_YOU_TTL),
             nav_dots: crate::ttl_cache::TtlCell::new(Self::NAV_DOTS_TTL),
+            orphan_report: std::sync::Mutex::new(None),
         }
     }
 }

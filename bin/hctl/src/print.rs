@@ -944,8 +944,22 @@ pub fn print_pretty(resp: &Response) {
                 println!("  latest: ↓ {} B/s ↑ {} B/s", s.rx_bps, s.tx_bps);
             }
         }
-        Response::BackupOffsiteRestore(msg) | Response::BackupOffsiteDelete(msg) => {
+        Response::BackupOffsiteRestore(msg)
+        | Response::BackupOffsiteDelete(msg)
+        | Response::BackupOrphanDelete(msg) => {
             println!("✓ {msg}")
+        }
+        Response::BackupOrphanCensus(c) => {
+            println!(
+                "target: {}",
+                c.target.as_deref().unwrap_or("(none configured)")
+            );
+            println!("domains: {}", c.domains.len());
+        }
+        Response::BackupOrphanList(folders) => {
+            for f in folders {
+                println!("{}/ ({} file(s))", f.name, f.files.len());
+            }
         }
         Response::BackupProgress(subs) => {
             if subs.is_empty() {
