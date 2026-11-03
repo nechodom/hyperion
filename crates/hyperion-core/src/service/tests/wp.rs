@@ -313,3 +313,177 @@ async fn base_theme_tick_does_not_count_a_failed_install() {
         .returning(|_, _| Err(AdapterError::Other("wordpress.org unreachable".into())));
     assert_eq!(base_theme_tick(a, "active", no_themes).await, 0);
 }
+
+/// One WordPress site on disk, loader in place, recorded as installed.
+async fn cron_site(
+    a: MockAdapterPort,
+) -> (
+    SqlitePool,
+    HostingService<MockAdapterPort>,
+    tempfile::TempDir,
+    String,
+    std::path::PathBuf,
+) {
+    let pool = open_memory().await.expect("open");
+    let home = tempfile::tempdir().expect("home");
+    let s = svc(pool.clone(), a).with_paths(HostingPaths {
+        home_root: home.path().display().to_string(),
+        ..Default::default()
+    });
+    s.create(req("ex.cz")).await.expect("create");
+    let d = s
+        .get(HostingSelector::Domain(Domain::parse("ex.cz").unwrap()))
+        .await
+        .expect("get");
+    let root = std::path::PathBuf::from(&d.root_dir);
+    let mu = root.join("wp-content/mu-plugins");
+    std::fs::create_dir_all(&mu).expect("mu-plugins");
+    std::fs::write(mu.join("hyperion.php"), "<?php\n").expect("loader");
+    wordpress::record_install(&pool, &d.id, "https://ex.cz", "6.9", "x", 1)
+        .await
+        .expect("record");
+    (pool, s, home, d.id.as_str().to_string(), mu)
+}
+
+/// The module that turns WordPress's own cron off lands only after the
+/// command line has worked on that site.
+#[tokio::test]
+async fn system_cron_disables_wp_cron_only_after_it_has_worked() {
+    let mut a = happy_mocks();
+    a.expect_wp_cron_run().times(1).returning(|_, _| Ok(()));
+    let (pool, s, _home, id, mu) = cron_site(a).await;
+    let module = mu.join("hyperion/cron.php");
+    assert!(!module.exists());
+
+    let mut last_run = std::collections::HashMap::new();
+    assert_eq!(s.wp_system_cron_tick(&mut last_run).await.expect("tick"), 1);
+    assert!(module.exists());
+    let st = hyperion_types::wpcron::State::parse(
+        &hyperion_state::hosting_kv::get(&pool, &id, hyperion_types::wpcron::KV_STATE)
+            .await
+            .expect("kv")
+            .expect("state"),
+    )
+    .expect("parse");
+    assert!(st.last_ok_at > 0);
+
+    // Just ran: `times(1)` above is what proves it is not run again yet.
+    assert_eq!(s.wp_system_cron_tick(&mut last_run).await.expect("tick"), 0);
+}
+
+/// A site whose cron keeps failing from the command line goes back to how
+/// it was, so it does not lose cron altogether.
+#[tokio::test]
+async fn system_cron_falls_back_after_repeated_failure() {
+    use hyperion_types::wpcron;
+    let mut a = happy_mocks();
+    a.expect_wp_cron_run()
+        .times(wpcron::MAX_FAILS as usize)
+        .returning(|_, _| Err(AdapterError::Other("fatal".into())));
+    let (pool, s, _home, id, mu) = cron_site(a).await;
+    let module = mu.join("hyperion/cron.php");
+    std::fs::create_dir_all(module.parent().unwrap()).expect("dir");
+    std::fs::write(&module, "old").expect("module");
+
+    for _ in 0..wpcron::MAX_FAILS {
+        // Fresh map: each loop stands for a run some minutes later.
+        let mut last_run = std::collections::HashMap::new();
+        assert_eq!(s.wp_system_cron_tick(&mut last_run).await.expect("tick"), 0);
+    }
+    assert!(!module.exists(), "back to WordPress's own cron");
+    let st = wpcron::State::parse(
+        &hyperion_state::hosting_kv::get(&pool, &id, wpcron::KV_STATE)
+            .await
+            .expect("kv")
+            .expect("state"),
+    )
+    .expect("parse");
+    assert!(st.retry_after > now_secs());
+
+    // `times` above: waiting out the retry, no further run.
+    let mut last_run = std::collections::HashMap::new();
+    assert_eq!(s.wp_system_cron_tick(&mut last_run).await.expect("tick"), 0);
+}
+
+/// Turned off: nothing runs and the module goes. No loader (a report-only
+/// site): Hyperion adds nothing.
+#[tokio::test]
+async fn system_cron_leaves_alone_a_site_turned_off_or_report_only() {
+    let mut a = happy_mocks();
+    a.expect_wp_cron_run().times(0);
+    let (pool, s, _home, id, mu) = cron_site(a).await;
+    let module = mu.join("hyperion/cron.php");
+    std::fs::create_dir_all(module.parent().unwrap()).expect("dir");
+    std::fs::write(&module, "old").expect("module");
+    hyperion_state::hosting_kv::set(&pool, &id, hyperion_types::wpcron::KV_ENABLED, "off", 0)
+        .await
+        .expect("kv");
+    let mut last_run = std::collections::HashMap::new();
+    assert_eq!(s.wp_system_cron_tick(&mut last_run).await.expect("tick"), 0);
+    assert!(!module.exists());
+
+    hyperion_state::hosting_kv::delete(&pool, &id, hyperion_types::wpcron::KV_ENABLED)
+        .await
+        .expect("kv");
+    std::fs::remove_file(mu.join("hyperion.php")).expect("loader");
+    assert_eq!(s.wp_system_cron_tick(&mut last_run).await.expect("tick"), 0);
+    assert!(!module.exists());
+}
+
+/// A staging copy keeps cron firing only when somebody opens it: on a timer
+/// it would repeat the real site's reminders and renewals.
+#[tokio::test]
+async fn system_cron_leaves_a_site_kept_out_of_search_engines_alone() {
+    let mut a = happy_mocks();
+    a.expect_wp_cron_run().times(0);
+    a.expect_nginx_delete_htpasswd().returning(|_| Ok(()));
+    let (_pool, s, _home, id, mu) = cron_site(a).await;
+    let sel = HostingSelector::Id(HostingId(id));
+    let mut o = s.get(sel.clone()).await.expect("get").vhost_options;
+    o.noindex = true;
+    s.set_vhost_options(sel, o, None).await.expect("options");
+    let module = mu.join("hyperion/cron.php");
+    std::fs::create_dir_all(module.parent().unwrap()).expect("dir");
+    std::fs::write(&module, "old").expect("module");
+    let mut last_run = std::collections::HashMap::new();
+    assert_eq!(s.wp_system_cron_tick(&mut last_run).await.expect("tick"), 0);
+    assert!(!module.exists());
+}
+
+/// A new WordPress site starts with the page cache on, briefly.
+#[tokio::test]
+async fn a_new_wordpress_site_starts_with_the_page_cache_on() {
+    let pool = open_memory().await.expect("open");
+    let mut a = happy_mocks();
+    a.expect_wp_install_run()
+        .returning(|_, _, _, _, _, _, _| Ok("6.9".into()));
+    a.expect_nginx_delete_htpasswd().returning(|_| Ok(()));
+    let s = svc(pool, a);
+    s.create(req("ex.cz")).await.expect("create");
+    let sel = HostingSelector::Domain(Domain::parse("ex.cz").unwrap());
+    assert!(
+        !s.get(sel.clone())
+            .await
+            .expect("get")
+            .vhost_options
+            .fastcgi_cache_enabled
+    );
+    s.install_wordpress(
+        sel.clone(),
+        hyperion_types::WpInstallRequest {
+            site_url: "https://ex.cz".into(),
+            title: "Ex".into(),
+            admin_user: "admin".into(),
+            admin_email: "a@ex.cz".into(),
+            admin_password: "correct horse battery".into(),
+            locale: "en_US".into(),
+            version: "latest".into(),
+            no_index: false,
+        },
+    )
+    .await
+    .expect("install");
+    let o = s.get(sel).await.expect("get").vhost_options;
+    assert!(o.fastcgi_cache_enabled);
+    assert_eq!(o.fastcgi_cache_ttl, 60);
+}

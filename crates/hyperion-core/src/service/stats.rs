@@ -1228,6 +1228,16 @@ pub(super) async fn read_net_bytes() -> Option<(u64, u64)> {
 /// `some avg10` (×100) from /proc/pressure/<resource>. 0 when PSI is
 /// unavailable (kernel without CONFIG_PSI). Line: `some avg10=0.00 avg60=...`.
 pub(super) async fn read_psi_some_avg10(resource: &str) -> i64 {
+    read_psi_some(resource, "avg10=").await
+}
+
+/// [`read_psi_some_avg10`] over the last minute, for a decision that a burst
+/// of a few seconds should not swing.
+pub(super) async fn read_psi_some_avg60(resource: &str) -> i64 {
+    read_psi_some(resource, "avg60=").await
+}
+
+async fn read_psi_some(resource: &str, field: &str) -> i64 {
     let path = format!("/proc/pressure/{resource}");
     let Ok(s) = tokio::fs::read_to_string(&path).await else {
         return 0;
@@ -1235,7 +1245,7 @@ pub(super) async fn read_psi_some_avg10(resource: &str) -> i64 {
     for line in s.lines() {
         if let Some(rest) = line.strip_prefix("some ") {
             for tok in rest.split_whitespace() {
-                if let Some(v) = tok.strip_prefix("avg10=") {
+                if let Some(v) = tok.strip_prefix(field) {
                     return v.parse::<f64>().map(|f| (f * 100.0) as i64).unwrap_or(0);
                 }
             }
@@ -1254,6 +1264,17 @@ pub(super) async fn read_mem_total_mb() -> Option<i64> {
         .and_then(|kib| kib.parse::<i64>().ok())
         .map(|kib| kib / 1024)
         .filter(|&mb| mb > 0)
+}
+
+/// `MemAvailable` from /proc/meminfo, in MiB. `None` as for
+/// [`read_mem_total_mb`].
+pub(super) async fn read_mem_available_mb() -> Option<i64> {
+    let s = tokio::fs::read_to_string("/proc/meminfo").await.ok()?;
+    s.lines()
+        .find_map(|l| l.strip_prefix("MemAvailable:"))
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|kib| kib.parse::<i64>().ok())
+        .map(|kib| kib / 1024)
 }
 
 pub(super) async fn read_proc_metrics() -> ProcMetrics {

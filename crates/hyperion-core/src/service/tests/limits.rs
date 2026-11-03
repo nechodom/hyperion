@@ -4,7 +4,7 @@ use super::*;
 
 /// `server reached pm.max_children` in an FPM log is counted for the
 /// site whose pool it names, and only for lines written after the first
-/// look.
+/// look. A full pool on its own alerts nobody.
 #[tokio::test]
 async fn php_workers_tick_records_pool_saturation() {
     use hyperion_types::phpworkers;
@@ -22,7 +22,7 @@ async fn php_workers_tick_records_pool_saturation() {
         format!("[06-Oct-2026 06:56:45] WARNING: [pool {user}] server reached pm.max_children setting (5), consider raising it\n")
     };
     std::fs::write(&log, line(&d.system_user)).expect("write");
-    let mut cursors = std::collections::HashMap::new();
+    let mut cursors = PhpWorkersCursors::default();
 
     // First look: history is not news.
     assert_eq!(
@@ -55,16 +55,225 @@ async fn php_workers_tick_records_pool_saturation() {
             .expect("state"),
     )
     .expect("parse");
-    assert_eq!(st.hits_today(st.last_at), 2);
-    assert_eq!(st.alerted_at, st.last_at, "first hit alerts");
+    assert_eq!(st.hits_24h(st.last_at), 2);
+    assert_eq!(st.alerted_at, 0, "nobody was affected, so nobody is told");
 
-    // Nothing new: nothing recorded.
+    // Nothing new: nothing recorded, though the site stays watched a while.
     assert_eq!(
         s.php_workers_tick(dir.path(), &mut cursors)
             .await
             .expect("tick"),
-        0
+        1
     );
+    let again = phpworkers::State::parse(
+        &hyperion_state::hosting_kv::get(&pool, d.id.as_str(), phpworkers::KV_STATE)
+            .await
+            .expect("kv")
+            .expect("state"),
+    )
+    .expect("parse");
+    assert_eq!(again.hits_24h(again.last_at), 2);
+}
+
+/// What the alert path sees: visitors hurt while the pool is full raise it
+/// first; only with the automation out of options does anyone get told, and
+/// then once a day, on one card per site.
+#[tokio::test]
+async fn php_workers_alert_only_when_visitors_hurt_and_automation_is_out_of_options() {
+    use hyperion_types::phpworkers;
+    use std::io::Write;
+    let pool = open_memory().await.expect("open");
+    let mut a = happy_mocks();
+    a.expect_apply_php_limits()
+        .returning(|_, _, _, _, _, _, _| Ok(()));
+    let home = tempfile::tempdir().expect("home");
+    let s = svc(pool.clone(), a).with_paths(HostingPaths {
+        home_root: home.path().display().to_string(),
+        ..Default::default()
+    });
+    s.create(req("ex.cz")).await.expect("create");
+    let sel = HostingSelector::Domain(Domain::parse("ex.cz").unwrap());
+    let d = s.get(sel.clone()).await.expect("get");
+    let id = d.id.as_str().to_string();
+    let logs = home.path().join(&d.system_user).join("ex.cz").join("logs");
+    std::fs::create_dir_all(&logs).expect("logs");
+    let access = logs.join("access.log");
+    std::fs::write(&access, "").expect("write");
+    let dir = tempfile::tempdir().expect("dir");
+    let fpm = dir.path().join("php8.3-fpm.log");
+    std::fs::write(&fpm, "").expect("write");
+    let mut cursors = PhpWorkersCursors::default();
+    s.php_workers_tick(dir.path(), &mut cursors)
+        .await
+        .expect("tick");
+    let append = |path: &std::path::Path, text: String| {
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(path)
+            .expect("open");
+        f.write_all(text.as_bytes()).expect("append");
+    };
+    let full = format!(
+        "[06-Oct-2026 06:56:45] WARNING: [pool {}] server reached pm.max_children setting (5), consider raising it\n",
+        d.system_user
+    );
+    let bad =
+        "1.2.3.4 - - [06/Oct/2026:10:49:14 +0200] \"GET / HTTP/2.0\" 502 0 \"-\" \"UA\" 0.1\n";
+    let state = || async {
+        phpworkers::State::parse(
+            &hyperion_state::hosting_kv::get(&pool, &id, phpworkers::KV_STATE)
+                .await
+                .expect("kv")
+                .expect("state"),
+        )
+        .expect("parse")
+    };
+
+    // The warning starts the watch, and the access log is read from there.
+    append(&fpm, full.clone());
+    s.php_workers_tick(dir.path(), &mut cursors)
+        .await
+        .expect("tick");
+    assert_eq!(s.php_workers_auto_tick().await.expect("auto"), 0);
+
+    // Visitors hurt: a single warning is enough for a raise, and no alert.
+    append(&access, bad.repeat(3));
+    s.php_workers_tick(dir.path(), &mut cursors)
+        .await
+        .expect("tick");
+    assert_eq!(state().await.impact_24h(now_secs()).0, 3);
+    assert_eq!(s.php_workers_auto_tick().await.expect("auto"), 1);
+    let raised = s.get_limits(sel.clone()).await.expect("limits");
+    assert!(raised.php_max_children > 5);
+    assert_eq!(
+        state().await.alerted_at,
+        0,
+        "the automation is dealing with it"
+    );
+
+    // Automation turned off: now somebody has to look, once.
+    hyperion_state::hosting_kv::set(&pool, &id, phpworkers::KV_AUTO, "off", 0)
+        .await
+        .expect("kv");
+    append(&access, bad.repeat(3));
+    s.php_workers_tick(dir.path(), &mut cursors)
+        .await
+        .expect("tick");
+    let st = state().await;
+    assert!(st.alerted_at > 0, "alerted");
+    let sent = st.alerted_at;
+    append(&access, bad.repeat(3));
+    s.php_workers_tick(dir.path(), &mut cursors)
+        .await
+        .expect("tick");
+    assert_eq!(state().await.alerted_at, sent, "at most once a day");
+}
+
+/// Repeated warnings raise the pool one step; a line written under the old
+/// limit does not count again; a hand save of the unchanged card keeps the
+/// floor, a changed value becomes it; turning it off restores the floor. On
+/// without anybody ticking anything.
+#[tokio::test]
+async fn php_workers_auto_raises_rebases_and_restores() {
+    use hyperion_types::phpworkers;
+    use std::io::Write;
+    let pool = open_memory().await.expect("open");
+    let mut a = happy_mocks();
+    a.expect_apply_php_limits()
+        .returning(|_, _, _, _, _, _, _| Ok(()));
+    let s = svc(pool.clone(), a);
+    s.create(req("ex.cz")).await.expect("create");
+    let sel = HostingSelector::Domain(Domain::parse("ex.cz").unwrap());
+    let d = s.get(sel.clone()).await.expect("get");
+    let id = d.id.as_str().to_string();
+    let children = || async {
+        s.get_limits(sel.clone())
+            .await
+            .expect("limits")
+            .php_max_children
+    };
+    let start = children().await;
+    let state = || async {
+        phpworkers::AutoState::parse(
+            &hyperion_state::hosting_kv::get(&pool, &id, phpworkers::KV_AUTO_STATE)
+                .await
+                .expect("kv")
+                .unwrap_or_default(),
+        )
+    };
+    let dir = tempfile::tempdir().expect("dir");
+    let log = dir.path().join("php8.3-fpm.log");
+    std::fs::write(&log, "").expect("write");
+    let mut cursors = PhpWorkersCursors::default();
+    s.php_workers_tick(dir.path(), &mut cursors)
+        .await
+        .expect("tick");
+    let mut f = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&log)
+        .expect("open");
+    let line = |limit: i64| {
+        format!(
+            "[06-Oct-2026 06:56:45] WARNING: [pool {}] server reached pm.max_children setting ({limit}), consider raising it\n",
+            d.system_user
+        )
+    };
+    let hit = |f: &mut std::fs::File, limit: i64, n: usize| {
+        for _ in 0..n {
+            f.write_all(line(limit).as_bytes()).expect("append");
+        }
+    };
+
+    // Two hits: not yet.
+    hit(&mut f, start, 2);
+    s.php_workers_tick(dir.path(), &mut cursors)
+        .await
+        .expect("tick");
+    assert_eq!(s.php_workers_auto_tick().await.expect("auto"), 0);
+    assert_eq!(state().await.expect("state").base, start);
+
+    // A third: one step up.
+    hit(&mut f, start, 1);
+    s.php_workers_tick(dir.path(), &mut cursors)
+        .await
+        .expect("tick");
+    assert_eq!(s.php_workers_auto_tick().await.expect("auto"), 1);
+    let raised = children().await;
+    assert!(raised > start && raised <= start + phpworkers::AUTO_STEP);
+    assert_eq!(state().await.expect("state").pending_hits, 0);
+
+    // Lines from before the raise (old limit) are not new hits.
+    hit(&mut f, start, 5);
+    s.php_workers_tick(dir.path(), &mut cursors)
+        .await
+        .expect("tick");
+    assert_eq!(state().await.expect("state").pending_hits, 0);
+
+    // Saving the card as shown keeps the operator's floor...
+    let mut l = s.get_limits(sel.clone()).await.expect("limits");
+    s.set_limits(sel.clone(), l.clone()).await.expect("set");
+    assert_eq!(state().await.expect("state").base, start);
+    // ...a value typed by hand becomes it.
+    l.php_max_children = start + 1;
+    s.set_limits(sel.clone(), l).await.expect("set");
+    assert_eq!(state().await.expect("state").base, start + 1);
+
+    // Raise once more, then switch off: the floor comes back.
+    let mut st = state().await.expect("state");
+    st.pending_hits = phpworkers::RAISE_AFTER_HITS;
+    st.last_change_at = 0;
+    hyperion_state::hosting_kv::set(&pool, &id, phpworkers::KV_AUTO_STATE, &st.to_json(), 0)
+        .await
+        .expect("kv");
+    assert_eq!(s.php_workers_auto_tick().await.expect("auto"), 1);
+    assert!(children().await > start + 1);
+    hyperion_state::hosting_kv::set(&pool, &id, phpworkers::KV_AUTO, "off", 0)
+        .await
+        .expect("kv");
+    assert_eq!(s.php_workers_auto_tick().await.expect("auto"), 1);
+    assert_eq!(children().await, start + 1);
+    assert!(state().await.is_none(), "state forgotten once off");
+    assert_eq!(s.php_workers_auto_tick().await.expect("auto"), 0);
 }
 
 /// The boot re-render must write each pool WITH its stored limits. It
