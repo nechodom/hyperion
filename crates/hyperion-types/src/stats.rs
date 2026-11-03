@@ -2043,6 +2043,9 @@ pub struct TrashEntry {
     pub seconds_remaining: i64,
     /// Which node hosts the (still-on-disk) site.
     pub node_id: String,
+    /// The purge also deletes the site's backups from the FTP/SFTP target.
+    #[serde(default)]
+    pub delete_offsite_backups: bool,
 }
 
 /// One notification surfaced in the bell-icon dropdown.

@@ -620,7 +620,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let detail = self.get(sel.clone()).await?;
         let Some((mut up, dir)) = self.remote_upload_for(&detail) else {
             return Err(RpcError::Validation {
-                message: "no FTP/SFTP off-site target is configured on this node".into(),
+                message: NO_REMOTE_TARGET.into(),
             });
         };
         up.remote_dir = &dir;
@@ -677,6 +677,62 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(format!(
             "deleted {name} (and its database dump, if it had one) from the off-site target"
         ))
+    }
+
+    /// Delete every archive and dump of this site from the FTP/SFTP target, on
+    /// the way to deleting the site itself. Works from a listing of the server,
+    /// not from the rows, so files no row knows about any more go too — and
+    /// filtered by domain, because the folder is shared by every hosting of the
+    /// system user. Returns how many files went.
+    pub(super) async fn delete_all_offsite_copies(
+        &self,
+        detail: &HostingDetail,
+    ) -> Result<usize, RpcError> {
+        let Some((mut up, dir)) = self.remote_upload_for(detail) else {
+            return Err(RpcError::Validation {
+                message: NO_REMOTE_TARGET.into(),
+            });
+        };
+        up.remote_dir = &dir;
+        let outcome = async {
+            let Some(files) = hyperion_adapters::backup::list_remote(&up).await? else {
+                return Ok(Vec::new());
+            };
+            let names: Vec<String> = files
+                .into_iter()
+                .map(|f| f.name)
+                .filter(|n| offsite_file_belongs(&detail.domain, n))
+                .collect();
+            let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+            hyperion_adapters::backup::delete_remote(&refs, &up).await?;
+            Ok::<_, AdapterError>(names)
+        }
+        .await;
+        let (result, details) = match &outcome {
+            Ok(names) => ("ok", serde_json::json!({ "deleted": names })),
+            Err(e) => ("failed", serde_json::json!({ "error": e.to_string() })),
+        };
+        self.append_audit(
+            "hosting.backup.offsite_delete_all",
+            Some(detail.id.as_str()),
+            &details.to_string(),
+            result,
+        )
+        .await;
+        let names = outcome.map_err(|e| {
+            RpcError::Internal_with(format!(
+                "could not delete the site's backups from the off-site target, so the site \
+                 was left in place: {e}"
+            ))
+        })?;
+        let archives: Vec<String> = names
+            .iter()
+            .filter(|n| !n.ends_with(".sql"))
+            .cloned()
+            .collect();
+        self.forget_ftp_copies(detail, &archives, "deleted with the hosting", None)
+            .await;
+        Ok(names.len())
     }
 
     /// Make this site's rows stop claiming FTP copies that are gone: delete a
@@ -1393,6 +1449,13 @@ pub(super) fn manifest_path_for(archive: &std::path::Path) -> Option<std::path::
 /// listing of it holds every sibling site's archives too. `backup_run` names
 /// them `<domain>-<unix seconds>.tar.gz` (and `.sql` for the dump); the stamp
 /// must be all digits, so `a.cz` never claims `a.cz-shop.cz-…`.
+pub(super) const NO_REMOTE_TARGET: &str = "no FTP/SFTP off-site target is configured on this node";
+
+/// `hosting_kv` key on a trashed site: its purge also deletes its backups from
+/// the FTP/SFTP target. The operator chose that when deleting, and the trash is
+/// where a change of mind still costs nothing, so nothing goes before the purge.
+pub(super) const DELETE_OFFSITE_ON_PURGE_KV: &str = "trash.delete_offsite_backups";
+
 pub(super) fn offsite_file_belongs(domain: &str, name: &str) -> bool {
     let Some(rest) = name.strip_prefix(domain).and_then(|r| r.strip_prefix('-')) else {
         return false;
