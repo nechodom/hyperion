@@ -678,6 +678,7 @@ async fn e2e_bundle_a_c_round_trip_through_wire() {
                 keep_user: false,
                 keep_database: false,
                 delete_offsite_backups: false,
+                delete_local_backups: false,
             },
         },
     )

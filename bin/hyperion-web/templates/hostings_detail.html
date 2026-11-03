@@ -5213,12 +5213,15 @@
 
   <form method="post" action="/hostings/delete" class="danger-row"
         data-confirm-title="Delete {{ detail.domain }}"
-        data-confirm-body="The files, database, system user, snapshots and nginx vhost are removed. This is permanent — recovery is only possible from a backup. Backups stay on this node and on the off-site targets. External DNS records are not touched. Type the domain to confirm."
+        data-confirm-body="The files, database, system user, snapshots and nginx vhost are removed. This is permanent — recovery is only possible from a backup. {note} Backups stay on the off-site targets. External DNS records are not touched. Type the domain to confirm."
+        data-confirm-note-field="local_backups"
+        data-confirm-note-on="Every backup of this site on this node goes too (archives, database dumps, and files no backup record names) and cannot be recovered. If they cannot be deleted, the hosting stays. With the trash on, they go when the site leaves the trash, not before."
+        data-confirm-note-off="Backups stay on this node."
         data-confirm-confirm-label="Delete permanently"
-        {% if can_delete_offsite && crate::handlers::hostings::any_ftp_copies(backups.as_slice()) %}
+        {% if can_delete_backups && crate::handlers::hostings::any_ftp_copies(backups.as_slice()) %}
         data-confirm-check="Also delete this site's backups from the off-site FTP target"
         data-confirm-check-name="offsite"
-        data-confirm-body-checked="The files, database, system user, snapshots and nginx vhost are removed, AND every backup of this site on the off-site FTP target (archives and database dumps). If they cannot be deleted, the hosting stays. With the trash on, they go when the site leaves the trash, not before. Backups on this node and on S3 are not touched. External DNS records are not touched. Type the domain to confirm."
+        data-confirm-body-checked="The files, database, system user, snapshots and nginx vhost are removed, AND every backup of this site on the off-site FTP target (archives and database dumps). If they cannot be deleted, the hosting stays. With the trash on, they go when the site leaves the trash, not before. {note} Backups on S3 are not touched. External DNS records are not touched. Type the domain to confirm."
         data-confirm-confirm-label-checked="Delete with FTP backups"
         {% endif %}
         data-confirm-variant="danger"
@@ -5231,6 +5234,7 @@
       <div class="d-opts">
         <label class="field-checkbox"><input type="checkbox" name="keep_user" value="on"> Keep the Linux user</label>
         <label class="field-checkbox"><input type="checkbox" name="keep_db" value="on"> Keep the database</label>
+        {% if can_delete_backups %}<label class="field-checkbox"><input type="checkbox" name="local_backups" value="on"> Also delete this site's backups on this node</label>{% endif %}
       </div>
     </div>
     <div>

@@ -710,6 +710,15 @@ function isShortcutContext(ev) {
   let checkName = null;
   let plain = { body: '', label: '' };
   let ticked = { body: '', label: '' };
+  // Fill the body's {note} from a checkbox on the form itself, so the dialog
+  // says which way that box went before anything happens.
+  function withNote(form, text) {
+    const name = form.dataset.confirmNoteField;
+    if (!name) return text;
+    const box = form.elements[name];
+    const note = box && box.checked ? form.dataset.confirmNoteOn : form.dataset.confirmNoteOff;
+    return text.replace('{note}', note || '');
+  }
   function paintCheck() {
     if (!checkName) return;
     const on = checkBox.checked;
@@ -724,7 +733,7 @@ function isShortcutContext(ev) {
     pendingForm = form;
     lastFocused = document.activeElement;
     const title = form.dataset.confirmTitle || 'Are you sure?';
-    const body = form.dataset.confirmBody || '';
+    const body = withNote(form, form.dataset.confirmBody || '');
     const confirmLabel = form.dataset.confirmConfirmLabel || 'Confirm';
     const variant = (form.dataset.confirmVariant || 'primary').toLowerCase();
     titleEl.textContent = title;
@@ -734,7 +743,7 @@ function isShortcutContext(ev) {
     if (checkName) {
       plain = { body: body, label: confirmLabel };
       ticked = {
-        body: form.dataset.confirmBodyChecked || body,
+        body: withNote(form, form.dataset.confirmBodyChecked || '') || body,
         label: form.dataset.confirmConfirmLabelChecked || confirmLabel,
       };
       checkLabel.textContent = form.dataset.confirmCheck;

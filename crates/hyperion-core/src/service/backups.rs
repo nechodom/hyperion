@@ -1718,6 +1718,108 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(())
     }
 
+    /// Delete every archive, dump and manifest of this site from this node, on
+    /// the way to deleting the site itself. The rows name most of them; a
+    /// listing finds the ones no row names any more, by exact domain because
+    /// the directories are shared by every hosting of a system user. Refuses
+    /// before anything goes while a backup runs or an archive is being read.
+    /// Returns how many files went.
+    pub(super) async fn delete_all_local_copies(
+        &self,
+        detail: &HostingDetail,
+    ) -> Result<usize, RpcError> {
+        let rows = hyperion_state::backups::list_for(&self.pool, &detail.id, i64::MAX)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("list backups: {e}")))?;
+        if rows.iter().any(|r| r.state == "running") {
+            return Err(RpcError::Conflict {
+                message: "a backup of this site is still running, so the site and its backups \
+                          were left in place. Delete again when it has finished."
+                    .into(),
+            });
+        }
+        let root = std::path::PathBuf::from(&self.paths.backup_root);
+        let listed = tokio::task::spawn_blocking(move || {
+            scan_untracked_backups(&root, &std::collections::HashSet::new(), &[])
+        })
+        .await
+        .map_err(|e| RpcError::Internal_with(format!("list backup files: {e}")))?;
+        let mut files: std::collections::BTreeSet<std::path::PathBuf> = listed
+            .into_iter()
+            .filter(|f| f.ours && f.key == detail.domain.as_str())
+            .map(|f| f.path)
+            .collect();
+        for run in &rows {
+            if let Some(p) = run.archive_path.as_deref().map(std::path::Path::new) {
+                files.insert(p.to_path_buf());
+                files.extend(manifest_path_for(p));
+            }
+            files.extend(run.db_dump_path.as_deref().map(std::path::PathBuf::from));
+        }
+        // Held until the last file is gone: a restore that starts half-way
+        // through would otherwise lose its dump.
+        let mut reservations = Vec::new();
+        for archive in files
+            .iter()
+            .filter(|f| f.to_string_lossy().ends_with(".tar.gz"))
+        {
+            let Some(reservation) = try_reserve_drop(archive, 0) else {
+                return Err(RpcError::Conflict {
+                    message: format!(
+                        "{} is being read by a restore or a push, so the site and its backups \
+                         were left in place. Delete again when that has finished.",
+                        archive.display()
+                    ),
+                });
+            };
+            reservations.push(reservation);
+        }
+        let mut removed = 0usize;
+        let mut failed: std::collections::HashMap<&std::path::Path, String> =
+            std::collections::HashMap::new();
+        for f in &files {
+            match tokio::fs::remove_file(f).await {
+                Ok(()) => removed += 1,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    failed.insert(f, e.to_string());
+                }
+            }
+        }
+        // The site stays if anything failed, so its rows must stop claiming
+        // the files that did go.
+        for run in &rows {
+            let mut named = [run.archive_path.as_deref(), run.db_dump_path.as_deref()]
+                .into_iter()
+                .flatten()
+                .map(std::path::Path::new)
+                .peekable();
+            if named.peek().is_some() && !named.any(|p| failed.contains_key(p)) {
+                hyperion_state::backups::clear_local_paths(&self.pool, run.id)
+                    .await
+                    .map_err(|e| RpcError::Internal_with(format!("forget local copy: {e}")))?;
+            }
+        }
+        let errors: Vec<String> = failed
+            .iter()
+            .map(|(p, e)| format!("{}: {e}", p.display()))
+            .collect();
+        self.append_audit(
+            "hosting.backup.local_delete_all",
+            Some(detail.id.as_str()),
+            &serde_json::json!({"files_removed": removed, "errors": errors}).to_string(),
+            if errors.is_empty() { "ok" } else { "failed" },
+        )
+        .await;
+        if !errors.is_empty() {
+            return Err(RpcError::Internal_with(format!(
+                "could not delete the site's local backups, so the site was left in place: {}",
+                errors.join("; ")
+            )));
+        }
+        Ok(removed)
+    }
+
     pub async fn backup_restore(
         &self,
         sel: HostingSelector,
@@ -2378,6 +2480,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         }
     }
 }
+
+/// `hosting_kv` key on a trashed site: its purge also deletes its backups from
+/// this node. Chosen when deleting; nothing goes before the purge, because the
+/// trash is where a change of mind still costs nothing.
+pub(super) const DELETE_LOCAL_ON_PURGE_KV: &str = "trash.delete_local_backups";
 
 /// Where one backup run's files go: `<backup_root>/<user>/<domain>-<ts>.*`.
 pub(super) struct BackupFiles {

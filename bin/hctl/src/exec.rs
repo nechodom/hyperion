@@ -190,6 +190,7 @@ pub async fn execute(socket: &Path, cmd: &Cmd) -> Result<Outcome> {
                         keep_user: *keep_user,
                         keep_database: *keep_db,
                         delete_offsite_backups: false,
+                        delete_local_backups: false,
                     },
                 }
             }
