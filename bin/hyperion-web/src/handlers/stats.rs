@@ -522,48 +522,30 @@ pub async fn get_stats(
         }
     });
 
-    let samples_in_window = history.samples.len();
+    let gauges = gauge_points(&history, &net_history);
+    let samples_in_window = gauges.len();
     let window_minutes = if samples_in_window >= 2 {
-        let first = history.samples.first().map(|s| s.at).unwrap_or(0);
-        let last = history.samples.last().map(|s| s.at).unwrap_or(0);
+        let first = gauges.first().map(|g| g.at).unwrap_or(0);
+        let last = gauges.last().map(|g| g.at).unwrap_or(0);
         ((last - first) / 60).max(0)
     } else {
         0
     };
 
-    let spark_cpu = build_sparkline(
-        history
-            .samples
-            .iter()
-            .map(|s| (s.at, s.cpu_pct_x100 as f64 / 100.0)),
-        "cpu",
-        |v| format!("{v:.1}%"),
-    );
+    let spark_cpu = build_sparkline(gauges.iter().map(|g| (g.at, g.cpu_pct)), "cpu", |v| {
+        format!("{v:.1}%")
+    });
     let cpu_split = selected_node
         .as_ref()
         .and_then(|n| n.cpu_breakdown.as_ref())
         .map(cpu_split_parts)
         .unwrap_or_default();
-    let spark_load = build_sparkline(
-        history
-            .samples
-            .iter()
-            .map(|s| (s.at, s.loadavg_1m_x100 as f64 / 100.0)),
-        "load",
-        |v| format!("{v:.2}"),
-    );
-    let spark_mem = build_sparkline(
-        history.samples.iter().map(|s| {
-            let pct = if s.mem_total_kib > 0 {
-                (s.mem_used_kib as f64 / s.mem_total_kib as f64) * 100.0
-            } else {
-                0.0
-            };
-            (s.at, pct)
-        }),
-        "mem",
-        |v| format!("{:.0}%", v),
-    );
+    let spark_load = build_sparkline(gauges.iter().map(|g| (g.at, g.load)), "load", |v| {
+        format!("{v:.2}")
+    });
+    let spark_mem = build_sparkline(gauges.iter().map(|g| (g.at, g.mem_pct)), "mem", |v| {
+        format!("{:.0}%", v)
+    });
     let spark_bw = build_sparkline(
         history
             .samples
@@ -1264,6 +1246,56 @@ fn label_for_node(current: &str, nodes: &[hyperion_types::NodeSummary]) -> Strin
         .unwrap_or_else(|| current.to_string())
 }
 
+/// One point of the CPU, load and memory graphs.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct GaugePoint {
+    at: i64,
+    cpu_pct: f64,
+    load: f64,
+    mem_pct: f64,
+}
+
+/// A chart of fewer samples than this says nothing yet, so the page keeps
+/// showing the 5-minute history (the first minute after an upgrade).
+const MIN_RING_POINTS: usize = 4;
+
+/// What the CPU, load and memory graphs draw: the seconds-scale ring, so they
+/// move with the figures above them, or the 5-minute history where the ring
+/// has no gauges (an older node, or too soon after an upgrade).
+fn gauge_points(history: &NodeMetricsHistory, net: &hyperion_types::NetHistory) -> Vec<GaugePoint> {
+    let mem_pct = |used: i64, total: i64| {
+        if total > 0 {
+            (used as f64 / total as f64) * 100.0
+        } else {
+            0.0
+        }
+    };
+    let ring: Vec<GaugePoint> = net
+        .samples
+        .iter()
+        .filter(|s| s.mem_total_kib > 0)
+        .map(|s| GaugePoint {
+            at: s.at,
+            cpu_pct: s.cpu_pct_x100 as f64 / 100.0,
+            load: s.loadavg_1m_x100 as f64 / 100.0,
+            mem_pct: mem_pct(s.mem_used_kib, s.mem_total_kib),
+        })
+        .collect();
+    if ring.len() >= MIN_RING_POINTS {
+        return ring;
+    }
+    history
+        .samples
+        .iter()
+        .map(|s| GaugePoint {
+            at: s.at,
+            cpu_pct: s.cpu_pct_x100 as f64 / 100.0,
+            load: s.loadavg_1m_x100 as f64 / 100.0,
+            mem_pct: mem_pct(s.mem_used_kib, s.mem_total_kib),
+        })
+        .collect()
+}
+
 /// Generate an SVG path + per-point JSON for hover tooltips. Callers
 /// pass `(timestamp_unix, value)` pairs so the tooltip can show the
 /// real time bucket instead of just an index.
@@ -1304,6 +1336,7 @@ where
     let n = pts.len() as f64;
     let dx = W / (n - 1.0);
 
+    let seconds = samples_under_a_minute_apart(&pts);
     let mut path = String::with_capacity(pts.len() * 16);
     // Build the points_json on the same pass so they share coords.
     let mut pj: Vec<String> = Vec::with_capacity(pts.len());
@@ -1320,7 +1353,7 @@ where
         // generated text but may contain quotes (unlikely) or
         // backslashes (also unlikely). serde_json handles it cleanly.
         let v_label = fmt(*v);
-        let t_label = fmt_time_label(*ts);
+        let t_label = fmt_time_label(*ts, seconds);
         pj.push(format!(
             "{{\"x\":{:.1},\"y\":{:.1},\"v\":{},\"t\":{}}}",
             x,
@@ -1358,6 +1391,9 @@ pub struct DualSparkline {
     pub in_peak: String,
     pub out_peak: String,
     pub has_data: bool,
+    /// Same shape as [`Sparkline::points_json`]: one point per sample at the
+    /// height of the "in" line, its label naming both rates.
+    pub points_json: String,
 }
 
 /// Build a two-line sparkline: `a` ("in") and `b` ("out") scaled to the SAME
@@ -1382,6 +1418,7 @@ where
             in_peak: "—".into(),
             out_peak: "—".into(),
             has_data: false,
+            points_json: "[]".into(),
         };
     }
     // Shared scale: the max over BOTH series, zero-based.
@@ -1413,6 +1450,25 @@ where
     let (path_out, _) = line(b);
     let latest = |s: &[(i64, f64)]| s.last().map(|(_, v)| *v).unwrap_or(0.0);
     let peak = |s: &[(i64, f64)]| s.iter().map(|(_, v)| *v).fold(0.0_f64, f64::max);
+    let height = |v: f64| PAD + (1.0 - (v / range)) * (H - 2.0 * PAD);
+    let longest = if a.len() >= b.len() { a } else { b };
+    let seconds = samples_under_a_minute_apart(longest);
+    let dx = W / (longest.len() as f64 - 1.0);
+    let points: Vec<String> = longest
+        .iter()
+        .enumerate()
+        .map(|(i, (ts, v))| {
+            let in_v = a.get(i).map_or(*v, |(_, v)| *v);
+            let out_v = b.get(i).map_or(0.0, |(_, v)| *v);
+            format!(
+                "{{\"x\":{:.1},\"y\":{:.1},\"v\":{},\"t\":{}}}",
+                i as f64 * dx,
+                height(in_v),
+                json_str(&format!("{} in · {} out", fmt(in_v), fmt(out_v))),
+                json_str(&fmt_time_label(*ts, seconds)),
+            )
+        })
+        .collect();
     DualSparkline {
         path_in,
         area_in,
@@ -1422,16 +1478,24 @@ where
         in_peak: fmt(peak(a)),
         out_peak: fmt(peak(b)),
         has_data: a.len() >= 2 || b.len() >= 2,
+        points_json: format!("[{}]", points.join(",")),
     }
 }
 
-/// Render a Unix timestamp as `HH:MM` UTC for the chart tooltip.
-/// We DON'T bother with the operator's local timezone because the
-/// stats page is server-internal — UTC is consistent across nodes.
-fn fmt_time_label(ts: i64) -> String {
+/// A series this dense needs seconds in its tooltip, or several neighbouring
+/// points read as the same moment.
+fn samples_under_a_minute_apart(pts: &[(i64, f64)]) -> bool {
+    matches!(pts, [(first, _), (second, _), ..] if second - first < 60)
+}
+
+/// Render a Unix timestamp as `HH:MM` UTC for the chart tooltip, or `HH:MM:SS`
+/// with `seconds`. We DON'T bother with the operator's local timezone because
+/// the stats page is server-internal — UTC is consistent across nodes.
+fn fmt_time_label(ts: i64, seconds: bool) -> String {
     use chrono::{DateTime, Utc};
+    let format = if seconds { "%H:%M:%S" } else { "%H:%M" };
     DateTime::<Utc>::from_timestamp(ts, 0)
-        .map(|d| d.format("%H:%M").to_string())
+        .map(|d| d.format(format).to_string())
         .unwrap_or_else(|| "—".into())
 }
 
@@ -2143,6 +2207,98 @@ mod tests {
         let d = build_dual_sparkline(&[(1i64, 5.0)], &[], |v| format!("{v}"));
         assert!(!d.has_data);
         assert_eq!(d.in_latest, "—");
+        assert_eq!(d.points_json, "[]");
+    }
+
+    #[test]
+    fn build_dual_sparkline_tooltip_points_name_both_rates() {
+        let a = vec![(0i64, 10.0), (15, 100.0)];
+        let b = vec![(0i64, 50.0), (15, 50.0)];
+        let d = build_dual_sparkline(&a, &b, |v| format!("{v:.0}"));
+        let pts: serde_json::Value = serde_json::from_str(&d.points_json).expect("valid JSON");
+        assert_eq!(pts[1]["x"], 600.0);
+        assert_eq!(pts[1]["y"], 4.0, "at the height of the in line");
+        assert_eq!(pts[1]["v"], "100 in · 50 out");
+        assert_eq!(pts[1]["t"], "00:00:15", "15 s apart needs seconds");
+    }
+
+    #[test]
+    fn sparkline_tooltip_time_has_seconds_only_for_dense_series() {
+        let label = |gap: i64| {
+            let s = build_sparkline([(0, 1.0), (gap, 2.0)], "cpu", |v| format!("{v}"));
+            let pts: serde_json::Value = serde_json::from_str(&s.points_json).expect("valid JSON");
+            pts[1]["t"].as_str().expect("label").to_string()
+        };
+        assert_eq!(label(15), "00:00:15");
+        assert_eq!(label(300), "00:05");
+    }
+
+    fn ring_point(at: i64, mem_total_kib: i64) -> hyperion_types::NetSamplePoint {
+        hyperion_types::NetSamplePoint {
+            at,
+            cpu_pct_x100: 2_500,
+            loadavg_1m_x100: 150,
+            mem_used_kib: mem_total_kib / 2,
+            mem_total_kib,
+            ..Default::default()
+        }
+    }
+
+    fn five_minute_history() -> NodeMetricsHistory {
+        let point = |at| hyperion_types::NodeMetricPoint {
+            at,
+            loadavg_1m_x100: 0,
+            mem_used_kib: 0,
+            mem_total_kib: 0,
+            total_bw_out_24h: 0,
+            total_requests_24h: 0,
+            hostings_count: 0,
+            cpu_pct_x100: 0,
+            swap_used_kib: 0,
+            net_rx_bps: 0,
+            net_tx_bps: 0,
+        };
+        NodeMetricsHistory {
+            samples: vec![point(300), point(600)],
+        }
+    }
+
+    #[test]
+    fn gauge_graphs_draw_the_ring_once_it_has_enough_samples() {
+        let net = hyperion_types::NetHistory {
+            samples: (0..4).map(|i| ring_point(i * 15, 1_000)).collect(),
+        };
+        let g = gauge_points(&five_minute_history(), &net);
+        assert_eq!(g.len(), 4);
+        assert_eq!(
+            g[0],
+            GaugePoint {
+                at: 0,
+                cpu_pct: 25.0,
+                load: 1.5,
+                mem_pct: 50.0,
+            }
+        );
+    }
+
+    #[test]
+    fn gauge_graphs_ignore_ring_rows_without_gauges() {
+        // Rows from before the gauges existed, and everything an older node
+        // sends: throughput only, so nothing to draw from them.
+        let net = hyperion_types::NetHistory {
+            samples: (0..240).map(|i| ring_point(i * 15, 0)).collect(),
+        };
+        let g = gauge_points(&five_minute_history(), &net);
+        assert_eq!(g.iter().map(|p| p.at).collect::<Vec<_>>(), vec![300, 600]);
+    }
+
+    #[test]
+    fn gauge_graphs_keep_the_history_until_the_ring_says_something() {
+        let net = hyperion_types::NetHistory {
+            samples: (0..3).map(|i| ring_point(i * 15, 1_000)).collect(),
+        };
+        let g = gauge_points(&five_minute_history(), &net);
+        assert_eq!(g.iter().map(|p| p.at).collect::<Vec<_>>(), vec![300, 600]);
     }
 
     #[test]
