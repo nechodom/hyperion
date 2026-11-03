@@ -850,6 +850,33 @@ pub fn culprit_from_output(output: &str) -> Option<(String, String)> {
     None
 }
 
+/// The line of wp-cli's output saying why WordPress could not load, from
+/// PHP's own label onward — whatever came before it on the line is a prefix
+/// ("PHP ", a caller's "plugins: "), not part of the reason.
+///
+/// A parse error counts as much as a fatal: PHP compiles a plugin as it loads
+/// it, so code it cannot parse stops the load just the same. That is what a
+/// plugin written for an older PHP does, and it never says "Fatal error".
+pub fn boot_error_line(output: &str) -> Option<&str> {
+    output.lines().find_map(|line| {
+        ["Fatal error", "Parse error"]
+            .iter()
+            .filter_map(|label| line.find(label))
+            .min()
+            .map(|i| line[i..].trim_end())
+    })
+}
+
+/// One sentence for "WordPress could not load", naming the plugin or theme
+/// when the output does. `None` when the output is some other failure.
+pub fn boot_failure_summary(output: &str) -> Option<String> {
+    let line = boot_error_line(output)?;
+    Some(match culprit_from_output(output) {
+        Some((slug, kind)) => format!("the {kind} {slug} stops WordPress loading: {line}"),
+        None => line.to_string(),
+    })
+}
+
 /// Emergency-disable a plugin by renaming its directory — the one lever
 /// that works when WordPress itself cannot boot.
 ///
@@ -1889,6 +1916,50 @@ mod tests {
             Some(("astra".to_string(), "theme".to_string()))
         );
         assert_eq!(super::culprit_from_output("connection refused"), None);
+    }
+
+    /// What wp-cli printed for a plugin written for PHP 7: PHP says it twice,
+    /// and a parse error is not a "Fatal error" though it stops the load
+    /// just the same.
+    const PARSE_ERROR: &str = "PHP Parse error:  syntax error, unexpected token \"{\", expecting \")\" in /home/stpl/stpl.cz/htdocs/wp-content/plugins/wp-cloudy/wpcloudy.php on line 1620\nParse error: syntax error, unexpected token \"{\", expecting \")\" in /home/stpl/stpl.cz/htdocs/wp-content/plugins/wp-cloudy/wpcloudy.php on line 1620";
+
+    #[test]
+    fn a_parse_error_is_a_boot_error_too() {
+        let line = super::boot_error_line(PARSE_ERROR).expect("a parse error");
+        assert!(line.starts_with("Parse error:"), "{line}");
+        assert!(line.ends_with("on line 1620"), "{line}");
+        assert!(!line.contains('\n'), "one line only: {line}");
+    }
+
+    #[test]
+    fn a_fatal_error_is_a_boot_error_and_anything_else_is_not() {
+        assert_eq!(
+            super::boot_error_line("noise\nplugins: PHP Fatal error: Uncaught Boom in /x.php:1"),
+            Some("Fatal error: Uncaught Boom in /x.php:1")
+        );
+        assert_eq!(
+            super::boot_error_line("Error establishing a database connection"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_boot_failure_names_what_stopped_the_load_once() {
+        let s = super::boot_failure_summary(PARSE_ERROR).expect("a summary");
+        assert!(
+            s.starts_with("the plugin wp-cloudy stops WordPress loading: Parse error:"),
+            "{s}"
+        );
+        assert_eq!(s.matches("Parse error").count(), 1, "{s}");
+    }
+
+    #[test]
+    fn a_boot_failure_without_a_culprit_still_says_what_failed() {
+        assert_eq!(
+            super::boot_failure_summary("PHP Fatal error: Boom in /x/wp-config.php:3").as_deref(),
+            Some("Fatal error: Boom in /x/wp-config.php:3")
+        );
+        assert_eq!(super::boot_failure_summary("connection refused"), None);
     }
 
     use super::*;

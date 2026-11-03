@@ -313,7 +313,12 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let error = if enumerated {
             String::new()
         } else {
-            errors.join("; ").chars().take(300).collect()
+            let all = errors.join("; ");
+            hyperion_adapters::wpcli::boot_failure_summary(&all)
+                .unwrap_or(all)
+                .chars()
+                .take(300)
+                .collect()
         };
         let result = hyperion_types::WpVulnScanResult {
             findings,
