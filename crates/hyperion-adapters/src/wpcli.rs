@@ -38,6 +38,31 @@ pub fn validate_args(args: &[&str]) -> Result<(), AdapterError> {
 /// converts via `.iter().map(String::as_str).collect()` before invoking
 /// the command.
 pub fn build_argv(user: &str, htdocs: &str, extra: &[&str]) -> Vec<String> {
+    let php = site_php_binary_in(std::path::Path::new("/"), user);
+    argv_with_php(user, htdocs, php.as_deref(), extra)
+}
+
+/// The PHP binary of the branch serving this site, found by its FPM pool.
+///
+/// The wp-cli phar's shebang takes the machine's default PHP, which need not
+/// be the site's: code the site runs fine can then be a parse error for every
+/// wp-cli call. `None` (no pool yet, or the branch has no CLI) keeps that
+/// default. A pool is removed before a version switch creates the next one,
+/// so two only coexist after a failed switch; the newest wins.
+fn site_php_binary_in(root: &std::path::Path, user: &str) -> Option<String> {
+    hyperion_types::PhpVersion::all()
+        .iter()
+        .rev()
+        .find_map(|v| {
+            let pool = root
+                .join(v.pool_dir().trim_start_matches('/'))
+                .join(format!("{user}.conf"));
+            let binary = root.join(format!("usr/bin/php{}", v.as_str()));
+            (pool.exists() && binary.exists()).then(|| binary.display().to_string())
+        })
+}
+
+fn argv_with_php(user: &str, htdocs: &str, php: Option<&str>, extra: &[&str]) -> Vec<String> {
     // wp-cli needs a writable HOME. `sudo -u` does NOT give it one: Debian's
     // sudoers resets the environment but leaves HOME pointing at the CALLING
     // user's home, which for the agent is /root. wp-cli then tries to write
@@ -61,10 +86,13 @@ pub fn build_argv(user: &str, htdocs: &str, extra: &[&str]) -> Vec<String> {
         "/usr/bin/env".into(),
         format!("WP_CLI_CACHE_DIR={site_tmp}/wp-cli-cache"),
         format!("TMPDIR={site_tmp}"),
-        "/usr/local/bin/wp".into(),
-        "--allow-root=false".into(),
-        format!("--path={}", htdocs),
     ];
+    v.extend(php.map(str::to_string));
+    v.extend([
+        "/usr/local/bin/wp".to_string(),
+        "--allow-root=false".to_string(),
+        format!("--path={}", htdocs),
+    ]);
     v.extend(extra.iter().map(|s| s.to_string()));
     v
 }
@@ -2077,6 +2105,62 @@ mod tests {
              filesystem, so a large download is not copied across devices: {cache}"
         );
         assert!(v.iter().any(|a| a.starts_with("TMPDIR=/home/alice_cz/")));
+    }
+
+    /// Fake filesystem root holding the given pools and php binaries.
+    fn php_root(pools: &[(&str, &str)], binaries: &[&str]) -> tempfile::TempDir {
+        let root = tempfile::tempdir().expect("tempdir");
+        for (branch, user) in pools {
+            let dir = root.path().join(format!("etc/php/{branch}/fpm/pool.d"));
+            std::fs::create_dir_all(&dir).expect("pool dir");
+            std::fs::write(dir.join(format!("{user}.conf")), "").expect("pool");
+        }
+        std::fs::create_dir_all(root.path().join("usr/bin")).expect("bin dir");
+        for branch in binaries {
+            std::fs::write(root.path().join(format!("usr/bin/php{branch}")), "").expect("bin");
+        }
+        root
+    }
+
+    /// wp-cli's shebang picks the machine's default PHP. A site on 8.3 on a
+    /// box defaulting to 8.4 then fails every wp-cli call on code the site
+    /// itself runs without trouble (wp-cloudy's `$x{0}`).
+    #[test]
+    fn wp_cli_runs_on_the_php_of_the_site_pool() {
+        let root = php_root(&[("8.3", "alice_cz"), ("8.4", "bob_cz")], &["8.3", "8.4"]);
+        assert_eq!(
+            site_php_binary_in(root.path(), "alice_cz"),
+            Some(root.path().join("usr/bin/php8.3").display().to_string())
+        );
+        assert_eq!(
+            site_php_binary_in(root.path(), "bob_cz"),
+            Some(root.path().join("usr/bin/php8.4").display().to_string())
+        );
+    }
+
+    /// No pool yet, or a branch without its CLI: keep the machine's default
+    /// rather than make wp-cli fail outright.
+    #[test]
+    fn wp_cli_keeps_the_default_php_when_the_site_has_no_usable_one() {
+        let root = php_root(&[("8.3", "alice_cz")], &["8.4"]);
+        assert_eq!(site_php_binary_in(root.path(), "alice_cz"), None);
+        assert_eq!(site_php_binary_in(root.path(), "nobody_cz"), None);
+    }
+
+    #[test]
+    fn the_site_php_runs_the_wp_cli_phar() {
+        let v = argv_with_php(
+            "alice_cz",
+            "/home/alice_cz/alice.cz/htdocs",
+            Some("/usr/bin/php8.3"),
+            &["plugin", "list"],
+        );
+        let php = v.iter().position(|a| a == "/usr/bin/php8.3").expect("php");
+        assert_eq!(v[php + 1], "/usr/local/bin/wp", "{v:?}");
+        assert!(
+            php > v.iter().position(|a| a == "/usr/bin/env").expect("env"),
+            "{v:?}"
+        );
     }
 
     /// A path with no parent must not send the cache somewhere surprising.
