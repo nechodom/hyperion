@@ -197,10 +197,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(purged)
     }
 
-    /// The hard-delete pipeline extracted so both `delete()` (when
-    /// trash is off) and `purge_from_trash()` / GC (when trash is
-    /// on) can share it. Keeps the existing public delete() body
-    /// readable instead of branching deep inside.
+    /// The one hard-delete pipeline. Every way a hosting leaves the node for
+    /// good ends here: `delete()` with the trash off or a keep flag set,
+    /// `purge_from_trash()`, the trash GC, a create reclaiming a trashed
+    /// domain and `roll_back_created()`. The keep flags spare the user and
+    /// the database only; everything else belongs to the hosting and goes.
     pub(super) async fn hard_delete_internal(
         &self,
         detail: HostingDetail,
@@ -209,6 +210,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         hostings::set_state(&self.pool, &detail.id, HostingState::Deleting, now_secs())
             .await
             .map_err(|e| RpcError::Internal_with(format!("set deleting: {e}")))?;
+        // Also drops the per-hosting cache zone and htpasswd sidecar, so the
+        // slot is clean for a future hosting reusing this ULID.
         let _ = self
             .adapters
             .nginx_delete_vhost(&detail.domain, Some(detail.id.to_string()))
@@ -230,7 +233,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // hosting via ON DELETE CASCADE, so if the accounts are not removed
         // HERE the cascade takes the only record of them and they stay on the
         // box forever — with a working password and, because they share the
-        // site's uid, whatever that uid is next given.
+        // site's uid, whatever that uid is next given. Before the tree goes, so
+        // no new FTP session can start inside it while it is being removed.
         if let Ok(logins) =
             hyperion_state::ftp_accounts::logins_for_hosting(&self.pool, &detail.id).await
         {
@@ -285,6 +289,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                          next hosting that derives the same name"
                     );
                 }
+                // Also drop the system_users row: userdel frees the UID, the
+                // next useradd allocates it again, and a row left here makes
+                // that hosting's INSERT hit UNIQUE(uid).
                 if let Ok(Some(row)) =
                     system_users::get_by_name(&self.pool, &detail.system_user).await
                 {
