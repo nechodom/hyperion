@@ -44,6 +44,7 @@ pub(crate) fn spawn_all(svc: &Svc, cert_renewal_window_days: i64) {
     spawn_rofs_watchdog(svc);
     spawn_stats(svc);
     spawn_net_sampler(svc);
+    spawn_cpu_sampler(svc);
     spawn_monitor(svc);
     spawn_php_mem_auto(svc);
     spawn_php_workers(svc);
@@ -327,6 +328,20 @@ fn spawn_net_sampler(svc: &Svc) {
             if let Err(e) = net_svc.net_sample_tick(&mut prev).await {
                 tracing::debug!(error=%e, "net sample tick failed");
             }
+        }
+    });
+}
+
+/// Per-site CPU sampler. Its own task because the 5-minute stats tick is far
+/// too coarse to catch PHP working: this reads /proc every few seconds, keeps
+/// the running totals in memory, and the stats tick drains them.
+fn spawn_cpu_sampler(svc: &Svc) {
+    let cpu_svc = svc.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(hyperion_core::CPU_TICK_SECS));
+        loop {
+            interval.tick().await;
+            cpu_svc.cpu_sample_tick().await;
         }
     });
 }

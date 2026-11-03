@@ -576,6 +576,12 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(v) => Response::HostingStatsAll(v),
             Err(e) => Response::Error(e),
         },
+        Request::HostingUsageRange { window_secs } => {
+            match api.hosting_usage_range(window_secs).await {
+                Ok(v) => Response::HostingUsageRange(v),
+                Err(e) => Response::Error(e),
+            }
+        }
         Request::NodeStats => match api.node_stats().await {
             Ok(v) => Response::NodeStats(v),
             Err(e) => Response::Error(e),
@@ -2769,6 +2775,14 @@ mod tests {
             })
         }
         async fn hosting_stats_all(&self) -> Result<Vec<HostingStats>, RpcError> {
+            Err(RpcError::Internal {
+                message: "not supported by this agent".into(),
+            })
+        }
+        async fn hosting_usage_range(
+            &self,
+            _: i64,
+        ) -> Result<Vec<hyperion_types::HostingUsageRange>, RpcError> {
             Err(RpcError::Internal {
                 message: "not supported by this agent".into(),
             })

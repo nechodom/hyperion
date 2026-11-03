@@ -1,5 +1,6 @@
 //! Metrics collection and readback: hostings, nodes, network history.
 
+use super::cpu_usage::{parse_proc_stat_cpu, read_proc_snapshot};
 use super::*;
 
 impl<A: AdapterPort + 'static> HostingService<A> {
@@ -35,29 +36,27 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             }
         }
 
-        // One /proc pass-pair (200 ms apart) to attribute live memory + CPU to
-        // each hosting's system_user — Hyperion runs one php-fpm pool per user,
-        // so a site's footprint is its user's processes. This is the only
-        // per-tick /proc walk; the per-hosting loop just looks up by uid.
-        let proc1 = scan_proc_usage_by_uid().await;
-        let cpu_total1 = read_cpu_jiffies().await.map(|(_, t)| t).unwrap_or(0) as i64;
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        let proc2 = scan_proc_usage_by_uid().await;
-        let cpu_total2 = read_cpu_jiffies().await.map(|(_, t)| t).unwrap_or(0) as i64;
-        let cpu_total_delta = (cpu_total2 - cpu_total1).max(1);
+        // What the 10 s sampler measured since the last tick. Hyperion runs one
+        // php-fpm pool per user, so a site's footprint is its user's processes.
+        let cpu = self.cpu_tracker.take_interval();
+        let rss_by_uid = self.cpu_tracker.rss_by_uid();
+        let users = hyperion_state::hostings::system_users_by_hosting(&self.pool)
+            .await
+            .unwrap_or_default();
 
         for s in &summaries {
-            let user = derive_user_from_summary(s);
+            let site_user = users.get(s.id.as_str());
+            let user = site_user
+                .map(|(name, _)| name.clone())
+                .or_else(|| derive_user_from_summary(s));
             let host_root = std::path::PathBuf::from(&self.paths.home_root)
                 .join(user.clone().unwrap_or_else(|| "_".to_string()))
                 .join(&s.domain);
-            // `derive_user_from_summary` GUESSES the system user from the
-            // domain, and an imported or renamed site defeats the guess. The
-            // path then points at nothing, `du` and the log parse both answer
-            // zero, and the row that gets written is indistinguishable from a
-            // real measurement: the customer's letter reads "0 requests, 0 B
-            // sent, peak disk 0 B … these figures cover the whole period" for
-            // a live site with gigabytes of files.
+            // A site whose tree is not where it should be would make `du` and
+            // the log parse both answer zero, and the row that gets written is
+            // indistinguishable from a real measurement: the customer's letter
+            // reads "0 requests, 0 B sent, peak disk 0 B … these figures cover
+            // the whole period" for a live site with gigabytes of files.
             //
             // Writing no row at all is the honest alternative — the day drops
             // out of `days_counted`, so the letter says the period was only
@@ -93,6 +92,21 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             // customer's traffic figure.
             let (p_in, p_out, p_reqs, _) =
                 parse_access_log_window(&access_log, hour_start - 3600, Some(hour_start)).await;
+            // What arrived since the last tick, for the five-minute history:
+            // the growth of this hour's bucket and of the one just left, read
+            // before either is rewritten below. Floored, because a rotated log
+            // parses lower than what is stored.
+            let (s_in, s_out, s_reqs) =
+                hyperion_state::limits::usage_traffic_at(&self.pool, &s.id, &period)
+                    .await
+                    .unwrap_or((bw_in, bw_out, reqs));
+            let (sp_in, sp_out, sp_reqs) =
+                hyperion_state::limits::usage_traffic_at(&self.pool, &s.id, &prev_period)
+                    .await
+                    .unwrap_or((p_in, p_out, p_reqs));
+            let tick_in = (bw_in - s_in).max(0) + (p_in - sp_in).max(0);
+            let tick_out = (bw_out - s_out).max(0) + (p_out - sp_out).max(0);
+            let tick_reqs = (reqs - s_reqs).max(0) + (p_reqs - sp_reqs).max(0);
             if p_reqs > 0 {
                 // `> 0` guards logrotate: once access.log has been rotated
                 // away the parse legitimately returns zero, and writing that
@@ -109,21 +123,30 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 .await;
             }
 
-            // Per-hosting RSS + CPU% from this user's processes.
-            let (mem_rss, cpu_pct) = match &user {
-                Some(uname) => {
-                    match hyperion_state::system_users::get_by_name(&self.pool, uname).await {
-                        Ok(Some(su)) => {
-                            let rss = proc2.get(&su.uid).map(|(r, _)| *r).unwrap_or(0);
-                            let c0 = proc1.get(&su.uid).map(|(_, c)| *c).unwrap_or(0);
-                            let c1 = proc2.get(&su.uid).map(|(_, c)| *c).unwrap_or(0);
-                            (rss, (c1 - c0).max(0) * 10000 / cpu_total_delta)
-                        }
-                        _ => (0, 0),
-                    }
-                }
-                None => (0, 0),
-            };
+            // Per-hosting RSS + CPU from this user's processes.
+            let uid = site_user.map(|(_, uid)| *uid);
+            let mem_rss = uid.and_then(|u| rss_by_uid.get(&u).copied()).unwrap_or(0);
+            let cpu_pct = uid.map(|u| cpu.uid_pct_x100(u)).unwrap_or(0);
+            let (cpu_busy, cpu_peak) = uid
+                .and_then(|u| cpu.by_uid.get(&u).copied())
+                .unwrap_or((0, 0));
+
+            let _ = hyperion_state::usage_samples::insert(
+                &self.pool,
+                &hyperion_state::usage_samples::UsageSample {
+                    hosting_id: s.id.clone(),
+                    at: now,
+                    cpu_busy_jiffies: cpu_busy,
+                    // No user, nothing measured: an unknown, not an idle site.
+                    cpu_total_jiffies: if uid.is_some() { cpu.total } else { 0 },
+                    cpu_peak_x100: cpu_peak,
+                    mem_rss_bytes: mem_rss,
+                    bw_in_bytes: tick_in,
+                    bw_out_bytes: tick_out,
+                    requests: tick_reqs,
+                },
+            )
+            .await;
 
             // Upsert usage row.
             let _ = hyperion_state::limits::upsert_usage(
@@ -185,6 +208,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             };
 
         let pm = read_proc_metrics().await;
+        // Keep a little over the longest range /stats offers.
+        let _ = hyperion_state::usage_samples::prune_older_than(&self.pool, now - 49 * 3600).await;
 
         let _ = metrics::insert(
             &self.pool,
@@ -201,7 +226,13 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 mem_total_kib: pm.mem_total_kib,
                 mem_used_kib: pm.mem_used_kib,
                 uptime_secs: pm.uptime_secs,
-                cpu_pct_x100: pm.cpu_pct_x100,
+                // The average over the tick where the sampler ran, so the
+                // history is not a row of 200 ms snapshots.
+                cpu_pct_x100: if cpu.total > 0 {
+                    cpu.node_pct_x100()
+                } else {
+                    pm.cpu_pct_x100
+                },
                 swap_total_kib: pm.swap_total_kib,
                 swap_used_kib: pm.swap_used_kib,
                 psi_cpu_x100: pm.psi_cpu_x100,
@@ -309,10 +340,32 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         }
         // Memory + CPU are instantaneous, so take the most recent row (rows
         // are period-DESC), not a 24h sum.
-        let (mem_rss, cpu_pct) = rows
+        let (mut mem_rss, mut cpu_pct) = rows
             .first()
             .map(|r| (r.mem_rss_bytes, r.cpu_pct_x100))
             .unwrap_or((0, 0));
+        let live = self.cpu_tracker.live(now);
+        let uid = hyperion_state::system_users::get_by_name(&self.pool, &detail.system_user)
+            .await
+            .ok()
+            .flatten()
+            .map(|u| u.uid);
+        let (cpu_live, cpu_cores) = match (&live, uid) {
+            (Some(l), Some(uid)) => {
+                cpu_pct = l.uid_pct_x100(uid);
+                mem_rss = l.rss_bytes(uid);
+                (true, l.cores)
+            }
+            _ => (false, 0),
+        };
+        let day = hyperion_state::usage_samples::rollup_since(
+            &self.pool,
+            now - 24 * 3600,
+            Some(&detail.id),
+        )
+        .await
+        .unwrap_or_default();
+        let day = day.first();
         Ok(HostingStats {
             hosting_id: detail.id,
             domain: detail.domain,
@@ -321,9 +374,15 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             bw_out_bytes_24h: bw_out,
             requests_24h: reqs,
             last_request_at: rows.first().map(|_| now),
-            sampled_at: now,
+            sampled_at: day.map_or(0, |d| d.last_at),
             mem_rss_bytes: mem_rss,
             cpu_pct_x100: cpu_pct,
+            cpu_live,
+            cpu_avg_24h_x100: day.and_then(|d| d.cpu_avg_x100()),
+            cpu_peak_24h_x100: day
+                .filter(|d| d.cpu_avg_x100().is_some())
+                .map(|d| d.cpu_peak_x100),
+            cpu_cores,
         })
     }
 
@@ -343,6 +402,15 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let by_id: HashMap<&str, &hyperion_state::limits::UsageRollup> =
             rollups.iter().map(|r| (r.hosting_id.as_str(), r)).collect();
         let now = now_secs();
+        let live = self.cpu_tracker.live(now);
+        let users = hyperion_state::hostings::system_users_by_hosting(&self.pool)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("usage: {e}")))?;
+        let day = hyperion_state::usage_samples::rollup_since(&self.pool, now - 24 * 3600, None)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("usage: {e}")))?;
+        let day_by_id: HashMap<&str, &hyperion_state::usage_samples::UsageSampleRollup> =
+            day.iter().map(|r| (r.hosting_id.as_str(), r)).collect();
         // Drive the list from the HOSTINGS, not from the usage rows: a
         // site created since the last sampler tick has no usage rows
         // yet, and it must still show up (all zeros) instead of
@@ -352,8 +420,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .filter(|s| matches!(s.state, HostingState::Active))
             .map(|s| {
                 let r = by_id.get(s.id.as_str()).copied();
+                let d = day_by_id.get(s.id.as_str()).copied();
+                let uid = users.get(s.id.as_str()).map(|(_, uid)| *uid);
+                let live_uid = live.as_ref().zip(uid);
                 HostingStats {
-                    hosting_id: s.id,
                     domain: s.domain,
                     disk_bytes: r.map(|r| r.disk_used_bytes).unwrap_or(0),
                     bw_in_bytes_24h: r.map(|r| r.bw_in_bytes).unwrap_or(0),
@@ -362,12 +432,122 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     // Same rule as hosting_stats: "we have at least one
                     // sample" ⇒ stamp now; never sampled ⇒ None.
                     last_request_at: r.filter(|r| r.periods > 0).map(|_| now),
-                    sampled_at: now,
-                    mem_rss_bytes: r.map(|r| r.mem_rss_bytes).unwrap_or(0),
-                    cpu_pct_x100: r.map(|r| r.cpu_pct_x100).unwrap_or(0),
+                    sampled_at: d.map_or(0, |d| d.last_at),
+                    mem_rss_bytes: match live_uid {
+                        Some((l, uid)) => l.rss_bytes(uid),
+                        None => r.map(|r| r.mem_rss_bytes).unwrap_or(0),
+                    },
+                    cpu_pct_x100: match live_uid {
+                        Some((l, uid)) => l.uid_pct_x100(uid),
+                        None => r.map(|r| r.cpu_pct_x100).unwrap_or(0),
+                    },
+                    cpu_live: live_uid.is_some(),
+                    cpu_avg_24h_x100: d.and_then(|d| d.cpu_avg_x100()),
+                    cpu_peak_24h_x100: d
+                        .filter(|d| d.cpu_avg_x100().is_some())
+                        .map(|d| d.cpu_peak_x100),
+                    cpu_cores: live.as_ref().map_or(0, |l| l.cores),
+                    hosting_id: s.id,
                 }
             })
             .collect())
+    }
+
+    /// Usage of every active hosting over the last `window_secs`, one DB round
+    /// per source. `0` is the live view: CPU and memory from the running
+    /// sampler, traffic from the latest five-minute sample.
+    pub async fn hosting_usage_range(
+        &self,
+        window_secs: i64,
+    ) -> Result<Vec<hyperion_types::HostingUsageRange>, RpcError> {
+        // The newest tick, however late `du` made it. Longer than one interval
+        // or a late tick reads as no traffic at all.
+        const LIVE_TRAFFIC_SECS: i64 = 400;
+        let err = |e: hyperion_state::StateError| RpcError::Internal_with(format!("usage: {e}"));
+        let now = now_secs();
+        let is_live = window_secs <= 0;
+        let since = now
+            - if is_live {
+                LIVE_TRAFFIC_SECS
+            } else {
+                window_secs.min(49 * 3600)
+            };
+        let summaries = self.list().await?;
+        let disks = hyperion_state::limits::usage_rollup_all(&self.pool, 24)
+            .await
+            .map_err(err)?;
+        let disk_by_id: HashMap<&str, &hyperion_state::limits::UsageRollup> =
+            disks.iter().map(|r| (r.hosting_id.as_str(), r)).collect();
+        let samples = hyperion_state::usage_samples::rollup_since(&self.pool, since, None)
+            .await
+            .map_err(err)?;
+        let sample_by_id: HashMap<&str, &hyperion_state::usage_samples::UsageSampleRollup> =
+            samples.iter().map(|r| (r.hosting_id.as_str(), r)).collect();
+        let users = hyperion_state::hostings::system_users_by_hosting(&self.pool)
+            .await
+            .map_err(err)?;
+        let live = self.cpu_tracker.live(now);
+        let active: Vec<_> = summaries
+            .into_iter()
+            .filter(|s| matches!(s.state, HostingState::Active))
+            .collect();
+        let mut sites_per_uid: HashMap<i64, i64> = HashMap::new();
+        for s in &active {
+            if let Some((_, uid)) = users.get(s.id.as_str()) {
+                *sites_per_uid.entry(*uid).or_default() += 1;
+            }
+        }
+        Ok(active
+            .into_iter()
+            .map(|s| {
+                let d = disk_by_id.get(s.id.as_str()).copied();
+                let r = sample_by_id.get(s.id.as_str()).copied();
+                let uid = users.get(s.id.as_str()).map(|(_, uid)| *uid);
+                let live_uid = live.as_ref().zip(uid);
+                let (cpu_pct_x100, cpu_peak_x100, mem_avg_bytes, mem_peak_bytes) = if is_live {
+                    let rss = live_uid.map_or(0, |(l, uid)| l.rss_bytes(uid));
+                    (live_uid.map(|(l, uid)| l.uid_pct_x100(uid)), None, rss, rss)
+                } else {
+                    let avg = r.and_then(|r| r.cpu_avg_x100());
+                    (
+                        avg,
+                        r.filter(|_| avg.is_some()).map(|r| r.cpu_peak_x100),
+                        r.map_or(0, |r| r.mem_avg_bytes),
+                        r.map_or(0, |r| r.mem_peak_bytes),
+                    )
+                };
+                hyperion_types::HostingUsageRange {
+                    domain: s.domain,
+                    disk_bytes: d.map_or(0, |d| d.disk_used_bytes),
+                    cpu_pct_x100,
+                    cpu_peak_x100,
+                    cpu_cores: live.as_ref().map_or(0, |l| l.cores),
+                    mem_avg_bytes,
+                    mem_peak_bytes,
+                    bw_in_bytes: r.map_or(0, |r| r.bw_in_bytes),
+                    bw_out_bytes: r.map_or(0, |r| r.bw_out_bytes),
+                    requests: r.map_or(0, |r| r.requests),
+                    first_at: r.map_or(0, |r| r.first_at),
+                    last_at: r.map_or(0, |r| r.last_at),
+                    has_samples: d.is_some_and(|d| d.periods > 0) || r.is_some(),
+                    shared_user_sites: uid
+                        .and_then(|u| sites_per_uid.get(&u).copied())
+                        .unwrap_or(1),
+                    hosting_id: s.id,
+                }
+            })
+            .collect())
+    }
+
+    /// One tick of the 10 s CPU sampler. Blocking `/proc` walk, off the runtime.
+    pub async fn cpu_sample_tick(&self) {
+        let snap = tokio::task::spawn_blocking(read_proc_snapshot)
+            .await
+            .ok()
+            .flatten();
+        if let Some(snap) = snap {
+            self.cpu_tracker.observe(now_secs(), snap);
+        }
     }
 
     pub async fn node_stats(&self, hostname: &str, version: &str) -> Result<NodeStats, RpcError> {
@@ -469,6 +649,20 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             ns.net_rx_bps = pm.net_rx_bps;
             ns.net_tx_bps = pm.net_tx_bps;
             ns.sampled_at = now_secs(); // = "just now", so the freshness label is honest
+        }
+        // The sampler's last minute beats a 200 ms snapshot, and reads the same
+        // window as the per-site figures, so the two can be compared.
+        if let Some(live) = self.cpu_tracker.live(now_secs()) {
+            let site_uids: std::collections::HashSet<i64> =
+                hyperion_state::hostings::system_users_by_hosting(&self.pool)
+                    .await
+                    .unwrap_or_default()
+                    .into_values()
+                    .map(|(_, uid)| uid)
+                    .collect();
+            ns.cpu_pct_x100 = live.node_pct_x100();
+            ns.cpu_cores = live.cores;
+            ns.cpu_breakdown = Some(live.breakdown(&site_uids));
         }
         // OOM-kill counters (filled regardless of the /proc read).
         ns.oom_kills_24h =
@@ -875,6 +1069,8 @@ pub(super) fn node_stats_from(
             agent_version: version.to_string(),
             agent_online: true,
             cpu_pct_x100: r.cpu_pct_x100,
+            cpu_cores: 0,
+            cpu_breakdown: None,
             swap_total_kib: r.swap_total_kib,
             swap_used_kib: r.swap_used_kib,
             psi_cpu_x100: r.psi_cpu_x100,
@@ -908,6 +1104,8 @@ pub(super) fn node_stats_from(
             agent_version: version.to_string(),
             agent_online: true,
             cpu_pct_x100: 0,
+            cpu_cores: 0,
+            cpu_breakdown: None,
             swap_total_kib: 0,
             swap_used_kib: 0,
             psi_cpu_x100: 0,
@@ -945,18 +1143,8 @@ pub(super) struct ProcMetrics {
 /// busy = total - idle - iowait.
 pub(super) async fn read_cpu_jiffies() -> Option<(u64, u64)> {
     let s = tokio::fs::read_to_string("/proc/stat").await.ok()?;
-    let line = s.lines().next()?; // "cpu  u n s idle iowait irq softirq steal ..."
-    let mut it = line.split_whitespace();
-    if it.next()? != "cpu" {
-        return None;
-    }
-    let vals: Vec<u64> = it.filter_map(|v| v.parse::<u64>().ok()).collect();
-    if vals.len() < 5 {
-        return None;
-    }
-    let total: u64 = vals.iter().sum();
-    let idle = vals[3] + vals.get(4).copied().unwrap_or(0); // idle + iowait
-    Some((total.saturating_sub(idle), total))
+    let (busy, total, _) = parse_proc_stat_cpu(&s)?;
+    Some((busy.max(0) as u64, total.max(0) as u64))
 }
 
 /// Rolling state the network sampler carries between ticks: the last
@@ -1160,26 +1348,6 @@ pub(super) async fn read_proc_metrics() -> ProcMetrics {
     }
 }
 
-/// utime+stime jiffies from a `/proc/<pid>/stat` line. `comm` (field 2) can
-/// contain spaces and parens, so we anchor on the LAST ')' and count fields
-/// after it: utime is the 12th, stime the 13th token there.
-pub(super) fn parse_stat_cpu_jiffies(s: &str) -> i64 {
-    let after = match s.rfind(')') {
-        Some(i) => &s[i + 1..],
-        None => return 0,
-    };
-    let toks: Vec<&str> = after.split_whitespace().collect();
-    let utime = toks
-        .get(11)
-        .and_then(|v| v.parse::<i64>().ok())
-        .unwrap_or(0);
-    let stime = toks
-        .get(12)
-        .and_then(|v| v.parse::<i64>().ok())
-        .unwrap_or(0);
-    utime + stime
-}
-
 /// (pid, comm) from a kernel OOM line containing "Killed process 1234 (comm)".
 pub(super) fn parse_oom_kill(msg: &str) -> (i64, String) {
     let Some(idx) = msg.find("Killed process ") else {
@@ -1197,51 +1365,6 @@ pub(super) fn parse_oom_kill(msg: &str) -> (i64, String) {
         .and_then(|(_, t)| t.split_once(')').map(|(c, _)| c.to_string()))
         .unwrap_or_default();
     (pid, comm)
-}
-
-/// One pass over /proc: per-UID (summed RSS bytes, summed CPU jiffies) across
-/// that user's processes. Used to attribute memory + CPU to each hosting via
-/// its system_user — Hyperion runs one php-fpm pool per user, so a hosting's
-/// footprint is its user's processes. RSS overcounts shared pages (PHP binary
-/// / opcache shared across workers); it's the standard pragmatic figure.
-pub(super) async fn scan_proc_usage_by_uid() -> std::collections::HashMap<i64, (i64, i64)> {
-    use std::collections::HashMap;
-    use std::os::unix::fs::MetadataExt;
-    const PAGE: i64 = 4096; // Debian x86_64 page size
-    let mut map: HashMap<i64, (i64, i64)> = HashMap::new();
-    let Ok(mut rd) = tokio::fs::read_dir("/proc").await else {
-        return map;
-    };
-    while let Ok(Some(ent)) = rd.next_entry().await {
-        let name = ent.file_name();
-        let name = name.to_string_lossy();
-        if name.is_empty() || !name.bytes().all(|b| b.is_ascii_digit()) {
-            continue; // not a pid dir
-        }
-        let dir = ent.path();
-        let Ok(meta) = tokio::fs::metadata(&dir).await else {
-            continue; // process exited between readdir and stat
-        };
-        let uid = meta.uid() as i64;
-        let rss = tokio::fs::read_to_string(dir.join("statm"))
-            .await
-            .ok()
-            .and_then(|s| {
-                s.split_whitespace()
-                    .nth(1)
-                    .and_then(|v| v.parse::<i64>().ok())
-            })
-            .unwrap_or(0)
-            * PAGE;
-        let cpu = tokio::fs::read_to_string(dir.join("stat"))
-            .await
-            .map(|s| parse_stat_cpu_jiffies(&s))
-            .unwrap_or(0);
-        let e = map.entry(uid).or_insert((0, 0));
-        e.0 += rss;
-        e.1 += cpu;
-    }
-    map
 }
 
 /// Snapshot of one filesystem's usage, parsed from `df -P -B1`.

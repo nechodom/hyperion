@@ -2099,6 +2099,53 @@ details.pkg-new .pkg-fs:first-of-type { padding-top: 0; }
 }
 .share-bar > span { display: block; height: 100%; background: var(--viz, var(--text-dim)); }
 
+/* Per-site table's range picker and what the figures cover. */
+.usage-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-4);
+  padding: 0.75rem 1.25rem;
+  border-bottom: 1px solid var(--border);
+}
+.usage-bar .search-segments { max-width: 100%; overflow-x: auto; }
+.usage-bar .seg { min-height: 2rem; }
+.usage-note { margin: 0; padding: 0.75rem 1.25rem; border-top: 1px solid var(--border); }
+
+/* "Where the CPU goes": stretches sized by flex-grow so the 2px gaps between
+   them can never overflow the track. Idle has no fill and shows as the track. */
+.viz-other { --viz: var(--text-soft); }
+.cpu-split { padding: 0.9rem 1.25rem; border-top: 1px solid var(--border); }
+.cpu-split-title { font-size: 0.8rem; margin-bottom: 0.5rem; }
+.cpu-split-bar {
+  display: flex;
+  gap: 2px;
+  height: 10px;
+  border-radius: 4px;
+  background: var(--surface-3);
+  overflow: hidden;
+}
+.cpu-split-bar > span { min-width: 2px; flex-basis: 0; background: var(--viz, transparent); }
+.cpu-split-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem var(--space-4);
+  margin: 0.6rem 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: 0.8rem;
+  color: var(--text-dim);
+}
+.cpu-split-legend strong { color: var(--text); font-weight: 500; font-variant-numeric: tabular-nums; }
+.cpu-split-legend i {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 0.35rem;
+  border-radius: 2px;
+  background: var(--viz, var(--surface-3));
+}
+
 /* ─────────────────────────────────────────────────────────────
    "Ready to copy" credentials panel after hosting creation
    ───────────────────────────────────────────────────────────── */
@@ -2367,13 +2414,16 @@ th a.th-sort.active { color: var(--text); }
 }
 .progress-bar.share .progress-bar-fill { opacity: 0.55; }
 
-/* Per-site usage table (/stats). Eight columns of byte figures in a
+/* Per-site usage table (/stats). Up to eight columns of figures in a
    column that is already narrowed by the sidebar: without this a value
    like "512.0 MiB" breaks across two lines and the rows go ragged.
    Scoped to this table so the .table-wrap scrolls sideways instead —
    which is the behaviour every other wide table here already has. */
 table.site-usage th,
 table.site-usage td.numeric { white-space: nowrap; }
+/* The table scrolls sideways, so the domain can keep a readable width instead
+   of breaking every few letters on a phone. */
+table.site-usage td:first-child { min-width: 11rem; }
 
 .table-empty {
   text-align: center;
@@ -5836,6 +5886,8 @@ td .cell-sub code { font-size: 0.74rem; }
 .site-alerts .flash { margin: 0 !important; }
 .site-alerts:not(:has(.flash)) { display: none; }
 .site-alerts > [hx-get]:empty { display: none; }
+/* No box of its own: its banners keep the column's gap. */
+#dns-banner { display: contents; }
 
 /* A plain text disclosure inside a card: "Reset the password…". */
 details.disclosure > summary {

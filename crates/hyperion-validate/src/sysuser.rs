@@ -1,7 +1,11 @@
 //! Linux system-user name parser + derivation from a domain.
 //!
-//! POSIX user names are constrained — we use `^[a-z][a-z0-9_]{2,31}$`
-//! to stay well within shell-safe + portable limits.
+//! POSIX user names are constrained — we use `^[a-z][a-z0-9_-]{2,31}$`
+//! to stay well within shell-safe + portable limits. A hyphen is fine anywhere
+//! but first, where it would read as a command-line option.
+//!
+//! `packaging/install/site-mail-wrapper.sh` keeps its own copy of this rule, so
+//! change the two together.
 
 use crate::ValidationError;
 use once_cell::sync::Lazy;
@@ -11,7 +15,7 @@ use std::fmt;
 use std::str::FromStr;
 
 static RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"^[a-z][a-z0-9_]{2,31}$")
+    Regex::new(r"^[a-z][a-z0-9_-]{2,31}$")
         .unwrap_or_else(|_| panic!("BUG: sysuser regex failed to compile"))
 });
 
@@ -24,7 +28,7 @@ impl SystemUserName {
         if !RE.is_match(s) {
             return Err(ValidationError::InvalidSystemUser(
                 s.to_string(),
-                "must match ^[a-z][a-z0-9_]{2,31}$",
+                "must match ^[a-z][a-z0-9_-]{2,31}$",
             ));
         }
         Ok(Self(s.to_string()))
@@ -136,15 +140,47 @@ mod tests {
         }
     }
 
+    /// Existing Debian boxes and panels like CloudPanel have logins such as
+    /// `example-dev`, and `useradd` accepts them.
+    #[test]
+    fn accepts_hyphens_after_the_first_character() {
+        let longest = format!("a{}", "-".repeat(31));
+        for s in ["example-dev", "admin-user", "a-b", "abc-", &longest] {
+            assert!(SystemUserName::parse(s).is_ok(), "should accept {s}");
+        }
+    }
+
     #[test]
     fn rejects_bad_names() {
         let too_long = "a".repeat(33);
+        let hyphens_too_long = format!("a{}", "-".repeat(32));
         let cases: Vec<&str> = vec![
-            "", "ab", "1abc", "_abc", "Abc", "abc!", "abc-def", &too_long,
+            "",
+            "ab",
+            "1abc",
+            "_abc",
+            "Abc",
+            "abc!",
+            "-abc",
+            "--help",
+            "a-",
+            "abc.def",
+            "../abc",
+            "abc/def",
+            "abc def",
+            "abc-def\n",
+            &too_long,
+            &hyphens_too_long,
         ];
         for s in cases {
-            assert!(SystemUserName::parse(s).is_err(), "should reject {s}");
+            assert!(SystemUserName::parse(s).is_err(), "should reject {s:?}");
         }
+    }
+
+    #[test]
+    fn serde_accepts_a_hyphenated_name() {
+        let back: SystemUserName = serde_json::from_str("\"example-dev\"").expect("deserialize");
+        assert_eq!(back.as_str(), "example-dev");
     }
 
     #[test]

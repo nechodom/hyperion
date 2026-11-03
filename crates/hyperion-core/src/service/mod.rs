@@ -40,6 +40,7 @@ mod care_report;
 mod certs;
 mod cluster;
 mod config;
+mod cpu_usage;
 mod cron;
 mod dashboard;
 mod database;
@@ -47,6 +48,7 @@ mod dkim;
 mod files;
 mod firewall;
 mod fs_health;
+pub use cpu_usage::{CpuClass, CpuTracker, ProcSample, ProcSnapshot, TICK_SECS as CPU_TICK_SECS};
 pub use fs_health::check_usr_writable;
 mod fs_util;
 mod ftp;
@@ -636,6 +638,8 @@ pub struct HostingService<A: AdapterPort + 'static> {
     /// does nothing at all unless restic is installed, so an install that
     /// has never heard of the feature is unaffected.
     pub snapshots_enabled: bool,
+    /// Per-site CPU accounting, fed every few seconds by the agent's sampler.
+    pub cpu_tracker: Arc<CpuTracker>,
     /// Which engine this node uses. See [`hyperion_types::ProtectionMode`].
     pub protection_mode: hyperion_types::ProtectionMode,
     /// Cluster-wide default Slack webhook for notifications.
@@ -874,6 +878,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             remote_backup: None,
             retention: BackupRetention::default(),
             snapshots_enabled: true,
+            cpu_tracker: Default::default(),
             protection_mode: hyperion_types::ProtectionMode::Both,
             slack_default_webhook: None,
             acme_contact_email: "admin@hyperion.invalid".into(),

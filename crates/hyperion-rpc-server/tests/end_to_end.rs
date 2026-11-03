@@ -253,6 +253,7 @@ async fn start_agent() -> (std::path::PathBuf, tempfile::TempDir) {
         paths: hyperion_core::HostingPaths::default(),
         permissions_autoheal: true,
         snapshots_enabled: false,
+        cpu_tracker: Default::default(),
         protection_mode: hyperion_types::ProtectionMode::Both,
         remote_backup: None,
         retention: hyperion_core::BackupRetention::default(),

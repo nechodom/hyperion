@@ -76,7 +76,7 @@ async fn run_capturing(program: &str, args: &[&str]) -> Result<Captured, Adapter
 }
 
 /// Refuse a system-user name that isn't a valid POSIX login. Reuses the
-/// canonical `^[a-z][a-z0-9_]{2,31}$` parser so this adapter can't be the
+/// canonical `^[a-z][a-z0-9_-]{2,31}$` parser so this adapter can't be the
 /// one place with a looser rule than the rest of the codebase.
 fn guard_user(user: &str) -> Result<(), AdapterError> {
     hyperion_validate::SystemUserName::parse(user)?;

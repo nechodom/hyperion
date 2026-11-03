@@ -413,6 +413,12 @@ pub enum Request {
     /// /stats per-site breakdown needs all of them; asking with N ×
     /// `HostingStats` would be N round-trips per node.
     HostingStatsAll,
+    /// Every active hosting's usage over the last `window_secs`, for the
+    /// /stats range picker. 0 = live. An older node answers 400, and the page
+    /// falls back to `HostingStatsAll` for it.
+    HostingUsageRange {
+        window_secs: i64,
+    },
     NodeStats,
     ClusterStats,
     NodeMetricsHistory {
@@ -2388,6 +2394,7 @@ pub enum Response {
     CertUpload(CertInfo),
     HostingStats(HostingStats),
     HostingStatsAll(Vec<HostingStats>),
+    HostingUsageRange(Vec<hyperion_types::HostingUsageRange>),
     NodeStats(NodeStats),
     ClusterStats(ClusterStats),
     NodeMetricsHistory(hyperion_types::NodeMetricsHistory),

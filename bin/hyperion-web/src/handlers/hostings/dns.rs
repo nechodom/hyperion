@@ -75,14 +75,20 @@ pub async fn post_dns_check(
         };
     // Find the hosting across the cluster — the operator may be
     // looking at a worker-hosted row whose master row doesn't
-    // exist. DnsCheck itself runs from the MASTER (dig from our
-    // network egress) regardless of where the hosting lives, so
-    // we only need find_anywhere for the domain lookup.
-    let (detail, _) = find_hosting_anywhere(&state, detail_sel).await?;
+    // exist. DnsCheck runs on the OWNING node, same as the banner it
+    // refreshes: issuance happens there, so "our IP" must be that
+    // node's. Asked on the master, a worker's site reported a mismatch
+    // for a correct record.
+    let (detail, owner_node) = find_hosting_anywhere(&state, detail_sel).await?;
     let domain = Domain::parse(&detail.domain)?;
-    let resp = hyperion_rpc_client::call(&state.agent_socket, Request::DnsCheck { domain }).await?;
+    let resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        owner_node.as_deref(),
+        Request::DnsCheck { domain },
+    )
+    .await?;
     let html = match resp {
-        RpcResponse::DnsCheck(r) => render_dns_fragment(&r),
+        RpcResponse::DnsCheck(r) => render_dns_check_with_banner(r)?,
         RpcResponse::Error(e) => {
             format!(
                 "<div class=\"flash error\"><div class=\"flash-body\">DNS check failed: {}</div></div>",
@@ -151,6 +157,18 @@ pub(super) fn render_dns_fragment(r: &DnsCheckResult) -> String {
 #[template(path = "_hosting_dns_banner.html")]
 pub(super) struct DnsBannerTpl {
     pub(super) dns: hyperion_types::DnsCheckResult,
+}
+
+/// The "Check DNS" answer plus an out-of-band refresh of the banner at the
+/// top of the page. The banner is only fetched once, on page load, so without
+/// this a domain repointed since then keeps its "DNS mismatch" right above a
+/// check saying it matches.
+pub(super) fn render_dns_check_with_banner(r: DnsCheckResult) -> Result<String, askama::Error> {
+    let fragment = render_dns_fragment(&r);
+    let banner = DnsBannerTpl { dns: r }.render()?;
+    Ok(format!(
+        r#"{fragment}<div id="dns-banner" hx-swap-oob="innerHTML">{banner}</div>"#
+    ))
 }
 
 pub async fn get_dns_panel(

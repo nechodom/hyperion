@@ -28,6 +28,7 @@
         {% endfor %}
       </select>
       <input type="hidden" name="sort" value="{{ sort }}">
+      <input type="hidden" name="range" value="{{ range.key }}">
       <noscript><button class="btn small" type="submit">Show</button></noscript>
     </form>
     {% endif %}
@@ -98,7 +99,7 @@
           {% for v in node_views %}
           <tr>
             <td>
-              <a href="/stats?node={{ v.node_id|e }}&amp;sort={{ sort }}"><span class="node-dot {% if v.online %}on{% else %}off{% endif %}"></span> <strong>{{ v.label }}</strong></a>
+              <a href="/stats?node={{ v.node_id|e }}&amp;sort={{ sort }}&amp;range={{ range.key }}"><span class="node-dot {% if v.online %}on{% else %}off{% endif %}"></span> <strong>{{ v.label }}</strong></a>
               {% if !v.online %}<span class="tone-err small"> · not answering</span>{% endif %}
             </td>
             {% if v.online %}
@@ -139,8 +140,18 @@
       <div class="stat viz-blue tone-{{ v.cpu_tone }}">
         <div class="stat-label">CPU</div>
         <div class="stat-value">{{ crate::handlers::stats::fmt_pct_x100(n.cpu_pct_x100) }}</div>
-        <div class="stat-meta">busy across all cores{% if n.psi_cpu_x100 > 0 %} · <span title="PSI: share of time some task was stalled waiting for CPU (avg 10 s)">stalled {{ crate::handlers::stats::fmt_pct_x100(n.psi_cpu_x100) }}</span>{% endif %}</div>
+        <div class="stat-meta">{% if n.cpu_cores > 0 %}last minute · {{ n.cpu_cores }} core{% if n.cpu_cores != 1 %}s{% endif %}{% else %}busy across all cores{% endif %}{% if n.psi_cpu_x100 > 0 %} · <span title="PSI: share of time some task was stalled waiting for CPU (avg 10 s)">stalled {{ crate::handlers::stats::fmt_pct_x100(n.psi_cpu_x100) }}</span>{% endif %}</div>
+        {% if spark_cpu.has_data %}
+        <div class="stat-chart">
+          <svg class="spark-svg" viewBox="0 0 600 60" preserveAspectRatio="none" aria-hidden="true" data-points='{{ spark_cpu.points_json|safe }}' data-spark-mount>
+            <defs><linearGradient id="grad-cpu" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="currentColor" stop-opacity="0.22"/><stop offset="100%" stop-color="currentColor" stop-opacity="0"/></linearGradient></defs>
+            <path class="spark-area" d="{{ spark_cpu.area_d }}" fill="url(#grad-cpu)"/>
+            <path class="spark-line" d="{{ spark_cpu.path_d }}" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke"/>
+          </svg>
+        </div>
+        {% else %}
         <div class="stat-meter"><span style="width:{{ n.cpu_pct_x100 / 100 }}%"></span></div>
+        {% endif %}
       </div>
 
       <div class="stat viz-blue">
@@ -218,6 +229,22 @@
         {% endif %}
       </div>
     </div>
+
+    {# The answer to "the sites add up to 8% but the node says 40%": the database
+       and nginx are shared, so no site's row can carry them. #}
+    {% if !cpu_split.is_empty() %}
+    <div class="cpu-split">
+      <div class="cpu-split-title">Where the CPU goes <span class="text-soft">· last minute</span></div>
+      <div class="cpu-split-bar" aria-hidden="true">
+        {% for p in cpu_split %}{% if p.pct_x100 > 0 %}<span class="{{ p.viz }}" style="flex-grow:{{ p.pct_x100 }}" title="{{ p.label }} {{ crate::handlers::stats::fmt_pct_x100(p.pct_x100) }}"></span>{% endif %}{% endfor %}
+      </div>
+      <ul class="cpu-split-legend">
+        {% for p in cpu_split %}
+        <li class="{{ p.viz }}" title="{{ p.hint }}"><i aria-hidden="true"></i>{{ p.label }} <strong>{{ crate::handlers::stats::fmt_pct_x100(p.pct_x100) }}</strong></li>
+        {% endfor %}
+      </ul>
+    </div>
+    {% endif %}
 
     {# The rarely-read facts — one quiet strip instead of a second card that
        repeated the figures above. #}
@@ -300,14 +327,25 @@
 
   {# ── Per-site breakdown ────────────────────────────────────────────
      "Which site is eating the box?" — one row per active hosting, heaviest
-     first. Sorting is a server-side ?sort= round trip on purpose: this table
-     sits inside #stats-live, so a client-side sort would be thrown away by
-     the next swap. #}
+     first. Sorting and the range are server-side round trips on purpose: this
+     table sits inside #stats-live, so client-side state would be thrown away
+     by the next swap. #}
   <div class="group">
     <div class="ghead">
       Per-site usage
       <span class="grow"></span>
-      <span class="ghead-note" title="CPU and RAM are the latest reading; traffic and requests cover the last 24 h">{{ sites.len() }} active · {% if sort == "domain" %}A→Z by domain{% else %}heaviest {{ sort }} first{% endif %}</span>
+      <span class="ghead-note">{{ sites.len() }} active · {% if sort == "domain" %}A→Z by domain{% else if sort == "peak" %}heaviest cpu peak first{% else %}heaviest {{ sort }} first{% endif %}</span>
+    </div>
+
+    <div class="usage-bar">
+      <nav class="search-segments" aria-label="Period">
+        {% for o in ranges %}
+        <a class="seg {% if o.key == range.key %}active{% endif %}" {% if o.key == range.key %}aria-current="true"{% endif %} href="/stats?node={{ current_node|e }}&amp;sort={% if o.is_live() && sort == "peak" %}cpu{% else %}{{ sort }}{% endif %}&amp;range={{ o.key }}">{{ o.label }}</a>
+        {% endfor %}
+      </nav>
+      <span class="text-soft small">
+        {% if range.is_live() %}CPU and RAM over the last minute, traffic and requests over the last 5 min{% else %}Average and peak over the last {{ range.label }}{% endif %}{% if history_since > 0 %} · <span class="tone-warn">history only reaches back {{ crate::handlers::stats::fmt_ago(history_since) }}</span>{% endif %}{% if newest_sample > 0 %} · disk and traffic read {{ crate::handlers::stats::fmt_ago(newest_sample) }}{% endif %}
+      </span>
     </div>
 
     {% if sites.is_empty() %}
@@ -320,14 +358,16 @@
       <table class="stats-table site-usage">
         <thead>
           <tr>
-            <th><a class="th-sort {% if sort == "domain" %}active{% endif %}" href="/stats?node={{ current_node|e }}&amp;sort=domain">Site{% if sort == "domain" %} ▾{% endif %}</a></th>
+            <th><a class="th-sort {% if sort == "domain" %}active{% endif %}" href="/stats?node={{ current_node|e }}&amp;sort=domain&amp;range={{ range.key }}">Site{% if sort == "domain" %} ▾{% endif %}</a></th>
             {% if show_node_col %}<th class="hide-on-phone">Node</th>{% endif %}
-            <th class="right"><a class="th-sort {% if sort == "cpu" %}active{% endif %}" href="/stats?node={{ current_node|e }}&amp;sort=cpu">CPU{% if sort == "cpu" %} ▾{% endif %}</a></th>
-            <th class="right"><a class="th-sort {% if sort == "ram" %}active{% endif %}" href="/stats?node={{ current_node|e }}&amp;sort=ram">RAM{% if sort == "ram" %} ▾{% endif %}</a></th>
-            <th class="right"><a class="th-sort {% if sort == "disk" %}active{% endif %}" href="/stats?node={{ current_node|e }}&amp;sort=disk">Disk{% if sort == "disk" %} ▾{% endif %}</a></th>
-            <th class="right" title="Bandwidth in + out over the last 24 h"><a class="th-sort {% if sort == "traffic" %}active{% endif %}" href="/stats?node={{ current_node|e }}&amp;sort=traffic">Traffic{% if sort == "traffic" %} ▾{% endif %}</a></th>
-            <th class="right hide-on-phone" title="Requests served over the last 24 h"><a class="th-sort {% if sort == "requests" %}active{% endif %}" href="/stats?node={{ current_node|e }}&amp;sort=requests">Requests{% if sort == "requests" %} ▾{% endif %}</a></th>
-            <th class="right hide-on-phone">Sampled</th>
+            <th class="right" title="Share of everything the site's node can do: 100% means all of its cores are busy"><a class="th-sort {% if sort == "cpu" %}active{% endif %}" href="/stats?node={{ current_node|e }}&amp;sort=cpu&amp;range={{ range.key }}">{% if range.is_live() %}CPU now{% else %}CPU avg{% endif %}{% if sort == "cpu" %} ▾{% endif %}</a></th>
+            {% if !range.is_live() %}
+            <th class="right hide-on-phone" title="The busiest single minute in this period"><a class="th-sort {% if sort == "peak" %}active{% endif %}" href="/stats?node={{ current_node|e }}&amp;sort=peak&amp;range={{ range.key }}">CPU peak{% if sort == "peak" %} ▾{% endif %}</a></th>
+            {% endif %}
+            <th class="right"><a class="th-sort {% if sort == "ram" %}active{% endif %}" href="/stats?node={{ current_node|e }}&amp;sort=ram&amp;range={{ range.key }}">{% if range.is_live() %}RAM{% else %}RAM peak{% endif %}{% if sort == "ram" %} ▾{% endif %}</a></th>
+            <th class="right"><a class="th-sort {% if sort == "disk" %}active{% endif %}" href="/stats?node={{ current_node|e }}&amp;sort=disk&amp;range={{ range.key }}">Disk{% if sort == "disk" %} ▾{% endif %}</a></th>
+            <th class="right" title="Bandwidth in + out over {{ range.traffic_label() }}"><a class="th-sort {% if sort == "traffic" %}active{% endif %}" href="/stats?node={{ current_node|e }}&amp;sort=traffic&amp;range={{ range.key }}">Traffic{% if sort == "traffic" %} ▾{% endif %}</a></th>
+            <th class="right hide-on-phone" title="Requests served over {{ range.traffic_label() }}"><a class="th-sort {% if sort == "requests" %}active{% endif %}" href="/stats?node={{ current_node|e }}&amp;sort=requests&amp;range={{ range.key }}">Requests{% if sort == "requests" %} ▾{% endif %}</a></th>
           </tr>
         </thead>
         <tbody>
@@ -335,21 +375,44 @@
           <tr>
             <td>
               <a href="/hostings/{{ r.hosting_id|e }}"><strong>{{ r.domain }}</strong></a>
-              {% if !r.has_samples %}
+              {% if r.legacy %}
+                <span class="text-soft small" title="This node runs an older version that cannot report CPU or usage over time.">· update node to measure</span>
+              {% else if !r.has_samples %}
                 <span class="text-soft small" title="The site exists and is active; the 5 min sampler simply has not written a usage row for it yet.">· not sampled yet</span>
+              {% else if !r.stale_note().is_empty() %}
+                <span class="tone-warn small" title="The 5 min sampler has not recorded this site lately, so its figures may be old or missing. The agent log says why.">· {{ r.stale_note() }}</span>
+              {% endif %}
+              {% if r.shared_user_sites > 1 %}
+                <span class="text-soft small" title="CPU and RAM can only be measured per system user. This one runs {{ r.shared_user_sites }} sites, and each of them shows the user's whole figure.">· shared user</span>
               {% endif %}
             </td>
             {% if show_node_col %}<td class="hide-on-phone text-dim">{{ r.node_label }}</td>{% endif %}
             <td class="right numeric">
-              {{ crate::handlers::stats::fmt_pct_x100(r.cpu_pct_x100) }}
+              {% if let Some(v) = r.cpu_pct_x100.as_ref() %}
+                <span title="{{ r.cpu_hint(v) }}">{{ crate::handlers::stats::fmt_cpu(v) }}</span>
+              {% else %}
+                <span class="text-soft" title="Not measured yet: the node's sampler has no reading for this site in this period">—</span>
+              {% endif %}
               {% if sort == "cpu" %}
-                <div class="share-bar viz-blue" title="{{ crate::handlers::stats::fmt_percent(r.cpu_pct_x100, sites_total_cpu_x100) }} of the CPU used by the sites listed"><span style="width:{{ r.bar_pct }}%"></span></div>
+                <div class="share-bar viz-blue" title="Compared with the heaviest site listed"><span style="width:{{ r.bar_pct }}%"></span></div>
               {% endif %}
             </td>
-            <td class="right numeric">
-              {{ crate::handlers::stats::fmt_bytes(r.mem_rss_bytes) }}
+            {% if !range.is_live() %}
+            <td class="right numeric hide-on-phone">
+              {% if let Some(v) = r.cpu_peak_x100.as_ref() %}
+                <span title="{{ r.cpu_hint(v) }}">{{ crate::handlers::stats::fmt_cpu(v) }}</span>
+              {% else %}
+                <span class="text-soft">—</span>
+              {% endif %}
+              {% if sort == "peak" %}
+                <div class="share-bar viz-blue" title="Compared with the heaviest site listed"><span style="width:{{ r.bar_pct }}%"></span></div>
+              {% endif %}
+            </td>
+            {% endif %}
+            <td class="right numeric" {% if !range.is_live() %}title="Average {{ crate::handlers::stats::fmt_bytes(r.mem_avg_bytes) }}"{% endif %}>
+              {{ crate::handlers::stats::fmt_bytes(r.mem_bytes) }}
               {% if sort == "ram" %}
-                <div class="share-bar viz-magenta" title="{{ crate::handlers::stats::fmt_percent(r.mem_rss_bytes, sites_total_mem) }} of the RAM used by the sites listed"><span style="width:{{ r.bar_pct }}%"></span></div>
+                <div class="share-bar viz-magenta" title="Compared with the heaviest site listed"><span style="width:{{ r.bar_pct }}%"></span></div>
               {% endif %}
             </td>
             <td class="right numeric">
@@ -358,19 +421,23 @@
                 <div class="share-bar viz-magenta" title="{{ crate::handlers::stats::fmt_percent(r.disk_bytes, sites_total_disk) }} of the disk used by the sites listed"><span style="width:{{ r.bar_pct }}%"></span></div>
               {% endif %}
             </td>
-            <td class="right numeric" title="in {{ crate::handlers::stats::fmt_bytes(r.bw_in_bytes_24h) }} · out {{ crate::handlers::stats::fmt_bytes(r.bw_out_bytes_24h) }}">
-              {{ crate::handlers::stats::fmt_bytes(r.bw_bytes_24h) }}
+            {% if r.legacy %}
+            <td class="right text-soft">—</td>
+            <td class="right text-soft hide-on-phone">—</td>
+            {% else %}
+            <td class="right numeric" title="in {{ crate::handlers::stats::fmt_bytes(r.bw_in_bytes) }} · out {{ crate::handlers::stats::fmt_bytes(r.bw_out_bytes) }}">
+              {{ crate::handlers::stats::fmt_bytes(r.bw_bytes) }}
               {% if sort == "traffic" %}
-                <div class="share-bar viz-violet" title="{{ crate::handlers::stats::fmt_percent(r.bw_bytes_24h, sites_total_bw) }} of the traffic across the sites listed"><span style="width:{{ r.bar_pct }}%"></span></div>
+                <div class="share-bar viz-violet" title="{{ crate::handlers::stats::fmt_percent(r.bw_bytes, sites_total_bw) }} of the traffic across the sites listed"><span style="width:{{ r.bar_pct }}%"></span></div>
               {% endif %}
             </td>
             <td class="right numeric hide-on-phone">
-              {{ r.requests_24h }}
+              {{ r.requests }}
               {% if sort == "requests" %}
-                <div class="share-bar viz-aqua" title="{{ crate::handlers::stats::fmt_percent(r.requests_24h, sites_total_reqs) }} of the requests across the sites listed"><span style="width:{{ r.bar_pct }}%"></span></div>
+                <div class="share-bar viz-aqua" title="{{ crate::handlers::stats::fmt_percent(r.requests, sites_total_reqs) }} of the requests across the sites listed"><span style="width:{{ r.bar_pct }}%"></span></div>
               {% endif %}
             </td>
-            <td class="right hide-on-phone text-soft small">{{ crate::handlers::stats::fmt_ago(r.sampled_at) }}</td>
+            {% endif %}
           </tr>
           {% endfor %}
         </tbody>
@@ -378,16 +445,20 @@
           <tr>
             <td><strong>All sites</strong></td>
             {% if show_node_col %}<td class="hide-on-phone"></td>{% endif %}
-            <td class="right numeric"><strong>{{ crate::handlers::stats::fmt_pct_x100(sites_total_cpu_x100) }}</strong></td>
+            <td class="right numeric"><strong>{{ sites_total_cpu }}</strong></td>
+            {% if !range.is_live() %}<td class="hide-on-phone"></td>{% endif %}
             <td class="right numeric"><strong>{{ crate::handlers::stats::fmt_bytes(sites_total_mem) }}</strong></td>
             <td class="right numeric"><strong>{{ crate::handlers::stats::fmt_bytes(sites_total_disk) }}</strong></td>
             <td class="right numeric"><strong>{{ crate::handlers::stats::fmt_bytes(sites_total_bw) }}</strong></td>
             <td class="right numeric hide-on-phone"><strong>{{ sites_total_reqs }}</strong></td>
-            <td class="hide-on-phone"></td>
           </tr>
         </tfoot>
       </table>
     </div>
+    <p class="usage-note text-soft small">
+      {% if sites_multi_node %}100% is all the cores of the site's own node, so the total is in cores.{% else %}100% is all the node's cores.{% endif %}
+      A site's CPU is its PHP and cron. Its database queries and nginx run in shared processes, counted under Where the CPU goes.
+    </p>
     {% endif %}
   </div>
 

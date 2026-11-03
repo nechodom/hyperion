@@ -169,6 +169,52 @@ async fn opting_every_site_out_leaves_the_node_wide_sources_alone() {
     );
 }
 
+/// The log lives under the site's REAL system user. An imported or hyphenated
+/// user does not match what the domain derives to, and reading the derived
+/// path instead left such a site's login page unwatched for good.
+///
+/// The derived path holds a flood from another address, so reading it instead
+/// of the real one (or as well as it) fails here too.
+#[tokio::test]
+async fn scan_reads_the_log_of_a_user_not_derived_from_the_domain() {
+    let pool = open_memory().await.expect("open");
+    let home = tempfile::tempdir().expect("dir");
+    let s = svc(pool.clone(), happy_mocks_many()).with_paths(HostingPaths {
+        home_root: home.path().display().to_string(),
+        ..HostingPaths::default()
+    });
+    let mut r = req("example.cz");
+    r.system_user = Some(SystemUserName::parse("imported-shop").expect("user"));
+    s.create(r).await.expect("create");
+    let a = s
+        .get(HostingSelector::Domain(
+            Domain::parse("example.cz").expect("parse"),
+        ))
+        .await
+        .expect("get");
+    let guess = SystemUserName::derive_from_domain("example.cz").expect("derive");
+    assert_ne!(
+        a.system_user,
+        guess.as_str(),
+        "fixture must defeat the guess"
+    );
+    write_wp_login_flood(home.path(), &a.system_user, &a.domain, "203.0.113.7");
+    write_wp_login_flood(home.path(), guess.as_str(), &a.domain, "198.51.100.9");
+    let since = now_secs() - s.fail2ban.window_secs;
+
+    assert_eq!(
+        http_hits(&s.fail2ban_scan(since).await.expect("scan")),
+        vec![(a.id.as_str().to_string(), "203.0.113.7".to_string())],
+    );
+    assert!(
+        hyperion_state::hosting_kv::get(&pool, a.id.as_str(), FAIL2BAN_HTTP_SINCE_KV_KEY)
+            .await
+            .expect("kv")
+            .is_some(),
+        "the site's log was read, so its coverage is stamped"
+    );
+}
+
 /// Absent key ⇒ on; only a literal "off" opts out. And once a site is
 /// out, its care report stops reporting an attacks-blocked count it
 /// cannot stand behind — nobody was watching that login page.

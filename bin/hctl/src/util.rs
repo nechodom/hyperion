@@ -204,6 +204,15 @@ mod tests {
     }
 
     #[test]
+    fn build_create_accepts_a_hyphenated_user() {
+        let r = build_create("a.cz", &[], None, None, Some("example-dev"), None).expect("build");
+        assert_eq!(
+            r.system_user.as_ref().map(|u| u.as_str()),
+            Some("example-dev")
+        );
+    }
+
+    #[test]
     fn build_create_proxy() {
         let r = build_create("a.cz", &[], None, None, None, Some("http://127.0.0.1:3000"))
             .expect("build");

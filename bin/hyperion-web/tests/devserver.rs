@@ -471,6 +471,7 @@ async fn start_agent_with_service() -> (PathBuf, tempfile::TempDir, Arc<StubServ
         paths: hyperion_core::HostingPaths::default(),
         permissions_autoheal: true,
         snapshots_enabled: false,
+        cpu_tracker: Default::default(),
         protection_mode: hyperion_types::ProtectionMode::Both,
         remote_backup: devserver_ftp(),
         retention: hyperion_core::BackupRetention::default(),
@@ -581,7 +582,7 @@ fn build_app_with_signer(
 /// `DEVSERVER_DEMO=1`: fill the empty database with a handful of sites and a
 /// few hours of plausible metrics, so the Dashboard and Stats pages have
 /// something to draw (README screenshots). Pure inserts; nothing is sampled.
-async fn seed_demo(svc: &StubService) {
+async fn seed_demo(svc: &Arc<StubService>) {
     use hyperion_rpc::wire::HostingCreateReq;
     use hyperion_validate::Domain;
 
@@ -1020,6 +1021,39 @@ async fn seed_demo(svc: &StubService) {
         }
     }
 
+    // Five-minute per-site history behind the /stats range picker.
+    let users = hyperion_state::hostings::system_users_by_hosting(pool)
+        .await
+        .expect("users");
+    for (n, id) in ids.iter().enumerate() {
+        for k in 1..=576i64 {
+            let at = now - k * 300;
+            let w = weights[n] * (1.0 + 0.6 * wave(k as f64 + n as f64 * 13.0, 3.0, 17.0));
+            hyperion_state::usage_samples::insert(
+                pool,
+                &hyperion_state::usage_samples::UsageSample {
+                    hosting_id: hyperion_types::HostingId(id.clone()),
+                    at,
+                    cpu_busy_jiffies: (w * 600.0) as i64,
+                    cpu_total_jiffies: 120_000,
+                    cpu_peak_x100: (w * 200.0) as i64,
+                    mem_rss_bytes: ((80.0 + w * 60.0) * 1_048_576.0) as i64,
+                    bw_in_bytes: (w * 400_000.0) as i64,
+                    bw_out_bytes: (w * 3_200_000.0) as i64,
+                    requests: (w * 35.0) as i64,
+                },
+            )
+            .await
+            .expect("sample");
+        }
+    }
+    seed_demo_cpu(
+        svc,
+        users.into_iter().map(|(id, (_, uid))| (id, uid)).collect(),
+        &ids,
+        &weights,
+    );
+
     // Node samples every 5 minutes for the last 8 hours.
     let mem_total: i64 = 8 * 1024 * 1024;
     let disk_total: i64 = 160 * 1_073_741_824;
@@ -1374,6 +1408,68 @@ async fn seed_demo(svc: &StubService) {
 
 /// WAF levels, a week of refusals and a few bans, so /protection has a
 /// chart, a false-positive suspect, busy addresses and a ban history.
+/// macOS has no /proc to sample, so feed the tracker what a four-core box with
+/// these sites on it would read.
+fn seed_demo_cpu(
+    svc: &Arc<StubService>,
+    uids: std::collections::HashMap<String, i64>,
+    ids: &[String],
+    weights: &[f64],
+) {
+    use hyperion_core::{CpuClass, ProcSample, ProcSnapshot};
+    let tracker = svc.cpu_tracker.clone();
+    let sites: Vec<(i64, f64)> = ids
+        .iter()
+        .zip(weights)
+        .filter_map(|(id, w)| uids.get(id).map(|uid| (*uid, *w)))
+        .collect();
+    tokio::spawn(async move {
+        let proc = |uid, class, j: f64, rss: i64| ProcSample {
+            ppid: 1,
+            uid,
+            class,
+            start_ticks: 1,
+            self_jiffies: j as i64,
+            child_jiffies: 0,
+            rss_bytes: rss * 1_048_576,
+        };
+        let mut i = 0.0_f64;
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+        loop {
+            interval.tick().await;
+            i += 1.0;
+            let mut procs = std::collections::HashMap::new();
+            for (n, (uid, w)) in sites.iter().enumerate() {
+                procs.insert(
+                    1000 + n as i64,
+                    proc(
+                        *uid,
+                        CpuClass::Other,
+                        i * w * 12.0,
+                        (70.0 + w * 80.0) as i64,
+                    ),
+                );
+            }
+            procs.insert(1, proc(106, CpuClass::Database, i * 140.0, 900));
+            procs.insert(2, proc(33, CpuClass::Web, i * 30.0, 120));
+            procs.insert(3, proc(0, CpuClass::Panel, i * 12.0, 80));
+            let at = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64;
+            tracker.observe(
+                at,
+                ProcSnapshot {
+                    busy_jiffies: (i * 620.0) as i64,
+                    total_jiffies: (i * 2_000.0) as i64,
+                    cores: 4,
+                    procs,
+                },
+            );
+        }
+    });
+}
+
 async fn seed_demo_waf(svc: &StubService, ids: &[String], now: i64) {
     use hyperion_types::waf::{WafBatch, WafHit};
     let pool = &svc.pool;
