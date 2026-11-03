@@ -193,6 +193,38 @@ pub async fn install_base_theme(user: &str, htdocs: &str) -> Result<String, Adap
     }
 }
 
+/// wp-cli's answer when a site has no scheduled events at all, which is
+/// nothing having gone wrong.
+fn cron_had_nothing_to_run(output: &str) -> bool {
+    output.contains("no scheduled cron events")
+        || output.contains("No events")
+        || output.contains("no_events")
+}
+
+/// Run the site's due cron events from the command line. In its own process
+/// group with a timeout: an event stuck on a dead HTTP call must not hold
+/// the node's slot, or leave a PHP process behind when it is given up on.
+pub async fn cron_run_due(user: &str, htdocs: &str) -> Result<(), AdapterError> {
+    let argv = build_argv(
+        user,
+        htdocs,
+        &["cron", "event", "run", "--due-now", "--quiet"],
+    );
+    match cmd::run_group_timeout(
+        "/usr/bin/sudo",
+        &argv_as_refs(&argv),
+        std::time::Duration::from_secs(hyperion_types::wpcron::RUN_TIMEOUT_SECS),
+        "wp cron",
+    )
+    .await
+    {
+        Err(AdapterError::Command { stderr_tail, .. }) if cron_had_nothing_to_run(&stderr_tail) => {
+            Ok(())
+        }
+        other => other.map(|_| ()),
+    }
+}
+
 /// Install WordPress into `htdocs` running as `user`.
 ///
 /// Pipeline:
@@ -1944,6 +1976,14 @@ mod tests {
     /// at the CALLING user's home — /root for the agent — so wp-cli tries to
     /// write its cache there, is denied, and the operator sees a plugin
     /// install fail while every file permission on the site is correct.
+    #[test]
+    fn no_events_is_not_a_cron_failure() {
+        assert!(cron_had_nothing_to_run(
+            "Error: You currently have no scheduled cron events."
+        ));
+        assert!(!cron_had_nothing_to_run("PHP Fatal error: Uncaught Error"));
+    }
+
     #[test]
     fn wp_cli_gets_a_writable_home_and_cache() {
         let v = build_argv(

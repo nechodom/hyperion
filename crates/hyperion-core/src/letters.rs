@@ -1199,23 +1199,78 @@ pub static STRINGS: &[LetterString] = &[
     LetterString {
         id: "ops.php_workers_full.title",
         group: "Operator alerts — hostings",
-        note: "A site's PHP-FPM pool keeps running out of workers.",
-        en: "Site ran out of PHP workers",
-        cs: "Webu došly PHP procesy",
+        note: "Visitors were affected by a full PHP-FPM pool, and the automatic max_children \
+               cannot help.",
+        en: "Visitors affected: site out of PHP workers",
+        cs: "Dopad na návštěvníky: webu došly PHP procesy",
     },
     LetterString {
         id: "ops.php_workers_full.body",
         group: "Operator alerts — hostings",
-        note: "Tokens: {domain} {children} (max_children) {today} (times today).",
-        en: "{domain} had all {children} PHP workers busy {today}× today, so visitors waited \
-             in a queue and some got a 502 or 504. More memory does not help with this. Open \
-             \"PHP slow requests\" in the site's Logs to see what keeps the workers busy, \
-             turn on the page cache, or raise max_children on the PHP-FPM & DB limits card.",
-        cs: "{domain} měl dnes {today}× obsazeno všech {children} PHP procesů, takže \
-             návštěvníci čekali ve frontě a někteří dostali chybu 502 nebo 504. Víc paměti \
-             tady nepomůže. V Logách webu otevřete „PHP slow requests“ a uvidíte, co procesy \
-             blokuje, zapněte cache stránek, nebo zvyšte max_children v kartě limitů PHP-FPM \
-             & DB.",
+        note: "Tokens: {domain} {children} (max_children) {errors} (502/504 answers lately) \
+               {waits} (pages over 10 s lately) {today} (pool full, last 24 hours).",
+        en: "With all {children} PHP workers of {domain} busy, visitors lately got {errors} \
+             502/504 errors and waited over 10 seconds {waits}×. The pool was full {today}× in \
+             the last 24 hours.",
+        cs: "Když bylo obsazeno všech {children} PHP procesů webu {domain}, návštěvníci poslední \
+             dobou dostali {errors}× chybu 502/504 a {waits}× čekali přes 10 sekund. Za \
+             posledních 24 hodin byl pool plný {today}×.",
+    },
+    LetterString {
+        id: "ops.php_workers_full.why_off",
+        group: "Operator alerts — hostings",
+        note: "Why nothing was done: the automatic max_children is off for this site.",
+        en: "Automatic max_children is off for this site.",
+        cs: "Automatické max_children je u tohoto webu vypnuté.",
+    },
+    LetterString {
+        id: "ops.php_workers_full.why_ceiling",
+        group: "Operator alerts — hostings",
+        note: "Why nothing was done: the site is at its own ceiling.",
+        en: "Automatic max_children has reached this site's ceiling, so more workers are not \
+             the answer without looking at what holds them.",
+        cs: "Automatické max_children narazilo na strop tohoto webu, takže bez zjištění, co \
+             procesy blokuje, další procesy nepomůžou.",
+    },
+    LetterString {
+        id: "ops.php_workers_full.why_ram",
+        group: "Operator alerts — hostings",
+        note: "Why nothing was done: the server has no memory to spare for more workers.",
+        en: "The server has no memory to spare for more workers.",
+        cs: "Server nemá volnou paměť na další procesy.",
+    },
+    LetterString {
+        id: "ops.php_workers_full.why_share",
+        group: "Operator alerts — hostings",
+        note: "Why nothing was done: the site already uses its maximum share of the server.",
+        en: "This site already uses its maximum share of the server, so it gets no more \
+             workers: the other sites need the rest.",
+        cs: "Tento web už využívá svůj maximální podíl na serveru, takže další procesy nedostane: \
+             zbytek potřebují ostatní weby.",
+    },
+    LetterString {
+        id: "ops.php_workers_full.why_cpu",
+        group: "Operator alerts — hostings",
+        note: "Why nothing was done: the server is short of CPU, more workers would make it worse.",
+        en: "The server is short of CPU, and more workers would only slow every request down.",
+        cs: "Serveru dochází CPU a další procesy by jen zpomalily všechny požadavky.",
+    },
+    LetterString {
+        id: "ops.php_workers_full.slow",
+        group: "Operator alerts — hostings",
+        note: "Appended to the body when the slow-request log has entries. Tokens: {scripts} \
+               (e.g. \"wp-cron.php 14× (curl_exec), index.php 3×\").",
+        en: "Most often in the slow-request log lately: {scripts}.",
+        cs: "V logu pomalých požadavků se poslední dobou nejčastěji objevuje: {scripts}.",
+    },
+    LetterString {
+        id: "ops.php_workers_full.cache",
+        group: "Operator alerts — hostings",
+        note: "Appended to the body when the site's page cache is off.",
+        en: "The page cache is off for this site; turning it on spares workers for anonymous \
+             visitors.",
+        cs: "Cache stránek je u tohoto webu vypnutá; její zapnutí ušetří procesy u nepřihlášených \
+             návštěvníků.",
     },
     LetterString {
         id: "ops.php_mem_raised.title",

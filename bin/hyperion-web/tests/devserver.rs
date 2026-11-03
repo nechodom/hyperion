@@ -307,6 +307,13 @@ impl hyperion_core::AdapterPort for StubAdapters {
             .collect();
         Ok((themes, "6.5.3".into()))
     }
+    async fn wp_cron_run(
+        &self,
+        _system_user: &str,
+        _htdocs: &str,
+    ) -> Result<(), hyperion_adapters::AdapterError> {
+        Ok(())
+    }
     async fn wp_core_check_update(
         &self,
         _: &str,
@@ -620,6 +627,45 @@ async fn seed_demo(svc: &Arc<StubService>) {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs() as i64;
+    // One WordPress site the automatic max_children has raised, whose full
+    // pool reached visitors; another whose pool filled up unnoticed.
+    {
+        use hyperion_types::{phpworkers, wpcron};
+        let raised = hyperion_types::HostingId(ids[0].clone());
+        let mut limits = hyperion_types::HostingLimits::defaults();
+        limits.php_max_children = 9;
+        svc.set_limits(
+            hyperion_rpc::wire::HostingSelector::Id(raised.clone()),
+            limits,
+        )
+        .await
+        .expect("limits");
+        let auto = phpworkers::AutoState {
+            base: 5,
+            last_full_at: now - 3_600,
+            last_change_at: now - 3_600,
+            ..Default::default()
+        };
+        let mut hurt = phpworkers::State::default();
+        hurt.record(now - 3_600, 6);
+        hurt.record_impact(now - 3_600, 4, 11);
+        let mut quiet = phpworkers::State::default();
+        quiet.record(now - 2 * 3_600, 5);
+        let cron = wpcron::State {
+            last_ok_at: now - 120,
+            ..Default::default()
+        };
+        for (id, key, value) in [
+            (&ids[0], phpworkers::KV_AUTO_STATE, auto.to_json()),
+            (&ids[0], phpworkers::KV_STATE, hurt.to_json()),
+            (&ids[0], wpcron::KV_STATE, cron.to_json()),
+            (&ids[1], phpworkers::KV_STATE, quiet.to_json()),
+        ] {
+            hyperion_state::hosting_kv::set(pool, id, key, &value, now)
+                .await
+                .expect("kv");
+        }
+    }
     sqlx::query("UPDATE hostings SET state = 'suspended' WHERE id = ?")
         .bind(&ids[5])
         .execute(pool)

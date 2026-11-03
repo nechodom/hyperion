@@ -2011,7 +2011,7 @@ pub(super) enum CarryScope {
 /// An allow-list rather than a deny-list so a key added later stays home
 /// until someone decides it should travel.
 pub(super) fn carried_kv_scope(key: &str) -> Option<CarryScope> {
-    use hyperion_types::phpmem;
+    use hyperion_types::{phpmem, phpworkers};
     const ALWAYS: &[&str] = &[
         BACKUP_KV_CADENCE,
         BACKUP_KV_INTERVAL_DAYS,
@@ -2025,6 +2025,11 @@ pub(super) fn carried_kv_scope(key: &str) -> Option<CarryScope> {
         // and without the floor the automation would adopt it as the
         // operator's own and never come back down.
         phpmem::KV_STATE,
+        // Same for the automatic max_children.
+        phpworkers::KV_AUTO,
+        phpworkers::KV_AUTO_MAX,
+        phpworkers::KV_AUTO_STATE,
+        hyperion_types::wpcron::KV_ENABLED,
         INTEGRITY_ENABLED_KV_KEY,
         PERM_AUTOHEAL_KV_KEY,
         WP_MAIL_AUTOFIX_KV_KEY,

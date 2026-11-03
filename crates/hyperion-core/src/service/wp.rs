@@ -3,6 +3,9 @@
 
 use super::*;
 
+/// Page-cache lifetime a new WordPress site starts with.
+const WP_DEFAULT_CACHE_TTL_SECS: i64 = 60;
+
 impl<A: AdapterPort + 'static> HostingService<A> {
     /// Install WordPress into an existing hosting.
     ///
@@ -155,6 +158,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         .await
         .map_err(|e| RpcError::Internal_with(format!("record_install: {e}")))?;
 
+        self.wp_default_page_cache(&detail).await;
+
         self.append_audit(
             "wordpress.install",
             Some(detail.id.as_str()),
@@ -175,6 +180,26 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             installed_at: now,
             last_pack_hash: pack_hash,
         })
+    }
+
+    /// A new WordPress site starts with the page cache on, so anonymous
+    /// visitors do not need a PHP worker each. Short on purpose: without a way
+    /// to purge from WordPress on publish, an edit must show up soon, and a
+    /// minute is already plenty against a burst, since the cache lock sends
+    /// one request per page to PHP. Best-effort: the site works without it.
+    async fn wp_default_page_cache(&self, detail: &HostingDetail) {
+        if detail.vhost_options.fastcgi_cache_enabled {
+            return;
+        }
+        let mut options = detail.vhost_options.clone();
+        options.fastcgi_cache_enabled = true;
+        options.fastcgi_cache_ttl = WP_DEFAULT_CACHE_TTL_SECS;
+        if let Err(e) = self
+            .set_vhost_options(HostingSelector::Id(detail.id.clone()), options, None)
+            .await
+        {
+            tracing::warn!(domain = %detail.domain, error = %e, "wordpress install: page cache not turned on");
+        }
     }
 
     /// Reset the WordPress admin password via `wp user update --user_pass`.

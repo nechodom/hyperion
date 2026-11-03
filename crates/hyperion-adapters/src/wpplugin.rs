@@ -7,6 +7,7 @@
 //! wp-content/mu-plugins/hyperion/mail.php     sender pin + failed-send log
 //! wp-content/mu-plugins/hyperion/regguard.php registration spam guard
 //! wp-content/mu-plugins/hyperion/preview.php  preview-host support
+//! wp-content/mu-plugins/hyperion/cron.php     cron run by the node, not visitors
 //! wp-content/mu-plugins/hyperion/status.php   what the agent last saw
 //! ```
 //!
@@ -54,7 +55,7 @@ use crate::AdapterError;
 /// Bumped whenever [`LOADER_TEMPLATE`] changes; the file is compared byte for
 /// byte, so any change relands on the next tick anyway — the number is for a
 /// person reading the plugin list.
-pub const LOADER_VERSION: u32 = 1;
+pub const LOADER_VERSION: u32 = 2;
 
 /// `wp-content/mu-plugins/<this>`.
 pub const LOADER_FILE: &str = "hyperion.php";
@@ -71,10 +72,16 @@ pub enum Module {
     Mail,
     RegGuard,
     Preview,
+    Cron,
 }
 
 impl Module {
-    pub const ALL: [Module; 3] = [Module::Mail, Module::RegGuard, Module::Preview];
+    pub const ALL: [Module; 4] = [
+        Module::Mail,
+        Module::RegGuard,
+        Module::Preview,
+        Module::Cron,
+    ];
 
     /// File name inside [`MODULE_DIR`]. The loader's list must match.
     pub fn file(self) -> &'static str {
@@ -82,6 +89,7 @@ impl Module {
             Module::Mail => "mail.php",
             Module::RegGuard => "regguard.php",
             Module::Preview => "preview.php",
+            Module::Cron => "cron.php",
         }
     }
 
@@ -91,6 +99,8 @@ impl Module {
             Module::Mail => "hyperion-mail.php",
             Module::RegGuard => "hyperion-regguard.php",
             Module::Preview => "hyperion-preview.php",
+            // Never existed as a single file; the name is only ever looked up.
+            Module::Cron => "hyperion-cron.php",
         }
     }
 }
@@ -107,6 +117,28 @@ pub enum FileState {
     Stale,
     Current,
 }
+
+/// The cron module. Stops WordPress spawning `wp-cron.php` from page views,
+/// because the node runs it from the command line.
+///
+/// Only while the node is demonstrably looking after this site: `status.php`
+/// is rewritten at least hourly, so an old one means the agent is gone, or
+/// this tree was copied to a server with no Hyperion on it. Cron must then
+/// work the way WordPress does on its own, or it silently never runs again.
+/// A `DISABLE_WP_CRON` already set in wp-config.php stays as it is.
+pub const CRON_MODULE: &str = r#"<?php
+/**
+ * Hyperion: WP-Cron is run by the server. Managed by Hyperion — edits are overwritten.
+ */
+if (!defined('ABSPATH')) { exit; }
+$hyperion_cron_status = __DIR__ . '/status.php';
+if (!defined('DISABLE_WP_CRON')
+    && is_file($hyperion_cron_status)
+    && time() - filemtime($hyperion_cron_status) < 21600) {
+    define('DISABLE_WP_CRON', true);
+}
+unset($hyperion_cron_status);
+"#;
 
 /// The loader. Static except for `{{VERSION}}`.
 ///
@@ -135,6 +167,7 @@ foreach (array(
     'mail'     => 'hyperion-mail.php',
     'regguard' => 'hyperion-regguard.php',
     'preview'  => 'hyperion-preview.php',
+    'cron'     => 'hyperion-cron.php',
 ) as $hyperion_mod => $hyperion_legacy) {
     if (is_file(__DIR__ . '/' . $hyperion_legacy)) {
         $GLOBALS['hyperion_modules'][$hyperion_mod] = 'legacy';
@@ -290,6 +323,14 @@ function hyperion_render_page() {
             ? hyperion_t('Sign-ups with a link in a name field, or a filled hidden field, are refused.', 'Registrace s odkazem v poli jména nebo s vyplněným skrytým polem se odmítají.')
             : '',
     );
+
+    if (!empty($mods['cron'])) {
+        $rows[] = array(
+            hyperion_t('Scheduled tasks', 'Plánované úlohy'),
+            $on,
+            hyperion_t('WP-Cron is run by the server every few minutes, so it does not take a PHP worker from visitors.', 'WP-Cron spouští každých pár minut server, takže nezabírá PHP proces návštěvníkům.'),
+        );
+    }
 
     if (!empty($mods['preview'])) {
         $rows[] = array(
@@ -679,6 +720,17 @@ mod tests {
                 "loader does not know module {m:?}"
             );
         }
+    }
+
+    #[test]
+    fn the_cron_module_steps_aside_when_nobody_is_looking_after_the_site() {
+        assert!(CRON_MODULE.starts_with("<?php"));
+        assert!(CRON_MODULE.contains("!defined('DISABLE_WP_CRON')"));
+        assert!(CRON_MODULE.contains("filemtime($hyperion_cron_status)"));
+        assert!(
+            !CRON_MODULE.contains("HOUR_IN_SECONDS"),
+            "core may not have it yet"
+        );
     }
 
     #[test]

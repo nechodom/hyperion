@@ -142,6 +142,8 @@ pub struct VhostOptionsForm {
     pub(super) waf_rule_empty_ua: String,
     #[serde(default)]
     pub(super) signup_limit_enabled: Option<String>,
+    #[serde(default)]
+    pub(super) php_rate_limit_enabled: Option<String>,
     // One checkbox per bot family. NOT a repeated `blocked_bots` key:
     // axum's urlencoded Form cannot collect repeated keys into a Vec and
     // answered every save with a ticked family with a 422.
@@ -223,6 +225,7 @@ impl VhostOptionsForm {
             None => options.waf_level = self.waf_level.trim().to_string(),
         }
         options.signup_limit_enabled = checkbox_on(&self.signup_limit_enabled);
+        options.php_rate_limit_enabled = checkbox_on(&self.php_rate_limit_enabled);
         options.blocked_bots = self.blocked_bots();
         // Sanitized again in the renderer, but rejecting non-codes here too
         // means the DB never stores something the vhost would drop — the
