@@ -1,0 +1,165 @@
+{% extends "settings_base.html" %}
+{#- Files on the FTP/SFTP target from sites that no longer exist. The search is
+    a job and fills `report`; the page only shows its last result. A checkbox is
+    UI-only: the script joins the ticked ones into the form's one `files` field,
+    because axum's Form cannot gather repeated keys into a Vec. -#}
+{% block section %}
+<p class="small" style="margin:0 0 1rem"><a href="/settings/backups#offsite-orphans">&larr; Backups</a></p>
+
+<div class="group">
+  <div class="ghead">Search</div>
+  <div class="item" id="orphan-search">
+    {% if let Some(r) = report %}
+    <p class="small" style="margin:0 0 0.8rem">Last searched {{ r.when() }}. Run it again to pick up anything since.</p>
+    {% else %}
+    <p class="small" style="margin:0 0 0.8rem">Not searched since the panel last started.</p>
+    {% endif %}
+    <form method="post" action="/settings/backups/orphans/scan" style="margin:0">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <button class="btn primary" type="submit">Search the off-site targets</button>
+    </form>
+    <details class="howto">
+      <summary>What counts as left over</summary>
+      <ul>
+        <li>A site deleted without ticking &ldquo;also delete its off-site backups&rdquo; leaves its files on the target, and nothing in the panel points at them any more.</li>
+        <li>A file counts when <strong>no hosting on any node</strong> uses its domain as its name or an alias, sites in the trash included. If any node does not answer, nothing counts: that node could be hosting the site.</li>
+        <li>The domain is read from the file name, which a backup run writes as <code>&lt;domain&gt;-&lt;time&gt;.tar.gz</code>, <code>.tgz</code> or <code>.sql</code>. Anything else is listed as unknown and cannot be deleted from here.</li>
+        <li>Nothing goes unless you tick it. These can be the only copy of a site that is gone, and a delete cannot be undone. An archive and its database dump are two files: tick both.</li>
+        <li>Every node is asked again when you delete, and a file whose domain has come back since is left alone.</li>
+      </ul>
+    </details>
+  </div>
+</div>
+
+{% if let Some(r) = report %}
+{% if !r.refused.is_empty() %}
+<div class="flash error" id="orphan-refused">
+  <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+  <div class="flash-body">
+    <strong>Nothing is called left over, because not every node answered.</strong>
+    A node that did not answer could be hosting any of these sites. Bring it back, or remove it from Nodes if it is gone for good, then search again.
+    <ul style="margin:0.4rem 0 0">
+      {% for why in r.refused %}<li>{{ why }}</li>{% endfor %}
+    </ul>
+  </div>
+</div>
+{% else if r.targets.is_empty() %}
+<div class="group">
+  <div class="ghead">Result</div>
+  <div class="item" id="orphan-no-target">
+    <p class="small" style="margin:0">No node has an FTP/SFTP target, so there is nothing to search. S3 targets are not covered here.</p>
+  </div>
+</div>
+{% endif %}
+
+{% for t in r.targets %}
+<form method="post" action="/settings/backups/orphans/delete" class="group orphan-form"
+      data-confirm-title="Delete the ticked files for good"
+      data-confirm-body="The ticked files are deleted from the off-site target. They can be the only copy left of a site that is gone, and this cannot be undone. Every node is asked again first, and a file whose domain is back in use is left alone."
+      data-confirm-confirm-label="Delete files"
+      data-confirm-variant="danger"
+      data-confirm-require="delete">
+  <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+  <input type="hidden" name="target" value="{{ t.key }}">
+  <input type="hidden" name="files" value="">
+  {# The heading style capitalises; a login and a path are case-sensitive. #}
+  <div class="ghead"><code style="word-break:break-all;text-transform:none">{{ t.key }}</code></div>
+  {% if let Some(p) = t.problem %}
+  <div class="item"><span class="pill err">could not list</span> <span class="text-soft small">{{ p }}</span></div>
+  {% else if t.folders.is_empty() %}
+  <div class="item"><p class="small" style="margin:0"><span class="pill ok">nothing left over</span> <span class="text-soft">{{ t.in_use }} file(s) here belong to sites that exist.</span></p></div>
+  {% else %}
+  <div class="item">
+    <div class="row" style="gap:0.8rem;flex-wrap:wrap;align-items:center">
+      <span class="small"><strong>{{ t.file_count() }} leftover file(s)</strong>, {{ t.size() }}. <span class="text-soft">{{ t.in_use }} other file(s) belong to sites that exist.</span></span>
+      <span class="grow"></span>
+      <span class="text-soft small orphan-count">none ticked</span>
+      <button type="submit" class="btn small danger orphan-delete" disabled>Delete ticked files</button>
+    </div>
+  </div>
+  {% for f in t.folders %}
+  <details class="item" open>
+    <summary><code>{{ f.name }}</code> <span class="text-soft small">{{ f.file_count() }} file(s), {{ f.size() }}</span></summary>
+    {% if let Some(e) = f.error %}
+    <p class="small" style="margin:0.5rem 0 0"><span class="pill warn">could not list this folder</span> <span class="text-soft">{{ e }}</span></p>
+    {% endif %}
+    {% for d in f.domains %}
+    <div style="margin-top:0.7rem">
+      <label class="small"><input type="checkbox" class="orphan-domain"> <strong>{{ d.domain }}</strong> <span class="text-soft">{{ d.files.len() }} file(s), {{ d.size() }}</span></label>
+      <div class="table-wrap inset" style="margin-top:0.3rem">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th scope="col"><span class="sr-only">Tick</span></th>
+              <th scope="col">File</th>
+              <th scope="col">Type</th>
+              <th scope="col">Taken</th>
+              <th scope="col" class="right">Size</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for x in d.files %}
+            <tr>
+              <td style="width:2rem"><input type="checkbox" class="orphan-file" value="{{ x.value }}" aria-label="Delete {{ x.name }}"></td>
+              <td><code style="word-break:break-all">{{ x.name }}</code></td>
+              <td class="small">{% if x.is_dump %}database dump{% else %}archive{% endif %}</td>
+              <td class="small">{{ x.date() }}</td>
+              <td class="small right">{{ x.size() }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+    {% endfor %}
+    {% if !f.unknown.is_empty() %}
+    <div style="margin-top:0.7rem" class="orphan-unknown">
+      <p class="small" style="margin:0 0 0.3rem"><span class="pill muted">unknown</span> <span class="text-soft">Not named the way a backup run names its files, so these cannot be deleted from here.</span></p>
+      <ul class="small" style="margin:0">
+        {% for u in f.unknown %}<li><code style="word-break:break-all">{{ u.name }}</code> <span class="text-soft">{{ u.size() }}</span></li>{% endfor %}
+      </ul>
+    </div>
+    {% endif %}
+  </details>
+  {% endfor %}
+  {% endif %}
+</form>
+{% endfor %}
+
+<script>
+(function () {
+  document.querySelectorAll('form.orphan-form').forEach(function (form) {
+    var files = form.querySelector('input[name="files"]');
+    var count = form.querySelector('.orphan-count');
+    var button = form.querySelector('.orphan-delete');
+    if (!count || !button) return;
+    function paint() {
+      var ticked = Array.prototype.filter.call(
+        form.querySelectorAll('.orphan-file'),
+        function (c) { return c.checked; }
+      );
+      files.value = ticked.map(function (c) { return c.value; }).join(',');
+      count.textContent = ticked.length ? ticked.length + ' ticked' : 'none ticked';
+      button.disabled = ticked.length === 0;
+      form.querySelectorAll('.orphan-domain').forEach(function (d) {
+        var own = d.closest('div').querySelectorAll('.orphan-file');
+        var on = Array.prototype.filter.call(own, function (c) { return c.checked; }).length;
+        d.checked = on > 0 && on === own.length;
+        d.indeterminate = on > 0 && on < own.length;
+      });
+    }
+    form.addEventListener('change', function (e) {
+      if (e.target.classList.contains('orphan-domain')) {
+        e.target.closest('div').querySelectorAll('.orphan-file').forEach(function (c) {
+          c.checked = e.target.checked;
+        });
+      }
+      paint();
+    });
+    // A reload keeps the boxes in some browsers; the field must agree with them.
+    paint();
+  });
+})();
+</script>
+{% endif %}
+{% endblock %}

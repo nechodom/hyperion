@@ -2289,6 +2289,26 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
             .backup_offsite_delete(sel, backup_id, filename)
             .await
     }
+    async fn backup_orphan_census(&self) -> Result<hyperion_types::OffsiteOrphanCensus, RpcError> {
+        self.svc.backup_orphan_census().await
+    }
+    async fn backup_orphan_list(
+        &self,
+    ) -> Result<Vec<hyperion_types::OffsiteFolderListing>, RpcError> {
+        self.svc.backup_orphan_list().await
+    }
+    async fn backup_orphan_delete(
+        &self,
+        target: String,
+        folder: String,
+        file: String,
+        actor_uid: i64,
+        actor_label: String,
+    ) -> Result<String, RpcError> {
+        self.svc
+            .backup_orphan_delete(target, folder, file, actor_uid, actor_label)
+            .await
+    }
     async fn wp_registration_get(
         &self,
         sel: HostingSelector,

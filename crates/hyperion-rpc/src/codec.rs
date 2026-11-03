@@ -1822,6 +1822,22 @@ pub enum Request {
         #[serde(default)]
         filename: Option<String>,
     },
+    /// This node's domains and FTP/SFTP target, for the search for backups
+    /// left by deleted sites.
+    BackupOrphanCensus {},
+    /// Every per-system-user folder on this node's FTP/SFTP target, and the
+    /// files in each.
+    BackupOrphanList {},
+    /// Delete one file left by a deleted site from this node's FTP/SFTP
+    /// target. `target` is the census's string for it: the node refuses when
+    /// its target has changed since.
+    BackupOrphanDelete {
+        target: String,
+        folder: String,
+        file: String,
+        actor_uid: i64,
+        actor_label: String,
+    },
     /// Does this WordPress site take public sign-ups, and as what role?
     WpRegistrationGet {
         sel: HostingSelector,
@@ -2845,6 +2861,9 @@ pub enum Response {
     BackupOffsitePushDrop(hyperion_types::OffsiteBackfillResult),
     BackupOffsiteRestore(String),
     BackupOffsiteDelete(String),
+    BackupOrphanCensus(hyperion_types::OffsiteOrphanCensus),
+    BackupOrphanList(Vec<hyperion_types::OffsiteFolderListing>),
+    BackupOrphanDelete(String),
     FtpAccountList(Vec<hyperion_types::FtpExtraAccount>),
     /// `(login, password)` — the password is shown once, and it is paired
     /// with the login it belongs to because the panel used to show a fresh

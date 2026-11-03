@@ -864,6 +864,26 @@ pub struct RemoteEntry {
 pub async fn list_remote(
     upload: &RemoteUpload<'_>,
 ) -> Result<Option<Vec<RemoteEntry>>, AdapterError> {
+    Ok(list_remote_raw(upload)
+        .await?
+        .map(|out| parse_ftp_listing(&out)))
+}
+
+/// The folders directly under `remote_dir`, or `None` when it is not there.
+///
+/// The level above [`list_remote`]: the per-system-user folders under
+/// `base_path`, which is how files left by a site that no longer exists are
+/// reached at all.
+pub async fn list_remote_folders(
+    upload: &RemoteUpload<'_>,
+) -> Result<Option<Vec<String>>, AdapterError> {
+    Ok(list_remote_raw(upload)
+        .await?
+        .map(|out| parse_ftp_folders(&out)))
+}
+
+/// The raw `LIST` of `remote_dir`, or `None` when it is not there.
+async fn list_remote_raw(upload: &RemoteUpload<'_>) -> Result<Option<String>, AdapterError> {
     let scheme = match upload.scheme {
         "ftp" | "ftps" | "sftp" => upload.scheme,
         other => {
@@ -872,13 +892,14 @@ pub async fn list_remote(
             )))
         }
     };
-    let dir = format!("/{}", upload.remote_dir.trim_matches('/'));
     // The trailing slash is what makes curl LIST a directory rather than
-    // retrieve a file of that name.
+    // retrieve a file of that name. An empty base path is the login's home:
+    // `//` would be the server's root, which is not where the uploads went.
     let url = format!(
-        "{scheme}://{host}:{port}{dir}/",
+        "{scheme}://{host}:{port}{dir}",
         host = upload.host,
         port = upload.port,
+        dir = remote_dir_url_path(upload.remote_dir),
     );
     let config = format!(
         concat!(
@@ -906,7 +927,7 @@ pub async fn list_remote(
     // empty, which is a different and more worrying answer.
     let (stdout, stderr, code) = cmd::curl_with_config_capture(&config).await?;
     match code {
-        0 => Ok(Some(parse_ftp_listing(&stdout))),
+        0 => Ok(Some(stdout)),
         // 78 is how SFTP says the same thing ("remote file not found").
         9 | 78 => Ok(None),
         _ => Err(AdapterError::Command {
@@ -915,6 +936,28 @@ pub async fn list_remote(
             stderr_tail: stderr,
         }),
     }
+}
+
+/// `remote_dir` as the path of a URL that lists it: one leading slash, one
+/// trailing slash, and just `/` for an empty one.
+fn remote_dir_url_path(remote_dir: &str) -> String {
+    match remote_dir.trim_matches('/') {
+        "" => "/".to_string(),
+        dir => format!("/{dir}/"),
+    }
+}
+
+/// The folders in a `LIST` of the same `ls -l` shape as [`parse_ftp_listing`].
+/// A symlink is not one: following it could lead anywhere on the server.
+pub fn parse_ftp_folders(out: &str) -> Vec<String> {
+    out.lines()
+        .filter(|line| line.starts_with('d'))
+        .filter_map(|line| {
+            let f: Vec<&str> = line.split_whitespace().collect();
+            (f.len() >= 9).then(|| f[8..].join(" "))
+        })
+        .filter(|name| !name.is_empty() && name != "." && name != "..")
+        .collect()
 }
 
 /// Parse the `LIST` output curl returns for an FTP directory.
@@ -1575,6 +1618,39 @@ pub fn engine_str(engine: DbProvision) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn folders_are_read_from_a_listing_and_only_folders() {
+        let out = "\
+drwxr-xr-x    2 1000     1000         4096 Jan 01 00:00 .
+drwxr-xr-x    3 0        0            4096 Jan 01 00:00 ..
+drwxr-xr-x    2 1000     1000         4096 Jan 01 00:00 web1
+drwx------    2 1000     1000         4096 Mar 03  2024 site_two
+-rw-r--r--    1 1000     1000          123 Jan 01 00:00 web3
+lrwxrwxrwx    1 1000     1000           12 Jan 01 00:00 web4 -> /etc
+drwxr-xr-x    2 1000     1000         4096 Jan 01 00:00 two words
+drwxr-xr-x short line
+garbage
+";
+        assert_eq!(
+            parse_ftp_folders(out),
+            ["web1", "site_two", "two words"],
+            "no . or .., no file, no symlink"
+        );
+        assert!(parse_ftp_folders("").is_empty());
+    }
+
+    /// The path a LIST goes to, for what `base_path` may be set to. An empty
+    /// one is the login's home, where uploads with no base path went; `//`
+    /// would be the root of the server.
+    #[test]
+    fn a_listing_url_has_one_slash_each_side_and_an_empty_dir_is_home() {
+        assert_eq!(remote_dir_url_path(""), "/");
+        assert_eq!(remote_dir_url_path("/"), "/");
+        assert_eq!(remote_dir_url_path("backups"), "/backups/");
+        assert_eq!(remote_dir_url_path("/backups/"), "/backups/");
+        assert_eq!(remote_dir_url_path("/backups/web1"), "/backups/web1/");
+    }
+
     #[test]
     fn definers_are_stripped_where_mariadb_dump_writes_them() {
         let dump = b"/*!50003 CREATE*/ /*!50017 DEFINER=`old_u`@`localhost`*/ /*!50003 TRIGGER t \
