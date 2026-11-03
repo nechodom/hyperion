@@ -87,7 +87,7 @@
               </form>
               <form method="post" action="/trash/purge" style="display:inline;margin:0"
                     data-confirm-title="Permanently delete {{ e.domain }}"
-                    data-confirm-body="Files, database, system user, and certificates will be removed now, skipping the retention window.{% if e.delete_offsite_backups %} Its backups on the off-site FTP target are deleted too, as chosen when it was deleted; if they cannot be, it stays in the trash.{% endif %} This cannot be undone. If {{ e.domain }} had automatic wildcard renewal, the customer can now remove its _acme-challenge CNAME. Type the domain to confirm."
+                    data-confirm-body="Files, database, system user, snapshots and certificates will be removed now, skipping the retention window.{% if e.delete_offsite_backups %} Its backups on the off-site FTP target are deleted too, as chosen when it was deleted; if they cannot be, it stays in the trash.{% endif %} This cannot be undone. If {{ e.domain }} had automatic wildcard renewal, the customer can now remove its _acme-challenge CNAME. Type the domain to confirm."
                     data-confirm-confirm-label="Delete permanently"
                     data-confirm-variant="danger"
                     data-confirm-require="{{ e.domain }}">

@@ -5213,12 +5213,12 @@
 
   <form method="post" action="/hostings/delete" class="danger-row"
         data-confirm-title="Delete {{ detail.domain }}"
-        data-confirm-body="The files, database, system user and nginx vhost are removed. This is permanent — recovery is only possible from a backup. Backups stay on this node and on the off-site targets. External DNS records are not touched. Type the domain to confirm."
+        data-confirm-body="The files, database, system user, snapshots and nginx vhost are removed. This is permanent — recovery is only possible from a backup. Backups stay on this node and on the off-site targets. External DNS records are not touched. Type the domain to confirm."
         data-confirm-confirm-label="Delete permanently"
         {% if can_delete_offsite && crate::handlers::hostings::any_ftp_copies(backups.as_slice()) %}
         data-confirm-check="Also delete this site's backups from the off-site FTP target"
         data-confirm-check-name="offsite"
-        data-confirm-body-checked="The files, database, system user and nginx vhost are removed, AND every backup of this site on the off-site FTP target (archives and database dumps). If they cannot be deleted, the hosting stays. With the trash on, they go when the site leaves the trash, not before. Backups on this node and on S3 are not touched. External DNS records are not touched. Type the domain to confirm."
+        data-confirm-body-checked="The files, database, system user, snapshots and nginx vhost are removed, AND every backup of this site on the off-site FTP target (archives and database dumps). If they cannot be deleted, the hosting stays. With the trash on, they go when the site leaves the trash, not before. Backups on this node and on S3 are not touched. External DNS records are not touched. Type the domain to confirm."
         data-confirm-confirm-label-checked="Delete with FTP backups"
         {% endif %}
         data-confirm-variant="danger"
@@ -5227,7 +5227,7 @@
     <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
     <div>
       <div class="d-title text-danger">Delete this hosting</div>
-      <div class="d-help">Removes the site, its files, databases, nginx vhost and Linux user. Permanent — recovery is only possible from a backup. External DNS records are not touched.</div>
+      <div class="d-help">Removes the site, its files, databases, snapshots, nginx vhost and Linux user. Permanent — recovery is only possible from a backup. External DNS records are not touched.</div>
       <div class="d-opts">
         <label class="field-checkbox"><input type="checkbox" name="keep_user" value="on"> Keep the Linux user</label>
         <label class="field-checkbox"><input type="checkbox" name="keep_db" value="on"> Keep the database</label>

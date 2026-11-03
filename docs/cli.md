@@ -177,8 +177,9 @@ hctl hosting delete old.example.com --keep-db --yes
 
 With trash enabled in Settings, the hosting moves to the trash and can be
 restored until it is purged; see [`hctl trash`](#trash). Without it,
-files, vhost and pool are removed now. `--keep-user` and `--keep-db` leave the
-system user or database in place.
+files, vhost, pool, snapshots, DKIM keys and git deploy secrets are removed now.
+`--keep-user` and `--keep-db` delete now even with trash enabled, and leave only
+the system user or database in place.
 
 ### hctl hosting suspend
 
