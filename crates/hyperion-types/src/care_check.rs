@@ -1192,12 +1192,52 @@ pub struct CareOverviewRow {
     /// Empty from an older node, and for plans sold without a price.
     #[serde(default)]
     pub charges: Vec<CareCharge>,
+    /// When the customer's next care report e-mail is scheduled. `None` = no
+    /// plan on this site sells a report, or an older node.
+    #[serde(default)]
+    pub next_report: Option<CareNextReport>,
 }
 
 impl CareOverviewRow {
     pub fn is_complete(&self) -> bool {
         self.outstanding.is_empty()
     }
+
+    /// The work list's order: sites with checks left first, the one whose
+    /// report e-mail leaves soonest at the top, because that is the deadline
+    /// for the ticks to reach the letter. No scheduled report sorts last.
+    pub fn work_order(a: &Self, b: &Self) -> std::cmp::Ordering {
+        let due = |r: &Self| r.next_report.as_ref().map_or(i64::MAX, |n| n.at);
+        a.is_complete()
+            .cmp(&b.is_complete())
+            .then_with(|| due(a).cmp(&due(b)))
+            .then_with(|| a.domain.cmp(&b.domain))
+    }
+}
+
+/// One site's next care report e-mail.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CareNextReport {
+    /// When the report's period is full. The hourly tick sends it at its first
+    /// run from here on, so the mail leaves within the hour after this.
+    pub at: i64,
+    /// What will stop it leaving at `at`, if anything. A bare countdown on a
+    /// site whose report has nowhere to go would promise a mail nobody gets.
+    #[serde(default)]
+    pub hold: Option<CareReportHold>,
+}
+
+/// A reason the scheduled tick will skip a report, each one read from the same
+/// fact the tick's own guard reads. The period stays open meanwhile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CareReportHold {
+    /// The care plan has no report e-mail for this site.
+    NoRecipient,
+    /// The node that owns the site has no SMTP relay configured.
+    NoRelay,
+    /// The site is suspended or in the trash.
+    SiteNotActive,
 }
 
 /// One priced plan on one site: the snapshot an activation carries.

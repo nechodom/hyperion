@@ -734,9 +734,13 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// different mail for different readers — and deliberately no
     /// cluster-wide fallback, see `care_report_send`. Empty when none is set.
     pub(super) async fn care_report_recipient(&self, detail: &HostingDetail) -> String {
+        self.care_report_recipient_of(&detail.id).await
+    }
+
+    async fn care_report_recipient_of(&self, hosting_id: &HostingId) -> String {
         let raw = hyperion_state::hosting_kv::get(
             &self.pool,
-            detail.id.as_str(),
+            hosting_id.as_str(),
             CARE_REPORT_RECIPIENTS_KV_KEY,
         )
         .await
@@ -744,6 +748,41 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         .flatten()
         .unwrap_or_default();
         parse_recipient_list(&raw).join(", ")
+    }
+
+    /// When `care_report_tick` will next mail this site, from the same period
+    /// and in the same guard order it uses. `None` when its plans sell no
+    /// report. `state` is `None` for a hosting row that cannot be read, which
+    /// the tick skips as well.
+    ///
+    /// The one guard left out is "nothing measurable": answering it means
+    /// building the whole report, and this runs on every dashboard load.
+    pub(super) async fn care_report_next(
+        &self,
+        hosting_id: &HostingId,
+        cadence: ReportCadence,
+        started_at: Option<i64>,
+        state: Option<HostingState>,
+        now: i64,
+    ) -> Option<hyperion_types::care_check::CareNextReport> {
+        use hyperion_types::care_check::{CareNextReport, CareReportHold};
+        let secs = report_cadence_secs(cadence)?;
+        let (from, _) = self
+            .care_report_period(hosting_id, cadence, started_at, now)
+            .await;
+        let hold = if state != Some(HostingState::Active) {
+            Some(CareReportHold::SiteNotActive)
+        } else if self.email_config.is_none() {
+            Some(CareReportHold::NoRelay)
+        } else if self.care_report_recipient_of(hosting_id).await.is_empty() {
+            Some(CareReportHold::NoRecipient)
+        } else {
+            None
+        };
+        Some(CareNextReport {
+            at: from + secs,
+            hold,
+        })
     }
 }
 
