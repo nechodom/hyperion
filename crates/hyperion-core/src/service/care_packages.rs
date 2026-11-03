@@ -474,6 +474,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let mut next_bill: HashMap<String, i64> = HashMap::new();
         let mut charges: HashMap<String, Vec<hyperion_types::care_check::CareCharge>> =
             HashMap::new();
+        // The report schedule, folded by the care report tick's rule: the most
+        // frequent cadence wins, and only a plan selling a report sets its start.
+        let mut cadences: HashMap<String, ReportCadence> = HashMap::new();
+        let mut report_since: HashMap<String, i64> = HashMap::new();
         for r in rows {
             let key = r.hosting_id.as_str().to_string();
             if !names.contains_key(&key) {
@@ -484,6 +488,17 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 .entry(key.clone())
                 .and_modify(|t| *t = (*t).min(start))
                 .or_insert(start);
+            let cadence = r.features.report_cadence;
+            cadences
+                .entry(key.clone())
+                .and_modify(|c| *c = c.combine(cadence))
+                .or_insert(cadence);
+            if report_cadence_secs(cadence).is_some() {
+                report_since
+                    .entry(key.clone())
+                    .and_modify(|t| *t = (*t).min(start))
+                    .or_insert(start);
+            }
             if let Some(nb) = r.next_billing_at {
                 next_bill
                     .entry(key.clone())
@@ -511,15 +526,25 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             }
             lists.entry(key).or_default().push(r.check_items.clone());
         }
+        let now = now_secs();
         let mut out = Vec::with_capacity(order.len());
         for id in order {
-            let domain = match hyperion_state::hostings::get_by_id(&self.pool, &id).await {
-                Ok(Some(h)) => h.domain,
+            let (domain, state) = match hyperion_state::hostings::get_by_id(&self.pool, &id).await {
+                Ok(Some(h)) => (h.domain, Some(h.state)),
                 // The activation outlived its hosting, or the row is
                 // unreadable. Naming it by id beats dropping it: an
                 // activation with no site is itself worth seeing.
-                _ => id.as_str().to_string(),
+                _ => (id.as_str().to_string(), None),
             };
+            let next_report = self
+                .care_report_next(
+                    &id,
+                    cadences.remove(id.as_str()).unwrap_or(ReportCadence::Leave),
+                    report_since.remove(id.as_str()),
+                    state,
+                    now,
+                )
+                .await;
             let raw = hyperion_state::hosting_kv::get(&self.pool, id.as_str(), CARE_CHECKS_KV_KEY)
                 .await
                 .ok()
@@ -557,16 +582,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 since: since.remove(id.as_str()),
                 next_billing_at: next_bill.remove(id.as_str()),
                 charges: charges.remove(id.as_str()).unwrap_or_default(),
+                next_report,
             });
         }
-        // Sites needing attention first, then alphabetically — the card is
-        // read top-down as a work list.
-        out.sort_by(|a, b| {
-            b.outstanding
-                .len()
-                .cmp(&a.outstanding.len())
-                .then_with(|| a.domain.cmp(&b.domain))
-        });
+        // The card is read top-down as a work list.
+        out.sort_by(CareOverviewRow::work_order);
         Ok(out)
     }
 

@@ -18,7 +18,7 @@ use axum::{
     response::{Html, IntoResponse, Response},
 };
 use hyperion_rpc::codec::{Request, Response as RpcResponse};
-use hyperion_types::care_check::CareOverviewRow;
+use hyperion_types::care_check::{CareNextReport, CareOverviewRow, CareReportHold};
 
 use hyperion_state::capabilities::Capability;
 
@@ -50,6 +50,67 @@ pub struct CareRow {
     pub outstanding: String,
     pub prev_outstanding: usize,
     pub complete: bool,
+    /// The countdown to the report e-mail. `None` = this site's plans send no
+    /// report, or its node predates the field.
+    pub report: Option<ReportCountdown>,
+}
+
+pub struct ReportCountdown {
+    pub text: String,
+    /// The exact date, for the hover.
+    pub title: String,
+    /// Pill tone: `muted` for plenty of time, `warn` for little,
+    /// `err` for a report that will not leave.
+    pub tone: &'static str,
+}
+
+/// With this little left, the countdown stops being background information.
+const REPORT_SOON_SECS: i64 = 3 * 86_400;
+
+fn report_countdown(next: &CareNextReport, now: i64) -> ReportCountdown {
+    let date = chrono::DateTime::from_timestamp(next.at, 0)
+        .map(|d| d.format("%-d %b %Y, %H:%M UTC").to_string())
+        .unwrap_or_else(|| "unknown date".into());
+    if let Some(hold) = next.hold {
+        let (text, why) = match hold {
+            CareReportHold::NoRecipient => (
+                "e-mail: no recipient",
+                "Set a care report e-mail on the site's care plan",
+            ),
+            CareReportHold::NoRelay => (
+                "e-mail: no SMTP relay",
+                "The node that owns this site has no SMTP relay configured",
+            ),
+            CareReportHold::SiteNotActive => (
+                "e-mail: site not active",
+                "No report leaves while the site is suspended or in the trash",
+            ),
+        };
+        return ReportCountdown {
+            text: text.into(),
+            title: format!("{why}. Scheduled for {date}; it stays due until this is fixed."),
+            tone: "err",
+        };
+    }
+    let left = next.at - now;
+    let text = if left <= 0 {
+        "e-mail within the hour".to_string()
+    } else if left < 3_600 {
+        format!("e-mail in {} min", (left / 60).max(1))
+    } else if left < 48 * 3_600 {
+        format!("e-mail in {} h", left / 3_600)
+    } else {
+        format!("e-mail in {} days", left / 86_400)
+    };
+    ReportCountdown {
+        text,
+        title: format!("Care report to the customer: {date}"),
+        tone: if left < REPORT_SOON_SECS {
+            "warn"
+        } else {
+            "muted"
+        },
+    }
 }
 
 /// GET /dashboard/care-panel — lazily swapped into the dashboard.
@@ -75,6 +136,7 @@ pub async fn get_care_panel(
         rows: rows
             .into_iter()
             .map(|r| CareRow {
+                report: r.next_report.as_ref().map(|n| report_countdown(n, now)),
                 complete: r.is_complete(),
                 outstanding: r.outstanding.join(", "),
                 packages: r.packages.join(", "),
@@ -166,13 +228,8 @@ pub(crate) async fn collect_overview(
     }
 
     // Same order every node's answer already used, re-applied across the
-    // merged list: work first, then alphabetical.
-    rows.sort_by(|a, b| {
-        b.outstanding
-            .len()
-            .cmp(&a.outstanding.len())
-            .then_with(|| a.domain.cmp(&b.domain))
-    });
+    // merged list.
+    rows.sort_by(CareOverviewRow::work_order);
     unreachable.sort();
     unreachable.dedup();
     (rows, unreachable)
@@ -208,5 +265,54 @@ pub(crate) fn month_label(period: &str) -> String {
     match m.parse::<usize>() {
         Ok(n) if (1..=12).contains(&n) => format!("{} {y}", MONTHS[n - 1]),
         _ => period.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const NOW: i64 = 1_793_750_400;
+
+    fn countdown(left: i64) -> ReportCountdown {
+        report_countdown(
+            &CareNextReport {
+                at: NOW + left,
+                hold: None,
+            },
+            NOW,
+        )
+    }
+
+    #[test]
+    fn the_countdown_reads_in_the_largest_unit_that_still_helps() {
+        assert_eq!(countdown(12 * 86_400).text, "e-mail in 12 days");
+        assert_eq!(countdown(2 * 86_400).text, "e-mail in 2 days");
+        assert_eq!(countdown(47 * 3_600).text, "e-mail in 47 h");
+        assert_eq!(countdown(30).text, "e-mail in 1 min");
+        // Due is not late: the hourly tick has not come round yet.
+        assert_eq!(countdown(0).text, "e-mail within the hour");
+        assert_eq!(countdown(-5 * 3_600).text, "e-mail within the hour");
+    }
+
+    #[test]
+    fn little_time_left_is_a_warning() {
+        assert_eq!(countdown(4 * 86_400).tone, "muted");
+        assert_eq!(countdown(2 * 86_400).tone, "warn");
+        assert_eq!(countdown(-60).tone, "warn");
+    }
+
+    /// A held report must not read as a time: nothing leaves at that time.
+    #[test]
+    fn a_held_report_says_why_instead_of_counting_down() {
+        let held = report_countdown(
+            &CareNextReport {
+                at: NOW + 5 * 86_400,
+                hold: Some(CareReportHold::NoRecipient),
+            },
+            NOW,
+        );
+        assert_eq!(held.text, "e-mail: no recipient");
+        assert_eq!(held.tone, "err");
     }
 }
