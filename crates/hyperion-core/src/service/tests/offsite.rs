@@ -1535,7 +1535,9 @@ async fn an_orphan_delete_refuses_what_this_node_can_see_is_wrong() {
 
 /// Against a real FTP server (`HY_FTP_TEST=host:port:user:password:base`):
 /// the search reaches every per-user folder from the base path alone, and a
-/// delete takes exactly the named file. Run with `--ignored`.
+/// delete takes exactly the named file. Run with `--ignored --test-threads=1`:
+/// run side by side, the real-server tests fail their uploads with curl (56)
+/// against a vsftpd in Docker.
 #[tokio::test]
 #[ignore]
 async fn orphan_list_and_delete_against_a_real_ftp_server() {

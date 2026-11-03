@@ -21,7 +21,7 @@
     <details class="howto">
       <summary>What counts as left over</summary>
       <ul>
-        <li>A site deleted without ticking &ldquo;also delete its off-site backups&rdquo; leaves its files on the target, and nothing in the panel points at them any more.</li>
+        <li>A site deleted without ticking &ldquo;Also delete this site's backups from the off-site FTP target&rdquo; leaves its files on the target, and nothing in the panel points at them any more.</li>
         <li>A file counts when <strong>no hosting on any node</strong> uses its domain as its name or an alias, sites in the trash included. If any node does not answer, nothing counts: that node could be hosting the site.</li>
         <li>The domain is read from the file name, which a backup run writes as <code>&lt;domain&gt;-&lt;time&gt;.tar.gz</code>, <code>.tgz</code> or <code>.sql</code>. Anything else is listed as unknown and cannot be deleted from here.</li>
         <li>Nothing goes unless you tick it. These can be the only copy of a site that is gone, and a delete cannot be undone. An archive and its database dump are two files: tick both.</li>
