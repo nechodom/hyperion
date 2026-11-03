@@ -19,6 +19,7 @@ pub(super) struct DetailTpl<'a> {
     pub(super) limits: hyperion_types::HostingLimits,
     pub(super) mem_auto: PhpMemAutoView,
     pub(super) workers_full: PhpWorkersView,
+    pub(super) wp_cron: WpCronView,
     pub(super) wp_status: Option<WpInstallStatus>,
     pub(super) expiry: hyperion_types::HostingExpiry,
     pub(super) backups: Vec<hyperion_types::BackupRunWire>,
@@ -394,9 +395,10 @@ impl<'a> DetailTpl<'a> {
             css_version: crate::handlers::css_version(),
             htmx_version: crate::handlers::htmx_version(),
             detail,
+            workers_full: PhpWorkersView::from_kv(&[], 0, limits.php_max_children),
+            wp_cron: WpCronView::from_kv(&[]),
             limits,
             mem_auto,
-            workers_full: PhpWorkersView::from_kv(&[], 0),
             wp_status: None,
             expiry: hyperion_types::HostingExpiry::defaults(),
             backups: vec![],
@@ -920,23 +922,96 @@ impl PhpMemAutoView {
 /// "The pool ran out of PHP workers", as the OWNING node records it
 /// (`hyperion_types::phpworkers`).
 pub struct PhpWorkersView {
-    /// Times today (UTC) every worker was busy.
-    pub today: i64,
+    /// Times in the last 24 hours every worker was busy.
+    pub last_24h: i64,
     /// Last time; 0 = never seen.
     pub last_at: i64,
+    /// 502/504 answers while the pool was full, last 24 hours.
+    pub errors_24h: i64,
+    /// Front-end pages over the wait threshold while it was full, last 24 hours.
+    pub waits_24h: i64,
+    /// Automatic max_children switched on.
+    pub auto_enabled: bool,
+    /// The most workers the automation may give.
+    pub auto_max: i64,
+    /// The operator's own max_children, when the automation has the pool
+    /// above it.
+    pub auto_raised_from: Option<i64>,
+    /// The operator's own max_children — what the ceiling must be above.
+    pub auto_floor: i64,
 }
 
 impl PhpWorkersView {
-    pub(super) fn from_kv(pairs: &[(String, String)], now: i64) -> Self {
+    pub(super) fn from_kv(pairs: &[(String, String)], now: i64, current_children: i64) -> Self {
         use hyperion_types::phpworkers;
-        let st = pairs
-            .iter()
-            .find(|(k, _)| k == phpworkers::KV_STATE)
-            .and_then(|(_, v)| phpworkers::State::parse(v))
+        let get = |k: &str| {
+            pairs
+                .iter()
+                .find(|(key, _)| key == k)
+                .map(|(_, v)| v.as_str())
+        };
+        let st = get(phpworkers::KV_STATE)
+            .and_then(phpworkers::State::parse)
             .unwrap_or_default();
+        let auto_raised_from = get(phpworkers::KV_AUTO_STATE)
+            .and_then(phpworkers::AutoState::parse)
+            .map(|s| s.base)
+            .filter(|&b| b > 0 && b < current_children);
+        let auto_floor = auto_raised_from.unwrap_or(current_children);
+        let (errors_24h, waits_24h) = st.impact_24h(now);
         PhpWorkersView {
-            today: st.hits_today(now),
+            last_24h: st.hits_24h(now),
             last_at: st.last_at,
+            errors_24h,
+            waits_24h,
+            auto_enabled: phpworkers::auto_enabled(get(phpworkers::KV_AUTO)),
+            auto_max: phpworkers::auto_ceiling(
+                get(phpworkers::KV_AUTO_MAX).and_then(|v| v.trim().parse().ok()),
+                auto_floor,
+            ),
+            auto_raised_from,
+            auto_floor,
+        }
+    }
+
+    /// Whether a visitor felt it in the last 24 hours.
+    pub fn visitors_affected(&self) -> bool {
+        self.errors_24h + self.waits_24h > 0
+    }
+
+    /// Switched on with a ceiling that leaves nothing to raise to.
+    pub fn auto_no_room(&self) -> bool {
+        self.auto_enabled
+            && hyperion_types::phpworkers::ceiling_leaves_no_room(self.auto_max, self.auto_floor)
+    }
+}
+
+/// WP-Cron run by the node (`hyperion_types::wpcron`), as the OWNING node
+/// records it.
+pub struct WpCronView {
+    pub enabled: bool,
+    /// Last run that worked; 0 = none yet.
+    pub last_ok_at: i64,
+    /// Went back to WordPress's own cron after failing; retried after this.
+    pub retry_after: i64,
+}
+
+impl WpCronView {
+    pub(super) fn from_kv(pairs: &[(String, String)]) -> Self {
+        use hyperion_types::wpcron;
+        let get = |k: &str| {
+            pairs
+                .iter()
+                .find(|(key, _)| key == k)
+                .map(|(_, v)| v.as_str())
+        };
+        let st = get(wpcron::KV_STATE)
+            .and_then(wpcron::State::parse)
+            .unwrap_or_default();
+        WpCronView {
+            enabled: wpcron::enabled(get(wpcron::KV_ENABLED)),
+            last_ok_at: st.last_ok_at,
+            retry_after: st.retry_after,
         }
     }
 }
@@ -1213,7 +1288,12 @@ pub async fn get_detail(
                 .map(|p| p.name.clone())
         });
     let mem_auto = PhpMemAutoView::from_kv(&owner_kv, limits.php_memory_mb);
-    let workers_full = PhpWorkersView::from_kv(&owner_kv, hyperion_types::now_secs());
+    let workers_full = PhpWorkersView::from_kv(
+        &owner_kv,
+        hyperion_types::now_secs(),
+        limits.php_max_children,
+    );
+    let wp_cron = WpCronView::from_kv(&owner_kv);
     let backup_schedule = BackupSchedule::from_kv(&owner_kv);
     // Last successful backup, as the OWNING node recorded it. Needed by the
     // health check below, which is why this is fetched here and not with the
@@ -1333,6 +1413,7 @@ pub async fn get_detail(
         acme_ssl,
         mem_auto,
         workers_full,
+        wp_cron,
         wp_status,
         expiry,
         backups,

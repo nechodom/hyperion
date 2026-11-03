@@ -364,6 +364,16 @@
 
     {%- if has_php %}
     location ~ \.php$ {
+        {%- if php_rate_limit_enabled %}
+        # Per visitor (zone in conf.d/hyperion-ratelimit.conf). A burst covers
+        # a page's few AJAX calls; past that, 429. A limit_req here REPLACES
+        # the server-level one rather than adding to it, so the sign-up limit
+        # has to be named again or registrations would escape it.
+        limit_req zone=hyperion_php burst=40 nodelay;
+        {%- if signup_limit_enabled %}
+        limit_req zone=hyperion_signup burst=5 nodelay;
+        {%- endif %}
+        {%- endif %}
         try_files $uri =404;
         fastcgi_split_path_info ^(.+\.php)(/.+)$;
         fastcgi_pass unix:/run/php/{{ php_version }}/{{ system_user }}.sock;

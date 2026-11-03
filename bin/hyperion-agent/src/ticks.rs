@@ -56,6 +56,7 @@ pub(crate) fn spawn_all(svc: &Svc, cert_renewal_window_days: i64) {
     spawn_wp_defender(svc);
     spawn_wp_version_refresh(svc);
     spawn_wp_base_theme(svc);
+    spawn_wp_system_cron(svc);
     spawn_wp_integrity(svc);
     spawn_billing_sweep(svc);
     spawn_package_enforce(svc);
@@ -394,7 +395,7 @@ fn spawn_php_workers(svc: &Svc) {
     let workers_svc = svc.clone();
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_secs(MIN)).await;
-        let mut cursors = std::collections::HashMap::new();
+        let mut cursors = hyperion_core::service::PhpWorkersCursors::default();
         let mut interval = tokio::time::interval(Duration::from_secs(MIN));
         loop {
             interval.tick().await;
@@ -407,6 +408,13 @@ fn spawn_php_workers(svc: &Svc) {
                 }
                 Ok(_) => {}
                 Err(e) => tracing::warn!(error=%e, "php workers tick failed"),
+            }
+            // Automatic max_children, right after the signs of trouble it
+            // acts on.
+            match workers_svc.php_workers_auto_tick().await {
+                Ok(n) if n > 0 => tracing::info!(pools = n, "php workers auto: rewrote pools"),
+                Ok(_) => {}
+                Err(e) => tracing::warn!(error=%e, "php workers auto tick failed"),
             }
         }
     });
@@ -513,6 +521,27 @@ fn spawn_wp_base_theme(svc: &Svc) {
             Ok(n) if n > 0 => tracing::info!(repaired = n, "wp base theme"),
             Ok(_) => {}
             Err(e) => tracing::warn!(error=%e, "wp base theme failed"),
+        }
+    });
+}
+
+/// WP-Cron run from the command line, so it takes no PHP worker from
+/// visitors. Its own task: a site's cron can take minutes, and must hold up
+/// nothing else. Checks every minute; each site runs every few.
+fn spawn_wp_system_cron(svc: &Svc) {
+    let cron_svc = svc.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(2 * MIN)).await;
+        let mut last_run = std::collections::HashMap::new();
+        let mut interval = tokio::time::interval(Duration::from_secs(MIN));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            interval.tick().await;
+            match cron_svc.wp_system_cron_tick(&mut last_run).await {
+                Ok(n) if n > 0 => tracing::debug!(sites = n, "wp system cron"),
+                Ok(_) => {}
+                Err(e) => tracing::warn!(error=%e, "wp system cron failed"),
+            }
         }
     });
 }

@@ -251,6 +251,7 @@ struct VhostTpl<'a> {
     /// root-owned WAF log and the verdict pass.
     waf_log: bool,
     signup_limit_enabled: bool,
+    php_rate_limit_enabled: bool,
     /// Validated IP/CIDR entries allowed to reach /wp-admin. Empty =
     /// allowlist disabled (every entry has already been checked to
     /// parse as an IpAddr or addr/prefix, so they're safe to inline).
@@ -810,6 +811,7 @@ pub fn render(input: &VhostInput<'_>) -> Result<String, AdapterError> {
         crs_rules,
         waf_log: uses_waf_log(input),
         signup_limit_enabled: input.options.signup_limit_enabled,
+        php_rate_limit_enabled: input.options.php_rate_limit_enabled,
         wp_admin_allow: parse_admin_allowlist(&input.options.wp_admin_allowlist),
         // The preview block needs ALL THREE of name/cert/key — a
         // half-supplied set (name but no cert) would render an nginx
@@ -1009,7 +1011,7 @@ pub async fn write_vhost(paths: &Paths, input: &VhostInput<'_>) -> Result<(), Ad
     // every site on the node with it. Written before the vhost, and
     // unconditionally, so the file is already there whichever way the toggle
     // moves.
-    if input.options.signup_limit_enabled {
+    if input.options.signup_limit_enabled || input.options.php_rate_limit_enabled {
         ensure_ratelimit_conf(DEFAULT_LOGIN_RPM, DEFAULT_SIGNUP_RPM).await?;
     }
     // Same reason, for the access-log format the vhost names.
@@ -1173,6 +1175,15 @@ limit_req_zone $binary_remote_addr zone=hyperion_login:10m rate=__PER_IP__r/m;
 # Per SITE. The one that stops a distributed sign-up flood, which no per-IP
 # limit can see.
 limit_req_zone $hyperion_signup_key zone=hyperion_signup:10m rate=__PER_SITE__r/m;
+
+# Per VISITOR, PHP requests only (the vhost names it in its PHP location), for
+# a crawler or bot keeping every PHP worker busy. A logged-in WordPress user
+# gets an empty key: an editor's wp-admin is many requests and no threat.
+map $http_cookie $hyperion_php_limit_key {
+    default                   $binary_remote_addr;
+    ~*wordpress_logged_in_    "";
+}
+limit_req_zone $hyperion_php_limit_key zone=hyperion_php:10m rate=10r/s;
 
 # 429, not 503: a rate limit is the client being told to slow down, and a 503
 # reads as the site being broken — to monitoring too.
@@ -1706,6 +1717,19 @@ mod tests {
         let c = super::render_ratelimit_conf(20, 10);
         assert!(c.contains(r"~*/wp-signup\.php"), "{c}");
         assert!(!c.contains(r"wp-signup\\.php"), "double-escaped: {c}");
+    }
+
+    /// The zone a vhost's PHP location names has to exist, and a logged-in
+    /// WordPress user has to get the empty key that exempts them.
+    #[test]
+    fn the_php_zone_exempts_logged_in_users() {
+        let c = super::render_ratelimit_conf(20, 10);
+        assert!(c.contains("zone=hyperion_php:10m rate=10r/s"), "{c}");
+        assert!(c.contains(r#"~*wordpress_logged_in_    """#), "{c}");
+        assert!(
+            c.contains("default                   $binary_remote_addr"),
+            "{c}"
+        );
     }
 
     /// An empty key is what makes a server-level zone count only sign-ups.
@@ -2693,6 +2717,50 @@ mod tests {
     }
 
     #[test]
+    fn php_rate_limit_is_opt_in_and_keeps_the_signup_limit() {
+        let render_with = |php: bool, signup: bool| {
+            let aliases: Vec<String> = vec![];
+            let opts = hyperion_types::VhostOptions {
+                php_rate_limit_enabled: php,
+                signup_limit_enabled: signup,
+                ..Default::default()
+            };
+            render(&VhostInput {
+                domain: "example.cz",
+                aliases: &aliases,
+                root_dir: "/home/example_cz/example.cz/htdocs",
+                logs_dir: "/home/example_cz/example.cz/logs",
+                system_user: "example_cz",
+                php_version: Some("8.3"),
+                cert_path: "/etc/lm/certs/example.cz/fullchain.pem",
+                key_path: "/etc/lm/certs/example.cz/privkey.pem",
+                acme_challenge_root: "/var/lib/lm/acme-challenges",
+                hosting_id: "01HRATE",
+                options: &opts,
+                preview_server_name: None,
+                preview_cert_path: None,
+                preview_cert_key_path: None,
+                modsec_available: false,
+            })
+            .expect("render")
+        };
+        assert!(!render_with(false, false).contains("zone=hyperion_php"));
+
+        let on = render_with(true, false);
+        let php_at = on.find("location ~ \\.php$ {").expect("php location");
+        let limit_at = on
+            .find("limit_req zone=hyperion_php burst=40 nodelay;")
+            .expect("limit");
+        assert!(limit_at > php_at, "belongs in the PHP location: {on}");
+        assert!(!on.contains("zone=hyperion_signup"));
+
+        // A location-level limit_req replaces the server-level one, so the
+        // sign-up limit has to appear again inside it.
+        let both = render_with(true, true);
+        assert_eq!(both.matches("limit_req zone=hyperion_signup").count(), 2);
+    }
+
+    #[test]
     fn render_fastcgi_cache_per_hosting_zone() {
         // Per-hosting cache zone name must include hosting_id so two
         // hostings on the same node don't collide.
@@ -2846,6 +2914,7 @@ mod tests {
         let opts = hyperion_types::VhostOptions {
             waf_enabled: true,
             signup_limit_enabled: false,
+            php_rate_limit_enabled: false,
             wp_admin_allowlist: "203.0.113.5, 198.51.100.0/24".into(),
             ..Default::default()
         };

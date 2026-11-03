@@ -43,6 +43,7 @@ pub mod spf;
 pub mod stats;
 pub mod waf;
 pub mod wp;
+pub mod wpcron;
 
 pub use acme_dns::{AcmeDnsConfig, AcmeDnsLabel};
 pub use cert::{CertInfo, CertOverviewItem, CertRenewOutcome, CertRenewResult, PanelCertProgress};

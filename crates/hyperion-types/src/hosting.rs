@@ -283,6 +283,11 @@ pub struct VhostOptions {
     /// the same card.
     #[serde(default)]
     pub signup_limit_enabled: bool,
+    /// Rate-limit PHP requests per visitor, so a crawler or a bot cannot keep
+    /// every worker busy. Logged-in WordPress users are exempt. Off by
+    /// default: many people behind one address look like one fast visitor.
+    #[serde(default)]
+    pub php_rate_limit_enabled: bool,
     /// Comma/newline-separated IPs or CIDRs allowed to reach
     /// /wp-admin and /wp-login.php (migration 036). Empty = open.
     /// admin-ajax.php is never gated so front-end AJAX keeps working.

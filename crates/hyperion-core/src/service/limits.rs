@@ -3,6 +3,20 @@
 
 use super::*;
 
+/// Where [`HostingService::php_workers_tick`] has read to, between ticks.
+/// Kept in memory: a restart starts every log at its end, so history is not
+/// news, and an ongoing incident shows up again with its next warning.
+#[derive(Debug, Default)]
+pub struct PhpWorkersCursors {
+    fpm: std::collections::HashMap<PhpVersion, (u64, u64)>,
+    /// Access-log position per (pool, hosting id), only while it is being
+    /// watched. Per hosting because sites can share a system user, and so a
+    /// pool, but never a log.
+    access: std::collections::HashMap<(String, String), (u64, u64)>,
+    /// Pools whose access log is being read, and until when.
+    watching: std::collections::HashMap<String, i64>,
+}
+
 impl<A: AdapterPort + 'static> HostingService<A> {
     /// Apply / replace the per-hosting limits. Persists the row, then asks the
     /// adapter to apply the PHP-FPM side effects. Returns the canonical row
@@ -16,9 +30,15 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let before = hyperion_state::limits::get(&self.pool, &detail.id)
             .await
             .ok()
-            .flatten()
-            .map(|r| r.php_memory_mb);
+            .flatten();
+        let before_children = before.as_ref().map(|r| r.php_max_children);
+        let before = before.map(|r| r.php_memory_mb);
         let limits = self.store_and_apply_limits(&detail, limits).await?;
+        // Same rule for the automatic max_children.
+        if before_children != Some(limits.php_max_children) {
+            self.php_workers_auto_rebase(detail.id.as_str(), limits.php_max_children)
+                .await;
+        }
         // A memory value typed by hand (or applied by a profile) is the new
         // floor for the automatic memory_limit. Saving the card UNCHANGED —
         // it shows the value the automation raised to — must not adopt that
@@ -80,6 +100,32 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             &self.pool,
             hosting_id,
             phpmem::KV_STATE,
+            &st.to_json(),
+            now,
+        )
+        .await;
+    }
+
+    /// Make `base` the floor of an existing automatic-max_children state.
+    async fn php_workers_auto_rebase(&self, hosting_id: &str, base: i64) {
+        use hyperion_types::phpworkers;
+        let Some(mut st) =
+            hyperion_state::hosting_kv::get(&self.pool, hosting_id, phpworkers::KV_AUTO_STATE)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|v| phpworkers::AutoState::parse(&v))
+        else {
+            return;
+        };
+        let now = now_secs();
+        st.base = base;
+        st.last_change_at = now;
+        st.pending_hits = 0;
+        let _ = hyperion_state::hosting_kv::set(
+            &self.pool,
+            hosting_id,
+            phpworkers::KV_AUTO_STATE,
             &st.to_json(),
             now,
         )
@@ -281,39 +327,409 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(acted)
     }
 
-    /// Notice pools that ran out of PHP workers.
+    /// What the automatic max_children has to know about this node: its
+    /// memory, its CPU pressure, the size of each pool's workers, and what
+    /// every site's raised workers could use together.
+    async fn php_workers_node_snapshot(
+        &self,
+    ) -> Result<
+        (
+            hyperion_types::phpworkers::NodeFacts,
+            std::collections::HashMap<String, hyperion_types::phpworkers::PoolMemory>,
+        ),
+        RpcError,
+    > {
+        use hyperion_types::phpworkers;
+        let pools = hyperion_adapters::phpfpm::pool_memory().await;
+        let mut extra_committed_mb = 0i64;
+        for s in self.list().await? {
+            if s.state != HostingState::Active {
+                continue;
+            }
+            let Some(st) = hyperion_state::hosting_kv::get(
+                &self.pool,
+                s.id.as_str(),
+                phpworkers::KV_AUTO_STATE,
+            )
+            .await
+            .ok()
+            .flatten()
+            .and_then(|v| phpworkers::AutoState::parse(&v)) else {
+                continue;
+            };
+            let Ok(Some(row)) = hyperion_state::limits::get(&self.pool, &s.id).await else {
+                continue;
+            };
+            let extra = row.php_max_children - st.base;
+            if st.base <= 0 || extra <= 0 {
+                continue;
+            }
+            let Ok(detail) = self.get(HostingSelector::Id(s.id.clone())).await else {
+                continue;
+            };
+            let size = phpworkers::worker_size_mb(
+                pools.get(detail.system_user.as_str()).copied(),
+                row.php_memory_mb,
+            );
+            extra_committed_mb += extra * size;
+        }
+        Ok((
+            phpworkers::NodeFacts {
+                mem_total_mb: read_mem_total_mb().await,
+                mem_available_mb: read_mem_available_mb().await,
+                extra_committed_mb,
+                cpu_pressure_pct: read_psi_some_avg60("cpu").await / 100,
+            },
+            pools,
+        ))
+    }
+
+    /// This site's share of the whole node's CPU over the last minute,
+    /// percent. 0 before the tracker has two reads to compare.
+    async fn php_site_cpu_pct(&self, detail: &HostingDetail) -> i64 {
+        let Some(live) = self.cpu_tracker.live(now_secs()) else {
+            return 0;
+        };
+        match hyperion_state::system_users::get_by_name(&self.pool, &detail.system_user).await {
+            Ok(Some(u)) => live.uid_pct_x100(u.uid) / 100,
+            _ => 0,
+        }
+    }
+
+    /// Whether the automation can still do something for this site, and if
+    /// not, why.
+    async fn php_workers_room(
+        &self,
+        detail: &HostingDetail,
+        limits: &hyperion_types::HostingLimits,
+    ) -> Result<hyperion_types::phpworkers::RaiseRoom, RpcError> {
+        use hyperion_types::phpworkers;
+        let id = detail.id.as_str();
+        let kv = |k: &'static str| async move {
+            hyperion_state::hosting_kv::get(&self.pool, id, k)
+                .await
+                .ok()
+                .flatten()
+        };
+        if !phpworkers::auto_enabled(kv(phpworkers::KV_AUTO).await.as_deref()) {
+            return Ok(phpworkers::RaiseRoom {
+                cap: limits.php_max_children,
+                blocked: Some(phpworkers::RaiseBlock::Off),
+            });
+        }
+        let base = kv(phpworkers::KV_AUTO_STATE)
+            .await
+            .and_then(|v| phpworkers::AutoState::parse(&v))
+            .map(|st| st.base)
+            .filter(|&b| b > 0)
+            .unwrap_or(limits.php_max_children);
+        let ceiling = phpworkers::auto_ceiling(
+            kv(phpworkers::KV_AUTO_MAX)
+                .await
+                .and_then(|v| v.trim().parse().ok()),
+            base,
+        );
+        let (node, pools) = self.php_workers_node_snapshot().await?;
+        let size = phpworkers::worker_size_mb(
+            pools.get(detail.system_user.as_str()).copied(),
+            limits.php_memory_mb,
+        );
+        Ok(phpworkers::raise_room(
+            limits.php_max_children,
+            ceiling,
+            limits.php_memory_mb,
+            size,
+            self.php_site_cpu_pct(detail).await,
+            &node,
+        ))
+    }
+
+    /// Feed this tick's signs of trouble to the automatic max_children, when
+    /// it is on: `hits` written under the limit now in force (a line from
+    /// before the last raise is no reason for another), and whether visitors
+    /// were affected. FPM warns once per episode, so a long one shows one
+    /// line however bad it is; visitors affected is reason enough on its own.
+    async fn php_workers_auto_note(
+        &self,
+        detail: &HostingDetail,
+        by_limit: Option<&std::collections::BTreeMap<i64, i64>>,
+        visitors_affected: bool,
+        now: i64,
+    ) {
+        use hyperion_types::phpworkers;
+        let id = detail.id.as_str();
+        let kv = |k: &'static str| async move {
+            hyperion_state::hosting_kv::get(&self.pool, id, k)
+                .await
+                .ok()
+                .flatten()
+        };
+        if !phpworkers::auto_enabled(kv(phpworkers::KV_AUTO).await.as_deref()) {
+            return;
+        }
+        let current = hyperion_state::limits::get(&self.pool, &detail.id)
+            .await
+            .ok()
+            .flatten()
+            .map(|r| r.php_max_children)
+            .unwrap_or_else(|| hyperion_types::HostingLimits::defaults().php_max_children);
+        let fresh = by_limit.map_or(0, |b| phpworkers::hits_at_or_above(b, current));
+        if fresh <= 0 && !visitors_affected {
+            return;
+        }
+        let mut st = kv(phpworkers::KV_AUTO_STATE)
+            .await
+            .and_then(|v| phpworkers::AutoState::parse(&v))
+            .unwrap_or_else(|| phpworkers::AutoState {
+                base: current,
+                ..Default::default()
+            });
+        st.pending_hits += fresh;
+        if visitors_affected {
+            st.pending_hits = st.pending_hits.max(phpworkers::RAISE_AFTER_HITS);
+        }
+        st.last_full_at = now;
+        let _ = hyperion_state::hosting_kv::set(
+            &self.pool,
+            id,
+            phpworkers::KV_AUTO_STATE,
+            &st.to_json(),
+            now,
+        )
+        .await;
+    }
+
+    /// Automatic `max_children` (see `hyperion_types::phpworkers`).
+    ///
+    /// For every live site that has run out of workers with it on: after
+    /// [`phpworkers::RAISE_AFTER_HITS`] times at the limit in force, or once
+    /// visitors were affected, raise `max_children` one step, bounded by
+    /// [`phpworkers::raise_room`]. A raised site taking CPU from the others
+    /// gives a step back ([`phpworkers::over_share`]), and so does a
+    /// fortnight without running out, towards the operator's own value. Turning it off puts
+    /// that value back. The signs of trouble are fed in by
+    /// [`Self::php_workers_tick`]. Raises go in the audit log and on the
+    /// limits card, not in the notification centre: nobody has to do anything
+    /// about one.
+    ///
+    /// Returns how many pools it rewrote.
+    pub async fn php_workers_auto_tick(&self) -> Result<i64, RpcError> {
+        use hyperion_types::phpworkers::{self, AutoStep};
+        let mut acted = 0i64;
+        let mut snapshot = None;
+        for s in self.list().await? {
+            let id = s.id.as_str().to_string();
+            let kv = |k: &'static str| {
+                let id = id.clone();
+                async move {
+                    hyperion_state::hosting_kv::get(&self.pool, &id, k)
+                        .await
+                        .ok()
+                        .flatten()
+                }
+            };
+            // No state: the site has never run out, so nothing to raise and
+            // nothing to give back. This is every quiet site on every tick.
+            let Some(stored) = kv(phpworkers::KV_AUTO_STATE)
+                .await
+                .and_then(|v| phpworkers::AutoState::parse(&v))
+            else {
+                continue;
+            };
+            let enabled = phpworkers::auto_enabled(kv(phpworkers::KV_AUTO).await.as_deref());
+            if s.state != HostingState::Active {
+                continue;
+            }
+            let Ok(detail) = self.get(HostingSelector::Id(s.id.clone())).await else {
+                continue;
+            };
+            if detail.php_version.is_none() || detail.system_user.trim().is_empty() {
+                continue;
+            }
+            let limits = hyperion_state::limits::get(&self.pool, &detail.id)
+                .await
+                .ok()
+                .flatten()
+                .map(row_to_limits)
+                .unwrap_or_else(hyperion_types::HostingLimits::defaults);
+            let current = limits.php_max_children;
+            let now = now_secs();
+
+            if !enabled {
+                // Turned off: hand back the operator's value, then forget.
+                let base = stored.base;
+                if base > 0 && base != current {
+                    let mut l = limits.clone();
+                    l.php_max_children = base;
+                    if let Err(e) = self.store_and_apply_limits(&detail, l).await {
+                        tracing::warn!(domain = %detail.domain, error = %e, "php workers auto: restoring the operator's max_children failed; will retry");
+                        continue;
+                    }
+                    acted += 1;
+                    self.append_audit(
+                        "php.workers_auto.restore",
+                        Some(&id),
+                        &serde_json::json!({"from": current, "to": base}).to_string(),
+                        "ok",
+                    )
+                    .await;
+                }
+                let _ =
+                    hyperion_state::hosting_kv::delete(&self.pool, &id, phpworkers::KV_AUTO_STATE)
+                        .await;
+                continue;
+            }
+
+            let mut st = stored;
+            let before = st.clone();
+            let ceiling = phpworkers::auto_ceiling(
+                kv(phpworkers::KV_AUTO_MAX)
+                    .await
+                    .and_then(|v| v.trim().parse().ok()),
+                st.base,
+            );
+            // Measuring means walking /proc: only for a site that wants to
+            // rise or is above its own value, once per tick however many.
+            let wants_to_rise = st.pending_hits >= phpworkers::RAISE_AFTER_HITS;
+            let (cap, gives_back) = if wants_to_rise || current > st.base {
+                if snapshot.is_none() {
+                    snapshot = Some(self.php_workers_node_snapshot().await?);
+                }
+                let Some((node, pools)) = snapshot.as_ref() else {
+                    continue;
+                };
+                let size = phpworkers::worker_size_mb(
+                    pools.get(detail.system_user.as_str()).copied(),
+                    limits.php_memory_mb,
+                );
+                let site_cpu = self.php_site_cpu_pct(&detail).await;
+                (
+                    Some(
+                        phpworkers::raise_room(
+                            current,
+                            ceiling,
+                            limits.php_memory_mb,
+                            size,
+                            site_cpu,
+                            node,
+                        )
+                        .cap,
+                    ),
+                    phpworkers::over_share(now, current, site_cpu, node.cpu_pressure_pct, &st),
+                )
+            } else {
+                (None, None)
+            };
+            let step = match gives_back {
+                Some(to) => AutoStep::Lower { to },
+                None => phpworkers::decide_auto(now, current, ceiling, cap, &st),
+            };
+            match step {
+                AutoStep::Nothing => {}
+                AutoStep::Raise { to } | AutoStep::Lower { to } if to == current => {}
+                step @ (AutoStep::Raise { to } | AutoStep::Lower { to }) => {
+                    let raise = matches!(step, AutoStep::Raise { .. });
+                    let mut l = limits.clone();
+                    l.php_max_children = to;
+                    match self.store_and_apply_limits(&detail, l).await {
+                        Ok(_) => {
+                            st.last_change_at = now;
+                            st.pending_hits = 0;
+                            acted += 1;
+                            // A raise changes what the next site may have.
+                            snapshot = None;
+                            self.append_audit(
+                                if raise {
+                                    "php.workers_auto.raise"
+                                } else {
+                                    "php.workers_auto.lower"
+                                },
+                                Some(&id),
+                                &serde_json::json!({"from": current, "to": to, "ceiling": ceiling})
+                                    .to_string(),
+                                "ok",
+                            )
+                            .await;
+                        }
+                        Err(e) => {
+                            tracing::warn!(domain = %detail.domain, to, error = %e, "php workers auto: pool rewrite failed; will retry");
+                        }
+                    }
+                }
+            }
+            if st != before {
+                let _ = hyperion_state::hosting_kv::set(
+                    &self.pool,
+                    &id,
+                    phpworkers::KV_AUTO_STATE,
+                    &st.to_json(),
+                    now,
+                )
+                .await;
+            }
+        }
+        Ok(acted)
+    }
+
+    /// The scripts that showed up most in this site's PHP-FPM slow-request
+    /// log lately (root-owned, outside the site's tree). Empty when there is
+    /// none or it cannot be read.
+    async fn php_slow_scripts(
+        &self,
+        detail: &HostingDetail,
+    ) -> Vec<hyperion_types::phpworkers::SlowScript> {
+        use hyperion_types::phpworkers;
+        if detail.system_user.trim().is_empty() {
+            return Vec::new();
+        }
+        let path = hyperion_adapters::phpfpm::slowlog_path(&detail.system_user);
+        match hyperion_adapters::fs::tail_lines(&path, 20 * phpworkers::SLOWLOG_ENTRIES).await {
+            Ok(text) => phpworkers::slow_scripts(&text, &detail.root_dir, 3),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// Notice pools that ran out of PHP workers, and whether anybody felt it.
     ///
     /// Reads what each PHP version's FPM log (`<log_dir>/php<ver>-fpm.log`)
     /// gained since the last tick — `cursors` carries the position between
-    /// ticks and starts every log at its end, so history is not news —
-    /// counts `server reached pm.max_children` per pool, records it in the
-    /// owning hosting's `hosting_kv` for the limits card, and warns the
-    /// admins at most every [`phpworkers::ALERT_EVERY_SECS`] per site.
+    /// ticks and starts every log at its end, so history is not news — and
+    /// counts `server reached pm.max_children` per pool. That goes in the
+    /// owning hosting's `hosting_kv` for the limits card, and starts a watch
+    /// on the site's access log: what visitors got while the pool stays full.
     ///
-    /// Returns how many sites hit their limit this tick.
+    /// Only that reaches a person, per [`phpworkers::State::should_alert`]:
+    /// a full pool nobody noticed is not news, and neither is one the
+    /// automation is still dealing with.
+    ///
+    /// Returns how many sites are being watched.
     pub async fn php_workers_tick(
         &self,
         log_dir: &std::path::Path,
-        cursors: &mut std::collections::HashMap<PhpVersion, (u64, u64)>,
+        cursors: &mut PhpWorkersCursors,
     ) -> Result<i64, RpcError> {
         use hyperion_types::phpworkers;
-        let mut hits: std::collections::BTreeMap<String, i64> = Default::default();
+        let mut hits: std::collections::BTreeMap<String, std::collections::BTreeMap<i64, i64>> =
+            Default::default();
         for ver in PhpVersion::all() {
             let path = log_dir.join(format!("{}.log", ver.service_name()));
             if !path.exists() {
                 continue;
             }
-            let (ino, off) = cursors.get(ver).copied().unwrap_or((0, 0));
+            let (ino, off) = cursors.fpm.get(ver).copied().unwrap_or((0, 0));
             let read = tokio::task::spawn_blocking(move || {
                 hyperion_adapters::fs::read_appended(&path, ino, off, phpworkers::MAX_SCAN_BYTES)
             })
             .await;
             match read {
                 Ok(Ok(a)) => {
-                    for (pool, n) in phpworkers::count_by_pool(&a.text) {
-                        *hits.entry(pool).or_insert(0) += n;
+                    for (pool, by_limit) in phpworkers::count_by_pool_and_limit(&a.text) {
+                        let e = hits.entry(pool).or_default();
+                        for (limit, n) in by_limit {
+                            *e.entry(limit).or_insert(0) += n;
+                        }
                     }
-                    cursors.insert(*ver, (a.ino, a.offset));
+                    cursors.fpm.insert(*ver, (a.ino, a.offset));
                 }
                 Ok(Err(e)) => {
                     tracing::debug!(version = %ver.as_str(), error = %e, "php workers: FPM log not read")
@@ -321,10 +737,27 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 Err(e) => tracing::warn!(error = %e, "php workers: log reader panicked"),
             }
         }
-        if hits.is_empty() {
+        let now = now_secs();
+        for pool in hits.keys() {
+            cursors
+                .watching
+                .insert(pool.clone(), now + phpworkers::WATCH_SECS);
+        }
+        // A watch that ran out, or whose site is gone: forget it and where
+        // its log was, so the next one starts at the end of the log.
+        let expired: Vec<String> = cursors
+            .watching
+            .iter()
+            .filter(|&(_, &until)| until <= now)
+            .map(|(pool, _)| pool.clone())
+            .collect();
+        for pool in expired {
+            cursors.watching.remove(&pool);
+            cursors.access.retain(|(p, _), _| *p != pool);
+        }
+        if cursors.watching.is_empty() {
             return Ok(0);
         }
-        let now = now_secs();
         let mut sites = 0i64;
         for s in self.list().await? {
             if s.state != HostingState::Active || s.php_version.is_none() {
@@ -333,10 +766,47 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             let Ok(detail) = self.get(HostingSelector::Id(s.id.clone())).await else {
                 continue;
             };
-            let Some(&n) = hits.get(detail.system_user.as_str()) else {
+            let pool = detail.system_user.clone();
+            if !cursors.watching.contains_key(pool.as_str()) {
                 continue;
-            };
+            }
             sites += 1;
+            let by_limit = hits.get(pool.as_str());
+            let path = std::path::PathBuf::from(&self.paths.home_root)
+                .join(&detail.system_user)
+                .join(&detail.domain)
+                .join("logs")
+                .join("access.log");
+            let access_key = (pool.clone(), detail.id.as_str().to_string());
+            let (ino, off) = cursors.access.get(&access_key).copied().unwrap_or((0, 0));
+            let read = tokio::task::spawn_blocking(move || {
+                hyperion_adapters::fs::read_appended(&path, ino, off, phpworkers::MAX_SCAN_BYTES)
+            })
+            .await;
+            let (errors, waits) = match read {
+                Ok(Ok(a)) => {
+                    cursors.access.insert(access_key, (a.ino, a.offset));
+                    phpworkers::count_impact(&a.text)
+                }
+                // No log yet, or one root must not read (a symlink).
+                Ok(Err(e)) => {
+                    tracing::debug!(domain = %detail.domain, error = %e, "php workers: access.log not read");
+                    (0, 0)
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "php workers: log reader panicked");
+                    (0, 0)
+                }
+            };
+            let affected = errors + waits > 0;
+            if affected {
+                cursors
+                    .watching
+                    .insert(pool.clone(), now + phpworkers::WATCH_SECS);
+            }
+            if by_limit.is_none() && !affected {
+                continue;
+            }
             let id = detail.id.as_str().to_string();
             let mut st = hyperion_state::hosting_kv::get(&self.pool, &id, phpworkers::KV_STATE)
                 .await
@@ -344,33 +814,15 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 .flatten()
                 .and_then(|v| phpworkers::State::parse(&v))
                 .unwrap_or_default();
-            st.record(now, n);
-            if st.should_alert(now) {
-                st.alerted_at = now;
-                let children = hyperion_state::limits::get(&self.pool, &detail.id)
-                    .await
-                    .ok()
-                    .flatten()
-                    .map(|r| r.php_max_children)
-                    .unwrap_or_else(|| hyperion_types::HostingLimits::defaults().php_max_children)
-                    .to_string();
-                let today = st.hits_today(now).to_string();
-                // warn, not error: the site still serves, queued — see the
-                // severity rule on `notify_admins`. One card per site: the
-                // next alert rewrites it with the new count.
-                let kind = format!("php_workers:{}", detail.domain);
-                self.notify_admins_say(
-                    "warn",
-                    "ops.php_workers_full",
-                    &[
-                        ("domain", detail.domain.as_str()),
-                        ("children", children.as_str()),
-                        ("today", today.as_str()),
-                    ],
-                    &format!("/hostings/{}#limits", detail.domain),
-                    &kind,
-                )
+            if let Some(by_limit) = by_limit {
+                st.record(now, by_limit.values().sum());
+            }
+            st.record_impact(now, errors, waits);
+            let incident = st.is_incident(now);
+            self.php_workers_auto_note(&detail, by_limit, incident, now)
                 .await;
+            if incident {
+                self.php_workers_maybe_alert(&detail, &mut st, now).await;
             }
             let _ = hyperion_state::hosting_kv::set(
                 &self.pool,
@@ -381,7 +833,92 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             )
             .await;
         }
+        // Whatever is still being watched but matched no live site this time
+        // (suspended, deleted) runs out on its own above.
         Ok(sites)
+    }
+
+    /// Tell the admins about an incident the automation can do nothing more
+    /// for. One card per site, rewritten at most once a day.
+    async fn php_workers_maybe_alert(
+        &self,
+        detail: &HostingDetail,
+        st: &mut hyperion_types::phpworkers::State,
+        now: i64,
+    ) {
+        use hyperion_types::phpworkers::{self, RaiseBlock};
+        // Everything below walks /proc and every site: only when the answer
+        // could be yes.
+        if !st.should_alert(now, false) {
+            return;
+        }
+        let limits = hyperion_state::limits::get(&self.pool, &detail.id)
+            .await
+            .ok()
+            .flatten()
+            .map(row_to_limits)
+            .unwrap_or_else(hyperion_types::HostingLimits::defaults);
+        let room = match self.php_workers_room(detail, &limits).await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(domain = %detail.domain, error = %e, "php workers: could not work out the room to raise");
+                return;
+            }
+        };
+        if !st.should_alert(now, room.blocked.is_none()) {
+            return;
+        }
+        st.alerted_at = now;
+        let (errors, waits) = st.impact_recent(now);
+        let (children, errors, waits, today) = (
+            limits.php_max_children.to_string(),
+            errors.to_string(),
+            waits.to_string(),
+            st.hits_24h(now).to_string(),
+        );
+        let args = [
+            ("domain", detail.domain.as_str()),
+            ("children", children.as_str()),
+            ("errors", errors.as_str()),
+            ("waits", waits.as_str()),
+            ("today", today.as_str()),
+        ];
+        let cat = self.operator_catalog();
+        let title = cat.render("ops.php_workers_full.title", &args);
+        let mut body = cat.render("ops.php_workers_full.body", &args);
+        let why = match room.blocked {
+            Some(RaiseBlock::Off) | None => "ops.php_workers_full.why_off",
+            Some(RaiseBlock::Ceiling) => "ops.php_workers_full.why_ceiling",
+            Some(RaiseBlock::SiteRam | RaiseBlock::NodeRam) => "ops.php_workers_full.why_ram",
+            Some(RaiseBlock::SiteShare) => "ops.php_workers_full.why_share",
+            Some(RaiseBlock::NodeCpu) => "ops.php_workers_full.why_cpu",
+        };
+        body.push(' ');
+        body.push_str(&cat.render(why, &args));
+        // What held the workers, so the alert says where to look instead of
+        // only that there is somewhere to look.
+        let slow = self.php_slow_scripts(detail).await;
+        if !slow.is_empty() {
+            let line = phpworkers::slow_scripts_line(&slow);
+            body.push(' ');
+            body.push_str(&cat.render("ops.php_workers_full.slow", &[("scripts", line.as_str())]));
+        }
+        if !detail.vhost_options.fastcgi_cache_enabled {
+            body.push(' ');
+            body.push_str(&cat.render("ops.php_workers_full.cache", &args));
+        }
+        // warn, not error: the site still serves, queued — see the severity
+        // rule on `notify_admins`. One card per site: the next alert rewrites
+        // it with the new count.
+        let kind = format!("php_workers:{}", detail.domain);
+        self.notify_admins(
+            "warn",
+            &title,
+            &body,
+            &format!("/hostings/{}#limits", detail.domain),
+            &kind,
+        )
+        .await;
     }
 
     pub async fn get_limits(
