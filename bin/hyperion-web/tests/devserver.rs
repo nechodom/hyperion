@@ -1333,18 +1333,45 @@ async fn seed_demo(svc: &Arc<StubService>) {
         .expect("email_log");
     }
 
-    // The 15 s network sampler, last hour.
-    for k in 0..240i64 {
-        let i = (240 - k) as f64;
+    // The 15 s sampler, last hour, and it keeps ticking so the graphs move.
+    let ring_row = move |pool: sqlx::SqlitePool, at: i64, i: f64| async move {
         let tx = (210_000.0 + 140_000.0 * wave(i, 4.0, 15.0)).max(15_000.0);
-        sqlx::query("INSERT INTO net_samples (at, rx_bps, tx_bps) VALUES (?,?,?)")
-            .bind(now - k * 15)
-            .bind((tx * 0.28) as i64)
-            .bind(tx as i64)
-            .execute(pool)
-            .await
-            .expect("net_samples");
+        let load = (0.45 + 0.35 * wave(i, 3.0, 11.0)).max(0.05);
+        let mem = 0.52 + 0.06 * wave(i, 5.0, 17.0);
+        sqlx::query(
+            "INSERT INTO net_samples (at, rx_bps, tx_bps, cpu_pct_x100, loadavg_1m_x100, \
+             mem_used_kib, mem_total_kib) VALUES (?,?,?,?,?,?,?)",
+        )
+        .bind(at)
+        .bind((tx * 0.28) as i64)
+        .bind(tx as i64)
+        .bind(((load * 22.0).min(100.0) * 100.0) as i64)
+        .bind((load * 100.0) as i64)
+        .bind((mem * mem_total as f64) as i64)
+        .bind(mem_total)
+        .execute(&pool)
+        .await
+        .expect("net_samples");
+    };
+    for k in 0..240i64 {
+        ring_row(pool.clone(), now - k * 15, (240 - k) as f64).await;
     }
+    let ring_pool = pool.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+        interval.tick().await;
+        let mut i = 240.0;
+        loop {
+            interval.tick().await;
+            i += 1.0;
+            let at = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64;
+            ring_row(ring_pool.clone(), at, i).await;
+            let _ = hyperion_state::net_samples::prune_older_than(&ring_pool, at - 3600).await;
+        }
+    });
 
     // Audit log: sign-ins (one failed), settings and cert changes, a node
     // event, spread over a few days. Appended through the real chain so
