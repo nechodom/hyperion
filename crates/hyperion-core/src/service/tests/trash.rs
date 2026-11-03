@@ -290,6 +290,7 @@ async fn delete_keeping_user_and_database_removes_everything_else() {
         DeleteOpts {
             keep_user: true,
             keep_database: true,
+            delete_offsite_backups: false,
         },
     )
     .await

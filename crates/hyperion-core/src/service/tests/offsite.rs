@@ -1162,3 +1162,240 @@ fn dig_keeps_records_that_contain_spaces_except_for_addresses() {
     // Blank lines are never an answer.
     assert!(!keeps("TXT", "   "));
 }
+
+/// Everything creating, trashing, restoring and tearing down a site calls.
+fn delete_mocks() -> MockAdapterPort {
+    let mut a = with_fake_shadow(offline_cycle_mocks(), &FakeShadow::default());
+    a.expect_linux_unlock_login().returning(|_| Ok(()));
+    a.expect_nginx_delete_vhost().returning(|_, _| Ok(()));
+    a.expect_acme_delete().returning(|_| Ok(()));
+    a.expect_db_drop().returning(|_, _, _| Ok(()));
+    a.expect_remove_hosting_tree().returning(|_| Ok(()));
+    a.expect_delete_user().returning(|_| Ok(()));
+    a
+}
+
+/// A target nothing listens on: any attempt to reach it fails at once.
+fn dead_ftp() -> RemoteBackupConfig {
+    RemoteBackupConfig {
+        scheme: "ftp".into(),
+        host: "127.0.0.1".into(),
+        port: 1,
+        user: "bk".into(),
+        password: "pw".into(),
+        base_path: "/backups".into(),
+    }
+}
+
+fn with_ftp_backups() -> hyperion_rpc::wire::DeleteOpts {
+    hyperion_rpc::wire::DeleteOpts {
+        delete_offsite_backups: true,
+        ..Default::default()
+    }
+}
+
+/// A service with the trash on, its config in the returned dir.
+fn trash_svc(pool: sqlx::SqlitePool) -> (HostingService<MockAdapterPort>, tempfile::TempDir) {
+    let dir = tempfile::tempdir().expect("tmp");
+    let cfg = dir.path().join("agent.toml");
+    std::fs::write(&cfg, "[cluster]\ntrash_enabled = true\n").expect("write agent.toml");
+    (svc(pool, delete_mocks()).with_agent_config_path(cfg), dir)
+}
+
+#[tokio::test]
+async fn delete_asking_for_ftp_backups_refuses_without_a_target() {
+    let pool = open_memory().await.expect("open");
+    let s = svc(pool, delete_mocks());
+    let created = s.create(req("noftp.cz")).await.expect("create");
+    let sel = HostingSelector::Id(created.id);
+
+    let err = s
+        .delete(sel.clone(), with_ftp_backups())
+        .await
+        .expect_err("nothing could honour the request");
+    assert!(matches!(err, RpcError::Validation { .. }), "{err:?}");
+    assert_eq!(
+        s.get(sel).await.expect("still there").state,
+        HostingState::Active
+    );
+}
+
+/// The operator asked for both, so a failed FTP delete must leave the site
+/// up to retry — not gone, with its backups orphaned on the server.
+#[tokio::test]
+async fn failed_ftp_delete_leaves_the_site_untouched() {
+    let pool = open_memory().await.expect("open");
+    let mut s = svc(pool, delete_mocks());
+    s.remote_backup = Some(dead_ftp());
+    let created = s.create(req("deadftp.cz")).await.expect("create");
+    let sel = HostingSelector::Id(created.id);
+
+    s.delete(sel.clone(), with_ftp_backups())
+        .await
+        .expect_err("the FTP target is down");
+    assert_eq!(
+        s.get(sel).await.expect("still there").state,
+        HostingState::Active
+    );
+}
+
+#[tokio::test]
+async fn delete_without_the_option_never_touches_the_ftp_target() {
+    let pool = open_memory().await.expect("open");
+    let mut s = svc(pool, delete_mocks());
+    s.remote_backup = Some(dead_ftp());
+    let created = s.create(req("keepftp.cz")).await.expect("create");
+    let sel = HostingSelector::Id(created.id);
+
+    s.delete(sel.clone(), hyperion_rpc::wire::DeleteOpts::default())
+        .await
+        .expect("a dead target is no reason to refuse");
+    assert!(s.get(sel).await.is_err(), "the hosting should be gone");
+}
+
+/// Trashing is reversible, so it must not delete anything off-site yet; the
+/// purge is what carries the choice out, and it refuses when it cannot.
+#[tokio::test]
+async fn trash_defers_the_ftp_delete_to_the_purge() {
+    let pool = open_memory().await.expect("open");
+    let (mut s, _dir) = trash_svc(pool);
+    s.remote_backup = Some(dead_ftp());
+    let created = s.create(req("trashftp.cz")).await.expect("create");
+    let sel = HostingSelector::Id(created.id);
+
+    s.delete(sel.clone(), with_ftp_backups())
+        .await
+        .expect("trashing must not need the target");
+    let listed = s.list_trash().await.expect("list");
+    assert!(listed[0].delete_offsite_backups, "/trash should warn");
+
+    s.purge_from_trash(sel.clone())
+        .await
+        .expect_err("the FTP target is down");
+    assert_eq!(
+        s.get(sel).await.expect("still there").state,
+        HostingState::Trashed
+    );
+}
+
+#[tokio::test]
+async fn gc_keeps_a_trashed_site_whose_ftp_backups_it_cannot_delete() {
+    let pool = open_memory().await.expect("open");
+    let (mut s, _dir) = trash_svc(pool.clone());
+    s.remote_backup = Some(dead_ftp());
+    let created = s.create(req("gcftp.cz")).await.expect("create");
+    let sel = HostingSelector::Id(created.id.clone());
+    s.delete(sel.clone(), with_ftp_backups())
+        .await
+        .expect("trash");
+    // Past any retention window.
+    hostings::mark_trashed(&pool, &created.id, 1)
+        .await
+        .expect("backdate");
+
+    assert_eq!(s.trash_gc_tick().await.expect("tick"), 0);
+    assert_eq!(
+        s.get(sel).await.expect("still there").state,
+        HostingState::Trashed
+    );
+}
+
+#[tokio::test]
+async fn restoring_from_trash_forgets_the_ftp_choice() {
+    let pool = open_memory().await.expect("open");
+    let (mut s, _dir) = trash_svc(pool);
+    s.remote_backup = Some(dead_ftp());
+    let created = s.create(req("restoreftp.cz")).await.expect("create");
+    let sel = HostingSelector::Id(created.id);
+    s.delete(sel.clone(), with_ftp_backups())
+        .await
+        .expect("trash");
+    s.restore_from_trash(sel.clone()).await.expect("restore");
+
+    s.delete(sel.clone(), hyperion_rpc::wire::DeleteOpts::default())
+        .await
+        .expect("trash again");
+    assert!(!s.list_trash().await.expect("list")[0].delete_offsite_backups);
+    s.purge_from_trash(sel.clone())
+        .await
+        .expect("the old choice must not reach the dead target");
+    assert!(s.get(sel).await.is_err(), "the hosting should be gone");
+}
+
+/// Trashed, then the target removed from the config: nothing can reach the
+/// files any more, and refusing would keep the site in the trash for ever.
+#[tokio::test]
+async fn purge_goes_ahead_when_the_target_was_removed_meanwhile() {
+    let pool = open_memory().await.expect("open");
+    let (mut s, _dir) = trash_svc(pool);
+    s.remote_backup = Some(dead_ftp());
+    let created = s.create(req("goneftp.cz")).await.expect("create");
+    let sel = HostingSelector::Id(created.id);
+    s.delete(sel.clone(), with_ftp_backups())
+        .await
+        .expect("trash");
+    s.remote_backup = None;
+
+    s.purge_from_trash(sel.clone()).await.expect("purge");
+    assert!(s.get(sel).await.is_err(), "the hosting should be gone");
+}
+
+/// Real server (see `HY_FTP_TEST`), same folder as a sibling site of the
+/// system user: only this site's archives and dumps go, a stray dump with no
+/// archive included. Run with `--ignored`.
+#[tokio::test]
+#[ignore]
+async fn delete_with_ftp_backups_against_a_real_ftp_server() {
+    let Ok(spec) = std::env::var("HY_FTP_TEST") else {
+        return;
+    };
+    let p: Vec<String> = spec.splitn(5, ':').map(str::to_string).collect();
+    let pool = open_memory().await.expect("open");
+    let mut s = svc(pool, delete_mocks());
+    s.remote_backup = Some(RemoteBackupConfig {
+        scheme: "ftp".into(),
+        host: p[0].clone(),
+        port: p[1].parse().expect("port"),
+        user: p[2].clone(),
+        password: p[3].clone(),
+        base_path: p[4].clone(),
+    });
+    let created = s.create(req("gone-e2e.cz")).await.expect("create");
+    let sel = HostingSelector::Id(created.id);
+    let detail = s.get(sel.clone()).await.expect("get");
+    let (mut up, dir) = s.remote_upload_for(&detail).expect("target");
+    up.remote_dir = &dir;
+    let tmp = tempfile::tempdir().expect("dir");
+    for n in [
+        "gone-e2e.cz-100.tar.gz",
+        "gone-e2e.cz-100.sql",
+        "gone-e2e.cz-200.tgz",
+        "gone-e2e.cz-300.sql",
+        "other.cz-100.tar.gz",
+        "gone-e2e.cz-shop.cz-100.tar.gz",
+    ] {
+        let f = tmp.path().join(n);
+        std::fs::write(&f, b"x").expect("write");
+        hyperion_adapters::backup::upload_remote(&f, &up)
+            .await
+            .expect("upload");
+    }
+
+    s.delete(sel.clone(), with_ftp_backups())
+        .await
+        .expect("delete");
+
+    assert!(s.get(sel).await.is_err(), "the hosting should be gone");
+    let mut left: Vec<String> = hyperion_adapters::backup::list_remote(&up)
+        .await
+        .expect("list")
+        .expect("folder")
+        .into_iter()
+        .map(|f| f.name)
+        .collect();
+    left.sort();
+    assert_eq!(
+        left,
+        ["gone-e2e.cz-shop.cz-100.tar.gz", "other.cz-100.tar.gz"]
+    );
+}

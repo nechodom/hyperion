@@ -101,6 +101,10 @@ pub struct DeleteOpts {
     pub keep_user: bool,
     #[serde(default)]
     pub keep_database: bool,
+    /// Also delete this site's archives and dumps from the FTP/SFTP off-site
+    /// target. With the trash on, they go when the site leaves the trash.
+    #[serde(default)]
+    pub delete_offsite_backups: bool,
 }
 
 #[cfg(test)]
