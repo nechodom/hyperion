@@ -5864,3 +5864,142 @@ async fn trash_page_warns_about_a_pending_ftp_delete() {
         "{trash}"
     );
 }
+
+/// Reaches every tenant's backups, so `BackupRun` (which every Customer holds)
+/// is not the bar: neither role gets the page, and neither starts a job.
+#[tokio::test]
+async fn leftover_backups_are_closed_to_anyone_without_the_estate_wide_right() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d) = start_agent().await;
+    let app = build_app(sock.clone(), admin);
+    for role in ["customer", "operator", "viewer"] {
+        let username = format!("left-{role}");
+        hyperion_rpc_client::call(
+            &sock,
+            hyperion_rpc::codec::Request::WebUserCreate {
+                username: username.clone(),
+                email: format!("{username}@example.invalid"),
+                password: "role-pw-12345".into(),
+                role: role.into(),
+            },
+        )
+        .await
+        .expect("create user");
+        let cookie = acme_dns_login(&app, &username, "role-pw-12345").await;
+        let (status, _) = acme_dns_get(&app, &cookie, "/settings/backups/orphans").await;
+        assert_eq!(status, StatusCode::SEE_OTHER, "{role} got the page");
+        let csrf = acme_ssl_csrf(&app, &cookie).await;
+        for (uri, body) in [
+            ("/settings/backups/orphans/scan", format!("_csrf={csrf}")),
+            (
+                "/settings/backups/orphans/delete",
+                format!("_csrf={csrf}&target=ftp%3A%2F%2Ft&files=web1%2Fgone.cz-1.sql"),
+            ),
+        ] {
+            let resp = acme_dns_post(&app, &cookie, uri, body).await;
+            let to = resp.headers()[header::LOCATION].to_str().unwrap();
+            assert!(
+                !to.starts_with("/jobs/") && to.contains("flash_error"),
+                "{role} {uri}: {to}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_leftover_search_with_no_target_says_so_and_deletes_nothing() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d) = start_agent().await;
+    let app = build_app(sock.clone(), admin);
+    let cookie = acme_dns_login(&app, "kevin", "good-pw").await;
+    let (status, page) = acme_dns_get(&app, &cookie, "/settings/backups/orphans").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(page.contains("Not searched"), "{page}");
+    let csrf = acme_ssl_csrf(&app, &cookie).await;
+    let resp = acme_dns_post(
+        &app,
+        &cookie,
+        "/settings/backups/orphans/scan",
+        format!("_csrf={csrf}"),
+    )
+    .await;
+    let to = resp.headers()[header::LOCATION]
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(to.starts_with("/jobs/"), "{to}");
+    assert_eq!(acme_ssl_wait_job(&sock, &to).await, "done");
+    let (_, page) = acme_dns_get(&app, &cookie, "/settings/backups/orphans").await;
+    assert!(page.contains("No node has an FTP/SFTP target"), "{page}");
+
+    // Nothing ticked is not a job.
+    let resp = acme_dns_post(
+        &app,
+        &cookie,
+        "/settings/backups/orphans/delete",
+        format!("_csrf={csrf}&target=ftp%3A%2F%2Ft&files="),
+    )
+    .await;
+    let to = resp.headers()[header::LOCATION].to_str().unwrap();
+    assert!(to.contains("flash_error"), "{to}");
+}
+
+/// The silent node could be hosting any of these sites. The search calls
+/// nothing left over, and a delete that was ticked before it went quiet does
+/// not go ahead.
+#[tokio::test]
+async fn a_silent_node_stops_both_the_search_and_the_delete() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d, pool) = start_agent_with_pool().await;
+    let app = build_app(sock.clone(), admin);
+    sqlx::query(
+        "INSERT INTO nodes (node_id, label, enrolled_at, last_seen_at, agent_version, public_ip, \
+         enrolled_via) VALUES ('web-2', 'web-2.example.net', 1, 1, '0', '', 'test')",
+    )
+    .execute(&pool)
+    .await
+    .expect("node");
+    let cookie = acme_dns_login(&app, "kevin", "good-pw").await;
+    let csrf = acme_ssl_csrf(&app, &cookie).await;
+
+    let resp = acme_dns_post(
+        &app,
+        &cookie,
+        "/settings/backups/orphans/scan",
+        format!("_csrf={csrf}"),
+    )
+    .await;
+    let to = resp.headers()[header::LOCATION]
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(acme_ssl_wait_job(&sock, &to).await, "failed");
+    let (_, page) = acme_dns_get(&app, &cookie, "/settings/backups/orphans").await;
+    assert!(page.contains("id=\"orphan-refused\""), "{page}");
+    assert!(page.contains("web-2.example.net"), "{page}");
+    assert!(!page.contains("class=\"orphan-file\""), "{page}");
+
+    let resp = acme_dns_post(
+        &app,
+        &cookie,
+        "/settings/backups/orphans/delete",
+        format!("_csrf={csrf}&target=ftp%3A%2F%2Ft&files=web1%2Fgone.cz-1.sql"),
+    )
+    .await;
+    let to = resp.headers()[header::LOCATION]
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(acme_ssl_wait_job(&sock, &to).await, "failed");
+    let id = to.trim_start_matches("/jobs/").to_string();
+    let job = match hyperion_rpc_client::call(&sock, hyperion_rpc::codec::Request::JobGet { id })
+        .await
+        .expect("job")
+    {
+        hyperion_rpc::codec::Response::JobGet(Some(j)) => j,
+        other => panic!("{other:?}"),
+    };
+    let err = job.error.unwrap_or_default();
+    assert!(err.contains("Nothing was deleted"), "{err}");
+    assert!(err.contains("web-2.example.net"), "{err}");
+}

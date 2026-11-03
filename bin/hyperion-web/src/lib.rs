@@ -767,6 +767,18 @@ pub fn build_router(state: SharedState) -> Router {
             post(handlers::settings::post_offsite_backfill),
         )
         .route(
+            "/settings/backups/orphans",
+            get(handlers::settings::page_orphans::get_orphans),
+        )
+        .route(
+            "/settings/backups/orphans/scan",
+            post(handlers::settings::page_orphans::post_scan),
+        )
+        .route(
+            "/settings/backups/orphans/delete",
+            post(handlers::settings::page_orphans::post_delete),
+        )
+        .route(
             "/settings/backups/upsert",
             post(handlers::backups::post_upsert),
         )

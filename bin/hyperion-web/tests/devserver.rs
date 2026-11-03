@@ -1835,6 +1835,30 @@ async fn seed_demo_offsite(svc: &StubService) {
     hyperion_adapters::backup::upload_remote(&orphan, &up)
         .await
         .expect("upload orphan");
+    // Left by sites that no longer exist, for Settings -> Backups -> Leftover
+    // backups, beside a file no backup run would have named.
+    for (folder, name, bytes) in [
+        ("old_shop", format!("old-shop.cz-{at}.tar.gz"), 48_000_000),
+        ("old_shop", format!("old-shop.cz-{at}.sql"), 2_400_000),
+        ("old_shop", "notes-from-2023.txt".to_string(), 900),
+        ("old_shop", format!("a.cz-shop.cz-{at}.tgz"), 310_000),
+        (
+            detail.system_user.as_str(),
+            format!("sibling.cz-{at}.tar.gz"),
+            1_200_000,
+        ),
+    ] {
+        let dir = format!("{}/{folder}", remote.base_path.trim_end_matches('/'));
+        let file = local.join(&name);
+        std::fs::write(&file, vec![b'o'; bytes]).expect("leftover");
+        let up = hyperion_adapters::backup::RemoteUpload {
+            remote_dir: &dir,
+            ..up.clone()
+        };
+        hyperion_adapters::backup::upload_remote(&file, &up)
+            .await
+            .expect("upload leftover");
+    }
 }
 
 /// `DEVSERVER_DEMO_NODES=1`: enroll three fake worker nodes so the Nodes

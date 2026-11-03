@@ -327,7 +327,10 @@ fn timeout_for_request(req: &Request) -> u64 {
         // remote host that may be slow to answer.
         Request::BackupOffsiteList { .. } => 120,
         // A session with the deletes in it, then a listing to see they took.
-        Request::BackupOffsiteDelete { .. } => 300,
+        Request::BackupOffsiteDelete { .. } | Request::BackupOrphanDelete { .. } => 300,
+        // One round trip per folder on the target, one after the other so a
+        // server's per-address connection limit is not the thing being tested.
+        Request::BackupOrphanList { .. } => 1800,
         // `apt-get update` waits on every configured mirror, and one slow
         // mirror is enough to blow a 30-second budget. Reported as "node
         // unreachable" it would send the operator looking at the wrong thing.

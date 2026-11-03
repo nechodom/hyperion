@@ -215,6 +215,17 @@ pub async fn list_trashed_expired(
     Ok(out)
 }
 
+/// Every domain a hosting on this node answers to: primary names and aliases,
+/// trashed sites included.
+pub async fn all_domains(pool: &SqlitePool) -> Result<Vec<String>, StateError> {
+    let rows: Vec<(String,)> = sqlx::query_as(
+        "SELECT domain FROM hostings UNION SELECT alias_domain FROM hosting_aliases",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(|(d,)| d).collect())
+}
+
 /// `(id, domain, php_version, trashed)` for every site with a PHP version,
 /// trashed ones included — a trashed site still needs its branch to come
 /// back. Read raw, without the allow-list parse: a row on a branch the panel
