@@ -350,6 +350,9 @@ xferlog_std_format=YES
 dual_log_enable=YES
 syslog_enable=YES
 seccomp_sandbox=NO
+pasv_enable=YES
+pasv_min_port=40000
+pasv_max_port=50000
 EOFV
     [[ "$FTP_PORT" != "21" ]] && echo "listen_port=${FTP_PORT}" >> /etc/vsftpd.conf
   fi

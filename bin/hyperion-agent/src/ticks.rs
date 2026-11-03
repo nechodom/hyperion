@@ -121,6 +121,14 @@ async fn reapply_on_boot(svc: &Svc) {
             tracing::warn!(rows = n, "startup: reaped stale backup runs");
         }
     }
+    // Pin the FTP passive range BEFORE the firewall: a confirmed
+    // default-drop opens whatever range vsftpd.conf names, and nothing
+    // at all when it names none.
+    match svc.ftp_pin_passive_range_on_boot().await {
+        Ok(true) => tracing::info!("startup: pinned the FTP passive range"),
+        Ok(false) => {}
+        Err(e) => tracing::warn!(error=%e, "startup: FTP passive range not pinned"),
+    }
     // Rebuild hyperion's firewall chain (presets, confirmed
     // default-drop) BEFORE the bans: nft rules do not survive a
     // reboot, and the ban infra would otherwise create the chain

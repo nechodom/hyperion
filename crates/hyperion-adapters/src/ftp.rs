@@ -44,6 +44,9 @@ xferlog_std_format=YES
 dual_log_enable=YES
 syslog_enable=YES
 seccomp_sandbox=NO
+pasv_enable=YES
+pasv_min_port=40000
+pasv_max_port=50000
 ";
 
 /// True when `conf` sets `key` on a real, uncommented line.
@@ -502,9 +505,95 @@ pub async fn passive_range() -> Option<(u16, u16)> {
     let conf = tokio::fs::read_to_string(VSFTPD_CONF)
         .await
         .unwrap_or_default();
-    let lo = conf_value(&conf, "pasv_min_port")?.parse().ok()?;
-    let hi = conf_value(&conf, "pasv_max_port")?.parse().ok()?;
-    Some((lo, hi))
+    parse_passive_range(&conf)
+}
+
+/// The passive range `conf` really pins. Port 0 is vsftpd's "any port", so a
+/// zero, half a range or a reversed one all leave the data port unpredictable.
+fn parse_passive_range(conf: &str) -> Option<(u16, u16)> {
+    let lo: u16 = conf_value(conf, "pasv_min_port")?.parse().ok()?;
+    let hi: u16 = conf_value(conf, "pasv_max_port")?.parse().ok()?;
+    (lo > 0 && hi >= lo).then_some((lo, hi))
+}
+
+/// `conf` with the passive range pinned, or `None` when there is nothing to do:
+/// a real range is already set, passive mode is off on purpose, or the file is
+/// not a config Hyperion runs (that is `ensure_vsftpd_configured`'s decision).
+fn with_pinned_passive_range(conf: &str) -> Option<String> {
+    if !conf_sets(conf, "local_enable") || !conf_sets(conf, "pam_service_name") {
+        return None;
+    }
+    if parse_passive_range(conf).is_some()
+        || conf_value(conf, "pasv_enable").is_some_and(|v| v.eq_ignore_ascii_case("NO"))
+    {
+        return None;
+    }
+    let kept: Vec<&str> = conf
+        .lines()
+        .filter(|l| {
+            let t = l.trim();
+            t.starts_with('#')
+                || !["pasv_enable", "pasv_min_port", "pasv_max_port"]
+                    .iter()
+                    .any(|k| t.starts_with(k) && t[k.len()..].starts_with('='))
+        })
+        .collect();
+    Some(kept.join("\n") + "\n" + &passive_range_block())
+}
+
+/// The managed passive-range block, as written into vsftpd.conf.
+fn passive_range_block() -> String {
+    format!(
+        "\n# ── Passive data range (managed by Hyperion) ───────────────\n\
+         pasv_enable=YES\n\
+         pasv_min_port={PASV_MIN}\n\
+         pasv_max_port={PASV_MAX}\n"
+    )
+}
+
+/// Pin vsftpd's passive range on a node that has none. Returns whether it
+/// changed anything.
+///
+/// Without a range vsftpd hands out any port from 1024-65535 while the `ftp`
+/// firewall preset opens 40000-50000, so roughly five data connections in six
+/// hang until the client times out. That reads as "FTP is brutally slow", not
+/// as a firewall problem, and only `set_ftps` ever wrote a range.
+///
+/// Safe to run unattended, unlike the rest of the config repair: SIGHUP makes
+/// vsftpd re-read its config without dropping a session (verified on 3.0.5),
+/// where a restart would cut every transfer in progress on the node. A failed
+/// reload puts the old file back, so the file never claims a range the running
+/// daemon is not using.
+pub async fn pin_passive_range() -> Result<bool, AdapterError> {
+    let current = tokio::fs::read_to_string(VSFTPD_CONF)
+        .await
+        .unwrap_or_default();
+    let Some(body) = with_pinned_passive_range(&current) else {
+        return Ok(false);
+    };
+    atomic_write(Path::new(VSFTPD_CONF), body.as_bytes(), 0o644)
+        .await
+        .map_err(|e| AdapterError::Other(format!("write {VSFTPD_CONF}: {e}")))?;
+    // A stopped daemon reads the new file when it next starts.
+    if crate::systemctl_status_rich("vsftpd").await.active_state != "active" {
+        return Ok(true);
+    }
+    if let Err(e) = cmd::run("/usr/bin/systemctl", &["reload", "vsftpd"]).await {
+        atomic_write(Path::new(VSFTPD_CONF), current.as_bytes(), 0o644)
+            .await
+            .map_err(|e2| {
+                AdapterError::Other(format!(
+                    "vsftpd reload failed ({e}) and restoring {VSFTPD_CONF} failed too: {e2}"
+                ))
+            })?;
+        return Err(AdapterError::Other(format!(
+            "vsftpd reload failed, passive range not pinned: {e}"
+        )));
+    }
+    if let Err(why) = vsftpd_settled_running().await {
+        return Err(rollback_or_report(&current, why).await);
+    }
+    Ok(true)
 }
 
 /// Any `userlist_*` / ftpusers gating that could refuse this user. Hyperion
@@ -790,7 +879,9 @@ pub async fn ensure_vsftpd_configured() -> Result<(), AdapterError> {
             "pasv_max_port",
         ] {
             if let Some(v) = conf_value(&current, key) {
-                body.push_str(&format!("{key}={v}\n"));
+                if conf_value(&body, key) != Some(v) {
+                    body.push_str(&format!("{key}={v}\n"));
+                }
             }
         }
         atomic_write(Path::new(VSFTPD_CONF), body.as_bytes(), 0o644)
@@ -850,6 +941,13 @@ pub async fn ensure_vsftpd_configured() -> Result<(), AdapterError> {
             })?;
         cmd::run("/usr/bin/systemctl", &["restart", "vsftpd"]).await?;
     }
+
+    // 5. Pin the passive range on configs that predate it. Not fatal: this runs
+    //    while a customer's password is being set, and a node without a range
+    //    still logs in. The agent retries at its next start.
+    if let Err(e) = pin_passive_range().await {
+        tracing::warn!(error = %e, "ftp: could not pin the passive range");
+    }
     Ok(())
 }
 
@@ -875,11 +973,12 @@ pub async fn ensure_vsftpd_configured() -> Result<(), AdapterError> {
 /// Where Hyperion keeps the FTPS certificate when no panel certificate is
 /// available on this node.
 const FTPS_DIR: &str = "/etc/hyperion/ftps";
-/// Passive data range. Matches the `ftp` firewall preset's 40000-50000 —
-/// they have to agree, and until now vsftpd pinned nothing at all while the
-/// preset opened a range the daemon never used.
-const PASV_MIN: u16 = 40000;
-const PASV_MAX: u16 = 50000;
+/// Passive data range. Matches the `ftp` firewall preset's 40000-50000 — they
+/// have to agree, or data connections land on ports nothing has opened. Plain
+/// FTP needs this as much as FTPS does: no rule here assigns the conntrack FTP
+/// helper, so the firewall never opens a data port on demand.
+pub const PASV_MIN: u16 = 40000;
+pub const PASV_MAX: u16 = 50000;
 
 /// Which of `wanted` the installed vsftpd actually understands.
 ///
@@ -1058,12 +1157,7 @@ pub async fn set_ftps(
     // match the `ftp` firewall preset (40000-50000) either way, and stripping
     // it on the way out would make the recovery button leave a firewalled
     // node WORSE than it found it.
-    body.push_str(&format!(
-        "\n# ── Passive data range (managed by Hyperion) ───────────────\n\
-         pasv_enable=YES\n\
-         pasv_min_port={PASV_MIN}\n\
-         pasv_max_port={PASV_MAX}\n"
-    ));
+    body.push_str(&passive_range_block());
     if enabled {
         // Version-gated. An unknown directive is FATAL to vsftpd, and the
         // TLS-version toggles in particular are not present in every build,
@@ -1360,6 +1454,118 @@ mod ftps_tests {
     #[test]
     fn the_passive_range_matches_the_firewall_preset() {
         assert_eq!((PASV_MIN, PASV_MAX), (40000, 50000));
+    }
+}
+
+#[cfg(test)]
+mod passive_range_tests {
+    use super::*;
+
+    const OURS: &str = "listen=YES\nlocal_enable=YES\npam_service_name=vsftpd\nlisten_port=2121\n";
+
+    /// The outage shape: with no range vsftpd hands out any port from
+    /// 1024-65535, the `ftp` firewall preset opens 40000-50000, and about five
+    /// data connections in six hang until the client gives up. Measured
+    /// through a real nft drop policy: 51 of 60 hung, 0 of 60 once pinned.
+    #[test]
+    fn an_unpinned_config_gets_the_range_the_firewall_opens() {
+        let out = with_pinned_passive_range(OURS).expect("must be rewritten");
+        assert_eq!(parse_passive_range(&out), Some((PASV_MIN, PASV_MAX)));
+        assert!(conf_value(&out, "pasv_enable").is_some_and(|v| v == "YES"));
+        assert!(out.contains("listen_port=2121"), "custom port must survive");
+    }
+
+    #[test]
+    fn pinning_is_idempotent() {
+        let once = with_pinned_passive_range(OURS).expect("rewritten");
+        assert_eq!(with_pinned_passive_range(&once), None);
+    }
+
+    /// An operator's own range is the operator's firewall contract.
+    #[test]
+    fn a_range_already_pinned_is_left_alone() {
+        let conf = format!("{OURS}pasv_min_port=30000\npasv_max_port=31000\n");
+        assert_eq!(with_pinned_passive_range(&conf), None);
+    }
+
+    #[test]
+    fn passive_mode_switched_off_on_purpose_stays_off() {
+        let conf = format!("{OURS}pasv_enable=NO\n");
+        assert_eq!(with_pinned_passive_range(&conf), None);
+    }
+
+    /// Port 0 is vsftpd's "any port", half a range still leaves the other end
+    /// open, and a commented line is no setting at all. All three are unpinned.
+    #[test]
+    fn anything_short_of_a_real_range_counts_as_unpinned() {
+        for extra in [
+            "pasv_min_port=0\npasv_max_port=0\n",
+            "pasv_min_port=40000\n",
+            "pasv_max_port=50000\n",
+            "pasv_min_port=50000\npasv_max_port=40000\n",
+            "#pasv_min_port=40000\n#pasv_max_port=50000\n",
+        ] {
+            let conf = format!("{OURS}{extra}");
+            assert_eq!(parse_passive_range(&conf), None, "{extra:?}");
+            let out = with_pinned_passive_range(&conf).expect("rewritten");
+            assert_eq!(
+                parse_passive_range(&out),
+                Some((PASV_MIN, PASV_MAX)),
+                "{extra:?}"
+            );
+        }
+    }
+
+    /// A stale half range must not survive above the managed block: reading
+    /// the file later should not need vsftpd's last-one-wins rule in your head.
+    #[test]
+    fn pinning_replaces_a_half_range_instead_of_stacking_on_it() {
+        let conf = format!("{OURS}pasv_min_port=40000\n");
+        let out = with_pinned_passive_range(&conf).expect("rewritten");
+        assert_eq!(out.matches("pasv_min_port=").count(), 1);
+    }
+
+    /// Not ours: the agent's config repair decides about a stock or missing
+    /// file. Editing it here would make it look configured when it is not.
+    #[test]
+    fn a_config_that_is_not_ours_is_not_touched() {
+        assert_eq!(with_pinned_passive_range(""), None);
+        assert_eq!(
+            with_pinned_passive_range("listen=YES\n#local_enable=YES\n"),
+            None
+        );
+    }
+
+    /// Every path that writes a fresh config has to pin, or the next install
+    /// ships the same slow FTP again.
+    #[test]
+    fn every_fresh_config_pins_the_range() {
+        for (name, text) in [
+            ("HYPERION_VSFTPD_CONF", HYPERION_VSFTPD_CONF),
+            (
+                "components.sh",
+                include_str!("../../../packaging/install/components.sh"),
+            ),
+            (
+                "install-node.sh",
+                include_str!("../../../packaging/install/install-node.sh"),
+            ),
+        ] {
+            for line in [
+                "pasv_enable=YES",
+                "pasv_min_port=40000",
+                "pasv_max_port=50000",
+            ] {
+                assert!(
+                    text.lines().any(|l| l.trim() == line),
+                    "{name} is missing {line}"
+                );
+            }
+        }
+        assert_eq!(
+            parse_passive_range(HYPERION_VSFTPD_CONF),
+            Some((PASV_MIN, PASV_MAX))
+        );
     }
 }
 
