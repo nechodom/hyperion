@@ -931,6 +931,68 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(changed)
     }
 
+    /// Give a theme back to every active WordPress site that has none. Such a
+    /// site answers each page with HTTP 200 and an empty body, which is what
+    /// every install made before the installer added a base theme looks like.
+    /// Returns how many sites were repaired.
+    ///
+    /// One directory read per site. wp-cli runs only where that read finds no
+    /// theme, and its answer decides, because a site can keep its themes
+    /// outside wp-content. An install is recorded only after its theme is in
+    /// place, so a site still being created is never picked up here.
+    pub async fn wp_base_theme_tick(&self) -> Result<usize, RpcError> {
+        let rows = wordpress::list_install_roots(&self.pool)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("wp installs: {e}")))?;
+        let mut repaired = 0;
+        for (id, root, _) in rows {
+            if !wp_themes_dir_is_empty(&root).await {
+                continue;
+            }
+            let detail = match self.get(HostingSelector::Id(id)).await {
+                Ok(d) if d.state == HostingState::Active => d,
+                Ok(_) => continue,
+                Err(e) => {
+                    tracing::warn!(root = %root, error = %e, "base theme: hosting lookup failed");
+                    continue;
+                }
+            };
+            match self
+                .adapters
+                .wp_theme_list(&detail.system_user, &root)
+                .await
+            {
+                Ok((themes, _)) if themes.is_empty() => {}
+                Ok(_) => continue,
+                Err(e) => {
+                    tracing::debug!(domain = %detail.domain, error = %e, "base theme: wp-cli could not list themes");
+                    continue;
+                }
+            }
+            match self
+                .adapters
+                .wp_install_base_theme(&detail.system_user, &root)
+                .await
+            {
+                Ok(theme) => {
+                    repaired += 1;
+                    tracing::info!(domain = %detail.domain, theme = %theme, "base theme: installed on a site with no theme");
+                    self.append_audit(
+                        "hosting.wp.base_theme",
+                        Some(detail.id.as_str()),
+                        &serde_json::json!({"domain": detail.domain, "theme": theme}).to_string(),
+                        "ok",
+                    )
+                    .await;
+                }
+                Err(e) => {
+                    tracing::warn!(domain = %detail.domain, error = %e, "base theme: install failed");
+                }
+            }
+        }
+        Ok(repaired)
+    }
+
     /// List installed WordPress plugins for a hosting. Returns the
     /// plugin table + wp version + Hyperion's bulk auto-update flag
     /// (which controls whether the daily updater touches plugins at
@@ -1492,6 +1554,35 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             "Refused: this setting makes {domain} redirect in a loop, so the change has \
              been rolled back and the site is serving as it was. {culprit}"
         ))
+    }
+}
+
+/// No theme directory under `wp-content/themes`, or no such directory at all.
+/// Plain files do not count: WordPress ships an `index.php` placeholder there.
+/// Root reads a tree the site user owns, so a symlink on the way, or anything
+/// unreadable, answers `false` and leaves the site alone.
+async fn wp_themes_dir_is_empty(root_dir: &str) -> bool {
+    let Ok(dir) = hyperion_adapters::files::resolve_inside_jail(
+        std::path::Path::new(root_dir),
+        "wp-content/themes",
+    )
+    .await
+    else {
+        return false;
+    };
+    let mut entries = match tokio::fs::read_dir(&dir).await {
+        Ok(entries) => entries,
+        Err(e) => return e.kind() == std::io::ErrorKind::NotFound,
+    };
+    loop {
+        match entries.next_entry().await {
+            Ok(None) => return true,
+            Ok(Some(entry)) => match entry.file_type().await {
+                Ok(t) if t.is_file() => {}
+                _ => return false,
+            },
+            Err(_) => return false,
+        }
     }
 }
 

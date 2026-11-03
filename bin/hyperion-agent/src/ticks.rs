@@ -55,6 +55,7 @@ pub(crate) fn spawn_all(svc: &Svc, cert_renewal_window_days: i64) {
     spawn_cert_renewal(svc, cert_renewal_window_days.max(1));
     spawn_wp_defender(svc);
     spawn_wp_version_refresh(svc);
+    spawn_wp_base_theme(svc);
     spawn_wp_integrity(svc);
     spawn_billing_sweep(svc);
     spawn_package_enforce(svc);
@@ -491,6 +492,19 @@ fn spawn_wp_version_refresh(svc: &Svc) {
             Ok(n) if n > 0 => tracing::info!(corrected = n, "wp version refresh"),
             Ok(_) => {}
             Err(e) => tracing::warn!(error=%e, "wp version refresh failed"),
+        }
+    });
+}
+
+/// WordPress base theme — every hour, install a theme on any active site that
+/// has none, since those serve a blank page. One directory read per site;
+/// wp-cli only where that read finds no theme, so a restart costs nothing.
+fn spawn_wp_base_theme(svc: &Svc) {
+    every(svc, 5 * MIN, HOUR, |svc| async move {
+        match svc.wp_base_theme_tick().await {
+            Ok(n) if n > 0 => tracing::info!(repaired = n, "wp base theme"),
+            Ok(_) => {}
+            Err(e) => tracing::warn!(error=%e, "wp base theme failed"),
         }
     });
 }

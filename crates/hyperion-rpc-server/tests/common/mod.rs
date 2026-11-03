@@ -193,6 +193,9 @@ impl hyperion_core::AdapterPort for StubAdapters {
     ) -> Result<(Vec<hyperion_types::WpTheme>, String), AdapterError> {
         Ok((vec![], "6.5.3".into()))
     }
+    async fn wp_install_base_theme(&self, _: &str, _: &str) -> Result<String, AdapterError> {
+        Ok("twentytwentyfive".into())
+    }
     async fn wp_core_check_update(
         &self,
         _: &str,

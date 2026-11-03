@@ -1267,6 +1267,14 @@ impl AdapterPort for RealAdapter {
         hyperion_adapters::wpcli::theme_list(system_user, htdocs).await
     }
 
+    async fn wp_install_base_theme(
+        &self,
+        system_user: &str,
+        htdocs: &str,
+    ) -> Result<String, AdapterError> {
+        hyperion_adapters::wpcli::install_base_theme(system_user, htdocs).await
+    }
+
     async fn wp_core_check_update(
         &self,
         system_user: &str,

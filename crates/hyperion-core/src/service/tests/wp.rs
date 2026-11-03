@@ -183,3 +183,133 @@ async fn recorded_wp_version_follows_the_files_on_disk() {
     let st = s.wp_status(sel).await.expect("status").expect("wp");
     assert_eq!(st.wp_version, "7.2");
 }
+
+/// Runs the base-theme tick once against a recorded WordPress site whose
+/// docroot is a temp dir laid out by `layout`. Any adapter call the test did
+/// not expect on `mocks` fails it, which is how "wp-cli never ran" is asserted.
+async fn base_theme_tick(
+    mocks: MockAdapterPort,
+    state: &str,
+    layout: impl FnOnce(&std::path::Path),
+) -> usize {
+    let pool = open_memory().await.expect("open");
+    let s = svc(pool.clone(), mocks);
+    s.create(req("blank.cz")).await.expect("create");
+    let sel = HostingSelector::Domain(Domain::parse("blank.cz").unwrap());
+    let detail = s.get(sel).await.expect("get");
+    let tmp = tempfile::tempdir().expect("tempdir");
+    layout(tmp.path());
+    sqlx::query("UPDATE hostings SET root_dir = ?, state = ? WHERE id = ?")
+        .bind(tmp.path().to_str().unwrap())
+        .bind(state)
+        .bind(detail.id.as_str())
+        .execute(&pool)
+        .await
+        .expect("repoint root_dir");
+    wordpress::record_install(&pool, &detail.id, "https://blank.cz", "6.9", "h", 1)
+        .await
+        .expect("wp row");
+    s.wp_base_theme_tick().await.expect("tick")
+}
+
+/// What a `--skip-content` install leaves behind: the directory and its
+/// `index.php` placeholder, no theme.
+fn no_themes(root: &std::path::Path) {
+    std::fs::create_dir_all(root.join("wp-content/themes")).unwrap();
+    std::fs::write(root.join("wp-content/themes/index.php"), b"<?php").unwrap();
+}
+
+fn listed_theme(slug: &str) -> hyperion_types::WpTheme {
+    hyperion_types::WpTheme {
+        slug: slug.into(),
+        name: slug.into(),
+        version: "1.0".into(),
+        status: "active".into(),
+        update_available: false,
+        latest_version: String::new(),
+    }
+}
+
+#[tokio::test]
+async fn base_theme_tick_repairs_a_site_with_no_theme() {
+    let mut a = happy_mocks();
+    a.expect_wp_theme_list()
+        .times(1)
+        .returning(|_, _| Ok((vec![], "6.9".into())));
+    a.expect_wp_install_base_theme()
+        .times(1)
+        .returning(|_, _| Ok("twentytwentyfive".into()));
+    assert_eq!(base_theme_tick(a, "active", no_themes).await, 1);
+}
+
+#[tokio::test]
+async fn base_theme_tick_repairs_a_site_with_no_themes_directory() {
+    let mut a = happy_mocks();
+    a.expect_wp_theme_list()
+        .times(1)
+        .returning(|_, _| Ok((vec![], "6.9".into())));
+    a.expect_wp_install_base_theme()
+        .times(1)
+        .returning(|_, _| Ok("twentytwentyfive".into()));
+    assert_eq!(base_theme_tick(a, "active", |_| {}).await, 1);
+}
+
+#[tokio::test]
+async fn base_theme_tick_never_runs_wp_cli_when_a_theme_is_on_disk() {
+    let layout = |root: &std::path::Path| {
+        no_themes(root);
+        std::fs::create_dir(root.join("wp-content/themes/astra")).unwrap();
+    };
+    assert_eq!(base_theme_tick(happy_mocks(), "active", layout).await, 0);
+}
+
+/// A symlink is the site user's own arrangement. Root does not follow it.
+#[tokio::test]
+async fn base_theme_tick_leaves_a_symlinked_themes_directory_alone() {
+    let layout = |root: &std::path::Path| {
+        std::fs::create_dir(root.join("wp-content")).unwrap();
+        std::os::unix::fs::symlink("/etc", root.join("wp-content/themes")).unwrap();
+    };
+    assert_eq!(base_theme_tick(happy_mocks(), "active", layout).await, 0);
+}
+
+/// Bedrock and friends move the themes out of wp-content. The directory looks
+/// empty, wp-cli knows better, and its answer decides.
+#[tokio::test]
+async fn base_theme_tick_trusts_wp_cli_over_an_empty_directory() {
+    let mut a = happy_mocks();
+    a.expect_wp_theme_list()
+        .times(1)
+        .returning(|_, _| Ok((vec![listed_theme("sage")], "6.9".into())));
+    assert_eq!(base_theme_tick(a, "active", no_themes).await, 0);
+}
+
+/// An error says nothing about the themes, so nothing gets installed.
+#[tokio::test]
+async fn base_theme_tick_installs_nothing_when_wp_cli_cannot_answer() {
+    let mut a = happy_mocks();
+    a.expect_wp_theme_list()
+        .times(1)
+        .returning(|_, _| Err(AdapterError::Other("database down".into())));
+    assert_eq!(base_theme_tick(a, "active", no_themes).await, 0);
+}
+
+#[tokio::test]
+async fn base_theme_tick_skips_a_site_that_is_not_active() {
+    assert_eq!(
+        base_theme_tick(happy_mocks(), "suspended", no_themes).await,
+        0
+    );
+}
+
+#[tokio::test]
+async fn base_theme_tick_does_not_count_a_failed_install() {
+    let mut a = happy_mocks();
+    a.expect_wp_theme_list()
+        .times(1)
+        .returning(|_, _| Ok((vec![], "6.9".into())));
+    a.expect_wp_install_base_theme()
+        .times(1)
+        .returning(|_, _| Err(AdapterError::Other("wordpress.org unreachable".into())));
+    assert_eq!(base_theme_tick(a, "active", no_themes).await, 0);
+}
