@@ -1167,7 +1167,7 @@ pub async fn get_docker_logs(
             let mut notes: Vec<String> = Vec::new();
             if chunk.truncated {
                 notes.push(
-                    "The log is longer than one page can hold, so part of it is left out."
+                    "The log is longer than one page can hold, so older lines are left out."
                         .to_string(),
                 );
             }
@@ -1814,6 +1814,24 @@ mod tests {
         assert_eq!(project_from_url(&"x".repeat(NAME_MAX_CHARS + 1)), None);
         assert_eq!(project_token(""), "%28other%29");
         assert_eq!(project_token("a<b>"), "a%3Cb%3E");
+    }
+
+    #[test]
+    fn a_follow_poll_shows_why_it_stopped_and_what_was_left_out() {
+        let mut p = LogsPanel::closed("local", "shop", Vec::new());
+        p.append = true;
+        p.opened = true;
+        p.error = Some("Docker is not responding <b>now</b>".into());
+        p.note = "1 container could not be read.".into();
+        p.stopped = Some(LOG_POLL_NOTE.into());
+        let html = LogsTpl { logs: p }.render().expect("render");
+        assert!(
+            html.contains("Docker is not responding &lt;b&gt;now&lt;/b&gt;"),
+            "{html}"
+        );
+        assert!(html.contains("1 container could not be read."), "{html}");
+        assert!(html.contains("Following stopped"), "{html}");
+        assert!(!html.contains("id=\"docker-logs\""), "rows only: {html}");
     }
 
     #[test]

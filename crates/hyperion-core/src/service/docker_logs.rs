@@ -507,9 +507,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             wanted
         }) as usize;
         let since = cursor.as_ref().map(LogCursor::since_secs);
-        let share = MAX_LOG_BYTES / targets.len();
 
-        let reads = self.docker_read_logs(targets, tail, since, share).await;
+        let reads = self.docker_read_logs(targets, tail, since).await;
 
         let mut parts: Vec<Vec<DockerLogLine>> = Vec::new();
         let mut unreadable = 0u32;
@@ -559,32 +558,46 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     }
 
     /// One `docker logs` per target, eight at a time, in the order given.
+    ///
+    /// Each read may use the whole [`MAX_LOG_BYTES`]. `docker logs` prints
+    /// oldest first and a read that reaches the limit is killed there, which
+    /// leaves the start of the window and loses the end, so a cut read is
+    /// thrown away and repeated with half the tail until it fits (or the tail
+    /// is one line). What comes back is then the newest part of the log.
     async fn docker_read_logs(
         &self,
         targets: Vec<Target>,
         tail: u32,
         since: Option<i64>,
-        share: usize,
     ) -> Vec<Result<(Vec<DockerLogLine>, bool), DockerError>> {
         let adapters = self.adapters.clone();
         bounded_map(targets, MAX_CONCURRENT_READS, move |t: Target| {
             let adapters = adapters.clone();
             async move {
-                adapters
-                    .docker_read(
-                        DockerCmd::Logs {
-                            id: t.id,
-                            tail,
-                            since,
-                        },
-                        share,
-                    )
-                    .await
-                    .map(|bytes| {
-                        let cut_short = bytes.len() >= share;
-                        let bytes = &bytes[..bytes.len().min(share)];
-                        (parse_log_bytes(bytes, &t.service, cut_short), cut_short)
-                    })
+                let mut tail = tail.max(1);
+                let mut shrunk = false;
+                loop {
+                    // One byte more than is kept, so that a read which hit the
+                    // limit can be told from one that ended exactly on it.
+                    let bytes = adapters
+                        .docker_read(
+                            DockerCmd::Logs {
+                                id: t.id.clone(),
+                                tail,
+                                since,
+                            },
+                            MAX_LOG_BYTES + 1,
+                        )
+                        .await?;
+                    let cut = bytes.len() > MAX_LOG_BYTES;
+                    if cut && tail > 1 {
+                        tail /= 2;
+                        shrunk = true;
+                        continue;
+                    }
+                    let bytes = &bytes[..bytes.len().min(MAX_LOG_BYTES)];
+                    return Ok((parse_log_bytes(bytes, &t.service, cut), cut || shrunk));
+                }
             }
         })
         .await

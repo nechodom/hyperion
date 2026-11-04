@@ -3,5 +3,9 @@
    whatever a container printed. Included by _docker_logs.html. #}
 {% for r in logs.rows %}<div class="dl-row"><span class="dl-time">{{ r.time }}</span>{% if logs.show_service %}<span class="dl-svc">{{ r.service }}</span>{% endif %}<span class="dl-text">{{ r.text }}</span></div>
 {% endfor %}
+{% if logs.append %}
+{% if let Some(e) = logs.error %}<div class="dl-row tone-err"><span class="dl-text">{{ e }}</span></div>{% endif %}
+{% if !logs.note.is_empty() %}<div class="dl-row dl-empty"><span class="dl-text">{{ logs.note }}</span></div>{% endif %}
+{% endif %}
 {% if let Some(m) = logs.stopped %}<div class="dl-row dl-empty"><span class="dl-text">{{ m }}</span></div>{% endif %}
 {% if let Some(u) = logs.poll_url %}<div id="dl-poll" class="dl-poll" aria-hidden="true" hx-get="{{ u }}" hx-trigger="poll-tick" hx-swap="outerHTML" data-poll-visible data-poll-ms="5000"></div>{% endif %}

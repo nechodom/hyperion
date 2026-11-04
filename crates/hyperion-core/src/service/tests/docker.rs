@@ -380,7 +380,7 @@ fn world_mock(w: &Shared) -> MockAdapterPort {
                 Ok(out.into_bytes())
             }
             DockerCmd::SystemDf => Ok(b"{\"Type\":\"Images\",\"Size\":\"1GB\"}\n".to_vec()),
-            DockerCmd::Logs { id, .. } => {
+            DockerCmd::Logs { id, tail, .. } => {
                 w.log_limits.push(max);
                 if let Some(e) = w.logs_err.clone() {
                     return Err(e);
@@ -389,7 +389,21 @@ fn world_mock(w: &Shared) -> MockAdapterPort {
                 if n.is_some_and(|n| w.logs_fail.contains(&n)) {
                     return Err(DockerError::Failed("boom secret-stderr".into()));
                 }
-                let out = n.and_then(|n| w.logs.get(&n).cloned()).unwrap_or_default();
+                let all = n.and_then(|n| w.logs.get(&n).cloned()).unwrap_or_default();
+                // What docker does: the last `tail` lines, oldest first, and a
+                // run that reaches the byte limit is killed there, which
+                // leaves the START of those lines.
+                let starts: Vec<usize> = std::iter::once(0)
+                    .chain(
+                        all.iter()
+                            .enumerate()
+                            .filter(|(i, b)| **b == b'\n' && i + 1 < all.len())
+                            .map(|(i, _)| i + 1),
+                    )
+                    .collect();
+                let from = starts[starts.len().saturating_sub(tail as usize)];
+                let mut out = all[from..].to_vec();
+                out.truncate(max);
                 Ok(out)
             }
             other => panic!("the tick may only list, inspect and measure: {other:?}"),
@@ -1031,15 +1045,34 @@ async fn lines_are_capped() {
     assert!(last.contains("tail: 200"), "the default is 200: {last}");
 }
 
+/// Second `i` of the day as a docker timestamp.
+fn tsi(i: u32) -> String {
+    format!(
+        "2024-05-01T{:02}:{:02}:{:02}.000000000Z",
+        i / 3600,
+        (i / 60) % 60,
+        i % 60
+    )
+}
+
+/// `n` log lines of about 1 KiB, numbered from `first`, each a second apart.
+fn kib_lines(first: u32, n: u32, mark: &str) -> Vec<(String, String)> {
+    let filler = "x".repeat(1000);
+    (first..first + n)
+        .map(|i| (tsi(i), format!("{mark}{i:05} {filler}")))
+        .collect()
+}
+
+fn printed_owned(lines: &[(String, String)]) -> Vec<u8> {
+    let refs: Vec<(String, &str)> = lines.iter().map(|(t, x)| (t.clone(), x.as_str())).collect();
+    printed(&refs)
+}
+
 #[tokio::test]
 async fn huge_output_is_truncated() {
     let (s, w, _d) = shop_with(&["web"]).await;
     // 5 MiB in 1 KiB lines.
-    let filler = "x".repeat(1000);
-    let all: Vec<(String, &str)> = (0..5200u32)
-        .map(|i| (ts(i / 1000, i % 1000), filler.as_str()))
-        .collect();
-    set_logs(&w, 1, printed(&all));
+    set_logs(&w, 1, printed_owned(&kib_lines(0, 5200, "n")));
     let mut req = logs_for("shop", Some("shop-web-1"));
     req.lines = 2000;
     let chunk = s.docker_logs(req).await.expect("logs");
@@ -1052,6 +1085,73 @@ async fn huge_output_is_truncated() {
     assert!(chunk.truncated);
     assert!(!chunk.lines.is_empty());
     assert!(chunk.lines.len() <= 2000);
+    // What survives is the END of the log, the part that matters.
+    let last = chunk.lines.last().expect("a line");
+    assert!(last.text.starts_with("n05199 "), "{}", &last.text[..10]);
+}
+
+#[tokio::test]
+async fn an_overflowing_tail_is_read_again_with_less_until_it_fits() {
+    let (s, w, _d) = shop_with(&["web"]).await;
+    set_logs(&w, 1, printed_owned(&kib_lines(0, 5200, "n")));
+    let mut req = logs_for("shop", Some("shop-web-1"));
+    req.lines = 2000;
+    s.docker_logs(req).await.expect("logs");
+    let reads = w.lock().expect("world").reads.clone();
+    let tails: Vec<&str> = reads
+        .iter()
+        .filter(|r| r.starts_with("Logs"))
+        .map(String::as_str)
+        .collect();
+    assert!(tails[0].contains("tail: 2000"), "{tails:?}");
+    assert!(tails[1].contains("tail: 1000"), "{tails:?}");
+    assert!(tails.len() <= 3, "{tails:?}");
+    // Every read was allowed the whole cap (plus the byte that detects a cut).
+    let limits = w.lock().expect("world").log_limits.clone();
+    assert!(limits.iter().all(|l| *l == MAX_LOG_BYTES + 1), "{limits:?}");
+}
+
+#[tokio::test]
+async fn a_noisy_container_does_not_push_out_a_quiet_one() {
+    let (s, w, _d) = shop_with(&["noisy", "quiet"]).await;
+    // The noisy one alone is five times the cap; the quiet one is about 600 KiB
+    // and newer than all of it.
+    set_logs(&w, 1, printed_owned(&kib_lines(0, 5000, "noisy")));
+    set_logs(&w, 2, printed_owned(&kib_lines(5000, 600, "quiet")));
+    let mut req = logs_for("shop", None);
+    req.lines = 2000;
+    let chunk = s.docker_logs(req).await.expect("stack");
+    let texts: Vec<&str> = chunk.lines.iter().map(|l| l.text.as_str()).collect();
+    assert!(
+        texts.iter().any(|t| t.starts_with("quiet05599 ")),
+        "the newest line of the quiet container"
+    );
+    assert!(
+        texts.iter().filter(|t| t.starts_with("quiet")).count() >= 500,
+        "most of the quiet container is there"
+    );
+    assert!(
+        texts.iter().any(|t| t.starts_with("noisy04999 ")),
+        "and the newest line of the noisy one, not its oldest"
+    );
+    assert!(!texts.iter().any(|t| t.starts_with("noisy00000 ")));
+    assert!(chunk.truncated);
+    let size: usize = chunk.lines.iter().map(|l| l.text.len() + l.ts.len()).sum();
+    assert!(size < MAX_LOG_BYTES);
+}
+
+#[tokio::test]
+async fn a_filter_finds_a_match_in_the_newest_lines_when_older_ones_overflow() {
+    let (s, w, _d) = shop_with(&["web"]).await;
+    let mut lines = kib_lines(0, 5200, "n");
+    lines[5199].1.push_str(" needle");
+    set_logs(&w, 1, printed_owned(&lines));
+    let mut req = logs_for("shop", Some("shop-web-1"));
+    req.filter = Some("NEEDLE".into());
+    let chunk = s.docker_logs(req).await.expect("logs");
+    assert_eq!(chunk.lines.len(), 1, "{}", chunk.lines.len());
+    assert!(chunk.lines[0].text.starts_with("n05199 "));
+    assert!(chunk.truncated, "older lines were left out");
 }
 
 #[tokio::test]
@@ -1072,6 +1172,16 @@ async fn gigantic_single_line_is_cut() {
         "cut on a boundary"
     );
     assert!(chunk.truncated);
+    let reads = w.lock().expect("world").reads.clone();
+    assert!(
+        reads
+            .iter()
+            .rev()
+            .find(|r| r.starts_with("Logs"))
+            .expect("read")
+            .contains("tail: 1,"),
+        "a single line over the cap is read down to one line and cut there"
+    );
 }
 
 #[test]
@@ -1332,7 +1442,7 @@ async fn stack_logs_merge_by_time() {
 }
 
 #[tokio::test]
-async fn stack_reads_share_the_byte_cap_and_ask_for_the_requested_tail() {
+async fn stack_reads_each_get_the_whole_cap_and_ask_for_the_requested_tail() {
     let names: Vec<String> = (1..=20).map(|i| format!("s{i:02}")).collect();
     let cts: Vec<Ct> = names
         .iter()
@@ -1349,10 +1459,10 @@ async fn stack_reads_share_the_byte_cap_and_ask_for_the_requested_tail() {
     let chunk = s.docker_logs(logs_for("shop", None)).await.expect("stack");
     assert_eq!(chunk.lines.len(), 20);
     assert_eq!(reads_of(&w, "Logs"), 20);
-    // The byte cap is shared out, so all of them together stay under it.
+    // Each read may use the cap (what is kept is fitted across the merge).
     let limits = w.lock().expect("world").log_limits.clone();
     assert_eq!(limits.len(), 20);
-    assert!(limits.iter().sum::<usize>() <= MAX_LOG_BYTES, "{limits:?}");
+    assert!(limits.iter().all(|l| *l == MAX_LOG_BYTES + 1), "{limits:?}");
     // And each was asked for the tail the request named.
     let reads = w.lock().expect("world").reads.clone();
     assert!(reads
