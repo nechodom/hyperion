@@ -19,6 +19,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             req.system_user = Some(self.free_system_user(&bare).await?);
         }
         let user = req.system_user.clone();
+        let php_version = req.php_version.filter(|_| req.kind == "php");
         let result = self.create_provision(req).await;
         // A create on an existing system user re-enables it once its row is in
         // (a new online site needs the account). If the create then failed and
@@ -27,6 +28,16 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         if result.is_err() {
             if let Some(user) = user {
                 self.apply_system_user_policy(user.as_str()).await;
+                // The pool of a shared user lists the site that just failed,
+                // whose tree is gone, and it may hold the others' sessions.
+                if let Some(ver) = php_version {
+                    if let Err(e) = self.rewrite_pool_for_live_sites(user.as_str(), ver).await {
+                        tracing::error!(
+                            error = %e, user = %user.as_str(), version = %ver,
+                            "create rollback: could not rewrite the shared FPM pool"
+                        );
+                    }
+                }
             }
         }
         result
@@ -272,11 +283,18 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 self.adapters
                     .fpm_ensure(system_user.as_str(), domain, ver)
                     .await?;
-                stack.push(Box::new(FpmDelete {
-                    adapters: self.adapters.clone(),
-                    system_user: system_user.as_str().to_string(),
-                    version: ver,
-                }));
+                // Not when a site already runs on it: `create` rewrites that
+                // pool once this row has been rolled back.
+                let shared = hostings::live_on_php_pool(&self.pool, system_user.as_str(), ver)
+                    .await
+                    .map_or(true, |live| live.iter().any(|(_, d)| d != domain));
+                if !shared {
+                    stack.push(Box::new(FpmDelete {
+                        adapters: self.adapters.clone(),
+                        system_user: system_user.as_str().to_string(),
+                        version: ver,
+                    }));
+                }
             }
         }
 
@@ -663,6 +681,66 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             // Never fall back to the defaults on a read error — that is the
             // very reset this function exists to prevent.
             Err(e) => Err(AdapterError::Other(format!("limits get: {e}"))),
+        }
+    }
+
+    /// A hosting has stopped using this pool. Its state or version must
+    /// already say so: remove the pool unless another site still runs on it,
+    /// and then write it for those sites, as the one that left may be the
+    /// one whose tree held its sessions. Hostings on one system user and
+    /// version share the file, so removing it answered 502 for all of them.
+    ///
+    /// The state goes down first on every path, so of two sites leaving at
+    /// once the later one always sees the other gone, and the pool goes.
+    /// Logged, not returned: the site leaving is gone either way.
+    pub(super) async fn release_fpm_pool(&self, system_user: &str, ver: PhpVersion) {
+        let result = match self.rewrite_pool_for_live_sites(system_user, ver).await {
+            Ok(true) => Ok(()),
+            Ok(false) => self.adapters.fpm_delete(system_user, ver).await,
+            Err(e) => Err(e),
+        };
+        if let Err(e) = result {
+            tracing::error!(
+                error = %e, user = %system_user, version = %ver,
+                "could not release the FPM pool"
+            );
+        }
+    }
+
+    /// Write the pool for the sites still on it, if any. Returns whether there
+    /// were any. Which site writes it decides the limits it gets: per pool in
+    /// PHP-FPM, per hosting here. The first by domain, so it does not vary.
+    pub(super) async fn rewrite_pool_for_live_sites(
+        &self,
+        system_user: &str,
+        ver: PhpVersion,
+    ) -> Result<bool, AdapterError> {
+        let live = hostings::live_on_php_pool(&self.pool, system_user, ver)
+            .await
+            .map_err(|e| AdapterError::Other(format!("sites on pool: {e}")))?;
+        let Some((id, _)) = live.into_iter().next() else {
+            return Ok(false);
+        };
+        let detail = self
+            .get(HostingSelector::Id(id))
+            .await
+            .map_err(|e| AdapterError::Other(format!("site on pool: {e}")))?;
+        self.fpm_ensure_with_limits(&detail, ver).await?;
+        Ok(true)
+    }
+
+    /// End what a site going offline left running — unless its system user
+    /// still runs a site that is online, whose workers those are.
+    pub(super) async fn kill_offline_user_procs(&self, system_user: &str) {
+        match hostings::system_user_has_live_site(&self.pool, system_user).await {
+            Ok(false) => {
+                let _ = self.adapters.kill_user_procs(system_user).await;
+            }
+            Ok(true) => {}
+            Err(e) => tracing::error!(
+                error = %e, user = %system_user,
+                "could not tell whether a user runs a live site — its processes keep running"
+            ),
         }
     }
 

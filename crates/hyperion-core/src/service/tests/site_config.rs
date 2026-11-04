@@ -1116,3 +1116,257 @@ async fn set_vhost_options_rollback_on_nginx_failure() {
     assert!(!detail_back.vhost_options.maintenance_mode);
     assert_eq!(detail_back.vhost_options.hsts_max_age, 0);
 }
+
+// ───────── one FPM pool, several hostings ─────────
+//
+// A pool is `<user>.conf` per PHP version, so hostings sharing a system user
+// and a version share it.
+
+/// What the pool-related adapter calls did, in order.
+type PoolCalls = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
+
+/// `offline_cycle_mocks` with the pool calls recorded. From scratch: mockall
+/// matches in registration order, so an inherited `fpm_delete` would win.
+fn pool_recording_mocks(calls: &PoolCalls) -> MockAdapterPort {
+    let mut a = MockAdapterPort::new();
+    a.expect_ensure_user().returning(|_, _| Ok(1042));
+    a.expect_ensure_dirs().returning(|_, _, _, _| Ok(()));
+    a.expect_db_create().returning(|_, _, _| Ok(db_creds()));
+    a.expect_acme_issue().returning(|d, _| Ok(cert_for(d)));
+    a.expect_nginx_write_vhost().returning(|_| Ok(()));
+    a.expect_redis_is_available().returning(|| true);
+    a.expect_nginx_apply_suspended().returning(|_, _, _| Ok(()));
+    a.expect_db_lock().returning(|_, _| Ok(()));
+    a.expect_db_unlock().returning(|_, _| Ok(()));
+    a.expect_db_drop().returning(|_, _, _| Ok(()));
+    a.expect_nginx_delete_vhost().returning(|_, _| Ok(()));
+    a.expect_acme_delete().returning(|_| Ok(()));
+    a.expect_remove_hosting_tree().returning(|_| Ok(()));
+    a.expect_linux_login_expiry()
+        .returning(|_| Ok(Some(String::new())));
+    a.expect_linux_set_login_expiry().returning(|_, _| Ok(()));
+    let log = calls.clone();
+    a.expect_fpm_ensure().returning(move |_, domain, ver| {
+        log.lock().unwrap().push(format!("write {domain} {ver}"));
+        Ok(())
+    });
+    let log = calls.clone();
+    a.expect_apply_php_limits()
+        .returning(move |_, domain, ver, _, _, _, _| {
+            let ver = ver.expect("a version");
+            log.lock().unwrap().push(format!("write {domain} {ver}"));
+            Ok(())
+        });
+    let log = calls.clone();
+    a.expect_fpm_delete().returning(move |_, ver| {
+        log.lock().unwrap().push(format!("delete {ver}"));
+        Ok(())
+    });
+    let log = calls.clone();
+    a.expect_kill_user_procs().returning(move |_| {
+        log.lock().unwrap().push("kill".to_string());
+        Ok(())
+    });
+    a
+}
+
+/// `a.cz`, and `b.cz` on its system user with the PHP version given. The log
+/// starts empty after them.
+async fn two_sites_on_one_user(
+    s: &HostingService<MockAdapterPort>,
+    calls: &PoolCalls,
+    b_version: PhpVersion,
+) -> (HostingDetail, HostingDetail) {
+    s.create(req("a.cz")).await.expect("create a");
+    let a = s
+        .get(HostingSelector::Domain(Domain::parse("a.cz").unwrap()))
+        .await
+        .expect("get a");
+    s.create(HostingCreateReq {
+        system_user: Some(SystemUserName::parse(&a.system_user).expect("name")),
+        php_version: Some(b_version),
+        // The mock hands out one database name; a second row would collide.
+        database: None,
+        ..req("b.cz")
+    })
+    .await
+    .expect("create b");
+    let b = s
+        .get(HostingSelector::Domain(Domain::parse("b.cz").unwrap()))
+        .await
+        .expect("get b");
+    assert_eq!(a.system_user, b.system_user);
+    calls.lock().unwrap().clear();
+    (a, b)
+}
+
+fn taken(calls: &PoolCalls) -> Vec<String> {
+    std::mem::take(&mut *calls.lock().unwrap())
+}
+
+#[tokio::test]
+async fn suspending_one_site_keeps_the_pool_for_the_live_one() {
+    let pool = open_memory().await.expect("open");
+    let calls = PoolCalls::default();
+    let s = svc(pool, pool_recording_mocks(&calls));
+    let (a, b) = two_sites_on_one_user(&s, &calls, PhpVersion::V8_3).await;
+    let manual = || hyperion_types::SuspendReason::Manual { message: None };
+
+    s.suspend(HostingSelector::Id(a.id.clone()), manual())
+        .await
+        .expect("suspend a");
+    assert_eq!(
+        taken(&calls),
+        ["write b.cz 8.3"],
+        "b's pool stays, written for b; killing the user would kill b's workers"
+    );
+
+    // The last one out takes the pool with it.
+    s.suspend(HostingSelector::Id(b.id.clone()), manual())
+        .await
+        .expect("suspend b");
+    assert_eq!(taken(&calls), ["delete 8.3", "kill"]);
+
+    s.resume(HostingSelector::Id(a.id.clone()))
+        .await
+        .expect("resume a");
+    assert_eq!(taken(&calls), ["write a.cz 8.3"]);
+}
+
+#[tokio::test]
+async fn trashing_one_site_keeps_the_pool_for_the_live_one() {
+    let pool = open_memory().await.expect("open");
+    let calls = PoolCalls::default();
+    let s = svc(pool, pool_recording_mocks(&calls));
+    let (a, b) = two_sites_on_one_user(&s, &calls, PhpVersion::V8_3).await;
+
+    s.trash_hosting(a).await.expect("trash a");
+    assert_eq!(taken(&calls), ["write b.cz 8.3"]);
+
+    s.trash_hosting(b).await.expect("trash b");
+    assert_eq!(taken(&calls), ["delete 8.3", "kill"]);
+}
+
+#[tokio::test]
+async fn deleting_one_site_keeps_the_pool_for_the_live_one() {
+    let pool = open_memory().await.expect("open");
+    let calls = PoolCalls::default();
+    let s = svc(pool, pool_recording_mocks(&calls));
+    let (a, _b) = two_sites_on_one_user(&s, &calls, PhpVersion::V8_3).await;
+
+    s.hard_delete_internal(a, hyperion_rpc::wire::DeleteOpts::default())
+        .await
+        .expect("delete a");
+    assert_eq!(taken(&calls), ["write b.cz 8.3"]);
+}
+
+/// Sites on another version have a pool of their own, but the same user: its
+/// workers are still theirs.
+#[tokio::test]
+async fn a_site_on_another_php_version_does_not_hold_the_pool_but_keeps_the_user() {
+    let pool = open_memory().await.expect("open");
+    let calls = PoolCalls::default();
+    let s = svc(pool, pool_recording_mocks(&calls));
+    let (a, _b) = two_sites_on_one_user(&s, &calls, PhpVersion::V8_2).await;
+
+    s.suspend(
+        HostingSelector::Id(a.id.clone()),
+        hyperion_types::SuspendReason::Manual { message: None },
+    )
+    .await
+    .expect("suspend a");
+    assert_eq!(taken(&calls), ["delete 8.3"]);
+}
+
+#[tokio::test]
+async fn switching_one_sites_php_keeps_the_old_pool_for_the_other() {
+    let pool = open_memory().await.expect("open");
+    let calls = PoolCalls::default();
+    let s = svc(pool, pool_recording_mocks(&calls));
+    let (a, _b) = two_sites_on_one_user(&s, &calls, PhpVersion::V8_3).await;
+
+    s.set_php_version(HostingSelector::Id(a.id.clone()), PhpVersion::V8_4)
+        .await
+        .expect("switch");
+    assert_eq!(taken(&calls), ["write a.cz 8.4", "write b.cz 8.3"]);
+}
+
+/// A suspended site tries the new version on a pool, then lets it go. When a
+/// live sibling already runs that version, the pool is theirs and stays.
+#[tokio::test]
+async fn switching_a_suspended_sites_php_keeps_the_new_pool_for_the_other() {
+    let pool = open_memory().await.expect("open");
+    let calls = PoolCalls::default();
+    let s = svc(pool, pool_recording_mocks(&calls));
+    let (a, _b) = two_sites_on_one_user(&s, &calls, PhpVersion::V8_4).await;
+    s.suspend(
+        HostingSelector::Id(a.id.clone()),
+        hyperion_types::SuspendReason::Manual { message: None },
+    )
+    .await
+    .expect("suspend");
+    calls.lock().unwrap().clear();
+
+    s.set_php_version(HostingSelector::Id(a.id.clone()), PhpVersion::V8_4)
+        .await
+        .expect("switch");
+    assert_eq!(taken(&calls), ["write a.cz 8.4", "write b.cz 8.4"]);
+}
+
+/// A create that fails on a shared user rolls back its own work, not the pool
+/// of the site that was there first.
+#[tokio::test]
+async fn a_failed_create_on_a_shared_user_keeps_the_existing_pool() {
+    let pool = open_memory().await.expect("open");
+    let calls = PoolCalls::default();
+    let mut mocks = MockAdapterPort::new();
+    let creates = std::sync::atomic::AtomicUsize::new(0);
+    mocks.expect_db_create().returning(move |_, _, _| {
+        if creates.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 0 {
+            Ok(db_creds())
+        } else {
+            Err(AdapterError::Other("no database today".into()))
+        }
+    });
+    mocks.expect_ensure_user().returning(|_, _| Ok(1042));
+    mocks.expect_ensure_dirs().returning(|_, _, _, _| Ok(()));
+    mocks.expect_acme_issue().returning(|d, _| Ok(cert_for(d)));
+    mocks.expect_nginx_write_vhost().returning(|_| Ok(()));
+    mocks.expect_redis_is_available().returning(|| true);
+    mocks.expect_remove_hosting_tree().returning(|_| Ok(()));
+    mocks
+        .expect_linux_login_expiry()
+        .returning(|_| Ok(Some(String::new())));
+    mocks
+        .expect_linux_set_login_expiry()
+        .returning(|_, _| Ok(()));
+    let log = calls.clone();
+    mocks.expect_fpm_ensure().returning(move |_, domain, ver| {
+        log.lock().unwrap().push(format!("write {domain} {ver}"));
+        Ok(())
+    });
+    let log = calls.clone();
+    mocks.expect_fpm_delete().returning(move |_, ver| {
+        log.lock().unwrap().push(format!("delete {ver}"));
+        Ok(())
+    });
+    let s = svc(pool, mocks);
+    s.create(req("a.cz")).await.expect("create a");
+    let a = s
+        .get(HostingSelector::Domain(Domain::parse("a.cz").unwrap()))
+        .await
+        .expect("get a");
+    calls.lock().unwrap().clear();
+
+    s.create(HostingCreateReq {
+        system_user: Some(SystemUserName::parse(&a.system_user).expect("name")),
+        ..req("b.cz")
+    })
+    .await
+    .expect_err("the database refuses");
+    assert_eq!(
+        taken(&calls),
+        ["write b.cz 8.3", "write a.cz 8.3"],
+        "the pool goes back to a alone: b's tree, listed in it, is gone"
+    );
+}
