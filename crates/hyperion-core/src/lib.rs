@@ -58,6 +58,10 @@ pub use hyperion_adapters::dns_responder::{
 // every fresh boot until something triggers ensure_pool.
 pub use hyperion_adapters::phpfpm::ensure_socket_dirs as ensure_phpfpm_socket_dirs;
 
+// Agent calls this at startup so one OOM-killed worker cannot stop the FPM
+// master every site on that PHP version shares.
+pub use hyperion_adapters::phpfpm::ensure_oom_policy_dropins as ensure_phpfpm_oom_policy_dropins;
+
 // Re-export postfix smart-host + direct-delivery helpers so the
 // agent's main() can configure the MTA at boot from agent.toml's
 // [email] settings (PHP mail() flows through the same authenticated
