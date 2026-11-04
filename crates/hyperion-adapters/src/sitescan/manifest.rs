@@ -17,7 +17,9 @@ use regex::Regex;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest as _, Sha256};
 
-use super::discover::{header_field, plugin_candidates, Field, HEADER_BYTES};
+use super::discover::{
+    header_field, plugin_candidates, Field, HEADER_BYTES, MAX_PLUGIN_CANDIDATES,
+};
 use crate::AdapterError;
 
 /// Files a site legitimately edits (a readme is rewritten by translation
@@ -153,6 +155,20 @@ pub struct Manifest {
     /// Path relative to the component root (core: the docroot).
     #[serde(default)]
     pub files: BTreeMap<String, Digest>,
+    /// Core only: the locale whose checksums these are. It differs from the
+    /// key's locale when wordpress.org had none for it and en_US stood in, and
+    /// translated files are then not comparable.
+    #[serde(default)]
+    pub served_locale: Option<String>,
+}
+
+impl Manifest {
+    /// Built from en_US checksums for a key that asked for another locale.
+    pub fn is_locale_fallback(&self, key: &ComponentKey) -> bool {
+        key.kind == ComponentKind::Core
+            && key.locale.is_some()
+            && self.served_locale.as_deref() != key.locale.as_deref()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -237,13 +253,27 @@ fn check_key(key: &ComponentKey) -> Result<(), AdapterError> {
 /// `<cache_dir>/<kind>/<slug>/<version>[@<locale>].json`. Fails for a slug,
 /// version or locale that could be anything but a plain file name.
 pub fn cache_path(cache_dir: &Path, key: &ComponentKey) -> Result<PathBuf, AdapterError> {
+    cache_path_for(cache_dir, key, ManifestSource::WordPressOrg)
+}
+
+/// Like [`cache_path`] for a manifest of `source`. Vendor packages live under
+/// `vendor/` so they can never stand in for (or be overwritten by) upstream's.
+pub fn cache_path_for(
+    cache_dir: &Path,
+    key: &ComponentKey,
+    source: ManifestSource,
+) -> Result<PathBuf, AdapterError> {
     check_key(key)?;
     let mut name = key.version.clone();
     if let Some(l) = &key.locale {
         name.push('@');
         name.push_str(l);
     }
-    Ok(cache_dir
+    let base = match source {
+        ManifestSource::WordPressOrg => cache_dir.to_path_buf(),
+        ManifestSource::VendorPackage => cache_dir.join("vendor"),
+    };
+    Ok(base
         .join(key.kind.as_str())
         .join(&key.slug)
         .join(format!("{name}.json")))
@@ -264,8 +294,32 @@ fn md5_of(hex_str: &str, what: &str) -> Result<[u8; 16], AdapterError> {
         .ok_or_else(|| AdapterError::Other(format!("bad md5 for {what} in checksums")))
 }
 
+/// A manifest key is a path below the component root. It is only compared, but
+/// a hostile or broken answer must not carry names that mean something else.
+pub fn rel_path_ok(p: &str) -> bool {
+    let b = p.as_bytes();
+    !(p.is_empty()
+        || p.contains('\\')
+        || p.contains('\0')
+        || p.starts_with('/')
+        || (b.len() >= 2 && b[1] == b':' && b[0].is_ascii_alphabetic())
+        || p.split('/').any(|c| c.is_empty() || c == "." || c == ".."))
+}
+
+fn checked_path<'a>(what: &str, p: &'a str) -> Result<&'a str, AdapterError> {
+    if rel_path_ok(p) {
+        Ok(p)
+    } else {
+        Err(AdapterError::Other(format!(
+            "{what}: refusing path {:?}",
+            p.chars().take(80).collect::<String>()
+        )))
+    }
+}
+
 /// `{"checksums":{"<path>":"<md5>",...}}`. `None` when wordpress.org has no
 /// checksums for this version and locale (it answers `{"checksums":false}`).
+/// An empty list is an error, not "nothing to check".
 pub fn parse_core_checksums(json: &str) -> Result<Option<BTreeMap<String, Digest>>, AdapterError> {
     let v: serde_json::Value = serde_json::from_str(json)
         .map_err(|e| AdapterError::Other(format!("core checksums: {e}")))?;
@@ -274,10 +328,14 @@ pub fn parse_core_checksums(json: &str) -> Result<Option<BTreeMap<String, Digest
         Some(serde_json::Value::Object(map)) => {
             let mut files = BTreeMap::new();
             for (path, val) in map {
+                checked_path("core checksums", path)?;
                 let h = val
                     .as_str()
                     .ok_or_else(|| AdapterError::Other("core checksums: non-string hash".into()))?;
                 files.insert(path.clone(), Digest::Md5(md5_of(h, path)?));
+            }
+            if files.is_empty() {
+                return Err(AdapterError::Other("core checksums: empty list".into()));
             }
             Ok(Some(files))
         }
@@ -307,6 +365,7 @@ pub fn parse_plugin_checksums(json: &str) -> Result<BTreeMap<String, Digest>, Ad
         .ok_or_else(|| bad("no files"))?;
     let mut out = BTreeMap::new();
     for (path, entry) in files {
+        checked_path("plugin checksums", path)?;
         let sha = entry.get("sha256").and_then(hash_strings).map(|l| {
             l.into_iter()
                 .map(hex_array::<32>)
@@ -329,6 +388,9 @@ pub fn parse_plugin_checksums(json: &str) -> Result<BTreeMap<String, Digest>, Ad
         };
         out.insert(path.clone(), digest);
     }
+    if out.is_empty() {
+        return Err(bad("empty list"));
+    }
     Ok(out)
 }
 
@@ -345,6 +407,8 @@ pub fn core_locale_chain(locale: Option<&str>) -> Vec<String> {
 /// comes from the site's database).
 #[derive(Debug, Clone, Copy)]
 pub struct ZipLimits {
+    /// Size of the ZIP file itself.
+    pub max_file_bytes: u64,
     pub max_total_bytes: u64,
     pub max_entries: usize,
 }
@@ -352,6 +416,7 @@ pub struct ZipLimits {
 impl Default for ZipLimits {
     fn default() -> Self {
         ZipLimits {
+            max_file_bytes: MAX_THEME_ZIP_BYTES,
             max_total_bytes: 512 * 1024 * 1024,
             max_entries: 50_000,
         }
@@ -374,6 +439,50 @@ fn zip_err(m: impl std::fmt::Display) -> AdapterError {
     AdapterError::Other(format!("zip: {m}"))
 }
 
+/// Total entries the end-of-central-directory record declares, read without
+/// parsing the directory (zip64 records included).
+fn declared_entry_count(file: &mut std::fs::File, size: u64) -> Result<u64, AdapterError> {
+    use std::io::{Seek, SeekFrom};
+    const EOCD_LEN: usize = 22;
+    // The EOCD ends the file, followed by at most a 64 KiB comment.
+    let tail_len = size.min(EOCD_LEN as u64 + 65_535);
+    let mut tail = vec![0u8; tail_len as usize];
+    file.seek(SeekFrom::Start(size - tail_len))?;
+    file.read_exact(&mut tail)?;
+    let at = (0..=tail.len().saturating_sub(EOCD_LEN))
+        .rev()
+        .find(|&i| tail[i..].starts_with(b"PK\x05\x06"))
+        .ok_or_else(|| zip_err("no end-of-central-directory record"))?;
+    let count16 = u16::from_le_bytes([tail[at + 10], tail[at + 11]]);
+    if count16 != 0xFFFF {
+        return Ok(count16 as u64);
+    }
+    // zip64: the locator sits right before the EOCD and points at the record.
+    let eocd_pos = size - tail_len + at as u64;
+    if eocd_pos < 20 {
+        return Err(zip_err("truncated zip64 locator"));
+    }
+    let mut loc = [0u8; 20];
+    file.seek(SeekFrom::Start(eocd_pos - 20))?;
+    file.read_exact(&mut loc)?;
+    if &loc[..4] != b"PK\x06\x07" {
+        return Err(zip_err("missing zip64 locator"));
+    }
+    let rec_pos = u64::from_le_bytes(loc[8..16].try_into().map_err(|_| zip_err("locator"))?);
+    if rec_pos.saturating_add(56) > size {
+        return Err(zip_err("zip64 record out of range"));
+    }
+    let mut rec = [0u8; 56];
+    file.seek(SeekFrom::Start(rec_pos))?;
+    file.read_exact(&mut rec)?;
+    if &rec[..4] != b"PK\x06\x06" {
+        return Err(zip_err("bad zip64 record"));
+    }
+    Ok(u64::from_le_bytes(
+        rec[32..40].try_into().map_err(|_| zip_err("zip64 count"))?,
+    ))
+}
+
 /// An entry name checked for anything that could name a place outside the
 /// package, split into the top-level folder and the path below it. None for
 /// entries to ignore (`__MACOSX`).
@@ -384,18 +493,8 @@ fn split_entry_name(name: &str) -> Result<Option<(&str, &str)>, AdapterError> {
             name.chars().take(80).collect::<String>()
         ))
     };
-    let b = name.as_bytes();
-    if name.contains('\\') || name.contains('\0') || name.starts_with('/') {
-        return Err(bad());
-    }
-    if b.len() >= 2 && b[1] == b':' && b[0].is_ascii_alphabetic() {
-        return Err(bad());
-    }
     let trimmed = name.strip_suffix('/').unwrap_or(name);
-    if trimmed
-        .split('/')
-        .any(|c| c.is_empty() || c == "." || c == "..")
-    {
+    if !rel_path_ok(trimmed) {
         return Err(bad());
     }
     let (top, rest) = match trimmed.split_once('/') {
@@ -419,8 +518,21 @@ pub(crate) fn manifest_from_zip_with(
     if expected.kind == ComponentKind::Core {
         return Err(zip_err("core has no package manifest"));
     }
-    let file = std::fs::File::open(path)?;
+    let mut file = std::fs::File::open(path)?;
+    // Before the zip crate parses the central directory, whose size is
+    // proportional to the entry count a file declares: measured, a 55 MB ZIP
+    // of a million entries costs over 500 MB to open.
+    let size = file.metadata()?.len();
+    if size > limits.max_file_bytes {
+        return Err(zip_err("file over the size cap"));
+    }
+    let declared = declared_entry_count(&mut file, size)?;
+    if declared > limits.max_entries as u64 {
+        return Err(zip_err(format!("more than {} entries", limits.max_entries)));
+    }
     let mut archive = zip::ZipArchive::new(file).map_err(zip_err)?;
+    // The crate collapses entries with the same name, so this can only be
+    // lower than the declared count; it is the bound the loops below use.
     if archive.len() > limits.max_entries {
         return Err(zip_err(format!("more than {} entries", limits.max_entries)));
     }
@@ -479,6 +591,7 @@ pub(crate) fn manifest_from_zip_with(
             .insert(rest.to_string(), Digest::Sha256(hasher.finalize().into()))
             .is_some()
         {
+            // Defensive: the crate already merges equal names.
             return Err(zip_err("duplicate entry"));
         }
         index.insert(rest.to_string(), i);
@@ -495,7 +608,11 @@ pub(crate) fn manifest_from_zip_with(
             expected.version
         )));
     }
-    Ok(Manifest { source, files })
+    Ok(Manifest {
+        source,
+        files,
+        served_locale: None,
+    })
 }
 
 /// The `Version:` the package's own header declares.
@@ -526,7 +643,10 @@ fn package_version(
                 .filter(|k| !k.contains('/') && k.ends_with(".php"))
                 .cloned()
                 .collect();
-            for n in plugin_candidates(&expected.slug, names) {
+            for n in plugin_candidates(&expected.slug, names)
+                .into_iter()
+                .take(MAX_PLUGIN_CANDIDATES)
+            {
                 let h = head(&n)?;
                 if header_field(&h, Field::PluginName).is_some() {
                     return header_field(&h, Field::Version)
@@ -636,50 +756,95 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), AdapterError> {
     Ok(())
 }
 
-fn read_cached(path: &Path) -> Option<Manifest> {
+/// A cached upstream manifest and how old it is. Anything that isn't a usable
+/// wordpress.org manifest (another source, no files, unreadable) is a miss.
+fn read_cached(path: &Path, now: SystemTime) -> Option<(Manifest, Duration)> {
     let meta = std::fs::metadata(path).ok()?;
     if meta.len() > MAX_JSON_BYTES {
         return None;
     }
-    serde_json::from_slice(&std::fs::read(path).ok()?).ok()
+    let m: Manifest = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+    if m.source != ManifestSource::WordPressOrg || m.files.is_empty() {
+        return None;
+    }
+    let age = now
+        .duration_since(meta.modified().ok()?)
+        .unwrap_or(Duration::ZERO);
+    Some((m, age))
 }
 
-fn miss_is_fresh(marker: &Path) -> bool {
+fn miss_is_fresh(marker: &Path, now: SystemTime) -> bool {
     std::fs::metadata(marker)
         .and_then(|m| m.modified())
         .ok()
-        .and_then(|t| SystemTime::now().duration_since(t).ok())
+        .and_then(|t| now.duration_since(t).ok())
         .is_some_and(|age| age < MISS_TTL)
 }
 
+/// The HTTP access `fetch_wporg_manifest` needs, so the fallback and cache
+/// rules can be tested without a network.
+#[async_trait::async_trait]
+trait Http: Sync {
+    /// GET `url`: the body, or `None` for a 404. Anything else that isn't a
+    /// 200 is an error, so an outage is never read as "nothing there".
+    async fn get(&self, url: &str, max_bytes: u64) -> Result<Option<Vec<u8>>, AdapterError>;
+}
+
+struct Curl<'a> {
+    cache_dir: &'a Path,
+}
+
+#[async_trait::async_trait]
+impl Http for Curl<'_> {
+    async fn get(&self, url: &str, max_bytes: u64) -> Result<Option<Vec<u8>>, AdapterError> {
+        get_body(url, self.cache_dir, max_bytes).await
+    }
+}
+
 /// The manifest wordpress.org implies for `key`, from the cache or the
-/// network. `Ok(None)` is "wordpress.org has nothing for this slug and
-/// version" (unverifiable, cached for 24 h); a network failure is `Err` and
-/// is never cached.
+/// network. `Ok(None)` is "wordpress.org has nothing for this" (unverifiable;
+/// cached for 24 h), including a key no wordpress.org URL could hold (a
+/// tenant picks its slug and version). A network failure is `Err` and is
+/// never cached. A core manifest built from en_US for another locale carries
+/// `served_locale` and is looked up again after 24 h.
 pub async fn fetch_wporg_manifest(
     key: &ComponentKey,
     cache_dir: &Path,
 ) -> Result<Option<Manifest>, AdapterError> {
-    let path = cache_path(cache_dir, key)?;
-    if let Some(m) = read_cached(&path) {
-        return Ok(Some(m));
+    fetch_with(&Curl { cache_dir }, key, cache_dir, SystemTime::now()).await
+}
+
+async fn fetch_with(
+    http: &dyn Http,
+    key: &ComponentKey,
+    cache_dir: &Path,
+    now: SystemTime,
+) -> Result<Option<Manifest>, AdapterError> {
+    let Ok(path) = cache_path(cache_dir, key) else {
+        return Ok(None);
+    };
+    if let Some((m, age)) = read_cached(&path, now) {
+        if !(m.is_locale_fallback(key) && age >= MISS_TTL) {
+            return Ok(Some(m));
+        }
     }
     let marker = miss_path(&path);
-    if miss_is_fresh(&marker) {
+    if miss_is_fresh(&marker, now) {
         return Ok(None);
     }
     let fetched = match key.kind {
-        ComponentKind::Core => fetch_core(key, cache_dir).await?,
+        ComponentKind::Core => fetch_core(http, key).await?,
         ComponentKind::Plugin => {
             let url = format!(
                 "https://downloads.wordpress.org/plugin-checksums/{}/{}.json",
                 key.slug, key.version
             );
-            match get_body(&url, cache_dir, MAX_JSON_BYTES).await? {
+            match http.get(&url, MAX_JSON_BYTES).await? {
                 None => None,
                 Some(body) => Some(Manifest {
                     source: ManifestSource::WordPressOrg,
                     files: parse_plugin_checksums(&String::from_utf8_lossy(&body))?,
+                    served_locale: None,
                 }),
             }
         }
@@ -696,22 +861,23 @@ pub async fn fetch_wporg_manifest(
     Ok(fetched)
 }
 
-async fn fetch_core(
-    key: &ComponentKey,
-    cache_dir: &Path,
-) -> Result<Option<Manifest>, AdapterError> {
+/// Core checksums for the key's locale, else en_US (marked in
+/// `served_locale`). Only a definite "no checksums" answer falls back; a
+/// network failure is an error.
+async fn fetch_core(http: &dyn Http, key: &ComponentKey) -> Result<Option<Manifest>, AdapterError> {
     for locale in core_locale_chain(key.locale.as_deref()) {
         let url = format!(
             "https://api.wordpress.org/core/checksums/1.0/?version={}&locale={locale}",
             key.version
         );
-        let Some(body) = get_body(&url, cache_dir, MAX_JSON_BYTES).await? else {
+        let Some(body) = http.get(&url, MAX_JSON_BYTES).await? else {
             continue;
         };
         if let Some(files) = parse_core_checksums(&String::from_utf8_lossy(&body))? {
             return Ok(Some(Manifest {
                 source: ManifestSource::WordPressOrg,
                 files,
+                served_locale: Some(locale),
             }));
         }
     }
@@ -738,6 +904,9 @@ async fn fetch_theme(
             )))
         }
     }
+    if std::fs::metadata(tmp.path())?.len() > MAX_THEME_ZIP_BYTES {
+        return Err(AdapterError::Other("theme package too large".into()));
+    }
     let zip_path = tmp.path().to_path_buf();
     let key = key.clone();
     // Hashing a large package is CPU and disk work: off the async threads.
@@ -753,31 +922,44 @@ async fn fetch_theme(
 
 // ---- does wordpress.org know this slug? ----
 
-/// What wordpress.org's info answer means for a slug. 404 and "not found"
-/// bodies are `false`; anything that is not clearly one or the other is an
-/// error, so an outage or a changed API is never read as "premium".
+/// What wordpress.org's info answer means for a slug. A body that names the
+/// slug, or says the plugin is closed (live: HTTP 404 with
+/// `{"error":"closed","slug":...}`), means it is known, whatever the status.
+/// Only a recognised "not found" answer is `false`; anything else is an error,
+/// so an outage or a changed API is never read as "premium".
 pub fn interpret_slug_info(
     kind: ComponentKind,
     status: u16,
     body: &str,
 ) -> Result<bool, AdapterError> {
     let bad = |m: &str| AdapterError::Other(format!("wordpress.org {} info: {m}", kind.as_str()));
-    match status {
-        404 => return Ok(false),
-        200 => {}
-        s => return Err(bad(&format!("HTTP {s}"))),
+    if status != 200 && status != 404 {
+        return Err(bad(&format!("HTTP {status}")));
     }
-    let v: serde_json::Value = serde_json::from_str(body).map_err(|e| bad(&e.to_string()))?;
-    match &v {
-        serde_json::Value::Null | serde_json::Value::Bool(false) => Ok(false),
-        serde_json::Value::Object(o) if o.contains_key("error") => Ok(false),
-        serde_json::Value::Object(o) if o.get("slug").is_some_and(|s| s.is_string()) => Ok(true),
+    match serde_json::from_str::<serde_json::Value>(body) {
+        Ok(serde_json::Value::Object(o)) => {
+            let error = o.get("error").and_then(|e| e.as_str()).unwrap_or("");
+            if o.get("slug").is_some_and(|s| s.is_string())
+                || o.get("closed").and_then(|c| c.as_bool()) == Some(true)
+                || error.eq_ignore_ascii_case("closed")
+            {
+                Ok(true)
+            } else if error.to_ascii_lowercase().contains("not found") {
+                Ok(false)
+            } else {
+                Err(bad("unrecognised answer"))
+            }
+        }
+        Ok(serde_json::Value::Null | serde_json::Value::Bool(false)) if status == 200 => Ok(false),
+        Err(_) if status == 404 && body.trim().is_empty() => Ok(false),
         _ => Err(bad("unrecognised answer")),
     }
 }
 
-/// True when wordpress.org lists a plugin or theme with this slug. Cached per
-/// slug for 7 days; a network failure is `Err`, never `false`.
+/// True when wordpress.org lists a plugin or theme with this slug (a closed
+/// one counts). Cached per slug for 7 days; a network failure is `Err`, never
+/// `false`. A slug that can't be a wordpress.org slug (the tenant names its
+/// folder) is `false`.
 pub async fn wporg_slug_known(
     kind: ComponentKind,
     slug: &str,
@@ -787,7 +969,7 @@ pub async fn wporg_slug_known(
         return Err(refuse_key("kind", "core"));
     }
     if !valid_slug(slug) {
-        return Err(refuse_key("slug", slug));
+        return Ok(false);
     }
     let url = if kind == ComponentKind::Plugin {
         format!("https://api.wordpress.org/plugins/info/1.0/{slug}.json")
@@ -935,6 +1117,7 @@ mod tests {
         let m = Manifest {
             source: ManifestSource::VendorPackage,
             files: BTreeMap::from([("a.php".to_string(), Digest::Sha256([7; 32]))]),
+            served_locale: Some("en_US".into()),
         };
         let back: Manifest =
             serde_json::from_str(&serde_json::to_string(&m).expect("ser")).expect("de");
@@ -1073,11 +1256,13 @@ mod tests {
         );
         let k = key(ComponentKind::Plugin, "demo", "1.2.3");
         let small = ZipLimits {
+            max_file_bytes: u64::MAX,
             max_total_bytes: 1024 * 1024,
             max_entries: 100,
         };
         assert!(manifest_from_zip_with(&zp, &k, ManifestSource::VendorPackage, small).is_err());
         let few = ZipLimits {
+            max_file_bytes: u64::MAX,
             max_total_bytes: u64::MAX,
             max_entries: 1,
         };
@@ -1125,15 +1310,28 @@ mod tests {
         assert!(
             interpret_slug_info(p, 200, r#"{"name":"Akismet","slug":"akismet"}"#).expect("known")
         );
-        assert!(!interpret_slug_info(p, 404, r#"{"error":"Plugin not found."}"#).expect("404"));
+        assert!(
+            !interpret_slug_info(p, 404, r#"{"error":"Plugin not found."}"#).expect("not found")
+        );
         assert!(!interpret_slug_info(p, 200, "null").expect("null"));
         assert!(!interpret_slug_info(t, 200, "false").expect("false"));
+        assert!(!interpret_slug_info(t, 404, "").expect("empty 404"));
         assert!(!interpret_slug_info(t, 200, r#"{"error":"Theme not found"}"#).expect("error"));
         assert!(interpret_slug_info(t, 200, r#"{"slug":"twentytwentyfour"}"#).expect("known"));
-        // An outage or a changed answer is never "unknown slug".
+        // Live: a plugin closed for security answers 404 with its slug. It is
+        // known to wordpress.org, not premium.
+        let closed = r#"{"error":"closed","slug":"display-widgets","name":"Display Widgets","closed":true,"reason":"security-issue"}"#;
+        assert!(interpret_slug_info(p, 404, closed).expect("closed 404"));
+        assert!(interpret_slug_info(p, 200, closed).expect("closed 200"));
+        assert!(interpret_slug_info(p, 404, r#"{"error":"closed"}"#).expect("closed, no slug"));
+        // Not recognised: never "unknown slug".
+        assert!(interpret_slug_info(p, 200, r#"{"error":"Rate limited"}"#).is_err());
+        assert!(interpret_slug_info(p, 404, r#"{"error":"Maintenance"}"#).is_err());
         assert!(interpret_slug_info(p, 503, "").is_err());
         assert!(interpret_slug_info(p, 200, "<html>").is_err());
+        assert!(interpret_slug_info(p, 404, "<html>").is_err());
         assert!(interpret_slug_info(p, 200, r#"{"foo":1}"#).is_err());
+        assert!(interpret_slug_info(p, 404, "null").is_err());
     }
 
     #[test]
@@ -1154,6 +1352,7 @@ mod tests {
         let m = Manifest {
             source: ManifestSource::WordPressOrg,
             files: BTreeMap::from([("a.php".to_string(), Digest::Md5([1; 16]))]),
+            served_locale: None,
         };
         write_atomic(&path, &serde_json::to_vec(&m).expect("ser")).expect("write");
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -1172,5 +1371,255 @@ mod tests {
                 .expect("miss"),
             None
         );
+    }
+
+    /// Answers `get` from a closure and records every URL asked for.
+    struct Mock {
+        calls: std::sync::Mutex<Vec<String>>,
+        answer: Box<dyn Fn(&str) -> Result<Option<Vec<u8>>, AdapterError> + Send + Sync>,
+    }
+
+    impl Mock {
+        fn new(
+            answer: impl Fn(&str) -> Result<Option<Vec<u8>>, AdapterError> + Send + Sync + 'static,
+        ) -> Mock {
+            Mock {
+                calls: Default::default(),
+                answer: Box::new(answer),
+            }
+        }
+        fn calls(&self) -> usize {
+            self.calls.lock().expect("lock").len()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Http for Mock {
+        async fn get(&self, url: &str, _max: u64) -> Result<Option<Vec<u8>>, AdapterError> {
+            self.calls.lock().expect("lock").push(url.to_string());
+            (self.answer)(url)
+        }
+    }
+
+    fn core_json() -> Vec<u8> {
+        format!(r#"{{"checksums":{{"wp-login.php":"{MD5_A}"}}}}"#).into_bytes()
+    }
+
+    #[tokio::test]
+    async fn core_en_us_fallback_is_marked_and_retried_after_a_day() {
+        let t = tempfile::tempdir().expect("tmp");
+        let mut k = key(ComponentKind::Core, "wordpress", "6.5.3");
+        k.locale = Some("cs_CZ".into());
+        let now = SystemTime::now();
+        let day = Duration::from_secs(24 * 3600);
+
+        // wordpress.org has no cs_CZ checksums yet: en_US stands in, marked.
+        let cs_ready = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = cs_ready.clone();
+        let mock = Mock::new(move |url| {
+            if url.contains("locale=cs_CZ") && !flag.load(std::sync::atomic::Ordering::SeqCst) {
+                Ok(Some(br#"{"checksums":false}"#.to_vec()))
+            } else {
+                Ok(Some(core_json()))
+            }
+        });
+        let m = fetch_with(&mock, &k, t.path(), now)
+            .await
+            .expect("fetch")
+            .expect("manifest");
+        assert_eq!(m.served_locale.as_deref(), Some("en_US"));
+        assert!(m.is_locale_fallback(&k));
+        assert_eq!(mock.calls(), 2);
+
+        // Within a day the fallback is served from the cache.
+        fetch_with(&mock, &k, t.path(), now + Duration::from_secs(3600))
+            .await
+            .expect("cached");
+        assert_eq!(mock.calls(), 2);
+
+        // After a day it is looked up again, and once cs_CZ exists it sticks.
+        cs_ready.store(true, std::sync::atomic::Ordering::SeqCst);
+        let m = fetch_with(&mock, &k, t.path(), now + day + Duration::from_secs(60))
+            .await
+            .expect("refetch")
+            .expect("manifest");
+        assert_eq!(mock.calls(), 3);
+        assert_eq!(m.served_locale.as_deref(), Some("cs_CZ"));
+        assert!(!m.is_locale_fallback(&k));
+        let years = Duration::from_secs(3 * 365 * 24 * 3600);
+        fetch_with(&mock, &k, t.path(), now + years)
+            .await
+            .expect("cached");
+        assert_eq!(mock.calls(), 3);
+    }
+
+    #[tokio::test]
+    async fn core_fallback_only_on_a_definite_answer() {
+        let t = tempfile::tempdir().expect("tmp");
+        let mut k = key(ComponentKind::Core, "wordpress", "6.5.3");
+        k.locale = Some("cs_CZ".into());
+        let mock = Mock::new(|url| {
+            if url.contains("locale=cs_CZ") {
+                Err(AdapterError::Other("timeout".into()))
+            } else {
+                Ok(Some(core_json()))
+            }
+        });
+        assert!(fetch_with(&mock, &k, t.path(), SystemTime::now())
+            .await
+            .is_err());
+        assert_eq!(mock.calls(), 1);
+
+        // No locale: en_US is simply the answer, not a fallback.
+        let plain = key(ComponentKind::Core, "wordpress", "6.5.3");
+        let mock = Mock::new(|_| Ok(Some(core_json())));
+        let m = fetch_with(&mock, &plain, t.path(), SystemTime::now())
+            .await
+            .expect("fetch")
+            .expect("manifest");
+        assert!(!m.is_locale_fallback(&plain));
+    }
+
+    #[tokio::test]
+    async fn refused_keys_are_unverifiable_not_errors() {
+        let t = tempfile::tempdir().expect("tmp");
+        let mock = Mock::new(|_| Err(AdapterError::Other("must not be called".into())));
+        for (slug, ver) in [
+            ("MyPlugin", "1.0"),
+            ("demo", "1.0 beta"),
+            ("demo", ""),
+            ("../x", "1"),
+        ] {
+            let k = key(ComponentKind::Plugin, slug, ver);
+            let got = fetch_with(&mock, &k, t.path(), SystemTime::now()).await;
+            assert_eq!(got.expect("not an error"), None, "{slug:?} {ver:?}");
+            assert!(!wporg_slug_known(ComponentKind::Plugin, slug, t.path())
+                .await
+                .expect("not an error"));
+        }
+        assert_eq!(mock.calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn vendor_manifest_is_never_served_as_upstream() {
+        let t = tempfile::tempdir().expect("tmp");
+        let k = key(ComponentKind::Plugin, "demo", "1.0");
+        let vendor = Manifest {
+            source: ManifestSource::VendorPackage,
+            files: BTreeMap::from([("x.php".to_string(), Digest::Md5([1; 16]))]),
+            served_locale: None,
+        };
+        let bytes = serde_json::to_vec(&vendor).expect("ser");
+        // Even planted at the upstream path it is a miss...
+        write_atomic(&cache_path(t.path(), &k).expect("path"), &bytes).expect("write");
+        let json = format!(r#"{{"files":{{"a.php":{{"md5":"{MD5_A}"}}}}}}"#);
+        let mock = Mock::new(move |_| Ok(Some(json.clone().into_bytes())));
+        let m = fetch_with(&mock, &k, t.path(), SystemTime::now())
+            .await
+            .expect("fetch")
+            .expect("manifest");
+        assert_eq!(m.source, ManifestSource::WordPressOrg);
+        assert!(m.files.contains_key("a.php"));
+        assert_eq!(mock.calls(), 1);
+        // ...and vendor manifests have their own place.
+        let up = cache_path(t.path(), &k).expect("path");
+        let ven = cache_path_for(t.path(), &k, ManifestSource::VendorPackage).expect("path");
+        assert_ne!(up, ven);
+        assert!(ven.starts_with(t.path().join("vendor")));
+    }
+
+    #[test]
+    fn empty_and_hostile_manifests_are_refused() {
+        assert!(parse_core_checksums(r#"{"checksums":{}}"#).is_err());
+        assert!(parse_plugin_checksums(r#"{"files":{}}"#).is_err());
+        for bad in ["../x", "/etc/x", "a/../b", "a//b", "a\\b", "C:x", ""] {
+            let core = format!(r#"{{"checksums":{{{bad:?}:"{MD5_A}"}}}}"#);
+            assert!(parse_core_checksums(&core).is_err(), "core {bad:?}");
+            let plugin = format!(r#"{{"files":{{{bad:?}:{{"md5":"{MD5_A}"}}}}}}"#);
+            assert!(parse_plugin_checksums(&plugin).is_err(), "plugin {bad:?}");
+        }
+        assert!(rel_path_ok("wp-admin/index.php"));
+        // An empty manifest on disk is a cache miss, not a verdict.
+        let t = tempfile::tempdir().expect("tmp");
+        let p = t.path().join("m.json");
+        let empty = Manifest {
+            source: ManifestSource::WordPressOrg,
+            files: BTreeMap::new(),
+            served_locale: None,
+        };
+        std::fs::write(&p, serde_json::to_vec(&empty).expect("ser")).expect("w");
+        assert!(read_cached(&p, SystemTime::now()).is_none());
+    }
+
+    #[test]
+    fn entry_count_is_read_from_the_end_record_before_parsing() {
+        let t = tempfile::tempdir().expect("tmp");
+        let k = key(ComponentKind::Plugin, "demo", "1.2.3");
+        let zp = make_zip(t.path(), &[("demo/demo.php", PLUGIN_HEAD)]);
+        let mut bytes = std::fs::read(&zp).expect("read");
+        let n = bytes.len();
+        // A small file whose end record claims 60,000 entries.
+        bytes[n - 14..n - 12].copy_from_slice(&60_000u16.to_le_bytes());
+        bytes[n - 12..n - 10].copy_from_slice(&60_000u16.to_le_bytes());
+        let lying = t.path().join("lying.zip");
+        std::fs::write(&lying, &bytes).expect("w");
+        let err = manifest_from_zip(&lying, &k, ManifestSource::VendorPackage).expect_err("cap");
+        assert!(err.to_string().contains("more than"), "{err}");
+        // The honest file is fine, and its count is read right.
+        let mut f = std::fs::File::open(&zp).expect("open");
+        assert_eq!(declared_entry_count(&mut f, n as u64).expect("count"), 1);
+        manifest_from_zip(&zp, &k, ManifestSource::VendorPackage).expect("honest");
+    }
+
+    #[test]
+    fn zip64_entry_count_is_checked_too() {
+        let t = tempfile::tempdir().expect("tmp");
+        let mut b = Vec::new();
+        // zip64 end record: total entries (offset 32) = 1,000,000.
+        b.extend_from_slice(b"PK\x06\x06");
+        b.extend_from_slice(&44u64.to_le_bytes());
+        b.extend_from_slice(&[45, 0, 45, 0]);
+        b.extend_from_slice(&[0; 8]);
+        b.extend_from_slice(&1_000_000u64.to_le_bytes());
+        b.extend_from_slice(&1_000_000u64.to_le_bytes());
+        b.extend_from_slice(&[0; 16]);
+        assert_eq!(b.len(), 56);
+        // locator pointing at it, then the end record with 0xFFFF counts.
+        b.extend_from_slice(b"PK\x06\x07");
+        b.extend_from_slice(&0u32.to_le_bytes());
+        b.extend_from_slice(&0u64.to_le_bytes());
+        b.extend_from_slice(&1u32.to_le_bytes());
+        b.extend_from_slice(b"PK\x05\x06");
+        b.extend_from_slice(&[0; 4]);
+        b.extend_from_slice(&0xFFFFu16.to_le_bytes());
+        b.extend_from_slice(&0xFFFFu16.to_le_bytes());
+        b.extend_from_slice(&[0; 10]);
+        let p = t.path().join("z64.zip");
+        std::fs::write(&p, &b).expect("w");
+        let mut f = std::fs::File::open(&p).expect("open");
+        assert_eq!(
+            declared_entry_count(&mut f, b.len() as u64).expect("count"),
+            1_000_000
+        );
+        let k = key(ComponentKind::Plugin, "demo", "1");
+        let err = manifest_from_zip(&p, &k, ManifestSource::VendorPackage).expect_err("cap");
+        assert!(err.to_string().contains("more than"), "{err}");
+        // Not a zip at all.
+        std::fs::write(&p, b"hello").expect("w");
+        assert!(manifest_from_zip(&p, &k, ManifestSource::VendorPackage).is_err());
+    }
+
+    #[test]
+    fn zip_file_over_the_size_cap_is_refused() {
+        let t = tempfile::tempdir().expect("tmp");
+        let zp = make_zip(t.path(), &[("demo/demo.php", PLUGIN_HEAD)]);
+        let k = key(ComponentKind::Plugin, "demo", "1.2.3");
+        let tiny = ZipLimits {
+            max_file_bytes: 10,
+            ..ZipLimits::default()
+        };
+        let err = manifest_from_zip_with(&zp, &k, ManifestSource::VendorPackage, tiny)
+            .expect_err("size cap");
+        assert!(err.to_string().contains("size cap"), "{err}");
     }
 }

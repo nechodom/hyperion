@@ -308,21 +308,26 @@ impl TenantRoot {
     /// The names directly inside the directory `rel` ("" is the root), reached
     /// like `open_file` reaches a file. Entries are classified without
     /// following links and are not opened. At most `max_entries` are returned
-    /// (`truncated` says more existed), in directory order.
+    /// (`truncated` says more existed), in directory order; names that can't be
+    /// listed count toward the cap.
     pub fn list_dir(&self, rel: &str, max_entries: usize) -> io::Result<DirListing> {
         let comps = split_rel(rel, true)?;
         let mut dir = Dir::new(self.descend(&comps)?).map_err(io::Error::from)?;
         let mut out = DirListing::default();
+        let mut seen = 0usize;
         while let Some(ent) = dir.read() {
             let ent = ent.map_err(io::Error::from)?;
             let name = ent.file_name();
             if name == c"." || name == c".." {
                 continue;
             }
-            if out.entries.len() >= max_entries {
+            // Every name looked at counts, listed or not, so a directory of
+            // unlistable names is bounded too.
+            if seen >= max_entries {
                 out.truncated = true;
                 break;
             }
+            seen += 1;
             let Ok(name_str) = std::str::from_utf8(name.to_bytes()) else {
                 out.non_utf8 += 1;
                 continue;
@@ -920,6 +925,22 @@ mod tests {
         );
         // "" is the root itself.
         assert_eq!(root.list_dir("", 100).expect("root").entries.len(), 1);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn list_dir_cap_counts_names_it_cannot_list() {
+        let t = tempfile::tempdir().expect("tmp");
+        for i in 0..5u8 {
+            let bytes = [b'b', 0xff, b'0' + i];
+            let name = std::ffi::OsStr::from_bytes(&bytes);
+            std::fs::write(t.path().join(name), b"x").expect("w");
+        }
+        std::fs::write(t.path().join("ok.php"), b"x").expect("w");
+        let root = TenantRoot::open(t.path()).expect("open");
+        let l = root.list_dir("", 3).expect("list");
+        assert!(l.truncated);
+        assert!(l.entries.len() as u64 + l.non_utf8 <= 3);
     }
 
     #[test]
