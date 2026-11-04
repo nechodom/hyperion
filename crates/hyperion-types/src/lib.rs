@@ -21,6 +21,7 @@ pub mod crs;
 pub mod db;
 pub mod dkim;
 pub mod dns;
+pub mod fpm_own;
 pub mod gitsync;
 pub mod hosting;
 pub mod ids;

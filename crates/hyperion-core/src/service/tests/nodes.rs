@@ -523,3 +523,106 @@ async fn node_reset_crypto_unblocks_a_reinstalled_agent() {
     // Unknown node is a forgiving no-op, matching node_remove.
     assert!(!s.node_reset_crypto("ghost", 1).await.expect("noop"));
 }
+
+// ============================================================
+//  Per-site PHP masters: the node's preflight report.
+// ============================================================
+
+fn roomy_facts() -> hyperion_types::fpm_own::PreflightFacts {
+    hyperion_types::fpm_own::PreflightFacts {
+        cgroup_controllers: Some("cpuset cpu io memory pids".into()),
+        systemd_version: Some(252),
+        swap_total_kib: 0,
+        mem_total_mb: Some(8000),
+        mem_available_mb: Some(6000),
+        php_users: 0,
+        own_users: 0,
+    }
+}
+
+/// A user counts once however many of its sites run PHP, and a site that is
+/// static, suspended or without a PHP version costs no master at all.
+#[tokio::test]
+async fn preflight_counts_distinct_php_users() {
+    let pool = open_memory().await.expect("db");
+    let mut mock = MockAdapterPort::new();
+    mock.expect_fpm_preflight_facts().returning(roomy_facts);
+    let s = svc(pool.clone(), mock);
+
+    let add = |name: &'static str, uid: i64| {
+        let pool = pool.clone();
+        async move {
+            hyperion_state::system_users::insert(
+                &pool,
+                name,
+                uid,
+                &format!("/home/{name}"),
+                "/x",
+                1,
+            )
+            .await
+            .expect("user")
+        }
+    };
+    let site = |domain: &'static str, user: i64, kind: &'static str, state: HostingState| {
+        let pool = pool.clone();
+        async move {
+            let id = HostingId::new_v7();
+            hyperion_state::hostings::insert(
+                &pool,
+                &id,
+                domain,
+                user,
+                Some(PhpVersion::V8_3),
+                "/x",
+                1,
+                None,
+            )
+            .await
+            .expect("hosting");
+            hyperion_state::hostings::set_kind(&pool, &id, kind, None, 1)
+                .await
+                .expect("kind");
+            hyperion_state::hostings::set_state(&pool, &id, state, 1)
+                .await
+                .expect("state");
+        }
+    };
+    let shared = add("shared", 2001).await;
+    let other = add("other", 2002).await;
+    let paused = add("paused", 2003).await;
+    let plain = add("plain", 2004).await;
+    site("one.test", shared, "php", HostingState::Active).await;
+    site("two.test", shared, "php", HostingState::Active).await;
+    site("three.test", other, "php", HostingState::Active).await;
+    site("static.test", plain, "static", HostingState::Active).await;
+    site("paused.test", paused, "php", HostingState::Suspended).await;
+
+    let p = s.fpm_own_preflight().await.expect("preflight");
+    assert_eq!(
+        p.php_users, 2,
+        "shared counts once, static and suspended not at all"
+    );
+    assert_eq!(p.own_users, 0, "nothing runs its own master yet");
+    assert_eq!(p.extra_mb, 2 * hyperion_types::fpm_own::MB_PER_USER);
+    assert!(p.ok(), "{:?}", p.blocks);
+}
+
+/// A node with nothing to convert still answers, and judges the host alone.
+#[tokio::test]
+async fn preflight_on_an_empty_node_blocks_only_on_the_host() {
+    let pool = open_memory().await.expect("db");
+    let mut mock = MockAdapterPort::new();
+    mock.expect_fpm_preflight_facts().returning(|| {
+        let mut f = roomy_facts();
+        f.cgroup_controllers = None;
+        f
+    });
+    let s = svc(pool, mock);
+    let p = s.fpm_own_preflight().await.expect("preflight");
+    assert_eq!(p.php_users, 0);
+    assert_eq!(
+        p.blocks,
+        vec![hyperion_types::fpm_own::PreflightBlock::NoCgroup2]
+    );
+}

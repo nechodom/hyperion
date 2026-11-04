@@ -420,6 +420,10 @@ pub enum Request {
         window_secs: i64,
     },
     NodeStats,
+    /// Whether this node could run a PHP-FPM master per site user, and what
+    /// that would cost. An older node answers 400; the Nodes page shows "not
+    /// reported" for it.
+    NodeFpmPreflight,
     ClusterStats,
     NodeMetricsHistory {
         /// Max samples to return (clamped 1..=2000). Typical: 48 for
@@ -2412,6 +2416,7 @@ pub enum Response {
     HostingStatsAll(Vec<HostingStats>),
     HostingUsageRange(Vec<hyperion_types::HostingUsageRange>),
     NodeStats(NodeStats),
+    NodeFpmPreflight(hyperion_types::fpm_own::Preflight),
     ClusterStats(ClusterStats),
     NodeMetricsHistory(hyperion_types::NodeMetricsHistory),
     SetHostingAcmeEmail,

@@ -441,6 +441,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .with_permissions_autoheal(cfg.permissions.enabled)
         .with_snapshots(cfg.snapshots.enabled)
+        .with_fpm_own_masters(cfg.php.own_masters)
         .with_agent_config_path(cli.config.clone())
         .with_node_state_file(state_file.clone())
         .with_git_sha(env!("HYPERION_GIT_SHA"));

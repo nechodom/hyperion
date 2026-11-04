@@ -159,3 +159,43 @@ async fn fail2ban_section_round_trips_and_refuses_values_the_agent_would_clamp()
     assert_eq!(after["fail2ban"]["http_threshold"].as_integer(), Some(6));
     assert!(after["fail2ban"].get("nft_table").is_none());
 }
+
+/// Saving the PHP card must not bounce the agent: boot would re-render the
+/// FPM pools and restart `php<ver>-fpm` for every version with a live site,
+/// for a setting that is read fresh from the file. Any other section is read
+/// once at start-up and still needs the restart.
+#[test]
+fn saving_the_php_section_does_not_restart_the_agent() {
+    assert!(!section_restarts_agent("php"));
+    for s in [
+        "update",
+        "fail2ban",
+        "backup_remote",
+        "acme",
+        "protection",
+        "backup",
+        "backup_retention",
+        "snapshots",
+        "email",
+    ] {
+        assert!(section_restarts_agent(s), "[{s}] must keep its restart");
+    }
+}
+
+/// The php save still reaches the file (and is acknowledged) without the
+/// restart task: `node_config_set` is the path both master and worker take.
+#[tokio::test]
+async fn node_config_set_writes_php_own_masters() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let toml = tmp.path().join("agent.toml");
+    std::fs::write(&toml, b"[php]\nown_masters = false\n").expect("write agent.toml");
+    let pool = open_memory().await.expect("open");
+    let s = svc(pool, happy_mocks()).with_agent_config_path(toml.clone());
+    let mut fields = std::collections::BTreeMap::new();
+    fields.insert("own_masters".to_string(), "true".to_string());
+    s.node_config_set("php".to_string(), fields)
+        .await
+        .expect("php save");
+    let written = std::fs::read_to_string(&toml).expect("read back");
+    assert!(written.contains("own_masters = true"), "{written}");
+}

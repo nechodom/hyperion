@@ -42,6 +42,7 @@ const SECTIONS: &[(&str, &str, &str)] = &[
     ("backup", "local-copies", "Local copies"),
     ("backup_retention", "backup-retention", "Archive retention"),
     ("snapshots", "snapshot-retention", "Snapshot retention"),
+    ("php", "php-masters", "Own PHP masters"),
 ];
 
 fn section_meta(section: &str) -> Option<(&'static str, &'static str)> {
@@ -49,6 +50,13 @@ fn section_meta(section: &str) -> Option<(&'static str, &'static str)> {
         .iter()
         .find(|(s, _, _)| *s == section)
         .map(|(_, anchor, label)| (*anchor, *label))
+}
+
+/// Whether the master's settings sync carries this section to every node. One
+/// it does not carry is the node's own, so it stays editable on a worker that
+/// follows the master.
+fn is_synced_section(section: &str) -> bool {
+    hyperion_core::cluster_sync::SYNCED_SECTIONS.contains(&section)
 }
 
 /// `""` / `"local"` is the master itself.
@@ -83,6 +91,12 @@ fn urlencode(s: &str) -> String {
 #[derive(Debug, Default, PartialEq)]
 struct RawExtras {
     acme_contact: Option<String>,
+    /// `[php] own_masters`, read off the file: the running agent's copy
+    /// lags a save by the restart, and the page must show what was saved.
+    /// `None` when the file is unreadable, does not parse, or holds a value
+    /// that is not a bool: a form built on a guess would overwrite the real
+    /// value. A parsed file without the key is `Some(false)`, the default.
+    own_masters: Option<bool>,
 }
 
 fn parse_raw_extras(raw: &str) -> RawExtras {
@@ -94,6 +108,12 @@ fn parse_raw_extras(raw: &str) -> RawExtras {
             .and_then(|a| a.get("contact_email"))
             .and_then(|v| v.as_str())
             .map(str::to_string),
+        own_masters: doc.as_ref().and_then(|d| {
+            match d.get("php").and_then(|p| p.get("own_masters")) {
+                None => Some(false),
+                Some(v) => v.as_bool(),
+            }
+        }),
     }
 }
 
@@ -123,9 +143,12 @@ struct NodeSettingsTpl<'a> {
     raw_error: String,
     fail2ban: Option<Fail2banView>,
     acme_contact: String,
+    /// `None` = the node's file could not be read; the card shows no form.
+    own_masters: Option<bool>,
     /// A worker whose synced sections the master's settings sync manages:
-    /// every card is shown read-only, because the next sync pass would undo
-    /// an edit made here. False for the master and for an agent too old to
+    /// every card but the PHP one is shown read-only, because the next sync
+    /// pass would undo an edit made here (`[php]` is this node's own setting
+    /// and is not synced). False for the master and for an agent too old to
     /// take the sync (its own file is still the only way to set it).
     managed: bool,
     /// What the last sync pass said about this node; empty before the first.
@@ -209,6 +232,7 @@ pub async fn get_node_settings(
         .as_deref()
         .map(parse_raw_extras)
         .unwrap_or_default();
+    let own_masters = extras.own_masters;
     let acme_contact = extras
         .acme_contact
         .or_else(|| config.as_ref().map(|c| c.acme.contact_email.clone()))
@@ -244,6 +268,7 @@ pub async fn get_node_settings(
         raw_error,
         fail2ban,
         acme_contact,
+        own_masters,
         managed: !is_master && sync.as_ref().map_or(true, |s| s.managed()),
         sync_verdict: sync
             .as_ref()
@@ -282,6 +307,17 @@ fn fields_to_write(
     fields
 }
 
+/// What the flash says after a save the node accepted. The agent only
+/// restarts for the sections `section_restarts_agent` names, so the text must
+/// not promise one otherwise.
+fn saved_flash(section: &str, label: &str) -> String {
+    if hyperion_core::service::section_restarts_agent(section) {
+        format!("{label} saved on this node — its agent is restarting (~5s)")
+    } else {
+        format!("{label} saved on this node")
+    }
+}
+
 /// POST /install/node-settings — write one section on one node.
 pub async fn post_node_settings(
     State(state): State<SharedState>,
@@ -310,6 +346,7 @@ pub async fn post_node_settings(
     // The master's settings sync owns these sections on a worker that can
     // take it; a value written here would be replaced on the next pass.
     if !is_local(&node_id)
+        && is_synced_section(&form.section)
         && state
             .cluster_sync
             .status_for(&node_id)
@@ -344,9 +381,7 @@ pub async fn post_node_settings(
     let dest = match resp {
         Ok(RpcResponse::NodeConfigSet) => format!(
             "{page}&flash={}#{anchor}",
-            urlencode(&format!(
-                "{label} saved on this node — its agent is restarting (~5s)"
-            ))
+            urlencode(&saved_flash(&section, label))
         ),
         Ok(RpcResponse::Error(e)) => {
             format!("{page}&flash_error={}#{anchor}", urlencode(&e.to_string()))
@@ -458,6 +493,7 @@ mod tests {
             "backup",
             "backup_retention",
             "snapshots",
+            "php",
         ] {
             assert!(section_meta(s).is_some(), "{s} should be editable per node");
         }
@@ -476,6 +512,40 @@ mod tests {
                 "{s} must not be editable per node"
             );
         }
+    }
+
+    /// `[php]` is the node's own: the master's settings sync does not carry
+    /// it, so a worker that follows the master must still be able to save it.
+    #[test]
+    fn own_masters_is_not_a_synced_section() {
+        assert!(!is_synced_section("php"));
+        // Every other editable section follows the master, so the follower
+        // refusal in `post_node_settings` covers all of them.
+        for (s, _, _) in SECTIONS.iter().filter(|(s, _, _)| *s != "php") {
+            assert!(is_synced_section(s), "{s} follows the master");
+        }
+    }
+
+    /// A PHP save leaves the agent running, so its flash must not say the
+    /// agent is restarting; every other section does restart.
+    #[test]
+    fn only_a_restarting_save_says_the_agent_restarts() {
+        assert!(!saved_flash("php", "Own PHP masters").contains("restarting"));
+        for (s, _, label) in SECTIONS.iter().filter(|(s, _, _)| *s != "php") {
+            assert!(saved_flash(s, label).contains("restarting"), "{s}");
+        }
+    }
+
+    #[test]
+    fn own_masters_reads_back_from_the_raw_file() {
+        let om = |raw: &str| parse_raw_extras(raw).own_masters;
+        assert_eq!(om("[php]\nown_masters = true\n"), Some(true));
+        assert_eq!(om("[php]\nown_masters = false\n"), Some(false));
+        // A readable file that never mentions it is genuinely off.
+        assert_eq!(om("[acme]\ncontact_email = \"a@b.cz\"\n"), Some(false));
+        // Anything that is not a clear answer is unknown, never a guessed off.
+        assert_eq!(om("[php]\nown_masters = \"true\"\n"), None);
+        assert_eq!(om("not = [toml"), None);
     }
 
     #[test]

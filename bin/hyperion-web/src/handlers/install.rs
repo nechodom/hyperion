@@ -958,6 +958,122 @@ fn render_node_facts(reach: &Reach, os: Option<&hyperion_types::OsUpdateStatus>)
     out
 }
 
+/// What a node said when asked whether it could run a PHP master per site user.
+#[derive(Debug)]
+enum PhpMasters {
+    Report(hyperion_types::fpm_own::Preflight),
+    /// No verdict. The row still renders; `why` is for its tooltip.
+    NotReported(String),
+}
+
+fn php_masters_from(res: Result<RpcResponse, crate::dispatcher::DispatchError>) -> PhpMasters {
+    use crate::dispatcher::DispatchError;
+    match res {
+        Ok(RpcResponse::NodeFpmPreflight(p)) => PhpMasters::Report(p),
+        Ok(RpcResponse::Error(e)) => PhpMasters::NotReported(e.to_string()),
+        Ok(_) => PhpMasters::NotReported("the node answered with something unexpected".into()),
+        // An agent from before NodeFpmPreflight can't decode it and answers
+        // 400; same fallback as the stats page's HostingUsageRange.
+        Err(DispatchError::Remote(_)) => PhpMasters::NotReported(
+            "this node runs an older Hyperion that does not report it yet; update it".into(),
+        ),
+        Err(e) => PhpMasters::NotReported(e.to_string()),
+    }
+}
+
+/// One plain sentence per reason a node cannot run masters of its own.
+fn preflight_block_text(b: &hyperion_types::fpm_own::PreflightBlock) -> String {
+    use hyperion_types::fpm_own::PreflightBlock::*;
+    match b {
+        NoCgroup2 => "the node does not use cgroup v2".to_string(),
+        MissingController(c) => format!("the {c} cgroup controller is not available"),
+        OldSystemd(v) => format!("systemd {v} is older than 252"),
+        UnknownSystemd => "the systemd version could not be read".to_string(),
+        LowRam {
+            need_mb,
+            free_after_mb,
+            floor_mb,
+        } => format!(
+            "not enough free memory: {need_mb} MB more would leave {free_after_mb} MB, \
+             and the node keeps {floor_mb} MB free"
+        ),
+    }
+}
+
+/// The row's PHP-masters fact as HTML: the verdict first, then swap, which is
+/// worth a line but never a reason to refuse.
+fn render_php_masters(m: &PhpMasters) -> String {
+    match m {
+        PhpMasters::NotReported(why) => format!(
+            "<span class=\"node-fact\" title=\"{}\">Own PHP masters: not reported</span>",
+            html_escape(why)
+        ),
+        PhpMasters::Report(p) => {
+            let swap = if p.has_swap {
+                "swap present"
+            } else {
+                "no swap"
+            };
+            let verdict = if p.ok() {
+                format!(
+                    "<span class=\"node-fact\">Own PHP masters: possible, about {} MB more</span>",
+                    p.extra_mb
+                )
+            } else {
+                let why: Vec<String> = p
+                    .blocks
+                    .iter()
+                    .map(|b| html_escape(&preflight_block_text(b)))
+                    .collect();
+                format!(
+                    "<span class=\"pill warn\">Own PHP masters: not possible, {}</span>",
+                    why.join("; ")
+                )
+            };
+            format!("{verdict}<span class=\"node-fact\">{swap}</span>")
+        }
+    }
+}
+
+/// GET /install/node-php-masters?node_id=… — whether the node could give each
+/// PHP site user its own master, as an HTML fragment. Lazy per row like the
+/// facts above, for the same reason: one slow or dead node must not hold up
+/// the page. Read-only; nothing on the node changes.
+pub async fn get_node_php_masters(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    axum::extract::Query(q): axum::extract::Query<UpdateNodeStatusQuery>,
+) -> Response {
+    let html = |status: axum::http::StatusCode, body: String| {
+        (status, [("content-type", "text/html; charset=utf-8")], body).into_response()
+    };
+    if !ctx.is_super_admin() {
+        return html(
+            axum::http::StatusCode::FORBIDDEN,
+            "<span class=\"pill err\">admin only</span>".into(),
+        );
+    }
+    let node_id = match q.node_id.trim() {
+        "" => "local",
+        id => id,
+    };
+    if !node_id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    {
+        return html(
+            axum::http::StatusCode::BAD_REQUEST,
+            "<span class=\"pill err\">invalid node id</span>".into(),
+        );
+    }
+    let target = (node_id != "local").then_some(node_id);
+    let res = crate::dispatcher::dispatch_to_node(&state, target, Request::NodeFpmPreflight).await;
+    html(
+        axum::http::StatusCode::OK,
+        render_php_masters(&php_masters_from(res)),
+    )
+}
+
 /// POST /install/os-updates-check — refresh the node's package index and
 /// re-read what is pending. Read-only on the node: nothing is installed.
 ///
@@ -1416,6 +1532,8 @@ async fn fetch_cluster_test_node_ids(state: &SharedState) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dispatcher::DispatchError;
+    use hyperion_types::fpm_own::{Preflight, PreflightBlock};
     use hyperion_types::{OsPendingPackage, OsUpdateStatus};
 
     fn pkg(name: &str, security: bool) -> OsPendingPackage {
@@ -1711,5 +1829,85 @@ mod tests {
             master.contains("use <strong>Install system updates</strong>"),
             "the master has no Update pane, so it points at its own form: {master}"
         );
+    }
+
+    fn verdict(blocks: Vec<PreflightBlock>, swap: bool, extra_mb: i64) -> Preflight {
+        Preflight {
+            blocks,
+            has_swap: swap,
+            extra_mb,
+            php_users: 5,
+            own_users: 0,
+        }
+    }
+
+    #[test]
+    fn own_masters_possible_says_how_much_more_ram_it_costs() {
+        let html = render_php_masters(&PhpMasters::Report(verdict(vec![], false, 55)));
+        assert!(
+            html.contains("Own PHP masters: possible, about 55 MB more"),
+            "{html}"
+        );
+        assert!(html.contains("no swap"), "{html}");
+        let html = render_php_masters(&PhpMasters::Report(verdict(vec![], true, 55)));
+        assert!(html.contains("swap present"), "{html}");
+    }
+
+    #[test]
+    fn own_masters_blocked_names_every_block() {
+        let html = render_php_masters(&PhpMasters::Report(verdict(
+            vec![
+                PreflightBlock::NoCgroup2,
+                PreflightBlock::MissingController("<memory>".into()),
+                PreflightBlock::OldSystemd(247),
+                PreflightBlock::UnknownSystemd,
+                PreflightBlock::LowRam {
+                    need_mb: 55,
+                    free_after_mb: 300,
+                    floor_mb: 400,
+                },
+            ],
+            true,
+            55,
+        )));
+        assert!(html.contains("Own PHP masters: not possible"), "{html}");
+        assert!(!html.contains("possible, about"), "{html}");
+        assert!(html.contains("cgroup v2"), "{html}");
+        assert!(html.contains("&lt;memory&gt;"), "escaped: {html}");
+        assert!(html.contains("systemd 247"), "{html}");
+        assert!(html.contains("systemd version could not be read"), "{html}");
+        assert!(html.contains("55 MB"), "{html}");
+        assert!(html.contains("400 MB"), "{html}");
+    }
+
+    #[test]
+    fn own_masters_older_node_is_not_reported_and_the_row_still_renders() {
+        // An agent from before the request cannot decode it and answers 400,
+        // which curl reports as exit 22.
+        let older = php_masters_from(Err(DispatchError::Remote(
+            hyperion_rpc_client::RemoteClientError::HttpError {
+                code: Some(22),
+                stderr: "The requested URL returned error: 400".into(),
+            },
+        )));
+        let html = render_php_masters(&older);
+        assert!(html.contains("Own PHP masters: not reported"), "{html}");
+        assert!(
+            !html.contains("pill err"),
+            "an old agent is not an error: {html}"
+        );
+
+        let down = php_masters_from(Err(DispatchError::NodeUnreachable {
+            node_id: "w1".into(),
+            kind: "timed out".into(),
+        }));
+        assert!(render_php_masters(&down).contains("Own PHP masters: not reported"));
+
+        let answered = php_masters_from(Ok(RpcResponse::NodeFpmPreflight(verdict(
+            vec![],
+            false,
+            11,
+        ))));
+        assert!(matches!(answered, PhpMasters::Report(_)));
     }
 }

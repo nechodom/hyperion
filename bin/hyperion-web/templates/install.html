@@ -136,6 +136,17 @@
         </div>
       </section>
 
+      {# ─── PHP masters ─── lazy like the update panel; read-only, one signed call. #}
+      <section class="node-sec">
+        <h4>PHP masters</h4>
+        <div id="php-masters-{{ n.node_id }}" class="node-sec-row"
+             hx-get="/install/node-php-masters?node_id={{ n.node_id }}"
+             hx-trigger="intersect once"
+             hx-swap="innerHTML">
+          <span class="text-soft small">Loading…</span>
+        </div>
+      </section>
+
       {% if !r.is_master %}
       {# ─── Connection ─── #}
       <section class="node-sec">

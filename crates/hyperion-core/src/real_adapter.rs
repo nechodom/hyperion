@@ -484,6 +484,10 @@ impl AdapterPort for RealAdapter {
         hyperion_adapters::phpfpm::delete_pool(system_user, version).await
     }
 
+    async fn fpm_preflight_facts(&self) -> hyperion_types::fpm_own::PreflightFacts {
+        hyperion_adapters::phpfpm::preflight_facts().await
+    }
+
     async fn db_create(
         &self,
         engine: DbProvision,
