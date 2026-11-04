@@ -15,7 +15,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// Internal: called from `delete()` when cluster.trash_enabled.
     pub(super) async fn trash_hosting(&self, detail: HostingDetail) -> Result<(), RpcError> {
         // Mirror the suspend side-effects.
-        // Logged, not discarded. The FPM pool is stopped a few lines below,
+        // Logged, not discarded. The FPM pool is stopped further down,
         // so a vhost that never went live means the site answers 502 rather
         // than the notice — and silence here is why that looked like a
         // mystery rather than a failed step.
@@ -33,9 +33,6 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 "trash: could not apply the suspended vhost — the site will answer 502"
             );
         }
-        if let Some(ver) = detail.php_version {
-            let _ = self.adapters.fpm_delete(&detail.system_user, ver).await;
-        }
         if let Some(db) = detail.database.as_ref() {
             let _ = self.adapters.db_lock(db.engine, &db.db_user).await;
         }
@@ -52,7 +49,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 .map_err(|e| RpcError::Internal_with(format!("mark trashed: {e}")))?;
             self.apply_login_policy_held(&detail.id, Some(legacy)).await;
         }
-        let _ = self.adapters.kill_user_procs(&detail.system_user).await;
+        // After the state: whether the pool can go depends on who is left.
+        if let Some(ver) = detail.php_version {
+            self.release_fpm_pool(&detail.system_user, ver).await;
+        }
+        self.kill_offline_user_procs(&detail.system_user).await;
 
         self.append_audit(
             "hosting.trash",
@@ -290,7 +291,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             }
         }
         if let Some(ver) = detail.php_version {
-            let _ = self.adapters.fpm_delete(&detail.system_user, ver).await;
+            self.release_fpm_pool(&detail.system_user, ver).await;
         }
         // Extra FTP logins are real passwd entries. The DB rows go with the
         // hosting via ON DELETE CASCADE, so if the accounts are not removed

@@ -209,14 +209,14 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             );
         }
         if let Some(ver) = detail.php_version {
-            let _ = self.adapters.fpm_delete(&detail.system_user, ver).await;
+            self.release_fpm_pool(&detail.system_user, ver).await;
         }
         if let Some(db) = detail.database.as_ref() {
             let _ = self.adapters.db_lock(db.engine, &db.db_user).await;
         }
         // The state and its record were written at the top.
         self.apply_login_policy(&detail.id, Some(false)).await;
-        let _ = self.adapters.kill_user_procs(&detail.system_user).await;
+        self.kill_offline_user_procs(&detail.system_user).await;
 
         self.append_audit(
             "hosting.suspend",

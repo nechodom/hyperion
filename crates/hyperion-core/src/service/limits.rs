@@ -949,8 +949,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     ///    points at the new path (`/run/php/<new>/<user>.sock`).
     ///    `nginx -t` runs inside `nginx_write_vhost` and rolls back
     ///    on failure.
-    /// 6. Tear down the OLD FPM pool (`fpm_delete`), now nothing points
-    ///    at it.
+    /// 6. Release the OLD FPM pool: it goes unless a site sharing this
+    ///    system user still runs on it.
     /// 7. Audit log line so the operator can trace the change.
     ///
     /// The old pool goes LAST so that no failure can leave a site without
@@ -1067,33 +1067,16 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .await
         {
             self.undo_php_switch(&detail, converting).await;
-            if let Err(del) = self
-                .adapters
-                .fpm_delete(&detail.system_user, new_version)
-                .await
-            {
-                tracing::warn!(
-                    domain = %detail.domain,
-                    version = %new_version,
-                    error = %del,
-                    "set_php_version: could not remove the unused new pool"
-                );
-            }
+            self.release_fpm_pool(&detail.system_user, new_version)
+                .await;
             return Err(e);
         }
 
-        // 4. Nothing points at the old pool any more. Best-effort: the site
+        // 4. This site no longer points at the old pool. Best-effort: it
         //    already runs on the new version, so a leftover pool is litter,
         //    not a failed switch.
         if let Some(current) = current {
-            if let Err(e) = self.adapters.fpm_delete(&detail.system_user, current).await {
-                tracing::warn!(
-                    domain = %detail.domain,
-                    from_version = %current,
-                    error = %e,
-                    "set_php_version: fpm_delete of old version failed (continuing)"
-                );
-            }
+            self.release_fpm_pool(&detail.system_user, current).await;
         }
 
         // 5. Audit log so we can reconstruct who/when/from→to.

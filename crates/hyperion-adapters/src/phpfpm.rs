@@ -10,6 +10,11 @@ use std::path::PathBuf;
 pub struct PoolInput<'a> {
     pub system_user: &'a str,
     pub domain: &'a str,
+    /// Other sites served by this pool. A pool is per system user and PHP
+    /// version, so hostings sharing both share one file and it has to let
+    /// all of them in. Order does not matter: any of them writes the same
+    /// paths.
+    pub also_serves: &'a [String],
     pub php_version: PhpVersion,
     pub max_children: u32,
     pub max_requests: u32,
@@ -30,6 +35,7 @@ impl<'a> PoolInput<'a> {
         Self {
             system_user,
             domain,
+            also_serves: &[],
             php_version,
             max_children: 5,
             max_requests: 1000,
@@ -60,7 +66,8 @@ impl<'a> PoolInput<'a> {
 #[template(path = "phpfpm-pool.conf.j2", escape = "none")]
 struct PoolTpl<'a> {
     system_user: &'a str,
-    domain: &'a str,
+    open_basedir: String,
+    session_domain: &'a str,
     php_version: &'a str,
     max_children: u32,
     max_requests: u32,
@@ -185,9 +192,19 @@ pub fn render(input: &PoolInput<'_>) -> Result<String, AdapterError> {
     // FPM backstop above PHP's own max_execution_time (+30s headroom) so a
     // worker blocked in a syscall past its exec limit still gets reaped.
     let request_terminate_secs = input.max_exec_secs.saturating_add(30);
+    let mut domains: Vec<&str> = input.also_serves.iter().map(String::as_str).collect();
+    domains.push(input.domain);
+    domains.sort_unstable();
+    domains.dedup();
+    let mut open_basedir = String::new();
+    for domain in &domains {
+        open_basedir.push_str(&format!("/home/{}/{domain}:", input.system_user));
+    }
+    open_basedir.push_str("/tmp");
     let tpl = PoolTpl {
         system_user: input.system_user,
-        domain: input.domain,
+        open_basedir,
+        session_domain: domains[0],
         php_version: input.php_version.as_str(),
         max_children,
         max_requests: input.max_requests,
@@ -819,6 +836,26 @@ mod tests {
     fn pool_path_shape() {
         let p = pool_path(&PoolInput::defaults("x", "x.cz", PhpVersion::V8_2));
         assert_eq!(p.to_string_lossy(), "/etc/php/8.2/fpm/pool.d/x.conf");
+    }
+
+    /// Sites on one system user and PHP version share the pool file. Written
+    /// for the last of them alone, PHP refused to open the others' scripts:
+    /// "open_basedir restriction in effect", and nginx answered 404.
+    #[test]
+    fn a_shared_pool_lets_in_every_site_whichever_of_them_wrote_it() {
+        let others = ["b.cz".to_string(), "c.cz".to_string()];
+        let mut from_a = PoolInput::defaults("shared", "a.cz", PhpVersion::V8_3);
+        from_a.also_serves = &others;
+        let out = render(&from_a).expect("render");
+        assert!(out.contains(
+            "open_basedir] = /home/shared/a.cz:/home/shared/b.cz:/home/shared/c.cz:/tmp\n"
+        ));
+        assert!(out.contains("session.save_path] = /home/shared/a.cz/tmp\n"));
+
+        let others = ["a.cz".to_string(), "b.cz".to_string()];
+        let mut from_c = PoolInput::defaults("shared", "c.cz", PhpVersion::V8_3);
+        from_c.also_serves = &others;
+        assert_eq!(render(&from_c).expect("render"), out);
     }
 
     /// The socket parent dir is derived directly from the version. If
