@@ -273,10 +273,12 @@ pub trait AdapterPort: Send + Sync {
     }
 
     /// Walk every installed php<ver>-fpm service and recover any
-    /// that's in systemd "failed" state. Runs unconditionally at
-    /// boot — when an OLD broken pool brought FPM down hard
-    /// (restart counter at 5), even after the operator fixes the
-    /// pool file systemd refuses to start without `reset-failed`.
+    /// that's in systemd "failed" state. Runs at boot and on a tick:
+    /// when an OLD broken pool brought FPM down hard (restart counter
+    /// at 5), even after the operator fixes the pool file systemd
+    /// refuses to start without `reset-failed`, and a unit also ends
+    /// up failed when its master is killed (see `spawn_fpm_recover`).
+    /// Attempts back off while a unit keeps failing.
     /// Returns the count of services we kicked back up.
     /// Default impl returns 0.
     async fn fpm_recover_failed(&self) -> Result<usize, AdapterError> {

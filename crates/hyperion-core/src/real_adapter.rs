@@ -72,6 +72,8 @@ pub struct RealAdapter {
     /// `test_domain_template` → wildcard base for the preview vhost.
     /// `None` ⇒ no preview (same as no wildcard).
     pub agent_config_path: Option<PathBuf>,
+    /// Paces `fpm_recover_failed`, which runs every tick.
+    pub fpm_recovery: std::sync::Mutex<hyperion_adapters::phpfpm::RecoveryBackoff>,
 }
 
 impl Default for RealAdapter {
@@ -85,11 +87,20 @@ impl Default for RealAdapter {
             nginx_user: hyperion_adapters::nginx::DEFAULT_NGINX_USER.to_string(),
             state_pool: None,
             agent_config_path: None,
+            fpm_recovery: Default::default(),
         }
     }
 }
 
 impl RealAdapter {
+    fn fpm_recovery_lock(
+        &self,
+    ) -> std::sync::MutexGuard<'_, hyperion_adapters::phpfpm::RecoveryBackoff> {
+        self.fpm_recovery
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     /// Replace the default www-data with whatever nginx is actually
     /// running as on this node. Called once at agent startup.
     pub async fn detect_nginx_user(&mut self) {
@@ -559,18 +570,10 @@ impl AdapterPort for RealAdapter {
         let mut recovered = 0usize;
         for ver in PhpVersion::all() {
             let svc = format!("{}.service", ver.service_name());
-            // Skip versions not installed on this node — checked via
-            // systemctl cat (canonical "is unit known").
-            let known = tokio::process::Command::new("/usr/bin/systemctl")
-                .args(["cat", &svc])
-                .output()
-                .await
-                .map(|o| o.status.success())
-                .unwrap_or(false);
-            if !known {
-                continue;
-            }
-            // is-failed --quiet returns exit 0 iff state is "failed".
+            let now = hyperion_types::now_secs();
+            // is-failed --quiet returns exit 0 iff state is "failed": a unit
+            // an operator stopped is "inactive", and a version not installed
+            // on this node has no state at all. Neither gets touched.
             let failed = tokio::process::Command::new("/usr/bin/systemctl")
                 .args(["is-failed", "--quiet", &svc])
                 .status()
@@ -578,17 +581,37 @@ impl AdapterPort for RealAdapter {
                 .map(|s| s.success())
                 .unwrap_or(false);
             if !failed {
+                self.fpm_recovery_lock().note_not_failed(*ver, now);
+                continue;
+            }
+            {
+                let mut backoff = self.fpm_recovery_lock();
+                if !backoff.may_attempt(*ver, now) {
+                    continue;
+                }
+                backoff.record_attempt(*ver, now);
+            }
+            // A pool that fails this would only spend systemd's start limit.
+            // This sweep never quarantines: that is for boot, when nothing is
+            // being edited. Rewriting the pool from the panel goes through
+            // `phpfpm::reload`, which recovers the unit without waiting here.
+            if let Err(e) = hyperion_adapters::phpfpm::test_config(*ver).await {
+                tracing::error!(
+                    service = %svc,
+                    error = %e,
+                    "FPM service stays failed: its configuration does not pass php-fpm -t"
+                );
                 continue;
             }
             tracing::warn!(
                 service = %svc,
-                "boot: FPM service in failed state — reset-failed + start"
+                "FPM service in failed state: reset-failed + start"
             );
             if let Err(e) = self.fpm_restart(*ver).await {
                 tracing::error!(
                     service = %svc,
                     error = %e,
-                    "boot: FPM recovery failed (likely a pool config error — see journalctl)"
+                    "FPM recovery failed (see journalctl)"
                 );
                 continue;
             }

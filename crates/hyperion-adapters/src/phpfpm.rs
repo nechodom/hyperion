@@ -3,6 +3,7 @@
 use crate::{cmd, fs::atomic_write, AdapterError};
 use askama::Template;
 use hyperion_types::PhpVersion;
+use std::collections::HashMap;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
@@ -569,6 +570,47 @@ async fn is_failed(svc: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// First wait after trying to recover a failed FPM unit, doubled per attempt.
+const RECOVERY_BACKOFF_MIN_SECS: i64 = 60;
+const RECOVERY_BACKOFF_MAX_SECS: i64 = 30 * 60;
+
+/// Paces the attempts to bring failed FPM units back. A unit that fails again
+/// straight after a start (a pool `php-fpm -t` accepts but the master rejects,
+/// a box out of memory) must not be restarted every tick: `reset-failed`
+/// clears systemd's own start limit, so nothing else would stop that loop.
+///
+/// Whether the attempt worked does not matter here, since a start that
+/// succeeds can still die a second later. What ends the streak is the unit
+/// staying out of `failed` for the whole wait: [`Self::note_not_failed`].
+#[derive(Debug, Default)]
+pub struct RecoveryBackoff {
+    /// Version → (attempts in a row, unix time the next one may run).
+    streaks: HashMap<PhpVersion, (u32, i64)>,
+}
+
+impl RecoveryBackoff {
+    pub fn may_attempt(&self, version: PhpVersion, now: i64) -> bool {
+        self.streaks
+            .get(&version)
+            .map_or(true, |(_, retry_at)| now >= *retry_at)
+    }
+
+    pub fn record_attempt(&mut self, version: PhpVersion, now: i64) {
+        let (attempts, retry_at) = self.streaks.entry(version).or_insert((0, 0));
+        let wait = RECOVERY_BACKOFF_MIN_SECS
+            .saturating_mul(1i64.checked_shl(*attempts).unwrap_or(i64::MAX))
+            .min(RECOVERY_BACKOFF_MAX_SECS);
+        *attempts = attempts.saturating_add(1);
+        *retry_at = now + wait;
+    }
+
+    pub fn note_not_failed(&mut self, version: PhpVersion, now: i64) {
+        if self.may_attempt(version, now) {
+            self.streaks.remove(&version);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
 
@@ -589,6 +631,56 @@ mod tests {
         );
     }
     use super::*;
+
+    /// A unit that keeps failing is retried on a growing schedule, capped,
+    /// and never by every tick. A first failure is tried at once: that is
+    /// the master OOM kill the tick exists for.
+    #[test]
+    fn recovery_backs_off_while_a_unit_keeps_failing() {
+        let v = PhpVersion::V8_2;
+        let mut b = RecoveryBackoff::default();
+        assert!(b.may_attempt(v, 1000));
+
+        let mut now = 1000;
+        for wait in [60, 120, 240, 480, 960, 1800, 1800] {
+            b.record_attempt(v, now);
+            assert!(!b.may_attempt(v, now));
+            assert!(!b.may_attempt(v, now + wait - 1), "wait {wait}");
+            now += wait;
+            assert!(b.may_attempt(v, now), "wait {wait}");
+        }
+        // Each version keeps its own streak.
+        b.record_attempt(v, now);
+        assert!(b.may_attempt(PhpVersion::V8_3, now));
+
+        // A very long streak must not overflow the shift.
+        for _ in 0..200 {
+            b.record_attempt(v, now);
+        }
+        assert!(!b.may_attempt(v, now + 1799));
+        assert!(b.may_attempt(v, now + 1800));
+    }
+
+    /// Only a unit that stayed out of `failed` for its whole wait is forgiven.
+    /// A start that succeeds and dies within the wait keeps its streak, or a
+    /// master crashing right after start would restart every tick.
+    #[test]
+    fn recovery_streak_ends_only_after_the_unit_stays_up_through_the_wait() {
+        let v = PhpVersion::V8_2;
+        let mut b = RecoveryBackoff::default();
+        b.record_attempt(v, 0);
+        b.note_not_failed(v, 30);
+        assert!(!b.may_attempt(v, 30));
+        // Failed again before the wait ran out: the next wait is the longer one.
+        b.record_attempt(v, 60);
+        b.note_not_failed(v, 179);
+        assert!(!b.may_attempt(v, 179));
+        // Survived the whole wait: the next failure starts over at 60 s.
+        b.note_not_failed(v, 180);
+        b.record_attempt(v, 500);
+        assert!(!b.may_attempt(v, 559));
+        assert!(b.may_attempt(v, 560));
+    }
 
     #[test]
     fn render_includes_key_fields() {
