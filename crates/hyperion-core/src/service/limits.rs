@@ -938,29 +938,28 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// 1. Validation — hosting must be PHP (not static / proxy /
     ///    redirect), target version must differ from current, hosting
     ///    must not be suspended/deleting (use suspend/resume for that).
-    /// 2. Tear down the OLD FPM pool (`fpm_delete`) so the old socket
-    ///    file gets removed and the previous php<ver>-fpm pool config
-    ///    file is dropped.
-    /// 3. Persist the new `php_version` on the hostings row.
-    /// 4. Ensure the NEW FPM pool exists (`fpm_ensure`) — this
+    /// 2. Ensure the NEW FPM pool exists (`fpm_ensure`) — this
     ///    creates the pool config under /etc/php/<new>/fpm/pool.d
     ///    and reloads php<new>-fpm.
-    /// 5. Re-apply the persisted per-hosting PHP limits to the new
+    /// 3. Re-apply the persisted per-hosting PHP limits to the new
     ///    pool (memory, max_children, max_exec, max_requests), so a
     ///    plan limit set on PHP 8.3 carries over to PHP 8.4.
-    /// 6. Re-render the nginx vhost so the `fastcgi_pass` socket
+    /// 4. Persist the new `php_version` on the hostings row.
+    /// 5. Re-render the nginx vhost so the `fastcgi_pass` socket
     ///    points at the new path (`/run/php/<new>/<user>.sock`).
     ///    `nginx -t` runs inside `nginx_write_vhost` and rolls back
     ///    on failure.
+    /// 6. Tear down the OLD FPM pool (`fpm_delete`), now nothing points
+    ///    at it.
     /// 7. Audit log line so the operator can trace the change.
     ///
-    /// On nginx -t failure the new pool is left in place but the
-    /// vhost still points at the OLD socket — site keeps serving via
-    /// the old FPM, the operator sees the vhost write error in the
-    /// flash. This is the safe direction: NEW pool is up, old pool
-    /// is gone, but vhost is unchanged → site keeps working off
-    /// whichever socket the OS still considers valid. Operator then
-    /// fixes the underlying config issue and retries.
+    /// The old pool goes LAST so that no failure can leave a site without
+    /// one: this used to delete it first, and a new pool that would not
+    /// start left the site on 502s with the row already naming the new
+    /// version — where retrying that version was a no-op. Now every failure
+    /// up to step 5 leaves the site serving on its old pool, with the row
+    /// saying so. Both pools can run side by side: they belong to different
+    /// FPM masters and listen on different sockets.
     pub async fn set_php_version(
         &self,
         sel: HostingSelector,
@@ -1017,50 +1016,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             });
         }
 
-        // 1. Tear down old FPM pool. Best-effort: a missing pool file
-        //    or already-stopped service is fine — we're about to
-        //    replace it with the new version anyway. The new pool
-        //    create below is what actually has to succeed.
-        if let Some(current) = current {
-            if let Err(e) = self.adapters.fpm_delete(&detail.system_user, current).await {
-                tracing::warn!(
-                    domain = %detail.domain,
-                    from_version = %current,
-                    error = %e,
-                    "set_php_version: fpm_delete of old version failed (continuing)"
-                );
-            }
-        }
-
-        // 1b. Converting: flip the kind FIRST, so the vhost re-render in
-        //     step 5 reads a hosting that is already PHP. Doing it after
-        //     would render the static template against a hosting that has
-        //     a pool — a site that 404s every .php it is asked for.
-        if converting && detail.kind != "php" {
-            hyperion_state::hostings::set_kind(&self.pool, &detail.id, "php", None, now_secs())
-                .await
-                .map_err(|e| {
-                    RpcError::Internal_with(format!("set_php_version: kind -> php: {e}"))
-                })?;
-        }
-
-        // 2. Persist the new version. If subsequent steps fail, the
-        //    hostings row reflects intent — the boot-time FPM self-heal
-        //    + vhost rewrite will re-converge on next agent restart.
-        hyperion_state::hostings::set_php_version(
-            &self.pool,
-            &detail.id,
-            Some(new_version),
-            now_secs(),
-        )
-        .await
-        .map_err(|e| RpcError::Internal_with(format!("set_php_version persist: {e}")))?;
-
-        // 3. Ensure the new pool. If this fails we leave the row at
-        //    the new version (intent) but rollback the FPM-pool-only
-        //    side: there's nothing to rollback because step 1 already
-        //    deleted the old pool. Operator retries; agent self-heal
-        //    will re-converge.
+        // 1. Ensure the new pool. Nothing has changed yet, so a failure here
+        //    only has to be reported. A pool file may stay behind when FPM
+        //    would not reload; retrying overwrites it. Not removed here, as
+        //    `fpm_delete` reloads too — for a version that failed to install
+        //    that would run the whole apt install a second time.
         if let Err(e) = self
             .adapters
             .fpm_ensure(&detail.system_user, &detail.domain, new_version)
@@ -1068,11 +1028,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         {
             return Err(RpcError::Internal_with(format!(
                 "fpm_ensure for PHP {new_version} failed: {e} \
-                 (the hostings row was updated; retry to converge)"
+                 (the site was left as it was)"
             )));
         }
 
-        // 4. Re-apply persisted PHP limits to the new pool so a plan
+        // 2. Re-apply persisted PHP limits to the new pool so a plan
         //    limit set on PHP 8.3 (memory, children, etc.) survives
         //    the switch to 8.4. Best-effort — operator can re-apply
         //    via the Limits card if needed.
@@ -1099,18 +1059,44 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             }
         }
 
-        // 5. Re-render vhost so fastcgi_pass points at the new socket.
-        //    Pull the FRESH detail (with new php_version) for rendering.
-        let new_detail = self.get(HostingSelector::Id(detail.id.clone())).await?;
-        if let Err(e) = self.write_vhost_for_state(&new_detail).await {
-            return Err(RpcError::Internal_with(format!(
-                "nginx_write_vhost after PHP version change failed: {e} \
-                 (FPM pool for PHP {new_version} is up; site still serves via the old socket \
-                 until the vhost is rewritten — retry once the underlying config error is fixed)"
-            )));
+        // 3. Point the row and the vhost at the new pool. A failure in here
+        //    is undone below, since nginx keeps the old vhost when `nginx -t`
+        //    refuses the new one.
+        if let Err(e) = self
+            .switch_row_and_vhost(&detail, converting, new_version)
+            .await
+        {
+            self.undo_php_switch(&detail, converting).await;
+            if let Err(del) = self
+                .adapters
+                .fpm_delete(&detail.system_user, new_version)
+                .await
+            {
+                tracing::warn!(
+                    domain = %detail.domain,
+                    version = %new_version,
+                    error = %del,
+                    "set_php_version: could not remove the unused new pool"
+                );
+            }
+            return Err(e);
         }
 
-        // 6. Audit log so we can reconstruct who/when/from→to.
+        // 4. Nothing points at the old pool any more. Best-effort: the site
+        //    already runs on the new version, so a leftover pool is litter,
+        //    not a failed switch.
+        if let Some(current) = current {
+            if let Err(e) = self.adapters.fpm_delete(&detail.system_user, current).await {
+                tracing::warn!(
+                    domain = %detail.domain,
+                    from_version = %current,
+                    error = %e,
+                    "set_php_version: fpm_delete of old version failed (continuing)"
+                );
+            }
+        }
+
+        // 5. Audit log so we can reconstruct who/when/from→to.
         self.append_audit(
             "hosting.set_php_version",
             Some(detail.id.as_str()),
@@ -1125,6 +1111,74 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         )
         .await;
         Ok(new_version)
+    }
+
+    /// Step 3 of [`Self::set_php_version`]. The kind flips FIRST when
+    /// converting, so the re-render reads a hosting that is already PHP.
+    /// Doing it after would render the static template against a hosting
+    /// that has a pool — a site that 404s every .php it is asked for.
+    async fn switch_row_and_vhost(
+        &self,
+        detail: &HostingDetail,
+        converting: bool,
+        new_version: PhpVersion,
+    ) -> Result<(), RpcError> {
+        if converting && detail.kind != "php" {
+            hyperion_state::hostings::set_kind(&self.pool, &detail.id, "php", None, now_secs())
+                .await
+                .map_err(|e| {
+                    RpcError::Internal_with(format!("set_php_version: kind -> php: {e}"))
+                })?;
+        }
+        hyperion_state::hostings::set_php_version(
+            &self.pool,
+            &detail.id,
+            Some(new_version),
+            now_secs(),
+        )
+        .await
+        .map_err(|e| RpcError::Internal_with(format!("set_php_version persist: {e}")))?;
+
+        // Pull the FRESH detail (with new php_version) for rendering.
+        let new_detail = self.get(HostingSelector::Id(detail.id.clone())).await?;
+        self.write_vhost_for_state(&new_detail).await.map_err(|e| {
+            RpcError::Internal_with(format!(
+                "nginx_write_vhost after PHP version change failed: {e} \
+                 (the site stays on its previous PHP; retry once the underlying \
+                 config error is fixed)"
+            ))
+        })
+    }
+
+    /// Put the row back to `detail` after a switch that did not complete. A
+    /// write failing here is logged only: the caller is already returning
+    /// the error that brought us here.
+    async fn undo_php_switch(&self, detail: &HostingDetail, converting: bool) {
+        if converting && detail.kind != "php" {
+            // `None` is right for every kind that can be converted: only a
+            // reverse proxy has an upstream, and it is refused up front.
+            if let Err(e) = hyperion_state::hostings::set_kind(
+                &self.pool,
+                &detail.id,
+                &detail.kind,
+                None,
+                now_secs(),
+            )
+            .await
+            {
+                tracing::error!(domain = %detail.domain, error = %e, "set_php_version: could not restore the kind");
+            }
+        }
+        if let Err(e) = hyperion_state::hostings::set_php_version(
+            &self.pool,
+            &detail.id,
+            detail.php_version,
+            now_secs(),
+        )
+        .await
+        {
+            tracing::error!(domain = %detail.domain, error = %e, "set_php_version: could not restore the version");
+        }
     }
 }
 
