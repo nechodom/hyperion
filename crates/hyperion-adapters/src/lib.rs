@@ -40,6 +40,7 @@ pub mod restic;
 pub mod rollback;
 pub mod setup_stack;
 pub mod sitecheck;
+pub mod sitescan;
 pub mod ssh;
 pub mod system_identity;
 pub mod users;
