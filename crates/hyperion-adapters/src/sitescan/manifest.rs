@@ -439,48 +439,78 @@ fn zip_err(m: impl std::fmt::Display) -> AdapterError {
     AdapterError::Other(format!("zip: {m}"))
 }
 
-/// Total entries the end-of-central-directory record declares, read without
-/// parsing the directory (zip64 records included).
+/// The most entries any end-of-central-directory record in the file could make
+/// the zip crate read, found without parsing a directory.
+///
+/// The crate is lenient, so this is deliberately wider than one record:
+/// - it falls back to earlier `PK\5\6` candidates when later ones fail, so the
+///   whole file is searched (one streaming pass), not just the tail;
+/// - on the zip32 path it uses the entries-on-this-disk field, not the total,
+///   so the larger of the two counts;
+/// - it switches to zip64 when the total is 0xFFFF OR the directory offset is
+///   0xFFFFFFFF, and may find the zip64 record away from where the locator
+///   says (prepended data), so every `PK\6\6` record counts, and a saturated
+///   field with no zip64 record at all is refused. A package within our size
+///   and entry caps never needs zip64, so this costs no real package.
 fn declared_entry_count(file: &mut std::fs::File, size: u64) -> Result<u64, AdapterError> {
     use std::io::{Seek, SeekFrom};
     const EOCD_LEN: usize = 22;
-    // The EOCD ends the file, followed by at most a 64 KiB comment.
-    let tail_len = size.min(EOCD_LEN as u64 + 65_535);
-    let mut tail = vec![0u8; tail_len as usize];
-    file.seek(SeekFrom::Start(size - tail_len))?;
-    file.read_exact(&mut tail)?;
-    let at = (0..=tail.len().saturating_sub(EOCD_LEN))
-        .rev()
-        .find(|&i| tail[i..].starts_with(b"PK\x05\x06"))
-        .ok_or_else(|| zip_err("no end-of-central-directory record"))?;
-    let count16 = u16::from_le_bytes([tail[at + 10], tail[at + 11]]);
-    if count16 != 0xFFFF {
-        return Ok(count16 as u64);
+    const EOCD64_LEN: usize = 56;
+    // A candidate starting in the last CARRY bytes of a chunk is handled with
+    // the next one, when all of it is in the buffer.
+    const CARRY: usize = EOCD64_LEN - 1;
+    file.seek(SeekFrom::Start(0))?;
+    let mut reader = file.take(size);
+    let mut chunk = vec![0u8; 1024 * 1024];
+    let mut buf: Vec<u8> = Vec::with_capacity(chunk.len() + CARRY);
+    let (mut count, mut candidates) = (0u64, 0u64);
+    let (mut saturated, mut zip64) = (false, None::<u64>);
+    loop {
+        let n = reader.read(&mut chunk)?;
+        let last = n == 0;
+        buf.extend_from_slice(&chunk[..n]);
+        let limit = if last {
+            buf.len()
+        } else {
+            buf.len().saturating_sub(CARRY)
+        };
+        let mut i = 0;
+        while i < limit {
+            let Some(off) = buf[i..limit].iter().position(|&b| b == b'P') else {
+                break;
+            };
+            i += off;
+            let rest = &buf[i..];
+            if rest.starts_with(b"PK\x05\x06") && rest.len() >= EOCD_LEN {
+                candidates += 1;
+                let on_disk = u16::from_le_bytes([rest[8], rest[9]]);
+                let total = u16::from_le_bytes([rest[10], rest[11]]);
+                let dir_offset = u32::from_le_bytes([rest[16], rest[17], rest[18], rest[19]]);
+                count = count.max(on_disk as u64).max(total as u64);
+                saturated |= on_disk == u16::MAX || total == u16::MAX || dir_offset == u32::MAX;
+            } else if rest.starts_with(b"PK\x06\x06") && rest.len() >= EOCD64_LEN {
+                let le = |at: usize| {
+                    let mut b = [0u8; 8];
+                    b.copy_from_slice(&rest[at..at + 8]);
+                    u64::from_le_bytes(b)
+                };
+                zip64 = Some(zip64.unwrap_or(0).max(le(24)).max(le(32)));
+            }
+            i += 1;
+        }
+        if last {
+            break;
+        }
+        buf.drain(..limit);
     }
-    // zip64: the locator sits right before the EOCD and points at the record.
-    let eocd_pos = size - tail_len + at as u64;
-    if eocd_pos < 20 {
-        return Err(zip_err("truncated zip64 locator"));
+    if candidates == 0 {
+        return Err(zip_err("no end-of-central-directory record"));
     }
-    let mut loc = [0u8; 20];
-    file.seek(SeekFrom::Start(eocd_pos - 20))?;
-    file.read_exact(&mut loc)?;
-    if &loc[..4] != b"PK\x06\x07" {
-        return Err(zip_err("missing zip64 locator"));
+    if saturated {
+        let z = zip64.ok_or_else(|| zip_err("zip64 fields without a zip64 record"))?;
+        count = count.max(z);
     }
-    let rec_pos = u64::from_le_bytes(loc[8..16].try_into().map_err(|_| zip_err("locator"))?);
-    if rec_pos.saturating_add(56) > size {
-        return Err(zip_err("zip64 record out of range"));
-    }
-    let mut rec = [0u8; 56];
-    file.seek(SeekFrom::Start(rec_pos))?;
-    file.read_exact(&mut rec)?;
-    if &rec[..4] != b"PK\x06\x06" {
-        return Err(zip_err("bad zip64 record"));
-    }
-    Ok(u64::from_le_bytes(
-        rec[32..40].try_into().map_err(|_| zip_err("zip64 count"))?,
-    ))
+    Ok(count)
 }
 
 /// An entry name checked for anything that could name a place outside the
@@ -528,7 +558,10 @@ pub(crate) fn manifest_from_zip_with(
     }
     let declared = declared_entry_count(&mut file, size)?;
     if declared > limits.max_entries as u64 {
-        return Err(zip_err(format!("more than {} entries", limits.max_entries)));
+        return Err(zip_err(format!(
+            "declares more than {} entries",
+            limits.max_entries
+        )));
     }
     let mut archive = zip::ZipArchive::new(file).map_err(zip_err)?;
     // The crate collapses entries with the same name, so this can only be
@@ -1621,5 +1654,124 @@ mod tests {
         let err = manifest_from_zip_with(&zp, &k, ManifestSource::VendorPackage, tiny)
             .expect_err("size cap");
         assert!(err.to_string().contains("size cap"), "{err}");
+    }
+
+    /// An end-of-central-directory record.
+    fn eocd(on_disk: u16, total: u16, dir_offset: u32) -> Vec<u8> {
+        let mut b = b"PK\x05\x06\0\0\0\0".to_vec();
+        b.extend_from_slice(&on_disk.to_le_bytes());
+        b.extend_from_slice(&total.to_le_bytes());
+        b.extend_from_slice(&[0; 4]);
+        b.extend_from_slice(&dir_offset.to_le_bytes());
+        b.extend_from_slice(&[0; 2]);
+        assert_eq!(b.len(), 22);
+        b
+    }
+
+    /// A zip64 end-of-central-directory record claiming `count` entries.
+    fn eocd64(count: u64) -> Vec<u8> {
+        let mut b = b"PK\x06\x06".to_vec();
+        b.extend_from_slice(&44u64.to_le_bytes());
+        b.extend_from_slice(&[45, 0, 45, 0]);
+        b.extend_from_slice(&[0; 8]);
+        b.extend_from_slice(&count.to_le_bytes());
+        b.extend_from_slice(&count.to_le_bytes());
+        b.extend_from_slice(&[0; 16]);
+        assert_eq!(b.len(), 56);
+        b
+    }
+
+    /// The count `manifest_from_zip` sees for these bytes, as the error text.
+    fn refused(t: &Path, bytes: &[u8]) -> String {
+        let p = t.join("crafted.zip");
+        std::fs::write(&p, bytes).expect("w");
+        manifest_from_zip(
+            &p,
+            &key(ComponentKind::Plugin, "demo", "1.2.3"),
+            ManifestSource::VendorPackage,
+        )
+        .expect_err("must be refused")
+        .to_string()
+    }
+
+    #[test]
+    fn crafted_counts_are_refused_before_the_crate_parses_anything() {
+        let t = tempfile::tempdir().expect("tmp");
+        // "declares" is our pre-check; the crate's own messages never say it,
+        // so this shows the file was refused before `ZipArchive::new`.
+        let pre = |bytes: &[u8]| {
+            let e = refused(t.path(), bytes);
+            assert!(e.contains("declares more than"), "{e}");
+        };
+        // (a) small 16-bit counts, offset saturated, zip64 record says 1M.
+        let mut b = eocd64(1_000_000);
+        b.extend(eocd(3, 3, u32::MAX));
+        pre(&b);
+        // ... with a locator in front as a writer would put it.
+        let mut b = eocd64(1_000_000);
+        b.extend_from_slice(b"PK\x06\x07\0\0\0\0");
+        b.extend_from_slice(&0u64.to_le_bytes());
+        b.extend_from_slice(&1u32.to_le_bytes());
+        b.extend(eocd(3, 3, u32::MAX));
+        pre(&b);
+        // (b) mismatched 16-bit fields, either way round.
+        pre(&eocd(60_000, 1, 0));
+        pre(&eocd(1, 60_000, 0));
+        // total saturated with the big count only in the zip64 record.
+        let mut b = eocd64(1_000_000);
+        b.extend(eocd(0xFFFF, 0xFFFF, 0));
+        pre(&b);
+        // (c) a later, small-looking record does not hide an earlier big one,
+        // and the reverse.
+        let mut b = eocd(60_000, 60_000, 0);
+        b.extend(eocd(1, 1, 0));
+        pre(&b);
+        let mut b = eocd(1, 1, 0);
+        b.extend(eocd(60_000, 60_000, 0));
+        pre(&b);
+        // a record that straddles a read chunk boundary is still seen.
+        let mut b = vec![0u8; 1024 * 1024 - 10];
+        b.extend(eocd(60_000, 60_000, 0));
+        pre(&b);
+        let mut b = vec![0u8; 1024 * 1024 - 30];
+        b.extend(eocd64(1_000_000));
+        b.extend(eocd(1, 1, u32::MAX));
+        pre(&b);
+    }
+
+    #[test]
+    fn saturated_field_without_a_zip64_record_is_refused() {
+        let t = tempfile::tempdir().expect("tmp");
+        for b in [eocd(3, 0xFFFF, 0), eocd(0xFFFF, 3, 0), eocd(3, 3, u32::MAX)] {
+            let e = refused(t.path(), &b);
+            assert!(e.contains("zip64"), "{e}");
+        }
+    }
+
+    #[test]
+    fn tiny_and_empty_files_do_not_panic() {
+        let t = tempfile::tempdir().expect("tmp");
+        for len in [0usize, 1, 4, 5, 11, 21] {
+            let mut b = b"PK\x05\x06".to_vec();
+            b.resize(len, 0);
+            b.truncate(len);
+            let e = refused(t.path(), &b);
+            assert!(e.contains("end-of-central-directory"), "{len}: {e}");
+        }
+        // And a 4-byte zip64 signature with nothing after it.
+        let e = refused(t.path(), b"PK\x06\x06");
+        assert!(e.contains("end-of-central-directory"), "{e}");
+    }
+
+    #[test]
+    fn honest_counts_pass_the_precheck() {
+        let t = tempfile::tempdir().expect("tmp");
+        let zp = make_zip(
+            t.path(),
+            &[("demo/demo.php", PLUGIN_HEAD), ("demo/a.php", b"<?php")],
+        );
+        let n = std::fs::metadata(&zp).expect("meta").len();
+        let mut f = std::fs::File::open(&zp).expect("open");
+        assert_eq!(declared_entry_count(&mut f, n).expect("count"), 2);
     }
 }
