@@ -24,6 +24,7 @@
 - Conversion order: start own master, set mode, rewrite vhosts, `nginx -t` and reload, drop old pool file, **no shared reload**.
 - RAM estimate 11 MB per system user, floor from `phpworkers::NODE_FREE_RAM_DIVISOR` (free RAM stays at or above total / 5).
 - Pool files use `;` comments only (`render_uses_only_semicolon_comments`).
+- Saving `[php]` never restarts the agent: a restart re-renders pools and restarts every PHP version (`rerender_fpm_pools`). Code reads the setting fresh from `agent.toml` when it needs it, never from a value cached at boot.
 - Every slow web action goes through `spawn_job`. Confirm dialogs go on the `<form>`, not the button.
 - Rewrites of an existing pool must keep stored limits (`fpm_ensure_with_limits` rule, PR #230).
 - Run `cargo test --workspace --all-targets`; plain `cargo check --workspace` skips `mod tests`. A new migration may need `touch crates/hyperion-state/src/lib.rs` before `--workspace` sees it.
@@ -225,7 +226,7 @@ Expected: PASS
 
 ### Task 5: One routing layer for every pool write and removal
 
-**Before starting:** check whether the session on suspend and trash (`local_4a182941-588d-4bf6-9820-2c9cc2c330e7`, branch `claude/nostalgic-noether-7701ef`) merged a sibling check. Reuse its helper in place of `fpm_user_still_needs` below. Do not write a second one.
+**PR #337 merged the shared-user sibling check (193fac3e).** Reuse it in place of `fpm_user_still_needs` below, and do not write a second one. `fpm_own::unit_name(ver, "")` returns the template name, so `fpm_own_delete` must refuse an empty user before it reaches `disable --now`.
 
 **Files:**
 - Create: `crates/hyperion-core/src/service/fpm_own.rs`
@@ -285,7 +286,7 @@ Expected: PASS, including every existing FPM test unchanged.
 
 Convert sequence, with one job per user:
 
-1. Refuse if `fpm_own_masters` is off, if preflight has blocks, or if the user has no active PHP hosting (`resume first`). Already own: return the report, no changes.
+1. Refuse if the setting is off, if preflight has a cgroup or systemd block, if converting this one user would take free RAM under the floor (judge this user's versions × `MB_PER_USER`, not the whole node's remaining users; the all-users RAM refusal is phase 2 only), or if the user has no active PHP hosting (`resume first`). Already own: return the report, no changes.
 2. For each PHP version among the user's active hostings: `fpm_own_ensure` with stored limits, then require `fpm_own_ready`, polled up to 10 s.
 3. `set_own`.
 4. For each of the user's active PHP hostings: fresh `get`, `write_vhost_for_state`.
@@ -306,7 +307,8 @@ Unconvert: `apply_php_limits` per version (pool back in `pool.d`, this reloads s
 #[tokio::test] async fn convert_refused_when_node_setting_off() {}
 #[tokio::test] async fn unconvert_works_with_node_setting_off() { /* Review Focus */ }
 #[tokio::test] async fn unconvert_restores_stored_limits_before_switching_vhosts() {}
-#[tokio::test] async fn new_user_adopted_only_when_on_and_ram_floor_holds() { /* on+ok: own. off: shared. on+LowRam: shared, no error */ }
+#[tokio::test] async fn new_user_adopted_only_when_on_and_preflight_clean() { /* on+ok: own. off: shared. on+LowRam, on+NoCgroup2, on+OldSystemd: shared, no error */ }
+#[tokio::test] async fn one_conversion_is_judged_on_its_own_cost() { /* free RAM cannot fit every remaining user but fits this one: allowed. Cannot fit this one: refused. */ }
 ```
 
 - [ ] **Step 2: Run to verify they fail**
@@ -351,6 +353,8 @@ Health: `health_reports_failed_own_units`.
 Run: `cargo test -p hyperion-core boot_rerender workers_tick_reopens bad_own_config health_reports`
 Expected: FAIL
 
+**Before starting:** see whether `claude/vibrant-mclaren-e89a0e` (recovering failed FPM units) has merged; it overlaps `fpm_recover_failed`. PR #336 already writes an `OOMPolicy=continue` drop-in for shared units, and own units carry it in the template.
+
 - [ ] **Step 3: Implement.** Call `ensure_own_units` beside `ensure_phpfpm_socket_dirs`. `ensure_own_pool` already does nothing for an unchanged file, so a boot leaves own masters untouched. `repair_orphan_fpm_pools` also walks `own_config_dir`, with a failing own config quarantined as the shared ones are, and that user's unit stopped; only that site is affected. `fpm_recover_failed` also does `reset-failed` plus `start` on `failed_own_units`. The `PartOf` restart on a PHP package upgrade needs no code.
 
 - [ ] **Step 4: Run to verify they pass**
@@ -370,6 +374,8 @@ Expected: PASS
 **Interfaces:**
 - Consumes: `Request::HostingFpmOwnSet`, `Request::NodeFpmPreflight`
 - Produces: `POST /hostings/set-fpm-own` (`selector`, `own`), gated by `require_manage_for_selector(.., Capability::HostingEditConfig)`, running through `spawn_job` with kind `hosting.fpm_own`
+
+The node setting reaches the card through a new `Request::NodeFpmOwnState` (or extend `NodeFpmPreflight`'s response) answered from a fresh read of `agent.toml`; `HostingDetail` and `AgentConfigView` do not carry it. Remove the card's "This version only reports" line and the same caveat in `packaging/agent.toml.example`.
 
 - [ ] **Step 1: Write the failing tests.** Web: viewer refused; POST creates a job and redirects to `/jobs/<id>`; the card shows the action only if the node setting is on and preflight is ok, shows rollback whenever the user is converted, and the confirm on the form names all hostings of that user. Rollback's confirm says it reloads the shared master, which can cut in-flight requests on other shared sites.
 
