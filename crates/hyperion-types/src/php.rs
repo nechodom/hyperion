@@ -38,6 +38,22 @@ impl PhpVersion {
         format!("/run/php/{}/{}.sock", self.as_str(), system_user)
     }
 
+    /// Socket of the user's own master (the shared master keeps
+    /// [`PhpVersion::socket_path`]).
+    pub fn own_socket_path(self, user: &str) -> String {
+        format!("/run/php/{}/site/{}.sock", self.as_str(), user)
+    }
+
+    /// Directory of the own masters' config files for this version.
+    pub fn own_config_dir(self) -> String {
+        format!("/etc/hyperion/fpm/{}", self.as_str())
+    }
+
+    /// The user's own master config file.
+    pub fn own_config_path(self, user: &str) -> String {
+        format!("{}/{}.conf", self.own_config_dir(), user)
+    }
+
     pub fn all() -> &'static [PhpVersion] {
         &[Self::V8_1, Self::V8_2, Self::V8_3, Self::V8_4]
     }
