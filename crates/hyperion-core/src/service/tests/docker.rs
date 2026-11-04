@@ -1860,11 +1860,18 @@ async fn outbound_body_has_no_log_lines() {
 }
 
 #[tokio::test]
-async fn a_flood_of_alerts_from_one_node_is_capped_per_batch() {
+async fn a_flood_is_capped_then_summarised_and_the_graver_news_goes_first() {
     let s = outbound_master(&["boss"]).await;
-    let batch: Vec<_> = (1..=30)
+    // 28 project alerts first, then the daemon and a node: the order they
+    // arrive in must not decide which of them leave.
+    let mut batch: Vec<_> = (1..=28)
         .map(|i| outbox_item(i, &format!("docker.project:p{i}")))
         .collect();
+    batch.push(outbox_item(29, "docker.daemon"));
+    batch.push(outbox_item(30, "docker.node:node_b"));
+    for it in &mut batch {
+        it.title = it.kind.clone();
+    }
     let n = s
         .notifications_ingest("node_a", batch)
         .await
@@ -1872,9 +1879,48 @@ async fn a_flood_of_alerts_from_one_node_is_capped_per_batch() {
     assert_eq!(n, 30, "every alert reaches the bell");
     assert_eq!(
         slack_sends(&s).await,
-        OUTBOUND_PER_INGEST as i64,
-        "but a node cannot make the master post without bound"
+        OUTBOUND_PER_INGEST as i64 + 1,
+        "the cap, plus one summary"
     );
+    let mail = mail_sends(&s).await;
+    assert_eq!(mail.len(), OUTBOUND_PER_INGEST + 1, "{mail:?}");
+    assert_eq!(mail[0].0, "docker.daemon");
+    assert_eq!(mail[1].0, "docker.node:node_b");
+    assert!(mail[2].0.starts_with("docker.project:p"), "{mail:?}");
+    let (subject, body) = &mail[OUTBOUND_PER_INGEST];
+    assert_eq!(subject, "More Docker alerts");
+    assert!(body.contains("20 more"), "30 - 10 = 20 unsent: {body}");
+    assert!(body.contains("/docker"), "and where to read them: {body}");
+}
+
+#[tokio::test]
+async fn an_item_half_written_when_the_database_fails_is_still_sent() {
+    let s = outbound_master(&["a", "b"]).await;
+    let ids: Vec<i64> = hyperion_state::web_users::list(&s.pool)
+        .await
+        .expect("users")
+        .into_iter()
+        .map(|u| u.id)
+        .collect();
+    // The first admin's row goes in; the second admin's write fails.
+    sqlx::query(&format!(
+        "CREATE TRIGGER fail_second BEFORE INSERT ON notifications \
+         WHEN NEW.user_id = {} BEGIN SELECT RAISE(ABORT, 'boom'); END",
+        ids[1]
+    ))
+    .execute(&s.pool)
+    .await
+    .expect("trigger");
+
+    s.notifications_ingest("node_a", vec![outbox_item(1, "docker.node:node_b")])
+        .await
+        .expect_err("the second write fails");
+    assert_eq!(
+        slack_sends(&s).await,
+        1,
+        "the first row is written, so on the next read it would be 'seen'"
+    );
+    assert_eq!(mail_sends(&s).await.len(), 1);
 }
 
 #[test]

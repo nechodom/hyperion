@@ -1669,6 +1669,20 @@ pub static STRINGS: &[LetterString] = &[
         cs: "{node} opět odpovídá masteru a jeho Docker kontejnery se zase sledují.",
     },
     LetterString {
+        id: "ops.docker_more.title",
+        group: "Operator alerts — Docker",
+        note: "Sent instead of the Docker alerts of one batch that are past the sending cap.",
+        en: "More Docker alerts",
+        cs: "Další Docker upozornění",
+    },
+    LetterString {
+        id: "ops.docker_more.body",
+        group: "Operator alerts — Docker",
+        note: "Tokens: {count} {link}. The link is the panel's Docker page.",
+        en: "{count} more Docker alerts arrived at once. See the panel: {link}",
+        cs: "Najednou dorazilo dalších {count} Docker upozornění. Podívejte se v panelu: {link}",
+    },
+    LetterString {
         id: "ops.rofs_by_design.title",
         group: "Operator alerts — this server",
         note: "The node runs an immutable image; hyperion cannot manage packages on it.",

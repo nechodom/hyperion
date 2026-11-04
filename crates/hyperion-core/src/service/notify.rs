@@ -790,26 +790,45 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     Ok(false) => {}
                     Err(e) => {
                         failed = Some(e);
-                        break 'items;
+                        break;
                     }
                 }
             }
+            // Counted even when a later admin's write failed: this admin's
+            // row is there now and would read as "seen" on the next pass.
             if item_written && is_outbound_docker_kind(&row.kind) {
                 outbound.push((row.title, row.body, row.kind));
+            }
+            if failed.is_some() {
+                break 'items;
             }
         }
         // Whatever was written is sent, even when a later item failed: those
         // rows are "seen" on the next read and would never be sent then.
-        if outbound.len() > OUTBOUND_PER_INGEST {
-            tracing::warn!(
-                node = node_id,
-                dropped = outbound.len() - OUTBOUND_PER_INGEST,
-                "docker alerts from one batch not sent outbound (per-batch cap)"
-            );
-            outbound.truncate(OUTBOUND_PER_INGEST);
-        }
+        // The daemon and the node are the rarer, graver news, so they go
+        // before project alerts; the sort is stable.
+        outbound.sort_by_key(|(_, _, kind)| kind.starts_with("docker.project"));
+        let over = outbound.len().saturating_sub(OUTBOUND_PER_INGEST);
+        outbound.truncate(OUTBOUND_PER_INGEST);
         for (title, body, kind) in &outbound {
             self.docker_outbound(title, body, kind).await;
+        }
+        if over > 0 {
+            // Past the cap nothing is dropped unsaid: ONE message says how
+            // many more there are and where to read them.
+            let panel = self.notify_panel_url();
+            let link = format!("{panel}{DOCKER_PAGE}");
+            let count = over.to_string();
+            let cat = self.operator_catalog();
+            let args = [("count", count.as_str()), ("link", link.as_str())];
+            let title = cat.render("ops.docker_more.title", &args);
+            let body = cat.render("ops.docker_more.body", &args);
+            tracing::warn!(
+                node = node_id,
+                over,
+                "docker alerts from one batch beyond the per-batch cap, summarised"
+            );
+            self.docker_outbound(&title, &body, "docker.more").await;
         }
         if let Some(e) = failed {
             return Err(RpcError::Internal_with(format!(
@@ -985,8 +1004,11 @@ pub fn is_outbound_docker_kind(kind: &str) -> bool {
 
 /// Most Docker alerts one collected batch may send outbound. The rows of a
 /// node are text that node wrote; the bell takes all of them, but a node
-/// must not be able to make the master post to Slack without bound.
+/// must not be able to make the master post to Slack without bound. Alerts
+/// past it are not lost: one summary message counts them.
 pub(super) const OUTBOUND_PER_INGEST: usize = 10;
+/// Where the summary message points.
+const DOCKER_PAGE: &str = "/docker";
 
 /// The Slack text for a Docker alert: title and body, nothing else.
 pub(super) fn docker_outbound_text(subject: &str, body: &str) -> String {
