@@ -23,9 +23,24 @@ use super::walk::FileMeta;
 /// "no baseline" and the site is scanned as a first scan.
 const FORMAT_VERSION: u32 = 1;
 
-/// A baseline that inflates past this is treated as damaged, so a corrupt or
-/// hostile gzip cannot exhaust the worker's memory.
-const MAX_UNCOMPRESSED: u64 = 200 * 1024 * 1024;
+/// What `load` will read. A corrupt or hostile file must not exhaust the
+/// worker's 256 MiB: the file is decoded as a stream and never held whole, and
+/// each of these ends the read as "damaged" instead.
+struct Limits {
+    /// Size of the file on disk.
+    compressed: u64,
+    /// Total decoded bytes.
+    inflated: u64,
+    /// One line. Longest real line is a path (at most 4096 bytes, six times
+    /// that when every character is escaped) plus a hash.
+    line: usize,
+}
+
+const LIMITS: Limits = Limits {
+    compressed: 64 * 1024 * 1024,
+    inflated: 200 * 1024 * 1024,
+    line: 64 * 1024,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BaselineEntry {
@@ -103,7 +118,7 @@ impl Baseline {
     /// `Ok(None)` for a missing, damaged, oversized or other-version file: the
     /// caller scans as a first scan. `Err` only for a real I/O failure.
     pub fn load(path: &Path) -> io::Result<Option<Baseline>> {
-        load_with_limit(path, MAX_UNCOMPRESSED)
+        load_with_limits(path, &LIMITS)
     }
 
     /// Writes next to `path` under a fresh O_EXCL 0600 name, fsyncs, renames
@@ -173,71 +188,105 @@ fn write_line(out: &mut impl Write, v: &impl Serialize) -> io::Result<()> {
     out.write_all(b"\n")
 }
 
-fn load_with_limit(path: &Path, limit: u64) -> io::Result<Option<Baseline>> {
+fn load_with_limits(path: &Path, lim: &Limits) -> io::Result<Option<Baseline>> {
     let f = match File::open(path) {
         Ok(f) => f,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e),
     };
-    // Read the compressed bytes first, so a failing disk is an error and
-    // everything after this point that fails is a damaged file.
-    let mut raw = Vec::new();
-    f.take(limit + 1).read_to_end(&mut raw)?;
-    if raw.len() as u64 > limit {
+    if f.metadata()?.len() > lim.compressed {
         return Ok(None);
     }
-    Ok(parse(&raw, limit))
+    parse(BufReader::with_capacity(64 * 1024, f), lim)
 }
 
-fn parse(raw: &[u8], limit: u64) -> Option<Baseline> {
-    // One more byte than the limit tells "exactly at it" from "past it".
-    let mut rd = BufReader::new(GzDecoder::new(raw).take(limit + 1));
-    let mut seen = 0u64;
-    let mut line = String::new();
-    let mut next = |line: &mut String| -> Option<bool> {
-        line.clear();
-        let n = rd.read_line(line).ok()?;
-        seen += n as u64;
-        if seen > limit {
-            return None;
-        }
-        Some(n > 0)
-    };
+/// Errors the gzip decoder raises for bad data. Anything else came from the
+/// disk underneath it and stays an error.
+fn is_damage(e: &io::Error) -> bool {
+    matches!(
+        e.kind(),
+        io::ErrorKind::InvalidData | io::ErrorKind::InvalidInput | io::ErrorKind::UnexpectedEof
+    )
+}
 
-    if !next(&mut line)? {
-        return None;
+enum Step {
+    Line,
+    Eof,
+    Damaged,
+}
+
+/// Reads one line into `buf`, holding at most `lim.line` bytes of it.
+fn next_line(
+    rd: &mut impl BufRead,
+    buf: &mut Vec<u8>,
+    seen: &mut u64,
+    lim: &Limits,
+) -> io::Result<Step> {
+    buf.clear();
+    // One byte over the cap tells a line that fits from one that does not.
+    let n = match rd.by_ref().take(lim.line as u64 + 1).read_until(b'\n', buf) {
+        Ok(n) => n,
+        Err(e) if is_damage(&e) => return Ok(Step::Damaged),
+        Err(e) => return Err(e),
+    };
+    *seen += n as u64;
+    if n > lim.line || *seen > lim.inflated {
+        return Ok(Step::Damaged);
     }
-    let head: Header = serde_json::from_str(&line).ok()?;
+    Ok(if n == 0 { Step::Eof } else { Step::Line })
+}
+
+fn parse(src: impl Read, lim: &Limits) -> io::Result<Option<Baseline>> {
+    let mut rd = BufReader::new(GzDecoder::new(src));
+    let (mut seen, mut buf) = (0u64, Vec::new());
+
+    if !matches!(next_line(&mut rd, &mut buf, &mut seen, lim)?, Step::Line) {
+        return Ok(None);
+    }
+    let Ok(head) = serde_json::from_slice::<Header>(&buf) else {
+        return Ok(None);
+    };
     if head.v != FORMAT_VERSION {
-        return None;
+        return Ok(None);
     }
     let mut b = Baseline {
         since: head.since,
         rule_pack: head.rule_pack,
         ..Baseline::default()
     };
-    while next(&mut line)? {
-        if line.trim().is_empty() {
+    loop {
+        match next_line(&mut rd, &mut buf, &mut seen, lim)? {
+            Step::Line => {}
+            Step::Eof => return Ok(Some(b)),
+            Step::Damaged => return Ok(None),
+        }
+        if buf.trim_ascii().is_empty() {
             continue;
         }
-        match serde_json::from_str(&line).ok()? {
-            Line::File { p, s, c, n, h } => {
+        match serde_json::from_slice(&buf) {
+            Ok(Line::File { p, s, c, n, h }) => {
+                let Some(sha256) = parse_hash(&h) else {
+                    return Ok(None);
+                };
                 b.entries.insert(
                     p,
                     BaselineEntry {
                         size: s,
                         ctime: c,
                         ctime_nsec: n,
-                        sha256: parse_hash(&h)?,
+                        sha256,
                     },
                 );
             }
-            Line::Trusted { p, h } => {
-                b.trusted.insert(p, parse_hash(&h)?);
+            Ok(Line::Trusted { p, h }) => {
+                let Some(h) = parse_hash(&h) else {
+                    return Ok(None);
+                };
+                b.trusted.insert(p, h);
             }
+            Err(_) => return Ok(None),
         }
     }
-    Some(b)
 }
 
 #[cfg(test)]
@@ -455,30 +504,78 @@ mod tests {
         assert_eq!(b.entries["a"].ctime_nsec, 3);
     }
 
+    fn lim(compressed: u64, inflated: u64, line: usize) -> Limits {
+        Limits {
+            compressed,
+            inflated,
+            line,
+        }
+    }
+
     #[test]
     fn inflating_past_the_limit_loads_as_none() {
         let t = tempfile::tempdir().expect("tmp");
         let p = t.path().join("bomb");
-        // A few hundred KiB of zeros inflate to far more than the test limit,
-        // and the single "line" never ends.
-        let mut gz = GzEncoder::new(File::create(&p).expect("create"), Compression::default());
-        let zeros = vec![b' '; 1 << 20];
-        for _ in 0..8 {
-            gz.write_all(&zeros).expect("write");
-        }
-        gz.finish().expect("finish");
-        assert_eq!(load_with_limit(&p, 1 << 20).expect("load"), None);
-        // Well under the limit the same helper still reads real baselines.
+        // Megabytes of lines inflate to far more than the test limit.
+        let line = format!("{}\n", " ".repeat(1023));
+        gz_file(&p, &line.repeat(4096));
+        assert_eq!(
+            load_with_limits(&p, &lim(1 << 30, 1 << 20, 4096)).expect("load"),
+            None
+        );
+        // Under the limit the same helper still reads real baselines.
         let q = t.path().join("ok");
         sample().save_atomic(&q).expect("save");
-        assert_eq!(load_with_limit(&q, 1 << 20).expect("load"), Some(sample()));
+        let big = lim(1 << 30, 1 << 20, 4096);
+        assert_eq!(load_with_limits(&q, &big).expect("load"), Some(sample()));
         // Exactly at the limit is fine; one byte less is not.
         let mut plain = Vec::new();
         sample().write_lines(&mut plain).expect("lines");
-        gz_file(&q, std::str::from_utf8(&plain).expect("utf8"));
         let n = plain.len() as u64;
-        assert!(load_with_limit(&q, n).expect("load").is_some());
-        assert_eq!(load_with_limit(&q, n - 1).expect("load"), None);
+        assert!(load_with_limits(&q, &lim(1 << 30, n, 4096))
+            .expect("load")
+            .is_some());
+        assert_eq!(
+            load_with_limits(&q, &lim(1 << 30, n - 1, 4096)).expect("load"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_line_without_a_newline_is_cut_off_at_the_line_limit() {
+        let t = tempfile::tempdir().expect("tmp");
+        let p = t.path().join("endless");
+        // One "line" of 1 MiB with no newline anywhere, under every other cap.
+        gz_file(&p, &"x".repeat(1 << 20));
+        assert_eq!(
+            load_with_limits(&p, &lim(1 << 30, 1 << 30, 1024)).expect("load"),
+            None
+        );
+        // The same after a valid header, where an entry line should be.
+        let q = t.path().join("endless-entry");
+        gz_file(&q, &format!("{{\"v\":1}}\n{}", "y".repeat(1 << 20)));
+        assert_eq!(
+            load_with_limits(&q, &lim(1 << 30, 1 << 30, 1024)).expect("load"),
+            None
+        );
+        // A line exactly at the cap (newline included) is accepted, one over is not.
+        let r = t.path().join("real");
+        sample().save_atomic(&r).expect("save");
+        let mut plain = Vec::new();
+        sample().write_lines(&mut plain).expect("lines");
+        let longest = plain
+            .split_inclusive(|b| *b == b'\n')
+            .map(<[u8]>::len)
+            .max();
+        let longest = longest.expect("lines");
+        assert_eq!(
+            load_with_limits(&r, &lim(1 << 30, 1 << 30, longest)).expect("load"),
+            Some(sample())
+        );
+        assert_eq!(
+            load_with_limits(&r, &lim(1 << 30, 1 << 30, longest - 1)).expect("load"),
+            None
+        );
     }
 
     #[test]
@@ -486,7 +583,10 @@ mod tests {
         let t = tempfile::tempdir().expect("tmp");
         let p = t.path().join("big");
         fs::write(&p, vec![7u8; 4096]).expect("write");
-        assert_eq!(load_with_limit(&p, 1024).expect("load"), None);
+        assert_eq!(
+            load_with_limits(&p, &lim(1024, 1 << 30, 4096)).expect("load"),
+            None
+        );
     }
 
     #[test]
@@ -515,10 +615,8 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_save_keeps_the_old_baseline() {
+    fn a_failed_rename_leaves_no_temp_file() {
         let t = tempfile::tempdir().expect("tmp");
-        let p = t.path().join("42");
-        sample().save_atomic(&p).expect("save");
         // A directory squatting on the target name makes the rename fail.
         let blocked = t.path().join("blocked");
         fs::create_dir(&blocked).expect("mkdir");
@@ -527,10 +625,29 @@ mod tests {
             .expect("ls")
             .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
             .collect();
-        assert!(
-            names.iter().all(|n| !n.starts_with(".baseline-")),
-            "{names:?}"
-        );
+        assert_eq!(names, vec!["blocked".to_string()]);
+    }
+
+    #[test]
+    fn a_failed_save_keeps_the_old_baseline() {
+        // Root ignores directory permissions, so the save would succeed.
+        if rustix::process::geteuid().is_root() {
+            return;
+        }
+        let t = tempfile::tempdir().expect("tmp");
+        let dir = t.path().join("baselines");
+        let p = dir.join("42");
+        sample().save_atomic(&p).expect("save");
+
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o500)).expect("chmod");
+        let mut other = sample();
+        other.since = 1;
+        let res = other.save_atomic(&p);
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).expect("chmod back");
+
+        assert!(res.is_err());
         assert_eq!(Baseline::load(&p).expect("load"), Some(sample()));
+        let names: Vec<_> = fs::read_dir(&dir).expect("ls").collect();
+        assert_eq!(names.len(), 1);
     }
 }
