@@ -103,7 +103,7 @@
       </div>
       <span class="pill {{ s.tone }}">{{ s.state_label }}</span>
       <div class="svc-actions">
-        {% if let Some(f) = s.forget_action %}
+        {% if is_admin %}{% if let Some(f) = s.forget_action %}
         <form method="post" action="{{ f }}"
               data-confirm-title="Forget {{ s.name }}"
               data-confirm-body="Clears Hyperion's record of this stack and its alert. No container, image or volume is touched. If the stack comes back it is picked up again."
@@ -112,7 +112,7 @@
           <input type="hidden" name="_csrf" value="{{ csrf_token }}">
           <button class="btn small" type="submit">Forget</button>
         </form>
-        {% endif %}
+        {% endif %}{% endif %}
         <a class="btn small ghost" href="{{ s.href }}" aria-label="Containers of {{ s.name }}">Details</a>
       </div>
     </div>

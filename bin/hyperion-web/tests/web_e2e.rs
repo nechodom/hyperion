@@ -6414,12 +6414,7 @@ async fn custom_role_without_scope_all_refused() {
         format!("_csrf={}", enc(&csrf)),
     )
     .await;
-    assert_ne!(resp.status(), StatusCode::OK);
-    assert!(
-        resp.status() == StatusCode::FORBIDDEN || resp.status() == StatusCode::SEE_OTHER,
-        "{}",
-        resp.status()
-    );
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 
     let wide = docker_custom_user(&app, &sock, "dk-wide", true).await;
     let (status, _) = acme_dns_get(&app, &wide, "/docker").await;
@@ -6442,6 +6437,82 @@ async fn custom_role_without_scope_all_refused() {
     )
     .await;
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    // Forgetting a stack is a write too: the same role is refused.
+    let resp = acme_dns_post(
+        &app,
+        &wide,
+        "/docker/local/shop/forget",
+        format!("_csrf={}", enc(&csrf)),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+/// A reader who may not forget is not offered the button either.
+#[tokio::test]
+async fn forget_button_is_for_administrators() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let mut snap = docker_snapshot();
+    snap.projects.push(DockerProject {
+        name: "old-forum".into(),
+        verdict: "gone".into(),
+        gone_since: Some(1_700_000_000),
+        ..Default::default()
+    });
+    let (sock, _d, pool) = start_agent_full(None, Some(snap)).await;
+    let app = build_app(sock.clone(), admin);
+    docker_enable_master(&sock, &pool).await;
+    let cookie = acme_dns_login(&app, "kevin", "good-pw").await;
+    let wide = docker_custom_user(&app, &sock, "dk-wide-forget", true).await;
+    let form = "action=\"/docker/local/old-forum/forget\"";
+
+    for uri in ["/docker", "/docker/local/old-forum"] {
+        let (status, page) = acme_dns_get(&app, &cookie, uri).await;
+        assert_eq!(status, StatusCode::OK, "{uri}");
+        assert!(page.contains(form), "admin sees Forget on {uri}");
+        let (status, page) = acme_dns_get(&app, &wide, uri).await;
+        assert_eq!(status, StatusCode::OK, "{uri}");
+        assert!(
+            !page.contains(form),
+            "a wide reader is not offered Forget on {uri}"
+        );
+        assert!(
+            page.contains("old-forum"),
+            "{uri}: the stack itself is listed"
+        );
+    }
+}
+
+/// The module is off for the cluster: a direct POST must not turn a node on.
+#[tokio::test]
+async fn node_install_is_refused_while_the_module_is_off() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d) = start_agent().await;
+    let app = build_app(sock.clone(), admin);
+    let cookie = acme_dns_login(&app, "kevin", "good-pw").await;
+    let csrf = acme_ssl_csrf(&app, &cookie).await;
+    let resp = acme_dns_post(
+        &app,
+        &cookie,
+        "/docker/nodes/local/install",
+        format!("_csrf={}", enc(&csrf)),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    match hyperion_rpc_client::call(
+        &sock,
+        DockerReq::JobList {
+            kind: Some("docker_node_install".into()),
+            state: None,
+            limit: 10,
+        },
+    )
+    .await
+    .expect("jobs")
+    {
+        DockerResp::JobList(v) => assert!(v.is_empty(), "no job was started: {v:?}"),
+        other => panic!("{other:?}"),
+    }
 }
 
 #[tokio::test]

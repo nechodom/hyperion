@@ -841,7 +841,7 @@ pub async fn get_docker_stack(
         summary: sv.summary,
         gone: sv.gone,
         forget_action: sv.forget_action,
-        can_forget: !ctx.is_read_only(),
+        can_forget: ctx.is_admin_or_higher(),
         log_warning: containers.iter().any(|c| c.log_warn),
         containers,
         disk: disk_view(&st),
@@ -1073,6 +1073,17 @@ pub async fn post_node_install(
     Path(node): Path<String>,
 ) -> Result<Response, AppError> {
     admin_only(&ctx)?;
+    // With the module off for the cluster a node must not be turned on by a
+    // direct POST: nothing lists it, and the nav would stay hidden.
+    if !registry(&state)
+        .await
+        .map_err(AppError::Rpc)?
+        .cluster_installed
+    {
+        return Err(AppError::BadRequest(
+            "The Docker module is not turned on. Turn it on in Settings first.".into(),
+        ));
+    }
     let canonical = writable_target(&state, &node).await?;
     let actor_uid = ctx.session.as_ref().map(|s| s.user_id).unwrap_or(0);
     let actor_label = ctx.username.clone();
@@ -1219,9 +1230,7 @@ pub async fn post_forget(
     ctx: AuthCtx,
     Path((node, project)): Path<(String, String)>,
 ) -> Result<Response, AppError> {
-    if !allowed(&ctx) || ctx.is_read_only() {
-        return Err(AppError::Forbidden);
-    }
+    admin_only(&ctx)?;
     let list = registry(&state).await.map_err(AppError::Rpc)?;
     let canonical = registered_target(&state, &list, &node)
         .await
