@@ -621,9 +621,9 @@ pub async fn check_usr_writable() -> Option<String> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum UsrRoCause {
     /// Read-only in THIS process's mount namespace only — systemd's
-    /// `ProtectSystem=` without `ReadWritePaths=/usr`. The host's /usr
-    /// is writable, so the operator's shell shows `rw` and remounting
-    /// changes nothing.
+    /// `ProtectSystem=`, which `ReadWritePaths=/usr` does not override on
+    /// systemd 257. The host's /usr is writable, so the operator's shell
+    /// shows `rw` and remounting changes nothing.
     Sandbox,
     /// Read-only on the host as well: a real `ro` mount at this point.
     Host(String),
@@ -653,11 +653,12 @@ pub(super) fn classify_usr_ro(own: &str, host: Option<&str>) -> UsrRoCause {
     }
 }
 
-const SANDBOX_FIX: &str = "hyperion-agent's unit is missing ReadWritePaths=/usr (shipped \
-     since v0.15.1). Run packaging/install/update.sh on this node, or add \
-     `ReadWritePaths=/usr` under [Service] in /etc/systemd/system/hyperion-agent.service, \
-     then `systemctl daemon-reload && systemctl restart hyperion-agent`. `systemctl cat \
-     hyperion-agent` shows whether a drop-in overrides it.";
+const SANDBOX_FIX: &str = "hyperion-agent's unit still sets ProtectSystem=, and on systemd 257 \
+     ReadWritePaths=/usr does not override it. Run packaging/install/update.sh on this node, \
+     or in /etc/systemd/system/hyperion-agent.service replace `ProtectSystem=true` and \
+     `ReadWritePaths=/usr` with `ReadOnlyPaths=-/boot -/efi`, then `systemctl daemon-reload \
+     && systemctl restart hyperion-agent`. `systemctl cat hyperion-agent` shows whether a \
+     drop-in sets it again.";
 
 /// The operator-facing sentence for a failed `/usr` write. The sandbox
 /// case must never suggest a remount: the disk is healthy, and an
@@ -679,8 +680,8 @@ pub(super) fn usr_not_writable_message(err: &str, cause: &UsrRoCause) -> String 
         ),
         UsrRoCause::Unknown => format!(
             "/usr is not writable ({err}), though no mount this agent can see explains it. \
-             Check the agent's sandbox first: `systemctl show hyperion-agent -p ProtectSystem \
-             -p ReadWritePaths` must list /usr. After that: `lsattr -d /usr` (an `i` flag \
+             Check the agent's sandbox first: `systemctl show hyperion-agent -p ProtectSystem` \
+             must say `no`. After that: `lsattr -d /usr` (an `i` flag \
              blocks writes; `chattr -i /usr` clears it), AppArmor/SELinux denials in \
              `journalctl -k`, and `mount | grep ' / '` for a read-only root."
         ),
@@ -778,12 +779,23 @@ mod mountinfo_tests {
     fn the_sandbox_message_never_suggests_a_remount() {
         let msg =
             usr_not_writable_message("Read-only file system (os error 30)", &UsrRoCause::Sandbox);
-        assert!(msg.contains("ReadWritePaths=/usr"), "{msg}");
+        assert!(msg.contains("ReadOnlyPaths=-/boot -/efi"), "{msg}");
         assert!(!msg.contains("remount,rw"), "{msg}");
         let host = usr_not_writable_message("x", &UsrRoCause::Host("/".into()));
         assert!(host.contains("mount -o remount,rw /"), "{host}");
         let unknown = usr_not_writable_message("x", &UsrRoCause::Unknown);
         let sandbox = unknown.find("ProtectSystem").expect("names the sandbox");
         assert!(sandbox < unknown.find("lsattr").unwrap(), "{unknown}");
+    }
+
+    /// On systemd 257 `ProtectSystem=true` beats `ReadWritePaths=/usr`, so a
+    /// unit carrying both leaves /usr read-only and every apt install dies.
+    #[test]
+    fn the_agent_unit_leaves_usr_writable_and_boot_read_only() {
+        let unit = include_str!("../../../../packaging/systemd/hyperion-agent.service");
+        let set = |key: &str| unit.lines().any(|l| l.starts_with(key));
+        assert!(!set("ProtectSystem="), "ProtectSystem= covers /usr");
+        assert!(!set("ReadWritePaths=/usr"), "cannot override ProtectSystem=");
+        assert!(set("ReadOnlyPaths=-/boot -/efi"), "/boot must stay read-only");
     }
 }
