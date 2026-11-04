@@ -104,6 +104,29 @@ impl RealAdapter {
         self.nginx_user = detected;
     }
 
+    /// The other live sites a pool written for `domain` must let in. Here so
+    /// that no path writing a pool can forget them. An unreadable DB fails the
+    /// write: a file listing only `domain` locks those sites out, which is
+    /// worse than leaving the current file in place.
+    async fn others_on_php_pool(
+        &self,
+        system_user: &str,
+        domain: &str,
+        version: PhpVersion,
+    ) -> Result<Vec<String>, AdapterError> {
+        let Some(pool) = self.state_pool.as_ref() else {
+            return Ok(Vec::new());
+        };
+        let live = hyperion_state::hostings::live_on_php_pool(pool, system_user, version)
+            .await
+            .map_err(|e| AdapterError::Other(format!("sites on pool: {e}")))?;
+        Ok(live
+            .into_iter()
+            .map(|(_, d)| d)
+            .filter(|d| d != domain)
+            .collect())
+    }
+
     /// Resolve the internal-preview vhost for `primary_domain` on THIS
     /// node, or `None` when no preview applies. The rule (shared with the
     /// web detail page via `ClusterConfigView::preview_subdomain`):
@@ -442,13 +465,17 @@ impl AdapterPort for RealAdapter {
         domain: &str,
         version: PhpVersion,
     ) -> Result<(), AdapterError> {
-        let input = hyperion_adapters::phpfpm::PoolInput::defaults_with_owner(
+        let others = self
+            .others_on_php_pool(system_user, domain, version)
+            .await?;
+        let mut input = hyperion_adapters::phpfpm::PoolInput::defaults_with_owner(
             system_user,
             domain,
             version,
             &self.nginx_user,
             &self.nginx_user,
         );
+        input.also_serves = &others;
         hyperion_adapters::phpfpm::ensure_pool(&input).await?;
         Ok(())
     }
@@ -1137,6 +1164,7 @@ impl AdapterPort for RealAdapter {
         let Some(ver) = version else {
             return Ok(());
         };
+        let others = self.others_on_php_pool(system_user, domain, ver).await?;
         let mut input = hyperion_adapters::phpfpm::PoolInput::defaults_with_owner(
             system_user,
             domain,
@@ -1144,6 +1172,7 @@ impl AdapterPort for RealAdapter {
             &self.nginx_user,
             &self.nginx_user,
         );
+        input.also_serves = &others;
         input.memory_mb = php_memory_mb.max(16) as u32;
         input.max_exec_secs = php_max_exec_secs.max(1) as u32;
         input.max_children = php_max_children.max(1) as u32;
@@ -1860,6 +1889,42 @@ async fn unix_user_exists(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_pool_lists_the_other_live_sites_on_it() {
+        let pool = hyperion_state::db::open_memory().await.expect("open");
+        let user = hyperion_state::system_users::insert(&pool, "shared", 2001, "/h", "/x", 1)
+            .await
+            .expect("user");
+        for domain in ["a.cz", "b.cz"] {
+            hyperion_state::hostings::insert(
+                &pool,
+                &hyperion_types::HostingId::new_v7(),
+                domain,
+                user,
+                Some(PhpVersion::V8_3),
+                "/r",
+                1,
+                None,
+            )
+            .await
+            .expect("site");
+        }
+        let adapter = RealAdapter {
+            state_pool: Some(pool),
+            ..Default::default()
+        };
+        let others = adapter
+            .others_on_php_pool("shared", "a.cz", PhpVersion::V8_3)
+            .await
+            .expect("others");
+        assert_eq!(others, ["b.cz"]);
+        let none = RealAdapter::default()
+            .others_on_php_pool("shared", "a.cz", PhpVersion::V8_3)
+            .await
+            .expect("no DB");
+        assert!(none.is_empty());
+    }
 
     /// The preview shim must land only in WordPress sites, only when a
     /// preview is active, and must be removed when it is not — otherwise a
