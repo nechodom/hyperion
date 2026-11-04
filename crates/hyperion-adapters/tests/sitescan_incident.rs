@@ -1182,6 +1182,7 @@ fn a_skipped_core_file_is_not_called_missing() {
         .core_missing
         .contains(&"wp-includes/load.php".to_string()));
     item(&out.review, "wp-includes/load.php");
+    assert_says_unchecked(&out);
 }
 
 #[test]
@@ -1991,6 +1992,284 @@ fn php_settings_under_uploads_get_rules() {
     let out = s.scan();
     assert_eq!(item(&out.review, ".user.ini").severity, "medium");
     assert_eq!(rels(&out.findings), Vec::<&str>::new());
+}
+
+/// Move a real directory out of the docroot and leave a symlink to it.
+fn swap_dir_for_link(s: &Site, rel: &str, hidden: &str) -> PathBuf {
+    let hid = s.root.parent().expect("parent").join(hidden);
+    fs::rename(s.path(rel), &hid).expect("rename");
+    std::os::unix::fs::symlink(&hid, s.path(rel)).expect("link");
+    hid
+}
+
+#[track_caller]
+fn assert_says_unchecked(out: &SiteScanOutcome) {
+    assert!(
+        out.coverage
+            .partial_reasons
+            .iter()
+            .any(|r| r.contains("could not be checked")),
+        "{:?}",
+        out.coverage.partial_reasons
+    );
+}
+
+#[test]
+fn a_symlink_over_core_is_not_clean() {
+    let s = Site::new();
+    s.wordpress();
+    s.scan();
+    settle();
+    let hid = swap_dir_for_link(&s, "wp-admin", "hid-admin");
+    fs::write(hid.join("admin.php"), EVAL).expect("write");
+    let out = s.scan();
+    let r = item(&out.review, "wp-admin");
+    assert_eq!(r.kind, FindingKind::BaselineChange);
+    assert!(r.snippet.contains("symlink"), "{}", r.snippet);
+    assert_says_unchecked(&out);
+    assert!(out.upstream.core_missing.is_empty());
+}
+
+#[test]
+fn a_symlink_inside_a_verified_plugin_is_not_clean() {
+    let s = incident_site();
+    s.scan();
+    settle();
+    let hid = swap_dir_for_link(&s, "wp-content/plugins/elementor/assets", "hid-assets");
+    fs::write(hid.join("lib/swiper/swiper.min.js"), JS_LOADER).expect("write");
+    let out = s.scan();
+    let r = item(&out.review, "wp-content/plugins/elementor/assets");
+    assert_eq!(r.component.as_deref(), Some("elementor"));
+    assert_says_unchecked(&out);
+    assert!(out.upstream.plugins_failed.is_empty());
+}
+
+#[test]
+fn a_listed_file_replaced_by_a_symlink_is_not_clean() {
+    let s = incident_site();
+    s.scan();
+    settle();
+    let rel = "wp-content/plugins/elementor/assets/lib/swiper/swiper.min.js";
+    let hid = s.root.parent().expect("parent").join("evil.js");
+    fs::write(&hid, JS_LOADER).expect("write");
+    s.rm(rel);
+    std::os::unix::fs::symlink(&hid, s.path(rel)).expect("link");
+    let out = s.scan();
+    item(&out.review, rel);
+    assert_says_unchecked(&out);
+}
+
+#[test]
+fn whole_plugins_and_mu_plugins_as_symlinks_are_not_clean() {
+    let s = incident_site();
+    s.scan();
+    settle();
+    swap_dir_for_link(&s, "wp-content/plugins/elementor", "hid-el");
+    let out = s.scan();
+    item(&out.review, "wp-content/plugins/elementor");
+    assert!(!out.coverage.partial_reasons.is_empty());
+
+    let hid = s.root.parent().expect("parent").join("hid-evil");
+    fs::create_dir(&hid).expect("mkdir");
+    fs::write(hid.join("evil.php"), SHELL).expect("write");
+    std::os::unix::fs::symlink(&hid, s.path("wp-content/plugins/evil")).expect("link");
+    std::os::unix::fs::symlink(&hid, s.path("wp-content/mu-plugins")).expect("link");
+    std::os::unix::fs::symlink(&hid, s.path("wp-content/themes/evil")).expect("link");
+    let out = s.scan();
+    item(&out.review, "wp-content/plugins/evil");
+    item(&out.review, "wp-content/themes/evil");
+    item(&out.review, "wp-content/mu-plugins");
+}
+
+#[test]
+fn a_symlinked_php_settings_file_is_not_clean() {
+    let s = Site::new();
+    s.wordpress();
+    s.write(".user.ini", "; ok\n");
+    s.scan();
+    settle();
+    let hid = s.root.parent().expect("parent").join("x.ini");
+    fs::write(&hid, "auto_prepend_file=/tmp/evil.php\n").expect("write");
+    s.rm(".user.ini");
+    std::os::unix::fs::symlink(&hid, s.path(".user.ini")).expect("link");
+    item(&s.scan().review, ".user.ini");
+}
+
+#[test]
+fn symlinks_where_nothing_would_be_looked_at_only_count() {
+    let s = Site::new();
+    s.wordpress();
+    let link = |rel: &str| {
+        let p = s.path(rel);
+        fs::create_dir_all(p.parent().expect("parent")).expect("mkdir");
+        std::os::unix::fs::symlink("/tmp/elsewhere", p).expect("symlink");
+    };
+    link("wp-content/uploads");
+    link("wp-content/cache");
+    link("wp-content/notes.txt");
+    link("shared");
+    let out = s.scan();
+    assert_eq!(rels(&out.review), Vec::<&str>::new());
+    assert_eq!(out.coverage.symlinks_skipped, 4);
+    assert_eq!(out.coverage.partial_reasons, Vec::<String>::new());
+}
+
+#[test]
+fn watched_javascript_grown_past_64_mib_is_a_change() {
+    let s = Site::new();
+    s.wordpress();
+    let rel = "wp-content/mu-plugins/app.js";
+    s.write(rel, "var a;\n");
+    settle();
+    s.scan();
+    settle();
+    s.write(rel, JS_LOADER);
+    fs::File::options()
+        .write(true)
+        .open(s.path(rel))
+        .expect("open")
+        .set_len(65 << 20)
+        .expect("grow");
+    for _ in 0..2 {
+        let out = s.scan();
+        assert_eq!(out.files_hashed, 0);
+        let r = item(&out.review, rel);
+        assert_eq!(r.kind, FindingKind::BaselineChange);
+        assert_eq!(r.sha256, "");
+    }
+}
+
+#[test]
+fn php_settings_past_64_mib_are_reported_like_php() {
+    let grow = |s: &Site| {
+        s.write(".user.ini", "auto_prepend_file=/tmp/evil.php\n");
+        fs::File::options()
+            .write(true)
+            .open(s.path(".user.ini"))
+            .expect("open")
+            .set_len(65 << 20)
+            .expect("grow");
+    };
+    // Watched and grown.
+    let s = Site::new();
+    s.wordpress();
+    s.write(".user.ini", "; ok\n");
+    s.scan();
+    settle();
+    grow(&s);
+    let out = s.scan();
+    assert_eq!(
+        item(&out.review, ".user.ini").kind,
+        FindingKind::TooLargeToInspect
+    );
+    assert_eq!(out.coverage.files_partly_inspected, 0);
+
+    // New, and in a first scan too.
+    let s = Site::new();
+    s.wordpress();
+    grow(&s);
+    assert_eq!(
+        item(&s.scan().review, ".user.ini").kind,
+        FindingKind::TooLargeToInspect
+    );
+}
+
+#[test]
+fn php_settings_padded_past_the_inspect_limit_are_reported() {
+    let s = Site::new();
+    s.wordpress();
+    let mut b = vec![b';'; 3 << 20];
+    b.extend_from_slice(b"\nauto_prepend_file=/tmp/evil.php\n");
+    s.write("wp-content/uploads/.user.ini", &b);
+    s.write(".htaccess", &b);
+    let out = s.scan();
+    for rel in ["wp-content/uploads/.user.ini", ".htaccess"] {
+        assert_eq!(
+            item(&out.review, rel).kind,
+            FindingKind::TooLargeToInspect,
+            "{rel}"
+        );
+    }
+    assert_eq!(out.coverage.files_partly_inspected, 0);
+}
+
+#[test]
+fn php_settings_with_cr_line_ends_are_read() {
+    let s = Site::new();
+    s.wordpress();
+    s.write(
+        "wp-content/uploads/.user.ini",
+        "; x\rauto_prepend_file=/tmp/evil.php\r",
+    );
+    let out = s.scan();
+    let r = item(&out.review, "wp-content/uploads/.user.ini");
+    assert_eq!(r.rule_id.as_deref(), Some("php_prepend_setting"));
+    assert!(r.snippet.starts_with("auto_prepend_file"), "{}", r.snippet);
+}
+
+fn padded_version_php() -> Vec<u8> {
+    let mut b = format!("<?php\n$wp_version = '{WP_VERSION}';\n$wp_local_package = 'cs_CZ';\n/*")
+        .into_bytes();
+    b.resize(3 << 20, b' ');
+    b.extend_from_slice(b"*/\n");
+    b.extend_from_slice(&EVAL[5..]);
+    b
+}
+
+#[test]
+fn a_fallback_version_php_past_the_inspect_limit_fails() {
+    let s = Site::new();
+    s.wordpress_with(Some("cs_CZ"), Some("en_US"));
+    s.scan();
+    settle();
+    s.write("wp-includes/version.php", padded_version_php());
+    let out = s.scan();
+    let f = item(&out.findings, "wp-includes/version.php");
+    assert_eq!(f.kind, FindingKind::CoreModified);
+    assert_eq!(f.severity, "high");
+    assert!(!s.load().verified.contains_key("wp-includes/version.php"));
+}
+
+#[test]
+fn a_rule_pack_bump_reinspects_a_fallback_version_php() {
+    let s = Site::new();
+    s.wordpress_with(Some("cs_CZ"), Some("en_US"));
+    let rel = "wp-includes/version.php";
+    let body = [
+        format!("<?php\n$wp_version = '{WP_VERSION}';\n$wp_local_package = 'cs_CZ';\n").as_bytes(),
+        &EVAL[5..],
+    ]
+    .concat();
+    s.write(rel, &body);
+    settle();
+    item(&s.scan().findings, rel);
+
+    // As if an older pack had passed it: rules are all that vouches for it.
+    let md = fs::metadata(s.path(rel)).expect("stat");
+    let mut b = s.load();
+    b.entries.insert(
+        rel.to_string(),
+        BaselineEntry {
+            size: md.len(),
+            ctime: md.ctime(),
+            ctime_nsec: md.ctime_nsec(),
+            sha256: sha_of(&body),
+        },
+    );
+    let id = "core/wordpress@6.8.1~en_US".to_string();
+    b.verified.insert(rel.to_string(), id);
+    b.save_atomic(&s.baseline).expect("save");
+    assert_eq!(
+        rels(&s.scan().findings),
+        Vec::<&str>::new(),
+        "no bump, no read"
+    );
+
+    let mut b = s.load();
+    b.rule_pack = RULE_PACK_VERSION - 1;
+    b.save_atomic(&s.baseline).expect("save");
+    item(&s.scan().findings, rel);
+    assert!(!s.load().verified.contains_key(rel));
 }
 
 #[test]

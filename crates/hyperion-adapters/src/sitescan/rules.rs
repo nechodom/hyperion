@@ -20,8 +20,8 @@ use regex::bytes::{Regex, RegexSet, RegexSetBuilder};
 pub const RULE_PACK_VERSION: u32 = 1;
 
 /// Bytes of one file that are inspected. A larger inspected file (PHP,
-/// JavaScript, HTML) is reported as `too_large_to_inspect` (never skipped
-/// silently); only the first `INSPECT_MAX_BYTES` of it are matched.
+/// JavaScript, HTML, PHP settings) is reported as `too_large_to_inspect` (never
+/// skipped silently); only the first `INSPECT_MAX_BYTES` of it are matched.
 pub const INSPECT_MAX_BYTES: usize = 2 * 1024 * 1024;
 
 const MAX_HITS: usize = 20;
@@ -160,7 +160,8 @@ const RULES: &[Rule] = &[
         // firewall, so it's worth a look and not an alarm.
         severity: Severity::Medium,
         scope: Scope::PhpSettings,
-        pattern: r"(?im-u)^[ \t]*(?:php_value[ \t]+)?auto_(?:prepend|append)_file\b",
+        // `R`: PHP's ini parser takes a bare CR as a line end too.
+        pattern: r"(?imR-u)^[ \t]*(?:php_value[ \t]+)?auto_(?:prepend|append)_file\b",
         also: None,
     },
 ];
@@ -280,7 +281,7 @@ fn inspect_with(rel_path: &str, bytes: &[u8], php: bool) -> Vec<RuleHit> {
     if php && under_uploads(rel_path) {
         hits.push(path_hit("php_in_uploads", Severity::High, rel_path));
     }
-    if script && bytes.len() > INSPECT_MAX_BYTES {
+    if (script || settings) && bytes.len() > INSPECT_MAX_BYTES {
         hits.push(path_hit(
             "too_large_to_inspect",
             Severity::Medium,
@@ -554,6 +555,14 @@ mod tests {
         assert!(inspect(".user.ini", b"; auto_prepend_file = x\n").is_empty());
         assert!(inspect("a.php", b"<?php\nauto_prepend_file\n").is_empty());
         assert!(inspect("a.txt", b"auto_prepend_file = x\n").is_empty());
+        // PHP's ini parser takes a bare CR as a line end, so a match starts there.
+        let h = inspect(".user.ini", b"; x\rauto_prepend_file=/tmp/x\r");
+        assert_eq!(ids(&h), ["php_prepend_setting"]);
+        assert!(h[0].snippet.starts_with("auto_prepend_file"), "{h:?}");
+        // Too big to read to the end is reported, like PHP.
+        let mut big = vec![b';'; INSPECT_MAX_BYTES + 1];
+        big.push(b'\n');
+        assert_eq!(ids(&inspect(".htaccess", &big)), ["too_large_to_inspect"]);
         // And PHP's own rules don't run on a settings file.
         assert!(inspect(".htaccess", b"# eval(base64_decode('x'))\n").is_empty());
     }

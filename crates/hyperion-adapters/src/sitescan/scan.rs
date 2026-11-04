@@ -311,17 +311,32 @@ fn in_scope(rel: &str) -> bool {
     runs_as_php(rel) || is_js(rel) || is_php_settings(rel)
 }
 
-/// Rules for this file. Past the inspect limit only PHP is a loose end: a big
-/// bundle gets its start inspected and is watched by hash like anything else.
+/// Too big to read to the end is a loose end only for what PHP runs or obeys: a
+/// big bundle gets its start inspected and is watched by hash like anything else.
+fn size_is_a_loose_end(rel: &str) -> bool {
+    runs_as_php(rel) || is_php_settings(rel)
+}
+
 fn rules_for(rel: &str, head: &[u8]) -> Vec<RuleHit> {
     if rel == MAINTENANCE {
         return inspect_as_php(rel, head);
     }
     let mut hits = inspect(rel, head);
-    if !is_php_like(rel) {
+    if !size_is_a_loose_end(rel) {
         hits.retain(|h| h.rule_id != TOO_LARGE_RULE);
     }
     hits
+}
+
+/// Directories whose contents WordPress runs, wherever a symlink sends them.
+fn holds_code(rel: &str) -> bool {
+    matches!(
+        rel,
+        "wp-admin" | "wp-includes" | "wp-content" | "wp-content/plugins" | "wp-content/themes"
+    ) || rel == "wp-content/mu-plugins"
+        || rel.starts_with("wp-content/mu-plugins/")
+        || rel.starts_with("wp-content/plugins/")
+        || rel.starts_with("wp-content/themes/")
 }
 
 /// What a name costs in the baseline file: JSON escapes control characters into
@@ -386,10 +401,14 @@ impl Seen {
         }
     }
 
+    fn visited(&self, rel: &str) -> bool {
+        self.visited.contains(&self.state.hash_one(rel))
+    }
+
     /// The walk reached this file, or couldn't say: a skipped name may be the
     /// file itself or a directory above it, and "" is the root.
     fn may_exist(&self, rel: &str) -> bool {
-        if self.skips_overflowed || self.visited.contains(&self.state.hash_one(rel)) {
+        if self.skips_overflowed || self.visited(rel) {
             return true;
         }
         if self.skipped.is_empty() {
@@ -611,6 +630,8 @@ struct Scan<'a> {
     not_recorded: u64,
     /// Code files with a name over the limit.
     long_names: u64,
+    /// Manifest files behind something the walk wouldn't go through.
+    listed_unchecked: u64,
     partly_inspected: i64,
     symlinks_skipped: i64,
     /// Why parts of this run couldn't check something, apart from the walk.
@@ -736,6 +757,7 @@ impl<'a> Scan<'a> {
             recorded_bytes,
             not_recorded: 0,
             long_names: 0,
+            listed_unchecked: 0,
             partly_inspected: 0,
             symlinks_skipped: 0,
             reasons,
@@ -779,10 +801,10 @@ impl<'a> Scan<'a> {
         if why != SkipReason::FileCapReached && rel.len() <= self.limits.max_rel_bytes {
             self.seen.skip(&rel);
         }
-        // Linking a file twice or pointing a name elsewhere mustn't make PHP
+        // Linking a file twice or pointing a name elsewhere mustn't make code
         // invisible, even though it isn't read.
         match why {
-            SkipReason::Symlink if runs_as_php(&rel) => {
+            SkipReason::Symlink if self.symlink_stands_for_code(&rel) => {
                 self.report_unread(&rel, "symlink: not followed");
                 return;
             }
@@ -798,6 +820,13 @@ impl<'a> Scan<'a> {
             _ => {}
         }
         self.count_skip(&rel, why);
+    }
+
+    /// A symlink is only harmless where a file of that name wouldn't have been
+    /// looked at anyway. Anywhere else it hides what would have been: a plugin's
+    /// subfolder or a listed file behind one is never compared.
+    fn symlink_stands_for_code(&self, rel: &str) -> bool {
+        holds_code(rel) || self.owner(rel).is_some() || !matches!(self.route(rel), Route::Ignore)
     }
 
     /// A review item for a file this scan won't read.
@@ -1045,6 +1074,7 @@ impl<'a> Scan<'a> {
         // state with `$wp_local_package`, so the rules still have to.
         let rules_decide = comp.locale_fallback && m.rel == VERSION_PHP;
         if self.input.mode == ScanMode::Delta
+            && !(rules_decide && self.rules_bumped)
             && self.baseline.verified.get(&m.rel) == Some(&comp.id)
             && classify(self.baseline.entries.get(&m.rel), m) == Change::Unchanged
         {
@@ -1061,7 +1091,11 @@ impl<'a> Scan<'a> {
             .then(|| rules_for(&m.rel, &read.head));
         let failed = match &hits {
             None => false,
-            Some(h) if rules_decide => worst(h).is_some_and(|h| h.severity == Severity::High),
+            // Rules are its only check, so what they couldn't read can't pass.
+            Some(h) if rules_decide => {
+                read.head.len() > INSPECT_MAX_BYTES
+                    || worst(h).is_some_and(|h| h.severity == Severity::High)
+            }
             Some(_) => true,
         };
         if failed {
@@ -1186,19 +1220,27 @@ impl<'a> Scan<'a> {
     }
 
     fn note_partly_inspected(&mut self, m: &FileMeta) {
-        if m.size > INSPECT_MAX_BYTES as u64 && !runs_as_php(&m.rel) {
+        if m.size > INSPECT_MAX_BYTES as u64 && !size_is_a_loose_end(&m.rel) {
             self.partly_inspected += 1;
         }
     }
 
-    /// Too big to be worth reading with nothing to compare it with? Only for PHP
-    /// is that something to report.
-    fn too_big_to_read(&mut self, m: &FileMeta, owner: Option<usize>) -> bool {
+    /// Too big to be worth reading with nothing to compare it with? That's
+    /// reported for what PHP runs or obeys, and for a watched file that changed:
+    /// metadata alone can say that much.
+    fn too_big_to_read(&mut self, m: &FileMeta, owner: Option<usize>, change: Change) -> bool {
         if m.size <= NO_MANIFEST_READ_MAX {
             return false;
         }
-        if runs_as_php(&m.rel) {
+        if size_is_a_loose_end(&m.rel) {
             self.report_oversize(m, owner);
+        } else if change == Change::NeedsHash {
+            let item = SiteFileFinding {
+                snippet: format!("{} bytes: changed, too large to read", m.size),
+                component: self.component_of(owner),
+                ..self.base_item(&m.rel, FindingKind::BaselineChange, None)
+            };
+            self.push_review(item);
         }
         true
     }
@@ -1212,7 +1254,7 @@ impl<'a> Scan<'a> {
         if change == Change::Unchanged && self.input.mode == ScanMode::Delta && !self.rules_bumped {
             return;
         }
-        if self.too_big_to_read(m, owner) {
+        if self.too_big_to_read(m, owner, change) {
             return;
         }
         let Some(read) = self.read(m, false) else {
@@ -1273,7 +1315,8 @@ impl<'a> Scan<'a> {
         if change == Change::Unchanged && self.input.mode == ScanMode::Delta {
             return;
         }
-        if self.too_big_to_read(m, owner) {
+        // No change detection here, so a change is not news.
+        if self.too_big_to_read(m, owner, Change::New) {
             return;
         }
         let Some(read) = self.read(m, false) else {
@@ -1301,12 +1344,17 @@ impl<'a> Scan<'a> {
     /// Manifest files the walk never met.
     fn add_missing(&mut self) {
         for i in 0..self.comps.len() {
-            let missing: Vec<String> = self.comps[i]
-                .in_scope_files()
-                .into_iter()
-                .map(|(_, rel)| rel)
-                .filter(|rel| !self.seen.may_exist(rel))
-                .collect();
+            let mut missing = Vec::new();
+            for (_, rel) in self.comps[i].in_scope_files() {
+                if self.seen.visited(&rel) {
+                    continue;
+                }
+                if self.seen.may_exist(&rel) {
+                    self.listed_unchecked += 1;
+                } else {
+                    missing.push(rel);
+                }
+            }
             let core = self.comps[i].is_core();
             let kind = if core {
                 FindingKind::CoreMissing
@@ -1527,6 +1575,12 @@ impl<'a> Scan<'a> {
             self.baseline.entries.retain(|p, _| seen.may_exist(p));
             self.baseline.verified.retain(|p, _| seen.may_exist(p));
             self.baseline.churn.retain(|p, _| seen.may_exist(p));
+        }
+        if self.listed_unchecked > 0 {
+            reasons.push(format!(
+                "{} files with an upstream checksum could not be checked: something in their path is not a plain file or directory",
+                self.listed_unchecked
+            ));
         }
         self.group_components();
         let (findings, upstream) = self.assemble(ran);

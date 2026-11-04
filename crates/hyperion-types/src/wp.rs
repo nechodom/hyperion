@@ -371,7 +371,8 @@ pub struct ScanCoverage {
     /// the start inspected (or, at the extreme, not read at all).
     #[serde(default)]
     pub files_partly_inspected: i64,
-    /// Symlinks not followed, other than PHP-named ones, which are review items.
+    /// Symlinks not followed where a file of that name wouldn't have been looked
+    /// at anyway. Any other symlink is a review item.
     #[serde(default)]
     pub symlinks_skipped: i64,
     /// Core was compared with its release.
