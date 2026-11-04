@@ -308,6 +308,25 @@ pub fn extract_tar_gz_sandboxed(archive: &Path, target_root: &Path) -> Result<u6
     Ok(archive_len)
 }
 
+/// Extract an import bundle's `docroot.tar.gz` straight into a hosting's
+/// document root, with the same per-member containment as a backup restore.
+///
+/// Not [`extract_tar_gz_sandboxed`]: that one is for hosting backups, whose
+/// members all sit under `htdocs/`. A docroot tarball is packed from inside the
+/// docroot (`tar czf … -C <docroot> .`), so its members are `./index.php` and
+/// the `htdocs/` rule refuses every one of them.
+///
+/// `MultiGzDecoder` because the WordPress plugin compresses each request's slice
+/// as its own gzip member. A plain `GzDecoder` stops at the first member's end
+/// and reads as a clean, short archive.
+pub fn extract_docroot_tar_gz_sandboxed(
+    archive: &Path,
+    target_root: &Path,
+) -> Result<u64, AdapterError> {
+    let gz = flate2::read::MultiGzDecoder::new(std::fs::File::open(archive)?);
+    extract_archive_sandboxed(gz, target_root, None)
+}
+
 /// Extract a *plain* (non-gzip) tar over `target_root`, refusing any member that
 /// would escape the root. Same containment guarantees as
 /// [`extract_tar_gz_sandboxed`]; used for uncompressed bundle archives (the
@@ -2017,6 +2036,78 @@ garbage
         // The cap truncates rather than allocating whatever the archive claims.
         let capped = read_tar_member(&tar, "manifest.json", 4).expect("capped");
         assert_eq!(capped.len(), 4);
+    }
+
+    /// Gzip one tar member's worth of `(path, content)` pairs. The tar end marker
+    /// is left to the caller so a stream can be split across gzip members.
+    fn tar_blocks(files: &[(&str, &str)]) -> Vec<u8> {
+        let mut b = tar::Builder::new(Vec::new());
+        for (path, content) in files {
+            let mut h = tar::Header::new_gnu();
+            h.set_size(content.len() as u64);
+            h.set_mode(0o644);
+            h.set_entry_type(tar::EntryType::Regular);
+            h.set_cksum();
+            b.append_data(&mut h, path, content.as_bytes())
+                .expect("append");
+        }
+        b.into_inner().expect("finish")
+    }
+
+    fn gz_member(bytes: &[u8]) -> Vec<u8> {
+        use std::io::Write;
+        let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        e.write_all(bytes).expect("gz");
+        e.finish().expect("gz finish")
+    }
+
+    /// What `tar czf … -C <docroot> .` produces. The backup-only `htdocs/` rule
+    /// refused this shape, so every archive-mode import failed on its first
+    /// member from #290 until this entry point existed.
+    #[test]
+    fn a_docroot_tarball_packed_from_inside_the_docroot_unpacks() {
+        let d = tempfile::tempdir().expect("tmp");
+        let gz = d.path().join("docroot.tar.gz");
+        std::fs::write(
+            &gz,
+            gz_member(&tar_blocks(&[("./index.php", "<?php"), ("./a/b.txt", "b")])),
+        )
+        .expect("write");
+        let dest = d.path().join("dest");
+        std::fs::create_dir_all(&dest).expect("dest");
+        extract_docroot_tar_gz_sandboxed(&gz, &dest).expect("extract");
+        assert_eq!(std::fs::read_to_string(dest.join("a/b.txt")).unwrap(), "b");
+        assert!(dest.join("index.php").is_file());
+    }
+
+    /// The plugin writes one gzip member per request. Stopping at the first one
+    /// would import the start of the site and report success.
+    #[test]
+    fn every_gzip_member_of_a_docroot_tarball_is_read() {
+        let d = tempfile::tempdir().expect("tmp");
+        let whole = tar_blocks(&[("first.txt", "1"), ("second.txt", "2")]);
+        let cut = 512 + 512; // Past the first member's header and data block.
+        let mut stream = gz_member(&whole[..cut]);
+        stream.extend(gz_member(&whole[cut..]));
+        let gz = d.path().join("docroot.tar.gz");
+        std::fs::write(&gz, stream).expect("write");
+        let dest = d.path().join("dest");
+        std::fs::create_dir_all(&dest).expect("dest");
+        extract_docroot_tar_gz_sandboxed(&gz, &dest).expect("extract");
+        assert!(dest.join("second.txt").is_file());
+    }
+
+    #[test]
+    fn a_docroot_tarball_still_cannot_escape() {
+        let d = tempfile::tempdir().expect("tmp");
+        let tar = d.path().join("evil.tar");
+        build_plain_tar(&tar, &[("leak", "symlink", "/etc/passwd")]);
+        let gz = d.path().join("docroot.tar.gz");
+        std::fs::write(&gz, gz_member(&std::fs::read(&tar).unwrap())).expect("write");
+        let dest = d.path().join("dest");
+        std::fs::create_dir_all(&dest).expect("dest");
+        assert!(extract_docroot_tar_gz_sandboxed(&gz, &dest).is_err());
+        assert!(!dest.join("leak").exists());
     }
 
     #[test]

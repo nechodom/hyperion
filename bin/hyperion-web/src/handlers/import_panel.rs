@@ -318,6 +318,7 @@ fn php_overrides_from(body: &[u8]) -> Vec<hyperion_import::SiteImportOverride> {
                 profile_id: None,
                 next_billing_at: None,
                 php_version: Some(version.to_string()),
+                wp_url_rewrites: Vec::new(),
             })
         })
         .collect()

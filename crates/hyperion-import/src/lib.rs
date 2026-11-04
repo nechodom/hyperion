@@ -25,6 +25,7 @@ pub mod panel;
 pub mod planner;
 pub(crate) mod proc;
 pub mod progress;
+pub mod wordpress;
 
 pub use adapter::{Location, SourceAdapter, SourceKind, SourcePanelInfo, SshTarget};
 pub use cloudpanel::CloudPanelAdapter;

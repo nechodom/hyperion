@@ -474,6 +474,15 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 self.wp_rewrite_domain(&created.system_user, &created.root_dir, &h.domain, &target)
                     .await;
             }
+            // The WordPress plugin knows the site's real URL, which can differ
+            // from the hosting's domain (www, a subfolder, a rename).
+            for (from, to) in &o.wp_url_rewrites {
+                self.wp_rewrite_domain(&created.system_user, &created.root_dir, from, to)
+                    .await;
+                if let Err(e) = repoint_wp_config_urls(&created.root_dir, from, to).await {
+                    tracing::warn!(error = %e, "could not repoint WP_HOME / WP_SITEURL");
+                }
+            }
             if let Some(pid) = o.profile_id {
                 if let Err(e) = self
                     .profile_apply(
@@ -913,7 +922,7 @@ async fn fetch_files(
                 // serves cross-tenant (sec-findings #8/#10). Sandboxed extract.
                 let dest_path = PathBuf::from(dest);
                 let unpacked = tokio::task::spawn_blocking(move || {
-                    hyperion_adapters::backup::extract_tar_gz_sandboxed(&tgz, &dest_path)
+                    hyperion_adapters::backup::extract_docroot_tar_gz_sandboxed(&tgz, &dest_path)
                 })
                 .await
                 .map_err(|e| format!("docroot unpack task join: {e}"))?;
@@ -1160,8 +1169,50 @@ pub(crate) async fn repoint_wp_config_db(
     .map_err(|e| format!("join: {e}"))?
 }
 
-/// wp-config.php content with its `DB_NAME` / `DB_USER` / `DB_PASSWORD`
-/// defines replaced, or `None` when it defines none of them.
+/// Move `WP_HOME` / `WP_SITEURL` in the site's wp-config.php along with a URL
+/// rewrite. `wp search-replace` only sees the database, and a define left on the
+/// old URL redirects the whole imported site back to the old host.
+async fn repoint_wp_config_urls(root_dir: &str, from: &str, to: &str) -> Result<bool, String> {
+    let path = Path::new(root_dir).join("wp-config.php");
+    if !path.exists() {
+        return Ok(false);
+    }
+    let (from, to) = (from.to_string(), to.to_string());
+    tokio::task::spawn_blocking(move || {
+        hyperion_adapters::fs::rewrite_no_follow(&path, |c| wp_config_with_urls(c, &from, &to))
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("join: {e}"))?
+}
+
+/// wp-config.php content with `//from` swapped for `//to` on its `WP_HOME` and
+/// `WP_SITEURL` defines, or `None` when no such line mentions `from`.
+fn wp_config_with_urls(content: &str, from: &str, to: &str) -> Option<String> {
+    let (old, new) = (format!("//{from}"), format!("//{to}"));
+    let mut touched = false;
+    let rewritten: Vec<String> = content
+        .split('\n')
+        .map(|line| {
+            let is_url_define = line.contains("define")
+                && (line.contains("WP_HOME") || line.contains("WP_SITEURL"));
+            if is_url_define && line.contains(&old) {
+                touched = true;
+                line.replace(&old, &new)
+            } else {
+                line.to_string()
+            }
+        })
+        .collect();
+    touched.then(|| rewritten.join("\n"))
+}
+
+/// wp-config.php content with its `DB_NAME` / `DB_USER` / `DB_PASSWORD` /
+/// `DB_HOST` defines replaced, or `None` when it defines none of them.
+///
+/// `DB_HOST` is always `localhost` here: the database was just created on this
+/// node. A source's value (`db123.wedos.net`, a socket path) points at a server
+/// that this site can no longer use.
 pub(crate) fn wp_config_with_db(
     content: &str,
     db_name: &str,
@@ -1177,6 +1228,7 @@ pub(crate) fn wp_config_with_db(
                 ("DB_NAME", db_name),
                 ("DB_USER", db_user),
                 ("DB_PASSWORD", db_pass),
+                ("DB_HOST", "localhost"),
             ] {
                 let is_def = line.contains("define")
                     && (line.contains(&format!("'{key}'")) || line.contains(&format!("\"{key}\"")));
@@ -1199,7 +1251,10 @@ pub(crate) fn wp_config_with_db(
 
 #[cfg(test)]
 mod tests {
-    use super::{domain_name_taken, import_aliases, looks_like_out_of_space, wp_config_with_db};
+    use super::{
+        domain_name_taken, import_aliases, looks_like_out_of_space, wp_config_with_db,
+        wp_config_with_urls,
+    };
 
     #[test]
     fn wp_config_db_defines_are_repointed() {
@@ -1213,6 +1268,26 @@ mod tests {
         assert!(out.ends_with('\n'));
         assert!(!out.contains("old"));
         assert_eq!(wp_config_with_db("<?php echo 1;\n", "a", "b", "c"), None);
+    }
+
+    #[test]
+    fn a_remote_database_host_is_pointed_at_this_node() {
+        let src = "<?php\ndefine('DB_NAME','a');\ndefine('DB_HOST','db123.wedos.net:3307');\n";
+        let out = wp_config_with_db(src, "n", "u", "p").expect("rewritten");
+        assert!(out.contains("define( 'DB_HOST', 'localhost' );"));
+        assert!(!out.contains("wedos"));
+    }
+
+    #[test]
+    fn url_defines_follow_a_rewrite_and_nothing_else_does() {
+        let src = "<?php\ndefine('WP_HOME','https://old.cz/blog');\n\
+                   define('WP_SITEURL', 'https://old.cz/blog/wp');\n\
+                   // see https://old.cz/blog for docs\n";
+        let out = wp_config_with_urls(src, "old.cz/blog", "new.cz").expect("rewritten");
+        assert!(out.contains("define('WP_HOME','https://new.cz');"));
+        assert!(out.contains("define('WP_SITEURL', 'https://new.cz/wp');"));
+        assert!(out.contains("// see https://old.cz/blog for docs"));
+        assert_eq!(wp_config_with_urls("<?php\n", "old.cz", "new.cz"), None);
     }
 
     #[tokio::test]

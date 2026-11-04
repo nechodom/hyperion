@@ -20,6 +20,9 @@ sha2.workspace = true
 # `killpg`: a timed-out dump has to be stopped along with whatever it forked,
 # and there is no `kill` BINARY on a minimal Debian — see `proc::kill_group`.
 rustix.workspace = true
+# Assembling a bundle from the WordPress plugin's upload streams.
+tar.workspace = true
+flate2.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

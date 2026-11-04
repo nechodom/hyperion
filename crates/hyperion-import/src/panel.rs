@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 /// Request for the panel-import RPCs (`hosting_import_panel` + `_plan`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ImportPanelReq {
-    /// `"cloudpanel"` | `"hestiacp"`.
+    /// `"cloudpanel"` | `"hestiacp"` | `"wordpress"`.
     pub source_kind: String,
     /// `"inplace"` | `"remote"` | `"archive"`.
     pub mode: String,
@@ -56,6 +56,12 @@ pub struct SiteImportOverride {
     /// the site's code survives the jump.
     #[serde(default)]
     pub php_version: Option<String>,
+    /// `(from, to)` pairs for `wp search-replace //from //to`, in order. Set by
+    /// the WordPress plugin import, the one source that knows the site's real
+    /// URL: it can sit on `www.`, in a subfolder, or be renamed, none of which
+    /// the hosting's domain alone can express.
+    #[serde(default)]
+    pub wp_url_rewrites: Vec<(String, String)>,
 }
 
 /// SSH connection to a remote source box. `key` carries the private key
@@ -113,6 +119,7 @@ pub fn adapter_for(source_kind: &str) -> Option<Box<dyn SourceAdapter>> {
     match source_kind {
         "cloudpanel" => Some(Box::new(CloudPanelAdapter)),
         "hestiacp" => Some(Box::new(crate::hestia::HestiaAdapter)),
+        "wordpress" => Some(Box::new(crate::wordpress::WordPressAdapter)),
         _ => None,
     }
 }
