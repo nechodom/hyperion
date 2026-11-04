@@ -643,6 +643,7 @@ pub(super) fn assemble_integrity_result(
         error: None,
         scanned_at: 0,
         scan_queued: false,
+        ..Default::default()
     }
 }
 

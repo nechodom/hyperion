@@ -291,6 +291,93 @@ pub struct WpMalwareHit {
     pub signature: String,
 }
 
+/// How the native site scanner came to report a file.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum FindingKind {
+    /// A core file whose content differs from the release.
+    CoreModified,
+    /// In `wp-admin`, `wp-includes` or the docroot root, but not in the release.
+    CoreUnexpected,
+    /// A release file that is gone.
+    CoreMissing,
+    /// A plugin or theme file whose content differs from its reference copy.
+    UpstreamModified,
+    /// In a plugin or theme tree, but not in its reference copy.
+    UpstreamAdded,
+    /// A file of the reference copy that is gone.
+    UpstreamMissing,
+    /// A file nothing vouches for hit a rule.
+    RuleHit,
+    /// Too big for the rules to read in full.
+    TooLargeToInspect,
+    /// New or changed since the baseline, with no rule hit.
+    #[default]
+    BaselineChange,
+}
+
+/// One file the native scanner reports. `snippet` is plain text from a tenant
+/// file: the template escapes it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct SiteFileFinding {
+    /// Relative to the docroot. A whole component's finding uses its folder.
+    #[serde(default)]
+    pub rel: String,
+    #[serde(default)]
+    pub kind: FindingKind,
+    /// "high" | "medium".
+    #[serde(default)]
+    pub severity: String,
+    /// The worst rule that hit, when one did.
+    #[serde(default)]
+    pub rule_id: Option<String>,
+    /// 1-based line of `rule_id`'s match; 0 when no rule hit.
+    #[serde(default)]
+    pub line: u32,
+    #[serde(default)]
+    pub domains: Vec<String>,
+    #[serde(default)]
+    pub snippet: String,
+    /// Hex. Empty when the file wasn't read.
+    #[serde(default)]
+    pub sha256: String,
+    /// Slug of the plugin or theme the file belongs to.
+    #[serde(default)]
+    pub component: Option<String>,
+    /// "wordpress.org" | "vendor package", on upstream findings.
+    #[serde(default)]
+    pub source_label: Option<String>,
+}
+
+/// What the native scan could speak for. A verdict states this rather than
+/// implying everything was looked at.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct ScanCoverage {
+    #[serde(default)]
+    pub plugins_verified: i64,
+    #[serde(default)]
+    pub plugins_total: i64,
+    #[serde(default)]
+    pub themes_verified: i64,
+    #[serde(default)]
+    pub themes_total: i64,
+    /// Files under change detection.
+    #[serde(default)]
+    pub files_watched: i64,
+    /// Unix seconds of the first scan; earlier changes can't be proven.
+    #[serde(default)]
+    pub watching_since: i64,
+    /// Core was compared with its release.
+    #[serde(default)]
+    pub upstream_ran: bool,
+    /// Not WordPress, so there is no release to compare with. Not a failure.
+    #[serde(default)]
+    pub no_upstream: bool,
+    /// What couldn't be looked at. Non-empty means the scan is partial.
+    #[serde(default)]
+    pub partial_reasons: Vec<String>,
+}
+
 /// Result of a WordPress **integrity** scan — the sibling of
 /// [`WpVulnScanResult`]. Where the vuln scan answers "is anything
 /// outdated?", this answers "has anything been *tampered with*?" using
@@ -377,6 +464,23 @@ pub struct WpIntegrityScanResult {
     /// panel, never stored: it only tells the card to keep polling.
     #[serde(default)]
     pub scan_queued: bool,
+    /// The native scanner ran, so the fields below mean something.
+    #[serde(default)]
+    pub native_scan_ran: bool,
+    /// The native layers are in their silent pilot: shown in the panel only.
+    #[serde(default)]
+    pub report_only: bool,
+    /// Rule hits and failed comparisons.
+    #[serde(default)]
+    pub findings: Vec<SiteFileFinding>,
+    /// Changes to review: the lower bucket.
+    #[serde(default)]
+    pub review: Vec<SiteFileFinding>,
+    /// Themes with at least one file that failed comparison.
+    #[serde(default)]
+    pub themes_failed: Vec<WpIntegrityPluginResult>,
+    #[serde(default)]
+    pub coverage: ScanCoverage,
 }
 
 impl WpIntegrityScanResult {

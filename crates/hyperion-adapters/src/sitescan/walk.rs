@@ -15,6 +15,7 @@ use std::collections::VecDeque;
 use std::ffi::{CStr, OsStr, OsString};
 use std::fs::File;
 use std::io;
+use std::ops::ControlFlow;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path};
@@ -210,7 +211,24 @@ impl TenantRoot {
     /// Walk the tree, reporting every regular file and everything that was not
     /// looked at. Only failing to open the root fd is an error. The walk never
     /// leaves the root's filesystem and never follows a symlink.
-    pub fn walk(&self, opts: &WalkOpts, visit: impl FnMut(WalkEvent<'_>)) -> io::Result<WalkStats> {
+    pub fn walk(
+        &self,
+        opts: &WalkOpts,
+        mut visit: impl FnMut(WalkEvent<'_>),
+    ) -> io::Result<WalkStats> {
+        self.walk_until(opts, |ev| {
+            visit(ev);
+            ControlFlow::Continue(())
+        })
+    }
+
+    /// Like [`walk`](Self::walk), with a visitor that can end the walk early.
+    /// What was walked so far is what the stats describe.
+    pub fn walk_until(
+        &self,
+        opts: &WalkOpts,
+        visit: impl FnMut(WalkEvent<'_>) -> ControlFlow<()>,
+    ) -> io::Result<WalkStats> {
         let mut w = Walker {
             opts,
             visit,
@@ -422,10 +440,12 @@ fn join_rel(parent: &str, name: &str) -> String {
     }
 }
 
-impl<F: FnMut(WalkEvent<'_>)> Walker<'_, F> {
+impl<F: FnMut(WalkEvent<'_>) -> ControlFlow<()>> Walker<'_, F> {
     fn skip(&mut self, rel: String, why: SkipReason) {
         self.stats.skipped += 1;
-        (self.visit)(WalkEvent::Skipped { rel, why });
+        if (self.visit)(WalkEvent::Skipped { rel, why }).is_break() {
+            self.done = true;
+        }
     }
 
     /// Classify one directory entry. Returns the child directory to descend
@@ -510,7 +530,9 @@ impl<F: FnMut(WalkEvent<'_>)> Walker<'_, F> {
                     self.skip(rel, SkipReason::HardLinked);
                 } else {
                     self.stats.files += 1;
-                    (self.visit)(WalkEvent::File(&file_meta(rel, &st)));
+                    if (self.visit)(WalkEvent::File(&file_meta(rel, &st))).is_break() {
+                        self.done = true;
+                    }
                 }
             }
             _ => self.skip(rel, SkipReason::NotRegular),

@@ -5,6 +5,7 @@ pub mod baseline;
 pub mod discover;
 pub mod manifest;
 pub mod rules;
+pub mod scan;
 pub mod walk;
 
 pub use walk::{FileMeta, SkipReason, TenantRoot, WalkEvent, WalkOpts, WalkStats};

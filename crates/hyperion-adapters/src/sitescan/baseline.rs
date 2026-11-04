@@ -3,9 +3,10 @@
 //! neither read nor forge it.
 //!
 //! The file is gzip over JSON lines: a header line carrying the format
-//! version, `since` and the rule-pack version, then one line per scanned file
-//! and one per trusted file. Paths are JSON strings (any odd character
-//! survives), hashes are hex.
+//! version, `since`, the rule-pack version and whether the first scan finished,
+//! then one line per scanned file, verified file, churn file, component and
+//! trusted file. Paths are JSON strings (any odd character survives), hashes
+//! are hex.
 
 use std::collections::BTreeMap;
 use std::fs::{self, File};
@@ -21,7 +22,7 @@ use super::walk::FileMeta;
 
 /// Bumped when a line changes shape; an older or newer file then reads as
 /// "no baseline" and the site is scanned as a first scan.
-const FORMAT_VERSION: u32 = 1;
+const FORMAT_VERSION: u32 = 2;
 
 /// What `load` will read. A corrupt or hostile file must not exhaust the
 /// worker's 256 MiB: the file is decoded as a stream and never held whole, and
@@ -55,7 +56,20 @@ pub struct Baseline {
     /// Unix time of the first scan this baseline was started by.
     pub since: i64,
     pub rule_pack: u32,
+    /// The first scan got to the end of the walk. Until it does, a file with no
+    /// entry is one the first scan hasn't reached, not a new file.
+    pub first_done: bool,
+    /// Files that are clean or trusted. A file with no entry here, or whose hash
+    /// differs from its entry, is still waiting for someone.
     pub entries: BTreeMap<String, BaselineEntry>,
+    /// Files in `entries` that matched a manifest, by path and manifest id. An
+    /// unchanged file with the same id needs no second look.
+    pub verified: BTreeMap<String, String>,
+    /// Rules-only files (churn paths) that came back clean: never compared for
+    /// change, only remembered so an unchanged one isn't read again.
+    pub churn: BTreeMap<String, BaselineEntry>,
+    /// Plugin and theme versions at the last finished scan, by `kind/slug`.
+    pub components: BTreeMap<String, String>,
     /// Files someone vouched for, by path and the hash they vouched for.
     pub trusted: BTreeMap<String, [u8; 32]>,
 }
@@ -92,6 +106,8 @@ struct Header {
     since: i64,
     #[serde(default)]
     rule_pack: u32,
+    #[serde(default)]
+    first_done: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -108,6 +124,19 @@ enum Line {
     },
     #[serde(rename = "t")]
     Trusted { p: String, h: String },
+    #[serde(rename = "v")]
+    Verified { p: String, i: String },
+    #[serde(rename = "c")]
+    Churn {
+        p: String,
+        s: u64,
+        c: i64,
+        #[serde(default)]
+        n: i64,
+        h: String,
+    },
+    #[serde(rename = "m")]
+    Component { p: String, v: String },
 }
 
 fn parse_hash(hex_str: &str) -> Option<[u8; 32]> {
@@ -156,6 +185,7 @@ impl Baseline {
                 v: FORMAT_VERSION,
                 since: self.since,
                 rule_pack: self.rule_pack,
+                first_done: self.first_done,
             },
         )?;
         for (p, e) in &self.entries {
@@ -167,6 +197,36 @@ impl Baseline {
                     c: e.ctime,
                     n: e.ctime_nsec,
                     h: hex::encode(e.sha256),
+                },
+            )?;
+        }
+        for (p, i) in &self.verified {
+            write_line(
+                out,
+                &Line::Verified {
+                    p: p.clone(),
+                    i: i.clone(),
+                },
+            )?;
+        }
+        for (p, e) in &self.churn {
+            write_line(
+                out,
+                &Line::Churn {
+                    p: p.clone(),
+                    s: e.size,
+                    c: e.ctime,
+                    n: e.ctime_nsec,
+                    h: hex::encode(e.sha256),
+                },
+            )?;
+        }
+        for (p, v) in &self.components {
+            write_line(
+                out,
+                &Line::Component {
+                    p: p.clone(),
+                    v: v.clone(),
                 },
             )?;
         }
@@ -252,6 +312,7 @@ fn parse(src: impl Read, lim: &Limits) -> io::Result<Option<Baseline>> {
     let mut b = Baseline {
         since: head.since,
         rule_pack: head.rule_pack,
+        first_done: head.first_done,
         ..Baseline::default()
     };
     loop {
@@ -283,6 +344,26 @@ fn parse(src: impl Read, lim: &Limits) -> io::Result<Option<Baseline>> {
                     return Ok(None);
                 };
                 b.trusted.insert(p, h);
+            }
+            Ok(Line::Verified { p, i }) => {
+                b.verified.insert(p, i);
+            }
+            Ok(Line::Churn { p, s, c, n, h }) => {
+                let Some(sha256) = parse_hash(&h) else {
+                    return Ok(None);
+                };
+                b.churn.insert(
+                    p,
+                    BaselineEntry {
+                        size: s,
+                        ctime: c,
+                        ctime_nsec: n,
+                        sha256,
+                    },
+                );
+            }
+            Ok(Line::Component { p, v }) => {
+                b.components.insert(p, v);
             }
             Err(_) => return Ok(None),
         }
@@ -320,6 +401,7 @@ mod tests {
         let mut b = Baseline {
             since: 1_699_999_999,
             rule_pack: 7,
+            first_done: true,
             ..Baseline::default()
         };
         b.entries
@@ -328,6 +410,11 @@ mod tests {
         b.entries
             .insert("sp ace/\"quote\"\\\u{e9}\t.php".into(), entry(3));
         b.trusted.insert("index.php".into(), [9; 32]);
+        b.verified
+            .insert("index.php".into(), "wordpress@6.8.1".into());
+        b.churn.insert("wp-content/cache/x.php".into(), entry(4));
+        b.components
+            .insert("plugin/elementor".into(), "3.25.0".into());
         b
     }
 
@@ -483,13 +570,13 @@ mod tests {
         let file =
             format!("{{\"k\":\"f\",\"p\":\"a\",\"s\":1,\"c\":2,\"n\":3,\"h\":\"{hash}\"}}\n");
         let cases = [
-            ("future", format!("{{\"v\":2,\"since\":1}}\n{file}")),
+            ("future", format!("{{\"v\":99,\"since\":1}}\n{file}")),
             ("no header", file.clone()),
             (
                 "short hash",
-                "{\"v\":1}\n{\"k\":\"f\",\"p\":\"a\",\"s\":1,\"c\":2,\"h\":\"ab\"}\n".to_string(),
+                "{\"v\":2}\n{\"k\":\"f\",\"p\":\"a\",\"s\":1,\"c\":2,\"h\":\"ab\"}\n".to_string(),
             ),
-            ("bad line", "{\"v\":1}\nnonsense\n".to_string()),
+            ("bad line", "{\"v\":2}\nnonsense\n".to_string()),
         ];
         for (name, text) in cases {
             let p = t.path().join(name.replace(' ', "_"));
@@ -498,7 +585,7 @@ mod tests {
         }
         // The same lines under the current version do load.
         let p = t.path().join("ok");
-        gz_file(&p, &format!("{{\"v\":1,\"since\":4}}\n{file}"));
+        gz_file(&p, &format!("{{\"v\":2,\"since\":4}}\n{file}"));
         let b = Baseline::load(&p).expect("load").expect("some");
         assert_eq!(b.since, 4);
         assert_eq!(b.entries["a"].ctime_nsec, 3);
@@ -553,7 +640,7 @@ mod tests {
         );
         // The same after a valid header, where an entry line should be.
         let q = t.path().join("endless-entry");
-        gz_file(&q, &format!("{{\"v\":1}}\n{}", "y".repeat(1 << 20)));
+        gz_file(&q, &format!("{{\"v\":2}}\n{}", "y".repeat(1 << 20)));
         assert_eq!(
             load_with_limits(&q, &lim(1 << 30, 1 << 30, 1024)).expect("load"),
             None
