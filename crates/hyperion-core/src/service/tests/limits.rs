@@ -460,6 +460,142 @@ async fn set_php_version_happy_path() {
     assert_eq!(after.php_version, Some(PhpVersion::V8_4));
 }
 
+/// A site on PHP 8.3 with a mock that holds only what a switch may touch,
+/// so any other adapter call panics. Separate from the creating mock
+/// because `happy_mocks`' catch-all `fpm_ensure` would win over ours.
+async fn php_switch_fixture(
+    domain: &str,
+    a: MockAdapterPort,
+) -> (HostingService<MockAdapterPort>, HostingSelector) {
+    let pool = open_memory().await.expect("open");
+    svc(pool.clone(), happy_mocks())
+        .create(req(domain))
+        .await
+        .expect("create");
+    (
+        svc(pool, a),
+        HostingSelector::Domain(Domain::parse(domain).unwrap()),
+    )
+}
+
+/// The new pool is up and the vhost points at it BEFORE the old pool goes:
+/// the other order left a window with no pool at all, and a failure inside
+/// that window left the site down.
+#[tokio::test]
+async fn set_php_version_removes_the_old_pool_last() {
+    use std::sync::{Arc, Mutex};
+    let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+    let mut a = MockAdapterPort::new();
+    let log = calls.clone();
+    a.expect_fpm_ensure().returning(move |_, _, v| {
+        log.lock().unwrap().push(format!("ensure {v}"));
+        Ok(())
+    });
+    let log = calls.clone();
+    a.expect_nginx_write_vhost().returning(move |d| {
+        let v = d
+            .php_version
+            .expect("the vhost must render the new version");
+        log.lock().unwrap().push(format!("vhost {v}"));
+        Ok(())
+    });
+    let log = calls.clone();
+    a.expect_fpm_delete().returning(move |_, v| {
+        log.lock().unwrap().push(format!("delete {v}"));
+        Ok(())
+    });
+    let (s, sel) = php_switch_fixture("order.cz", a).await;
+
+    s.set_php_version(sel, PhpVersion::V8_4)
+        .await
+        .expect("switch");
+
+    assert_eq!(
+        *calls.lock().unwrap(),
+        ["ensure 8.4", "vhost 8.4", "delete 8.3"]
+    );
+}
+
+/// The new pool cannot start (PHP version will not install, FPM refuses the
+/// config): the site must keep serving from the pool it already has.
+#[tokio::test]
+async fn set_php_version_keeps_the_site_when_the_new_pool_fails() {
+    let mut a = MockAdapterPort::new();
+    a.expect_fpm_ensure()
+        .returning(|_, _, _| Err(AdapterError::Other("php8.4-fpm refused".into())));
+    a.expect_fpm_delete().times(0);
+    a.expect_nginx_write_vhost().times(0);
+    let (s, sel) = php_switch_fixture("poolfail.cz", a).await;
+
+    let err = s
+        .set_php_version(sel.clone(), PhpVersion::V8_4)
+        .await
+        .expect_err("the switch must report the failure");
+    assert!(err.to_string().contains("php8.4-fpm refused"), "got: {err}");
+
+    // Same row, so the panel tells the truth — and a retry of 8.4 is a real
+    // retry instead of the "already on that version" no-op.
+    let after = s.get(sel).await.expect("get");
+    assert_eq!(after.php_version, Some(PhpVersion::V8_3));
+}
+
+/// nginx rejects the new vhost: nginx keeps the old one, so the old pool must
+/// stay, the row must go back to it, and the unused new pool must go.
+#[tokio::test]
+async fn set_php_version_rolls_back_when_the_vhost_fails() {
+    let mut a = MockAdapterPort::new();
+    a.expect_fpm_ensure().returning(|_, _, _| Ok(()));
+    a.expect_nginx_write_vhost()
+        .returning(|_| Err(AdapterError::Other("nginx -t failed".into())));
+    a.expect_fpm_delete()
+        .withf(|_, v| *v == PhpVersion::V8_4)
+        .times(1)
+        .returning(|_, _| Ok(()));
+    let (s, sel) = php_switch_fixture("vhostfail.cz", a).await;
+
+    let err = s
+        .set_php_version(sel.clone(), PhpVersion::V8_4)
+        .await
+        .expect_err("the switch must report the failure");
+    assert!(err.to_string().contains("nginx -t failed"), "got: {err}");
+
+    let after = s.get(sel).await.expect("get");
+    assert_eq!(after.php_version, Some(PhpVersion::V8_3));
+}
+
+/// A failed conversion puts the hosting back to static with no version: left
+/// half-converted it would claim a PHP pool that was just removed.
+#[tokio::test]
+async fn set_php_version_rolls_back_a_failed_conversion() {
+    let pool = open_memory().await.expect("open");
+    let mut r = req("convfail.cz");
+    r.php_version = None;
+    r.kind = "static".into();
+    r.database = None;
+    svc(pool.clone(), happy_mocks())
+        .create(r)
+        .await
+        .expect("create static");
+    let mut a = MockAdapterPort::new();
+    a.expect_fpm_ensure().returning(|_, _, _| Ok(()));
+    a.expect_nginx_write_vhost()
+        .returning(|_| Err(AdapterError::Other("nginx -t failed".into())));
+    a.expect_fpm_delete()
+        .withf(|_, v| *v == PhpVersion::V8_4)
+        .times(1)
+        .returning(|_, _| Ok(()));
+    let s = svc(pool, a);
+    let sel = HostingSelector::Domain(Domain::parse("convfail.cz").unwrap());
+
+    s.set_php_version(sel.clone(), PhpVersion::V8_4)
+        .await
+        .expect_err("the conversion must report the failure");
+
+    let after = s.get(sel).await.expect("get");
+    assert_eq!(after.php_version, None);
+    assert_eq!(after.kind, "static");
+}
+
 /// Switching to the SAME version returns Ok(version) and leaves
 /// the row untouched — operator can click without churn.
 #[tokio::test]

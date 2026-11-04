@@ -954,7 +954,7 @@
                switch. #}
             <form method="post" action="/hostings/set-php-version" class="inline-switch"
                   data-confirm-title="Change PHP version"
-                  data-confirm-body="The PHP-FPM pool for this site is torn down and re-created on the chosen version. Expect a few hundred ms of 502s while the new pool starts. Persisted PHP limits (memory, max_children and so on) carry over."
+                  data-confirm-body="A PHP-FPM pool starts on the chosen version, the site moves to it, then the old pool is removed. If the new pool cannot start, the site stays on its current version. Persisted PHP limits (memory, max_children and so on) carry over."
                   data-confirm-confirm-label="Switch version"
                   data-confirm-variant="primary">
               {# Session-wide CSRF token — the middleware accepts the same
