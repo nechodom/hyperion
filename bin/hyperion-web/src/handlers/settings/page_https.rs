@@ -312,7 +312,7 @@ pub fn cert_state(base: &str, items: Option<&[CertOverviewItem]>) -> CertState {
     let Some(items) = items else {
         return CertState::Unknown;
     };
-    match items.iter().find(|c| c.domain.eq_ignore_ascii_case(base)) {
+    match items.iter().find(|c| c.is_wildcard_for(base)) {
         Some(c) => CertState::Present {
             band: if c.days_left < 0 {
                 "expired".to_string()
@@ -579,6 +579,7 @@ mod tests {
             days_left,
             band: band.into(),
             node_id: String::new(),
+            wildcard: true,
             ..Default::default()
         }
     }
@@ -666,6 +667,20 @@ mod tests {
             }
             other => panic!("expected Present, got {other:?}"),
         }
+    }
+
+    /// The panel's own certificate has the base's name when the panel lives
+    /// on the node's hostname. It does not cover `*.<base>`.
+    #[test]
+    fn a_plain_certificate_on_the_base_name_is_not_the_wildcard() {
+        let items = [CertOverviewItem {
+            wildcard: false,
+            ..cert("hos-1.example.com", 80, "ok")
+        }];
+        assert_eq!(
+            cert_state("hos-1.example.com", Some(&items)),
+            CertState::Missing
+        );
     }
 
     #[test]
