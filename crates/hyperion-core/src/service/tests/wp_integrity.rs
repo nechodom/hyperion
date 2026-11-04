@@ -518,3 +518,54 @@ async fn integrity_tick_skips_when_the_stamp_is_unreadable() {
         None
     );
 }
+
+/// Right after ClamAV is installed freshclam is still downloading
+/// signatures. The pass waits: it says so, carries the previous verdict,
+/// and leaves no failed stamp, so there is no back-off once they arrive.
+#[test]
+fn missing_signature_db_waits_without_a_failure_stamp() {
+    use super::super::wp_integrity::malware_pass_precheck;
+    let now = 1_700_000_000;
+    let hit = hyperion_types::WpMalwareHit {
+        path: "/home/x/htdocs/wp-content/uploads/a.php".into(),
+        signature: "Php.Trojan.Webshell-1".into(),
+    };
+    let prior = StoredIntegrityScan {
+        scanned_at: now - 86_400,
+        clamav_at: now - 86_400,
+        clamav_failed_at: 0,
+        result: hyperion_types::WpIntegrityScanResult {
+            clamav_available: true,
+            malware: vec![hit.clone()],
+            ..Default::default()
+        },
+    };
+
+    // First ever pass: nothing to carry, and no failure recorded.
+    let mut errors = Vec::new();
+    let done = malware_pass_precheck(true, false, now, None, &mut errors).expect("pass is over");
+    assert_eq!(done, (false, Vec::new(), 0, 0));
+    assert_eq!(errors.len(), 1);
+    assert!(errors[0].contains("still downloading"), "{errors:?}");
+
+    // With a previous verdict: carried as it was, failed_at still 0.
+    let mut errors = Vec::new();
+    let (available, hits, at, failed_at) =
+        malware_pass_precheck(true, false, now, Some(&prior), &mut errors).expect("pass is over");
+    assert!(available);
+    assert_eq!(hits, vec![hit]);
+    assert_eq!(at, now - 86_400, "the hits keep their original age");
+    assert_eq!(failed_at, 0, "waiting is not a failure");
+
+    // Signatures present and nothing holding it off: the scan goes ahead.
+    let mut errors = Vec::new();
+    assert!(malware_pass_precheck(true, true, now, None, &mut errors).is_none());
+    assert!(errors.is_empty());
+    // Not installed: not scanned, no note.
+    let mut errors = Vec::new();
+    assert_eq!(
+        malware_pass_precheck(false, false, now, None, &mut errors),
+        Some((false, Vec::new(), 0, 0))
+    );
+    assert!(errors.is_empty());
+}

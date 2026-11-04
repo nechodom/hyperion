@@ -480,6 +480,58 @@ pub(super) struct StoredIntegrityScan {
     pub(super) result: hyperion_types::WpIntegrityScanResult,
 }
 
+/// The previous pass's verdict, carried forward when this one does not run.
+fn carried_malware_verdict(
+    prior: Option<&StoredIntegrityScan>,
+) -> (bool, Vec<hyperion_types::WpMalwareHit>, i64, i64) {
+    match prior {
+        Some(p) => (
+            p.result.clamav_available,
+            p.result.malware.clone(),
+            p.clamav_at,
+            p.clamav_failed_at,
+        ),
+        None => (false, Vec::new(), 0, 0),
+    }
+}
+
+/// The reasons a ClamAV pass does not start at all. `Some(tuple)` = the
+/// pass is over with that verdict; `None` = go ahead and scan. Node facts
+/// come in as arguments so this stays testable.
+pub(super) fn malware_pass_precheck(
+    installed: bool,
+    db_present: bool,
+    now: i64,
+    prior: Option<&StoredIntegrityScan>,
+    errors: &mut Vec<String>,
+) -> Option<(bool, Vec<hyperion_types::WpMalwareHit>, i64, i64)> {
+    // No scanner installed. A normal state on a shared host — never an
+    // error, and explicitly NOT a clean bill of health (the caller renders
+    // `clamav_available = false` as "not scanned").
+    if !installed {
+        return Some((false, Vec::new(), 0, 0));
+    }
+    // Installed but still downloading signatures right after the package
+    // went in: clamscan would exit 2 on every run. Wait, without the
+    // failure back-off or a failed stamp.
+    if !db_present {
+        errors.push("malware scan waiting: ClamAV signatures are still downloading".into());
+        return Some(carried_malware_verdict(prior));
+    }
+    if clamav_pass_held_off(prior, now) {
+        if let Some(p) = prior.filter(|p| p.clamav_failed_at > 0) {
+            errors.push(format!(
+                "malware scan failed at its last attempt; next try after {} UTC",
+                chrono::DateTime::from_timestamp(p.clamav_failed_at + CLAMAV_FAILED_RETRY_SECS, 0)
+                    .map(|t| t.format("%H:%M").to_string())
+                    .unwrap_or_default()
+            ));
+        }
+        return Some(carried_malware_verdict(prior));
+    }
+    None
+}
+
 /// The ClamAV half of an integrity scan, with the two guards that keep a
 /// signature sweep from hurting the node it protects:
 ///
@@ -501,42 +553,18 @@ pub(super) async fn integrity_malware_pass(
     prior: Option<&StoredIntegrityScan>,
     errors: &mut Vec<String>,
 ) -> (bool, Vec<hyperion_types::WpMalwareHit>, i64, i64) {
-    // No scanner installed. A normal state on a shared host — never an
-    // error, and explicitly NOT a clean bill of health (the caller renders
-    // `clamav_available = false` as "not scanned").
-    if !integrity::clamav_available() {
-        return (false, Vec::new(), 0, 0);
-    }
-    let carry = || match prior {
-        Some(p) => (
-            p.result.clamav_available,
-            p.result.malware.clone(),
-            p.clamav_at,
-            p.clamav_failed_at,
-        ),
-        None => (false, Vec::new(), 0, 0),
-    };
-    // Installed but still downloading signatures right after the package
-    // went in: clamscan would exit 2 on every run. Wait, without the
-    // failure back-off or a failed stamp.
-    if !integrity::clamav_db_present() {
-        errors.push("malware scan waiting: ClamAV signatures are still downloading".into());
-        return carry();
-    }
-    if clamav_pass_held_off(prior, now) {
-        if let Some(p) = prior.filter(|p| p.clamav_failed_at > 0) {
-            errors.push(format!(
-                "malware scan failed at its last attempt; next try after {} UTC",
-                chrono::DateTime::from_timestamp(p.clamav_failed_at + CLAMAV_FAILED_RETRY_SECS, 0)
-                    .map(|t| t.format("%H:%M").to_string())
-                    .unwrap_or_default()
-            ));
-        }
-        return carry();
+    if let Some(done) = malware_pass_precheck(
+        integrity::clamav_available(),
+        integrity::clamav_db_present(),
+        now,
+        prior,
+        errors,
+    ) {
+        return done;
     }
     let Ok(_gate) = CLAMAV_GATE.try_lock() else {
         errors.push("malware scan skipped: another scan is already running on this node".into());
-        return carry();
+        return carried_malware_verdict(prior);
     };
     match integrity::scan_malware_niced(&detail.root_dir, scan_niceness).await {
         Ok(scan) => malware_scan_outcome(scan, now, errors),
