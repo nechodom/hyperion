@@ -278,6 +278,11 @@ pub async fn ensure_pool(input: &PoolInput<'_>) -> Result<PathBuf, AdapterError>
     if let Err(e) = ensure_opcache_ini(input.php_version).await {
         tracing::warn!(error = %e, version = input.php_version.as_str(), "opcache ini not written");
     }
+    // Startup only covers versions installed at the time; a version installed
+    // later gets this with its first pool. Best-effort like the OPcache ini.
+    if let Err(e) = ensure_oom_policy_dropin(input.php_version).await {
+        tracing::warn!(error = %e, version = input.php_version.as_str(), "FPM OOM policy drop-in not written");
+    }
     let body = render(input)?;
     let path = pool_path(input);
     // Backup the existing pool (if any) so we can roll back when our
@@ -367,6 +372,67 @@ pub async fn ensure_opcache_ini(php_version: PhpVersion) -> Result<bool, Adapter
     }
     atomic_write(&path, want.as_bytes(), 0o644).await?;
     Ok(true)
+}
+
+/// `/etc/systemd/system/php<ver>-fpm.service.d/90-hyperion-oom-policy.conf`.
+pub fn oom_policy_dropin_path(php_version: PhpVersion) -> PathBuf {
+    PathBuf::from(format!(
+        "/etc/systemd/system/{}.service.d/90-hyperion-oom-policy.conf",
+        php_version.service_name()
+    ))
+}
+
+/// Every site on a PHP version shares one FPM unit, and systemd's default
+/// `OOMPolicy=stop` stops the whole unit when the OOM killer takes any one
+/// process in it: one site's oversized worker cuts every neighbour's
+/// in-flight requests and returns 502 until something restarts the unit
+/// (Debian 12's package never does). With `continue` the FPM master just
+/// replaces the worker. A master killed outright still takes the unit down;
+/// no OOM policy changes that.
+pub fn render_oom_policy_dropin() -> &'static str {
+    "# Auto-managed by Hyperion. Do not edit.\n\
+     [Service]\n\
+     OOMPolicy=continue\n"
+}
+
+/// Write [`render_oom_policy_dropin`] for this version and `daemon-reload`.
+/// Idempotent on content; returns whether it changed. Skipped when the
+/// version's FPM unit is not installed. Applies to the running unit without
+/// restarting it, so this never touches a live site.
+pub async fn ensure_oom_policy_dropin(php_version: PhpVersion) -> Result<bool, AdapterError> {
+    let path = oom_policy_dropin_path(php_version);
+    let want = render_oom_policy_dropin();
+    if tokio::fs::read_to_string(&path).await.ok().as_deref() == Some(want) {
+        return Ok(false);
+    }
+    let svc = format!("{}.service", php_version.service_name());
+    let load_state = cmd::run(
+        "/usr/bin/systemctl",
+        &["show", "--property=LoadState", "--value", &svc],
+    )
+    .await?;
+    if load_state.trim() != "loaded" {
+        return Ok(false);
+    }
+    atomic_write(&path, want.as_bytes(), 0o644).await?;
+    if let Err(e) = cmd::run("/usr/bin/systemctl", &["daemon-reload"]).await {
+        // systemd has not seen the file; removing it makes the next run retry
+        // rather than find matching content and call it done.
+        let _ = tokio::fs::remove_file(&path).await;
+        return Err(e);
+    }
+    Ok(true)
+}
+
+/// [`ensure_oom_policy_dropin`] for every supported version. Best-effort,
+/// never errors. Called from the agent's startup so `update.sh` (which
+/// restarts the agent) is enough to cover existing nodes.
+pub async fn ensure_oom_policy_dropins() {
+    for v in PhpVersion::all() {
+        if let Err(e) = ensure_oom_policy_dropin(*v).await {
+            tracing::warn!(error = %e, version = v.as_str(), "FPM OOM policy drop-in not written");
+        }
+    }
 }
 
 /// Run `php-fpm<ver> -t` and return an error with the exact
@@ -571,6 +637,23 @@ async fn is_failed(svc: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+    /// One OOM-killed worker must not stop the FPM master every other site
+    /// on this version depends on. Exact match: a stray `MemoryMax=` or
+    /// `Restart=` here would change every node's shared master.
+    #[test]
+    fn oom_policy_dropin_keeps_the_master_running() {
+        assert_eq!(
+            render_oom_policy_dropin(),
+            "# Auto-managed by Hyperion. Do not edit.\n\
+             [Service]\n\
+             OOMPolicy=continue\n"
+        );
+        assert_eq!(
+            oom_policy_dropin_path(PhpVersion::V8_3).to_string_lossy(),
+            "/etc/systemd/system/php8.3-fpm.service.d/90-hyperion-oom-policy.conf"
+        );
+    }
 
     #[test]
     fn opcache_ini_scales_with_the_box_and_isolates_tenants() {
