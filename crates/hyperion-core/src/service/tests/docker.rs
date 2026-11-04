@@ -1896,12 +1896,13 @@ async fn a_flood_is_capped_then_summarised_and_the_graver_news_goes_first() {
 #[tokio::test]
 async fn an_item_half_written_when_the_database_fails_is_still_sent() {
     let s = outbound_master(&["a", "b"]).await;
-    let ids: Vec<i64> = hyperion_state::web_users::list(&s.pool)
+    let mut ids: Vec<i64> = hyperion_state::web_users::list(&s.pool)
         .await
         .expect("users")
         .into_iter()
         .map(|u| u.id)
         .collect();
+    ids.sort_unstable();
     // The first admin's row goes in; the second admin's write fails.
     sqlx::query(&format!(
         "CREATE TRIGGER fail_second BEFORE INSERT ON notifications \
@@ -1920,6 +1921,56 @@ async fn an_item_half_written_when_the_database_fails_is_still_sent() {
         1,
         "the first row is written, so on the next read it would be 'seen'"
     );
+    assert_eq!(mail_sends(&s).await.len(), 1);
+
+    // The retry finds the first admin's row there, writes the second's, and
+    // must not send the item a second time.
+    sqlx::query("DROP TRIGGER fail_second")
+        .execute(&s.pool)
+        .await
+        .expect("drop trigger");
+    let n = s
+        .notifications_ingest("node_a", vec![outbox_item(1, "docker.node:node_b")])
+        .await
+        .expect("retry");
+    assert_eq!(n, 1, "only the second admin's row was missing");
+    assert_eq!(slack_sends(&s).await, 1, "still one Slack post");
+    assert_eq!(mail_sends(&s).await.len(), 1, "still one mail");
+}
+
+#[tokio::test]
+async fn a_failed_first_write_sends_nothing_and_the_retry_sends_once() {
+    let s = outbound_master(&["a", "b"]).await;
+    let mut ids: Vec<i64> = hyperion_state::web_users::list(&s.pool)
+        .await
+        .expect("users")
+        .into_iter()
+        .map(|u| u.id)
+        .collect();
+    ids.sort_unstable();
+    sqlx::query(&format!(
+        "CREATE TRIGGER fail_first BEFORE INSERT ON notifications \
+         WHEN NEW.user_id = {} BEGIN SELECT RAISE(ABORT, 'boom'); END",
+        ids[0]
+    ))
+    .execute(&s.pool)
+    .await
+    .expect("trigger");
+    let batch = vec![outbox_item(1, "docker.node:node_b")];
+    s.notifications_ingest("node_a", batch.clone())
+        .await
+        .expect_err("the first write fails");
+    assert_eq!(slack_sends(&s).await, 0);
+    assert!(mail_sends(&s).await.is_empty());
+
+    sqlx::query("DROP TRIGGER fail_first")
+        .execute(&s.pool)
+        .await
+        .expect("drop trigger");
+    s.notifications_ingest("node_a", batch)
+        .await
+        .expect("retry");
+    assert_eq!(slack_sends(&s).await, 1);
     assert_eq!(mail_sends(&s).await.len(), 1);
 }
 

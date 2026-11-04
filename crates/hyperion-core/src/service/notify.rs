@@ -726,7 +726,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 message: "node_id is required".into(),
             });
         }
-        let admins: Vec<i64> = hyperion_state::web_users::list(&self.pool)
+        let mut admins: Vec<i64> = hyperion_state::web_users::list(&self.pool)
             .await
             .map_err(|e| RpcError::Internal_with(format!("notifications ingest: {e}")))?
             .into_iter()
@@ -739,9 +739,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             })
             .map(|u| u.id)
             .collect();
+        // Id order, so "the first admin" means the same on every pass.
+        admins.sort_unstable();
         let mut written = 0;
-        // Docker alerts that were new to at least one admin, to go out once
-        // the rows are committed.
+        // Docker alerts that were new, to go out once the rows are committed.
         let mut outbound: Vec<(String, String, String)> = Vec::new();
         let mut failed = None;
         'items: for it in items {
@@ -763,12 +764,16 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             };
             let replaces = hyperion_types::notification_replaces(&row.kind);
             // One outbox item is ONE alert however many admins it fans out
-            // to, so it leaves at most once: when some admin's row is new. A
-            // batch read again finds every row already there and sends
-            // nothing; a batch cut short by an error and read again sends
-            // only for the items whose rows were not all there before.
-            let mut item_written = false;
-            for &uid in &admins {
+            // to, so it leaves at most once: when the row of the FIRST admin
+            // (id order) was newly written. Only that row decides, never a
+            // later admin's. A batch read again finds the first admin's row
+            // there and sends nothing; a pass cut short after the first
+            // admin's write has sent the item, and its retry finds that row
+            // there too, so the retry does not send it again. A pass that
+            // failed on the first admin's write sent nothing, and the retry
+            // sends once.
+            let mut lead_written = false;
+            for (i, &uid) in admins.iter().enumerate() {
                 let put = if replaces {
                     hyperion_state::notifications::replace(
                         &self.pool,
@@ -785,7 +790,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 match put {
                     Ok(true) => {
                         written += 1;
-                        item_written = true;
+                        lead_written |= i == 0;
                     }
                     Ok(false) => {}
                     Err(e) => {
@@ -794,17 +799,18 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     }
                 }
             }
-            // Counted even when a later admin's write failed: this admin's
-            // row is there now and would read as "seen" on the next pass.
-            if item_written && is_outbound_docker_kind(&row.kind) {
+            // Queued even when a later admin's write failed: the first
+            // admin's row is there now and reads as "seen" on the next pass.
+            if lead_written && is_outbound_docker_kind(&row.kind) {
                 outbound.push((row.title, row.body, row.kind));
             }
             if failed.is_some() {
                 break 'items;
             }
         }
-        // Whatever was written is sent, even when a later item failed: those
-        // rows are "seen" on the next read and would never be sent then.
+        // What is queued is sent even when a later item failed: the rows
+        // that decided it are "seen" on the next read and would never be
+        // sent then.
         // The daemon and the node are the rarer, graver news, so they go
         // before project alerts; the sort is stable.
         outbound.sort_by_key(|(_, _, kind)| kind.starts_with("docker.project"));
