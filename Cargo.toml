@@ -58,6 +58,8 @@ once_cell = "1"
 hex = "0.4"
 rand = "0.8"
 sha2 = "0.10"
+# MD5 only because wordpress.org publishes core and plugin checksums as MD5.
+md-5 = "0.10"
 # Safe wrappers for the handful of syscalls that have no std equivalent —
 # today `killpg`, which the export path needs to stop a wedged `mysqldump`
 # together with everything it forked. Already in the tree transitively; taking

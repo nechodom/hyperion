@@ -261,6 +261,21 @@ impl TenantRoot {
         Ok(w.stats)
     }
 
+    /// Open the directory at `comps` (relative to the root) by descending one
+    /// `O_NOFOLLOW` component at a time, checking each stays on the root's
+    /// filesystem. No components gives a fresh descriptor for the root.
+    fn descend(&self, comps: &[&str]) -> io::Result<OwnedFd> {
+        let mut held = open_dir(&self.fd, ".")?;
+        for c in comps {
+            let next = open_dir(&held, *c)?;
+            if dev_of(&fstat(&next).map_err(io::Error::from)?) != self.dev {
+                return Err(refuse("directory is on another filesystem"));
+            }
+            held = next;
+        }
+        Ok(held)
+    }
+
     /// Open the regular file `rel` for reading, the way `walk` reached it:
     /// every component relative to a directory fd with `O_NOFOLLOW`, so a
     /// parent swapped for a symlink since the walk is refused rather than
@@ -268,29 +283,13 @@ impl TenantRoot {
     /// that is not a regular file with one name.
     pub fn open_file(&self, rel: &str) -> io::Result<File> {
         let bad = |m: &str| io::Error::new(io::ErrorKind::InvalidInput, m.to_string());
-        if rel.is_empty() || rel.contains('\0') || rel.starts_with('/') {
-            return Err(bad("invalid relative path"));
-        }
-        let comps: Vec<&str> = rel.split('/').collect();
-        if comps
-            .iter()
-            .any(|c| c.is_empty() || *c == "." || *c == "..")
-        {
-            return Err(bad("invalid path component"));
-        }
+        let comps = split_rel(rel, false)?;
         let (leaf, parents) = comps.split_last().ok_or_else(|| bad("empty path"))?;
-        let mut held: Option<OwnedFd> = None;
-        for c in parents {
-            let next = open_dir(held.as_ref().map_or(self.fd.as_fd(), |f| f.as_fd()), *c)?;
-            if dev_of(&fstat(&next).map_err(io::Error::from)?) != self.dev {
-                return Err(refuse("directory is on another filesystem"));
-            }
-            held = Some(next);
-        }
+        let parent = self.descend(parents)?;
         // NONBLOCK so a FIFO swapped in since the walk cannot hang the open;
         // it has no effect on a regular file.
         let fd = openat(
-            held.as_ref().map_or(self.fd.as_fd(), |f| f.as_fd()),
+            &parent,
             *leaf,
             OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
             Mode::empty(),
@@ -305,6 +304,95 @@ impl TenantRoot {
         }
         Ok(File::from(fd))
     }
+
+    /// The names directly inside the directory `rel` ("" is the root), reached
+    /// like `open_file` reaches a file. Entries are classified without
+    /// following links and are not opened. At most `max_entries` are returned
+    /// (`truncated` says more existed), in directory order.
+    pub fn list_dir(&self, rel: &str, max_entries: usize) -> io::Result<DirListing> {
+        let comps = split_rel(rel, true)?;
+        let mut dir = Dir::new(self.descend(&comps)?).map_err(io::Error::from)?;
+        let mut out = DirListing::default();
+        while let Some(ent) = dir.read() {
+            let ent = ent.map_err(io::Error::from)?;
+            let name = ent.file_name();
+            if name == c"." || name == c".." {
+                continue;
+            }
+            if out.entries.len() >= max_entries {
+                out.truncated = true;
+                break;
+            }
+            let Ok(name_str) = std::str::from_utf8(name.to_bytes()) else {
+                out.non_utf8 += 1;
+                continue;
+            };
+            let kind = match statat(
+                dir.fd().map_err(io::Error::from)?,
+                name,
+                AtFlags::SYMLINK_NOFOLLOW,
+            ) {
+                Ok(st) => match FileType::from_raw_mode(st.st_mode) {
+                    FileType::RegularFile => EntryKind::File,
+                    FileType::Directory => EntryKind::Dir,
+                    FileType::Symlink => EntryKind::Symlink,
+                    _ => EntryKind::Other,
+                },
+                // Gone since it was listed.
+                Err(Errno::NOENT) => continue,
+                Err(_) => EntryKind::Other,
+            };
+            out.entries.push(DirEntryInfo {
+                name: name_str.to_string(),
+                kind,
+            });
+        }
+        Ok(out)
+    }
+}
+
+/// Split a relative path into components, refusing anything that could leave
+/// the root. `allow_empty` accepts "" as the root itself.
+fn split_rel(rel: &str, allow_empty: bool) -> io::Result<Vec<&str>> {
+    let bad = |m: &str| io::Error::new(io::ErrorKind::InvalidInput, m.to_string());
+    if rel.is_empty() && allow_empty {
+        return Ok(Vec::new());
+    }
+    if rel.is_empty() || rel.contains('\0') || rel.starts_with('/') {
+        return Err(bad("invalid relative path"));
+    }
+    let comps: Vec<&str> = rel.split('/').collect();
+    if comps
+        .iter()
+        .any(|c| c.is_empty() || *c == "." || *c == "..")
+    {
+        return Err(bad("invalid path component"));
+    }
+    Ok(comps)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntryKind {
+    File,
+    Dir,
+    Symlink,
+    /// A FIFO, socket, device or anything else that is not a plain file.
+    Other,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirEntryInfo {
+    pub name: String,
+    pub kind: EntryKind,
+}
+
+#[derive(Debug, Default)]
+pub struct DirListing {
+    pub entries: Vec<DirEntryInfo>,
+    /// More entries existed than the cap asked for.
+    pub truncated: bool,
+    /// Entries whose name is not UTF-8: not listed, as they can't be re-opened.
+    pub non_utf8: u64,
 }
 
 struct Walker<'o, F> {
@@ -809,6 +897,66 @@ mod tests {
         let root = TenantRoot::open(t.path()).expect("open");
         tenant_symlink(outside.path(), &t.path().join("a"));
         assert!(root.open_file("a/secret.php").is_err());
+    }
+
+    #[test]
+    fn list_dir_classifies_entries_without_following() {
+        let outside = tempfile::tempdir().expect("outside");
+        let t = tempfile::tempdir().expect("tmp");
+        std::fs::create_dir_all(t.path().join("p/a")).expect("mkdir");
+        std::fs::write(t.path().join("p/f.php"), b"x").expect("w");
+        tenant_symlink(outside.path(), &t.path().join("p/l"));
+        let root = TenantRoot::open(t.path()).expect("open");
+        let mut got = root.list_dir("p", 100).expect("list").entries;
+        got.sort_by(|a, b| a.name.cmp(&b.name));
+        let got: Vec<(&str, EntryKind)> = got.iter().map(|e| (e.name.as_str(), e.kind)).collect();
+        assert_eq!(
+            got,
+            vec![
+                ("a", EntryKind::Dir),
+                ("f.php", EntryKind::File),
+                ("l", EntryKind::Symlink)
+            ]
+        );
+        // "" is the root itself.
+        assert_eq!(root.list_dir("", 100).expect("root").entries.len(), 1);
+    }
+
+    #[test]
+    fn list_dir_refuses_symlinked_parent_and_bad_paths() {
+        let outside = tempfile::tempdir().expect("outside");
+        std::fs::write(outside.path().join("secret.php"), b"x").expect("w");
+        let t = tempfile::tempdir().expect("tmp");
+        let root = TenantRoot::open(t.path()).expect("open");
+        tenant_symlink(outside.path(), &t.path().join("a"));
+        assert!(root.list_dir("a", 100).is_err());
+        assert!(root.list_dir("../x", 100).is_err());
+        assert!(root.list_dir("/etc", 100).is_err());
+    }
+
+    #[test]
+    fn list_dir_is_capped_and_counts_non_utf8_names() {
+        let t = tempfile::tempdir().expect("tmp");
+        for i in 0..5 {
+            std::fs::write(t.path().join(format!("f{i}.php")), b"x").expect("w");
+        }
+        let root = TenantRoot::open(t.path()).expect("open");
+        let l = root.list_dir("", 3).expect("list");
+        assert_eq!(l.entries.len(), 3);
+        assert!(l.truncated);
+        let all = root.list_dir("", 100).expect("list");
+        assert_eq!(all.entries.len(), 5);
+        assert!(!all.truncated);
+
+        let bad = t.path().join(std::ffi::OsStr::from_bytes(b"bad\xff.php"));
+        if let Err(e) = std::fs::write(&bad, b"x") {
+            // macOS (APFS) refuses names that are not valid UTF-8 outright.
+            assert_eq!(e.raw_os_error(), Some(92), "EILSEQ expected, got {e}");
+            return;
+        }
+        let all = root.list_dir("", 100).expect("list");
+        assert_eq!(all.entries.len(), 5);
+        assert_eq!(all.non_utf8, 1);
     }
 
     #[test]

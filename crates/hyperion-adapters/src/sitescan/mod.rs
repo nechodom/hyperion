@@ -1,6 +1,8 @@
 //! Native site scanner building blocks. Everything here runs as root over
 //! tenant-controlled trees, so nothing resolves a path by name below the root.
 
+pub mod discover;
+pub mod manifest;
 pub mod rules;
 pub mod walk;
 
