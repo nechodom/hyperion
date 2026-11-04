@@ -1431,6 +1431,32 @@ async fn dispatch_request(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(items) => Response::MonitorOverview(items),
             Err(e) => Response::Error(e),
         },
+        Request::DockerModuleStatus => match api.docker_module_status().await {
+            Ok(st) => Response::DockerModule(st),
+            Err(e) => Response::Error(e),
+        },
+        Request::DockerClusterInstall => match api.docker_cluster_install().await {
+            Ok(st) => Response::DockerModule(st),
+            Err(e) => Response::Error(e),
+        },
+        Request::DockerClusterRemove => match api.docker_cluster_remove().await {
+            Ok(st) => Response::DockerModule(st),
+            Err(e) => Response::Error(e),
+        },
+        Request::DockerNodeInstall => match api.docker_node_install().await {
+            Ok(st) => Response::DockerModule(st),
+            Err(e) => Response::Error(e),
+        },
+        Request::DockerNodeRemove => match api.docker_node_remove().await {
+            Ok(st) => Response::DockerModule(st),
+            Err(e) => Response::Error(e),
+        },
+        Request::DockerNodeRegister { node_id, installed } => {
+            match api.docker_node_register(node_id, installed).await {
+                Ok(()) => Response::DockerNodeRegistered,
+                Err(e) => Response::Error(e),
+            }
+        }
         Request::AvatarFilename { user_id } => match api.avatar_filename(user_id).await {
             Ok(f) => Response::AvatarFilename(f),
             Err(e) => Response::Error(e),
@@ -3530,6 +3556,34 @@ mod tests {
             &self,
         ) -> Result<Vec<hyperion_types::MonitorOverviewItem>, RpcError> {
             Ok(vec![])
+        }
+        async fn docker_module_status(
+            &self,
+        ) -> Result<hyperion_types::docker::DockerModuleState, RpcError> {
+            Ok(Default::default())
+        }
+        async fn docker_cluster_install(
+            &self,
+        ) -> Result<hyperion_types::docker::DockerModuleState, RpcError> {
+            Ok(Default::default())
+        }
+        async fn docker_cluster_remove(
+            &self,
+        ) -> Result<hyperion_types::docker::DockerModuleState, RpcError> {
+            Ok(Default::default())
+        }
+        async fn docker_node_install(
+            &self,
+        ) -> Result<hyperion_types::docker::DockerModuleState, RpcError> {
+            Ok(Default::default())
+        }
+        async fn docker_node_remove(
+            &self,
+        ) -> Result<hyperion_types::docker::DockerModuleState, RpcError> {
+            Ok(Default::default())
+        }
+        async fn docker_node_register(&self, _: String, _: bool) -> Result<(), RpcError> {
+            Ok(())
         }
         async fn avatar_filename(&self, _: i64) -> Result<Option<String>, RpcError> {
             Ok(None)

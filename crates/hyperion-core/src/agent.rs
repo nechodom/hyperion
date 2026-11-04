@@ -1628,6 +1628,34 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
     async fn monitor_overview(&self) -> Result<Vec<hyperion_types::MonitorOverviewItem>, RpcError> {
         self.svc.monitor_overview().await
     }
+    async fn docker_module_status(
+        &self,
+    ) -> Result<hyperion_types::docker::DockerModuleState, RpcError> {
+        self.svc.docker_module_status().await
+    }
+    async fn docker_cluster_install(
+        &self,
+    ) -> Result<hyperion_types::docker::DockerModuleState, RpcError> {
+        self.svc.docker_cluster_install().await
+    }
+    async fn docker_cluster_remove(
+        &self,
+    ) -> Result<hyperion_types::docker::DockerModuleState, RpcError> {
+        self.svc.docker_cluster_remove().await
+    }
+    async fn docker_node_install(
+        &self,
+    ) -> Result<hyperion_types::docker::DockerModuleState, RpcError> {
+        self.svc.docker_node_install().await
+    }
+    async fn docker_node_remove(
+        &self,
+    ) -> Result<hyperion_types::docker::DockerModuleState, RpcError> {
+        self.svc.docker_node_remove().await
+    }
+    async fn docker_node_register(&self, node_id: String, installed: bool) -> Result<(), RpcError> {
+        self.svc.docker_node_register(&node_id, installed).await
+    }
     async fn avatar_filename(&self, user_id: i64) -> Result<Option<String>, RpcError> {
         self.svc.avatar_filename(user_id).await
     }

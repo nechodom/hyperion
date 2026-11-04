@@ -69,11 +69,18 @@ pub enum Capability {
     /// that user, `alias /` serves any file nginx can read, and a log
     /// directive writes attacker-shaped lines to a root-chosen path.
     HostingEditNginxRaw,
+    // — Docker —
+    // Also appended at the end, for the same reason as above.
+    /// See containers, projects, image freshness and disk use.
+    DockerView,
+    /// Read container log lines. Separate from `DockerView` because a log
+    /// holds whatever the app printed, tokens and customer data included.
+    DockerLogs,
 }
 
 impl Capability {
     /// Every capability, in display order. Keep in sync with the enum.
-    pub const ALL: [Capability; 32] = [
+    pub const ALL: [Capability; 34] = [
         Capability::HostingView,
         Capability::HostingCreate,
         Capability::HostingDelete,
@@ -106,6 +113,8 @@ impl Capability {
         Capability::TrashManage,
         Capability::ApiKeysManage,
         Capability::HostingEditNginxRaw,
+        Capability::DockerView,
+        Capability::DockerLogs,
     ];
 
     /// Bit for this capability in a [`CapSet`].
@@ -148,6 +157,8 @@ impl Capability {
             Capability::PanelImport => "panel_import",
             Capability::TrashManage => "trash_manage",
             Capability::ApiKeysManage => "api_keys_manage",
+            Capability::DockerView => "docker_view",
+            Capability::DockerLogs => "docker_logs",
         }
     }
 
@@ -188,6 +199,8 @@ impl Capability {
             Capability::PanelImport => "Import from another panel",
             Capability::TrashManage => "Manage trash (restore / purge)",
             Capability::ApiKeysManage => "Manage API keys (remote management API)",
+            Capability::DockerView => "View Docker containers and images",
+            Capability::DockerLogs => "Read Docker container logs",
         }
     }
 
@@ -290,6 +303,7 @@ pub fn groups() -> Vec<(&'static str, Vec<Capability>)> {
         ("TLS", vec![CertManage]),
         ("Security", vec![SecurityManage]),
         ("Monitoring", vec![MonitoringView, MonitoringManage]),
+        ("Docker", vec![DockerView, DockerLogs]),
         (
             "Cluster",
             vec![NodesView, NodesManage, ServicesView, ServicesManage],
@@ -318,7 +332,8 @@ impl WebRole {
         use Capability::*;
         match self {
             WebRole::SuperAdmin => CapSet::all(),
-            // Admin = everything except managing users + roles.
+            // Admin = everything except managing users + roles (so it holds
+            // the Docker capabilities; no tenant preset below lists them).
             WebRole::Admin => CapSet(CapSet::all().0 & !UsersManage.bit() & !RolesManage.bit()),
             // Operator = full control of assigned hostings + their tooling.
             WebRole::Operator => [
@@ -414,10 +429,35 @@ mod tests {
 
     #[test]
     fn all_array_matches_count() {
-        // 32 distinct bits, none above 63.
+        // 34 distinct bits, none above 63.
         let s = CapSet::all();
-        assert_eq!(s.count(), 32);
-        assert_eq!(Capability::ALL.len(), 32);
+        assert_eq!(s.count(), 34);
+        assert_eq!(Capability::ALL.len(), 34);
+    }
+
+    /// A stored role bitmask keeps its meaning across the upgrade only if
+    /// every existing variant keeps its bit, so the Docker capabilities go
+    /// at the end. They are admin-level: container logs can hold anything
+    /// an app printed, and the tenant roles are not entitled to that.
+    #[test]
+    fn docker_caps_are_appended_and_admin_only() {
+        assert_eq!(Capability::ApiKeysManage as u8, 30);
+        assert_eq!(Capability::HostingEditNginxRaw as u8, 31);
+        assert_eq!(Capability::DockerView as u8, 32);
+        assert_eq!(Capability::DockerLogs as u8, 33);
+        assert_eq!(Capability::DockerView.as_str(), "docker_view");
+        assert_eq!(Capability::DockerLogs.as_str(), "docker_logs");
+
+        for role in [WebRole::SuperAdmin, WebRole::Admin] {
+            let caps = role.capabilities();
+            assert!(caps.contains(Capability::DockerView), "{role:?}");
+            assert!(caps.contains(Capability::DockerLogs), "{role:?}");
+        }
+        for role in [WebRole::Operator, WebRole::Customer, WebRole::Viewer] {
+            let caps = role.capabilities();
+            assert!(!caps.contains(Capability::DockerView), "{role:?}");
+            assert!(!caps.contains(Capability::DockerLogs), "{role:?}");
+        }
     }
 
     #[test]

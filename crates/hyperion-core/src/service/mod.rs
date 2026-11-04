@@ -45,6 +45,7 @@ mod cron;
 mod dashboard;
 mod database;
 mod dkim;
+mod docker;
 mod files;
 mod firewall;
 mod fs_health;

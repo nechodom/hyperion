@@ -368,6 +368,16 @@ pub fn print_pretty(resp: &Response) {
             None => println!("avatar: (none)"),
         },
         Response::AvatarSet => println!("✓ avatar updated"),
+        Response::DockerModule(st) => {
+            println!(
+                "docker module: cluster {}, node {}, buildx {}, docker {}",
+                if st.cluster_installed { "on" } else { "off" },
+                if st.node_installed { "on" } else { "off" },
+                if st.buildx { "yes" } else { "no" },
+                st.docker_version.as_deref().unwrap_or("-")
+            );
+        }
+        Response::DockerNodeRegistered => println!("✓ docker node recorded"),
         Response::EmailChangeRequest { masked_to } => {
             println!("✓ verification code sent to {masked_to}");
         }

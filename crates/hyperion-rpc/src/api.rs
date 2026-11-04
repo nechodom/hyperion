@@ -1243,6 +1243,31 @@ pub trait AgentApi: Send + Sync + 'static {
     /// and concatenates the rows.
     async fn monitor_overview(&self) -> Result<Vec<hyperion_types::MonitorOverviewItem>, RpcError>;
 
+    /// Docker module state of this node. Runs `docker version` only when
+    /// the module is on.
+    async fn docker_module_status(
+        &self,
+    ) -> Result<hyperion_types::docker::DockerModuleState, RpcError>;
+    /// Master: turn the module on for the cluster (bookkeeping only).
+    async fn docker_cluster_install(
+        &self,
+    ) -> Result<hyperion_types::docker::DockerModuleState, RpcError>;
+    /// Master: turn the cluster flag off and clear `docker_nodes`.
+    async fn docker_cluster_remove(
+        &self,
+    ) -> Result<hyperion_types::docker::DockerModuleState, RpcError>;
+    /// Turn the module on for this node; refused when docker is absent or
+    /// its daemon is silent.
+    async fn docker_node_install(
+        &self,
+    ) -> Result<hyperion_types::docker::DockerModuleState, RpcError>;
+    /// Turn the module off for this node and clear the data it kept.
+    async fn docker_node_remove(
+        &self,
+    ) -> Result<hyperion_types::docker::DockerModuleState, RpcError>;
+    /// Master: record whether `node_id` runs the module.
+    async fn docker_node_register(&self, node_id: String, installed: bool) -> Result<(), RpcError>;
+
     /// Read the avatar filename column for one user.
     async fn avatar_filename(&self, user_id: i64) -> Result<Option<String>, RpcError>;
     /// Set / clear the avatar filename column.

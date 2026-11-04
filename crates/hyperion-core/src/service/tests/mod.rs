@@ -1191,6 +1191,7 @@ mod certs;
 mod cluster;
 mod config;
 mod dashboard;
+mod docker;
 mod firewall;
 mod fs_health;
 mod fs_util;

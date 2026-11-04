@@ -19,6 +19,7 @@ pub mod certificates;
 pub mod custom_roles;
 pub mod databases;
 pub mod db;
+pub mod docker;
 pub mod email_log;
 pub mod ftp_accounts;
 pub mod hosting_kv;

@@ -57,3 +57,18 @@ pub struct DockerDisk {
     pub containers_bytes: u64,
     pub read_at: i64,
 }
+
+/// Whether the Docker module is on, as one node (or the master) reports it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DockerModuleState {
+    /// The operator turned the module on for the cluster (master only).
+    pub cluster_installed: bool,
+    /// This node runs the module.
+    pub node_installed: bool,
+    /// `docker buildx` is available on this node.
+    pub buildx: bool,
+    /// The daemon's version; `None` while the module is off or the daemon
+    /// did not answer.
+    pub docker_version: Option<String>,
+}

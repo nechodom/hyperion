@@ -1412,6 +1412,23 @@ pub enum Request {
     /// Cluster-wide monitor list — every enabled monitor on this
     /// node with computed 24h success rate + avg latency.
     MonitorOverview,
+    /// Docker module state of this node (and, on the master, the cluster
+    /// flag). Runs `docker version` only when the module is on.
+    DockerModuleStatus,
+    /// Master: turn the Docker module on for the cluster. Bookkeeping only.
+    DockerClusterInstall,
+    /// Master: turn the cluster flag off and forget every registered node.
+    DockerClusterRemove,
+    /// Turn the module on for this node. Refused unless `docker version`
+    /// answers.
+    DockerNodeInstall,
+    /// Turn the module off for this node and drop the data it kept.
+    DockerNodeRemove,
+    /// Master: record that `node_id` runs (or no longer runs) the module.
+    DockerNodeRegister {
+        node_id: String,
+        installed: bool,
+    },
     /// Look up the avatar basename for one web_user.
     AvatarFilename {
         user_id: i64,
@@ -2735,6 +2752,10 @@ pub enum Response {
     HostingFileMkdir,
     HostingFileRename,
     MonitorOverview(Vec<hyperion_types::MonitorOverviewItem>),
+    /// Answer to every Docker module call but `DockerNodeRegister`.
+    DockerModule(hyperion_types::docker::DockerModuleState),
+    /// Ack for DockerNodeRegister.
+    DockerNodeRegistered,
     AvatarFilename(Option<String>),
     AvatarSet,
     /// Returns the masked target address (e.g. "k****@example.cz").
