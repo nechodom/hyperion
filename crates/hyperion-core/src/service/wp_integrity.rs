@@ -211,6 +211,36 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(result)
     }
 
+    /// What the last scan left for this hosting, without starting one.
+    ///
+    /// The WordPress tab loads this when it opens. It reads one KV row and
+    /// the docroot's `wp-config.php` presence; no wp-cli, no clamscan, no
+    /// tenant PHP. A hosting never scanned comes back with
+    /// `scanned_at == 0`, which `is_clean()` already refuses to call clean.
+    pub async fn wp_integrity_stored(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<hyperion_types::WpIntegrityScanResult, RpcError> {
+        let detail = self.get(sel).await?;
+        if let Some(stored) = self.stored_integrity_scan(detail.id.as_str()).await {
+            let mut result = stored.result;
+            // The record's own clock wins over a result that predates the
+            // field; the scanner flag is a node fact, read fresh.
+            result.scanned_at = stored.scanned_at;
+            result.clamav_installed = integrity::clamav_available();
+            result.scan_queued = false;
+            return Ok(result);
+        }
+        // Same answer the scan gives a site with no core to compare.
+        let error = (!self.hosting_has_wordpress(&detail).await)
+            .then(|| INTEGRITY_ERR_NOT_WORDPRESS.to_string());
+        Ok(hyperion_types::WpIntegrityScanResult {
+            error,
+            clamav_installed: integrity::clamav_available(),
+            ..Default::default()
+        })
+    }
+
     /// Daily integrity sweep over every active WordPress hosting on this
     /// node: verify core + plugin checksums, run ClamAV where it exists,
     /// store each result for the dashboard, and notify admins about
@@ -514,6 +544,7 @@ pub(super) fn assemble_integrity_result(
         plugins_total,
         error: None,
         scanned_at: 0,
+        scan_queued: false,
     }
 }
 

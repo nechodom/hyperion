@@ -348,3 +348,73 @@ fn clamav_pass_backs_off_after_a_failure() {
         now
     ));
 }
+
+/// Opening the WordPress tab reads what the last scan left behind; it must
+/// never start one. The mock adapter has no expectation for any scan probe
+/// (plugin list, wp-cli, clamscan), so a spawn would panic the test.
+#[tokio::test]
+async fn wp_integrity_stored_never_spawns_a_scan() {
+    let pool = open_memory().await.expect("open");
+    let s = svc(pool.clone(), package_mocks());
+    let site = hosting_for_packages(&s, "kos.cz").await;
+    wordpress::record_install(&pool, &site.id, "https://kos.cz", "6.6.2", "h", 1)
+        .await
+        .expect("wp install row");
+    let sel = HostingSelector::Id(site.id.clone());
+
+    // Never scanned: an empty record that cannot read as clean.
+    let r = s.wp_integrity_stored(sel.clone()).await.expect("stored");
+    assert_eq!(r.scanned_at, 0);
+    assert!(!r.is_clean(), "a site nobody checked is never clean");
+    assert!(!r.scan_queued);
+    assert!(
+        hyperion_state::hosting_kv::get(&pool, site.id.as_str(), INTEGRITY_KV_KEY)
+            .await
+            .expect("kv get")
+            .is_none(),
+        "reading must not write a record either"
+    );
+
+    // With a record: exactly what was stored comes back.
+    let mut stored = assemble_integrity_result(
+        integrity::CoreChecksums {
+            checked: true,
+            modified: vec!["wp-includes/version.php".into()],
+            ..Default::default()
+        },
+        plugins_verified(),
+        vec![],
+        false,
+        3,
+        true,
+    );
+    stored.scanned_at = 1_700_000_000;
+    s.set_stored_integrity_scan(
+        site.id.as_str(),
+        &StoredIntegrityScan {
+            scanned_at: 1_700_000_000,
+            clamav_at: 0,
+            clamav_failed_at: 0,
+            result: stored.clone(),
+        },
+    )
+    .await;
+    let r = s.wp_integrity_stored(sel).await.expect("stored");
+    assert_eq!(r.scanned_at, 1_700_000_000);
+    assert_eq!(r.core_modified, vec!["wp-includes/version.php"]);
+    assert!(!r.is_clean());
+}
+
+/// A static site has no core to compare: say so, as the scan does.
+#[tokio::test]
+async fn wp_integrity_stored_on_a_non_wordpress_site_says_so() {
+    let pool = open_memory().await.expect("open");
+    let s = svc(pool.clone(), package_mocks());
+    let site = hosting_for_packages(&s, "static-site.cz").await;
+    let r = s
+        .wp_integrity_stored(HostingSelector::Id(site.id))
+        .await
+        .expect("stored");
+    assert_eq!(r.error.as_deref(), Some(INTEGRITY_ERR_NOT_WORDPRESS));
+    assert!(!r.is_clean());
+}

@@ -935,6 +935,13 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.wp_integrity_scan(hosting).await
     }
 
+    async fn wp_integrity_stored(
+        &self,
+        hosting: hyperion_rpc::HostingSelector,
+    ) -> Result<hyperion_types::WpIntegrityScanResult, RpcError> {
+        self.svc.wp_integrity_stored(hosting).await
+    }
+
     async fn integrity_findings_list(
         &self,
     ) -> Result<Vec<hyperion_types::HostingIntegritySummary>, RpcError> {

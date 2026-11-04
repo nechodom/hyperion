@@ -678,6 +678,12 @@ pub enum Request {
     WpIntegrityScan {
         hosting: HostingSelector,
     },
+    /// The last stored integrity result for a hosting, without scanning:
+    /// answered by `Response::WpIntegrityScan`. What the WordPress tab
+    /// reads when it opens — a page view must never start a scan.
+    WpIntegrityStored {
+        hosting: HostingSelector,
+    },
     /// Every hosting's last stored integrity scan on this node — drives
     /// the cluster-wide integrity dashboard.
     IntegrityFindingsList,

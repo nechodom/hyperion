@@ -565,6 +565,11 @@ pub trait AgentApi: Send + Sync + 'static {
         &self,
         hosting: HostingSelector,
     ) -> Result<hyperion_types::WpIntegrityScanResult, RpcError>;
+    /// The last stored integrity result, read-only: never scans.
+    async fn wp_integrity_stored(
+        &self,
+        hosting: HostingSelector,
+    ) -> Result<hyperion_types::WpIntegrityScanResult, RpcError>;
     /// Every hosting's last stored integrity scan on this node.
     async fn integrity_findings_list(
         &self,

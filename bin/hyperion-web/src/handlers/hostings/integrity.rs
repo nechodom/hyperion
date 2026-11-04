@@ -3,8 +3,8 @@
 use super::*;
 
 /// Lazily-loaded file-integrity + malware panel — the tamper-detection
-/// sibling of the vuln panel. Dispatched to the OWNING node: wp-cli's
-/// checksum comparison and clamscan both have to read the site's files.
+/// sibling of the vuln panel. Dispatched to the OWNING node, where it reads
+/// the last stored result; opening the page never starts a scan.
 #[derive(Template)]
 #[template(path = "_hosting_integrity_card.html")]
 pub(super) struct IntegrityCardTpl {
@@ -16,7 +16,16 @@ pub(super) struct IntegrityCardTpl {
     /// does not swap a non-2xx response — an error status would leave the
     /// operator watching a spinner.
     pub(super) notice: Option<(bool, String)>,
+    /// When the pending scan was asked for (unix seconds); only read while
+    /// `scan.scan_queued`. The polling card sends it back so the panel can
+    /// tell whether the stored result is newer than the request.
+    pub(super) queued_since: i64,
 }
+
+/// How long a card keeps polling for a scan it queued. A scan that never
+/// stores a record (it could not run at all) would otherwise poll for as
+/// long as the tab stays open.
+const QUEUED_POLL_LIMIT_SECS: i64 = 15 * 60;
 
 /// A result meaning "nothing was checked", carrying why.
 ///
@@ -31,33 +40,52 @@ pub(super) fn integrity_not_checked(why: String) -> hyperion_types::WpIntegrityS
     }
 }
 
-/// Run the scan on the owning node, folding every failure mode into a
-/// renderable "couldn't check" result rather than a 500 — a blank corner
-/// of the page reads as "fine" to an operator, which is the one thing
-/// this card must never imply.
-pub(super) async fn integrity_scan_on_node(
+/// The request that fills the card on page load. A read of the stored
+/// result, never `WpIntegrityScan`: that one runs wp-cli and clamscan.
+pub(super) fn integrity_panel_request(sel: HostingSelector) -> Request {
+    Request::WpIntegrityStored { hosting: sel }
+}
+
+/// Phrase a node's refusal. A node from before `WpIntegrityStored` rejects
+/// the request by name, which reads as gibberish to an operator.
+pub(super) fn integrity_error_text(e: &str) -> String {
+    if e.contains("unknown variant") {
+        "this node needs updating to show scan results".into()
+    } else {
+        e.to_string()
+    }
+}
+
+/// Read the stored scan from the owning node, folding every failure mode
+/// into a renderable "couldn't check" result rather than a 500 — a blank
+/// corner of the page reads as "fine" to an operator, which is the one
+/// thing this card must never imply.
+pub(super) async fn integrity_stored_on_node(
     state: &SharedState,
     owner_node: Option<&str>,
     sel: HostingSelector,
 ) -> hyperion_types::WpIntegrityScanResult {
-    match crate::dispatcher::dispatch_to_node(
-        state,
-        owner_node,
-        Request::WpIntegrityScan { hosting: sel },
-    )
-    .await
+    match crate::dispatcher::dispatch_to_node(state, owner_node, integrity_panel_request(sel)).await
     {
         Ok(RpcResponse::WpIntegrityScan(scan)) => scan,
-        Ok(RpcResponse::Error(e)) => integrity_not_checked(e.to_string()),
+        Ok(RpcResponse::Error(e)) => integrity_not_checked(integrity_error_text(&e.to_string())),
         Ok(_) => integrity_not_checked("unexpected response from the node".into()),
-        Err(e) => integrity_not_checked(e.to_string()),
+        Err(e) => integrity_not_checked(integrity_error_text(&e.to_string())),
     }
+}
+
+#[derive(Deserialize)]
+pub struct IntegrityPanelQuery {
+    /// Set by a card that is waiting for a scan it queued.
+    #[serde(default)]
+    pub queued_at: i64,
 }
 
 pub async fn get_integrity_panel(
     State(state): State<SharedState>,
     ctx: AuthCtx,
     Path(selector): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<IntegrityPanelQuery>,
 ) -> Result<Response, AppError> {
     let sel = parse_selector(&selector)?;
     let (detail, owner_node) = find_hosting_anywhere(&state, sel.clone()).await?;
@@ -73,17 +101,77 @@ pub async fn get_integrity_panel(
         return Ok(r);
     }
     let csrf_token = crate::handlers::session_csrf_token(&state, &ctx);
-    let scan = integrity_scan_on_node(&state, owner_node.as_deref(), sel).await;
+    let mut scan = integrity_stored_on_node(&state, owner_node.as_deref(), sel).await;
+    // Still waiting: a scan was asked for and no result newer than the
+    // request has landed yet. An unreadable result (`error` on a record
+    // that never scanned) keeps waiting too, within the poll limit.
+    scan.scan_queued = q.queued_at > 0
+        && scan.scanned_at < q.queued_at
+        && now_secs_web() - q.queued_at < QUEUED_POLL_LIMIT_SECS;
     Ok(Html(
         IntegrityCardTpl {
             scan,
             selector,
             csrf_token,
             notice: None,
+            queued_since: q.queued_at,
         }
         .render()?,
     )
     .into_response())
+}
+
+/// Queue a scan of one hosting as a background job. The scan re-reads every
+/// core and plugin file and can walk the whole docroot, so it never runs
+/// inside a request; the card polls for the stored result instead.
+async fn queue_integrity_scan(
+    state: &SharedState,
+    ctx: &AuthCtx,
+    selector: &str,
+    sel: HostingSelector,
+    owner: Option<String>,
+) -> Result<(), AppError> {
+    let actor_uid = ctx.session.as_ref().map(|s| s.user_id).unwrap_or(0);
+    let job_state = state.clone();
+    crate::handlers::jobs::spawn_job(
+        state.clone(),
+        "integrity_scan",
+        Some(selector),
+        "{}",
+        &ctx.username,
+        actor_uid,
+        move |reporter| async move {
+            reporter.step("Scanning the site's files…", 20, "").await;
+            let outcome = crate::dispatcher::dispatch_to_node(
+                &job_state,
+                owner.as_deref(),
+                Request::WpIntegrityScan { hosting: sel },
+            )
+            .await;
+            match outcome {
+                Ok(RpcResponse::WpIntegrityScan(r)) => {
+                    // An error with nothing verified is a scan that did not
+                    // run: a failed job, never a clean-looking finished one.
+                    if let (Some(e), false) = (&r.error, r.wp_cli_ok || r.clamav_available) {
+                        reporter.finish(false, Some(e.clone())).await;
+                    } else {
+                        let summary = format!("{} finding(s).", r.total_findings());
+                        reporter.step("Done", 100, &summary).await;
+                        reporter.finish(true, None).await;
+                    }
+                }
+                Ok(RpcResponse::Error(e)) => reporter.finish(false, Some(e.to_string())).await,
+                Ok(_) => {
+                    reporter
+                        .finish(false, Some("unexpected response from the node".into()))
+                        .await
+                }
+                Err(e) => reporter.finish(false, Some(e.to_string())).await,
+            }
+        },
+    )
+    .await?;
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -95,7 +183,8 @@ pub struct IntegrityScanForm {
 /// isn't a refresh: it re-hashes every core and plugin file against
 /// WordPress.org and can walk the whole docroot with clamscan. Gated on
 /// `WpManage` for the same reason — reading the verdict is a view,
-/// spending the node's IO is not.
+/// spending the node's IO is not. Starts a background job and answers with
+/// the card in its "queued" state, which polls until the result is stored.
 pub async fn post_integrity_scan(
     State(state): State<SharedState>,
     ctx: AuthCtx,
@@ -108,30 +197,53 @@ pub async fn post_integrity_scan(
         Err(r) => return Ok(r),
     };
     let csrf_token = crate::handlers::session_csrf_token(&state, &ctx);
+    let queued_since = now_secs_web();
     // Resolve the owner EXPLICITLY: `.ok()`-to-None would retarget a
     // lookup failure at the master, which would then verify checksums for
     // files that aren't there and report the miss as a finding.
-    let scan = match find_hosting_anywhere(&state, sel.clone()).await {
-        Ok((_detail, owner_node)) => {
-            integrity_scan_on_node(&state, owner_node.as_deref(), sel).await
+    let (_detail, owner_node) = match find_hosting_anywhere(&state, sel.clone()).await {
+        Ok(found) => found,
+        Err(e) => {
+            return Ok(Html(
+                IntegrityCardTpl {
+                    scan: integrity_not_checked(e.to_string()),
+                    selector: form.selector,
+                    csrf_token,
+                    notice: None,
+                    queued_since: 0,
+                }
+                .render()?,
+            )
+            .into_response())
         }
-        Err(e) => integrity_not_checked(e.to_string()),
     };
+    queue_integrity_scan(
+        &state,
+        &ctx,
+        &form.selector,
+        sel.clone(),
+        owner_node.clone(),
+    )
+    .await?;
+    let mut scan = integrity_stored_on_node(&state, owner_node.as_deref(), sel).await;
+    scan.scan_queued = true;
     Ok(Html(
         IntegrityCardTpl {
             scan,
             selector: form.selector,
             csrf_token,
             notice: None,
+            queued_since,
         }
         .render()?,
     )
     .into_response())
 }
 
-/// Run a fix on the owning node, then re-scan and render the card with the
-/// fix's outcome on top. The re-scan is the proof: "repaired" is only worth
-/// saying next to a scan that no longer lists the file.
+/// Run a fix on the owning node, then queue a re-scan and render the card
+/// with the fix's outcome on top. The re-scan is the proof: "repaired" is
+/// only worth saying next to a scan that no longer lists the file — until
+/// that lands, the card says it is waiting and shows the previous result.
 ///
 /// The fix is idempotent (it re-downloads the release the site already
 /// runs), so a dropped connection mid-way means "click it again", not a
@@ -148,9 +260,10 @@ async fn integrity_fix(
         Err(r) => return Ok(r),
     };
     let csrf_token = crate::handlers::session_csrf_token(&state, &ctx);
+    let queued_since = now_secs_web();
     // Same explicit owner resolution as "Scan now": falling back to the
     // master would rewrite core on a box that doesn't hold the site.
-    let (notice, scan) = match find_hosting_anywhere(&state, sel.clone()).await {
+    let (notice, scan, queued_since) = match find_hosting_anywhere(&state, sel.clone()).await {
         Ok((_detail, owner_node)) => {
             let owner = owner_node.as_deref();
             let notice =
@@ -169,12 +282,20 @@ async fn integrity_fix(
                     Ok(_) => (false, "unexpected response from the node".into()),
                     Err(e) => (false, e.to_string()),
                 };
-            (
-                Some(notice),
-                integrity_scan_on_node(&state, owner, sel).await,
-            )
+            // The fix already happened: failing to queue the re-scan must
+            // not hide its outcome behind an error page.
+            let queued =
+                queue_integrity_scan(&state, &ctx, &selector, sel.clone(), owner_node.clone())
+                    .await;
+            let mut scan = integrity_stored_on_node(&state, owner, sel).await;
+            scan.scan_queued = queued.is_ok();
+            let mut notice = notice;
+            if let Err(e) = queued {
+                notice.1 = format!("{}\n\nThe re-scan could not be queued: {e}", notice.1);
+            }
+            (Some(notice), scan, queued_since)
         }
-        Err(e) => (None, integrity_not_checked(e.to_string())),
+        Err(e) => (None, integrity_not_checked(e.to_string()), 0),
     };
     Ok(Html(
         IntegrityCardTpl {
@@ -182,6 +303,7 @@ async fn integrity_fix(
             selector,
             csrf_token,
             notice,
+            queued_since,
         }
         .render()?,
     )

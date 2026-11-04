@@ -322,6 +322,7 @@ fn render_integrity(scan: hyperion_types::WpIntegrityScanResult) -> String {
         selector: "example.com".into(),
         csrf_token: "t".into(),
         notice: None,
+        queued_since: 0,
     }
     .render()
     .expect("integrity card renders")
@@ -497,6 +498,84 @@ fn unexpected_core_files_get_no_repair_button() {
     assert!(html.contains("aren't removed by any fix here"));
 }
 
+/// Opening the WordPress tab reads the stored result. `WpIntegrityScan`
+/// runs wp-cli and maybe clamscan on the node, so the page-load request must
+/// be the read-only one.
+#[test]
+fn integrity_panel_get_dispatches_stored_not_scan() {
+    let sel = parse_selector("example.com").expect("selector");
+    assert!(matches!(
+        integrity_panel_request(sel),
+        Request::WpIntegrityStored { .. }
+    ));
+    // …and the GET handler builds its request through that function only.
+    let src = include_str!("integrity.rs");
+    let get = src
+        .split("pub async fn get_integrity_panel")
+        .nth(1)
+        .and_then(|rest| rest.split("/// Queue a scan").next())
+        .expect("get_integrity_panel source");
+    assert!(get.contains("integrity_stored_on_node"));
+    assert!(!get.contains("WpIntegrityScan"));
+}
+
+/// A node from before `WpIntegrityStored` rejects the request by name; the
+/// card says the node needs updating rather than echoing the parser error.
+#[test]
+fn an_old_node_renders_as_needs_updating() {
+    let why = integrity_error_text("invalid request: unknown variant `wp_integrity_stored`");
+    let html = render_integrity(integrity_not_checked(why));
+    assert!(html.contains("this node needs updating to show scan results"));
+    assert!(!html.contains("unknown variant"));
+    assert!(html.contains(r#"data-verdict="unchecked""#));
+    assert!(!html.contains("Clean —"));
+    assert_eq!(integrity_error_text("boom"), "boom");
+}
+
+/// A site nobody has scanned says so, and polls only while a scan is queued.
+#[test]
+fn never_scanned_says_not_scanned_and_only_a_queued_card_polls() {
+    let html = render_integrity(Default::default());
+    assert!(html.contains("Not scanned yet"));
+    assert!(!html.contains("Clean —"));
+    assert!(html.contains(r#"data-verdict="unchecked""#));
+    assert!(
+        !html.contains("hx-trigger=\"every 10s\""),
+        "idle card must not poll"
+    );
+    assert!(!html.contains(" disabled"));
+
+    let queued = IntegrityCardTpl {
+        scan: hyperion_types::WpIntegrityScanResult {
+            scan_queued: true,
+            ..Default::default()
+        },
+        selector: "example.com".into(),
+        csrf_token: "t".into(),
+        notice: None,
+        queued_since: 1_700_000_000,
+    }
+    .render()
+    .expect("renders");
+    assert!(queued.contains(
+        r#"hx-get="/hostings/example.com/integrity-panel?queued_at=1700000000" hx-trigger="every 10s""#
+    ));
+    assert!(queued.contains("scan queued"));
+    assert!(queued.contains(" disabled"));
+    assert!(!queued.contains("Clean —"));
+}
+
+/// "Scan now" and the re-scan after a fix go through a background job, not
+/// an inline dispatch that holds the request open for minutes.
+#[test]
+fn scan_now_is_a_job_not_an_inline_dispatch() {
+    let src = include_str!("integrity.rs");
+    assert!(src.contains(r#""integrity_scan""#));
+    assert!(!src.contains("integrity_scan_on_node"));
+    // The only place the long-running request is built is inside the job.
+    assert_eq!(src.matches("Request::WpIntegrityScan {").count(), 1);
+}
+
 /// The outcome of a fix renders inside the row (HTMX won't swap an error
 /// status), worded so a failure can't be read as success.
 #[test]
@@ -510,6 +589,7 @@ fn fix_outcome_renders_in_the_card() {
         selector: "example.com".into(),
         csrf_token: "t".into(),
         notice: Some((true, "WordPress 6.4.2 core files replaced.".into())),
+        queued_since: 0,
     }
     .render()
     .expect("renders");
@@ -519,6 +599,7 @@ fn fix_outcome_renders_in_the_card() {
         selector: "example.com".into(),
         csrf_token: "t".into(),
         notice: Some((false, "download failed".into())),
+        queued_since: 0,
     }
     .render()
     .expect("renders");

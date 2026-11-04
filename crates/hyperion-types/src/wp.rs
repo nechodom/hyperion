@@ -373,6 +373,10 @@ pub struct WpIntegrityScanResult {
     /// Unix seconds of the scan. 0 = never scanned.
     #[serde(default)]
     pub scanned_at: i64,
+    /// A scan was asked for and has not finished. A view flag set by the
+    /// panel, never stored: it only tells the card to keep polling.
+    #[serde(default)]
+    pub scan_queued: bool,
 }
 
 impl WpIntegrityScanResult {
