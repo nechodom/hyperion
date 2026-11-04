@@ -319,6 +319,7 @@ async fn start_agent_with(toml: Option<&str>) -> (PathBuf, tempfile::TempDir, sq
         paths: hyperion_core::HostingPaths::default(),
         permissions_autoheal: true,
         snapshots_enabled: false,
+        fpm_own_masters: false,
         cpu_tracker: Default::default(),
         protection_mode: hyperion_types::ProtectionMode::Both,
         remote_backup: None,
@@ -4130,8 +4131,8 @@ async fn phpmyadmin_relay_is_gated_and_isolated() {
     hyperion_rpc_client::call(
         &sock,
         hyperion_rpc::codec::Request::WebUserCreate {
-            username: "pma-viewer".into(),
-            email: "pma-viewer@example.invalid".into(),
+            username: "php-viewer".into(),
+            email: "php-viewer@example.invalid".into(),
             password: "viewer-pw-1".into(),
             role: "viewer".into(),
         },
@@ -4140,7 +4141,7 @@ async fn phpmyadmin_relay_is_gated_and_isolated() {
     .unwrap();
     let viewer_cookie = extract_cookie(
         &app.clone()
-            .oneshot(login(b"username=pma-viewer&password=viewer-pw-1&next=/"))
+            .oneshot(login(b"username=php-viewer&password=viewer-pw-1&next=/"))
             .await
             .unwrap(),
     );
@@ -6050,4 +6051,133 @@ async fn a_silent_node_stops_both_the_search_and_the_delete() {
     let err = job.error.unwrap_or_default();
     assert!(err.contains("Nothing was deleted"), "{err}");
     assert!(err.contains("web-2.example.net"), "{err}");
+}
+
+/// The Nodes page loads each node's PHP-masters verdict lazily, so one dead
+/// node cannot hold the page; the row carries the hook for it.
+#[tokio::test]
+async fn own_masters_row_loads_its_verdict_lazily() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d) = start_agent().await;
+    let app = build_app(sock.clone(), admin);
+    let cookie = acme_dns_login(&app, "kevin", "good-pw").await;
+    let (status, page) = acme_dns_get(&app, &cookie, "/install").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        page.contains("hx-get=\"/install/node-php-masters?node_id=local\""),
+        "the master's row must fetch its own verdict"
+    );
+}
+
+/// The stub node has no cgroup facts at all, so the fragment must say it
+/// cannot and why, rather than claiming nothing or crashing the row.
+#[tokio::test]
+async fn own_masters_fragment_names_what_blocks_the_node() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d) = start_agent().await;
+    let app = build_app(sock.clone(), admin);
+    let cookie = acme_dns_login(&app, "kevin", "good-pw").await;
+    let (status, html) =
+        acme_dns_get(&app, &cookie, "/install/node-php-masters?node_id=local").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(html.contains("Own PHP masters: not possible"), "{html}");
+    assert!(html.contains("cgroup v2"), "{html}");
+
+    let (status, _) = acme_dns_get(&app, &cookie, "/install/node-php-masters?node_id=a/b").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+/// The verdict is the owner's to read: a logged-in user without the owner
+/// role gets a 403, and the fragment says nothing about the node.
+#[tokio::test]
+async fn own_masters_fragment_is_refused_to_a_non_admin() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d) = start_agent().await;
+    let app = build_app(sock.clone(), admin);
+    match hyperion_rpc_client::call(
+        &sock,
+        hyperion_rpc::codec::Request::WebUserCreate {
+            username: "php-viewer".into(),
+            email: "php-viewer@example.invalid".into(),
+            password: "viewer-pw-1".into(),
+            role: "viewer".into(),
+        },
+    )
+    .await
+    .expect("create viewer")
+    {
+        hyperion_rpc::codec::Response::WebUserCreate { .. } => {}
+        other => panic!("unexpected create response: {other:?}"),
+    }
+    let cookie = acme_dns_login(&app, "php-viewer", "viewer-pw-1").await;
+    let (status, html) =
+        acme_dns_get(&app, &cookie, "/install/node-php-masters?node_id=local").await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{html}");
+    assert!(!html.contains("Own PHP masters:"), "{html}");
+}
+
+/// The setting is a checkbox on the node's own settings page, with its
+/// copy, and it starts unticked on a node that never heard of it.
+#[tokio::test]
+async fn own_masters_checkbox_is_on_the_node_settings_page() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d, _cfg) = start_agent_with_toml("[agent]\n").await;
+    let app = build_app(sock.clone(), admin);
+    let cookie = acme_dns_login(&app, "kevin", "good-pw").await;
+    let (status, page) = acme_dns_get(&app, &cookie, "/install/node-settings?node_id=local").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(page.contains("name=\"own_masters\""), "checkbox missing");
+    assert!(page.contains("value=\"php\""), "section field missing");
+    assert!(page.contains("name=\"_checkboxes\" value=\"own_masters\""));
+    assert!(page.contains(
+        "New sites and sites you convert run on their own PHP process. About 11 MB per site."
+    ));
+    assert!(
+        !page.contains("name=\"own_masters\" value=\"true\" checked"),
+        "off by default"
+    );
+    assert!(
+        page.contains("This version only reports. A ticked box starts applying in a later update.")
+    );
+}
+
+/// What the node's file says is what the box shows.
+#[tokio::test]
+async fn own_masters_checkbox_is_ticked_when_the_file_says_so() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d, _cfg) = start_agent_with_toml("[php]\nown_masters = true\n").await;
+    let app = build_app(sock.clone(), admin);
+    let cookie = acme_dns_login(&app, "kevin", "good-pw").await;
+    let (status, page) = acme_dns_get(&app, &cookie, "/install/node-settings?node_id=local").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        page.contains("name=\"own_masters\" value=\"true\" checked"),
+        "ticked box missing"
+    );
+}
+
+/// A file that cannot be read, or does not parse, must not render a box: an
+/// unticked guess saved with one click would overwrite the real value.
+#[tokio::test]
+async fn own_masters_card_has_no_form_when_the_file_is_unknown() {
+    // No agent.toml wired: NodeConfigRead answers an error.
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d) = start_agent().await;
+    let app = build_app(sock.clone(), admin);
+    let cookie = acme_dns_login(&app, "kevin", "good-pw").await;
+    let (status, page) = acme_dns_get(&app, &cookie, "/install/node-settings?node_id=local").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(page.contains("id=\"php-masters\""), "card missing");
+    assert!(!page.contains("name=\"own_masters\""), "form on a guess");
+    assert!(page.contains("a form here would be guessing"));
+
+    // A file that does not parse.
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d, _cfg) = start_agent_with_toml("[php\nown_masters = true\n").await;
+    let app = build_app(sock.clone(), admin);
+    let cookie = acme_dns_login(&app, "kevin", "good-pw").await;
+    let (status, page) = acme_dns_get(&app, &cookie, "/install/node-settings?node_id=local").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!page.contains("name=\"own_masters\""), "form on a guess");
+    assert!(page.contains("a form here would be guessing"));
 }

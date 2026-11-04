@@ -15,7 +15,7 @@
       {% if is_master %}
         What this server does with its own <code>agent.toml</code>. Panel-wide settings are on <a href="/settings">Settings</a>.
       {% else if managed %}
-        What this node runs with: its scanner, its backups, its updates, its certificates. These follow the master — change them on <a href="/settings">Settings</a> and every node gets the new value within minutes.
+        What this node runs with: its scanner, its backups, its updates, its certificates. These follow the master — change them on <a href="/settings">Settings</a> and every node gets the new value within minutes. The PHP card is this node’s own setting and stays editable.
       {% else %}
         What this node does on its own: its scanner, its backups, its updates, its certificates. Saved in the node’s <code>/etc/hyperion/agent.toml</code>; the node’s agent restarts to apply each save.
       {% endif %}
@@ -32,7 +32,7 @@
       <strong>Settings from the master: {{ sync_verdict }}.</strong> {{ label }} {{ sync_detail }}.
     {% endif %}
     {% if managed && config.is_some() %}
-      The cards below show this node’s current values, read-only.
+      The cards below show this node’s current values, read-only, except the PHP card: that one is this node’s own setting.
     {% endif %}
   </div>
 </div>
@@ -393,6 +393,40 @@
   </div>
 </div>
 </fieldset>
+
+{# ───── PHP ───── outside the fieldset on purpose: the master's settings sync
+   does not carry [php], so a node that follows the master still edits it. #}
+<div class="group">
+  <div class="ghead">PHP</div>
+  <div class="item" id="php-masters">
+    <h3>
+      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3"/></svg>
+      PHP masters
+    </h3>
+    {% if let Some(own_masters_on) = own_masters %}
+    <form method="post" action="/install/node-settings" autocomplete="off">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="node_id" value="{{ node_id }}">
+      <input type="hidden" name="section" value="php">
+      <input type="hidden" name="_checkboxes" value="own_masters">
+      <label class="field-checkbox" style="font-weight:600">
+        <input type="checkbox" name="own_masters" value="true" {% if own_masters_on %}checked{% endif %}>
+        Own PHP masters
+      </label>
+      <p class="text-soft small" style="margin:0.5rem 0 0.8rem;line-height:1.55">
+        New sites and sites you convert run on their own PHP process. About 11 MB per site.
+        This version only reports. A ticked box starts applying in a later update.
+      </p>
+      <div class="item-actions"><button type="submit" class="btn primary">Save</button></div>
+    </form>
+    {% else %}
+    <p class="text-soft small" style="margin:0;line-height:1.55">
+      {% if raw_error.is_empty() %}This node’s <code>agent.toml</code> did not parse{% else %}{{ raw_error }}{% endif %},
+      so the current setting can’t be shown and a form here would be guessing.
+    </p>
+    {% endif %}
+  </div>
+</div>
 
 {% else %}
 <div class="flash error">

@@ -17,6 +17,7 @@ pub struct Config {
     pub permissions: PermissionsSection,
     pub snapshots: SnapshotsSection,
     pub protection: ProtectionSection,
+    pub php: PhpSection,
 }
 
 /// Which copy-of-the-site engine this node uses: `backups`, `snapshots` or
@@ -61,6 +62,19 @@ impl Default for SnapshotsSection {
     fn default() -> Self {
         Self { enabled: true }
     }
+}
+
+/// How this node runs PHP.
+///
+/// `own_masters` gives each site user its own FPM master, so the kernel can
+/// enforce that user's CPU and memory share. Defaults to OFF: with it off
+/// every file, vhost and process is what it was before the key existed, so an
+/// agent.toml without `[php]` changes nothing. The panel's Nodes page says
+/// whether a node can take it.
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct PhpSection {
+    pub own_masters: bool,
 }
 
 /// The permission self-repair. `enabled = false` makes
@@ -412,6 +426,19 @@ mod tests {
         assert_eq!(off.enrollment.verify_tls, Some(false));
         let on: Config = toml::from_str("[enrollment]\nverify_tls = true").expect("parse");
         assert_eq!(on.enrollment.verify_tls, Some(true));
+    }
+
+    /// Per-site PHP masters change how every site is served, so a node that
+    /// never heard of the setting keeps the shared master.
+    #[test]
+    fn own_masters_defaults_off() {
+        let none: Config = toml::from_str("[agent]\nsocket_group = \"ops\"").expect("parse");
+        assert!(!none.php.own_masters);
+        assert!(!Config::default().php.own_masters);
+        let empty: Config = toml::from_str("[php]").expect("parse");
+        assert!(!empty.php.own_masters);
+        let on: Config = toml::from_str("[php]\nown_masters = true").expect("parse");
+        assert!(on.php.own_masters);
     }
 
     #[test]

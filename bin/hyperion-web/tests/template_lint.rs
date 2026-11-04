@@ -312,6 +312,9 @@ fn every_page_is_reachable_from_the_nav() {
         "/install/update-node-status",
         // Per-row fragment the Nodes page lazy-loads into each summary.
         "/install/node-facts",
+        // Per-row fragment: whether the node could run a PHP master per site
+        // user, loaded when the row is opened.
+        "/install/node-php-masters",
         // Per-row DNS cell the HTTPS settings page lazy-loads for each node.
         "/settings/https/preview-dns",
         // htmx partial behind the HTTPS page's Check delegation button (POST).

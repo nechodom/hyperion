@@ -735,6 +735,10 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.node_stats(&self.hostname, &self.version).await
     }
 
+    async fn node_fpm_preflight(&self) -> Result<hyperion_types::fpm_own::Preflight, RpcError> {
+        self.svc.fpm_own_preflight().await
+    }
+
     async fn cluster_stats(&self) -> Result<ClusterStats, RpcError> {
         self.svc.cluster_stats(&self.hostname, &self.version).await
     }

@@ -71,6 +71,7 @@ async fn rollback_cleans_system_users_db_row_so_uid_can_be_reused() {
         remote_backup: None,
         retention: BackupRetention::default(),
         snapshots_enabled: true,
+        fpm_own_masters: false,
         cpu_tracker: Default::default(),
         protection_mode: hyperion_types::ProtectionMode::Both,
         slack_default_webhook: None,

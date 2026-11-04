@@ -249,6 +249,10 @@ async fn main() -> anyhow::Result<()> {
     // yet or systemd-tmpfiles hasn't run since.
     hyperion_core::ensure_phpfpm_socket_dirs().await;
 
+    // One OOM-killed worker must not stop the FPM master all sites on that
+    // PHP version share. Written once, no FPM restart.
+    hyperion_core::ensure_phpfpm_oom_policy_dropins().await;
+
     // Say so at BOOT if this unit cannot write /usr, rather than letting
     // the operator discover it from a wall of dpkg output the first time
     // they enable DKIM or install a service. The message tells systemd's
@@ -437,6 +441,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .with_permissions_autoheal(cfg.permissions.enabled)
         .with_snapshots(cfg.snapshots.enabled)
+        .with_fpm_own_masters(cfg.php.own_masters)
         .with_agent_config_path(cli.config.clone())
         .with_node_state_file(state_file.clone())
         .with_git_sha(env!("HYPERION_GIT_SHA"));

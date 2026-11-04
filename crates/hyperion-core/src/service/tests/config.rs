@@ -252,3 +252,22 @@ fn customer_letter_templates_are_settings_writable() {
     )]);
     assert!(parse_agent_section_fields("notifications", &bogus).is_err());
 }
+
+/// `[php] own_masters` is the one key of that section a node edits, and it is
+/// a plain bool: a typo must be refused, not saved as "off".
+#[test]
+fn own_masters_is_a_node_editable_bool() {
+    let one = |section: &str, key: &str, v: &str| {
+        let mut f = std::collections::BTreeMap::new();
+        f.insert(key.to_string(), v.to_string());
+        parse_agent_section_fields(section, &f)
+    };
+    let on = one("php", "own_masters", "true").expect("accepted");
+    assert!(matches!(
+        on.as_slice(),
+        [(k, crate::config_persist::FieldValue::Bool(true))] if k == "own_masters"
+    ));
+    assert!(one("php", "own_masters", "false").is_ok());
+    assert!(one("php", "own_masters", "maybe").is_err());
+    assert!(one("php", "something_else", "1").is_err());
+}

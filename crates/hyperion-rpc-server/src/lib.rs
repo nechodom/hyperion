@@ -620,6 +620,10 @@ async fn dispatch_request(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(v) => Response::NodeStats(v),
             Err(e) => Response::Error(e),
         },
+        Request::NodeFpmPreflight => match api.node_fpm_preflight().await {
+            Ok(v) => Response::NodeFpmPreflight(v),
+            Err(e) => Response::Error(e),
+        },
         Request::ClusterStats => match api.cluster_stats().await {
             Ok(v) => Response::ClusterStats(v),
             Err(e) => Response::Error(e),
@@ -2843,6 +2847,11 @@ mod tests {
             })
         }
         async fn node_stats(&self) -> Result<NodeStats, RpcError> {
+            Err(RpcError::Internal {
+                message: "not supported by this agent".into(),
+            })
+        }
+        async fn node_fpm_preflight(&self) -> Result<hyperion_types::fpm_own::Preflight, RpcError> {
             Err(RpcError::Internal {
                 message: "not supported by this agent".into(),
             })

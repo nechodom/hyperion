@@ -11,6 +11,11 @@ use std::path::PathBuf;
 pub struct PoolInput<'a> {
     pub system_user: &'a str,
     pub domain: &'a str,
+    /// Other sites served by this pool. A pool is per system user and PHP
+    /// version, so hostings sharing both share one file and it has to let
+    /// all of them in. Order does not matter: any of them writes the same
+    /// paths.
+    pub also_serves: &'a [String],
     pub php_version: PhpVersion,
     pub max_children: u32,
     pub max_requests: u32,
@@ -31,6 +36,7 @@ impl<'a> PoolInput<'a> {
         Self {
             system_user,
             domain,
+            also_serves: &[],
             php_version,
             max_children: 5,
             max_requests: 1000,
@@ -61,7 +67,8 @@ impl<'a> PoolInput<'a> {
 #[template(path = "phpfpm-pool.conf.j2", escape = "none")]
 struct PoolTpl<'a> {
     system_user: &'a str,
-    domain: &'a str,
+    open_basedir: String,
+    session_domain: &'a str,
     php_version: &'a str,
     max_children: u32,
     max_requests: u32,
@@ -186,9 +193,19 @@ pub fn render(input: &PoolInput<'_>) -> Result<String, AdapterError> {
     // FPM backstop above PHP's own max_execution_time (+30s headroom) so a
     // worker blocked in a syscall past its exec limit still gets reaped.
     let request_terminate_secs = input.max_exec_secs.saturating_add(30);
+    let mut domains: Vec<&str> = input.also_serves.iter().map(String::as_str).collect();
+    domains.push(input.domain);
+    domains.sort_unstable();
+    domains.dedup();
+    let mut open_basedir = String::new();
+    for domain in &domains {
+        open_basedir.push_str(&format!("/home/{}/{domain}:", input.system_user));
+    }
+    open_basedir.push_str("/tmp");
     let tpl = PoolTpl {
         system_user: input.system_user,
-        domain: input.domain,
+        open_basedir,
+        session_domain: domains[0],
         php_version: input.php_version.as_str(),
         max_children,
         max_requests: input.max_requests,
@@ -279,6 +296,11 @@ pub async fn ensure_pool(input: &PoolInput<'_>) -> Result<PathBuf, AdapterError>
     if let Err(e) = ensure_opcache_ini(input.php_version).await {
         tracing::warn!(error = %e, version = input.php_version.as_str(), "opcache ini not written");
     }
+    // Startup only covers versions installed at the time; a version installed
+    // later gets this with its first pool. Best-effort like the OPcache ini.
+    if let Err(e) = ensure_oom_policy_dropin(input.php_version).await {
+        tracing::warn!(error = %e, version = input.php_version.as_str(), "FPM OOM policy drop-in not written");
+    }
     let body = render(input)?;
     let path = pool_path(input);
     // Backup the existing pool (if any) so we can roll back when our
@@ -368,6 +390,67 @@ pub async fn ensure_opcache_ini(php_version: PhpVersion) -> Result<bool, Adapter
     }
     atomic_write(&path, want.as_bytes(), 0o644).await?;
     Ok(true)
+}
+
+/// `/etc/systemd/system/php<ver>-fpm.service.d/90-hyperion-oom-policy.conf`.
+pub fn oom_policy_dropin_path(php_version: PhpVersion) -> PathBuf {
+    PathBuf::from(format!(
+        "/etc/systemd/system/{}.service.d/90-hyperion-oom-policy.conf",
+        php_version.service_name()
+    ))
+}
+
+/// Every site on a PHP version shares one FPM unit, and systemd's default
+/// `OOMPolicy=stop` stops the whole unit when the OOM killer takes any one
+/// process in it: one site's oversized worker cuts every neighbour's
+/// in-flight requests and returns 502 until something restarts the unit
+/// (Debian 12's package never does). With `continue` the FPM master just
+/// replaces the worker. A master killed outright still takes the unit down;
+/// no OOM policy changes that.
+pub fn render_oom_policy_dropin() -> &'static str {
+    "# Auto-managed by Hyperion. Do not edit.\n\
+     [Service]\n\
+     OOMPolicy=continue\n"
+}
+
+/// Write [`render_oom_policy_dropin`] for this version and `daemon-reload`.
+/// Idempotent on content; returns whether it changed. Skipped when the
+/// version's FPM unit is not installed. Applies to the running unit without
+/// restarting it, so this never touches a live site.
+pub async fn ensure_oom_policy_dropin(php_version: PhpVersion) -> Result<bool, AdapterError> {
+    let path = oom_policy_dropin_path(php_version);
+    let want = render_oom_policy_dropin();
+    if tokio::fs::read_to_string(&path).await.ok().as_deref() == Some(want) {
+        return Ok(false);
+    }
+    let svc = format!("{}.service", php_version.service_name());
+    let load_state = cmd::run(
+        "/usr/bin/systemctl",
+        &["show", "--property=LoadState", "--value", &svc],
+    )
+    .await?;
+    if load_state.trim() != "loaded" {
+        return Ok(false);
+    }
+    atomic_write(&path, want.as_bytes(), 0o644).await?;
+    if let Err(e) = cmd::run("/usr/bin/systemctl", &["daemon-reload"]).await {
+        // systemd has not seen the file; removing it makes the next run retry
+        // rather than find matching content and call it done.
+        let _ = tokio::fs::remove_file(&path).await;
+        return Err(e);
+    }
+    Ok(true)
+}
+
+/// [`ensure_oom_policy_dropin`] for every supported version. Best-effort,
+/// never errors. Called from the agent's startup so `update.sh` (which
+/// restarts the agent) is enough to cover existing nodes.
+pub async fn ensure_oom_policy_dropins() {
+    for v in PhpVersion::all() {
+        if let Err(e) = ensure_oom_policy_dropin(*v).await {
+            tracing::warn!(error = %e, version = v.as_str(), "FPM OOM policy drop-in not written");
+        }
+    }
 }
 
 /// Run `php-fpm<ver> -t` and return an error with the exact
@@ -611,8 +694,90 @@ impl RecoveryBackoff {
     }
 }
 
+/// What `/proc/meminfo` says that the preflight needs.
+#[derive(Debug, PartialEq, Eq, Default)]
+pub struct MemInfo {
+    pub mem_total_mb: Option<i64>,
+    pub mem_available_mb: Option<i64>,
+    pub swap_total_kib: i64,
+}
+
+/// Read `MemTotal`, `MemAvailable` and `SwapTotal` out of `/proc/meminfo`
+/// text. RAM that is missing stays `None` (the verdict then skips the RAM
+/// bound rather than guess one); no swap line means no swap.
+pub fn parse_meminfo(meminfo: &str) -> MemInfo {
+    let kib = |key: &str| -> Option<i64> {
+        meminfo
+            .lines()
+            .find_map(|l| l.strip_prefix(key))
+            .and_then(|rest| rest.split_whitespace().next())
+            .and_then(|v| v.parse::<i64>().ok())
+    };
+    MemInfo {
+        mem_total_mb: kib("MemTotal:").map(|k| k / 1024).filter(|&mb| mb > 0),
+        mem_available_mb: kib("MemAvailable:").map(|k| k / 1024),
+        swap_total_kib: kib("SwapTotal:").unwrap_or(0),
+    }
+}
+
+/// The major version in `systemctl --version`'s first line
+/// (`systemd 252 (252.31-1~deb12u1)`).
+pub fn parse_systemd_major(version_output: &str) -> Option<u32> {
+    version_output
+        .lines()
+        .next()?
+        .strip_prefix("systemd ")?
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()
+}
+
+/// What this node reports about running a PHP-FPM master per site user. Plain
+/// readings only; `hyperion_types::fpm_own::judge` decides. `php_users` and
+/// `own_users` are the service's to fill (they come from the database).
+pub async fn preflight_facts() -> hyperion_types::fpm_own::PreflightFacts {
+    let cgroup_controllers = tokio::fs::read_to_string("/sys/fs/cgroup/cgroup.controllers")
+        .await
+        .ok();
+    let systemd_version = cmd::run("/usr/bin/systemctl", &["--version"])
+        .await
+        .ok()
+        .and_then(|out| parse_systemd_major(&out));
+    let mem = tokio::fs::read_to_string("/proc/meminfo")
+        .await
+        .map(|m| parse_meminfo(&m))
+        .unwrap_or_default();
+    hyperion_types::fpm_own::PreflightFacts {
+        cgroup_controllers,
+        systemd_version,
+        swap_total_kib: mem.swap_total_kib,
+        mem_total_mb: mem.mem_total_mb,
+        mem_available_mb: mem.mem_available_mb,
+        php_users: 0,
+        own_users: 0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
+
+    /// One OOM-killed worker must not stop the FPM master every other site
+    /// on this version depends on. Exact match: a stray `MemoryMax=` or
+    /// `Restart=` here would change every node's shared master.
+    #[test]
+    fn oom_policy_dropin_keeps_the_master_running() {
+        assert_eq!(
+            render_oom_policy_dropin(),
+            "# Auto-managed by Hyperion. Do not edit.\n\
+             [Service]\n\
+             OOMPolicy=continue\n"
+        );
+        assert_eq!(
+            oom_policy_dropin_path(PhpVersion::V8_3).to_string_lossy(),
+            "/etc/systemd/system/php8.3-fpm.service.d/90-hyperion-oom-policy.conf"
+        );
+    }
 
     #[test]
     fn opcache_ini_scales_with_the_box_and_isolates_tenants() {
@@ -830,6 +995,26 @@ mod tests {
         assert_eq!(p.to_string_lossy(), "/etc/php/8.2/fpm/pool.d/x.conf");
     }
 
+    /// Sites on one system user and PHP version share the pool file. Written
+    /// for the last of them alone, PHP refused to open the others' scripts:
+    /// "open_basedir restriction in effect", and nginx answered 404.
+    #[test]
+    fn a_shared_pool_lets_in_every_site_whichever_of_them_wrote_it() {
+        let others = ["b.cz".to_string(), "c.cz".to_string()];
+        let mut from_a = PoolInput::defaults("shared", "a.cz", PhpVersion::V8_3);
+        from_a.also_serves = &others;
+        let out = render(&from_a).expect("render");
+        assert!(out.contains(
+            "open_basedir] = /home/shared/a.cz:/home/shared/b.cz:/home/shared/c.cz:/tmp\n"
+        ));
+        assert!(out.contains("session.save_path] = /home/shared/a.cz/tmp\n"));
+
+        let others = ["a.cz".to_string(), "b.cz".to_string()];
+        let mut from_c = PoolInput::defaults("shared", "c.cz", PhpVersion::V8_3);
+        from_c.also_serves = &others;
+        assert_eq!(render(&from_c).expect("render"), out);
+    }
+
     /// The socket parent dir is derived directly from the version. If
     /// this drifts away from what the pool template writes into
     /// `listen = ...`, FPM would try to bind in a different directory
@@ -848,5 +1033,40 @@ mod tests {
                 "pool config must declare `{expected_listen}`. got: {rendered}"
             );
         }
+    }
+
+    #[test]
+    fn systemd_major_is_the_number_after_the_name() {
+        assert_eq!(
+            parse_systemd_major("systemd 252 (252.31-1~deb12u1)\n+PAM +AUDIT -SELINUX\n"),
+            Some(252)
+        );
+        assert_eq!(
+            parse_systemd_major("systemd 257 (257.9-1~deb13u1)"),
+            Some(257)
+        );
+        assert_eq!(parse_systemd_major("systemd 215"), Some(215));
+        assert_eq!(parse_systemd_major(""), None);
+        assert_eq!(parse_systemd_major("not systemd at all"), None);
+        assert_eq!(parse_systemd_major("systemd (252)"), None);
+    }
+
+    #[test]
+    fn meminfo_gives_mib_for_ram_and_kib_for_swap() {
+        let m = parse_meminfo(
+            "MemTotal:        8167848 kB\nMemFree:          200000 kB\n\
+             MemAvailable:    6144000 kB\nSwapTotal:       2097148 kB\nSwapFree: 2097148 kB\n",
+        );
+        assert_eq!(m.mem_total_mb, Some(7976));
+        assert_eq!(m.mem_available_mb, Some(6000));
+        assert_eq!(m.swap_total_kib, 2_097_148);
+        // No swap line, no available line: unknown RAM is None, no swap is 0.
+        let bare = parse_meminfo("MemTotal: 1024 kB\n");
+        assert_eq!(bare.mem_total_mb, Some(1));
+        assert_eq!(bare.mem_available_mb, None);
+        assert_eq!(bare.swap_total_kib, 0);
+        let empty = parse_meminfo("");
+        assert_eq!(empty.mem_total_mb, None);
+        assert_eq!(empty.swap_total_kib, 0);
     }
 }

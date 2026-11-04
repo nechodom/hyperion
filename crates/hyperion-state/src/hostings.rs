@@ -69,6 +69,49 @@ pub async fn insert(
     Ok(())
 }
 
+/// Hostings that need PHP served through `system_user`'s pool on `version`,
+/// by domain: id and domain of every one not offline or on its way out. A
+/// pool is per user and version, so this is what decides whether it can go
+/// and what it must allow.
+pub async fn live_on_php_pool(
+    pool: &SqlitePool,
+    system_user: &str,
+    version: PhpVersion,
+) -> Result<Vec<(HostingId, String)>, StateError> {
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT h.id, h.domain \
+         FROM hostings h JOIN system_users u ON u.id = h.system_user_id \
+         WHERE u.name = ? AND h.php_version = ? \
+           AND h.state NOT IN ('suspended', 'trashed', 'deleting') \
+         ORDER BY h.domain",
+    )
+    .bind(system_user)
+    .bind(version.as_str())
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, domain)| (HostingId(id), domain))
+        .collect())
+}
+
+/// Whether any hosting on `system_user` is online, whatever it runs. Its
+/// processes are then that site's, however offline the others are.
+pub async fn system_user_has_live_site(
+    pool: &SqlitePool,
+    system_user: &str,
+) -> Result<bool, StateError> {
+    let (live,): (i64,) = sqlx::query_as(
+        "SELECT count(*) \
+         FROM hostings h JOIN system_users u ON u.id = h.system_user_id \
+         WHERE u.name = ? AND h.state NOT IN ('suspended', 'trashed', 'deleting')",
+    )
+    .bind(system_user)
+    .fetch_one(pool)
+    .await?;
+    Ok(live > 0)
+}
+
 pub async fn insert_alias(
     pool: &SqlitePool,
     hosting_id: &HostingId,
@@ -243,6 +286,20 @@ pub async fn list_php_sites(
         .into_iter()
         .map(|(id, domain, php, state)| (id, domain, php, state == "trashed"))
         .collect())
+}
+
+/// How many distinct system users have an active PHP site. Sites of one user
+/// share a pool, so each user counts once; static, proxy, redirect, suspended
+/// and trashed sites cost no PHP process.
+pub async fn count_active_php_users(pool: &SqlitePool) -> Result<i64, StateError> {
+    let (n,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(DISTINCT system_user_id) FROM hostings \
+          WHERE kind = 'php' AND state = 'active' \
+            AND php_version IS NOT NULL AND php_version != ''",
+    )
+    .fetch_one(pool)
+    .await?;
+    Ok(n)
 }
 
 /// All currently-trashed hostings (any age). Used by the
@@ -993,6 +1050,45 @@ mod tests {
         system_users::insert(pool, name, uid, &format!("/home/{name}"), "/x", 1)
             .await
             .expect("insert user")
+    }
+
+    #[tokio::test]
+    async fn only_live_sites_on_that_user_and_version_are_on_a_pool() {
+        let pool = open_memory().await.expect("open");
+        let shared = fresh_user(&pool, "shared", 2001).await;
+        let other = fresh_user(&pool, "other", 2002).await;
+        for (domain, user, ver, state) in [
+            ("z.cz", shared, PhpVersion::V8_3, HostingState::Active),
+            ("a.cz", shared, PhpVersion::V8_3, HostingState::Active),
+            (
+                "new.cz",
+                shared,
+                PhpVersion::V8_3,
+                HostingState::Provisioning,
+            ),
+            ("off.cz", shared, PhpVersion::V8_3, HostingState::Suspended),
+            ("bin.cz", shared, PhpVersion::V8_3, HostingState::Trashed),
+            ("gone.cz", shared, PhpVersion::V8_3, HostingState::Deleting),
+            ("old.cz", shared, PhpVersion::V8_2, HostingState::Active),
+            ("else.cz", other, PhpVersion::V8_3, HostingState::Suspended),
+        ] {
+            let id = HostingId::new_v7();
+            insert(&pool, &id, domain, user, Some(ver), "/r", 1, None)
+                .await
+                .expect("insert");
+            set_state(&pool, &id, state, 2).await.expect("state");
+        }
+
+        let domains: Vec<String> = live_on_php_pool(&pool, "shared", PhpVersion::V8_3)
+            .await
+            .expect("list")
+            .into_iter()
+            .map(|(_, d)| d)
+            .collect();
+        assert_eq!(domains, ["a.cz", "new.cz", "z.cz"]);
+        assert!(system_user_has_live_site(&pool, "shared").await.expect("q"));
+        assert!(!system_user_has_live_site(&pool, "other").await.expect("q"));
+        assert!(!system_user_has_live_site(&pool, "nobody").await.expect("q"));
     }
 
     #[tokio::test]
