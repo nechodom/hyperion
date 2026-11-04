@@ -1700,7 +1700,7 @@ pub(crate) async fn compute_preview_domain(
     let has_wildcard = matches!(
         resp,
         Ok(RpcResponse::CertOverview(ref items))
-            if items.iter().any(|c| c.domain.eq_ignore_ascii_case(&base))
+            if items.iter().any(|c| c.is_wildcard_for(&base))
     );
     if has_wildcard {
         PreviewInfo {

@@ -35,6 +35,15 @@ pub struct CertOverviewItem {
     pub delegated: bool,
 }
 
+impl CertOverviewItem {
+    /// Is this the `*.<base>` certificate? Matching the name alone is not
+    /// enough: when the panel lives on the node's hostname, the panel's own
+    /// plain certificate is listed under the same name as the base.
+    pub fn is_wildcard_for(&self, base: &str) -> bool {
+        self.wildcard && self.domain.eq_ignore_ascii_case(base)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CertInfo {
     pub domain: String,
