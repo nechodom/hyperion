@@ -1,7 +1,8 @@
 # Hard per-site CPU and memory caps for PHP-FPM sites
 
-Status: design, not approved, nothing implemented. Written 2026-11-03. File and
-line references are to `origin/main` at 54a3fb8c.
+Status: approved 2026-11-04, nothing implemented. Written 2026-11-03. File and
+line references are to `origin/main` at 54a3fb8c. Plan for phases 0 and 1:
+`docs/superpowers/plans/2026-11-04-php-own-masters-phase-0-1.md`.
 
 ## Why
 
@@ -149,6 +150,7 @@ PartOf=php<ver>-fpm.service
 [Service]
 Type=notify
 Slice=hyperion-sites-%i.slice
+CPUWeight=100
 ExecStartPre=/usr/bin/install -d -m 0755 /run/php/<ver>/site
 ExecStart=/usr/sbin/php-fpm<ver> --nodaemonize --fpm-config /etc/hyperion/fpm/<ver>/%I.conf -d opcache.memory_consumption=256
 ExecReload=/bin/kill -USR2 $MAINPID
@@ -162,6 +164,11 @@ WantedBy=multi-user.target
 
 The reasons these lines matter, each checked:
 
+- `CPUWeight=100` is **required**, although 100 is the default value. Without an
+  explicit weight systemd does not enable the `cpu` controller for the unit, so
+  there is no CPU separation at all (checked on systemd 252 and 257: controllers
+  `memory pids` without it, `cpu memory pids` with it). The lab's weight-only runs
+  set it through `set-property`.
 - `OOMPolicy=continue` is **required**. systemd's default is `stop`: one worker
   killed at the cap stopped the whole unit, failed all 5 in-flight requests,
   restarted it and lost the OPcache. With `continue`, 3 of 5 requests got 502, 2
@@ -175,7 +182,8 @@ The reasons these lines matter, each checked:
   many busy sites cannot outweigh MariaDB, nginx and the agent however many there
   are. The lab cannot show this benefit: separate cgroups alone already kept
   MariaDB at 0.80 s with three noisy sites, with or without the parent slice. It
-  costs nothing, because the per-user slices nest under it anyway.
+  costs nothing, because the per-user slices nest under it anyway. Under contention
+  the split is `hyperion.slice` against `system.slice`, equal by default.
 - `PartOf=` makes a dpkg restart of `php<ver>-fpm` restart the site masters too.
   Verified with a real `apt-get install --reinstall`: without a restart a master
   keeps running `/usr/sbin/php-fpm8.4 (deleted)`, which would mean missing
@@ -419,6 +427,11 @@ already sees the inode change, so that is the natural place to send it.
 - Socket activation for idle sites was considered as a further saving and not tried.
 
 ## Open questions for the operator
+
+The design was approved without answers to these. Until answered: the defaults
+above stand, questions 1 and 2 do not block phases 0 and 1 (no cap is applied there,
+and `NULL`/`0` on the limits row can express either answer to question 1), and
+question 3 must be answered before the pilot starts.
 
 1. Are 50% of CPU and 1/3 of RAM the right node defaults, and once a node enables
    caps, should they apply to every site or only those on a plan or profile that
