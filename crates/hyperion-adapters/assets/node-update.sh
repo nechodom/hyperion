@@ -12,7 +12,7 @@
 #   HYP_JOB_DIR         where `result` is written when the run ends
 #
 # Why a unit of its own. Run inside hyperion-agent.service, apt inherited the
-# agent's sandbox: ProtectKernelModules hides /lib/modules and ProtectSystem
+# agent's sandbox: ProtectKernelModules hides /lib/modules and ReadOnlyPaths
 # makes /boot read-only, so every kernel package died in its preinst with
 # "mkdir: cannot create directory '/lib/modules/…': Read-only file system" and
 # left dpkg half-configured. And update.sh stops hyperion-agent — which, in the
