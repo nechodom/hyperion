@@ -740,7 +740,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .map(|u| u.id)
             .collect();
         let mut written = 0;
-        for it in items {
+        // Docker alerts that were new to at least one admin, to go out once
+        // the rows are committed.
+        let mut outbound: Vec<(String, String, String)> = Vec::new();
+        let mut failed = None;
+        'items: for it in items {
             let row = hyperion_state::notifications::OutboxRow {
                 id: it.id,
                 severity: match it.severity.as_str() {
@@ -758,6 +762,12 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 created_at: it.created_at,
             };
             let replaces = hyperion_types::notification_replaces(&row.kind);
+            // One outbox item is ONE alert however many admins it fans out
+            // to, so it leaves at most once: when some admin's row is new. A
+            // batch read again finds every row already there and sends
+            // nothing; a batch cut short by an error and read again sends
+            // only for the items whose rows were not all there before.
+            let mut item_written = false;
             for &uid in &admins {
                 let put = if replaces {
                     hyperion_state::notifications::replace(
@@ -773,15 +783,38 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                         .await
                 };
                 match put {
-                    Ok(true) => written += 1,
+                    Ok(true) => {
+                        written += 1;
+                        item_written = true;
+                    }
                     Ok(false) => {}
                     Err(e) => {
-                        return Err(RpcError::Internal_with(format!(
-                            "notifications ingest: {e}"
-                        )))
+                        failed = Some(e);
+                        break 'items;
                     }
                 }
             }
+            if item_written && is_outbound_docker_kind(&row.kind) {
+                outbound.push((row.title, row.body, row.kind));
+            }
+        }
+        // Whatever was written is sent, even when a later item failed: those
+        // rows are "seen" on the next read and would never be sent then.
+        if outbound.len() > OUTBOUND_PER_INGEST {
+            tracing::warn!(
+                node = node_id,
+                dropped = outbound.len() - OUTBOUND_PER_INGEST,
+                "docker alerts from one batch not sent outbound (per-batch cap)"
+            );
+            outbound.truncate(OUTBOUND_PER_INGEST);
+        }
+        for (title, body, kind) in &outbound {
+            self.docker_outbound(title, body, kind).await;
+        }
+        if let Some(e) = failed {
+            return Err(RpcError::Internal_with(format!(
+                "notifications ingest: {e}"
+            )));
         }
         Ok(written)
     }
@@ -867,7 +900,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             Ok(u) => u,
             Err(e) => {
                 tracing::warn!(error = %e, "notify_admins: list users failed");
-                return;
+                Vec::new()
             }
         };
         for u in users {
@@ -893,6 +926,74 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 tracing::warn!(user = %u.username, error = %e, "notify_admins: insert failed");
             }
         }
+        // This box IS the master, so its own Docker alert leaves from here.
+        // A worker's reaches the same place through the ingest above and
+        // never through this branch.
+        if is_outbound_docker_kind(kind) {
+            self.docker_outbound(title, body, kind).await;
+        }
+    }
+
+    /// Send a Docker alert to the master's global channels: the default
+    /// Slack webhook and the administrator addresses.
+    ///
+    /// Workers send nothing: their Slack and address lists are their own
+    /// and may reach nobody or the wrong people, so a worker parks the alert
+    /// and the master sends it after collecting it. The text is the alert's
+    /// title and body, which are summaries (service, exit code, cause) and
+    /// never container log text. Nothing here fails the caller: a send that
+    /// does not work is logged at warn WITHOUT the message and the alert
+    /// stays in the bell.
+    pub(crate) async fn docker_outbound(&self, subject: &str, body: &str, kind: &str) {
+        if self.is_worker_node() {
+            return;
+        }
+        if let Some(url) = self.slack_default_webhook.as_deref() {
+            let tmpls = read_notifications_section(self.agent_config_path.as_deref());
+            let time = fmt_notif_time(now_secs());
+            let panel = self.notify_panel_url();
+            let text = docker_outbound_text(subject, body);
+            let message = render_template(
+                &tmpls.slack_template,
+                &[("message", &text), ("time", &time), ("panel", &panel)],
+            );
+            let payload = serde_json::json!({ "text": message }).to_string();
+            let outcome = http_post_json(url, &payload).await;
+            if let Err(e) = &outcome {
+                tracing::warn!(kind, error = %e, "docker alert: Slack post failed");
+            }
+            // The record says that and where it went, not what it said.
+            self.append_audit(
+                "notify.docker.slack",
+                None,
+                &serde_json::json!({ "kind": kind }).to_string(),
+                if outcome.is_ok() { "ok" } else { "failed" },
+            )
+            .await;
+        }
+        // No relay or no address is a no-op inside; a refusal is logged there
+        // (subject and error, never the body).
+        self.notify_email("", subject, body, None, "docker").await;
+    }
+}
+
+/// Docker alerts that are sent beyond the bell: the `docker.` family
+/// (`docker.project:<name>`, `docker.daemon`, `docker.node:<id>`).
+pub fn is_outbound_docker_kind(kind: &str) -> bool {
+    kind.starts_with("docker.")
+}
+
+/// Most Docker alerts one collected batch may send outbound. The rows of a
+/// node are text that node wrote; the bell takes all of them, but a node
+/// must not be able to make the master post to Slack without bound.
+pub(super) const OUTBOUND_PER_INGEST: usize = 10;
+
+/// The Slack text for a Docker alert: title and body, nothing else.
+pub(super) fn docker_outbound_text(subject: &str, body: &str) -> String {
+    if body.trim().is_empty() {
+        subject.to_string()
+    } else {
+        format!("*{subject}*\n{body}")
     }
 }
 

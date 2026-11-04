@@ -1626,3 +1626,367 @@ fn a_last_line_without_a_newline_is_kept_unless_the_run_was_cut() {
         (ts(1, 0).as_str(), "no stamp")
     );
 }
+
+// ---------------------------------------------------------------------------
+// Outbound alerts and silent nodes (the master sends; a worker only parks).
+// ---------------------------------------------------------------------------
+
+use hyperion_types::NotificationOutboxItem;
+
+/// A master (no node state file) with Slack and one alert address set, whose
+/// every send fails fast: loopback is refused as a webhook and the relay is
+/// not a mailbox. What was ATTEMPTED is what the tests count.
+async fn outbound_master(admins: &[&str]) -> HostingService<MockAdapterPort> {
+    use hyperion_state::web_users::WebRole;
+    let pool = open_memory().await.expect("open");
+    let s = svc(pool, happy_mocks())
+        .with_email(Some(refusing_relay()), Some("ops@example.cz".into()))
+        .with_slack_webhook(Some("https://127.0.0.1/hook".into()));
+    for a in admins {
+        seed_web_user(&s, a, WebRole::Admin).await;
+    }
+    s
+}
+
+/// Slack posts attempted for Docker alerts.
+async fn slack_sends(s: &HostingService<MockAdapterPort>) -> i64 {
+    let (n,): (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM audit_log WHERE action = 'notify.docker.slack'")
+            .fetch_one(&s.pool)
+            .await
+            .expect("count");
+    n
+}
+
+/// (subject, body) of every Docker mail attempted, oldest first.
+async fn mail_sends(s: &HostingService<MockAdapterPort>) -> Vec<(String, String)> {
+    let mut rows = hyperion_state::email_log::list(&s.pool, None, 100)
+        .await
+        .expect("email log");
+    rows.reverse();
+    rows.into_iter()
+        .filter(|r| r.kind == "docker")
+        .map(|r| (r.subject, r.body_preview))
+        .collect()
+}
+
+fn outbox_item(id: i64, kind: &str) -> NotificationOutboxItem {
+    NotificationOutboxItem {
+        id,
+        severity: "error".into(),
+        title: "Docker project has a problem".into(),
+        body: "x: web: exited (1)".into(),
+        href: "/docker".into(),
+        kind: kind.into(),
+        created_at: T0,
+    }
+}
+
+#[tokio::test]
+async fn ingest_sends_docker_alert_outbound() {
+    let s = outbound_master(&["boss"]).await;
+    let n = s
+        .notifications_ingest("node_a", vec![outbox_item(1, "docker.project:x")])
+        .await
+        .expect("ingest");
+    assert_eq!(n, 1);
+    assert_eq!(slack_sends(&s).await, 1, "one Slack post");
+    let mail = mail_sends(&s).await;
+    assert_eq!(mail.len(), 1, "one mail to the one address: {mail:?}");
+    assert_eq!(mail[0].0, "Docker project has a problem");
+    assert!(mail[0].1.contains("x: web: exited (1)"), "{mail:?}");
+}
+
+#[tokio::test]
+async fn reingesting_a_batch_sends_nothing() {
+    let s = outbound_master(&["boss"]).await;
+    let batch = vec![
+        outbox_item(1, "docker.project:x"),
+        outbox_item(2, "docker.daemon"),
+        outbox_item(3, "docker.node:node_b"),
+    ];
+    assert_eq!(
+        s.notifications_ingest("node_a", batch.clone())
+            .await
+            .expect("first"),
+        3
+    );
+    assert_eq!(slack_sends(&s).await, 3);
+    assert_eq!(mail_sends(&s).await.len(), 3);
+
+    assert_eq!(
+        s.notifications_ingest("node_a", batch)
+            .await
+            .expect("again"),
+        0,
+        "nothing new was written"
+    );
+    assert_eq!(slack_sends(&s).await, 3, "so nothing new is sent");
+    assert_eq!(mail_sends(&s).await.len(), 3);
+}
+
+#[tokio::test]
+async fn several_admins_still_mean_one_send_per_alert() {
+    let s = outbound_master(&["a", "b", "c"]).await;
+    // A card kind (folded per admin) and a plain one (a row per admin).
+    let batch = vec![
+        outbox_item(1, "docker.project:x"),
+        outbox_item(2, "docker.node:node_b"),
+    ];
+    let n = s
+        .notifications_ingest("node_a", batch.clone())
+        .await
+        .expect("ingest");
+    assert_eq!(n, 6, "every admin gets both cards");
+    assert_eq!(slack_sends(&s).await, 2, "but each alert leaves once");
+    assert_eq!(mail_sends(&s).await.len(), 2);
+
+    s.notifications_ingest("node_a", batch)
+        .await
+        .expect("again");
+    assert_eq!(slack_sends(&s).await, 2);
+    assert_eq!(mail_sends(&s).await.len(), 2);
+
+    // A later alert of the same kind is news again.
+    s.notifications_ingest("node_a", vec![outbox_item(3, "docker.project:x")])
+        .await
+        .expect("next");
+    assert_eq!(slack_sends(&s).await, 3);
+}
+
+#[tokio::test]
+async fn other_kinds_stay_bell_only() {
+    let s = outbound_master(&["boss"]).await;
+    let n = s
+        .notifications_ingest(
+            "node_a",
+            vec![
+                outbox_item(1, "monitor.down:x"),
+                outbox_item(2, "dockerish"),
+                outbox_item(3, "php_workers:a.cz"),
+            ],
+        )
+        .await
+        .expect("ingest");
+    assert_eq!(n, 3, "they reach the bell");
+    assert_eq!(slack_sends(&s).await, 0);
+    assert!(mail_sends(&s).await.is_empty());
+}
+
+#[tokio::test]
+async fn ingest_with_no_channel_set_just_fills_the_bell() {
+    use hyperion_state::web_users::WebRole;
+    let pool = open_memory().await.expect("open");
+    let s = svc(pool, happy_mocks());
+    seed_web_user(&s, "boss", WebRole::Admin).await;
+    let n = s
+        .notifications_ingest("node_a", vec![outbox_item(1, "docker.project:x")])
+        .await
+        .expect("a master with nowhere to send still ingests");
+    assert_eq!(n, 1);
+    assert_eq!(slack_sends(&s).await, 0);
+    assert!(mail_sends(&s).await.is_empty());
+}
+
+#[tokio::test]
+async fn master_own_alert_goes_outbound_once() {
+    let s = outbound_master(&["a", "b"]).await;
+    s.notify_admins(
+        "error",
+        "Docker project has a problem",
+        "x: web: exited (1)",
+        "/docker",
+        "docker.project:x",
+    )
+    .await;
+    assert_eq!(slack_sends(&s).await, 1, "one send, not one per admin");
+    assert_eq!(mail_sends(&s).await.len(), 1);
+
+    s.notify_admins("error", "Disk", "full", "/", "system.rofs")
+        .await;
+    assert_eq!(slack_sends(&s).await, 1, "a non-Docker kind stays home");
+}
+
+#[tokio::test]
+async fn worker_parks_and_does_not_send() {
+    let dir = tempfile::tempdir().expect("dir");
+    let state = dir.path().join("node-id.json");
+    std::fs::write(&state, b"{}").expect("state file");
+    let pool = open_memory().await.expect("open");
+    let s = svc(pool, happy_mocks())
+        .with_node_state_file(state)
+        .with_email(Some(refusing_relay()), Some("ops@example.cz".into()))
+        .with_slack_webhook(Some("https://127.0.0.1/hook".into()));
+
+    s.notify_admins("error", "t", "b", "/docker", "docker.project:x")
+        .await;
+    s.docker_outbound("t", "b", "docker.project:x").await;
+
+    assert_eq!(alerts(&s).await.len(), 1, "parked for the master");
+    assert_eq!(slack_sends(&s).await, 0);
+    assert!(mail_sends(&s).await.is_empty());
+}
+
+#[tokio::test]
+async fn outbound_body_has_no_log_lines() {
+    let w = world(vec![ct(1, "shop", "web")]);
+    let pool = open_memory().await.expect("open");
+    let s = svc(pool.clone(), world_mock(&w))
+        .with_email(Some(refusing_relay()), Some("ops@example.cz".into()));
+    hyperion_state::docker::set_node_installed(&pool, false, 1)
+        .await
+        .expect("module on");
+    set_logs(&w, 1, printed(&[(ts(1, 0), "needle-in-the-log")]));
+
+    tick_at(&s, T0).await;
+    set(&w, vec![ct(1, "shop", "web").exited(1)]);
+    tick_through(&s, T0 + 30, T0 + 400).await;
+    // Reading the log must not feed an alert either.
+    s.docker_logs(logs_for("shop", None)).await.expect("logs");
+
+    let mail = mail_sends(&s).await;
+    assert_eq!(mail.len(), 1, "{mail:?}");
+    assert!(mail[0].1.contains("web"), "the summary is there: {mail:?}");
+    assert!(
+        !format!("{mail:?}").contains("needle-in-the-log"),
+        "{mail:?}"
+    );
+    assert_eq!(
+        docker_outbound_text("Title", "Body"),
+        "*Title*\nBody",
+        "Slack carries the title and the body, nothing else"
+    );
+    assert_eq!(docker_outbound_text("Title", ""), "Title");
+}
+
+#[tokio::test]
+async fn a_flood_of_alerts_from_one_node_is_capped_per_batch() {
+    let s = outbound_master(&["boss"]).await;
+    let batch: Vec<_> = (1..=30)
+        .map(|i| outbox_item(i, &format!("docker.project:p{i}")))
+        .collect();
+    let n = s
+        .notifications_ingest("node_a", batch)
+        .await
+        .expect("ingest");
+    assert_eq!(n, 30, "every alert reaches the bell");
+    assert_eq!(
+        slack_sends(&s).await,
+        OUTBOUND_PER_INGEST as i64,
+        "but a node cannot make the master post without bound"
+    );
+}
+
+#[test]
+fn only_docker_kinds_go_outbound() {
+    assert!(is_outbound_docker_kind("docker.project:x"));
+    assert!(is_outbound_docker_kind("docker.daemon"));
+    assert!(is_outbound_docker_kind("docker.node:n"));
+    assert!(!is_outbound_docker_kind("docker"));
+    assert!(!is_outbound_docker_kind("dockerish"));
+    assert!(!is_outbound_docker_kind("monitor.down:x"));
+    assert!(!is_outbound_docker_kind(""));
+}
+
+/// A registered node `node_a` that the `nodes` table knows as "Frankfurt".
+async fn master_with_labelled_node() -> HostingService<MockAdapterPort> {
+    let s = outbound_master(&["boss"]).await;
+    hyperion_state::nodes::insert(
+        &s.pool,
+        &hyperion_state::nodes::NewNode {
+            node_id: "node_a".into(),
+            label: "Frankfurt".into(),
+            master_url: None,
+            agent_version: "t".into(),
+            public_ip: None,
+            enrolled_via_hash: "h".into(),
+            secret_hash: "s".into(),
+        },
+        1,
+    )
+    .await
+    .expect("node row");
+    s.docker_node_register("node_a", true).await.expect("reg");
+    s
+}
+
+#[tokio::test]
+async fn node_silent_alerts_once_and_recovers() {
+    let s = master_with_labelled_node().await;
+
+    assert!(s.docker_node_silent("node_a", true).await.expect("down"));
+    assert!(
+        !s.docker_node_silent("node_a", true).await.expect("again"),
+        "already silent: no transition"
+    );
+    let mail = mail_sends(&s).await;
+    assert_eq!(mail.len(), 1, "one Down: {mail:?}");
+    assert_eq!(mail[0].0, "Docker node has gone silent");
+    assert!(
+        mail[0].1.contains("Frankfurt"),
+        "the label, not the id: {mail:?}"
+    );
+    assert_eq!(slack_sends(&s).await, 1);
+
+    assert!(s.docker_node_silent("node_a", false).await.expect("up"));
+    assert!(
+        !s.docker_node_silent("node_a", false).await.expect("again"),
+        "already back"
+    );
+    let mail = mail_sends(&s).await;
+    assert_eq!(mail.len(), 2, "one Up: {mail:?}");
+    assert_eq!(mail[1].0, "Docker node answers again");
+    assert_eq!(slack_sends(&s).await, 2);
+
+    // Both land on the bell under the node's kind, on one card.
+    let me = hyperion_state::web_users::list(&s.pool)
+        .await
+        .expect("users")[0]
+        .id;
+    assert_eq!(manual_kinds(&s, me).await, ["docker.node:node_a"]);
+}
+
+#[tokio::test]
+async fn a_node_the_master_never_registered_is_not_alerted_about() {
+    let s = outbound_master(&["boss"]).await;
+    assert!(!s.docker_node_silent("ghost", true).await.expect("ok"));
+    assert!(!s.docker_node_silent("local", true).await.expect("ok"));
+    assert!(mail_sends(&s).await.is_empty());
+    assert_eq!(slack_sends(&s).await, 0);
+}
+
+#[tokio::test]
+async fn an_unlabelled_node_is_named_by_its_id() {
+    let s = outbound_master(&["boss"]).await;
+    s.docker_node_register("node_z", true).await.expect("reg");
+    assert!(s.docker_node_silent("node_z", true).await.expect("down"));
+    assert!(mail_sends(&s).await[0].1.contains("node_z"));
+}
+
+#[tokio::test]
+async fn forgetting_a_silent_node_takes_its_open_alert_with_it() {
+    let s = master_with_labelled_node().await;
+    assert!(s.docker_node_silent("node_a", true).await.expect("down"));
+    let list = s.docker_node_list().await.expect("list");
+    assert!(list.nodes[0].silent, "the list says so for the watcher");
+
+    s.docker_node_register("node_a", false).await.expect("off");
+    s.docker_node_register("node_a", true).await.expect("on");
+    let list = s.docker_node_list().await.expect("list");
+    assert!(!list.nodes[0].silent, "a fresh row starts quiet");
+    assert!(
+        !s.docker_node_silent("node_a", false).await.expect("up"),
+        "so there is no recovery to announce"
+    );
+    assert_eq!(mail_sends(&s).await.len(), 1, "only the Down was sent");
+}
+
+#[tokio::test]
+async fn a_worker_cannot_flag_nodes_silent() {
+    let (s, _d) = worker_with(happy_mocks()).await;
+    let err = s
+        .docker_node_silent("node_a", true)
+        .await
+        .expect_err("master only");
+    assert!(matches!(err, RpcError::Validation { .. }), "{err}");
+}

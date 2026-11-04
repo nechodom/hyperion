@@ -1461,6 +1461,12 @@ async fn dispatch_request(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(l) => Response::DockerNodeList(l),
             Err(e) => Response::Error(e),
         },
+        Request::DockerNodeSilent { node_id, silent } => {
+            match api.docker_node_silent(node_id, silent).await {
+                Ok(changed) => Response::DockerNodeSilent { changed },
+                Err(e) => Response::Error(e),
+            }
+        }
         Request::DockerOverview => match api.docker_overview().await {
             Ok(st) => Response::DockerOverview(st),
             Err(e) => Response::Error(e),
@@ -3607,6 +3613,9 @@ mod tests {
             &self,
         ) -> Result<hyperion_types::docker::DockerNodeList, RpcError> {
             Ok(Default::default())
+        }
+        async fn docker_node_silent(&self, _: String, _: bool) -> Result<bool, RpcError> {
+            Ok(false)
         }
         async fn docker_overview(
             &self,

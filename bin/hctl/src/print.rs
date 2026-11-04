@@ -388,6 +388,9 @@ pub fn print_pretty(resp: &Response) {
                 println!("  {}", n.node_id);
             }
         }
+        Response::DockerNodeSilent { changed } => {
+            println!("docker node silent state {}", if *changed { "changed" } else { "unchanged" })
+        }
         Response::DockerProjectForgotten => println!("✓ docker project forgotten"),
         Response::DockerOverview(st) => {
             println!(

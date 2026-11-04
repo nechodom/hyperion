@@ -2180,12 +2180,13 @@ pub fn notification_topic(kind: &str) -> (&'static str, &'static str) {
 /// `docker.project:<name>` is the same shape: a project's problem and its
 /// recovery share one card that always says how it stands now. The Docker
 /// daemon is one subject per node, so `docker.daemon` has no suffix (the
-/// master keeps one card per node already).
+/// master keeps one card per node already). `docker.node:<id>` (a node that
+/// went silent, and its return) folds the same way.
 pub fn notification_replaces(kind: &str) -> bool {
     kind == "docker.daemon"
         || matches!(
             kind.split_once(':'),
-            Some(("php_workers" | "docker.project", subject)) if !subject.is_empty()
+            Some(("php_workers" | "docker.project" | "docker.node", subject)) if !subject.is_empty()
         )
 }
 
@@ -3168,6 +3169,7 @@ mod notification_topic_tests {
             ("hosting.trash", "trash"),
             ("docker.project:shop", "docker"),
             ("docker.daemon", "docker"),
+            ("docker.node:node_a", "docker"),
             ("hosting.something_else", "other"),
             ("brand_new", "other"),
             ("", "other"),
@@ -3190,6 +3192,8 @@ mod notification_topic_tests {
         assert!(notification_replaces("docker.project:shop"));
         assert!(notification_replaces("docker.project:(other)"));
         assert!(notification_replaces("docker.daemon"));
+        assert!(notification_replaces("docker.node:node_a"));
+        assert!(!notification_replaces("docker.node"));
         assert!(!notification_replaces("docker.project"));
         assert!(!notification_replaces("docker.project:"));
         assert!(!notification_replaces("docker.daemon:x"));

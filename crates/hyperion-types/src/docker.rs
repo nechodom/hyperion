@@ -80,6 +80,9 @@ pub struct DockerNodeEntry {
     /// `local` for the master itself, else the enrolled node id.
     pub node_id: String,
     pub installed_at: i64,
+    /// The master has alerted that this node stopped answering and has not
+    /// yet announced that it is back.
+    pub silent: bool,
 }
 
 /// Master: whether the module is on for the cluster and which nodes the

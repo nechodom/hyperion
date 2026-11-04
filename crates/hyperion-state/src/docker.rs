@@ -151,6 +151,34 @@ pub async fn unregister_node(pool: &SqlitePool, node_id: &str) -> Result<(), Sta
     Ok(())
 }
 
+/// Master: record that `node_id` went silent (or answers again). Returns
+/// whether the stored state CHANGED, which is the only moment worth an alert:
+/// the update is one statement, so two callers cannot both see a transition.
+/// A node that is not registered is not changed.
+pub async fn set_node_silent(
+    pool: &SqlitePool,
+    node_id: &str,
+    silent: bool,
+    now: i64,
+) -> Result<bool, StateError> {
+    let (state, since, other) = if silent {
+        ("silent", now, "silent")
+    } else {
+        ("ok", 0, "ok")
+    };
+    let r = sqlx::query(
+        "UPDATE docker_nodes SET alert_state = ?, silent_since = ? \
+         WHERE node_id = ? AND alert_state <> ?",
+    )
+    .bind(state)
+    .bind(since)
+    .bind(node_id)
+    .bind(other)
+    .execute(pool)
+    .await?;
+    Ok(r.rows_affected() > 0)
+}
+
 pub async fn list_nodes(pool: &SqlitePool) -> Result<Vec<DockerNodeRow>, StateError> {
     let rows: Vec<(String, i64, i64, String)> = sqlx::query_as(
         "SELECT node_id, installed_at, silent_since, alert_state FROM docker_nodes ORDER BY node_id",

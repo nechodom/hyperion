@@ -1432,6 +1432,12 @@ pub enum Request {
     /// Master: whether the module is on for the cluster, and which nodes
     /// were recorded as running it.
     DockerNodeList,
+    /// Master: a node with the module stopped answering (`silent`) or answers
+    /// again. Alerts only when the recorded state changes.
+    DockerNodeSilent {
+        node_id: String,
+        silent: bool,
+    },
     /// Projects and containers of this node's Docker, as of the last tick.
     DockerOverview,
     /// Forget a Docker project's panel state on this node. Touches no
@@ -2769,6 +2775,11 @@ pub enum Response {
     /// Ack for DockerNodeRegister.
     DockerNodeRegistered,
     DockerNodeList(hyperion_types::docker::DockerNodeList),
+    /// Answer to DockerNodeSilent: whether the recorded state changed (and
+    /// so an alert went out).
+    DockerNodeSilent {
+        changed: bool,
+    },
     DockerOverview(hyperion_types::docker::DockerNodeStatus),
     /// Ack for DockerForgetProject.
     DockerProjectForgotten,

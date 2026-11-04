@@ -1659,6 +1659,9 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
     async fn docker_node_list(&self) -> Result<hyperion_types::docker::DockerNodeList, RpcError> {
         self.svc.docker_node_list().await
     }
+    async fn docker_node_silent(&self, node_id: String, silent: bool) -> Result<bool, RpcError> {
+        self.svc.docker_node_silent(&node_id, silent).await
+    }
     async fn docker_overview(&self) -> Result<hyperion_types::docker::DockerNodeStatus, RpcError> {
         self.svc.docker_overview().await
     }

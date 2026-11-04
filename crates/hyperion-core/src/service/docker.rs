@@ -187,9 +187,59 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 .map(|n| DockerNodeEntry {
                     node_id: n.node_id,
                     installed_at: n.installed_at,
+                    silent: n.alert_state == "silent",
                 })
                 .collect(),
         })
+    }
+
+    /// Master: a node with the module stopped answering (`silent`) or
+    /// answers again. Returns whether this was a change, and alerts only
+    /// then, so the watcher may repeat itself freely. Not registered, or the
+    /// master itself (`local`, which cannot be silent to itself), changes
+    /// nothing.
+    pub async fn docker_node_silent(&self, node_id: &str, silent: bool) -> Result<bool, RpcError> {
+        if self.is_worker_node() {
+            return Err(RpcError::Validation {
+                message: "silent nodes are tracked on the master".into(),
+            });
+        }
+        let node_id = node_id.trim();
+        if node_id.is_empty() || node_id == "local" {
+            return Ok(false);
+        }
+        let changed =
+            hyperion_state::docker::set_node_silent(&self.pool, node_id, silent, now_secs())
+                .await
+                .map_err(|e| db_err("docker_node_silent", e))?;
+        if !changed {
+            return Ok(false);
+        }
+        let label = match hyperion_state::nodes::get_by_node_id(&self.pool, node_id).await {
+            Ok(Some(n)) if !n.label.trim().is_empty() => n.label,
+            _ => node_id.to_string(),
+        };
+        let kind = format!("docker.node:{node_id}");
+        if silent {
+            self.notify_admins_say(
+                "error",
+                "ops.docker_node_silent",
+                &[("node", label.as_str())],
+                ALERT_HREF,
+                &kind,
+            )
+            .await;
+        } else {
+            self.notify_admins_say(
+                "info",
+                "ops.docker_node_back",
+                &[("node", label.as_str())],
+                ALERT_HREF,
+                &kind,
+            )
+            .await;
+        }
+        Ok(true)
     }
 
     /// `docker version`, reduced to the daemon's version, with errors worded

@@ -1270,6 +1270,9 @@ pub trait AgentApi: Send + Sync + 'static {
     /// Master: whether the module is on for the cluster and the nodes that
     /// were recorded as running it.
     async fn docker_node_list(&self) -> Result<hyperion_types::docker::DockerNodeList, RpcError>;
+    /// Master: record that a node stopped answering or is back; true when
+    /// that changed the record (and alerted).
+    async fn docker_node_silent(&self, node_id: String, silent: bool) -> Result<bool, RpcError>;
     /// What this node's Docker looked like at the last tick: projects,
     /// containers, verdicts. Refused while the module is off.
     async fn docker_overview(&self) -> Result<hyperion_types::docker::DockerNodeStatus, RpcError>;

@@ -20,6 +20,7 @@ pub mod auth;
 pub mod cluster_sync;
 pub mod config;
 pub mod dispatcher;
+pub mod docker_watch;
 pub mod error;
 pub mod filters;
 pub mod handlers;
