@@ -93,7 +93,10 @@ struct RawExtras {
     acme_contact: Option<String>,
     /// `[php] own_masters`, read off the file: the running agent's copy
     /// lags a save by the restart, and the page must show what was saved.
-    own_masters: bool,
+    /// `None` when the file is unreadable, does not parse, or holds a value
+    /// that is not a bool: a form built on a guess would overwrite the real
+    /// value. A parsed file without the key is `Some(false)`, the default.
+    own_masters: Option<bool>,
 }
 
 fn parse_raw_extras(raw: &str) -> RawExtras {
@@ -105,12 +108,12 @@ fn parse_raw_extras(raw: &str) -> RawExtras {
             .and_then(|a| a.get("contact_email"))
             .and_then(|v| v.as_str())
             .map(str::to_string),
-        own_masters: doc
-            .as_ref()
-            .and_then(|d| d.get("php"))
-            .and_then(|p| p.get("own_masters"))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false),
+        own_masters: doc.as_ref().and_then(|d| {
+            match d.get("php").and_then(|p| p.get("own_masters")) {
+                None => Some(false),
+                Some(v) => v.as_bool(),
+            }
+        }),
     }
 }
 
@@ -140,7 +143,8 @@ struct NodeSettingsTpl<'a> {
     raw_error: String,
     fail2ban: Option<Fail2banView>,
     acme_contact: String,
-    own_masters: bool,
+    /// `None` = the node's file could not be read; the card shows no form.
+    own_masters: Option<bool>,
     /// A worker whose synced sections the master's settings sync manages:
     /// every card is shown read-only, because the next sync pass would undo
     /// an edit made here. False for the master and for an agent too old to
@@ -227,11 +231,11 @@ pub async fn get_node_settings(
         .as_deref()
         .map(parse_raw_extras)
         .unwrap_or_default();
+    let own_masters = extras.own_masters;
     let acme_contact = extras
         .acme_contact
         .or_else(|| config.as_ref().map(|c| c.acme.contact_email.clone()))
         .unwrap_or_default();
-    let own_masters = extras.own_masters;
     let label = match summary {
         Some(n) if !n.label.trim().is_empty() => n.label.clone(),
         Some(n) => n.node_id.clone(),
@@ -518,11 +522,14 @@ mod tests {
 
     #[test]
     fn own_masters_reads_back_from_the_raw_file() {
-        assert!(parse_raw_extras("[php]\nown_masters = true\n").own_masters);
-        assert!(!parse_raw_extras("[php]\nown_masters = false\n").own_masters);
-        assert!(!parse_raw_extras("[acme]\ncontact_email = \"a@b.cz\"\n").own_masters);
-        assert!(!parse_raw_extras("[php]\nown_masters = \"true\"\n").own_masters);
-        assert!(!parse_raw_extras("not = [toml").own_masters);
+        let om = |raw: &str| parse_raw_extras(raw).own_masters;
+        assert_eq!(om("[php]\nown_masters = true\n"), Some(true));
+        assert_eq!(om("[php]\nown_masters = false\n"), Some(false));
+        // A readable file that never mentions it is genuinely off.
+        assert_eq!(om("[acme]\ncontact_email = \"a@b.cz\"\n"), Some(false));
+        // Anything that is not a clear answer is unknown, never a guessed off.
+        assert_eq!(om("[php]\nown_masters = \"true\"\n"), None);
+        assert_eq!(om("not = [toml"), None);
     }
 
     #[test]

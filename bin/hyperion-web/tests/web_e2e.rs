@@ -6107,4 +6107,48 @@ async fn own_masters_checkbox_is_on_the_node_settings_page() {
         !page.contains("name=\"own_masters\" value=\"true\" checked"),
         "off by default"
     );
+    assert!(
+        page.contains("This version only reports. A ticked box starts applying in a later update.")
+    );
+}
+
+/// What the node's file says is what the box shows.
+#[tokio::test]
+async fn own_masters_checkbox_is_ticked_when_the_file_says_so() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d, _cfg) = start_agent_with_toml("[php]\nown_masters = true\n").await;
+    let app = build_app(sock.clone(), admin);
+    let cookie = acme_dns_login(&app, "kevin", "good-pw").await;
+    let (status, page) = acme_dns_get(&app, &cookie, "/install/node-settings?node_id=local").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        page.contains("name=\"own_masters\" value=\"true\" checked"),
+        "ticked box missing"
+    );
+}
+
+/// A file that cannot be read, or does not parse, must not render a box: an
+/// unticked guess saved with one click would overwrite the real value.
+#[tokio::test]
+async fn own_masters_card_has_no_form_when_the_file_is_unknown() {
+    // No agent.toml wired: NodeConfigRead answers an error.
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d) = start_agent().await;
+    let app = build_app(sock.clone(), admin);
+    let cookie = acme_dns_login(&app, "kevin", "good-pw").await;
+    let (status, page) = acme_dns_get(&app, &cookie, "/install/node-settings?node_id=local").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(page.contains("id=\"php-masters\""), "card missing");
+    assert!(!page.contains("name=\"own_masters\""), "form on a guess");
+    assert!(page.contains("a form here would be guessing"));
+
+    // A file that does not parse.
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d, _cfg) = start_agent_with_toml("[php\nown_masters = true\n").await;
+    let app = build_app(sock.clone(), admin);
+    let cookie = acme_dns_login(&app, "kevin", "good-pw").await;
+    let (status, page) = acme_dns_get(&app, &cookie, "/install/node-settings?node_id=local").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!page.contains("name=\"own_masters\""), "form on a guess");
+    assert!(page.contains("a form here would be guessing"));
 }
