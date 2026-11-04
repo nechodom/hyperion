@@ -73,6 +73,24 @@ pub struct DockerModuleState {
     pub docker_version: Option<String>,
 }
 
+/// One node the master has recorded as running the module.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DockerNodeEntry {
+    /// `local` for the master itself, else the enrolled node id.
+    pub node_id: String,
+    pub installed_at: i64,
+}
+
+/// Master: whether the module is on for the cluster and which nodes the
+/// master fans out to. The web layer reads this instead of a database.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DockerNodeList {
+    pub cluster_installed: bool,
+    pub nodes: Vec<DockerNodeEntry>,
+}
+
 /// One compose project on a node, with the verdict the module reached. A
 /// project that is gone has no containers and a `gone_since`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

@@ -151,6 +151,17 @@ async fn cluster_install_and_remove_manage_the_master_bookkeeping() {
         .expect("count");
     assert_eq!(n, 1);
 
+    let list = s.docker_node_list().await.expect("list");
+    assert!(list.cluster_installed);
+    assert_eq!(
+        list.nodes
+            .iter()
+            .map(|n| n.node_id.as_str())
+            .collect::<Vec<_>>(),
+        ["s4"],
+        "the web layer fans out to exactly what is registered"
+    );
+
     let st = s.docker_cluster_remove().await.expect("cluster remove");
     assert!(!st.cluster_installed);
     let (n,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM docker_nodes")

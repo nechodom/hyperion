@@ -337,6 +337,31 @@ pub fn build_router(state: SharedState) -> Router {
             post(handlers::stats::post_backup_untracked_delete),
         )
         .route("/monitoring", get(handlers::monitoring::get_monitoring))
+        .route("/docker", get(handlers::docker::get_docker))
+        .route(
+            "/docker/install-cluster",
+            post(handlers::docker::post_install_cluster),
+        )
+        .route(
+            "/docker/remove-cluster",
+            post(handlers::docker::post_remove_cluster),
+        )
+        .route(
+            "/docker/nodes/:node/install",
+            post(handlers::docker::post_node_install),
+        )
+        .route(
+            "/docker/nodes/:node/remove",
+            post(handlers::docker::post_node_remove),
+        )
+        .route(
+            "/docker/:node/:project",
+            get(handlers::docker::get_docker_stack),
+        )
+        .route(
+            "/docker/:node/:project/forget",
+            post(handlers::docker::post_forget),
+        )
         .route("/trash", get(handlers::trash::get_trash))
         .route("/trash/restore", post(handlers::trash::post_trash_restore))
         .route("/trash/purge", post(handlers::trash::post_trash_purge))

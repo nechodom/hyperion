@@ -1429,6 +1429,9 @@ pub enum Request {
         node_id: String,
         installed: bool,
     },
+    /// Master: whether the module is on for the cluster, and which nodes
+    /// were recorded as running it.
+    DockerNodeList,
     /// Projects and containers of this node's Docker, as of the last tick.
     DockerOverview,
     /// Forget a Docker project's panel state on this node. Touches no
@@ -2763,6 +2766,7 @@ pub enum Response {
     DockerModule(hyperion_types::docker::DockerModuleState),
     /// Ack for DockerNodeRegister.
     DockerNodeRegistered,
+    DockerNodeList(hyperion_types::docker::DockerNodeList),
     DockerOverview(hyperion_types::docker::DockerNodeStatus),
     /// Ack for DockerForgetProject.
     DockerProjectForgotten,

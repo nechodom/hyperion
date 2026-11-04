@@ -1457,6 +1457,10 @@ async fn dispatch_request(api: Arc<dyn AgentApi>, req: Request) -> Response {
                 Err(e) => Response::Error(e),
             }
         }
+        Request::DockerNodeList => match api.docker_node_list().await {
+            Ok(l) => Response::DockerNodeList(l),
+            Err(e) => Response::Error(e),
+        },
         Request::DockerOverview => match api.docker_overview().await {
             Ok(st) => Response::DockerOverview(st),
             Err(e) => Response::Error(e),
@@ -3594,6 +3598,11 @@ mod tests {
         }
         async fn docker_node_register(&self, _: String, _: bool) -> Result<(), RpcError> {
             Ok(())
+        }
+        async fn docker_node_list(
+            &self,
+        ) -> Result<hyperion_types::docker::DockerNodeList, RpcError> {
+            Ok(Default::default())
         }
         async fn docker_overview(
             &self,

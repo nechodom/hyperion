@@ -378,6 +378,16 @@ pub fn print_pretty(resp: &Response) {
             );
         }
         Response::DockerNodeRegistered => println!("✓ docker node recorded"),
+        Response::DockerNodeList(l) => {
+            println!(
+                "docker module: cluster {}, {} node(s)",
+                if l.cluster_installed { "on" } else { "off" },
+                l.nodes.len()
+            );
+            for n in &l.nodes {
+                println!("  {}", n.node_id);
+            }
+        }
         Response::DockerProjectForgotten => println!("✓ docker project forgotten"),
         Response::DockerOverview(st) => {
             println!(

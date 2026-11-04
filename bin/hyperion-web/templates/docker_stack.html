@@ -1,0 +1,89 @@
+{% extends "base.html" %}
+{% block title %}{{ name }} · Docker · Hyperion{% endblock %}
+{% block main %}
+<div class="page-header">
+  <div>
+    <h1>{{ name }} <span class="text-soft" style="font-weight:400;font-size:0.7em">· {{ node_label }}</span></h1>
+    <div class="subtitle">Containers of this stack as of the node's last look, {{ read }}.</div>
+    <nav class="svc-jump small" aria-label="Back">
+      <a href="/docker">← All stacks</a>
+    </nav>
+  </div>
+</div>
+
+{% if let Some(err) = daemon_error %}
+  <div class="flash error">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+    <div class="flash-body">Docker is not answering on this node: {{ err }} What follows is what it said last.</div>
+  </div>
+{% endif %}
+
+<div class="svc-verdict {{ tone }}">
+  <span class="dot"></span>
+  <span>{{ state_label }}</span>
+  {% if !summary.is_empty() %}<span class="svc-counts small">{{ summary }}</span>{% endif %}
+</div>
+
+{% if !gone.is_empty() %}
+<div class="group">
+  <div class="item svc-row">
+    <div class="svc-main">
+      <div class="svc-title"><strong>{{ gone }}</strong></div>
+      <div class="text-soft small">Hyperion remembers this stack and has told the administrators it vanished. Forgetting clears that record and its alert; no container, image or volume is touched.</div>
+    </div>
+    {% if can_forget %}{% if let Some(f) = forget_action %}
+    <div class="svc-actions">
+      <form method="post" action="{{ f }}"
+            data-confirm-title="Forget {{ name }}"
+            data-confirm-body="Clears Hyperion's record of this stack and its alert. No container, image or volume is touched. If the stack comes back it is picked up again."
+            data-confirm-confirm-label="Forget"
+            data-confirm-variant="danger">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <button class="btn small" type="submit">Forget</button>
+      </form>
+    </div>
+    {% endif %}{% endif %}
+  </div>
+</div>
+{% endif %}
+
+{% if !containers.is_empty() %}
+<div class="group">
+  <div class="ghead">Containers{% if !stats_note.is_empty() %}<span class="ghead-note">{{ stats_note }}</span>{% endif %}</div>
+  <div class="table-wrap">
+    <table class="stats-table">
+      <thead><tr><th>Container</th><th>State</th><th>Image</th><th class="right">Restarts</th><th class="hide-on-phone">Started</th><th class="hide-on-phone">Ports</th><th class="right hide-on-phone">CPU</th><th class="right hide-on-phone">Memory</th><th class="right">Log</th></tr></thead>
+      <tbody>
+      {% for c in containers %}
+        <tr>
+          <td>{{ c.name }}{% if !c.service.is_empty() %} <span class="text-soft small">{{ c.service }}</span>{% endif %}</td>
+          <td><span class="pill {{ c.tone }}">{{ c.state }}</span>{% if !c.exit.is_empty() %} <span class="text-soft small">{{ c.exit }}</span>{% endif %}</td>
+          <td class="mono small">{{ c.image }}</td>
+          <td class="right numeric">{{ c.restarts }}</td>
+          <td class="hide-on-phone">{{ c.started }}</td>
+          <td class="hide-on-phone mono small">{{ c.ports }}</td>
+          <td class="right numeric hide-on-phone">{{ c.cpu }}</td>
+          <td class="right numeric hide-on-phone">{{ c.memory }}</td>
+          <td class="right numeric">{{ c.log }}{% if c.log_warn %}<div class="small" style="color:var(--warn)">no max-size</div>{% endif %}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% if log_warning %}
+  <div class="item">
+    <p class="text-soft small" style="margin:0">A log over 1 GiB with no <code>max-size</code> keeps growing until the disk is full. Set <code>max-size</code> and <code>max-file</code> under <code>logging.options</code> for the service in the compose file.</p>
+  </div>
+  {% endif %}
+</div>
+{% endif %}
+
+{% if let Some(d) = disk %}
+<div class="group">
+  <div class="ghead">Disk used by Docker on {{ node_label }}<span class="ghead-note">read {{ d.read }}</span></div>
+  <div class="item">
+    <div class="svc-facts small" style="margin:0"><span>Images {{ d.images }}</span><span>Volumes {{ d.volumes }}</span><span>Build cache {{ d.build_cache }}</span></div>
+  </div>
+</div>
+{% endif %}
+{% endblock %}

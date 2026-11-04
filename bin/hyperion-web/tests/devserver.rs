@@ -420,6 +420,25 @@ impl hyperion_core::AdapterPort for StubAdapters {
             log_tail,
         }
     }
+    /// `DEVSERVER_DOCKER=1` pretends Docker 27 is installed, so turning the
+    /// module on from `/docker` succeeds; otherwise this machine has none.
+    async fn docker_read(
+        &self,
+        cmd: hyperion_adapters::docker::DockerCmd,
+        _max_bytes: usize,
+    ) -> Result<Vec<u8>, hyperion_adapters::docker::DockerError> {
+        use hyperion_adapters::docker::{DockerCmd, DockerError};
+        if std::env::var_os("DEVSERVER_DOCKER").is_none() {
+            return Err(DockerError::NotInstalled);
+        }
+        match cmd {
+            DockerCmd::Version => {
+                Ok(br#"{"Client":{"Version":"27.3.1"},"Server":{"Version":"27.3.1"}}"#.to_vec())
+            }
+            DockerCmd::BuildxVersion => Ok(b"github.com/docker/buildx v0.17.1 abc\n".to_vec()),
+            _ => Err(DockerError::NotResponding),
+        }
+    }
     async fn current_hostname(&self) -> String {
         "vps-3f91a2".into()
     }
@@ -1923,6 +1942,113 @@ async fn seed_demo_nodes(svc: &StubService) {
     .expect("drain");
 }
 
+/// `DEVSERVER_DOCKER=1`: what the master's Docker module would have read, so
+/// `/docker` has stacks to draw once the module is turned on (Settings →
+/// Panel → Docker monitoring, then "Turn on" for the master). One stack is
+/// fine, one has a dead database, one has a 2 GiB log nobody rotates, and a
+/// stray container belongs to no stack. With `DEVSERVER_DEMO_NODES=1` the
+/// demo workers have no reachable address, so turning the module on for one
+/// shows the "did not answer" warning.
+async fn seed_demo_docker(svc: &StubService) {
+    use hyperion_types::docker::{
+        DockerContainer, DockerDisk, DockerNodeStatus, DockerPort, DockerProject,
+    };
+    let now = hyperion_types::now_secs();
+    let c =
+        |project: &str, service: &str, state: &str, mem_mib: u64, cpu_x100: i64| DockerContainer {
+            id: format!("{project}-{service}-id"),
+            name: if project.is_empty() {
+                service.to_string()
+            } else {
+                format!("{project}-{service}-1")
+            },
+            project: project.into(),
+            service: if project.is_empty() {
+                String::new()
+            } else {
+                service.into()
+            },
+            image: match service {
+                "db" => "mariadb:11.4".into(),
+                "cache" => "redis:7.4-alpine".into(),
+                "proxy" => "traefik:v3.1".into(),
+                _ => format!("registry.example.net/{project}/{service}:2024.11"),
+            },
+            state: state.into(),
+            restart_policy: "unless-stopped".into(),
+            started_at: now - 3 * 86_400,
+            cpu_pct_x100: (state == "running").then_some(cpu_x100),
+            mem_bytes: (state == "running").then_some(mem_mib * 1024 * 1024),
+            log_size_bytes: 12 * 1024 * 1024,
+            log_max_size: Some("10m".into()),
+            ..Default::default()
+        };
+    let mut web = c("shop", "web", "running", 310, 420);
+    web.ports = vec![DockerPort {
+        host_ip: "127.0.0.1".into(),
+        host_port: 8080,
+        container_port: 80,
+        proto: "tcp".into(),
+    }];
+    // 2 GiB of log and no rotation: how Docker fills a disk.
+    let mut worker = c("shop", "worker", "running", 180, 95);
+    worker.log_size_bytes = 2 * 1024 * 1024 * 1024;
+    worker.log_max_size = None;
+    let mut db = c("blog", "db", "exited", 0, 0);
+    db.exit_code = 137;
+    db.oom_killed = true;
+    db.restart_count = 4;
+    db.finished_at = now - 25 * 60;
+    let mut proxy = c("", "proxy", "running", 64, 12);
+    proxy.ports = vec![DockerPort {
+        host_ip: "0.0.0.0".into(),
+        host_port: 443,
+        container_port: 443,
+        proto: "tcp".into(),
+    }];
+    let status = DockerNodeStatus {
+        read_at: now - 20,
+        stats_at: now - 40,
+        daemon_ok: true,
+        daemon_error: None,
+        projects: vec![
+            DockerProject {
+                name: "shop".into(),
+                containers: vec![web, worker, c("shop", "cache", "running", 24, 8)],
+                verdict: "ok".into(),
+                ..Default::default()
+            },
+            DockerProject {
+                name: "blog".into(),
+                containers: vec![db, c("blog", "wordpress", "running", 140, 30)],
+                verdict: "problem".into(),
+                summary: "db: exit 137, out of memory".into(),
+                ..Default::default()
+            },
+            DockerProject {
+                name: "old-forum".into(),
+                verdict: "gone".into(),
+                gone_since: Some(now - 5 * 3600),
+                ..Default::default()
+            },
+            DockerProject {
+                name: String::new(),
+                containers: vec![proxy],
+                verdict: "ok".into(),
+                ..Default::default()
+            },
+        ],
+        disk: Some(DockerDisk {
+            images_bytes: 4_200_000_000,
+            volumes_bytes: 1_100_000_000,
+            build_cache_bytes: 800_000_000,
+            containers_bytes: 90_000_000,
+            read_at: now - 1500,
+        }),
+    };
+    *svc.docker_snapshot.write().await = Some(status);
+}
+
 /// `DEVSERVER_DEMO=1`: a bell's worth of notifications. They belong to a web
 /// user, and the first login is what creates that row — so this waits for an
 /// admin to exist, then writes the set once (two of them as if collected from
@@ -2027,6 +2153,9 @@ async fn devserver() {
     }
     if std::env::var_os("DEVSERVER_DEMO_NODES").is_some() {
         seed_demo_nodes(&svc).await;
+    }
+    if std::env::var_os("DEVSERVER_DOCKER").is_some() {
+        seed_demo_docker(&svc).await;
     }
     if std::env::var_os("DEVSERVER_DEMO").is_some() {
         seed_demo_notifications(svc.pool.clone());

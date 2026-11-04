@@ -84,6 +84,15 @@
         <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
         Service health
       </a>
+      {# Starts hidden: the module is off until an administrator turns it on,
+         and a sidebar entry for a page that only redirects is noise. The
+         nav-status poller shows it once /api/nav-status says it is on. #}
+      <a id="nav-docker" class="nav-link {% if active == "docker" %}active{% endif %}" href="/docker" hidden
+         data-require-caps="docker_view" data-require-scope-all>
+        <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8l-9-5-9 5v8l9 5 9-5V8z"/><path d="M3 8l9 5 9-5"/><path d="M12 13v8"/></svg>
+        Docker
+        <span id="nav-docker-dot" class="nav-status-dot" hidden></span>
+      </a>
       <a class="nav-link {% if active == "import" %}active{% endif %}" href="/import"
          data-require-caps="panel_import">
         <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>

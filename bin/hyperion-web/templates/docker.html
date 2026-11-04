@@ -1,0 +1,159 @@
+{% extends "base.html" %}
+{% block title %}Docker · Hyperion{% endblock %}
+{% block main %}
+<div class="page-header">
+  <div>
+    <h1>Docker</h1>
+    <div class="subtitle">Compose stacks on the nodes that run the module, as of each node's last look. Hyperion only reads: it never starts, stops or changes a container.</div>
+  </div>
+</div>
+
+{% if let Some(m) = flash %}
+  <div class="flash success">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+    <div class="flash-body">{{ m }}</div>
+  </div>
+{% endif %}
+{% if let Some(e) = flash_error %}
+  <div class="flash error">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+    <div class="flash-body">{{ e }}</div>
+  </div>
+{% endif %}
+
+{#- A short list on a monitoring page reads as "nothing is wrong". Say so
+    when a node's rows are missing, and why. -#}
+{% if let Some(w) = node_auth_warning %}
+  <div class="flash error">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+    <div class="flash-body">{{ w }}</div>
+  </div>
+{% endif %}
+{% if !silent.is_empty() %}
+  <div class="flash error">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+    <div class="flash-body">{{ silent.join(", ") }} did not answer. This list is incomplete: the stacks on {% if silent.len() == 1 %}that node{% else %}those nodes{% endif %} are not shown, and their absence says nothing about whether they are running.</div>
+  </div>
+{% endif %}
+
+<div class="svc-verdict {{ verdict.tone }}">
+  <span class="dot"></span>
+  <span>{{ verdict.line }}</span>
+  {% if !verdict.counts.is_empty() %}<span class="svc-counts small">{{ verdict.counts }}</span>{% endif %}
+</div>
+
+{% for n in nodes %}
+<div class="group">
+  <div class="ghead">
+    {{ n.label }}
+    {% if is_admin %}
+    <div class="ghead-tools">
+      <form method="post" action="{{ n.remove_action }}"
+            data-confirm-title="Remove the Docker module from {{ n.label }}"
+            data-confirm-body="{{ n.remove_body }}"
+            data-confirm-confirm-label="Remove"
+            data-confirm-variant="danger">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <button class="btn small ghost" type="submit">Remove from this node</button>
+      </form>
+    </div>
+    {% endif %}
+  </div>
+
+  {% if n.kind == "old" %}
+  <div class="item">
+    <div class="row" style="align-items:center;gap:0.6rem;flex-wrap:wrap">
+      <h3 style="margin:0">Older agent</h3>
+      <span class="pill warn">update needed</span>
+    </div>
+    <p class="text-soft small" style="margin:0.4rem 0 0">
+      Update the node first. It runs an agent that does not know the Docker module, so it cannot say what is running. <a href="/install">Nodes</a>
+    </p>
+  </div>
+  {% else if n.kind == "down" %}
+  <div class="item">
+    <div class="row" style="align-items:center;gap:0.6rem;flex-wrap:wrap">
+      <h3 style="margin:0">Not reachable</h3>
+      <span class="pill err">did not answer</span>
+    </div>
+    <p class="text-soft small" style="margin:0.4rem 0 0">
+      The master could not read this node's Docker. Its stacks are not listed, which does not mean they are running. The module stays registered here, so it can be removed once the node is back.
+    </p>
+  </div>
+  {% else %}
+    {% if let Some(err) = n.daemon_error %}
+    <div class="item">
+      <div class="row" style="align-items:center;gap:0.6rem;flex-wrap:wrap">
+        <h3 style="margin:0">Docker is not answering</h3>
+        <span class="pill err">daemon down</span>
+      </div>
+      <p class="text-soft small" style="margin:0.4rem 0 0">{{ err }}{% if n.stale_stacks %} The stacks below are what it said last, {{ n.read }}.{% endif %}</p>
+    </div>
+    {% endif %}
+    {% if n.stacks.is_empty() && n.daemon_error.is_none() %}
+    <div class="item"><p class="text-soft small" style="margin:0">No containers on this node.</p></div>
+    {% endif %}
+    {% for s in n.stacks %}
+    <div class="item svc-row">
+      <div class="svc-main">
+        <div class="svc-title"><a class="svc-link" href="{{ s.href }}"><strong>{{ s.name }}</strong></a>{% if s.containers > 1 %} <span class="text-soft small">{{ s.containers }} containers</span>{% endif %}</div>
+        {% if !s.services.is_empty() %}<div class="svc-facts small"><span>{{ s.services }}</span></div>{% endif %}
+        {% if !s.summary.is_empty() %}<div class="small" style="color:var(--danger)">{{ s.summary }}</div>{% endif %}
+        {% if !s.gone.is_empty() %}<div class="text-soft small">{{ s.gone }}</div>{% endif %}
+      </div>
+      <span class="pill {{ s.tone }}">{{ s.state_label }}</span>
+      <div class="svc-actions">
+        {% if let Some(f) = s.forget_action %}
+        <form method="post" action="{{ f }}"
+              data-confirm-title="Forget {{ s.name }}"
+              data-confirm-body="Clears Hyperion's record of this stack and its alert. No container, image or volume is touched. If the stack comes back it is picked up again."
+              data-confirm-confirm-label="Forget"
+              data-confirm-variant="danger">
+          <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+          <button class="btn small" type="submit">Forget</button>
+        </form>
+        {% endif %}
+        <a class="btn small ghost" href="{{ s.href }}" aria-label="Containers of {{ s.name }}">Details</a>
+      </div>
+    </div>
+    {% endfor %}
+
+    {% if !n.logs.is_empty() || n.disk.is_some() %}
+    <div class="item">
+      {% if let Some(d) = n.disk %}
+      <div class="svc-facts small" style="margin:0 0 0.4rem">
+        <span>Images {{ d.images }}</span><span>Volumes {{ d.volumes }}</span><span>Build cache {{ d.build_cache }}</span><span>read {{ d.read }}</span>
+      </div>
+      {% endif %}
+      {% if !n.logs.is_empty() %}
+      <div class="text-soft small">Largest container logs</div>
+      {% for l in n.logs %}
+      <div class="svc-facts small"><span>{{ l.size }}</span><span>{{ l.container }}</span><span>{{ l.stack }}</span>{% if l.warn %}<span class="warn">over 1 GiB and no max-size: Docker keeps writing until the disk is full</span>{% endif %}</div>
+      {% endfor %}
+      {% endif %}
+    </div>
+    {% endif %}
+  {% endif %}
+</div>
+{% endfor %}
+
+{% if !offers.is_empty() %}
+<div class="group">
+  <div class="ghead">Not monitored</div>
+  {% for o in offers %}
+  <div class="item svc-row">
+    <div class="svc-main">
+      <div class="svc-title"><strong>{{ o.label }}</strong></div>
+      <div class="text-soft small">The module is off here. Turning it on checks that Docker answers on the node; Hyperion does not install Docker.</div>
+    </div>
+    <div class="svc-actions">
+      <form method="post" action="{{ o.install_action }}">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <button class="btn small primary" type="submit">Turn on</button>
+      </form>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+{% endblock %}

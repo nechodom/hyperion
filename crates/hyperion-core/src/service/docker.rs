@@ -15,7 +15,8 @@ use hyperion_adapters::docker::{
 };
 use hyperion_state::docker::{ProjectRow, WatchRow, DAEMON_ROW};
 use hyperion_types::docker::{
-    DockerContainer, DockerDisk, DockerModuleState, DockerNodeStatus, DockerProject,
+    DockerContainer, DockerDisk, DockerModuleState, DockerNodeEntry, DockerNodeList,
+    DockerNodeStatus, DockerProject,
 };
 use std::collections::{BTreeMap, HashMap};
 
@@ -168,6 +169,27 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             hyperion_state::docker::unregister_node(&self.pool, node_id).await
         }
         .map_err(|e| db_err("docker_node_register", e))
+    }
+
+    /// Master: the cluster flag and the nodes recorded as running the
+    /// module. This is the fan-out list the web layer reads.
+    pub async fn docker_node_list(&self) -> Result<DockerNodeList, RpcError> {
+        let row = hyperion_state::docker::get_module(&self.pool)
+            .await
+            .map_err(|e| db_err("docker_node_list", e))?;
+        let nodes = hyperion_state::docker::list_nodes(&self.pool)
+            .await
+            .map_err(|e| db_err("docker_node_list", e))?;
+        Ok(DockerNodeList {
+            cluster_installed: row.cluster_installed,
+            nodes: nodes
+                .into_iter()
+                .map(|n| DockerNodeEntry {
+                    node_id: n.node_id,
+                    installed_at: n.installed_at,
+                })
+                .collect(),
+        })
     }
 
     /// `docker version`, reduced to the daemon's version, with errors worded

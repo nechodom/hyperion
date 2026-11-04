@@ -303,6 +303,16 @@ async fn start_agent_with_toml(toml: &str) -> (PathBuf, tempfile::TempDir, PathB
 }
 
 async fn start_agent_with(toml: Option<&str>) -> (PathBuf, tempfile::TempDir, sqlx::SqlitePool) {
+    start_agent_full(toml, None).await
+}
+
+/// [`start_agent_with`] whose Docker module already holds `snapshot` as the
+/// last thing the daemon said, so `/docker` has stacks to draw without a
+/// real daemon.
+async fn start_agent_full(
+    toml: Option<&str>,
+    snapshot: Option<hyperion_types::docker::DockerNodeStatus>,
+) -> (PathBuf, tempfile::TempDir, sqlx::SqlitePool) {
     let dir = tempfile::tempdir().expect("dir");
     let agent_config_path = toml.map(|t| {
         let p = dir.path().join("agent.toml");
@@ -340,7 +350,7 @@ async fn start_agent_with(toml: Option<&str>) -> (PathBuf, tempfile::TempDir, sq
             hyperion_types::ServiceInstallStatus::default(),
         )),
         backup_progress: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
-        docker_snapshot: Arc::new(tokio::sync::RwLock::new(None)),
+        docker_snapshot: Arc::new(tokio::sync::RwLock::new(snapshot)),
     });
     let agent: Arc<dyn AgentApi> = Arc::new(AgentImpl::new(svc));
     let path = dir.path().join("agent.sock");
@@ -6181,4 +6191,621 @@ async fn own_masters_card_has_no_form_when_the_file_is_unknown() {
     assert_eq!(status, StatusCode::OK);
     assert!(!page.contains("name=\"own_masters\""), "form on a guess");
     assert!(page.contains("a form here would be guessing"));
+}
+
+// ---------------------------------------------------------------------------
+// Docker module pages.
+// ---------------------------------------------------------------------------
+
+use hyperion_rpc::codec::{Request as DockerReq, Response as DockerResp};
+use hyperion_types::docker::{DockerContainer, DockerNodeStatus, DockerProject};
+
+/// Create `name` with a built-in `role` and return its session cookie.
+async fn docker_user(app: &axum::Router, sock: &std::path::Path, name: &str, role: &str) -> String {
+    match hyperion_rpc_client::call(
+        sock,
+        DockerReq::WebUserCreate {
+            username: name.into(),
+            email: format!("{name}@example.invalid"),
+            password: "docker-pw-12345".into(),
+            role: role.into(),
+        },
+    )
+    .await
+    .expect("create user")
+    {
+        DockerResp::WebUserCreate { .. } => {}
+        other => panic!("unexpected user create: {other:?}"),
+    }
+    acme_dns_login(app, name, "docker-pw-12345").await
+}
+
+/// A user on a custom role holding `DockerView`, with or without every
+/// hosting in scope.
+async fn docker_custom_user(
+    app: &axum::Router,
+    sock: &std::path::Path,
+    name: &str,
+    scope_all: bool,
+) -> String {
+    use hyperion_state::capabilities::Capability;
+    let role_id = match hyperion_rpc_client::call(
+        sock,
+        DockerReq::RoleCreate {
+            name: format!("docker-{name}"),
+            capabilities: Capability::DockerView.bit(),
+            scope_all,
+        },
+    )
+    .await
+    .expect("role")
+    {
+        DockerResp::RoleCreate { id } => id,
+        other => panic!("unexpected role create: {other:?}"),
+    };
+    let user_id = match hyperion_rpc_client::call(
+        sock,
+        DockerReq::WebUserCreate {
+            username: name.into(),
+            email: format!("{name}@example.invalid"),
+            password: "docker-pw-12345".into(),
+            role: "operator".into(),
+        },
+    )
+    .await
+    .expect("user")
+    {
+        DockerResp::WebUserCreate { id } => id,
+        other => panic!("unexpected user create: {other:?}"),
+    };
+    hyperion_rpc_client::call(
+        sock,
+        DockerReq::WebUserSetCustomRole {
+            user_id,
+            custom_role_id: role_id,
+        },
+    )
+    .await
+    .expect("assign");
+    acme_dns_login(app, name, "docker-pw-12345").await
+}
+
+/// Turn the module on for the cluster and for the master itself, the way the
+/// install buttons do once Docker answers.
+async fn docker_enable_master(sock: &std::path::Path, pool: &sqlx::SqlitePool) {
+    hyperion_rpc_client::call(sock, DockerReq::DockerClusterInstall)
+        .await
+        .expect("cluster");
+    hyperion_state::docker::set_node_installed(pool, false, 1)
+        .await
+        .expect("node installed");
+    hyperion_rpc_client::call(
+        sock,
+        DockerReq::DockerNodeRegister {
+            node_id: "local".into(),
+            installed: true,
+        },
+    )
+    .await
+    .expect("register master");
+}
+
+async fn docker_add_worker(sock: &std::path::Path, pool: &sqlx::SqlitePool, id: &str, label: &str) {
+    // No address on record: the master cannot reach it, which is how a node
+    // that went quiet looks from here.
+    sqlx::query(
+        "INSERT INTO nodes (node_id, label, enrolled_at, last_seen_at, agent_version, public_ip, \
+         enrolled_via) VALUES (?, ?, 1, 1, '0', '', 'test')",
+    )
+    .bind(id)
+    .bind(label)
+    .execute(pool)
+    .await
+    .expect("node");
+    hyperion_rpc_client::call(
+        sock,
+        DockerReq::DockerNodeRegister {
+            node_id: id.into(),
+            installed: true,
+        },
+    )
+    .await
+    .expect("register worker");
+}
+
+fn docker_container(project: &str, service: &str, state: &str) -> DockerContainer {
+    DockerContainer {
+        id: format!("{project}-{service}-id"),
+        name: format!("{project}-{service}-1"),
+        project: project.into(),
+        service: service.into(),
+        image: "nginx:1.27".into(),
+        state: state.into(),
+        started_at: 1_700_000_000,
+        ..Default::default()
+    }
+}
+
+fn docker_snapshot() -> DockerNodeStatus {
+    let mut big_log = docker_container("shop", "web", "running");
+    big_log.log_size_bytes = 2 * 1024 * 1024 * 1024;
+    let mut dead = docker_container("blog", "db", "exited");
+    dead.exit_code = 137;
+    dead.oom_killed = true;
+    DockerNodeStatus {
+        read_at: 1_700_000_100,
+        daemon_ok: true,
+        projects: vec![
+            DockerProject {
+                name: "shop".into(),
+                containers: vec![big_log, docker_container("shop", "cache", "running")],
+                verdict: "ok".into(),
+                ..Default::default()
+            },
+            DockerProject {
+                name: "blog".into(),
+                containers: vec![dead],
+                verdict: "problem".into(),
+                summary: "db: exit 137, out of memory".into(),
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn docker_requires_capability() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d, pool) = start_agent_with_pool().await;
+    let app = build_app(sock.clone(), admin);
+    docker_enable_master(&sock, &pool).await;
+    let cookie = acme_dns_login(&app, "kevin", "good-pw").await;
+    for role in ["viewer", "customer"] {
+        let cookie = docker_user(&app, &sock, &format!("dk-{role}"), role).await;
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/docker")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("call");
+        assert_eq!(resp.status(), StatusCode::SEE_OTHER, "{role}");
+        assert_eq!(resp.headers()[header::LOCATION], "/", "{role}");
+    }
+    let (status, page) = acme_dns_get(&app, &cookie, "/docker").await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+}
+
+/// The rows span every tenant, so the capability alone is not enough.
+#[tokio::test]
+async fn custom_role_without_scope_all_refused() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d, pool) = start_agent_with_pool().await;
+    let app = build_app(sock.clone(), admin);
+    docker_enable_master(&sock, &pool).await;
+
+    let narrow = docker_custom_user(&app, &sock, "dk-narrow", false).await;
+    for uri in ["/docker", "/docker/local/shop"] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .header(header::COOKIE, &narrow)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("call");
+        assert_eq!(resp.status(), StatusCode::SEE_OTHER, "{uri}");
+        assert_eq!(resp.headers()[header::LOCATION], "/", "{uri}");
+    }
+    // And a write through the same role is refused, not just hidden.
+    let csrf = acme_ssl_csrf(&app, &narrow).await;
+    let resp = acme_dns_post(
+        &app,
+        &narrow,
+        "/docker/local/shop/forget",
+        format!("_csrf={}", enc(&csrf)),
+    )
+    .await;
+    assert_ne!(resp.status(), StatusCode::OK);
+    assert!(
+        resp.status() == StatusCode::FORBIDDEN || resp.status() == StatusCode::SEE_OTHER,
+        "{}",
+        resp.status()
+    );
+
+    let wide = docker_custom_user(&app, &sock, "dk-wide", true).await;
+    let (status, _) = acme_dns_get(&app, &wide, "/docker").await;
+    assert_eq!(status, StatusCode::OK, "scope_all + docker_view reads");
+    // Reading is not installing.
+    let csrf = acme_ssl_csrf(&app, &wide).await;
+    let resp = acme_dns_post(
+        &app,
+        &wide,
+        "/docker/nodes/local/install",
+        format!("_csrf={}", enc(&csrf)),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    let resp = acme_dns_post(
+        &app,
+        &wide,
+        "/docker/remove-cluster",
+        format!("_csrf={}", enc(&csrf)),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn docker_off_redirects_to_settings() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d) = start_agent().await;
+    let app = build_app(sock.clone(), admin);
+    let cookie = acme_dns_login(&app, "kevin", "good-pw").await;
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/docker")
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        resp.headers()[header::LOCATION],
+        "/settings/panel#docker-module"
+    );
+
+    // Nobody else learns the module exists.
+    let viewer = docker_user(&app, &sock, "dk-off-viewer", "viewer").await;
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/docker")
+                .header(header::COOKIE, &viewer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    assert_eq!(resp.headers()[header::LOCATION], "/");
+
+    let (_, nav) = acme_dns_get(&app, &cookie, "/api/nav-status").await;
+    let nav: serde_json::Value = serde_json::from_str(&nav).expect("json");
+    assert_eq!(nav["docker_installed"], false, "{nav}");
+    assert_eq!(nav["docker_problems"], 0, "{nav}");
+
+    // The nav entry exists but starts hidden; the poller shows it.
+    let (_, home) = acme_dns_get(&app, &cookie, "/profile").await;
+    assert!(
+        home.contains("id=\"nav-docker\"") && home.contains("data-require-caps=\"docker_view\""),
+        "nav entry missing"
+    );
+
+    // Installing it is the Settings card's job; afterwards the nav says so
+    // at once, not a minute later.
+    let (_, panel) = acme_dns_get(&app, &cookie, "/settings/panel").await;
+    assert!(panel.contains("id=\"docker-module\""), "card missing");
+    assert!(panel.contains("action=\"/docker/install-cluster\""));
+    let csrf = acme_ssl_csrf(&app, &cookie).await;
+    let resp = acme_dns_post(
+        &app,
+        &cookie,
+        "/docker/install-cluster",
+        format!("_csrf={}", enc(&csrf)),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let (_, nav) = acme_dns_get(&app, &cookie, "/api/nav-status").await;
+    let nav: serde_json::Value = serde_json::from_str(&nav).expect("json");
+    assert_eq!(nav["docker_installed"], true, "{nav}");
+    let (status, page) = acme_dns_get(&app, &cookie, "/docker").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        page.contains("action=\"/docker/nodes/local/install\""),
+        "the master offers the node install: {page}"
+    );
+}
+
+/// A node that does not answer is named, and the page says the list is
+/// short, rather than reading as a cluster with nothing running.
+#[tokio::test]
+async fn failed_node_shows_incomplete_warning() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d, pool) = start_agent_with_pool().await;
+    let app = build_app(sock.clone(), admin);
+    docker_enable_master(&sock, &pool).await;
+    docker_add_worker(&sock, &pool, "web-2", "web-2.example.net").await;
+    let cookie = acme_dns_login(&app, "kevin", "good-pw").await;
+    let (status, page) = acme_dns_get(&app, &cookie, "/docker").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(page.contains("web-2.example.net"), "{page}");
+    assert!(page.contains("did not answer"), "{page}");
+    assert!(page.contains("list is incomplete"), "{page}");
+    // It stays where it can be removed later.
+    assert!(
+        page.contains("action=\"/docker/nodes/web-2/remove\""),
+        "{page}"
+    );
+}
+
+#[tokio::test]
+async fn node_install_is_a_job() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d, _pool) = start_agent_with_pool().await;
+    let app = build_app(sock.clone(), admin);
+    let cookie = acme_dns_login(&app, "kevin", "good-pw").await;
+    let csrf = acme_ssl_csrf(&app, &cookie).await;
+    hyperion_rpc_client::call(&sock, DockerReq::DockerClusterInstall)
+        .await
+        .expect("cluster");
+
+    let resp = acme_dns_post(
+        &app,
+        &cookie,
+        "/docker/nodes/local/install",
+        format!("_csrf={}", enc(&csrf)),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let to = resp.headers()[header::LOCATION]
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(to.starts_with("/jobs/"), "{to}");
+    // The test box has no Docker, which the job says in plain words and
+    // leaves the node unregistered.
+    assert_eq!(acme_ssl_wait_job(&sock, &to).await, "failed");
+    let id = to.trim_start_matches("/jobs/").to_string();
+    let job = match hyperion_rpc_client::call(&sock, DockerReq::JobGet { id })
+        .await
+        .expect("job")
+    {
+        DockerResp::JobGet(Some(j)) => j,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(job.kind, "docker_node_install");
+    assert!(
+        job.error
+            .unwrap_or_default()
+            .contains("Install Docker first"),
+        "the reason must reach the operator"
+    );
+    match hyperion_rpc_client::call(&sock, DockerReq::DockerNodeList)
+        .await
+        .expect("list")
+    {
+        DockerResp::DockerNodeList(l) => assert!(l.nodes.is_empty(), "{l:?}"),
+        other => panic!("{other:?}"),
+    }
+
+    // A node the master does not know is refused before any job exists.
+    let resp = acme_dns_post(
+        &app,
+        &cookie,
+        "/docker/nodes/node_nope/install",
+        format!("_csrf={}", enc(&csrf)),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    // And without the token nothing starts either.
+    let resp = acme_dns_post(&app, &cookie, "/docker/nodes/local/install", String::new()).await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+/// Removing the module asks every registered node first. A node that is
+/// silent stays registered, so it can be removed once it answers.
+#[tokio::test]
+async fn removing_the_module_keeps_a_node_that_did_not_answer() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d, pool) = start_agent_with_pool().await;
+    let app = build_app(sock.clone(), admin);
+    docker_enable_master(&sock, &pool).await;
+    docker_add_worker(&sock, &pool, "web-2", "web-2.example.net").await;
+    let cookie = acme_dns_login(&app, "kevin", "good-pw").await;
+    let csrf = acme_ssl_csrf(&app, &cookie).await;
+
+    let resp = acme_dns_post(
+        &app,
+        &cookie,
+        "/docker/remove-cluster",
+        format!("_csrf={}", enc(&csrf)),
+    )
+    .await;
+    let to = resp.headers()[header::LOCATION]
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(to.starts_with("/jobs/"), "{to}");
+    assert_eq!(acme_ssl_wait_job(&sock, &to).await, "failed");
+    let id = to.trim_start_matches("/jobs/").to_string();
+    let job = match hyperion_rpc_client::call(&sock, DockerReq::JobGet { id })
+        .await
+        .expect("job")
+    {
+        DockerResp::JobGet(Some(j)) => j,
+        other => panic!("{other:?}"),
+    };
+    assert!(
+        job.error.unwrap_or_default().contains("web-2.example.net"),
+        "the silent node is named"
+    );
+    let list = match hyperion_rpc_client::call(&sock, DockerReq::DockerNodeList)
+        .await
+        .expect("list")
+    {
+        DockerResp::DockerNodeList(l) => l,
+        other => panic!("{other:?}"),
+    };
+    assert!(list.cluster_installed, "the module is not half removed");
+    assert_eq!(
+        list.nodes
+            .iter()
+            .map(|n| n.node_id.as_str())
+            .collect::<Vec<_>>(),
+        ["web-2"],
+        "the master was removed, the silent node was not forgotten"
+    );
+    assert!(
+        !hyperion_state::docker::node_installed(&pool)
+            .await
+            .expect("state"),
+        "the master's own module data is gone"
+    );
+
+    // Once the node is out of the way, removing the module completes.
+    hyperion_rpc_client::call(
+        &sock,
+        DockerReq::DockerNodeRegister {
+            node_id: "web-2".into(),
+            installed: false,
+        },
+    )
+    .await
+    .expect("unregister");
+    let resp = acme_dns_post(
+        &app,
+        &cookie,
+        "/docker/remove-cluster",
+        format!("_csrf={}", enc(&csrf)),
+    )
+    .await;
+    let to = resp.headers()[header::LOCATION]
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(acme_ssl_wait_job(&sock, &to).await, "done");
+    match hyperion_rpc_client::call(&sock, DockerReq::DockerNodeList)
+        .await
+        .expect("list")
+    {
+        DockerResp::DockerNodeList(l) => assert!(!l.cluster_installed, "{l:?}"),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn stacks_list_problems_first_and_escape_their_names() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let mut snap = docker_snapshot();
+    snap.projects.push(DockerProject {
+        name: "a<b>&c".into(),
+        containers: vec![docker_container("a<b>&c", "app", "running")],
+        verdict: "ok".into(),
+        ..Default::default()
+    });
+    let (sock, _d, pool) = start_agent_full(None, Some(snap)).await;
+    let app = build_app(sock.clone(), admin);
+    docker_enable_master(&sock, &pool).await;
+    let cookie = acme_dns_login(&app, "kevin", "good-pw").await;
+    let (status, page) = acme_dns_get(&app, &cookie, "/docker").await;
+    assert_eq!(status, StatusCode::OK);
+
+    let blog = page.find("/docker/local/blog").expect("blog link");
+    let shop = page.find("/docker/local/shop").expect("shop link");
+    assert!(blog < shop, "the stack with a problem comes first");
+    assert!(page.contains("db: exit 137, out of memory"));
+    assert!(
+        !page.contains("a<b>"),
+        "a project name is data, never markup"
+    );
+    assert!(page.contains("a%3Cb%3E%26c"), "links are URL-encoded");
+    assert!(page.contains("a&lt;b&gt;&amp;c"), "{page}");
+    assert!(
+        !page.contains("other containers"),
+        "the catch-all group is shown only when it has containers"
+    );
+    // 2 GiB of log with no max-size is how Docker fills a disk.
+    assert!(page.contains("no max-size"), "{page}");
+}
+
+#[tokio::test]
+async fn other_containers_group_is_labelled_and_reachable() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let mut snap = docker_snapshot();
+    snap.projects.push(DockerProject {
+        name: String::new(),
+        containers: vec![docker_container("", "", "running")],
+        verdict: "ok".into(),
+        ..Default::default()
+    });
+    let (sock, _d, pool) = start_agent_full(None, Some(snap)).await;
+    let app = build_app(sock.clone(), admin);
+    docker_enable_master(&sock, &pool).await;
+    let cookie = acme_dns_login(&app, "kevin", "good-pw").await;
+    let (_, page) = acme_dns_get(&app, &cookie, "/docker").await;
+    assert!(page.contains("other containers"), "{page}");
+    let (status, detail) = acme_dns_get(&app, &cookie, "/docker/local/%28other%29").await;
+    assert_eq!(status, StatusCode::OK, "{detail}");
+    assert!(detail.contains("other containers"));
+}
+
+#[tokio::test]
+async fn stack_detail_shows_container_facts_and_refuses_strangers() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d, pool) = start_agent_full(None, Some(docker_snapshot())).await;
+    let app = build_app(sock.clone(), admin);
+    docker_enable_master(&sock, &pool).await;
+    let cookie = acme_dns_login(&app, "kevin", "good-pw").await;
+
+    let (status, page) = acme_dns_get(&app, &cookie, "/docker/local/blog").await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert!(page.contains("blog-db-1"));
+    assert!(page.contains("137"), "exit code");
+    assert!(page.contains("out of memory"), "OOM is stated");
+
+    // A node that is not registered, a project that does not exist, and a
+    // name made of markup are all plain 404s that echo nothing back.
+    for uri in [
+        "/docker/node_unknown/blog",
+        "/docker/local/nothing-here",
+        "/docker/local/%3Cscript%3Ealert(1)%3C%2Fscript%3E",
+    ] {
+        let (status, body) = acme_dns_get(&app, &cookie, uri).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{uri}");
+        assert!(!body.contains("<script>alert"), "{uri}: {body}");
+    }
+}
+
+#[tokio::test]
+async fn forgetting_a_project_needs_a_registered_node() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d, pool) = start_agent_with_pool().await;
+    let app = build_app(sock.clone(), admin);
+    docker_enable_master(&sock, &pool).await;
+    let cookie = acme_dns_login(&app, "kevin", "good-pw").await;
+    let csrf = acme_ssl_csrf(&app, &cookie).await;
+    let resp = acme_dns_post(
+        &app,
+        &cookie,
+        "/docker/node_unknown/blog/forget",
+        format!("_csrf={}", enc(&csrf)),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let resp = acme_dns_post(
+        &app,
+        &cookie,
+        "/docker/local/blog/forget",
+        format!("_csrf={}", enc(&csrf)),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert!(resp.headers()[header::LOCATION]
+        .to_str()
+        .unwrap()
+        .starts_with("/docker"));
 }

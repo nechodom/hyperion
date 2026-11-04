@@ -1346,7 +1346,11 @@ function isShortcutContext(ev) {
     ['nav-wp-dot', 'wp_outdated', 'site', 'waiting on you for WordPress updates'],
     ['nav-certs-dot', 'certs_expiring', 'certificate', 'expiring within 14 days'],
   ];
-  if (!targets.some(([id]) => document.getElementById(id))) return;
+  // The Docker entry is hidden until the module is on, then carries the same
+  // kind of dot. Hidden again if the module is removed while the tab is open.
+  const dockerLink = document.getElementById('nav-docker');
+  const dockerDot = document.getElementById('nav-docker-dot');
+  if (!targets.some(([id]) => document.getElementById(id)) && !dockerLink) return;
   function paint(el, n, noun, suffix) {
     if (!el) return;
     el.hidden = false;
@@ -1371,6 +1375,12 @@ function isShortcutContext(ev) {
       const j = await r.json();
       targets.forEach(([id, key, noun, suffix]) =>
         paint(document.getElementById(id), Number(j[key] || 0), noun, suffix));
+      const dockerOn = j.docker_installed === true;
+      if (dockerLink) dockerLink.hidden = !dockerOn;
+      if (dockerDot) {
+        if (dockerOn) paint(dockerDot, Number(j.docker_problems || 0), 'problem', 'in Docker');
+        else dockerDot.hidden = true;
+      }
     } catch (_) { /* leave the dots as they were */ }
   }
   poll();
