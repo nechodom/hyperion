@@ -277,6 +277,13 @@ struct World {
     /// Containers `ps` lists that are gone by the time `inspect` asks.
     vanish_before_inspect: Vec<u32>,
     reads: Vec<String>,
+    /// What `docker logs` prints for container number n.
+    logs: std::collections::HashMap<u32, Vec<u8>>,
+    logs_err: Option<DockerError>,
+    /// Containers (by number) whose `docker logs` fails.
+    logs_fail: Vec<u32>,
+    /// The byte limit each `docker logs` was given.
+    log_limits: Vec<usize>,
 }
 
 type Shared = Arc<Mutex<World>>;
@@ -333,7 +340,7 @@ fn inspect_json(c: &Ct) -> serde_json::Value {
 fn world_mock(w: &Shared) -> MockAdapterPort {
     let w = w.clone();
     let mut a = happy_mocks();
-    a.expect_docker_read().returning(move |cmd, _| {
+    a.expect_docker_read().returning(move |cmd, max| {
         let mut w = w.lock().expect("world");
         w.reads.push(format!("{cmd:?}"));
         match cmd {
@@ -373,6 +380,18 @@ fn world_mock(w: &Shared) -> MockAdapterPort {
                 Ok(out.into_bytes())
             }
             DockerCmd::SystemDf => Ok(b"{\"Type\":\"Images\",\"Size\":\"1GB\"}\n".to_vec()),
+            DockerCmd::Logs { id, .. } => {
+                w.log_limits.push(max);
+                if let Some(e) = w.logs_err.clone() {
+                    return Err(e);
+                }
+                let n = w.cts.iter().find(|c| c.id() == id.as_str()).map(|c| c.n);
+                if n.is_some_and(|n| w.logs_fail.contains(&n)) {
+                    return Err(DockerError::Failed("boom secret-stderr".into()));
+                }
+                let out = n.and_then(|n| w.logs.get(&n).cloned()).unwrap_or_default();
+                Ok(out)
+            }
             other => panic!("the tick may only list, inspect and measure: {other:?}"),
         }
     });
@@ -870,4 +889,630 @@ async fn forgetting_needs_a_real_project_name() {
     s.docker_forget_project("never-seen".into())
         .await
         .expect("an unknown project is nothing to forget");
+}
+
+// ---------------------------------------------------------------------------
+// Logs.
+// ---------------------------------------------------------------------------
+
+use super::super::docker_logs::{lines_after, merge_by_ts, strip_ansi, LogCursor};
+use hyperion_types::docker::{DockerLogLine, DockerLogRequest, MAX_LOG_BYTES, MAX_LOG_LINES};
+
+/// A docker timestamp `sec` seconds and `ns` nanoseconds past 10:00:00.
+fn ts(sec: u32, ns: u32) -> String {
+    format!("2024-05-01T10:00:{sec:02}.{ns:09}Z")
+}
+
+/// What `docker logs --timestamps` prints for these (timestamp, text) pairs.
+fn printed(lines: &[(String, &str)]) -> Vec<u8> {
+    lines
+        .iter()
+        .map(|(t, x)| format!("{t} {x}\n"))
+        .collect::<String>()
+        .into_bytes()
+}
+
+fn line(t: String, service: &str, text: &str) -> DockerLogLine {
+    DockerLogLine {
+        ts: t,
+        service: service.into(),
+        text: text.into(),
+    }
+}
+
+fn logs_for(project: &str, container: Option<&str>) -> DockerLogRequest {
+    DockerLogRequest {
+        project: project.into(),
+        container: container.map(str::to_string),
+        ..Default::default()
+    }
+}
+
+fn set_logs(w: &Shared, n: u32, bytes: Vec<u8>) {
+    w.lock().expect("world").logs.insert(n, bytes);
+}
+
+/// A node with one stack, `shop`, of the given services (container n+1 for
+/// the n-th), already ticked once. Container names are `shop-<service>-1`.
+async fn shop_with(
+    services: &[&'static str],
+) -> (HostingService<MockAdapterPort>, Shared, tempfile::TempDir) {
+    let w = world(
+        services
+            .iter()
+            .enumerate()
+            .map(|(i, svc)| ct(i as u32 + 1, "shop", svc))
+            .collect(),
+    );
+    let (s, dir) = worker_with(world_mock(&w)).await;
+    tick_at(&s, T0).await;
+    (s, w, dir)
+}
+
+#[tokio::test]
+async fn container_must_exist_in_snapshot() {
+    let (s, w, _d) = shop_with(&["web"]).await;
+    let err = s
+        .docker_logs(logs_for("shop", Some("shop-nope-1")))
+        .await
+        .expect_err("no such container");
+    assert!(matches!(err, RpcError::Validation { .. }), "{err}");
+    let err = s
+        .docker_logs(logs_for("elsewhere", None))
+        .await
+        .expect_err("no such stack");
+    assert!(matches!(err, RpcError::Validation { .. }), "{err}");
+    assert_eq!(reads_of(&w, "Logs"), 0, "docker was never asked");
+}
+
+#[tokio::test]
+async fn form_value_never_reaches_docker() {
+    let (s, w, _d) = shop_with(&["web"]).await;
+    let id = format!("{:064x}", 1);
+    for hostile in [
+        "--help",
+        "-f",
+        "shop-web-1; id",
+        &id,
+        "../../etc",
+        "shop-web-1\n",
+    ] {
+        let r = s.docker_logs(logs_for("shop", Some(hostile))).await;
+        assert!(
+            matches!(r, Err(RpcError::Validation { .. })),
+            "{hostile:?}: {r:?}"
+        );
+    }
+    assert_eq!(
+        reads_of(&w, "Logs"),
+        0,
+        "no hostile value became an argument"
+    );
+
+    // A real name works, and what docker is given is the id the node found.
+    set_logs(&w, 1, printed(&[(ts(1, 0), "hello")]));
+    s.docker_logs(logs_for("shop", Some("shop-web-1")))
+        .await
+        .expect("real container");
+    let reads = w.lock().expect("world").reads.clone();
+    let logs: Vec<_> = reads.iter().filter(|r| r.starts_with("Logs")).collect();
+    assert_eq!(logs.len(), 1);
+    assert!(logs[0].contains(&id), "{}", logs[0]);
+    assert!(!logs[0].contains("shop-web-1"), "{}", logs[0]);
+}
+
+#[tokio::test]
+async fn lines_are_capped() {
+    let (s, w, _d) = shop_with(&["web"]).await;
+    set_logs(&w, 1, printed(&[(ts(1, 0), "x")]));
+    let mut req = logs_for("shop", Some("shop-web-1"));
+    req.lines = 999_999;
+    s.docker_logs(req).await.expect("logs");
+    let reads = w.lock().expect("world").reads.clone();
+    let last = reads
+        .iter()
+        .rev()
+        .find(|r| r.starts_with("Logs"))
+        .expect("read");
+    assert!(
+        last.contains(&format!("tail: {MAX_LOG_LINES}")),
+        "asked docker for too much: {last}"
+    );
+
+    let mut req = logs_for("shop", Some("shop-web-1"));
+    req.lines = 0;
+    s.docker_logs(req).await.expect("logs");
+    let reads = w.lock().expect("world").reads.clone();
+    let last = reads
+        .iter()
+        .rev()
+        .find(|r| r.starts_with("Logs"))
+        .expect("read");
+    assert!(last.contains("tail: 200"), "the default is 200: {last}");
+}
+
+#[tokio::test]
+async fn huge_output_is_truncated() {
+    let (s, w, _d) = shop_with(&["web"]).await;
+    // 5 MiB in 1 KiB lines.
+    let filler = "x".repeat(1000);
+    let all: Vec<(String, &str)> = (0..5200u32)
+        .map(|i| (ts(i / 1000, i % 1000), filler.as_str()))
+        .collect();
+    set_logs(&w, 1, printed(&all));
+    let mut req = logs_for("shop", Some("shop-web-1"));
+    req.lines = 2000;
+    let chunk = s.docker_logs(req).await.expect("logs");
+    let size: usize = chunk
+        .lines
+        .iter()
+        .map(|l| l.ts.len() + l.service.len() + l.text.len())
+        .sum();
+    assert!(size < MAX_LOG_BYTES, "{size} bytes");
+    assert!(chunk.truncated);
+    assert!(!chunk.lines.is_empty());
+    assert!(chunk.lines.len() <= 2000);
+}
+
+#[tokio::test]
+async fn gigantic_single_line_is_cut() {
+    let (s, w, _d) = shop_with(&["web"]).await;
+    // Two-byte characters, so a cut at the wrong byte would split one.
+    let huge = "é".repeat(5 * 1024 * 1024 / 2);
+    set_logs(&w, 1, printed(&[(ts(1, 0), huge.as_str())]));
+    let chunk = s
+        .docker_logs(logs_for("shop", Some("shop-web-1")))
+        .await
+        .expect("logs");
+    assert_eq!(chunk.lines.len(), 1);
+    let text = &chunk.lines[0].text;
+    assert!(text.len() < MAX_LOG_BYTES, "{}", text.len());
+    assert!(
+        !text.is_empty() && text.chars().all(|c| c == 'é'),
+        "cut on a boundary"
+    );
+    assert!(chunk.truncated);
+}
+
+#[test]
+fn ansi_stripped() {
+    assert_eq!(strip_ansi("\x1b[31mred\x1b[0m"), "red");
+    assert_eq!(strip_ansi("\x1b[1;38;5;196mbold\x1b[m!"), "bold!");
+    assert_eq!(strip_ansi("a\x1b]0;window title\x07b"), "ab");
+    assert_eq!(
+        strip_ansi("a\x1b]8;;http://x\x1b\\link\x1b]8;;\x1b\\b"),
+        "alinkb"
+    );
+    assert_eq!(strip_ansi("\x1b[2K\x1b[1Gdone"), "done");
+    assert_eq!(strip_ansi("lone \x1b"), "lone ");
+    assert_eq!(strip_ansi("cut \x1b[31"), "cut ");
+    assert_eq!(strip_ansi("plain ünïcode"), "plain ünïcode");
+}
+
+#[tokio::test]
+async fn ansi_and_control_characters_are_gone_from_what_is_served() {
+    let (s, w, _d) = shop_with(&["web"]).await;
+    let mut out = printed(&[(ts(1, 0), "\x1b[31mred\x1b[0m\x07 bell \u{202e}rtl")]);
+    // Not UTF-8 at all, and a NUL.
+    out.extend_from_slice(format!("{} bin ", ts(2, 0)).as_bytes());
+    out.extend_from_slice(&[0xff, 0xfe, 0x00]);
+    out.extend_from_slice(b" end\n");
+    out.extend_from_slice(&[0xff, 0xfe, b'\n', 0x00, b'\n']);
+    set_logs(&w, 1, out);
+    let chunk = s
+        .docker_logs(logs_for("shop", Some("shop-web-1")))
+        .await
+        .expect("never panics");
+    assert_eq!(chunk.lines[0].text, "red bell rtl");
+    assert!(
+        chunk.lines[1].text.starts_with("bin "),
+        "{:?}",
+        chunk.lines[1]
+    );
+    assert!(chunk
+        .lines
+        .iter()
+        .all(|l| !l.text.chars().any(|c| c.is_control())));
+}
+
+#[tokio::test]
+async fn filter_is_case_insensitive() {
+    let (s, w, _d) = shop_with(&["web"]).await;
+    set_logs(
+        &w,
+        1,
+        printed(&[
+            (ts(1, 0), "ERROR boom"),
+            (ts(2, 0), "info all fine"),
+            (ts(3, 0), "an Error again"),
+            (ts(4, 0), "\x1b[31mer\x1b[0mror coloured"),
+            (ts(5, 0), "e.r not a pattern"),
+        ]),
+    );
+    let ask = |f: &str| {
+        let mut r = logs_for("shop", Some("shop-web-1"));
+        r.filter = Some(f.into());
+        r
+    };
+    let got = s.docker_logs(ask("error")).await.expect("logs");
+    let texts: Vec<_> = got.lines.iter().map(|l| l.text.as_str()).collect();
+    assert_eq!(texts, ["ERROR boom", "an Error again", "error coloured"]);
+    // A pattern is just characters.
+    let got = s.docker_logs(ask("e.r")).await.expect("logs");
+    assert_eq!(got.lines.len(), 1);
+    assert_eq!(got.lines[0].text, "e.r not a pattern");
+    assert!(s
+        .docker_logs(ask(".*"))
+        .await
+        .expect("logs")
+        .lines
+        .is_empty());
+    // And the filter is bounded.
+    let err = s
+        .docker_logs(ask(&"a".repeat(201)))
+        .await
+        .expect_err("long");
+    assert!(matches!(err, RpcError::Validation { .. }));
+    let err = s.docker_logs(ask("a\nb")).await.expect_err("control");
+    assert!(matches!(err, RpcError::Validation { .. }));
+}
+
+#[test]
+fn follow_does_not_repeat() {
+    let a = line(ts(1, 0), "web", "a");
+    let b = line(ts(2, 5), "web", "b");
+    let c = line(ts(2, 5), "web", "c");
+    let nanos = |l: &DockerLogLine| {
+        chrono::DateTime::parse_from_rfc3339(&l.ts)
+            .expect("ts")
+            .timestamp_nanos_opt()
+            .expect("nanos")
+    };
+
+    // Without a cursor, everything.
+    assert_eq!(lines_after(vec![a.clone(), b.clone()], None).len(), 2);
+
+    // At or before the cursor is dropped; a bare timestamp has seen no line
+    // at that exact instant, so b and c are both still news.
+    let at_b = LogCursor::parse(&nanos(&b).to_string()).expect("cursor");
+    assert_eq!(
+        lines_after(vec![a.clone(), b.clone(), c.clone()], Some(&at_b)),
+        [b.clone(), c.clone()]
+    );
+    // Once b has been seen, only c is.
+    let seen_b = LogCursor::parse(&format!(
+        "{}:{:x}",
+        nanos(&b),
+        super::super::docker_logs::fingerprint(&b)
+    ))
+    .expect("cursor");
+    assert_eq!(
+        lines_after(vec![a, b, c.clone()], Some(&seen_b)),
+        [c],
+        "the line already seen at that instant is dropped, its neighbour is not"
+    );
+}
+
+#[tokio::test]
+async fn follow_polls_never_repeat_and_never_lose_a_line() {
+    let (s, w, _d) = shop_with(&["web"]).await;
+    let a = (ts(1, 0), "a");
+    let b = (ts(2, 5), "b");
+    let c = (ts(2, 5), "c same instant as b");
+    let d = (ts(3, 0), "d");
+    let texts = |ch: &hyperion_types::docker::DockerLogChunk| {
+        ch.lines.iter().map(|l| l.text.clone()).collect::<Vec<_>>()
+    };
+
+    set_logs(&w, 1, printed(&[a.clone(), b.clone()]));
+    let first = s
+        .docker_logs(logs_for("shop", Some("shop-web-1")))
+        .await
+        .expect("first");
+    assert_eq!(texts(&first), ["a", "b"]);
+    let cur = first.cursor.clone().expect("a cursor");
+
+    let poll = |cur: String| {
+        let mut r = logs_for("shop", Some("shop-web-1"));
+        r.since_cursor = Some(cur);
+        r
+    };
+
+    // Docker re-sends from the whole second; the same lines are not repeated.
+    let quiet = s.docker_logs(poll(cur.clone())).await.expect("quiet");
+    assert!(quiet.lines.is_empty(), "{:?}", quiet.lines);
+    assert_eq!(
+        quiet.cursor.as_deref(),
+        Some(cur.as_str()),
+        "nothing new, same cursor"
+    );
+    let reads = w.lock().expect("world").reads.clone();
+    let last = reads
+        .iter()
+        .rev()
+        .find(|r| r.starts_with("Logs"))
+        .expect("read");
+    let secs = chrono::DateTime::parse_from_rfc3339(&b.0)
+        .expect("ts")
+        .timestamp();
+    assert!(
+        last.contains(&format!("since: Some({secs})")),
+        "whole seconds: {last}"
+    );
+
+    // A line with the very same timestamp as the newest one arrives later.
+    set_logs(&w, 1, printed(&[a.clone(), b.clone(), c.clone()]));
+    let next = s
+        .docker_logs(poll(cur.clone()))
+        .await
+        .expect("same instant");
+    assert_eq!(
+        texts(&next),
+        ["c same instant as b"],
+        "not lost, not repeated"
+    );
+    let cur2 = next.cursor.clone().expect("cursor");
+
+    set_logs(
+        &w,
+        1,
+        printed(&[a.clone(), b.clone(), c.clone(), d.clone()]),
+    );
+    let next = s.docker_logs(poll(cur2.clone())).await.expect("later");
+    assert_eq!(texts(&next), ["d"]);
+    let cur3 = next.cursor.expect("cursor");
+    let none = s.docker_logs(poll(cur3.clone())).await.expect("none");
+    assert!(none.lines.is_empty());
+
+    // Two identical lines at one instant are two lines.
+    let e = (ts(4, 0), "same");
+    set_logs(&w, 1, printed(&[d.clone(), e.clone()]));
+    let one = s.docker_logs(poll(cur3.clone())).await.expect("one");
+    assert_eq!(texts(&one), ["same"]);
+    set_logs(&w, 1, printed(&[d.clone(), e.clone(), e.clone()]));
+    let two = s
+        .docker_logs(poll(one.cursor.expect("cursor")))
+        .await
+        .expect("two");
+    assert_eq!(texts(&two), ["same"], "the second identical line is new");
+}
+
+#[tokio::test]
+async fn a_cursor_that_is_not_one_is_refused() {
+    let (s, w, _d) = shop_with(&["web"]).await;
+    for bad in ["x", "-5", "12:zz", "1:2.3.", &"1".repeat(3000), "1:1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1.1"] {
+        let mut r = logs_for("shop", Some("shop-web-1"));
+        r.since_cursor = Some(bad.to_string());
+        let e = s.docker_logs(r).await.expect_err(bad);
+        assert!(matches!(e, RpcError::Validation { .. }), "{bad}: {e}");
+    }
+    assert_eq!(reads_of(&w, "Logs"), 0);
+}
+
+#[tokio::test]
+async fn stack_logs_merge_by_time() {
+    let (s, w, _d) = shop_with(&["web", "worker"]).await;
+    set_logs(
+        &w,
+        1,
+        printed(&[(ts(1, 0), "web one"), (ts(4, 0), "web four")]),
+    );
+    set_logs(
+        &w,
+        2,
+        printed(&[(ts(2, 0), "worker two"), (ts(3, 0), "worker three")]),
+    );
+    let chunk = s.docker_logs(logs_for("shop", None)).await.expect("stack");
+    let got: Vec<(&str, &str)> = chunk
+        .lines
+        .iter()
+        .map(|l| (l.service.as_str(), l.text.as_str()))
+        .collect();
+    assert_eq!(
+        got,
+        [
+            ("web", "web one"),
+            ("worker", "worker two"),
+            ("worker", "worker three"),
+            ("web", "web four"),
+        ]
+    );
+    assert_eq!(reads_of(&w, "Logs"), 2, "one docker logs per container");
+
+    // The pure part.
+    let merged = merge_by_ts(
+        vec![
+            vec![line(ts(1, 0), "a", "1"), line(ts(3, 0), "a", "3")],
+            vec![line(ts(2, 0), "b", "2"), line(ts(4, 0), "b", "4")],
+        ],
+        3,
+    );
+    let order: Vec<_> = merged.iter().map(|l| l.text.as_str()).collect();
+    assert_eq!(order, ["2", "3", "4"], "the newest three, oldest first");
+}
+
+#[tokio::test]
+async fn stack_reads_share_the_byte_cap_and_ask_for_the_requested_tail() {
+    let names: Vec<String> = (1..=20).map(|i| format!("s{i:02}")).collect();
+    let cts: Vec<Ct> = names
+        .iter()
+        .enumerate()
+        .map(|(i, n)| ct(i as u32 + 1, "shop", Box::leak(n.clone().into_boxed_str())))
+        .collect();
+    let w = world(cts);
+    let (s, _d) = worker_with(world_mock(&w)).await;
+    tick_at(&s, T0).await;
+    for i in 1..=20u32 {
+        set_logs(&w, i, printed(&[(ts(i, 0), "hi")]));
+    }
+
+    let chunk = s.docker_logs(logs_for("shop", None)).await.expect("stack");
+    assert_eq!(chunk.lines.len(), 20);
+    assert_eq!(reads_of(&w, "Logs"), 20);
+    // The byte cap is shared out, so all of them together stay under it.
+    let limits = w.lock().expect("world").log_limits.clone();
+    assert_eq!(limits.len(), 20);
+    assert!(limits.iter().sum::<usize>() <= MAX_LOG_BYTES, "{limits:?}");
+    // And each was asked for the tail the request named.
+    let reads = w.lock().expect("world").reads.clone();
+    assert!(reads
+        .iter()
+        .filter(|r| r.starts_with("Logs"))
+        .all(|r| r.contains("tail: 200")));
+}
+
+#[tokio::test]
+async fn a_stack_with_one_unreadable_container_still_shows_the_rest() {
+    let (s, w, _d) = shop_with(&["web", "worker"]).await;
+    set_logs(&w, 1, printed(&[(ts(1, 0), "web line")]));
+    w.lock().expect("world").logs_fail = vec![2];
+    let chunk = s
+        .docker_logs(logs_for("shop", None))
+        .await
+        .expect("partial");
+    assert_eq!(chunk.lines.len(), 1);
+    assert_eq!(chunk.unreadable, 1, "and the page can say so");
+
+    w.lock().expect("world").logs_fail = vec![1, 2];
+    let err = s
+        .docker_logs(logs_for("shop", None))
+        .await
+        .expect_err("all unreadable");
+    assert!(
+        !err.to_string().contains("secret-stderr"),
+        "docker's words stay out: {err}"
+    );
+}
+
+#[tokio::test]
+async fn docker_down_is_an_error_not_an_empty_log() {
+    let (s, w, _d) = shop_with(&["web"]).await;
+    w.lock().expect("world").logs_err = Some(DockerError::NotResponding);
+    let err = s
+        .docker_logs(logs_for("shop", Some("shop-web-1")))
+        .await
+        .expect_err("down");
+    assert!(err.to_string().contains("not responding"), "{err}");
+}
+
+#[tokio::test]
+async fn audit_only_when_actor_given() {
+    let (s, w, _d) = shop_with(&["web"]).await;
+    set_logs(&w, 1, printed(&[(ts(1, 0), "secret-looking line")]));
+    let rows = |s: &HostingService<MockAdapterPort>| {
+        let pool = s.pool.clone();
+        async move {
+            sqlx::query_as::<_, (String, String, Option<String>, String, String)>(
+                "SELECT actor_label, action, target, payload_json, result FROM audit_log \
+                 WHERE action = 'docker.logs.read'",
+            )
+            .fetch_all(&pool)
+            .await
+            .expect("audit")
+        }
+    };
+
+    let mut poll = logs_for("shop", Some("shop-web-1"));
+    poll.filter = Some("needle".into());
+    s.docker_logs(poll).await.expect("poll");
+    assert!(rows(&s).await.is_empty(), "no actor, no entry");
+
+    let mut open = logs_for("shop", Some("shop-web-1"));
+    open.audit_actor = Some("kevin".into());
+    open.filter = Some("needle".into());
+    s.docker_logs(open).await.expect("open");
+    let got = rows(&s).await;
+    assert_eq!(got.len(), 1, "{got:?}");
+    let (actor, _, target, payload, result) = &got[0];
+    assert_eq!(actor, "kevin");
+    assert_eq!(target.as_deref(), Some("shop/shop-web-1"));
+    assert_eq!(result, "ok");
+    assert!(
+        !payload.contains("needle"),
+        "the filter is not recorded: {payload}"
+    );
+    assert!(!payload.contains("secret-looking"), "{payload}");
+
+    let mut whole = logs_for("shop", None);
+    whole.audit_actor = Some("kevin".into());
+    s.docker_logs(whole).await.expect("stack");
+    let got = rows(&s).await;
+    assert_eq!(got.len(), 2);
+    assert_eq!(got[1].2.as_deref(), Some("shop"));
+
+    // A refused request leaves nothing behind.
+    let mut bad = logs_for("shop", Some("nope"));
+    bad.audit_actor = Some("kevin".into());
+    s.docker_logs(bad).await.expect_err("refused");
+    assert_eq!(rows(&s).await.len(), 2);
+}
+
+#[tokio::test]
+async fn log_text_stays_out_of_alerts() {
+    let (s, w, _d) = shop_with(&["web"]).await;
+    set_logs(&w, 1, printed(&[(ts(1, 0), "needle-in-the-log")]));
+    s.docker_logs(logs_for("shop", None)).await.expect("logs");
+    let sent = alerts(&s).await;
+    assert!(
+        sent.iter()
+            .all(|a| !format!("{a:?}").contains("needle-in-the-log")),
+        "{sent:?}"
+    );
+}
+
+#[tokio::test]
+async fn logs_need_the_module_on() {
+    let pool = open_memory().await.expect("open");
+    let s = svc(pool, happy_mocks());
+    let err = s
+        .docker_logs(logs_for("shop", None))
+        .await
+        .expect_err("module off runs no docker");
+    assert!(matches!(err, RpcError::Validation { .. }), "{err}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn bounded_map_runs_at_most_the_limit_at_once_and_keeps_order() {
+    use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+    let running = Arc::new(AtomicUsize::new(0));
+    let peak = Arc::new(AtomicUsize::new(0));
+    let (r, p) = (running.clone(), peak.clone());
+    let out = super::super::docker_logs::bounded_map((0..30u32).collect(), 8, move |i| {
+        let (r, p) = (r.clone(), p.clone());
+        async move {
+            let now = r.fetch_add(1, SeqCst) + 1;
+            p.fetch_max(now, SeqCst);
+            tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+            r.fetch_sub(1, SeqCst);
+            i * 2
+        }
+    })
+    .await;
+    assert_eq!(out, (0..30u32).map(|i| Some(i * 2)).collect::<Vec<_>>());
+    assert_eq!(running.load(SeqCst), 0);
+    let peak = peak.load(SeqCst);
+    assert!(peak <= 8, "{peak} at once");
+    assert!(peak >= 4, "and they do overlap ({peak})");
+}
+
+#[test]
+fn a_last_line_without_a_newline_is_kept_unless_the_run_was_cut() {
+    use super::super::docker_logs::parse_log_bytes;
+    let whole = format!("{} one\n{} two", ts(1, 0), ts(2, 0));
+    let got = parse_log_bytes(whole.as_bytes(), "web", false);
+    assert_eq!(got.len(), 2, "{got:?}");
+    assert_eq!(got[1].text, "two");
+    let cut = parse_log_bytes(whole.as_bytes(), "web", true);
+    assert_eq!(
+        cut.len(),
+        1,
+        "the partial line is not shown as if it were whole"
+    );
+    // Text with no timestamp rides on the line before it.
+    let odd = format!("{} one\nno stamp\n", ts(1, 0));
+    let got = parse_log_bytes(odd.as_bytes(), "web", false);
+    assert_eq!(
+        (got[1].ts.as_str(), got[1].text.as_str()),
+        (ts(1, 0).as_str(), "no stamp")
+    );
 }

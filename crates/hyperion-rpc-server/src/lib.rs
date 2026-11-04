@@ -1471,6 +1471,10 @@ async fn dispatch_request(api: Arc<dyn AgentApi>, req: Request) -> Response {
                 Err(e) => Response::Error(e),
             }
         }
+        Request::DockerLogs(req) => match api.docker_logs(req).await {
+            Ok(chunk) => Response::DockerLogs(chunk),
+            Err(e) => Response::Error(e),
+        },
         Request::AvatarFilename { user_id } => match api.avatar_filename(user_id).await {
             Ok(f) => Response::AvatarFilename(f),
             Err(e) => Response::Error(e),
@@ -3611,6 +3615,12 @@ mod tests {
         }
         async fn docker_forget_project(&self, _: String) -> Result<(), RpcError> {
             Ok(())
+        }
+        async fn docker_logs(
+            &self,
+            _: hyperion_types::docker::DockerLogRequest,
+        ) -> Result<hyperion_types::docker::DockerLogChunk, RpcError> {
+            Ok(Default::default())
         }
         async fn avatar_filename(&self, _: i64) -> Result<Option<String>, RpcError> {
             Ok(None)

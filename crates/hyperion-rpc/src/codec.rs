@@ -1439,6 +1439,8 @@ pub enum Request {
     DockerForgetProject {
         project: String,
     },
+    /// Read the log of one container or of a whole stack on this node.
+    DockerLogs(hyperion_types::docker::DockerLogRequest),
     /// Look up the avatar basename for one web_user.
     AvatarFilename {
         user_id: i64,
@@ -2770,6 +2772,7 @@ pub enum Response {
     DockerOverview(hyperion_types::docker::DockerNodeStatus),
     /// Ack for DockerForgetProject.
     DockerProjectForgotten,
+    DockerLogs(hyperion_types::docker::DockerLogChunk),
     AvatarFilename(Option<String>),
     AvatarSet,
     /// Returns the masked target address (e.g. "k****@example.cz").

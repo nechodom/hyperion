@@ -1276,6 +1276,11 @@ pub trait AgentApi: Send + Sync + 'static {
     /// Forget a Docker project on this node: Hyperion's record of it and
     /// its alert, not a container.
     async fn docker_forget_project(&self, project: String) -> Result<(), RpcError>;
+    /// Read a container's or a stack's log lines from this node's Docker.
+    async fn docker_logs(
+        &self,
+        req: hyperion_types::docker::DockerLogRequest,
+    ) -> Result<hyperion_types::docker::DockerLogChunk, RpcError>;
 
     /// Read the avatar filename column for one user.
     async fn avatar_filename(&self, user_id: i64) -> Result<Option<String>, RpcError>;

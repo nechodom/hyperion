@@ -65,6 +65,33 @@ window.addEventListener('unhandledrejection', function (ev) {
 })();
 
 // ============================================================
+//  Docker log viewer (#dl-lines). "Follow" appends rows to the
+//  open view every few seconds, so: keep the newest line in view
+//  while the reader is at the bottom (and leave them alone when
+//  they scrolled up), start a freshly loaded view at the bottom,
+//  and cap the rows so a day of following does not pile up in
+//  the page.
+// ============================================================
+(function () {
+  const MAX_ROWS = 3000;
+  const NEAR = 40;
+  let lastBox = null;
+  let stick = true;
+  document.body.addEventListener('htmx:beforeSwap', function () {
+    const box = document.getElementById('dl-lines');
+    stick = !box || (box.scrollHeight - box.scrollTop - box.clientHeight) <= NEAR;
+  });
+  document.body.addEventListener('htmx:afterSwap', function () {
+    const box = document.getElementById('dl-lines');
+    if (!box) { lastBox = null; return; }
+    const rows = box.querySelectorAll('.dl-row');
+    for (let i = 0; i < rows.length - MAX_ROWS; i++) rows[i].remove();
+    if (box !== lastBox || stick) box.scrollTop = box.scrollHeight;
+    lastBox = box;
+  });
+})();
+
+// ============================================================
 //  Password generator — existing feature, untouched.
 //  Generates a strong password into [data-genpw="<input-id>"].
 // ============================================================

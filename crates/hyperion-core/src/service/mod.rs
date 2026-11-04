@@ -46,6 +46,7 @@ mod dashboard;
 mod database;
 mod dkim;
 mod docker;
+mod docker_logs;
 mod docker_verdict;
 mod files;
 mod firewall;

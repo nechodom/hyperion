@@ -408,6 +408,17 @@ pub fn print_pretty(resp: &Response) {
                 );
             }
         }
+        Response::DockerLogs(chunk) => {
+            for l in &chunk.lines {
+                println!("{} {}  {}", l.ts, l.service, l.text);
+            }
+            if chunk.truncated {
+                println!("(output was cut short)");
+            }
+            if chunk.unreadable > 0 {
+                println!("({} container(s) could not be read)", chunk.unreadable);
+            }
+        }
         Response::EmailChangeRequest { masked_to } => {
             println!("✓ verification code sent to {masked_to}");
         }

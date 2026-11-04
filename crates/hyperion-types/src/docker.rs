@@ -126,3 +126,94 @@ pub struct DockerNodeStatus {
     pub projects: Vec<DockerProject>,
     pub disk: Option<DockerDisk>,
 }
+
+/// Lines returned when the request does not say.
+pub const DEFAULT_LOG_LINES: u32 = 200;
+/// The most lines one request may ask for.
+pub const MAX_LOG_LINES: u32 = 2000;
+/// The most log text one response carries, whatever the line count.
+pub const MAX_LOG_BYTES: usize = 1024 * 1024;
+
+/// Ask for the log of one container, or of every container of a stack.
+///
+/// `container` is a name the node looks up in its own inspect result; it is
+/// never handed to `docker`. `since_cursor` is the opaque `cursor` of an
+/// earlier answer and asks only for what came after it.
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DockerLogRequest {
+    /// The compose project; empty for the group of containers without one.
+    pub project: String,
+    /// One container of that project; `None` reads all of them.
+    pub container: Option<String>,
+    /// 0 means the default.
+    pub lines: u32,
+    pub since_cursor: Option<String>,
+    /// Plain text, matched without regard to case. Not a pattern.
+    pub filter: Option<String>,
+    /// Who opened the log, for the audit entry. `None` writes none, which is
+    /// what a follow poll sends.
+    pub audit_actor: Option<String>,
+}
+
+// The filter is what someone searched for in a log; keep it out of any
+// `{:?}` that ends up in a log file.
+impl std::fmt::Debug for DockerLogRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DockerLogRequest")
+            .field("project", &self.project)
+            .field("container", &self.container)
+            .field("lines", &self.lines)
+            .field("filter", &self.filter.as_ref().map(|_| "(set)"))
+            .finish_non_exhaustive()
+    }
+}
+
+/// One line of a container's log.
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DockerLogLine {
+    /// Docker's RFC 3339 timestamp, as printed.
+    pub ts: String,
+    /// The service the line came from (the container name when it has none).
+    pub service: String,
+    /// The text, without escape sequences or control characters.
+    pub text: String,
+}
+
+// Log text must not reach a tracing line by accident.
+impl std::fmt::Debug for DockerLogLine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DockerLogLine")
+            .field("ts", &self.ts)
+            .field("service", &self.service)
+            .field("text_len", &self.text.len())
+            .finish()
+    }
+}
+
+/// The answer to a [`DockerLogRequest`]: oldest line first.
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DockerLogChunk {
+    pub lines: Vec<DockerLogLine>,
+    /// Hand this back as `since_cursor` to get what is new. Opaque. `None`
+    /// when nothing was read.
+    pub cursor: Option<String>,
+    /// Some of the log was left out: the byte cap was reached, or the read
+    /// was cut short.
+    pub truncated: bool,
+    /// Containers of the stack whose log could not be read.
+    pub unreadable: u32,
+}
+
+impl std::fmt::Debug for DockerLogChunk {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DockerLogChunk")
+            .field("lines", &self.lines.len())
+            .field("cursor", &self.cursor)
+            .field("truncated", &self.truncated)
+            .field("unreadable", &self.unreadable)
+            .finish()
+    }
+}

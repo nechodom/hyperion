@@ -359,6 +359,10 @@ pub fn build_router(state: SharedState) -> Router {
             get(handlers::docker::get_docker_stack),
         )
         .route(
+            "/docker/:node/:project/logs",
+            get(handlers::docker::get_docker_logs),
+        )
+        .route(
             "/docker/:node/:project/forget",
             post(handlers::docker::post_forget),
         )

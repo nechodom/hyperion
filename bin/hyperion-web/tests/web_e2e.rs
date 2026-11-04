@@ -60,6 +60,22 @@ impl StubAdapters {
 
 #[async_trait]
 impl hyperion_core::AdapterPort for StubAdapters {
+    /// Only `docker logs` answers, so the log viewer has something to draw:
+    /// one line that is markup and one that is plain.
+    async fn docker_read(
+        &self,
+        cmd: hyperion_adapters::docker::DockerCmd,
+        _max_bytes: usize,
+    ) -> Result<Vec<u8>, hyperion_adapters::docker::DockerError> {
+        match cmd {
+            hyperion_adapters::docker::DockerCmd::Logs { .. } => Ok(
+                b"2024-05-01T10:00:01.000000000Z <script>alert(1)</script> \x1b[31mred\x1b[0m\n\
+                  2024-05-01T10:00:02.000000000Z second line\n"
+                    .to_vec(),
+            ),
+            _ => Err(hyperion_adapters::docker::DockerError::NotInstalled),
+        }
+    }
     async fn ensure_user(&self, _: &str, _: &str) -> Result<u32, AdapterError> {
         Ok(self.uid_seq.fetch_add(1, Ordering::SeqCst))
     }
@@ -6879,4 +6895,236 @@ async fn forgetting_a_project_needs_a_registered_node() {
         .to_str()
         .unwrap()
         .starts_with("/docker"));
+}
+
+// ---------------------------------------------------------------------------
+// Docker logs.
+// ---------------------------------------------------------------------------
+
+/// A user on a custom role holding exactly `caps`, with every hosting in scope
+/// unless `scope_all` says otherwise.
+async fn docker_cap_user(
+    app: &axum::Router,
+    sock: &std::path::Path,
+    name: &str,
+    caps: u64,
+    scope_all: bool,
+) -> String {
+    let role_id = match hyperion_rpc_client::call(
+        sock,
+        DockerReq::RoleCreate {
+            name: format!("docker-caps-{name}"),
+            capabilities: caps,
+            scope_all,
+        },
+    )
+    .await
+    .expect("role")
+    {
+        DockerResp::RoleCreate { id } => id,
+        other => panic!("unexpected role create: {other:?}"),
+    };
+    let user_id = match hyperion_rpc_client::call(
+        sock,
+        DockerReq::WebUserCreate {
+            username: name.into(),
+            email: format!("{name}@example.invalid"),
+            password: "docker-pw-12345".into(),
+            role: "operator".into(),
+        },
+    )
+    .await
+    .expect("user")
+    {
+        DockerResp::WebUserCreate { id } => id,
+        other => panic!("unexpected user create: {other:?}"),
+    };
+    hyperion_rpc_client::call(
+        sock,
+        DockerReq::WebUserSetCustomRole {
+            user_id,
+            custom_role_id: role_id,
+        },
+    )
+    .await
+    .expect("assign");
+    acme_dns_login(app, name, "docker-pw-12345").await
+}
+
+/// The `shop` stack with real-looking container ids, which is what the log
+/// viewer needs to hand docker.
+fn docker_log_snapshot() -> DockerNodeStatus {
+    let mut snap = docker_snapshot();
+    for (i, c) in snap.projects[0].containers.iter_mut().enumerate() {
+        c.id = format!("{:064x}", i + 1);
+    }
+    snap
+}
+
+fn audit_rows_sql() -> &'static str {
+    "SELECT actor_label, target, payload_json FROM audit_log WHERE action = 'docker.logs.read'"
+}
+
+#[tokio::test]
+async fn logs_need_their_own_capability() {
+    use hyperion_state::capabilities::Capability;
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d, pool) = start_agent_full(None, Some(docker_log_snapshot())).await;
+    let app = build_app(sock.clone(), admin);
+    docker_enable_master(&sock, &pool).await;
+
+    let view = Capability::DockerView.bit();
+    let logs = Capability::DockerLogs.bit();
+    let only_view = docker_cap_user(&app, &sock, "dk-viewonly", view, true).await;
+    let both = docker_cap_user(&app, &sock, "dk-both", view | logs, true).await;
+    let narrow = docker_cap_user(&app, &sock, "dk-narrow-logs", view | logs, false).await;
+
+    // Seeing the stack is not reading what it prints: no link, and the route
+    // refuses.
+    let (status, page) = acme_dns_get(&app, &only_view, "/docker/local/shop").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!page.contains("docker-logs"), "no log viewer offered");
+    assert!(!page.contains("/docker/local/shop/logs"), "{page}");
+    let (status, body) = acme_dns_get(&app, &only_view, "/docker/local/shop/logs").await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+
+    // Every tenant's containers: the capability alone is not enough.
+    let (status, _) = acme_dns_get(&app, &narrow, "/docker/local/shop/logs").await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // With both, the viewer is on the page but reads nothing until asked.
+    let (status, page) = acme_dns_get(&app, &both, "/docker/local/shop").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(page.contains("id=\"docker-logs\""));
+    assert!(page.contains("/docker/local/shop/logs"));
+    assert!(!page.contains("dl-lines") && !page.contains("hx-trigger=\"poll-tick\""));
+    let (status, body) = acme_dns_get(&app, &both, "/docker/local/shop/logs").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("second line"), "{body}");
+
+    // The node must be one of the registered ones, and the stack real.
+    let (status, _) = acme_dns_get(&app, &both, "/docker/node_unknown/shop/logs").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn log_markup_is_escaped() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d, pool) = start_agent_full(None, Some(docker_log_snapshot())).await;
+    let app = build_app(sock.clone(), admin);
+    docker_enable_master(&sock, &pool).await;
+    let cookie = acme_dns_login(&app, "kevin", "good-pw").await;
+
+    let (status, body) = acme_dns_get(&app, &cookie, "/docker/local/shop/logs").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        body.contains("&lt;script&gt;alert(1)&lt;/script&gt;"),
+        "{body}"
+    );
+    assert!(!body.contains("<script>alert"), "{body}");
+    assert!(body.contains(" red"), "ANSI colours are removed: {body}");
+    assert!(!body.contains('\u{1b}') && !body.contains("[31m"), "{body}");
+
+    // What was typed in the filter comes back as text too.
+    let (status, body) = acme_dns_get(
+        &app,
+        &cookie,
+        "/docker/local/shop/logs?filter=%22%3E%3Cimg%20src%3Dx%20onerror%3Dalert(1)%3E",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(!body.contains("<img"), "{body}");
+    assert!(
+        body.contains("&lt;img") || body.contains("&#60;img"),
+        "{body}"
+    );
+    // And so is a container name from the query that matches nothing.
+    let (status, body) = acme_dns_get(
+        &app,
+        &cookie,
+        "/docker/local/shop/logs?container=%3Cb%3Ex%3C%2Fb%3E",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!body.contains("<b>x"), "{body}");
+}
+
+#[tokio::test]
+async fn following_polls_only_while_asked_and_is_audited_once() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d, pool) = start_agent_full(None, Some(docker_log_snapshot())).await;
+    let app = build_app(sock.clone(), admin);
+    docker_enable_master(&sock, &pool).await;
+    let cookie = acme_dns_login(&app, "kevin", "good-pw").await;
+
+    // Follow off: nothing that polls.
+    let (_, body) = acme_dns_get(
+        &app,
+        &cookie,
+        "/docker/local/shop/logs?container=shop-web-1",
+    )
+    .await;
+    assert!(
+        !body.contains("poll-tick") && !body.contains("dl-poll"),
+        "{body}"
+    );
+
+    // Follow on: one element that asks again, with a cursor it was given.
+    let (status, body) = acme_dns_get(
+        &app,
+        &cookie,
+        "/docker/local/shop/logs?container=shop-web-1&follow=on",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("hx-trigger=\"poll-tick\""), "{body}");
+    assert!(body.contains("data-poll-visible") && body.contains("data-poll-ms=\"5000\""));
+    let url = body
+        .split("id=\"dl-poll\"")
+        .nth(1)
+        .and_then(|t| t.split("hx-get=\"").nth(1))
+        .and_then(|t| t.split('"').next())
+        .expect("poll url")
+        .replace("&amp;", "&");
+    assert!(
+        url.contains("poll=1") && url.contains("cursor=") && url.contains("proof="),
+        "{url}"
+    );
+
+    // The poll reads what is new (nothing), carries on, and is not audited.
+    let (status, again) = acme_dns_get(&app, &cookie, &url).await;
+    assert_eq!(status, StatusCode::OK, "{again}");
+    assert!(!again.contains("second line"), "already seen: {again}");
+    assert!(again.contains("id=\"dl-poll\""), "keeps following: {again}");
+
+    // A cursor the page was not given reads nothing and stops.
+    let (status, forged) = acme_dns_get(
+        &app,
+        &cookie,
+        "/docker/local/shop/logs?container=shop-web-1&follow=on&poll=1&cursor=0&proof=forged",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        !forged.contains("second line") && !forged.contains("dl-poll\""),
+        "{forged}"
+    );
+    assert!(forged.contains("Following stopped"), "{forged}");
+    // A real proof for another log does not work here either.
+    let other = url.replace("container=shop-web-1", "container=shop-cache-1");
+    let (_, swapped) = acme_dns_get(&app, &cookie, &other).await;
+    assert!(
+        swapped.contains("Following stopped") && !swapped.contains("second"),
+        "{swapped}"
+    );
+
+    let rows: Vec<(String, Option<String>, String)> = sqlx::query_as(audit_rows_sql())
+        .fetch_all(&pool)
+        .await
+        .expect("audit");
+    // Two opens (follow off, follow on); the polls wrote nothing.
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert!(rows
+        .iter()
+        .all(|(who, t, _)| who == "kevin" && t.as_deref() == Some("shop/shop-web-1")));
 }

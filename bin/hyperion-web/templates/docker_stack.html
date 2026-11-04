@@ -78,6 +78,10 @@
 </div>
 {% endif %}
 
+{% if let Some(logs) = logs %}
+{% include "_docker_logs.html" %}
+{% endif %}
+
 {% if let Some(d) = disk %}
 <div class="group">
   <div class="ghead">Disk used by Docker on {{ node_label }}<span class="ghead-note">read {{ d.read }}</span></div>

@@ -1,0 +1,47 @@
+{# Container and stack logs. The first render comes with the stack page and
+   shows only the form; submitting it swaps this whole block for the lines
+   (hx-get, nothing is read on page load). With "Follow" on, the block ends in
+   a #dl-poll element that asks for what is new every few seconds and swaps
+   itself for the new rows plus a fresh #dl-poll. With it off there is no such
+   element, so nothing polls; closing the page removes it. #}
+{% if logs.append %}{% include "_docker_logs_rows.html" %}{% else %}
+<div class="group" id="docker-logs">
+  <div class="ghead">Logs
+    {% if logs.opened %}<span class="ghead-note">{% if logs.follow %}following · {% endif %}{{ logs.rows.len() }} lines</span>{% endif %}
+  </div>
+  <div class="item">
+    <form class="dl-form" action="{{ logs.action }}" method="get"
+          hx-get="{{ logs.action }}" hx-target="#docker-logs" hx-swap="outerHTML" hx-trigger="submit, change">
+      <label>Container
+        <select name="container">
+          <option value=""{% if logs.container.is_empty() %} selected{% endif %}>All containers</option>
+          {% for c in logs.container_choices() %}<option value="{{ c.value }}"{% if c.selected %} selected{% endif %}>{{ c.value }}</option>{% endfor %}
+        </select>
+      </label>
+      <label>Lines
+        <select name="lines">
+          {% for n in logs.line_options() %}<option value="{{ n.value }}"{% if n.selected %} selected{% endif %}>{{ n.value }}</option>{% endfor %}
+        </select>
+      </label>
+      <label class="dl-filter">Contains
+        <input type="text" name="filter" value="{{ logs.filter }}" maxlength="200" autocomplete="off" placeholder="text to look for">
+      </label>
+      <label class="dl-follow"><input type="checkbox" name="follow" value="on"{% if logs.follow %} checked{% endif %}> Follow</label>
+      {% if let Some(o) = logs.opened_proof %}<input type="hidden" name="opened" value="{{ o }}">{% endif %}
+      <button class="btn small" type="submit">{% if logs.opened %}Refresh{% else %}Show logs{% endif %}</button>
+    </form>
+  </div>
+  {% if let Some(e) = logs.error %}
+  <div class="item"><p class="small tone-err" style="margin:0">{{ e }}</p></div>
+  {% endif %}
+  {% if logs.opened %}
+  <div class="item">
+    {% if logs.rows.is_empty() && logs.stopped.is_none() && logs.error.is_none() %}<p class="text-soft small" style="margin:0 0 0.5rem">No lines{% if !logs.filter.is_empty() %} contain that text{% endif %}.</p>{% endif %}
+    <div class="dl-lines" id="dl-lines" role="log" aria-label="Container log">
+      {% include "_docker_logs_rows.html" %}
+    </div>
+    {% if !logs.note.is_empty() %}<p class="text-soft small" style="margin:0.5rem 0 0">{{ logs.note }}</p>{% endif %}
+  </div>
+  {% endif %}
+</div>
+{% endif %}

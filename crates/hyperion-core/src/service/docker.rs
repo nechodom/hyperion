@@ -778,7 +778,7 @@ fn clean_name(s: &str) -> String {
     out
 }
 
-fn daemon_silent() -> RpcError {
+pub(super) fn daemon_silent() -> RpcError {
     RpcError::Validation {
         message: "Docker is installed but its daemon is not responding. Start Docker and \
                   try again."

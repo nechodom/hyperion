@@ -19,7 +19,8 @@ use axum::response::{Html, IntoResponse, Redirect, Response};
 use hyperion_rpc::codec::{Request, Response as RpcResponse};
 use hyperion_state::capabilities::Capability;
 use hyperion_types::docker::{
-    DockerContainer, DockerNodeEntry, DockerNodeList, DockerNodeStatus, DockerProject,
+    DockerContainer, DockerLogRequest, DockerNodeEntry, DockerNodeList, DockerNodeStatus,
+    DockerProject, DEFAULT_LOG_LINES, MAX_LOG_LINES,
 };
 use hyperion_types::NodeSummary;
 use serde::Deserialize;
@@ -61,6 +62,12 @@ pub(crate) struct NodeDockerRow {
 /// Only for readers who may see every tenant's containers.
 fn allowed(ctx: &AuthCtx) -> bool {
     ctx.can(Capability::DockerView) && ctx.scope_all()
+}
+
+/// Logs hold what the containers print, so they have a capability of their
+/// own; the rows still span every tenant, hence `scope_all`.
+fn logs_allowed(ctx: &AuthCtx) -> bool {
+    ctx.can(Capability::DockerLogs) && ctx.scope_all()
 }
 
 /// The master's own bookkeeping: whether the module is on and which nodes run
@@ -696,6 +703,8 @@ struct StackTpl<'a> {
     read: String,
     stats_note: String,
     daemon_error: Option<String>,
+    /// The log viewer, for readers who hold `DockerLogs`.
+    logs: Option<LogsPanel>,
 }
 
 fn container_tone(c: &DockerContainer) -> &'static str {
@@ -859,8 +868,401 @@ pub async fn get_docker_stack(
                 .clone()
                 .unwrap_or_else(|| "the Docker daemon did not answer".to_string())
         }),
+        logs: (logs_allowed(&ctx) && !p.containers.is_empty()).then(|| {
+            LogsPanel::closed(
+                &canonical,
+                &name,
+                p.containers.iter().map(|c| c.name.clone()).collect(),
+            )
+        }),
     };
     Ok(Html(tpl.render()?).into_response())
+}
+
+// ---------------------------------------------------------------------------
+// GET /docker/:node/:project/logs
+// ---------------------------------------------------------------------------
+
+/// How the viewer polls while "Follow" is on.
+const LOG_POLL_NOTE: &str = "Following stopped. Press Refresh to read the log again.";
+/// What the "Lines" menu offers.
+const LINE_CHOICES: [u32; 6] = [50, 100, 200, 500, 1000, 2000];
+/// Longest filter the form sends; the node enforces its own limit too.
+const FILTER_MAX_CHARS: usize = 200;
+
+struct LogRow {
+    time: String,
+    service: String,
+    text: String,
+}
+
+/// Everything `_docker_logs.html` draws. Askama escapes every field.
+struct LogsPanel {
+    /// Where the form (and the follow poll) asks.
+    action: String,
+    containers: Vec<String>,
+    /// The container chosen; empty for all of them.
+    container: String,
+    lines: u32,
+    filter: String,
+    follow: bool,
+    /// The log has been read, as opposed to the form on its own.
+    opened: bool,
+    rows: Vec<LogRow>,
+    show_service: bool,
+    note: String,
+    error: Option<String>,
+    /// Said in place of more rows when following has ended.
+    stopped: Option<String>,
+    /// Proof that this session already opened this log, so changing the
+    /// filter or the line count does not write another audit entry.
+    opened_proof: Option<String>,
+    /// The next follow request; `None` means nothing polls.
+    poll_url: Option<String>,
+    /// Only rows and the next poll element: the answer to a follow poll.
+    append: bool,
+}
+
+struct Choice {
+    value: String,
+    selected: bool,
+}
+
+impl LogsPanel {
+    /// "All containers" is the empty value; the named one is selected.
+    fn container_choices(&self) -> Vec<Choice> {
+        self.containers
+            .iter()
+            .map(|c| Choice {
+                value: c.clone(),
+                selected: *c == self.container,
+            })
+            .collect()
+    }
+
+    fn line_options(&self) -> Vec<Choice> {
+        LINE_CHOICES
+            .iter()
+            .map(|n| Choice {
+                value: n.to_string(),
+                selected: *n == self.lines,
+            })
+            .collect()
+    }
+
+    fn closed(node: &str, project: &str, containers: Vec<String>) -> Self {
+        Self {
+            action: logs_action(node, project),
+            containers,
+            container: String::new(),
+            lines: DEFAULT_LOG_LINES,
+            filter: String::new(),
+            follow: false,
+            opened: false,
+            rows: Vec::new(),
+            show_service: true,
+            note: String::new(),
+            error: None,
+            stopped: None,
+            opened_proof: None,
+            poll_url: None,
+            append: false,
+        }
+    }
+}
+
+fn logs_action(node: &str, project: &str) -> String {
+    format!("/docker/{}/{}/logs", enc(node), project_token(project))
+}
+
+#[derive(Deserialize, Default)]
+pub struct LogsQuery {
+    #[serde(default)]
+    pub container: Option<String>,
+    #[serde(default)]
+    pub lines: Option<String>,
+    #[serde(default)]
+    pub filter: Option<String>,
+    #[serde(default)]
+    pub follow: Option<String>,
+    /// Where the last answer ended, with `proof` that this page was given it.
+    #[serde(default)]
+    pub cursor: Option<String>,
+    #[serde(default)]
+    pub proof: Option<String>,
+    /// Present on the requests the follow element makes.
+    #[serde(default)]
+    pub poll: Option<String>,
+    /// Proof that this session already opened this log.
+    #[serde(default)]
+    pub opened: Option<String>,
+}
+
+#[derive(Template)]
+#[template(path = "_docker_logs.html")]
+struct LogsTpl {
+    logs: LogsPanel,
+}
+
+/// What a cursor or an "already opened" token is bound to, besides the
+/// session: the node, the stack and the container, so one cannot be used to
+/// read somewhere else without a record.
+fn log_proof_scope(kind: &str, node: &str, project: &str, container: &str, extra: &str) -> String {
+    format!("docker-log:{kind}|{node}|{project}|{container}|{extra}")
+}
+
+fn session_id(ctx: &AuthCtx) -> String {
+    ctx.session
+        .as_ref()
+        .map(|s| s.sid.clone())
+        .unwrap_or_default()
+}
+
+fn mint_log_proof(state: &SharedState, ctx: &AuthCtx, scope: &str) -> String {
+    hyperion_auth::csrf::mint(
+        state.csrf_key.as_ref(),
+        &session_id(ctx),
+        scope,
+        hyperion_types::now_secs(),
+    )
+}
+
+fn log_proof_ok(state: &SharedState, ctx: &AuthCtx, scope: &str, token: Option<&str>) -> bool {
+    token.is_some_and(|t| {
+        hyperion_auth::csrf::verify(
+            state.csrf_key.as_ref(),
+            &session_id(ctx),
+            scope,
+            t,
+            hyperion_types::now_secs(),
+        )
+    })
+}
+
+fn short_ts(ts: &str) -> String {
+    ts.chars().take(19).collect::<String>().replace('T', " ")
+}
+
+fn truthy(v: &Option<String>) -> bool {
+    v.as_deref()
+        .is_some_and(|v| !v.is_empty() && v != "0" && v != "off" && v != "false")
+}
+
+/// GET /docker/:node/:project/logs — the log viewer's rows, for htmx. Reading
+/// a log needs `DockerLogs` on top of seeing every tenant. The container the
+/// form names is only ever a name the node looks up in its own inspect
+/// result.
+///
+/// A person opening a log is audited once. A follow poll carries the cursor
+/// the previous answer handed out, signed for this session, this log and that
+/// cursor, so a poll cannot be forged to read an old part of the log without
+/// the open that comes first; one whose proof does not check out ends the
+/// following instead of reading anything.
+pub async fn get_docker_logs(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Path((node, project)): Path<(String, String)>,
+    Query(q): Query<LogsQuery>,
+) -> Result<Response, AppError> {
+    if !logs_allowed(&ctx) {
+        return Err(AppError::Forbidden);
+    }
+    let list = registry(&state).await.map_err(AppError::Rpc)?;
+    if !list.cluster_installed {
+        return Err(AppError::NotFound);
+    }
+    let canonical = registered_target(&state, &list, &node)
+        .await
+        .ok_or(AppError::NotFound)?;
+    let name = project_from_url(&project).ok_or(AppError::NotFound)?;
+
+    let container = q
+        .container
+        .as_deref()
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+        .map(str::to_string);
+    if container
+        .as_deref()
+        .is_some_and(|c| c.chars().count() > NAME_MAX_CHARS || c.chars().any(|c| c.is_control()))
+    {
+        return Err(AppError::NotFound);
+    }
+    let container_key = container.clone().unwrap_or_default();
+    let lines = q
+        .lines
+        .as_deref()
+        .and_then(|l| l.trim().parse::<u32>().ok())
+        .filter(|n| (1..=MAX_LOG_LINES).contains(n))
+        .unwrap_or(DEFAULT_LOG_LINES);
+    let filter: String = q
+        .filter
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or("")
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(FILTER_MAX_CHARS)
+        .collect();
+    let follow = truthy(&q.follow);
+    let is_poll = q.poll.is_some();
+
+    let cursor_scope =
+        |cursor: &str| log_proof_scope("cursor", &canonical, &name, &container_key, cursor);
+    let open_scope = log_proof_scope("open", &canonical, &name, &container_key, "");
+    let cursor = q
+        .cursor
+        .as_deref()
+        .filter(|c| !c.is_empty())
+        .filter(|c| log_proof_ok(&state, &ctx, &cursor_scope(c), q.proof.as_deref()))
+        .map(str::to_string);
+
+    let mut panel = LogsPanel::closed(&canonical, &name, Vec::new());
+    panel.container = container_key.clone();
+    panel.lines = lines;
+    panel.filter = filter.clone();
+    panel.follow = follow;
+    panel.opened = true;
+    panel.append = is_poll;
+
+    if is_poll && cursor.is_none() {
+        // Nothing to read from: the page's cursor is not one this session
+        // was given.
+        panel.stopped = Some(LOG_POLL_NOTE.to_string());
+        return render_logs(panel);
+    }
+
+    let already_opened = log_proof_ok(&state, &ctx, &open_scope, q.opened.as_deref());
+    let audit_actor = (cursor.is_none() && !already_opened).then(|| ctx.username.clone());
+
+    // The containers for the menu come from the node's own list.
+    let answer = crate::dispatcher::dispatch_to_node(
+        &state,
+        dispatch_target(&canonical),
+        Request::DockerLogs(DockerLogRequest {
+            project: name.clone(),
+            container: container.clone(),
+            lines,
+            since_cursor: cursor.clone(),
+            filter: (!filter.is_empty()).then(|| filter.clone()),
+            audit_actor,
+        }),
+    )
+    .await;
+    if !is_poll {
+        panel.containers = stack_container_names(&state, &canonical, &name).await;
+    }
+    match answer {
+        Ok(RpcResponse::DockerLogs(chunk)) => {
+            panel.show_service = container.is_none();
+            panel.rows = chunk
+                .lines
+                .into_iter()
+                .map(|l| LogRow {
+                    time: short_ts(&l.ts),
+                    service: l.service,
+                    text: l.text,
+                })
+                .collect();
+            let mut notes: Vec<String> = Vec::new();
+            if chunk.truncated {
+                notes.push(
+                    "The log is longer than one page can hold, so part of it is left out."
+                        .to_string(),
+                );
+            }
+            if chunk.unreadable > 0 {
+                notes.push(format!(
+                    "{} could not be read.",
+                    plural(chunk.unreadable as usize, "container", "containers")
+                ));
+            }
+            panel.note = notes.join(" ");
+            panel.opened_proof = Some(mint_log_proof(&state, &ctx, &open_scope));
+            if follow {
+                // A log with nothing in it yet has no cursor; "0" reads from
+                // the start, which is nothing, so the first line is news.
+                let next = chunk.cursor.as_deref().unwrap_or("0");
+                let proof = mint_log_proof(&state, &ctx, &cursor_scope(next));
+                panel.poll_url = Some(poll_url(
+                    &panel.action,
+                    container.as_deref(),
+                    lines,
+                    &filter,
+                    next,
+                    &proof,
+                ));
+            }
+        }
+        Ok(RpcResponse::Error(e)) => {
+            panel.error = Some(e.to_string());
+            if is_poll {
+                panel.stopped = Some(LOG_POLL_NOTE.to_string());
+            }
+        }
+        Ok(_) => {
+            panel.error = Some("The node sent something unexpected.".to_string());
+        }
+        Err(e) => {
+            panel.error = Some(format!("The node did not answer: {e}"));
+            if is_poll {
+                panel.stopped = Some(LOG_POLL_NOTE.to_string());
+            }
+        }
+    }
+    render_logs(panel)
+}
+
+/// The URL the follow element asks, carrying everything the next answer
+/// needs. The values are percent-encoded; Askama escapes the whole for HTML.
+fn poll_url(
+    action: &str,
+    container: Option<&str>,
+    lines: u32,
+    filter: &str,
+    cursor: &str,
+    proof: &str,
+) -> String {
+    let mut u = format!("{action}?lines={lines}&follow=on&poll=1");
+    if let Some(c) = container {
+        u.push_str(&format!("&container={}", enc(c)));
+    }
+    if !filter.is_empty() {
+        u.push_str(&format!("&filter={}", enc(filter)));
+    }
+    u.push_str(&format!("&cursor={}&proof={}", enc(cursor), enc(proof)));
+    u
+}
+
+/// The container names of a stack, for the menu, from the node's overview.
+/// A node that cannot say just leaves the menu with "All containers".
+async fn stack_container_names(state: &SharedState, canonical: &str, project: &str) -> Vec<String> {
+    match crate::dispatcher::dispatch_to_node(
+        state,
+        dispatch_target(canonical),
+        Request::DockerOverview,
+    )
+    .await
+    {
+        Ok(RpcResponse::DockerOverview(st)) => st
+            .projects
+            .iter()
+            .find(|p| p.name == project)
+            .map(|p| p.containers.iter().map(|c| c.name.clone()).collect())
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+fn render_logs(panel: LogsPanel) -> Result<Response, AppError> {
+    let tpl = LogsTpl { logs: panel };
+    let mut resp = Html(tpl.render()?).into_response();
+    // Log text is not something to keep in a cache or a history entry.
+    resp.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+    Ok(resp)
 }
 
 // ---------------------------------------------------------------------------
