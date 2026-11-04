@@ -1391,7 +1391,7 @@ pub(super) async fn fetch_wp_assets(
     let resp = hyperion_rpc_client::call(&state.agent_socket, Request::WpAssetList).await?;
     match resp {
         RpcResponse::WpAssetList(v) => Ok(v),
-        RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),
+        RpcResponse::Error(e) => Err(AppError::from(e)),
         _ => Err(AppError::Internal("unexpected response".into())),
     }
 }

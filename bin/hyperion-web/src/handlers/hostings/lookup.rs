@@ -41,7 +41,7 @@ pub async fn find_hosting_anywhere(
             return Err(AppError::NotFound);
         }
         Ok(RpcResponse::Error(e)) if !is_not_found_error(&e) => {
-            return Err(AppError::Rpc(e.to_string()));
+            return Err(AppError::from(e));
         }
         Ok(_) => {}
         Err(e) => return Err(AppError::from(e)),

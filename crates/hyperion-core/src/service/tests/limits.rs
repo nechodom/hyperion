@@ -478,6 +478,94 @@ async fn php_switch_fixture(
     )
 }
 
+/// A suspended site on PHP 8.3. Its pool is gone, as `suspend` removed it.
+/// The returned service holds only what a switch may touch.
+async fn suspended_php_fixture(
+    domain: &str,
+    a: MockAdapterPort,
+) -> (HostingService<MockAdapterPort>, HostingSelector) {
+    let pool = open_memory().await.expect("open");
+    let sel = HostingSelector::Domain(Domain::parse(domain).unwrap());
+    let mut setup = happy_mocks();
+    setup
+        .expect_nginx_apply_suspended()
+        .returning(|_, _, _| Ok(()));
+    setup.expect_fpm_delete().returning(|_, _| Ok(()));
+    setup.expect_db_lock().returning(|_, _| Ok(()));
+    setup.expect_linux_lock_login().returning(|_| Ok(()));
+    setup
+        .expect_linux_login_expiry()
+        .returning(|_| Ok(Some(String::new())));
+    setup
+        .expect_linux_set_login_expiry()
+        .returning(|_, _| Ok(()));
+    setup.expect_kill_user_procs().returning(|_| Ok(()));
+    let s = svc(pool.clone(), setup);
+    s.create(req(domain)).await.expect("create");
+    s.suspend(
+        sel.clone(),
+        hyperion_types::SuspendReason::Manual { message: None },
+    )
+    .await
+    .expect("suspend");
+    (svc(pool, a), sel)
+}
+
+/// A suspended site can leave an unsafe PHP without coming back online first.
+/// The new version is proven by starting a pool on it, which is then removed:
+/// resume builds the real one from the row, and ignores its failure.
+#[tokio::test]
+async fn set_php_version_on_a_suspended_site_keeps_it_offline() {
+    use std::sync::{Arc, Mutex};
+    let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+    let mut a = MockAdapterPort::new();
+    let log = calls.clone();
+    a.expect_fpm_ensure().returning(move |_, _, v| {
+        log.lock().unwrap().push(format!("ensure {v}"));
+        Ok(())
+    });
+    let log = calls.clone();
+    a.expect_fpm_delete().returning(move |_, v| {
+        log.lock().unwrap().push(format!("delete {v}"));
+        Ok(())
+    });
+    a.expect_nginx_apply_suspended().returning(|_, _, _| Ok(()));
+    a.expect_nginx_write_vhost().times(0);
+    let (s, sel) = suspended_php_fixture("parked.cz", a).await;
+
+    s.set_php_version(sel.clone(), PhpVersion::V8_4)
+        .await
+        .expect("switch");
+
+    assert_eq!(*calls.lock().unwrap(), ["ensure 8.4", "delete 8.4"]);
+    let after = s.get(sel).await.expect("get");
+    assert_eq!(after.php_version, Some(PhpVersion::V8_4));
+    assert_eq!(after.state, HostingState::Suspended);
+}
+
+/// A version that will not start must not reach the row of a suspended site:
+/// resume would then bring it back on 502s.
+#[tokio::test]
+async fn set_php_version_on_a_suspended_site_keeps_the_row_when_the_pool_fails() {
+    let mut a = MockAdapterPort::new();
+    a.expect_fpm_ensure()
+        .returning(|_, _, _| Err(AdapterError::Other("php8.4-fpm refused".into())));
+    a.expect_fpm_delete().times(0);
+    a.expect_nginx_apply_suspended().times(0);
+    a.expect_nginx_write_vhost().times(0);
+    let (s, sel) = suspended_php_fixture("parkedfail.cz", a).await;
+
+    let err = s
+        .set_php_version(sel.clone(), PhpVersion::V8_4)
+        .await
+        .expect_err("the switch must report the failure");
+    assert!(err.to_string().contains("php8.4-fpm refused"), "got: {err}");
+
+    let after = s.get(sel).await.expect("get");
+    assert_eq!(after.php_version, Some(PhpVersion::V8_3));
+    assert_eq!(after.state, HostingState::Suspended);
+}
+
 /// The new pool is up and the vhost points at it BEFORE the old pool goes:
 /// the other order left a window with no pool at all, and a failure inside
 /// that window left the site down.
