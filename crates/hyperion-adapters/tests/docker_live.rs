@@ -20,22 +20,33 @@ async fn every_read_command_parses_against_real_docker() {
     assert!(v.server.is_some(), "daemon not answering");
 
     let b = docker::run(&DockerCmd::BuildxVersion, MAX).await;
-    println!("buildx: {:?}", b.map(|o| String::from_utf8_lossy(&o).into_owned()));
+    println!(
+        "buildx: {:?}",
+        b.map(|o| String::from_utf8_lossy(&o).into_owned())
+    );
 
     let ps = docker::run(&DockerCmd::PsAll, MAX).await.unwrap();
     let ids = docker::parse_ps(&ps).unwrap();
 
     if !ids.is_empty() {
-        let raw = docker::run(&DockerCmd::Inspect(ids.clone()), MAX).await.unwrap();
+        let raw = docker::run(&DockerCmd::Inspect(ids.clone()), MAX)
+            .await
+            .unwrap();
         let cs = docker::parse_inspect(&raw).unwrap();
         assert_eq!(cs.len(), ids.len());
 
         let first = docker::ContainerId::parse(&cs[0].id).unwrap();
-        let logs = DockerCmd::Logs { id: first, tail: 20, since: None };
+        let logs = DockerCmd::Logs {
+            id: first,
+            tail: 20,
+            since: None,
+        };
         docker::run(&logs, MAX).await.unwrap();
 
         let img = docker::ImageRef::parse(&cs[0].image_id).unwrap();
-        docker::run(&DockerCmd::ImageInspect(img), MAX).await.unwrap();
+        docker::run(&DockerCmd::ImageInspect(img), MAX)
+            .await
+            .unwrap();
     }
 
     let st = docker::run(&DockerCmd::Stats, MAX).await.unwrap();

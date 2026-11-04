@@ -295,6 +295,9 @@ pub trait AdapterPort: Send + Sync {
 
     /// One read-only `docker` command, output capped at `max_bytes`. Default
     /// impl says docker is absent, so stub adapters need no change.
+    ///
+    /// The raw bytes may hold `Config.Env` and other secrets (inspect). They go
+    /// only to a `docker::parse_*` function and are never logged or sent over RPC.
     async fn docker_read(
         &self,
         _cmd: hyperion_adapters::docker::DockerCmd,

@@ -40,7 +40,8 @@ pub struct ContainerId(String);
 impl ContainerId {
     pub fn parse(s: &str) -> Result<Self, DockerError> {
         let ok = (12..=64).contains(&s.len())
-            && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+            && s.bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
         if ok {
             Ok(Self(s.to_string()))
         } else {
@@ -81,7 +82,11 @@ pub enum DockerCmd {
     BuildxVersion,
     PsAll,
     Inspect(Vec<ContainerId>),
-    Logs { id: ContainerId, tail: u32, since: Option<i64> },
+    Logs {
+        id: ContainerId,
+        tail: u32,
+        since: Option<i64>,
+    },
     Stats,
     SystemDf,
     ImageInspect(ImageRef),
@@ -130,6 +135,10 @@ impl DockerCmd {
 
 /// Run one read command against the system docker, returning at most
 /// `max_bytes` of its output.
+///
+/// The raw output may hold `Config.Env` and other secrets (inspect). It goes
+/// only to a `parse_*` function in this module and is never logged or sent
+/// over RPC.
 pub async fn run(cmd: &DockerCmd, max_bytes: usize) -> Result<Vec<u8>, DockerError> {
     let bin = DOCKER_PATHS
         .iter()
@@ -157,7 +166,11 @@ async fn pump<R: tokio::io::AsyncRead + Unpin>(
         match r.read_until(b'\n', &mut line).await {
             Ok(0) | Err(_) => return,
             Ok(_) => {
-                let c = if is_err { Chunk::Err(line) } else { Chunk::Out(line) };
+                let c = if is_err {
+                    Chunk::Err(line)
+                } else {
+                    Chunk::Out(line)
+                };
                 if tx.send(c).is_err() {
                     return;
                 }
@@ -203,16 +216,31 @@ pub(crate) async fn run_with(
                 Chunk::Out(b) => out.extend_from_slice(&b),
                 // Logs: container stderr arrives on our stderr; keep the
                 // lines in arrival order with the rest.
-                Chunk::Err(b) if merge => out.extend_from_slice(&b),
-                Chunk::Err(b) => err.extend_from_slice(&b),
+                // stderr is also kept on its own, so a failing `docker logs`
+                // can be told from a container that wrote to stderr.
+                Chunk::Err(b) => {
+                    err.extend_from_slice(&b);
+                    if merge {
+                        out.extend_from_slice(&b);
+                    }
+                }
             }
-            if out.len() + err.len() > max_bytes {
+            let held = if merge {
+                out.len()
+            } else {
+                out.len() + err.len()
+            };
+            if held > max_bytes {
                 truncated = true;
                 let _ = child.start_kill();
                 break;
             }
         }
-        let status = if truncated { None } else { child.wait().await.ok() };
+        let status = if truncated {
+            None
+        } else {
+            child.wait().await.ok()
+        };
         (out, err, status, truncated)
     };
 
@@ -226,10 +254,19 @@ pub(crate) async fn run_with(
     };
     if truncated {
         let _ = child.wait().await;
-        out.truncate(max_bytes);
-        return Ok(out);
-    }
-    if status.is_some_and(|s| s.success()) || !out.is_empty() {
+        // A killed run is not a failure when it produced output. With no
+        // stdout, a flood of stderr is one: empty must not read as "nothing".
+        if !out.is_empty() {
+            out.truncate(max_bytes);
+            return Ok(out);
+        }
+    } else if merge {
+        // `docker logs` exits 0 whatever the container did, so a non-zero
+        // exit is docker's own failure, not log text.
+        if status.is_some_and(|s| s.success()) {
+            return Ok(out);
+        }
+    } else if status.is_some_and(|s| s.success()) || !out.is_empty() {
         return Ok(out);
     }
     let mut text = String::from_utf8_lossy(&err).trim().to_string();
@@ -394,7 +431,9 @@ fn container_of(r: InspectRow) -> DockerContainer {
     let mut ports = Vec::new();
     for (key, binds) in r.network_settings.ports.iter().flatten() {
         let (cp, proto) = key.split_once('/').unwrap_or((key.as_str(), "tcp"));
-        let Ok(container_port) = cp.parse::<u16>() else { continue };
+        let Ok(container_port) = cp.parse::<u16>() else {
+            continue;
+        };
         for b in binds.iter().flatten() {
             if let Ok(host_port) = b.host_port.parse::<u16>() {
                 ports.push(DockerPort {
@@ -407,8 +446,12 @@ fn container_of(r: InspectRow) -> DockerContainer {
         }
     }
     ports.sort_by(|a, b| {
-        (a.container_port, &a.proto, a.host_port, &a.host_ip)
-            .cmp(&(b.container_port, &b.proto, b.host_port, &b.host_ip))
+        (a.container_port, &a.proto, a.host_port, &a.host_ip).cmp(&(
+            b.container_port,
+            &b.proto,
+            b.host_port,
+            &b.host_ip,
+        ))
     });
     DockerContainer {
         name: r.name.trim_start_matches('/').to_string(),
@@ -465,10 +508,18 @@ pub fn parse_stats(bytes: &[u8]) -> Result<Vec<ContainerStats>, DockerError> {
     Ok(jsonl::<StatsRow>(bytes)?
         .into_iter()
         .map(|r| ContainerStats {
-            id: if r.container.is_empty() { r.id } else { r.container },
+            id: if r.container.is_empty() {
+                r.id
+            } else {
+                r.container
+            },
             name: r.name,
             cpu_pct_x100: parse_pct_x100(&r.cpu_perc),
-            mem_bytes: r.mem_usage.split('/').next().and_then(|m| parse_size(m.trim())),
+            mem_bytes: r
+                .mem_usage
+                .split('/')
+                .next()
+                .and_then(|m| parse_size(m.trim())),
         })
         .collect())
 }
@@ -572,8 +623,16 @@ mod tests {
             DockerCmd::BuildxVersion,
             DockerCmd::PsAll,
             DockerCmd::Inspect(vec![id('a'), id('b')]),
-            DockerCmd::Logs { id: id('a'), tail: 100, since: Some(1_700_000_000) },
-            DockerCmd::Logs { id: id('a'), tail: 5, since: None },
+            DockerCmd::Logs {
+                id: id('a'),
+                tail: 100,
+                since: Some(1_700_000_000),
+            },
+            DockerCmd::Logs {
+                id: id('a'),
+                tail: 5,
+                since: None,
+            },
             DockerCmd::Stats,
             DockerCmd::SystemDf,
             DockerCmd::ImageInspect(ImageRef::parse("nginx:alpine").unwrap()),
@@ -674,8 +733,8 @@ mod tests {
 
     #[test]
     fn system_df_parses() {
-        let d = parse_system_df(include_bytes!("../tests/fixtures/docker/system_df.jsonl"))
-            .unwrap();
+        let d =
+            parse_system_df(include_bytes!("../tests/fixtures/docker/system_df.jsonl")).unwrap();
         assert_eq!(d.images_bytes, 94_600_000);
         assert_eq!(d.containers_bytes, 94_210);
         assert_eq!(d.volumes_bytes, 0);
@@ -743,15 +802,81 @@ mod tests {
         // stderr counts against the same bound
         let flood_err = script(&d, "exec yes 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee' >&2");
         let out = run_with(&flood_err, &DockerCmd::PsAll, 4096, Duration::from_secs(20)).await;
-        assert!(out.is_ok() || matches!(out, Err(DockerError::Failed(_))), "{out:?}");
+        assert!(
+            matches!(&out, Err(DockerError::Failed(m)) if m.starts_with("eeee") && m.len() <= 2000),
+            "{out:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn logs_exit_one_is_failed_in_both_forms() {
+        let d = tempfile::tempdir().unwrap();
+        let cmd = DockerCmd::Logs {
+            id: id('a'),
+            tail: 10,
+            since: None,
+        };
+        // stderr only
+        let s = script(
+            &d,
+            "echo 'Error response from daemon: No such container' >&2; exit 1",
+        );
+        let r = run_with(&s, &cmd, 4096, Duration::from_secs(5)).await;
+        assert!(
+            matches!(&r, Err(DockerError::Failed(m)) if m.contains("No such container")),
+            "{r:?}"
+        );
+        // some stdout first, then the failure
+        let s = script(
+            &d,
+            "echo partial; echo 'Error response from daemon: boom' >&2; exit 1",
+        );
+        let r = run_with(&s, &cmd, 4096, Duration::from_secs(5)).await;
+        assert!(
+            matches!(&r, Err(DockerError::Failed(m)) if m.contains("boom")),
+            "{r:?}"
+        );
+        // daemon down
+        let s = script(
+            &d,
+            "echo 'Cannot connect to the Docker daemon at unix:///x' >&2; exit 1",
+        );
+        let r = run_with(&s, &cmd, 4096, Duration::from_secs(5)).await;
+        assert!(matches!(r, Err(DockerError::NotResponding)), "{r:?}");
+    }
+
+    #[tokio::test]
+    async fn logs_truncated_run_is_ok_and_container_stderr_is_kept() {
+        let d = tempfile::tempdir().unwrap();
+        let cmd = DockerCmd::Logs {
+            id: id('a'),
+            tail: 10,
+            since: None,
+        };
+        let s = script(&d, "exec yes 'llllllllllllllllllllllllllllllll'");
+        let out = run_with(&s, &cmd, 4096, Duration::from_secs(20))
+            .await
+            .unwrap();
+        assert_eq!(out.len(), 4096);
+        let s = script(&d, "exec yes 'llllllllllllllllllllllllllllllll' >&2");
+        let out = run_with(&s, &cmd, 4096, Duration::from_secs(20))
+            .await
+            .unwrap();
+        assert_eq!(out.len(), 4096);
     }
 
     #[tokio::test]
     async fn logs_keep_both_streams() {
         let d = tempfile::tempdir().unwrap();
         let s = script(&d, "echo out-line; echo err-line >&2");
-        let cmd = DockerCmd::Logs { id: id('a'), tail: 10, since: None };
-        let out = run_with(&s, &cmd, 4096, Duration::from_secs(5)).await.unwrap();
+        let cmd = DockerCmd::Logs {
+            id: id('a'),
+            tail: 10,
+            since: None,
+        };
+        let out = run_with(&s, &cmd, 4096, Duration::from_secs(5))
+            .await
+            .unwrap();
         let t = String::from_utf8(out).unwrap();
         assert!(t.contains("out-line") && t.contains("err-line"), "{t}");
     }
@@ -761,10 +886,16 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let s = script(&d, "echo 'no such container' >&2; exit 1");
         let r = run_with(&s, &DockerCmd::PsAll, 4096, Duration::from_secs(5)).await;
-        assert!(matches!(&r, Err(DockerError::Failed(m)) if m.contains("no such container")), "{r:?}");
+        assert!(
+            matches!(&r, Err(DockerError::Failed(m)) if m.contains("no such container")),
+            "{r:?}"
+        );
         let big = script(&d, "yes eeeeeeeeeeeeeeee | head -c 100000 >&2; exit 1");
         let r = run_with(&big, &DockerCmd::PsAll, 1 << 20, Duration::from_secs(5)).await;
-        assert!(matches!(&r, Err(DockerError::Failed(m)) if m.len() <= 2100), "{r:?}");
+        assert!(
+            matches!(&r, Err(DockerError::Failed(m)) if m.len() <= 2100),
+            "{r:?}"
+        );
     }
 
     #[tokio::test]
