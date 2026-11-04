@@ -6,6 +6,7 @@
 //! load on the same sites if they started together, and none of them should
 //! compete with provisioning right after boot.
 
+use hyperion_core::AdapterPort;
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
@@ -48,6 +49,7 @@ pub(crate) fn spawn_all(svc: &Svc, cert_renewal_window_days: i64) {
     spawn_monitor(svc);
     spawn_php_mem_auto(svc);
     spawn_php_workers(svc);
+    spawn_fpm_recover(svc);
     spawn_site_check(svc);
     // acme-dns responder: idle unless the master's operator enabled it in
     // Settings → HTTPS (the row is never synced to workers).
@@ -382,6 +384,23 @@ fn spawn_php_mem_auto(svc: &Svc) {
             Ok(n) if n > 0 => tracing::info!(pools = n, "php mem auto: rewrote pools"),
             Ok(_) => {}
             Err(e) => tracing::warn!(error=%e, "php mem auto tick failed"),
+        }
+    });
+}
+
+/// A failed php<ver>-fpm unit is a 502 on every site of that version, and
+/// systemd will not fix it: Debian 12's own package has no `Restart=`,
+/// and sury's `Restart=on-failure` gives up at the start limit (5 in 10 s).
+/// This is the only thing that clears both, so it runs here rather than as a
+/// `Restart=` drop-in, which would add nothing on the sury units the installer
+/// sets up. Own task because `systemctl start` waits for FPM to be ready. The
+/// first run is after boot's own sweep in `spawn_fpm_repair`.
+fn spawn_fpm_recover(svc: &Svc) {
+    every(svc, 60, 30, |svc| async move {
+        match svc.adapters.fpm_recover_failed().await {
+            Ok(0) => {}
+            Ok(n) => tracing::warn!(recovered = n, "kicked failed FPM services back up"),
+            Err(e) => tracing::error!(error = %e, "FPM failed-state recovery sweep errored"),
         }
     });
 }
