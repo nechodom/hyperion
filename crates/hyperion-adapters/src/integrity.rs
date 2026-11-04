@@ -197,6 +197,62 @@ pub async fn verify_plugins(user: &str, htdocs: &str) -> Result<PluginChecksums,
 pub struct MalwareScan {
     pub available: bool,
     pub hits: Vec<WpMalwareHit>,
+    /// clamscan exited 2 (part of the tree could not be read) but still
+    /// reported detections. The hits are real; the absence of more is not
+    /// proven.
+    pub partial: bool,
+}
+
+/// Where freshclam keeps the signature database.
+const CLAMAV_DB_DIR: &str = "/var/lib/clamav";
+
+/// Does this node have any ClamAV signatures yet? Right after the package
+/// installs, `freshclam` is still downloading them and `clamscan` exits 2
+/// with "No supported database files found". That is a state to wait out,
+/// not a scan that failed.
+pub fn clamav_db_present() -> bool {
+    clamav_db_present_in(Path::new(CLAMAV_DB_DIR))
+}
+
+fn clamav_db_present_in(dir: &Path) -> bool {
+    std::fs::read_dir(dir).is_ok_and(|rd| {
+        rd.flatten().any(|e| {
+            matches!(
+                e.path().extension().and_then(|x| x.to_str()),
+                Some("cvd" | "cld")
+            )
+        })
+    })
+}
+
+/// Turn a finished `clamscan` run into a [`MalwareScan`].
+///
+/// Exit 0 = clean, 1 = infections, 2 = an error occurred. Exit 2 is
+/// usually one unreadable file, so detections printed before it are kept
+/// (`partial`); without any, a half-walked tree proves nothing and the scan
+/// is not `available`. Any other code is not a result at all.
+pub fn classify_clamscan(code: i32, stdout: &str) -> MalwareScan {
+    match code {
+        0 => MalwareScan {
+            available: true,
+            ..Default::default()
+        },
+        1 => MalwareScan {
+            available: true,
+            // Detections go to stdout; stderr carries only diagnostics.
+            hits: parse_clamscan_output(stdout),
+            partial: false,
+        },
+        2 => {
+            let hits = parse_clamscan_output(stdout);
+            MalwareScan {
+                available: !hits.is_empty(),
+                hits,
+                partial: true,
+            }
+        }
+        _ => MalwareScan::default(),
+    }
 }
 
 /// First `clamscan` binary that exists on this node, if any.
@@ -217,10 +273,10 @@ pub fn clamav_available() -> bool {
 /// Recursively scan `path` for malware signatures.
 ///
 /// Exit-code contract (`clamscan(1)`): 0 = nothing found, 1 = infections
-/// found, 2 = an error occurred. Only 1 is a *result*; we deliberately
-/// surface 2 as an error rather than as "clean", because 2 means some part
-/// of the tree could not be read and a partial pass must not be reported as
-/// a pass.
+/// found, 2 = an error occurred. Exit 2 with no detections is an error, not
+/// "clean": some part of the tree could not be read and a partial pass must
+/// not be reported as a pass. Exit 2 WITH detections keeps them, marked
+/// `partial` (see [`classify_clamscan`]).
 pub async fn scan_malware(path: &str) -> Result<MalwareScan, AdapterError> {
     scan_malware_niced(path, 0).await
 }
@@ -267,22 +323,16 @@ pub async fn scan_malware_niced(path: &str, niceness: i32) -> Result<MalwareScan
     } else {
         run_capturing(bin, &scan_args).await?
     };
-    match out.code {
-        0 => Ok(MalwareScan {
-            available: true,
-            hits: Vec::new(),
-        }),
-        1 => Ok(MalwareScan {
-            available: true,
-            // Detections go to stdout; stderr carries only diagnostics.
-            hits: parse_clamscan_output(&out.stdout),
-        }),
-        code => Err(AdapterError::Command {
-            cmd: format!("{bin} -r --infected --no-summary {path}"),
-            code,
-            stderr_tail: out.stderr,
-        }),
+    let scan = classify_clamscan(out.code, &out.stdout);
+    if scan.available {
+        return Ok(scan);
     }
+    // Nothing usable: no pass at all, so say why.
+    Err(AdapterError::Command {
+        cmd: format!("{bin} -r --infected --no-summary {path}"),
+        code: out.code,
+        stderr_tail: out.stderr,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -732,6 +782,54 @@ LibClamAV Warning: something
                 "must not invent a hit from {s:?}"
             );
         }
+    }
+
+    #[test]
+    fn exit_two_keeps_real_hits_and_marks_partial() {
+        // One unreadable file makes clamscan exit 2 even though it found a
+        // webshell elsewhere; dropping that hit would hide a real infection.
+        let out = "/home/site/htdocs/wp-content/uploads/x.php: Php.Trojan.Webshell-1 FOUND\n";
+        let scan = classify_clamscan(2, out);
+        assert!(scan.available);
+        assert!(scan.partial);
+        assert_eq!(scan.hits.len(), 1);
+        assert_eq!(scan.hits[0].signature, "Php.Trojan.Webshell-1");
+    }
+
+    #[test]
+    fn exit_two_without_hits_proves_nothing() {
+        let scan = classify_clamscan(2, "");
+        assert!(!scan.available, "a partial walk with no hits is not a pass");
+        assert!(scan.hits.is_empty());
+    }
+
+    #[test]
+    fn exit_zero_is_not_partial() {
+        let scan = classify_clamscan(0, "");
+        assert!(scan.available);
+        assert!(!scan.partial);
+        assert!(scan.hits.is_empty());
+        let scan = classify_clamscan(1, "/h/a.php: Php.Trojan.Agent-1 FOUND\n");
+        assert!(scan.available && !scan.partial);
+        assert_eq!(scan.hits.len(), 1);
+    }
+
+    #[test]
+    fn missing_signature_db_is_not_a_failure() {
+        let dir = std::env::temp_dir().join(format!("hyp-clamdb-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // Absent directory and a directory with only freshclam's lock/temp
+        // files both read as "signatures still downloading".
+        assert!(!clamav_db_present_in(&dir));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        std::fs::write(dir.join("freshclam.dat"), b"x").expect("write");
+        assert!(!clamav_db_present_in(&dir));
+        std::fs::write(dir.join("daily.cld"), b"x").expect("write");
+        assert!(clamav_db_present_in(&dir));
+        std::fs::remove_file(dir.join("daily.cld")).expect("rm");
+        std::fs::write(dir.join("main.cvd"), b"x").expect("write");
+        assert!(clamav_db_present_in(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // -- guards ------------------------------------------------------------

@@ -319,6 +319,37 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(newly_flagged)
     }
 
+    /// [`wp_integrity_scan_tick`](Self::wp_integrity_scan_tick) about once a
+    /// day, however often it is asked. `None` = not due, `Some(flagged)` =
+    /// swept.
+    ///
+    /// The last run is stamped in `node_kv` BEFORE the sweep, so neither a
+    /// restart (every deploy restarts the agent) nor a sweep that dies half
+    /// way starts it again straight away. With a plain 24 h timer the sweep
+    /// fired a few minutes after every agent start.
+    pub async fn wp_integrity_tick(&self) -> Result<Option<i64>, RpcError> {
+        self.wp_integrity_tick_at(now_secs()).await
+    }
+
+    pub(super) async fn wp_integrity_tick_at(&self, now: i64) -> Result<Option<i64>, RpcError> {
+        // A read that failed is not "never ran": sweeping on it could repeat
+        // a docroot-wide scan, so it waits for the next tick instead.
+        let last_run = match hyperion_state::node_kv::get(&self.pool, INTEGRITY_LAST_RUN_KV).await {
+            Ok(v) => v.and_then(|s| s.trim().parse::<i64>().ok()).unwrap_or(0),
+            Err(e) => {
+                tracing::warn!(error = %e, "integrity: last run unreadable — skipping");
+                return Ok(None);
+            }
+        };
+        if !integrity_tick_due(last_run, now) {
+            return Ok(None);
+        }
+        hyperion_state::node_kv::set(&self.pool, INTEGRITY_LAST_RUN_KV, &now.to_string(), now)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("integrity: stamp last run: {e}")))?;
+        self.wp_integrity_scan_tick().await.map(Some)
+    }
+
     /// Read every hosting's last stored integrity scan (this node only)
     /// for the cluster-wide dashboard. Mirrors `vuln_findings_list`, but
     /// deliberately returns CLEAN and COULDN'T-CHECK rows too: "we have
@@ -383,6 +414,21 @@ pub(super) const INTEGRITY_ENABLED_KV_KEY: &str = "integrity_scan_enabled";
 /// WordPress at all. A sentinel rather than free text because the sweep
 /// branches on it — a static site is *skipped*, not *reported*.
 pub(super) const INTEGRITY_ERR_NOT_WORDPRESS: &str = "hosting has no WordPress installation";
+
+/// `node_kv` key: unix seconds the integrity sweep last started.
+pub(super) const INTEGRITY_LAST_RUN_KV: &str = "integrity_last_run_at";
+
+/// Minimum gap between two integrity sweeps. Twenty hours rather than a
+/// flat day, for the same reason as [`CLAMAV_MIN_INTERVAL_SECS`]: a sweep
+/// that starts a little late must not push the next one past the cutoff and
+/// halve the cadence.
+pub(super) const INTEGRITY_TICK_INTERVAL_SECS: i64 = 20 * 3600;
+
+/// Is the integrity sweep due? A stamp from the future (the clock moved
+/// back) counts as due, or the sweep would stay off until the clock caught up.
+pub(super) fn integrity_tick_due(last_run: i64, now: i64) -> bool {
+    last_run <= 0 || last_run > now || now - last_run >= INTEGRITY_TICK_INTERVAL_SECS
+}
 
 /// Minimum gap between two ClamAV passes over the same docroot. Twenty
 /// hours rather than a flat day so ordinary jitter in the daily sweep
@@ -470,6 +516,13 @@ pub(super) async fn integrity_malware_pass(
         ),
         None => (false, Vec::new(), 0, 0),
     };
+    // Installed but still downloading signatures right after the package
+    // went in: clamscan would exit 2 on every run. Wait, without the
+    // failure back-off or a failed stamp.
+    if !integrity::clamav_db_present() {
+        errors.push("malware scan waiting: ClamAV signatures are still downloading".into());
+        return carry();
+    }
     if clamav_pass_held_off(prior, now) {
         if let Some(p) = prior.filter(|p| p.clamav_failed_at > 0) {
             errors.push(format!(
@@ -486,20 +539,37 @@ pub(super) async fn integrity_malware_pass(
         return carry();
     };
     match integrity::scan_malware_niced(&detail.root_dir, scan_niceness).await {
-        Ok(scan) => (
-            scan.available,
-            scan.hits,
-            if scan.available { now } else { 0 },
-            0,
-        ),
-        // clamscan exited ≥ 2: part of the tree could not be read, so this
-        // pass proves nothing. "Couldn't check" — we never build a pass on
-        // top of a partial walk.
+        Ok(scan) => malware_scan_outcome(scan, now, errors),
+        // clamscan exited ≥ 2 without a single detection: part of the tree
+        // could not be read, so this pass proves nothing. "Couldn't check"
+        // — we never build a pass on top of a partial walk.
         Err(e) => {
             errors.push(format!("malware scan failed: {e}"));
             (false, Vec::new(), 0, now)
         }
     }
+}
+
+/// Fold one finished ClamAV run into the pass tuple. A partial run that
+/// still found something counts as having run: the hits are real, and a
+/// retry back-off would only delay telling anyone. The report says it was
+/// partial, so the missing hits are not read as absent.
+pub(super) fn malware_scan_outcome(
+    scan: integrity::MalwareScan,
+    now: i64,
+    errors: &mut Vec<String>,
+) -> (bool, Vec<hyperion_types::WpMalwareHit>, i64, i64) {
+    if scan.partial && scan.available {
+        errors.push(
+            "malware scan was partial: some files could not be read, so more may be hiding".into(),
+        );
+    }
+    (
+        scan.available,
+        scan.hits,
+        if scan.available { now } else { 0 },
+        0,
+    )
 }
 
 /// Fold the three probe outcomes into the wire result.

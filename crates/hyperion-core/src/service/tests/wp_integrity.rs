@@ -418,3 +418,103 @@ async fn wp_integrity_stored_on_a_non_wordpress_site_says_so() {
     assert_eq!(r.error.as_deref(), Some(INTEGRITY_ERR_NOT_WORDPRESS));
     assert!(!r.is_clean());
 }
+
+/// clamscan exit 2 with detections: the hits are kept, the pass counts as
+/// having run (so no retry back-off), and the report says it was partial.
+#[test]
+fn a_partial_clamav_pass_keeps_its_hits_without_a_backoff() {
+    use super::super::wp_integrity::malware_scan_outcome;
+    let now = 1_700_000_000;
+    let hit = hyperion_types::WpMalwareHit {
+        path: "/home/x/htdocs/wp-content/uploads/a.php".into(),
+        signature: "Php.Trojan.Webshell-1".into(),
+    };
+    let mut errors = Vec::new();
+    let (available, hits, at, failed_at) = malware_scan_outcome(
+        integrity::MalwareScan {
+            available: true,
+            hits: vec![hit.clone()],
+            partial: true,
+        },
+        now,
+        &mut errors,
+    );
+    assert!(available);
+    assert_eq!(hits, vec![hit]);
+    assert_eq!(at, now);
+    assert_eq!(failed_at, 0, "real hits are not a failure");
+    assert_eq!(errors.len(), 1);
+    assert!(errors[0].contains("partial"), "{errors:?}");
+
+    // A complete pass says nothing extra.
+    let mut errors = Vec::new();
+    let (available, _, at, failed_at) = malware_scan_outcome(
+        integrity::MalwareScan {
+            available: true,
+            ..Default::default()
+        },
+        now,
+        &mut errors,
+    );
+    assert!(available && at == now && failed_at == 0);
+    assert!(errors.is_empty());
+}
+
+/// The tick checks every ten minutes but sweeps at most about once a day,
+/// and the stamp is in the database, so the agent restart every deploy
+/// causes does not start another sweep.
+#[tokio::test]
+async fn integrity_tick_does_not_rerun_after_restart() {
+    let pool = open_memory().await.expect("open");
+    let s = svc(pool.clone(), MockAdapterPort::new());
+    let t0 = 1_700_000_000;
+    assert_eq!(
+        s.wp_integrity_tick_at(t0).await.expect("tick"),
+        Some(0),
+        "never ran: due"
+    );
+    assert_eq!(
+        hyperion_state::node_kv::get(&pool, "integrity_last_run_at")
+            .await
+            .expect("kv")
+            .as_deref(),
+        Some(t0.to_string().as_str()),
+        "stamped when it started"
+    );
+    // The agent after a restart, over the same database.
+    let again = svc(pool.clone(), MockAdapterPort::new());
+    assert_eq!(
+        again.wp_integrity_tick_at(t0 + 600).await.expect("tick"),
+        None
+    );
+    assert_eq!(
+        again
+            .wp_integrity_tick_at(t0 + 19 * 3600)
+            .await
+            .expect("tick"),
+        None
+    );
+    assert_eq!(
+        again
+            .wp_integrity_tick_at(t0 + 20 * 3600)
+            .await
+            .expect("tick"),
+        Some(0),
+        "twenty hours on it is due again"
+    );
+}
+
+/// A stamp that cannot be read is not "never ran": the sweep waits.
+#[tokio::test]
+async fn integrity_tick_skips_when_the_stamp_is_unreadable() {
+    let pool = open_memory().await.expect("open");
+    sqlx::query("DROP TABLE node_kv")
+        .execute(&pool)
+        .await
+        .expect("drop");
+    let s = svc(pool, MockAdapterPort::new());
+    assert_eq!(
+        s.wp_integrity_tick_at(1_700_000_000).await.expect("tick"),
+        None
+    );
+}

@@ -565,15 +565,18 @@ fn spawn_wp_system_cron(svc: &Svc) {
     });
 }
 
-/// WordPress integrity sweep — once per day. The other half of the
+/// WordPress integrity sweep — about once a day. The other half of the
 /// defender: verifies core + plugin files against the checksums
 /// WordPress.org publishes and (where clamscan exists) sweeps each
 /// docroot, then notifies admins about NEWLY-appeared findings.
+/// Checked every 10 minutes; `wp_integrity_tick` decides, from a persisted
+/// stamp, whether the sweep is due, so a restart does not start another.
 fn spawn_wp_integrity(svc: &Svc) {
-    every(svc, 6 * MIN, DAY, |svc| async move {
-        match svc.wp_integrity_scan_tick().await {
-            Ok(n) if n > 0 => tracing::warn!(flagged = n, "wp integrity tick"),
-            Ok(_) => tracing::debug!("wp integrity tick: no new findings"),
+    every(svc, 6 * MIN, 10 * MIN, |svc| async move {
+        match svc.wp_integrity_tick().await {
+            Ok(Some(n)) if n > 0 => tracing::warn!(flagged = n, "wp integrity tick"),
+            Ok(Some(_)) => tracing::debug!("wp integrity tick: no new findings"),
+            Ok(None) => {}
             Err(e) => tracing::warn!(error=%e, "wp integrity tick failed"),
         }
     });
