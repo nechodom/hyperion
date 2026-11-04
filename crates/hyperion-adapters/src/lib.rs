@@ -17,6 +17,7 @@ pub mod cmd;
 pub mod dkim;
 pub mod dns_probe;
 pub mod dns_responder;
+pub mod docker;
 pub mod email;
 pub mod fs;
 pub mod ftp;

@@ -293,6 +293,16 @@ pub trait AdapterPort: Send + Sync {
         Ok(0)
     }
 
+    /// One read-only `docker` command, output capped at `max_bytes`. Default
+    /// impl says docker is absent, so stub adapters need no change.
+    async fn docker_read(
+        &self,
+        _cmd: hyperion_adapters::docker::DockerCmd,
+        _max_bytes: usize,
+    ) -> Result<Vec<u8>, hyperion_adapters::docker::DockerError> {
+        Err(hyperion_adapters::docker::DockerError::NotInstalled)
+    }
+
     async fn nginx_write_vhost(&self, detail: &HostingDetail) -> Result<(), AdapterError>;
     /// Remove vhost + symlink for this domain. When `hosting_id` is
     /// supplied the adapter also drops the per-hosting cache zone +
