@@ -1,23 +1,34 @@
 //! Safe walk over a tenant's document root.
 //!
-//! The site user owns every directory below (and above) the root and can swap
-//! any of them for a symlink at any moment. So the root itself is opened with
-//! `O_NOFOLLOW` and everything else is reached relative to a directory fd:
-//! `openat(O_DIRECTORY|O_NOFOLLOW)` to descend, `statat(AT_SYMLINK_NOFOLLOW)`
-//! to classify. A path string is never re-resolved, and a file is never opened
-//! by the walk itself (a FIFO would hang the scanner).
+//! The site user owns every directory below the root, and the parent of the
+//! root (`/home/<user>/<domain>`), and can swap any of them for a symlink at
+//! any moment. So `TenantRoot::open` resolves the root once, component by
+//! component from `/` with `openat(O_NOFOLLOW)` (a symlink is accepted only
+//! when root owns both the link and its directory, which a tenant cannot
+//! create), and pins the result as a directory fd. Walking and re-opening
+//! work only from that fd: `openat(O_DIRECTORY|O_NOFOLLOW)` to descend,
+//! `statat(AT_SYMLINK_NOFOLLOW)` to classify. The root path is never resolved
+//! again, and a file is never opened by the walk itself (a FIFO would hang
+//! the scanner).
 
-use std::ffi::CStr;
+use std::collections::VecDeque;
+use std::ffi::{CStr, OsStr, OsString};
 use std::fs::File;
 use std::io;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
-use std::path::Path;
+use std::os::unix::ffi::OsStrExt;
+use std::path::{Component, Path};
 
-use rustix::fs::{fstat, openat, statat, AtFlags, Dir, FileType, Mode, OFlags, Stat, CWD};
+use rustix::fs::{
+    fstat, openat, readlinkat, statat, AtFlags, Dir, FileType, Mode, OFlags, Stat, CWD,
+};
 use rustix::io::Errno;
 
 pub struct WalkOpts {
-    pub max_files: u64,
+    /// Directory entries of any kind (files, links, directories, ...) looked
+    /// at before the walk stops with `capped` set. Bounds the work, not just
+    /// the number of files reported.
+    pub max_entries: u64,
     /// Relative directory paths (`wp-content/cache`) that are not descended into.
     pub prune: Vec<String>,
 }
@@ -27,6 +38,9 @@ pub struct FileMeta {
     pub rel: String,
     pub size: u64,
     pub ctime: i64,
+    /// Nanosecond part of `ctime`: a same-size rewrite within one second
+    /// still changes it.
+    pub ctime_nsec: i64,
     pub mode: u32,
     pub uid: u32,
     pub nlink: u64,
@@ -46,6 +60,9 @@ pub enum SkipReason {
     NonUtf8Name,
     Vanished,
     FileCapReached,
+    /// A directory on another device than the root (a mount point, or a
+    /// btrfs subvolume): not part of this site, not looked at.
+    OtherFilesystem,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -58,6 +75,9 @@ pub struct WalkStats {
 /// Deepest directory level descended into. Each level holds one open fd, and a
 /// tenant can nest directories far past anything a real site has.
 const MAX_DEPTH: usize = 128;
+
+/// Symlinks followed while resolving the root path.
+const MAX_ROOT_LINKS: usize = 8;
 
 const DIR_FLAGS: OFlags = OFlags::RDONLY
     .union(OFlags::DIRECTORY)
@@ -88,6 +108,7 @@ fn file_meta(rel: String, st: &Stat) -> FileMeta {
         rel,
         size: st.st_size.max(0) as u64,
         ctime: st.st_ctime as i64,
+        ctime_nsec: st.st_ctime_nsec as i64,
         mode: st.st_mode as u32,
         uid: st.st_uid as u32,
         nlink: st.st_nlink as u64,
@@ -99,12 +120,213 @@ fn dev_of(st: &Stat) -> u64 {
     st.st_dev as u64
 }
 
+/// A directory only root can change: owned by uid 0 and not writable by
+/// others, unless sticky (then entries can't be replaced by non-owners).
+#[allow(clippy::unnecessary_cast)]
+fn root_controlled_dir(st: &Stat) -> bool {
+    let mode = st.st_mode as u32;
+    st.st_uid == 0 && (mode & 0o022 == 0 || mode & 0o1000 != 0)
+}
+
+fn refuse(msg: &str) -> io::Error {
+    io::Error::new(io::ErrorKind::PermissionDenied, msg.to_string())
+}
+
+/// A tenant's document root, pinned as a directory fd. See the module docs.
+#[derive(Debug)]
+pub struct TenantRoot {
+    fd: OwnedFd,
+    dev: u64,
+}
+
+impl TenantRoot {
+    /// Resolve `root` (absolute) from `/` without trusting any component a
+    /// tenant could have swapped. A symlink component is followed only when
+    /// both the link and its directory are root-owned (macOS `/var`, an
+    /// admin's `/home -> /data/home`); any other symlink is refused.
+    pub fn open(root: &Path) -> io::Result<TenantRoot> {
+        let bad = |m: &str| io::Error::new(io::ErrorKind::InvalidInput, m.to_string());
+        if !root.is_absolute() {
+            return Err(bad("root must be an absolute path"));
+        }
+        let mut pending: VecDeque<OsString> = VecDeque::new();
+        for c in root.components() {
+            match c {
+                Component::RootDir | Component::CurDir => {}
+                Component::Normal(n) => pending.push_back(n.to_os_string()),
+                _ => return Err(bad("root must not contain `..`")),
+            }
+        }
+        let mut cur = open_dir(CWD, "/")?;
+        let mut links = 0;
+        while let Some(name) = pending.pop_front() {
+            let err = match open_dir(&cur, name.as_os_str()) {
+                Ok(next) => {
+                    cur = next;
+                    continue;
+                }
+                Err(e) => e,
+            };
+            if !matches!(
+                Errno::from_io_error(&err),
+                Some(Errno::LOOP | Errno::NOTDIR)
+            ) {
+                return Err(err);
+            }
+            let link = statat(&cur, name.as_os_str(), AtFlags::SYMLINK_NOFOLLOW)
+                .map_err(io::Error::from)?;
+            if FileType::from_raw_mode(link.st_mode) != FileType::Symlink {
+                return Err(err);
+            }
+            let parent = fstat(&cur).map_err(io::Error::from)?;
+            if link.st_uid != 0 || !root_controlled_dir(&parent) {
+                return Err(refuse("refusing root: a path component is a symlink"));
+            }
+            links += 1;
+            if links > MAX_ROOT_LINKS {
+                return Err(refuse("too many symlinks in root path"));
+            }
+            let target = readlinkat(&cur, name.as_os_str(), Vec::new()).map_err(io::Error::from)?;
+            let target = Path::new(OsStr::from_bytes(target.to_bytes()));
+            let mut comps = Vec::new();
+            for c in target.components() {
+                match c {
+                    Component::RootDir | Component::CurDir => {}
+                    Component::Normal(n) => comps.push(n.to_os_string()),
+                    _ => return Err(refuse("unsupported symlink target in root path")),
+                }
+            }
+            if target.is_absolute() {
+                cur = open_dir(CWD, "/")?;
+            }
+            for c in comps.into_iter().rev() {
+                pending.push_front(c);
+            }
+        }
+        let dev = dev_of(&fstat(&cur).map_err(io::Error::from)?);
+        Ok(TenantRoot { fd: cur, dev })
+    }
+
+    /// Walk the tree, reporting every regular file and everything that was not
+    /// looked at. Only failing to open the root fd is an error. The walk never
+    /// leaves the root's filesystem and never follows a symlink.
+    pub fn walk(&self, opts: &WalkOpts, visit: impl FnMut(WalkEvent<'_>)) -> io::Result<WalkStats> {
+        let mut w = Walker {
+            opts,
+            visit,
+            stats: WalkStats::default(),
+            root_dev: self.dev,
+            entries: 0,
+            done: false,
+        };
+        // A fresh descriptor, so the pinned one stays usable for more walks.
+        let top = open_dir(&self.fd, ".")?;
+        let mut stack = vec![Frame {
+            dir: Dir::new(top).map_err(io::Error::from)?,
+            rel: String::new(),
+        }];
+        while !w.done {
+            let depth = stack.len();
+            let Some(frame) = stack.last_mut() else { break };
+            let child = match frame.dir.read() {
+                None => {
+                    stack.pop();
+                    continue;
+                }
+                Some(Err(_)) => {
+                    // Reading this directory failed part-way: drop the rest of it.
+                    let f = stack.pop();
+                    w.skip(f.map(|f| f.rel).unwrap_or_default(), SkipReason::Unreadable);
+                    continue;
+                }
+                Some(Ok(ent)) => {
+                    let name = ent.file_name();
+                    if name == c"." || name == c".." {
+                        continue;
+                    }
+                    match frame.dir.fd() {
+                        Ok(dirfd) => w.entry(dirfd, &frame.rel, name, depth),
+                        Err(_) => {
+                            let f = stack.pop();
+                            w.skip(f.map(|f| f.rel).unwrap_or_default(), SkipReason::Unreadable);
+                            continue;
+                        }
+                    }
+                }
+            };
+            if let Some(c) = child {
+                stack.push(c);
+            }
+        }
+        Ok(w.stats)
+    }
+
+    /// Open the regular file `rel` for reading, the way `walk` reached it:
+    /// every component relative to a directory fd with `O_NOFOLLOW`, so a
+    /// parent swapped for a symlink since the walk is refused rather than
+    /// followed. Also refuses a directory on another filesystem, and anything
+    /// that is not a regular file with one name.
+    pub fn open_file(&self, rel: &str) -> io::Result<File> {
+        let bad = |m: &str| io::Error::new(io::ErrorKind::InvalidInput, m.to_string());
+        if rel.is_empty() || rel.contains('\0') || rel.starts_with('/') {
+            return Err(bad("invalid relative path"));
+        }
+        let comps: Vec<&str> = rel.split('/').collect();
+        if comps
+            .iter()
+            .any(|c| c.is_empty() || *c == "." || *c == "..")
+        {
+            return Err(bad("invalid path component"));
+        }
+        let (leaf, parents) = comps.split_last().ok_or_else(|| bad("empty path"))?;
+        let mut held: Option<OwnedFd> = None;
+        for c in parents {
+            let next = open_dir(held.as_ref().map_or(self.fd.as_fd(), |f| f.as_fd()), *c)?;
+            if dev_of(&fstat(&next).map_err(io::Error::from)?) != self.dev {
+                return Err(refuse("directory is on another filesystem"));
+            }
+            held = Some(next);
+        }
+        // NONBLOCK so a FIFO swapped in since the walk cannot hang the open;
+        // it has no effect on a regular file.
+        let fd = openat(
+            held.as_ref().map_or(self.fd.as_fd(), |f| f.as_fd()),
+            *leaf,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(io::Error::from)?;
+        let st = fstat(&fd).map_err(io::Error::from)?;
+        if FileType::from_raw_mode(st.st_mode) != FileType::RegularFile {
+            return Err(bad("not a regular file"));
+        }
+        if st.st_nlink > 1 {
+            return Err(refuse("hard-linked file"));
+        }
+        Ok(File::from(fd))
+    }
+}
+
 struct Walker<'o, F> {
     opts: &'o WalkOpts,
     visit: F,
     stats: WalkStats,
     root_dev: u64,
+    entries: u64,
     done: bool,
+}
+
+struct Frame {
+    dir: Dir,
+    rel: String,
+}
+
+fn join_rel(parent: &str, name: &str) -> String {
+    if parent.is_empty() {
+        name.to_string()
+    } else {
+        format!("{parent}/{name}")
+    }
 }
 
 impl<F: FnMut(WalkEvent<'_>)> Walker<'_, F> {
@@ -123,6 +345,14 @@ impl<F: FnMut(WalkEvent<'_>)> Walker<'_, F> {
         depth: usize,
     ) -> Option<Frame> {
         let bytes = name.to_bytes();
+        if self.entries >= self.opts.max_entries {
+            self.stats.capped = true;
+            self.done = true;
+            let rel = join_rel(parent, &String::from_utf8_lossy(bytes));
+            self.skip(rel, SkipReason::FileCapReached);
+            return None;
+        }
+        self.entries += 1;
         let Ok(name_str) = std::str::from_utf8(bytes) else {
             // `rel` is a String, so a name it can't hold can't be re-opened
             // later either: report it, don't look inside.
@@ -148,9 +378,8 @@ impl<F: FnMut(WalkEvent<'_>)> Walker<'_, F> {
                 if self.opts.prune.contains(&rel) {
                     return None;
                 }
-                // A different st_dev is a mount point (or a bind mount a
-                // tenant can't make): not part of this site.
                 if dev_of(&st) != self.root_dev {
+                    self.skip(rel, SkipReason::OtherFilesystem);
                     return None;
                 }
                 if depth >= MAX_DEPTH {
@@ -167,7 +396,10 @@ impl<F: FnMut(WalkEvent<'_>)> Walker<'_, F> {
                 // Check the directory we actually opened, not the one we stat'ed.
                 match fstat(&fd) {
                     Ok(st) if dev_of(&st) == self.root_dev => {}
-                    Ok(_) => return None,
+                    Ok(_) => {
+                        self.skip(rel, SkipReason::OtherFilesystem);
+                        return None;
+                    }
                     Err(_) => {
                         self.skip(rel, SkipReason::Unreadable);
                         return None;
@@ -183,10 +415,6 @@ impl<F: FnMut(WalkEvent<'_>)> Walker<'_, F> {
                 // may be a tenant's link to something it must not make us read.
                 if st.st_nlink > 1 {
                     self.skip(rel, SkipReason::HardLinked);
-                } else if self.stats.files >= self.opts.max_files {
-                    self.stats.capped = true;
-                    self.done = true;
-                    self.skip(rel, SkipReason::FileCapReached);
                 } else {
                     self.stats.files += 1;
                     (self.visit)(WalkEvent::File(&file_meta(rel, &st)));
@@ -198,122 +426,10 @@ impl<F: FnMut(WalkEvent<'_>)> Walker<'_, F> {
     }
 }
 
-struct Frame {
-    dir: Dir,
-    rel: String,
-}
-
-fn join_rel(parent: &str, name: &str) -> String {
-    if parent.is_empty() {
-        name.to_string()
-    } else {
-        format!("{parent}/{name}")
-    }
-}
-
-/// Walk `root`, reporting every regular file and everything that was not
-/// looked at. Only failing to open the root is an error. The walk never
-/// leaves the root's filesystem and never follows a symlink.
-pub fn walk(
-    root: &Path,
-    opts: &WalkOpts,
-    visit: impl FnMut(WalkEvent<'_>),
-) -> io::Result<WalkStats> {
-    let root_fd = open_dir(CWD, root)?;
-    let root_dev = dev_of(&fstat(&root_fd).map_err(io::Error::from)?);
-    let mut w = Walker {
-        opts,
-        visit,
-        stats: WalkStats::default(),
-        root_dev,
-        done: false,
-    };
-    let mut stack = vec![Frame {
-        dir: Dir::new(root_fd).map_err(io::Error::from)?,
-        rel: String::new(),
-    }];
-    while !w.done {
-        let depth = stack.len();
-        let Some(frame) = stack.last_mut() else { break };
-        let child = match frame.dir.read() {
-            None => {
-                stack.pop();
-                continue;
-            }
-            Some(Err(_)) => {
-                // Reading this directory failed part-way: drop the rest of it.
-                let f = stack.pop();
-                w.skip(f.map(|f| f.rel).unwrap_or_default(), SkipReason::Unreadable);
-                continue;
-            }
-            Some(Ok(ent)) => {
-                let name = ent.file_name();
-                if name == c"." || name == c".." {
-                    continue;
-                }
-                match frame.dir.fd() {
-                    Ok(dirfd) => w.entry(dirfd, &frame.rel, name, depth),
-                    Err(_) => {
-                        let f = stack.pop();
-                        w.skip(f.map(|f| f.rel).unwrap_or_default(), SkipReason::Unreadable);
-                        continue;
-                    }
-                }
-            }
-        };
-        if let Some(c) = child {
-            stack.push(c);
-        }
-    }
-    Ok(w.stats)
-}
-
-/// Open the regular file `rel` under `root` for reading, the way `walk`
-/// reached it: every component relative to a directory fd with `O_NOFOLLOW`,
-/// so a parent swapped for a symlink since the walk is refused rather than
-/// followed. Also refuses anything that is not a regular file with one name.
-pub fn open_file_at(root: &Path, rel: &str) -> io::Result<File> {
-    let bad = |m: &str| io::Error::new(io::ErrorKind::InvalidInput, m.to_string());
-    if rel.is_empty() || rel.contains('\0') || rel.starts_with('/') {
-        return Err(bad("invalid relative path"));
-    }
-    let comps: Vec<&str> = rel.split('/').collect();
-    if comps
-        .iter()
-        .any(|c| c.is_empty() || *c == "." || *c == "..")
-    {
-        return Err(bad("invalid path component"));
-    }
-    let (leaf, parents) = comps.split_last().ok_or_else(|| bad("empty path"))?;
-    let mut cur = open_dir(CWD, root)?;
-    for c in parents {
-        cur = open_dir(&cur, *c)?;
-    }
-    // NONBLOCK so a FIFO swapped in since the walk cannot hang the open;
-    // it has no effect on a regular file.
-    let fd = openat(
-        &cur,
-        *leaf,
-        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
-        Mode::empty(),
-    )
-    .map_err(io::Error::from)?;
-    let st = fstat(&fd).map_err(io::Error::from)?;
-    if FileType::from_raw_mode(st.st_mode) != FileType::RegularFile {
-        return Err(bad("not a regular file"));
-    }
-    if st.st_nlink > 1 {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "hard-linked file",
-        ));
-    }
-    Ok(File::from(fd))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Read;
     use std::os::unix::ffi::OsStrExt;
     use std::time::Duration;
 
@@ -325,16 +441,18 @@ mod tests {
 
     fn run(root: &Path, opts: &WalkOpts) -> (Seen, io::Result<WalkStats>) {
         let mut seen = Seen::default();
-        let r = walk(root, opts, |ev| match ev {
-            WalkEvent::File(m) => seen.files.push(m.clone()),
-            WalkEvent::Skipped { rel, why } => seen.skipped.push((rel, why)),
+        let r = TenantRoot::open(root).and_then(|r| {
+            r.walk(opts, |ev| match ev {
+                WalkEvent::File(m) => seen.files.push(m.clone()),
+                WalkEvent::Skipped { rel, why } => seen.skipped.push((rel, why)),
+            })
         });
         (seen, r)
     }
 
     fn opts() -> WalkOpts {
         WalkOpts {
-            max_files: 1_000,
+            max_entries: 100_000,
             prune: Vec::new(),
         }
     }
@@ -343,6 +461,27 @@ mod tests {
         let mut v: Vec<&str> = seen.files.iter().map(|m| m.rel.as_str()).collect();
         v.sort_unstable();
         v
+    }
+
+    fn is_root() -> bool {
+        rustix::process::geteuid().is_root()
+    }
+
+    /// A symlink the way a tenant makes one: not owned by root. Tests that run
+    /// as root (a container) would otherwise create root-owned links, which
+    /// `TenantRoot::open` rightly trusts.
+    fn tenant_symlink(target: &Path, link: &Path) {
+        std::os::unix::fs::symlink(target, link).expect("ln");
+        if is_root() {
+            rustix::fs::chownat(
+                CWD,
+                link,
+                Some(rustix::fs::Uid::from_raw(1000)),
+                None,
+                AtFlags::SYMLINK_NOFOLLOW,
+            )
+            .expect("lchown");
+        }
     }
 
     #[test]
@@ -367,9 +506,11 @@ mod tests {
         let outside = tempfile::tempdir().expect("outside");
         std::fs::write(outside.path().join("secret.php"), b"x").expect("w");
         let t = tempfile::tempdir().expect("tmp");
-        std::os::unix::fs::symlink(outside.path(), t.path().join("dirlink")).expect("ln");
-        std::os::unix::fs::symlink(outside.path().join("secret.php"), t.path().join("filelink"))
-            .expect("ln");
+        tenant_symlink(outside.path(), &t.path().join("dirlink"));
+        tenant_symlink(
+            &outside.path().join("secret.php"),
+            &t.path().join("filelink"),
+        );
         let (seen, r) = run(t.path(), &opts());
         let stats = r.expect("walk");
         assert!(seen.files.is_empty(), "followed a link: {:?}", seen.files);
@@ -390,9 +531,79 @@ mod tests {
         let real = tempfile::tempdir().expect("real");
         let t = tempfile::tempdir().expect("tmp");
         let link = t.path().join("htdocs");
-        std::os::unix::fs::symlink(real.path(), &link).expect("ln");
+        tenant_symlink(real.path(), &link);
         let (_, r) = run(&link, &opts());
         assert!(r.is_err(), "a symlinked root must not be walked");
+    }
+
+    /// /home/u/<domain>/htdocs where tenant u swaps `<domain>` for a link to
+    /// tenant v's `<domain>`: refused at open, nothing of v is ever read.
+    #[test]
+    fn symlinked_parent_of_root_is_refused_at_open() {
+        let t = tempfile::tempdir().expect("tmp");
+        let v = t.path().join("home/v/other.org/htdocs");
+        std::fs::create_dir_all(&v).expect("mkdir");
+        std::fs::write(v.join("wp-config.php"), b"VICTIM_DB_PASSWORD").expect("w");
+        let u = t.path().join("home/u");
+        std::fs::create_dir_all(&u).expect("mkdir");
+        tenant_symlink(&t.path().join("home/v/other.org"), &u.join("evil.com"));
+        let err = TenantRoot::open(&u.join("evil.com/htdocs")).expect_err("must refuse");
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+    }
+
+    #[test]
+    fn swapping_the_domain_after_open_does_not_move_the_walk() {
+        let t = tempfile::tempdir().expect("tmp");
+        let mine = t.path().join("home/u/evil.com/htdocs");
+        std::fs::create_dir_all(&mine).expect("mkdir");
+        std::fs::write(mine.join("mine.php"), b"mine").expect("w");
+        let theirs = t.path().join("home/v/other.org");
+        std::fs::create_dir_all(theirs.join("htdocs")).expect("mkdir");
+        std::fs::write(theirs.join("htdocs/wp-config.php"), b"VICTIM_DB_PASSWORD").expect("w");
+
+        let root = TenantRoot::open(&mine).expect("open");
+        // The tenant swaps <domain> for a link to another tenant's site.
+        let dom = t.path().join("home/u/evil.com");
+        std::fs::rename(&dom, t.path().join("home/u/evil.old")).expect("mv");
+        tenant_symlink(&theirs, &dom);
+
+        let mut files = Vec::new();
+        root.walk(&opts(), |ev| {
+            if let WalkEvent::File(m) = ev {
+                files.push(m.rel.clone());
+            }
+        })
+        .expect("walk");
+        assert_eq!(files, vec!["mine.php"]);
+        let mut s = String::new();
+        root.open_file("mine.php")
+            .expect("open_file")
+            .read_to_string(&mut s)
+            .expect("read");
+        assert_eq!(s, "mine");
+        assert!(root.open_file("wp-config.php").is_err());
+    }
+
+    #[test]
+    fn root_owned_symlink_in_root_owned_dir_is_followed() {
+        // macOS keeps /var -> private/var, so every tempdir there exercises the
+        // trusted-link path; elsewhere there is nothing to assert.
+        let t = tempfile::tempdir().expect("tmp");
+        let st = std::fs::symlink_metadata("/var").expect("stat /var");
+        if !st.file_type().is_symlink() {
+            return;
+        }
+        std::fs::write(t.path().join("a.php"), b"x").expect("w");
+        assert!(t.path().starts_with("/var") || t.path().starts_with("/private"));
+        let (seen, r) = run(t.path(), &opts());
+        r.expect("walk");
+        assert_eq!(rels(&seen), vec!["a.php"]);
+    }
+
+    #[test]
+    fn relative_root_is_refused() {
+        assert!(TenantRoot::open(Path::new("htdocs")).is_err());
+        assert!(TenantRoot::open(Path::new("/tmp/../etc")).is_err());
     }
 
     #[test]
@@ -464,17 +675,59 @@ mod tests {
         assert!(seen.skipped[0].0.starts_with("bad"));
     }
 
+    /// The directory is replaced by a link to an outside tree while the walk
+    /// is under way (swap done from the visit callback, so it is
+    /// deterministic). Whichever side of the swap the walk was on, nothing from
+    /// the outside tree may be reported, and a later `open_file` through the
+    /// swapped name is refused.
     #[test]
     fn symlink_swapped_for_dir_is_not_entered() {
-        // The walk stats an entry as a directory, then opens it. If the tenant
-        // swaps it for a symlink in between, the open must refuse.
         let outside = tempfile::tempdir().expect("outside");
-        std::fs::write(outside.path().join("secret.php"), b"x").expect("w");
+        for n in ["one.php", "two.php", "three.php"] {
+            std::fs::write(outside.path().join(n), b"secret").expect("w");
+        }
         let t = tempfile::tempdir().expect("tmp");
-        std::os::unix::fs::symlink(outside.path(), t.path().join("d")).expect("ln");
-        let root = open_dir(rustix::fs::CWD, t.path()).expect("root");
-        let name = std::ffi::CString::new("d").expect("cstr");
-        let err = open_dir(&root, name.as_c_str()).expect_err("must not follow");
+        for d in ["a", "b"] {
+            std::fs::create_dir(t.path().join(d)).expect("mkdir");
+            for n in ["one.php", "two.php", "three.php"] {
+                std::fs::write(t.path().join(d).join(n), b"x").expect("w");
+            }
+        }
+        let root = TenantRoot::open(t.path()).expect("open");
+        let mut swapped = false;
+        let mut files = Vec::new();
+        root.walk(&opts(), |ev| {
+            if let WalkEvent::File(m) = ev {
+                files.push(m.clone());
+                if !swapped {
+                    swapped = true;
+                    // Swap the directory the walk is NOT currently in, and the
+                    // one it is in: both names now point outside.
+                    for d in ["a", "b"] {
+                        let p = t.path().join(d);
+                        std::fs::rename(&p, t.path().join(format!("{d}.moved"))).expect("mv");
+                        tenant_symlink(outside.path(), &p);
+                    }
+                }
+            }
+        })
+        .expect("walk");
+        assert!(!files.is_empty());
+        for m in &files {
+            assert_eq!(m.size, 1, "{} came from the outside tree", m.rel);
+        }
+        assert!(root.open_file("a/two.php").is_err());
+        assert!(root.open_file("b/two.php").is_err());
+    }
+
+    /// The stat said "directory"; by the time of the open it is a link.
+    #[test]
+    fn open_dir_refuses_a_link() {
+        let outside = tempfile::tempdir().expect("outside");
+        let t = tempfile::tempdir().expect("tmp");
+        tenant_symlink(outside.path(), &t.path().join("d"));
+        let root = TenantRoot::open(t.path()).expect("open");
+        let err = open_dir(&root.fd, "d").expect_err("must not follow");
         // Linux answers ELOOP or ENOTDIR for a trailing symlink, macOS ENOTDIR.
         let why = skip_for_open_error(err);
         assert!(
@@ -484,13 +737,46 @@ mod tests {
     }
 
     #[test]
-    fn open_file_at_reads_a_regular_file() {
-        use std::io::Read;
+    fn entries_vanishing_mid_walk_are_reported() {
+        let t = tempfile::tempdir().expect("tmp");
+        for i in 0..20 {
+            std::fs::write(t.path().join(format!("f{i}.php")), b"x").expect("w");
+        }
+        let dir = t.path().to_path_buf();
+        let mut first = true;
+        let mut seen = Seen::default();
+        let root = TenantRoot::open(t.path()).expect("open");
+        let stats = root
+            .walk(&opts(), |ev| match ev {
+                WalkEvent::File(m) => {
+                    seen.files.push(m.clone());
+                    if first {
+                        first = false;
+                        // The directory was already listed; every entry goes
+                        // away before the walk gets to it.
+                        for i in 0..20 {
+                            let _ = std::fs::remove_file(dir.join(format!("f{i}.php")));
+                        }
+                    }
+                }
+                WalkEvent::Skipped { rel, why } => seen.skipped.push((rel, why)),
+            })
+            .expect("walk");
+        assert_eq!(seen.files.len(), 1);
+        assert_eq!(seen.skipped.len(), 19, "{:?}", seen.skipped);
+        assert!(seen.skipped.iter().all(|(_, w)| *w == SkipReason::Vanished));
+        assert_eq!(stats.skipped, 19);
+        assert!(!stats.capped);
+    }
+
+    #[test]
+    fn open_file_reads_a_regular_file() {
         let t = tempfile::tempdir().expect("tmp");
         std::fs::create_dir(t.path().join("a")).expect("mkdir");
         std::fs::write(t.path().join("a/f.php"), b"body").expect("w");
+        let root = TenantRoot::open(t.path()).expect("open");
         let mut s = String::new();
-        open_file_at(t.path(), "a/f.php")
+        root.open_file("a/f.php")
             .expect("open")
             .read_to_string(&mut s)
             .expect("read");
@@ -498,35 +784,37 @@ mod tests {
     }
 
     #[test]
-    fn open_file_at_refuses_symlinked_parent() {
+    fn open_file_refuses_symlinked_parent() {
         let outside = tempfile::tempdir().expect("outside");
         std::fs::write(outside.path().join("secret.php"), b"x").expect("w");
         let t = tempfile::tempdir().expect("tmp");
-        std::os::unix::fs::symlink(outside.path(), t.path().join("a")).expect("ln");
-        assert!(open_file_at(t.path(), "a/secret.php").is_err());
+        let root = TenantRoot::open(t.path()).expect("open");
+        tenant_symlink(outside.path(), &t.path().join("a"));
+        assert!(root.open_file("a/secret.php").is_err());
     }
 
     #[test]
-    fn open_file_at_refuses_leaf_symlink_dotdot_fifo_and_hard_link() {
+    fn open_file_refuses_leaf_symlink_dotdot_fifo_and_hard_link() {
         let t = tempfile::tempdir().expect("tmp");
         std::fs::write(t.path().join("f.php"), b"x").expect("w");
-        std::os::unix::fs::symlink(t.path().join("f.php"), t.path().join("l.php")).expect("ln");
-        assert!(open_file_at(t.path(), "l.php").is_err(), "leaf symlink");
-        assert!(open_file_at(t.path(), "../f.php").is_err(), "..");
-        assert!(open_file_at(t.path(), "/etc/passwd").is_err(), "absolute");
-        assert!(open_file_at(t.path(), "").is_err(), "empty");
-        assert!(open_file_at(t.path(), "a\0b").is_err(), "NUL");
+        tenant_symlink(&t.path().join("f.php"), &t.path().join("l.php"));
+        let root = TenantRoot::open(t.path()).expect("open");
+        assert!(root.open_file("l.php").is_err(), "leaf symlink");
+        assert!(root.open_file("../f.php").is_err(), "..");
+        assert!(root.open_file("/etc/passwd").is_err(), "absolute");
+        assert!(root.open_file("").is_err(), "empty");
+        assert!(root.open_file("a\0b").is_err(), "NUL");
         std::fs::create_dir(t.path().join("dir")).expect("mkdir");
-        assert!(open_file_at(t.path(), "dir").is_err(), "directory");
+        assert!(root.open_file("dir").is_err(), "directory");
         let fifo = t.path().join("pipe");
         assert!(std::process::Command::new("mkfifo")
             .arg(&fifo)
             .status()
             .expect("mkfifo")
             .success());
-        assert!(open_file_at(t.path(), "pipe").is_err(), "fifo");
+        assert!(root.open_file("pipe").is_err(), "fifo");
         std::fs::hard_link(t.path().join("f.php"), t.path().join("h.php")).expect("link");
-        assert!(open_file_at(t.path(), "h.php").is_err(), "hard link");
+        assert!(root.open_file("h.php").is_err(), "hard link");
     }
 
     #[test]
@@ -536,7 +824,7 @@ mod tests {
             std::fs::write(t.path().join(format!("f{i}.php")), b"x").expect("w");
         }
         let o = WalkOpts {
-            max_files: 3,
+            max_entries: 3,
             prune: Vec::new(),
         };
         let (seen, r) = run(t.path(), &o);
@@ -550,11 +838,44 @@ mod tests {
             .any(|(_, w)| *w == SkipReason::FileCapReached));
         // Exactly at the cap is not capped.
         let o = WalkOpts {
-            max_files: 5,
+            max_entries: 5,
             prune: Vec::new(),
         };
         let (_, r) = run(t.path(), &o);
         assert!(!r.expect("walk").capped);
+    }
+
+    /// Links, hard links and empty directories are entries too: they count
+    /// against the cap, so a tree of them can't keep the walk busy.
+    #[test]
+    fn cap_counts_every_kind_of_entry() {
+        let t = tempfile::tempdir().expect("tmp");
+        std::fs::write(t.path().join("f.php"), b"x").expect("w");
+        for i in 0..1000 {
+            std::os::unix::fs::symlink("/nonexistent", t.path().join(format!("l{i}"))).expect("ln");
+            std::fs::hard_link(t.path().join("f.php"), t.path().join(format!("h{i}")))
+                .expect("link");
+            std::fs::create_dir(t.path().join(format!("d{i}"))).expect("mkdir");
+        }
+        for (max, most_events) in [(0u64, 1usize), (50, 51)] {
+            let o = WalkOpts {
+                max_entries: max,
+                prune: Vec::new(),
+            };
+            let (seen, r) = run(t.path(), &o);
+            let stats = r.expect("walk");
+            assert!(stats.capped, "max_entries={max}");
+            let events = seen.files.len() + seen.skipped.len();
+            // Empty directories are entries but report nothing.
+            assert!(events <= most_events, "max_entries={max}: {events} events");
+            assert_eq!(
+                seen.skipped
+                    .iter()
+                    .filter(|(_, w)| *w == SkipReason::FileCapReached)
+                    .count(),
+                1
+            );
+        }
     }
 
     #[test]
@@ -564,7 +885,7 @@ mod tests {
         std::fs::write(t.path().join("wp-content/cache/c.php"), b"x").expect("w");
         std::fs::write(t.path().join("wp-content/keep.php"), b"x").expect("w");
         let o = WalkOpts {
-            max_files: 100,
+            max_entries: 100,
             prune: vec!["wp-content/cache".into()],
         };
         let (seen, r) = run(t.path(), &o);
@@ -576,8 +897,11 @@ mod tests {
     #[test]
     fn unreadable_directory_is_skipped_and_walk_continues() {
         use std::os::unix::fs::PermissionsExt;
-        if rustix::process::geteuid().is_root() {
-            return; // root reads everything; nothing to observe
+        if is_root() {
+            // Root reads every directory regardless of mode, so there is no
+            // unreadable directory to observe when the suite runs as root
+            // (e.g. in a container).
+            return;
         }
         let t = tempfile::tempdir().expect("tmp");
         let locked = t.path().join("locked");
@@ -620,12 +944,7 @@ mod tests {
     #[test]
     fn too_deep_tree_is_reported_not_fatal() {
         let t = tempfile::tempdir().expect("tmp");
-        let mut p = t.path().to_path_buf();
-        for _ in 0..(MAX_DEPTH + 20) {
-            p.push("d");
-        }
-        // Build with relative chdir-free steps: create_dir_all on a long
-        // absolute path can hit PATH_MAX on macOS, so build level by level.
+        // Build level by level: one long absolute path can hit PATH_MAX.
         let mut cur = rustix::fs::openat(
             rustix::fs::CWD,
             t.path(),
@@ -653,7 +972,7 @@ mod tests {
 
     #[test]
     fn ctime_not_mtime_is_reported() {
-        use rustix::fs::{utimensat, AtFlags, Timespec, Timestamps, CWD};
+        use rustix::fs::{utimensat, Timespec, Timestamps};
         let t = tempfile::tempdir().expect("tmp");
         let f = t.path().join("old.php");
         std::fs::write(&f, b"x").expect("w");
@@ -685,13 +1004,18 @@ mod tests {
             "ctime {} should be about now {now}, not the 2024 mtime",
             m.ctime
         );
+        assert!(
+            (0..1_000_000_000).contains(&m.ctime_nsec),
+            "{}",
+            m.ctime_nsec
+        );
     }
 
+    /// `/proc` is always its own mount. Walk `/` but prune every other
+    /// top-level directory so only the mount boundary is exercised.
     #[cfg(target_os = "linux")]
     #[test]
     fn stays_on_one_filesystem() {
-        // `/proc` is always its own mount. Walk `/` but prune every other
-        // top-level directory so only the mount boundary is exercised.
         let mut prune = Vec::new();
         for e in std::fs::read_dir("/").expect("read /") {
             let e = e.expect("entry");
@@ -700,14 +1024,31 @@ mod tests {
             }
         }
         let o = WalkOpts {
-            max_files: 100_000,
+            max_entries: 100_000,
             prune,
         };
         let (seen, r) = run(Path::new("/"), &o);
-        r.expect("walk");
+        let stats = r.expect("walk");
         assert!(
             !seen.files.iter().any(|m| m.rel.starts_with("proc/")),
             "crossed into /proc"
         );
+        assert!(
+            seen.skipped
+                .contains(&("proc".to_string(), SkipReason::OtherFilesystem)),
+            "mount point not reported: {:?}",
+            seen.skipped
+        );
+        assert!(stats.skipped >= 1);
+    }
+
+    /// The same boundary on the re-open path: a directory component on another
+    /// device is refused (leaf files are not checked, overlayfs differs).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn open_file_refuses_other_filesystem() {
+        let root = TenantRoot::open(Path::new("/")).expect("open /");
+        assert!(root.open_file("proc/version").is_err());
+        assert!(root.open_file("etc/passwd").is_ok());
     }
 }

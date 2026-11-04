@@ -3,4 +3,4 @@
 
 pub mod walk;
 
-pub use walk::{open_file_at, walk, FileMeta, SkipReason, WalkEvent, WalkOpts, WalkStats};
+pub use walk::{FileMeta, SkipReason, TenantRoot, WalkEvent, WalkOpts, WalkStats};
