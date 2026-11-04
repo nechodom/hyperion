@@ -18,8 +18,11 @@ scriptable HTTP API, or a CLI.
 [![Debian](https://img.shields.io/badge/debian-12%20%7C%2013-red?logo=debian)](#install)
 [![API](https://img.shields.io/badge/API-OpenAPI_3-purple)](#remote-api)
 [![Status](https://img.shields.io/badge/status-in_production-green)](#status)
+[![Docs](https://img.shields.io/badge/docs-manual-teal)](https://docs.hyperion.nechodom.cz/)
 
-[Install](#install) · [Features](#features) · [Remote API](#remote-api) · [Import](#import-from-another-panel) · [Architecture](#architecture) · [Status](#status)
+**[Read the manual](https://docs.hyperion.nechodom.cz/)**
+
+[Install](#install) · [Documentation](#documentation) · [Features](#features) · [Remote API](#remote-api) · [Import](#import-from-another-panel) · [Architecture](#architecture) · [Status](#status)
 
 </div>
 
@@ -114,6 +117,25 @@ deploys and recovery steps.
 
 ---
 
+## Documentation
+
+The [Hyperion manual](https://docs.hyperion.nechodom.cz/) takes you from a fresh
+install to sites that are running and backed up:
+
+- [Start here](https://docs.hyperion.nechodom.cz/start/): the concepts and a
+  first walk through the panel.
+- [Install and update](https://docs.hyperion.nechodom.cz/install/): the master,
+  worker nodes and keeping the cluster current.
+- [Guides](https://docs.hyperion.nechodom.cz/guides/): step-by-step procedures
+  for sites, WordPress, backups, mail, security, monitoring, users and the
+  cluster.
+- [Troubleshooting](https://docs.hyperion.nechodom.cz/troubleshooting/): start
+  from the symptom you see and work toward the cause.
+- [Reference](https://docs.hyperion.nechodom.cz/reference/): settings, commands
+  and limits, listed for lookup.
+
+---
+
 ## Features
 
 ### Sites
@@ -125,13 +147,16 @@ deploys and recovery steps.
 - **PHP 8.1–8.4 side by side**, per-site PHP settings, static-to-PHP
   conversion, www / non-www canonical redirects, HSTS, FastCGI cache, a
   maintenance page, and a custom nginx snippet (raw nginx is admin-only).
+  The panel flags PHP builds hit by known security advisories and can uninstall
+  branches nothing uses.
 - **MariaDB or PostgreSQL**, with one-click phpMyAdmin that signs in
   automatically. phpMyAdmin is never exposed on the network: the panel relays
   every request after its own login and permission check, and the database
   password never leaves the node.
 - **Let's Encrypt** certificates over HTTP-01 with auto-renewal, also behind a
-  Cloudflare proxy, plus guided DNS-01 wildcards. The DNS check asks the
-  domain's authoritative nameservers.
+  Cloudflare proxy, plus guided DNS-01 wildcards that can renew themselves
+  through acme-dns CNAME delegation. The DNS check asks the domain's
+  authoritative nameservers.
 - **Preview address** on the node's wildcard certificate, so a site can be
   checked before its DNS moves.
 - **File manager, cron editor, log viewer,** several FTP/FTPS logins per site,
@@ -143,10 +168,12 @@ deploys and recovery steps.
   another node.
 - **Profiles** bundle limits, PHP, database engine, plugins and backup cadence.
   A profile stays linked to its sites, so changing it can be re-applied to all
-  of them.
+  of them. One site can keep its own price across a re-apply.
 - **Limits:** kernel-enforced disk quotas with notify-or-suspend on overage,
   bandwidth alerts, and PHP memory limits that rise automatically when a site
-  runs out of memory and come back down after 14 quiet days.
+  runs out of memory and come back down after 14 quiet days. PHP workers rise
+  within the site's limits too, and you get an alert only when visitors were
+  affected.
 
 ### WordPress
 
@@ -155,12 +182,14 @@ deploys and recovery steps.
   profiles install on new sites.
 - **Updates page** that sorts every site by what it needs. Detection is keyless,
   against public WordPress.org data, and minor/patch updates can apply
-  automatically. "Couldn't check" is never shown as "up to date".
+  automatically. "Couldn't check" is never shown as "up to date". Core, plugins
+  and themes can also be updated by hand from every place that lists them.
 - **Site health** reproduces a fatal error, names the plugin that causes it and
   offers to park it, which is the only fix once WordPress won't boot.
 - **Repair:** a file-permission check with a real write probe, core-file
   checksum repair, and a full reinstall that only runs after a backup succeeds.
-- **Integrity and malware scan** using wp-cli checksums and ClamAV.
+- **Integrity and malware scan** using wp-cli checksums and ClamAV, with repair
+  of core files and reinstall of tampered plugins from the findings.
 - Staging copy with push to production (production is backed up first), Redis
   object cache, a `WP_DEBUG` switch, admin password reset, a sign-up spam
   guard, and a mail self-repair that sends WordPress mail through the local
@@ -171,12 +200,16 @@ deploys and recovery steps.
 - Scheduled and on-demand backups (files plus a database dump), with retention
   per site, per profile or per care plan.
 - **Off-site copies** to S3 (client-side `age` encryption, several targets with
-  their own retention) or FTP / FTPS / SFTP. The local copy can be dropped once
-  the off-site copy is verified.
+  their own retention) or FTP / FTPS / SFTP with keep-newest. The local copy can
+  be dropped once the off-site copy is verified, and restored from off-site
+  later.
 - **Backup before every automatic update:** a full backup (files plus database)
-  is taken before each WordPress auto-update run. It is deleted after a set
-  number of days (14 by default) when every update went in cleanly, and kept
-  until deleted by hand when one failed.
+  is taken before each WordPress auto-update run. It is deleted 24 hours later
+  when every update went in cleanly, and kept until deleted by hand when one
+  failed.
+- **Cleanup:** deleting a site can also delete its local and FTP backups, and
+  **Leftover backups** finds and removes archives left behind by sites already
+  deleted.
 - **restic snapshots** per site, by hand, with diff, restore and
   keep-for-N-days.
 - Restore everything, only the database or only the files; restore into a new
@@ -214,17 +247,20 @@ deploys and recovery steps.
   signing, SPF checks and a per-site mail log.
 - An **email log** for the whole server, grouped by day with a delivery
   verdict and queue-id search.
+- Postfix's message size limit can be set from the panel.
 - Hyperion does not host mailboxes or DNS zones.
 
 ### Monitoring and notifications
 
 - Live CPU, memory, swap, disk, pressure (PSI) and network gauges, history
-  sampled every 5 minutes, a realtime network graph, and per-site resource use.
+  sampled every 5 minutes, a realtime network graph, and per-site resource use
+  with a period picker. Per-site CPU comes from a tracker fed every 10 seconds.
 - **HTTP uptime monitoring** per site, with every monitored site on one page.
 - OOM kills, a read-only root filesystem, pending OS updates and a needed
   reboot are all reported.
-- A **Services** page with the state of every system service and one-click
-  installs of optional software (ClamAV, Redis, …).
+- A **Service health** page with the state of every system service across all
+  nodes, a page per unit, and one-click installs of optional software (ClamAV,
+  Redis, …).
 - A **notification centre** with alerts from every node, delivered by email
   (HTML, with your logo) and Slack, with wording you can edit.
 
@@ -238,8 +274,8 @@ For agencies that sell maintenance:
   are stored with each activation, so later edits don't rewrite past invoices.
   When a site lacks protection the plan sells because of the server (the
   brute-force scanner off, ModSecurity not installed), you get a notification.
-- A monthly **service checklist** per site, and Slack messages that say what to
-  invoice.
+- A monthly **service checklist** per site, with the time each site's report
+  e-mail leaves, and Slack messages that say what to invoice.
 - **Monthly customer reports** covering updates, backups, uptime, load speed and
   Core Web Vitals (PageSpeed Insights or Lighthouse), with a start date per plan,
   sections you can hide, and one-off reports for any date range.
@@ -388,8 +424,8 @@ template and script lints) before it ships. It is not yet proven on a large
 fleet, and multi-node has had less real traffic than single-node, so feedback
 from bigger installs is the most useful contribution.
 
-**Roadmap:** ModSecurity with the OWASP Core Rule Set per site (in progress) ·
-HA control plane (warm standby + state replication) · SSO / OIDC login.
+**Roadmap:** HA control plane (warm standby + state replication) · SSO / OIDC
+login.
 
 ---
 
@@ -399,7 +435,7 @@ HA control plane (warm standby + state replication) · SSO / OIDC login.
 git clone https://github.com/nechodom/hyperion && cd hyperion
 cargo build --release --workspace     # → target/release/{hyperion-agent,hyperion-web,hctl}
 
-cargo test --workspace                # ~1,800 tests
+cargo test --workspace                # ~2,500 tests
 cargo clippy --workspace --all-targets   # clean under -D warnings
 ```
 
