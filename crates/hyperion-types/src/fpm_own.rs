@@ -17,7 +17,8 @@ pub const MB_PER_USER: i64 = 11;
 
 /// The cgroup v2 controllers a user's slice needs to get a CPU and memory cap.
 const REQUIRED_CONTROLLERS: [&str; 2] = ["cpu", "memory"];
-/// First systemd with the cgroup v2 behaviour the slices rely on.
+/// Oldest systemd this was tested on (252). Not a proven lower bound: an older
+/// one may work, but nothing has checked.
 const MIN_SYSTEMD: u32 = 252;
 
 /// The user as a systemd unit instance name, like `systemd-escape`: ASCII

@@ -4131,8 +4131,8 @@ async fn phpmyadmin_relay_is_gated_and_isolated() {
     hyperion_rpc_client::call(
         &sock,
         hyperion_rpc::codec::Request::WebUserCreate {
-            username: "pma-viewer".into(),
-            email: "pma-viewer@example.invalid".into(),
+            username: "php-viewer".into(),
+            email: "php-viewer@example.invalid".into(),
             password: "viewer-pw-1".into(),
             role: "viewer".into(),
         },
@@ -4141,7 +4141,7 @@ async fn phpmyadmin_relay_is_gated_and_isolated() {
     .unwrap();
     let viewer_cookie = extract_cookie(
         &app.clone()
-            .oneshot(login(b"username=pma-viewer&password=viewer-pw-1&next=/"))
+            .oneshot(login(b"username=php-viewer&password=viewer-pw-1&next=/"))
             .await
             .unwrap(),
     );
@@ -6085,6 +6085,35 @@ async fn own_masters_fragment_names_what_blocks_the_node() {
 
     let (status, _) = acme_dns_get(&app, &cookie, "/install/node-php-masters?node_id=a/b").await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+/// The verdict is the owner's to read: a logged-in user without the owner
+/// role gets a 403, and the fragment says nothing about the node.
+#[tokio::test]
+async fn own_masters_fragment_is_refused_to_a_non_admin() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d) = start_agent().await;
+    let app = build_app(sock.clone(), admin);
+    match hyperion_rpc_client::call(
+        &sock,
+        hyperion_rpc::codec::Request::WebUserCreate {
+            username: "php-viewer".into(),
+            email: "php-viewer@example.invalid".into(),
+            password: "viewer-pw-1".into(),
+            role: "viewer".into(),
+        },
+    )
+    .await
+    .expect("create viewer")
+    {
+        hyperion_rpc::codec::Response::WebUserCreate { .. } => {}
+        other => panic!("unexpected create response: {other:?}"),
+    }
+    let cookie = acme_dns_login(&app, "php-viewer", "viewer-pw-1").await;
+    let (status, html) =
+        acme_dns_get(&app, &cookie, "/install/node-php-masters?node_id=local").await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{html}");
+    assert!(!html.contains("Own PHP masters:"), "{html}");
 }
 
 /// The setting is a checkbox on the node's own settings page, with its

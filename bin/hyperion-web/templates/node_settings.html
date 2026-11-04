@@ -15,7 +15,7 @@
       {% if is_master %}
         What this server does with its own <code>agent.toml</code>. Panel-wide settings are on <a href="/settings">Settings</a>.
       {% else if managed %}
-        What this node runs with: its scanner, its backups, its updates, its certificates. These follow the master — change them on <a href="/settings">Settings</a> and every node gets the new value within minutes.
+        What this node runs with: its scanner, its backups, its updates, its certificates. These follow the master — change them on <a href="/settings">Settings</a> and every node gets the new value within minutes. The PHP card is this node’s own setting and stays editable.
       {% else %}
         What this node does on its own: its scanner, its backups, its updates, its certificates. Saved in the node’s <code>/etc/hyperion/agent.toml</code>; the node’s agent restarts to apply each save.
       {% endif %}
@@ -32,7 +32,7 @@
       <strong>Settings from the master: {{ sync_verdict }}.</strong> {{ label }} {{ sync_detail }}.
     {% endif %}
     {% if managed && config.is_some() %}
-      The cards below show this node’s current values, read-only.
+      The cards below show this node’s current values, read-only, except the PHP card: that one is this node’s own setting.
     {% endif %}
   </div>
 </div>

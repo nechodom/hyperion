@@ -67,6 +67,7 @@ mod migration;
 mod monitor;
 mod net;
 mod node_config;
+pub use node_config::section_restarts_agent;
 mod nodes;
 mod notify;
 mod offsite;

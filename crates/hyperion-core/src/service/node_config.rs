@@ -2,6 +2,15 @@
 
 use super::*;
 
+/// Whether saving this section of a node's agent.toml bounces the agent.
+/// Every section but `php` does: they are read once at start-up. `php` is
+/// read fresh from the file each time it is needed, and a restart is not free
+/// — boot re-renders the FPM pools and restarts `php<ver>-fpm` for every
+/// version with a live site, cutting requests in flight.
+pub fn section_restarts_agent(section: &str) -> bool {
+    section != "php"
+}
+
 impl<A: AdapterPort + 'static> HostingService<A> {
     /// Sanitised view of the agent's effective config — no secrets.
     /// Reads from the live `HostingService` state (which mirrors
@@ -191,16 +200,21 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// over the signed channel, so it restarts the agent it runs in — detached
     /// and delayed, so this RPC's answer is back before the agent goes down.
     /// Same validation as `agent_config_update` (`parse_agent_section_fields`).
+    /// A section for which `section_restarts_agent` is false is only written.
     pub async fn node_config_set(
         &self,
         section: String,
         fields: std::collections::BTreeMap<String, String>,
     ) -> Result<(), RpcError> {
         let is_email = section == "email";
+        let restart = section_restarts_agent(&section);
         self.agent_config_update(section, fields).await?;
         if is_email {
             // Apply postfix immediately from the just-written agent.toml.
             let _ = self.mta_reconfigure().await;
+        }
+        if !restart {
+            return Ok(());
         }
         tokio::spawn(async {
             tokio::time::sleep(std::time::Duration::from_secs(3)).await;

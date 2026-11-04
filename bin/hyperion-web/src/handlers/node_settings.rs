@@ -146,8 +146,9 @@ struct NodeSettingsTpl<'a> {
     /// `None` = the node's file could not be read; the card shows no form.
     own_masters: Option<bool>,
     /// A worker whose synced sections the master's settings sync manages:
-    /// every card is shown read-only, because the next sync pass would undo
-    /// an edit made here. False for the master and for an agent too old to
+    /// every card but the PHP one is shown read-only, because the next sync
+    /// pass would undo an edit made here (`[php]` is this node's own setting
+    /// and is not synced). False for the master and for an agent too old to
     /// take the sync (its own file is still the only way to set it).
     managed: bool,
     /// What the last sync pass said about this node; empty before the first.
@@ -306,6 +307,17 @@ fn fields_to_write(
     fields
 }
 
+/// What the flash says after a save the node accepted. The agent only
+/// restarts for the sections `section_restarts_agent` names, so the text must
+/// not promise one otherwise.
+fn saved_flash(section: &str, label: &str) -> String {
+    if hyperion_core::service::section_restarts_agent(section) {
+        format!("{label} saved on this node — its agent is restarting (~5s)")
+    } else {
+        format!("{label} saved on this node")
+    }
+}
+
 /// POST /install/node-settings — write one section on one node.
 pub async fn post_node_settings(
     State(state): State<SharedState>,
@@ -369,9 +381,7 @@ pub async fn post_node_settings(
     let dest = match resp {
         Ok(RpcResponse::NodeConfigSet) => format!(
             "{page}&flash={}#{anchor}",
-            urlencode(&format!(
-                "{label} saved on this node — its agent is restarting (~5s)"
-            ))
+            urlencode(&saved_flash(&section, label))
         ),
         Ok(RpcResponse::Error(e)) => {
             format!("{page}&flash_error={}#{anchor}", urlencode(&e.to_string()))
@@ -509,14 +519,20 @@ mod tests {
     #[test]
     fn own_masters_is_not_a_synced_section() {
         assert!(!is_synced_section("php"));
-        for s in [
-            "fail2ban",
-            "backup_remote",
-            "snapshots",
-            "protection",
-            "acme",
-        ] {
+        // Every other editable section follows the master, so the follower
+        // refusal in `post_node_settings` covers all of them.
+        for (s, _, _) in SECTIONS.iter().filter(|(s, _, _)| *s != "php") {
             assert!(is_synced_section(s), "{s} follows the master");
+        }
+    }
+
+    /// A PHP save leaves the agent running, so its flash must not say the
+    /// agent is restarting; every other section does restart.
+    #[test]
+    fn only_a_restarting_save_says_the_agent_restarts() {
+        assert!(!saved_flash("php", "Own PHP masters").contains("restarting"));
+        for (s, _, label) in SECTIONS.iter().filter(|(s, _, _)| *s != "php") {
+            assert!(saved_flash(s, label).contains("restarting"), "{s}");
         }
     }
 

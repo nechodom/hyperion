@@ -290,6 +290,8 @@ enabled = true
 # The Nodes page says whether this node can take it (cgroup v2 with the cpu and
 # memory controllers, systemd 252 or later, room in RAM). Set per node, not
 # synced from the master.
+# This version only reports: nothing acts on the setting yet, and saving it
+# does not restart the agent.
 [php]
 own_masters = false
 
