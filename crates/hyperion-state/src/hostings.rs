@@ -245,6 +245,20 @@ pub async fn list_php_sites(
         .collect())
 }
 
+/// How many distinct system users have an active PHP site. Sites of one user
+/// share a pool, so each user counts once; static, proxy, redirect, suspended
+/// and trashed sites cost no PHP process.
+pub async fn count_active_php_users(pool: &SqlitePool) -> Result<i64, StateError> {
+    let (n,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(DISTINCT system_user_id) FROM hostings \
+          WHERE kind = 'php' AND state = 'active' \
+            AND php_version IS NOT NULL AND php_version != ''",
+    )
+    .fetch_one(pool)
+    .await?;
+    Ok(n)
+}
+
 /// All currently-trashed hostings (any age). Used by the
 /// /trash page UI.
 pub async fn list_trashed(pool: &SqlitePool) -> Result<Vec<HostingRow>, StateError> {

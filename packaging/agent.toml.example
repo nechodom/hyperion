@@ -282,6 +282,17 @@ waf_threshold  = 20   # ban-counted WAF refusals (per site; 3..=1000)
 [snapshots]
 enabled = true
 
+# ─── PHP ──────────────────────────────────────────────────────────────────
+#
+# own_masters: each site user's PHP runs on its own process, so the kernel can
+# hold that user to a CPU and memory share. About 11 MB of RAM per user. Off by
+# default; with it off every file, vhost and process is exactly as before.
+# The Nodes page says whether this node can take it (cgroup v2 with the cpu and
+# memory controllers, systemd 252 or later, room in RAM). Set per node, not
+# synced from the master.
+[php]
+own_masters = false
+
 # ─── Permission self-repair ────────────────────────────────────────────────
 #
 # Every five minutes hyperion checks each active site for permissions that

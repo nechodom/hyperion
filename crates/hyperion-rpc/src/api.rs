@@ -416,6 +416,8 @@ pub trait AgentApi: Send + Sync + 'static {
     ) -> Result<Vec<hyperion_types::HostingUsageRange>, RpcError>;
     /// Latest snapshot for this agent (single-node = this box).
     async fn node_stats(&self) -> Result<NodeStats, RpcError>;
+    /// Whether this node could run a PHP-FPM master per site user.
+    async fn node_fpm_preflight(&self) -> Result<hyperion_types::fpm_own::Preflight, RpcError>;
     /// Cluster-wide aggregate. Single-node today = wraps node_stats.
     async fn cluster_stats(&self) -> Result<ClusterStats, RpcError>;
 

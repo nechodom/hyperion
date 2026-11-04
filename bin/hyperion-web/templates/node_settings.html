@@ -394,6 +394,32 @@
 </div>
 </fieldset>
 
+{# ───── PHP ───── outside the fieldset on purpose: the master's settings sync
+   does not carry [php], so a node that follows the master still edits it. #}
+<div class="group">
+  <div class="ghead">PHP</div>
+  <div class="item" id="php-masters">
+    <h3>
+      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3"/></svg>
+      PHP masters
+    </h3>
+    <form method="post" action="/install/node-settings" autocomplete="off">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="node_id" value="{{ node_id }}">
+      <input type="hidden" name="section" value="php">
+      <input type="hidden" name="_checkboxes" value="own_masters">
+      <label class="field-checkbox" style="font-weight:600">
+        <input type="checkbox" name="own_masters" value="true" {% if own_masters %}checked{% endif %}>
+        Own PHP masters
+      </label>
+      <p class="text-soft small" style="margin:0.5rem 0 0.8rem;line-height:1.55">
+        New sites and sites you convert run on their own PHP process. About 11 MB per site.
+      </p>
+      <div class="item-actions"><button type="submit" class="btn primary">Save</button></div>
+    </form>
+  </div>
+</div>
+
 {% else %}
 <div class="flash error">
   <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>

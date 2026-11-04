@@ -42,6 +42,7 @@ const SECTIONS: &[(&str, &str, &str)] = &[
     ("backup", "local-copies", "Local copies"),
     ("backup_retention", "backup-retention", "Archive retention"),
     ("snapshots", "snapshot-retention", "Snapshot retention"),
+    ("php", "php-masters", "Own PHP masters"),
 ];
 
 fn section_meta(section: &str) -> Option<(&'static str, &'static str)> {
@@ -49,6 +50,13 @@ fn section_meta(section: &str) -> Option<(&'static str, &'static str)> {
         .iter()
         .find(|(s, _, _)| *s == section)
         .map(|(_, anchor, label)| (*anchor, *label))
+}
+
+/// Whether the master's settings sync carries this section to every node. One
+/// it does not carry is the node's own, so it stays editable on a worker that
+/// follows the master.
+fn is_synced_section(section: &str) -> bool {
+    hyperion_core::cluster_sync::SYNCED_SECTIONS.contains(&section)
 }
 
 /// `""` / `"local"` is the master itself.
@@ -83,6 +91,9 @@ fn urlencode(s: &str) -> String {
 #[derive(Debug, Default, PartialEq)]
 struct RawExtras {
     acme_contact: Option<String>,
+    /// `[php] own_masters`, read off the file: the running agent's copy
+    /// lags a save by the restart, and the page must show what was saved.
+    own_masters: bool,
 }
 
 fn parse_raw_extras(raw: &str) -> RawExtras {
@@ -94,6 +105,12 @@ fn parse_raw_extras(raw: &str) -> RawExtras {
             .and_then(|a| a.get("contact_email"))
             .and_then(|v| v.as_str())
             .map(str::to_string),
+        own_masters: doc
+            .as_ref()
+            .and_then(|d| d.get("php"))
+            .and_then(|p| p.get("own_masters"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
     }
 }
 
@@ -123,6 +140,7 @@ struct NodeSettingsTpl<'a> {
     raw_error: String,
     fail2ban: Option<Fail2banView>,
     acme_contact: String,
+    own_masters: bool,
     /// A worker whose synced sections the master's settings sync manages:
     /// every card is shown read-only, because the next sync pass would undo
     /// an edit made here. False for the master and for an agent too old to
@@ -213,6 +231,7 @@ pub async fn get_node_settings(
         .acme_contact
         .or_else(|| config.as_ref().map(|c| c.acme.contact_email.clone()))
         .unwrap_or_default();
+    let own_masters = extras.own_masters;
     let label = match summary {
         Some(n) if !n.label.trim().is_empty() => n.label.clone(),
         Some(n) => n.node_id.clone(),
@@ -244,6 +263,7 @@ pub async fn get_node_settings(
         raw_error,
         fail2ban,
         acme_contact,
+        own_masters,
         managed: !is_master && sync.as_ref().map_or(true, |s| s.managed()),
         sync_verdict: sync
             .as_ref()
@@ -310,6 +330,7 @@ pub async fn post_node_settings(
     // The master's settings sync owns these sections on a worker that can
     // take it; a value written here would be replaced on the next pass.
     if !is_local(&node_id)
+        && is_synced_section(&form.section)
         && state
             .cluster_sync
             .status_for(&node_id)
@@ -458,6 +479,7 @@ mod tests {
             "backup",
             "backup_retention",
             "snapshots",
+            "php",
         ] {
             assert!(section_meta(s).is_some(), "{s} should be editable per node");
         }
@@ -476,6 +498,31 @@ mod tests {
                 "{s} must not be editable per node"
             );
         }
+    }
+
+    /// `[php]` is the node's own: the master's settings sync does not carry
+    /// it, so a worker that follows the master must still be able to save it.
+    #[test]
+    fn own_masters_is_not_a_synced_section() {
+        assert!(!is_synced_section("php"));
+        for s in [
+            "fail2ban",
+            "backup_remote",
+            "snapshots",
+            "protection",
+            "acme",
+        ] {
+            assert!(is_synced_section(s), "{s} follows the master");
+        }
+    }
+
+    #[test]
+    fn own_masters_reads_back_from_the_raw_file() {
+        assert!(parse_raw_extras("[php]\nown_masters = true\n").own_masters);
+        assert!(!parse_raw_extras("[php]\nown_masters = false\n").own_masters);
+        assert!(!parse_raw_extras("[acme]\ncontact_email = \"a@b.cz\"\n").own_masters);
+        assert!(!parse_raw_extras("[php]\nown_masters = \"true\"\n").own_masters);
+        assert!(!parse_raw_extras("not = [toml").own_masters);
     }
 
     #[test]

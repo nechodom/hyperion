@@ -366,6 +366,9 @@ pub(super) fn parse_agent_section_fields(
                 }
                 crate::config_persist::FieldValue::Int(n)
             }
+            // [php] — this node's own PHP setup. Not part of the master's
+            // settings sync: each node says for itself whether it can take it.
+            ("php", "own_masters") => crate::config_persist::FieldValue::Bool(parse_bool(v)?),
             // [cluster] — master web UI placement preferences
             ("cluster", "master_accepts_hostings")
             | ("cluster", "test_wp_no_index")

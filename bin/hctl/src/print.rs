@@ -667,6 +667,19 @@ pub fn print_pretty(resp: &Response) {
             }
             println!("{} hostings", rows.len());
         }
+        Response::NodeFpmPreflight(p) => {
+            println!(
+                "own PHP masters: {} ({} of {} PHP users, about {} MB more, swap {})",
+                if p.ok() { "possible" } else { "not possible" },
+                p.own_users,
+                p.php_users,
+                p.extra_mb,
+                if p.has_swap { "present" } else { "absent" },
+            );
+            for b in &p.blocks {
+                println!("  blocked by {b:?}");
+            }
+        }
         Response::NodeStats(n) => {
             println!("{} ({})", n.label, n.node_id);
             println!(

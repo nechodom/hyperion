@@ -569,6 +569,71 @@ async fn is_failed(svc: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// What `/proc/meminfo` says that the preflight needs.
+#[derive(Debug, PartialEq, Eq, Default)]
+pub struct MemInfo {
+    pub mem_total_mb: Option<i64>,
+    pub mem_available_mb: Option<i64>,
+    pub swap_total_kib: i64,
+}
+
+/// Read `MemTotal`, `MemAvailable` and `SwapTotal` out of `/proc/meminfo`
+/// text. RAM that is missing stays `None` (the verdict then skips the RAM
+/// bound rather than guess one); no swap line means no swap.
+pub fn parse_meminfo(meminfo: &str) -> MemInfo {
+    let kib = |key: &str| -> Option<i64> {
+        meminfo
+            .lines()
+            .find_map(|l| l.strip_prefix(key))
+            .and_then(|rest| rest.split_whitespace().next())
+            .and_then(|v| v.parse::<i64>().ok())
+    };
+    MemInfo {
+        mem_total_mb: kib("MemTotal:").map(|k| k / 1024).filter(|&mb| mb > 0),
+        mem_available_mb: kib("MemAvailable:").map(|k| k / 1024),
+        swap_total_kib: kib("SwapTotal:").unwrap_or(0),
+    }
+}
+
+/// The major version in `systemctl --version`'s first line
+/// (`systemd 252 (252.31-1~deb12u1)`).
+pub fn parse_systemd_major(version_output: &str) -> Option<u32> {
+    version_output
+        .lines()
+        .next()?
+        .strip_prefix("systemd ")?
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()
+}
+
+/// What this node reports about running a PHP-FPM master per site user. Plain
+/// readings only; `hyperion_types::fpm_own::judge` decides. `php_users` and
+/// `own_users` are the service's to fill (they come from the database).
+pub async fn preflight_facts() -> hyperion_types::fpm_own::PreflightFacts {
+    let cgroup_controllers = tokio::fs::read_to_string("/sys/fs/cgroup/cgroup.controllers")
+        .await
+        .ok();
+    let systemd_version = cmd::run("/usr/bin/systemctl", &["--version"])
+        .await
+        .ok()
+        .and_then(|out| parse_systemd_major(&out));
+    let mem = tokio::fs::read_to_string("/proc/meminfo")
+        .await
+        .map(|m| parse_meminfo(&m))
+        .unwrap_or_default();
+    hyperion_types::fpm_own::PreflightFacts {
+        cgroup_controllers,
+        systemd_version,
+        swap_total_kib: mem.swap_total_kib,
+        mem_total_mb: mem.mem_total_mb,
+        mem_available_mb: mem.mem_available_mb,
+        php_users: 0,
+        own_users: 0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
 
@@ -756,5 +821,40 @@ mod tests {
                 "pool config must declare `{expected_listen}`. got: {rendered}"
             );
         }
+    }
+
+    #[test]
+    fn systemd_major_is_the_number_after_the_name() {
+        assert_eq!(
+            parse_systemd_major("systemd 252 (252.31-1~deb12u1)\n+PAM +AUDIT -SELINUX\n"),
+            Some(252)
+        );
+        assert_eq!(
+            parse_systemd_major("systemd 257 (257.9-1~deb13u1)"),
+            Some(257)
+        );
+        assert_eq!(parse_systemd_major("systemd 215"), Some(215));
+        assert_eq!(parse_systemd_major(""), None);
+        assert_eq!(parse_systemd_major("not systemd at all"), None);
+        assert_eq!(parse_systemd_major("systemd (252)"), None);
+    }
+
+    #[test]
+    fn meminfo_gives_mib_for_ram_and_kib_for_swap() {
+        let m = parse_meminfo(
+            "MemTotal:        8167848 kB\nMemFree:          200000 kB\n\
+             MemAvailable:    6144000 kB\nSwapTotal:       2097148 kB\nSwapFree: 2097148 kB\n",
+        );
+        assert_eq!(m.mem_total_mb, Some(7976));
+        assert_eq!(m.mem_available_mb, Some(6000));
+        assert_eq!(m.swap_total_kib, 2_097_148);
+        // No swap line, no available line: unknown RAM is None, no swap is 0.
+        let bare = parse_meminfo("MemTotal: 1024 kB\n");
+        assert_eq!(bare.mem_total_mb, Some(1));
+        assert_eq!(bare.mem_available_mb, None);
+        assert_eq!(bare.swap_total_kib, 0);
+        let empty = parse_meminfo("");
+        assert_eq!(empty.mem_total_mb, None);
+        assert_eq!(empty.swap_total_kib, 0);
     }
 }

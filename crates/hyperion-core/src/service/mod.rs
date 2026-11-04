@@ -60,6 +60,7 @@ mod kv_expiry;
 mod letters;
 mod limits;
 pub use limits::PhpWorkersCursors;
+mod fpm_own;
 mod login_lock;
 mod mail;
 mod migration;
@@ -184,6 +185,14 @@ pub trait AdapterPort: Send + Sync {
         version: PhpVersion,
     ) -> Result<(), AdapterError>;
     async fn fpm_delete(&self, system_user: &str, version: PhpVersion) -> Result<(), AdapterError>;
+
+    /// What this node can say about running a PHP-FPM master per site user:
+    /// cgroup controllers, systemd version, RAM and swap. The user counts are
+    /// the service's to fill. Default impl reads nothing, so every verdict
+    /// built on it is a block — the stub adapters need no change.
+    async fn fpm_preflight_facts(&self) -> hyperion_types::fpm_own::PreflightFacts {
+        hyperion_types::fpm_own::PreflightFacts::default()
+    }
 
     async fn db_create(
         &self,
@@ -651,6 +660,12 @@ pub struct HostingService<A: AdapterPort + 'static> {
     /// does nothing at all unless restic is installed, so an install that
     /// has never heard of the feature is unaffected.
     pub snapshots_enabled: bool,
+    /// `[php] own_masters`: each site user's PHP runs under its own FPM master.
+    ///
+    /// Node-wide and OFF by default. Only stored for now: nothing reads it
+    /// until the units that act on it exist, so flipping it changes no file,
+    /// vhost or process.
+    pub fpm_own_masters: bool,
     /// Per-site CPU accounting, fed every few seconds by the agent's sampler.
     pub cpu_tracker: Arc<CpuTracker>,
     /// Which engine this node uses. See [`hyperion_types::ProtectionMode`].
@@ -891,6 +906,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             remote_backup: None,
             retention: BackupRetention::default(),
             snapshots_enabled: true,
+            fpm_own_masters: false,
             cpu_tracker: Default::default(),
             protection_mode: hyperion_types::ProtectionMode::Both,
             slack_default_webhook: None,
@@ -1053,6 +1069,13 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// not a way to turn the feature on.
     pub fn with_snapshots(mut self, enabled: bool) -> Self {
         self.snapshots_enabled = enabled;
+        self
+    }
+
+    /// Node-wide switch for per-site PHP masters (`[php] own_masters`). Default
+    /// OFF. Stored only; see [`HostingService::fpm_own_masters`].
+    pub fn with_fpm_own_masters(mut self, enabled: bool) -> Self {
+        self.fpm_own_masters = enabled;
         self
     }
 

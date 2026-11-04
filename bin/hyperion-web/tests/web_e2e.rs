@@ -319,6 +319,7 @@ async fn start_agent_with(toml: Option<&str>) -> (PathBuf, tempfile::TempDir, sq
         paths: hyperion_core::HostingPaths::default(),
         permissions_autoheal: true,
         snapshots_enabled: false,
+        fpm_own_masters: false,
         cpu_tracker: Default::default(),
         protection_mode: hyperion_types::ProtectionMode::Both,
         remote_backup: None,
@@ -6050,4 +6051,60 @@ async fn a_silent_node_stops_both_the_search_and_the_delete() {
     let err = job.error.unwrap_or_default();
     assert!(err.contains("Nothing was deleted"), "{err}");
     assert!(err.contains("web-2.example.net"), "{err}");
+}
+
+/// The Nodes page loads each node's PHP-masters verdict lazily, so one dead
+/// node cannot hold the page; the row carries the hook for it.
+#[tokio::test]
+async fn own_masters_row_loads_its_verdict_lazily() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d) = start_agent().await;
+    let app = build_app(sock.clone(), admin);
+    let cookie = acme_dns_login(&app, "kevin", "good-pw").await;
+    let (status, page) = acme_dns_get(&app, &cookie, "/install").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        page.contains("hx-get=\"/install/node-php-masters?node_id=local\""),
+        "the master's row must fetch its own verdict"
+    );
+}
+
+/// The stub node has no cgroup facts at all, so the fragment must say it
+/// cannot and why, rather than claiming nothing or crashing the row.
+#[tokio::test]
+async fn own_masters_fragment_names_what_blocks_the_node() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d) = start_agent().await;
+    let app = build_app(sock.clone(), admin);
+    let cookie = acme_dns_login(&app, "kevin", "good-pw").await;
+    let (status, html) =
+        acme_dns_get(&app, &cookie, "/install/node-php-masters?node_id=local").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(html.contains("Own PHP masters: not possible"), "{html}");
+    assert!(html.contains("cgroup v2"), "{html}");
+
+    let (status, _) = acme_dns_get(&app, &cookie, "/install/node-php-masters?node_id=a/b").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+/// The setting is a checkbox on the node's own settings page, with its
+/// copy, and it starts unticked on a node that never heard of it.
+#[tokio::test]
+async fn own_masters_checkbox_is_on_the_node_settings_page() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d, _cfg) = start_agent_with_toml("[agent]\n").await;
+    let app = build_app(sock.clone(), admin);
+    let cookie = acme_dns_login(&app, "kevin", "good-pw").await;
+    let (status, page) = acme_dns_get(&app, &cookie, "/install/node-settings?node_id=local").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(page.contains("name=\"own_masters\""), "checkbox missing");
+    assert!(page.contains("value=\"php\""), "section field missing");
+    assert!(page.contains("name=\"_checkboxes\" value=\"own_masters\""));
+    assert!(page.contains(
+        "New sites and sites you convert run on their own PHP process. About 11 MB per site."
+    ));
+    assert!(
+        !page.contains("name=\"own_masters\" value=\"true\" checked"),
+        "off by default"
+    );
 }
