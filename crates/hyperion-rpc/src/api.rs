@@ -1004,6 +1004,25 @@ pub trait AgentApi: Send + Sync + 'static {
         backup_id: Option<i64>,
         filename: Option<String>,
     ) -> Result<String, RpcError>;
+    /// This node's domains and FTP/SFTP target, for the search for backups
+    /// left by deleted sites.
+    async fn backup_orphan_census(&self) -> Result<hyperion_types::OffsiteOrphanCensus, RpcError>;
+    /// Every per-system-user folder on this node's FTP/SFTP target, and the
+    /// files in each.
+    async fn backup_orphan_list(
+        &self,
+    ) -> Result<Vec<hyperion_types::OffsiteFolderListing>, RpcError>;
+    /// Delete one file left by a deleted site from this node's FTP/SFTP
+    /// target. The panel has already asked every node that no site uses the
+    /// file's domain, which is more than this node alone can know.
+    async fn backup_orphan_delete(
+        &self,
+        target: String,
+        folder: String,
+        file: String,
+        actor_uid: i64,
+        actor_label: String,
+    ) -> Result<String, RpcError>;
     /// Does this WordPress site take public sign-ups, and as what role?
     async fn wp_registration_get(
         &self,

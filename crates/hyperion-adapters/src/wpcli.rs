@@ -38,6 +38,31 @@ pub fn validate_args(args: &[&str]) -> Result<(), AdapterError> {
 /// converts via `.iter().map(String::as_str).collect()` before invoking
 /// the command.
 pub fn build_argv(user: &str, htdocs: &str, extra: &[&str]) -> Vec<String> {
+    let php = site_php_binary_in(std::path::Path::new("/"), user);
+    argv_with_php(user, htdocs, php.as_deref(), extra)
+}
+
+/// The PHP binary of the branch serving this site, found by its FPM pool.
+///
+/// The wp-cli phar's shebang takes the machine's default PHP, which need not
+/// be the site's: code the site runs fine can then be a parse error for every
+/// wp-cli call. `None` (no pool yet, or the branch has no CLI) keeps that
+/// default. A pool is removed before a version switch creates the next one,
+/// so two only coexist after a failed switch; the newest wins.
+fn site_php_binary_in(root: &std::path::Path, user: &str) -> Option<String> {
+    hyperion_types::PhpVersion::all()
+        .iter()
+        .rev()
+        .find_map(|v| {
+            let pool = root
+                .join(v.pool_dir().trim_start_matches('/'))
+                .join(format!("{user}.conf"));
+            let binary = root.join(format!("usr/bin/php{}", v.as_str()));
+            (pool.exists() && binary.exists()).then(|| binary.display().to_string())
+        })
+}
+
+fn argv_with_php(user: &str, htdocs: &str, php: Option<&str>, extra: &[&str]) -> Vec<String> {
     // wp-cli needs a writable HOME. `sudo -u` does NOT give it one: Debian's
     // sudoers resets the environment but leaves HOME pointing at the CALLING
     // user's home, which for the agent is /root. wp-cli then tries to write
@@ -61,10 +86,13 @@ pub fn build_argv(user: &str, htdocs: &str, extra: &[&str]) -> Vec<String> {
         "/usr/bin/env".into(),
         format!("WP_CLI_CACHE_DIR={site_tmp}/wp-cli-cache"),
         format!("TMPDIR={site_tmp}"),
-        "/usr/local/bin/wp".into(),
-        "--allow-root=false".into(),
-        format!("--path={}", htdocs),
     ];
+    v.extend(php.map(str::to_string));
+    v.extend([
+        "/usr/local/bin/wp".to_string(),
+        "--allow-root=false".to_string(),
+        format!("--path={}", htdocs),
+    ]);
     v.extend(extra.iter().map(|s| s.to_string()));
     v
 }
@@ -190,6 +218,38 @@ pub async fn install_base_theme(user: &str, htdocs: &str) -> Result<String, Adap
             install_item(user, htdocs, "theme", BASE_THEME_FALLBACK, true).await?;
             Ok(BASE_THEME_FALLBACK.to_string())
         }
+    }
+}
+
+/// wp-cli's answer when a site has no scheduled events at all, which is
+/// nothing having gone wrong.
+fn cron_had_nothing_to_run(output: &str) -> bool {
+    output.contains("no scheduled cron events")
+        || output.contains("No events")
+        || output.contains("no_events")
+}
+
+/// Run the site's due cron events from the command line. In its own process
+/// group with a timeout: an event stuck on a dead HTTP call must not hold
+/// the node's slot, or leave a PHP process behind when it is given up on.
+pub async fn cron_run_due(user: &str, htdocs: &str) -> Result<(), AdapterError> {
+    let argv = build_argv(
+        user,
+        htdocs,
+        &["cron", "event", "run", "--due-now", "--quiet"],
+    );
+    match cmd::run_group_timeout(
+        "/usr/bin/sudo",
+        &argv_as_refs(&argv),
+        std::time::Duration::from_secs(hyperion_types::wpcron::RUN_TIMEOUT_SECS),
+        "wp cron",
+    )
+    .await
+    {
+        Err(AdapterError::Command { stderr_tail, .. }) if cron_had_nothing_to_run(&stderr_tail) => {
+            Ok(())
+        }
+        other => other.map(|_| ()),
     }
 }
 
@@ -816,6 +876,33 @@ pub fn culprit_from_output(output: &str) -> Option<(String, String)> {
         }
     }
     None
+}
+
+/// The line of wp-cli's output saying why WordPress could not load, from
+/// PHP's own label onward — whatever came before it on the line is a prefix
+/// ("PHP ", a caller's "plugins: "), not part of the reason.
+///
+/// A parse error counts as much as a fatal: PHP compiles a plugin as it loads
+/// it, so code it cannot parse stops the load just the same. That is what a
+/// plugin written for an older PHP does, and it never says "Fatal error".
+pub fn boot_error_line(output: &str) -> Option<&str> {
+    output.lines().find_map(|line| {
+        ["Fatal error", "Parse error"]
+            .iter()
+            .filter_map(|label| line.find(label))
+            .min()
+            .map(|i| line[i..].trim_end())
+    })
+}
+
+/// One sentence for "WordPress could not load", naming the plugin or theme
+/// when the output does. `None` when the output is some other failure.
+pub fn boot_failure_summary(output: &str) -> Option<String> {
+    let line = boot_error_line(output)?;
+    Some(match culprit_from_output(output) {
+        Some((slug, kind)) => format!("the {kind} {slug} stops WordPress loading: {line}"),
+        None => line.to_string(),
+    })
 }
 
 /// Emergency-disable a plugin by renaming its directory — the one lever
@@ -1859,6 +1946,50 @@ mod tests {
         assert_eq!(super::culprit_from_output("connection refused"), None);
     }
 
+    /// What wp-cli printed for a plugin written for PHP 7: PHP says it twice,
+    /// and a parse error is not a "Fatal error" though it stops the load
+    /// just the same.
+    const PARSE_ERROR: &str = "PHP Parse error:  syntax error, unexpected token \"{\", expecting \")\" in /home/stpl/stpl.cz/htdocs/wp-content/plugins/wp-cloudy/wpcloudy.php on line 1620\nParse error: syntax error, unexpected token \"{\", expecting \")\" in /home/stpl/stpl.cz/htdocs/wp-content/plugins/wp-cloudy/wpcloudy.php on line 1620";
+
+    #[test]
+    fn a_parse_error_is_a_boot_error_too() {
+        let line = super::boot_error_line(PARSE_ERROR).expect("a parse error");
+        assert!(line.starts_with("Parse error:"), "{line}");
+        assert!(line.ends_with("on line 1620"), "{line}");
+        assert!(!line.contains('\n'), "one line only: {line}");
+    }
+
+    #[test]
+    fn a_fatal_error_is_a_boot_error_and_anything_else_is_not() {
+        assert_eq!(
+            super::boot_error_line("noise\nplugins: PHP Fatal error: Uncaught Boom in /x.php:1"),
+            Some("Fatal error: Uncaught Boom in /x.php:1")
+        );
+        assert_eq!(
+            super::boot_error_line("Error establishing a database connection"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_boot_failure_names_what_stopped_the_load_once() {
+        let s = super::boot_failure_summary(PARSE_ERROR).expect("a summary");
+        assert!(
+            s.starts_with("the plugin wp-cloudy stops WordPress loading: Parse error:"),
+            "{s}"
+        );
+        assert_eq!(s.matches("Parse error").count(), 1, "{s}");
+    }
+
+    #[test]
+    fn a_boot_failure_without_a_culprit_still_says_what_failed() {
+        assert_eq!(
+            super::boot_failure_summary("PHP Fatal error: Boom in /x/wp-config.php:3").as_deref(),
+            Some("Fatal error: Boom in /x/wp-config.php:3")
+        );
+        assert_eq!(super::boot_failure_summary("connection refused"), None);
+    }
+
     use super::*;
 
     #[test]
@@ -1945,6 +2076,14 @@ mod tests {
     /// write its cache there, is denied, and the operator sees a plugin
     /// install fail while every file permission on the site is correct.
     #[test]
+    fn no_events_is_not_a_cron_failure() {
+        assert!(cron_had_nothing_to_run(
+            "Error: You currently have no scheduled cron events."
+        ));
+        assert!(!cron_had_nothing_to_run("PHP Fatal error: Uncaught Error"));
+    }
+
+    #[test]
     fn wp_cli_gets_a_writable_home_and_cache() {
         let v = build_argv(
             "alice_cz",
@@ -1966,6 +2105,62 @@ mod tests {
              filesystem, so a large download is not copied across devices: {cache}"
         );
         assert!(v.iter().any(|a| a.starts_with("TMPDIR=/home/alice_cz/")));
+    }
+
+    /// Fake filesystem root holding the given pools and php binaries.
+    fn php_root(pools: &[(&str, &str)], binaries: &[&str]) -> tempfile::TempDir {
+        let root = tempfile::tempdir().expect("tempdir");
+        for (branch, user) in pools {
+            let dir = root.path().join(format!("etc/php/{branch}/fpm/pool.d"));
+            std::fs::create_dir_all(&dir).expect("pool dir");
+            std::fs::write(dir.join(format!("{user}.conf")), "").expect("pool");
+        }
+        std::fs::create_dir_all(root.path().join("usr/bin")).expect("bin dir");
+        for branch in binaries {
+            std::fs::write(root.path().join(format!("usr/bin/php{branch}")), "").expect("bin");
+        }
+        root
+    }
+
+    /// wp-cli's shebang picks the machine's default PHP. A site on 8.3 on a
+    /// box defaulting to 8.4 then fails every wp-cli call on code the site
+    /// itself runs without trouble (wp-cloudy's `$x{0}`).
+    #[test]
+    fn wp_cli_runs_on_the_php_of_the_site_pool() {
+        let root = php_root(&[("8.3", "alice_cz"), ("8.4", "bob_cz")], &["8.3", "8.4"]);
+        assert_eq!(
+            site_php_binary_in(root.path(), "alice_cz"),
+            Some(root.path().join("usr/bin/php8.3").display().to_string())
+        );
+        assert_eq!(
+            site_php_binary_in(root.path(), "bob_cz"),
+            Some(root.path().join("usr/bin/php8.4").display().to_string())
+        );
+    }
+
+    /// No pool yet, or a branch without its CLI: keep the machine's default
+    /// rather than make wp-cli fail outright.
+    #[test]
+    fn wp_cli_keeps_the_default_php_when_the_site_has_no_usable_one() {
+        let root = php_root(&[("8.3", "alice_cz")], &["8.4"]);
+        assert_eq!(site_php_binary_in(root.path(), "alice_cz"), None);
+        assert_eq!(site_php_binary_in(root.path(), "nobody_cz"), None);
+    }
+
+    #[test]
+    fn the_site_php_runs_the_wp_cli_phar() {
+        let v = argv_with_php(
+            "alice_cz",
+            "/home/alice_cz/alice.cz/htdocs",
+            Some("/usr/bin/php8.3"),
+            &["plugin", "list"],
+        );
+        let php = v.iter().position(|a| a == "/usr/bin/php8.3").expect("php");
+        assert_eq!(v[php + 1], "/usr/local/bin/wp", "{v:?}");
+        assert!(
+            php > v.iter().position(|a| a == "/usr/bin/env").expect("env"),
+            "{v:?}"
+        );
     }
 
     /// A path with no parent must not send the cache somewhere surprising.

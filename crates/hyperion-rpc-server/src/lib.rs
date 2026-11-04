@@ -8,12 +8,12 @@
 #![forbid(unsafe_code)]
 
 use hyperion_rpc::codec::{read_frame, write_frame, Request, Response};
-use hyperion_rpc::AgentApi;
+use hyperion_rpc::{AgentApi, RpcError};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::net::{UnixListener, UnixStream};
-use tracing::{debug, error};
+use tracing::{debug, error, info, warn, Level};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ServerError {
@@ -81,6 +81,40 @@ async fn handle_conn(mut stream: UnixStream, api: Arc<dyn AgentApi>) -> std::io:
 /// identical whether a request came in over the local socket or
 /// over the master→node signed channel.
 pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
+    let method = <&'static str>::from(&req);
+    let resp = dispatch_request(api, req).await;
+    if let Response::Error(e) = &resp {
+        log_rpc_error(method, e);
+    }
+    resp
+}
+
+/// How loud a failed RPC is on the node. Without this line the reason reached
+/// only the caller, and the node's journal held no trace of what went wrong.
+fn rpc_error_level(e: &RpcError) -> Level {
+    match e {
+        // Pollers ask after things that are gone, routinely.
+        RpcError::NotFound { .. } => Level::DEBUG,
+        // The node refusing a request, which is it doing its job.
+        RpcError::Validation { .. }
+        | RpcError::AlreadyExists { .. }
+        | RpcError::Conflict { .. } => Level::INFO,
+        RpcError::ProvisioningFailed { .. }
+        | RpcError::SystemCommand { .. }
+        | RpcError::Internal { .. } => Level::WARN,
+    }
+}
+
+fn log_rpc_error(method: &'static str, e: &RpcError) {
+    // The method name and the error only — never the params, see handle_conn.
+    match rpc_error_level(e) {
+        Level::DEBUG => debug!(method, error = %e, "request failed"),
+        Level::INFO => info!(method, error = %e, "request failed"),
+        _ => warn!(method, error = %e, "request failed"),
+    }
+}
+
+async fn dispatch_request(api: Arc<dyn AgentApi>, req: Request) -> Response {
     match req {
         Request::AgentInfo => match api.agent_info().await {
             Ok(v) => Response::AgentInfo(v),
@@ -1851,6 +1885,27 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(v) => Response::BackupOffsiteDelete(v),
             Err(e) => Response::Error(e),
         },
+        Request::BackupOrphanCensus {} => match api.backup_orphan_census().await {
+            Ok(v) => Response::BackupOrphanCensus(v),
+            Err(e) => Response::Error(e),
+        },
+        Request::BackupOrphanList {} => match api.backup_orphan_list().await {
+            Ok(v) => Response::BackupOrphanList(v),
+            Err(e) => Response::Error(e),
+        },
+        Request::BackupOrphanDelete {
+            target,
+            folder,
+            file,
+            actor_uid,
+            actor_label,
+        } => match api
+            .backup_orphan_delete(target, folder, file, actor_uid, actor_label)
+            .await
+        {
+            Ok(v) => Response::BackupOrphanDelete(v),
+            Err(e) => Response::Error(e),
+        },
         Request::WpRegistrationGet { sel } => match api.wp_registration_get(sel).await {
             Ok(v) => Response::WpRegistration(v),
             Err(e) => Response::Error(e),
@@ -2255,7 +2310,7 @@ mod tests {
     use hyperion_rpc::wire::{
         AgentInfo, DeleteOpts, HostingCreateReq, HostingCreated, HostingSelector,
     };
-    use hyperion_rpc::{AuditEntryWire, RpcError};
+    use hyperion_rpc::AuditEntryWire;
     use hyperion_types::{
         BackupRunWire, CertInfo, CertIssueRequest, CertRenewResult, ClusterStats, DashboardAlert,
         DnsCheckResult, ExpiringHosting, HostingDetail, HostingExpiry, HostingLimits,
@@ -3989,6 +4044,26 @@ mod tests {
         ) -> Result<String, RpcError> {
             Ok(String::new())
         }
+        async fn backup_orphan_census(
+            &self,
+        ) -> Result<hyperion_types::OffsiteOrphanCensus, RpcError> {
+            Ok(Default::default())
+        }
+        async fn backup_orphan_list(
+            &self,
+        ) -> Result<Vec<hyperion_types::OffsiteFolderListing>, RpcError> {
+            Ok(Vec::new())
+        }
+        async fn backup_orphan_delete(
+            &self,
+            _: String,
+            _: String,
+            _: String,
+            _: i64,
+            _: String,
+        ) -> Result<String, RpcError> {
+            Ok(String::new())
+        }
         async fn wp_registration_get(
             &self,
             _: HostingSelector,
@@ -4304,6 +4379,79 @@ mod tests {
         tokio::spawn(srv.run());
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         (path, dir)
+    }
+
+    /// What `tracing` wrote while `f` ran, at INFO and above.
+    async fn logged_during<F: std::future::Future>(f: F) -> String {
+        use std::sync::{Arc, Mutex};
+        #[derive(Clone)]
+        struct Sink(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Sink {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let sink = Sink(buf.clone());
+        let sub = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .with_ansi(false)
+            .with_writer(move || sink.clone())
+            .finish();
+        let _guard = tracing::subscriber::set_default(sub);
+        f.await;
+        let out = buf.lock().unwrap().clone();
+        String::from_utf8(out).unwrap()
+    }
+
+    /// A failing RPC used to leave no trace on the node: the error went back
+    /// to the caller and only the panel's error page ever showed it.
+    #[tokio::test]
+    async fn dispatch_logs_a_failed_request_with_its_reason() {
+        let log = logged_during(async {
+            let req = Request::HostingCreate(HostingCreateReq {
+                domain: Domain::parse("example.cz").expect("parse"),
+                aliases: vec![],
+                php_version: None,
+                database: None,
+                system_user: None,
+                kind: "php".into(),
+                proxy_upstream_url: None,
+            });
+            dispatch(Arc::new(EchoApi), req).await;
+        })
+        .await;
+        assert!(log.contains("WARN"), "got: {log}");
+        assert!(log.contains("HostingCreate"), "got: {log}");
+        assert!(log.contains("not supported by this agent"), "got: {log}");
+    }
+
+    /// A refusal is logged too, as it answers "why did that click fail", but
+    /// below WARN: it is the node doing its job.
+    #[test]
+    fn expected_refusals_log_below_warn() {
+        let conflict = RpcError::Conflict {
+            message: "suspended".into(),
+        };
+        assert_eq!(rpc_error_level(&conflict), tracing::Level::INFO);
+        let missing = RpcError::NotFound {
+            kind: "hosting".into(),
+            id: "x".into(),
+        };
+        assert_eq!(rpc_error_level(&missing), tracing::Level::DEBUG);
+    }
+
+    #[tokio::test]
+    async fn dispatch_stays_quiet_on_success() {
+        let log = logged_during(async {
+            dispatch(Arc::new(EchoApi), Request::HostingList).await;
+        })
+        .await;
+        assert_eq!(log, "");
     }
 
     #[tokio::test]

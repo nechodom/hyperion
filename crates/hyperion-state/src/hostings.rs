@@ -215,6 +215,17 @@ pub async fn list_trashed_expired(
     Ok(out)
 }
 
+/// Every domain a hosting on this node answers to: primary names and aliases,
+/// trashed sites included.
+pub async fn all_domains(pool: &SqlitePool) -> Result<Vec<String>, StateError> {
+    let rows: Vec<(String,)> = sqlx::query_as(
+        "SELECT domain FROM hostings UNION SELECT alias_domain FROM hosting_aliases",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(|(d,)| d).collect())
+}
+
 /// `(id, domain, php_version, trashed)` for every site with a PHP version,
 /// trashed ones included — a trashed site still needs its branch to come
 /// back. Read raw, without the allow-list parse: a row on a branch the panel
@@ -429,6 +440,7 @@ struct RawHostingVhost {
     redirect_preserve_path: i64,
     waf_enabled: i64,
     signup_limit_enabled: i64,
+    php_rate_limit_enabled: i64,
     wp_admin_allowlist: String,
     blocked_bots: String,
     blocked_countries: String,
@@ -454,7 +466,7 @@ const QUERY_DOMAIN: &str =
 const QUERY_VHOST_BY_ID: &str =
     "SELECT basic_auth_enabled, basic_auth_user, basic_auth_hash, force_https, hsts_max_age, \
             custom_nginx_snippet, maintenance_mode, fastcgi_cache_enabled, fastcgi_cache_ttl, \
-            redirect_url, redirect_code, redirect_preserve_path, waf_enabled, signup_limit_enabled, wp_admin_allowlist, \
+            redirect_url, redirect_code, redirect_preserve_path, waf_enabled, signup_limit_enabled, php_rate_limit_enabled, wp_admin_allowlist, \
              blocked_bots,
             blocked_countries, blocked_countries, \
             canonical_host, waf_level, waf_overrides, noindex, \
@@ -524,6 +536,7 @@ async fn fetch_one<'a>(
             redirect_preserve_path,
             waf_enabled,
             signup_limit_enabled,
+            php_rate_limit_enabled,
             wp_admin_allowlist,
             blocked_bots,
             blocked_countries,
@@ -551,6 +564,7 @@ async fn fetch_one<'a>(
             redirect_preserve_path: redirect_preserve_path != 0,
             waf_enabled: waf_enabled != 0,
             signup_limit_enabled: signup_limit_enabled != 0,
+            php_rate_limit_enabled: php_rate_limit_enabled != 0,
             wp_admin_allowlist,
             blocked_bots,
             blocked_countries,
@@ -648,7 +662,7 @@ pub async fn set_vhost_options(
                 force_https=?, hsts_max_age=?, custom_nginx_snippet=?, \
                 maintenance_mode=?, fastcgi_cache_enabled=?, fastcgi_cache_ttl=?, \
                 redirect_url=?, redirect_code=?, redirect_preserve_path=?, \
-                waf_enabled=?, signup_limit_enabled=?, wp_admin_allowlist=?, blocked_bots=?, blocked_countries=?, canonical_host=?, waf_level=?, waf_overrides=?, noindex=?, \
+                waf_enabled=?, signup_limit_enabled=?, php_rate_limit_enabled=?, wp_admin_allowlist=?, blocked_bots=?, blocked_countries=?, canonical_host=?, waf_level=?, waf_overrides=?, noindex=?, \
                 crs_mode=?, crs_paranoia=?, crs_threshold=?, crs_wordpress=?, crs_exclusions=?, updated_at=? \
              WHERE id = ?",
         )
@@ -670,6 +684,7 @@ pub async fn set_vhost_options(
         // shifts every later placeholder, so the statement still runs and
         // silently writes the wrong columns.
         .bind(opts.signup_limit_enabled as i64)
+        .bind(opts.php_rate_limit_enabled as i64)
         .bind(&opts.wp_admin_allowlist)
         .bind(&opts.blocked_bots)
         .bind(&opts.blocked_countries)
@@ -705,7 +720,7 @@ pub async fn set_vhost_options(
                 force_https=?, hsts_max_age=?, custom_nginx_snippet=?, \
                 maintenance_mode=?, fastcgi_cache_enabled=?, fastcgi_cache_ttl=?, \
                 redirect_url=?, redirect_code=?, redirect_preserve_path=?, \
-                waf_enabled=?, signup_limit_enabled=?, wp_admin_allowlist=?, blocked_bots=?, blocked_countries=?, canonical_host=?, waf_level=?, waf_overrides=?, noindex=?, \
+                waf_enabled=?, signup_limit_enabled=?, php_rate_limit_enabled=?, wp_admin_allowlist=?, blocked_bots=?, blocked_countries=?, canonical_host=?, waf_level=?, waf_overrides=?, noindex=?, \
                 crs_mode=?, crs_paranoia=?, crs_threshold=?, crs_wordpress=?, crs_exclusions=?, updated_at=? \
              WHERE id = ?",
         )
@@ -726,6 +741,7 @@ pub async fn set_vhost_options(
         // shifts every later placeholder, so the statement still runs and
         // silently writes the wrong columns.
         .bind(opts.signup_limit_enabled as i64)
+        .bind(opts.php_rate_limit_enabled as i64)
         .bind(&opts.wp_admin_allowlist)
         .bind(&opts.blocked_bots)
         .bind(&opts.blocked_countries)

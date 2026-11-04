@@ -228,6 +228,79 @@ async fn care_overview_carries_each_sites_agreed_price_and_dates() {
     assert_eq!(monthly, 49_000 + 10_000);
 }
 
+/// The dashboard's countdown has to name the moment the tick really sends. A
+/// site owing a report says so, then the marker the tick writes moves it one
+/// cadence on. Each thing the tick would refuse over shows as a hold.
+#[tokio::test]
+async fn care_overview_says_when_the_tick_will_mail_the_report() {
+    use hyperion_types::care_check::CareReportHold;
+
+    let pool = open_memory().await.expect("open");
+    let (s, detail) = site_owing_a_care_report(&pool).await;
+    let id = detail.id.as_str();
+    let next_report = |s: HostingService<MockAdapterPort>| async move {
+        let rows = s.care_overview("2026-11".into()).await.expect("overview");
+        let row = rows.into_iter().next().expect("row");
+        (s, row.next_report.expect("the plan sells a report"))
+    };
+
+    // Bought 40 days ago on a monthly plan: ten days past due.
+    let (s, due) = next_report(s).await;
+    assert!(
+        (due.at - (now_secs() - 10 * 86_400)).abs() < 60,
+        "first period runs from the purchase: {due:?}"
+    );
+    assert_eq!(due.hold, None);
+
+    // Exactly what the tick reads as "the last report ended here".
+    let sent_at = now_secs() - 86_400;
+    hyperion_state::hosting_kv::set(
+        &pool,
+        id,
+        CARE_REPORT_KV_PERIOD_END,
+        &sent_at.to_string(),
+        1,
+    )
+    .await
+    .expect("marker");
+    let (s, due) = next_report(s).await;
+    assert_eq!(due.at, sent_at + 30 * 86_400);
+
+    hyperion_state::hosting_kv::set(&pool, id, CARE_REPORT_RECIPIENTS_KV_KEY, "", 1)
+        .await
+        .expect("no recipient");
+    let (s, due) = next_report(s).await;
+    assert_eq!(due.hold, Some(CareReportHold::NoRecipient));
+
+    let s = s.with_email(None, None);
+    let (s, due) = next_report(s).await;
+    assert_eq!(due.hold, Some(CareReportHold::NoRelay));
+
+    hyperion_state::hostings::set_state(&pool, &detail.id, HostingState::Suspended, 1)
+        .await
+        .expect("suspend");
+    let (_, due) = next_report(s).await;
+    assert_eq!(due.hold, Some(CareReportHold::SiteNotActive));
+}
+
+/// A plan that sells no report has no countdown, whatever else it sells, and
+/// does not borrow a start date from one that does.
+#[tokio::test]
+async fn care_overview_has_no_next_report_without_a_plan_selling_one() {
+    let pool = open_memory().await.expect("open");
+    let s = svc(pool.clone(), package_mocks());
+    let detail = hosting_for_packages(&s, "bez-reportu.cz").await;
+    let plan = s
+        .package_create(care_input("Care", PackageFeatures::default()))
+        .await
+        .expect("plan");
+    s.package_activate(HostingSelector::Id(detail.id.clone()), plan.id, None, None)
+        .await
+        .expect("on");
+    let rows = s.care_overview("2026-11".into()).await.expect("overview");
+    assert_eq!(rows[0].next_report, None);
+}
+
 /// The half of a package edit that does not happen on the master.
 ///
 /// `hosting_packages` is co-located with its hosting, so the UPDATE inside

@@ -954,7 +954,7 @@
                switch. #}
             <form method="post" action="/hostings/set-php-version" class="inline-switch"
                   data-confirm-title="Change PHP version"
-                  data-confirm-body="The PHP-FPM pool for this site is torn down and re-created on the chosen version. Expect a few hundred ms of 502s while the new pool starts. Persisted PHP limits (memory, max_children and so on) carry over."
+                  data-confirm-body="A PHP-FPM pool starts on the chosen version, the site moves to it, then the old pool is removed. If the new pool cannot start, the site stays on its current version. Persisted PHP limits (memory, max_children and so on) carry over."
                   data-confirm-confirm-label="Switch version"
                   data-confirm-variant="primary">
               {# Session-wide CSRF token — the middleware accepts the same
@@ -2717,6 +2717,18 @@
         <div class="s-control"><input type="checkbox" class="switch" id="signup_limit_enabled" name="signup_limit_enabled" value="on"
              {% if detail.vhost_options.signup_limit_enabled %}checked{% endif %}></div>
       </div>
+
+      <div class="setting-row">
+        <label class="s-label" for="php_rate_limit_enabled">Rate-limit PHP requests per visitor</label>
+        <p class="s-help">
+          Stops one crawler or bot from keeping every PHP worker busy: about 10 PHP requests a second per
+          address, with a burst of 40, then <code>429</code>. Logged-in WordPress users are exempt, and images,
+          styles and scripts are not counted. Leave it off unless bots are the problem: many people behind one
+          address, such as an office or a school, count as one visitor.
+        </p>
+        <div class="s-control"><input type="checkbox" class="switch" id="php_rate_limit_enabled" name="php_rate_limit_enabled" value="on"
+             {% if detail.vhost_options.php_rate_limit_enabled %}checked{% endif %}></div>
+      </div>
     </div>
 
     <div class="setting-group">Bots</div>
@@ -2975,13 +2987,66 @@
        pm.max_children"). Memory is not what ran out here, so the automatic
        memory_limit below cannot help; the slow-request log says what holds
        the workers. #}
-    {% if workers_full.last_at > 0 %}
-    <p class="note{% if workers_full.today > 0 %} text-warn{% endif %}" style="margin:0 0 0.8rem">
-      {% if workers_full.today > 0 %}All PHP workers were busy {{ workers_full.today }}× today{% else %}All PHP workers were last busy{% endif %}
-      — most recently {{ crate::handlers::stats::fmt_ago(workers_full.last_at) }}. Visitors queue while that lasts and
-      may get a 502 or 504. <a href="#logs">PHP slow requests</a> shows what keeps the workers busy; the page cache
-      or a higher max_children gives more headroom.
+    {# Automatic max_children: the owning node raises the pool by a few
+       workers after it ran out several times at the limit in force or
+       visitors were affected, up to the ceiling and to what the node's RAM
+       affords; two quiet weeks take it one step back. On unless turned off.
+       Unticking restores the value above. #}
+    <div class="field-row">
+      <div class="field">
+        <label class="field-checkbox" style="margin-top:1.6rem">
+          <input id="workers_auto" type="checkbox" name="workers_auto" value="on"{% if workers_full.auto_enabled %} checked{% endif %}>
+          <span>Raise max_children automatically when the workers run out <span class="hint">— +4 per step, at most a third of this server's memory and half its CPU; back down after 2 quiet weeks</span></span>
+        </label>
+      </div>
+      <div class="field">
+        <label for="workers_auto_max">Automatic ceiling <span class="hint">workers</span></label>
+        <input id="workers_auto_max" name="workers_auto_max" type="number" min="1" max="200"
+               value="{{ workers_full.auto_max }}">
+      </div>
+    </div>
+    {% if workers_full.auto_no_room() %}
+    <p class="note text-warn" style="margin:0 0 0.8rem">
+      The ceiling must be above the site's own max_children ({{ workers_full.auto_floor }}) — at or under it there is
+      nothing to raise to.
     </p>
+    {% endif %}
+    {% if let Some(from) = workers_full.auto_raised_from %}
+    <p class="note" style="margin:0 0 0.8rem">
+      Raised automatically from your {{ from }} to {{ limits.php_max_children }} workers.
+    </p>
+    {% endif %}
+    {% if workers_full.last_at > 0 %}
+    <p class="note{% if workers_full.visitors_affected() %} text-warn{% endif %}" style="margin:0 0 0.8rem">
+      {% if workers_full.last_24h > 0 %}All PHP workers were busy {{ workers_full.last_24h }}× in the last 24 hours{% else %}All PHP workers were last busy{% endif %}
+      — most recently {{ crate::handlers::stats::fmt_ago(workers_full.last_at) }}.
+      {% if workers_full.visitors_affected() %}
+      Visitors got {{ workers_full.errors_24h }} 502/504 errors and waited over 10 seconds {{ workers_full.waits_24h }}×.
+      <a href="#logs">PHP slow requests</a> shows what keeps the workers busy.
+      {% else %}
+      No visitor got an error or waited over 10 seconds, so nothing needs doing.
+      {% endif %}
+    </p>
+    {% endif %}
+    {# WP-Cron from the command line. The hidden field says the box was on
+       the page: an unticked box and a page without one post the same. #}
+    {% if wp_status.is_some() %}
+    <input type="hidden" name="wp_system_cron_shown" value="1">
+    <div class="field-row">
+      <div class="field">
+        <label class="field-checkbox">
+          <input id="wp_system_cron" type="checkbox" name="wp_system_cron" value="on"{% if wp_cron.enabled %} checked{% endif %}>
+          <span>Run WP-Cron from the server <span class="hint">— every 5 minutes, so scheduled tasks take no PHP worker from visitors. Not on sites kept out of search engines, such as staging copies</span></span>
+        </label>
+      </div>
+    </div>
+    {% if wp_cron.retry_after > 0 %}
+    <p class="note text-warn" style="margin:0 0 0.8rem">
+      It kept failing on this site, so WordPress is running its own cron again. Hyperion tries once more within a day.
+    </p>
+    {% else if wp_cron.enabled && wp_cron.last_ok_at > 0 %}
+    <p class="note" style="margin:0 0 0.8rem">Last ran {{ crate::handlers::stats::fmt_ago(wp_cron.last_ok_at) }}.</p>
+    {% endif %}
     {% endif %}
     <div class="field-row">
       <div class="field">
@@ -5148,18 +5213,28 @@
 
   <form method="post" action="/hostings/delete" class="danger-row"
         data-confirm-title="Delete {{ detail.domain }}"
-        data-confirm-body="The files, database, system user and nginx vhost are removed. This is permanent — recovery is only possible from a backup. External DNS records are not touched. Type the domain to confirm."
+        data-confirm-body="The files, database, system user, snapshots and nginx vhost are removed. This is permanent — recovery is only possible from a backup. {note} Backups stay on the off-site targets. External DNS records are not touched. Type the domain to confirm."
+        data-confirm-note-field="local_backups"
+        data-confirm-note-on="Every backup of this site on this node goes too (archives, database dumps, and files no backup record names) and cannot be recovered. If they cannot be deleted, the hosting stays. With the trash on, they go when the site leaves the trash, not before."
+        data-confirm-note-off="Backups stay on this node."
         data-confirm-confirm-label="Delete permanently"
+        {% if can_delete_backups && crate::handlers::hostings::any_ftp_copies(backups.as_slice()) %}
+        data-confirm-check="Also delete this site's backups from the off-site FTP target"
+        data-confirm-check-name="offsite"
+        data-confirm-body-checked="The files, database, system user, snapshots and nginx vhost are removed, AND every backup of this site on the off-site FTP target (archives and database dumps). If they cannot be deleted, the hosting stays. With the trash on, they go when the site leaves the trash, not before. {note} Backups on S3 are not touched. External DNS records are not touched. Type the domain to confirm."
+        data-confirm-confirm-label-checked="Delete with FTP backups"
+        {% endif %}
         data-confirm-variant="danger"
         data-confirm-require="{{ detail.domain }}">
     <input type="hidden" name="_csrf" value="{{ csrf_delete }}">
     <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
     <div>
       <div class="d-title text-danger">Delete this hosting</div>
-      <div class="d-help">Removes the site, its files, databases, nginx vhost and Linux user. Permanent — recovery is only possible from a backup. External DNS records are not touched.</div>
+      <div class="d-help">Removes the site, its files, databases, snapshots, nginx vhost and Linux user. Permanent — recovery is only possible from a backup. External DNS records are not touched.</div>
       <div class="d-opts">
         <label class="field-checkbox"><input type="checkbox" name="keep_user" value="on"> Keep the Linux user</label>
         <label class="field-checkbox"><input type="checkbox" name="keep_db" value="on"> Keep the database</label>
+        {% if can_delete_backups %}<label class="field-checkbox"><input type="checkbox" name="local_backups" value="on"> Also delete this site's backups on this node</label>{% endif %}
       </div>
     </div>
     <div>

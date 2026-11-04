@@ -155,12 +155,12 @@ pub(super) async fn carry_access_grants(state: &SharedState, from: &str, to: &st
 /// in the archive). Everything else in the master's kv is node state, which
 /// the bundle carries or deliberately leaves.
 pub(super) fn is_master_site_kv(key: &str) -> bool {
-    // `php.mem_auto*` and `php.workers_full` share the prefix but are node
+    // `php.mem_auto*` and `php.workers_*` share the prefix but are node
     // state on the owning node; the bundle handles them.
     matches!(key, "notes" | "tags")
         || (key.starts_with("php.")
             && !key.starts_with("php.mem_auto")
-            && key != "php.workers_full")
+            && !key.starts_with("php.workers_"))
 }
 
 /// Give the hosting `to` the master-side notes, tags and PHP-ini copy `from`

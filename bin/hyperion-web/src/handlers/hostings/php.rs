@@ -197,6 +197,17 @@ pub struct SetLimitsForm {
     pub(super) mem_auto: String,
     #[serde(default)]
     pub(super) mem_auto_max_mb: String,
+    /// Checkbox: absent when unticked.
+    #[serde(default)]
+    pub(super) workers_auto: String,
+    #[serde(default)]
+    pub(super) workers_auto_max: String,
+    /// Checkbox: absent when unticked, or when the site has no WordPress.
+    #[serde(default)]
+    pub(super) wp_system_cron: String,
+    /// Set when the box above was on the page.
+    #[serde(default)]
+    pub(super) wp_system_cron_shown: String,
     #[serde(default)]
     pub(super) target_node: String,
 }
@@ -304,6 +315,29 @@ pub async fn post_set_limits(
         },
     };
     let mem_auto_on = form.mem_auto.trim() == "on";
+    let workers_auto_max: Option<i64> = match form.workers_auto_max.trim() {
+        "" => None,
+        v => match v.parse::<i64>() {
+            Ok(n) if (1..=hyperion_types::phpworkers::AUTO_MAX_LIMIT).contains(&n) => Some(n),
+            _ => {
+                let msg = format!(
+                    "Automatic max_children ceiling must be 1–{}.",
+                    hyperion_types::phpworkers::AUTO_MAX_LIMIT
+                );
+                return Ok(save_result(
+                    &headers,
+                    false,
+                    &msg,
+                    format!(
+                        "/hostings/{}?flash_error={}#limits",
+                        urlencoding(&form.selector),
+                        urlencoding(&msg)
+                    ),
+                ));
+            }
+        },
+    };
+    let workers_auto_on = form.workers_auto.trim() == "on";
     let target = node_target(&form.target_node);
     let hosting_id = find_hosting_anywhere(&state, sel.clone())
         .await?
@@ -311,18 +345,13 @@ pub async fn post_set_limits(
         .id
         .as_str()
         .to_string();
-    if mem_auto_on {
-        // A ceiling at or under the operator's own value gives the
-        // automation nothing to raise to — every out-of-memory would end as
-        // a daily "stuck at the ceiling" alert. Refuse it before anything is
-        // written. The floor is decided the way set_limits will decide it,
-        // from what the OWNING node has stored.
-        use hyperion_types::phpmem;
-        let stored = fetch_limits(&state, target, sel.clone())
-            .await
-            .ok()
-            .map(|l| l.php_memory_mb);
-        let st = match crate::dispatcher::dispatch_to_node(
+    // A ceiling at or under the operator's own value gives an automation
+    // nothing to raise to. Refuse it before anything is written. The floor
+    // is decided the way set_limits will decide it, from what the OWNING
+    // node has stored.
+    let (stored, owner_kv) = if mem_auto_on || workers_auto_on {
+        let stored = fetch_limits(&state, target, sel.clone()).await.ok();
+        let kv = match crate::dispatcher::dispatch_to_node(
             &state,
             target,
             Request::HostingKvList {
@@ -331,12 +360,52 @@ pub async fn post_set_limits(
         )
         .await
         {
-            Ok(RpcResponse::HostingKvList(v)) => v
-                .into_iter()
-                .find(|(k, _)| k == phpmem::KV_STATE)
-                .and_then(|(_, v)| phpmem::State::parse(&v)),
-            _ => None,
+            Ok(RpcResponse::HostingKvList(v)) => v,
+            _ => Vec::new(),
         };
+        (stored, kv)
+    } else {
+        (None, Vec::new())
+    };
+    if workers_auto_on {
+        use hyperion_types::phpworkers;
+        let st = owner_kv
+            .iter()
+            .find(|(k, _)| k == phpworkers::KV_AUTO_STATE)
+            .and_then(|(_, v)| phpworkers::AutoState::parse(v));
+        let floor = phpworkers::floor_after_save(
+            form.php_max_children,
+            stored.as_ref().map(|l| l.php_max_children),
+            st.as_ref(),
+        );
+        if let Some(max) = workers_auto_max {
+            if phpworkers::ceiling_leaves_no_room(max, floor) {
+                let msg = format!(
+                    "Automatic max_children ceiling ({max}) must be above the site's own \
+                     max_children ({floor}), or there is nothing to raise to."
+                );
+                return Ok(save_result(
+                    &headers,
+                    false,
+                    &msg,
+                    format!(
+                        "/hostings/{}?flash_error={}#limits",
+                        urlencoding(&form.selector),
+                        urlencoding(&msg)
+                    ),
+                ));
+            }
+        }
+    }
+    if mem_auto_on {
+        // Out-of-memory at the ceiling would end as a daily "stuck at the
+        // ceiling" alert.
+        use hyperion_types::phpmem;
+        let stored = stored.as_ref().map(|l| l.php_memory_mb);
+        let st = owner_kv
+            .iter()
+            .find(|(k, _)| k == phpmem::KV_STATE)
+            .and_then(|(_, v)| phpmem::State::parse(v));
         let floor = phpmem::floor_after_save(form.php_memory_mb, stored, st.as_ref());
         if phpmem::ceiling_leaves_no_room(mem_auto_max, floor) {
             let msg = format!(
@@ -375,7 +444,31 @@ pub async fn post_set_limits(
                 if mem_auto_on { "on" } else { "off" }.to_string(),
             ),
             (hyperion_types::phpmem::KV_MAX_MB, mem_auto_max.to_string()),
+            (
+                hyperion_types::phpworkers::KV_AUTO,
+                if workers_auto_on { "on" } else { "off" }.to_string(),
+            ),
+            // Blank keeps what is stored, or the default for the site's size.
+            (
+                hyperion_types::phpworkers::KV_AUTO_MAX,
+                workers_auto_max.map_or_else(String::new, |n| n.to_string()),
+            ),
+            (
+                hyperion_types::wpcron::KV_ENABLED,
+                if form.wp_system_cron.trim() == "on" {
+                    "on"
+                } else {
+                    "off"
+                }
+                .to_string(),
+            ),
         ] {
+            if key == hyperion_types::phpworkers::KV_AUTO_MAX && value.is_empty() {
+                continue;
+            }
+            if key == hyperion_types::wpcron::KV_ENABLED && form.wp_system_cron_shown.is_empty() {
+                continue;
+            }
             match crate::dispatcher::dispatch_to_node(
                 &state,
                 target,

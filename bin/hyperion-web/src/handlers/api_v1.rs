@@ -559,6 +559,8 @@ pub async fn delete_hosting(
     let opts = DeleteOpts {
         keep_user: q.keep_user,
         keep_database: q.keep_database,
+        delete_offsite_backups: false,
+        delete_local_backups: false,
     };
     let hid = detail.id.as_str().to_string();
     let payload = json!({

@@ -136,6 +136,7 @@ pub const CARDS: &[(&str, &str)] = &[
     ("snapshot-retention", "backups"),
     ("trash", "backups"),
     ("offsite-backfill", "backups"),
+    ("offsite-orphans", "backups"),
     ("sign-in", "access"),
     ("users-roles", "access"),
     ("audit-retention", "access"),

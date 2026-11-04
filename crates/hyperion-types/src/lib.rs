@@ -43,6 +43,7 @@ pub mod spf;
 pub mod stats;
 pub mod waf;
 pub mod wp;
+pub mod wpcron;
 
 pub use acme_dns::{AcmeDnsConfig, AcmeDnsLabel};
 pub use cert::{CertInfo, CertOverviewItem, CertRenewOutcome, CertRenewResult, PanelCertProgress};
@@ -63,8 +64,8 @@ pub use limits::next_anniversary;
 pub use limits::{
     BackupRestoreMode, BackupRunWire, ExpiringHosting, HostingExpiry, HostingLimits,
     HostingUsageBucket, IpBanWire, JobSubstep, NodeInviteMint, NodeInviteSummary,
-    OffsiteBackfillResult, OffsiteFile, OffsiteListing, OverBwPolicy, ProtectionMode,
-    SuspendReason,
+    OffsiteBackfillResult, OffsiteFile, OffsiteFolderListing, OffsiteListing, OffsiteOrphanCensus,
+    OverBwPolicy, ProtectionMode, SuspendReason,
 };
 pub use migration::{HostingImportResult, HostingMigrationBundle, HostingMigrationManifest};
 pub use package::{

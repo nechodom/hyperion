@@ -677,11 +677,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(ns)
     }
 
-    /// One tick of the dedicated high-resolution network sampler. `prev` holds
-    /// the last per-interface counters + the MONOTONIC instant they were read,
-    /// so the rate is bytes-since-last over real elapsed time. Cheap — one
-    /// /proc/net/dev read, no `du` — so it can run every few seconds, unlike
-    /// `stats_tick`. Keeps ~1h.
+    /// One tick of the dedicated high-resolution sampler. `prev` holds the last
+    /// per-interface counters + the MONOTONIC instant they were read, so the
+    /// rate is bytes-since-last over real elapsed time. Cheap — /proc reads, no
+    /// `du` — so it can run every few seconds, unlike `stats_tick`. Keeps ~1h.
     ///
     /// Two traps this avoids deliberately:
     ///   * `dt` comes from a MONOTONIC `Instant`, never the wall clock — a
@@ -704,9 +703,22 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         if let Some((prev_map, pinstant)) = prev.as_ref() {
             let dt = mono.saturating_duration_since(*pinstant).as_secs();
             let (rx_bps, tx_bps) = net_rate_from_delta(prev_map, &cur_map, dt);
-            if let Err(e) =
-                hyperion_state::net_samples::insert(&self.pool, now, rx_bps, tx_bps).await
-            {
+            let pm = read_proc_metrics().await;
+            // The same last-minute figure the page prints above the graph.
+            let cpu_pct_x100 = self
+                .cpu_tracker
+                .live(now)
+                .map_or(pm.cpu_pct_x100, |live| live.node_pct_x100());
+            let sample = hyperion_state::net_samples::NetSample {
+                at: now,
+                rx_bps,
+                tx_bps,
+                cpu_pct_x100,
+                loadavg_1m_x100: pm.loadavg_1m_x100,
+                mem_used_kib: pm.mem_used_kib,
+                mem_total_kib: pm.mem_total_kib,
+            };
+            if let Err(e) = hyperion_state::net_samples::insert(&self.pool, &sample).await {
                 tracing::debug!(error=%e, "net sample insert failed");
             }
             // Short rolling window — the graph only shows the last hour.
@@ -716,8 +728,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(())
     }
 
-    /// High-resolution network history (oldest → newest) for the realtime
-    /// stats sparkline. Empty until the sampler has taken two ticks.
+    /// High-resolution history (oldest → newest) for the realtime stats
+    /// sparklines. Empty until the sampler has taken two ticks.
     pub async fn net_history(&self, limit: i64) -> Result<hyperion_types::NetHistory, RpcError> {
         let samples = hyperion_state::net_samples::recent(&self.pool, limit)
             .await
@@ -727,6 +739,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 at: s.at,
                 rx_bps: s.rx_bps,
                 tx_bps: s.tx_bps,
+                cpu_pct_x100: s.cpu_pct_x100,
+                loadavg_1m_x100: s.loadavg_1m_x100,
+                mem_used_kib: s.mem_used_kib,
+                mem_total_kib: s.mem_total_kib,
             })
             .collect();
         Ok(hyperion_types::NetHistory { samples })
@@ -1228,6 +1244,16 @@ pub(super) async fn read_net_bytes() -> Option<(u64, u64)> {
 /// `some avg10` (×100) from /proc/pressure/<resource>. 0 when PSI is
 /// unavailable (kernel without CONFIG_PSI). Line: `some avg10=0.00 avg60=...`.
 pub(super) async fn read_psi_some_avg10(resource: &str) -> i64 {
+    read_psi_some(resource, "avg10=").await
+}
+
+/// [`read_psi_some_avg10`] over the last minute, for a decision that a burst
+/// of a few seconds should not swing.
+pub(super) async fn read_psi_some_avg60(resource: &str) -> i64 {
+    read_psi_some(resource, "avg60=").await
+}
+
+async fn read_psi_some(resource: &str, field: &str) -> i64 {
     let path = format!("/proc/pressure/{resource}");
     let Ok(s) = tokio::fs::read_to_string(&path).await else {
         return 0;
@@ -1235,7 +1261,7 @@ pub(super) async fn read_psi_some_avg10(resource: &str) -> i64 {
     for line in s.lines() {
         if let Some(rest) = line.strip_prefix("some ") {
             for tok in rest.split_whitespace() {
-                if let Some(v) = tok.strip_prefix("avg10=") {
+                if let Some(v) = tok.strip_prefix(field) {
                     return v.parse::<f64>().map(|f| (f * 100.0) as i64).unwrap_or(0);
                 }
             }
@@ -1254,6 +1280,17 @@ pub(super) async fn read_mem_total_mb() -> Option<i64> {
         .and_then(|kib| kib.parse::<i64>().ok())
         .map(|kib| kib / 1024)
         .filter(|&mb| mb > 0)
+}
+
+/// `MemAvailable` from /proc/meminfo, in MiB. `None` as for
+/// [`read_mem_total_mb`].
+pub(super) async fn read_mem_available_mb() -> Option<i64> {
+    let s = tokio::fs::read_to_string("/proc/meminfo").await.ok()?;
+    s.lines()
+        .find_map(|l| l.strip_prefix("MemAvailable:"))
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|kib| kib.parse::<i64>().ok())
+        .map(|kib| kib / 1024)
 }
 
 pub(super) async fn read_proc_metrics() -> ProcMetrics {

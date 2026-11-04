@@ -194,6 +194,13 @@ impl hyperion_core::AdapterPort for StubAdapters {
     async fn wp_install_base_theme(&self, _: &str, _: &str) -> Result<String, AdapterError> {
         Ok("twentytwentyfive".into())
     }
+    async fn wp_cron_run(
+        &self,
+        _system_user: &str,
+        _htdocs: &str,
+    ) -> Result<(), hyperion_adapters::AdapterError> {
+        Ok(())
+    }
     async fn wp_core_check_update(
         &self,
         _: &str,
@@ -670,6 +677,8 @@ async fn e2e_bundle_a_c_round_trip_through_wire() {
             opts: DeleteOpts {
                 keep_user: false,
                 keep_database: false,
+                delete_offsite_backups: false,
+                delete_local_backups: false,
             },
         },
     )

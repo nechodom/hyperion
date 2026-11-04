@@ -362,6 +362,9 @@ fn every_page_is_reachable_from_the_nav() {
         "settings_overview.html",
         // The Settings frame: its sub-navigation is how each section page is reached.
         "settings_base.html",
+        // One click from that sub-navigation; its Leftover backups page has
+        // no place of its own there.
+        "settings_backups.html",
         "api_keys.html",
         "roles.html",
         "certs.html",

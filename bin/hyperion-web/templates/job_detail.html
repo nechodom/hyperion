@@ -37,6 +37,9 @@
     {% if let Some(h) = job.hosting_target() %}
       <a href="/hostings/{{ h }}" class="btn">Open {{ h }}</a>
     {% endif %}
+    {% if job.kind.starts_with("offsite-orphan") %}
+      <a href="/settings/backups/orphans" class="btn">Leftover backups</a>
+    {% endif %}
   </div>
 </div>
 

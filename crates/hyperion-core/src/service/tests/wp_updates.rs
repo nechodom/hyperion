@@ -91,6 +91,35 @@ async fn a_scan_that_cannot_read_the_site_keeps_the_last_findings_and_says_why()
     assert_eq!(row.core_updates.len(), 1, "core from the good scan stays");
 }
 
+/// A plugin that stops WordPress loading fails every wp-cli call the same
+/// way. The saved reason names it, instead of PHP's message cut off at 300
+/// characters with the same error repeated.
+#[tokio::test]
+async fn a_scan_stopped_by_a_broken_plugin_names_the_plugin() {
+    let pool = open_memory().await.expect("open");
+    let mut a = package_mocks();
+    let parse_error = "PHP Parse error:  syntax error, unexpected token \"{\", expecting \")\" in /home/stpl/stpl.cz/htdocs/wp-content/plugins/wp-cloudy/wpcloudy.php on line 1620\nParse error: syntax error, unexpected token \"{\", expecting \")\" in /home/stpl/stpl.cz/htdocs/wp-content/plugins/wp-cloudy/wpcloudy.php on line 1620";
+    a.expect_wp_plugin_list()
+        .returning(move |_, _| Err(AdapterError::Other(parse_error.into())));
+    a.expect_wp_theme_list()
+        .returning(move |_, _| Err(AdapterError::Other(parse_error.into())));
+    let s = svc(pool.clone(), a);
+    let site = hosting_for_packages(&s, "kos.cz").await;
+
+    let scan = s
+        .wp_vuln_scan(HostingSelector::Id(site.id.clone()))
+        .await
+        .expect("scan");
+    assert!(scan.feed_unavailable, "a failed read is still a failure");
+    assert!(
+        scan.error
+            .starts_with("the plugin wp-cloudy stops WordPress loading: Parse error:"),
+        "{}",
+        scan.error
+    );
+    assert!(scan.error.ends_with("on line 1620"), "{}", scan.error);
+}
+
 /// Whether an update applies itself depends on the site's switch and on
 /// the pause map — both read when the list is built, so Resume or a
 /// flipped switch shows at once rather than after the next sweep.

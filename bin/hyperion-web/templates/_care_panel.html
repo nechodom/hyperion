@@ -49,6 +49,9 @@
         <span class="text-soft small">{{ r.packages }}</span>
       {% endif %}
       <span class="grow"></span>
+      {% if let Some(c) = r.report %}
+        <span class="pill {{ c.tone }}" style="font-size:0.6rem" title="{{ c.title }}">{{ c.text }}</span>
+      {% endif %}
       {% if r.complete %}
         <span class="pill ok" style="font-size:0.6rem">checked</span>
       {% else %}
@@ -66,7 +69,8 @@
   <p class="text-soft small" style="margin:0.6rem 0 0;line-height:1.5">
     These are the part of a care plan a machine cannot do — set per plan on
     the care packages page. A tick records that an operator confirmed they did
-    it: bookkeeping, not a measurement. Untouched is undone.
+    it: bookkeeping, not a measurement. Untouched is undone. The e-mail time is
+    when the customer's care report leaves: ticks made before then reach it.
   </p>
   {% endif %}
 </div>

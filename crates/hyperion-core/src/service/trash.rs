@@ -127,6 +127,21 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 .map_err(|e| RpcError::Internal_with(format!("unmark: {e}")))?;
             self.apply_login_policy_held(&detail.id, Some(legacy)).await;
         }
+        // The site is back, and a later delete asks again.
+        hyperion_state::hosting_kv::delete(
+            &self.pool,
+            detail.id.as_str(),
+            DELETE_OFFSITE_ON_PURGE_KV,
+        )
+        .await
+        .map_err(|e| RpcError::Internal_with(format!("forget choice: {e}")))?;
+        hyperion_state::hosting_kv::delete(
+            &self.pool,
+            detail.id.as_str(),
+            DELETE_LOCAL_ON_PURGE_KV,
+        )
+        .await
+        .map_err(|e| RpcError::Internal_with(format!("forget choice: {e}")))?;
         self.append_audit(
             "hosting.trash.restore",
             Some(detail.id.as_str()),
@@ -197,18 +212,69 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(purged)
     }
 
-    /// The hard-delete pipeline extracted so both `delete()` (when
-    /// trash is off) and `purge_from_trash()` / GC (when trash is
-    /// on) can share it. Keeps the existing public delete() body
-    /// readable instead of branching deep inside.
+    /// The one hard-delete pipeline. Every way a hosting leaves the node for
+    /// good ends here: `delete()` with the trash off or a keep flag set,
+    /// `purge_from_trash()`, the trash GC, a create reclaiming a trashed
+    /// domain and `roll_back_created()`. The keep flags spare the user and
+    /// the database only; everything else belongs to the hosting and goes.
     pub(super) async fn hard_delete_internal(
         &self,
         detail: HostingDetail,
         opts: DeleteOpts,
     ) -> Result<(), RpcError> {
+        // Asked for when the site was deleted, carried out now. First, so a
+        // refusal leaves the site in the trash for the operator (or the next
+        // GC tick) to try again. A target removed from the config meanwhile
+        // is different: no retry will ever reach those files, and refusing
+        // would keep the site in the trash for ever.
+        let remembered = hyperion_state::hosting_kv::get(
+            &self.pool,
+            detail.id.as_str(),
+            DELETE_OFFSITE_ON_PURGE_KV,
+        )
+        .await
+        .map_err(|e| RpcError::Internal_with(format!("read choice: {e}")))?
+        .is_some();
+        if opts.delete_offsite_backups || remembered {
+            if self.remote_backup.is_some() {
+                self.delete_all_offsite_copies(&detail).await.map_err(|e| {
+                    tracing::error!(
+                        error = %e, domain = %detail.domain,
+                        "purge: the site's off-site backups could not be deleted — it stays in the trash"
+                    );
+                    e
+                })?;
+            } else {
+                tracing::warn!(
+                    domain = %detail.domain,
+                    "purge: no off-site target is configured any more — the site's backups on it, if any, stay there"
+                );
+            }
+        }
+        // After the off-site step, whose likely failure is a network one: an
+        // unreachable target refuses before any local copy is gone.
+        let remembered = hyperion_state::hosting_kv::get(
+            &self.pool,
+            detail.id.as_str(),
+            DELETE_LOCAL_ON_PURGE_KV,
+        )
+        .await
+        .map_err(|e| RpcError::Internal_with(format!("read choice: {e}")))?
+        .is_some();
+        if opts.delete_local_backups || remembered {
+            self.delete_all_local_copies(&detail).await.map_err(|e| {
+                tracing::error!(
+                    error = %e, domain = %detail.domain,
+                    "purge: the site's local backups could not be deleted — it stays in place"
+                );
+                e
+            })?;
+        }
         hostings::set_state(&self.pool, &detail.id, HostingState::Deleting, now_secs())
             .await
             .map_err(|e| RpcError::Internal_with(format!("set deleting: {e}")))?;
+        // Also drops the per-hosting cache zone and htpasswd sidecar, so the
+        // slot is clean for a future hosting reusing this ULID.
         let _ = self
             .adapters
             .nginx_delete_vhost(&detail.domain, Some(detail.id.to_string()))
@@ -230,7 +296,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // hosting via ON DELETE CASCADE, so if the accounts are not removed
         // HERE the cascade takes the only record of them and they stay on the
         // box forever — with a working password and, because they share the
-        // site's uid, whatever that uid is next given.
+        // site's uid, whatever that uid is next given. Before the tree goes, so
+        // no new FTP session can start inside it while it is being removed.
         if let Ok(logins) =
             hyperion_state::ftp_accounts::logins_for_hosting(&self.pool, &detail.id).await
         {
@@ -285,6 +352,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                          next hosting that derives the same name"
                     );
                 }
+                // Also drop the system_users row: userdel frees the UID, the
+                // next useradd allocates it again, and a row left here makes
+                // that hosting's INSERT hit UNIQUE(uid).
                 if let Ok(Some(row)) =
                     system_users::get_by_name(&self.pool, &detail.system_user).await
                 {
@@ -365,12 +435,28 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let rows = hostings::list_trashed(&self.pool)
             .await
             .map_err(|e| RpcError::Internal_with(format!("list trashed: {e}")))?;
+        let delete_offsite: std::collections::HashSet<String> =
+            hyperion_state::hosting_kv::list_by_key(&self.pool, DELETE_OFFSITE_ON_PURGE_KV)
+                .await
+                .map_err(|e| RpcError::Internal_with(format!("list choices: {e}")))?
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect();
+        let delete_local: std::collections::HashSet<String> =
+            hyperion_state::hosting_kv::list_by_key(&self.pool, DELETE_LOCAL_ON_PURGE_KV)
+                .await
+                .map_err(|e| RpcError::Internal_with(format!("list choices: {e}")))?
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect();
         Ok(rows
             .into_iter()
             .map(|r| {
                 let trashed_at = r.trashed_at.unwrap_or(0);
                 let purge_at = trashed_at + retention_secs;
                 let secs_remaining = (purge_at - now).max(0);
+                let delete_offsite_backups = delete_offsite.contains(r.id.as_str());
+                let delete_local_backups = delete_local.contains(r.id.as_str());
                 hyperion_types::TrashEntry {
                     id: r.id.as_str().to_string(),
                     domain: r.domain,
@@ -378,6 +464,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     purge_at,
                     seconds_remaining: secs_remaining,
                     node_id: r.node_id.unwrap_or_default(),
+                    delete_offsite_backups,
+                    delete_local_backups,
                 }
             })
             .collect())

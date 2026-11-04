@@ -111,6 +111,46 @@ pub fn slowlog_path(system_user: &str) -> PathBuf {
     PathBuf::from(SLOWLOG_DIR).join(format!("{system_user}.log"))
 }
 
+/// Each pool's running workers, measured from `/proc`, by pool name. Needs
+/// root for another user's `smaps_rollup`; a process it cannot read, or one
+/// that exited meanwhile, is skipped. Empty off Linux.
+pub async fn pool_memory(
+) -> std::collections::HashMap<String, hyperion_types::phpworkers::PoolMemory> {
+    use hyperion_types::phpworkers;
+    tokio::task::spawn_blocking(|| {
+        let mut out: std::collections::HashMap<String, phpworkers::PoolMemory> = Default::default();
+        let Ok(entries) = std::fs::read_dir("/proc") else {
+            return out;
+        };
+        for e in entries.flatten() {
+            let name = e.file_name();
+            if !name.to_string_lossy().bytes().all(|b| b.is_ascii_digit()) {
+                continue;
+            }
+            let Ok(cmdline) = std::fs::read(e.path().join("cmdline")) else {
+                continue;
+            };
+            let cmdline = String::from_utf8_lossy(&cmdline);
+            let Some(pool) = phpworkers::pool_of_cmdline(&cmdline) else {
+                continue;
+            };
+            let Some(pss) = std::fs::read_to_string(e.path().join("smaps_rollup"))
+                .ok()
+                .as_deref()
+                .and_then(phpworkers::pss_mb)
+            else {
+                continue;
+            };
+            let m = out.entry(pool.to_string()).or_default();
+            m.workers += 1;
+            m.largest_mb = m.largest_mb.max(pss);
+        }
+        out
+    })
+    .await
+    .unwrap_or_default()
+}
+
 /// The slowlog directory (0750 root) and its logrotate rule. FPM refuses
 /// to start a pool whose slowlog directory is missing, so this runs before
 /// every pool write. Idempotent on content.

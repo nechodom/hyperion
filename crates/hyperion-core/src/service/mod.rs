@@ -59,6 +59,7 @@ mod jobs;
 mod kv_expiry;
 mod letters;
 mod limits;
+pub use limits::PhpWorkersCursors;
 mod login_lock;
 mod mail;
 mod migration;
@@ -87,6 +88,7 @@ mod trash;
 mod users;
 mod wp;
 mod wp_assets;
+mod wp_cron;
 mod wp_integrity;
 mod wp_mail;
 mod wp_updates;
@@ -421,6 +423,9 @@ pub trait AdapterPort: Send + Sync {
         system_user: &str,
         htdocs: &str,
     ) -> Result<String, AdapterError>;
+
+    /// Run the site's due WP-Cron events from the command line.
+    async fn wp_cron_run(&self, system_user: &str, htdocs: &str) -> Result<(), AdapterError>;
 
     /// `wp core check-update` — core releases on offer, newest first. An
     /// error means "not checked", which callers must never read as current.

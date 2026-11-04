@@ -895,11 +895,42 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // destroy the DB/user the operator asked to keep, weeks later.
         // When either keep flag is set we hard-delete now (honouring
         // opts) instead of trashing.
+        //
+        // Asked up front so the answer is the same with the trash on or off:
+        // otherwise a node with no target would only say so weeks later, at
+        // the purge, when there is nobody left to tell.
+        if opts.delete_offsite_backups && self.remote_backup.is_none() {
+            return Err(RpcError::Validation {
+                message: NO_REMOTE_TARGET.into(),
+            });
+        }
         let cluster_cfg = read_cluster_section(self.agent_config_path.as_deref());
         if cluster_cfg.trash_enabled && !opts.keep_user && !opts.keep_database {
+            if opts.delete_offsite_backups {
+                hyperion_state::hosting_kv::set(
+                    &self.pool,
+                    detail.id.as_str(),
+                    DELETE_OFFSITE_ON_PURGE_KV,
+                    "1",
+                    now_secs(),
+                )
+                .await
+                .map_err(|e| RpcError::Internal_with(format!("remember choice: {e}")))?;
+            }
+            if opts.delete_local_backups {
+                hyperion_state::hosting_kv::set(
+                    &self.pool,
+                    detail.id.as_str(),
+                    DELETE_LOCAL_ON_PURGE_KV,
+                    "1",
+                    now_secs(),
+                )
+                .await
+                .map_err(|e| RpcError::Internal_with(format!("remember choice: {e}")))?;
+            }
             return self.trash_hosting(detail).await;
         }
-        self.delete_now(detail, opts).await
+        self.hard_delete_internal(detail, opts).await
     }
 
     /// Undo a hosting this very call just created and failed to fill
@@ -909,122 +940,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// "moved to trash" for a site nobody ever had.
     pub(super) async fn roll_back_created(&self, id: &HostingId) {
         if let Ok(detail) = self.get(HostingSelector::Id(id.clone())).await {
-            let _ = self.delete_now(detail, DeleteOpts::default()).await;
+            let _ = self
+                .hard_delete_internal(detail, DeleteOpts::default())
+                .await;
         }
-    }
-
-    /// The hard-delete half of [`Self::delete`]: tear everything down now,
-    /// never via the trash.
-    pub(super) async fn delete_now(
-        &self,
-        detail: HostingDetail,
-        opts: DeleteOpts,
-    ) -> Result<(), RpcError> {
-        hostings::set_state(&self.pool, &detail.id, HostingState::Deleting, now_secs())
-            .await
-            .map_err(|e| RpcError::Internal_with(format!("set deleting: {e}")))?;
-
-        // best-effort nginx delete (also drops per-hosting cache zone +
-        // htpasswd sidecar so the slot is fully clean for a future
-        // hosting reusing this ULID).
-        let _ = self
-            .adapters
-            .nginx_delete_vhost(&detail.domain, Some(detail.id.to_string()))
-            .await;
-        // best-effort cert delete
-        let _ = self.adapters.acme_delete(&detail.domain).await;
-        let _ = certificates::delete(&self.pool, &detail.domain).await;
-        // db drop
-        if let Some(db) = detail.database.as_ref() {
-            if !opts.keep_database {
-                let _ = self
-                    .adapters
-                    .db_drop(db.engine, &db.db_name, &db.db_user)
-                    .await;
-            }
-        }
-        // fpm pool delete
-        if let Some(ver) = detail.php_version {
-            let _ = self.adapters.fpm_delete(&detail.system_user, ver).await;
-        }
-        // remove tree
-        let hosting_root = format!(
-            "{}/{}/{}",
-            self.paths.home_root, detail.system_user, detail.domain
-        );
-        let _ = self.adapters.remove_hosting_tree(&hosting_root).await;
-
-        // Extra FTP logins are real passwd entries that share the site's uid;
-        // the ftp_accounts rows cascade away with the hosting, so remove the
-        // accounts here or nothing ever will. (hard_delete_internal does the
-        // same.)
-        if let Ok(logins) =
-            hyperion_state::ftp_accounts::logins_for_hosting(&self.pool, &detail.id).await
-        {
-            for login in logins {
-                if let Err(e) = hyperion_adapters::ftp::delete_extra_login(&login).await {
-                    tracing::error!(
-                        error = %e, login = %login,
-                        "delete: could not remove an extra FTP login — it will outlive the hosting"
-                    );
-                }
-            }
-        }
-        // State is `deleting` by now, so the site counts as neither online
-        // nor offline: its extra logins stay shut on the way out, and its
-        // system user is decided by whatever hostings remain on it.
-        {
-            let _serial = LOGIN_LOCKS.lock().await;
-            let legacy = matches!(
-                detail.state,
-                HostingState::Suspended | HostingState::Trashed
-            ) && matches!(self.login_lock_record(&detail.id).await, Ok(None));
-            self.apply_login_policy_held(&detail.id, Some(legacy)).await;
-        }
-        if !opts.keep_user {
-            // delete user only if no other hostings reference them
-            let (others,): (i64,) =
-                sqlx::query_as("SELECT count(*) FROM hostings WHERE system_user_id = (SELECT id FROM system_users WHERE name = ?) AND id != ?")
-                    .bind(&detail.system_user)
-                    .bind(detail.id.as_str())
-                    .fetch_one(&self.pool)
-                    .await
-                    .map_err(|e| RpcError::Internal_with(format!("count: {e}")))?;
-            if others == 0 {
-                // `userdel` refuses (exit 8) while any process still holds the
-                // account's UID, and this hosting's PHP-FPM workers do until
-                // the pool is gone. The trash and suspend paths already kill
-                // them; delete did not, so the failure was swallowed by the
-                // `let _ =` below and the Linux user OUTLIVED the hosting —
-                // while the `system_users` row was dropped anyway, which is
-                // the orphan state the create-rollback goes to some length to
-                // avoid. Killing here is right: the hosting is being
-                // destroyed, so its processes are meant to stop.
-                let _ = self.adapters.kill_user_procs(&detail.system_user).await;
-                if let Err(e) = self.adapters.delete_user(&detail.system_user).await {
-                    tracing::error!(
-                        error = %e, user = %detail.system_user,
-                        "delete: the Linux user survived — it will collide with the \
-                         next hosting that derives the same name"
-                    );
-                }
-                // Also drop the system_users row so the UID can be reused
-                // for a future hosting (Linux frees the UID via userdel;
-                // without this cleanup the next useradd allocates the same
-                // UID and `system_users` INSERT hits its UNIQUE(uid)
-                // constraint).
-                if let Ok(Some(row)) =
-                    system_users::get_by_name(&self.pool, &detail.system_user).await
-                {
-                    let _ = system_users::delete(&self.pool, row.id).await;
-                }
-            }
-        }
-
-        hostings::delete(&self.pool, &detail.id)
-            .await
-            .map_err(|e| RpcError::Internal_with(format!("delete row: {e}")))?;
-        Ok(())
     }
 }
 

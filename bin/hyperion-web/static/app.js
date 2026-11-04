@@ -470,6 +470,14 @@ function isShortcutContext(ev) {
 // ============================================================
 (function () {
   const NS = 'http://www.w3.org/2000/svg';
+  // Each mounted chart's "show the point nearest this clientX".
+  const shows = new WeakMap();
+  // The live refresh replaces the chart under a still mouse, and the new one
+  // hears nothing until the mouse moves again. Knowing where it is lets the
+  // tooltip carry over, showing the fresh value.
+  let mouse = null;
+  document.addEventListener('mousemove', (ev) => { mouse = { x: ev.clientX, y: ev.clientY }; }, { passive: true });
+  document.documentElement.addEventListener('mouseleave', () => { mouse = null; });
 
   function init(svg) {
     let points;
@@ -521,10 +529,10 @@ function isShortcutContext(ev) {
       return best;
     }
 
-    svg.addEventListener('mousemove', (ev) => {
+    function show(clientX) {
       const r = svg.getBoundingClientRect();
       if (r.width === 0) return;
-      const svgX = ((ev.clientX - r.left) / r.width) * 600;
+      const svgX = ((clientX - r.left) / r.width) * 600;
       const p = nearest(svgX);
       dot.setAttribute('cx', p.x);
       dot.setAttribute('cy', p.y);
@@ -541,9 +549,13 @@ function isShortcutContext(ev) {
       const tipW = tip.offsetWidth || 100;
       let left = pxX + 10;
       if (left + tipW > r.width) left = pxX - tipW - 10;
-      tip.style.left = Math.max(2, left) + 'px';
+      // A tip wider than the chart hangs off its left edge, not its right: the
+      // chart may end at the edge of a clipping .group.
+      tip.style.left = Math.max(Math.min(2, r.width - tipW - 2), left) + 'px';
       tip.style.top = Math.max(2, pxY - 34) + 'px';
-    });
+    }
+    shows.set(svg, show);
+    svg.addEventListener('mousemove', (ev) => show(ev.clientX));
     svg.addEventListener('mouseleave', () => {
       tip.style.display = 'none';
       dot.style.display = 'none';
@@ -566,7 +578,13 @@ function isShortcutContext(ev) {
   // Re-mount after HTMX swaps so dynamically-loaded sparklines also wire up.
   document.addEventListener('htmx:afterSettle', mountAll);
   // The live-refresh driver swaps innerHTML without htmx; re-arm hover there too.
-  document.addEventListener('live-refresh-swapped', mountAll);
+  document.addEventListener('live-refresh-swapped', () => {
+    mountAll();
+    if (!mouse) return;
+    const under = document.elementFromPoint(mouse.x, mouse.y);
+    const show = under && shows.get(under.closest('svg.spark-svg') || under);
+    if (show) show(mouse.x);
+  });
 })();
 })();
 
@@ -692,6 +710,15 @@ function isShortcutContext(ev) {
   let checkName = null;
   let plain = { body: '', label: '' };
   let ticked = { body: '', label: '' };
+  // Fill the body's {note} from a checkbox on the form itself, so the dialog
+  // says which way that box went before anything happens.
+  function withNote(form, text) {
+    const name = form.dataset.confirmNoteField;
+    if (!name) return text;
+    const box = form.elements[name];
+    const note = box && box.checked ? form.dataset.confirmNoteOn : form.dataset.confirmNoteOff;
+    return text.replace('{note}', note || '');
+  }
   function paintCheck() {
     if (!checkName) return;
     const on = checkBox.checked;
@@ -706,7 +733,7 @@ function isShortcutContext(ev) {
     pendingForm = form;
     lastFocused = document.activeElement;
     const title = form.dataset.confirmTitle || 'Are you sure?';
-    const body = form.dataset.confirmBody || '';
+    const body = withNote(form, form.dataset.confirmBody || '');
     const confirmLabel = form.dataset.confirmConfirmLabel || 'Confirm';
     const variant = (form.dataset.confirmVariant || 'primary').toLowerCase();
     titleEl.textContent = title;
@@ -716,7 +743,7 @@ function isShortcutContext(ev) {
     if (checkName) {
       plain = { body: body, label: confirmLabel };
       ticked = {
-        body: form.dataset.confirmBodyChecked || body,
+        body: withNote(form, form.dataset.confirmBodyChecked || '') || body,
         label: form.dataset.confirmConfirmLabelChecked || confirmLabel,
       };
       checkLabel.textContent = form.dataset.confirmCheck;
@@ -1475,9 +1502,13 @@ function isShortcutContext(ev) {
       try {
         // no-store: the whole point is to defeat the stale HTTP cache the
         // user had to F5 past. Always pull a fresh render.
-        const r = await fetch(location.href, { credentials: 'same-origin', cache: 'no-store' });
+        const asked = location.href;
+        const r = await fetch(asked, { credentials: 'same-origin', cache: 'no-store' });
         if (!r.ok) return;
         const doc = new DOMParser().parseFromString(await r.text(), 'text/html');
+        // The page moved on in place (the /stats period picker) while this was
+        // in flight: this answer is for a view nobody is looking at any more.
+        if (location.href !== asked) return;
         const fresh = doc.getElementById(id);
         const cur = document.getElementById(id);
         // Re-check after the await: a dialog may have opened while the

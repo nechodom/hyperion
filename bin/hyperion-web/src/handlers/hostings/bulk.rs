@@ -218,6 +218,8 @@ pub(super) async fn run_bulk_job(
                 opts: hyperion_rpc::wire::DeleteOpts {
                     keep_user: false,
                     keep_database: false,
+                    delete_offsite_backups: false,
+                    delete_local_backups: false,
                 },
             },
             "install_asset" => Request::WpInstallFromAsset {
