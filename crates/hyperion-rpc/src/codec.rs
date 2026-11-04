@@ -1429,6 +1429,13 @@ pub enum Request {
         node_id: String,
         installed: bool,
     },
+    /// Projects and containers of this node's Docker, as of the last tick.
+    DockerOverview,
+    /// Forget a Docker project's panel state on this node. Touches no
+    /// container.
+    DockerForgetProject {
+        project: String,
+    },
     /// Look up the avatar basename for one web_user.
     AvatarFilename {
         user_id: i64,
@@ -2756,6 +2763,9 @@ pub enum Response {
     DockerModule(hyperion_types::docker::DockerModuleState),
     /// Ack for DockerNodeRegister.
     DockerNodeRegistered,
+    DockerOverview(hyperion_types::docker::DockerNodeStatus),
+    /// Ack for DockerForgetProject.
+    DockerProjectForgotten,
     AvatarFilename(Option<String>),
     AvatarSet,
     /// Returns the masked target address (e.g. "k****@example.cz").

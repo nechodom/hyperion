@@ -46,6 +46,7 @@ mod dashboard;
 mod database;
 mod dkim;
 mod docker;
+mod docker_verdict;
 mod files;
 mod firewall;
 mod fs_health;
@@ -755,6 +756,9 @@ pub struct HostingService<A: AdapterPort + 'static> {
     /// clones so the concurrent read sees the running op's writes; ephemeral,
     /// cleared when the op finishes.
     pub backup_progress: Arc<tokio::sync::Mutex<HashMap<String, Vec<hyperion_types::JobSubstep>>>>,
+    /// What the Docker module's tick saw last, for the overview to serve
+    /// without running `docker` per page view. `None` until the first read.
+    pub docker_snapshot: Arc<tokio::sync::RwLock<Option<hyperion_types::docker::DockerNodeStatus>>>,
 }
 
 /// Default renewal window — matches Let's Encrypt's recommended
@@ -940,6 +944,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 hyperion_types::ServiceInstallStatus::default(),
             )),
             backup_progress: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            docker_snapshot: Arc::new(tokio::sync::RwLock::new(None)),
         }
     }
 

@@ -72,3 +72,39 @@ pub struct DockerModuleState {
     /// did not answer.
     pub docker_version: Option<String>,
 }
+
+/// One compose project on a node, with the verdict the module reached. A
+/// project that is gone has no containers and a `gone_since`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DockerProject {
+    /// The compose project name; empty for containers that belong to none
+    /// (shown as "other containers").
+    pub name: String,
+    pub containers: Vec<DockerContainer>,
+    /// `ok`, `problem` or `gone`.
+    pub verdict: String,
+    /// What is wrong, as service, exit code and cause. Never log text.
+    pub summary: String,
+    /// Domains of the hostings this project belongs to.
+    pub hostings: Vec<String>,
+    /// Unix seconds since the project's containers all disappeared.
+    pub gone_since: Option<i64>,
+}
+
+/// What a node's Docker looked like at the last read.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DockerNodeStatus {
+    /// Unix seconds of the last successful read of the container list.
+    pub read_at: i64,
+    /// Unix seconds of the last `docker stats` read; the CPU and memory
+    /// figures are that old.
+    pub stats_at: i64,
+    /// The daemon answered on the latest attempt. When it did not,
+    /// `projects` is the last thing it said.
+    pub daemon_ok: bool,
+    pub daemon_error: Option<String>,
+    pub projects: Vec<DockerProject>,
+    pub disk: Option<DockerDisk>,
+}

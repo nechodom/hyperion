@@ -168,6 +168,153 @@ pub async fn list_nodes(pool: &SqlitePool) -> Result<Vec<DockerNodeRow>, StateEr
         .collect())
 }
 
+/// Reserved `docker_projects` row that holds the daemon's own alert state.
+/// The parentheses cannot appear in a compose project name, so it never
+/// collides with a project, and [`list_projects`] leaves it out.
+pub const DAEMON_ROW: &str = "(daemon)";
+
+/// One row of `docker_projects`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProjectRow {
+    pub project: String,
+    pub last_seen_at: i64,
+    pub gone_since: i64,
+    pub problem_since: i64,
+    /// `ok`, `problem` or `gone`.
+    pub alert_state: String,
+    pub last_summary: String,
+}
+
+type ProjectTuple = (String, i64, i64, i64, String, String);
+
+fn project_of(r: ProjectTuple) -> ProjectRow {
+    ProjectRow {
+        project: r.0,
+        last_seen_at: r.1,
+        gone_since: r.2,
+        problem_since: r.3,
+        alert_state: r.4,
+        last_summary: r.5,
+    }
+}
+
+const PROJECT_COLS: &str =
+    "project, last_seen_at, gone_since, problem_since, alert_state, last_summary";
+
+/// Every project this node has seen, by name. Not the daemon's row.
+pub async fn list_projects(pool: &SqlitePool) -> Result<Vec<ProjectRow>, StateError> {
+    let rows: Vec<ProjectTuple> = sqlx::query_as(&format!(
+        "SELECT {PROJECT_COLS} FROM docker_projects WHERE project != ? ORDER BY project"
+    ))
+    .bind(DAEMON_ROW)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(project_of).collect())
+}
+
+/// One row, including the daemon's.
+pub async fn get_project(
+    pool: &SqlitePool,
+    project: &str,
+) -> Result<Option<ProjectRow>, StateError> {
+    let row: Option<ProjectTuple> = sqlx::query_as(&format!(
+        "SELECT {PROJECT_COLS} FROM docker_projects WHERE project = ?"
+    ))
+    .bind(project)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(project_of))
+}
+
+pub async fn put_project(pool: &SqlitePool, r: &ProjectRow) -> Result<(), StateError> {
+    sqlx::query(
+        "INSERT INTO docker_projects \
+           (project, last_seen_at, gone_since, problem_since, alert_state, last_summary) \
+         VALUES (?, ?, ?, ?, ?, ?) \
+         ON CONFLICT(project) DO UPDATE SET \
+           last_seen_at = excluded.last_seen_at, gone_since = excluded.gone_since, \
+           problem_since = excluded.problem_since, alert_state = excluded.alert_state, \
+           last_summary = excluded.last_summary",
+    )
+    .bind(&r.project)
+    .bind(r.last_seen_at)
+    .bind(r.gone_since)
+    .bind(r.problem_since)
+    .bind(&r.alert_state)
+    .bind(&r.last_summary)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Forget a project: its row and its restart history, nothing else. Whether
+/// anything was there is the return value; the daemon's row is not a project
+/// and is never touched.
+pub async fn forget_project(pool: &SqlitePool, project: &str) -> Result<bool, StateError> {
+    if project == DAEMON_ROW {
+        return Ok(false);
+    }
+    let mut tx = pool.begin().await?;
+    let gone = sqlx::query("DELETE FROM docker_projects WHERE project = ?")
+        .bind(project)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+    sqlx::query("DELETE FROM docker_container_watch WHERE project = ?")
+        .bind(project)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(gone > 0)
+}
+
+/// Restart history of one compose service.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WatchRow {
+    pub project: String,
+    pub service: String,
+    /// Sum of the service's containers' restart counts at the last look.
+    pub restart_count: i64,
+    /// Unix seconds at which that count was seen to rise.
+    pub rises: Vec<i64>,
+}
+
+pub async fn load_watch(pool: &SqlitePool) -> Result<Vec<WatchRow>, StateError> {
+    let rows: Vec<(String, String, i64, String)> = sqlx::query_as(
+        "SELECT project, service, restart_count, restart_window_json FROM docker_container_watch",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|r| WatchRow {
+            project: r.0,
+            service: r.1,
+            restart_count: r.2,
+            // A damaged window reads as no history rather than failing the tick.
+            rises: serde_json::from_str(&r.3).unwrap_or_default(),
+        })
+        .collect())
+}
+
+pub async fn put_watch(pool: &SqlitePool, r: &WatchRow) -> Result<(), StateError> {
+    let json = serde_json::to_string(&r.rises).unwrap_or_else(|_| "[]".into());
+    sqlx::query(
+        "INSERT INTO docker_container_watch (project, service, restart_count, restart_window_json) \
+         VALUES (?, ?, ?, ?) \
+         ON CONFLICT(project, service) DO UPDATE SET \
+           restart_count = excluded.restart_count, \
+           restart_window_json = excluded.restart_window_json",
+    )
+    .bind(&r.project)
+    .bind(&r.service)
+    .bind(r.restart_count)
+    .bind(json)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -211,5 +358,73 @@ mod tests {
         unregister_node(&pool, "w1").await.expect("remove");
         unregister_node(&pool, "w1").await.expect("again is fine");
         assert!(list_nodes(&pool).await.expect("list").is_empty());
+    }
+
+    #[tokio::test]
+    async fn forgetting_a_project_clears_its_row_and_history_only() {
+        let pool = crate::db::open_memory().await.expect("open");
+        for p in ["shop", "blog", DAEMON_ROW] {
+            put_project(
+                &pool,
+                &ProjectRow {
+                    project: p.into(),
+                    alert_state: "problem".into(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("put");
+        }
+        put_watch(
+            &pool,
+            &WatchRow {
+                project: "shop".into(),
+                service: "web".into(),
+                restart_count: 4,
+                rises: vec![10, 20],
+            },
+        )
+        .await
+        .expect("watch");
+
+        assert_eq!(
+            list_projects(&pool).await.expect("list").len(),
+            2,
+            "the daemon row is not a project"
+        );
+        assert!(forget_project(&pool, "shop").await.expect("forget"));
+        assert!(!forget_project(&pool, "shop").await.expect("again"));
+        assert!(!forget_project(&pool, DAEMON_ROW).await.expect("daemon"));
+        assert!(get_project(&pool, DAEMON_ROW).await.expect("get").is_some());
+        assert!(load_watch(&pool).await.expect("watch").is_empty());
+        let names: Vec<_> = list_projects(&pool)
+            .await
+            .expect("list")
+            .into_iter()
+            .map(|r| r.project)
+            .collect();
+        assert_eq!(names, ["blog"]);
+    }
+
+    #[tokio::test]
+    async fn watch_rows_round_trip_and_a_damaged_window_reads_empty() {
+        let pool = crate::db::open_memory().await.expect("open");
+        let w = WatchRow {
+            project: "p".into(),
+            service: "s".into(),
+            restart_count: 7,
+            rises: vec![1, 2, 3],
+        };
+        put_watch(&pool, &w).await.expect("put");
+        assert_eq!(
+            load_watch(&pool).await.expect("load"),
+            std::slice::from_ref(&w)
+        );
+        sqlx::query("UPDATE docker_container_watch SET restart_window_json = 'nope'")
+            .execute(&pool)
+            .await
+            .expect("damage");
+        let got = load_watch(&pool).await.expect("load");
+        assert_eq!((got[0].restart_count, got[0].rises.is_empty()), (7, true));
     }
 }

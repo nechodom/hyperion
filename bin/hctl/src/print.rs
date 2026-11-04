@@ -378,6 +378,26 @@ pub fn print_pretty(resp: &Response) {
             );
         }
         Response::DockerNodeRegistered => println!("✓ docker node recorded"),
+        Response::DockerProjectForgotten => println!("✓ docker project forgotten"),
+        Response::DockerOverview(st) => {
+            println!(
+                "docker: {}{}",
+                if st.daemon_ok { "ok" } else { "not answering" },
+                st.daemon_error
+                    .as_deref()
+                    .map(|e| format!(" ({e})"))
+                    .unwrap_or_default()
+            );
+            for p in &st.projects {
+                let name = if p.name.is_empty() { "(other containers)" } else { &p.name };
+                println!(
+                    "  {name}: {} ({} containers){}",
+                    p.verdict,
+                    p.containers.len(),
+                    if p.summary.is_empty() { String::new() } else { format!(" - {}", p.summary) }
+                );
+            }
+        }
         Response::EmailChangeRequest { masked_to } => {
             println!("✓ verification code sent to {masked_to}");
         }

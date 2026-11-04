@@ -1457,6 +1457,16 @@ async fn dispatch_request(api: Arc<dyn AgentApi>, req: Request) -> Response {
                 Err(e) => Response::Error(e),
             }
         }
+        Request::DockerOverview => match api.docker_overview().await {
+            Ok(st) => Response::DockerOverview(st),
+            Err(e) => Response::Error(e),
+        },
+        Request::DockerForgetProject { project } => {
+            match api.docker_forget_project(project).await {
+                Ok(()) => Response::DockerProjectForgotten,
+                Err(e) => Response::Error(e),
+            }
+        }
         Request::AvatarFilename { user_id } => match api.avatar_filename(user_id).await {
             Ok(f) => Response::AvatarFilename(f),
             Err(e) => Response::Error(e),
@@ -3583,6 +3593,14 @@ mod tests {
             Ok(Default::default())
         }
         async fn docker_node_register(&self, _: String, _: bool) -> Result<(), RpcError> {
+            Ok(())
+        }
+        async fn docker_overview(
+            &self,
+        ) -> Result<hyperion_types::docker::DockerNodeStatus, RpcError> {
+            Ok(Default::default())
+        }
+        async fn docker_forget_project(&self, _: String) -> Result<(), RpcError> {
             Ok(())
         }
         async fn avatar_filename(&self, _: i64) -> Result<Option<String>, RpcError> {

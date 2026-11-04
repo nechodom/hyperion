@@ -64,6 +64,7 @@ pub(crate) fn spawn_all(svc: &Svc, cert_renewal_window_days: i64) {
     spawn_scheduled_backups(svc);
     spawn_snapshot_retention(svc);
     spawn_os_updates(svc);
+    spawn_docker(svc);
 }
 
 /// Background-job closures run in the hyperion-web process, so a web
@@ -439,6 +440,20 @@ fn spawn_site_check(svc: &Svc) {
             Ok(n) if n > 0 => tracing::info!(sites = n, "site check: walked sites"),
             Ok(_) => {}
             Err(e) => tracing::warn!(error=%e, "site check tick failed"),
+        }
+    });
+}
+
+/// The Docker module: containers, verdicts and problem alerts. Its own
+/// task, so a slow `docker` never holds up another tick, and `every` makes
+/// a slow run delay the next one instead of overlapping it. While the
+/// module is off the tick returns before it runs anything. 30 s keeps a
+/// crash visible well inside the 3-minute alert grace; the offset keeps it
+/// off the stats and monitor ticks.
+fn spawn_docker(svc: &Svc) {
+    every(svc, 25, 30, |svc| async move {
+        if let Err(e) = svc.docker_tick().await {
+            tracing::warn!(error=%e, "docker tick failed");
         }
     });
 }

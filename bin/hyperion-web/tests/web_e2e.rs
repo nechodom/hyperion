@@ -340,6 +340,7 @@ async fn start_agent_with(toml: Option<&str>) -> (PathBuf, tempfile::TempDir, sq
             hyperion_types::ServiceInstallStatus::default(),
         )),
         backup_progress: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        docker_snapshot: Arc::new(tokio::sync::RwLock::new(None)),
     });
     let agent: Arc<dyn AgentApi> = Arc::new(AgentImpl::new(svc));
     let path = dir.path().join("agent.sock");

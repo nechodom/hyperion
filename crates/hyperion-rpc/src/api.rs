@@ -1267,6 +1267,12 @@ pub trait AgentApi: Send + Sync + 'static {
     ) -> Result<hyperion_types::docker::DockerModuleState, RpcError>;
     /// Master: record whether `node_id` runs the module.
     async fn docker_node_register(&self, node_id: String, installed: bool) -> Result<(), RpcError>;
+    /// What this node's Docker looked like at the last tick: projects,
+    /// containers, verdicts. Refused while the module is off.
+    async fn docker_overview(&self) -> Result<hyperion_types::docker::DockerNodeStatus, RpcError>;
+    /// Forget a Docker project on this node: Hyperion's record of it and
+    /// its alert, not a container.
+    async fn docker_forget_project(&self, project: String) -> Result<(), RpcError>;
 
     /// Read the avatar filename column for one user.
     async fn avatar_filename(&self, user_id: i64) -> Result<Option<String>, RpcError>;

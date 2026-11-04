@@ -2135,6 +2135,7 @@ pub const NOTIFICATION_TOPICS: &[(&str, &str)] = &[
     ("server", "Server"),
     ("trash", "Trash"),
     ("protection", "Protection"),
+    ("docker", "Docker"),
     ("other", "Other"),
 ];
 
@@ -2159,6 +2160,7 @@ pub fn notification_topic(kind: &str) -> (&'static str, &'static str) {
         "system" => "server",
         "hosting" if family == "hosting.trash" => "trash",
         "protection" => "protection",
+        "docker" => "docker",
         _ => "other",
     };
     NOTIFICATION_TOPICS
@@ -2174,8 +2176,17 @@ pub fn notification_topic(kind: &str) -> (&'static str, &'static str) {
 /// keeps hitting its limit, and a card per firing buried the bell in copies
 /// of one site. Only per-subject kinds (`family:<subject>`) qualify, so two
 /// different sites never share a card.
+///
+/// `docker.project:<name>` is the same shape: a project's problem and its
+/// recovery share one card that always says how it stands now. The Docker
+/// daemon is one subject per node, so `docker.daemon` has no suffix (the
+/// master keeps one card per node already).
 pub fn notification_replaces(kind: &str) -> bool {
-    matches!(kind.split_once(':'), Some(("php_workers", subject)) if !subject.is_empty())
+    kind == "docker.daemon"
+        || matches!(
+            kind.split_once(':'),
+            Some(("php_workers" | "docker.project", subject)) if !subject.is_empty()
+        )
 }
 
 /// One archive page plus everything the toolbar needs.
@@ -3155,6 +3166,8 @@ mod notification_topic_tests {
             ("quota.resolved:a.cz", "quota"),
             ("system.rofs", "server"),
             ("hosting.trash", "trash"),
+            ("docker.project:shop", "docker"),
+            ("docker.daemon", "docker"),
             ("hosting.something_else", "other"),
             ("brand_new", "other"),
             ("", "other"),
@@ -3170,5 +3183,15 @@ mod notification_topic_tests {
         assert!(!notification_replaces("php_workers:"));
         assert!(!notification_replaces("php_mem_auto"));
         assert!(!notification_replaces("cert.renew_failed:a.cz"));
+    }
+
+    #[test]
+    fn docker_alerts_fold_into_one_card_per_subject() {
+        assert!(notification_replaces("docker.project:shop"));
+        assert!(notification_replaces("docker.project:(other)"));
+        assert!(notification_replaces("docker.daemon"));
+        assert!(!notification_replaces("docker.project"));
+        assert!(!notification_replaces("docker.project:"));
+        assert!(!notification_replaces("docker.daemon:x"));
     }
 }

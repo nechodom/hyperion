@@ -287,6 +287,7 @@ pub async fn build_agent() -> (Arc<dyn AgentApi>, tempfile::TempDir) {
             hyperion_types::ServiceInstallStatus::default(),
         )),
         backup_progress: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        docker_snapshot: Arc::new(tokio::sync::RwLock::new(None)),
     });
     let agent: Arc<dyn AgentApi> = Arc::new(AgentImpl::new(svc));
     (agent, dir)

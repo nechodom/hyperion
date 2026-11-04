@@ -1656,6 +1656,12 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
     async fn docker_node_register(&self, node_id: String, installed: bool) -> Result<(), RpcError> {
         self.svc.docker_node_register(&node_id, installed).await
     }
+    async fn docker_overview(&self) -> Result<hyperion_types::docker::DockerNodeStatus, RpcError> {
+        self.svc.docker_overview().await
+    }
+    async fn docker_forget_project(&self, project: String) -> Result<(), RpcError> {
+        self.svc.docker_forget_project(project).await
+    }
     async fn avatar_filename(&self, user_id: i64) -> Result<Option<String>, RpcError> {
         self.svc.avatar_filename(user_id).await
     }
