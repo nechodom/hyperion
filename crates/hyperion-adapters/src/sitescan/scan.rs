@@ -62,6 +62,11 @@ const SKIPS_TRACKED: usize = 20_000;
 const GROUP_MIN_FILES: usize = 10;
 /// So is one with this many code files added, whatever the manifest's size.
 const GROUP_ADDED_CODE: u64 = 50;
+/// The hash in a record of a file too big to read. No file hashes to it, so one
+/// that comes back small enough to read counts as changed.
+const METADATA_ONLY: [u8; 32] = [0; 32];
+/// Symlinked directories named in the partial reason; the rest are counted.
+const DIR_LINKS_NAMED: usize = 5;
 /// How much of an over-long name an item shows.
 const NAME_SHOWN_BYTES: usize = 200;
 
@@ -326,6 +331,24 @@ fn rules_for(rel: &str, head: &[u8]) -> Vec<RuleHit> {
         hits.retain(|h| h.rule_id != TOO_LARGE_RULE);
     }
     hits
+}
+
+/// What a Trust action vouches for when it trusts a symlink: where it points.
+fn link_hash(target: &[u8]) -> [u8; 32] {
+    let mut h = Sha256::new();
+    h.update(b"symlink:");
+    h.update(target);
+    h.finalize().into()
+}
+
+/// Plain text from a tenant's link, like any snippet.
+fn link_snippet(target: &[u8]) -> String {
+    let shown: String = String::from_utf8_lossy(target)
+        .chars()
+        .take(100)
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    format!("symlink to {shown}")
 }
 
 /// Directories whose contents WordPress runs, wherever a symlink sends them.
@@ -632,6 +655,9 @@ struct Scan<'a> {
     long_names: u64,
     /// Manifest files behind something the walk wouldn't go through.
     listed_unchecked: u64,
+    /// Symlinked directories whose contents would have been looked at.
+    dir_links: u64,
+    dir_links_named: Vec<String>,
     partly_inspected: i64,
     symlinks_skipped: i64,
     /// Why parts of this run couldn't check something, apart from the walk.
@@ -668,8 +694,9 @@ impl<'a> Scan<'a> {
         let first = !baseline.first_done;
         let rules_bumped = baseline.rule_pack < RULE_PACK_VERSION;
         if rules_bumped {
-            // Their memory of "clean" was this older pack's.
-            baseline.churn.clear();
+            // Their memory of "clean" was this older pack's. Files too big to read
+            // were never judged by it, and are known by their metadata alone.
+            baseline.churn.retain(|_, e| e.sha256 == METADATA_ONLY);
         }
 
         let recorded_bytes = baseline
@@ -758,6 +785,8 @@ impl<'a> Scan<'a> {
             not_recorded: 0,
             long_names: 0,
             listed_unchecked: 0,
+            dir_links: 0,
+            dir_links_named: Vec::new(),
             partly_inspected: 0,
             symlinks_skipped: 0,
             reasons,
@@ -804,15 +833,7 @@ impl<'a> Scan<'a> {
         // Linking a file twice or pointing a name elsewhere mustn't make code
         // invisible, even though it isn't read.
         match why {
-            SkipReason::Symlink if self.symlink_stands_for_code(&rel) => {
-                self.report_unread(&rel, "symlink: not followed");
-                return;
-            }
-            SkipReason::Symlink => {
-                // A deploy's `uploads` link is an ordinary site, not a partial scan.
-                self.symlinks_skipped += 1;
-                return;
-            }
+            SkipReason::Symlink => return self.on_symlink(&rel),
             SkipReason::Vanished if self.is_churn_path(&rel) => return,
             SkipReason::HardLinked if in_scope(&rel) => {
                 self.report_unread(&rel, "hard-linked file: not read");
@@ -820,6 +841,67 @@ impl<'a> Scan<'a> {
             _ => {}
         }
         self.count_skip(&rel, why);
+    }
+
+    fn on_symlink(&mut self, rel: &str) {
+        // What's behind it stays unscanned, whatever anyone thinks of the link.
+        // If it can't be told what it leads to, it may be a directory.
+        if !self.dir_link_is_ignored(rel) && self.root.link_leads_to_dir(rel).unwrap_or(true) {
+            self.dir_links += 1;
+            if self.dir_links_named.len() < DIR_LINKS_NAMED {
+                self.dir_links_named.push(short_name(rel));
+            }
+        }
+        if !self.symlink_stands_for_code(rel) {
+            // A deploy's `uploads` link is an ordinary site, not a partial scan.
+            self.symlinks_skipped += 1;
+            return;
+        }
+        let target = self.root.read_link(rel).ok();
+        let sha = target.as_deref().map(link_hash);
+        let listed = self.listed_in(rel);
+        if listed.is_none() && sha.is_some() && self.baseline.trusted.get(rel) == sha.as_ref() {
+            return;
+        }
+        let why = target
+            .as_deref()
+            .map_or_else(|| "symlink: not followed".to_string(), link_snippet);
+        let mut item = self.unread_item(rel, why, sha.as_ref());
+        // Where a manifest speaks, this is a failed comparison: no trust list can
+        // override that.
+        if let Some(i) = listed {
+            item.kind = if self.comps[i].is_core() {
+                FindingKind::CoreModified
+            } else {
+                FindingKind::UpstreamModified
+            };
+            item.source_label = self.comps[i].source_label();
+        }
+        self.push_review(item);
+    }
+
+    /// The component whose manifest lists this path.
+    fn listed_in(&self, rel: &str) -> Option<usize> {
+        let Route::Manifest(i, key) = self.route(rel) else {
+            return None;
+        };
+        let listed = self.comps[i]
+            .manifest
+            .as_ref()
+            .is_some_and(|m| m.files.contains_key(&key));
+        (listed && !is_soft_file(&key)).then_some(i)
+    }
+
+    /// A deploy's link for `uploads` or `vendor`: what's in there would mostly
+    /// have been ignored anyway.
+    fn dir_link_is_ignored(&self, rel: &str) -> bool {
+        if self.input.discovery.is_wordpress {
+            return CHURN_DIRS
+                .iter()
+                .chain(std::iter::once(&UPLOADS_DIR))
+                .any(|d| rel.starts_with(d) || d.strip_suffix('/') == Some(rel));
+        }
+        rel.split('/').any(|d| NON_WP_CHURN_NAMES.contains(&d))
     }
 
     /// A symlink is only harmless where a file of that name wouldn't have been
@@ -831,6 +913,11 @@ impl<'a> Scan<'a> {
 
     /// A review item for a file this scan won't read.
     fn report_unread(&mut self, rel: &str, why: &str) {
+        let item = self.unread_item(rel, why.to_string(), None);
+        self.push_review(item);
+    }
+
+    fn unread_item(&self, rel: &str, why: String, sha: Option<&[u8; 32]>) -> SiteFileFinding {
         let component = self.owner(rel).map(|i| self.comps[i].slug().to_string());
         // An exact name for anything that could be acted on by name.
         let name = if rel.len() > self.limits.max_rel_bytes {
@@ -838,12 +925,11 @@ impl<'a> Scan<'a> {
         } else {
             rel.to_string()
         };
-        let item = SiteFileFinding {
-            snippet: why.to_string(),
+        SiteFileFinding {
+            snippet: why,
             component,
-            ..self.base_item(&name, FindingKind::BaselineChange, None)
-        };
-        self.push_review(item);
+            ..self.base_item(&name, FindingKind::BaselineChange, sha)
+        }
     }
 
     fn base_item(
@@ -1225,24 +1311,61 @@ impl<'a> Scan<'a> {
         }
     }
 
-    /// Too big to be worth reading with nothing to compare it with? That's
-    /// reported for what PHP runs or obeys, and for a watched file that changed:
-    /// metadata alone can say that much.
-    fn too_big_to_read(&mut self, m: &FileMeta, owner: Option<usize>, change: Change) -> bool {
+    /// Too big to be worth reading with nothing to compare it with? What PHP runs
+    /// or obeys is always reported. Otherwise metadata can still tell what's new
+    /// or changed since the first scan, and what was there at the first scan is
+    /// remembered by it.
+    fn too_big_to_read(
+        &mut self,
+        m: &FileMeta,
+        owner: Option<usize>,
+        change: Change,
+        rules_only: bool,
+    ) -> bool {
         if m.size <= NO_MANIFEST_READ_MAX {
             return false;
         }
         if size_is_a_loose_end(&m.rel) {
             self.report_oversize(m, owner);
-        } else if change == Change::NeedsHash {
-            let item = SiteFileFinding {
-                snippet: format!("{} bytes: changed, too large to read", m.size),
-                component: self.component_of(owner),
-                ..self.base_item(&m.rel, FindingKind::BaselineChange, None)
-            };
-            self.push_review(item);
+            return true;
+        }
+        match change {
+            Change::Unchanged => {}
+            Change::New if self.first => self.remember_unread(m, rules_only),
+            Change::NeedsHash if !rules_only => {
+                let item = SiteFileFinding {
+                    snippet: format!("{} bytes: changed, too large to read", m.size),
+                    component: self.component_of(owner),
+                    ..self.base_item(&m.rel, FindingKind::BaselineChange, None)
+                };
+                self.push_review(item);
+            }
+            _ => self.report_oversize(m, owner),
         }
         true
+    }
+
+    fn remember_unread(&mut self, m: &FileMeta, rules_only: bool) {
+        let known = if rules_only {
+            self.baseline.churn.contains_key(&m.rel)
+        } else {
+            self.baseline.entries.contains_key(&m.rel)
+        };
+        if !known && !self.make_room(&m.rel) {
+            return;
+        }
+        let entry = BaselineEntry {
+            size: m.size,
+            ctime: m.ctime,
+            ctime_nsec: m.ctime_nsec,
+            sha256: METADATA_ONLY,
+        };
+        let map = if rules_only {
+            &mut self.baseline.churn
+        } else {
+            &mut self.baseline.entries
+        };
+        map.insert(m.rel.clone(), entry);
     }
 
     /// Steps 2 and 3: baseline and rules.
@@ -1254,7 +1377,7 @@ impl<'a> Scan<'a> {
         if change == Change::Unchanged && self.input.mode == ScanMode::Delta && !self.rules_bumped {
             return;
         }
-        if self.too_big_to_read(m, owner, change) {
+        if self.too_big_to_read(m, owner, change, false) {
             return;
         }
         let Some(read) = self.read(m, false) else {
@@ -1315,8 +1438,7 @@ impl<'a> Scan<'a> {
         if change == Change::Unchanged && self.input.mode == ScanMode::Delta {
             return;
         }
-        // No change detection here, so a change is not news.
-        if self.too_big_to_read(m, owner, Change::New) {
+        if self.too_big_to_read(m, owner, change, true) {
             return;
         }
         let Some(read) = self.read(m, false) else {
@@ -1529,6 +1651,14 @@ impl<'a> Scan<'a> {
             ));
         } else if self.stopped {
             out.push("the scan was stopped early and resumes on the next run".to_string());
+        }
+        if self.dir_links > 0 {
+            let mut names = self.dir_links_named.join(", ");
+            let more = self.dir_links - self.dir_links_named.len() as u64;
+            if more > 0 {
+                names.push_str(&format!(", and {more} more"));
+            }
+            out.push(format!("symlinked directories not looked at: {names}"));
         }
         if self.long_names > 0 {
             out.push(format!(
@@ -2117,5 +2247,32 @@ mod tests {
         assert_eq!(vanished.len(), 1, "{vanished:?}");
         assert!(vanished[0].starts_with("1 "), "{}", vanished[0]);
         assert!(vanished[0].contains("functions.php"), "{}", vanished[0]);
+    }
+
+    #[test]
+    fn a_link_whose_target_cant_be_read_has_no_hash() {
+        let (_t, base, root) = tree();
+        write(&root, "index.php", b"<?php\n");
+        let inp = input(&base, &root);
+        let tenant = TenantRoot::open(&root).expect("open");
+        let pause = || false;
+        let mut scan = Scan::new(&inp, &tenant, Loaded::Missing, &LIMITS, &pause);
+        // Reported by the walk, gone by the time it's asked about.
+        let _ = scan.on_event(WalkEvent::Skipped {
+            rel: "app/x.php".to_string(),
+            why: SkipReason::Symlink,
+        });
+        let out = scan.finish(WalkStats::default());
+        assert_eq!(out.review.len(), 1);
+        assert_eq!(out.review[0].sha256, "");
+        assert!(out.review[0].snippet.contains("symlink"));
+    }
+
+    #[test]
+    fn a_link_snippet_is_plain_and_short() {
+        let s = link_snippet("a\u{1}b\nc".repeat(100).as_bytes());
+        assert!(s.starts_with("symlink to a b c"), "{s}");
+        assert!(s.chars().count() <= 120);
+        assert!(!s.chars().any(char::is_control));
     }
 }

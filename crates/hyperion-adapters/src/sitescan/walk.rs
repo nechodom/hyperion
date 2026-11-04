@@ -323,6 +323,35 @@ impl TenantRoot {
         Ok(File::from(fd))
     }
 
+    /// The target of the symlink `rel`, reached like `open_file` reaches a file.
+    /// The bytes as stored; nothing is resolved.
+    pub fn read_link(&self, rel: &str) -> io::Result<Vec<u8>> {
+        let comps = split_rel(rel, false)?;
+        let (leaf, parents) = comps
+            .split_last()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "empty path"))?;
+        let parent = self.descend(parents)?;
+        let target = readlinkat(&parent, *leaf, Vec::new()).map_err(io::Error::from)?;
+        Ok(target.into_bytes())
+    }
+
+    /// Does the symlink `rel` lead to a directory? This is the one call here that
+    /// follows a link, and only to `stat` what it finds: the caller learns one
+    /// bit and opens nothing. A dangling link or a loop leads nowhere. `Err` means
+    /// it couldn't be told.
+    pub fn link_leads_to_dir(&self, rel: &str) -> io::Result<bool> {
+        let comps = split_rel(rel, false)?;
+        let (leaf, parents) = comps
+            .split_last()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "empty path"))?;
+        let parent = self.descend(parents)?;
+        match statat(&parent, *leaf, AtFlags::empty()) {
+            Ok(st) => Ok(FileType::from_raw_mode(st.st_mode) == FileType::Directory),
+            Err(Errno::NOENT | Errno::NOTDIR | Errno::LOOP) => Ok(false),
+            Err(e) => Err(io::Error::from(e)),
+        }
+    }
+
     /// The names directly inside the directory `rel` ("" is the root), reached
     /// like `open_file` reaches a file. Entries are classified without
     /// following links and are not opened. At most `max_entries` are returned
@@ -1288,5 +1317,47 @@ mod tests {
         let root = TenantRoot::open(Path::new("/")).expect("open /");
         assert!(root.open_file("proc/version").is_err());
         assert!(root.open_file("etc/passwd").is_ok());
+    }
+
+    #[test]
+    fn read_link_returns_the_stored_target_and_refuses_the_rest() {
+        let t = tempfile::tempdir().expect("tmp");
+        let base = t.path().canonicalize().expect("canonical");
+        let root = base.join("htdocs");
+        std::fs::create_dir_all(root.join("a")).expect("mkdir");
+        std::fs::write(root.join("a/file.php"), "<?php").expect("write");
+        std::os::unix::fs::symlink("../some/target", root.join("a/link")).expect("link");
+        std::os::unix::fs::symlink(root.join("a"), root.join("swapped")).expect("link");
+        let tr = TenantRoot::open(&root).expect("open");
+
+        assert_eq!(tr.read_link("a/link").expect("read"), b"../some/target");
+        // Not a link, not there, and an escape are errors, not targets.
+        assert!(tr.read_link("a/file.php").is_err());
+        assert!(tr.read_link("a/none").is_err());
+        assert!(tr.read_link("../x").is_err());
+        // A parent swapped for a symlink is refused, not followed.
+        assert!(tr.read_link("swapped/link").is_err());
+    }
+
+    #[test]
+    fn link_leads_to_dir_tells_the_three_apart() {
+        let t = tempfile::tempdir().expect("tmp");
+        let base = t.path().canonicalize().expect("canonical");
+        let root = base.join("htdocs");
+        std::fs::create_dir(&root).expect("mkdir");
+        std::fs::create_dir(base.join("d")).expect("mkdir");
+        std::fs::write(base.join("f"), "x").expect("write");
+        let link = |target: &Path, name: &str| {
+            std::os::unix::fs::symlink(target, root.join(name)).expect("link");
+        };
+        link(&base.join("d"), "to-dir");
+        link(&base.join("f"), "to-file");
+        link(&base.join("gone"), "dangling");
+        link(&root.join("loop"), "loop");
+        let tr = TenantRoot::open(&root).expect("open");
+        assert!(tr.link_leads_to_dir("to-dir").expect("stat"));
+        assert!(!tr.link_leads_to_dir("to-file").expect("stat"));
+        assert!(!tr.link_leads_to_dir("dangling").expect("stat"));
+        assert!(!tr.link_leads_to_dir("loop").expect("stat"));
     }
 }

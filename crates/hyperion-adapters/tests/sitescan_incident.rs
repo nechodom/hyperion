@@ -38,6 +38,10 @@ fn sha_of(b: &[u8]) -> [u8; 32] {
     Sha256::digest(b).into()
 }
 
+fn link_sha(target: &str) -> [u8; 32] {
+    sha_of(format!("symlink:{target}").as_bytes())
+}
+
 fn md5_of(b: &[u8]) -> [u8; 16] {
     Md5::digest(b).into()
 }
@@ -240,6 +244,13 @@ impl Site {
 
     fn load(&self) -> Baseline {
         Baseline::load(&self.baseline).expect("load").expect("some")
+    }
+
+    /// What the Trust action will do for a symlink: path plus the hash it reported.
+    fn trust_link(&self, rel: &str, target: &str) {
+        let mut b = self.load();
+        b.trusted.insert(rel.to_string(), link_sha(target));
+        b.save_atomic(&self.baseline).expect("save");
     }
 
     fn trust(&self, rel: &str) {
@@ -1181,7 +1192,10 @@ fn a_skipped_core_file_is_not_called_missing() {
         .upstream
         .core_missing
         .contains(&"wp-includes/load.php".to_string()));
-    item(&out.review, "wp-includes/load.php");
+    assert_eq!(
+        item(&out.review, "wp-includes/load.php").kind,
+        FindingKind::CoreModified
+    );
     assert_says_unchecked(&out);
 }
 
@@ -1201,8 +1215,8 @@ fn symlinks_are_named_when_php_and_counted_otherwise() {
     let out = s.scan();
     let r = item(&out.review, "wp-content/mu-plugins/loader.php");
     assert_eq!(r.kind, FindingKind::BaselineChange);
-    assert_eq!(r.sha256, "");
-    assert!(r.snippet.contains("symlink"), "{}", r.snippet);
+    assert_eq!(r.sha256, hex::encode(link_sha("/tmp/evil.php")));
+    assert!(r.snippet.contains("/tmp/evil.php"), "{}", r.snippet);
     item(&out.review, ".maintenance");
     assert_eq!(out.review.len(), 2, "{:?}", rels(&out.review));
     assert_eq!(out.coverage.symlinks_skipped, 2);
@@ -2055,7 +2069,15 @@ fn a_listed_file_replaced_by_a_symlink_is_not_clean() {
     s.rm(rel);
     std::os::unix::fs::symlink(&hid, s.path(rel)).expect("link");
     let out = s.scan();
-    item(&out.review, rel);
+    let r = item(&out.review, rel);
+    assert_eq!(r.kind, FindingKind::UpstreamModified);
+    assert_eq!(r.source_label.as_deref(), Some("wordpress.org"));
+    assert_says_unchecked(&out);
+
+    // A manifest can't be trusted away, whatever the link says.
+    s.trust_link(rel, hid.to_str().expect("utf8"));
+    let out = s.scan();
+    assert_eq!(item(&out.review, rel).kind, FindingKind::UpstreamModified);
     assert_says_unchecked(&out);
 }
 
@@ -2099,19 +2121,181 @@ fn a_symlinked_php_settings_file_is_not_clean() {
 fn symlinks_where_nothing_would_be_looked_at_only_count() {
     let s = Site::new();
     s.wordpress();
+    let elsewhere = s.root.parent().expect("parent").join("elsewhere");
+    fs::create_dir(&elsewhere).expect("mkdir");
     let link = |rel: &str| {
         let p = s.path(rel);
         fs::create_dir_all(p.parent().expect("parent")).expect("mkdir");
-        std::os::unix::fs::symlink("/tmp/elsewhere", p).expect("symlink");
+        std::os::unix::fs::symlink(&elsewhere, p).expect("symlink");
     };
+    // A deploy's links into what the scan ignores anyway.
     link("wp-content/uploads");
     link("wp-content/cache");
-    link("wp-content/notes.txt");
-    link("shared");
+    link("wp-content/languages/shared");
+    std::os::unix::fs::symlink("/nowhere/at/all", s.path("wp-content/notes.txt")).expect("link");
     let out = s.scan();
     assert_eq!(rels(&out.review), Vec::<&str>::new());
     assert_eq!(out.coverage.symlinks_skipped, 4);
     assert_eq!(out.coverage.partial_reasons, Vec::<String>::new());
+}
+
+#[track_caller]
+fn assert_names_link(out: &SiteScanOutcome, rel: &str) {
+    assert!(
+        out.coverage
+            .partial_reasons
+            .iter()
+            .any(|r| r.contains("symlinked directories") && r.contains(rel)),
+        "{rel}: {:?}",
+        out.coverage.partial_reasons
+    );
+}
+
+#[test]
+fn a_symlinked_directory_outside_ignored_paths_is_never_clean() {
+    // The usual deploy, on a site with no other trace of the application.
+    let s = Site::new();
+    let releases = s.root.parent().expect("parent").join("releases");
+    fs::create_dir(&releases).expect("mkdir");
+    fs::write(releases.join("evil.php"), SHELL).expect("write");
+    std::os::unix::fs::symlink(&releases, s.path("app")).expect("link");
+    std::os::unix::fs::symlink(&releases, s.path("vendor")).expect("link");
+    s.write("index.php", "<?php\n");
+    let out = s.scan();
+    assert_eq!(rels(&out.findings), Vec::<&str>::new());
+    assert_names_link(&out, "app");
+    let reasons = out.coverage.partial_reasons.join(" ");
+    assert!(!reasons.contains("vendor"), "{reasons}");
+    assert_eq!(out.coverage.symlinks_skipped, 2);
+
+    // The same on WordPress, wherever the name is nobody's in particular.
+    let s = Site::new();
+    s.wordpress();
+    let d = s.root.parent().expect("parent").join("d");
+    fs::create_dir(&d).expect("mkdir");
+    std::os::unix::fs::symlink(&d, s.path("blog")).expect("link");
+    s.write("wp-content/index.php", "<?php\n");
+    std::os::unix::fs::symlink(&d, s.path("wp-content/custom")).expect("link");
+    let out = s.scan();
+    assert_eq!(rels(&out.review), Vec::<&str>::new());
+    assert_names_link(&out, "blog");
+    assert_names_link(&out, "wp-content/custom");
+
+    // Where the link also gets an item, the reason is still there.
+    let s = incident_site();
+    swap_dir_for_link(&s, "wp-content/plugins/elementor/assets", "hid");
+    assert_names_link(&s.scan(), "wp-content/plugins/elementor/assets");
+}
+
+#[test]
+fn many_symlinked_directories_stay_one_bounded_reason() {
+    let s = Site::new();
+    let d = s.root.parent().expect("parent").join("d");
+    fs::create_dir(&d).expect("mkdir");
+    for i in 0..30 {
+        std::os::unix::fs::symlink(&d, s.path(&format!("l{i}"))).expect("link");
+    }
+    let out = s.scan();
+    assert_eq!(out.coverage.partial_reasons.len(), 1);
+    assert!(
+        out.coverage.partial_reasons[0].contains("25 more"),
+        "{:?}",
+        out.coverage.partial_reasons
+    );
+}
+
+#[test]
+fn a_trusted_symlink_is_cleared_until_it_points_elsewhere() {
+    let s = Site::new();
+    s.wordpress();
+    let rel = "wp-content/mu-plugins/loader.php";
+    fs::create_dir_all(s.path("wp-content/mu-plugins")).expect("mkdir");
+    std::os::unix::fs::symlink("/opt/shared/loader.php", s.path(rel)).expect("link");
+    let out = s.scan();
+    assert_eq!(item(&out.review, rel).kind, FindingKind::BaselineChange);
+
+    s.trust_link(rel, "/opt/shared/loader.php");
+    assert_eq!(rels(&s.scan().review), Vec::<&str>::new());
+
+    s.rm(rel);
+    std::os::unix::fs::symlink("/tmp/evil.php", s.path(rel)).expect("link");
+    let r = s.scan();
+    assert_eq!(
+        item(&r.review, rel).sha256,
+        hex::encode(link_sha("/tmp/evil.php"))
+    );
+}
+
+#[test]
+fn a_trusted_directory_symlink_still_says_its_contents_are_unscanned() {
+    let s = incident_site();
+    s.scan();
+    let rel = "wp-content/plugins/elementor/assets";
+    let hid = swap_dir_for_link(&s, rel, "hid");
+    let out = s.scan();
+    let r = item(&out.review, rel);
+    assert_eq!(r.sha256, hex::encode(link_sha(hid.to_str().expect("utf8"))));
+    assert_eq!(r.kind, FindingKind::BaselineChange);
+
+    s.trust_link(rel, hid.to_str().expect("utf8"));
+    let out = s.scan();
+    assert_eq!(rels(&out.review), Vec::<&str>::new());
+    assert_names_link(&out, rel);
+    assert_says_unchecked(&out);
+}
+
+#[test]
+fn a_new_code_file_past_64_mib_is_too_large_without_being_read() {
+    let s = Site::new();
+    s.wordpress();
+    // There at the first scan: known, counted, and no news afterwards.
+    let old = "wp-content/mu-plugins/old.js";
+    s.write(old, "");
+    grow(&s, old, 65 << 20);
+    settle();
+    let first = s.scan();
+    assert_eq!(rels(&first.review), Vec::<&str>::new());
+    assert_eq!(first.coverage.files_partly_inspected, 1);
+    settle();
+    assert_eq!(rels(&s.scan().review), Vec::<&str>::new());
+
+    // Turned up since.
+    let new = "wp-content/mu-plugins/new.js";
+    grow(&s, new, 65 << 20);
+    for _ in 0..2 {
+        let out = s.scan();
+        assert_eq!(out.files_hashed, 0);
+        let r = item(&out.review, new);
+        assert_eq!(r.kind, FindingKind::TooLargeToInspect);
+        assert_eq!(r.sha256, "");
+        assert_eq!(rels(&out.review), [new]);
+    }
+
+    // The one from the first scan changing is a change.
+    settle();
+    grow(&s, old, 66 << 20);
+    let out = s.scan();
+    assert_eq!(item(&out.review, old).kind, FindingKind::BaselineChange);
+
+    // Back under the limit it's read and judged like anything else.
+    settle();
+    s.write(old, JS_LOADER);
+    assert_eq!(item(&s.scan().findings, old).kind, FindingKind::RuleHit);
+}
+
+#[test]
+fn a_new_rules_only_file_past_64_mib_is_too_large_too() {
+    let s = Site::new();
+    s.write("index.php", "<?php\n");
+    settle();
+    s.scan();
+    grow(&s, "app/new.js", 65 << 20);
+    let out = s.scan();
+    assert_eq!(out.files_hashed, 0);
+    assert_eq!(
+        item(&out.review, "app/new.js").kind,
+        FindingKind::TooLargeToInspect
+    );
 }
 
 #[test]
