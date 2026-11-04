@@ -795,7 +795,13 @@ mod mountinfo_tests {
         let unit = include_str!("../../../../packaging/systemd/hyperion-agent.service");
         let set = |key: &str| unit.lines().any(|l| l.starts_with(key));
         assert!(!set("ProtectSystem="), "ProtectSystem= covers /usr");
-        assert!(!set("ReadWritePaths=/usr"), "cannot override ProtectSystem=");
-        assert!(set("ReadOnlyPaths=-/boot -/efi"), "/boot must stay read-only");
+        assert!(
+            !set("ReadWritePaths=/usr"),
+            "cannot override ProtectSystem="
+        );
+        assert!(
+            set("ReadOnlyPaths=-/boot -/efi"),
+            "/boot must stay read-only"
+        );
     }
 }
