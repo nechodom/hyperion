@@ -54,6 +54,9 @@ thiserror.workspace = true
 blake3.workspace = true
 hex.workspace = true
 flate2.workspace = true
+# Packs the WordPress plugin for download. Same crate hyperion-adapters reads
+# GeoIP archives with.
+zip.workspace = true
 askama_escape = "0.10"
 # CIDR parse/match for per-API-key IP allowlists (/api/v1 hardening).
 ipnet = "2"
@@ -69,6 +72,7 @@ rand.workspace = true
 sha2.workspace = true
 
 [dev-dependencies]
+tar.workspace = true
 tokio = { workspace = true, features = ["macros", "rt"] }
 tempfile.workspace = true
 # The resume tests hash a payload to drive the digest contract end to end.

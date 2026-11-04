@@ -40,7 +40,7 @@ const PANEL_VHOST: &str = "/etc/nginx/sites-enabled/hyperion-panel.conf";
 /// Overridable via `HYPERION_MIGRATION_DIR` for two reasons: the tests must not
 /// write to a real system path, and an operator whose `/var` is too small for a
 /// 40 GB bundle needs somewhere to put it that is not a recompile away.
-fn migration_dir() -> String {
+pub(super) fn migration_dir() -> String {
     std::env::var("HYPERION_MIGRATION_DIR").unwrap_or_else(|_| MIGRATION_DIR_DEFAULT.to_string())
 }
 const MIN_FREE_BYTES: i64 = 2 * 1024 * 1024 * 1024; // 2 GiB floor before accepting
@@ -167,7 +167,10 @@ pub struct MintForm {
 
 // ---- RPC helpers (token ops live in the agent's DB) ---------------------------
 
-async fn token_rpc(state: &SharedState, op: ImportTokenOp) -> Result<ImportTokenResult, AppError> {
+pub(super) async fn token_rpc(
+    state: &SharedState,
+    op: ImportTokenOp,
+) -> Result<ImportTokenResult, AppError> {
     match hyperion_rpc_client::call(&state.agent_socket, Request::ImportToken(op)).await {
         Ok(RpcResponse::ImportToken(r)) => Ok(r),
         Ok(RpcResponse::Error(e)) => Err(AppError::Internal(e.to_string())),
@@ -176,7 +179,7 @@ async fn token_rpc(state: &SharedState, op: ImportTokenOp) -> Result<ImportToken
     }
 }
 
-async fn resolve(
+pub(super) async fn resolve(
     state: &SharedState,
     token: &str,
     consume: bool,
@@ -195,7 +198,7 @@ async fn resolve(
     }
 }
 
-async fn update(
+pub(super) async fn update(
     state: &SharedState,
     id: i64,
     status: Option<&str>,
@@ -231,6 +234,8 @@ async fn list_transfers(state: &SharedState) -> Vec<TransferRow> {
                 let packing_note = summarise_source_progress(&i.source_progress_json);
                 let stage = if i.job_id.is_some() || i.status != "pending" {
                     "active"
+                } else if i.source_kind == "wordpress" {
+                    "awaiting_plugin"
                 } else if has_selection && !packing_note.is_empty() && i.received_bytes == 0 {
                     "packing"
                 } else if has_selection {
@@ -542,6 +547,7 @@ pub async fn post_select(
             // The self-service wizard does not offer a PHP choice; the import
             // derives one from what the source reports.
             php_version: None,
+            wp_url_rewrites: Vec::new(),
         });
     }
     if !bad_targets.is_empty() {
@@ -595,6 +601,7 @@ pub async fn post_cancel(
         return Ok(Redirect::to("/?flash_error=admin+role+required").into_response());
     }
     token_rpc(&state, ImportTokenOp::Cancel { id: form.id }).await?;
+    super::import_wordpress::discard_run(form.id).await;
     Ok(Redirect::to("/import?flash=Transfer+cancelled").into_response())
 }
 
@@ -700,7 +707,7 @@ pub async fn get_agent_script(
 /// Largest chunk the panel will accept. nginx no longer caps `/import/`, so this
 /// IS the ceiling — and being the ceiling in the application means an oversized
 /// body gets a sentence back instead of a closed socket.
-const MAX_CHUNK_BYTES: u64 = 128 * 1024 * 1024;
+pub(super) const MAX_CHUNK_BYTES: u64 = 128 * 1024 * 1024;
 
 /// Chunk size the panel asks the source to use.
 const PREFERRED_CHUNK_BYTES: u64 = 64 * 1024 * 1024;
@@ -713,7 +720,7 @@ const PREFERRED_CHUNK_BYTES: u64 = 64 * 1024 * 1024;
 /// world-readable on many installs and is routinely shipped to aggregation, so
 /// putting a live credential in it hundreds of times is the same mistake as
 /// putting one on argv, which this project already refuses to do.
-fn bearer(headers: &HeaderMap) -> Option<String> {
+pub(super) fn bearer(headers: &HeaderMap) -> Option<String> {
     let raw = headers
         .get(axum::http::header::AUTHORIZATION)?
         .to_str()
@@ -727,7 +734,7 @@ fn bearer(headers: &HeaderMap) -> Option<String> {
     Some(t.to_string())
 }
 
-fn text(code: StatusCode, body: String) -> Response {
+pub(super) fn text(code: StatusCode, body: String) -> Response {
     (
         code,
         [(
@@ -752,7 +759,7 @@ fn part_path(id: i64) -> String {
     format!("{}/bundle-{id}.tar.part", migration_dir())
 }
 
-fn final_path(id: i64) -> String {
+pub(super) fn final_path(id: i64) -> String {
     format!("{}/bundle-{id}.tar", migration_dir())
 }
 
@@ -767,7 +774,7 @@ async fn part_len(id: i64) -> u64 {
 ///
 /// The bundle holds plaintext database dumps and wp-config secrets; a site's
 /// PHP-FPM uid must not be able to traverse in.
-async fn ensure_migration_dir() {
+pub(super) async fn ensure_migration_dir() {
     use std::os::unix::fs::PermissionsExt;
     let _ = tokio::fs::create_dir_all(migration_dir()).await;
     let _ =
@@ -1354,7 +1361,7 @@ fn manifest_domain_set(manifest_json: &str) -> std::collections::HashSet<String>
 /// no comma (the list delimiter), no whitespace/control, no quote/shell-meta.
 /// Real panel domains (incl. underscores and punycode IDN) pass — this rejects,
 /// never rewrites, so a legitimate domain is never silently mangled.
-fn wire_safe_domain(s: &str) -> bool {
+pub(super) fn wire_safe_domain(s: &str) -> bool {
     !s.is_empty()
         && !s.chars().any(|c| {
             c.is_whitespace()
@@ -1590,7 +1597,7 @@ pub async fn post_ingest(
 /// strict host[:port] charset so no shell metacharacter can ever reach the
 /// generated script. Combined with single-quoting in the script, this closes the
 /// Host-header → RCE-on-source vector.
-async fn base_url(state: &SharedState, headers: &HeaderMap) -> String {
+pub(super) async fn base_url(state: &SharedState, headers: &HeaderMap) -> String {
     let scheme = if state.cfg.web.tls_enabled {
         "https"
     } else {
@@ -1662,7 +1669,7 @@ fn exporter_bin_path_for(arch: Option<&str>) -> Option<PathBuf> {
     cands.into_iter().find(|p| p.is_file())
 }
 
-async fn avail_bytes(dir: &str) -> Option<i64> {
+pub(super) async fn avail_bytes(dir: &str) -> Option<i64> {
     let out = tokio::process::Command::new("df")
         .arg("-B1")
         .arg("--output=avail")
@@ -1766,7 +1773,7 @@ fn summarise_source_progress(json: &str) -> String {
 fn transfers_html(rows: &[TransferRow], csrf: &str) -> String {
     if rows.is_empty() {
         return "<div class=\"ghead\">Transfers</div>\
-                <div class=\"item text-soft small\">No transfers in flight. Generate a command above and run it on your source server.</div>"
+                <div class=\"item text-soft small\">No transfers in flight.</div>"
             .to_string();
     }
     let mut h = format!(
@@ -1777,6 +1784,11 @@ fn transfers_html(rows: &[TransferRow], csrf: &str) -> String {
     for r in rows {
         // Stage label + the primary action cell.
         let (stage, action) = match r.stage.as_str() {
+            "awaiting_plugin" => (
+                "waiting for the plugin".to_string(),
+                "<span class=\"text-soft\">paste the code into the plugin in wp-admin</span>"
+                    .to_string(),
+            ),
             "awaiting_report" => (
                 "scanning source…".to_string(),
                 "<span class=\"text-soft\">waiting for the source to report…</span>".to_string(),

@@ -14,32 +14,36 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         from: &str,
         to: &str,
     ) {
-        let old_url = format!("//{from}");
-        let new_url = format!("//{to}");
-        let sr = [
-            "search-replace",
-            old_url.as_str(),
-            new_url.as_str(),
-            "--all-tables",
-            "--skip-columns=guid",
-            "--report-changed-only",
+        // Twice: plain, and in the JSON-escaped form page builders store
+        // (`https:\\/\\/old.cz` in Elementor's data). Search-replace sees those as
+        // different strings, so one pass leaves every builder link on the old host.
+        let passes = [
+            (format!("//{from}"), format!("//{to}")),
+            (
+                format!("//{from}").replace('/', "\\/"),
+                format!("//{to}").replace('/', "\\/"),
+            ),
         ];
-        let argv = hyperion_adapters::wpcli::build_argv(system_user, root_dir, &sr);
-        let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
-        match hyperion_adapters::cmd::run("/usr/bin/sudo", &refs).await {
-            Ok(_) => {
-                let flush = hyperion_adapters::wpcli::build_argv(
-                    system_user,
-                    root_dir,
-                    &["cache", "flush"],
-                );
-                let frefs: Vec<&str> = flush.iter().map(String::as_str).collect();
-                let _ = hyperion_adapters::cmd::run("/usr/bin/sudo", &frefs).await;
-            }
-            Err(e) => {
-                tracing::info!(error = %e, "wp_rewrite_domain skipped (non-WP or wp-cli error)")
+        for (old_url, new_url) in &passes {
+            let sr = [
+                "search-replace",
+                old_url.as_str(),
+                new_url.as_str(),
+                "--all-tables",
+                "--skip-columns=guid",
+                "--report-changed-only",
+            ];
+            let argv = hyperion_adapters::wpcli::build_argv(system_user, root_dir, &sr);
+            let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+            if let Err(e) = hyperion_adapters::cmd::run("/usr/bin/sudo", &refs).await {
+                tracing::info!(error = %e, "wp_rewrite_domain skipped (non-WP or wp-cli error)");
+                return;
             }
         }
+        let flush =
+            hyperion_adapters::wpcli::build_argv(system_user, root_dir, &["cache", "flush"]);
+        let frefs: Vec<&str> = flush.iter().map(String::as_str).collect();
+        let _ = hyperion_adapters::cmd::run("/usr/bin/sudo", &frefs).await;
     }
 
     /// Recursively chown a hosting's home tree to its system user — needed

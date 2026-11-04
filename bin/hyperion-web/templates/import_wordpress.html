@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% block title %}Import · Hyperion{% endblock %}
+{% block main %}
+{% let import_tab = "wordpress" %}
+{% include "_import_header.html" %}
+
+{% if let Some(m) = flash_error %}
+  <div class="flash error">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+    <div class="flash-body">{{ m }}</div>
+  </div>
+{% endif %}
+
+<div class="group">
+  <div class="ghead">Move a WordPress site from any host</div>
+  {% if let Some(m) = minted %}
+  <div class="item" id="import-code">
+    <h3>Paste this code into the plugin</h3>
+    <pre class="code-block import-oneliner"><code>{{ m.code }}</code></pre>
+    <div class="item-actions" style="justify-content:flex-start;margin-top:0.6rem">
+      <button class="btn small" type="button" data-copy="{{ m.code }}">Copy code</button>
+      <span class="text-soft small">Valid for 4 hours, extended automatically while a transfer runs. It lets its holder upload a site to this panel, so treat it like a password.</span>
+    </div>
+    {% if !m.target_domain.is_empty() %}
+    <p class="text-soft small" style="margin:0.75rem 0 0">The site will land as <strong>{{ m.target_domain }}</strong>, with its URLs rewritten to match.</p>
+    {% endif %}
+  </div>
+  {% endif %}
+  <div class="item{% if minted.is_some() %} muted{% endif %}">
+    <ol class="import-steps" style="margin-top:0">
+      <li><a href="/import/wordpress/hyperion-migrate.zip"><strong>Download the plugin</strong></a> and install it on the source site: <em>Plugins → Add New → Upload Plugin</em>.</li>
+      <li><strong>Generate a code</strong> below and paste it in <em>Tools → Hyperion Migration</em>.</li>
+      <li><strong>Keep that tab open</strong> while it transfers. If it closes, open the page again and the transfer picks up where it stopped. The site stays online throughout.</li>
+    </ol>
+    <p class="text-soft small" style="margin:0.75rem 0 1rem">Works on any host, with no SSH and no panel access. Sites land on this node; use <a href="/hostings/transfer">Move</a> afterwards to put one on another. Mailboxes and DNS stay where they are.</p>
+    <form method="post" action="/import/wordpress/mint" class="import-mint">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <div class="field" style="margin:0">
+        <label for="target_domain">Import as <span class="text-soft">(optional)</span></label>
+        <input id="target_domain" name="target_domain" type="text" placeholder="keep the site's domain" autocomplete="off" spellcheck="false">
+      </div>
+      {% if !profiles.is_empty() %}
+      <div class="field" style="margin:0">
+        <label for="profile_id">Profile <span class="text-soft">(optional)</span></label>
+        <select id="profile_id" name="profile_id">
+          <option value="">None</option>
+          {% for p in profiles %}
+          <option value="{{ p.id }}">{{ p.name }} · {{ p.price }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      {% endif %}
+      <button class="btn {% if minted.is_none() %}primary{% endif %}" type="submit">
+        {% if minted.is_some() %}Generate another code{% else %}Generate code{% endif %}
+      </button>
+    </form>
+  </div>
+</div>
+
+<div class="group" id="import-transfers"
+     hx-get="/import/wizard/transfers" hx-trigger="load, poll-tick" hx-swap="innerHTML"
+     data-poll-visible data-poll-ms="3000">
+  <div class="ghead">Transfers</div>
+  <div class="item text-soft small">Loading…</div>
+</div>
+
+{% endblock %}

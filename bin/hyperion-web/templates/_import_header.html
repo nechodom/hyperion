@@ -5,7 +5,7 @@
 <div class="page-header">
   <div>
     <h1>Import</h1>
-    <div class="subtitle">Bring sites and their databases into Hyperion. <strong>CloudPanel</strong> and <strong>HestiaCP</strong> servers: run one command on the source (no SSH key handed over), or let a node read them over SSH. Another Hyperion node: paste its transfer file link.</div>
+    <div class="subtitle">Bring sites and their databases into Hyperion. <strong>CloudPanel</strong> and <strong>HestiaCP</strong> servers: run one command on the source (no SSH key handed over), or let a node read them over SSH. <strong>A WordPress site anywhere else</strong>: install a plugin in its wp-admin. Another Hyperion node: paste its transfer file link.</div>
   </div>
 </div>
 
@@ -19,6 +19,11 @@
      data-require-caps="panel_import"
      {% if import_tab == "ssh" %}aria-current="page"{% endif %}>
     Over SSH or in place
+  </a>
+  <a class="seg {% if import_tab == "wordpress" %}active{% endif %}" href="/import/wordpress"
+     data-require-caps="panel_import"
+     {% if import_tab == "wordpress" %}aria-current="page"{% endif %}>
+    WordPress plugin
   </a>
   <a class="seg {% if import_tab == "hyperion" %}active{% endif %}" href="/import/hyperion"
      data-require-caps="hosting_migrate_clone"
