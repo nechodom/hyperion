@@ -14,6 +14,10 @@ pub enum AppError {
     BadRequest(String),
     #[error("not found")]
     NotFound,
+    /// 409 — the agent refused because of the state something is in (a
+    /// suspended hosting, a name already taken). Body is its sentence.
+    #[error("conflict: {0}")]
+    Conflict(String),
     #[error("agent rpc: {0}")]
     Rpc(String),
     #[error("internal: {0}")]
@@ -191,6 +195,17 @@ impl IntoResponse for AppError {
                     Some(("Open /install", "/install")),
                 )
             }
+            AppError::Conflict(m) => {
+                let safe = redact_addresses(&m);
+                render_themed(
+                    StatusCode::CONFLICT,
+                    "Not possible right now",
+                    "This can't be done right now",
+                    &safe,
+                    &[],
+                    Some(("Go back", "javascript:history.back()")),
+                )
+            }
             AppError::Rpc(m) => {
                 let safe = redact_addresses(&m);
                 // Heuristic: when the agent rpc error mentions a curl-7
@@ -258,6 +273,23 @@ impl From<askama::Error> for AppError {
     }
 }
 
+/// The same split as `map_rpc_error` in the `/api/v1` handlers: a refusal keeps
+/// its own status, and only a failure on the node is a 502.
+impl From<hyperion_rpc::RpcError> for AppError {
+    fn from(e: hyperion_rpc::RpcError) -> Self {
+        use hyperion_rpc::RpcError;
+        match e {
+            RpcError::Conflict { message } => AppError::Conflict(message),
+            RpcError::AlreadyExists { kind, id } => {
+                AppError::Conflict(format!("{kind} {id} already exists"))
+            }
+            RpcError::Validation { message } => AppError::BadRequest(message),
+            RpcError::NotFound { .. } => AppError::NotFound,
+            other => AppError::Rpc(other.to_string()),
+        }
+    }
+}
+
 impl From<hyperion_rpc_client::ClientError> for AppError {
     fn from(e: hyperion_rpc_client::ClientError) -> Self {
         AppError::Rpc(e.to_string())
@@ -307,6 +339,48 @@ mod tests {
     fn redacts_loopback_ipv6() {
         let out = redact_addresses("connect ::1 port 9443");
         assert!(!out.contains("::1"), "leaked ::1: {out}");
+    }
+
+    /// The agent refusing an action is an answer, not a broken gateway: it
+    /// used to reach the operator as "502 Agent error" with the variant name
+    /// glued to the sentence.
+    #[test]
+    fn a_refusal_from_the_agent_is_not_a_bad_gateway() {
+        let conflict = AppError::from(hyperion_rpc::RpcError::Conflict {
+            message: "hosting is in <trash>".into(),
+        })
+        .into_response();
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
+        let body =
+            futures_block_on(async { to_bytes(conflict.into_body(), 64 * 1024).await.unwrap() });
+        let text = String::from_utf8_lossy(&body);
+        assert!(text.contains("hosting is in &lt;trash&gt;"), "got: {text}");
+        assert!(!text.contains("conflict:"), "got: {text}");
+        assert!(!text.contains("Agent error"), "got: {text}");
+
+        let exists = AppError::from(hyperion_rpc::RpcError::AlreadyExists {
+            kind: "hosting".into(),
+            id: "ex.cz".into(),
+        });
+        assert_eq!(exists.into_response().status(), StatusCode::CONFLICT);
+        let invalid = AppError::from(hyperion_rpc::RpcError::Validation {
+            message: "bad".into(),
+        });
+        assert_eq!(invalid.into_response().status(), StatusCode::BAD_REQUEST);
+        let missing = AppError::from(hyperion_rpc::RpcError::NotFound {
+            kind: "hosting".into(),
+            id: "ex.cz".into(),
+        });
+        assert_eq!(missing.into_response().status(), StatusCode::NOT_FOUND);
+    }
+
+    /// A failure on the node stays a 502: the action did not get an answer.
+    #[test]
+    fn a_failure_on_the_agent_stays_a_bad_gateway() {
+        let err = AppError::from(hyperion_rpc::RpcError::Internal {
+            message: "disk full".into(),
+        });
+        assert_eq!(err.into_response().status(), StatusCode::BAD_GATEWAY);
     }
 
     #[test]

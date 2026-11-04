@@ -555,7 +555,7 @@ pub async fn get_download(
             )
                 .into_response())
         }
-        RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),
+        RpcResponse::Error(e) => Err(AppError::from(e)),
         _ => Err(AppError::Internal("unexpected response".into())),
     }
 }

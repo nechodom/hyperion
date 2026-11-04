@@ -389,7 +389,7 @@ async fn post_login_via_rpc(
                 Ok(login_failed(&form.next))
             }
         },
-        hyperion_rpc::codec::Response::Error(e) => Err(AppError::Rpc(e.to_string())),
+        hyperion_rpc::codec::Response::Error(e) => Err(AppError::from(e)),
         _ => Err(AppError::Internal("unexpected response".into())),
     }
 }
@@ -711,7 +711,7 @@ pub async fn post_login_2fa(
             };
             Ok(Redirect::to(&with_next(base, &form.next)).into_response())
         }
-        hyperion_rpc::codec::Response::Error(e) => Err(AppError::Rpc(e.to_string())),
+        hyperion_rpc::codec::Response::Error(e) => Err(AppError::from(e)),
         _ => Err(AppError::Internal("unexpected response".into())),
     }
 }

@@ -1948,7 +1948,7 @@ pub(super) async fn fetch_profile_apply(
         .await?;
     match resp {
         RpcResponse::ProfileGetApply(v) => Ok(v),
-        RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),
+        RpcResponse::Error(e) => Err(AppError::from(e)),
         _ => Err(AppError::Internal("unexpected response".into())),
     }
 }
@@ -1959,7 +1959,7 @@ pub(super) async fn fetch_all_profiles(
     let resp = hyperion_rpc_client::call(&state.agent_socket, Request::ProfileList).await?;
     match resp {
         RpcResponse::ProfileList(v) => Ok(v),
-        RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),
+        RpcResponse::Error(e) => Err(AppError::from(e)),
         _ => Err(AppError::Internal("unexpected response".into())),
     }
 }
@@ -1987,7 +1987,7 @@ pub(super) async fn fetch_stats(
         crate::dispatcher::dispatch_to_node(state, target, Request::HostingStats { sel }).await?;
     match resp {
         RpcResponse::HostingStats(s) => Ok(s),
-        RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),
+        RpcResponse::Error(e) => Err(AppError::from(e)),
         _ => Err(AppError::Internal("unexpected response".into())),
     }
 }
@@ -2098,7 +2098,7 @@ pub(super) async fn fetch_expiry(
         crate::dispatcher::dispatch_to_node(state, target, Request::HostingGetExpiry(sel)).await?;
     match resp {
         RpcResponse::HostingGetExpiry(e) => Ok(e),
-        RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),
+        RpcResponse::Error(e) => Err(AppError::from(e)),
         _ => Err(AppError::Internal("unexpected response".into())),
     }
 }
@@ -2114,7 +2114,7 @@ pub(super) async fn fetch_backup_list(
             .await?;
     match resp {
         RpcResponse::BackupList(rows) => Ok(rows),
-        RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),
+        RpcResponse::Error(e) => Err(AppError::from(e)),
         _ => Err(AppError::Internal("unexpected response".into())),
     }
 }
@@ -2128,7 +2128,7 @@ pub(super) async fn fetch_wp_status(
         crate::dispatcher::dispatch_to_node(state, target, Request::WpStatus { sel }).await?;
     match resp {
         RpcResponse::WpStatus(s) => Ok(s),
-        RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),
+        RpcResponse::Error(e) => Err(AppError::from(e)),
         _ => Err(AppError::Internal("unexpected response".into())),
     }
 }
@@ -2142,7 +2142,7 @@ pub(super) async fn fetch_limits(
         crate::dispatcher::dispatch_to_node(state, target, Request::HostingGetLimits(sel)).await?;
     match resp {
         RpcResponse::HostingGetLimits(l) => Ok(l),
-        RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),
+        RpcResponse::Error(e) => Err(AppError::from(e)),
         _ => Err(AppError::Internal("unexpected response".into())),
     }
 }

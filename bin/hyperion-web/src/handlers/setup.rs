@@ -587,7 +587,7 @@ pub async fn get_2fa(State(state): State<SharedState>, ctx: AuthCtx) -> Result<R
     }
     let en = match rpc(&state, Request::Web2faEnrollStart { user_id: s.user_id }).await? {
         RpcResponse::Web2faEnrollStart(e) => e,
-        RpcResponse::Error(e) => return Err(AppError::Rpc(e.to_string())),
+        RpcResponse::Error(e) => return Err(AppError::from(e)),
         _ => return Err(AppError::Internal("unexpected response".into())),
     };
     let tpl = TwoFaTpl {
@@ -812,7 +812,7 @@ fn stack_progress(st: hyperion_types::SetupStackStatus, csrf: String) -> StackPr
 async fn stack_status(state: &SharedState) -> Result<hyperion_types::SetupStackStatus, AppError> {
     match rpc(state, Request::SetupStackStatus).await? {
         RpcResponse::SetupStackStatus(s) => Ok(s),
-        RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),
+        RpcResponse::Error(e) => Err(AppError::from(e)),
         _ => Err(AppError::Internal("unexpected response".into())),
     }
 }

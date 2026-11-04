@@ -1276,7 +1276,7 @@ pub async fn get_backup_download(
             filename,
             ..
         } => (total_size, filename),
-        RpcResponse::Error(e) => return Err(AppError::Rpc(e.to_string())),
+        RpcResponse::Error(e) => return Err(AppError::from(e)),
         _ => return Err(AppError::Internal("unexpected response".into())),
     };
 

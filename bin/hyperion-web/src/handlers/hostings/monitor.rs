@@ -127,7 +127,7 @@ pub async fn post_monitor_set(
             urlencoding(&form.selector)
         ))
         .into_response()),
-        RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),
+        RpcResponse::Error(e) => Err(AppError::from(e)),
         _ => Err(AppError::Internal("unexpected response".into())),
     }
 }
@@ -212,7 +212,7 @@ pub async fn post_monitor_from_profile(
     .await?
     {
         RpcResponse::MonitorGet { config, .. } => config,
-        RpcResponse::Error(e) => return Err(AppError::Rpc(e.to_string())),
+        RpcResponse::Error(e) => return Err(AppError::from(e)),
         _ => return Err(AppError::Internal("unexpected response".into())),
     };
     let mut emails = recipient_list(current.alert_email.as_deref().unwrap_or(""));

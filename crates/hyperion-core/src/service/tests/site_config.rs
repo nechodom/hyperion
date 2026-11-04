@@ -772,10 +772,8 @@ async fn resume_brings_back_to_active() {
 /// Editing a SUSPENDED site must not bring it back online.
 ///
 /// nginx_write_vhost renders the serving vhost with no idea what state the
-/// hosting is in. set_php_version happens to refuse on a suspended site
-/// already ("resume first"), but the alias and vhost-option editors did
-/// not — so an alias edit quietly un-suspended a customer who had not
-/// paid. The serving writer must not be touched at all here.
+/// hosting is in, so an alias edit quietly un-suspended a customer who had
+/// not paid. The serving writer must not be touched at all here.
 #[tokio::test]
 async fn editing_aliases_on_a_suspended_site_does_not_unsuspend_it() {
     use std::sync::atomic::{AtomicUsize, Ordering};

@@ -487,7 +487,7 @@ async fn setup(
     };
     match crate::dispatcher::dispatch_to_node(state, None, req).await? {
         RpcResponse::AcmeDnsLabel(_) => {}
-        RpcResponse::Error(e) => return Err(AppError::Rpc(e.to_string())),
+        RpcResponse::Error(e) => return Err(AppError::from(e)),
         _ => return Err(AppError::Internal("unexpected response".into())),
     }
     probe_and_render(state, ctx, subject).await

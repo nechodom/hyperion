@@ -407,7 +407,7 @@ pub async fn post_revoke(
     .await?;
     match resp {
         RpcResponse::InviteRevoke => Ok(Redirect::to("/install").into_response()),
-        RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),
+        RpcResponse::Error(e) => Err(AppError::from(e)),
         _ => Err(AppError::Internal("unexpected response".into())),
     }
 }
@@ -1354,7 +1354,7 @@ async fn fetch_invites(state: &SharedState) -> Result<Vec<NodeInviteSummary>, Ap
     let resp = hyperion_rpc_client::call(&state.agent_socket, Request::InviteList).await?;
     match resp {
         RpcResponse::InviteList(v) => Ok(v),
-        RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),
+        RpcResponse::Error(e) => Err(AppError::from(e)),
         _ => Err(AppError::Internal("unexpected response".into())),
     }
 }
@@ -1363,7 +1363,7 @@ async fn fetch_nodes(state: &SharedState) -> Result<Vec<NodeSummary>, AppError> 
     let resp = hyperion_rpc_client::call(&state.agent_socket, Request::NodesList).await?;
     match resp {
         RpcResponse::NodesList(v) => Ok(v),
-        RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),
+        RpcResponse::Error(e) => Err(AppError::from(e)),
         _ => Err(AppError::Internal("unexpected response".into())),
     }
 }

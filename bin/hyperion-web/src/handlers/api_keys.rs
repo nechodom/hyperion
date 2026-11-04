@@ -297,7 +297,7 @@ pub async fn post_api_key_create(
     .await?;
     let created = match resp {
         RpcResponse::ApiKeyCreated(c) => c,
-        RpcResponse::Error(e) => return Err(AppError::Rpc(e.to_string())),
+        RpcResponse::Error(e) => return Err(AppError::from(e)),
         _ => return Err(AppError::Internal("unexpected response".into())),
     };
     // Reveal the raw key exactly once via a short-lived HttpOnly cookie rather
