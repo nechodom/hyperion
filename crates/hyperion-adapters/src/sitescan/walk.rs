@@ -584,17 +584,35 @@ mod tests {
         assert!(root.open_file("wp-config.php").is_err());
     }
 
+    /// A link that root owns, in a directory only root can change, is the
+    /// admin's own (macOS `/var -> private/var`, Debian `/bin -> usr/bin`) and
+    /// must be followed.
     #[test]
     fn root_owned_symlink_in_root_owned_dir_is_followed() {
-        // macOS keeps /var -> private/var, so every tempdir there exercises the
-        // trusted-link path; elsewhere there is nothing to assert.
-        let t = tempfile::tempdir().expect("tmp");
-        let st = std::fs::symlink_metadata("/var").expect("stat /var");
-        if !st.file_type().is_symlink() {
-            return;
+        use std::os::unix::fs::MetadataExt;
+        let mut followed = 0;
+        for link in ["/var", "/bin"] {
+            let Ok(st) = std::fs::symlink_metadata(link) else {
+                continue;
+            };
+            if !st.file_type().is_symlink() || st.uid() != 0 {
+                continue;
+            }
+            let root = TenantRoot::open(Path::new(link)).expect("root-owned link is followed");
+            root.walk(
+                &WalkOpts {
+                    max_entries: 20,
+                    prune: Vec::new(),
+                },
+                |_| {},
+            )
+            .expect("walk through the link");
+            followed += 1;
         }
+        assert!(followed > 0, "no root-owned symlink on this system to try");
+        // And a path that runs through one (macOS tempdirs live under /var).
+        let t = tempfile::tempdir().expect("tmp");
         std::fs::write(t.path().join("a.php"), b"x").expect("w");
-        assert!(t.path().starts_with("/var") || t.path().starts_with("/private"));
         let (seen, r) = run(t.path(), &opts());
         r.expect("walk");
         assert_eq!(rels(&seen), vec!["a.php"]);
@@ -843,6 +861,35 @@ mod tests {
         };
         let (_, r) = run(t.path(), &o);
         assert!(!r.expect("walk").capped);
+    }
+
+    /// Directories emit no events, so only `capped` shows whether they are
+    /// counted: a tree of nothing but empty directories must hit the cap.
+    #[test]
+    fn cap_counts_directories_alone() {
+        let t = tempfile::tempdir().expect("tmp");
+        for i in 0..1000 {
+            std::fs::create_dir(t.path().join(format!("d{i}"))).expect("mkdir");
+        }
+        let o = WalkOpts {
+            max_entries: 50,
+            prune: Vec::new(),
+        };
+        let (seen, r) = run(t.path(), &o);
+        let stats = r.expect("walk");
+        assert!(stats.capped, "empty directories were not counted");
+        assert_eq!(stats.files, 0);
+        // The walk stopped at the cap: one marker, nothing after it.
+        assert_eq!(
+            seen.skipped,
+            vec![(seen.skipped[0].0.clone(), SkipReason::FileCapReached)]
+        );
+        // Under the cap is not capped.
+        let o = WalkOpts {
+            max_entries: 1000,
+            prune: Vec::new(),
+        };
+        assert!(!run(t.path(), &o).1.expect("walk").capped);
     }
 
     /// Links, hard links and empty directories are entries too: they count
