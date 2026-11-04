@@ -367,6 +367,13 @@ pub struct ScanCoverage {
     /// Unix seconds of the first scan; earlier changes can't be proven.
     #[serde(default)]
     pub watching_since: i64,
+    /// Non-PHP files bigger than the rules read: hashed and watched, with only
+    /// the start inspected (or, at the extreme, not read at all).
+    #[serde(default)]
+    pub files_partly_inspected: i64,
+    /// Symlinks not followed, other than PHP-named ones, which are review items.
+    #[serde(default)]
+    pub symlinks_skipped: i64,
     /// Core was compared with its release.
     #[serde(default)]
     pub upstream_ran: bool,

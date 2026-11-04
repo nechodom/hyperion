@@ -47,7 +47,7 @@ struct Site {
     root: PathBuf,
     cache: PathBuf,
     baseline: PathBuf,
-    known: BTreeSet<String>,
+    known: Option<BTreeSet<String>>,
 }
 
 impl Site {
@@ -60,7 +60,7 @@ impl Site {
             root,
             cache: base.join("manifests"),
             baseline: base.join("baselines").join("7"),
-            known: BTreeSet::new(),
+            known: Some(BTreeSet::new()),
             _t: t,
         }
     }
@@ -470,10 +470,30 @@ fn no_php_is_executed() {
     std::env::set_var("PATH", old);
 
     assert!(!marker.exists(), "something ran the tenant's PHP");
-    // And nothing in the scan can start a process to begin with.
-    let src = include_str!("../src/sitescan/scan.rs");
-    assert!(!src.contains("process::"), "scan.rs spawns a process");
-    assert!(!src.contains("Command"), "scan.rs spawns a process");
+    // And nothing in the scanner can start a tenant's interpreter. The only
+    // program any module runs is curl, in the agent's fetch step; the module the
+    // worker scans with runs none.
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/sitescan");
+    let mut modules = 0;
+    for ent in fs::read_dir(dir).expect("ls") {
+        let path = ent.expect("entry").path();
+        let src = fs::read_to_string(&path).expect("read");
+        let code = src.split("#[cfg(test)]").next().expect("code");
+        modules += 1;
+        let spawns = code.matches("Command::new(").count();
+        let curl = code.matches("Command::new(CURL)").count();
+        assert_eq!(spawns, curl, "{} spawns something else", path.display());
+        assert_eq!(
+            code.matches("process::").count(),
+            curl,
+            "{} reaches for processes",
+            path.display()
+        );
+        if path.ends_with("scan.rs") {
+            assert_eq!(spawns, 0, "scan.rs spawns a process");
+        }
+    }
+    assert!(modules >= 6, "{modules}");
 }
 
 #[test]
@@ -638,7 +658,7 @@ fn a_theme_sharing_a_plugins_slug_does_not_look_like_an_update() {
 #[test]
 fn wporg_slug_with_no_manifest_goes_to_review_after_retry() {
     let mut s = Site::new();
-    s.known.insert("free".to_string());
+    s.known = Some(BTreeSet::from(["free".to_string()]));
     s.wordpress();
     s.plugin("free", "1.0", &[("a.php", b"<?php // a\n")]);
     assert_eq!(s.scan().upstream.plugins_unknown, vec!["free".to_string()]);
@@ -1126,6 +1146,8 @@ fn hard_linked_php_is_reported() {
         s.path("wp-content/data2.bin"),
     )
     .expect("link");
+    s.write("wp-content/app.js", "var a;\n");
+    fs::hard_link(s.path("wp-content/app.js"), s.path("wp-content/app2.js")).expect("link");
     let out = s.scan();
     assert_eq!(
         out.files_hashed,
@@ -1137,7 +1159,10 @@ fn hard_linked_php_is_reported() {
     assert_eq!(r.sha256, "");
     assert!(r.snippet.contains("hard"), "{}", r.snippet);
     item(&out.review, "wp-content/mu-plugins/real.php");
-    assert_eq!(out.review.len(), 2, "{:?}", rels(&out.review));
+    // Any file type in scope, by name; a data file only counts.
+    item(&out.review, "wp-content/app.js");
+    item(&out.review, "wp-content/app2.js");
+    assert_eq!(out.review.len(), 4, "{:?}", rels(&out.review));
     assert!(out
         .coverage
         .partial_reasons
@@ -1156,11 +1181,32 @@ fn a_skipped_core_file_is_not_called_missing() {
         .upstream
         .core_missing
         .contains(&"wp-includes/load.php".to_string()));
-    assert!(out
-        .coverage
-        .partial_reasons
-        .iter()
-        .any(|r| r.contains("symlink")));
+    item(&out.review, "wp-includes/load.php");
+}
+
+#[test]
+fn symlinks_are_named_when_php_and_counted_otherwise() {
+    let s = Site::new();
+    s.wordpress();
+    let link = |target: &str, rel: &str| {
+        let p = s.path(rel);
+        fs::create_dir_all(p.parent().expect("parent")).expect("mkdir");
+        std::os::unix::fs::symlink(target, p).expect("symlink");
+    };
+    link("/tmp/evil.php", "wp-content/mu-plugins/loader.php");
+    link("/tmp/evil", ".maintenance");
+    link("../shared/uploads", "wp-content/uploads");
+    link("/tmp/x.txt", "wp-content/notes.txt");
+    let out = s.scan();
+    let r = item(&out.review, "wp-content/mu-plugins/loader.php");
+    assert_eq!(r.kind, FindingKind::BaselineChange);
+    assert_eq!(r.sha256, "");
+    assert!(r.snippet.contains("symlink"), "{}", r.snippet);
+    item(&out.review, ".maintenance");
+    assert_eq!(out.review.len(), 2, "{:?}", rels(&out.review));
+    assert_eq!(out.coverage.symlinks_skipped, 2);
+    // A git-deploy `uploads` link is an ordinary site, not a partial scan.
+    assert_eq!(out.coverage.partial_reasons, Vec::<String>::new());
 }
 
 #[test]
@@ -1322,17 +1368,17 @@ fn core_scope_and_its_exemptions() {
     s.write("wp-admin/.htaccess", "# hardening\n");
     s.write("google123.html", "google-site-verification");
     s.write("custom.php", "<?php // site's own\n");
-    s.write("wp-admin/extra.txt", "dropped");
+    s.write("wp-admin/extra.php", "<?php // dropped\n");
     s.write("wp-includes/wp-config.php", "<?php // not the real one\n");
-    s.write("wp-foo.txt", "x");
+    s.write("wp-foo.php", "<?php // dropped\n");
     let out = s.scan();
     let mut got = rels(&out.findings);
     got.sort();
     assert_eq!(
         got,
         [
-            "wp-admin/extra.txt",
-            "wp-foo.txt",
+            "wp-admin/extra.php",
+            "wp-foo.php",
             "wp-includes/wp-config.php"
         ]
     );
@@ -1355,6 +1401,41 @@ fn core_scope_and_its_exemptions() {
     settle();
     s.write(".htaccess", "# rewrite, edited\n");
     item(&s.scan().review, ".htaccess");
+
+    // WordPress requires `.maintenance` as PHP on every load, whatever its name
+    // says, and it comes and goes with updates: rules, no change detection.
+    assert!(!s.load().entries.contains_key(".maintenance"));
+    settle();
+    s.write(".maintenance", SHELL);
+    let f = s.scan();
+    let hit = item(&f.findings, ".maintenance");
+    assert_eq!(hit.kind, FindingKind::RuleHit);
+    assert_eq!(hit.rule_id.as_deref(), Some("webshell_marker"));
+}
+
+#[test]
+fn non_code_added_to_a_verified_tree_raises_nothing() {
+    let s = incident_site();
+    for rel in [
+        "wp-cli.yml",
+        "error_log",
+        "wp-admin/error_log",
+        "wp-includes/notes.txt",
+        "wp-admin/page.html",
+        "wp-content/plugins/elementor/storage/data.json",
+        "wp-content/plugins/woocommerce/logs/x.log",
+    ] {
+        s.write(rel, "anything");
+    }
+    let out = s.scan();
+    assert_eq!(rels(&out.findings), Vec::<&str>::new());
+    assert_eq!(rels(&out.review), Vec::<&str>::new());
+    assert!(out.upstream.plugins_failed.is_empty());
+    assert!(out.upstream.core_unexpected.is_empty());
+
+    // A `.php.bak` is a name PHP can run under on older setups: that's code.
+    s.write("wp-config.php.bak", "<?php // old\n");
+    assert_eq!(rels(&s.scan().findings), ["wp-config.php.bak"]);
 }
 
 #[test]
@@ -1493,6 +1574,31 @@ fn czech_fallback_ignores_version_php() {
     s.append("wp-includes/load.php", b"// x\n");
     let out = s.scan();
     assert_eq!(out.upstream.core_modified, ["wp-includes/load.php"]);
+
+    // The digest can't speak for version.php here, and a tenant can pick this
+    // state with `$wp_local_package`, so the rules still do.
+    s.write(
+        "wp-includes/version.php",
+        [
+            format!("<?php\n$wp_version = '{WP_VERSION}';\n$wp_local_package = 'cs_CZ';\n")
+                .as_bytes(),
+            &EVAL[5..],
+        ]
+        .concat(),
+    );
+    let out = s.scan();
+    let f = item(&out.findings, "wp-includes/version.php");
+    assert_eq!(f.kind, FindingKind::CoreModified);
+    assert_eq!(f.rule_id.as_deref(), Some("eval_decoder"));
+}
+
+#[test]
+fn a_clean_fallback_version_php_is_not_read_again() {
+    let s = Site::new();
+    s.wordpress_with(Some("cs_CZ"), Some("en_US"));
+    settle();
+    s.scan();
+    assert_eq!(s.scan().files_hashed, 0);
 }
 
 #[test]
@@ -1527,6 +1633,72 @@ fn a_huge_file_is_reported_without_being_read() {
     assert_eq!(r.sha256, "");
 }
 
+fn grow(s: &Site, rel: &str, len: u64) {
+    s.write(rel, "");
+    fs::File::options()
+        .write(true)
+        .open(s.path(rel))
+        .expect("open")
+        .set_len(len)
+        .expect("grow");
+}
+
+#[test]
+fn a_file_with_no_manifest_over_64_mib_is_not_read() {
+    let s = Site::new();
+    grow(&s, "app/big.php", 65 << 20);
+    grow(&s, "app/big.js", 65 << 20);
+    let out = s.scan();
+    assert_eq!(out.files_hashed, 0);
+    let r = item(&out.review, "app/big.php");
+    assert_eq!(r.kind, FindingKind::TooLargeToInspect);
+    assert_eq!(rels(&out.review), ["app/big.php"]);
+    assert_eq!(out.coverage.files_partly_inspected, 1);
+}
+
+#[test]
+fn big_javascript_enters_by_hash_with_its_start_inspected() {
+    let s = Site::new();
+    let rel = "app/bundle.js";
+    s.write(rel, vec![b' '; 3 << 20]);
+    settle();
+    let out = s.scan();
+    assert_eq!(rels(&out.review), Vec::<&str>::new());
+    assert_eq!(out.coverage.files_partly_inspected, 1);
+    assert!(s.load().entries.is_empty(), "rules-only on a non-WP site");
+
+    // In a WordPress tree it's watched like any other file.
+    let s = Site::new();
+    s.wordpress();
+    let rel = "wp-content/mu-plugins/bundle.js";
+    s.write(rel, vec![b' '; 3 << 20]);
+    settle();
+    let out = s.scan();
+    assert_eq!(rels(&out.review), Vec::<&str>::new());
+    assert_eq!(out.coverage.files_partly_inspected, 1);
+    assert!(s.load().entries.contains_key(rel));
+    settle();
+    // Not a pending item: unchanged, it isn't read again, and it still counts.
+    let again = s.scan();
+    assert_eq!(again.files_hashed, 0);
+    assert_eq!(again.coverage.files_partly_inspected, 1);
+
+    // Same size, new content: a change like any other.
+    let mut edited = vec![b' '; 3 << 20];
+    edited[0] = b'/';
+    s.write(rel, &edited);
+    assert_eq!(
+        item(&s.scan().review, rel).kind,
+        FindingKind::BaselineChange
+    );
+
+    // A loader in the part that's read is still a finding.
+    let mut loaded = JS_LOADER.to_vec();
+    loaded.resize(3 << 20, b' ');
+    s.write(rel, loaded);
+    assert_eq!(item(&s.scan().findings, rel).kind, FindingKind::RuleHit);
+}
+
 #[test]
 fn a_large_php_file_is_never_skipped_silently() {
     let s = Site::new();
@@ -1556,7 +1728,7 @@ fn a_root_that_cannot_be_opened_is_an_error_not_a_clean_scan() {
         baseline_path: s.baseline.clone(),
         mode: ScanMode::Delta,
         now: NOW,
-        wporg_known_slugs: BTreeSet::new(),
+        wporg_known_slugs: None,
         accept_since: None,
     };
     assert!(scan_site(&input, &|| false).is_err());
@@ -1584,6 +1756,241 @@ fn a_baseline_that_cannot_be_saved_says_so() {
         "{:?}",
         out.coverage.partial_reasons
     );
+}
+
+/// Built with `*at` calls: only each syscall is bound by PATH_MAX, and a tenant
+/// can go on like this down to the walker's depth limit. Overlayfs (a container's
+/// /tmp) gives up around 4 KiB, so this stops a level before it refuses.
+fn deep_php(s: &Site) -> String {
+    use rustix::fs::{mkdirat, openat, Mode, OFlags, CWD};
+    let name = "\u{1}".repeat(200);
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY;
+    let mut dir = openat(CWD, &s.root, flags, Mode::empty()).expect("root");
+    let mut rel = String::new();
+    for _ in 0..60 {
+        if mkdirat(&dir, &name, Mode::RWXU).is_err() {
+            break;
+        }
+        let next = openat(&dir, &name, flags, Mode::empty()).expect("descend");
+        // Is there room for the deeper one? Only then is this level final.
+        if mkdirat(&next, &name, Mode::RWXU).is_err() {
+            break;
+        }
+        rustix::fs::unlinkat(&next, &name, rustix::fs::AtFlags::REMOVEDIR).expect("rmdir");
+        dir = next;
+        rel.push_str(&name);
+        rel.push('/');
+    }
+    let flags = OFlags::CREATE | OFlags::WRONLY;
+    let f = openat(&dir, "x.php", flags, Mode::RUSR | Mode::WUSR).expect("create");
+    drop(f);
+    rel.push_str("x.php");
+    rel
+}
+
+#[test]
+fn one_long_file_name_does_not_turn_off_change_detection() {
+    let s = Site::new();
+    s.wordpress();
+    s.child_theme("kid");
+    let rel = deep_php(&s);
+    assert!(rel.len() > 1024, "{}", rel.len());
+
+    let first = s.scan();
+    // Named, as far as a name that long is any use, and said out loud.
+    assert_eq!(first.review.len(), 1, "{:?}", first.review.len());
+    let r = &first.review[0];
+    assert!(r.rel.len() <= 256, "{}", r.rel.len());
+    assert!(rel.starts_with(r.rel.trim_end_matches('…')));
+    assert!(first
+        .coverage
+        .partial_reasons
+        .iter()
+        .any(|p| p.contains("1024")));
+
+    // The baseline survived it.
+    let b = s.load();
+    assert!(!b.entries.contains_key(&rel));
+    assert!(b.first_done);
+
+    settle();
+    let f = "wp-content/themes/kid/functions.php";
+    s.write(f, "<?php // attacker edit with no rule hit\n");
+    let second = s.scan();
+    assert_eq!(item(&second.review, f).kind, FindingKind::BaselineChange);
+    assert_eq!(s.load().since, NOW);
+}
+
+#[test]
+fn an_unreadable_baseline_is_partial_for_that_run() {
+    let s = incident_site();
+    s.scan();
+    fs::write(&s.baseline, "damaged").expect("write");
+    let out = s.scan();
+    assert!(
+        out.coverage
+            .partial_reasons
+            .iter()
+            .any(|r| r.contains("baseline")),
+        "{:?}",
+        out.coverage.partial_reasons
+    );
+    // It was started again, so the next run has one to compare with.
+    assert_eq!(s.scan().coverage.partial_reasons, Vec::<String>::new());
+    // No baseline at all is just a first scan.
+    let fresh = incident_site();
+    assert_eq!(fresh.scan().coverage.partial_reasons, Vec::<String>::new());
+}
+
+#[test]
+fn many_added_code_files_group_even_with_a_tiny_manifest() {
+    // A one-file manifest: 300 High findings would be the flood grouping is for.
+    let s = Site::new();
+    s.wordpress();
+    s.verified_plugin("contact", "2.0", &[("a.php", b"<?php // a\n")]);
+    for i in 0..1100 {
+        s.write(
+            &format!("wp-content/plugins/contact/own/o{i}.php"),
+            "<?php\n",
+        );
+    }
+    let out = s.scan();
+    assert_eq!(rels(&out.findings), ["wp-content/plugins/contact"]);
+    assert!(out.findings[0].snippet.contains("1100 added"));
+    assert_eq!(out.coverage.partial_reasons, Vec::<String>::new());
+
+    // Below the line each file still stands alone.
+    let s = Site::new();
+    s.wordpress();
+    s.verified_plugin("contact", "2.0", &[("a.php", b"<?php // a\n")]);
+    for i in 0..49 {
+        s.write(
+            &format!("wp-content/plugins/contact/own/o{i}.php"),
+            "<?php\n",
+        );
+    }
+    assert_eq!(s.scan().findings.len(), 49);
+}
+
+#[test]
+fn the_item_cap_in_one_component_says_so() {
+    // Under half of the files differ, so nothing groups and the cap bites.
+    let s = Site::new();
+    s.wordpress();
+    let files: Vec<(String, Vec<u8>)> = (0..3000)
+        .map(|i| (format!("inc/f{i}.txt"), format!("{i}\n").into_bytes()))
+        .collect();
+    s.verified_plugin("big", "1.0", &borrowed(&files));
+    for (p, _) in files.iter().take(1100) {
+        s.append(&format!("wp-content/plugins/big/{p}"), b"x");
+    }
+    let out = s.scan();
+    assert_eq!(out.findings.len(), 1000);
+    assert!(
+        out.coverage
+            .partial_reasons
+            .iter()
+            .any(|r| r.contains("100 more findings not listed")),
+        "{:?}",
+        out.coverage.partial_reasons
+    );
+}
+
+#[test]
+fn child_themes_get_no_update_pass() {
+    // A child theme is the site's own code, and its version says nothing.
+    let s = Site::new();
+    s.wordpress();
+    s.child_theme("kid");
+    s.scan();
+    settle();
+    s.write(
+        "wp-content/themes/kid/style.css",
+        "/*\nTheme Name: kid\nTemplate: hello-elementor\nVersion: 2.0\n*/\n",
+    );
+    s.write("wp-content/themes/kid/functions.php", "<?php // edited\n");
+    let out = s.scan();
+    assert!(out.auto_accepted.is_empty());
+    item(&out.review, "wp-content/themes/kid/functions.php");
+}
+
+#[test]
+fn no_slug_list_means_no_update_pass() {
+    // wordpress.org's answer wasn't available: any plugin might be a free one.
+    let mut s = Site::new();
+    s.known = None;
+    s.wordpress();
+    s.plugin("premium", "1.0", &[("a.php", b"<?php // a\n")]);
+    s.scan();
+    settle();
+    s.bump("premium", "1.1");
+    s.write("wp-content/plugins/premium/a.php", "<?php // a2\n");
+    let out = s.scan();
+    assert!(out.auto_accepted.is_empty());
+    item(&out.review, "wp-content/plugins/premium/a.php");
+}
+
+#[test]
+fn ordinary_generated_php_paths_are_churn() {
+    let s = Site::new();
+    s.wordpress();
+    let dirs = [
+        "wp-content/languages/plugins",
+        "wp-content/et-cache/1",
+        "wp-content/litespeed/php",
+        "wp-content/ai1wm-backups",
+        "wp-content/updraft",
+    ];
+    for d in dirs {
+        s.write(&format!("{d}/x.php"), "<?php // generated\n");
+    }
+    s.scan();
+    settle();
+    for d in dirs {
+        s.write(&format!("{d}/x.php"), "<?php // generated again\n");
+    }
+    let out = s.scan();
+    assert_eq!(rels(&out.review), Vec::<&str>::new());
+    let b = s.load();
+    assert!(b.entries.keys().all(|k| !k.starts_with("wp-content/")));
+    // Still rules-only, not unchecked.
+    s.write("wp-content/languages/plugins/x.php", EVAL);
+    item(&s.scan().findings, "wp-content/languages/plugins/x.php");
+}
+
+#[test]
+fn php_settings_under_uploads_get_rules() {
+    const INI: &str = "; Wordfence WAF\nauto_prepend_file = '/home/u/htdocs/wordfence-waf.php'\n";
+    const HTA: &str =
+        "<IfModule mod_php.c>\n\tphp_value auto_prepend_file '/tmp/x.php'\n</IfModule>\n";
+    let s = Site::new();
+    s.wordpress();
+    s.write("wp-content/uploads/.user.ini", INI);
+    s.write("wp-content/uploads/2026/.htaccess", HTA);
+    s.write("wp-content/uploads/plain/.htaccess", "Require all denied\n");
+    let out = s.scan();
+    let a = item(&out.review, "wp-content/uploads/.user.ini");
+    assert_eq!(a.kind, FindingKind::RuleHit);
+    assert_eq!(a.severity, "medium");
+    assert_eq!(a.rule_id.as_deref(), Some("php_prepend_setting"));
+    item(&out.review, "wp-content/uploads/2026/.htaccess");
+    assert_eq!(out.review.len(), 2, "{:?}", rels(&out.review));
+    assert_eq!(rels(&out.findings), Vec::<&str>::new());
+    // Plugins write these, so no change detection on the plain one.
+    settle();
+    s.write(
+        "wp-content/uploads/plain/.htaccess",
+        "Require all granted\n",
+    );
+    assert_eq!(s.scan().review.len(), 2);
+
+    // Wordfence's own setup in the root: worth a look, not an alarm.
+    let s = Site::new();
+    s.wordpress();
+    s.write(".user.ini", INI);
+    let out = s.scan();
+    assert_eq!(item(&out.review, ".user.ini").severity, "medium");
+    assert_eq!(rels(&out.findings), Vec::<&str>::new());
 }
 
 #[test]

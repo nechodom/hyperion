@@ -66,6 +66,8 @@ enum Scope {
     Php,
     /// JavaScript, HTML and PHP-like files (injected `<script>` lives in all).
     Script,
+    /// `.htaccess` and `.user.ini`: what PHP is told to do, not PHP itself.
+    PhpSettings,
 }
 
 struct Rule {
@@ -152,6 +154,15 @@ const RULES: &[Rule] = &[
         pattern: r"(?-u)\b(?:eval|Function)\s*\([^;{}]{0,80}?\batob\s*\(",
         also: None,
     },
+    Rule {
+        id: "php_prepend_setting",
+        // Runs a file before every request. Also how Wordfence sets up its
+        // firewall, so it's worth a look and not an alarm.
+        severity: Severity::Medium,
+        scope: Scope::PhpSettings,
+        pattern: r"(?im-u)^[ \t]*(?:php_value[ \t]+)?auto_(?:prepend|append)_file\b",
+        also: None,
+    },
 ];
 
 struct Compiled {
@@ -222,6 +233,13 @@ fn is_script_like(rel_path: &str) -> bool {
         .is_some_and(|(_, ext)| SCRIPT_EXTS.iter().any(|e| ext.eq_ignore_ascii_case(e)))
 }
 
+fn is_php_settings(rel_path: &str) -> bool {
+    matches!(
+        rel_path.rsplit('/').next().unwrap_or(rel_path),
+        ".htaccess" | ".user.ini"
+    )
+}
+
 fn is_core_lookalike(rel_path: &str) -> bool {
     if rel_path.starts_with("wp-includes/") || rel_path.starts_with("wp-admin/") {
         return false;
@@ -235,8 +253,8 @@ fn is_core_lookalike(rel_path: &str) -> bool {
 }
 
 /// Inspect one file. `rel_path` is relative to the document root. Only PHP-like,
-/// JavaScript and HTML files get content rules; any PHP-like file under a
-/// directory named `uploads` is a finding by its path alone. Never panics and
+/// JavaScript, HTML and PHP settings files get content rules; any PHP-like file
+/// under a directory named `uploads` is a finding by its path alone. Never panics and
 /// never returns more than 20 hits, sorted by line.
 ///
 /// Only the first `INSPECT_MAX_BYTES` are matched. The caller must pass up to
@@ -244,8 +262,18 @@ fn is_core_lookalike(rel_path: &str) -> bool {
 /// `too_large_to_inspect`, so a caller that truncates at the cap exactly never
 /// sees the signal.
 pub fn inspect(rel_path: &str, bytes: &[u8]) -> Vec<RuleHit> {
-    let php = is_php_like(rel_path);
+    inspect_with(rel_path, bytes, is_php_like(rel_path))
+}
+
+/// `inspect` for a file PHP runs whatever it is called: WordPress requires
+/// `.maintenance` on every load.
+pub fn inspect_as_php(rel_path: &str, bytes: &[u8]) -> Vec<RuleHit> {
+    inspect_with(rel_path, bytes, true)
+}
+
+fn inspect_with(rel_path: &str, bytes: &[u8], php: bool) -> Vec<RuleHit> {
     let script = php || is_script_like(rel_path);
+    let settings = is_php_settings(rel_path);
     let body = &bytes[..bytes.len().min(INSPECT_MAX_BYTES)];
 
     let mut hits: Vec<RuleHit> = Vec::new();
@@ -259,7 +287,7 @@ pub fn inspect(rel_path: &str, bytes: &[u8]) -> Vec<RuleHit> {
             "larger than the 2 MiB inspect limit, only the start was checked",
         ));
     }
-    if !script {
+    if !script && !settings {
         return hits;
     }
 
@@ -269,7 +297,12 @@ pub fn inspect(rel_path: &str, bytes: &[u8]) -> Vec<RuleHit> {
     let mut first_start: Option<usize> = None;
     for idx in pack.set.matches(body).iter() {
         let c = &pack.rules[idx];
-        if c.rule.scope == Scope::Php && !php {
+        let applies = match c.rule.scope {
+            Scope::Php => php,
+            Scope::Script => script,
+            Scope::PhpSettings => settings,
+        };
+        if !applies {
             continue;
         }
         if c.also.as_ref().is_some_and(|a| !a.is_match(body)) {
@@ -489,6 +522,40 @@ mod tests {
             fx!("clean_minified.js"),
         );
         assert!(h.is_empty(), "{h:?}");
+    }
+
+    #[test]
+    fn inspect_as_php_runs_php_rules_on_any_name() {
+        let shell = fx!("fake403_shell.php");
+        assert!(inspect(".maintenance", shell).is_empty());
+        let h = inspect_as_php(".maintenance", shell);
+        assert_eq!(worst(&h), Some(Severity::High), "{h:?}");
+        assert!(ids(&h).contains(&"webshell_marker"));
+    }
+
+    #[test]
+    fn prepend_settings_are_medium_where_php_reads_them() {
+        for (rel, src) in [
+            (
+                ".user.ini",
+                &b"; Wordfence WAF\nauto_prepend_file = '/home/u/wordfence-waf.php'\n; END\n"[..],
+            ),
+            (
+                "wp-content/uploads/.htaccess",
+                b"<IfModule mod_php7.c>\n\tphp_value auto_prepend_file '/tmp/x'\n</IfModule>\n",
+            ),
+            (".user.ini", b"AUTO_APPEND_FILE=/tmp/x\n"),
+        ] {
+            let h = inspect(rel, src);
+            assert_eq!(ids(&h), ["php_prepend_setting"], "{rel}");
+            assert_eq!(worst(&h), Some(Severity::Medium));
+        }
+        // Commented out, or in another file type, is nothing.
+        assert!(inspect(".user.ini", b"; auto_prepend_file = x\n").is_empty());
+        assert!(inspect("a.php", b"<?php\nauto_prepend_file\n").is_empty());
+        assert!(inspect("a.txt", b"auto_prepend_file = x\n").is_empty());
+        // And PHP's own rules don't run on a settings file.
+        assert!(inspect(".htaccess", b"# eval(base64_decode('x'))\n").is_empty());
     }
 
     #[test]

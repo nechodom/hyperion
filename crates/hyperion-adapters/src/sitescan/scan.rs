@@ -28,12 +28,14 @@ use md5::Md5;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
-use super::baseline::{classify, Baseline, BaselineEntry, Change};
+use super::baseline::{classify, Baseline, BaselineEntry, Change, Loaded};
 use super::discover::{Component, Discovery};
 use super::manifest::{
     cache_path_for, is_soft_file, ComponentKey, ComponentKind, Digest, Manifest, ManifestSource,
 };
-use super::rules::{inspect, is_php_like, RuleHit, Severity, INSPECT_MAX_BYTES, RULE_PACK_VERSION};
+use super::rules::{
+    inspect, inspect_as_php, is_php_like, RuleHit, Severity, INSPECT_MAX_BYTES, RULE_PACK_VERSION,
+};
 use super::walk::{FileMeta, SkipReason, TenantRoot, WalkEvent, WalkOpts, WalkStats};
 use crate::AdapterError;
 
@@ -43,9 +45,14 @@ const HASH_BUF_BYTES: usize = 64 * 1024;
 /// A file hashed this close to its ctime could change again within the same
 /// clock tick and keep that ctime, so its record can't be believed next time.
 const RACY_CTIME_NANOS: i128 = 10_000_000;
-/// Files larger than this are reported, not read. Tenants can make a sparse file
-/// of any size for free, and hashing one would hold up every site on the node.
+/// Files a manifest lists larger than this are a mismatch without being read. A
+/// tenant can make a sparse file of any size for free, and hashing one would hold
+/// up every site on the node.
 const HASH_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+/// With no manifest to compare with, this is where reading stops being worth it.
+const NO_MANIFEST_READ_MAX: u64 = 64 * 1024 * 1024;
+/// `pause` also gets asked this often inside one file.
+const PAUSE_EVERY_READ_BYTES: u64 = 16 * 1024 * 1024;
 const AUTO_ACCEPTED_CAP: usize = 200;
 const PARTIAL_REASONS_CAP: usize = 20;
 /// Skipped names remembered, so they aren't called deleted or missing. Past this
@@ -53,18 +60,30 @@ const PARTIAL_REASONS_CAP: usize = 20;
 const SKIPS_TRACKED: usize = 20_000;
 /// A component this size or larger with most files differing is one finding.
 const GROUP_MIN_FILES: usize = 10;
+/// So is one with this many code files added, whatever the manifest's size.
+const GROUP_ADDED_CODE: u64 = 50;
+/// How much of an over-long name an item shows.
+const NAME_SHOWN_BYTES: usize = 200;
 
 const VERSION_PHP: &str = "wp-includes/version.php";
 const WP_CONFIG: &str = "wp-config.php";
+/// WordPress requires this root file as PHP on every load, and updates write and
+/// remove it.
+const MAINTENANCE: &str = ".maintenance";
 /// In the docroot root these are the site's own, not an unexpected core file.
-const ROOT_EXEMPT: [&str; 4] = [WP_CONFIG, ".htaccess", ".user.ini", ".maintenance"];
+const ROOT_EXEMPT: [&str; 4] = [WP_CONFIG, ".htaccess", ".user.ini", MAINTENANCE];
 /// In `wp-admin` and `wp-includes` only these are: a `wp-config.php` there isn't
 /// the real one.
 const CORE_DIR_EXEMPT: [&str; 2] = [".htaccess", ".user.ini"];
-const CHURN_DIRS: [&str; 3] = [
+const CHURN_DIRS: [&str; 8] = [
     "wp-content/cache/",
     "wp-content/wflogs/",
     "wp-content/upgrade/",
+    "wp-content/languages/",
+    "wp-content/et-cache/",
+    "wp-content/litespeed/",
+    "wp-content/ai1wm-backups/",
+    "wp-content/updraft/",
 ];
 const UPLOADS_DIR: &str = "wp-content/uploads/";
 const NON_WP_CHURN_NAMES: [&str; 2] = ["vendor", "node_modules"];
@@ -79,11 +98,23 @@ struct Limits {
     max_entries: u64,
     /// Items listed per site, for findings and for review each.
     max_items: usize,
+    /// A longer `rel` is never recorded. The kernel's PATH_MAX doesn't bound it
+    /// (each `openat` is short), and a line the baseline can't load back would
+    /// silently make every scan a first scan.
+    max_rel_bytes: usize,
+    /// Names recorded in the baseline in total, as they cost once written. Keeps
+    /// the file under the size `Baseline::load` accepts.
+    recorded_rel_bytes: u64,
+    /// Bytes read per run. Past it the run stops and the next one resumes.
+    read_budget: u64,
 }
 
 const LIMITS: Limits = Limits {
     max_entries: 300_000,
     max_items: 1000,
+    max_rel_bytes: 1024,
+    recorded_rel_bytes: 32 * 1024 * 1024,
+    read_budget: 8 * 1024 * 1024 * 1024,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -109,9 +140,10 @@ pub struct ScanInput {
     pub baseline_path: PathBuf,
     pub mode: ScanMode,
     pub now: i64,
-    /// Slugs wordpress.org knows: these get no premium-update pass.
+    /// Slugs wordpress.org knows: these get no premium-update pass. None means
+    /// the answer wasn't available, and then no slug gets it.
     #[serde(default)]
-    pub wporg_known_slugs: BTreeSet<String>,
+    pub wporg_known_slugs: Option<BTreeSet<String>>,
     /// Carried for a later task: a writer whose changes go through the rules only.
     #[serde(default)]
     pub accept_since: Option<(WriterKind, i64)>,
@@ -161,7 +193,8 @@ pub struct SiteScanOutcome {
     pub stopped: bool,
 }
 
-/// Scan one site. `pause` is called every few hundred files and may sleep; true
+/// Scan one site. `pause` is called every few hundred files and during long
+/// reads, and may sleep; true
 /// means stop now, which still saves the baseline and returns a partial outcome.
 /// `Err` means the site couldn't be checked at all.
 pub fn scan_site(
@@ -177,7 +210,7 @@ fn scan_with_limits(
     limits: &Limits,
 ) -> Result<SiteScanOutcome, AdapterError> {
     let root = TenantRoot::open(&input.root)?;
-    let loaded = Baseline::load(&input.baseline_path)?;
+    let loaded = Baseline::load_state(&input.baseline_path)?;
     let mut scan = Scan::new(input, &root, loaded, limits, pause);
     let opts = WalkOpts {
         max_entries: limits.max_entries,
@@ -201,8 +234,11 @@ struct Comp<'a> {
     accept_update: bool,
     items: Vec<SiteFileFinding>,
     modified: u64,
+    /// Code files only: anything else added to a tree raises nothing.
     added: u64,
     missing: u64,
+    /// Items past the cap. Forgiven if the component groups into one.
+    dropped: u64,
 }
 
 impl Comp<'_> {
@@ -262,9 +298,53 @@ fn is_js(rel: &str) -> bool {
         .is_some_and(|(_, e)| e.eq_ignore_ascii_case("js") || e.eq_ignore_ascii_case("mjs"))
 }
 
-/// The file types Layer B looks at.
+fn is_php_settings(rel: &str) -> bool {
+    matches!(base_name(rel), ".htaccess" | ".user.ini")
+}
+
+fn runs_as_php(rel: &str) -> bool {
+    is_php_like(rel) || rel == MAINTENANCE
+}
+
+/// The file types Layer B looks at. These are what counts as code.
 fn in_scope(rel: &str) -> bool {
-    is_php_like(rel) || is_js(rel) || matches!(base_name(rel), ".htaccess" | ".user.ini")
+    runs_as_php(rel) || is_js(rel) || is_php_settings(rel)
+}
+
+/// Rules for this file. Past the inspect limit only PHP is a loose end: a big
+/// bundle gets its start inspected and is watched by hash like anything else.
+fn rules_for(rel: &str, head: &[u8]) -> Vec<RuleHit> {
+    if rel == MAINTENANCE {
+        return inspect_as_php(rel, head);
+    }
+    let mut hits = inspect(rel, head);
+    if !is_php_like(rel) {
+        hits.retain(|h| h.rule_id != TOO_LARGE_RULE);
+    }
+    hits
+}
+
+/// What a name costs in the baseline file: JSON escapes control characters into
+/// six bytes, and a tenant picks the characters.
+fn recorded_cost(rel: &str) -> u64 {
+    rel.bytes()
+        .map(|b| match b {
+            0..=0x1f => 6,
+            b'"' | b'\\' => 2,
+            _ => 1,
+        })
+        .sum()
+}
+
+fn short_name(rel: &str) -> String {
+    if rel.len() <= NAME_SHOWN_BYTES {
+        return rel.to_string();
+    }
+    let mut end = NAME_SHOWN_BYTES;
+    while !rel.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &rel[..end])
 }
 
 /// Where a file goes.
@@ -291,6 +371,11 @@ struct Seen {
 impl Seen {
     fn visit(&mut self, rel: &str) {
         self.visited.insert(self.state.hash_one(rel));
+    }
+
+    /// It turned out not to be anyone's concern: any stale record of it goes.
+    fn unvisit(&mut self, rel: &str) {
+        self.visited.remove(&self.state.hash_one(rel));
     }
 
     fn skip(&mut self, rel: &str) {
@@ -329,6 +414,7 @@ struct FileRead {
     /// Up to `INSPECT_MAX_BYTES + 1`, so `inspect` can tell a file was cut short.
     head: Vec<u8>,
     hashed_at: (i64, i64),
+    bytes: u64,
 }
 
 fn unix_now() -> (i64, i64) {
@@ -343,20 +429,36 @@ fn unix_now() -> (i64, i64) {
 }
 
 /// One open, one pass: the digests and the bytes the rules see are the same
-/// content, whatever the tenant does to the file meanwhile.
-fn read_file(root: &TenantRoot, rel: &str, want_md5: bool, buf: &mut [u8]) -> io::Result<FileRead> {
+/// content, whatever the tenant does to the file meanwhile. `Ok(None)` means
+/// `pause` asked to stop partway through.
+fn read_file(
+    root: &TenantRoot,
+    rel: &str,
+    want_md5: bool,
+    buf: &mut [u8],
+    pause: &dyn Fn() -> bool,
+) -> io::Result<Option<FileRead>> {
     let hashed_at = unix_now();
     let mut f = root.open_file(rel)?.take(HASH_MAX_BYTES);
     let mut sha = Sha256::new();
     let mut md5 = want_md5.then(Md5::new);
     let mut head = Vec::new();
+    let mut bytes = 0u64;
+    let mut next_pause = PAUSE_EVERY_READ_BYTES;
     loop {
+        if bytes >= next_pause {
+            next_pause += PAUSE_EVERY_READ_BYTES;
+            if pause() {
+                return Ok(None);
+            }
+        }
         let n = match f.read(buf) {
             Ok(0) => break,
             Ok(n) => n,
             Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
             Err(e) => return Err(e),
         };
+        bytes += n as u64;
         sha.update(&buf[..n]);
         if let Some(m) = md5.as_mut() {
             m.update(&buf[..n]);
@@ -364,12 +466,13 @@ fn read_file(root: &TenantRoot, rel: &str, want_md5: bool, buf: &mut [u8]) -> io
         let room = (INSPECT_MAX_BYTES + 1).saturating_sub(head.len());
         head.extend_from_slice(&buf[..n.min(room)]);
     }
-    Ok(FileRead {
+    Ok(Some(FileRead {
         sha256: sha.finalize().into(),
         md5: md5.map(|m| m.finalize().into()),
         head,
         hashed_at,
-    })
+        bytes,
+    }))
 }
 
 fn digest_matches(d: &Digest, read: &FileRead) -> bool {
@@ -499,6 +602,17 @@ struct Scan<'a> {
     files_hashed: u64,
     hashed_since_flush: u64,
     stopped: bool,
+    /// Why it stopped: this run's read budget ran out.
+    out_of_budget: bool,
+    bytes_read: u64,
+    /// What the names in the baseline cost so far.
+    recorded_bytes: u64,
+    /// Files with no room left in the baseline.
+    not_recorded: u64,
+    /// Code files with a name over the limit.
+    long_names: u64,
+    partly_inspected: i64,
+    symlinks_skipped: i64,
     /// Why parts of this run couldn't check something, apart from the walk.
     reasons: Vec<String>,
     save_failed: bool,
@@ -509,10 +623,22 @@ impl<'a> Scan<'a> {
     fn new(
         input: &'a ScanInput,
         root: &'a TenantRoot,
-        loaded: Option<Baseline>,
+        loaded: Loaded,
         limits: &'a Limits,
         pause: &'a dyn Fn() -> bool,
     ) -> Scan<'a> {
+        let mut reasons = Vec::new();
+        let loaded = match loaded {
+            Loaded::Found(b) => Some(b),
+            Loaded::Missing => None,
+            Loaded::Unreadable => {
+                reasons.push(
+                    "the saved baseline could not be read and was started again; earlier changes can't be proven"
+                        .to_string(),
+                );
+                None
+            }
+        };
         let mut baseline = loaded.unwrap_or_else(|| Baseline {
             since: input.now,
             rule_pack: RULE_PACK_VERSION,
@@ -525,7 +651,13 @@ impl<'a> Scan<'a> {
             baseline.churn.clear();
         }
 
-        let mut reasons = Vec::new();
+        let recorded_bytes = baseline
+            .entries
+            .keys()
+            .chain(baseline.verified.keys())
+            .chain(baseline.churn.keys())
+            .map(|p| recorded_cost(p))
+            .sum();
         let mut comps = Vec::with_capacity(input.discovery.components.len());
         let mut by_root = HashMap::new();
         let mut core = None;
@@ -539,12 +671,17 @@ impl<'a> Scan<'a> {
             } else {
                 by_root.insert(c.rel_root.as_str(), i);
             }
-            // No pass for a slug wordpress.org knows, or for a first sighting: a
-            // dropper with a made-up header is not an update.
+            // No pass for a slug wordpress.org knows or might, for a child theme
+            // (the site's own code), or for a first sighting: a dropper with a
+            // made-up header is not an update.
             let accept_update = manifest.is_none()
                 && c.key.kind != ComponentKind::Core
+                && !c.is_child_theme
                 && !c.key.version.is_empty()
-                && !input.wporg_known_slugs.contains(&c.key.slug)
+                && input
+                    .wporg_known_slugs
+                    .as_ref()
+                    .is_some_and(|k| !k.contains(&c.key.slug))
                 && baseline
                     .components
                     .get(&component_key(c))
@@ -563,6 +700,7 @@ impl<'a> Scan<'a> {
                 modified: 0,
                 added: 0,
                 missing: 0,
+                dropped: 0,
             });
         }
 
@@ -593,6 +731,13 @@ impl<'a> Scan<'a> {
             files_hashed: 0,
             hashed_since_flush: 0,
             stopped: false,
+            out_of_budget: false,
+            bytes_read: 0,
+            recorded_bytes,
+            not_recorded: 0,
+            long_names: 0,
+            partly_inspected: 0,
+            symlinks_skipped: 0,
             reasons,
             save_failed: false,
             buf: vec![0; HASH_BUF_BYTES],
@@ -608,6 +753,9 @@ impl<'a> Scan<'a> {
                 if self.hashed_since_flush >= FLUSH_EVERY_HASHED {
                     self.flush();
                 }
+                if self.stopped {
+                    return ControlFlow::Break(());
+                }
                 if self.files_seen % PAUSE_EVERY_FILES == 0 && (self.pause)() {
                     self.stopped = true;
                     return ControlFlow::Break(());
@@ -621,27 +769,52 @@ impl<'a> Scan<'a> {
         let slot = self
             .skip_counts
             .entry(why)
-            .or_insert_with(|| (0, rel.to_string()));
+            .or_insert_with(|| (0, short_name(rel)));
         slot.0 += 1;
     }
 
     fn on_skip(&mut self, rel: String, why: SkipReason) {
+        // Files below a name this long aren't recorded or listed in a manifest
+        // either, so nothing needs it remembered.
+        if why != SkipReason::FileCapReached && rel.len() <= self.limits.max_rel_bytes {
+            self.seen.skip(&rel);
+        }
+        // Linking a file twice or pointing a name elsewhere mustn't make PHP
+        // invisible, even though it isn't read.
+        match why {
+            SkipReason::Symlink if runs_as_php(&rel) => {
+                self.report_unread(&rel, "symlink: not followed");
+                return;
+            }
+            SkipReason::Symlink => {
+                // A deploy's `uploads` link is an ordinary site, not a partial scan.
+                self.symlinks_skipped += 1;
+                return;
+            }
+            SkipReason::Vanished if self.is_churn_path(&rel) => return,
+            SkipReason::HardLinked if in_scope(&rel) => {
+                self.report_unread(&rel, "hard-linked file: not read");
+            }
+            _ => {}
+        }
         self.count_skip(&rel, why);
-        if why == SkipReason::FileCapReached {
-            return;
-        }
-        self.seen.skip(&rel);
-        // A name a tenant can't hide behind: linking a file twice mustn't make
-        // it invisible, even though it isn't read.
-        if why == SkipReason::HardLinked && is_php_like(&rel) {
-            let component = self.owner(&rel).map(|i| self.comps[i].slug().to_string());
-            let item = SiteFileFinding {
-                snippet: "hard-linked file: not read".to_string(),
-                component,
-                ..self.base_item(&rel, FindingKind::BaselineChange, None)
-            };
-            self.push_review(item);
-        }
+    }
+
+    /// A review item for a file this scan won't read.
+    fn report_unread(&mut self, rel: &str, why: &str) {
+        let component = self.owner(rel).map(|i| self.comps[i].slug().to_string());
+        // An exact name for anything that could be acted on by name.
+        let name = if rel.len() > self.limits.max_rel_bytes {
+            short_name(rel)
+        } else {
+            rel.to_string()
+        };
+        let item = SiteFileFinding {
+            snippet: why.to_string(),
+            component,
+            ..self.base_item(&name, FindingKind::BaselineChange, None)
+        };
+        self.push_review(item);
     }
 
     fn base_item(
@@ -724,40 +897,46 @@ impl<'a> Scan<'a> {
         self.route_unverified(rel, owner)
     }
 
+    /// Files here come and go by themselves: no change detection.
+    fn is_churn_path(&self, rel: &str) -> bool {
+        if self.input.discovery.is_wordpress {
+            return CHURN_DIRS.iter().any(|d| rel.starts_with(d))
+                || (rel.starts_with(UPLOADS_DIR) && !is_php_like(rel));
+        }
+        let mut dirs = rel.split('/');
+        dirs.next_back();
+        dirs.any(|d| NON_WP_CHURN_NAMES.contains(&d))
+    }
+
     fn route_unverified(&self, rel: &str, owner: Option<usize>) -> Route {
         if !in_scope(rel) {
             return Route::Ignore;
         }
-        let php = is_php_like(rel);
-        if self.input.discovery.is_wordpress {
-            if CHURN_DIRS.iter().any(|d| rel.starts_with(d)) {
-                return if php {
-                    Route::RulesOnly(owner)
-                } else {
-                    Route::Ignore
-                };
-            }
-            if rel.starts_with(UPLOADS_DIR) && !php {
-                return Route::Ignore;
-            }
-            return Route::Watch(owner);
+        if rel == MAINTENANCE {
+            return Route::RulesOnly(owner);
         }
-        let mut dirs = rel.split('/');
-        dirs.next_back();
-        if dirs.any(|d| NON_WP_CHURN_NAMES.contains(&d)) {
-            return if php || is_js(rel) {
+        let wordpress = self.input.discovery.is_wordpress;
+        if self.is_churn_path(rel) {
+            return if is_php_like(rel) || is_php_settings(rel) || (!wordpress && is_js(rel)) {
                 Route::RulesOnly(owner)
             } else {
                 Route::Ignore
             };
         }
-        if is_js(rel) {
+        if !wordpress && is_js(rel) {
             return Route::RulesOnly(owner);
         }
         Route::Watch(owner)
     }
 
     fn on_file(&mut self, m: &FileMeta) {
+        if m.rel.len() > self.limits.max_rel_bytes {
+            if in_scope(&m.rel) {
+                self.long_names += 1;
+                self.report_unread(&m.rel, "file name too long to record: not read");
+            }
+            return;
+        }
         match self.route(&m.rel) {
             Route::Manifest(i, key) => {
                 self.seen.visit(&m.rel);
@@ -778,23 +957,73 @@ impl<'a> Scan<'a> {
     }
 
     /// Read a file, keeping the count. A file that can't be read leaves its
-    /// records alone and goes into the partial reasons.
-    fn read(&mut self, rel: &str, want_md5: bool) -> Option<FileRead> {
-        match read_file(self.root, rel, want_md5, &mut self.buf) {
-            Ok(r) => {
+    /// records alone and goes into the partial reasons. None with `stopped` set
+    /// means this run ends here, for the next one to resume.
+    fn read(&mut self, m: &FileMeta, want_md5: bool) -> Option<FileRead> {
+        if self.bytes_read.saturating_add(m.size) > self.limits.read_budget {
+            self.out_of_budget = true;
+            self.stopped = true;
+            return None;
+        }
+        match read_file(self.root, &m.rel, want_md5, &mut self.buf, self.pause) {
+            Ok(Some(r)) => {
                 self.files_hashed += 1;
                 self.hashed_since_flush += 1;
+                self.bytes_read += r.bytes;
                 Some(r)
             }
-            Err(e) => {
-                let why = if e.kind() == io::ErrorKind::NotFound {
-                    SkipReason::Vanished
-                } else {
-                    SkipReason::Unreadable
-                };
-                self.count_skip(rel, why);
+            Ok(None) => {
+                self.stopped = true;
                 None
             }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                if !self.is_churn_path(&m.rel) {
+                    self.count_skip(&m.rel, SkipReason::Vanished);
+                }
+                None
+            }
+            Err(_) => {
+                self.count_skip(&m.rel, SkipReason::Unreadable);
+                None
+            }
+        }
+    }
+
+    /// Would one more name fit in the baseline?
+    fn fits(&self, rel: &str) -> bool {
+        self.recorded_bytes.saturating_add(recorded_cost(rel)) <= self.limits.recorded_rel_bytes
+    }
+
+    /// Account for a new name, or say there's no room for it.
+    fn make_room(&mut self, rel: &str) -> bool {
+        if !self.fits(rel) {
+            self.not_recorded += 1;
+            return false;
+        }
+        self.recorded_bytes += recorded_cost(rel);
+        true
+    }
+
+    fn remember_entry(&mut self, m: &FileMeta, read: &FileRead) {
+        if self.baseline.entries.contains_key(&m.rel) || self.make_room(&m.rel) {
+            self.baseline
+                .entries
+                .insert(m.rel.clone(), entry_for(m, read));
+        }
+    }
+
+    fn remember_churn(&mut self, m: &FileMeta, read: &FileRead) {
+        if self.baseline.churn.contains_key(&m.rel) || self.make_room(&m.rel) {
+            self.baseline
+                .churn
+                .insert(m.rel.clone(), entry_for(m, read));
+        }
+    }
+
+    fn remember_verified(&mut self, m: &FileMeta, read: &FileRead, id: String) {
+        self.remember_entry(m, read);
+        if self.baseline.verified.contains_key(&m.rel) || self.make_room(&m.rel) {
+            self.baseline.verified.insert(m.rel.clone(), id);
         }
     }
 
@@ -812,9 +1041,9 @@ impl<'a> Scan<'a> {
         let Some(digest) = digest else {
             return self.unlisted(i, m);
         };
-        if comp.locale_fallback && m.rel == VERSION_PHP {
-            return;
-        }
+        // Translated, so the digest can't speak for it. A tenant can pick this
+        // state with `$wp_local_package`, so the rules still have to.
+        let rules_decide = comp.locale_fallback && m.rel == VERSION_PHP;
         if self.input.mode == ScanMode::Delta
             && self.baseline.verified.get(&m.rel) == Some(&comp.id)
             && classify(self.baseline.entries.get(&m.rel), m) == Change::Unchanged
@@ -825,19 +1054,22 @@ impl<'a> Scan<'a> {
             return self.mismatch(i, m, None, &[]);
         }
         let want_md5 = matches!(digest, Digest::Md5(_) | Digest::Md5Any(_));
-        let Some(read) = self.read(&m.rel, want_md5) else {
+        let Some(read) = self.read(m, want_md5) else {
             return;
         };
-        if digest_matches(&digest, &read) {
-            let id = self.comps[i].id.clone();
-            self.baseline
-                .entries
-                .insert(m.rel.clone(), entry_for(m, &read));
-            self.baseline.verified.insert(m.rel.clone(), id);
-            return;
+        let hits = (rules_decide || !digest_matches(&digest, &read))
+            .then(|| rules_for(&m.rel, &read.head));
+        let failed = match &hits {
+            None => false,
+            Some(h) if rules_decide => worst(h).is_some_and(|h| h.severity == Severity::High),
+            Some(_) => true,
+        };
+        if failed {
+            let hits = hits.unwrap_or_default();
+            return self.mismatch(i, m, Some(&read.sha256), &hits);
         }
-        let hits = inspect(&m.rel, &read.head);
-        self.mismatch(i, m, Some(&read.sha256), &hits);
+        let id = self.comps[i].id.clone();
+        self.remember_verified(m, &read, id);
     }
 
     fn forget(&mut self, rel: &str) {
@@ -859,6 +1091,11 @@ impl<'a> Scan<'a> {
 
     /// A file in a verified tree that the manifest doesn't list.
     fn unlisted(&mut self, i: usize, m: &FileMeta) {
+        // `wp-cli.yml`, `error_log`, a plugin's storage: only code is a finding.
+        if !in_scope(&m.rel) {
+            self.seen.unvisit(&m.rel);
+            return;
+        }
         let comp = &self.comps[i];
         let vendor = comp
             .manifest
@@ -866,25 +1103,19 @@ impl<'a> Scan<'a> {
             .is_some_and(|mf| mf.source == ManifestSource::VendorPackage);
         if vendor && !comp.is_core() {
             // Some premium plugins write into their own folder.
-            if in_scope(&m.rel) {
-                self.watch(m, Some(i));
-            } else {
-                self.seen.visited.remove(&self.seen.state.hash_one(&m.rel));
-            }
-            return;
+            return self.watch(m, Some(i));
         }
         self.forget(&m.rel);
         self.comps[i].added += 1;
+        let core = self.comps[i].is_core();
         // Past the cap it won't be listed, so there's nothing to read it for.
-        if self.comps[i].items.len() >= self.limits.max_items || m.size > HASH_MAX_BYTES {
-            let core = self.comps[i].is_core();
+        if self.comps[i].items.len() >= self.limits.max_items || m.size > NO_MANIFEST_READ_MAX {
             return self.stage(i, m, added_kind(core), None, &[]);
         }
-        let Some(read) = self.read(&m.rel, false) else {
+        let Some(read) = self.read(m, false) else {
             return;
         };
-        let hits = inspect(&m.rel, &read.head);
-        let core = self.comps[i].is_core();
+        let hits = rules_for(&m.rel, &read.head);
         self.stage(i, m, added_kind(core), Some(&read.sha256), &hits);
     }
 
@@ -897,6 +1128,7 @@ impl<'a> Scan<'a> {
         hits: &[RuleHit],
     ) {
         if self.comps[i].items.len() >= self.limits.max_items {
+            self.comps[i].dropped += 1;
             return;
         }
         let item = with_hits(
@@ -953,18 +1185,37 @@ impl<'a> Scan<'a> {
         self.push_review(item);
     }
 
+    fn note_partly_inspected(&mut self, m: &FileMeta) {
+        if m.size > INSPECT_MAX_BYTES as u64 && !runs_as_php(&m.rel) {
+            self.partly_inspected += 1;
+        }
+    }
+
+    /// Too big to be worth reading with nothing to compare it with? Only for PHP
+    /// is that something to report.
+    fn too_big_to_read(&mut self, m: &FileMeta, owner: Option<usize>) -> bool {
+        if m.size <= NO_MANIFEST_READ_MAX {
+            return false;
+        }
+        if runs_as_php(&m.rel) {
+            self.report_oversize(m, owner);
+        }
+        true
+    }
+
     /// Steps 2 and 3: baseline and rules.
     fn watch(&mut self, m: &FileMeta, owner: Option<usize>) {
         self.baseline.churn.remove(&m.rel);
         self.baseline.verified.remove(&m.rel);
+        self.note_partly_inspected(m);
         let change = classify(self.baseline.entries.get(&m.rel), m);
         if change == Change::Unchanged && self.input.mode == ScanMode::Delta && !self.rules_bumped {
             return;
         }
-        if m.size > HASH_MAX_BYTES {
-            return self.report_oversize(m, owner);
+        if self.too_big_to_read(m, owner) {
+            return;
         }
-        let Some(read) = self.read(&m.rel, false) else {
+        let Some(read) = self.read(m, false) else {
             return;
         };
         let trusted = self.baseline.trusted.get(&m.rel) == Some(&read.sha256);
@@ -976,35 +1227,33 @@ impl<'a> Scan<'a> {
         if same {
             // Only a High hit from a newer pack takes back what was accepted.
             if self.rules_bumped && !trusted {
-                let hits = inspect(&m.rel, &read.head);
+                let hits = rules_for(&m.rel, &read.head);
                 if worst(&hits).is_some_and(|h| h.severity == Severity::High) {
                     self.baseline.entries.remove(&m.rel);
                     return self.report_hits(m, owner, &read.sha256, &hits);
                 }
             }
-            self.baseline
-                .entries
-                .insert(m.rel.clone(), entry_for(m, &read));
-            return;
+            return self.remember_entry(m, &read);
         }
         if trusted {
-            self.baseline
-                .entries
-                .insert(m.rel.clone(), entry_for(m, &read));
-            return;
+            return self.remember_entry(m, &read);
         }
-        let hits = inspect(&m.rel, &read.head);
+        let hits = rules_for(&m.rel, &read.head);
         if !hits.is_empty() {
             return self.report_hits(m, owner, &read.sha256, &hits);
         }
         let accept = owner.is_some_and(|i| self.comps[i].accept_update);
         if self.first || accept {
-            self.baseline
-                .entries
-                .insert(m.rel.clone(), entry_for(m, &read));
+            self.remember_entry(m, &read);
             if !self.first && self.auto_accepted.len() < AUTO_ACCEPTED_CAP {
                 self.auto_accepted.push(m.rel.clone());
             }
+            return;
+        }
+        // With the baseline full, "no entry" says nothing about the file: the
+        // rules found nothing, and the partial reason covers the rest.
+        if !self.baseline.entries.contains_key(&m.rel) && !self.fits(&m.rel) {
+            self.not_recorded += 1;
             return;
         }
         let item = SiteFileFinding {
@@ -1019,26 +1268,25 @@ impl<'a> Scan<'a> {
     /// it keeps being reported.
     fn rules_only(&mut self, m: &FileMeta, owner: Option<usize>) {
         self.forget(&m.rel);
+        self.note_partly_inspected(m);
         let change = classify(self.baseline.churn.get(&m.rel), m);
         if change == Change::Unchanged && self.input.mode == ScanMode::Delta {
             return;
         }
-        if m.size > HASH_MAX_BYTES {
-            return self.report_oversize(m, owner);
+        if self.too_big_to_read(m, owner) {
+            return;
         }
-        let Some(read) = self.read(&m.rel, false) else {
+        let Some(read) = self.read(m, false) else {
             return;
         };
         if self.baseline.trusted.get(&m.rel) != Some(&read.sha256) {
-            let hits = inspect(&m.rel, &read.head);
+            let hits = rules_for(&m.rel, &read.head);
             if !hits.is_empty() {
                 self.baseline.churn.remove(&m.rel);
                 return self.report_hits(m, owner, &read.sha256, &hits);
             }
         }
-        self.baseline
-            .churn
-            .insert(m.rel.clone(), entry_for(m, &read));
+        self.remember_churn(m, &read);
     }
 
     /// Save what's known so far, so a killed worker resumes from here.
@@ -1069,6 +1317,7 @@ impl<'a> Scan<'a> {
                 self.forget(&rel);
                 self.comps[i].missing += 1;
                 if self.comps[i].items.len() >= self.limits.max_items {
+                    self.comps[i].dropped += 1;
                     continue;
                 }
                 // Usually a botched update, not an attack: not High on its own.
@@ -1082,17 +1331,19 @@ impl<'a> Scan<'a> {
         }
     }
 
-    /// Most of a component differing is one fact, not hundreds: a mass injector
-    /// or a private plugin in a wordpress.org slug's folder. Either way one High
-    /// finding on the folder says it.
+    /// Most of a component differing, or a pile of code added to it, is one fact,
+    /// not hundreds: a mass injector or a private plugin in a wordpress.org slug's
+    /// folder. Either way one High finding on the folder says it.
     fn group_components(&mut self) {
         for comp in &mut self.comps {
             let differ = comp.modified + comp.missing;
-            if differ == 0 {
+            let many_added = comp.added >= GROUP_ADDED_CODE;
+            if differ == 0 && !many_added {
                 continue;
             }
             let total = comp.in_scope_files().len();
-            if total < GROUP_MIN_FILES || differ.saturating_mul(2) <= total as u64 {
+            let most_differ = total >= GROUP_MIN_FILES && differ.saturating_mul(2) > total as u64;
+            if !most_differ && !many_added {
                 continue;
             }
             let label = comp.source_label().unwrap_or_default();
@@ -1124,6 +1375,7 @@ impl<'a> Scan<'a> {
                 add_domains(&mut item.domains, it.domains.iter().cloned());
             }
             comp.items = vec![item];
+            comp.dropped = 0;
         }
     }
 
@@ -1139,6 +1391,7 @@ impl<'a> Scan<'a> {
         let max = self.limits.max_items;
         let mut dropped = self.dropped_findings;
         for comp in &mut self.comps {
+            dropped += comp.dropped;
             let items = std::mem::take(&mut comp.items);
             let kind = comp.c.key.kind;
             match (kind, &comp.manifest) {
@@ -1200,14 +1453,13 @@ impl<'a> Scan<'a> {
         let mut out = Vec::new();
         for (why, (n, first)) in &self.skip_counts {
             let label = match why {
-                SkipReason::Symlink => "symlinks not followed",
                 SkipReason::NotRegular => "special files not read",
                 SkipReason::HardLinked => "hard-linked files not read",
                 SkipReason::Unreadable => "files or directories could not be read",
                 SkipReason::NonUtf8Name => "names that aren't UTF-8 not looked at",
                 SkipReason::Vanished => "files vanished during the scan",
                 SkipReason::OtherFilesystem => "directories on another filesystem not looked at",
-                SkipReason::FileCapReached => continue,
+                SkipReason::Symlink | SkipReason::FileCapReached => continue,
             };
             let first = if first.is_empty() {
                 "the docroot"
@@ -1222,8 +1474,25 @@ impl<'a> Scan<'a> {
                 self.limits.max_entries
             ));
         }
-        if self.stopped {
+        if self.out_of_budget {
+            out.push(format!(
+                "this run's read budget of {} bytes ran out; the scan resumes on the next run",
+                self.limits.read_budget
+            ));
+        } else if self.stopped {
             out.push("the scan was stopped early and resumes on the next run".to_string());
+        }
+        if self.long_names > 0 {
+            out.push(format!(
+                "{} files with names over {} bytes were not recorded or read",
+                self.long_names, self.limits.max_rel_bytes
+            ));
+        }
+        if self.not_recorded > 0 {
+            out.push(format!(
+                "the baseline has no room for more names; {} files are not watched for changes",
+                self.not_recorded
+            ));
         }
         out
     }
@@ -1312,6 +1581,8 @@ impl<'a> Scan<'a> {
             themes_total: count(ComponentKind::Theme, false),
             files_watched: i64::try_from(self.baseline.entries.len()).unwrap_or(i64::MAX),
             watching_since: self.baseline.since,
+            files_partly_inspected: self.partly_inspected,
+            symlinks_skipped: self.symlinks_skipped,
             upstream_ran: ran,
             no_upstream: !d.is_wordpress,
             partial_reasons: reasons,
@@ -1366,7 +1637,7 @@ mod tests {
             baseline_path: base.join("b"),
             mode: ScanMode::Delta,
             now: 1,
-            wporg_known_slugs: BTreeSet::new(),
+            wporg_known_slugs: Some(BTreeSet::new()),
             accept_since: None,
         }
     }
@@ -1404,6 +1675,7 @@ mod tests {
             md5: None,
             head: Vec::new(),
             hashed_at: at,
+            bytes: 0,
         };
         let e = entry_for(&m, &read((100, 8)));
         assert_eq!((e.ctime, e.ctime_nsec), (0, 0));
@@ -1447,7 +1719,7 @@ mod tests {
         let inp = input(&base, &root);
         let limits = Limits {
             max_entries: 20,
-            max_items: 1000,
+            ..LIMITS
         };
         let out = scan_with_limits(&inp, &|| false, &limits).expect("scan");
         let reasons = &out.coverage.partial_reasons;
@@ -1484,8 +1756,8 @@ mod tests {
         }
         let inp = input(&base, &root);
         let limits = Limits {
-            max_entries: 1000,
             max_items: 10,
+            ..LIMITS
         };
         scan_with_limits(&inp, &|| false, &LIMITS).expect("first");
         for i in 0..30 {
@@ -1531,5 +1803,265 @@ mod tests {
         let out = scan_site(&input(&base, &root), &|| false).expect("scan");
         assert!(out.review.is_empty());
         assert_eq!(out.auto_accepted.len(), AUTO_ACCEPTED_CAP);
+    }
+
+    /// A plugin on disk with a wordpress.org manifest listing `listed` files, the
+    /// first `gone` of which aren't on disk.
+    fn verified_plugin(base: &Path, root: &Path, listed: usize, gone: usize) {
+        let mut files = BTreeMap::new();
+        let main = b"<?php\n/*\nPlugin Name: p\nVersion: 1\n*/\n";
+        write(root, "wp-content/plugins/p/p.php", main);
+        files.insert(
+            "p.php".to_string(),
+            Digest::Sha256(Sha256::digest(main).into()),
+        );
+        for i in 0..listed {
+            let body = format!("<?php // {i}\n");
+            if i >= gone {
+                write(
+                    root,
+                    &format!("wp-content/plugins/p/f{i}.php"),
+                    body.as_bytes(),
+                );
+            }
+            files.insert(
+                format!("f{i}.php"),
+                Digest::Sha256(Sha256::digest(body.as_bytes()).into()),
+            );
+        }
+        let key = ComponentKey {
+            kind: ComponentKind::Plugin,
+            slug: "p".into(),
+            version: "1".into(),
+            locale: None,
+        };
+        let p = cache_path(&base.join("m"), &key).expect("path");
+        fs::create_dir_all(p.parent().expect("parent")).expect("mkdir");
+        let manifest = Manifest {
+            source: ManifestSource::WordPressOrg,
+            files,
+            served_locale: None,
+        };
+        fs::write(p, serde_json::to_vec(&manifest).expect("json")).expect("write");
+    }
+
+    #[test]
+    fn dropped_added_files_are_counted() {
+        let (_t, base, root) = tree();
+        write(&root, "wp-load.php", b"<?php\n");
+        verified_plugin(&base, &root, 1, 0);
+        for i in 0..12 {
+            write(
+                &root,
+                &format!("wp-content/plugins/p/own/o{i}.php"),
+                b"<?php\n",
+            );
+        }
+        let limits = Limits {
+            max_items: 10,
+            ..LIMITS
+        };
+        let out = scan_with_limits(&input(&base, &root), &|| false, &limits).expect("scan");
+        assert_eq!(out.findings.len(), 10);
+        let reasons = &out.coverage.partial_reasons;
+        assert!(
+            reasons.iter().any(|r| r.contains("2 more findings")),
+            "{reasons:?}"
+        );
+    }
+
+    #[test]
+    fn dropped_missing_files_are_counted() {
+        let (_t, base, root) = tree();
+        write(&root, "wp-load.php", b"<?php\n");
+        verified_plugin(&base, &root, 42, 12);
+        let limits = Limits {
+            max_items: 10,
+            ..LIMITS
+        };
+        let out = scan_with_limits(&input(&base, &root), &|| false, &limits).expect("scan");
+        assert_eq!(out.findings.len(), 10);
+        let reasons = &out.coverage.partial_reasons;
+        assert!(
+            reasons.iter().any(|r| r.contains("2 more findings")),
+            "{reasons:?}"
+        );
+    }
+
+    #[test]
+    fn a_name_over_the_limit_is_named_and_never_recorded() {
+        let (_t, base, root) = tree();
+        let long = "app/a-name-well-over-the-limit.php";
+        write(&root, long, b"<?php\n");
+        write(&root, "app/ok.php", b"<?php\n");
+        write(&root, "app/not-code-well-over-the-limit.txt", b"x");
+        let limits = Limits {
+            max_rel_bytes: 20,
+            ..LIMITS
+        };
+        let inp = input(&base, &root);
+        let out = scan_with_limits(&inp, &|| false, &limits).expect("scan");
+        assert_eq!(out.review.len(), 1, "{:?}", out.review);
+        assert_eq!(out.review[0].rel, long);
+        assert_eq!(out.files_hashed, 1);
+        let reasons = &out.coverage.partial_reasons;
+        assert!(
+            reasons.iter().any(|r| r.contains("over 20 bytes")),
+            "{reasons:?}"
+        );
+        let b = Baseline::load(&inp.baseline_path)
+            .expect("load")
+            .expect("some");
+        assert_eq!(b.entries.keys().collect::<Vec<_>>(), ["app/ok.php"]);
+    }
+
+    #[test]
+    fn a_full_baseline_stops_recording_and_says_so() {
+        let (_t, base, root) = tree();
+        for i in 10..20 {
+            write(&root, &format!("app/f{i}.php"), b"<?php\n");
+        }
+        // Room for three of these 11-byte names.
+        let limits = Limits {
+            recorded_rel_bytes: 40,
+            ..LIMITS
+        };
+        let inp = input(&base, &root);
+        let out = scan_with_limits(&inp, &|| false, &limits).expect("scan");
+        let has_reason = |o: &SiteScanOutcome| {
+            o.coverage
+                .partial_reasons
+                .iter()
+                .any(|r| r.contains("no room"))
+        };
+        assert!(has_reason(&out), "{:?}", out.coverage.partial_reasons);
+        let b = Baseline::load(&inp.baseline_path)
+            .expect("load")
+            .expect("some");
+        assert_eq!(b.entries.len(), 3);
+
+        // The next run: what's in still works, what isn't raises no false change.
+        let recorded = b.entries.keys().next().expect("one").clone();
+        write(&root, &recorded, b"<?php // edited\n");
+        let out = scan_with_limits(&inp, &|| false, &limits).expect("scan");
+        assert!(has_reason(&out));
+        let got: Vec<&str> = out.review.iter().map(|r| r.rel.as_str()).collect();
+        assert_eq!(got, [recorded.as_str()]);
+
+        // And the rules still run on files with no room.
+        write(
+            &root,
+            "app/new.php",
+            b"<?php eval(base64_decode('QQ=='));\n",
+        );
+        let out = scan_with_limits(&inp, &|| false, &limits).expect("scan");
+        assert_eq!(out.findings.len(), 1);
+    }
+
+    #[test]
+    fn a_name_costs_what_it_costs_once_escaped() {
+        assert_eq!(recorded_cost("abc"), 3);
+        assert_eq!(recorded_cost("a\u{1}\"\\"), 1 + 6 + 2 + 2);
+        assert_eq!(recorded_cost("é"), 2);
+    }
+
+    #[test]
+    fn the_real_budgets_keep_the_baseline_loadable() {
+        // All names share the budget, escapes counted. Add the rest of a file's
+        // line and a verified line for every file at the walk's limit, and it's
+        // still under the 200 MiB `Baseline::load` reads.
+        let per_file = 130 + 70;
+        let most = LIMITS.recorded_rel_bytes + per_file * LIMITS.max_entries;
+        assert!(most < 200 * 1024 * 1024, "{most}");
+    }
+
+    #[test]
+    fn the_read_budget_stops_the_run_and_the_next_resumes() {
+        let (_t, base, root) = tree();
+        for i in 0..10 {
+            write(&root, &format!("app/f{i}.php"), &[b'/'; 300]);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        let limits = Limits {
+            read_budget: 1000,
+            ..LIMITS
+        };
+        let inp = input(&base, &root);
+        let out = scan_with_limits(&inp, &|| false, &limits).expect("scan");
+        assert!(out.stopped);
+        assert_eq!(out.files_hashed, 3);
+        let reasons = &out.coverage.partial_reasons;
+        assert!(reasons.iter().any(|r| r.contains("budget")), "{reasons:?}");
+
+        let mut runs = 1;
+        loop {
+            let out = scan_with_limits(&inp, &|| false, &limits).expect("scan");
+            runs += 1;
+            assert!(runs <= 4, "no progress");
+            if !out.stopped {
+                assert!(out.review.is_empty(), "still a first scan");
+                assert_eq!(out.coverage.partial_reasons, Vec::<String>::new());
+                break;
+            }
+        }
+        let b = Baseline::load(&inp.baseline_path)
+            .expect("load")
+            .expect("some");
+        assert_eq!(b.entries.len(), 10);
+    }
+
+    #[test]
+    fn pause_is_asked_inside_a_long_read() {
+        let (_t, base, root) = tree();
+        write(&root, "app/big.js", b"");
+        write(&root, "app/big.php", b"");
+        let grow = |rel: &str| {
+            fs::File::options()
+                .write(true)
+                .open(root.join(rel))
+                .expect("open")
+                .set_len(20 * 1024 * 1024)
+                .expect("grow");
+        };
+        grow("app/big.js");
+        grow("app/big.php");
+        let inp = input(&base, &root);
+        let calls = std::cell::Cell::new(0);
+        let stop = || {
+            calls.set(calls.get() + 1);
+            true
+        };
+        let out = scan_with_limits(&inp, &stop, &LIMITS).expect("scan");
+        assert_eq!(calls.get(), 1);
+        assert!(out.stopped);
+        assert_eq!(out.files_hashed, 0, "that read didn't finish");
+    }
+
+    #[test]
+    fn a_vanished_file_is_partial_only_outside_churn() {
+        let (_t, base, root) = tree();
+        write(&root, "wp-load.php", b"<?php\n");
+        write(&root, "wp-config.php", b"<?php\n");
+        let inp = input(&base, &root);
+        let tenant = TenantRoot::open(&root).expect("open");
+        let pause = || false;
+        let mut scan = Scan::new(&inp, &tenant, Loaded::Missing, &LIMITS, &pause);
+        let vanish = |rel: &str| WalkEvent::Skipped {
+            rel: rel.to_string(),
+            why: SkipReason::Vanished,
+        };
+        let _ = scan.on_event(vanish("wp-content/cache/x.php"));
+        let _ = scan.on_event(vanish("wp-content/uploads/a.js"));
+        let _ = scan.on_event(vanish("wp-content/themes/t/functions.php"));
+        let out = scan.finish(WalkStats::default());
+        let vanished: Vec<&String> = out
+            .coverage
+            .partial_reasons
+            .iter()
+            .filter(|r| r.contains("vanished"))
+            .collect();
+        assert_eq!(vanished.len(), 1, "{vanished:?}");
+        assert!(vanished[0].starts_with("1 "), "{}", vanished[0]);
+        assert!(vanished[0].contains("functions.php"), "{}", vanished[0]);
     }
 }

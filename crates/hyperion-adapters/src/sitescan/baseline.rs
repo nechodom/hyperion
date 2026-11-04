@@ -32,8 +32,10 @@ struct Limits {
     compressed: u64,
     /// Total decoded bytes.
     inflated: u64,
-    /// One line. Longest real line is a path (at most 4096 bytes, six times
-    /// that when every character is escaped) plus a hash.
+    /// One line. Longest real line is a path (the scan records none over 1024
+    /// bytes, six times that when every character is escaped) plus a hash. A
+    /// line over this makes the whole file unreadable, so the cap on recorded
+    /// names is what stands between a tenant and the baseline.
     line: usize,
 }
 
@@ -72,6 +74,17 @@ pub struct Baseline {
     pub components: BTreeMap<String, String>,
     /// Files someone vouched for, by path and the hash they vouched for.
     pub trusted: BTreeMap<String, [u8; 32]>,
+}
+
+/// What is at a baseline's path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Loaded {
+    Found(Baseline),
+    /// None yet: a first scan, and nothing to explain.
+    Missing,
+    /// A file is there and can't be used (damaged, oversized, another format).
+    /// What it knew is gone, which the verdict has to say.
+    Unreadable,
 }
 
 /// What the metadata alone says about a file.
@@ -148,6 +161,18 @@ impl Baseline {
     /// caller scans as a first scan. `Err` only for a real I/O failure.
     pub fn load(path: &Path) -> io::Result<Option<Baseline>> {
         load_with_limits(path, &LIMITS)
+    }
+
+    /// Like `load`, telling "none yet" from "there, but unusable".
+    pub fn load_state(path: &Path) -> io::Result<Loaded> {
+        if let Some(b) = load_with_limits(path, &LIMITS)? {
+            return Ok(Loaded::Found(b));
+        }
+        match fs::symlink_metadata(path) {
+            Ok(_) => Ok(Loaded::Unreadable),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Loaded::Missing),
+            Err(e) => Err(e),
+        }
     }
 
     /// Writes next to `path` under a fresh O_EXCL 0600 name, fsyncs, renames
@@ -522,6 +547,20 @@ mod tests {
     fn missing_file_is_none() {
         let t = tempfile::tempdir().expect("tmp");
         assert_eq!(Baseline::load(&t.path().join("nope")).expect("load"), None);
+    }
+
+    #[test]
+    fn load_state_tells_missing_from_unreadable() {
+        let t = tempfile::tempdir().expect("tmp");
+        let p = t.path().join("7");
+        assert_eq!(Baseline::load_state(&p).expect("load"), Loaded::Missing);
+        fs::write(&p, "not gzip").expect("write");
+        assert_eq!(Baseline::load_state(&p).expect("load"), Loaded::Unreadable);
+        sample().save_atomic(&p).expect("save");
+        assert_eq!(
+            Baseline::load_state(&p).expect("load"),
+            Loaded::Found(sample())
+        );
     }
 
     #[test]
