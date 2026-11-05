@@ -258,7 +258,7 @@ systemd-run --unit=hyperion-sitescan --wait --pipe --collect
   -p IOSchedulingClass=idle -p CPUQuota=<50% on <=2 cores, else 100%>
   -p RuntimeMaxSec=21600
   -p CapabilityBoundingSet=CAP_DAC_READ_SEARCH -p NoNewPrivileges=yes
-  -p PrivateNetwork=yes -p ProtectSystem=strict
+  -p PrivateNetwork=yes -p ProtectSystem=strict -p ProtectHome=read-only
   -p ReadWritePaths=/var/lib/hyperion/scan
   -p "ReadOnlyPaths=/home /var/lib/hyperion/scan/manifests" -p ReadOnlyPaths=/run
   -p PrivateDevices=yes -p ProtectKernelTunables=yes -p ProtectKernelModules=yes

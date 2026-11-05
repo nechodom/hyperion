@@ -112,6 +112,9 @@ pub fn unit_args_for(unit: &str, cores: usize, exe: &Path) -> Vec<String> {
         "NoNewPrivileges=yes".to_string(),
         "PrivateNetwork=yes".to_string(),
         "ProtectSystem=strict".to_string(),
+        // `strict` leaves /home, /root and /run/user to this: without it a worker
+        // taken over could write /root/.ssh/authorized_keys.
+        "ProtectHome=read-only".to_string(),
         "ReadWritePaths=/var/lib/hyperion/scan".to_string(),
         // Home-directory hostings, and the manifests inside the writable
         // directory: the worker reads those and never changes them.
@@ -533,6 +536,7 @@ mod tests {
             "NoNewPrivileges=yes",
             "PrivateNetwork=yes",
             "ProtectSystem=strict",
+            "ProtectHome=read-only",
             "ReadWritePaths=/var/lib/hyperion/scan",
             "ReadOnlyPaths=/home /var/lib/hyperion/scan/manifests",
             "RuntimeMaxSec=21600",

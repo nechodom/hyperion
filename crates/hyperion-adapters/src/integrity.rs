@@ -784,6 +784,8 @@ fn launch_for(bin: &str, list_path: &Path, cores: usize, systemd: bool, nice: bo
             "NoNewPrivileges=yes".to_string(),
             "PrivateNetwork=yes".to_string(),
             "ProtectSystem=strict".to_string(),
+            // `strict` leaves /home, /root and /run/user to this.
+            "ProtectHome=read-only".to_string(),
             // clamscan unpacks into a temporary directory, and under a read-only
             // system without one it says so on stderr and scans nothing.
             "PrivateTmp=yes".to_string(),
@@ -1758,6 +1760,7 @@ exit {exit}"#,
             "NoNewPrivileges=yes",
             "PrivateNetwork=yes",
             "ProtectSystem=strict",
+            "ProtectHome=read-only",
             "PrivateTmp=yes",
             "PrivateDevices=yes",
             "ProtectKernelTunables=yes",
