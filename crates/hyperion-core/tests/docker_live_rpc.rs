@@ -10,8 +10,9 @@
 //!
 //! * `status`, `install`, `remove`, `overview`: the call of that name.
 //! * `logs`: `DOCKER_PROJECT` (may be empty), optional `DOCKER_CONTAINER`,
-//!   `DOCKER_LINES`, `DOCKER_FILTER`, `DOCKER_CURSOR`. Prints the line count,
-//!   the bytes of text, the first and the last line rather than every line.
+//!   `DOCKER_LINES`, `DOCKER_FILTER`, `DOCKER_CURSOR`, and `DOCKER_ACTOR`, which
+//!   also writes an audit row under that name. Prints the line count, the bytes
+//!   of text, the first and the last line rather than every line.
 //! * `forget`: `DOCKER_PROJECT`.
 //! * `updates`: the image answers from the overview. The daily check itself
 //!   has no RPC; the agent's tick runs it.

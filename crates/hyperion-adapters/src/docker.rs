@@ -648,22 +648,23 @@ pub struct LocalImage {
 struct ImageInspectRow {
     id: String,
     repo_digests: Option<Vec<String>>,
-    identity: Option<ImageIdentity>,
+    /// Read by hand: another shape must not fail the row. A failed read leaves
+    /// the last answer about the image standing.
+    identity: serde_json::Value,
 }
 
-/// Where an image came from (Docker 29). Only whether it was built and which
-/// repositories it was pulled from are kept.
-#[derive(Deserialize, Default)]
-#[serde(default, rename_all = "PascalCase")]
-struct ImageIdentity {
-    build: Option<Vec<serde::de::IgnoredAny>>,
-    pull: Option<Vec<ImagePull>>,
-}
-
-#[derive(Deserialize, Default)]
-#[serde(default, rename_all = "PascalCase")]
-struct ImagePull {
-    repository: String,
+/// The repositories `Identity` says an image was pulled from, and whether it
+/// says the image was built (Docker 29). Any other shape says nothing.
+fn image_origin(identity: &serde_json::Value) -> (Vec<String>, bool) {
+    let list = |key| identity.get(key).and_then(serde_json::Value::as_array);
+    let pulled_from = list("Pull")
+        .into_iter()
+        .flatten()
+        .filter_map(|p| p.get("Repository")?.as_str())
+        .filter(|p| !p.is_empty())
+        .map(str::to_string)
+        .collect();
+    (pulled_from, list("Build").is_some_and(|b| !b.is_empty()))
 }
 
 /// Facts from `docker image inspect <image_ref>`. `None` when the node has no
@@ -676,20 +677,13 @@ pub fn parse_image_inspect(
 ) -> Result<Option<LocalImage>, DockerError> {
     let rows: Vec<ImageInspectRow> = serde_json::from_slice(bytes).map_err(jerr)?;
     Ok(rows.into_iter().next().map(|r| {
-        let identity = r.identity.unwrap_or_default();
-        let pulled_from: Vec<String> = identity
-            .pull
-            .unwrap_or_default()
-            .into_iter()
-            .map(|p| p.repository)
-            .filter(|p| !p.is_empty())
-            .collect();
+        let (pulled_from, built) = image_origin(&r.identity);
         LocalImage {
             image_ref: image_ref.to_string(),
             repo_digests: r.repo_digests.unwrap_or_default(),
             image_id: r.id,
             pinned: image_ref.contains("@sha256:"),
-            built_here: pulled_from.is_empty() && identity.build.is_some_and(|b| !b.is_empty()),
+            built_here: pulled_from.is_empty() && built,
             pulled_from,
         }
     }))
@@ -1016,6 +1010,40 @@ mod tests {
         let img = parse_image_inspect(old, "x:1").unwrap().expect("image");
         assert!(!img.built_here);
         assert!(img.pulled_from.is_empty());
+    }
+
+    /// A newer daemon may print this field in another shape. That must read as
+    /// a daemon that says nothing, not as an image that cannot be read: a failed
+    /// read leaves the last answer standing, for good.
+    #[test]
+    fn an_identity_of_any_other_shape_says_nothing() {
+        for identity in [
+            r#""weird""#,
+            r#"{"Build":{"Ref":"x"}}"#,
+            r#"{"Pull":{"Repository":"x"}}"#,
+            r#"{"Pull":[{"Repository":null}]}"#,
+            r#"{"Pull":["docker.io/library/nginx"]}"#,
+            r#"{"Pull":[{}]}"#,
+            r#"{"Pull":null,"Build":null}"#,
+            r#"{}"#,
+            r#"null"#,
+            r#"7"#,
+        ] {
+            let raw = format!(
+                r#"[{{"Id":"sha256:aa","RepoDigests":["nginx@sha256:aa"],"Identity":{identity}}}]"#
+            );
+            let img = parse_image_inspect(raw.as_bytes(), "nginx:1")
+                .unwrap_or_else(|e| panic!("{identity}: {e}"))
+                .expect("image");
+            assert!(!img.built_here, "{identity}");
+            assert!(img.pulled_from.is_empty(), "{identity}");
+            assert_eq!(img.repo_digests, ["nginx@sha256:aa"], "{identity}");
+        }
+
+        // A usable entry beside an unusable one still counts.
+        let raw = br#"[{"Id":"sha256:aa","Identity":{"Pull":[7,{"Repository":"a/b"}]}}]"#;
+        let img = parse_image_inspect(raw, "a/b:1").unwrap().expect("image");
+        assert_eq!(img.pulled_from, ["a/b"]);
     }
 
     #[test]

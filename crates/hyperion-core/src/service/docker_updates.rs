@@ -102,20 +102,15 @@ fn without_port(repo: &str) -> String {
 /// Whether the image came from the repository the reference names. Docker 29
 /// lists a digest under every local name, re-tagged ones too, so where it was
 /// pulled from is what counts (a push that kept the digest counts as well). A
-/// daemon that does not say leaves only the digests to go by. `Identity` leaves
-/// the registry's port out, so the port is not compared.
+/// daemon that does not say, or says nothing usable, leaves only the digests to
+/// go by. `Identity` leaves the registry's port out, so the port is not compared.
 fn pulled_from_its_own_repo(local: &LocalImage) -> bool {
-    if local.pulled_from.is_empty() {
-        return true;
+    let name = |reference: &str| repo_name_of(&without_port(reference));
+    let pulled: Vec<String> = local.pulled_from.iter().filter_map(|p| name(p)).collect();
+    match name(&local.image_ref) {
+        Some(repo) if !pulled.is_empty() => pulled.contains(&repo),
+        _ => true,
     }
-    let Some(repo) = repo_name_of(&local.image_ref).map(|r| without_port(&r)) else {
-        return false;
-    };
-    local
-        .pulled_from
-        .iter()
-        .filter_map(|p| repo_name_of(p))
-        .any(|p| without_port(&p) == repo)
 }
 
 /// A reason the registry need not be asked at all, from the local copy alone.

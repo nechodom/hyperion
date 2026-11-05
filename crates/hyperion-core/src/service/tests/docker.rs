@@ -1791,6 +1791,18 @@ async fn a_log_driver_that_cannot_be_read_says_so() {
     let text = err.to_string();
     assert!(text.contains("logging driver"), "{text}");
     assert!(!text.contains("reload"), "{text}");
+
+    // The same words inside a container's own stderr are not Docker saying so.
+    w.lock().expect("world").logs_err = Some(DockerError::Failed(
+        "app: the backend does not support reading\nError response from daemon: No such container"
+            .into(),
+    ));
+    let text = s
+        .docker_logs(logs_for("shop", Some("shop-web-1")))
+        .await
+        .expect_err("no log to read")
+        .to_string();
+    assert!(text.contains("reload"), "{text}");
 }
 
 #[tokio::test]
@@ -2978,6 +2990,43 @@ fn an_image_pulled_under_another_name_cannot_be_compared() {
     assert_eq!(
         image_state(&hub, OLD_D, Ok(OLD_D), None),
         ImageUpdateState::UpToDate
+    );
+
+    // A port on the Hub's own host is still the Hub.
+    let mut hub = nginx_local(OLD_D);
+    hub.image_ref = "docker.io:443/library/nginx:alpine".into();
+    hub.repo_digests = vec![format!("docker.io:443/library/nginx@{OLD_D}")];
+    hub.pulled_from = vec!["docker.io/library/nginx".into()];
+    assert_eq!(
+        image_state(&hub, OLD_D, Ok(OLD_D), None),
+        ImageUpdateState::UpToDate
+    );
+
+    // Entries that are no repository name say nothing, so they are not a
+    // statement that it came from elsewhere.
+    let mut odd = nginx_local(OLD_D);
+    odd.pulled_from = vec!["Bad Name!".into()];
+    assert_eq!(
+        image_state(&odd, OLD_D, Ok(OLD_D), None),
+        ImageUpdateState::UpToDate
+    );
+}
+
+/// A shape of `Identity` this code has never seen must not stop the check: the
+/// stored answer would stay "up to date" for good, with no error beside it.
+#[tokio::test]
+async fn an_unknown_identity_shape_still_asks_the_registry() {
+    let w = nginx_world(1);
+    w.lock().expect("world").identities.insert(
+        "nginx:alpine".into(),
+        serde_json::json!({"Pull": {"Repository": "somewhere/else"}}),
+    );
+    let (s, _dir) = worker_with(world_mock(&w)).await;
+    updates_at(&s, T0).await;
+    assert_eq!(lookups(&w), ["nginx:alpine"]);
+    assert_eq!(
+        container_updates(&s).await,
+        vec![Some(ImageUpdateState::UpdateAvailable)]
     );
 }
 

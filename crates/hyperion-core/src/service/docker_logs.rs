@@ -384,11 +384,17 @@ fn log_error(e: &DockerError) -> RpcError {
         DockerError::NotInstalled => bad("Docker is not installed on this node."),
         DockerError::NotResponding => daemon_silent(),
         // `--log-driver none`: no reload will help. Docker's sentence is only
-        // recognised here, never passed on.
-        DockerError::Failed(t) if t.contains("does not support reading") => bad(
-            "This container's logging driver keeps no log that Docker can read. Change the \
-             logging driver in the compose file to see its logs here.",
-        ),
+        // recognised here, never passed on. It has to be the last thing said:
+        // the text before it can be the container's own stderr.
+        DockerError::Failed(t)
+            if t.trim_end()
+                .ends_with("configured logging driver does not support reading") =>
+        {
+            bad(
+                "This container's logging driver keeps no log that Docker can read. Change the \
+                 logging driver in the compose file to see its logs here.",
+            )
+        }
         DockerError::Failed(_) => bad(
             "Docker could not read that log. The container may have been removed a moment \
              ago; reload the page.",
