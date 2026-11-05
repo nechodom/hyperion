@@ -272,12 +272,12 @@ pub(crate) async fn run_with(
         Ok(r) => r,
         Err(_) => {
             let _ = child.start_kill();
-            let _ = child.wait().await;
+            reap(child.wait()).await;
             return Err(DockerError::NotResponding);
         }
     };
     if truncated {
-        let _ = child.wait().await;
+        reap(child.wait()).await;
         // A killed run is not a failure when it produced output. With no
         // stdout, a flood of stderr is one: empty must not read as "nothing".
         if !out.is_empty() {
@@ -311,6 +311,20 @@ pub(crate) async fn run_with(
         text.truncate(n);
     }
     Err(DockerError::Failed(text))
+}
+
+/// How long to wait for a killed `docker` to be collected. A process stuck
+/// in the kernel (a hung mount under a log file, say) survives SIGKILL for as
+/// long as the kernel holds it; the read has already been answered, so it
+/// must not wait that long too. `kill_on_drop` finishes the job later.
+const REAP_WAIT: Duration = Duration::from_secs(2);
+
+async fn reap<F: std::future::Future>(wait: F) -> Option<F::Output> {
+    reap_within(wait, REAP_WAIT).await
+}
+
+async fn reap_within<F: std::future::Future>(wait: F, limit: Duration) -> Option<F::Output> {
+    tokio::time::timeout(limit, wait).await.ok()
 }
 
 fn jerr(e: serde_json::Error) -> DockerError {
@@ -729,6 +743,18 @@ mod tests {
 
     /// Every read that is asked for JSON asks with the template, which also
     /// older CLIs know; the bare word `json` needs a 23.0 CLI.
+    /// A killed process that is not collected does not hold the read up.
+    #[tokio::test]
+    async fn waiting_for_a_killed_child_is_bounded() {
+        let started = std::time::Instant::now();
+        let got = reap_within(std::future::pending::<()>(), Duration::from_millis(50)).await;
+        assert!(got.is_none());
+        assert!(started.elapsed() < Duration::from_secs(1));
+        // A child that is collected promptly is waited for as before.
+        let got = reap_within(async { 7 }, Duration::from_secs(5)).await;
+        assert_eq!(got, Some(7));
+    }
+
     #[test]
     fn json_is_asked_for_with_the_template_not_the_bare_word() {
         let mut formats = 0;
