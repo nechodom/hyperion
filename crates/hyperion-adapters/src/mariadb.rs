@@ -156,7 +156,7 @@ pub async fn read_option(
         .prefix("hyperion-dbread-")
         .suffix(".cnf")
         .tempfile()?;
-    opt.write_all(mariadb_option_file(login).as_bytes())?;
+    opt.write_all(mariadb_option_file(login)?.as_bytes())?;
     opt.flush()?;
     let mut child = tokio::process::Command::new("/usr/bin/mariadb")
         // `--defaults-extra-file` must come first. `--local-infile=0`: the client
@@ -470,7 +470,11 @@ mod tests {
 
         // And past the check, as a swap could get: the tenant's own rights.
         let mut opt = tempfile::NamedTempFile::new().expect("tmp");
-        std::io::Write::write_all(&mut opt, mariadb_option_file(&login).as_bytes()).expect("write");
+        std::io::Write::write_all(
+            &mut opt,
+            mariadb_option_file(&login).expect("plain").as_bytes(),
+        )
+        .expect("write");
         let arg = format!("--defaults-extra-file={}", opt.path().display());
         let as_tenant = cmd::run_with_stdin(
             "/usr/bin/mariadb",

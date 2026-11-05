@@ -570,7 +570,7 @@ pub async fn restore_mariadb_dump(
         use std::io::Write;
         // tempfile creates 0600 with O_EXCL, so nothing else can read it or
         // have pre-planted it.
-        opt.write_all(mariadb_option_file(login).as_bytes())?;
+        opt.write_all(mariadb_option_file(login)?.as_bytes())?;
         opt.flush()?;
     }
     let opt_arg = format!("--defaults-extra-file={}", opt.path().display());
@@ -595,16 +595,25 @@ pub async fn restore_mariadb_dump(
 
 /// `[client]` option-file body for `login`. Values are double-quoted with
 /// `\` and `"` escaped, so a password containing `#`, `;` or a quote is read
-/// back literally rather than truncated as a comment.
-pub(crate) fn mariadb_option_file(login: &DbLogin<'_>) -> String {
-    let q = |v: &str| v.replace('\\', "\\\\").replace('"', "\\\"");
+/// back literally rather than truncated as a comment. A control character is
+/// refused, not quoted: a newline would start a line of its own (`plugin-dir=`,
+/// `default-auth=`) in a file a root client reads.
+pub(crate) fn mariadb_option_file(login: &DbLogin<'_>) -> Result<String, AdapterError> {
+    let q = |what: &str, v: &str| {
+        if v.chars().any(|c| c < ' ' || c == '\u{7f}') {
+            return Err(AdapterError::Other(format!(
+                "the database {what} contains a control character, which no option file may hold"
+            )));
+        }
+        Ok(v.replace('\\', "\\\\").replace('"', "\\\""))
+    };
     // `local-infile=0`: defense in depth against server-driven LOAD DATA LOCAL
     // reads by the root restore client (the argv pin is authoritative).
-    format!(
+    Ok(format!(
         "[client]\nuser=\"{}\"\npassword=\"{}\"\nlocal-infile=0\n",
-        q(login.user),
-        q(login.password)
-    )
+        q("user", login.user)?,
+        q("password", login.password)?
+    ))
 }
 
 /// Drop the `DEFINER=…` clauses mariadb-dump writes on views, triggers,
@@ -1713,7 +1722,8 @@ garbage
         let f = mariadb_option_file(&DbLogin {
             user: "lm_abc_u",
             password: r#"p#a;s"s\w"#,
-        });
+        })
+        .expect("plain text");
         assert_eq!(
             f,
             "[client]\nuser=\"lm_abc_u\"\npassword=\"p#a;s\\\"s\\\\w\"\nlocal-infile=0\n"
@@ -1728,11 +1738,43 @@ garbage
         let f = mariadb_option_file(&DbLogin {
             user: "lm_abc_u",
             password: "pw",
-        });
+        })
+        .expect("plain text");
         assert!(
             f.contains("\nlocal-infile=0\n"),
             "option file must disable LOCAL INFILE: {f}"
         );
+    }
+
+    /// A newline inside a value would end the quoted line and start one of its
+    /// own, such as `plugin-dir=` for a root client. No quoting is trusted with
+    /// that: the file isn't written.
+    #[test]
+    fn option_file_refuses_control_characters() {
+        for bad in [
+            "pw\n[client]\nplugin-dir=/home/x",
+            "pw\r",
+            "p\tw",
+            "pw\u{7f}",
+            "pw\0",
+        ] {
+            assert!(
+                mariadb_option_file(&DbLogin {
+                    user: "lm_abc_u",
+                    password: bad,
+                })
+                .is_err(),
+                "{bad:?}"
+            );
+            assert!(
+                mariadb_option_file(&DbLogin {
+                    user: bad,
+                    password: "pw",
+                })
+                .is_err(),
+                "{bad:?}"
+            );
+        }
     }
 
     /// A wrong size here would make a good backup look broken, so anything

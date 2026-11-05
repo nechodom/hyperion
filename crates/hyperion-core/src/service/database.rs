@@ -67,6 +67,15 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 message: "new password must be at least 12 characters".into(),
             });
         }
+        // It goes into a mariadb option file a root client reads: a newline
+        // would start a line of its own there.
+        if new_password.chars().any(|c| c < ' ' || c == '\u{7f}') {
+            return Err(RpcError::Validation {
+                message:
+                    "new password can't contain control characters (newline, tab and the like)"
+                        .into(),
+            });
+        }
         let detail = self.get(sel).await?;
         let db_row = databases::get_for_hosting(&self.pool, &detail.id)
             .await
