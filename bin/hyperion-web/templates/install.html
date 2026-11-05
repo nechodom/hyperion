@@ -45,8 +45,8 @@
     <pre class="invite-cmd"><code id="install-cmd"
             data-token="{{ m.token }}"
             data-default-master="{{ master_url }}"
-            data-hidden="1">curl -fsSL https://raw.githubusercontent.com/nechodom/hyperion/main/packaging/install/install-node.sh \
-  | sudo bash -s -- --token=&lt;hidden — click Reveal or Copy&gt; --master={{ master_url }}</code></pre>
+            data-hidden="1">{ printf 'HYPERION_INVITE_TOKEN=%s\n' '&lt;hidden — click Reveal or Copy&gt;'; curl -fsSL https://raw.githubusercontent.com/nechodom/hyperion/main/packaging/install/install-node.sh; } \
+  | sudo bash -s -- --master={{ master_url }}</code></pre>
     <div class="invite-cmd-actions">
       <button type="button" class="btn small" id="install-cmd-copy">Copy install command</button>
       <button type="button" class="btn small ghost" id="install-cmd-reveal" data-revealed="0">Reveal token</button>
@@ -532,7 +532,9 @@
 
   function commandFor(token) {
     const url = input.value.trim().replace(/\/+$/, '') || defaultUrl;
-    return `curl -fsSL https://raw.githubusercontent.com/nechodom/hyperion/main/packaging/install/install-node.sh \\\n  | sudo bash -s -- --token=${token} --master=${url}`;
+    // printf is a shell builtin: the token reaches bash through the pipe, never
+    // through anyone's argv, which any local user can read in /proc.
+    return `{ printf 'HYPERION_INVITE_TOKEN=%s\\n' '${token}'; curl -fsSL https://raw.githubusercontent.com/nechodom/hyperion/main/packaging/install/install-node.sh; } \\\n  | sudo bash -s -- --master=${url}`;
   }
   // The visible command masks the token while data-hidden=1. Copy always
   // takes the FULL command, so it can be pasted without ever showing it.

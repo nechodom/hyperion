@@ -3421,9 +3421,10 @@ async fn the_generated_bootstrap_is_syntactically_valid_bash() {
     // the shape instead: no line that mentions a URL may also splice `$T` into
     // it. The prelude line that defines T is the one exception.
     // ONE-SHOT bootstrap fetches are exempt, and only these. The operator pastes
-    // `curl <panel>/import/agent/<token> | sudo bash` themselves, so that token
-    // is already in their shell history and in one access-log line; fetching the
-    // exporter the same way adds nothing that is not already there. What must
+    // a command that fetches <panel>/import/agent/<token> themselves, so that
+    // token is already in their shell history and in one access-log line;
+    // fetching the exporter the same way adds nothing that is not already there.
+    // They still pass the URL to curl on stdin, never on argv. What must
     // never happen is a LOOP putting it there hundreds of times — the selection
     // poll (up to 2640 requests) and the chunk upload (one per 64 MiB).
     //
@@ -3436,6 +3437,14 @@ async fn the_generated_bootstrap_is_syntactically_valid_bash() {
         if l.starts_with("T=") || l.starts_with('#') {
             continue;
         }
+        // Exempt or not, curl's own arguments never carry the token: any local
+        // user on the source box can read them from /proc/<pid>/cmdline.
+        assert!(
+            !l.replace("$TMP", "")
+                .split('|')
+                .any(|cmd| cmd.contains("curl ") && cmd.contains("$T")),
+            "the token is on curl's argv:\n{line}"
+        );
         let exempt = ONE_SHOT.iter().any(|p| l.contains(p));
         let mentions_url = l.contains("http") || l.contains("url =") || l.contains("$B/");
         let splices_token = l.contains("/$T") || l.contains("$T?") || l.contains("${T}");

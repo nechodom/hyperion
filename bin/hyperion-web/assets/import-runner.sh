@@ -112,7 +112,9 @@ TMP="$(mktemp)"; LIST="$(mktemp)"
 # --- 1. the exporter binary --------------------------------------------------
 say "downloading exporter from $B …"
 ARCH="$(uname -m)"
-curl -fsSL "$B/import/agent-bin/$T?arch=$ARCH" -o "$TMP"
+# The URL holds the token, so curl reads it from stdin: nothing on argv, where
+# any local user could read it from /proc/<pid>/cmdline.
+printf 'url = "%s"\n' "$B/import/agent-bin/$T?arch=$ARCH" | curl -fsSL -K - -o "$TMP"
 
 if [ ! -s "$TMP" ]; then
   say "the exporter downloaded as an EMPTY file."
@@ -153,8 +155,8 @@ BIN="$RUN/hyperion-export"
 # --- 2. report and wait ------------------------------------------------------
 say "scanning $K and reporting the sites to Hyperion …"
 "$BIN" --kind "$K" --list --json > "$LIST"
-curl -fsS -X POST -H 'Content-Type: application/json' --data-binary @"$LIST" \
-  "$B/import/manifest/$T" >/dev/null
+printf 'url = "%s"\n' "$B/import/manifest/$T" \
+  | curl -fsS -X POST -H 'Content-Type: application/json' --data-binary @"$LIST" -K - >/dev/null
 # The selection poll runs up to 2640 times, and the token was in its URL every
 # time — 2640 lines of the panel's nginx access log carrying a live credential.
 # Same reasoning as the chunk loop: URL and header live in a 0600 config.
@@ -226,8 +228,8 @@ if [ "$FITS" = "false" ] && [ -n "$NEED_BYTES" ] && [ -n "$FREE_BYTES" ]; then
   say "    biggest ones in their own batch; or"
   say "  • free up space; or"
   say "  • point the export at a bigger filesystem and re-run:"
-  say "      HYPERION_EXPORT_DIR=/path/with/room TMPDIR=/path/with/room \\"
-  say "        curl -fsSL \"$B/import/agent/\$T\" | sudo -E bash"
+  say "      export HYPERION_EXPORT_DIR=/path/with/room TMPDIR=/path/with/room"
+  say "    then paste the command from Hyperion again, with sudo -E for sudo."
   say ""
   say "Sites can be imported in several batches — each one is independent, and"
   say "Hyperion skips a site it has already imported."

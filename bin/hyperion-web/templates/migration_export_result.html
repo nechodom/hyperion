@@ -70,7 +70,7 @@
   <div class="copy-row">
     <div class="copy-input">
       <input type="text" readonly id="copy-hctl"
-             value='sudo hctl hosting import-from-url --base-url="{{ bundle.download_base_url }}" --token="{{ bundle.bundle_token }}"'>
+             value='printf "%s\n" "{{ bundle.bundle_token }}" | sudo hctl hosting import-from-url --base-url="{{ bundle.download_base_url }}" --token-stdin'>
       <button type="button" class="btn small" data-copy-from="copy-hctl">Copy</button>
     </div>
   </div>
