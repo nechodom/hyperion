@@ -949,6 +949,63 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.wp_integrity_scan_request(hosting).await
     }
 
+    async fn scan_file_quarantine(
+        &self,
+        hosting: hyperion_rpc::HostingSelector,
+        rel: String,
+        sha256: String,
+        actor: String,
+    ) -> Result<hyperion_types::WpIntegrityScanResult, RpcError> {
+        self.svc
+            .scan_file_quarantine(hosting, rel, sha256, actor)
+            .await
+    }
+
+    async fn scan_file_restore(
+        &self,
+        hosting: hyperion_rpc::HostingSelector,
+        id: String,
+        actor: String,
+    ) -> Result<hyperion_types::WpIntegrityScanResult, RpcError> {
+        self.svc.scan_file_restore(hosting, id, actor).await
+    }
+
+    async fn scan_file_trust(
+        &self,
+        hosting: hyperion_rpc::HostingSelector,
+        rel: String,
+        sha256: String,
+        actor: String,
+    ) -> Result<hyperion_types::WpIntegrityScanResult, RpcError> {
+        self.svc.scan_file_trust(hosting, rel, sha256, actor).await
+    }
+
+    async fn scan_trust_all_review(
+        &self,
+        hosting: hyperion_rpc::HostingSelector,
+        actor: String,
+    ) -> Result<hyperion_types::WpIntegrityScanResult, RpcError> {
+        self.svc.scan_trust_all_review(hosting, actor).await
+    }
+
+    async fn scan_quarantine_list(
+        &self,
+        hosting: hyperion_rpc::HostingSelector,
+    ) -> Result<hyperion_types::QuarantineList, RpcError> {
+        self.svc.scan_quarantine_list(hosting).await
+    }
+
+    async fn scan_component_reinstall(
+        &self,
+        hosting: hyperion_rpc::HostingSelector,
+        slug: String,
+        theme: bool,
+    ) -> Result<hyperion_types::WpPluginActionResult, RpcError> {
+        self.svc
+            .scan_component_reinstall(hosting, slug, theme)
+            .await
+    }
+
     async fn integrity_findings_list(
         &self,
     ) -> Result<Vec<hyperion_types::HostingIntegritySummary>, RpcError> {

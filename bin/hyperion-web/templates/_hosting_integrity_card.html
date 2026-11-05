@@ -17,16 +17,51 @@
    "wordpress.org" for it.
 
    Everything a tenant chose (paths, snippets, domains, reasons) goes through
-   `tenant_text` and askama's escaping, never `|safe`. #}
+   `tenant_text` and askama's escaping, never `|safe`. The hidden fields don't:
+   they go back to the node as the exact name it reported, which it then checks.
+   Quarantine and Trust are shown to who may use them and refused on the server
+   either way; their confirm attributes are on the <form>. #}
+{% macro file_actions(f) %}
+{% if (can_manage && f.can_quarantine()) || (can_trust && f.can_trust()) %}
+<div class="file-act">
+  {% if can_manage && f.can_quarantine() %}
+  <form hx-post="/hostings/integrity/quarantine" hx-target="#integrity-card" hx-swap="outerHTML"
+        hx-indicator="#integrity-spinner" hx-disabled-elt="find button"
+        data-confirm-title="Quarantine {{ f.rel|tenant_text }}"
+        data-confirm-body="Moves this file out of the site, where nothing can load it, and keeps it for 90 days.{% if f.looks_loaded_by_site() %} The site may be using this file, so it may break; restore is one click.{% endif %} The site is scanned again right after."
+        data-confirm-confirm-label="Quarantine file">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    <input type="hidden" name="selector" value="{{ selector }}">
+    <input type="hidden" name="rel" value="{{ f.rel }}">
+    <input type="hidden" name="sha256" value="{{ f.sha256 }}">
+    <button class="btn ghost small" type="submit">Quarantine</button>
+  </form>
+  {% endif %}
+  {% if can_trust && f.can_trust() %}
+  <form hx-post="/hostings/integrity/trust" hx-target="#integrity-card" hx-swap="outerHTML"
+        hx-indicator="#integrity-spinner" hx-disabled-elt="find button"
+        data-confirm-title="Trust {{ f.rel|tenant_text }}"
+        data-confirm-body="{% if f.symlink %}Accepts this symlink as long as it points where it does now. The target's content isn't scanned.{% else %}Accepts this file as it stands, so it's no longer flagged. If its content changes it's flagged again.{% endif %}{% if f.rule_id.is_some() %} It matched a malware rule: only trust it if you've read it.{% endif %}"
+        data-confirm-confirm-label="Trust file">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    <input type="hidden" name="selector" value="{{ selector }}">
+    <input type="hidden" name="rel" value="{{ f.rel }}">
+    <input type="hidden" name="sha256" value="{{ f.sha256 }}">
+    <button class="btn ghost small" type="submit">Trust</button>
+  </form>
+  {% endif %}
+</div>
+{% endif %}
+{% endmacro %}
 {% macro finding_row(f) %}
 <li><span class="chk-dot {% if f.severity == "high" %}err{% else %}warn{% endif %}"></span><code>{{ f.rel|tenant_text }}</code><span class="chk-detail">
   {% if f.rel == "." %}most of WordPress core no longer matches the release
-  {% else if let Some(noun) = f.component_wide() %}this {{ noun }} no longer matches {% if let Some(l) = f.source_label %}{% if l == "vendor package" %}the vendor's package{% else %}{{ l|tenant_text }}{% endif %}{% else %}wordpress.org{% endif %}
+  {% else if let Some(noun) = f.component_wide() %}this {{ noun }} no longer matches {% if let Some(l) = f.source_label %}{% if l == "vendor package" %}the vendor's package{% else %}{{ l|tenant_text }}{% endif %}{% else %}its source{% endif %}
   {% else %}{{ f.kind.label() }}{% endif %}
   {% if let Some(r) = f.rule_id %} · rule <code>{{ r|tenant_text }}</code>{% if f.line > 0 %}, line {{ f.line }}{% endif %}{% endif %}
   {% if !f.domains.is_empty() %} · mentions {% for d in f.domains %}{% if loop.index0 < 5 %}<code>{{ d|tenant_text }}</code> {% endif %}{% endfor %}{% endif %}
   {% if !f.snippet.is_empty() %} · <code>{{ f.snippet|tenant_text }}</code>{% endif %}
-</span></li>
+</span>{% call file_actions(f) %}</li>
 {% endmacro %}
 {% let v = scan.verdict().as_str() %}
 <div class="chk-row" id="integrity-card"
@@ -75,6 +110,9 @@
        one taken right after it, so the two can be read against each other. #}
     {% if let Some((ok, text)) = notice %}
     <p class="chk-note {% if ok %}tone-ok{% else %}tone-err{% endif %}" style="white-space:pre-line">{% if ok %}Fixed: {% else %}Fix failed: {% endif %}{{ text }}</p>
+    {% endif %}
+    {% if let Some((ok, text)) = action_notice %}
+    <p class="chk-note {% if ok %}tone-ok{% else %}tone-err{% endif %}" style="white-space:pre-line">{% if !ok %}Not done: {% endif %}{{ text }}</p>
     {% endif %}
     {# The pilot: what is shown is real, but nothing leaves the panel yet. #}
     {% if scan.report_only && scan.native_scan_ran %}
@@ -153,7 +191,7 @@
     {# ── WordPress core ──────────────────────────────────────────────── #}
     {% if scan.core_issue_count() > 0 %}
     <h4 class="chk-sub">WordPress core — {{ scan.core_issue_count() }} file(s)</h4>
-    <ul class="chk-list chk-files">
+    <ul class="chk-list chk-files file-acts">
       {# Capped per bucket: a mass-injector compromise can touch a
          thousand files, and a row that renders a thousand lines is one
          nobody scrolls. The count above stays exact. #}
@@ -162,11 +200,11 @@
       {% if p == "." %}
       <li><span class="chk-dot err"></span><span>WordPress core</span><span class="chk-detail">most of WordPress core no longer matches the official release</span></li>
       {% else %}
-      <li><span class="chk-dot err"></span><code>{{ p|tenant_text }}</code><span class="chk-detail">modified — differs from the official release</span></li>
+      <li><span class="chk-dot err"></span><code>{{ p|tenant_text }}</code><span class="chk-detail">modified — differs from the official release</span>{% if let Some(f) = scan.finding_at(p) %}{% call file_actions(f) %}{% endif %}</li>
       {% endif %}
       {% endif %}{% endfor %}
       {% for p in scan.core_unexpected %}{% if loop.index0 < 50 %}
-      <li><span class="chk-dot err"></span><code>{{ p|tenant_text }}</code><span class="chk-detail">shouldn't exist — not part of WordPress</span></li>
+      <li><span class="chk-dot err"></span><code>{{ p|tenant_text }}</code><span class="chk-detail">shouldn't exist — not part of WordPress</span>{% if let Some(f) = scan.finding_at(p) %}{% call file_actions(f) %}{% endif %}</li>
       {% endif %}{% endfor %}
       {% for p in scan.core_missing %}{% if loop.index0 < 50 %}
       <li><span class="chk-dot warn"></span><code>{{ p|tenant_text }}</code><span class="chk-detail">missing — official file is gone</span></li>
@@ -191,11 +229,11 @@
     </div>
     {% endif %}
     {% if !scan.core_unexpected.is_empty() %}
-    {# Deliberately no button: a stray file in wp-admin/ or wp-includes/ is
-       either a leftover from an old release or the dropper itself, and only
-       a person who has looked at it can tell which. Deleting it blind also
-       deletes the evidence. #}
-    <p class="chk-note">Files that shouldn't exist aren't removed by any fix here — open each one, then delete it over SFTP or the file manager once you know what it is.</p>
+    {# A stray file in wp-admin/ or wp-includes/ is either a leftover from an old
+       release or the dropper itself, and only a person who has looked at it can
+       tell which. Deleting it blind deletes the evidence, so no repair touches it:
+       quarantine keeps a copy, and can be undone. #}
+    <p class="chk-note">Files that shouldn't exist aren't removed by any fix here — open each one, then quarantine it or delete it over SFTP or the file manager once you know what it is.</p>
     {% endif %}
     {% endif %}
 
@@ -205,12 +243,12 @@
        to ignore this row. ─────────────────────────────────────────────── #}
     {% for pl in scan.plugins_failed %}
     <h4 class="chk-sub">Plugin <code>{{ pl.slug|tenant_text }}</code> — {{ pl.issues.len() }} file(s) don't match {{ scan.reference_of(pl.slug) }}</h4>
-    <ul class="chk-list chk-files">
+    <ul class="chk-list chk-files file-acts">
       {% for i in pl.issues %}{% if loop.index0 < 25 %}
       {% if i.path == "." %}
       <li><span class="chk-dot err"></span><span>whole plugin</span><span class="chk-detail">this plugin no longer matches {{ scan.reference_of(pl.slug) }} — {{ i.message|tenant_text }}</span></li>
       {% else %}
-      <li><span class="chk-dot err"></span><code>{{ i.path|tenant_text }}</code><span class="chk-detail">{{ i.message|tenant_text }}</span></li>
+      <li><span class="chk-dot err"></span><code>{{ i.path|tenant_text }}</code><span class="chk-detail">{{ i.message|tenant_text }}</span>{% if let Some(f) = scan.finding_of_issue(pl.slug, i.path) %}{% call file_actions(f) %}{% endif %}</li>
       {% endif %}
       {% endif %}{% endfor %}
     </ul>
@@ -239,21 +277,35 @@
     {% endif %}
     {% endfor %}
 
-    {# ── Themes that failed comparison. No fix button yet: those come with the
-       file actions. ───────────────────────────────────────────────────── #}
+    {# ── Themes that failed comparison, with the same fix as a plugin when
+       wordpress.org is what they were compared with. ─────────────────────── #}
     {% for th in scan.themes_failed %}
     <h4 class="chk-sub">Theme <code>{{ th.slug|tenant_text }}</code> — {{ th.issues.len() }} file(s) don't match {{ scan.reference_of(th.slug) }}</h4>
-    <ul class="chk-list chk-files">
+    <ul class="chk-list chk-files file-acts">
       {% for i in th.issues %}{% if loop.index0 < 25 %}
       {% if i.path == "." %}
       <li><span class="chk-dot err"></span><span>whole theme</span><span class="chk-detail">this theme no longer matches {{ scan.reference_of(th.slug) }} — {{ i.message|tenant_text }}</span></li>
       {% else %}
-      <li><span class="chk-dot err"></span><code>{{ i.path|tenant_text }}</code><span class="chk-detail">{{ i.message|tenant_text }}</span></li>
+      <li><span class="chk-dot err"></span><code>{{ i.path|tenant_text }}</code><span class="chk-detail">{{ i.message|tenant_text }}</span>{% if let Some(f) = scan.finding_of_issue(th.slug, i.path) %}{% call file_actions(f) %}{% endif %}</li>
       {% endif %}
       {% endif %}{% endfor %}
     </ul>
     {% if th.issues.len() > 25 %}
     <p class="chk-note">Showing 25 of {{ th.issues.len() }} files.</p>
+    {% endif %}
+    {% if can_manage && !th.version.is_empty() && scan.reinstallable_from_wordpress_org(th.slug) %}
+    <div class="chk-fixes">
+      <form hx-post="/hostings/integrity/reinstall-theme" hx-target="#integrity-card" hx-swap="outerHTML"
+            hx-indicator="#integrity-spinner" hx-disabled-elt="find button"
+            data-confirm-title="Reinstall {{ th.slug|tenant_text }}"
+            data-confirm-body="Downloads version {{ th.version|tenant_text }} of {{ th.slug|tenant_text }}, the one this site already runs, from wordpress.org and replaces the theme's whole folder with it — changed files are overwritten and files that were added are removed. Its settings are in the database and stay. Anything someone saved inside the theme's own folder is lost. The site is scanned again right after."
+            data-confirm-confirm-label="Reinstall theme">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <input type="hidden" name="selector" value="{{ selector }}">
+        <input type="hidden" name="slug" value="{{ th.slug }}">
+        <button class="btn primary small" type="submit">Reinstall {{ th.slug|tenant_text }}</button>
+      </form>
+    </div>
     {% endif %}
     {% endfor %}
 
@@ -261,7 +313,7 @@
        repeated here: the sections above carry them. ───────────────────── #}
     {% if scan.listed_findings().count() > 0 %}
     <h4 class="chk-sub">Files that need a look — {{ scan.listed_findings().count() }}</h4>
-    <ul class="chk-list chk-files">
+    <ul class="chk-list chk-files file-acts">
       {% for f in scan.listed_findings() %}{% if loop.index0 < 50 %}
       {% call finding_row(f) %}
       {% endif %}{% endfor %}
@@ -275,13 +327,30 @@
        for, and medium rule hits. Not a verdict of bad. #}
     {% if !scan.review.is_empty() %}
     <h4 class="chk-sub">Changes to review — {{ scan.review.len() }}</h4>
-    <ul class="chk-list chk-files">
+    <ul class="chk-list chk-files file-acts">
       {% for f in scan.review %}{% if loop.index0 < 50 %}
       {% call finding_row(f) %}
       {% endif %}{% endfor %}
     </ul>
     {% if scan.review.len() > 50 %}
     <p class="chk-note">Showing 50 of {{ scan.review.len() }} changes.</p>
+    {% endif %}
+    {% if !can_trust %}
+    <p class="chk-note">These are waiting for your provider to check.</p>
+    {% else if scan.trust_all_items().next().is_some() %}
+    {% let trust_all = scan.trust_all_items().count() %}
+    <div class="chk-fixes">
+      {# For a bulk edit. Nothing with a rule hit, and nothing a comparison failed. #}
+      <form hx-post="/hostings/integrity/trust-all" hx-target="#integrity-card" hx-swap="outerHTML"
+            hx-indicator="#integrity-spinner" hx-disabled-elt="find button"
+            data-confirm-title="Trust all changes to review"
+            data-confirm-body="Accepts {{ trust_all }} file(s) as they stand, so they're no longer flagged. Any of them whose content changes is flagged again. Files that matched a malware rule aren't included.{% if scan.trust_all_has_symlink() %} Some are symlinks: their targets' content isn't scanned.{% endif %}"
+            data-confirm-confirm-label="Trust {{ trust_all }} file(s)">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <input type="hidden" name="selector" value="{{ selector }}">
+        <button class="btn ghost small" type="submit">Trust all changes to review</button>
+      </form>
+    </div>
     {% endif %}
     {% endif %}
 
@@ -296,6 +365,38 @@
     {% if scan.malware.len() > 50 %}
     <p class="chk-note">Showing 50 of {{ scan.malware.len() }} detections.</p>
     {% endif %}
+    {% endif %}
+
+    {# ── What's been moved out. Names and dates only: nothing here serves the
+       content of a held file. ──────────────────────────────────────────── #}
+    {% if quarantine.total > 0 %}
+    <h4 class="chk-sub">In quarantine — {{ quarantine.total }}</h4>
+    <ul class="chk-list chk-files file-acts">
+      {% for q in quarantine.items %}
+      <li><span class="chk-dot"></span><code>{{ q.rel|tenant_text }}</code><span class="chk-detail">{{ q.kind.label() }}{% if let Some(r) = q.rule_id %} · rule <code>{{ r|tenant_text }}</code>{% endif %} · moved {{ crate::handlers::stats::fmt_ago(q.time) }}; removed for good 90 days after that</span>
+      {% if can_manage %}
+      <div class="file-act">
+        <form hx-post="/hostings/integrity/restore" hx-target="#integrity-card" hx-swap="outerHTML"
+              hx-indicator="#integrity-spinner" hx-disabled-elt="find button"
+              data-confirm-title="Restore {{ q.rel|tenant_text }}"
+              data-confirm-body="Puts this file back where it was, with its owner and permissions. If it was malware, it can run again. If something else is at that path now, nothing is overwritten. The site is scanned again right after."
+              data-confirm-confirm-label="Restore file">
+          <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+          <input type="hidden" name="selector" value="{{ selector }}">
+          <input type="hidden" name="id" value="{{ q.id }}">
+          <button class="btn ghost small" type="submit">Restore</button>
+        </form>
+      </div>
+      {% endif %}
+      </li>
+      {% endfor %}
+    </ul>
+    {% if quarantine.is_cut() %}
+    <p class="chk-note">Showing {{ quarantine.items.len() }} of {{ quarantine.total }} files.</p>
+    {% endif %}
+    {% endif %}
+    {% if let Some(n) = quarantine_note %}
+    <p class="chk-note">Quarantined files can't be listed: {{ n|tenant_text }}.</p>
     {% endif %}
 
     {# ── Plugins with no published checksums. Deliberately last, collapsed,

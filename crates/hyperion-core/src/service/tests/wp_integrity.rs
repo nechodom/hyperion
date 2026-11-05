@@ -189,6 +189,7 @@ fn scan_outcome_maps_onto_the_stored_fields() {
             path: path.into(),
             message: "Checksum does not match".into(),
         }],
+        ..Default::default()
     };
     let finding = |rel: &str| hyperion_types::SiteFileFinding {
         rel: rel.into(),
@@ -1547,6 +1548,7 @@ mod site_scan {
                 path: "functions.php".into(),
                 message: "Checksum does not match".into(),
             }],
+            ..Default::default()
         }];
         let pool = open_memory().await.expect("open");
         let s = svc(pool.clone(), answering(happy_mocks(), outcome.clone()));
@@ -1609,6 +1611,7 @@ mod site_scan {
                 path: "akismet.php".into(),
                 message: "Checksum does not match".into(),
             }],
+            ..Default::default()
         }];
         *reply.lock().expect("lock") = tampered;
         let t2 = t1 + 6 * HOUR;
@@ -1702,6 +1705,7 @@ mod site_scan {
                     };
                     600
                 ],
+                ..Default::default()
             };
             3
         ];
@@ -2016,6 +2020,7 @@ mod site_scan {
                 path: "x.php".into(),
                 message: "Checksum does not match".into(),
             }],
+            ..Default::default()
         }
     }
 

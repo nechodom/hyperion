@@ -300,6 +300,26 @@ pub fn build_router(state: SharedState) -> Router {
             "/hostings/integrity/reinstall-plugin",
             post(handlers::hostings::post_integrity_reinstall_plugin),
         )
+        .route(
+            "/hostings/integrity/reinstall-theme",
+            post(handlers::hostings::post_integrity_reinstall_theme),
+        )
+        .route(
+            "/hostings/integrity/quarantine",
+            post(handlers::hostings::post_integrity_quarantine),
+        )
+        .route(
+            "/hostings/integrity/restore",
+            post(handlers::hostings::post_integrity_restore),
+        )
+        .route(
+            "/hostings/integrity/trust",
+            post(handlers::hostings::post_integrity_trust),
+        )
+        .route(
+            "/hostings/integrity/trust-all",
+            post(handlers::hostings::post_integrity_trust_all),
+        )
         .route("/hostings/ban", post(handlers::hostings::post_ban))
         .route(
             "/hostings/:selector/bans-panel",

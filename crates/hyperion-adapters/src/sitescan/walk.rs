@@ -23,7 +23,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path};
 
 use rustix::fs::{
-    fstat, openat, readlinkat, statat, AtFlags, Dir, FileType, Mode, OFlags, Stat, CWD,
+    fstat, openat, readlinkat, statat, unlinkat, AtFlags, Dir, FileType, Mode, OFlags, Stat, CWD,
 };
 use rustix::io::Errno;
 
@@ -325,6 +325,45 @@ impl TenantRoot {
         if st.st_nlink > 1 {
             return Err(refuse("hard-linked file"));
         }
+        Ok(File::from(fd))
+    }
+
+    /// Remove the name `rel`, reached like `open_file` reaches a file, if it is
+    /// still the file `same_as` has open. Anything else put there since stays, and
+    /// that is `PermissionDenied`. The check and the unlink can't be one step, but
+    /// what's left between them is a name in the tenant's own directory, gone by
+    /// the tenant's own doing.
+    pub fn unlink(&self, rel: &str, same_as: &File) -> io::Result<()> {
+        let comps = split_rel(rel, false)?;
+        let (leaf, parents) = comps
+            .split_last()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "empty path"))?;
+        let parent = self.descend(parents)?;
+        let at = statat(&parent, *leaf, AtFlags::SYMLINK_NOFOLLOW).map_err(io::Error::from)?;
+        let held = fstat(same_as).map_err(io::Error::from)?;
+        if at.st_ino != held.st_ino || at.st_dev != held.st_dev {
+            return Err(refuse("not the file that was opened"));
+        }
+        unlinkat(&parent, *leaf, AtFlags::empty()).map_err(io::Error::from)
+    }
+
+    /// Create the file `rel` for writing, root-only until the caller says
+    /// otherwise. Never follows anything: every parent is reached like `open_file`
+    /// reaches one, and whatever is at the name already, a symlink included, is
+    /// an error.
+    pub fn create_new(&self, rel: &str) -> io::Result<File> {
+        let comps = split_rel(rel, false)?;
+        let (leaf, parents) = comps
+            .split_last()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "empty path"))?;
+        let parent = self.descend(parents)?;
+        let fd = openat(
+            &parent,
+            *leaf,
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::from_raw_mode(0o600),
+        )
+        .map_err(io::Error::from)?;
         Ok(File::from(fd))
     }
 

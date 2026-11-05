@@ -2019,6 +2019,13 @@ pub fn print_pretty(resp: &Response) {
                 }
             }
         }
+        // The panel's: hctl has no command that asks for this.
+        Response::ScanQuarantineList(l) => {
+            for f in &l.items {
+                println!("{} {} {}", f.id, f.sha256, f.rel.escape_debug());
+            }
+            println!("{} file(s) in quarantine", l.total);
+        }
         Response::WpIntegrityScan(r) => {
             if let Some(err) = &r.error {
                 println!("integrity scan: {err}");

@@ -691,6 +691,52 @@ pub enum Request {
     WpIntegrityScanRequest {
         hosting: HostingSelector,
     },
+    /// Move a file the last scan reported to quarantine, answered by
+    /// `Response::WpIntegrityScan`. `rel` and `sha256` must name an item of the
+    /// stored result. `actor` is who the audit row names.
+    ScanFileQuarantine {
+        hosting: HostingSelector,
+        rel: String,
+        sha256: String,
+        #[serde(default)]
+        actor: String,
+    },
+    /// Put a quarantined file back, answered by `Response::WpIntegrityScan`.
+    ScanFileRestore {
+        hosting: HostingSelector,
+        id: String,
+        #[serde(default)]
+        actor: String,
+    },
+    /// Vouch for a file the last scan reported, as it stands, answered by
+    /// `Response::WpIntegrityScan`. The panel only sends this for `WpScanTrust`.
+    ScanFileTrust {
+        hosting: HostingSelector,
+        rel: String,
+        sha256: String,
+        #[serde(default)]
+        actor: String,
+    },
+    /// Vouch for every change to review with no rule hit, answered by
+    /// `Response::WpIntegrityScan`. The panel only sends this for `WpScanTrust`.
+    ScanTrustAllReview {
+        hosting: HostingSelector,
+        #[serde(default)]
+        actor: String,
+    },
+    /// What a hosting holds in quarantine: metadata only.
+    ScanQuarantineList {
+        hosting: HostingSelector,
+    },
+    /// Replace a plugin or theme that failed its comparison with wordpress.org's
+    /// copy, answered by `Response::WpPluginAction`. Refused unless wordpress.org is
+    /// what the stored result compared it with.
+    ScanComponentReinstall {
+        hosting: HostingSelector,
+        slug: String,
+        #[serde(default)]
+        theme: bool,
+    },
     /// Every hosting's last stored integrity scan on this node — drives
     /// the cluster-wide integrity dashboard.
     IntegrityFindingsList,
@@ -2536,6 +2582,7 @@ pub enum Response {
     WpVulnScan(hyperion_types::WpVulnScanResult),
     VulnFindingsList(Vec<hyperion_types::HostingVulnSummary>),
     WpIntegrityScan(hyperion_types::WpIntegrityScanResult),
+    ScanQuarantineList(hyperion_types::QuarantineList),
     IntegrityFindingsList(Vec<hyperion_types::HostingIntegritySummary>),
     WpStagingCreate {
         staging_domain: String,

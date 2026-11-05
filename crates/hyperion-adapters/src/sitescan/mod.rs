@@ -5,6 +5,7 @@ pub mod baseline;
 pub mod discover;
 pub mod manifest;
 pub mod pressure;
+pub mod quarantine;
 pub mod rules;
 pub mod runner;
 pub mod scan;

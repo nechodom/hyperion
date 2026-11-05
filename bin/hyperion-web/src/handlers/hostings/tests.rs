@@ -321,8 +321,7 @@ fn render_integrity(scan: hyperion_types::WpIntegrityScanResult) -> String {
         scan,
         selector: "example.com".into(),
         csrf_token: "t".into(),
-        notice: None,
-        queued_since: 0,
+        ..Default::default()
     }
     .render()
     .expect("integrity card renders")
@@ -442,6 +441,7 @@ fn findings_are_listed_with_their_paths() {
                 path: "akismet.php".into(),
                 message: "Checksum does not match".into(),
             }],
+            ..Default::default()
         }],
         malware: vec![hyperion_types::WpMalwareHit {
             path: "/var/www/uploads/s.php".into(),
@@ -472,6 +472,7 @@ fn fixable_findings_offer_a_fix() {
                 path: "akismet.php".into(),
                 message: "Checksum does not match".into(),
             }],
+            ..Default::default()
         }],
         scanned_at: 1_700_000_000,
         ..Default::default()
@@ -552,8 +553,8 @@ fn never_scanned_says_not_scanned_and_only_a_queued_card_polls() {
         },
         selector: "example.com".into(),
         csrf_token: "t".into(),
-        notice: None,
         queued_since: 1_700_000_000,
+        ..Default::default()
     }
     .render()
     .expect("renders");
@@ -859,6 +860,7 @@ fn component_level_finding_says_the_plugin_no_longer_matches() {
                 path: ".".into(),
                 message: "9 of 10 files differ from wordpress.org, 0 added".into(),
             }],
+            ..Default::default()
         }],
         findings: vec![hyperion_types::SiteFileFinding {
             rel: "wp-content/plugins/akismet".into(),
@@ -890,6 +892,7 @@ fn component_finding_names_its_own_reference() {
                 path: ".".into(),
                 message: "x".into(),
             }],
+            ..Default::default()
         }],
         findings: vec![hyperion_types::SiteFileFinding {
             rel: "wp-content/plugins/elementor-pro".into(),
@@ -919,6 +922,7 @@ fn reinstall_needs_wordpress_org_as_the_reference() {
             path: "a.php".into(),
             message: "Checksum does not match".into(),
         }],
+        ..Default::default()
     };
     let labelled = |slug: &str, label: &str| hyperion_types::SiteFileFinding {
         component: Some(slug.into()),
@@ -983,6 +987,7 @@ fn theme_failures_are_listed() {
                 path: "functions.php".into(),
                 message: "Checksum does not match".into(),
             }],
+            ..Default::default()
         }],
         ..native_scan()
     });
@@ -990,8 +995,274 @@ fn theme_failures_are_listed() {
     assert!(html.contains("Theme <code>twentytwentyfour</code>"));
     assert!(html.contains("functions.php"));
     assert!(html.contains("1 file(s) need attention"));
-    // File actions come later: no button on a theme yet.
+    // Nothing says it was compared with wordpress.org, so no button for it.
     assert!(!html.contains("reinstall-theme"));
+}
+
+fn card_for(can_manage: bool, can_trust: bool) -> String {
+    let file = |rel: &str, kind, sha: &str| hyperion_types::SiteFileFinding {
+        rel: rel.into(),
+        kind,
+        severity: "medium".into(),
+        sha256: sha.into(),
+        ..Default::default()
+    };
+    let scan = hyperion_types::WpIntegrityScanResult {
+        findings: vec![hyperion_types::SiteFileFinding {
+            rule_id: Some("php.eval".into()),
+            severity: "high".into(),
+            ..file(
+                "wp-content/uploads/s.php",
+                hyperion_types::FindingKind::RuleHit,
+                "aa",
+            )
+        }],
+        review: vec![
+            file("new.php", hyperion_types::FindingKind::BaselineChange, "bb"),
+            hyperion_types::SiteFileFinding {
+                symlink: true,
+                ..file("l.php", hyperion_types::FindingKind::BaselineChange, "cc")
+            },
+        ],
+        ..native_scan()
+    };
+    IntegrityCardTpl {
+        scan,
+        selector: "example.com".into(),
+        csrf_token: "t".into(),
+        can_manage,
+        can_trust,
+        quarantine: hyperion_types::QuarantineList {
+            items: vec![hyperion_types::QuarantinedFile {
+                id: "ab".repeat(16),
+                rel: "old\u{202e}.php".into(),
+                time: 1_700_000_000,
+                ..Default::default()
+            }],
+            total: 70,
+        },
+        ..Default::default()
+    }
+    .render()
+    .expect("renders")
+}
+
+/// A stolen customer login can move a file out of harm's way and can't approve
+/// one: no Trust anywhere on the card, and it says who is going to look.
+#[test]
+fn customer_cannot_trust_but_can_quarantine() {
+    let html = card_for(true, false);
+    assert!(html.contains(r#"hx-post="/hostings/integrity/quarantine""#));
+    assert!(html.contains(r#"hx-post="/hostings/integrity/restore""#));
+    assert!(!html.contains("/hostings/integrity/trust"));
+    assert!(html.contains("waiting for your provider to check"));
+}
+
+/// Read-only: the items and the list are there, and no button the POST would refuse.
+#[test]
+fn viewer_can_do_neither() {
+    let html = card_for(false, false);
+    assert!(html.contains("new.php"));
+    assert!(html.contains("In quarantine — 70"));
+    assert!(!html.contains("/hostings/integrity/quarantine"));
+    assert!(!html.contains("/hostings/integrity/restore"));
+    assert!(!html.contains("/hostings/integrity/trust"));
+}
+
+/// Confirm attributes on the `<form>`, where the driver reads them.
+#[test]
+fn file_actions_confirm_on_the_form_and_say_what_matters() {
+    let html = card_for(true, true);
+    let form = |action: &str, marker: &str| -> String {
+        html.split(&format!(r#"hx-post="/hostings/integrity/{action}""#))
+            .skip(1)
+            .filter_map(|part| part.split("</form>").next())
+            .find(|f| f.contains(marker) && f.contains("data-confirm-title"))
+            .unwrap_or_else(|| panic!("no {action} form for {marker}"))
+            .to_string()
+    };
+    // A symlink can only be trusted, and the dialog says what that leaves out.
+    let link = form("trust", r#"value="l.php""#);
+    assert!(
+        link.contains("target&#x27;s content isn&#x27;t scanned")
+            || link.contains("target's content isn't scanned"),
+        "{link}"
+    );
+    assert!(link.find("data-confirm-body").expect("body") < link.find("<button").expect("button"));
+    assert!(!html
+        .split(r#"hx-post="/hostings/integrity/quarantine""#)
+        .any(|p| p
+            .split("</form>")
+            .next()
+            .is_some_and(|f| f.contains(r#"value="l.php""#))));
+    // Trust all counts what it takes, which isn't the rule hit in findings.
+    let all = form("trust-all", "data-confirm-confirm-label");
+    assert!(all.contains("Accepts 2 file(s)"), "{all}");
+    assert!(all.contains("Trust 2 file(s)"), "{all}");
+    assert!(all.contains("symlinks"), "{all}");
+    // The list is capped by the node, and the card says what it isn't showing.
+    assert!(html.contains("Showing 1 of 70 files."));
+    assert!(html.contains(&"ab".repeat(16)));
+    assert!(!html.contains('\u{202e}'));
+}
+
+/// Quarantine warns when the file is core, a component's, or looks loaded.
+#[test]
+fn quarantine_warns_where_the_site_may_break() {
+    let scan_with = |rel: &str, kind| hyperion_types::WpIntegrityScanResult {
+        findings: vec![hyperion_types::SiteFileFinding {
+            rel: rel.into(),
+            kind,
+            rule_id: Some("php.eval".into()),
+            sha256: "aa".into(),
+            ..Default::default()
+        }],
+        ..native_scan()
+    };
+    let render = |scan| {
+        IntegrityCardTpl {
+            scan,
+            selector: "example.com".into(),
+            csrf_token: "t".into(),
+            can_manage: true,
+            ..Default::default()
+        }
+        .render()
+        .expect("renders")
+    };
+    use hyperion_types::FindingKind as K;
+    for (rel, kind) in [
+        ("wp-includes/x.php", K::CoreModified),
+        ("wp-content/plugins/p/x.php", K::UpstreamModified),
+        ("wp-content/mu-plugins/x.php", K::RuleHit),
+        ("wp-content/themes/t/functions.php", K::RuleHit),
+        ("wp-content/plugins/p/p.php", K::RuleHit),
+        ("wp-content/plugins/single.php", K::RuleHit),
+        ("wp-content/object-cache.php", K::RuleHit),
+        (".htaccess", K::RuleHit),
+    ] {
+        let html = render(scan_with(rel, kind));
+        assert!(html.contains("it may break; restore is one click"), "{rel}");
+    }
+    for rel in [
+        "wp-content/uploads/s.php",
+        "wp-content/themes/t/inc/functions.php",
+    ] {
+        let html = render(scan_with(rel, K::RuleHit));
+        assert!(html.contains("/hostings/integrity/quarantine"), "{rel}");
+        assert!(!html.contains("it may break"), "{rel}");
+    }
+    // wp-config.php gets no button at all, and the node says why if asked.
+    let html = render(scan_with("wp-config.php", K::RuleHit));
+    assert!(!html.contains("/hostings/integrity/quarantine"));
+}
+
+/// A theme compared with wordpress.org gets the same fix as a plugin, and only then.
+#[test]
+fn reinstall_theme_is_for_wordpress_org_themes() {
+    let themed = |label: Option<&str>, version: &str, can_manage: bool| {
+        let scan = hyperion_types::WpIntegrityScanResult {
+            findings: vec![hyperion_types::SiteFileFinding {
+                rel: "wp-content/themes/t/x.php".into(),
+                kind: hyperion_types::FindingKind::UpstreamModified,
+                component: Some("t".into()),
+                source_label: label.map(str::to_string),
+                sha256: "aa".into(),
+                ..Default::default()
+            }],
+            themes_failed: vec![hyperion_types::WpIntegrityPluginResult {
+                slug: "t".into(),
+                issues: vec![hyperion_types::WpIntegrityFileIssue {
+                    path: "x.php".into(),
+                    message: "Checksum does not match".into(),
+                }],
+                version: version.into(),
+            }],
+            ..native_scan()
+        };
+        IntegrityCardTpl {
+            scan,
+            selector: "example.com".into(),
+            csrf_token: "t".into(),
+            can_manage,
+            ..Default::default()
+        }
+        .render()
+        .expect("renders")
+    };
+    let ok = themed(Some("wordpress.org"), "2.5", true);
+    assert!(ok.contains(r#"hx-post="/hostings/integrity/reinstall-theme""#));
+    assert!(ok.contains("Downloads version 2.5 of t"));
+    // The line under the theme can be quarantined too.
+    assert!(ok.contains(r#"value="wp-content/themes/t/x.php""#));
+    assert!(!themed(Some("vendor package"), "2.5", true).contains("reinstall-theme"));
+    assert!(!themed(None, "2.5", true).contains("reinstall-theme"));
+    assert!(!themed(Some("wordpress.org"), "", true).contains("reinstall-theme"));
+    assert!(!themed(Some("wordpress.org"), "2.5", false).contains("reinstall-theme"));
+}
+
+/// A native record with no label says nothing about where a component came from.
+#[test]
+fn an_unlabelled_native_record_names_no_source() {
+    let html = render_integrity(hyperion_types::WpIntegrityScanResult {
+        plugins_failed: vec![hyperion_types::WpIntegrityPluginResult {
+            slug: "p".into(),
+            issues: vec![hyperion_types::WpIntegrityFileIssue {
+                path: ".".into(),
+                message: "x".into(),
+            }],
+            ..Default::default()
+        }],
+        ..native_scan()
+    });
+    assert!(html.contains("don't match its source"), "{html}");
+    assert!(html.contains("no longer matches its source"), "{html}");
+    assert!(!html.contains("match wordpress.org"));
+}
+
+/// The reinstall buttons send the request the node checks, not the one that takes
+/// any slug.
+#[test]
+fn reinstall_goes_through_the_checked_request() {
+    let sel = parse_selector("example.com").expect("selector");
+    assert!(matches!(
+        integrity_reinstall_request(sel, "akismet".into(), true),
+        Request::ScanComponentReinstall { theme: true, .. }
+    ));
+    let src = include_str!("integrity.rs");
+    assert!(!src.contains("WpPluginAction::Reinstall"));
+}
+
+/// A node too old to list quarantine doesn't take the rest of the card with it.
+#[test]
+fn an_unlistable_quarantine_says_so() {
+    let html = IntegrityCardTpl {
+        scan: native_scan(),
+        selector: "example.com".into(),
+        csrf_token: "t".into(),
+        quarantine_note: Some(action_error_text("unknown variant `scan_quarantine_list`")),
+        ..Default::default()
+    }
+    .render()
+    .expect("renders");
+    assert!(
+        html.contains("Quarantined files can&#x27;t be listed: this node needs updating.")
+            || html.contains("Quarantined files can't be listed: this node needs updating."),
+        "{html}"
+    );
+}
+
+/// An old node refuses these by name. A refusal reads as itself.
+#[test]
+fn action_errors_read_as_words() {
+    assert_eq!(
+        action_error_text("unknown variant `scan_file_trust`, expected one of"),
+        "this node needs updating"
+    );
+    assert_eq!(
+        action_error_text("conflict: this changed since the last scan; scan again"),
+        "this changed since the last scan; scan again"
+    );
 }
 
 /// A rule-carrying comparison standing alone is one file in the headline.
@@ -1125,7 +1396,7 @@ fn fix_outcome_renders_in_the_card() {
         selector: "example.com".into(),
         csrf_token: "t".into(),
         notice: Some((true, "WordPress 6.4.2 core files replaced.".into())),
-        queued_since: 0,
+        ..Default::default()
     }
     .render()
     .expect("renders");
@@ -1135,7 +1406,7 @@ fn fix_outcome_renders_in_the_card() {
         selector: "example.com".into(),
         csrf_token: "t".into(),
         notice: Some((false, "download failed".into())),
-        queued_since: 0,
+        ..Default::default()
     }
     .render()
     .expect("renders");

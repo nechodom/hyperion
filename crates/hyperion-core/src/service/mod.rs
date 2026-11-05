@@ -79,6 +79,7 @@ mod protection;
 mod provision;
 mod quota;
 mod rollback;
+mod scan_actions;
 mod scan_queue;
 mod scheduler;
 mod site_check;
@@ -131,6 +132,7 @@ pub use permissions::*;
 use protection::*;
 pub(crate) use quota::*;
 use rollback::*;
+use scan_actions::*;
 use scan_queue::*;
 #[cfg(test)]
 use site_check::*;
@@ -224,6 +226,32 @@ pub trait AdapterPort: Send + Sync {
 
     /// Drop cached manifests nothing has read for 90 days.
     async fn site_scan_evict_manifests(&self, _cache_dir: &std::path::Path) {}
+
+    /// Move one file out of a tenant's tree, into quarantine.
+    async fn site_scan_quarantine(
+        &self,
+        _req: hyperion_adapters::sitescan::quarantine::QuarantineRequest,
+    ) -> Result<hyperion_types::QuarantinedFile, AdapterError> {
+        Err(AdapterError::Other("no quarantine here".into()))
+    }
+
+    /// Put a quarantined file back where it was.
+    async fn site_scan_restore(
+        &self,
+        _req: hyperion_adapters::sitescan::quarantine::RestoreRequest,
+    ) -> Result<hyperion_types::QuarantinedFile, AdapterError> {
+        Err(AdapterError::Other("no quarantine here".into()))
+    }
+
+    /// What a hosting holds in quarantine, up to `cap`.
+    async fn site_scan_quarantine_list(
+        &self,
+        _base: &std::path::Path,
+        _hosting_id: &str,
+        _cap: usize,
+    ) -> Result<hyperion_types::QuarantineList, AdapterError> {
+        Ok(hyperion_types::QuarantineList::default())
+    }
 
     /// Is `clamscan` installed, and does it have signatures yet?
     async fn clamav_facts(&self) -> (bool, bool) {

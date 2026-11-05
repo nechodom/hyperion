@@ -575,6 +575,47 @@ pub trait AgentApi: Send + Sync + 'static {
         &self,
         hosting: HostingSelector,
     ) -> Result<hyperion_types::WpIntegrityScanResult, RpcError>;
+    /// Move a file the last scan reported to quarantine.
+    async fn scan_file_quarantine(
+        &self,
+        hosting: HostingSelector,
+        rel: String,
+        sha256: String,
+        actor: String,
+    ) -> Result<hyperion_types::WpIntegrityScanResult, RpcError>;
+    /// Put a quarantined file back.
+    async fn scan_file_restore(
+        &self,
+        hosting: HostingSelector,
+        id: String,
+        actor: String,
+    ) -> Result<hyperion_types::WpIntegrityScanResult, RpcError>;
+    /// Vouch for a file the last scan reported, as it stands.
+    async fn scan_file_trust(
+        &self,
+        hosting: HostingSelector,
+        rel: String,
+        sha256: String,
+        actor: String,
+    ) -> Result<hyperion_types::WpIntegrityScanResult, RpcError>;
+    /// Vouch for every change to review with no rule hit.
+    async fn scan_trust_all_review(
+        &self,
+        hosting: HostingSelector,
+        actor: String,
+    ) -> Result<hyperion_types::WpIntegrityScanResult, RpcError>;
+    /// What a hosting holds in quarantine: metadata only.
+    async fn scan_quarantine_list(
+        &self,
+        hosting: HostingSelector,
+    ) -> Result<hyperion_types::QuarantineList, RpcError>;
+    /// Reinstall a plugin or theme from wordpress.org, if that's its reference.
+    async fn scan_component_reinstall(
+        &self,
+        hosting: HostingSelector,
+        slug: String,
+        theme: bool,
+    ) -> Result<hyperion_types::WpPluginActionResult, RpcError>;
     /// Every hosting's last stored integrity scan on this node.
     async fn integrity_findings_list(
         &self,

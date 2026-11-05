@@ -1192,6 +1192,7 @@ mod protection;
 mod provision;
 mod quota;
 mod rollback;
+mod scan_actions;
 mod scheduler;
 mod site_config;
 mod snapshots;

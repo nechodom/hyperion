@@ -69,11 +69,15 @@ pub enum Capability {
     /// that user, `alias /` serves any file nginx can read, and a log
     /// directive writes attacker-shaped lines to a root-chosen path.
     HostingEditNginxRaw,
+    /// Accept a file the site scanner flagged, so it stops being flagged. Apart
+    /// from WpManage, which every Customer holds: a stolen customer login must not
+    /// be able to approve a webshell or turn a paid report green.
+    WpScanTrust,
 }
 
 impl Capability {
     /// Every capability, in display order. Keep in sync with the enum.
-    pub const ALL: [Capability; 32] = [
+    pub const ALL: [Capability; 33] = [
         Capability::HostingView,
         Capability::HostingCreate,
         Capability::HostingDelete,
@@ -106,6 +110,7 @@ impl Capability {
         Capability::TrashManage,
         Capability::ApiKeysManage,
         Capability::HostingEditNginxRaw,
+        Capability::WpScanTrust,
     ];
 
     /// Bit for this capability in a [`CapSet`].
@@ -128,6 +133,7 @@ impl Capability {
             Capability::HostingMigrateClone => "hosting_migrate_clone",
             Capability::WpManage => "wp_manage",
             Capability::WpVulnView => "wp_vuln_view",
+            Capability::WpScanTrust => "wp_scan_trust",
             Capability::BackupRun => "backup_run",
             Capability::BackupRestore => "backup_restore",
             Capability::BackupTargets => "backup_targets",
@@ -168,6 +174,7 @@ impl Capability {
             Capability::HostingMigrateClone => "Migrate / clone hostings",
             Capability::WpManage => "Manage WordPress (plugins, staging, …)",
             Capability::WpVulnView => "View WordPress vulnerability scans",
+            Capability::WpScanTrust => "Trust files the site scanner flagged",
             Capability::BackupRun => "Run backups",
             Capability::BackupRestore => "Restore backups",
             Capability::BackupTargets => "Manage off-site backup targets",
@@ -285,7 +292,7 @@ pub fn groups() -> Vec<(&'static str, Vec<Capability>)> {
                 HostingMigrateClone,
             ],
         ),
-        ("WordPress", vec![WpManage, WpVulnView]),
+        ("WordPress", vec![WpManage, WpVulnView, WpScanTrust]),
         ("Backups", vec![BackupRun, BackupRestore, BackupTargets]),
         ("TLS", vec![CertManage]),
         ("Security", vec![SecurityManage]),
@@ -333,6 +340,7 @@ impl WebRole {
                 HostingMigrateClone,
                 WpManage,
                 WpVulnView,
+                WpScanTrust,
                 BackupRun,
                 BackupRestore,
                 CertManage,
@@ -346,9 +354,10 @@ impl WebRole {
             // shows a slimmer nav) — they fully manage their OWN granted sites.
             // This MUST match Operator's per-hosting caps so the capability gate
             // (now enforced on every per-hosting mutation) doesn't silently strip
-            // actions customers already had via their per-hosting grant. The one
-            // difference is HostingCreate: spinning up brand-new hostings is not a
-            // per-hosting action and stays an operator/admin grant.
+            // actions customers already had via their per-hosting grant. The
+            // differences are HostingCreate, since spinning up brand-new hostings is
+            // not a per-hosting action and stays an operator/admin grant, and
+            // WpScanTrust, which is there to hold against the customer's own login.
             WebRole::Customer => [
                 HostingView,
                 HostingDelete,
@@ -412,12 +421,26 @@ mod tests {
         }
     }
 
+    /// A stolen customer login must not be able to approve a webshell.
+    #[test]
+    fn scan_trust_is_for_staff_only() {
+        for role in [WebRole::SuperAdmin, WebRole::Admin, WebRole::Operator] {
+            assert!(role.capabilities().contains(Capability::WpScanTrust));
+        }
+        for role in [WebRole::Customer, WebRole::Viewer] {
+            assert!(!role.capabilities().contains(Capability::WpScanTrust));
+        }
+        assert_eq!(Capability::WpScanTrust.as_str(), "wp_scan_trust");
+        // Appended, so what's stored keeps its meaning.
+        assert_eq!(Capability::WpScanTrust as u8, 32);
+    }
+
     #[test]
     fn all_array_matches_count() {
-        // 32 distinct bits, none above 63.
+        // 33 distinct bits, none above 63.
         let s = CapSet::all();
-        assert_eq!(s.count(), 32);
-        assert_eq!(Capability::ALL.len(), 32);
+        assert_eq!(s.count(), 33);
+        assert_eq!(Capability::ALL.len(), 33);
     }
 
     #[test]

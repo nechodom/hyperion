@@ -6182,3 +6182,93 @@ async fn own_masters_card_has_no_form_when_the_file_is_unknown() {
     assert!(!page.contains("name=\"own_masters\""), "form on a guess");
     assert!(page.contains("a form here would be guessing"));
 }
+
+/// The site scanner's file actions, by role. Trust is the one a customer can't
+/// reach, whatever a form says, so a stolen customer login can't approve a webshell
+/// or turn a paid report green. A viewer gets neither; an operator gets both.
+#[tokio::test]
+async fn scan_file_actions_are_gated_by_role() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d) = start_agent().await;
+    let app = build_app(sock.clone(), admin);
+    let id = acme_ssl_hosting(&sock, "scan-acts.cz").await;
+    let file = format!("selector={id}&rel=a.php&sha256={}", "a".repeat(64));
+
+    // What a form may post, by whoever gets past the gate. The node then refuses:
+    // nothing was ever scanned here, so there's no such item.
+    let refused = "this changed since the last scan; scan again";
+    let try_all = |cookie: String, csrf: String| {
+        let (app, file, id) = (app.clone(), file.clone(), id.clone());
+        async move {
+            let mut out = Vec::new();
+            for (uri, body) in [
+                ("/hostings/integrity/quarantine", file.clone()),
+                ("/hostings/integrity/trust", file.clone()),
+                ("/hostings/integrity/trust-all", format!("selector={id}")),
+            ] {
+                let body = format!("_csrf={}&{body}", enc(&csrf));
+                let resp = acme_dns_post(&app, &cookie, uri, body).await;
+                let status = resp.status();
+                out.push((uri, status, body_string(resp).await));
+            }
+            out
+        }
+    };
+
+    let cookie = acme_ssl_user(&app, &sock, "customer", Some(&id)).await;
+    let csrf = acme_ssl_csrf(&app, &cookie).await;
+    for (uri, status, page) in try_all(cookie.clone(), csrf.clone()).await {
+        if uri == "/hostings/integrity/quarantine" {
+            assert_eq!(status, StatusCode::OK, "{uri}");
+            assert!(page.contains(refused), "customer {uri}: {page}");
+        } else {
+            assert_eq!(status, StatusCode::FORBIDDEN, "customer {uri}");
+        }
+    }
+
+    let cookie = acme_ssl_user(&app, &sock, "viewer", Some(&id)).await;
+    let csrf = acme_ssl_csrf(&app, &cookie).await;
+    for (uri, status, _) in try_all(cookie, csrf).await {
+        assert_eq!(status, StatusCode::FORBIDDEN, "viewer {uri}");
+    }
+    let cookie = acme_ssl_user(&app, &sock, "operator", Some(&id)).await;
+    let csrf = acme_ssl_csrf(&app, &cookie).await;
+    for (uri, status, page) in try_all(cookie, csrf).await {
+        assert_eq!(status, StatusCode::OK, "operator {uri}");
+        assert!(page.contains("Not done:"), "operator {uri}: {page}");
+    }
+}
+
+/// Restore takes `WpManage` too, and an operator with no grant on this hosting has
+/// nothing to act on.
+#[tokio::test]
+async fn scan_restore_is_gated_and_scoped() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d) = start_agent().await;
+    let app = build_app(sock.clone(), admin);
+    let id = acme_ssl_hosting(&sock, "scan-restore.cz").await;
+    let form = |csrf: &str| {
+        format!(
+            "_csrf={}&selector={id}&id=00000000000000000000000000000000",
+            enc(csrf)
+        )
+    };
+    let uri = "/hostings/integrity/restore";
+
+    let cookie = acme_ssl_user(&app, &sock, "viewer", Some(&id)).await;
+    let csrf = acme_ssl_csrf(&app, &cookie).await;
+    let resp = acme_dns_post(&app, &cookie, uri, form(&csrf)).await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+    let cookie = acme_ssl_user(&app, &sock, "operator", None).await;
+    let csrf = acme_ssl_csrf(&app, &cookie).await;
+    let resp = acme_dns_post(&app, &cookie, uri, form(&csrf)).await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    let trust = format!(
+        "_csrf={}&selector={id}&rel=a.php&sha256={}",
+        enc(&csrf),
+        "a".repeat(64)
+    );
+    let resp = acme_dns_post(&app, &cookie, "/hostings/integrity/trust", trust).await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}

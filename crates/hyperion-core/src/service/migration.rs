@@ -2031,6 +2031,10 @@ pub(super) fn carried_kv_scope(key: &str) -> Option<CarryScope> {
         phpworkers::KV_AUTO_STATE,
         hyperion_types::wpcron::KV_ENABLED,
         INTEGRITY_ENABLED_KV_KEY,
+        // What someone vouched for: paths relative to the docroot, and the files
+        // come along. Without it a Copy asks all over again, and a file with a
+        // rule hit someone accepted would read as a new finding.
+        SCAN_TRUST_KV_KEY,
         PERM_AUTOHEAL_KV_KEY,
         WP_MAIL_AUTOFIX_KV_KEY,
         WP_MAIL_OVERRIDE_KV_KEY,

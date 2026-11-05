@@ -285,7 +285,9 @@ fn timeout_for_request(req: &Request) -> u64 {
         // boots WordPress around it. On the default 30s a big plugin was
         // reported as failed while the node kept replacing the folder, and
         // the re-scan right after read it half-replaced.
-        Request::WpPluginAction { .. } => 300,
+        Request::WpPluginAction { .. } | Request::ScanComponentReinstall { .. } => 300,
+        // Up to 2 GiB copied and fsynced, one way or the other.
+        Request::ScanFileQuarantine { .. } | Request::ScanFileRestore { .. } => 300,
         // Move a bundle / install WordPress.
         Request::BackupFetchChunk { .. }
         | Request::HostingMigrationFetchBundleFile { .. }

@@ -72,7 +72,9 @@ pub struct Baseline {
     pub churn: BTreeMap<String, BaselineEntry>,
     /// Plugin and theme versions at the last finished scan, by `kind/slug`.
     pub components: BTreeMap<String, String>,
-    /// Files someone vouched for, by path and the hash they vouched for.
+    /// Unused by the scan, which takes what's trusted from `ScanInput::trusted`,
+    /// and emptied on its first save. Still read and written so a file from before
+    /// that loads.
     pub trusted: BTreeMap<String, [u8; 32]>,
 }
 

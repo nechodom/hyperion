@@ -593,6 +593,31 @@ pub async fn theme_list(
     Ok((themes, core_out.trim().to_string()))
 }
 
+/// `wp theme install` for the release a site already runs. The version was read
+/// from a tenant's `style.css`, so it is checked like wp-cli's own answer is for a
+/// plugin. `--force` clears the destination, so a file an attacker added goes too;
+/// `--skip-plugins --skip-themes` because the theme being repaired may be what now
+/// fatals on load.
+fn theme_reinstall_args(slug: &str, version: &str) -> Result<Vec<String>, AdapterError> {
+    validate_plugin_slug(slug)?;
+    let version = parse_plugin_version(version)
+        .filter(|v| v == version)
+        .ok_or_else(|| {
+            AdapterError::Other(format!(
+                "the version recorded for {slug} doesn't look like one, so it was not reinstalled"
+            ))
+        })?;
+    Ok(vec![
+        "theme".into(),
+        "install".into(),
+        slug.into(),
+        format!("--version={version}"),
+        "--force".into(),
+        "--skip-plugins".into(),
+        "--skip-themes".into(),
+    ])
+}
+
 /// Apply one whitelisted theme action via wp-cli. Slug is empty
 /// for UpdateAll. Same shape as plugin_action.
 pub async fn theme_action(
@@ -631,6 +656,9 @@ pub async fn theme_action(
         }
         hyperion_types::WpThemeAction::Delete => {
             vec!["theme".into(), "delete".into(), slug.into()]
+        }
+        hyperion_types::WpThemeAction::Reinstall { version } => {
+            theme_reinstall_args(slug, version)?
         }
     };
     let args_refs: Vec<&str> = args_owned.iter().map(|s| s.as_str()).collect();
@@ -1363,6 +1391,46 @@ pub fn rewrite_url_host(current: &str, new_host: &str) -> Option<String> {
     // stored value against the request and a mismatch is its own redirect.
     let out = u.to_string();
     Some(out.strip_suffix('/').unwrap_or(&out).to_string())
+}
+
+#[cfg(test)]
+mod theme_reinstall_tests {
+    use super::theme_reinstall_args;
+
+    #[test]
+    fn pins_the_version_and_clears_the_folder() {
+        let args = theme_reinstall_args("twentytwenty", "2.5").expect("args");
+        assert_eq!(
+            args,
+            [
+                "theme",
+                "install",
+                "twentytwenty",
+                "--version=2.5",
+                "--force",
+                "--skip-plugins",
+                "--skip-themes"
+            ]
+        );
+    }
+
+    /// Both come from a tenant's tree by way of the scan.
+    #[test]
+    fn slug_and_version_are_checked() {
+        for (slug, version) in [
+            ("../evil", "1.0"),
+            ("--require=/tmp/x", "1.0"),
+            ("ok", "--path=/etc"),
+            ("ok", "1.0 --require=x"),
+            ("ok", ""),
+            ("ok", "1.0\n2.0"),
+        ] {
+            assert!(
+                theme_reinstall_args(slug, version).is_err(),
+                "{slug} {version}"
+            );
+        }
+    }
 }
 
 #[cfg(test)]

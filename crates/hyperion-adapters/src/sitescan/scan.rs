@@ -152,6 +152,11 @@ pub struct ScanInput {
     /// Carried for a later task: a writer whose changes go through the rules only.
     #[serde(default)]
     pub accept_since: Option<(WriterKind, i64)>,
+    /// Files someone vouched for, by path and the hash they vouched for. A
+    /// symlink's is the hash of its target, a file too large to read its
+    /// [`metadata_hash`]. The agent keeps this list; a worker has no say in it.
+    #[serde(default)]
+    pub trusted: BTreeMap<String, [u8; 32]>,
 }
 
 /// What the comparison with upstream said, in the shape the stored result has.
@@ -199,6 +204,10 @@ pub struct SiteScanOutcome {
     /// The walk hit its entry limit. The next run gets no further.
     #[serde(default)]
     pub capped: bool,
+    /// Trusted paths a finished walk found nothing at. They needn't take up room
+    /// in the list any more.
+    #[serde(default)]
+    pub trust_gone: Vec<String>,
 }
 
 /// Scan one site. `pause` is called every few hundred files and during long
@@ -342,6 +351,16 @@ fn link_hash(target: &[u8]) -> [u8; 32] {
     h.update(b"symlink:");
     h.update(target);
     h.finalize().into()
+}
+
+/// What a Trust action vouches for when a file is too large to read: its size
+/// and when it last changed. Anything that touches the file changes this.
+pub fn metadata_hash(size: u64, ctime: i64, ctime_nsec: i64) -> [u8; 32] {
+    Sha256::digest(format!("meta:{size}:{ctime}:{ctime_nsec}")).into()
+}
+
+fn metadata_hash_of(m: &FileMeta) -> [u8; 32] {
+    metadata_hash(m.size, m.ctime, m.ctime_nsec)
 }
 
 /// Plain text from a tenant's link, like any snippet.
@@ -695,6 +714,7 @@ impl<'a> Scan<'a> {
             rule_pack: RULE_PACK_VERSION,
             ..Baseline::default()
         });
+        baseline.trusted.clear();
         let first = !baseline.first_done;
         let rules_bumped = baseline.rule_pack < RULE_PACK_VERSION;
         if rules_bumped {
@@ -873,13 +893,14 @@ impl<'a> Scan<'a> {
         let target = self.root.read_link(rel).ok();
         let sha = target.as_deref().map(link_hash);
         let listed = self.listed_in(rel);
-        if listed.is_none() && sha.is_some() && self.baseline.trusted.get(rel) == sha.as_ref() {
+        if listed.is_none() && sha.is_some() && self.input.trusted.get(rel) == sha.as_ref() {
             return;
         }
         let why = target
             .as_deref()
             .map_or_else(|| "symlink: not followed".to_string(), link_snippet);
         let mut item = self.unread_item(rel, why, sha.as_ref());
+        item.symlink = true;
         // Where a manifest speaks, this is a failed comparison: no trust list can
         // override that.
         if let Some(i) = listed {
@@ -1241,8 +1262,12 @@ impl<'a> Scan<'a> {
         self.comps[i].added += 1;
         let core = self.comps[i].is_core();
         // Past the cap it won't be listed, so there's nothing to read it for.
-        if self.comps[i].items.len() >= self.limits.max_items || m.size > NO_MANIFEST_READ_MAX {
+        if self.comps[i].items.len() >= self.limits.max_items {
             return self.stage(i, m, added_kind(core), None, &[]);
+        }
+        if m.size > NO_MANIFEST_READ_MAX {
+            let meta = metadata_hash_of(m);
+            return self.stage(i, m, added_kind(core), Some(&meta), &[]);
         }
         let Some(read) = self.read(m, false) else {
             return;
@@ -1312,7 +1337,11 @@ impl<'a> Scan<'a> {
         let item = SiteFileFinding {
             snippet: format!("{} bytes: too large to read", m.size),
             component: self.component_of(owner),
-            ..self.base_item(&m.rel, FindingKind::TooLargeToInspect, None)
+            ..self.base_item(
+                &m.rel,
+                FindingKind::TooLargeToInspect,
+                Some(&metadata_hash_of(m)),
+            )
         };
         self.push_review(item);
     }
@@ -1337,6 +1366,11 @@ impl<'a> Scan<'a> {
         if m.size <= NO_MANIFEST_READ_MAX {
             return false;
         }
+        // Someone vouched for it as it stands. It comes back when it's touched.
+        if self.input.trusted.get(&m.rel) == Some(&metadata_hash_of(m)) {
+            self.remember_unread(m, rules_only);
+            return true;
+        }
         if size_is_a_loose_end(&m.rel) {
             self.report_oversize(m, owner);
             return true;
@@ -1348,7 +1382,11 @@ impl<'a> Scan<'a> {
                 let item = SiteFileFinding {
                     snippet: format!("{} bytes: changed, too large to read", m.size),
                     component: self.component_of(owner),
-                    ..self.base_item(&m.rel, FindingKind::BaselineChange, None)
+                    ..self.base_item(
+                        &m.rel,
+                        FindingKind::BaselineChange,
+                        Some(&metadata_hash_of(m)),
+                    )
                 };
                 self.push_review(item);
             }
@@ -1395,7 +1433,7 @@ impl<'a> Scan<'a> {
         let Some(read) = self.read(m, false) else {
             return;
         };
-        let trusted = self.baseline.trusted.get(&m.rel) == Some(&read.sha256);
+        let trusted = self.input.trusted.get(&m.rel) == Some(&read.sha256);
         let same = self
             .baseline
             .entries
@@ -1456,7 +1494,7 @@ impl<'a> Scan<'a> {
         let Some(read) = self.read(m, false) else {
             return;
         };
-        if self.baseline.trusted.get(&m.rel) != Some(&read.sha256) {
+        if self.input.trusted.get(&m.rel) != Some(&read.sha256) {
             let hits = rules_for(&m.rel, &read.head);
             if !hits.is_empty() {
                 self.baseline.churn.remove(&m.rel);
@@ -1613,6 +1651,7 @@ impl<'a> Scan<'a> {
                 let failed = WpIntegrityPluginResult {
                     slug: comp.slug().to_string(),
                     issues,
+                    version: comp.c.key.version.clone(),
                 };
                 match kind {
                     ComponentKind::Theme => up.themes_failed.push(failed),
@@ -1711,9 +1750,17 @@ impl<'a> Scan<'a> {
             }
         }
 
+        let mut trust_gone = Vec::new();
         if complete {
             self.add_missing();
             let seen = &self.seen;
+            trust_gone.extend(
+                self.input
+                    .trusted
+                    .keys()
+                    .filter(|p| !seen.may_exist(p))
+                    .cloned(),
+            );
             self.baseline.entries.retain(|p, _| seen.may_exist(p));
             self.baseline.verified.retain(|p, _| seen.may_exist(p));
             self.baseline.churn.retain(|p, _| seen.may_exist(p));
@@ -1792,6 +1839,7 @@ impl<'a> Scan<'a> {
             files_hashed: self.files_hashed,
             stopped: self.stopped,
             capped: stats.capped,
+            trust_gone,
         }
     }
 }
@@ -1836,6 +1884,7 @@ mod tests {
             now: 1,
             wporg_known_slugs: Some(BTreeSet::new()),
             accept_since: None,
+            trusted: BTreeMap::new(),
         }
     }
 

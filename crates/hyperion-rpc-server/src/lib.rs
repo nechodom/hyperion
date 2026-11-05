@@ -891,6 +891,48 @@ async fn dispatch_request(api: Arc<dyn AgentApi>, req: Request) -> Response {
                 Err(e) => Response::Error(e),
             }
         }
+        Request::ScanFileQuarantine {
+            hosting,
+            rel,
+            sha256,
+            actor,
+        } => match api.scan_file_quarantine(hosting, rel, sha256, actor).await {
+            Ok(r) => Response::WpIntegrityScan(r),
+            Err(e) => Response::Error(e),
+        },
+        Request::ScanFileRestore { hosting, id, actor } => {
+            match api.scan_file_restore(hosting, id, actor).await {
+                Ok(r) => Response::WpIntegrityScan(r),
+                Err(e) => Response::Error(e),
+            }
+        }
+        Request::ScanFileTrust {
+            hosting,
+            rel,
+            sha256,
+            actor,
+        } => match api.scan_file_trust(hosting, rel, sha256, actor).await {
+            Ok(r) => Response::WpIntegrityScan(r),
+            Err(e) => Response::Error(e),
+        },
+        Request::ScanTrustAllReview { hosting, actor } => {
+            match api.scan_trust_all_review(hosting, actor).await {
+                Ok(r) => Response::WpIntegrityScan(r),
+                Err(e) => Response::Error(e),
+            }
+        }
+        Request::ScanQuarantineList { hosting } => match api.scan_quarantine_list(hosting).await {
+            Ok(r) => Response::ScanQuarantineList(r),
+            Err(e) => Response::Error(e),
+        },
+        Request::ScanComponentReinstall {
+            hosting,
+            slug,
+            theme,
+        } => match api.scan_component_reinstall(hosting, slug, theme).await {
+            Ok(r) => Response::WpPluginAction(r),
+            Err(e) => Response::Error(e),
+        },
         Request::IntegrityFindingsList => match api.integrity_findings_list().await {
             Ok(v) => Response::IntegrityFindingsList(v),
             Err(e) => Response::Error(e),
@@ -3079,6 +3121,57 @@ mod tests {
             _: HostingSelector,
         ) -> Result<hyperion_types::WpIntegrityScanResult, RpcError> {
             Ok(hyperion_types::WpIntegrityScanResult::default())
+        }
+        async fn scan_file_quarantine(
+            &self,
+            _: HostingSelector,
+            _: String,
+            _: String,
+            _: String,
+        ) -> Result<hyperion_types::WpIntegrityScanResult, RpcError> {
+            Ok(hyperion_types::WpIntegrityScanResult::default())
+        }
+        async fn scan_file_restore(
+            &self,
+            _: HostingSelector,
+            _: String,
+            _: String,
+        ) -> Result<hyperion_types::WpIntegrityScanResult, RpcError> {
+            Ok(hyperion_types::WpIntegrityScanResult::default())
+        }
+        async fn scan_file_trust(
+            &self,
+            _: HostingSelector,
+            _: String,
+            _: String,
+            _: String,
+        ) -> Result<hyperion_types::WpIntegrityScanResult, RpcError> {
+            Ok(hyperion_types::WpIntegrityScanResult::default())
+        }
+        async fn scan_trust_all_review(
+            &self,
+            _: HostingSelector,
+            _: String,
+        ) -> Result<hyperion_types::WpIntegrityScanResult, RpcError> {
+            Ok(hyperion_types::WpIntegrityScanResult::default())
+        }
+        async fn scan_quarantine_list(
+            &self,
+            _: HostingSelector,
+        ) -> Result<hyperion_types::QuarantineList, RpcError> {
+            Ok(hyperion_types::QuarantineList::default())
+        }
+        async fn scan_component_reinstall(
+            &self,
+            _: HostingSelector,
+            _: String,
+            _: bool,
+        ) -> Result<hyperion_types::WpPluginActionResult, RpcError> {
+            Ok(hyperion_types::WpPluginActionResult {
+                state: "ok".into(),
+                message: String::new(),
+                output_tail: String::new(),
+            })
         }
         async fn integrity_findings_list(
             &self,

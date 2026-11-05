@@ -280,6 +280,9 @@ pub struct WpIntegrityPluginResult {
     /// Plugin directory slug, as wp-cli reports it.
     pub slug: String,
     pub issues: Vec<WpIntegrityFileIssue>,
+    /// The version that was compared. Empty on a record from before this field.
+    #[serde(default)]
+    pub version: String,
 }
 
 /// One ClamAV detection: the file, and the signature that matched it.
@@ -290,6 +293,13 @@ pub struct WpMalwareHit {
     /// ClamAV signature name, e.g. `Php.Trojan.Webshell-1`.
     pub signature: String,
 }
+
+/// The root file quarantine refuses by name.
+const WP_CONFIG_REL: &str = "wp-config.php";
+/// How the scanner marks a name it cut, and the shortest such name. The name of a
+/// file that really ends this way only loses its buttons.
+const CUT_NAME_MARK: char = '…';
+const CUT_NAME_MIN_BYTES: usize = 200;
 
 /// How the native site scanner came to report a file.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -347,6 +357,57 @@ pub struct SiteFileFinding {
     /// "wordpress.org" | "vendor package", on upstream findings.
     #[serde(default)]
     pub source_label: Option<String>,
+    /// The name is a symlink: `sha256` is what it points at, not any content.
+    #[serde(default)]
+    pub symlink: bool,
+}
+
+/// One file held in quarantine: what restoring it needs and what the card lists.
+/// Never its content.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct QuarantinedFile {
+    /// Random hex, never tenant text.
+    #[serde(default)]
+    pub id: String,
+    /// Where it was, relative to the docroot.
+    #[serde(default)]
+    pub rel: String,
+    /// The hash the scan reported.
+    #[serde(default)]
+    pub sha256: String,
+    #[serde(default)]
+    pub size: u64,
+    /// As it was. Restoring masks it to the permission bits.
+    #[serde(default)]
+    pub mode: u32,
+    #[serde(default)]
+    pub uid: u32,
+    #[serde(default)]
+    pub gid: u32,
+    /// Unix seconds it was quarantined.
+    #[serde(default)]
+    pub time: i64,
+    #[serde(default)]
+    pub kind: FindingKind,
+    #[serde(default)]
+    pub rule_id: Option<String>,
+}
+
+/// What a hosting has in quarantine, newest first. `total` counts what the cap
+/// left out of `items`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct QuarantineList {
+    #[serde(default)]
+    pub items: Vec<QuarantinedFile>,
+    #[serde(default)]
+    pub total: u64,
+}
+
+impl QuarantineList {
+    /// The cap left something out.
+    pub fn is_cut(&self) -> bool {
+        self.total > u64::try_from(self.items.len()).unwrap_or(u64::MAX)
+    }
 }
 
 impl FindingKind {
@@ -395,6 +456,79 @@ impl SiteFileFinding {
             Some("themes") => Some("theme"),
             _ => None,
         }
+    }
+
+    /// Does this item name one file the actions can reach? Not a whole core or
+    /// component, not a name the scan had to cut, and not a file it never hashed.
+    pub fn is_actionable(&self) -> bool {
+        !self.sha256.is_empty()
+            && self.rel != "."
+            && self.component_wide().is_none()
+            && !(self.rel.ends_with(CUT_NAME_MARK) && self.rel.len() >= CUT_NAME_MIN_BYTES)
+    }
+
+    /// Trust is for what nothing else can speak for. A file that fails its
+    /// comparison can be repaired, reinstalled or quarantined, so no trust list
+    /// can override a manifest.
+    pub fn can_trust(&self) -> bool {
+        self.is_actionable() && !self.is_comparison()
+    }
+
+    /// Root doesn't touch a symlink, and `wp-config.php` isn't a file a site can
+    /// lose. Hard-linked files never get a hash, and missing ones have nothing
+    /// to move.
+    pub fn can_quarantine(&self) -> bool {
+        self.is_actionable()
+            && !self.symlink
+            && self.rel != WP_CONFIG_REL
+            && !matches!(
+                self.kind,
+                FindingKind::CoreMissing | FindingKind::UpstreamMissing
+            )
+    }
+
+    /// Would moving this file away likely stop the site loading? Core and
+    /// component files, and the ones WordPress or PHP load by name.
+    pub fn looks_loaded_by_site(&self) -> bool {
+        if self.is_comparison() {
+            return true;
+        }
+        let rel = self.rel.as_str();
+        if matches!(
+            rel,
+            "index.php"
+                | ".htaccess"
+                | ".user.ini"
+                | "wp-content/db.php"
+                | "wp-content/object-cache.php"
+                | "wp-content/advanced-cache.php"
+        ) || rel.starts_with("wp-content/mu-plugins/")
+        {
+            return true;
+        }
+        if let Some(rest) = rel.strip_prefix("wp-content/themes/") {
+            return rest.split('/').nth(1) == Some("functions.php") && rest.split('/').count() == 2;
+        }
+        let Some(rest) = rel.strip_prefix("wp-content/plugins/") else {
+            return false;
+        };
+        match rest.split_once('/') {
+            // A single-file plugin.
+            None => true,
+            Some((slug, file)) => file.strip_suffix(".php") == Some(slug),
+        }
+    }
+
+    /// Is this the file a failed component lists as `path`? Issue paths are
+    /// relative to the component, and a single-file plugin's is its own name.
+    pub fn is_issue(&self, slug: &str, path: &str) -> bool {
+        if self.component.as_deref() != Some(slug) {
+            return false;
+        }
+        ["plugins", "mu-plugins", "themes"].iter().any(|kind| {
+            self.rel == format!("wp-content/{kind}/{slug}/{path}")
+                || (!path.contains('/') && self.rel == format!("wp-content/{kind}/{path}"))
+        })
     }
 }
 
@@ -596,12 +730,13 @@ impl WpIntegrityScanResult {
     }
 
     /// What a plugin or theme was compared with, as a phrase: its finding's
-    /// label, else wordpress.org, the only reference a record without one can
-    /// have meant.
+    /// label. Without one, a record from before the labels can only have meant
+    /// wordpress.org; on a native record the list was cut short and nobody knows.
     pub fn reference_of(&self, slug: &str) -> &str {
         match self.source_label_of(slug) {
             Some("vendor package") => "the vendor's package",
             Some(l) => l,
+            None if self.native_scan_ran => "its source",
             None => "wordpress.org",
         }
     }
@@ -610,12 +745,43 @@ impl WpIntegrityScanResult {
     /// Only when that is what it was compared with. A private plugin that shares
     /// a slug with a wordpress.org one would be swapped for a different plugin.
     /// A native record whose findings carry no label (cut by the item cap) is not
-    /// assumed to be wordpress.org; only a record from before the label is.
+    /// assumed to be wordpress.org; only a record from before the label is. A
+    /// plugin and a theme can share a slug, so one other label is enough to say no.
     pub fn reinstallable_from_wordpress_org(&self, slug: &str) -> bool {
-        match self.source_label_of(slug) {
-            Some(l) => l == "wordpress.org",
-            None => !self.native_scan_ran,
+        let mut labels = self
+            .findings
+            .iter()
+            .chain(&self.review)
+            .filter(|f| f.component.as_deref() == Some(slug))
+            .filter_map(|f| f.source_label.as_deref())
+            .peekable();
+        if labels.peek().is_none() {
+            return !self.native_scan_ran;
         }
+        labels.all(|l| l == "wordpress.org")
+    }
+
+    /// The finding behind a line of the core lists.
+    pub fn finding_at(&self, rel: &str) -> Option<&SiteFileFinding> {
+        self.findings.iter().find(|f| f.rel == rel)
+    }
+
+    /// The finding behind a failed plugin's or theme's line.
+    pub fn finding_of_issue(&self, slug: &str, path: &str) -> Option<&SiteFileFinding> {
+        self.findings.iter().find(|f| f.is_issue(slug, path))
+    }
+
+    /// What "Trust all changes to review" takes: no rule hit, nothing a comparison
+    /// failed, and a hash to hold it to.
+    pub fn trust_all_items(&self) -> impl Iterator<Item = &SiteFileFinding> {
+        self.review
+            .iter()
+            .filter(|f| f.can_trust() && f.rule_id.is_none())
+    }
+
+    /// Would "Trust all" accept a symlink? Its dialog has to say what that means.
+    pub fn trust_all_has_symlink(&self) -> bool {
+        self.trust_all_items().any(|f| f.symlink)
     }
 
     /// Theme files flagged, across all failed themes.
@@ -825,6 +991,10 @@ pub enum WpThemeAction {
     /// `wp theme delete <slug>`. Refuses if the theme is currently
     /// active (matches wp-cli's safety check).
     Delete,
+    /// `wp theme install <slug> --version=<version> --force`: the same release
+    /// over the top, for a theme that failed its comparison. Same version on
+    /// purpose, like [`WpPluginAction::Reinstall`].
+    Reinstall { version: String },
 }
 
 /// Outcome of a `WpThemeAction` — same shape as the plugin variant.
@@ -901,6 +1071,7 @@ mod tests {
         r.themes_failed = vec![WpIntegrityPluginResult {
             slug: "t".into(),
             issues: vec![WpIntegrityFileIssue::default()],
+            ..Default::default()
         }];
         assert_eq!(r.verdict(), Findings);
 

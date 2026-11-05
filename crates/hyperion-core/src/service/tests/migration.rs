@@ -279,6 +279,7 @@ fn carried_kv_allow_list() {
         "wp_auto_update",
         "regguard_enabled",
         "gitsync_repo",
+        "scan_trust",
     ] {
         assert_eq!(carried_kv_scope(k), Some(CarryScope::Always), "{k}");
     }

@@ -43,7 +43,7 @@ const SCAN_REQUEST_HONOURED_KV_KEY: &str = "scan_request_honoured_at";
 /// can ask, a customer included, and the node has one worker.
 const SCAN_REQUEST_MIN_GAP_SECS: i64 = 10 * 60;
 
-/// `node_kv` key: unix seconds the manifest cache was last swept.
+/// `node_kv` key: unix seconds the manifest cache and the quarantine were last swept.
 const EVICT_LAST_RUN_KV: &str = "site_scan_evict_last_run_at";
 
 /// wordpress.org requests one site's scan may make.
@@ -63,6 +63,8 @@ const MAX_COMPONENTS: usize = 10_001;
 /// The worker's 20, and what the agent adds in front of them.
 const MAX_REASONS: usize = 24;
 const MAX_AUTO_ACCEPTED: usize = 200;
+/// The trust list's own cap.
+const MAX_TRUST_GONE: usize = 5000;
 const MAX_DOMAINS: usize = 10;
 const MAX_PATH_BYTES: usize = 4096;
 const MAX_TEXT_BYTES: usize = 1024;
@@ -541,6 +543,16 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .as_ref()
             .map(|o| o.auto_accepted.clone())
             .unwrap_or_default();
+        // What this run itself said, before the last run's standing items join it.
+        let (reported, trust_gone) = outcome.as_ref().map_or_else(Default::default, |o| {
+            let reported: Vec<(String, String)> = o
+                .findings
+                .iter()
+                .chain(&o.review)
+                .map(|f| (f.rel.clone(), f.sha256.clone()))
+                .collect();
+            (reported, o.trust_gone.clone())
+        });
 
         // Before anything can go wrong below: the worker has accepted these.
         if !auto_accepted.is_empty() {
@@ -568,6 +580,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             None => stored_after_failure(prior, clamav, now),
         };
         self.set_stored_integrity_scan(detail.id.as_str(), &stored)
+            .await;
+        self.prune_scan_trust(detail.id.as_str(), &reported, &trust_gone)
             .await;
         drop(record_lock);
 
@@ -623,6 +637,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             now,
             wporg_known_slugs: pass.known_slugs,
             accept_since: None,
+            trusted: self.scan_trust_map(detail.id.as_str()).await,
         });
         let mut outcome = match self.adapters.site_scan_worker(job).await {
             WorkerReply::Scan(o) => o,
@@ -781,8 +796,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         }
     }
 
-    /// Sweep the manifest cache once a day, stamped in `node_kv` so a restart
-    /// doesn't repeat it. Under the lock: never beneath a running worker.
+    /// Sweep the manifest cache, under the lock so never beneath a running worker,
+    /// and the quarantine, once a day. Stamped in `node_kv` so a restart doesn't
+    /// repeat it.
     async fn site_scan_evict_daily(&self, now: i64) {
         let last = match hyperion_state::node_kv::get(&self.pool, EVICT_LAST_RUN_KV).await {
             Ok(v) => v.and_then(|s| s.trim().parse::<i64>().ok()).unwrap_or(0),
@@ -800,9 +816,24 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             tracing::warn!(error = %e, "site scan: eviction stamp not written");
             return;
         }
+        self.site_scan_purge_quarantine(now).await;
         let _gate = self.site_scan.node.lock().await;
         let dir = Path::new(&self.paths.scan_dir).join("manifests");
         self.adapters.site_scan_evict_manifests(&dir).await;
+    }
+
+    /// Held files go 90 days after they came in. Root's own tree, nothing of a
+    /// tenant's, so this doesn't wait for anything.
+    async fn site_scan_purge_quarantine(&self, now: i64) {
+        let base = PathBuf::from(&self.paths.quarantine_dir);
+        let removed = tokio::task::spawn_blocking(move || {
+            hyperion_adapters::sitescan::quarantine::purge_quarantine(&base, now)
+        })
+        .await
+        .unwrap_or(0);
+        if removed > 0 {
+            tracing::info!(removed, "site scan: purged old quarantined files");
+        }
     }
 }
 
@@ -1119,6 +1150,7 @@ fn clamp_failed(list: &mut Vec<hyperion_types::WpIntegrityPluginResult>) {
     let mut left = MAX_ITEMS;
     for p in list.iter_mut() {
         clip(&mut p.slug, MAX_NAME_BYTES);
+        clip(&mut p.version, MAX_ID_BYTES);
         p.issues.truncate(left);
         left -= p.issues.len();
         for i in &mut p.issues {
@@ -1157,6 +1189,7 @@ pub(super) fn clamp_scan_outcome(o: &mut SiteScanOutcome) {
         list.iter_mut().for_each(clamp_finding);
     }
     clip_list(&mut o.auto_accepted, MAX_AUTO_ACCEPTED, MAX_PATH_BYTES);
+    clip_list(&mut o.trust_gone, MAX_TRUST_GONE, MAX_PATH_BYTES);
 
     let c = &mut o.coverage;
     for n in [

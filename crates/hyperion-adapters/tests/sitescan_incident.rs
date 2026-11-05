@@ -9,7 +9,7 @@
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -19,7 +19,9 @@ use hyperion_adapters::sitescan::manifest::{
     cache_path_for, ComponentKey, ComponentKind, Digest, Manifest, ManifestSource,
 };
 use hyperion_adapters::sitescan::rules::RULE_PACK_VERSION;
-use hyperion_adapters::sitescan::scan::{scan_site, ScanInput, ScanMode, SiteScanOutcome};
+use hyperion_adapters::sitescan::scan::{
+    metadata_hash, scan_site, ScanInput, ScanMode, SiteScanOutcome,
+};
 use hyperion_adapters::sitescan::TenantRoot;
 use hyperion_types::{FindingKind, SiteFileFinding};
 use md5::Md5;
@@ -52,6 +54,8 @@ struct Site {
     cache: PathBuf,
     baseline: PathBuf,
     known: Option<BTreeSet<String>>,
+    /// What the agent would hand the scan as vouched for.
+    trusted: std::cell::RefCell<BTreeMap<String, [u8; 32]>>,
 }
 
 impl Site {
@@ -65,6 +69,7 @@ impl Site {
             cache: base.join("manifests"),
             baseline: base.join("baselines").join("7"),
             known: Some(BTreeSet::new()),
+            trusted: Default::default(),
             _t: t,
         }
     }
@@ -234,6 +239,7 @@ impl Site {
             now: NOW,
             wporg_known_slugs: self.known.clone(),
             accept_since: None,
+            trusted: self.trusted.borrow().clone(),
         };
         scan_site(&input, pause).expect("scan")
     }
@@ -248,16 +254,16 @@ impl Site {
 
     /// What the Trust action will do for a symlink: path plus the hash it reported.
     fn trust_link(&self, rel: &str, target: &str) {
-        let mut b = self.load();
-        b.trusted.insert(rel.to_string(), link_sha(target));
-        b.save_atomic(&self.baseline).expect("save");
+        self.trusted
+            .borrow_mut()
+            .insert(rel.to_string(), link_sha(target));
     }
 
     fn trust(&self, rel: &str) {
-        let mut b = self.load();
         let body = fs::read(self.path(rel)).expect("read");
-        b.trusted.insert(rel.to_string(), sha_of(&body));
-        b.save_atomic(&self.baseline).expect("save");
+        self.trusted
+            .borrow_mut()
+            .insert(rel.to_string(), sha_of(&body));
     }
 }
 
@@ -1664,7 +1670,8 @@ fn a_huge_file_is_reported_without_being_read() {
     assert_eq!(out.files_hashed, 0);
     let r = item(&out.review, rel);
     assert_eq!(r.kind, FindingKind::TooLargeToInspect);
-    assert_eq!(r.sha256, "");
+    // Its metadata's hash: nothing was read.
+    assert_eq!(r.sha256.len(), 64);
 }
 
 fn grow(s: &Site, rel: &str, len: u64) {
@@ -1764,6 +1771,7 @@ fn a_root_that_cannot_be_opened_is_an_error_not_a_clean_scan() {
         now: NOW,
         wporg_known_slugs: None,
         accept_since: None,
+        trusted: BTreeMap::new(),
     };
     assert!(scan_site(&input, &|| false).is_err());
 }
@@ -2260,6 +2268,7 @@ fn a_trusted_symlink_is_cleared_until_it_points_elsewhere() {
     std::os::unix::fs::symlink("/opt/shared/loader.php", s.path(rel)).expect("link");
     let out = s.scan();
     assert_eq!(item(&out.review, rel).kind, FindingKind::BaselineChange);
+    assert!(item(&out.review, rel).symlink);
 
     s.trust_link(rel, "/opt/shared/loader.php");
     assert_eq!(rels(&s.scan().review), Vec::<&str>::new());
@@ -2314,7 +2323,12 @@ fn a_new_code_file_past_64_mib_is_too_large_without_being_read() {
         assert_eq!(out.files_hashed, 0);
         let r = item(&out.review, new);
         assert_eq!(r.kind, FindingKind::TooLargeToInspect);
-        assert_eq!(r.sha256, "");
+        // Never read, so its metadata stands in for a hash.
+        let st = fs::metadata(s.path(new)).expect("stat");
+        assert_eq!(
+            r.sha256,
+            hex::encode(metadata_hash(st.len(), st.ctime(), st.ctime_nsec()))
+        );
         assert_eq!(rels(&out.review), [new]);
     }
 
@@ -2328,6 +2342,85 @@ fn a_new_code_file_past_64_mib_is_too_large_without_being_read() {
     settle();
     s.write(old, JS_LOADER);
     assert_eq!(item(&s.scan().findings, old).kind, FindingKind::RuleHit);
+}
+
+/// Nothing past 64 MiB is read, so Trust holds it to its size and ctime: it stays
+/// quiet while the file is left alone, whatever a scan's mode, and any touch brings
+/// it back. Without this a big file would be on the card forever.
+#[test]
+fn metadata_item_can_be_trusted_and_flags_on_ctime_change() {
+    let s = Site::new();
+    s.wordpress();
+    for rel in [
+        "wp-content/mu-plugins/big.php",
+        "wp-content/cache/big.php",
+        "wp-content/mu-plugins/big.js",
+    ] {
+        s.write(rel, "");
+        grow(&s, rel, 65 << 20);
+    }
+    settle();
+    let out = s.scan();
+    // A big bundle at the first scan is remembered; what PHP runs never is.
+    for rel in ["wp-content/mu-plugins/big.php", "wp-content/cache/big.php"] {
+        let r = item(&out.review, rel);
+        assert_eq!(r.kind, FindingKind::TooLargeToInspect);
+        assert_eq!(r.sha256.len(), 64);
+        let mut sha = [0u8; 32];
+        hex::decode_to_slice(&r.sha256, &mut sha).expect("hex");
+        s.trusted.borrow_mut().insert(rel.to_string(), sha);
+    }
+
+    settle();
+    assert_eq!(rels(&s.scan().review), Vec::<&str>::new());
+    assert_eq!(
+        rels(&s.scan_with(ScanMode::FullRehash, &|| false).review),
+        Vec::<&str>::new()
+    );
+
+    // Same size, same content, and a new ctime.
+    for rel in ["wp-content/mu-plugins/big.php", "wp-content/cache/big.php"] {
+        settle();
+        fs::set_permissions(s.path(rel), fs::Permissions::from_mode(0o640)).expect("chmod");
+        let out = s.scan();
+        let r = item(&out.review, rel);
+        assert_ne!(
+            hex::encode(s.trusted.borrow().get(rel).expect("trusted")),
+            r.sha256
+        );
+        assert_eq!(out.files_hashed, 0);
+    }
+
+    // A changed bundle reports the same way, so it can be trusted too.
+    settle();
+    let rel = "wp-content/mu-plugins/big.js";
+    grow(&s, rel, 66 << 20);
+    let r = s.scan();
+    let r = item(&r.review, rel);
+    assert_eq!(r.kind, FindingKind::BaselineChange);
+    assert_eq!(r.sha256.len(), 64);
+}
+
+/// A trusted path a whole walk found nothing at can come off the list. A walk
+/// that stopped can't say, and neither can a name it was refused.
+#[test]
+fn trusted_paths_with_nothing_there_are_named() {
+    let s = Site::new();
+    s.wordpress();
+    s.write("wp-content/mu-plugins/here.php", "<?php\n");
+    for i in 0..300 {
+        s.write(&format!("app/f{i}.php"), format!("<?php // {i}\n"));
+    }
+    for rel in [
+        "wp-content/mu-plugins/here.php",
+        "wp-content/mu-plugins/gone.php",
+    ] {
+        s.trusted.borrow_mut().insert(rel.to_string(), [1; 32]);
+    }
+    assert_eq!(s.scan().trust_gone, ["wp-content/mu-plugins/gone.php"]);
+    let stopped = s.scan_with(ScanMode::FullRehash, &|| true);
+    assert!(stopped.stopped);
+    assert!(stopped.trust_gone.is_empty());
 }
 
 #[test]
@@ -2366,7 +2459,8 @@ fn watched_javascript_grown_past_64_mib_is_a_change() {
         assert_eq!(out.files_hashed, 0);
         let r = item(&out.review, rel);
         assert_eq!(r.kind, FindingKind::BaselineChange);
-        assert_eq!(r.sha256, "");
+        // Its metadata's hash: nothing was read.
+        assert_eq!(r.sha256.len(), 64);
     }
 }
 

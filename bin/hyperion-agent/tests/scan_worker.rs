@@ -61,6 +61,7 @@ async fn a_scan_job_comes_back_as_an_outcome_and_writes_the_baseline() {
         now: 1_700_000_000,
         wporg_known_slugs: None,
         accept_since: None,
+        trusted: Default::default(),
     });
     let reply = run_direct(&job, Path::new(AGENT), MAX_REPLY_BYTES)
         .await

@@ -1262,6 +1262,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             hyperion_types::WpThemeAction::Update => "update",
             hyperion_types::WpThemeAction::UpdateAll => "update_all",
             hyperion_types::WpThemeAction::Delete => "delete",
+            hyperion_types::WpThemeAction::Reinstall { .. } => "reinstall",
         };
         self.append_audit(
             "wp.theme.action",

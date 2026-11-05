@@ -195,7 +195,7 @@ const KEEPS_WP_LISTS: &[&str] = &[
     "/hostings/letter-language",
     "/hostings/perm-autoheal",
     "/hostings/page-cache/",
-    "/hostings/integrity/scan",
+    "/hostings/integrity/",
     "/hostings/ban",
     "/hostings/waf-",
     "/hostings/access/",

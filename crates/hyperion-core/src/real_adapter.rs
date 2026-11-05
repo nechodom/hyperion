@@ -439,6 +439,43 @@ impl AdapterPort for RealAdapter {
         }
     }
 
+    async fn site_scan_quarantine(
+        &self,
+        req: hyperion_adapters::sitescan::quarantine::QuarantineRequest,
+    ) -> Result<hyperion_types::QuarantinedFile, AdapterError> {
+        // Up to 2 GiB copied and fsynced: off the async threads.
+        tokio::task::spawn_blocking(move || {
+            hyperion_adapters::sitescan::quarantine::quarantine_file(&req)
+        })
+        .await
+        .map_err(|e| AdapterError::Other(format!("quarantine: {e}")))?
+    }
+
+    async fn site_scan_restore(
+        &self,
+        req: hyperion_adapters::sitescan::quarantine::RestoreRequest,
+    ) -> Result<hyperion_types::QuarantinedFile, AdapterError> {
+        tokio::task::spawn_blocking(move || {
+            hyperion_adapters::sitescan::quarantine::restore_file(&req)
+        })
+        .await
+        .map_err(|e| AdapterError::Other(format!("quarantine: {e}")))?
+    }
+
+    async fn site_scan_quarantine_list(
+        &self,
+        base: &std::path::Path,
+        hosting_id: &str,
+        cap: usize,
+    ) -> Result<hyperion_types::QuarantineList, AdapterError> {
+        let (base, hosting_id) = (base.to_path_buf(), hosting_id.to_string());
+        tokio::task::spawn_blocking(move || {
+            hyperion_adapters::sitescan::quarantine::list_quarantine(&base, &hosting_id, cap)
+        })
+        .await
+        .map_err(|e| AdapterError::Other(format!("quarantine: {e}")))?
+    }
+
     async fn clamav_facts(&self) -> (bool, bool) {
         (
             hyperion_adapters::integrity::clamav_available(),
