@@ -392,9 +392,10 @@ upstream and node filled in, and you type the domain.
   limit. Check `systemctl status docker` on the node. The stacks shown are what
   it said last.
 - **"Not reachable".** The master could not read the node. Its stacks are not
-  shown, which does not mean they are running. A node that is registered always
-  gets a row. If the master could not verify a node's answer, that node is
-  reported in a warning at the top of the page instead of a row.
+  shown, which does not mean they are running. A registered node gets a row
+  unless its answer fails authentication (the master cannot verify who wrote
+  it). That node then appears in a warning at the top of the page instead of a
+  row.
 - **An image shows "cannot verify".** The row says why. For a registry other
   than Docker Hub, install `docker-buildx-plugin` and log in with `docker login`
   as root on the node.
