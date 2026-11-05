@@ -20,6 +20,7 @@ use askama::Template;
 use axum::extract::{Path as AxPath, Query, State};
 use axum::response::{Html, IntoResponse, Response};
 use hyperion_rpc::codec::{Request, Response as RpcResponse};
+use hyperion_state::capabilities::Capability;
 use serde::Deserialize;
 
 #[derive(Template)]
@@ -127,6 +128,9 @@ pub fn job_kind_label(kind: &str) -> String {
         "post_create_setup" => "Set up new hosting",
         "wp_install" => "Install WordPress",
         "modsec_install" => "Install ModSecurity + OWASP CRS",
+        "docker_node_install" => "Turn on the Docker module for a node",
+        "docker_node_remove" => "Remove the Docker module from a node",
+        "docker_cluster_remove" => "Remove the Docker module",
         "wp_reinstall" => "Reinstall WordPress core",
         "wp_reinstall_all" => "Reinstall WordPress core everywhere",
         "wp_core_update" => "Update WordPress core",
@@ -353,9 +357,25 @@ pub async fn get_nav_status(
     State(state): State<SharedState>,
     ctx: AuthCtx,
 ) -> Result<Response, AppError> {
-    let zero = serde_json::json!({"monitors_down": 0, "wp_outdated": 0, "certs_expiring": 0});
+    let zero = serde_json::json!({
+        "monitors_down": 0,
+        "wp_outdated": 0,
+        "certs_expiring": 0,
+        "docker_installed": false,
+        "docker_problems": 0,
+    });
+    // The Docker entry follows its own capability, not the role: a custom
+    // role may hold it without being an administrator.
+    let docker_visible = ctx.can(Capability::DockerView) && ctx.scope_all();
     if !ctx.is_admin_or_higher() {
-        return Ok(axum::Json(zero).into_response());
+        if !docker_visible {
+            return Ok(axum::Json(zero).into_response());
+        }
+        let dots = nav_dots_cached(&state).await;
+        let mut out = zero;
+        out["docker_installed"] = dots.docker_installed.into();
+        out["docker_problems"] = dots.docker_problems.into();
+        return Ok(axum::Json(out).into_response());
     }
     let (dots, wp_outdated) = tokio::join!(
         nav_dots_cached(&state),
@@ -367,11 +387,17 @@ pub async fn get_nav_status(
     let NavDots {
         monitors_down,
         certs_expiring,
+        docker_installed,
+        docker_problems,
     } = dots;
     Ok(axum::Json(serde_json::json!({
         "monitors_down": monitors_down,
         "wp_outdated": wp_outdated,
         "certs_expiring": certs_expiring,
+        // Only a reader of the Docker page is told; the sidebar entry stays
+        // hidden for everyone else even though the poller runs for them.
+        "docker_installed": docker_installed && docker_visible,
+        "docker_problems": if docker_visible { docker_problems } else { 0 },
     }))
     .into_response())
 }
@@ -383,6 +409,10 @@ pub struct NavDots {
     pub monitors_down: usize,
     /// Let's Encrypt certificates with under 14 days left (or expired).
     pub certs_expiring: usize,
+    /// The Docker module is on for the cluster, so the sidebar shows it.
+    pub docker_installed: bool,
+    /// Docker stacks and nodes that need a person, counted as /docker does.
+    pub docker_problems: i64,
 }
 
 impl NavDots {
@@ -399,6 +429,8 @@ impl NavDots {
                 .iter()
                 .filter(|c| c.days_left < 14 && c.issuer.to_lowercase().contains("letsencrypt"))
                 .count(),
+            docker_installed: false,
+            docker_problems: 0,
         }
     }
 }
@@ -416,11 +448,24 @@ async fn nav_dots_cached(state: &SharedState) -> NavDots {
         .caches
         .nav_dots
         .get_or_load(|| async {
-            let ((monitors, _), (certs, _)) = tokio::join!(
+            let (
+                (monitors, _),
+                (certs, _),
+                (docker_installed, docker_problems),
+                url_checks_down,
+            ) = tokio::join!(
                 super::monitoring::collect_overview(state),
                 super::certs::collect_overview(state),
+                // Asks no node at all while the module is off.
+                super::docker::nav_summary(state),
+                // The master's own URL checks sit on the same page.
+                super::monitoring::urls_alerting(state),
             );
-            Ok::<_, ()>(NavDots::count(&monitors, &certs))
+            let mut dots = NavDots::count(&monitors, &certs);
+            dots.monitors_down += url_checks_down;
+            dots.docker_installed = docker_installed;
+            dots.docker_problems = docker_problems;
+            Ok::<_, ()>(dots)
         })
         .await
         .unwrap_or_default()
@@ -844,7 +889,7 @@ pub async fn get_job_progress(
     Ok(resp)
 }
 
-async fn fetch_job(
+pub(crate) async fn fetch_job(
     state: &SharedState,
     id: &str,
 ) -> Result<Option<hyperion_types::JobView>, AppError> {

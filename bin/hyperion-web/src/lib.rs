@@ -20,6 +20,7 @@ pub mod auth;
 pub mod cluster_sync;
 pub mod config;
 pub mod dispatcher;
+pub mod docker_watch;
 pub mod error;
 pub mod filters;
 pub mod handlers;
@@ -29,6 +30,7 @@ pub mod ratelimit;
 pub mod setup;
 pub mod state;
 pub mod ttl_cache;
+pub mod url_watch;
 pub mod wp_library;
 pub mod wp_list_cache;
 
@@ -361,6 +363,47 @@ pub fn build_router(state: SharedState) -> Router {
             post(handlers::stats::post_backup_untracked_delete),
         )
         .route("/monitoring", get(handlers::monitoring::get_monitoring))
+        .route(
+            "/monitoring/urls",
+            post(handlers::monitoring::post_url_save),
+        )
+        .route(
+            "/monitoring/urls/:id/delete",
+            post(handlers::monitoring::post_url_delete),
+        )
+        .route("/docker", get(handlers::docker::get_docker))
+        .route(
+            "/docker/install-cluster",
+            post(handlers::docker::post_install_cluster),
+        )
+        .route(
+            "/docker/remove-cluster",
+            post(handlers::docker::post_remove_cluster),
+        )
+        .route(
+            "/docker/nodes/:node/install",
+            post(handlers::docker::post_node_install),
+        )
+        .route(
+            "/docker/nodes/:node/remove",
+            post(handlers::docker::post_node_remove),
+        )
+        .route(
+            "/docker/hosting-chip",
+            get(handlers::docker::get_hosting_chip),
+        )
+        .route(
+            "/docker/:node/:project",
+            get(handlers::docker::get_docker_stack),
+        )
+        .route(
+            "/docker/:node/:project/logs",
+            get(handlers::docker::get_docker_logs),
+        )
+        .route(
+            "/docker/:node/:project/forget",
+            post(handlers::docker::post_forget),
+        )
         .route("/trash", get(handlers::trash::get_trash))
         .route("/trash/restore", post(handlers::trash::post_trash_restore))
         .route("/trash/purge", post(handlers::trash::post_trash_purge))
@@ -868,6 +911,18 @@ pub fn build_router(state: SharedState) -> Router {
         // node) are the other two tabs of the same page.
         .route("/import", get(handlers::import_wizard::get_wizard))
         .route("/import/ssh", get(handlers::import_panel::get_import))
+        .route(
+            "/import/wordpress",
+            get(handlers::import_wordpress::get_page),
+        )
+        .route(
+            "/import/wordpress/mint",
+            post(handlers::import_wordpress::post_mint),
+        )
+        .route(
+            "/import/wordpress/hyperion-migrate.zip",
+            get(handlers::import_wordpress::get_plugin_zip),
+        )
         .route("/import/hyperion", get(handlers::migration::get_import))
         .route("/import/plan", post(handlers::import_panel::post_plan))
         .route("/import/apply", post(handlers::import_panel::post_apply))
@@ -1438,6 +1493,28 @@ pub fn build_router(state: SharedState) -> Router {
         .route(
             "/import/upload/status",
             get(handlers::import_wizard::get_upload_status),
+        )
+        // The WordPress plugin's upload. Same token rules, two streams instead
+        // of one bundle: see handlers/import_wordpress.rs.
+        .route(
+            "/import/upload/wp/begin",
+            post(handlers::import_wordpress::post_begin)
+                .layer(axum::extract::DefaultBodyLimit::max(128 * 1024)),
+        )
+        .route(
+            "/import/upload/wp/chunk",
+            axum::routing::put(handlers::import_wordpress::put_chunk)
+                .layer(axum::extract::DefaultBodyLimit::max(128 * 1024 * 1024)),
+        )
+        .route(
+            "/import/upload/wp/commit",
+            post(handlers::import_wordpress::post_commit)
+                .layer(axum::extract::DefaultBodyLimit::max(128 * 1024)),
+        )
+        .route(
+            "/import/upload/wp/abort",
+            post(handlers::import_wordpress::post_abort)
+                .layer(axum::extract::DefaultBodyLimit::max(8 * 1024)),
         )
         .route(
             "/import/progress",

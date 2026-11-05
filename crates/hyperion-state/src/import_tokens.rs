@@ -396,14 +396,20 @@ pub const FAILED_VISIBLE_SECS: i64 = 24 * 60 * 60;
 /// the table. The operator was left with a row that had been there a moment ago
 /// and no statement of what happened, which is the one thing a transfer list
 /// exists to prevent: "absent" and "lost" must never look the same.
+///
+/// A committed transfer is listed for that same day even after its token expires:
+/// the import job does not stop with the code, and its outcome still has to reach
+/// the operator.
 pub async fn list_active(pool: &SqlitePool, now: i64) -> Result<Vec<ImportTokenRow>, StateError> {
     let rows = sqlx::query_as::<_, ImportTokenRow>(&format!(
         "SELECT {COLS} FROM import_tokens \
          WHERE (status IN ('pending', 'receiving', 'importing') AND expires_at > ?) \
             OR (status = 'failed' AND created_at > ?) \
+            OR (status = 'importing' AND job_id IS NOT NULL AND created_at > ?) \
          ORDER BY created_at DESC",
     ))
     .bind(now)
+    .bind(now - FAILED_VISIBLE_SECS)
     .bind(now - FAILED_VISIBLE_SECS)
     .fetch_all(pool)
     .await?;
@@ -666,6 +672,35 @@ mod tests {
             "a fresh failure must not be deleted while the wizard still shows it"
         );
         assert_eq!(cleanup(&pool, now + 1).await.unwrap(), 1);
+    }
+
+    /// The import job can outlive the code that started it. Its outcome still has
+    /// to reach the table, for the same day a failed transfer is shown.
+    #[tokio::test]
+    async fn a_committed_transfer_stays_listed_past_its_tokens_expiry() {
+        let pool = mem().await;
+        let now = 10_000;
+        let id = create(&pool, "c1", "local", "cloudpanel", "admin", now, now + 60)
+            .await
+            .unwrap();
+        set_job(&pool, id, "job-1").await.unwrap();
+        // Never committed: an expired code is simply gone.
+        create(&pool, "c2", "local", "cloudpanel", "admin", now, now + 60)
+            .await
+            .unwrap();
+
+        let rows = list_active(&pool, now + 3_600).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, id);
+        assert!(get_fetchable(&pool, "c1", now + 3_600)
+            .await
+            .unwrap()
+            .is_none());
+
+        assert!(list_active(&pool, now + FAILED_VISIBLE_SECS + 60)
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     /// A packing heartbeat is evidence of progress and must extend the token —

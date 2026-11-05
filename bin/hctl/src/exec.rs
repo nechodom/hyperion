@@ -6,7 +6,7 @@
 //! --follow` poll. Whatever the path, the caller gets back the one response
 //! to print plus any secrets this run generated.
 
-use crate::util::{confirm, new_secret, parse_selector};
+use crate::util::{confirm, new_secret, parse_selector, secret_from_stdin};
 use crate::*;
 use anyhow::{anyhow, bail, Context, Result};
 use hyperion_rpc::codec::{AuditSearchFilter, Request, Response};
@@ -304,9 +304,19 @@ pub async fn execute(socket: &Path, cmd: &Cmd) -> Result<Outcome> {
             HostingCmd::Import { manifest } => Request::HostingImport {
                 manifest_path: manifest.clone(),
             },
-            HostingCmd::ImportFromUrl { base_url, token } => Request::HostingImportFromUrl {
+            HostingCmd::ImportFromUrl {
+                base_url,
+                token_stdin,
+                token,
+            } => Request::HostingImportFromUrl {
                 base_url: base_url.clone(),
-                token: token.clone(),
+                token: if *token_stdin {
+                    secret_from_stdin("--token-stdin")?
+                } else {
+                    token
+                        .clone()
+                        .context("--token-stdin or --token is required")?
+                },
                 override_domain: None,
                 override_aliases: Vec::new(),
                 master_minted: false,

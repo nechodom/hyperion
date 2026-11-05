@@ -91,6 +91,8 @@ async fn rollback_cleans_system_users_db_row_so_uid_can_be_reused() {
         )),
         backup_progress: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         site_scan: Default::default(),
+        docker_snapshot: Arc::new(tokio::sync::RwLock::new(None)),
+        docker_log_gate: crate::service::new_docker_log_gate(),
     };
     s2.create(req("test6.example.cz"))
         .await

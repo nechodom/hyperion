@@ -228,6 +228,70 @@ pub struct NewQuery {
     /// `1` opens the one-screen test-site form instead of the wizard.
     #[serde(default)]
     pub(super) test: String,
+    /// Prefill from a link (the Docker stack page's "Add reverse proxy").
+    /// Every one of these is user input in a URL: it is checked against what
+    /// the wizard itself offers and dropped when it does not match, and the
+    /// submit validates again.
+    #[serde(default)]
+    pub(super) site_type: String,
+    #[serde(default)]
+    pub(super) proxy_upstream_url: String,
+    #[serde(default)]
+    pub(super) target_node: String,
+}
+
+/// What the wizard starts with, taken from the query.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(super) struct WizardPrefill {
+    pub(super) site_type: String,
+    pub(super) proxy_upstream_url: String,
+    pub(super) target_node: String,
+}
+
+/// Longest upstream address read from a URL.
+const PREFILL_URL_MAX_CHARS: usize = 512;
+
+/// Keep what the wizard would accept and nothing else. The only card a link
+/// may choose is the reverse proxy; the upstream must pass the same check
+/// the vhost renderer applies and point at this node's own loopback (a link
+/// is not a way to aim a proxy at another machine); the node must be one the
+/// picker lists. The domain is never prefilled.
+pub(super) fn wizard_prefill(
+    q: &NewQuery,
+    nodes: &[hyperion_types::NodeSummary],
+    master_accepts_hostings: bool,
+) -> WizardPrefill {
+    let site_type = if q.site_type.trim() == "reverse_proxy" {
+        "reverse_proxy".to_string()
+    } else {
+        String::new()
+    };
+    let raw = q.proxy_upstream_url.trim();
+    let proxy_upstream_url = if raw.chars().count() > PREFILL_URL_MAX_CHARS {
+        String::new()
+    } else {
+        hyperion_adapters::nginx::validate_upstream_url(raw)
+            .ok()
+            .filter(|u| hyperion_core::service::loopback_port(u).is_some())
+            .unwrap_or_default()
+    };
+    let want = q.target_node.trim();
+    let target_node = if want == crate::dispatcher::LOCAL_NODE_SENTINEL {
+        // The picker only lists the master when it takes sites; with no
+        // workers there is no picker and the master is the only target.
+        (nodes.is_empty() || master_accepts_hostings).then(|| want.to_string())
+    } else {
+        nodes
+            .iter()
+            .find(|n| !want.is_empty() && n.node_id == want)
+            .map(|n| n.node_id.clone())
+    }
+    .unwrap_or_default();
+    WizardPrefill {
+        site_type,
+        proxy_upstream_url,
+        target_node,
+    }
 }
 
 pub async fn get_new(
@@ -280,6 +344,7 @@ pub async fn get_new(
     // option from the Target-node dropdown.
     let (master_hostname, cluster_cfg) = fetch_master_and_cluster(&state).await;
     let master_accepts_hostings = cluster_cfg.master_accepts_hostings;
+    let prefill = wizard_prefill(&q, &nodes, master_accepts_hostings);
     let tpl = NewTpl {
         test_available: test_setup.available(),
         master_hostname: master_hostname.clone(),
@@ -295,10 +360,10 @@ pub async fn get_new(
         php_in: "8.3".to_string(),
         db_in: "mariadb".to_string(),
         kind_in: "php".to_string(),
-        site_type_in: String::new(),
-        proxy_upstream_url_in: String::new(),
+        site_type_in: prefill.site_type,
+        proxy_upstream_url_in: prefill.proxy_upstream_url,
         nodes,
-        target_node_in: String::new(),
+        target_node_in: prefill.target_node,
         master_accepts_hostings,
         // The master's option posts `local`; list it under that id too when
         // it is a test server, so the short-name field follows it.
@@ -613,6 +678,9 @@ async fn plan_create(
         if u.is_empty() {
             return Err("Reverse proxy requires an upstream URL.".into());
         }
+        // The same check the vhost renderer applies, run before anything is
+        // created: a link can prefill this field, so it is user input.
+        hyperion_adapters::nginx::validate_upstream_url(u).map_err(|e| e.to_string())?;
         Some(u.to_string())
     } else {
         None
@@ -1700,7 +1768,7 @@ pub(crate) async fn compute_preview_domain(
     let has_wildcard = matches!(
         resp,
         Ok(RpcResponse::CertOverview(ref items))
-            if items.iter().any(|c| c.domain.eq_ignore_ascii_case(&base))
+            if items.iter().any(|c| c.is_wildcard_for(&base))
     );
     if has_wildcard {
         PreviewInfo {

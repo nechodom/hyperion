@@ -255,6 +255,112 @@ async fn probe_http_waits_for_a_slow_page() {
     assert!(r.response_ms >= 7_000, "{r:?}");
 }
 
+/// A page of several megabytes is read, judged on its head as ever, and
+/// never held: the probe keeps the head and the end of the output.
+#[tokio::test]
+async fn probe_http_judges_a_large_page_on_its_head() {
+    if curl_missing() {
+        return;
+    }
+    let site = spawn_test_site().await;
+    let url = format!("https://{}/", site.host());
+
+    site.set(SiteMode::Big(8 * 1024 * 1024));
+    let r = super::probe_http(&url).await;
+    assert!(r.success, "{r:?}");
+    assert_eq!(r.http_status, Some(200));
+
+    site.set(SiteMode::BigCriticalFirst(8 * 1024 * 1024));
+    let r = super::probe_http(&url).await;
+    assert!(!r.success && r.hard_failure, "{r:?}");
+    let err = r.error_message.clone().unwrap_or_default();
+    assert!(err.contains("critical error"), "{r:?}");
+
+    // Past the cap nothing is looked at: the same answer as before the
+    // output was capped.
+    site.set(SiteMode::BigCriticalLate(8 * 1024 * 1024));
+    let r = super::probe_http(&url).await;
+    assert!(r.success, "{r:?}");
+}
+
+/// What is kept of an answer is bounded whatever its size: the head holds
+/// the characters judged and the code comes from the end.
+#[test]
+fn the_probe_output_is_split_into_a_bounded_head_and_a_code() {
+    use super::{split_probe_output, PROBE_BODY_CAP, PROBE_STATUS_MARK};
+    // Whole output: read as it always was.
+    let whole = format!("<html>hi</html>{PROBE_STATUS_MARK}200");
+    assert_eq!(
+        split_probe_output(whole.as_bytes(), b"", 0),
+        ("<html>hi</html>".to_string(), 200)
+    );
+    // The same output cut into a head and a tail that touch.
+    let (h, t) = whole.as_bytes().split_at(10);
+    assert_eq!(
+        split_probe_output(h, t, 0),
+        ("<html>hi</html>".to_string(), 200)
+    );
+    // No mark: curl never printed it.
+    assert_eq!(
+        split_probe_output(b"partial", b"", 0),
+        ("partial".into(), 0)
+    );
+    // A body longer than the head kept: the head is cut to the characters
+    // judged and the code comes from the tail.
+    let head = "é".repeat(PROBE_BODY_CAP * 2);
+    let tail = format!("end{PROBE_STATUS_MARK}503");
+    let (body, code) = split_probe_output(head.as_bytes(), tail.as_bytes(), 9_999_999);
+    assert_eq!(body.chars().count(), PROBE_BODY_CAP);
+    assert!(body.chars().all(|c| c == 'é'));
+    assert_eq!(code, 503);
+    // Dropped bytes and no mark in the tail: no code.
+    assert_eq!(split_probe_output(b"abc", b"xyz", 5).1, 0);
+    // A mark inside the body does not count: the last one does.
+    let tricky = format!("a{PROBE_STATUS_MARK}999 b{PROBE_STATUS_MARK}404");
+    assert_eq!(split_probe_output(tricky.as_bytes(), b"", 0).1, 404);
+}
+
+/// Every process's command line on this machine, the way any local user
+/// reads it.
+fn all_command_lines() -> String {
+    let out = std::process::Command::new("ps")
+        .args(["-axo", "args="])
+        .output()
+        .expect("ps");
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// The address of a probe may carry a token. It must reach curl on stdin,
+/// never on the command line, for the whole life of the request.
+#[tokio::test]
+async fn probe_http_keeps_the_address_off_the_command_line() {
+    if curl_missing() {
+        return;
+    }
+    let site = spawn_test_site().await;
+    site.set(SiteMode::Slow(4));
+    // Unique to this run, so a curl left over from an earlier run cannot
+    // be mistaken for this one.
+    let token = format!(
+        "PROBE-TOKEN-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos())
+    );
+    let url = format!("https://{}/page?key={token}", site.host());
+    let probe = tokio::spawn(async move { super::probe_http(&url).await });
+    tokio::time::sleep(std::time::Duration::from_millis(1_500)).await;
+    let seen = all_command_lines();
+    assert!(!seen.contains(&token), "the token is on a command line");
+    assert!(
+        seen.contains("curl --config -"),
+        "the probe was not running when the command lines were read"
+    );
+    let r = probe.await.expect("probe");
+    assert!(r.success, "{r:?}");
+}
+
 /// Sporadic blips (one probe in five gets no answer) are not an outage:
 /// no bell at all.
 #[tokio::test]

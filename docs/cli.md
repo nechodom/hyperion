@@ -367,17 +367,21 @@ keys never travel; a new certificate is issued.
 
 Import a migration bundle straight from the source node.
 
-**Options:** `--base-url URL` `--token TOKEN`
+**Options:** `--base-url URL` `--token-stdin` `--token TOKEN`
 
 ```bash
-hctl hosting import-from-url \
+printf '%s\n' 'AAAA.BBBB' | hctl hosting import-from-url \
   --base-url https://old.example.net/api/migration/bundle/mig_abc \
-  --token AAAA.BBBB
+  --token-stdin
 ```
 
 The URL and the signed token come from the export result page in the panel;
 `hctl hosting export` cannot sign one. The token expires an hour after the
 export.
+
+`--token-stdin` reads the token from one line of stdin. `printf` is a shell
+builtin, so the token never appears in the process list. `--token` still works,
+but any local user can read it there while the import runs.
 
 ### hctl hosting import-panel
 
@@ -1607,7 +1611,9 @@ CI, another server. Every command prints the API's JSON answer, ready for
 Connection settings resolve in this order: `--url` / `--key` →
 `$HYPERION_API_URL` / `$HYPERION_API_KEY` → `~/.config/hyperion/remote.toml`
 (written by `remote login`). `--insecure` skips TLS verification for a panel
-on a self-signed certificate.
+on a self-signed certificate. Any local user can read `--key` from the process
+list while the command runs, so prefer the environment variable or the saved
+file.
 
 Commands that start a background job print `{ "job_id": … }`. Add `--wait` to
 follow the job to the end. It then exits `1` if the job failed.
@@ -1616,13 +1622,14 @@ follow the job to the end. It then exits `1` if the job failed.
 
 Save the API URL and key.
 
-**Options:** `--url URL` `--key KEY`
+**Options:** `--url URL` `--key-stdin` `--key KEY`
 
 ```bash
-hctl remote login --url https://panel.example.com --key hyp_…
+hctl remote login --url https://panel.example.com --key-stdin < api-key.txt
 ```
 
-Writes `~/.config/hyperion/remote.toml` with mode `0600`.
+`--key-stdin` reads the key from one line of stdin. `$HYPERION_API_KEY` works
+too. Writes `~/.config/hyperion/remote.toml` with mode `0600`.
 
 ### hctl remote me
 

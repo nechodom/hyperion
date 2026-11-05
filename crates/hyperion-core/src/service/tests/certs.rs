@@ -390,6 +390,43 @@ async fn seed_wildcard(
     now
 }
 
+/// A newly issued wildcard must reach sites NOT under the base too: their
+/// preview server block only exists once the vhost is rendered again, and
+/// nothing else re-renders an established site. Their own certificate stays.
+#[tokio::test]
+async fn wildcard_refreshes_every_active_site_but_repoints_only_subdomains() {
+    let pool = open_memory().await.expect("open");
+    let s = svc(pool.clone(), happy_mocks_many());
+    for d in ["fortischem.sk", "blog.base.cz", "a.b.base.cz"] {
+        s.create(req(d)).await.expect("create");
+    }
+    for d in ["fortischem.sk", "a.b.base.cz"] {
+        certificates::upsert(&pool, d, 1, 2, "/own/f.pem", "/own/k.pem", "letsencrypt")
+            .await
+            .expect("own cert");
+    }
+    seed_wildcard(&s, "base.cz", 80, false).await;
+
+    let mut m = MockAdapterPort::new();
+    m.expect_nginx_write_vhost().times(3).returning(|_| Ok(()));
+    let s = svc(pool.clone(), m);
+    assert_eq!(s.refresh_vhosts_for_wildcard("base.cz").await.unwrap(), 3);
+
+    let path = |d: &'static str| {
+        let pool = pool.clone();
+        async move {
+            certificates::get(&pool, d)
+                .await
+                .unwrap()
+                .expect("row")
+                .cert_path
+        }
+    };
+    assert_eq!(path("blog.base.cz").await, "/c/f.pem");
+    assert_eq!(path("fortischem.sk").await, "/own/f.pem");
+    assert_eq!(path("a.b.base.cz").await, "/own/f.pem");
+}
+
 #[tokio::test]
 async fn delegated_wildcard_is_skipped_without_manual_alert() {
     use hyperion_state::web_users::WebRole;

@@ -4162,6 +4162,35 @@ hr.divider {
 .import-steps { margin: 1rem 0 0; padding-left: 1.25rem; font-size: 0.9rem; line-height: 1.7; }
 .import-steps li + li { margin-top: 0.15rem; }
 .import-php { padding: 0.15rem 0.35rem; font-size: 0.82rem; }
+
+/* WordPress plugin import: numbered steps, with the download as the first thing
+   the eye lands on. */
+.group > .wpm-step { display: grid; grid-template-columns: 1.75rem minmax(0, 1fr) auto; column-gap: 0.9rem; align-items: start; }
+.wpm-num { position: relative; display: flex; align-items: center; justify-content: center; width: 1.75rem; height: 1.75rem; border-radius: 50%; border: 1px solid var(--border-strong); color: var(--text-dim); font-size: 0.8rem; font-weight: 600; font-variant-numeric: tabular-nums; transition: background-color var(--t-med), border-color var(--t-med), color var(--t-med); }
+.wpm-tick { display: none; width: 0.85rem; height: 0.85rem; }
+.wpm-step.is-done .wpm-num { background: var(--success-soft); border-color: transparent; color: var(--success); }
+.wpm-step.is-done .wpm-digit { display: none; }
+.wpm-step.is-done .wpm-tick { display: block; }
+.wpm-body h3 { margin: 0.2rem 0 0.35rem; font-size: 0.95rem; text-wrap: balance; }
+.wpm-body p { margin: 0; color: var(--text-dim); font-size: 0.88rem; line-height: 1.6; text-wrap: pretty; }
+.wpm-body p.wpm-meta { margin-top: 0.45rem; color: var(--text-soft); font-size: 0.78rem; font-variant-numeric: tabular-nums; }
+.wpm-wide { grid-column: 2 / -1; }
+.btn.wpm-download { align-self: center; padding: 0.8rem 1.25rem; font-size: 0.92rem; }
+.btn.wpm-download .btn-icon { width: 16px; height: 16px; }
+.wpm-code-actions { display: flex; align-items: center; gap: 0.75rem; margin-top: 0.75rem; }
+.wpm-code-actions .btn { flex: none; }
+.wpm-body p.wpm-landing { margin-top: 0.75rem; }
+.wpm-mint { margin-top: 1rem; }
+.wpm-mint .field { margin: 0; }
+.group > .wpm-scope { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1.5rem; }
+.wpm-scope h4 { margin: 0 0 0.3rem; font-size: 0.8rem; font-weight: 600; color: var(--text); }
+.wpm-scope p { margin: 0; color: var(--text-soft); font-size: 0.82rem; line-height: 1.6; text-wrap: pretty; }
+@media (max-width: 680px) {
+  .group > .wpm-step { grid-template-columns: 1.75rem minmax(0, 1fr); }
+  .btn.wpm-download { grid-column: 2; justify-self: start; margin-top: 0.85rem; }
+  .wpm-code-actions { flex-direction: column; align-items: flex-start; }
+  .group > .wpm-scope { grid-template-columns: minmax(0, 1fr); gap: 1rem; }
+}
 .seg-dot {
   width: 7px;
   height: 7px;
@@ -6335,4 +6364,30 @@ form[aria-busy="true"] * { pointer-events: none; }
 .prot-req { word-break: break-all; max-width: 28rem; }
 @media (max-width: 640px) {
   .prot-days > span:nth-child(even) { display: none; }
+}
+
+/* ── Docker log viewer ───────────────────────────────────────── */
+.dl-form { display: flex; align-items: flex-end; gap: 0.6rem; flex-wrap: wrap; margin: 0; }
+.dl-form label { display: flex; flex-direction: column; gap: 0.2rem; font-size: 0.78rem; color: var(--text-soft); }
+.dl-form .dl-filter { flex: 1 1 12rem; min-width: 0; }
+.dl-form .dl-follow { flex-direction: row; align-items: center; gap: 0.4rem; padding-bottom: 0.45rem; }
+.dl-lines {
+  max-height: 32rem;
+  overflow: auto;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0.5rem 0.7rem;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+.dl-row { display: flex; gap: 0.6rem; min-width: 0; }
+.dl-time { flex: none; color: var(--text-soft); }
+.dl-svc { flex: none; color: var(--primary-h); }
+.dl-text { white-space: pre-wrap; overflow-wrap: anywhere; min-width: 0; min-height: 1.2em; }
+.dl-poll { height: 0; overflow: hidden; }
+.dl-empty { color: var(--text-soft); }
+@media (max-width: 600px) {
+  .dl-row { flex-wrap: wrap; gap: 0.1rem 0.5rem; }
 }

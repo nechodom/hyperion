@@ -246,6 +246,182 @@ dig TXT _acme-challenge.<base>                   # public resolver follows the C
 An end-to-end issuance against Let's Encrypt staging on a test domain is still
 recommended before relying on it in production.
 
+## Docker monitoring
+
+An optional module that watches the Docker Compose stacks on your nodes. It is
+off until an administrator turns it on, and while it is off no node runs a
+`docker` command, the sidebar has no Docker entry and no URL check runs.
+
+### What it does
+
+- Lists stacks per node, problems first: containers, state, health, restarts,
+  exit code and OOM kills, published ports, CPU and memory, log size, and the
+  disk used by images, volumes and build cache.
+- Alerts on an unhealthy container, a restart loop, a container that exited
+  badly or was OOM-killed, a stack that disappeared, and a Docker daemon that
+  stops answering. A state has to last about 3 minutes before it alerts, so a
+  deploy stays quiet. A job that exited 0 and will not be restarted (restart
+  policy none or `on-failure`) is fine. A container Docker created but could
+  not start (state `created` with a non-zero exit code) is a problem.
+- Shows container and stack logs to people allowed to read them.
+- Checks once a day whether the tag a container runs has moved on at its
+  registry.
+- Runs URL checks from the master (below), which replace an external uptime
+  tool.
+- Starts a reverse-proxy hosting from a stack that publishes a port.
+
+It is read-only. Hyperion never starts, stops, restarts, pulls, execs or deletes
+anything in Docker, and it does not install or update Docker. Container
+environment variables and labels other than the Compose ones never leave the
+node. `hctl` and `/api/v1` do not cover the module yet.
+
+### Turn it on
+
+Docker has to be installed on each node you want to watch (Docker Engine from
+Docker's own apt repository, for example). The module does not install it.
+
+1. Settings → Panel → **Docker monitoring** → **Turn on Docker monitoring**
+   (administrators only). This adds the **Docker** page and enables URL checks.
+   The master needs no Docker for this step.
+2. On the **Docker** page, press **Turn on** for each node, the master included.
+   It runs as a background job and checks that the Docker daemon answers on
+   that node. If Docker is missing, the job fails and says to install Docker
+   first. If it is installed but stopped, the job says "Start Docker and try
+   again". A node running an older agent says "update the node first".
+
+`docker buildx` is optional. Without it, image updates still work for Docker
+Hub but show "cannot verify" for every other registry and for private Hub
+repositories.
+
+### Turn it off
+
+Settings → Panel → **Remove the module** asks every node to delete what
+Hyperion kept about Docker (remembered stacks, open alerts, cached disk
+figures, image-update answers and restart-loop history) and then turns the
+module off on the master. The URL checks and their history are deleted with
+it. A node that does not answer stays listed and the module stays on until it
+is removed there. **Remove from this node** on the Docker page deletes the same
+node data for that one node only. The URL checks stay, and the module stays on
+for the cluster. Docker, its containers, images and volumes are never touched,
+and reverse-proxy hostings made through the module stay, since they are
+ordinary hostings.
+
+### Logs
+
+Opening a stack's or container's logs needs the Docker logs permission. It is
+admin-level, custom roles can be given it, and it only works for a user who
+can see every hosting, because these rows span all tenants. Customers never see
+the Docker pages. The page shows the last 50 to 2000 lines (200 by
+default), can filter by text and can follow the log. Opening a log writes an
+audit entry (`docker.logs.read`) with who and which container. Following does
+not write one per refresh. The entry is written on the node that serves the
+logs, so the logs of a stack on a worker are audited in that worker's audit
+log, not the master's.
+
+A container on the `none` logging driver has no log to show, and the page says
+so. The `journald` and `local` drivers can be read like the default one, but
+keep no file Hyperion can measure, so their log size shows as 0.
+
+Log lines appear in the panel only. Alerts by email, Slack or webhook never
+contain them.
+
+### Alerts
+
+The master sends the outbound alerts, to the cluster's Slack webhook and the
+administrator addresses, after a worker's alert has reached it. Per-stack
+routing does not exist. Stack problems, daemon down, a node that stops
+answering for about 3 minutes, and URL check failures go out by email and Slack
+as well as the bell, each with a recovery. Image update notices are bell only,
+one card per node.
+
+Stopping on purpose is not told apart from a failure when Docker would bring
+the container back. A `docker compose stop` of a service whose restart policy
+is `always` or `unless-stopped` alerts after about 3 minutes, and recovers when
+you start it again. A `docker compose down` removes the containers, so the
+stack alerts as gone until you start it again or press **Forget** on it. A
+service with restart policy `no` or `on-failure` that exited 0 counts as a
+finished job and is fine; one that exited non-zero alerts, and a stopped
+container often exits 143 or 137.
+
+### Image updates
+
+Once a day, per unique image reference, Hyperion compares the digest the
+node pulled with the digest the registry holds under the same tag. It does not
+look for a newer version number (`1.2` to `1.3`), and it pulls nothing.
+Results are up to date, update available, or cannot verify (built locally,
+pinned by digest, registry error, rate limit, or no buildx). A failed check
+keeps the last answer, marked "The latest check failed"; with no earlier answer
+it shows cannot verify. It also flags a
+container running an older image than the tag's local copy.
+
+Docker Hub is asked with an anonymous token and a `HEAD` on the manifest, which
+does not count against Hub's per-IP pull limit. Other registries, and Hub
+repositories that need a login, go through `docker buildx imagetools inspect`,
+so **buildx has to be installed on the node** and the registry login has to be
+in Docker's own credential store. Hyperion never reads or stores a registry
+password. A rate-limited answer waits until the next day.
+
+### URL checks
+
+URL checks live on the **Monitoring** page, next to the per-hosting uptime
+monitor, which is unchanged. Each check has an address, an interval (30 seconds
+at the shortest), an expected status, how many failures alert, and optional own
+email addresses, Slack webhook and generic webhook (the cluster's Slack and
+administrator addresses otherwise). https addresses also warn at 14 and 3 days
+before the certificate expires, and once more when it has expired. Uptime Kuma monitors are entered by hand: there is no import and no history
+carried over.
+
+The checks run **from the master** (on a single server with no workers, from
+that server), so a whole node dying is seen from outside.
+The flip side: an app on the master's own server has no outside view, and its
+check only proves the master can reach itself.
+
+Hyperion works out which node an address belongs to from its host name, and an
+administrator can override that. When a check fails it asks that node for the
+stack's state and puts it in the alert (for example "web: exit 137, out of
+memory"), or says the node does not answer. An address that belongs to no
+hosting is fine.
+
+### Published ports and the firewall
+
+A port published as `0.0.0.0:8080` is not stopped by Hyperion's firewall
+input rules or its bans. Docker sends that traffic through forwarding, and on a
+real node a rule dropping the port in an input chain did not stop a request
+from outside. The app is then reachable directly, around nginx and the WAF.
+Publish it on loopback instead, in the compose file:
+
+```yaml
+ports:
+  - "127.0.0.1:8080:80"
+```
+
+The stack page warns when a port it offers for proxying is bound this way. A
+reverse-proxy hosting can only target a loopback port that a container publishes, never a container
+address, because that changes when the container is recreated. Ports 80 and 443
+are not offered since nginx owns them. To add one, open a stack that publishes
+a port and press **Add reverse proxy**: the new-site form opens with the type,
+upstream and node filled in, and you type the domain.
+
+### Troubleshooting
+
+- **"Docker is not answering".** The daemon did not reply within the time
+  limit. Check `systemctl status docker` on the node. The stacks shown are what
+  it said last.
+- **"Not reachable".** The master could not read the node. Its stacks are not
+  shown, which does not mean they are running. A registered node gets a row
+  unless its answer fails authentication (the master cannot verify who wrote
+  it). That node then appears in a warning at the top of the page instead of a
+  row.
+- **"The Docker version on this node is too old".** Turning the module on read
+  `docker version` and could not make sense of it. Hyperion asks Docker for
+  JSON with the `{{json .}}` template, which older CLIs understand, but a
+  very old Docker still answers in a form it cannot read. Update Docker.
+- **An image shows "cannot verify".** The row says why. For a registry other
+  than Docker Hub, install `docker-buildx-plugin` and log in with `docker login`
+  as root on the node.
+- **A removed stack stays listed.** Press **Forget** on it. That clears
+  Hyperion's record and its alert, and touches no container.
+
 ## Logs
 
 - Structured agent log: `/var/log/hyperion/agent.log` (JSON Lines).

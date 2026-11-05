@@ -282,16 +282,19 @@ async fn php_workers_auto_raises_rebases_and_restores() {
 /// memory_limit without it ever noticing.
 #[tokio::test]
 async fn boot_rerender_keeps_stored_pool_limits() {
+    use hyperion_adapters::phpfpm::{FpmApply, PoolLimits};
     use std::sync::{Arc, Mutex};
     let pool = open_memory().await.expect("open");
-    let seen: Arc<Mutex<Vec<(i64, i64)>>> = Arc::default();
+    let seen: Arc<Mutex<Vec<Option<PoolLimits>>>> = Arc::default();
     let mut a = happy_mocks();
-    let rec = seen.clone();
     a.expect_apply_php_limits()
-        .returning(move |_, _, _, mem, _, children, _| {
-            rec.lock().unwrap().push((mem, children));
-            Ok(())
-        });
+        .returning(|_, _, _, _, _, _, _| Ok(()));
+    let rec = seen.clone();
+    a.expect_fpm_sync_pool().returning(move |_, _, _, limits| {
+        rec.lock().unwrap().push(limits);
+        Ok(FpmApply::Nothing)
+    });
+    a.expect_fpm_apply().never();
     let s = svc(pool, a);
     s.create(req("ex.cz")).await.expect("create");
     let sel = HostingSelector::Domain(Domain::parse("ex.cz").unwrap());
@@ -299,10 +302,140 @@ async fn boot_rerender_keeps_stored_pool_limits() {
     l.php_memory_mb = 512;
     l.php_max_children = 12;
     s.set_limits(sel, l).await.expect("set");
-    seen.lock().unwrap().clear();
 
     assert_eq!(s.rerender_fpm_pools().await, 1);
-    assert_eq!(*seen.lock().unwrap(), vec![(512, 12)]);
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    let limits = seen[0].expect("stored limits, not the defaults");
+    assert_eq!((limits.memory_mb, limits.max_children), (512, 12));
+}
+
+/// Runs the boot re-render over one site per entry, each pool answering with
+/// the given action, and returns what reached the running masters.
+async fn boot_applies(
+    sites: &[(&str, PhpVersion, hyperion_adapters::phpfpm::FpmApply)],
+) -> Vec<(PhpVersion, hyperion_adapters::phpfpm::FpmApply)> {
+    use std::sync::{Arc, Mutex};
+    let pool = open_memory().await.expect("open");
+    let answers: std::collections::HashMap<String, _> = sites
+        .iter()
+        .map(|(domain, _, what)| (domain.to_string(), *what))
+        .collect();
+    let applied: Arc<Mutex<Vec<_>>> = Arc::default();
+    let synced = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut a = happy_mocks_many();
+    let count = synced.clone();
+    a.expect_fpm_sync_pool().returning(move |_, domain, _, _| {
+        count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(answers[domain])
+    });
+    let rec = applied.clone();
+    a.expect_fpm_apply().returning(move |ver, what| {
+        rec.lock().unwrap().push((ver, what));
+        Ok(())
+    });
+    let s = svc(pool, a);
+    for (domain, ver, _) in sites {
+        let mut r = req(domain);
+        r.php_version = Some(*ver);
+        s.create(r).await.expect("create");
+    }
+    assert_eq!(s.rerender_fpm_pools().await, sites.len());
+    assert_eq!(
+        synced.load(std::sync::atomic::Ordering::SeqCst),
+        sites.len(),
+        "every pool goes through the write that leaves the master alone"
+    );
+    let mut got = applied.lock().unwrap().clone();
+    got.sort_by_key(|(ver, _)| ver.as_str());
+    got
+}
+
+/// An agent start that finds every pool as it should be leaves PHP alone. It
+/// used to restart FPM every time: 502s, every in-flight request cut, OPcache
+/// emptied, on every deploy, to apply a change that was almost never there.
+#[tokio::test]
+async fn boot_rerender_leaves_fpm_alone_when_nothing_changed() {
+    use hyperion_adapters::phpfpm::FpmApply::Nothing;
+    let sites = [
+        ("a.cz", PhpVersion::V8_3, Nothing),
+        ("b.cz", PhpVersion::V8_3, Nothing),
+    ];
+    assert_eq!(boot_applies(&sites).await, vec![]);
+}
+
+/// However many pools changed, a version gets one reload.
+#[tokio::test]
+async fn boot_rerender_reloads_a_version_once() {
+    use hyperion_adapters::phpfpm::FpmApply::{Nothing, Reload};
+    let sites = [
+        ("a.cz", PhpVersion::V8_3, Reload),
+        ("b.cz", PhpVersion::V8_3, Nothing),
+        ("c.cz", PhpVersion::V8_3, Reload),
+    ];
+    assert_eq!(boot_applies(&sites).await, vec![(PhpVersion::V8_3, Reload)]);
+}
+
+/// The race this exists for. A restart right after a reload can land while
+/// the master is re-executing: php-fpm queues the SIGTERM in its signal pipe,
+/// `exec` throws the pipe away, and systemd waits out its 90 s stop timeout
+/// before SIGKILL. So a version never gets both: the restart alone, which
+/// reads every pool file anyway.
+#[tokio::test]
+async fn boot_rerender_never_reloads_and_restarts_one_version() {
+    use hyperion_adapters::phpfpm::FpmApply::{Reload, Restart};
+    let sites = [
+        ("a.cz", PhpVersion::V8_3, Reload),
+        ("b.cz", PhpVersion::V8_3, Restart),
+        ("c.cz", PhpVersion::V8_3, Reload),
+    ];
+    assert_eq!(
+        boot_applies(&sites).await,
+        vec![(PhpVersion::V8_3, Restart)]
+    );
+}
+
+/// Each version only answers for its own pools.
+#[tokio::test]
+async fn boot_rerender_decides_per_version() {
+    use hyperion_adapters::phpfpm::FpmApply::{Nothing, Reload, Restart};
+    let sites = [
+        ("a.cz", PhpVersion::V8_2, Reload),
+        ("b.cz", PhpVersion::V8_3, Restart),
+        ("c.cz", PhpVersion::V8_4, Nothing),
+    ];
+    assert_eq!(
+        boot_applies(&sites).await,
+        vec![(PhpVersion::V8_2, Reload), (PhpVersion::V8_3, Restart)]
+    );
+}
+
+/// A pool that cannot be written asks nothing of the master, and does not
+/// stop the next site's pool from being handled.
+#[tokio::test]
+async fn boot_rerender_survives_a_pool_that_fails() {
+    use hyperion_adapters::phpfpm::FpmApply::Reload;
+    use std::sync::{Arc, Mutex};
+    let pool = open_memory().await.expect("open");
+    let applied: Arc<Mutex<Vec<_>>> = Arc::default();
+    let mut a = happy_mocks_many();
+    a.expect_fpm_sync_pool().returning(|_, domain, _, _| {
+        if domain == "a.cz" {
+            Err(AdapterError::Other("php-fpm -t failed".into()))
+        } else {
+            Ok(Reload)
+        }
+    });
+    let rec = applied.clone();
+    a.expect_fpm_apply().returning(move |ver, what| {
+        rec.lock().unwrap().push((ver, what));
+        Ok(())
+    });
+    let s = svc(pool, a);
+    s.create(req("a.cz")).await.expect("create");
+    s.create(req("b.cz")).await.expect("create");
+    assert_eq!(s.rerender_fpm_pools().await, 1);
+    assert_eq!(*applied.lock().unwrap(), vec![(PhpVersion::V8_3, Reload)]);
 }
 
 /// Out-of-memory in the site's error.log raises the pool one step; a hand

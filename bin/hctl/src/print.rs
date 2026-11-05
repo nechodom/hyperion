@@ -368,6 +368,75 @@ pub fn print_pretty(resp: &Response) {
             None => println!("avatar: (none)"),
         },
         Response::AvatarSet => println!("✓ avatar updated"),
+        Response::DockerModule(st) => {
+            println!(
+                "docker module: cluster {}, node {}, buildx {}, docker {}",
+                if st.cluster_installed { "on" } else { "off" },
+                if st.node_installed { "on" } else { "off" },
+                if st.buildx { "yes" } else { "no" },
+                st.docker_version.as_deref().unwrap_or("-")
+            );
+        }
+        Response::DockerNodeRegistered => println!("✓ docker node recorded"),
+        Response::DockerNodeList(l) => {
+            println!(
+                "docker module: cluster {}, {} node(s)",
+                if l.cluster_installed { "on" } else { "off" },
+                l.nodes.len()
+            );
+            for n in &l.nodes {
+                println!("  {}", n.node_id);
+            }
+        }
+        Response::DockerNodeSilent { changed } => {
+            println!("docker node silent state {}", if *changed { "changed" } else { "unchanged" })
+        }
+        Response::UrlMonitorList(l) => {
+            if !l.enabled {
+                println!("URL checks are off: the Docker module is not on for the cluster");
+            }
+            for m in &l.monitors {
+                println!(
+                    "{:>4}  {:<9}  {}  ({}% over 24 h)",
+                    m.id, m.alert_state, m.url, m.success_pct_24h
+                );
+            }
+        }
+        Response::UrlMonitorSet { id } => println!("✓ url check {id} saved"),
+        Response::UrlMonitorDeleted => println!("✓ url check deleted"),
+        Response::UrlMonitorTick(events) => println!("{} url alert(s) pending", events.len()),
+        Response::UrlMonitorAlerted => println!("✓ url alert sent"),
+        Response::DockerProjectForgotten => println!("✓ docker project forgotten"),
+        Response::DockerOverview(st) => {
+            println!(
+                "docker: {}{}",
+                if st.daemon_ok { "ok" } else { "not answering" },
+                st.daemon_error
+                    .as_deref()
+                    .map(|e| format!(" ({e})"))
+                    .unwrap_or_default()
+            );
+            for p in &st.projects {
+                let name = if p.name.is_empty() { "(other containers)" } else { &p.name };
+                println!(
+                    "  {name}: {} ({} containers){}",
+                    p.verdict,
+                    p.containers.len(),
+                    if p.summary.is_empty() { String::new() } else { format!(" - {}", p.summary) }
+                );
+            }
+        }
+        Response::DockerLogs(chunk) => {
+            for l in &chunk.lines {
+                println!("{} {}  {}", l.ts, l.service, l.text);
+            }
+            if chunk.truncated {
+                println!("(output was cut short)");
+            }
+            if chunk.unreadable > 0 {
+                println!("({} container(s) could not be read)", chunk.unreadable);
+            }
+        }
         Response::EmailChangeRequest { masked_to } => {
             println!("✓ verification code sent to {masked_to}");
         }

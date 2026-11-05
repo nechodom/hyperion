@@ -2135,6 +2135,7 @@ pub const NOTIFICATION_TOPICS: &[(&str, &str)] = &[
     ("server", "Server"),
     ("trash", "Trash"),
     ("protection", "Protection"),
+    ("docker", "Docker"),
     ("other", "Other"),
 ];
 
@@ -2149,7 +2150,7 @@ pub fn notification_topic(kind: &str) -> (&'static str, &'static str) {
     let family = kind.split(':').next().unwrap_or(kind);
     let first = family.split('.').next().unwrap_or(family);
     let key = match first {
-        "monitor" => "uptime",
+        "monitor" | "url" => "uptime",
         "cert" => "certs",
         "site_check_broken" => "pages",
         "wp" => "wordpress",
@@ -2159,6 +2160,7 @@ pub fn notification_topic(kind: &str) -> (&'static str, &'static str) {
         "system" => "server",
         "hosting" if family == "hosting.trash" => "trash",
         "protection" => "protection",
+        "docker" => "docker",
         _ => "other",
     };
     NOTIFICATION_TOPICS
@@ -2174,8 +2176,21 @@ pub fn notification_topic(kind: &str) -> (&'static str, &'static str) {
 /// keeps hitting its limit, and a card per firing buried the bell in copies
 /// of one site. Only per-subject kinds (`family:<subject>`) qualify, so two
 /// different sites never share a card.
+///
+/// `docker.project:<name>` is the same shape: a project's problem and its
+/// recovery share one card that always says how it stands now. The Docker
+/// daemon is one subject per node, so `docker.daemon` has no suffix (the
+/// master keeps one card per node already). `docker.node:<id>` (a node that
+/// went silent, and its return) folds the same way, and so does
+/// `docker.update:<node>` (the images with an update, one card per node), and so do the two
+/// states of a URL check (`url.monitor:<id>`: down, then back up). A
+/// certificate warning (`url.cert:<id>`) is its own event and does not fold.
 pub fn notification_replaces(kind: &str) -> bool {
-    matches!(kind.split_once(':'), Some(("php_workers", subject)) if !subject.is_empty())
+    kind == "docker.daemon"
+        || matches!(
+            kind.split_once(':'),
+            Some(("php_workers" | "docker.project" | "docker.node" | "docker.update" | "url.monitor", subject)) if !subject.is_empty()
+        )
 }
 
 /// One archive page plus everything the toolbar needs.
@@ -3156,6 +3171,12 @@ mod notification_topic_tests {
             ("quota.resolved:a.cz", "quota"),
             ("system.rofs", "server"),
             ("hosting.trash", "trash"),
+            ("docker.project:shop", "docker"),
+            ("docker.daemon", "docker"),
+            ("docker.node:node_a", "docker"),
+            ("docker.update:node_a", "docker"),
+            ("url.monitor:7", "uptime"),
+            ("url.cert:7", "uptime"),
             ("hosting.something_else", "other"),
             ("brand_new", "other"),
             ("", "other"),
@@ -3171,5 +3192,24 @@ mod notification_topic_tests {
         assert!(!notification_replaces("php_workers:"));
         assert!(!notification_replaces("php_mem_auto"));
         assert!(!notification_replaces("cert.renew_failed:a.cz"));
+    }
+
+    #[test]
+    fn docker_alerts_fold_into_one_card_per_subject() {
+        assert!(notification_replaces("docker.project:shop"));
+        assert!(notification_replaces("docker.project:(other)"));
+        assert!(notification_replaces("docker.daemon"));
+        assert!(notification_replaces("docker.node:node_a"));
+        assert!(notification_replaces("docker.update:node_a"));
+        assert!(!notification_replaces("docker.update"));
+        assert!(!notification_replaces("docker.update:"));
+        assert!(notification_replaces("url.monitor:7"));
+        assert!(!notification_replaces("url.monitor"));
+        assert!(!notification_replaces("url.monitor:"));
+        assert!(!notification_replaces("url.cert:7"));
+        assert!(!notification_replaces("docker.node"));
+        assert!(!notification_replaces("docker.project"));
+        assert!(!notification_replaces("docker.project:"));
+        assert!(!notification_replaces("docker.daemon:x"));
     }
 }

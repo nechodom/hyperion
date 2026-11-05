@@ -33,9 +33,12 @@ bcrypt = { workspace = true }
 url = { workspace = true }
 
 [dev-dependencies]
+# tests/docker_live_rpc.rs talks to a real agent over its socket.
+hyperion-rpc-client = { path = "../hyperion-rpc-client" }
 tokio = { workspace = true, features = ["macros", "rt"] }
 mockall.workspace = true
 tempfile.workspace = true
+tracing-subscriber.workspace = true
 # A local HTTPS site for the uptime-probe tests: the probe only speaks https
 # and shells out to the real curl, so that is what the tests drive.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }

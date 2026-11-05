@@ -65,6 +65,33 @@ window.addEventListener('unhandledrejection', function (ev) {
 })();
 
 // ============================================================
+//  Docker log viewer (#dl-lines). "Follow" appends rows to the
+//  open view every few seconds, so: keep the newest line in view
+//  while the reader is at the bottom (and leave them alone when
+//  they scrolled up), start a freshly loaded view at the bottom,
+//  and cap the rows so a day of following does not pile up in
+//  the page.
+// ============================================================
+(function () {
+  const MAX_ROWS = 3000;
+  const NEAR = 40;
+  let lastBox = null;
+  let stick = true;
+  document.body.addEventListener('htmx:beforeSwap', function () {
+    const box = document.getElementById('dl-lines');
+    stick = !box || (box.scrollHeight - box.scrollTop - box.clientHeight) <= NEAR;
+  });
+  document.body.addEventListener('htmx:afterSwap', function () {
+    const box = document.getElementById('dl-lines');
+    if (!box) { lastBox = null; return; }
+    const rows = box.querySelectorAll('.dl-row');
+    for (let i = 0; i < rows.length - MAX_ROWS; i++) rows[i].remove();
+    if (box !== lastBox || stick) box.scrollTop = box.scrollHeight;
+    lastBox = box;
+  });
+})();
+
+// ============================================================
 //  Password generator — existing feature, untouched.
 //  Generates a strong password into [data-genpw="<input-id>"].
 // ============================================================
@@ -1332,6 +1359,18 @@ function isShortcutContext(ev) {
 })();
 
 // ============================================================
+//  WordPress plugin import: once the plugin is on its way, the
+//  next thing to press is Generate code.
+// ============================================================
+document.addEventListener('click', (e) => {
+  const link = e.target.closest('[data-wpm-download]');
+  if (!link) return;
+  link.classList.remove('primary');
+  link.closest('[data-wpm-step]')?.classList.add('is-done');
+  document.querySelector('[data-wpm-mint]')?.classList.add('primary');
+});
+
+// ============================================================
 //  Sidebar status dots — monitoring / WordPress updates / certs.
 //  One request for all three, so the dots can never disagree with
 //  each other, and a hiccup in one RPC does not turn the sidebar
@@ -1346,7 +1385,11 @@ function isShortcutContext(ev) {
     ['nav-wp-dot', 'wp_outdated', 'site', 'waiting on you for WordPress updates'],
     ['nav-certs-dot', 'certs_expiring', 'certificate', 'expiring within 14 days'],
   ];
-  if (!targets.some(([id]) => document.getElementById(id))) return;
+  // The Docker entry is hidden until the module is on, then carries the same
+  // kind of dot. Hidden again if the module is removed while the tab is open.
+  const dockerLink = document.getElementById('nav-docker');
+  const dockerDot = document.getElementById('nav-docker-dot');
+  if (!targets.some(([id]) => document.getElementById(id)) && !dockerLink) return;
   function paint(el, n, noun, suffix) {
     if (!el) return;
     el.hidden = false;
@@ -1371,6 +1414,12 @@ function isShortcutContext(ev) {
       const j = await r.json();
       targets.forEach(([id, key, noun, suffix]) =>
         paint(document.getElementById(id), Number(j[key] || 0), noun, suffix));
+      const dockerOn = j.docker_installed === true;
+      if (dockerLink) dockerLink.hidden = !dockerOn;
+      if (dockerDot) {
+        if (dockerOn) paint(dockerDot, Number(j.docker_problems || 0), 'problem', 'in Docker');
+        else dockerDot.hidden = true;
+      }
     } catch (_) { /* leave the dots as they were */ }
   }
   poll();

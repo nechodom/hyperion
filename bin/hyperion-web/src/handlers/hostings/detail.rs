@@ -266,6 +266,9 @@ pub(super) struct DetailTpl<'a> {
     pub(super) csrf_vhost_options: String,
     /// CSRF token for the reverse-proxy upstream edit form.
     pub(super) csrf_proxy_upstream: String,
+    /// The viewer may read Docker stacks (capability and every hosting in
+    /// scope), so a reverse proxy asks which stack it forwards to.
+    pub(super) docker_chip: bool,
     /// Whether this viewer may write the raw nginx snippet. The server
     /// enforces it regardless; this only decides whether the textarea is
     /// shown, so a tenant is not handed a field whose every save 403s.
@@ -521,6 +524,7 @@ impl<'a> DetailTpl<'a> {
             wp_themes: hyperion_types::WpThemeListResponse::default(),
             csrf_vhost_options: csrf("/hostings/vhost-options"),
             csrf_proxy_upstream: csrf("/hostings/proxy-upstream"),
+            docker_chip: ctx.can(Capability::DockerView) && ctx.scope_all(),
             can_edit_nginx_raw: ctx.can(Capability::HostingEditNginxRaw),
             quota: hyperion_types::HostingQuotaReport::default(),
             csrf_quota_set: csrf("/hostings/quota/set"),

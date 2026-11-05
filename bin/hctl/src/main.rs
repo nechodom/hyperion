@@ -300,10 +300,14 @@ pub enum HostingCmd {
         /// panel can sign one — `hctl hosting export` prints none).
         #[arg(long = "base-url")]
         base_url: String,
-        /// Signed token from the same export result page. Expires
-        /// 1h after the export — re-export from the panel if stale.
+        /// Read the signed token from stdin, one line. It comes from the same
+        /// export result page and expires 1h after the export.
+        #[arg(long, conflicts_with = "token", required_unless_present = "token")]
+        token_stdin: bool,
+        /// The token as an argument. Any local user can read it from the process
+        /// list while this runs; use --token-stdin.
         #[arg(long)]
-        token: String,
+        token: Option<String>,
     },
     /// Import sites from a third-party control panel (HestiaCP /
     /// CloudPanel). Reuses `hosting create` per site + copies files &
@@ -1083,6 +1087,37 @@ mod tests {
     fn plugin_update_all_needs_no_slug_but_activate_does() {
         assert!(Cli::try_parse_from(["hctl", "wp", "plugin", "a.cz", "update-all"]).is_ok());
         assert!(Cli::try_parse_from(["hctl", "wp", "plugin", "a.cz", "activate"]).is_err());
+    }
+
+    #[test]
+    fn import_from_url_needs_a_token_source() {
+        let base = [
+            "hctl",
+            "hosting",
+            "import-from-url",
+            "--base-url",
+            "https://a",
+        ];
+        assert!(Cli::try_parse_from(base).is_err());
+        let with = |extra: &[&'static str]| {
+            Cli::try_parse_from(base.iter().chain(extra).copied().collect::<Vec<_>>())
+        };
+        assert!(with(&["--token-stdin"]).is_ok());
+        // Commands copied from an older panel keep working.
+        assert!(with(&["--token", "t"]).is_ok());
+        assert!(with(&["--token-stdin", "--token", "t"]).is_err());
+    }
+
+    #[test]
+    fn remote_login_takes_the_key_from_stdin() {
+        let cli = Cli::parse_from(["hctl", "remote", "login", "--key-stdin"]);
+        assert!(matches!(
+            cli.cmd,
+            Cmd::Remote {
+                cmd: remote::RemoteCmd::Login { key_stdin: true },
+                ..
+            }
+        ));
     }
 
     #[test]

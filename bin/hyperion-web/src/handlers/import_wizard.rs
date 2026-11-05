@@ -32,6 +32,20 @@ use std::path::PathBuf;
 const TOKEN_TTL_SECS: i64 = 4 * 60 * 60;
 const MIGRATION_DIR_DEFAULT: &str = "/var/lib/hyperion/migration";
 
+/// `source_kind` of a code made for the WordPress plugin.
+pub(super) const PLUGIN_KIND: &str = "wordpress";
+
+/// The bundle routes take a manifest naming hostings, paths and databases, which
+/// is what the plugin's own routes exist to keep out of a source's hands. Its code
+/// may be pasted into a site its operator does not control, so it must not open
+/// them.
+fn refuse_plugin_code() -> Response {
+    text(
+        StatusCode::FORBIDDEN,
+        "this code only works with the Hyperion WordPress plugin\n".into(),
+    )
+}
+
 /// The panel's own nginx vhost, as the agent writes it.
 const PANEL_VHOST: &str = "/etc/nginx/sites-enabled/hyperion-panel.conf";
 
@@ -40,7 +54,7 @@ const PANEL_VHOST: &str = "/etc/nginx/sites-enabled/hyperion-panel.conf";
 /// Overridable via `HYPERION_MIGRATION_DIR` for two reasons: the tests must not
 /// write to a real system path, and an operator whose `/var` is too small for a
 /// 40 GB bundle needs somewhere to put it that is not a recompile away.
-fn migration_dir() -> String {
+pub(super) fn migration_dir() -> String {
     std::env::var("HYPERION_MIGRATION_DIR").unwrap_or_else(|_| MIGRATION_DIR_DEFAULT.to_string())
 }
 const MIN_FREE_BYTES: i64 = 2 * 1024 * 1024 * 1024; // 2 GiB floor before accepting
@@ -49,6 +63,8 @@ const MIN_FREE_BYTES: i64 = 2 * 1024 * 1024 * 1024; // 2 GiB floor before accept
 pub struct TransferRow {
     pub id: i64,
     pub source_kind: String,
+    /// The site being moved, for a source that sends one site. Empty until known.
+    pub site: String,
     pub status: String,
     pub received: String,
     /// Raw byte count behind `received` — the formatted string is for display
@@ -70,6 +86,19 @@ pub struct TransferRow {
     pub rate_bytes_per_sec: i64,
     /// What the source last said while PACKING. Empty until it reports.
     pub packing_note: String,
+}
+
+/// The site a plugin transfer is moving: where it lands, as far as that is known.
+fn plugin_site(selection_json: &str) -> String {
+    serde_json::from_str::<Vec<hyperion_import::SiteImportOverride>>(selection_json)
+        .ok()
+        .and_then(|v| v.into_iter().next())
+        .and_then(|o| {
+            o.target_domain
+                .filter(|d| !d.is_empty())
+                .or_else(|| Some(o.source_domain).filter(|d| !d.is_empty()))
+        })
+        .unwrap_or_default()
 }
 
 /// Shown once after minting: the single interactive command to paste on the
@@ -167,7 +196,10 @@ pub struct MintForm {
 
 // ---- RPC helpers (token ops live in the agent's DB) ---------------------------
 
-async fn token_rpc(state: &SharedState, op: ImportTokenOp) -> Result<ImportTokenResult, AppError> {
+pub(super) async fn token_rpc(
+    state: &SharedState,
+    op: ImportTokenOp,
+) -> Result<ImportTokenResult, AppError> {
     match hyperion_rpc_client::call(&state.agent_socket, Request::ImportToken(op)).await {
         Ok(RpcResponse::ImportToken(r)) => Ok(r),
         Ok(RpcResponse::Error(e)) => Err(AppError::Internal(e.to_string())),
@@ -176,7 +208,7 @@ async fn token_rpc(state: &SharedState, op: ImportTokenOp) -> Result<ImportToken
     }
 }
 
-async fn resolve(
+pub(super) async fn resolve(
     state: &SharedState,
     token: &str,
     consume: bool,
@@ -195,7 +227,7 @@ async fn resolve(
     }
 }
 
-async fn update(
+pub(super) async fn update(
     state: &SharedState,
     id: i64,
     status: Option<&str>,
@@ -214,49 +246,89 @@ async fn update(
     .await;
 }
 
+/// A transfer's status as of now. `importing` on the token only says a job took
+/// it; how that job ended is on the job row, and is read from there rather than
+/// copied back. A copy would stay `importing` when a restart kills the task that
+/// should have written it (the reaper fails the job all the same), and could be
+/// overwritten by the commit handler still storing the job id of a job that has
+/// already failed.
+///
+/// A job that cannot be read keeps the row at `importing`: nothing is known yet.
+pub(super) async fn current_status(state: &SharedState, info: &ImportTokenInfo) -> String {
+    if info.status != "importing" {
+        return info.status.clone();
+    }
+    let Some(job) = info.job_id.as_deref() else {
+        return info.status.clone();
+    };
+    match super::jobs::fetch_job(state, job).await {
+        Ok(Some(j)) if j.is_terminal() => {
+            if j.state == "done" {
+                "done".into()
+            } else {
+                "failed".into()
+            }
+        }
+        _ => info.status.clone(),
+    }
+}
+
 async fn list_transfers(state: &SharedState) -> Vec<TransferRow> {
     match token_rpc(state, ImportTokenOp::List).await {
-        Ok(ImportTokenResult::Listed(v)) => v
-            .into_iter()
-            .map(|i| {
-                let site_count = serde_json::from_str::<Vec<serde_json::Value>>(&i.manifest_json)
-                    .map(|a| a.len())
-                    .unwrap_or(0);
-                let has_manifest = !i.manifest_json.trim().is_empty();
-                let has_selection = !i.selection_json.trim().is_empty();
-                // Stage drives the wizard row: the source is in one of these
-                // phases while status is still "pending" (pre-ingest).
-                // What the source reports while it packs — the phase that used
-                // to be dead air, and is usually the longest part of a run.
-                let packing_note = summarise_source_progress(&i.source_progress_json);
-                let stage = if i.job_id.is_some() || i.status != "pending" {
-                    "active"
-                } else if has_selection && !packing_note.is_empty() && i.received_bytes == 0 {
-                    "packing"
-                } else if has_selection {
-                    "selected"
-                } else if has_manifest {
-                    "awaiting_selection"
-                } else {
-                    "awaiting_report"
-                }
-                .to_string();
-                TransferRow {
-                    id: i.id,
-                    source_kind: i.source_kind,
-                    status: i.status,
-                    received: human_bytes(i.received_bytes),
-                    received_bytes: i.received_bytes,
-                    job_id: i.job_id,
-                    created_by: i.created_by,
-                    stage,
-                    site_count,
-                    expected_bytes: i.expected_bytes,
-                    rate_bytes_per_sec: i.rate_bytes_per_sec,
-                    packing_note,
-                }
-            })
-            .collect(),
+        Ok(ImportTokenResult::Listed(mut v)) => {
+            for i in &mut v {
+                i.status = current_status(state, i).await;
+            }
+            v.into_iter()
+                .map(|i| {
+                    let site_count =
+                        serde_json::from_str::<Vec<serde_json::Value>>(&i.manifest_json)
+                            .map(|a| a.len())
+                            .unwrap_or(0);
+                    let has_manifest = !i.manifest_json.trim().is_empty();
+                    let has_selection = !i.selection_json.trim().is_empty();
+                    // Stage drives the wizard row: the source is in one of these
+                    // phases while status is still "pending" (pre-ingest).
+                    // What the source reports while it packs — the phase that used
+                    // to be dead air, and is usually the longest part of a run.
+                    let packing_note = summarise_source_progress(&i.source_progress_json);
+                    let stage = if i.job_id.is_some() || i.status != "pending" {
+                        "active"
+                    } else if i.source_kind == PLUGIN_KIND {
+                        "awaiting_plugin"
+                    } else if has_selection && !packing_note.is_empty() && i.received_bytes == 0 {
+                        "packing"
+                    } else if has_selection {
+                        "selected"
+                    } else if has_manifest {
+                        "awaiting_selection"
+                    } else {
+                        "awaiting_report"
+                    }
+                    .to_string();
+                    let site = if i.source_kind == PLUGIN_KIND {
+                        plugin_site(&i.selection_json)
+                    } else {
+                        String::new()
+                    };
+                    TransferRow {
+                        id: i.id,
+                        site,
+                        source_kind: i.source_kind,
+                        status: i.status,
+                        received: human_bytes(i.received_bytes),
+                        received_bytes: i.received_bytes,
+                        job_id: i.job_id,
+                        created_by: i.created_by,
+                        stage,
+                        site_count,
+                        expected_bytes: i.expected_bytes,
+                        rate_bytes_per_sec: i.rate_bytes_per_sec,
+                        packing_note,
+                    }
+                })
+                .collect()
+        }
         _ => Vec::new(),
     }
 }
@@ -285,6 +357,13 @@ pub async fn get_wizard(
         return Ok(Redirect::to("/?flash_error=admin+role+required").into_response());
     }
     render(&state, &ctx, None, q.flash, q.flash_error).await
+}
+
+/// The command an operator pastes on the source server. The URL holds the token
+/// and the source's tenants are local users who can read /proc/<pid>/cmdline, so
+/// curl takes it as config on stdin. printf is a shell builtin and has no argv.
+fn agent_one_liner(base: &str, token: &str) -> String {
+    format!("printf 'url = \"%s\"\\n' '{base}/import/agent/{token}' | curl -fsSL -K - | sudo bash")
 }
 
 pub async fn post_mint(
@@ -316,7 +395,7 @@ pub async fn post_mint(
         _ => return Err(AppError::Internal("mint returned unexpected result".into())),
     };
     let base = base_url(&state, &headers).await;
-    let one_liner = format!("curl -fsSL \"{base}/import/agent/{token}\" | sudo bash");
+    let one_liner = agent_one_liner(&base, &token);
     render(
         &state,
         &ctx,
@@ -542,6 +621,7 @@ pub async fn post_select(
             // The self-service wizard does not offer a PHP choice; the import
             // derives one from what the source reports.
             php_version: None,
+            wp_url_rewrites: Vec::new(),
         });
     }
     if !bad_targets.is_empty() {
@@ -582,6 +662,9 @@ pub struct CancelForm {
     #[serde(default)]
     pub _csrf: String,
     pub id: i64,
+    /// `wordpress` when the page to return to is the plugin tab.
+    #[serde(default)]
+    pub back: String,
 }
 
 /// `POST /import/cancel` — revoke a transfer; its waiting source script sees
@@ -595,7 +678,13 @@ pub async fn post_cancel(
         return Ok(Redirect::to("/?flash_error=admin+role+required").into_response());
     }
     token_rpc(&state, ImportTokenOp::Cancel { id: form.id }).await?;
-    Ok(Redirect::to("/import?flash=Transfer+cancelled").into_response())
+    super::import_wordpress::discard_run(form.id).await;
+    let page = if form.back == PLUGIN_KIND {
+        "/import/wordpress"
+    } else {
+        "/import"
+    };
+    Ok(Redirect::to(&format!("{page}?flash=Transfer+cancelled")).into_response())
 }
 
 /// Percent-encode for flash query params.
@@ -700,7 +789,7 @@ pub async fn get_agent_script(
 /// Largest chunk the panel will accept. nginx no longer caps `/import/`, so this
 /// IS the ceiling — and being the ceiling in the application means an oversized
 /// body gets a sentence back instead of a closed socket.
-const MAX_CHUNK_BYTES: u64 = 128 * 1024 * 1024;
+pub(super) const MAX_CHUNK_BYTES: u64 = 128 * 1024 * 1024;
 
 /// Chunk size the panel asks the source to use.
 const PREFERRED_CHUNK_BYTES: u64 = 64 * 1024 * 1024;
@@ -713,7 +802,7 @@ const PREFERRED_CHUNK_BYTES: u64 = 64 * 1024 * 1024;
 /// world-readable on many installs and is routinely shipped to aggregation, so
 /// putting a live credential in it hundreds of times is the same mistake as
 /// putting one on argv, which this project already refuses to do.
-fn bearer(headers: &HeaderMap) -> Option<String> {
+pub(super) fn bearer(headers: &HeaderMap) -> Option<String> {
     let raw = headers
         .get(axum::http::header::AUTHORIZATION)?
         .to_str()
@@ -727,7 +816,7 @@ fn bearer(headers: &HeaderMap) -> Option<String> {
     Some(t.to_string())
 }
 
-fn text(code: StatusCode, body: String) -> Response {
+pub(super) fn text(code: StatusCode, body: String) -> Response {
     (
         code,
         [(
@@ -752,7 +841,7 @@ fn part_path(id: i64) -> String {
     format!("{}/bundle-{id}.tar.part", migration_dir())
 }
 
-fn final_path(id: i64) -> String {
+pub(super) fn final_path(id: i64) -> String {
     format!("{}/bundle-{id}.tar", migration_dir())
 }
 
@@ -767,7 +856,7 @@ async fn part_len(id: i64) -> u64 {
 ///
 /// The bundle holds plaintext database dumps and wp-config secrets; a site's
 /// PHP-FPM uid must not be able to traverse in.
-async fn ensure_migration_dir() {
+pub(super) async fn ensure_migration_dir() {
     use std::os::unix::fs::PermissionsExt;
     let _ = tokio::fs::create_dir_all(migration_dir()).await;
     let _ =
@@ -819,10 +908,14 @@ pub async fn post_upload_begin(
     // bundle's offset, splicing the tail of one archive onto the head of
     // another; only the commit digest would notice, after the whole remainder
     // had been uploaded.
-    let previous_sha = resolve(&state, &token, false)
-        .await?
-        .map(|i| i.bundle_sha256)
-        .unwrap_or_default();
+    let previous = resolve(&state, &token, false).await?;
+    if previous
+        .as_ref()
+        .is_some_and(|i| i.source_kind == PLUGIN_KIND)
+    {
+        return Ok(refuse_plugin_code());
+    }
+    let previous_sha = previous.map(|i| i.bundle_sha256).unwrap_or_default();
 
     let claimed = match token_rpc(
         &state,
@@ -944,6 +1037,9 @@ pub async fn put_upload_chunk(
         // completed transfer lands here. 410 is the runner's stop signal.
         return Ok(text(StatusCode::GONE, "state cancelled\n".into()));
     };
+    if info.source_kind == PLUGIN_KIND {
+        return Ok(refuse_plugin_code());
+    }
     if info.status == "importing" {
         // The precondition stated here rather than left to the query filter:
         // once commit has handed the bundle to a job, no further byte may be
@@ -1066,6 +1162,9 @@ pub async fn post_upload_commit(
     let Some(info) = resolve(&state, &token, false).await? else {
         return Ok(text(StatusCode::GONE, "state cancelled\n".into()));
     };
+    if info.source_kind == PLUGIN_KIND {
+        return Ok(refuse_plugin_code());
+    }
     // Already committed. Retrying a commit whose 200 was lost is normal, and
     // answering "cancelled" for it would be both wrong and alarming; answering
     // with the existing job is right, and re-importing the same bundle would be
@@ -1075,7 +1174,8 @@ pub async fn post_upload_commit(
             return Ok(text(
                 StatusCode::OK,
                 format!(
-                    "state importing\njob {job}\nreceived {}\n",
+                    "state {}\njob {job}\nreceived {}\n",
+                    current_status(&state, &info).await,
                     info.received_bytes
                 ),
             ));
@@ -1212,7 +1312,7 @@ pub async fn get_upload_status(
         StatusCode::OK,
         format!(
             "state {}\noffset {}\nexpected {}\njob {}\n",
-            info.status,
+            current_status(&state, &info).await,
             part_len(info.id).await,
             info.expected_bytes,
             info.job_id.as_deref().unwrap_or("-"),
@@ -1254,8 +1354,11 @@ pub async fn post_manifest(
     Path(token): Path<String>,
     body: String,
 ) -> Result<Response, AppError> {
-    if resolve(&state, &token, false).await?.is_none() {
+    let Some(info) = resolve(&state, &token, false).await? else {
         return Ok((StatusCode::NOT_FOUND, "invalid or expired import token\n").into_response());
+    };
+    if info.source_kind == PLUGIN_KIND {
+        return Ok(refuse_plugin_code());
     }
     // Cap the manifest size (defensive) and require it to parse as a JSON ARRAY
     // (the site list) — not just any JSON, else a `{}` would advance the row to a
@@ -1354,7 +1457,7 @@ fn manifest_domain_set(manifest_json: &str) -> std::collections::HashSet<String>
 /// no comma (the list delimiter), no whitespace/control, no quote/shell-meta.
 /// Real panel domains (incl. underscores and punycode IDN) pass — this rejects,
 /// never rewrites, so a legitimate domain is never silently mangled.
-fn wire_safe_domain(s: &str) -> bool {
+pub(super) fn wire_safe_domain(s: &str) -> bool {
     !s.is_empty()
         && !s.chars().any(|c| {
             c.is_whitespace()
@@ -1418,6 +1521,12 @@ pub async fn post_ingest(
     Path(token): Path<String>,
     body: axum::body::Body,
 ) -> Result<Response, AppError> {
+    // Before the claim, which would spend the code.
+    if let Some(info) = resolve(&state, &token, false).await? {
+        if info.source_kind == PLUGIN_KIND {
+            return Ok(refuse_plugin_code());
+        }
+    }
     // Atomic single-use claim. None = already used / expired / unknown.
     let Some(info) = resolve(&state, &token, true).await? else {
         return Ok((
@@ -1590,7 +1699,7 @@ pub async fn post_ingest(
 /// strict host[:port] charset so no shell metacharacter can ever reach the
 /// generated script. Combined with single-quoting in the script, this closes the
 /// Host-header → RCE-on-source vector.
-async fn base_url(state: &SharedState, headers: &HeaderMap) -> String {
+pub(super) async fn base_url(state: &SharedState, headers: &HeaderMap) -> String {
     let scheme = if state.cfg.web.tls_enabled {
         "https"
     } else {
@@ -1662,7 +1771,7 @@ fn exporter_bin_path_for(arch: Option<&str>) -> Option<PathBuf> {
     cands.into_iter().find(|p| p.is_file())
 }
 
-async fn avail_bytes(dir: &str) -> Option<i64> {
+pub(super) async fn avail_bytes(dir: &str) -> Option<i64> {
     let out = tokio::process::Command::new("df")
         .arg("-B1")
         .arg("--output=avail")
@@ -1703,8 +1812,9 @@ fn esc(s: &str) -> String {
 /// which the state layer already decided by returning 0 — so 0 renders as
 /// nothing at all, never as "0 B/s", which would read as a stall.
 fn progress_cell(r: &TransferRow) -> String {
-    if r.expected_bytes <= 0 {
-        // Total unknown: say how much has landed and stop there.
+    if r.expected_bytes <= 0 || matches!(r.status.as_str(), "done" | "failed") {
+        // Total unknown, or nothing is moving any more: say how much has landed
+        // and stop there.
         return esc(&r.received);
     }
     let pct = (r.received_bytes.min(r.expected_bytes) * 100) / r.expected_bytes;
@@ -1766,7 +1876,7 @@ fn summarise_source_progress(json: &str) -> String {
 fn transfers_html(rows: &[TransferRow], csrf: &str) -> String {
     if rows.is_empty() {
         return "<div class=\"ghead\">Transfers</div>\
-                <div class=\"item text-soft small\">No transfers in flight. Generate a command above and run it on your source server.</div>"
+                <div class=\"item text-soft small\">No transfers in flight.</div>"
             .to_string();
     }
     let mut h = format!(
@@ -1777,6 +1887,11 @@ fn transfers_html(rows: &[TransferRow], csrf: &str) -> String {
     for r in rows {
         // Stage label + the primary action cell.
         let (stage, action) = match r.stage.as_str() {
+            "awaiting_plugin" => (
+                "waiting for the plugin".to_string(),
+                "<span class=\"text-soft\">paste the code into the plugin in wp-admin</span>"
+                    .to_string(),
+            ),
             "awaiting_report" => (
                 "scanning source…".to_string(),
                 "<span class=\"text-soft\">waiting for the source to report…</span>".to_string(),
@@ -1800,11 +1915,30 @@ fn transfers_html(rows: &[TransferRow], csrf: &str) -> String {
                 "selected".to_string(),
                 "<span class=\"text-soft\">waiting for the source to export…</span>".to_string(),
             ),
+            // A new code is the only way on: the job deleted the bundle and the
+            // uploaded streams on its way out, and a committed code never takes
+            // another upload.
             _ if r.status == "failed" => (
                 "<span class=\"pill err\">failed</span>".to_string(),
-                "<span class=\"text-soft\">this transfer did not finish — start a new \
-                 one from the command above</span>"
-                    .to_string(),
+                format!(
+                    "{}<span class=\"text-soft\">this transfer did not finish — {}</span>",
+                    match &r.job_id {
+                        Some(j) => format!("<a href=\"/jobs/{}\">what happened →</a> ", esc(j)),
+                        None => String::new(),
+                    },
+                    if r.source_kind == PLUGIN_KIND {
+                        "generate a new code and start the plugin again"
+                    } else {
+                        "start a new one from the command above"
+                    },
+                ),
+            ),
+            _ if r.status == "done" => (
+                "<span class=\"pill ok\">finished</span>".to_string(),
+                match &r.job_id {
+                    Some(j) => format!("<a href=\"/jobs/{}\">result →</a>", esc(j)),
+                    None => String::new(),
+                },
             ),
             _ => (
                 esc(&r.status),
@@ -1823,16 +1957,30 @@ fn transfers_html(rows: &[TransferRow], csrf: &str) -> String {
                 "<form method=\"post\" action=\"/import/cancel\" style=\"display:inline;margin-left:.4rem\">\
                  <input type=\"hidden\" name=\"_csrf\" value=\"{}\">\
                  <input type=\"hidden\" name=\"id\" value=\"{}\">\
+                 <input type=\"hidden\" name=\"back\" value=\"{}\">\
                  <button class=\"btn small ghost\" type=\"submit\">Cancel</button></form>",
                 esc(csrf),
                 r.id,
+                if r.source_kind == PLUGIN_KIND {
+                    PLUGIN_KIND
+                } else {
+                    ""
+                },
             )
         } else {
             String::new()
         };
         h.push_str(&format!(
             "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}{}</td></tr>",
-            esc(&r.source_kind),
+            if r.site.is_empty() {
+                esc(&r.source_kind)
+            } else {
+                format!(
+                    "{} <span class=\"text-soft\">· {}</span>",
+                    esc(&r.site),
+                    esc(&r.source_kind)
+                )
+            },
             esc(&r.created_by),
             stage,
             progress_cell(r),
@@ -1846,6 +1994,43 @@ fn transfers_html(rows: &[TransferRow], csrf: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// Only printf, a shell builtin with no argv of its own, may see the token.
+    #[test]
+    fn the_pasted_command_keeps_the_token_off_argv() {
+        let cmd = agent_one_liner("https://panel.example", "abc123");
+        let parts: Vec<&str> = cmd.split(" | ").collect();
+        assert_eq!(parts.len(), 3, "{cmd}");
+        assert!(parts[0].starts_with("printf ") && parts[0].contains("abc123"));
+        assert_eq!(parts[1], "curl -fsSL -K -");
+        assert_eq!(parts[2], "sudo bash");
+    }
+
+    /// A rate and a time left describe a transfer still moving. Next to "failed"
+    /// or "finished" they would read as if it were.
+    #[test]
+    fn a_settled_transfer_shows_no_rate() {
+        let row = |status: &str| TransferRow {
+            id: 1,
+            source_kind: "cloudpanel".into(),
+            site: String::new(),
+            status: status.into(),
+            received: "1.0 GiB".into(),
+            received_bytes: 1 << 30,
+            job_id: Some("job".into()),
+            created_by: "kevin".into(),
+            stage: "active".into(),
+            site_count: 0,
+            expected_bytes: 1 << 30,
+            rate_bytes_per_sec: 1 << 20,
+            packing_note: String::new(),
+        };
+        assert!(progress_cell(&row("importing")).contains("left"));
+        assert_eq!(progress_cell(&row("failed")), "1.0 GiB");
+        assert_eq!(progress_cell(&row("done")), "1.0 GiB");
+    }
+
     /// The diagnosis must be pinned to what the template ACTUALLY renders, not
     /// to a string someone remembered.
     ///

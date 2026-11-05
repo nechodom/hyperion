@@ -69,6 +69,7 @@ several servers from the start.
 | Tamper-evident audit log | — | BLAKE3 hash chain |
 | Off-site backups | FTP | S3 (age-encrypted) + FTP/FTPS/SFTP, restic snapshots |
 | Import from HestiaCP / CloudPanel | — | in place, over SSH, or from an exporter |
+| Import a WordPress site from any host | — | plugin and a pasted code, no SSH needed |
 
 ---
 
@@ -143,7 +144,8 @@ install to sites that are running and backed up:
 - **Create in one step.** A type-first "Add a website" flow for WordPress, plain
   PHP, static sites and reverse proxies (Node.js, Python, Docker or any
   upstream). Linux user, PHP-FPM pool, database, vhost and certificate are
-  created in one transaction; a failure undoes the finished steps.
+  created in one transaction; a failure undoes the finished steps. A reverse
+  proxy can start from a stack the Docker module found, with its port filled in.
 - **PHP 8.1–8.4 side by side**, per-site PHP settings, static-to-PHP
   conversion, www / non-www canonical redirects, HSTS, FastCGI cache, a
   maintenance page, and a custom nginx snippet (raw nginx is admin-only).
@@ -267,6 +269,10 @@ install to sites that are running and backed up:
   sampled every 5 minutes, a realtime network graph, and per-site resource use
   with a period picker. Per-site CPU comes from a tracker fed every 10 seconds.
 - **HTTP uptime monitoring** per site, with every monitored site on one page.
+- An optional **Docker module** for the Compose stacks on your nodes: status,
+  logs, restart-loop and unhealthy alerts, image update notices and URL checks
+  that run from the master. It is read-only and Docker has to be installed
+  already. See [Docker monitoring](docs/RUNBOOK.md#docker-monitoring).
 - OOM kills, a read-only root filesystem, pending OS updates and a needed
   reboot are all reported.
 - A **Service health** page with the state of every system service across all
@@ -347,14 +353,20 @@ Every command is listed with examples in the [CLI reference](docs/cli.md).
 
 ## Import from another panel
 
-Move existing sites off HestiaCP or CloudPanel, or between two Hyperion
-servers. The **Import** page (admin) has three ways in:
+Move existing sites off HestiaCP or CloudPanel, off any host running WordPress,
+or between two Hyperion servers. The **Import** page (admin) has four ways in:
 
 - **Command:** run a small exporter on the old server. It is a static binary,
   so it runs on old systems too, and its upload resumes after a dropped
   connection. No inbound SSH to the source is needed.
 - **SSH:** Hyperion connects to the source with a key that is used for that one
   run and then deleted.
+- **WordPress plugin:** for a WordPress site on a host with no shell. Install the
+  plugin from the Import page, paste the code Hyperion generates, and keep the
+  tab open while it sends the site in small pieces. A closed tab resumes. It
+  needs nothing from the host beyond running WordPress, and leaves out caches,
+  old backups and files that would break the site on a new server. It lists
+  what it left out.
 - **Hyperion:** import from another Hyperion node.
 
 Hyperion reads the source panel's own state (Hestia `*.conf`, CloudPanel's

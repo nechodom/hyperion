@@ -1,0 +1,92 @@
+{#- The add / change form of a URL check. Needs `url_form: Option<UrlForm>`,
+    `csrf_token` and `limitation` on the page's template struct. The Slack and
+    generic webhook addresses are credentials: they are never drawn, not even
+    masked, so there is no value= for them, only "set" and a way to remove. -#}
+{% if let Some(f) = url_form %}
+<form method="post" action="/monitoring/urls" id="url-form" autocomplete="off" class="group">
+  <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+  <input type="hidden" name="id" value="{{ f.id }}">
+  <div class="ghead">{% if f.id.is_empty() %}Add a URL check{% else %}Change the URL check{% endif %}</div>
+
+  {% if let Some(e) = f.error %}
+  <div class="item">
+    <div class="flash error in-card">
+      <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+      <div class="flash-body">{{ e }}</div>
+    </div>
+  </div>
+  {% endif %}
+
+  <div class="item">
+    <div class="field">
+      <label for="u_url">Address</label>
+      <input id="u_url" name="url" type="text" inputmode="url" required maxlength="2048"
+             placeholder="https://example.com/health" value="{{ f.url }}">
+      <span class="help">Fetched with a plain GET from the master. An address inside your own network is fine; redirects are followed up to three times.</span>
+    </div>
+    <div class="field-row three">
+      <div class="field">
+        <label for="u_interval">Interval <span class="hint">seconds, 30 or more</span></label>
+        <input id="u_interval" name="interval_secs" type="number" min="30" max="86400" value="{{ f.interval_secs }}">
+      </div>
+      <div class="field">
+        <label for="u_status">Expected status <span class="hint">empty: any 2xx or 3xx</span></label>
+        <input id="u_status" name="expected_status" type="number" min="100" max="599" placeholder="200" value="{{ f.expected_status }}">
+      </div>
+      <div class="field">
+        <label for="u_after">Alert after <span class="hint">failed checks in a row</span></label>
+        <input id="u_after" name="alert_after_fails" type="number" min="1" max="20" value="{{ f.alert_after_fails }}">
+      </div>
+    </div>
+    <div class="field">
+      <label for="u_node">Owning node</label>
+      <select id="u_node" name="node">
+        <option value="auto" {% if f.node == "auto" %}selected{% endif %}>Work it out from the address</option>
+        {% for n in f.nodes %}
+        <option value="{{ n.value }}" {% if f.node == n.value %}selected{% endif %}>{{ n.label }}</option>
+        {% endfor %}
+        <option value="none" {% if f.node == "none" %}selected{% endif %}>No node (not a hosting of ours)</option>
+      </select>
+      <span class="help">The node whose hosting has this host name. It is asked what the stack looks like when the check fails, and whether it answers at all. An address that belongs to no hosting is fine.</span>
+    </div>
+  </div>
+
+  <div class="item">
+    <h3>Alert channels</h3>
+    <p class="text-soft small" style="margin:0 0 0.8rem">Left empty, a check uses the cluster's Slack webhook and administrator addresses. The alert always reaches the bell. It names the address, the error and the status, and the Docker stack when one is known. It never carries log lines.</p>
+    <div class="field">
+      <label for="u_email">E-mail recipients <span class="hint">comma-separated</span></label>
+      <input id="u_email" name="alert_email" type="text" placeholder="ops@example.cz, sre@example.cz" value="{{ f.alert_email }}">
+    </div>
+    {% if f.channels_editable %}
+    <div class="field">
+      <label for="u_slack">Slack incoming webhook</label>
+      {% if f.slack_set %}<div class="cluster"><span class="pill ok">set</span>
+        <label class="small"><input type="checkbox" name="clear_slack_webhook" value="on"> Remove it</label></div>{% endif %}
+      <input id="u_slack" name="alert_slack_webhook" type="url" placeholder="{% if f.slack_set %}Paste a new address to replace it{% else %}https://hooks.slack.com/services/…{% endif %}" value="">
+      <span class="help">An address is a credential: it is stored, used, and never shown again.</span>
+    </div>
+    <div class="field">
+      <label for="u_hook">Generic JSON webhook</label>
+      {% if f.webhook_set %}<div class="cluster"><span class="pill ok">set</span>
+        <label class="small"><input type="checkbox" name="clear_webhook_url" value="on"> Remove it</label></div>{% endif %}
+      <input id="u_hook" name="alert_webhook_url" type="url" placeholder="{% if f.webhook_set %}Paste a new address to replace it{% else %}https://your-pipeline.example.cz/hyperion{% endif %}" value="">
+      <span class="help">POSTs <code>{"kind":"DOWN|RESOLVED|CERT","url":…,"error":…,"http_status":…}</code> on every alert and recovery.</span>
+    </div>
+    {% else %}
+    <p class="text-soft small" style="margin:0">Webhooks can be set by an administrator.</p>
+    {% endif %}
+  </div>
+
+  <div class="item muted">
+    <p class="text-soft small" style="margin:0">{{ limitation }} Certificates of https addresses are read once an hour and warn at 14 and 3 days.</p>
+  </div>
+
+  <div class="item">
+    <div class="item-actions">
+      <a class="btn" href="/monitoring">Cancel</a>
+      <button class="btn primary" type="submit">Save URL check</button>
+    </div>
+  </div>
+</form>
+{% endif %}

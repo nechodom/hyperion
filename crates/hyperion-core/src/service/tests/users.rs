@@ -43,6 +43,55 @@ async fn a_demotion_takes_effect_on_the_next_request() {
     );
 }
 
+/// A custom role always stores `role = operator`, so giving one to an Owner
+/// demotes them. Doing that to the only Owner left the cluster with nobody
+/// who can manage users or unlock accounts.
+#[tokio::test]
+async fn a_custom_role_cannot_demote_the_last_owner() {
+    let pool = open_memory().await.expect("open");
+    let s = svc(pool.clone(), happy_mocks());
+    let owner = s
+        .web_user_create(
+            "olga".into(),
+            "olga@example.cz".into(),
+            "correct horse battery".into(),
+            "super_admin".into(),
+        )
+        .await
+        .expect("create owner");
+    let role = s
+        .role_create("Support".into(), 0, false)
+        .await
+        .expect("create role");
+
+    let refused = s.web_user_set_custom_role(owner, role).await;
+    assert!(
+        matches!(refused, Err(RpcError::Validation { .. })),
+        "the last Owner was demoted: {refused:?}"
+    );
+    let kept = hyperion_state::web_users::get_by_id(&pool, owner)
+        .await
+        .expect("get")
+        .expect("owner exists");
+    assert_eq!(kept.role, hyperion_state::web_users::WebRole::SuperAdmin);
+
+    // With a second Owner the first one can step down, and the guard then
+    // protects the one who remains.
+    let second = s
+        .web_user_create(
+            "pavla".into(),
+            "pavla@example.cz".into(),
+            "correct horse battery".into(),
+            "super_admin".into(),
+        )
+        .await
+        .expect("create second owner");
+    s.web_user_set_custom_role(owner, role)
+        .await
+        .expect("a spare Owner can take a custom role");
+    assert!(s.web_user_set_custom_role(second, role).await.is_err());
+}
+
 /// The profile page shows a pending email change as "a code went to
 /// <address>". So a pending change is reported only while its code can
 /// still be entered, and a request that sent nothing must leave none.

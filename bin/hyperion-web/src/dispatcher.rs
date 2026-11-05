@@ -119,11 +119,10 @@ pub async fn dispatch_to_node(
     // phpMyAdmin relays one RPC per asset — dozens per page. At INFO they
     // would bury every operator action in the journal.
     // Same for the notification collector, which reads every worker's
-    // outbox twice a minute.
-    let chatty = matches!(
-        req,
-        Request::PmaHttp { .. } | Request::NotificationsOutbox { .. }
-    );
+    // outbox twice a minute, and the Docker watcher, which asks every node
+    // once a minute. A followed log or an open Docker page asks every few
+    // seconds, and the URL checks tick every 15 s.
+    let chatty = is_chatty(&req);
     match target {
         None => {
             if chatty {
@@ -204,6 +203,20 @@ pub(crate) async fn remote_target<'a>(
     } else {
         Some(t)
     }
+}
+
+/// Requests that repeat so often that logging each dispatch at INFO would
+/// bury the operator actions in the journal. They go to DEBUG.
+fn is_chatty(req: &Request) -> bool {
+    matches!(
+        req,
+        Request::PmaHttp { .. }
+            | Request::NotificationsOutbox { .. }
+            | Request::DockerModuleStatus
+            | Request::DockerOverview
+            | Request::DockerLogs(_)
+            | Request::UrlMonitorTick
+    )
 }
 
 /// Is `node_id` the master's own hostname (as its rows store it)?
@@ -1006,6 +1019,16 @@ mod tests {
     /// Stand-in for a response whose content an attacker would love to
     /// rewrite (the password shown to the operator after a reset).
     const BODY: &[u8] = br#"{"HostingResetPassword":{"password":"real-secret"}}"#;
+
+    #[test]
+    fn requests_that_repeat_every_few_seconds_do_not_log_at_info() {
+        assert!(is_chatty(&Request::DockerOverview));
+        assert!(is_chatty(&Request::DockerModuleStatus));
+        assert!(is_chatty(&Request::UrlMonitorTick));
+        assert!(is_chatty(&Request::DockerLogs(Default::default())));
+        // An operator action stays in the journal.
+        assert!(!is_chatty(&Request::DockerClusterInstall));
+    }
 
     #[test]
     fn endpoint_dials_the_reported_port_and_brackets_only_ipv6() {

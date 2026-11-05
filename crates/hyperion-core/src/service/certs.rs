@@ -910,61 +910,66 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         )
         .await;
 
-        // Best-effort: route existing auto-subdomains through the shared cert.
-        let _ = self.repoint_hostings_to_wildcard(base.as_str()).await;
+        // Best-effort: route existing auto-subdomains through the shared cert
+        // and give every other site its preview server block.
+        let _ = self.refresh_vhosts_for_wildcard(base.as_str()).await;
         Ok(cert)
     }
 
-    /// Point every active hosting whose domain is a direct subdomain of
-    /// `base` (covered by `*.<base>`) at the shared wildcard cert: rewrite
-    /// its `certificates` row to the wildcard's files + re-render its
-    /// vhost. Best-effort; returns how many vhosts were re-pointed.
-    pub async fn repoint_hostings_to_wildcard(&self, base: &str) -> Result<usize, RpcError> {
+    /// Re-render every active hosting's vhost after `*.<base>` was issued.
+    /// Without this an established site gets no preview server block until
+    /// something else happens to rewrite its vhost. A direct subdomain of
+    /// `base` (covered by `*.<base>`) is also pointed at the shared wildcard
+    /// cert, by rewriting its `certificates` row to the wildcard's files.
+    /// Best-effort; returns how many vhosts were re-rendered.
+    pub async fn refresh_vhosts_for_wildcard(&self, base: &str) -> Result<usize, RpcError> {
         let wc = match certificates::get(&self.pool, base).await.ok().flatten() {
             Some(c) => c,
             None => return Ok(0),
         };
         let suffix = format!(".{base}");
         let summaries = self.list().await?;
-        let mut repointed = 0usize;
+        let mut refreshed = 0usize;
         for s in summaries {
-            if s.state != HostingState::Active || !s.domain.ends_with(&suffix) {
+            if s.state != HostingState::Active {
                 continue;
             }
             // Only DIRECT subdomains — `*.base` covers one label, so
-            // `a.b.base` is out of scope.
-            let label = &s.domain[..s.domain.len() - suffix.len()];
-            if label.is_empty() || label.contains('.') {
-                continue;
+            // `a.b.base` keeps its own certificate.
+            let covered = s
+                .domain
+                .strip_suffix(&suffix)
+                .is_some_and(|label| !label.is_empty() && !label.contains('.'));
+            if covered {
+                let _ = certificates::upsert(
+                    &self.pool,
+                    &s.domain,
+                    wc.issued_at,
+                    wc.not_after,
+                    &wc.cert_path,
+                    &wc.key_path,
+                    &wc.issuer,
+                )
+                .await;
             }
-            let _ = certificates::upsert(
-                &self.pool,
-                &s.domain,
-                wc.issued_at,
-                wc.not_after,
-                &wc.cert_path,
-                &wc.key_path,
-                &wc.issuer,
-            )
-            .await;
             match self.get(HostingSelector::Id(s.id.clone())).await {
                 Ok(detail) => {
                     if let Err(e) = self.adapters.nginx_write_vhost(&detail).await {
-                        tracing::error!(domain = %s.domain, error = %e, "repoint: vhost re-render failed");
+                        tracing::error!(domain = %s.domain, error = %e, "wildcard: vhost re-render failed");
                         continue;
                     }
                 }
                 Err(e) => {
-                    tracing::warn!(domain = %s.domain, error = %e, "repoint: load detail failed");
+                    tracing::warn!(domain = %s.domain, error = %e, "wildcard: load detail failed");
                     continue;
                 }
             }
-            repointed += 1;
+            refreshed += 1;
         }
-        if repointed > 0 {
-            tracing::info!(base = %base, repointed, "re-pointed auto-subdomains at node wildcard");
+        if refreshed > 0 {
+            tracing::info!(base = %base, refreshed, "re-rendered vhosts for node wildcard");
         }
-        Ok(repointed)
+        Ok(refreshed)
     }
 
     /// Sweep `certificates` for LE certs whose `not_after - now` is

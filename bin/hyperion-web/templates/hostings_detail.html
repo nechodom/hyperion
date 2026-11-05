@@ -1086,6 +1086,12 @@
                  aria-label="Upstream URL" style="flex:1;min-width:11rem">
           <button type="submit" class="btn small">Save</button>
         </form>
+        {# Which Docker stack this forwards to. Lazy and silent: the answer
+           is empty unless the module is on and a stack publishes the port. #}
+        {% if docker_chip %}
+        <div hx-get="/docker/hosting-chip?selector={{ detail.id.as_str() }}"
+             hx-trigger="intersect once" hx-swap="outerHTML"></div>
+        {% endif %}
       </dd>
     </div>
     {% endif %}

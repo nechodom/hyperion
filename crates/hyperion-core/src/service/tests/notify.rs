@@ -178,3 +178,182 @@ fn customer_letter_templates_default_to_empty_meaning_builtin() {
     assert_eq!(v.care_report_body_template, "Hi {domain}\n{uptime}");
     assert!(v.expiry_warning_body_template.is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// The webhook POST: options on stdin, never on a command line.
+// ---------------------------------------------------------------------------
+
+/// The directive each line of a curl config starts with.
+fn config_directives(config: &str) -> Vec<String> {
+    config
+        .lines()
+        .map(|l| l.split([' ', '=']).next().unwrap_or("").to_string())
+        .collect()
+}
+
+/// A body, an address and a pin with quotes, newlines and a directive of
+/// their own in them stay values: nothing becomes a further option.
+#[test]
+fn a_webhook_post_cannot_smuggle_options_through_its_values() {
+    let evil = "x\"\noutput = \"/etc/cron.d/pwned\"\nurl = \"http://evil\"";
+    let config = post_json_config(
+        &format!("https://example.test/{evil}"),
+        &[format!("example.test:443:1.2.3.4{evil}")],
+        &format!("{{\"text\":\"{evil}\"}}"),
+    );
+    let known = [
+        "silent",
+        "show-error",
+        "insecure",
+        "max-redirs",
+        "proto",
+        "max-time",
+        "resolve",
+        "header",
+        "request",
+        "data-raw",
+        "url",
+    ];
+    for d in config_directives(&config) {
+        assert!(
+            known.contains(&d.as_str()),
+            "unexpected option {d:?}:\n{config}"
+        );
+    }
+}
+
+/// Every command line on this machine, as any local user reads them.
+fn command_lines() -> String {
+    let out = std::process::Command::new("ps")
+        .args(["-axo", "args="])
+        .output()
+        .expect("ps");
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// A webhook address (Slack's is its whole credential) and the payload are
+/// not on curl's command line while it runs.
+#[tokio::test]
+async fn a_webhook_post_keeps_address_and_payload_off_the_command_line() {
+    if !std::path::Path::new("/usr/bin/curl").exists() {
+        return;
+    }
+    let site = spawn_test_site().await;
+    site.set(SiteMode::Slow(4));
+    let tag = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos())
+    );
+    let url = format!("https://{}/services/HOOK-{tag}", site.host());
+    let body = format!("{{\"text\":\"PAYLOAD-{tag}\"}}");
+    let post = tokio::spawn(async move { post_json_pinned(&url, &[], &body).await });
+    tokio::time::sleep(std::time::Duration::from_millis(1_500)).await;
+    let seen = command_lines();
+    assert!(
+        !seen.contains(&format!("HOOK-{tag}")),
+        "the address is on a command line"
+    );
+    assert!(
+        !seen.contains(&format!("PAYLOAD-{tag}")),
+        "the payload is on a command line"
+    );
+    assert!(
+        seen.contains("curl --config -"),
+        "the post was not running when the command lines were read"
+    );
+    post.await.expect("post").expect("delivered");
+}
+
+/// What curl really sends: a one-shot plain-HTTP receiver returns the
+/// request it got.
+async fn receive_one_request() -> (u16, tokio::task::JoinHandle<String>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    let task = tokio::spawn(async move {
+        let (mut tcp, _) = listener.accept().await.expect("accept");
+        let mut got = Vec::new();
+        let mut chunk = [0u8; 4096];
+        loop {
+            let n = tcp.read(&mut chunk).await.expect("read");
+            got.extend_from_slice(&chunk[..n]);
+            let text = String::from_utf8_lossy(&got).into_owned();
+            if let Some((head, rest)) = text.split_once("\r\n\r\n") {
+                let want: usize = head
+                    .lines()
+                    .find_map(|l| {
+                        l.to_ascii_lowercase()
+                            .strip_prefix("content-length:")
+                            .map(|v| v.trim().parse().unwrap_or(0))
+                    })
+                    .unwrap_or(0);
+                if rest.len() >= want {
+                    break;
+                }
+            }
+            if n == 0 {
+                break;
+            }
+        }
+        let _ = tcp
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            .await;
+        String::from_utf8_lossy(&got).into_owned()
+    });
+    (port, task)
+}
+
+/// The body arrives byte for byte, whatever it holds, as a POST of JSON.
+#[tokio::test]
+async fn a_webhook_post_delivers_the_body_whole() {
+    if !std::path::Path::new("/usr/bin/curl").exists() {
+        return;
+    }
+    for body in [
+        r#"{"text":"*Title*\nline \"quoted\" \\ back, ünïcode ✓"}"#.to_string(),
+        "@/etc/hostname".to_string(),
+    ] {
+        let (port, got) = receive_one_request().await;
+        post_json_pinned(&format!("http://127.0.0.1:{port}/hook"), &[], &body)
+            .await
+            .expect("delivered");
+        let request = got.await.expect("request");
+        assert!(request.starts_with("POST /hook "), "{request}");
+        assert!(
+            request
+                .to_ascii_lowercase()
+                .contains("content-type: application/json"),
+            "{request}"
+        );
+        assert!(
+            request.ends_with(&body),
+            "the body arrived whole: {request}"
+        );
+    }
+}
+
+/// A transport failure is still an error, and a refused address is
+/// still refused before curl runs.
+#[tokio::test]
+async fn a_webhook_post_reports_a_failure_and_still_refuses_internal_addresses() {
+    if !std::path::Path::new("/usr/bin/curl").exists() {
+        return;
+    }
+    // Nothing listens on port 1.
+    let err = post_json_pinned("http://127.0.0.1:1/hook", &[], "{}")
+        .await
+        .expect_err("refused connection");
+    assert!(err.starts_with("curl exit "), "{err}");
+    let err = http_post_json("http://169.254.169.254/latest", "{}")
+        .await
+        .expect_err("metadata address");
+    assert!(
+        !err.starts_with("curl exit "),
+        "the guard answers first: {err}"
+    );
+}

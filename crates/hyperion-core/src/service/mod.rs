@@ -45,10 +45,17 @@ mod cron;
 mod dashboard;
 mod database;
 mod dkim;
+mod docker;
+mod docker_logs;
+mod docker_updates;
+mod docker_verdict;
 mod files;
 mod firewall;
 mod fs_health;
 pub use cpu_usage::{CpuClass, CpuTracker, ProcSample, ProcSnapshot, TICK_SECS as CPU_TICK_SECS};
+pub use docker::{loopback_port, proxy_offer, ProxyOffer};
+pub use docker_logs::new_log_gate as new_docker_log_gate;
+pub use docker_updates::image_state;
 pub use fs_health::check_usr_writable;
 mod fs_util;
 mod ftp;
@@ -89,6 +96,7 @@ mod staging;
 mod stats;
 mod system;
 mod trash;
+mod url_monitor;
 mod users;
 mod wp;
 mod wp_assets;
@@ -443,6 +451,29 @@ pub trait AdapterPort: Send + Sync {
         Ok(0)
     }
 
+    /// One read-only `docker` command, output capped at `max_bytes`. Default
+    /// impl says docker is absent, so stub adapters need no change.
+    ///
+    /// The raw bytes may hold `Config.Env` and other secrets (inspect). They go
+    /// only to a `docker::parse_*` function and are never logged or sent over RPC.
+    async fn docker_read(
+        &self,
+        _cmd: hyperion_adapters::docker::DockerCmd,
+        _max_bytes: usize,
+    ) -> Result<Vec<u8>, hyperion_adapters::docker::DockerError> {
+        Err(hyperion_adapters::docker::DockerError::NotInstalled)
+    }
+
+    /// The digest a registry holds under an image reference's tag. Asks the
+    /// registry only; nothing is pulled. Default impl cannot ask, so stub
+    /// adapters need no change.
+    async fn docker_remote_digest(
+        &self,
+        _image: hyperion_adapters::docker::ImageRef,
+    ) -> Result<String, hyperion_adapters::docker_registry::RemoteDigestError> {
+        Err(hyperion_adapters::docker_registry::RemoteDigestError::Unsupported)
+    }
+
     async fn nginx_write_vhost(&self, detail: &HostingDetail) -> Result<(), AdapterError>;
     /// Remove vhost + symlink for this domain. When `hosting_id` is
     /// supplied the adapter also drops the per-hosting cache zone +
@@ -483,6 +514,29 @@ pub trait AdapterPort: Send + Sync {
         php_max_children: i64,
         php_max_requests: i64,
     ) -> Result<(), AdapterError>;
+
+    /// Write one site's pool file with `limits` (the defaults when it never
+    /// had any) WITHOUT touching the running master, and say what the master
+    /// has to do about it. The caller sends that once per version through
+    /// [`Self::fpm_apply`].
+    async fn fpm_sync_pool(
+        &self,
+        _system_user: &str,
+        _domain: &str,
+        _version: PhpVersion,
+        _limits: Option<hyperion_adapters::phpfpm::PoolLimits>,
+    ) -> Result<hyperion_adapters::phpfpm::FpmApply, AdapterError> {
+        Ok(hyperion_adapters::phpfpm::FpmApply::Nothing)
+    }
+
+    /// Reload or restart one version's master, or nothing.
+    async fn fpm_apply(
+        &self,
+        _version: PhpVersion,
+        _what: hyperion_adapters::phpfpm::FpmApply,
+    ) -> Result<(), AdapterError> {
+        Ok(())
+    }
 
     /// Lock the DB user/role so the hosting cannot reach its database.
     async fn db_lock(&self, engine: DbProvision, db_user: &str) -> Result<(), AdapterError>;
@@ -893,6 +947,13 @@ pub struct HostingService<A: AdapterPort + 'static> {
     pub backup_progress: Arc<tokio::sync::Mutex<HashMap<String, Vec<hyperion_types::JobSubstep>>>>,
     /// The site scan's locks and its wake-up. Shared across clones.
     pub site_scan: Arc<SiteScanShared>,
+    /// What the Docker module's tick saw last, for the overview to serve
+    /// without running `docker` per page view. `None` until the first read.
+    pub docker_snapshot: Arc<tokio::sync::RwLock<Option<hyperion_types::docker::DockerNodeStatus>>>,
+    /// Permits for `docker logs` processes, shared by every request this
+    /// node serves, so several people reading stacks at once still run only
+    /// [`docker_logs::MAX_CONCURRENT_READS`] of them.
+    pub docker_log_gate: Arc<tokio::sync::Semaphore>,
 }
 
 /// What every holder of a [`HostingService`] shares about the site scan.
@@ -1109,6 +1170,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             )),
             backup_progress: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             site_scan: Arc::default(),
+            docker_snapshot: Arc::new(tokio::sync::RwLock::new(None)),
+            docker_log_gate: docker_logs::new_log_gate(),
         }
     }
 

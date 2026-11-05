@@ -285,6 +285,8 @@ async fn start_agent() -> (std::path::PathBuf, tempfile::TempDir) {
         )),
         backup_progress: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         site_scan: Default::default(),
+        docker_snapshot: Arc::new(tokio::sync::RwLock::new(None)),
+        docker_log_gate: hyperion_core::service::new_docker_log_gate(),
     });
     let _ = adapters; // silence unused warning
     let agent: Arc<dyn AgentApi> = Arc::new(AgentImpl::new(svc));

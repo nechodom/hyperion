@@ -188,6 +188,7 @@ async fn serve(cfg: Config) -> anyhow::Result<()> {
         });
     }
     hyperion_web::notify_collector::spawn(state.clone());
+    hyperion_web::docker_watch::spawn(state.clone());
     hyperion_web::acme_dns_renew::spawn(state.clone());
     hyperion_web::wp_library::spawn(state.clone());
     hyperion_web::cluster_sync::spawn(state.clone());
