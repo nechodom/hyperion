@@ -314,6 +314,7 @@ async fn run() -> anyhow::Result<()> {
         home_root: cfg.agent.home_root.to_string_lossy().to_string(),
         acme_challenge_root: cfg.acme.challenge_dir.to_string_lossy().to_string(),
         backup_root: cfg.agent.backup_root.to_string_lossy().to_string(),
+        ..Default::default()
     };
     let remote_backup = if cfg.backup_remote.enabled {
         Some(hyperion_core::RemoteBackupConfig {

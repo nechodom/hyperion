@@ -27,6 +27,8 @@ use crate::AdapterError;
 pub const WORKER_ARG: &str = "scan-worker";
 /// Fixed, so systemd itself refuses a second worker on the node.
 pub const UNIT_NAME: &str = "hyperion-sitescan";
+/// The worker's state: `manifests/` and `baselines/`. [`unit_args`] names it.
+pub const SCAN_DIR: &str = "/var/lib/hyperion/scan";
 /// Replies and jobs bigger than this are refused. A reply that large is a bug or
 /// an attack, and holding it in memory would not be free.
 pub const MAX_REPLY_BYTES: usize = 64 * 1024 * 1024;
@@ -112,6 +114,45 @@ pub fn unit_args(cores: usize, exe: &Path) -> Vec<String> {
     args.push(exe.to_string_lossy().into_owned());
     args.push(WORKER_ARG.to_string());
     args
+}
+
+/// Make the directories the unit mounts, root-only. Without them it exits 226
+/// before the worker starts.
+pub fn prepare_scan_dirs(base: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    for dir in [
+        base.to_path_buf(),
+        base.join("manifests"),
+        base.join("baselines"),
+    ] {
+        std::fs::create_dir_all(&dir)?;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+/// After an update `current_exe` names the replaced file, with this suffix. The
+/// new binary is at the path without it, and the old one can't be started by name.
+fn strip_deleted_suffix(exe: PathBuf) -> PathBuf {
+    match exe.to_str().and_then(|s| s.strip_suffix(" (deleted)")) {
+        Some(s) => PathBuf::from(s),
+        None => exe,
+    }
+}
+
+/// Run one job the way the agent does: the directories made, this binary as the
+/// worker. Every way that can fail is `WorkerReply::Failed`.
+pub async fn run_job(job: &WorkerJob) -> WorkerReply {
+    if let Err(e) = prepare_scan_dirs(Path::new(SCAN_DIR)) {
+        return failed(format!("could not prepare {SCAN_DIR}: {e}"));
+    }
+    let exe = match std::env::current_exe() {
+        Ok(p) => strip_deleted_suffix(p),
+        Err(e) => return failed(format!("could not find the agent binary: {e}")),
+    };
+    run_worker(job, &exe)
+        .await
+        .unwrap_or_else(|e| failed(e.to_string()))
 }
 
 /// Run one job in the capped unit, or, without `systemd-run`, as a child under
@@ -341,6 +382,47 @@ mod tests {
         WorkerJob::Discover {
             root: PathBuf::from("/nowhere"),
         }
+    }
+
+    /// The unit names these in `ReadWritePaths` and `ReadOnlyPaths`: if one is
+    /// missing it exits 226 before the worker starts.
+    #[test]
+    fn scan_dirs_exist_and_are_root_only() {
+        let t = tempfile::tempdir().expect("tmp");
+        let base = t.path().join("hyperion/scan");
+        prepare_scan_dirs(&base).expect("prepare");
+        for d in [&base, &base.join("manifests"), &base.join("baselines")] {
+            let mode = std::fs::metadata(d).expect("meta").permissions().mode();
+            assert_eq!(mode & 0o777, 0o700, "{}", d.display());
+        }
+        // Again, over a directory something widened: put back, contents kept.
+        std::fs::set_permissions(
+            base.join("baselines"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .expect("chmod");
+        std::fs::write(base.join("baselines/site"), b"x").expect("write");
+        prepare_scan_dirs(&base).expect("prepare again");
+        let mode = std::fs::metadata(base.join("baselines"))
+            .expect("meta")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o700);
+        assert!(base.join("baselines/site").exists());
+    }
+
+    /// `current_exe` after an update names the replaced file: the new binary is
+    /// at the path without the suffix, and the old one can't be started by name.
+    #[test]
+    fn a_replaced_binary_resolves_to_its_path() {
+        assert_eq!(
+            strip_deleted_suffix(PathBuf::from("/usr/bin/hyperion-agent (deleted)")),
+            PathBuf::from("/usr/bin/hyperion-agent")
+        );
+        assert_eq!(
+            strip_deleted_suffix(PathBuf::from("/usr/bin/hyperion-agent")),
+            PathBuf::from("/usr/bin/hyperion-agent")
+        );
     }
 
     fn arg_after(args: &[String], prop: &str) -> Option<String> {

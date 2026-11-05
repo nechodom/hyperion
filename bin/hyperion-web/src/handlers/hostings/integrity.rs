@@ -41,7 +41,7 @@ pub(super) fn integrity_not_checked(why: String) -> hyperion_types::WpIntegrityS
 }
 
 /// The request that fills the card on page load. A read of the stored
-/// result, never `WpIntegrityScan`: that one runs wp-cli and clamscan.
+/// result, never `WpIntegrityScan`: that one runs the scan worker and clamscan.
 pub(super) fn integrity_panel_request(sel: HostingSelector) -> Request {
     Request::WpIntegrityStored { hosting: sel }
 }

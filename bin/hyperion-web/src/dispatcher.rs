@@ -382,8 +382,10 @@ fn timeout_for_request(req: &Request) -> u64 {
         // Enabling quotas apt-installs `quota` and runs quotacheck, which
         // the node itself allows 240 s; QuotaSet enables them inline.
         Request::QuotaEnableKernel { .. } | Request::QuotaSet { .. } => 600,
-        // ClamAV over the docroot plus wp-cli checksums.
-        Request::WpIntegrityScan { .. } => 900,
+        // Waits for the node's one scan slot, then a capped worker (up to its
+        // 6-hour limit) and ClamAV. Losing this timeout would be reported as a
+        // failed job while the node is still scanning.
+        Request::WpIntegrityScan { .. } => 6 * 3600 + 600,
         Request::WpCoreRepair { .. } => 900,
         // SSH preflight + remote extract against the source panel.
         Request::HostingImportPanelPlan { .. } => 900,

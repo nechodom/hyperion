@@ -386,7 +386,7 @@ fn delete_local() -> DeleteOpts {
     }
 }
 
-fn hard_delete_mocks() -> MockAdapterPort {
+pub(super) fn hard_delete_mocks() -> MockAdapterPort {
     let mut mocks = create_and_teardown_mocks();
     mocks.expect_db_drop().returning(|_, _, _| Ok(()));
     mocks.expect_delete_user().returning(|_| Ok(()));

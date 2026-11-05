@@ -79,6 +79,7 @@ mod protection;
 mod provision;
 mod quota;
 mod rollback;
+mod scan_queue;
 mod scheduler;
 mod site_check;
 mod site_config;
@@ -130,6 +131,7 @@ pub use permissions::*;
 use protection::*;
 pub(crate) use quota::*;
 use rollback::*;
+use scan_queue::*;
 #[cfg(test)]
 use site_check::*;
 #[cfg(test)]
@@ -167,6 +169,61 @@ pub trait AdapterPort: Send + Sync {
     async fn redis_is_available(&self) -> bool {
         true
     }
+
+    /// Run one job in the capped scan worker. Every way it can fail to answer
+    /// is `WorkerReply::Failed`, and the reply is untrusted input.
+    ///
+    /// The `site_scan_*` defaults answer "couldn't", for stand-ins with no worker.
+    /// mockall ignores them and the real adapter overrides them all.
+    async fn site_scan_worker(
+        &self,
+        _job: hyperion_adapters::sitescan::runner::WorkerJob,
+    ) -> hyperion_adapters::sitescan::runner::WorkerReply {
+        hyperion_adapters::sitescan::runner::WorkerReply::Failed("no scan worker here".into())
+    }
+
+    /// What the cache can say about `key` with no network: `None` when only a
+    /// fetch can tell, `Some(None)` when wordpress.org is known to have nothing.
+    async fn site_scan_cached_manifest(
+        &self,
+        _key: &hyperion_adapters::sitescan::manifest::ComponentKey,
+        _cache_dir: &std::path::Path,
+    ) -> Option<Option<hyperion_adapters::sitescan::manifest::Manifest>> {
+        None
+    }
+
+    /// wordpress.org's manifest for `key`, into the cache the worker reads.
+    /// `Err` is a network failure: "couldn't check", never "nothing there".
+    async fn site_scan_fetch_manifest(
+        &self,
+        _key: &hyperion_adapters::sitescan::manifest::ComponentKey,
+        _cache_dir: &std::path::Path,
+    ) -> Result<Option<hyperion_adapters::sitescan::manifest::Manifest>, AdapterError> {
+        Err(AdapterError::Other("no network here".into()))
+    }
+
+    /// [`site_scan_slug_known`](Self::site_scan_slug_known) from the cache alone.
+    async fn site_scan_cached_slug(
+        &self,
+        _kind: hyperion_adapters::sitescan::manifest::ComponentKind,
+        _slug: &str,
+        _cache_dir: &std::path::Path,
+    ) -> Option<bool> {
+        None
+    }
+
+    /// Does wordpress.org list this slug? `Err` is a network failure, never "no".
+    async fn site_scan_slug_known(
+        &self,
+        _kind: hyperion_adapters::sitescan::manifest::ComponentKind,
+        _slug: &str,
+        _cache_dir: &std::path::Path,
+    ) -> Result<bool, AdapterError> {
+        Err(AdapterError::Other("no network here".into()))
+    }
+
+    /// Drop cached manifests nothing has read for 90 days.
+    async fn site_scan_evict_manifests(&self, _cache_dir: &std::path::Path) {}
 
     async fn ensure_user(&self, name: &str, home_dir: &str) -> Result<u32, AdapterError>;
     async fn delete_user(&self, name: &str) -> Result<(), AdapterError>;
@@ -743,6 +800,9 @@ pub struct HostingService<A: AdapterPort + 'static> {
     /// clones so the concurrent read sees the running op's writes; ephemeral,
     /// cleared when the op finishes.
     pub backup_progress: Arc<tokio::sync::Mutex<HashMap<String, Vec<hyperion_types::JobSubstep>>>>,
+    /// One site scan at a time on this node. Tokio's mutex is FIFO, which is
+    /// what lets a "Scan now" waiting on it run ahead of the rest of a sweep.
+    pub site_scan_gate: Arc<tokio::sync::Mutex<()>>,
 }
 
 /// Default renewal window — matches Let's Encrypt's recommended
@@ -816,6 +876,8 @@ pub struct HostingPaths {
     pub home_root: String,           // e.g. "/home"
     pub acme_challenge_root: String, // e.g. "/var/lib/hyperion/acme-challenges"
     pub backup_root: String,         // e.g. "/var/lib/hyperion/backups/local"
+    pub scan_dir: String,            // e.g. "/var/lib/hyperion/scan"
+    pub quarantine_dir: String,      // e.g. "/var/lib/hyperion/quarantine"
 }
 
 impl Default for HostingPaths {
@@ -824,6 +886,8 @@ impl Default for HostingPaths {
             home_root: "/home".into(),
             acme_challenge_root: "/var/lib/hyperion/acme-challenges".into(),
             backup_root: "/var/lib/hyperion/backups/local".into(),
+            scan_dir: SCAN_DIR.into(),
+            quarantine_dir: QUARANTINE_DIR.into(),
         }
     }
 }
@@ -928,6 +992,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 hyperion_types::ServiceInstallStatus::default(),
             )),
             backup_progress: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            site_scan_gate: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -975,6 +1040,12 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// Niceness for the malware sweep — see [`read_scan_niceness`].
     pub fn malware_scan_niceness(&self) -> i32 {
         read_scan_niceness(self.agent_config_path.as_deref())
+    }
+
+    /// Whether the site scan's new layers are past their silent pilot — see
+    /// [`read_new_layers_live`].
+    pub fn site_scan_new_layers_live(&self) -> bool {
+        read_new_layers_live(self.agent_config_path.as_deref())
     }
 
     pub fn is_worker_node(&self) -> bool {

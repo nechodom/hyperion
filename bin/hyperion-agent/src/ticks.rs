@@ -59,7 +59,7 @@ pub(crate) fn spawn_all(svc: &Svc, cert_renewal_window_days: i64) {
     spawn_wp_version_refresh(svc);
     spawn_wp_base_theme(svc);
     spawn_wp_system_cron(svc);
-    spawn_wp_integrity(svc);
+    spawn_site_scan(svc);
     spawn_billing_sweep(svc);
     spawn_package_enforce(svc);
     spawn_care_reports(svc);
@@ -565,19 +565,17 @@ fn spawn_wp_system_cron(svc: &Svc) {
     });
 }
 
-/// WordPress integrity sweep — about once a day. The other half of the
-/// defender: verifies core + plugin files against the checksums
-/// WordPress.org publishes and (where clamscan exists) sweeps each
-/// docroot, then notifies admins about NEWLY-appeared findings.
-/// Checked every 10 minutes; `wp_integrity_tick` decides, from a persisted
-/// stamp, whether the sweep is due, so a restart does not start another.
-fn spawn_wp_integrity(svc: &Svc) {
+/// Native site scan: every site's files against upstream and its baseline, one
+/// site at a time in a capped worker, plus ClamAV where it exists. Admins hear
+/// about NEWLY-appeared findings. Checked every 10 minutes; `site_scan_tick`
+/// decides from each site's stored record which are due, so a restart starts
+/// nothing by itself.
+fn spawn_site_scan(svc: &Svc) {
     every(svc, 6 * MIN, 10 * MIN, |svc| async move {
-        match svc.wp_integrity_tick().await {
-            Ok(Some(n)) if n > 0 => tracing::warn!(flagged = n, "wp integrity tick"),
-            Ok(Some(_)) => tracing::debug!("wp integrity tick: no new findings"),
-            Ok(None) => {}
-            Err(e) => tracing::warn!(error=%e, "wp integrity tick failed"),
+        match svc.site_scan_tick().await {
+            Ok(n) if n > 0 => tracing::warn!(flagged = n, "site scan tick"),
+            Ok(_) => tracing::debug!("site scan tick: no new findings"),
+            Err(e) => tracing::warn!(error=%e, "site scan tick failed"),
         }
     });
 }

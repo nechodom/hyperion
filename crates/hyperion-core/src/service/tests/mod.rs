@@ -880,29 +880,6 @@ fn vh_defaults() -> hyperion_types::VhostOptions {
 }
 
 // ============================================================
-//  WordPress integrity scan. The feature exists because the
-//  operator SELLS "regular malware scanning", so the thing worth
-//  guarding is not the happy path — it's that a scan which could
-//  not run never renders as a clean site.
-// ============================================================
-
-/// A core verification that actually ran and found nothing.
-fn core_verified() -> integrity::CoreChecksums {
-    integrity::CoreChecksums {
-        checked: true,
-        ..Default::default()
-    }
-}
-
-/// A plugin verification that actually ran and found nothing.
-fn plugins_verified() -> integrity::PluginChecksums {
-    integrity::PluginChecksums {
-        checked: true,
-        ..Default::default()
-    }
-}
-
-// ============================================================
 //  Care packages — the paid entitlement layer.
 //
 //  What these guard is the difference between a package and a

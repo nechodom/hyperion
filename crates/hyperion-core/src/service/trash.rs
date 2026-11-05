@@ -409,6 +409,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             detail.id.as_str(),
         )
         .await;
+        // The scan's baseline and anything quarantined are root-owned and sit
+        // outside the site's tree.
+        remove_site_scan_state(&self.paths, detail.id.as_str()).await;
         hostings::delete(&self.pool, &detail.id)
             .await
             .map_err(|e| RpcError::Internal_with(format!("delete row: {e}")))?;

@@ -448,9 +448,9 @@ pub struct WpIntegrityScanResult {
     /// Absent (false) from nodes older than this field.
     #[serde(default)]
     pub clamav_installed: bool,
-    /// Whether wp-cli was able to run the checksum comparison at all.
-    /// False for a broken install, a missing wp-cli, or a WordPress.org
-    /// lookup that failed.
+    /// Whether core was compared with its release at all (wp-cli did this once,
+    /// hence the name). False for a broken install, a site with no WordPress, or
+    /// a WordPress.org lookup that failed.
     #[serde(default)]
     pub wp_cli_ok: bool,
     /// Plugins wp-cli actually compared against published checksums

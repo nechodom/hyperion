@@ -376,6 +376,69 @@ impl AdapterPort for RealAdapter {
         self.nginx_user.clone()
     }
 
+    async fn site_scan_worker(
+        &self,
+        job: hyperion_adapters::sitescan::runner::WorkerJob,
+    ) -> hyperion_adapters::sitescan::runner::WorkerReply {
+        hyperion_adapters::sitescan::runner::run_job(&job).await
+    }
+
+    async fn site_scan_cached_manifest(
+        &self,
+        key: &hyperion_adapters::sitescan::manifest::ComponentKey,
+        cache_dir: &std::path::Path,
+    ) -> Option<Option<hyperion_adapters::sitescan::manifest::Manifest>> {
+        // A manifest can be tens of MiB of JSON: off the async threads.
+        let (key, cache_dir) = (key.clone(), cache_dir.to_path_buf());
+        tokio::task::spawn_blocking(move || {
+            hyperion_adapters::sitescan::manifest::cached_wporg_manifest(&key, &cache_dir)
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+
+    async fn site_scan_fetch_manifest(
+        &self,
+        key: &hyperion_adapters::sitescan::manifest::ComponentKey,
+        cache_dir: &std::path::Path,
+    ) -> Result<Option<hyperion_adapters::sitescan::manifest::Manifest>, AdapterError> {
+        hyperion_adapters::sitescan::manifest::fetch_wporg_manifest(key, cache_dir).await
+    }
+
+    async fn site_scan_cached_slug(
+        &self,
+        kind: hyperion_adapters::sitescan::manifest::ComponentKind,
+        slug: &str,
+        cache_dir: &std::path::Path,
+    ) -> Option<bool> {
+        hyperion_adapters::sitescan::manifest::cached_slug_known(kind, slug, cache_dir)
+    }
+
+    async fn site_scan_slug_known(
+        &self,
+        kind: hyperion_adapters::sitescan::manifest::ComponentKind,
+        slug: &str,
+        cache_dir: &std::path::Path,
+    ) -> Result<bool, AdapterError> {
+        hyperion_adapters::sitescan::manifest::wporg_slug_known(kind, slug, cache_dir).await
+    }
+
+    async fn site_scan_evict_manifests(&self, cache_dir: &std::path::Path) {
+        let cache_dir = cache_dir.to_path_buf();
+        let swept = tokio::task::spawn_blocking(move || {
+            hyperion_adapters::sitescan::manifest::evict_stale_manifests(
+                &cache_dir,
+                std::time::SystemTime::now(),
+            )
+        })
+        .await
+        .unwrap_or(0);
+        if swept > 0 {
+            tracing::info!(swept, "site scan: dropped cached manifests nothing reads");
+        }
+    }
+
     async fn ensure_user(&self, name: &str, home_dir: &str) -> Result<u32, AdapterError> {
         let spec = hyperion_adapters::users::UserSpec::new_with_default_shell(
             SystemUserName::parse(name)?,

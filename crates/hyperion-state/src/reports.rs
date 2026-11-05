@@ -414,6 +414,11 @@ pub async fn integrity(
         return Ok(None);
     }
     let r = &stored.result;
+    // The native scan reaches sites with no WordPress. A report has no words for
+    // those yet and says what it said before such a record could exist.
+    if r.native_scan_ran && r.coverage.no_upstream {
+        return Ok(None);
+    }
     Ok(Some(CareIntegrity {
         scanned_at,
         checksums_ran: r.wp_cli_ok,
@@ -1062,6 +1067,27 @@ mod tests {
         assert_eq!(i.core_issues, 1);
         assert_eq!(i.total_findings(), 1);
         assert!(!i.is_clean());
+    }
+
+    /// The native scan reaches sites with no WordPress. Until the verdict for
+    /// those exists, the report says what it said before the record did.
+    #[tokio::test]
+    async fn integrity_ignores_a_native_scan_with_no_upstream() {
+        let (pool, a, _b) = fresh().await;
+        put_scan(
+            &pool,
+            a.as_str(),
+            &format!(
+                r#"{{"scanned_at":{},"result":{{"native_scan_ran":true,"clamav_available":true,
+                     "coverage":{{"no_upstream":true}}}}}}"#,
+                FROM + 1
+            ),
+        )
+        .await;
+        assert_eq!(
+            integrity(&pool, a.as_str(), FROM, TO).await.expect("q"),
+            None
+        );
     }
 
     #[tokio::test]

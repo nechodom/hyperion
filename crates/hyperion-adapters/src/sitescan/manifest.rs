@@ -288,6 +288,12 @@ fn miss_path(manifest_path: &Path) -> PathBuf {
 const MISS_TTL: Duration = Duration::from_secs(24 * 3600);
 /// How long "wordpress.org knows / doesn't know this slug" is believed.
 const SLUG_TTL_SECS: u64 = 7 * 24 * 3600;
+/// A cached answer nothing has read for this long is dropped.
+const EVICT_AFTER: Duration = Duration::from_secs(90 * 24 * 3600);
+/// Reading a manifest marks it read at most this often: each mark is a write.
+const MARK_READ_EVERY: Duration = Duration::from_secs(24 * 3600);
+/// `<kind>/<slug>/<file>` and `slugs/<kind>/<file>`.
+const CACHE_DEPTH: usize = 3;
 
 fn md5_of(hex_str: &str, what: &str) -> Result<[u8; 16], AdapterError> {
     hex_array::<16>(hex_str)
@@ -847,6 +853,82 @@ pub async fn fetch_wporg_manifest(
     fetch_with(&Curl { cache_dir }, key, cache_dir, SystemTime::now()).await
 }
 
+/// What the cache can say about `key` with no network, for a caller counting what
+/// it spends. `None` means only [`fetch_wporg_manifest`] can tell; `Some(None)`
+/// means wordpress.org has nothing, including for a key no URL could hold.
+pub fn cached_wporg_manifest(key: &ComponentKey, cache_dir: &Path) -> Option<Option<Manifest>> {
+    let Ok(path) = cache_path(cache_dir, key) else {
+        return Some(None);
+    };
+    local_answer(key, &path, SystemTime::now())
+}
+
+/// The cached answer that is still good, and the mark that keeps it cached. A
+/// locale fallback isn't marked: its age is what sends it back to wordpress.org.
+fn local_answer(key: &ComponentKey, path: &Path, now: SystemTime) -> Option<Option<Manifest>> {
+    if let Some((m, age)) = read_cached(path, now) {
+        let fallback = m.is_locale_fallback(key);
+        if !fallback && age >= MARK_READ_EVERY {
+            mark_read(path, now);
+        }
+        if !(fallback && age >= MISS_TTL) {
+            return Some(Some(m));
+        }
+    }
+    miss_is_fresh(&miss_path(path), now).then_some(None)
+}
+
+/// The worker reads manifests through a read-only mount, so the agent's lookup
+/// before each scan is what says one is in use. A mark that fails costs at worst
+/// a download.
+fn mark_read(path: &Path, now: SystemTime) {
+    let _ = std::fs::File::options()
+        .write(true)
+        .open(path)
+        .and_then(|f| f.set_modified(now));
+}
+
+/// Drop what nothing has read for [`EVICT_AFTER`], with folders left empty.
+/// Returns the number of files removed. Vendor packages stay: nothing can fetch
+/// those again.
+pub fn evict_stale_manifests(cache_dir: &Path, now: SystemTime) -> usize {
+    let Ok(entries) = std::fs::read_dir(cache_dir) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .filter(|e| e.file_name() != "vendor")
+        .map(|e| evict_entry(&e.path(), now, CACHE_DEPTH))
+        .sum()
+}
+
+fn evict_entry(path: &Path, now: SystemTime, depth: usize) -> usize {
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        return 0;
+    };
+    if meta.is_dir() {
+        if depth == 0 {
+            return 0;
+        }
+        let swept = std::fs::read_dir(path).map_or(0, |entries| {
+            entries
+                .flatten()
+                .map(|e| evict_entry(&e.path(), now, depth - 1))
+                .sum()
+        });
+        // Fails unless it's empty, which is the point.
+        let _ = std::fs::remove_dir(path);
+        return swept;
+    }
+    let stale = meta.is_file()
+        && meta
+            .modified()
+            .ok()
+            .and_then(|t| now.duration_since(t).ok())
+            .is_some_and(|age| age >= EVICT_AFTER);
+    usize::from(stale && std::fs::remove_file(path).is_ok())
+}
+
 async fn fetch_with(
     http: &dyn Http,
     key: &ComponentKey,
@@ -856,15 +938,10 @@ async fn fetch_with(
     let Ok(path) = cache_path(cache_dir, key) else {
         return Ok(None);
     };
-    if let Some((m, age)) = read_cached(&path, now) {
-        if !(m.is_locale_fallback(key) && age >= MISS_TTL) {
-            return Ok(Some(m));
-        }
+    if let Some(answer) = local_answer(key, &path, now) {
+        return Ok(answer);
     }
     let marker = miss_path(&path);
-    if miss_is_fresh(&marker, now) {
-        return Ok(None);
-    }
     let fetched = match key.kind {
         ComponentKind::Core => fetch_core(http, key).await?,
         ComponentKind::Plugin => {
@@ -1009,13 +1086,8 @@ pub async fn wporg_slug_known(
     } else {
         format!("https://api.wordpress.org/themes/info/1.1/?action=theme_information&request[slug]={slug}")
     };
-    let cache = cache_dir
-        .join("slugs")
-        .join(kind.as_str())
-        .join(format!("{slug}.json"));
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
+    let cache = slug_cache_path(cache_dir, kind, slug);
+    let now = unix_now();
     if let Some(known) = read_slug_cache(&cache, now) {
         return Ok(known);
     }
@@ -1029,6 +1101,31 @@ pub async fn wporg_slug_known(
     let stamp = serde_json::json!({ "known": known, "checked_at": now });
     write_atomic(&cache, stamp.to_string().as_bytes())?;
     Ok(known)
+}
+
+/// [`wporg_slug_known`]'s answer when it needs no network. `None` means only a
+/// lookup can tell.
+pub fn cached_slug_known(kind: ComponentKind, slug: &str, cache_dir: &Path) -> Option<bool> {
+    if kind == ComponentKind::Core {
+        return None;
+    }
+    if !valid_slug(slug) {
+        return Some(false);
+    }
+    read_slug_cache(&slug_cache_path(cache_dir, kind, slug), unix_now())
+}
+
+fn slug_cache_path(cache_dir: &Path, kind: ComponentKind, slug: &str) -> PathBuf {
+    cache_dir
+        .join("slugs")
+        .join(kind.as_str())
+        .join(format!("{slug}.json"))
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
 }
 
 fn read_slug_cache(path: &Path, now: u64) -> Option<bool> {
@@ -1404,6 +1501,170 @@ mod tests {
                 .expect("miss"),
             None
         );
+    }
+
+    fn demo_manifest() -> Manifest {
+        Manifest {
+            source: ManifestSource::WordPressOrg,
+            files: BTreeMap::from([("a.php".to_string(), Digest::Md5([1; 16]))]),
+            served_locale: None,
+        }
+    }
+
+    fn mtime(p: &Path) -> SystemTime {
+        std::fs::metadata(p)
+            .expect("meta")
+            .modified()
+            .expect("mtime")
+    }
+
+    fn set_mtime(p: &Path, t: SystemTime) {
+        std::fs::File::options()
+            .write(true)
+            .open(p)
+            .expect("open")
+            .set_modified(t)
+            .expect("set mtime");
+    }
+
+    #[test]
+    fn cached_answer_says_what_needs_no_network() {
+        let t = tempfile::tempdir().expect("tmp");
+        let k = key(ComponentKind::Plugin, "demo", "1.0");
+        assert_eq!(cached_wporg_manifest(&k, t.path()), None, "nothing known");
+
+        let path = cache_path(t.path(), &k).expect("path");
+        let m = demo_manifest();
+        write_atomic(&path, &serde_json::to_vec(&m).expect("ser")).expect("write");
+        assert_eq!(cached_wporg_manifest(&k, t.path()), Some(Some(m)));
+
+        let gone = key(ComponentKind::Plugin, "gone", "1.0");
+        let p = cache_path(t.path(), &gone).expect("path");
+        write_atomic(&miss_path(&p), b"").expect("marker");
+        assert_eq!(cached_wporg_manifest(&gone, t.path()), Some(None));
+        // A stale miss is worth asking again.
+        set_mtime(
+            &miss_path(&p),
+            SystemTime::now() - MISS_TTL - Duration::from_secs(60),
+        );
+        assert_eq!(cached_wporg_manifest(&gone, t.path()), None);
+
+        // A key no URL could hold costs nothing: a tenant picks its slug.
+        let bad = key(ComponentKind::Plugin, "../evil", "1.0");
+        assert_eq!(cached_wporg_manifest(&bad, t.path()), Some(None));
+        let unversioned = key(ComponentKind::Plugin, "demo", "");
+        assert_eq!(cached_wporg_manifest(&unversioned, t.path()), Some(None));
+    }
+
+    #[test]
+    fn cached_slug_answer_needs_no_network() {
+        let t = tempfile::tempdir().expect("tmp");
+        assert_eq!(
+            cached_slug_known(ComponentKind::Plugin, "demo", t.path()),
+            None
+        );
+        assert_eq!(
+            cached_slug_known(ComponentKind::Plugin, "../evil", t.path()),
+            Some(false)
+        );
+        let f = t.path().join("slugs/plugin/demo.json");
+        std::fs::create_dir_all(f.parent().expect("parent")).expect("mkdir");
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_secs();
+        std::fs::write(&f, format!(r#"{{"known":true,"checked_at":{now}}}"#)).expect("w");
+        assert_eq!(
+            cached_slug_known(ComponentKind::Plugin, "demo", t.path()),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn reading_a_manifest_marks_it_as_read() {
+        let t = tempfile::tempdir().expect("tmp");
+        let k = key(ComponentKind::Plugin, "demo", "1.0");
+        let path = cache_path(t.path(), &k).expect("path");
+        write_atomic(&path, &serde_json::to_vec(&demo_manifest()).expect("ser")).expect("write");
+        let long_ago = SystemTime::now() - Duration::from_secs(80 * 24 * 3600);
+        set_mtime(&path, long_ago);
+        assert!(cached_wporg_manifest(&k, t.path()).is_some());
+        assert!(
+            mtime(&path) > long_ago + Duration::from_secs(79 * 24 * 3600),
+            "read today, so 90 days start again"
+        );
+    }
+
+    /// A locale fallback's age decides when it is asked for again, so reading
+    /// it must not make it look new.
+    #[test]
+    fn reading_a_locale_fallback_keeps_its_age() {
+        let t = tempfile::tempdir().expect("tmp");
+        let mut k = key(ComponentKind::Core, "wordpress", "6.6.2");
+        k.locale = Some("cs_CZ".to_string());
+        let path = cache_path(t.path(), &k).expect("path");
+        let mut m = demo_manifest();
+        m.served_locale = Some("en_US".to_string());
+        write_atomic(&path, &serde_json::to_vec(&m).expect("ser")).expect("write");
+        let hours_ago = SystemTime::now() - Duration::from_secs(3 * 3600);
+        set_mtime(&path, hours_ago);
+        assert!(cached_wporg_manifest(&k, t.path()).is_some());
+        let drift = mtime(&path)
+            .duration_since(hours_ago)
+            .unwrap_or(Duration::ZERO);
+        assert!(drift < Duration::from_secs(5), "{drift:?}");
+    }
+
+    #[test]
+    fn eviction_takes_what_was_not_read_for_ninety_days() {
+        let t = tempfile::tempdir().expect("tmp");
+        let now = SystemTime::now();
+        let old = now - Duration::from_secs(91 * 24 * 3600);
+        let write = |rel: &str, when: SystemTime| {
+            let p = t.path().join(rel);
+            std::fs::create_dir_all(p.parent().expect("parent")).expect("mkdir");
+            std::fs::write(&p, b"{}").expect("write");
+            set_mtime(&p, when);
+            p
+        };
+        let stale = write("plugin/old/1.0.json", old);
+        let stale_miss = write("plugin/other/1.0.404", old);
+        let stale_slug = write("slugs/plugin/old.json", old);
+        let stale_temp = write(".tmpABC", old);
+        let fresh = write("plugin/live/2.0.json", now);
+        let bought = write("vendor/plugin/pro/1.0.json", old);
+
+        assert_eq!(evict_stale_manifests(t.path(), now), 4);
+
+        for gone in [&stale, &stale_miss, &stale_slug, &stale_temp] {
+            assert!(!gone.exists(), "{}", gone.display());
+        }
+        assert!(fresh.exists());
+        assert!(
+            bought.exists(),
+            "a vendor package can't be fetched again: not this sweep's to drop"
+        );
+        assert!(
+            !t.path().join("plugin/old").exists(),
+            "emptied folders go too"
+        );
+        assert!(t.path().join("plugin/live").exists());
+        // A cache that isn't there yet is nothing to do.
+        assert_eq!(evict_stale_manifests(&t.path().join("none"), now), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn eviction_does_not_follow_a_link() {
+        let t = tempfile::tempdir().expect("tmp");
+        let outside = tempfile::tempdir().expect("tmp");
+        let keep = outside.path().join("keep.json");
+        std::fs::write(&keep, b"{}").expect("write");
+        let old = SystemTime::now() - Duration::from_secs(91 * 24 * 3600);
+        set_mtime(&keep, old);
+        std::os::unix::fs::symlink(outside.path(), t.path().join("plugin")).expect("link");
+        evict_stale_manifests(t.path(), SystemTime::now());
+        assert!(keep.exists());
     }
 
     /// Answers `get` from a closure and records every URL asked for.
