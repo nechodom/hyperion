@@ -493,6 +493,20 @@ fn no_php_is_executed() {
         modules += 1;
         let spawns = code.matches("Command::new(").count();
         let curl = code.matches("Command::new(CURL)").count();
+        if path.ends_with("runner.rs") {
+            // The agent's side of the worker: systemd-run, nice, and the agent's
+            // own binary. It never touches a tenant's tree, and the worker it
+            // starts is what the scan runs in.
+            let own = [
+                "Command::new(SYSTEMD_RUN)",
+                "Command::new(NICE)",
+                "Command::new(exe)",
+            ]
+            .map(|c| code.matches(c).count());
+            assert_eq!(own, [1, 1, 1], "runner.rs spawns something else");
+            assert_eq!(spawns, 3, "runner.rs spawns something else");
+            continue;
+        }
         assert_eq!(spawns, curl, "{} spawns something else", path.display());
         assert_eq!(
             code.matches("process::").count(),

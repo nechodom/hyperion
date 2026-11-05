@@ -4,7 +4,9 @@
 pub mod baseline;
 pub mod discover;
 pub mod manifest;
+pub mod pressure;
 pub mod rules;
+pub mod runner;
 pub mod scan;
 pub mod walk;
 

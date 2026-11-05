@@ -10,6 +10,7 @@ name = "hyperion-agent"
 path = "src/main.rs"
 
 [dependencies]
+hyperion-adapters = { path = "../../crates/hyperion-adapters" }
 hyperion-core = { path = "../../crates/hyperion-core" }
 hyperion-import = { path = "../../crates/hyperion-import" }
 hyperion-rpc = { path = "../../crates/hyperion-rpc" }

@@ -98,6 +98,10 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Internal: the capped site-scan worker. Reads one job as JSON on stdin and
+    /// writes one reply on stdout. The agent starts it; it is never run by hand.
+    #[command(hide = true)]
+    ScanWorker,
 }
 
 /// `export-bundle`: detect + extract the local source panel, then pack docroots,
@@ -188,8 +192,20 @@ async fn dry_run_migrations(real_db: &std::path::Path) -> anyhow::Result<()> {
     }
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
+    // The scan worker is a sandboxed process that parses tenant files as root:
+    // no async runtime, no agent.toml, no logging setup. Checked before clap so
+    // nothing else in this binary has run.
+    if std::env::args().nth(1).as_deref() == Some(hyperion_adapters::sitescan::runner::WORKER_ARG) {
+        std::process::exit(hyperion_adapters::sitescan::runner::worker_main());
+    }
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(run())
+}
+
+async fn run() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         // Log to STDERR, never stdout. The daemon doesn't care (journald
         // captures both), but `export-bundle --out -` streams the bundle tar to
@@ -215,6 +231,10 @@ async fn main() -> anyhow::Result<()> {
     }) = cli.command
     {
         return run_export_bundle(kind, out, only, list, json).await;
+    }
+
+    if matches!(cli.command, Some(Command::ScanWorker)) {
+        anyhow::bail!("scan-worker must be the first argument");
     }
 
     let cfg = config::Config::load_from_path(&cli.config)?;
